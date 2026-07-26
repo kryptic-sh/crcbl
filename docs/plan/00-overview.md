@@ -30,6 +30,7 @@ is an orthographic projection with `z` as z-index.
 | Audio        | From scratch (`crcbl-audio`), stylized spatializer                               | First-class pillar, lands before first sample. Deterministic ITD/ILD/pitch/occlusion cue grammar — learnable player skill, not realistic HRTF. cpal/AudioWorklet at the device seam only.                                              |
 | CLI/headless | `crcbl` binary drives everything                                                 | Editor edits are transport commands → CLI is just another client. Scriptable scenes, sims, screenshots; agent/CI-friendly.                                                                                                             |
 | Testing      | Unit + property + e2e per subsystem, same phase                                  | Golden images (lavapipe CI) + golden audio buffers + determinism hashes. No subsystem lands untested.                                                                                                                                  |
+| Persistence  | `crcbl-store`: saves = snapshots, settings = TOML                                | Save game = replication snapshot in versioned container (one serialization path, shared with play-mode restore + join-in-progress); layered settings; RON profiles; async `StorageSource` (platform dirs / OPFS wasm); atomic writes.  |
 
 ## Core design principles
 
@@ -84,11 +85,12 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 11    | [11-cli-headless.md](11-cli-headless.md) | `crcbl` CLI: headless engine/editor control, scripting    |
 | 12    | [12-testing.md](12-testing.md)           | Test infra: unit/property/e2e, golden images, determinism |
 | 13    | [13-audio.md](13-audio.md)               | Spatial cue grammar, mixer, occlusion, audio testing      |
+| 14    | [14-persistence.md](14-persistence.md)   | Save games (snapshot-based), settings layers, profiles    |
 
 Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before
 the first sample; wasm + the GitHub Pages demo site land immediately after the
-first sample (P5). Stages 1–8 + topics 11–13 slices are the MVP; Metal/DX12 (9)
+first sample (P5). Stages 1–8 + topics 11–14 slices are the MVP; Metal/DX12 (9)
 and the WebTransport half of 10 complete cross-platform. Stage 10's constraints
 (renderer Tier B, async assets, message-shaped transport, `tick(dt)` loop) are
 baked in from the start — wasm is a first-class target, not a port.
@@ -101,22 +103,23 @@ Every game sample ships as a browser demo on the Pages site.
 
 ## MVP feature → stage map
 
-| MVP feature                          | Doc(s)  |
-| ------------------------------------ | ------- |
-| Render engine                        | 2, 3    |
-| Physics (L0+L1+CCD, sector space)    | 1, 5    |
-| Audio (spatial cue grammar + mixing) | 13      |
-| CLI/headless engine + editor control | 11      |
-| Test infra (unit + e2e everywhere)   | 12      |
-| Wasm target + Pages demo site        | 10      |
-| Scene loader                         | 6       |
-| ECS (system-owned arrays)            | 4       |
-| Scene editor                         | 8       |
-| Immediate-mode GUI (editor + game)   | 7       |
-| Editor built on the engine           | 8       |
-| Debug tools throughout               | 2–8, 13 |
-| Server→client from day 1             | 1, 4    |
-| 3D-first, 2D as ortho projection     | 2, 3    |
+| MVP feature                           | Doc(s)  |
+| ------------------------------------- | ------- |
+| Render engine                         | 2, 3    |
+| Physics (L0+L1+CCD, sector space)     | 1, 5    |
+| Audio (spatial cue grammar + mixing)  | 13      |
+| CLI/headless engine + editor control  | 11      |
+| Test infra (unit + e2e everywhere)    | 12      |
+| Persistence (saves/settings/profiles) | 14      |
+| Wasm target + Pages demo site         | 10      |
+| Scene loader                          | 6       |
+| ECS (system-owned arrays)             | 4       |
+| Scene editor                          | 8       |
+| Immediate-mode GUI (editor + game)    | 7       |
+| Editor built on the engine            | 8       |
+| Debug tools throughout                | 2–8, 13 |
+| Server→client from day 1              | 1, 4    |
+| 3D-first, 2D as ortho projection      | 2, 3    |
 
 ## Out of MVP scope (explicitly)
 

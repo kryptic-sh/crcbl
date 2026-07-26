@@ -45,6 +45,9 @@ without needing prediction.
   shared gold.
 - 1–4 players co-op; solo = same game over in-memory transport.
 - Win/lose, restart, lobby-lite (join before wave 1; late join post-MVP).
+- Save/resume (topic 14): manual + between-wave autosave; solo and
+  dedicated-server co-op (world save server-side, clients rejoin into it — save
+  = same snapshot machinery as join-in-progress).
 
 ## Non-goals (until engine post-MVP)
 

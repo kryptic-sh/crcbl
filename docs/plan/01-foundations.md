@@ -28,6 +28,7 @@ crcbl/
 │   ├── crcbl-scene/        # stage 6: scene format, glTF import
 │   ├── crcbl-ui/           # stage 7: immediate-mode GUI
 │   ├── crcbl-audio/        # topic 13: mixer + spatial cue grammar
+│   ├── crcbl-store/        # topic 14: saves, settings, profiles
 │   ├── crcbl-cli/          # topic 11: `crcbl` binary — headless control
 │   └── crcbl/              # umbrella: re-exports, engine setup helpers
 ├── apps/

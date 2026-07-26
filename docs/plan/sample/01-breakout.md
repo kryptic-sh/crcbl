@@ -51,5 +51,7 @@ local multiplayer. Any of these appearing = scope violation.
   document, not hide).
 - Deterministic input-script run: same script → same final score hash (rides the
   stage 4 determinism harness).
+- High score + settings persist across restarts via `crcbl-store` (topic 14) —
+  first persistence consumer, native + browser (OPFS once P5 lands).
 - Total game code small enough to read in one sitting (~500 lines target) — this
   sample is the engine's "hello world" documentation.
