@@ -100,12 +100,14 @@ them generically.
 | 4 — interpreted via VM-in-module | **Lua** (official Lua-VM module template; scripts = hot-reloadable assets), JS (QuickJS), Python (MicroPython, demand-driven) | one template per VM, zero new ABI work                     |
 
 **Priority (LOCKED)**: Rust SDK (P6A) → **C header** (proves
-language-neutrality; unlocks the whole C-FFI class — C/C++/Zig/Nim/D/Odin — in
-one move) → **Lua VM template** (the modding masses) → **C#** (Unity-refugee
-audience, when NativeAOT-wasm settles). That trio covers most bases: native
-gamedev (C class), scripting/modding (Lua), managed mainstream (C#). Other tiers
-remain possible by construction (flat C ABI) — just no first-party SDK until
-demanded. WasmGC tracked as future-proofing for tier 3.
+language-neutrality; unlocks the whole C-FFI class — C/C++/Nim/D/Odin — in one
+move) → **Zig SDK** (first-class citizen: idiomatic bindings + `build.zig`
+template, not just `@cImport` — Zig's wasm story is excellent and it deserves
+better than header consumption) → **Lua VM template** (the modding masses) →
+**C#** (Unity-refugee audience, when NativeAOT-wasm settles). Covers the bases:
+native gamedev (C class + Zig), scripting/modding (Lua), managed mainstream
+(C#). Other tiers remain possible by construction (flat C ABI) — just no
+first-party SDK until demanded. WasmGC tracked as future-proofing for tier 3.
 
 ## SDK layout: in-repo, one dir per language
 
@@ -120,6 +122,8 @@ sdk/
   c/                 # crcbl.h (generated from abi/, CI-checked in sync; extern "C"
                      #   guarded — C++ consumes it directly) + make example;
                      #   optional crcbl.hpp RAII/span wrapper when demanded
+  zig/               # first-class idiomatic Zig bindings (comptime-generated from
+                     #   the ABI, not just @cImport of crcbl.h) + build.zig template
   lua/               # Lua VM module template + engine-API lua glue
   csharp/            # .NET project template (lands when NativeAOT-wasm settles)
 ```
@@ -165,9 +169,10 @@ Rules:
 | breakout-as-`.wasm` equivalence gate (hash == static build)              | P6A           |
 | Browser nested-module instantiation via JS shim                          | P7–P10 window |
 | `crcbl mod` CLI (build/check/sign-later), hot reload of modules          | P9–P10        |
-| C header (ABI reference — unlocks C/C++/Zig/Nim/D/Odin class)            | post-MVP #1   |
-| Lua VM module template (scripts = hot-reloadable assets)                 | post-MVP #2   |
-| C# SDK (NativeAOT-wasm when it settles)                                  | post-MVP #3   |
+| C header (ABI reference — unlocks C/C++/Nim/D/Odin class)                | post-MVP #1   |
+| Zig SDK (idiomatic bindings + build.zig, conformance-tested)             | post-MVP #2   |
+| Lua VM module template (scripts = hot-reloadable assets)                 | post-MVP #3   |
+| C# SDK (NativeAOT-wasm when it settles)                                  | post-MVP #4   |
 | Modding polish (capability manifests, version negotiation, mod packs)    | post-MVP      |
 
 ## Exit criteria (MVP)
