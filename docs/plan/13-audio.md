@@ -64,10 +64,11 @@ Grammar invariants (what makes it a learnable skill):
   client-side, like graphics; the server never mixes. Default mode: replicated
   events carry `WorldPos` — the spatializer computes relative position from the
   listener (camera/avatar) exactly like the renderer computes view space.
-  **Competitive mode** (topic 31): the server computes the grammar per listener
-  and the wire carries only quantized ear-parameters — no positions in audio
-  messages; the DSP core is identical either way (it consumes parameters, never
-  caring who computed them).
+  **Competitive mode** (the `competitive_integrity` gate, topic 31 — one flag
+  enables this + the visibility filter together): the server computes the
+  grammar per listener and the wire carries only quantized ear-parameters — no
+  positions in audio messages; the DSP core is identical either way (it consumes
+  parameters, never caring who computed them).
 - **Listener** = one entity (client's view); grammar math happens in listener
   space each block.
 - **Occlusion (rule 5) rides physics**: per active voice, a client-side

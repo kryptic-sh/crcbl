@@ -97,8 +97,19 @@ from the audio wire entirely:
   ray pool answers both "can you see them" and "how muffled are they."
 - Own sounds stay client-local (13, unchanged); spectators/replays keep full
   positional streams (delay-protected, 22).
-- Default mode remains client-positional events (simpler, right for co-op/PvE);
-  competitive games flip vis-culling + authoritative-audio together.
+- **The server-cost price, stated plainly**: this mode moves per-listener
+  spatialization math + occlusion rays from N clients onto the one server —
+  O(listeners × audible tagged sources) per tick. It's small math (the grammar
+  is a handful of ops per pair) and the rays share the vis pool, but it is real
+  server load that client-side processing distributes for free. That asymmetry
+  is exactly why the mode exists as a switch, not a default.
+- **One feature gate (LOCKED)**: `competitive_integrity` — a single server
+  config flag enabling **both** the visibility filter and server-authoritative
+  audio together. They close the same leak (entity positions through walls) via
+  two channels; shipping one without the other is a false promise, so the engine
+  doesn't offer them separately. Gate off (default): client-positional audio,
+  full replication — zero added server cost, right for co-op/PvE/towers. Gate
+  on: both filters, budgets shared, leak auditor covering both channels.
 
 ## What still gets through (by design — and catalogued)
 
