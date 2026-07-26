@@ -1,10 +1,12 @@
 # Topic 15 — Windowing (`crcbl-shell`)
 
-From-scratch windowing, replacing winit — **zero third-party code**. Own event
-loop, windows, monitors, input, surface handles behind one trait; native
-backends per platform, including the platform protocol/binding layer itself: we
-own all the code and all the bugs. Godot's `DisplayServer` is the closest prior
-art for the shape; nobody's crates underneath ours.
+From-scratch windowing, replacing winit. Own event loop, windows, monitors,
+input, and surface handles behind one trait; native backends per platform, with
+**all windowing logic ours** — we own the code and the bugs above the OS/driver
+ABI. Godot's `DisplayServer` is the closest prior art for the shape; no
+windowing framework underneath ours. (The original "zero third-party code"
+phrasing is superseded by the policy section below — the Vulkan WSI ABI makes it
+unachievable, and pretending otherwise would have blocked P1.)
 
 ## The dependency line: bindings, not frameworks (REVISED — see WSI note)
 
