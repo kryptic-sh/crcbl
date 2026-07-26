@@ -131,14 +131,56 @@ Designed against InMemory first; every later transport inherits them:
   adaptive snapshot rate under sustained over-budget is the congestion response
   (drop to 30/20 Hz gracefully rather than queue).
 
-## Interest management (the intended design, for the record)
+## Galaxy-scale model: sectors are the wire architecture
 
-Sector-based pub/sub: a client subscribes to its bubble's sectors (the same
-sectors physics/streaming/scenes already use — one spatial system, fourth
-consumer). Entities entering/leaving subscribed sectors generate create/destroy
-on the wire. Spectators (topic 22) subscribe to everything. Post-MVP as
-scheduled; the SnapshotWriter client-id hook plus sector keys mean landing it
-later touches encoding, not architecture.
+The physics pillar made sectors the unit of space (topic 5: `WorldPos`, bubbles,
+streaming). Networking adopts the same shape **as its architecture, not as a
+later optimization** — a galaxy-capable sim with a whole-world wire protocol
+would be a contradiction. MVP scenes simply occupy one sector, and every
+mechanism below degenerates to "the whole scene" at zero cost.
+
+- **Subscription is the primitive.** A client is subscribed to a set of sectors
+  (its bubble + margin, server-controlled). _Everything_ it receives is scoped
+  to that set: entity replication, events, scene chunks (stage 6 streaming and
+  net subscription are the same concept — subscribe to a sector = get its scene
+  data + its live entity stream + its physics activity). Sector = unit of space,
+  physics, streaming, scenes, **and replication** — fifth consumer, one spatial
+  system.
+- **Snapshots are sector-partitioned**: per-(client, sector) ack-baseline
+  streams. Subscribe = full sector state (join-in-progress machinery, scoped);
+  unsubscribe = bulk destroy. "Full world snapshot" stops existing as a concept
+  beyond one sector — which is why join, save, and replay all remain
+  well-defined at any world size (they're sector sets).
+- **Wire coordinates are sector-local always** (the quantization design above) —
+  absolute galactic positions never cross the network; the subscription context
+  provides the sector frame. Precision and bandwidth are both solved by the same
+  structure.
+- **Entity ownership + handoff as first-class**: every entity is owned by
+  exactly one sector; crossing a boundary = explicit migration (trivial
+  in-process — index move + `WorldPos` rebase, which physics does anyway).
+  Formalizing migration now is the **server-meshing seam**: a sector ownership
+  table maps sectors → sim instance; MVP = one sim owns all, later = multiple
+  sim threads (topic 21 pool) or processes/machines own disjoint sector sets,
+  with the same migration event crossing a transport instead of a pointer.
+  Cross-server meshing itself stays post-MVP infra — but every protocol message
+  being sector-scoped from P2 is what keeps it _possible_ instead of a rewrite.
+- **Time at scale**: multiplayer bubbles share the one server tick clock (topics
+  21/23 sync). On-rails regions (Kepler, topic 5) need no replication _at all_ —
+  clients compute them analytically from orbital elements (tiny, near-static
+  data); only live-bubble sectors stream. This is why a galaxy is cheap on the
+  wire: almost all of it is equations, not state. Timewarp is a
+  solo/single-bubble feature; a shared server never warps under connected
+  clients with divergent bubbles.
+- **Spectators/replays** (topic 22) inherit scoping: a spectator subscribes like
+  a client (casters: to the action's sectors); recordings are per-sector streams
+  — replay a battle without recording a galaxy.
+
+Rollout: sector-scoped message envelope + (client, sector) baselines land at
+**P2** (cost ≈ a key in a map while everything fits one sector); multi-sector
+subscription activates with physics bubbles/streaming (P11, orbit is the proof);
+relevance _within_ a subscribed sector (the priority/budget encoder above)
+covers dense-sector scaling; cross-machine meshing = post-MVP infra behind the
+ownership table.
 
 ## Topology stance (decided)
 
@@ -150,14 +192,14 @@ core; the token mint is the interface those services will use. LAN discovery
 
 ## Delivery
 
-| Slice                                                                                                                           | Phase                                             |
-| ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| Channel semantics, handshake/version/schema-hash, session+reconnect, condition simulator, hardening + fuzz corpus               | P2 (on InMemory)                                  |
-| Netgraph HUD                                                                                                                    | P10                                               |
-| UDP reliability layer (acks, resend, fragmentation, tokens, **X25519+XChaCha20-Poly1305 AEAD**) + WebTransport + WebSocket(wss) | P13                                               |
-| Quantization + priority/budget encoder                                                                                          | P13, tightened by towers co-op numbers            |
-| Authenticated key roots (backend token mint / PSK), interest management, LAN discovery                                          | post-MVP                                          |
-| Backend infra (NAT/relay/matchmaking/accounts/browser)                                                                          | out of engine core — separate project when needed |
+| Slice                                                                                                                                                                                                                  | Phase                                             |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| Channel semantics, handshake/version/schema-hash, session+reconnect, condition simulator, hardening + fuzz corpus, **sector-scoped envelope + (client,sector) ack-baselines** (galaxy wire model, degenerate 1-sector) | P2 (on InMemory)                                  |
+| Netgraph HUD                                                                                                                                                                                                           | P10                                               |
+| UDP reliability layer (acks, resend, fragmentation, tokens, **X25519+XChaCha20-Poly1305 AEAD**) + WebTransport + WebSocket(wss)                                                                                        | P13                                               |
+| Quantization + priority/budget encoder                                                                                                                                                                                 | P13, tightened by towers co-op numbers            |
+| Authenticated key roots (backend token mint / PSK), interest management, LAN discovery                                                                                                                                 | post-MVP                                          |
+| Backend infra (NAT/relay/matchmaking/accounts/browser)                                                                                                                                                                 | out of engine core — separate project when needed |
 
 ## Testing (topic 12)
 
