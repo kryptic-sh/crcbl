@@ -136,13 +136,35 @@ default-bound on every device class:
 WASD-in-menus conflicts with nothing by construction: the `ui` context is active
 while a menu has input, gameplay's WASD binding lives in the `gameplay` context
 underneath — the context stack (topic 19) is the disambiguator, not special
-cases. Text inputs are the one exception: while editing, WASD types letters and
-arrows move the caret (`ui_move` suspended until edit mode exits).
+cases.
 
-Widget-local semantics compose: `ui_accept` on a slider enters adjust mode
-(`ui_move` horizontal = increment, accept/back commits/cancels); text input
-enters edit mode (on-screen keyboard is post-MVP, tracked with touch controls);
-lists/tables treat `ui_move` vertical as row traversal (inner focus scope).
+### Focused vs engaged: the universal two-state rule (LOCKED)
+
+**Focus never captures navigation.** Moving focus onto _any_ input widget —
+text, number, slider, dropdown, drag-value, color picker, all of them — is
+inert: `ui_move` keeps navigating right past it, always. A widget only starts
+consuming input after **explicit engagement**: click it, press Enter, or press
+`ui_accept` (pad South). No getting stuck on a slider while arrowing down a
+settings list — the classic console-menu UX failure, banned by rule.
+
+- **Engaged** is a third interaction state after hover/focus (`:engaged`
+  pseudo-class — stylesheet-visible, so an engaged widget looks unmistakably
+  different from a merely focused one).
+- While engaged, the widget owns the nav actions per its semantics: text =
+  type/caret (WASD types letters, arrows move the caret), slider/number =
+  `ui_move` adjusts the value, dropdown = `ui_move` traverses options,
+  list/table = row traversal (inner focus scope).
+- **Exit is symmetric and universal**: `ui_accept`/Enter/click-away **commits**;
+  `ui_back`/Esc **cancels** and reverts to the pre-engagement value (widgets
+  snapshot on engage — part of the widget contract). Either way, focus returns
+  to normal navigation on the same element.
+- At most one engaged widget per context; engaging another commits the first.
+  Buttons/checkboxes are instant-activation widgets — `ui_accept` fires them
+  directly, no engaged state (nothing to adjust).
+- Pointer feel unchanged: click = engage where it always did; dragging a slider
+  = engage-adjust-commit in one gesture.
+- On-screen keyboard for engaged text inputs is post-MVP (tracked with touch
+  controls, topic 19).
 
 ### Spatial navigation (automatic, from layout)
 
