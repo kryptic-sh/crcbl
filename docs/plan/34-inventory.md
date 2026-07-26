@@ -65,6 +65,74 @@ algorithm, one persistence format — filters are data.
 - Auto-placement (`take all`, quick-move) is deterministic first-fit **trying
   both rotations**; explicit drags carry an exact cell + rotation.
 
+### Equipment: mounts, coverage, and composition
+
+Worn gear needs two orthogonal ideas — **where it attaches** and **what it
+physically occupies**. Conflating them is what forces engines into hand-written
+exclusion tables; keeping them apart makes layering rules fall out of data.
+
+- **Mount** = which 1×1 filtered grid on the player it goes into (`head`,
+  `ears`, `torso`, `armor`, `back`, `legs`…). Already the uniform primitive.
+- **Coverage** = the set of body regions the item physically occupies (`skull`,
+  `ears`, `face`, `torso_outer`, `torso_armor`, …). **Two worn items conflict
+  iff their coverage sets intersect** — that single rule replaces every bespoke
+  "can't wear X with Y" list.
+
+| Item          | Mount   | Coverage                     |
+| ------------- | ------- | ---------------------------- |
+| Helmet        | `head`  | `{skull}`                    |
+| Hat           | `head`  | `{skull}`                    |
+| Headset       | `ears`  | `{ears}`                     |
+| Chest rig     | `torso` | `{torso_outer}`              |
+| Plate carrier | `torso` | `{torso_outer, torso_armor}` |
+| Body armor    | `armor` | `{torso_armor}`              |
+
+The requested rules derive with no special cases:
+
+- helmet vs hat → same mount **and** `{skull}` ∩ `{skull}` ≠ ∅ → exclusive.
+- headset → different mount, disjoint coverage → wearable with either.
+- chest rig vs plate carrier → same `torso` mount → exclusive.
+- **armor + chest rig** → `{torso_armor}` ∩ `{torso_outer}` = ∅ → **allowed**.
+- **armor + plate carrier** → `{torso_armor}` ∩ `{torso_outer, torso_armor}` ≠ ∅
+  → **refused**, because the carrier already occupies the armor layer.
+
+Coverage vocabulary is game data — a game with exosuits or three armor layers
+writes its own regions without touching the kit.
+
+**Composition: gear is just grids it provides.** An equipment item declares the
+child grids it exposes, which is exactly what distinguishes these three:
+
+```ron
+PlateCarrier( mount: "torso", coverage: ["torso_outer", "torso_armor"],
+  provides: [ Grid(1,1, filter: "plate_front"), Grid(1,1, filter: "plate_back"),
+              Grid(2,3), Grid(2,3) ] )            // plates AND storage
+
+ChestRig(     mount: "torso", coverage: ["torso_outer"],
+  provides: [ Grid(2,3), Grid(1,2), Grid(1,2) ] ) // storage, no plate grids
+
+BodyArmor(    mount: "armor", coverage: ["torso_armor"],
+  provides: [ Grid(1,1, filter: "plate_front"), Grid(1,1, filter: "plate_back") ] )
+                                                   // plates, no storage
+```
+
+A chest rig **is** a plate carrier without plate grids; body armor **is** a
+plate carrier without storage grids — stated as data, not as three
+implementations. Removing a worn container takes its contents with it (nesting
+already covers that).
+
+**Two bridges out of coverage** (one data model, three consumers):
+
+- **Protection** (28): coverage regions map to hitbox groups, so the damage
+  model knows which plate the chain hit and what it protects — no parallel
+  "armor zones" table.
+- **Visuals** (29): coverage drives render layering and body-part hiding (helmet
+  hides hair, carrier renders over rig) inside the cosmetic loadout component —
+  again, no second data model.
+
+**Conflict UX**: an equip that conflicts is refused with the offending item
+named ("remove plate carrier"); games may enable auto-unequip-and-place as a kit
+knob rather than reimplementing it.
+
 ### Items are entities, and that's the anti-dupe foundation
 
 - Every item instance is an entity with stable identity; its state (durability,
@@ -150,6 +218,10 @@ UI just doesn't wait to look responsive.
   transposed footprint has space; first-fit deterministic and rotation-complete
   (if any placement exists, auto-place finds one); nesting depth/cycle
   rejection.
+- **Coverage-conflict property**: for a fuzzed loadout set, an equip succeeds
+  iff coverage sets are pairwise disjoint — asserted against a hand-written
+  truth table for the shipped vocabulary (helmet/hat/headset/rig/carrier/ armor
+  combinations), so a data change that breaks layering fails CI.
 - **Persistence roundtrip**: save → load → identical grid state (positions,
   rotations, stacks, nesting, item ids); stash survives a server restart;
   store-crossing moves (stash ↔ match) are atomic under injected failure.
