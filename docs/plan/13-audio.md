@@ -36,7 +36,7 @@ Grammar invariants (what makes it a learnable skill):
 
 ## Architecture
 
-- **Pure-DSP core, platform seam at the device edge** (same shape as winit/HAL):
+- **Pure-DSP core, platform seam at the device edge** (same shape as shell/HAL):
   `crcbl-audio` DSP is pure `f32` block processing — runs identically on native
   and wasm, and is unit-testable as plain functions. Device output behind an
   `AudioDevice` seam: `cpal` native (ALSA/PipeWine/ WASAPI/CoreAudio),

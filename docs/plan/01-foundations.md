@@ -19,6 +19,7 @@ crcbl/
 ├── Cargo.toml              # workspace root
 ├── crates/
 │   ├── crcbl-core/         # ids, handles, arenas, slotmaps, time, logging
+│   ├── crcbl-shell/        # topic 15: windowing — own wire-protocol backends
 │   ├── crcbl-hal/          # backend seam: traits + POD descriptors only
 │   ├── crcbl-vk/           # stage 2: ash implementation of the HAL
 │   ├── crcbl-render/       # render graph, frame loop, meshes, materials
@@ -45,7 +46,7 @@ elsewhere — an empty `lib.rs` is fine.
 
 ### 1.1 Workspace + tooling
 
-- Workspace `Cargo.toml`, shared `[workspace.dependencies]` (glam, winit, ash,
+- Workspace `Cargo.toml`, shared `[workspace.dependencies]` (glam, ash,
   thiserror, log).
 - `rustfmt.toml`, `deny.toml` (match gpur conventions),
   `.github/workflows/ci.yml` running fmt + clippy + test on Linux.
@@ -77,7 +78,7 @@ level, bindless-capable descriptor model.
 Core objects (traits or handle-based, decided here):
 
 - `Instance` → `Adapter` enumeration → `Device` + `Queue`.
-- `Surface` + `Swapchain` (created from a raw-window-handle).
+- `Surface` + `Swapchain` (created from a shell `SurfaceTarget` — topic 15).
 - Resources: `Buffer`, `Image`, `Sampler` — created from POD descriptor structs
   (`BufferDesc { size, usage, memory }`).
 - `ShaderModule` (SPIR-V in; Metal/DX12 backends consume SPIR-V via
@@ -94,12 +95,18 @@ in `crcbl-render`, above the seam.
 Deliverable check: a `NullBackend` (no-op impl) in `crcbl-hal` tests proving the
 seam compiles as a trait object / generic and nothing leaks backend types.
 
-### 1.4 Window + event loop
+### 1.4 Window + event loop (`crcbl-shell`, topic 15)
 
-- `apps/sandbox`: winit window, event loop, raw-window-handle plumbed to where
-  the HAL surface will be created.
+- From-scratch windowing: shell trait + own Wayland wire-protocol backend (wayr
+  as donor) + own X11 backend. Zero third-party code — OS boundary only. Two
+  display modes only — windowed (freeform or aspect-locked) and borderless
+  (render-scale handled by the renderer). See
+  [15-windowing.md](15-windowing.md).
+- `apps/sandbox`: shell window, event loop, raw surface handle plumbed to where
+  the HAL surface will be created. `HeadlessShell` for CI.
 - Input event normalization into engine types (`crcbl-core::input`): keyboard,
-  mouse, resize, DPI. winit types stop at the app boundary.
+  mouse (incl. raw motion + pointer lock), resize, DPI. Shell backend types stop
+  at the shell boundary.
 
 ## Exit criteria
 
@@ -114,4 +121,6 @@ seam compiles as a trait object / generic and nothing leaks backend types.
 - **Over-designing the HAL before the Vulkan impl exists.** Mitigation: the seam
   is allowed to change during stage 2; it freezes at stage 2 exit, not stage 1
   exit.
-- **winit API churn.** Pin the version workspace-wide; upgrade deliberately.
+- **Windowing edge-case iceberg** (the reason winit exists — DPI, focus, WM
+  quirks). Contained per topic 15: Linux-first with daily driving + CI under
+  nested compositors; Win32/AppKit deferred to P14; letterbox-always-works.

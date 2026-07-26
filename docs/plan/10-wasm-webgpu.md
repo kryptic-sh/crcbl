@@ -48,8 +48,8 @@ the GPU — the GPU-bound principle holds, only the draw-emission tail differs.
 
 - **Build**: `wasm32-unknown-unknown` + `wasm-bindgen`; a small `crcbl-web`
   crate for canvas setup, rAF loop driving `tick(dt)`, resize/DPI from the
-  browser. winit's web backend evaluated first — if its canvas/rAF handling is
-  solid, `crcbl-web` shrinks to glue.
+  browser. crcbl-shell's canvas backend (topic 15, own JS shim) provides this —
+  if its canvas/rAF handling is solid, `crcbl-web` shrinks to glue.
 - **Shaders**: Slang → WGSL (via SPIR-V → naga if Slang's WGSL target isn't
   clean at the time). Same shader-hash pipeline, third artifact format.
 - **Assets**: `FetchSource` (HTTP fetch → async decode). Asset packs matter more
@@ -93,6 +93,7 @@ the GPU — the GPU-bound principle holds, only the draw-emission tail differs.
 
 - **WebGPU timestamp/feature availability varies by browser.** Debug tooling
   degrades feature-by-feature, never breaks the build.
-- **wgpu version churn.** Pin and upgrade deliberately (same policy as winit).
+- **wgpu version churn.** Pin and upgrade deliberately (same policy as other
+  pinned deps).
 - **Tier B perf disappointment.** Set the budget expectation in this doc's perf
   task — Tier B is the reach-everyone tier, not the showcase tier.

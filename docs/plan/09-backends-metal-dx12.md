@@ -75,8 +75,8 @@ GPU-based validation) integration into the same log path as Vulkan validation.
 3. `crcbl-mtl`: bring-up ladder (clear → triangle → sandbox → editor), then
    tier-A features, then perf pass vs Vulkan baseline.
 4. `crcbl-dx12`: same ladder.
-5. Windowing: winit already covers macOS/Windows; verify DPI + resize behavior
-   per platform.
+5. Windowing: crcbl-shell Win32 + AppKit backends land here (topic 15); verify
+   DPI + resize behavior per platform.
 6. CI matrix + on-hardware smoke runs.
 7. Perf validation: stage 3 exit-criteria scene within ~15% of the Vulkan
    numbers on comparable hardware (flag, investigate, document if not).
