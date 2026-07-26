@@ -46,6 +46,19 @@ audio) stay native forever; the module seam is for _game_ logic.
 
 ## ABI sketch
 
+> **Decision (2026-07-27): hand-rolled contract + own codegen; WIT/component
+> model considered and rejected.** Rationale: (1) components in the browser
+> require `jco` transpilation — breaks our own-JS-shim core-module symmetry; (2)
+> the hot path (array views) bypasses interface types anyway, so WIT would only
+> cover the cold surface while charging full toolchain tax; (3) the
+> batch-oriented API is deliberately tiny (~dozens of functions, POD records) —
+> per-language binding cost is small by construction; (4) foreign generated glue
+> vs "we own all the bugs". The contract lives in `sdk/abi/` as data; **our own
+> generator** emits `crcbl.h`, Zig bindings, and Rust extern decls from it —
+> programmatic, drift-proof, zero foreign toolchain. ABI stays WIT-shaped (flat
+> funcs, POD records, no callbacks) so migration remains cheap if the calculus
+> ever flips.
+
 Flat C-style, versioned, no host-side codegen required of guests (language SDKs
 are sugar, Rust SDK first):
 
