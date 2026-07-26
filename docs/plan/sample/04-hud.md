@@ -63,5 +63,7 @@ doesn't drive speculative widgets — that's the reverse of the rule).
   css edit shows the change (CI-verifiable web-workflow).
 - A new widget cannot merge without a gallery entry + golden frame (enforced by
   review checklist; the gallery is the widget registry).
+- Full gallery traversable by pad/arrows/WASD alone (focus-path e2e green) —
+  pointer never required.
 - Published on the Pages site; loads fast (UI-only bundle is the smallest wasm
   artifact — measure and record it).

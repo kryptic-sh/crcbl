@@ -98,6 +98,80 @@ drag-value, text input (single line), tree node, collapsing header, window
 divider), list/table (flex rows), color swatch. Widgets are added when the
 editor or debug tools need them, never speculatively.
 
+## Focus + gamepad/keyboard navigation
+
+Every UI screen is fully drivable without a pointer — gamepad, keyboard, and
+(later) on-screen controls navigate the same trees the mouse clicks. This is the
+bridge between topic 19's device-agnostic input and the DOM-like tree:
+console-grade menu UX, designed once, free for every screen.
+
+### Focus model
+
+- **One focused element per context** (the topic 19 `ui` context); focus is
+  ordinary interaction state next to hover/active — the `:focus` pseudo-class
+  already styles it, so **focus rings are stylesheet-driven** (`outline`-style
+  properties in `default.css`, themable per game).
+- Focusable = interactive widgets by default (button, checkbox, slider, input,
+  tree node, list row…); blocks opt in/out via a `focusable` attribute.
+  Containers form **focus scopes**: modals trap focus inside themselves, scroll
+  containers auto-scroll the focused element into view, windows/panes are scope
+  roots.
+- **Mixed-input rule** (last-active device, topic 19): pointer mode shows hover
+  affordances; pad/keyboard mode shows the focus ring. A click also sets focus
+  (so switching devices mid-flow continues from the obvious place); pad input
+  after mouse use resumes from last focus or last hover.
+
+### Navigation = reserved UI actions (topic 19)
+
+Engine-reserved action set in the `ui` context — rebindable like everything,
+default-bound on every device class:
+
+| Action              | Keyboard          | Gamepad           | Semantics                                                                                                  |
+| ------------------- | ----------------- | ----------------- | ---------------------------------------------------------------------------------------------------------- |
+| `ui_move` (Axis2)   | **arrows + WASD** | dpad + left stick | spatial focus movement — arrows/WASD are a strict 1:1 of dpad; every UI screen is fully drivable by either |
+| `ui_next`/`ui_prev` | Tab / Shift+Tab   | LB/RB             | tree-order traversal (fallback/lists)                                                                      |
+| `ui_accept`         | Enter/Space       | South             | same event path as click — widgets can't tell                                                              |
+| `ui_back`           | Esc               | East              | close modal / pop screen (context stack)                                                                   |
+
+WASD-in-menus conflicts with nothing by construction: the `ui` context is active
+while a menu has input, gameplay's WASD binding lives in the `gameplay` context
+underneath — the context stack (topic 19) is the disambiguator, not special
+cases. Text inputs are the one exception: while editing, WASD types letters and
+arrows move the caret (`ui_move` suspended until edit mode exits).
+
+Widget-local semantics compose: `ui_accept` on a slider enters adjust mode
+(`ui_move` horizontal = increment, accept/back commits/cancels); text input
+enters edit mode (on-screen keyboard is post-MVP, tracked with touch controls);
+lists/tables treat `ui_move` vertical as row traversal (inner focus scope).
+
+### Spatial navigation (automatic, from layout)
+
+- Directional moves resolve **geometrically from the laid-out rects** (the CSS
+  spatial-navigation approach): candidates = focusables whose rect lies in the
+  direction's half-plane from the current rect; score by along-axis distance +
+  cross-axis overlap/misalignment penalty; best score wins. **No per-screen
+  wiring** — a new menu is navigable the moment it lays out.
+- **Explicit overrides where auto is wrong**: stylesheet/inline props
+  `nav-up: "#id"`, `nav-down`, `nav-left`, `nav-right` (+ `nav-wrap` for
+  grids/carousels) — the escape hatch is data, matching the CSS-subset
+  philosophy. Focus-scope boundaries clamp candidates (a modal never leaks
+  focus).
+- Degenerate layouts (nothing in that direction): stay put, or wrap if
+  `nav-wrap`; `ui_next` order = depth-first tree order as the always-works
+  fallback.
+
+### Debug + testing
+
+- UI inspector grows: focus path display + **candidate-scoring overlay** (why
+  focus went there — every candidate's score rendered on request); focus-history
+  log.
+- Tests (topic 12): spatial-scoring unit table on fixture layouts; headless e2e
+  — scripted `ui_move`/`ui_accept` sequences traverse the hud gallery end-to-end
+  and assert the focus path; golden frames with focus ring per theme. The
+  settings/rebind screens (topic 14/19, P10) are the first real consumers;
+  **puppet's device-swap showcase is the acceptance test** (full menu flow on
+  pad alone).
+
 ## Debug tools (`crcbl-ui::debug` or thin crate atop it)
 
 Surfaces for instrumentation that already exists:
