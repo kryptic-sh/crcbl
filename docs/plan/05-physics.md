@@ -138,7 +138,7 @@ early.
 
 ## Exit criteria
 
-- Orbit sample ([sample/05-orbit.md](sample/05-orbit.md)) passes: launch from
+- Orbit sample ([sample/06-orbit.md](sample/06-orbit.md)) passes: launch from
   planet surface, atmosphere exit (drag + terminal velocity measurably correct),
   stable orbit achieved with symplectic integrator (energy drift bounded over
   10k orbits on-rails handoff), deorbit + land, across at least one sector

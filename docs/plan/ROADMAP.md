@@ -36,8 +36,8 @@ engine's public face and its continuous cross-backend regression test.
 | **P8**  | Phys slice 3: batch queries at scale, sleeping/islands pressure                                                                                                                                                                            | 5                 |                                                                              |
 | **S3**  | **Sample: horde**                                                                                                                                                                                                                          | —                 | 10k enemies @60; perf numbers recorded; web demo (smaller budget)            |
 | **P9**  | Assets + scenes: `AssetSource` (Dir/Fetch), glTF import, RON scene format, hot reload; `crcbl import`; glTF corpus e2e                                                                                                                     | 6, 11, 12         | Sponza-class scene through full path                                         |
-| **P10** | UI slice 2 + debug tools: widget set, panels/splitters, profiler HUD, inspector, console; music streaming + ducking + cue inspector                                                                                                        | 7, 13             | Debug overlay live over loaded scene                                         |
-| **S4**  | **Sample: viewer** (native tool; web build stretch)                                                                                                                                                                                        | —                 | Arbitrary glTF opens, panels work                                            |
+| **P10** | UI slice 2 + debug tools: widget set, panels/splitters, profiler HUD, inspector, console, **UI inspector**; music streaming + ducking + cue inspector; audio occlusion                                                                     | 7, 13             | Debug overlay live over loaded scene                                         |
+| **S4**  | **Samples: hud complete + viewer** (hud skeleton exists since P4 as the UI fixture; viewer = native tool, web build stretch)                                                                                                               | —                 | Widget gallery + themes golden-framed; arbitrary glTF opens, panels work     |
 | **P11** | Phys slice 4 (L1 full): sector frames + SOI, gravity/drag/atmosphere, Kepler on-rails, bubbles, timewarp                                                                                                                                   | 5                 | Physics stage exit nears                                                     |
 | **S5**  | **Sample: orbit** — physics acceptance test                                                                                                                                                                                                | —                 | Full mission; **flashiest web demo**                                         |
 | **P12** | Editor: edit-mode schedule, viewport+picking (phys raycast), outliner, properties, gizmos, undo commands, play mode; `crcbl scene`/`edit --serve` CLI protocol + command/undo property suite                                               | 8, 11, 12         | Scene authored start-to-finish in editor **and** modifiable headless via CLI |
@@ -80,8 +80,8 @@ slice tables):
 - Physics slices P3/P6/P8/P11 are the demand-driven delivery from
   [05-physics.md](05-physics.md); the slice↔sample mapping there matches the
   S-phases here.
-- Sample docs renumbered to build order: 01 breakout, 02 asteroids, 03 horde, 04
-  viewer, 05 orbit, 06 towers, 07 arena.
+- Sample docs numbered in build order: 01 breakout, 02 asteroids, 03 horde, 04
+  hud (P4 skeleton → P10 complete), 05 viewer, 06 orbit, 07 towers, 08 arena.
 - HAL freeze moves in practice to P5 exit: the seam isn't frozen until _two_
   backends (vk + wgpu) implement it — earlier and stronger than the old "freeze
   at stage 2 exit", superseding it.

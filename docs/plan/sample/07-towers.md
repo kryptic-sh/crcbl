@@ -1,4 +1,4 @@
-# Sample 06 — towers (flagship)
+# Sample 07 — towers (flagship)
 
 Co-op 3D tower defense, 1–4 players. The flagship sample: every engine pillar in
 one shippable game, and the long-lived dogfood project that keeps evolving with

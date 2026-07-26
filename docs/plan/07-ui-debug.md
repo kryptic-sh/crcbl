@@ -1,44 +1,102 @@
 # Stage 7 — Immediate-Mode GUI + Debug Tools
 
-Own imgui (`crcbl-ui`) rendered through the engine's own draw path, then the
-debug tooling built on top of it: profiler HUD, inspector, console. This is the
+Own GUI (`crcbl-ui`) rendered through the engine's own draw path, then the debug
+tooling built on top of it: profiler HUD, inspector, console. This is the
 toolkit the stage 8 editor is made of.
 
 ## Goals
 
 - One GUI system for editor and game (locked decision) — no egui, no foreign
   draw path.
+- **Web-like layout + styling**: the UI is a DOM-ish tree of nested blocks/spans
+  laid out by a CSS-subset engine, styled via stylesheets with selectors.
+  Layouts read like web layouts; styles hot-reload like web dev.
+- **Engine-wide**: every UI surface the engine itself ships — debug overlay,
+  editor chrome, sample HUDs, the hud demo — is built from this system and its
+  stylesheets. There is no second UI path; changing engine UI = editing tree
+  code + css, same as a game would. The [hud sample](sample/04-hud.md) is the
+  living fixture and gallery.
 - GUI renders as ordinary engine content: vertices into a per-frame buffer, one
   pass in the render graph, textures from the bindless/material system.
 - Debug tools become visible: everything instrumented in stages 2–6 gets a live
   surface.
 
-## GUI architecture (`crcbl-ui`)
+## Architecture: immediate-mode authoring, DOM-like model, CSS-subset styling
 
-- Classic single-pass imgui: widgets emit draw data + hit-test against
-  _previous_ frame layout (Dear-ImGui-style, one frame of interaction latency,
-  drastically simpler than retained/two-pass). Post-MVP revisit only if the
-  editor genuinely hurts.
-- `UiContext` per frame: input state in (stage 1 normalized input), draw list
-  out. ID stack (hash of label + parent) for widget identity, hot/active
-  tracking for interaction state.
-- Draw list: triangles + scissor rects + texture id per command; tessellation
-  for rects/rounded rects/lines/text quads on CPU (UI vertex counts are small;
-  not worth GPU tessellation complexity).
-- Renderer integration: draw list uploads into the per-frame bump-allocated
-  vertex buffer, drawn by a dedicated graph pass, ortho projection (the 2D path
-  from stage 3 — UI is the first consumer of it). Game world can also render UI
-  in-world (it's just meshes) — free win for 3D-space UI later.
-- Text: `fontdue`/`swash`-class rasterizer → glyph atlas (grows-on-demand, lives
-  in the texture system). SDF text post-MVP; bitmap atlas at fixed sizes for
-  MVP.
-- Widget MVP set (editor-driven): label, button, checkbox, slider, drag-value,
-  text input (single line), tree node, collapsing header, window (move/resize),
-  dockable split panes (simple splitter, not full docking), list/table, color
-  swatch. Nothing speculative — widgets are added when the editor or debug tools
-  need them.
-- Game-UI usable: styling is a small style struct (colors, padding, font) —
-  enough for game HUDs; theming systems post-MVP.
+Three cleanly separated layers:
+
+### 1. Element tree (the "DOM")
+
+- Two node kinds, browser-shaped: **block** (container, participates in layout)
+  and **span** (inline leaf: text, image, custom-draw). Every widget is composed
+  of these — a button is a block with a span child and behavior.
+- Nodes carry `id` (unique name), `classes`, inline style overrides, and
+  interaction state (hover/active/focus — usable as selector pseudo-classes).
+- **Authoring stays immediate-mode**: game/editor code rebuilds the tree every
+  frame through a builder API —
+  `ui.block("#health-bar.hud", |ui| { ui.span("75/100"); … })`. No retained
+  scene graph to sync; identity comes from the id path (same as the old ID-stack
+  plan). Internally the tree is diffed/cached per frame for layout- and
+  style-resolution reuse, but that's an optimization detail, not the API.
+
+### 2. Layout engine (CSS-subset, from scratch)
+
+- **Flexbox subset** as the one layout model (covers game HUDs and editor
+  panels; grid post-MVP if something demands it): `display: flex | none`,
+  `flex-direction`, `flex-wrap`, `justify-content`, `align-items`, `align-self`,
+  `flex-grow/shrink/basis`, `gap`.
+- Box model: `width/height/min/max` in px / % / `auto`, `padding`, `margin`,
+  `border` (widths), `box-sizing: border-box` semantics only.
+- `position: relative | absolute` (+ `top/right/bottom/left`) for overlays,
+  tooltips, drag ghosts; `overflow: hidden | scroll` (scroll = scissor +
+  offset); `z-index` within a stacking context.
+- Not full CSS spec, deliberately: no floats, no inline flow beyond span runs
+  inside a block, no tables (a table widget composes flex rows), no
+  animations/transitions in MVP (style values can still be tweened by code).
+
+### 3. Style system (CSS-compatible-ish)
+
+- **Stylesheets in actual `.css`-syntax files** (subset parser, from scratch):
+  type (`block`, `span`, widget names like `button`), `#id`, `.class`,
+  descendant combinator, and pseudo-classes `:hover`, `:active`, `:focus`,
+  `:disabled`. Specificity = simplified (inline > id > class > type; last-wins
+  within a tier) — predictable over spec-faithful.
+- Properties: colors (`background`, `color`, `border-color`), `border-radius`,
+  `opacity`, `font-size`, `font` (family id), text align, plus every layout
+  property above. Custom properties (`--vars`) + `var()` for theming.
+- Cascade sources: engine `default.css` → game/app stylesheet(s) → inline
+  overrides on the node. **Hot reload** via the stage 6 asset watcher — editing
+  a `.css` restyles the running app; the editor's own look is a stylesheet, and
+  game HUD theming = shipping a different stylesheet.
+- Style resolution is cached per node id + class-set + pseudo-state; only dirty
+  nodes re-resolve (style thrash is the classic perf trap here).
+
+### Pipeline per frame
+
+`build tree (immediate) → resolve styles (cached) → flex layout → emit draw list → graph pass`.
+Hit-testing against the _previous_ frame's layout (one-frame interaction latency
+— same simplicity win as classic imgui, now with real layout).
+
+## Rendering (unchanged from original plan)
+
+- Draw list: triangles + scissor rects + texture id per command; CPU
+  tessellation for rects/rounded rects/borders/text quads.
+- Uploads into the per-frame bump-allocated vertex buffer, dedicated graph pass,
+  ortho projection (stage 3's 2D path — UI is its first consumer). World-space
+  UI = same tree rendered with a world transform (3D nameplates free).
+- Text: `fontdue`/`swash`-class rasterizer → glyph atlas in the texture system.
+  Bitmap atlas at fixed sizes MVP; SDF post-MVP. Spans wrap within their block
+  (simple greedy line-break; no shaping/RTL in MVP).
+
+## Widgets
+
+Widgets = block/span compositions + behavior, styled by the same stylesheets (a
+widget ships default rules in `default.css`, overridable by games — the pikr
+pattern, proven). MVP set (editor-driven): label, button, checkbox, slider,
+drag-value, text input (single line), tree node, collapsing header, window
+(move/resize = absolute-positioned block), split panes (flex + draggable
+divider), list/table (flex rows), color swatch. Widgets are added when the
+editor or debug tools need them, never speculatively.
 
 ## Debug tools (`crcbl-ui::debug` or thin crate atop it)
 
@@ -58,36 +116,54 @@ Surfaces for instrumentation that already exists:
    network connection (server-authoritative debugging, free).
 5. **Debug draw controls** — toggle the stage 3 debug-draw categories (AABBs,
    system overlays) per system.
+6. **UI inspector** (the web-dev devtools payoff): hover any element → its box
+   outlines (content/padding/margin), matched style rules, computed values,
+   id/class path. Nearly free because the tree + resolved styles are real data
+   structures.
 
 ## Tasks
 
-1. `UiContext`, ID/hot/active core, draw list + tessellation, hit-testing.
-2. Glyph atlas + text rendering.
-3. Graph pass + per-frame buffer integration; input routing (UI consumes input
-   first; unconsumed falls through to game — capture rules explicit).
-4. Widget set, driven by building tool #1 (profiler HUD) first as the proving
-   ground.
-5. Inspector + console + stats panels.
-6. Sandbox: full debug overlay over the Sponza scene from stage 6.
+1. Element tree + builder API, id/class/pseudo-state, hover/active/focus
+   tracking, hit-testing.
+2. CSS-subset parser (+ tests against a fixture corpus), cascade/specificity,
+   resolution cache, `default.css`.
+3. Flex layout engine + property-test suite (layout invariants: children fit
+   parent under constraints, gap/grow math vs hand-computed fixtures).
+4. Draw-list emit + tessellation; glyph atlas + text; graph pass + input routing
+   (UI consumes first; unconsumed falls through — capture rules explicit).
+5. Widget set, driven by building the profiler HUD first as proving ground.
+6. Stylesheet hot reload; UI inspector.
+7. Inspector + console + stats panels.
+8. Sandbox: full debug overlay over the Sponza scene from stage 6.
 
 ## Exit criteria
 
 - Debug overlay (profiler, inspector, console, stats) runs in the sandbox over a
   live scene; interaction solid (drag sliders, select entities, run console
   commands against the server).
+- A non-trivial HUD (health bar + minimap frame + wave banner) is built **purely
+  by editing a `.css` file + ~30 lines of tree code**, restyled live without
+  recompile — the web-workflow claim, demonstrated.
+- Layout engine passes the fixture corpus (side-by-side spot-checks against
+  browser flexbox for the supported subset).
 - UI pass cost visible in its own profiler row and within budget (<0.5 ms GPU
   for the debug overlay at 1080p on target hardware).
-- A minimal "game HUD" demo (health bar + crosshair from the same API) proving
-  the game-UI story.
+- Draw-list snapshot tests + layout property tests green (topic 12).
 - No renderer specifics leak into `crcbl-ui` (it produces draw lists;
   `crcbl-render` owns the pass) — checked by dependency direction in CI.
 
 ## Risks
 
+- **CSS scope creep** — the subset above is the contract; a property gets added
+  only when the editor or a sample needs it, and "browser does it" is not a
+  requirement. Simplified specificity is a feature, not a gap.
+- **Layout engine correctness rabbit hole.** Flexbox subset only, fixture-
+  driven; when a case is ambiguous, match what the browser does for the subset,
+  document divergence otherwise.
+- **Style resolution perf.** Cache by (id, classes, pseudo-state) from day one;
+  the UI inspector shows resolve counts so thrash is visible early.
 - **Text rendering rabbit hole.** Bitmap atlas, Latin-1 + basic UTF-8, two font
-  sizes. Shaping/RTL/emoji are post-MVP; the atlas design just mustn't preclude
-  them.
-- **Docking complexity.** Simple splitters only. Full docking is the classic
-  imgui time sink; the editor layout (stage 8) is designed around splitters.
-- **Input-latency purism.** One-frame hit-test latency is fine; do not build the
-  two-pass layout engine in MVP.
+  sizes. Shaping/RTL/emoji post-MVP; atlas design mustn't preclude them.
+- **Docking complexity.** Split panes via flex + dividers only; full docking is
+  the classic time sink. The editor layout (stage 8) is designed around
+  splitters.
