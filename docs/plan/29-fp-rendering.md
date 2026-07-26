@@ -86,6 +86,57 @@ A dedicated pass after world opaque, before transparency:
   scoped players see enemies pop in. Recorded here so the vis-culling slice
   inherits the requirement.
 
+## Full-sync guarantees: feet, cosmetics, sound (LOCKED)
+
+The two-model split must never become two _truths_. Three guarantees keep 1P,
+3P, spectators, and audio all describing the same body:
+
+### One skeleton, one pose
+
+- The world-model skeleton pose (from replicated anim state, 17) is **the**
+  pose. Full-body-1P renders it directly (head collapsed for the camera — a
+  render detail, not a pose change); the arms viewmodel is a _view_ of the same
+  arm chains + weapon state; 3P is the pose unmodified.
+- **Feet are therefore identical by construction**: foot placement, stride
+  phase, and leg IK (applied to the shared pose _before_ any view renders) are
+  the same world-space positions whether you look down in 1P, watch in 3P,
+  spectate, or scrub a replay. Looking down at your feet shows exactly what an
+  enemy sees — no "1P legs animation set" divergence, ever.
+- Pose parity is test-enforced (below), same pattern as viewmodel derivability.
+
+### Cosmetics: declared once, rendered everywhere
+
+- A player's **cosmetic loadout is a replicated component** (entitlement claims
+  arrive via topic 27 tokens; the loadout itself is ordinary synced state —
+  spectators and replays get it free).
+- Each cosmetic slot declares its representations once:
+  `CosmeticSlot { world_mesh, viewmodel_mesh?, materials, sockets }` —
+  gloves/sleeves define the arms the viewmodel shows, the jacket defines what 3P
+  and full-body-1P show, weapon skins apply to both weapon instances by shared
+  material reference. One data entry, every view.
+- Rule: **there is no view-only cosmetic state** — if it's visible anywhere,
+  it's in the loadout component. Kill-cams and spectators render your outfit
+  correctly because there is nothing else to know.
+
+### Sound: positions from the body, grammar for everyone
+
+- Every gameplay sound is an event **at a world position derived from the shared
+  skeleton**: footsteps fire from anim events (17) at the foot socket's world
+  position; gunshots at the muzzle socket; foley (reload, gear rustle) at their
+  sockets. Since the pose is shared, the _owner's_ footstep and the _enemy's
+  perception_ of that footstep are the same event at the same coordinates — the
+  esports audio grammar (13) spatializes it per listener, and a spectator hears
+  exactly what proximity dictates.
+- Own-sound presentation: the owner hears their own actions through the same
+  grammar (distance ≈ 0 → effectively the unprocessed reference, rule 1 of topic
+  13 — no special "1P sound set" needed); cosmetic-only local layers (breathing)
+  are client-side but positioned on the same sockets, so switching to
+  3P/spectator never relocates a sound source.
+- Surface-dependent footsteps: the anim event carries the foot socket; the audio
+  system resolves surface material from the ground collider under that foot (the
+  property block again) — identical resolution for every listener because it
+  runs from replicated state.
+
 ## Spectating / replay / kill-cam (consumers, mostly free)
 
 1P spectate + kill-cam = render the target's POV from replicated state: eye
@@ -106,6 +157,14 @@ review shows what the shooter's screen credibly showed.
   FPS sample's budget gates include scoped combat.
 - Sight alignment: socket-math property — any optic on any weapon centers its
   reticle on the eye trace at ADS rest.
+- **Pose parity**: full-body-1P pose hash == world-model pose hash from the same
+  replicated state (feet/legs identical across views by test, not intent).
+- **Cosmetic parity**: a loadout renders to golden frames in 1P, 3P, and
+  spectator views — one data entry, three matching appearances; no view-only
+  cosmetic state compiles (schema-level check).
+- **Audio-position parity**: footstep/gunshot event positions derived owner-side
+  vs spectator-side from the same tick state are identical (socket-position
+  hash); surface-material resolution matches for every listener.
 
 ## Delivery (FPS-project era)
 
