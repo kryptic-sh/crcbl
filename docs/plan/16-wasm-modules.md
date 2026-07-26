@@ -99,9 +99,13 @@ them generically.
 | 3 — big-audience, runtime-heavy  | **C#** (Mono-wasm/NativeAOT — Unity-refugee audience), **Kotlin/Wasm**                                                        | ship GC runtime in-module; WasmGC host support when stable |
 | 4 — interpreted via VM-in-module | **Lua** (official Lua-VM module template; scripts = hot-reloadable assets), JS (QuickJS), Python (MicroPython, demand-driven) | one template per VM, zero new ABI work                     |
 
-Priority: Rust SDK → C header (proves language-neutrality, unlocks tier 1) →
-AssemblyScript SDK → Lua VM template → C# when NativeAOT-wasm settles. WasmGC
-tracked as future-proofing for tier 3.
+**Priority (LOCKED)**: Rust SDK (P6A) → **C header** (proves
+language-neutrality; unlocks the whole C-FFI class — C/C++/Zig/Nim/D/Odin — in
+one move) → **Lua VM template** (the modding masses) → **C#** (Unity-refugee
+audience, when NativeAOT-wasm settles). That trio covers most bases: native
+gamedev (C class), scripting/modding (Lua), managed mainstream (C#). Other tiers
+remain possible by construction (flat C ABI) — just no first-party SDK until
+demanded. WasmGC tracked as future-proofing for tier 3.
 
 ## Consequences elsewhere (kept honest)
 
@@ -125,7 +129,9 @@ tracked as future-proofing for tier 3.
 | breakout-as-`.wasm` equivalence gate (hash == static build)           | P6A           |
 | Browser nested-module instantiation via JS shim                       | P7–P10 window |
 | `crcbl mod` CLI (build/check/sign-later), hot reload of modules       | P9–P10        |
-| Language SDK #2 (C or Zig header) — proves the ABI is real            | post-MVP      |
+| C header (ABI reference — unlocks C/C++/Zig/Nim/D/Odin class)         | post-MVP #1   |
+| Lua VM module template (scripts = hot-reloadable assets)              | post-MVP #2   |
+| C# SDK (NativeAOT-wasm when it settles)                               | post-MVP #3   |
 | Modding polish (capability manifests, version negotiation, mod packs) | post-MVP      |
 
 ## Exit criteria (MVP)
