@@ -1,12 +1,37 @@
-# Topic 28 — Ballistic Penetration
+# Topic 28 — Ballistics + Kinetic Impact
 
-The penetrating-projectile extension to physics CCD (topic 5): multi-surface
-segment queries with material-based energy loss, ricochet, deflection, and media
-drag — the engine half of Tarkov-grade gunplay. The engine owns the **ballistic
-transport** (where the projectile goes, what it passes through, how much energy
-survives); the game owns the **damage model** (health, armor semantics) on top
-of the query results. FPS-project era; designed now so the collider property
-block and query API grow the right shape.
+The kinetic-harm layer of physics (topic 5): penetrating projectile sweeps **and
+generalized impact transfer** — one model where **anything with mass and
+velocity can hurt anything it hits**. A bullet, a hammer dropped five stories, a
+vehicle, your own body meeting the ground: all of them resolve through the same
+physics (kinetic energy in, energy deposited on contact) and report through one
+event shape. The engine owns the **kinetic transport** (paths, penetration,
+deposited energy/impulse); the game owns the **damage model** (health, armor
+semantics, energy→damage curves) on top. FPS-project era for the ballistic half;
+contact impacts ride L2; designed now so the collider property block, round
+model, and event schema grow the right shape.
+
+## The kinetic model: mass × velocity, everywhere
+
+Projectiles are not abstract "damage rays" — a round is a physical object:
+
+```ron
+Round(
+  mass: 0.008,        // kg — 8 g rifle round
+  muzzle_velocity: 900.0, // m/s → E = ½mv² ≈ 3.2 kJ, momentum p = mv
+  pen_coeff: 1.8,     // penetrator hardness/shape factor (AP > FMJ > soft)
+  area: 0.6,          // cm² presented cross-section (sectional density input)
+)
+```
+
+- **Energy** `E = ½mv²` drives harm potential; **penetration capability** =
+  `E × pen_coeff / area` (sectional density: heavy-narrow-hard penetrates,
+  light-wide-soft transfers) vs material `resistance × thickness`.
+- The same numbers describe a hammer (2 kg, terminal velocity from a 5-story
+  fall via L1 gravity/drag ≈ 17 m/s → ~290 J, huge area, pen ≈ 0) or a car (1500
+  kg at 8 m/s → 48 kJ, pen 0). Nothing special-cases them — low `pen_coeff/area`
+  just means the penetration branch never wins and everything becomes
+  deposition.
 
 ## Material model (the collider property block grows again)
 
@@ -75,18 +100,65 @@ traversal**:
   identical penetrating sweep against rewound hitboxes + present statics.
   Wallbangs are lag-compensated by construction.
 
+## Energy deposition: penetration and blunt are one accounting
+
+Every surface interaction **deposits** energy into what was hit — the chain
+reports it per hit, and deposition is the universal damage input:
+
+- **Penetrated**: deposited = `resistance × thickness` (what the material
+  absorbed slowing the round); the rest continues.
+- **Stopped/embedded**: deposited = _all_ remaining energy — which is exactly
+  **blunt transfer**. A plate that stops a round eats 3 kJ; the game's damage
+  model maps deposited-behind-armor energy (minus the armor's attenuation
+  factor, game data) to trauma. Behind-armor blunt damage isn't a feature bolted
+  on — it's the energy conservation the model already does.
+- **Ricochet**: deposited = the energy lost in the bounce.
+
+## Generalized kinetic contacts: the `KineticContact` event
+
+One event schema unifies every way mass-in-motion meets a body:
+
+```ron
+KineticContact(
+  source: Ballistic | Contact,   // sweep chain hit vs solver contact
+  bodies: (impactor, struck),    // entity ids (impactor may be None: world)
+  point, normal,
+  relative_velocity, impactor_mass,
+  energy_deposited, impulse,     // the two damage-relevant magnitudes
+)
+```
+
+- **Ballistic sweeps** emit one per chain hit (as above).
+- **Contact impulses** (L2 solver, and CCD/controller contacts before L2): any
+  collision whose impulse exceeds a per-body threshold emits one —
+  resting/rolling contacts filtered by relative-velocity floor, so no event spam
+  from a crate sitting on the floor.
+- This makes the requested cases fall out with **zero special systems**:
+  - _hammer from the 5th floor_: L1 gravity+drag gives impact velocity → CCD
+    contact on the head hitbox → `KineticContact { ~290 J }` → game's
+    energy→damage curve says ouch;
+  - _vehicle hits player_: solver contact impulse from a 1500 kg body → same
+    event, very large numbers;
+  - _fall damage_: your own body contacting ground **is** a `KineticContact`
+    (struck = you, impactor = world) — fall damage is this system consumed by
+    the game, not an engine special case;
+  - _thrown crate, debris, melee swing_: mass × velocity, same event.
+- Deterministic like all sim: solver impulses and sweep chains are tick-state →
+  events replicate, replay, and hash like everything else.
+
 ## Hitboxes + armor: the engine/game split
 
 - Character hitboxes are colliders with the `flesh` material — limbs cost
   energy, through-and-through exits happen naturally, multi-limb paths report
-  each hit with its entry energy.
-- **Armor is game logic**: the query returns the ordered hit chain with energy
-  at each surface; the game's damage module resolves armor
+  each hit with its entry energy **and deposition**.
+- **Armor is game logic**: the query returns the ordered hit chain with
+  energy/deposition at each surface; the game's damage module resolves armor
   (class/durability/blunt-through — Tarkov semantics live in game data), and
-  **truncates the chain** at a stopping hit (ignore hits after k). Flesh
-  resistance is low, so pass-through energy error from truncation is negligible
-  — this keeps the query pure and batchable, no game callbacks inside the
-  physics loop. The engine ships the transport; games ship the hurt.
+  **truncates the chain** at a stopping hit (ignore hits after k) — the stopping
+  hit's deposition is the blunt-trauma input. Flesh resistance is low, so
+  pass-through energy error from truncation is negligible — this keeps the query
+  pure and batchable, no game callbacks inside the physics loop. The engine
+  ships the transport and the joules; games ship the hurt.
 
 ## Debug + tooling
 
@@ -108,16 +180,27 @@ traversal**:
   oblique ≥ perpendicular cost; same seed → identical chain (determinism).
 - Media: submerged-segment decay matches closed-form drag integral.
 - Lag-comp composite: golden wallbang scenarios through rewound hitboxes.
+- **Kinetic-contact goldens**: hammer 5-story drop deposits `≈ mgh − drag`
+  within tolerance; vehicle-vs-hitbox impulse matches momentum math;
+  behind-armor deposition = stopped energy exactly (conservation asserted: Σ
+  deposited + retained + ricochet losses = initial E, per chain).
+- Threshold behavior: resting/rolling contacts emit nothing; the event floor is
+  deterministic (no jitter-dependent damage ticks).
 - Fuzz: degenerate geometry (coplanar exits, zero-thickness, grazing hits) never
   NaN/hang — chain terminates cleanly.
 
 ## Delivery (FPS-project era; API shape reserved in topic 5 now)
 
-1. Multi-hit ordered traversal + material resistance + embed (the core).
-2. Ricochet + exit deflection (deterministic rolls).
-3. Drag media volumes.
-4. Armor interface (chain truncation contract) + lag-comp composite query.
-5. Shot-trace viz + `penmatrix` + golden-slab suite.
+1. Multi-hit ordered traversal + material resistance + embed + per-hit
+   deposition (the core, energy-conserving from day one).
+2. `KineticContact` event + CCD/controller contact emission (falls, drops,
+   thrown objects — pre-L2).
+3. Ricochet + exit deflection (deterministic rolls).
+4. Drag media volumes.
+5. Armor interface (chain truncation contract) + lag-comp composite query.
+6. L2 solver impulse emission (vehicles, dynamic-body impacts) — lands with L2
+   contacts (wave 2 dependency).
+7. Shot-trace viz + `penmatrix` + golden-slab + kinetic-golden suites.
 
 ## Risks
 
