@@ -148,6 +148,18 @@ KineticContact(
 
 ## Hitboxes + armor: the engine/game split
 
+- **Every chain hit and `KineticContact` carries
+  `(entity, collider_id, collider_tag)`** — guaranteed, so game damage models
+  always know _what part_ was struck (hitbox→body-part mapping is a game table
+  keyed on the tag). No damage system ever guesses from geometry.
+- **Nested hitbox colliders are supported**: hitbox sets may contain child
+  colliders (organ boxes) attached to the same skeleton transforms (the topic 26
+  cooked hitbox tracks pose them together, lag-comp rewinds them together). The
+  penetrating sweep traverses them in order like any other surfaces — flesh →
+  organ → flesh, each with its own deposition. **A Tarkov-grade organ-damage
+  model is therefore pure game data**: organ colliders + per-organ components +
+  an energy→trauma table; the engine contribution is that a liver shot is
+  _geometry_, not a dice table.
 - Character hitboxes are colliders with the `flesh` material — limbs cost
   energy, through-and-through exits happen naturally, multi-limb paths report
   each hit with its entry energy **and deposition**.
