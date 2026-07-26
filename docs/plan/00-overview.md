@@ -100,6 +100,7 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 21    | [21-jobs.md](21-jobs.md)                       | Threading: pipeline threads + job pool, mailboxes, tick sync            |
 | 22    | [22-replay.md](22-replay.md)                   | State recording: replays, black-box debug, spectating                   |
 | 23    | [23-netcode.md](23-netcode.md)                 | Transports (UDP+own reliability, WebTransport/WS), protocol foundations |
+| 24    | [24-navigation.md](24-navigation.md)           | Navmesh gen (Recast-lineage, sector-tiled), A\*+funnel, crowds          |
 
 Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before
