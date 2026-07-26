@@ -31,6 +31,7 @@ is an orthographic projection with `z` as z-index.
 | CLI/headless | `crcbl` binary drives everything                                                 | Editor edits are transport commands → CLI is just another client. Scriptable scenes, sims, screenshots; agent/CI-friendly.                                                                                                                                                                |
 | Testing      | Unit + property + e2e per subsystem, same phase                                  | Golden images (lavapipe CI) + golden audio buffers + determinism hashes. No subsystem lands untested.                                                                                                                                                                                     |
 | Persistence  | `crcbl-store`: saves = snapshots, settings = TOML                                | Save game = replication snapshot in versioned container (one serialization path, shared with play-mode restore + join-in-progress); layered settings; RON profiles; async `StorageSource` (platform dirs / OPFS wasm); atomic writes.                                                     |
+| Game modules | Wasm FFI (`crcbl-mod`, topic 16)                                                 | Game logic = wasm modules, any wasm language; engine owns all state (modules ~stateless → hot reload/saves/replication free); static+wasm dual binding, one API; wasmtime behind seam (browser: nested instantiate).                                                                      |
 
 ## Core design principles
 
@@ -62,6 +63,10 @@ is an orthographic projection with `z` as z-index.
 9. **Untested is unfinished.** Each subsystem ships unit + e2e coverage in the
    same roadmap phase; samples double as CI fixtures (determinism scripts,
    golden frames, golden audio).
+10. **Game logic is a guest.** Gameplay code lives in wasm modules behind a flat
+    FFI (any wasm language); the engine owns all state, so hot reload, saves,
+    replication, and sandboxed modding come free. One API, two bindings: static
+    for dev, wasm for shipping/mods.
 
 ## Stages
 
@@ -87,6 +92,7 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 13    | [13-audio.md](13-audio.md)               | Spatial cue grammar, mixer, occlusion, audio testing          |
 | 14    | [14-persistence.md](14-persistence.md)   | Save games (snapshot-based), settings layers, profiles        |
 | 15    | [15-windowing.md](15-windowing.md)       | Own windowing: wire-protocol backends, 2 modes, agnostic seam |
+| 16    | [16-wasm-modules.md](16-wasm-modules.md) | Game logic as wasm modules: FFI ABI, any language, modding    |
 
 Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before
@@ -112,6 +118,8 @@ Every game sample ships as a browser demo on the Pages site.
 | CLI/headless engine + editor control  | 11      |
 | Test infra (unit + e2e everywhere)    | 12      |
 | Persistence (saves/settings/profiles) | 14      |
+| Own windowing (2 modes, render scale) | 15      |
+| Game modules (API + wasm host)        | 16      |
 | Wasm target + Pages demo site         | 10      |
 | Scene loader                          | 6       |
 | ECS (system-owned arrays)             | 4       |

@@ -1,0 +1,151 @@
+# Topic 16 — Game Modules via Wasm FFI
+
+Game logic lives in **modules**: wasm binaries loaded by the engine host,
+talking through a flat FFI over linear memory. Any language that compiles to
+wasm (Rust, C/C++, Zig, TinyGo, AssemblyScript, C#/NativeAOT…) can write game
+code. The engine is a host/runtime; a game is data (assets/scenes) + modules.
+
+Prior art: Ambient engine (wasm game modules + server-authoritative multiplayer
+— closest match to our architecture), Godot GDExtension (C ABI seam), Unity DOTS
+(data-oriented logic separation). We combine the wasm sandbox with our
+system-owned-array ECS.
+
+## The load-bearing design decision: state lives in the engine
+
+Modules are (approximately) **stateless logic over engine-owned SoA arrays**:
+
+- A module _declares_ its systems + component schemas at init; the **engine
+  allocates and owns the arrays** (`crcbl-ecs` storage, exactly as if the system
+  were native).
+- Each tick the host calls the module's `tick` export with views into those
+  arrays (shared linear-memory windows, batch-oriented — one FFI crossing per
+  system per tick, not per entity).
+- Because state is engine-side: **hot reload** = swap the module, arrays
+  survive; **saves** (topic 14 snapshots), **replication** (stage 4), and the
+  **determinism hash** all work on module-defined components with zero module
+  cooperation. The module is a pure-ish function; the engine is the database.
+- Module-private scratch state is allowed (its linear memory persists between
+  ticks) but anything that must survive reload/save/replicate belongs in
+  components. `crcbl mod check` warns when a module's memory grows suspiciously
+  (state-smuggling detector, best-effort).
+
+## One API, two bindings: static and wasm
+
+The module interface is **the** game API — defined once, consumed two ways:
+
+| Binding    | What                                                       | Use                                                 |
+| ---------- | ---------------------------------------------------------- | --------------------------------------------------- |
+| **Static** | Rust trait impl compiled into the binary (no wasm runtime) | engine-internal systems, dev iteration, MVP samples |
+| **Wasm**   | same interface over the FFI ABI, module loaded at runtime  | shipped game logic, mods, other languages           |
+
+Samples are written against the module API from breakout onward (static binding
+first); the wasm host later runs the _same_ breakout compiled to `.wasm` and the
+determinism hash must match the static build — that equivalence test is the
+ABI's acceptance criterion. Engine-internal systems (physics, render feed,
+audio) stay native forever; the module seam is for _game_ logic.
+
+## ABI sketch
+
+Flat C-style, versioned, no host-side codegen required of guests (language SDKs
+are sugar, Rust SDK first):
+
+Guest exports:
+
+```
+crcbl_abi_version() -> u32
+crcbl_init(ctx) -> ()            // declare systems, components, event subs
+crcbl_tick(sys_id, dt_fixed) -> ()      // server tick, per declared system
+crcbl_event(sys_id, ptr, len) -> ()     // replicated events, commands
+crcbl_alloc(size) / crcbl_free(ptr)     // guest allocator for host writes
+```
+
+Host imports (capability-scoped — a module only links what it's granted):
+
+- ECS: component array views (`borrow(sys, comp) -> (ptr, len, stride)`),
+  spawn/despawn queues, entity queries by id.
+- Physics L0: raycast/sweep/overlap batches.
+- Events/net: emit server events, read input commands.
+- Audio: play/emit spatial events (server-event path from topic 13).
+- UI (client modules): block/span builder calls into the stage 7 tree.
+- Log/diagnostics; deterministic RNG handle; fixed-point time. **No clock, no
+  filesystem, no sockets** — determinism and sandbox by omission.
+
+Schemas: components declared with a compact type description (POD layouts only)
+so the engine can hash/replicate/save them and the editor inspector can render
+them generically.
+
+## Runtime
+
+- **Host = `wasmtime` behind a `WasmHost` seam** (pragmatic exception to
+  from-scratch, stated openly: a correct JIT is a multi-year project and not
+  this project's learning goal — the _seam_ is ours, so a from-scratch
+  interpreter can replace it later as its own learning exercise, post-MVP).
+  Config: NaN canonicalization ON (cross-module float determinism), fuel or
+  epoch limits (a buggy mod can't hang the server tick), no WASI.
+- **Browser target symmetry**: in the browser the _browser_ is the wasm runtime
+  — modules are instantiated via the stage 15 JS shim
+  (`WebAssembly.instantiate`) with the same import surface; no wasmtime shipped
+  to wasm builds. Engine-as-wasm hosting game-as-wasm nests cleanly.
+- Sandbox = modding story: capability-granted imports, memory-isolated,
+  server-authoritative user code is safe by construction (a mod cannot reach the
+  filesystem, network, or other modules' memory).
+
+## Language support tiers
+
+| Tier                             | Languages                                                                                                                     | Path                                                       |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| 1 — compiled, no GC              | **Rust** (SDK #1, P6A), **C/C++** (C header = ABI reference), **Zig**                                                         | direct wasm32 targets, near-zero runtime                   |
+| 2 — scripting-feel, compiled     | **AssemblyScript** (TS syntax, wasm-first — best modder on-ramp), **TinyGo**                                                  | small runtimes, easy SDKs                                  |
+| 3 — big-audience, runtime-heavy  | **C#** (Mono-wasm/NativeAOT — Unity-refugee audience), **Kotlin/Wasm**                                                        | ship GC runtime in-module; WasmGC host support when stable |
+| 4 — interpreted via VM-in-module | **Lua** (official Lua-VM module template; scripts = hot-reloadable assets), JS (QuickJS), Python (MicroPython, demand-driven) | one template per VM, zero new ABI work                     |
+
+Priority: Rust SDK → C header (proves language-neutrality, unlocks tier 1) →
+AssemblyScript SDK → Lua VM template → C# when NativeAOT-wasm settles. WasmGC
+tracked as future-proofing for tier 3.
+
+## Consequences elsewhere (kept honest)
+
+- **`crcbl new` scaffolds a module project**, not an engine fork; `crcbl run`
+  hosts it. The engine binary + game modules + assets = a shipped game.
+- Editor play mode loads the game's modules; the inspector renders
+  module-declared components from their schemas.
+- Replication carries module component data as schema'd blobs — protocol
+  unchanged.
+- Perf rule: FFI crossings are per-system-per-tick, array-batch granularity. If
+  a module needs per-entity host calls in a hot loop, the API is wrong — add a
+  batch call.
+
+## Delivery (interleaved — see ROADMAP)
+
+| Slice                                                                 | Roadmap phase |
+| --------------------------------------------------------------------- | ------------- |
+| Module API (trait) + static binding — samples use it from the start   | P2            |
+| Component schema declaration + generic inspect/save/replicate         | P2–P4         |
+| Wasm host (`wasmtime` seam, NaN canon, fuel), Rust guest SDK          | **P6A**       |
+| breakout-as-`.wasm` equivalence gate (hash == static build)           | P6A           |
+| Browser nested-module instantiation via JS shim                       | P7–P10 window |
+| `crcbl mod` CLI (build/check/sign-later), hot reload of modules       | P9–P10        |
+| Language SDK #2 (C or Zig header) — proves the ABI is real            | post-MVP      |
+| Modding polish (capability manifests, version negotiation, mod packs) | post-MVP      |
+
+## Exit criteria (MVP)
+
+- breakout compiled as wasm module runs bit-identical (state hash) to its static
+  build, native and in-browser.
+- Hot-swapping a module mid-session preserves world state (arrays engine-side —
+  demonstrated in the editor).
+- A deliberately hostile module (infinite loop, OOB, huge allocs) cannot crash
+  or hang the server — fuel/limits tests in CI.
+- Module component data round-trips through save/load and replication with no
+  module-specific engine code.
+
+## Risks
+
+- **ABI churn**: every engine API addition now has an FFI shape. Contained:
+  additive-only after P6A, version negotiation at load, the static binding keeps
+  dev friction near zero.
+- **Perf cliffs at the boundary**: mitigated by batch-only design + the
+  equivalence benchmark (static vs wasm breakout perf delta recorded; budget set
+  there).
+- **wasmtime dependency weight**: seam-isolated; interpreter replacement stays
+  possible; wasm builds don't carry it at all.

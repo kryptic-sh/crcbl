@@ -72,3 +72,7 @@ force post-MVP netcode work and is explicitly not started before MVP ends.
    scale; orbit → full L1; towers → CCD vs moving targets, triggers, character
    controller). A physics feature no sample demands is a feature built too
    early.
+10. **Game logic through the module API** (topic 16). Sample gameplay code
+    implements `GameModule` (static binding for dev; breakout also ships as
+    `.wasm` for the P6A equivalence gate). Engine-internal systems stay native;
+    sample code is module code — proving the API games and mods will live on.
