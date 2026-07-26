@@ -97,6 +97,7 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 18    | [18-render-features.md](18-render-features.md) | Shadows (CSM) + post stack: HDR, tonemap, FXAA, bloom           |
 | 19    | [19-input.md](19-input.md)                     | Device-agnostic action input: kb/mouse/pad/touch, one config    |
 | 20    | [20-particles.md](20-particles.md)             | GPU-resident particles/VFX: compute sim, RON effects, workbench |
+| 21    | [21-jobs.md](21-jobs.md)                       | Threading: pipeline threads + job pool, mailboxes, tick sync    |
 
 Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before
