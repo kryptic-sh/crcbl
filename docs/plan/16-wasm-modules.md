@@ -152,6 +152,10 @@ Rules:
   registration, and state hash. One suite, N languages — the ABI's
   cross-language regression net. A host ABI change that breaks any SDK breaks
   the build immediately, not a modder three weeks later.
+- **Binding production is mechanical by design** — POD-only surface + the
+  `sdk/abi/` spec means new-language bindings are brute-forceable (own codegen,
+  or LLM-generated against the spec); the conformance suite is the acceptance
+  gate either way, so correctness never rests on the producer.
 - Each SDK dir is self-contained for its users (copy dir / add dep, build to
   wasm, done) — engine repo checkout not required to _use_ a released SDK
   (published per ecosystem: crates.io, header download, LuaRocks-style template
