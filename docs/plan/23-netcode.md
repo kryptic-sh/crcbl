@@ -7,12 +7,16 @@ retrofit.
 
 ## Supported stacks (LOCKED)
 
-| Transport                 | Platform                   | Role                                                          | Lands           |
-| ------------------------- | -------------------------- | ------------------------------------------------------------- | --------------- |
-| **InMemory**              | all                        | single player, tests, editor — the permanent local path       | P2              |
-| **UDP + own reliability** | native                     | primary game transport                                        | P13 (design P2) |
-| **WebTransport**          | browser (+native optional) | QUIC datagrams=unreliable, streams=reliable — 1:1 channel map | P13             |
-| **WebSocket**             | browser fallback           | reliable-only; unreliable channel degrades to reliable        | P13             |
+| Transport                 | Platform                   | Role                                                                                      | Lands           |
+| ------------------------- | -------------------------- | ----------------------------------------------------------------------------------------- | --------------- |
+| **InMemory**              | all                        | single player, tests, editor — the permanent local path; **the only plaintext transport** | P2              |
+| **UDP + own reliability** | native                     | primary game transport — **per-packet AEAD, always**                                      | P13 (design P2) |
+| **WebTransport**          | browser (+native optional) | QUIC datagrams=unreliable, streams=reliable — 1:1 channel map; TLS inherent               | P13             |
+| **WebSocket**             | browser fallback           | reliable-only; unreliable degrades to reliable; **wss:// only**                           | P13             |
+
+**Encryption rule (LOCKED)**: every packet on every network transport is
+encrypted — no plaintext mode exists on the wire, no "disable crypto" flag.
+InMemory is the sole plain path (it never touches a network).
 
 Rejected: **TCP** (head-of-line blocking poisons the snapshot channel); **QUIC
 from scratch** (TLS 1.3 from scratch = the wrong own-all-bugs; if a native QUIC
@@ -43,12 +47,24 @@ from-scratch this project is for:
   optional discovery later.
 - **Connection tokens** (netcode.io pattern): clients connect with a short-lived
   token minted by a trusted source (the server itself in direct-connect MVP; a
-  backend later) — anti-spoof, cheap junk-traffic filter, and the future
-  auth/crypto seam in one mechanism.
-- **Encryption, stated honestly**: browser transports have TLS inherently.
-  Native UDP is plaintext in MVP; the token layer reserves the slot for
-  per-packet AEAD (XChaCha-class) post-MVP. Competitive-integrity features
-  should not pretend to exist before then.
+  backend later) — anti-spoof, cheap junk-traffic filter, and the key-material
+  carrier when a backend exists.
+- **Per-packet AEAD, from day one**: session keys established in the handshake
+  via **X25519** key exchange (or delivered inside the connection token when a
+  backend mints it); every packet after the hello is sealed with
+  **XChaCha20-Poly1305** — nonce derived from direction + packet sequence
+  (unique by construction, never reused), tag authenticates the header too
+  (acks/sequence can't be forged). Rekey on reconnect.
+  - **Crypto primitives are the sanctioned exception** (same policy as
+    wasmtime/quinn): audited RustCrypto crates behind a seam — rolling your own
+    cipher is the one from-scratch this project explicitly refuses. The
+    _protocol_ (handshake, nonce discipline, framing) is ours; the primitives
+    are not.
+  - Trust model, stated honestly: direct-connect ECDH encrypts against passive
+    snooping but is MITM-able without an authenticated root; token minting via a
+    trusted backend (or operator-configured pre-shared key) upgrades to
+    authenticated — that's the post-MVP auth story, and the seam for it exists
+    in the token layer now.
 - **Keepalive/timeout**: heartbeats on idle, drop detection windows, graceful
   disconnect message distinct from timeout.
 
@@ -56,11 +72,12 @@ from-scratch this project is for:
 
 Designed against InMemory first; every later transport inherits them:
 
-- **Handshake**: hello → version gate → session accept. Exchanges protocol
-  version, engine/game build ids, and the **component schema hash** (modules —
-  topic 16 — make this mandatory: server and client must agree on every
-  replicated schema; mismatch = clean refusal with a reason, never a decode
-  crash).
+- **Handshake**: hello → **key exchange** (X25519; skipped only by InMemory) →
+  version gate → session accept. Exchanges protocol version, engine/game build
+  ids, and the **component schema hash** (modules — topic 16 — make this
+  mandatory: server and client must agree on every replicated schema; mismatch =
+  clean refusal with a reason, never a decode crash). Everything after the hello
+  rides the session keys.
 - **Session identity + reconnect**: session token survives transport drops — a
   net blip resumes the session (entity bindings kept server-side for a grace
   window; catch-up = join-in-progress machinery). Distinct from a fresh join by
@@ -112,14 +129,14 @@ core; the token mint is the interface those services will use. LAN discovery
 
 ## Delivery
 
-| Slice                                                                                                             | Phase                                             |
-| ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| Channel semantics, handshake/version/schema-hash, session+reconnect, condition simulator, hardening + fuzz corpus | P2 (on InMemory)                                  |
-| Netgraph HUD                                                                                                      | P10                                               |
-| UDP reliability layer (acks, resend, fragmentation, tokens) + WebTransport + WebSocket                            | P13                                               |
-| Quantization + priority/budget encoder                                                                            | P13, tightened by towers co-op numbers            |
-| Per-packet encryption, interest management, LAN discovery                                                         | post-MVP                                          |
-| Backend infra (NAT/relay/matchmaking/accounts/browser)                                                            | out of engine core — separate project when needed |
+| Slice                                                                                                                           | Phase                                             |
+| ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| Channel semantics, handshake/version/schema-hash, session+reconnect, condition simulator, hardening + fuzz corpus               | P2 (on InMemory)                                  |
+| Netgraph HUD                                                                                                                    | P10                                               |
+| UDP reliability layer (acks, resend, fragmentation, tokens, **X25519+XChaCha20-Poly1305 AEAD**) + WebTransport + WebSocket(wss) | P13                                               |
+| Quantization + priority/budget encoder                                                                                          | P13, tightened by towers co-op numbers            |
+| Authenticated key roots (backend token mint / PSK), interest management, LAN discovery                                          | post-MVP                                          |
+| Backend infra (NAT/relay/matchmaking/accounts/browser)                                                                          | out of engine core — separate project when needed |
 
 ## Testing (topic 12)
 
@@ -137,7 +154,10 @@ core; the token mint is the interface those services will use. LAN discovery
 - **Reliability-layer subtleties** (ack wraparound, RTO tuning, fragment loss):
   the literature is rich and the condition-simulator soak is the gate; this is
   the best-documented from-scratch territory in gamedev.
-- **Plaintext window**: stated in docs and release notes until AEAD lands; no
-  ranked/competitive claims before it.
+- **Crypto misuse beats crypto strength**: primitives are audited crates; the
+  risks that remain are ours — nonce discipline (sequence-derived, unique by
+  construction, property-tested), rekey on reconnect, header authentication
+  coverage. MITM caveat stands until an authenticated root (backend mint / PSK)
+  exists — no ranked/competitive integrity claims before that.
 - **Scope pull from backend infra**: the token mint is the boundary — the engine
   never grows matchmaking.
