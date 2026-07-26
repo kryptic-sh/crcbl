@@ -35,6 +35,7 @@ GitHub Pages site.
 | 06  | [orbit](06-orbit.md)         | S5 (P11)               | Physics acceptance test: sector space, orbits, drag, CCD, on-rails handoff                       |
 | 07  | [towers](07-towers.md)       | S6 (P12–P13)           | **Flagship**: everything — editor content, co-op multiplayer, browser client, esports audio cues |
 | 08  | [arena](08-arena.md)         | post-MVP               | Client prediction driver — pulls netcode forward; audio grammar under fire                       |
+| 09  | [puppet](09-puppet.md)       | post-MVP wave 1        | Skeletal animation acceptance test; shadows + device-swap input showcase                         |
 
 01–06 stay tiny (days, not weeks, each; hud is continuous — a P4 skeleton that
 grows until P10). 07 is the real game and the long-lived dogfood. 08 exists to

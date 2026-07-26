@@ -117,8 +117,8 @@ pub trait Shell {
   implementation, two triggers).
 
 Explicitly out (post-MVP or never): exclusive fullscreen, multi-window MVP
-(editor is single-window until it isn't), gamepad (separate input topic later),
-touch.
+(editor is single-window until it isn't), gamepad raw backends
+(evdev/XInput/GameController per topic 19 schedule), touch.
 
 ## Backends
 

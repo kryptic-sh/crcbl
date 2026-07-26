@@ -85,14 +85,17 @@ is an orthographic projection with `z` as z-index.
 
 Cross-cutting topic docs (identity, no ordering implied):
 
-| Topic | Doc                                      | Theme                                                         |
-| ----- | ---------------------------------------- | ------------------------------------------------------------- |
-| 11    | [11-cli-headless.md](11-cli-headless.md) | `crcbl` CLI: headless engine/editor control, scripting        |
-| 12    | [12-testing.md](12-testing.md)           | Test infra: unit/property/e2e, golden images, determinism     |
-| 13    | [13-audio.md](13-audio.md)               | Spatial cue grammar, mixer, occlusion, audio testing          |
-| 14    | [14-persistence.md](14-persistence.md)   | Save games (snapshot-based), settings layers, profiles        |
-| 15    | [15-windowing.md](15-windowing.md)       | Own windowing: wire-protocol backends, 2 modes, agnostic seam |
-| 16    | [16-wasm-modules.md](16-wasm-modules.md) | Game logic as wasm modules: FFI ABI, any language, modding    |
+| Topic | Doc                                            | Theme                                                         |
+| ----- | ---------------------------------------------- | ------------------------------------------------------------- |
+| 11    | [11-cli-headless.md](11-cli-headless.md)       | `crcbl` CLI: headless engine/editor control, scripting        |
+| 12    | [12-testing.md](12-testing.md)                 | Test infra: unit/property/e2e, golden images, determinism     |
+| 13    | [13-audio.md](13-audio.md)                     | Spatial cue grammar, mixer, occlusion, audio testing          |
+| 14    | [14-persistence.md](14-persistence.md)         | Save games (snapshot-based), settings layers, profiles        |
+| 15    | [15-windowing.md](15-windowing.md)             | Own windowing: wire-protocol backends, 2 modes, agnostic seam |
+| 16    | [16-wasm-modules.md](16-wasm-modules.md)       | Game logic as wasm modules: FFI ABI, any language, modding    |
+| 17    | [17-animation.md](17-animation.md)             | Skeletal animation: cooked clips, state machine, GPU skinning |
+| 18    | [18-render-features.md](18-render-features.md) | Shadows (CSM) + post stack: HDR, tonemap, FXAA, bloom         |
+| 19    | [19-input.md](19-input.md)                     | Device-agnostic action input: kb/mouse/pad/touch, one config  |
 
 Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before
@@ -110,29 +113,34 @@ Every game sample ships as a browser demo on the Pages site.
 
 ## MVP feature → stage map
 
-| MVP feature                           | Doc(s)  |
-| ------------------------------------- | ------- |
-| Render engine                         | 2, 3    |
-| Physics (L0+L1+CCD, sector space)     | 1, 5    |
-| Audio (spatial cue grammar + mixing)  | 13      |
-| CLI/headless engine + editor control  | 11      |
-| Test infra (unit + e2e everywhere)    | 12      |
-| Persistence (saves/settings/profiles) | 14      |
-| Own windowing (2 modes, render scale) | 15      |
-| Game modules (API + wasm host)        | 16      |
-| Wasm target + Pages demo site         | 10      |
-| Scene loader                          | 6       |
-| ECS (system-owned arrays)             | 4       |
-| Scene editor                          | 8       |
-| Immediate-mode GUI (editor + game)    | 7       |
-| Editor built on the engine            | 8       |
-| Debug tools throughout                | 2–8, 13 |
-| Server→client from day 1              | 1, 4    |
-| 3D-first, 2D as ortho projection      | 2, 3    |
+| MVP feature                             | Doc(s)  |
+| --------------------------------------- | ------- |
+| Render engine                           | 2, 3    |
+| Physics (L0+L1+CCD, sector space)       | 1, 5    |
+| Audio (spatial cue grammar + mixing)    | 13      |
+| CLI/headless engine + editor control    | 11      |
+| Test infra (unit + e2e everywhere)      | 12      |
+| Persistence (saves/settings/profiles)   | 14      |
+| Own windowing (2 modes, render scale)   | 15      |
+| Game modules (API + wasm host)          | 16      |
+| Shadows + post stack (HDR/tonemap/FXAA) | 18      |
+| Action-based input (kb/mouse in MVP)    | 19      |
+| Wasm target + Pages demo site           | 10      |
+| Scene loader                            | 6       |
+| ECS (system-owned arrays)               | 4       |
+| Scene editor                            | 8       |
+| Immediate-mode GUI (editor + game)      | 7       |
+| Editor built on the engine              | 8       |
+| Debug tools throughout                  | 2–8, 13 |
+| Server→client from day 1                | 1, 4    |
+| 3D-first, 2D as ortho projection        | 2, 3    |
 
 ## Out of MVP scope (explicitly)
 
-- Animation blending/state machines, scripting.
+- Skeletal animation: fully designed (topic 17), scheduled post-MVP wave 1 with
+  the puppet sample (09) as forcing function & acceptance test.
+- Scripting-as-text: game logic is wasm modules (topic 16); Lua VM template
+  covers script-style workflows post-MVP.
 - Audio: reverb zones, portal/room-graph propagation, doppler, surround — the
   cue grammar (incl. occlusion) and mixing are MVP; see
   [13-audio.md](13-audio.md).
