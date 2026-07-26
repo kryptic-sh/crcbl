@@ -224,3 +224,39 @@ core; the token mint is the interface those services will use. LAN discovery
   exists — no ranked/competitive integrity claims before that.
 - **Scope pull from backend infra**: the token mint is the boundary — the engine
   never grows matchmaking.
+
+## Corrections (design review, 2026-07-27)
+
+The ack-baseline model is the **Quake 3 delta-compressed snapshot** design —
+named now, along with the two answers it supplies that were missing:
+
+- **Entity lifecycle**: a delta is computed against the baseline's _entity set_,
+  so **removals are expressed as part of the delta** (entities present in the
+  baseline and absent now are encoded as destroys). "Unchanged → zero bytes"
+  applies to surviving entities only. Asteroids' churn exercises this in P2's
+  first week.
+- **Baseline too old**: if a client's last ack has fallen off the bounded
+  snapshot ring, the server sends a **full (keyframe) snapshot** and resets the
+  baseline — the standard `delta-base-too-old` path, and the same encoder
+  replays/join-in-progress already use.
+- **Priority model**: the relevance×staleness rotation is the **Tribes 2
+  priority-accumulator** design (Frohnmayer & Gift) — named so its
+  starvation-avoidance rules are adopted rather than reinvented. Predicted
+  components (26) are **exempt from rotation**: skipping their tick stalls
+  reconciliation.
+- **One-datagram rule**: since only the reliable channel fragments, a
+  steady-state snapshot **must fit a single ~1200-byte datagram**. That is a
+  hard contract on the budget encoder (≈576 kbps at 60 Hz), not a guideline;
+  exceeding it means shedding by priority, never silently fragmenting.
+- **Third traffic class added — unreliable events**: transient, high-rate,
+  worthless-late messages (footstep/gunfire cues, impact VFX) must **not** ride
+  reliable-ordered, where one lost packet head-of-line-blocks them into a stale
+  burst. Channel table gains `unreliable-event`: tick-stamped, fire-and-forget,
+  late = dropped.
+- **WebSocket fallback**: TCP will head-of-line queue stale snapshots under
+  loss; the sender applies **latest-only coalescing** (drop queued unsent
+  snapshots on backpressure) rather than letting the queue snowball latency.
+- **Encoded-space change detection**: "changed vs baseline" means _the encoded
+  representation differs_, from P2 onward (identity codec until quantization
+  lands at P13). Otherwise the P2 encoder is rewritten at P13 — and prediction
+  comparison breaks (see 26).

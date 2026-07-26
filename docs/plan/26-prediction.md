@@ -133,3 +133,28 @@ validates shots **in that past**:
 - **Scope creep toward full-world prediction**: predicted subset is
   schema-declared and reviewed; "predict everything" is a rejected architecture
   (that's lockstep's territory, a different engine).
+
+## Corrections (design review, 2026-07-27)
+
+- **Compare in encoded space, not sim space** (the false-misprediction
+  generator): the server simulates f64 but the wire carries quantized values, so
+  comparing a f64 prediction against a decoded authoritative value produces
+  constant "mismatches". The client **quantizes its predicted state through the
+  same wire codec** before storing and comparing — both sides live in encoded
+  space (the Overwatch/Rocket League practice). With 23's identity codec at P2
+  this costs nothing now and prevents a P13 rewrite.
+- **Lag-comp rewind must not trust client-reported view time** — clamping only
+  to `max_rewind_ms` _is_ the CS:GO-style backtrack cheat (always claim the
+  oldest legal T). The server **independently estimates** each client's view
+  time from its known interpolation-buffer depth + measured RTT and clamps the
+  reported value to that estimate ± a small tolerance; `max_rewind_ms` is the
+  outer bound, not the validator. This is a security requirement, not a fairness
+  knob.
+- **Rollback collision context (was undecided)**: re-simulated ticks collide
+  against the **latest authoritative snapshot held fixed** for the whole re-sim
+  (the standard choice), not per-tick historical snapshots and not statics-only.
+  Stated so it isn't discovered mid-implementation.
+- **The predicted-state capsule includes physics-internal state**: character
+  controller ground/contact caches, solver warm-start impulses for predicted
+  bodies, and **the per-tick RNG stream position**. Without these, "restore
+  authoritative M" is not a restore and rollback drifts silently.

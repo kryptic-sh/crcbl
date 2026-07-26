@@ -161,3 +161,30 @@ early.
   the determinism hash catches silent divergence.
 - **f64 SIMD throughput** on wasm/older CPUs. Bubbles keep live-body counts
   bounded; profile before optimizing.
+
+## Corrections (design review, 2026-07-27)
+
+- **Static triangle-mesh / heightfield colliders were missing from the shape
+  inventory** — yet the character controller walks editor-authored maps, orbit
+  lands on terrain, 28 penetrates static meshes, and 24 voxelizes collider
+  geometry. Added to L0 explicitly: **static trimesh with a BVH midphase** (plus
+  segment/swept-capsule-vs-triangle in CCD), landing with the towers slice at
+  the latest. Decision: **trimesh for statics**, convex decomposition only for
+  dynamics that need it — 28's entry/exit penetration model depends on this
+  choice, so it is made here rather than discovered.
+- **Client-side query world (the client _does_ need collision)**: the 3P camera
+  boom sweeps (30) and audio occlusion rays (13) are client-side and land well
+  before prediction. The correct statement is "the client never **advances**
+  simulation" — it hosts a **read-only query world** (statics from scene load +
+  dynamic colliders reconstructed from snapshots, with interpolation-buffer
+  staleness) for sweeps and rays. Owned as a P10 deliverable; previously nobody
+  owned it.
+- **Determinism scope, restated precisely**: f64 same-binary determinism was the
+  original claim, but the module equivalence gate (16/P6A) and browser play
+  require _cross-target_ agreement. Resolution: all determinism-bearing math
+  routes through a **software transcendental implementation compiled into every
+  target** (the `libm` crate is the standard answer) — never platform libm — and
+  sim crates **ban FMA contraction** (no `mul_add`, no fast-math). Basic IEEE
+  ops are already bit-exact everywhere. The scope is therefore "deterministic
+  across targets _within the sim math kernel_", which is what the gates actually
+  require.

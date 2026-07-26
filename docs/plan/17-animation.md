@@ -94,3 +94,18 @@ test.
   (topic 5 L0), not transform directly; decided now to avoid the classic desync.
 - **Curve compression rabbit hole** — fixed-rate quantized MVP; measure before
   fitting curves.
+
+## Corrections (design review, 2026-07-27)
+
+- **"No pose math on the server" was overstated**: server-side root-motion
+  extraction and animation-event timing both require sampling cooked curves.
+  Corrected: the cook emits a **server strip** per clip — root track + event
+  track + duration only — which the server loads; full curve sets stay
+  client-only. The claim becomes "the server samples no _pose_ curves", which is
+  true and implementable.
+- **TAA motion vectors for skinned meshes need previous-frame skinned
+  positions**, not just a previous transform (18's "prev-transform slot makes
+  TAA additive" is false for deforming geometry). Corrected: the
+  **skinned-output pool region is double-buffered (prev/current ping-pong) from
+  day one** — a pool-layout decision that is nearly free now and a
+  skinning-pipeline rewrite later.

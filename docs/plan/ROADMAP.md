@@ -91,3 +91,32 @@ slice tables):
 - HAL freeze moves in practice to P5 exit: the seam isn't frozen until _two_
   backends (vk + wgpu) implement it — earlier and stronger than the old "freeze
   at stage 2 exit", superseding it.
+
+## Corrections (design review, 2026-07-27)
+
+- **P2 is split into three gated sub-phases.** As written it held ECS,
+  transport, server/client, replication, interpolation, determinism harness,
+  input thread + tick stack, tick-id protocol, `crcbl-store`, `GameModule` API,
+  `.crpl` writer/reader, and the whole protocol foundation — more scope than
+  P0+P1 combined behind one modest exit, with several architecture-shaping
+  decisions riding along invisibly:
+  - **P2a — sim core**: `crcbl-ecs`, `crcbl-server`/`crcbl-client`,
+    interpolation, tick-id protocol + client tick alignment, input thread +
+    `InputTickState`, determinism harness (`crcbl sim --hash`). _Exit_:
+    server-simulated entities render via interpolation; hash stable.
+  - **P2b — protocol foundations**: transport trait + InMemory, handshake +
+    schema-hash gate, session/reconnect, sector-scoped envelope, **ack-baseline
+    deltas incl. entity-removal encoding and delta-base-too-old keyframe
+    fallback**, encoded-space change detection, condition simulator, decode
+    hardening + fuzz corpus. _Exit_: replication survives scripted loss/reorder
+    with state equality.
+  - **P2c — durability + modules**: `crcbl-store` (settings, saves as sector-set
+    snapshots), `GameModule` API + static binding, `.crpl` tick-linear replay
+    writer/reader + `FileTransport`. _Exit_: save→load→hash green; a recorded
+    session replays identically.
+- **P4A gate wording**: the audible gate is **cue grammar rules 1–4**; occlusion
+  (rule 5) needs the physics BVH and lands at P10 per topic 13's own delivery
+  table. A gate must be checkable when it's claimed.
+- **HDR from P1**: render to `RGBA16F` + trivial tonemap from the first lit mesh
+  so breakout/asteroids goldens and web demos aren't re-blessed wholesale when
+  18's stack lands at P7.

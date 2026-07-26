@@ -97,3 +97,15 @@ the GPU — the GPU-bound principle holds, only the draw-emission tail differs.
   pinned deps).
 - **Tier B perf disappointment.** Set the budget expectation in this doc's perf
   task — Tier B is the reach-everyone tier, not the showcase tier.
+
+## Correction (design review, 2026-07-27)
+
+**GitHub Pages cannot set COOP/COEP headers**, so `SharedArrayBuffer` is
+unavailable on the flagship deploy target. Consequences, stated rather than
+discovered: (a) the "wasm-threads later" plan does not apply to the Pages demos
+— those stay single-threaded; (b) the **AudioWorklet feed must not depend on an
+SAB ring buffer** — design it around `postMessage`/worklet-pull from P5; (c) if
+SAB is ever wanted on Pages, the standard workaround is the `coi-serviceworker`
+shim, adopted deliberately rather than accidentally. Module memory (16) is
+unaffected — an imported `WebAssembly.Memory` needs no SAB unless shared across
+threads.

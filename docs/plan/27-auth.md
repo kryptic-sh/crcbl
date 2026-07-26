@@ -117,3 +117,21 @@ OAuth, scaling — that's the backend project.
   storage; anything more is the backend project pulling engine resources.
 - **Tier-1 false confidence**: the netgraph/server browser must label
   unauthenticated servers visibly — honesty in UI, not just docs.
+
+## Corrections (design review, 2026-07-27)
+
+- **Use the Noise Protocol Framework rather than a hand-rolled handshake.**
+  X25519 + XChaCha20-Poly1305 with a bespoke transcript is exactly what Noise
+  exists to make un-hand-rollable: `Noise_XX` (tier 1, mutual discovery),
+  `Noise_XXpsk3` (tier 2, PSK-bound), `Noise_IK` (tier 3, known server key from
+  the token) give verified key confirmation, rekey, and transcript binding over
+  the same RustCrypto primitives (WireGuard lineage). Our protocol work stays
+  the token format and framing; the handshake pattern is standard.
+- **Tier 2 PSK needs a stated entropy rule**: a human-chosen passphrase bound
+  into the handshake is offline-guessable from a passive transcript. Either
+  require high-entropy keys (generated, not typed) **or** use a PAKE (**SPAKE2**
+  / CPace). Decision: high-entropy generated PSKs only; PAKE is the documented
+  upgrade if community servers want passphrases.
+- **Nonce/sequence width is specified**: 64-bit sequence, transmitted truncated
+  with **DTLS 1.3-style implicit reconstruction**, epoch bump on rekey. Wrap
+  behavior is defined rather than left to discovery.

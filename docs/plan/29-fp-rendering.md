@@ -188,3 +188,13 @@ review shows what the shooter's screen credibly showed.
 - **Derivability erosion** (client-only viewmodel state creeping in): the
   spectator-vs-owner pose-hash property test is the structural guard — same
   pattern as every other "it's a rule because a test enforces it" in this plan.
+
+## Correction (design review, 2026-07-27)
+
+**PiP scopes cannot simply "reuse the same CSMs."** Cascades are fitted to the
+main camera's frustum and far range; a 4–8× optic resolves geometry at distances
+where the last cascade is absent or texel-starved — scoped targets would render
+shadowless or blocky exactly where players look hardest. Resolution (pick per
+quality tier, all three shipped as knobs): extend cascade far range while ADS,
+add a scope-fitted extra cascade, or accept and **document** the quality floor.
+18's CSM fit reserves the hook.

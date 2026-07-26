@@ -234,3 +234,50 @@ Rules:
   there).
 - **wasmtime dependency weight**: seam-isolated; interpreter replacement stays
   possible; wasm builds don't carry it at all.
+
+## Correction: the guest memory model (design review, 2026-07-27)
+
+The original text said modules get "views into engine-owned arrays (shared
+linear-memory windows)" — **wasm cannot do that for host-owned buffers.** A
+guest can only address its own linear memory, so there were exactly two
+implementations and the doc had silently assumed a third that doesn't exist.
+
+**Decision: host-created imported memory.**
+
+- The host creates the `Memory` and the module **imports** it (rather than
+  defining its own). Component arrays for module-declared components are
+  allocated _inside that memory_ by the host's ECS storage allocator.
+- Module `tick` therefore receives real `(offset, len, stride)` triples into its
+  own address space — **genuinely zero-copy**, which is what the "one FFI
+  crossing per system per tick" claim requires.
+- **Hot reload survives**: memory is a separate object from the instance, so
+  swapping the module instance while keeping the memory preserves all component
+  state — the property the whole design rests on.
+- **Cross-module access**: one memory per module (isolation preserved); a module
+  reading another's components goes through a host batch call that copies — cold
+  path by design, and the perf asymmetry makes the intended architecture the
+  fast one.
+- **Native/static binding**: unchanged (direct slices) — the equivalence gate
+  compares behavior, not mechanism.
+- **Browser**: an imported `WebAssembly.Memory` needs no `SharedArrayBuffer` as
+  long as it isn't shared _across threads_ — which the single-threaded wasm
+  build (10) already is. This is why the COOP/COEP limitation on GitHub Pages
+  doesn't block modules.
+- Rejected alternative: copy-in/copy-out per system per tick (the Ambient
+  approach) — correct and simpler, but 2× memcpy of every component array every
+  tick contradicts the engine's whole data-movement discipline. Recorded so the
+  choice isn't relitigated blindly.
+
+## Correction: module state and re-simulation (design review)
+
+"Approximately stateless" is fine for hot reload but **not** for rollback (26)
+or `replay verify` (22): both re-simulate from restored engine arrays while
+guest linear memory still holds _current_ values, so any scratch- dependent
+logic diverges while looking deterministic.
+
+**Rule:** a system declared `predicted` or participating in verification must be
+**strictly stateless** — all state in components. Enforced, not trusted: the
+verifier re-runs it in a **freshly instantiated module** and requires an
+identical state hash. Systems that want scratch may keep it, but they are
+ineligible for prediction and are skipped by the verifier (declared at
+registration, so the restriction is visible in code).

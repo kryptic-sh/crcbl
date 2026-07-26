@@ -35,7 +35,9 @@ churn sample — entities spawn and die constantly.
 
 ## Non-goals (hard cap)
 
-UFOs, hyperspace, power-ups, particles, sound, two-player.
+UFOs, hyperspace, power-ups, particles, two-player. (Sound is _not_ a non-goal —
+sample rule 8 requires spatial audio after P4A; thrust/shot/ explosion cues ship
+with it.)
 
 ## Milestones
 

@@ -123,3 +123,19 @@ The server already emits, every tick: snapshot deltas + events, tick-id stamped
   one event API; the engine never interprets them beyond jump-to.
 - **Relay infra scope**: MVP spectating = same-server connections; relay nodes
   are post-MVP infra listed in the multiplayer-infra gap, not smuggled in here.
+
+## Correction (design review, 2026-07-27)
+
+**"The recording IS the replication stream" was too literal.** The wire is
+per-(client, sector) _ack-baseline_ deltas; a file has no acks and no client. A
+recording is therefore a **tick-linear delta chain** (each tick delta'd against
+the previous tick) plus keyframes — the same _codec_ as replication, different
+baseline logic. `FileTransport` playback consequently requires the client's
+delta-apply path to accept previous-tick baselines as well as acked ones. Small,
+but it must exist at P2 rather than being discovered when the first replay is
+written.
+
+**Migration placement**: since `FileTransport` bypasses the handshake (and
+therefore the schema-hash gate), version migration for older replays runs as a
+**whole-file transcode** on load (not per-message decode) — one code path, and
+it fails loudly on unsupported versions instead of half-playing.

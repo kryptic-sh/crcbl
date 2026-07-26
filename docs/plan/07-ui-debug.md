@@ -263,3 +263,14 @@ Surfaces for instrumentation that already exists:
 - **Docking complexity.** Split panes via flex + dividers only; full docking is
   the classic time sink. The editor layout (stage 8) is designed around
   splitters.
+
+## Corrections (design review, 2026-07-27)
+
+- **Font policy decided**: TTF/OTF _parsing_ is a sanctioned exception
+  (`swash`/`ttf-parser` class), same policy as cpal/Opus/RustCrypto — font
+  formats are a standards-compliance surface, not a learning goal, and shaping
+  lives there too when it lands. Rasterization and atlas management are ours.
+- **Glyph atlas lifecycle specified**: **shelf/skyline packing** into fixed
+  atlas pages, new pages allocated on demand, **LRU eviction** per page with a
+  per-frame re-raster budget. Stated now because the "atlas design mustn't
+  preclude SDF/emoji" note implies exactly this structure.

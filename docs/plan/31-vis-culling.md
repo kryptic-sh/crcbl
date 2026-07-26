@@ -271,3 +271,21 @@ sense of protection is worse than none.
 - **False security**: the filter stops position-stream wallhacks — it does not
   stop aimbots or game-side leaks. The docs say so plainly; the leak checklist
   scopes what "protected" means.
+
+## Corrections (design review, 2026-07-27)
+
+- **The JND claim was overstated.** Per _sample_, quantized ear-params leak no
+  more than a perceptual cone — true. But a cheat **integrates** dozens of
+  samples across a footstep sequence together with its own known motion and
+  trilaterates a far tighter fix (a trivial Kalman filter; humans do not
+  integrate this way). The honest claim is: _per-sample resolution is capped at
+  human JND; sustained emitters remain estimable by aggregation._ Consequences:
+  the **leak auditor measures an optimal estimator's position error over a bot
+  match**, not per-message quantization, and repeated emitters get update-rate
+  limiting plus dithered quantization.
+- **The timing gate overrides adaptive snapshot rate.** 23's congestion response
+  (drop to 30/20 Hz) is itself a content-correlated timing signal — precisely
+  what the gate's fixed cadence removes. With `competitive_integrity` on:
+  **fixed cadence + padded buckets always**, and congestion is handled by
+  priority starvation only. The resulting bandwidth floor is stated as part of
+  the gate's cost.

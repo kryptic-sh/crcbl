@@ -107,3 +107,13 @@ crates/crcbl-net      — transport trait, in-memory impl, replication protocol
 - **Determinism drift (floats).** Only chase determinism to the level the smoke
   test needs (same binary, same machine). Cross-platform determinism is
   explicitly out of scope.
+
+## Correction (design review, 2026-07-27)
+
+**Interpolation buffer depth**: "render clock trails server clock by one tick"
+is too shallow — one tick (16.7 ms) survives zero jitter and no dropped
+snapshots. The design is the industry norm (Valve's Source networking documents
+it): **~100 ms / two snapshot intervals plus a jitter margin**, with the buffer
+**jitter-adaptive** (grows under measured jitter, shrinks when calm). 26 already
+assumes this number; this doc is the P2 implementation reference and now carries
+it.

@@ -127,3 +127,11 @@ RON (engine-data rule), hot-reloadable, schema'd like everything else:
   assets; overdraw heatmap in the debug panel from day one.
 - **Workbench scope**: it's a gallery with sliders, not a node graph. Node-based
   VFX authoring is a someday-maybe, gated on real demand.
+
+## Correction (design review, 2026-07-27)
+
+**Ribbon/trail history storage was unspecified**: trails need per-trail
+**circular vertex history** buffers (fixed capacity per trail, allocated from
+the same pool budget as particles), written by the update pass and consumed by
+strip generation. Capacity is part of the effect asset's budget block, so a long
+trail costs a declared amount rather than an unbounded one.

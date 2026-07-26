@@ -259,3 +259,13 @@ UI just doesn't wait to look responsive.
   incremental aggregate updates; property tests cover the pathological shapes.
 - **Icon bake pipeline** adds a content step; mitigated by it being automatic
   (part of `crcbl bake`) rather than an artist chore.
+
+## Correction (design review, 2026-07-27)
+
+**Stash scope boundary, stated before someone hits it in breach.** The
+server-side PlayerId store works for a single long-lived community server. A
+_fleet_ of match servers (tier-3 ranked, 27) sharing one stash needs a shared
+backend datastore — which 23/27 deliberately keep outside engine scope. The
+line: **engine stash = per-server-instance store**; cross-fleet stash =
+backend-project territory, reached through the same `StorageSource` seam so the
+engine side never changes.

@@ -130,3 +130,21 @@ Grammar invariants (what makes it a learnable skill):
   heavy wall vs open air is identifiable in the grammar trainer; walking into a
   closed room audibly muffles the outside world.
 - Golden-buffer audio e2e in CI for every sample that emits sound.
+
+## Corrections (design review, 2026-07-27)
+
+- **Fractional delay lines are required for ITD** (the grammar's own failure
+  mode): as an emitter moves, ITD length modulates continuously; changing an
+  integer delay tap produces clicks, and delay modulation _is_ pitch shift —
+  corrupting the very pitch cues rules 3/4 depend on. Named machinery:
+  **fractional delay with linear/Lagrange interpolation**, per-block parameter
+  smoothing, and **crossfaded dual delay lines** for large jumps and left↔right
+  ear swaps. New property: an orbiting emitter produces no unintended pitch
+  glide beyond a stated cents bound.
+- **"Identical across platforms because pure f32" is only true without libm.**
+  Biquad coefficients (`cos`, `exp`), resampler windows (`sin`) and cents→ratio
+  (`powf`) all hit platform libm, which differs across glibc/musl/macOS/wasm —
+  golden buffers would mismatch between dev and CI. **Fix**: own polynomial
+  approximations / LUTs for every transcendental in the DSP path, a CI `deny` on
+  std float transcendentals inside `crcbl-audio` (the same pattern as the
+  `std::fs` deny), and no `mul_add`/FMA contraction.

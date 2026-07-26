@@ -159,3 +159,23 @@ binary blob for shipping and wasm (solves the many-small-fetches problem;
 - **Writer determinism erosion.** Any new serialized type must keep the
   byte-stable-save property; the property test is the gate, not review
   vigilance.
+
+## Corrections (design review, 2026-07-27)
+
+- **`AssetId` = hash-of-path breaks on rename/move.** Renaming `props/crate.glb`
+  silently orphans every scene chunk, material instance, and effect referencing
+  it — the exact problem Unity's `.meta` GUIDs and Godot's `.import` UIDs exist
+  to solve. **Corrected model**: every asset gets a **sidecar meta file**
+  (`crate.glb.meta.ron`) carrying a stable random 128-bit GUID, created on first
+  import and committed to git; references use the GUID. Path hashing survives
+  only as a CLI/debug convenience lookup. Cheap now, painful after P9 content
+  exists.
+- **The sidecar also carries import settings** that a bare file can't express:
+  texture `color_space` (sRGB vs linear — a standalone normal-map PNG has no way
+  to declare itself), `usage`, compression target, LOD overrides (25), ragdoll
+  asset link (35).
+- **sRGB mip generation**: Vulkan has **no sRGB storage-image format**, so
+  "mipgen in a compute pass" cannot write sRGB directly. Corrected: create a
+  `UNORM` **image view alias** over the sRGB image and do the encode/decode
+  manually in the compute shader (the standard approach), or fall back to
+  render-pass downsampling. Stated so it isn't discovered at P9.

@@ -99,3 +99,15 @@ GPU-based validation) integration into the same log path as Vulkan validation.
   mac/Windows hardware time before declaring the stage done.
 - **HAL freeze pressure.** Metal will find seam leaks; fix them as HAL changes
   with Vulkan re-verified, never as `#[cfg]` in the renderer.
+
+## Corrections (design review, 2026-07-27)
+
+- **FFI policy is not a contradiction with 15**: the rule is _bindings, not
+  frameworks_. `ash`, `objc2`, `windows-rs` are thin bindings to APIs the
+  OS/driver requires by ABI and are fine; winit/SDL-class frameworks are not.
+  See 15's revised dependency-line section.
+- **DX12's justification is corrected**: it is _not_ old-Intel-iGPU coverage —
+  this backend is specced Tier A with SM6.6 dynamic resources, which those GPUs
+  don't support (they're what `crcbl-wgpu` exists for). DX12 is here for (a) the
+  Xbox door and (b) first-class Windows GPU debugging/vendor tooling. No Tier B
+  DX12 path is planned.

@@ -224,3 +224,19 @@ KineticContact(
 - **Realism creep** (temperature, bullet deformation, spall simulation): the
   energy/resistance model is the contract; higher fidelity is game-side
   interpretation of the same chain, not more physics.
+
+## Corrections (design review, 2026-07-27)
+
+- **RNG consumption order is ABI-stable.** The client predicts a shot's exact
+  spread _and_ its ricochet/deflection rolls from the same seed (38); if the
+  predicted and authoritative queries draw from the stream in a different order
+  or count, tracers diverge permanently. The per-shot draw sequence is therefore
+  part of the ballistics contract, versioned with the ABI, and covered by a
+  property test comparing predicted vs authoritative chains.
+- **Multi-tick projectile lag compensation is decided**: a round in flight
+  rewinds **per segment with a sliding window** — segment _k_ tests against
+  hitboxes at `shot_view_time + elapsed_flight_time`, i.e. the world as it was
+  when the round reached that point (the Battlefield-style approach), clamped by
+  the same `max_rewind_ms`. Hitscan-like rounds collapse to the single-segment
+  case; slow projectiles converge on present-time. Added to the fairness harness
+  scenarios.

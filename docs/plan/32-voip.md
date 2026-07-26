@@ -140,3 +140,10 @@ FPS-era, with breach; the capture seam is useful earlier.
   recorded from breach matches.
 - **Codec dependency**: seam-isolated; a from-scratch codec remains possible as
   its own exercise, and the browser path may not ship one at all.
+
+## Correction (design review, 2026-07-27)
+
+**WebCodecs audio _encode_ support is uneven** across Firefox/Safari, so the
+browser path cannot assume it. Corrected: ship **libopus compiled to wasm as the
+baseline** for browser encode/decode, with WebCodecs used opportunistically
+where available (a capability check, not a requirement).

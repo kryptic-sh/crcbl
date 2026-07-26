@@ -97,3 +97,26 @@ via HAL capability flags (added to the HAL this stage).
   No live defrag.
 - **Premature material system.** Materials here are a table + textures. Shading
   models/graphs are post-MVP.
+
+## Corrections (design review, 2026-07-27)
+
+- **Camera-relative rendering vs delta-only instance upload** (these
+  contradicted each other): instances store **sector-local f32 transforms + a
+  sector id**, which are static while an object doesn't move — so delta upload
+  survives camera motion. Per frame the CPU computes a small **sector→camera
+  offset table in f64** (one entry per resident sector) and uploads only that;
+  the vertex/cull shaders add the offset. This also defines the space cull AABBs
+  live in. Must exist before P7.
+- **Draw binning is a fixed bucket table**, not "GPU binning or CPU sort": at
+  load, enumerate reachable `(material template, permutation, pass)` combos
+  (37's declared permutations make this finite) into a bucket table; the cull
+  shader scatters compacted instances into per-bucket indirect draws with
+  per-bucket count buffers. Per-bucket capacity is sized from scene stats with
+  an overflow counter. Tier B emits the same buckets as per-batch indirect
+  draws.
+- **Transparent sorting**: GPU **radix sort over packed depth keys** (bitonic is
+  the fallback for small counts) — named so it isn't rediscovered at P7.
+- **Per-tier shader authoring is one source**: Slang with a `TIER_B` capability
+  specialization; **tier is a permutation axis** with its own line in 37's
+  permutation budget. Decided before any shader is written, because P1's shaders
+  become P5's inputs.

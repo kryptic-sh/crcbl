@@ -102,3 +102,18 @@ open scene, move things, edit properties, save, play.
 - **Editor-only engine APIs creeping in.** Every editor need is met by
   commands/systems available to games too; anything else is a smell worth a
   design pause.
+
+## Correction (design review, 2026-07-27)
+
+**Concurrent editing needs stated semantics** (the doc promised concurrent GUI +
+CLI clients without defining them). MVP rules:
+
+- **One global undo log**, not per-client — the command log _is_ the document's
+  history; a client's Ctrl-Z undoes the most recent command regardless of author
+  (with the author shown in the undo entry).
+- **Commands validate against current state**; stale operations (transforming an
+  entity another client just deleted) **fail with a reason code** rather than
+  resurrecting or corrupting — the same optimistic-then-reconcile shape the
+  inventory kit uses.
+- Last-writer-wins for conflicting property sets, which server serialization
+  gives for free.

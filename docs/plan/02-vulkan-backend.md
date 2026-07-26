@@ -106,3 +106,27 @@ Milestone ladder, each a sandbox commit:
   alongside sources until the toolchain story is smooth.
 - **Graph over-engineering.** MVP graph = linear pass list with computed
   barriers. No multi-queue scheduling, no reordering. Resist.
+
+## Corrections (design review, 2026-07-27)
+
+- **Reversed-Z is LOCKED** (was missing entirely): depth buffer is `D32_SFLOAT`,
+  projection uses an **infinite far plane with reversed depth**, compare op
+  `GREATER`, clear to 0.0. A sector-tiled world with 300 m+ sightlines z-fights
+  immediately on a conventional 0..1 buffer, and retrofitting after P1
+  invalidates every blessed golden frame. This binds projection math, the
+  viewmodel depth-slice remap (29), soft particles and depth collision (20), and
+  every AA/post input (18).
+- **HDR target from P1, not P7**: render to `RGBA16F` + a trivial tonemap pass
+  from the first lit mesh, even with no HDR content. Costs nothing now and
+  avoids re-blessing breakout/asteroids goldens (and their web demos) when 18's
+  real stack lands.
+- **Transfer queue**: MVP uploads share the graphics+compute queue — stated, not
+  assumed. The render graph's barrier model must nonetheless represent
+  queue-family **acquire/release** from the start so a dedicated transfer queue
+  is additive later rather than a barrier-model rewrite.
+- **HAL freeze wording**: the seam is **provisional** at stage-2 exit and
+  **frozen at P5 exit**, when a second backend (`crcbl-wgpu`) has implemented
+  it. ROADMAP is canonical; this doc's earlier "frozen at stage exit" is
+  superseded.
+- **Lavapipe golden-image e2e is a hard P1 gate**, not "if practical" — a gate
+  cannot be optional.

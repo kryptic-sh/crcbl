@@ -6,14 +6,46 @@ backends per platform, including the platform protocol/binding layer itself: we
 own all the code and all the bugs. Godot's `DisplayServer` is the closest prior
 art for the shape; nobody's crates underneath ours.
 
-The dependency line: the **OS boundary is the only boundary**. On Linux that
-means talking the Wayland and X11 _wire protocols_ directly over unix sockets
-(no libwayland, no xcb, no protocol crates — both are documented socket
-protocols). On Windows/macOS it means hand-written FFI declarations to the OS
-APIs we use (no `windows-rs`, no `objc2` — the OS itself is unavoidable; the
-bindings are ours and scoped to exactly what we call). `wayr` (our own Wayland
-toolkit) is the donor/foundation for the Wayland backend — absorbed or
-refactored to the no-deps rule as needed; it's our code either way.
+## The dependency line: bindings, not frameworks (REVISED — see WSI note)
+
+The rule is **"no framework makes decisions for us"**, not "no code but ours
+links into the process":
+
+- **Rejected**: frameworks that own policy — winit, SDL, GLFW (windowing), and
+  by the same logic egui (UI) and wgpu-as-the-performance-tier.
+- **Accepted**: thin bindings to APIs the OS or driver requires _by ABI_ — `ash`
+  (already locked for Vulkan), `objc2`/`windows-rs` (09), and on Linux
+  **libwayland-client / libxcb for the connection and proxy objects only**.
+  Everything above those handles — protocol selection, event loop, window
+  lifecycle, DPI, input, modes — is ours.
+
+### Why the Linux exception is forced (the WSI ABI)
+
+A hand-rolled wire-protocol client **cannot present through Vulkan.**
+`vkCreateWaylandSurfaceKHR` takes a real `wl_display*` / `wl_surface*`, and the
+driver's WSI implementation calls libwayland functions on them
+(`wl_proxy_marshal_flags`, its own event-queue dispatch); the same is true of
+`vkCreateXcbSurfaceKHR` and a genuine `xcb_connection_t*` (the driver issues
+Present-extension traffic on it). Objects we invent from raw socket bytes are
+not those objects. This was missed in the first draft of this plan and would
+have blocked the P1 gate ("lit mesh on screen") on day one.
+
+So, LOCKED for P0:
+
+- **libwayland-client / libxcb provide the connection and proxy objects**; our
+  codegen sits on top of `wl_proxy_marshal_flags` (exactly how the Rust
+  wayland-client crates work — we own the protocol layer, not the transport
+  ABI). `wayr` is the donor for that layer.
+- **Full independence remains possible and is documented, not scheduled**:
+  render offscreen, export `VkDeviceMemory` as a dma-buf
+  (`VK_EXT_external_memory_dma_buf`), and present via `zwp_linux_dmabuf_v1` +
+  `linux-drm-syncobj-v1` explicit sync + `wp_presentation` pacing — a real
+  subsystem (and one the earlier protocol list omitted entirely, which is how
+  the cost stayed hidden). Revisit only as a deliberate exercise, never as a P0
+  assumption.
+- Windows/macOS keep hand-written FFI where it's small, but the policy above
+  means `objc2`/`windows-rs` in the HAL (09) is **not** a contradiction —
+  bindings are fine; frameworks are not.
 
 ## Display modes (LOCKED — two, not three)
 
@@ -122,25 +154,27 @@ Explicitly out (post-MVP or never): exclusive fullscreen, multi-window MVP
 
 ## Backends
 
-| Platform | Backend                                                                 | Lands |
-| -------- | ----------------------------------------------------------------------- | ----- |
-| Wayland  | own wire-protocol client (unix socket + fd passing; `wayr` as donor)    | P0    |
-| X11      | own wire-protocol client (core requests + EWMH atoms + RandR subset)    | P0    |
-| Web      | canvas + DOM events via our own minimal JS shim + wasm imports          | P5    |
-| Windows  | hand-written Win32 FFI (`extern "system"` decls for the surface we use) | P14   |
-| macOS    | hand-written Objective-C runtime FFI (`objc_msgSend`) to AppKit         | P14   |
+| Platform | Backend                                                                                                  | Lands |
+| -------- | -------------------------------------------------------------------------------------------------------- | ----- |
+| Wayland  | libwayland-client connection/proxies + **our** protocol codegen on `wl_proxy_marshal_flags` (wayr donor) | P0    |
+| X11      | libxcb connection + **our** request/event layer (core, EWMH atoms, RandR, XKB)                           | P0    |
+| Web      | canvas + DOM events via our own minimal JS shim + wasm imports                                           | P5    |
+| Windows  | hand-written Win32 FFI (`extern "system"` decls for the surface we use)                                  | P14   |
+| macOS    | hand-written Objective-C runtime FFI (`objc_msgSend`) to AppKit                                          | P14   |
 
 Notes on the from-scratch protocol work:
 
-- **Wayland**: protocol is XML-specified message framing over a unix socket with
-  fd passing (`SCM_RIGHTS`). We generate our marshaling from the protocol XMLs
-  with our own small codegen (build-time, in-repo). Needed protocols: core,
-  `xdg-shell`, `xdg-decoration`, `wp_viewporter`, `fractional-scale-v1`,
-  `pointer-constraints` + `relative-pointer` (raw motion/lock), `data-device`
-  (clipboard/DnD).
+- **Wayland**: we generate marshaling from the protocol XMLs with our own
+  build-time codegen, emitting `wl_proxy_marshal_flags` calls against
+  libwayland-client's connection (the WSI ABI requirement above). Needed
+  protocols: core, `xdg-shell`, `xdg-decoration`, `wp_viewporter`,
+  `fractional-scale-v1`, `pointer-constraints` + `relative-pointer` (raw
+  motion/lock), `data-device` (clipboard/DnD) — plus `zwp_linux_dmabuf_v1`
+  **only** if the independent-presentation path is ever taken.
 - **X11**: core protocol subset (window create/map, atoms/EWMH for fullscreen +
-  hints, input events), RandR extension for monitor enumeration, XKB for
-  keymaps. Wire codec is ours; scope stays at what the shell actually uses.
+  hints, input events) over libxcb's connection, RandR for monitor enumeration,
+  XKB for keymaps. Request/event layer is ours; scope stays at what the shell
+  actually uses.
 - **Windows/macOS**: FFI declarations are code we write and own — dozens of
   functions, not thousands; audited by use. Land with Metal/DX12 (P14) — before
   that they'd be compile-verified-only anyway (gpur lesson: that's not support).

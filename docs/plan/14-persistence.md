@@ -109,3 +109,21 @@ on the hot path.
 - Save→load→hash property green in CI; kill-during-write leaves prior save.
 - `crcbl save dump/diff` works on any save; settings scriptable via CLI.
 - Same game code path for autosave, manual save, console `save`, CLI save.
+
+## Correction (design review, 2026-07-27)
+
+**Save shape must match the galaxy wire model (23).** "Full server world state
+at a tick" is incoherent once "full world snapshot" stops existing as a concept
+beyond one sector. A save is:
+
+```
+header (versions, scene ref+hash, tick, playtime)
++ sector set (which sectors this save covers)
++ per-sector snapshots (the same encoder replication and replay use)
++ on-rails elements (orbital parameters for everything not live-simulated)
++ per-system extension blocks
+```
+
+Single-sector games (every MVP sample) produce exactly the original format, so
+nothing gets more complex early — but the container is correct from P2 instead
+of being restructured after saves ship.

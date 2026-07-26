@@ -143,3 +143,15 @@ deliberately not here.
 - **Scope pull toward destruction**: T2 is a shader trick with hard limits. Real
   geometry destruction is a separate topic with server-authoritative
   requirements; the line is stated here so it stays uncrossed by accident.
+
+## Correction (design review, 2026-07-27)
+
+**"Carve applies in the shadow pass — same cluster data" was wrong.** The froxel
+grid is built in the main camera's frustum; a shadow cascade views different
+space at different granularity, so a shadow fragment cannot look up camera
+froxels. Carve volumes get **their own per-shadow-view binning** (world-space
+uniform grid, or a per-cascade cluster build). MVP is honest and simple: a flat
+"test all active carve volumes" loop in the shadow fragment shader with a hard
+cap, since carve counts are small. Note the consequence: **carveable geometry
+loses its depth-only shadow pipeline** — it needs a fragment shader with
+`discard` in the shadow pass.

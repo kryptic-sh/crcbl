@@ -212,3 +212,14 @@ as before/after proof.
 - **Main-thread creep** (systems sneaking work into converge): the wait≈0 KPI +
   timeline view make creep visible; review rule — converge assembles, never
   computes.
+
+## Correction (design review, 2026-07-27)
+
+**"Rate-based, never stepping" cannot converge after a real discontinuity.**
+±0.5% slew at 60 Hz corrects ~0.3 ticks/second; a 500 ms offset (route change,
+wifi→wired, resume from suspend) would take ~100 s to converge while every input
+misses its target tick. Every deployed clock-sync design (NTP being canonical)
+is hybrid. Corrected policy: **slew below a threshold (~50 ms), step above it**,
+with a defined sim-side policy for the stepped interval (drop or fast-forward
+the skipped ticks, logged and surfaced in the netgraph). Absolutism replaced by
+a documented threshold.

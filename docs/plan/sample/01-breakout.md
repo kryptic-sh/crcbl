@@ -29,7 +29,8 @@ Deliberately the smallest thing that is a _game_ and not a demo.
   reflection from contact normal. Paddle = kinematic body. No game-code
   collision math. Speed ramps per hit.
 - 3 lives, score, restart. Keyboard + mouse paddle input.
-- Sound: none (audio is out of engine MVP).
+- Sound: bounce/brick-break cues through the spatial grammar (P4A lands audio
+  before this sample — the earlier "no sound" line predated that decision).
 
 ## Non-goals (hard cap)
 
