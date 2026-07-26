@@ -64,13 +64,47 @@ envelopes** on both ends:
   peeks + more leak. The leak auditor (below) turns the choice into numbers per
   map/mode.
 
+## Server-authoritative audio mode (closing the audio side-channel)
+
+Positional audio events are themselves a wallhack vector — a cheat reading event
+coordinates pinpoints enemies through walls more precisely than any ear could.
+The companion mode (paired with this filter; same optionality) removes positions
+from the audio wire entirely:
+
+- **Server spatializes, client renders**: the cue grammar (13) is a small
+  deterministic parameter set, so the server computes it per listener per event
+  and sends only
+  `{sound_id, seed, ITD, per-ear gains, pitch cents, occlusion params, rolloff}`
+  — **no world position in any audio message**. The client DSP applies
+  parameters directly; the pure-f32 core doesn't care where the numbers came
+  from.
+- **The information-theoretic honest part**: audible direction _is_ direction
+  data — the cap, not the elimination, is the win. Parameters are **quantized to
+  human just-noticeable differences** (coarse ITD steps, ~1 dB gain steps,
+  coarse cents): a cheat decoding the wire learns a fuzzy bearing cone — exactly
+  what a skilled listener's ears extract, and nothing more. Versus raw
+  coordinates (exact position, arbitrary precision), the leak collapses to
+  perceptual resolution.
+- **Rotation staleness** (client turns between server compute and playback): the
+  wire carries **quantized listener-relative polar** (azimuth/elevation/distance
+  — information-equivalent to the ear params); the client applies a rotation
+  correction from its _own_ orientation delta since the compute tick. Flicks
+  stay directionally correct; the leak stays capped at the quantized cone.
+- Moving/looping sources: per-tick param updates for audible voices (a few bytes
+  each), client interpolates — latest-wins like everything else.
+- **Occlusion raycasts run server-side** in this mode (server has both
+  positions) and **share the budget/cache with the visibility rays above** — one
+  ray pool answers both "can you see them" and "how muffled are they."
+- Own sounds stay client-local (13, unchanged); spectators/replays keep full
+  positional streams (delay-protected, 22).
+- Default mode remains client-positional events (simpler, right for co-op/PvE);
+  competitive games flip vis-culling + authoritative-audio together.
+
 ## What still gets through (by design — and catalogued)
 
-- **Audio events**: footsteps/gunshots of culled enemies still deliver — hearing
-  through walls is the esports audio grammar's _purpose_ (13). Event positions
-  are one-shot, gameplay-legitimate information; paranoid games can quantize
-  event positions for culled sources (knob). The distinction: **no continuous
-  transform stream ≠ no information** — the grammar is the sanctioned channel.
+- **Audio information at perceptual resolution** — by design, capped as above.
+  The distinction: **no coordinates ≠ no information** — the grammar cone is the
+  sanctioned channel.
 - Create/destroy churn rides the 23 machinery (visibility flip = same wire
   semantics as sector enter/leave; ack-baselines handle it).
 - **The leak checklist** (engine docs, game responsibility): minimap markers,
@@ -97,6 +131,14 @@ envelopes** on both ends:
   margin config); smoke/door-state cases if dynamic occluders enabled.
 - Leak property: no tagged entity's transform is ever sent while outside the
   expanded envelope beyond grace (the anti-wallhack claim, as a test).
+- Audio-mode leak property: in authoritative-audio mode, no message on the audio
+  path contains world coordinates (schema-level assert), and param quantization
+  steps meet the configured JND floors.
+- Perceptual equivalence golden: a scene rendered from server params vs from
+  positions (reference mode) produces per-ear output within the quantization
+  tolerance — the mode changes the wire, not the experience.
+- Rotation-staleness bound: scripted flick at RTT presets keeps rendered
+  direction error within the quantized cone (asserted).
 - Budget property: ray spend per tick ≤ cap under bot-match load; starved budget
   degrades toward visible, never toward pop-in.
 - Soak: bot matches (24) with the condition simulator (23) sweeping RTT — leak
