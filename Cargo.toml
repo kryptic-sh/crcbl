@@ -1,0 +1,11 @@
+[package]
+name = "crcbl"
+version = "0.1.0"
+edition = "2024"
+description = "Crucible — a cross-platform GPU rendering engine (Vulkan, Metal, DX12) in Rust"
+license = "MIT"
+repository = "https://github.com/kryptic-sh/crcbl"
+keywords = ["gamedev", "graphics", "vulkan", "metal", "dx12"]
+categories = ["game-engines", "graphics", "rendering"]
+
+[dependencies]
