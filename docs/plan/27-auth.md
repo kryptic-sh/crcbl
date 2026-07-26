@@ -16,10 +16,9 @@ a dev tool).
 | **3 — Token** | backend keypair (Ed25519)            | official/ranked/public servers | full: authenticated identity, per-session keys, bans, ranked chain                                              |
 
 The tier is server config; clients discover it in the hello. Engine code above
-the transport never branches on tier — it sees "authenticated: yes/no
-
-- PlayerId claims" and games gate features on that (ranked requires tier 3; the
-  topic 23 "no competitive claims" caveat resolves here).
+the transport never branches on tier — it sees "authenticated: yes/no, plus
+PlayerId claims" and games gate features on that (ranked requires tier 3; the
+topic 23 "no competitive claims" caveat resolves here).
 
 ## Tier 3: connect tokens (netcode.io model, hardened)
 
