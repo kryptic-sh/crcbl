@@ -1,4 +1,4 @@
-# Sample 05 — towers (flagship)
+# Sample 06 — towers (flagship)
 
 Co-op 3D tower defense, 1–4 players. The flagship sample: every engine pillar in
 one shippable game, and the long-lived dogfood project that keeps evolving with
@@ -28,6 +28,10 @@ without needing prediction.
   where both bodies move), kinematic spline-followers in the broadphase, trigger
   volumes (creep-reaches-exit), character controller (dev fly/walk camera on the
   map — the controller's first real terrain).
+- **Audio grammar in anger** (topic 13): off-screen creep waves locatable by ear
+  (direction + behind-cue), tower fire pans with the camera, occlusion muffles
+  lanes behind terrain — the esports-legibility claim demonstrated in a real
+  game, native + browser.
 
 ## Scope (MVP of the sample)
 

@@ -17,6 +17,10 @@ open scene, move things, edit properties, save, play.
   - Play-in-editor = tell the server to switch from edit-mode schedule to the
     game schedule (edit-mode systems freeze, game systems run). Stop = restore
     the pre-play snapshot (the stage 4 snapshot machinery, reused).
+  - **Headless/CLI is a peer client** (topic 11): `crcbl edit --serve` runs the
+    editor server windowless; `crcbl scene …` sends the same commands the GUI
+    sends. Nothing editor-side may be implemented GUI-only — the command
+    protocol is the editor's real API, the GUI just drives it.
 - Edit-mode ECS additions: selection system, gizmo system, editor-camera system
   — ordinary systems in the edit schedule, demonstrating the ECS's own extension
   story.

@@ -1,0 +1,87 @@
+# Roadmap — Interleaved Build Order (canonical)
+
+This is the **canonical build order** for the engine. The numbered stage docs
+(`01`–`10`) are topical deep-dives — architecture, tasks, risks per subsystem;
+this roadmap interleaves _slices_ of those stages with the samples that consume
+them.
+
+Two hard rules govern the ordering:
+
+1. **Engine base before any sample.** Phases 0–4 build the complete core (window
+   → render → sim → physics slice → UI slice) before the first line of sample
+   code. No sample ever starts before every module it needs exists.
+2. **Component → system → sample.** After the base, work proceeds in pulls:
+   build the component(s), build the system(s) on them, then ship the sample
+   that proves them. The sample is the phase's exit criterion.
+
+**Wasm is early** (phase 5, right after the first playable): every sample from
+breakout onward ships as a browser demo on GitHub Pages. The demo site is the
+engine's public face and its continuous cross-backend regression test.
+
+## Phase table
+
+| Phase   | Build                                                                                                                                                                                                                                      | From stage        | Gate / deliverable                                                           |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------- | ---------------------------------------------------------------------------- |
+| **P0**  | Workspace, CI, **test infra** (nextest, coverage, NullBackend suite — topic 12), `crcbl-cli` scaffold (`new`/`run`/`build` — topic 11), `crcbl-core` (handles, pools, `WorldPos`, clock, input), HAL seam + NullBackend, winit window loop | 1, 11, 12         | Window opens; CI green                                                       |
+| **P1**  | `crcbl-vk`: device, swapchain, frames-in-flight, render graph, pipelines; milestone ladder → lit mesh; ortho/2D path; offscreen render + `crcbl screenshot` + lavapipe golden-image e2e                                                    | 2, 11, 12         | Lit spinning mesh, zero validation errors, golden frame in CI                |
+| **P2**  | `crcbl-ecs` (system-owned arrays), `crcbl-net` (transport trait, in-memory), `crcbl-server`/`crcbl-client`, replication, interpolation, tick determinism; `crcbl sim --hash` harness                                                       | 4, 11, 12         | Server-simulated entities render via interpolation                           |
+| **P3**  | `crcbl-phys` slice 1 (L0): box/sphere colliders, BVH, ray/segment, swept-sphere TOI + contact normals                                                                                                                                      | 5                 | Physics unit+property suite + debug draw                                     |
+| **P4**  | `crcbl-ui` slice 1: draw-list pass, glyph atlas text, label/button, HUD basics; draw-list snapshot tests                                                                                                                                   | 7, 12             | Text + score HUD renders through engine                                      |
+| **P4A** | `crcbl-audio`: device seam (cpal), audio thread, mixer/buses, WAV/QOA, voices, **full spatial cue grammar** (topic 13), server-event wiring, golden-buffer e2e                                                                             | 13                | Grammar-trainer orbit test audible + green e2e                               |
+| **S1**  | **Sample: breakout** — first playable; all deps (P0–P4A) exist before it starts; bounces pan spatially                                                                                                                                     | —                 | Winnable/losable native game                                                 |
+| **P5**  | **Wasm early**: `crcbl-wgpu` Tier B backend, canvas/rAF platform, Slang→WGSL, `FetchSource`-lite, AudioWorklet output; cross-backend image compare (vk↔wgpu); **GitHub Pages demo site + CI deploy**                                       | 10 (part), 12, 13 | **breakout playable in browser at the Pages URL**                            |
+| **P6**  | Phys slice 2: dynamic BVH churn, overlap queries, L1 integrator start (thrust, damping)                                                                                                                                                    | 5                 |                                                                              |
+| **S2**  | **Sample: asteroids**                                                                                                                                                                                                                      | —                 | Native + published web demo                                                  |
+| **P7**  | GPU-driven rendering full: geometry pools, instance deltas, GPU culling, indirect draws — Tier A _and_ Tier B paths                                                                                                                        | 3                 | 10k-instance sandbox, flat CPU cost, both backends                           |
+| **P8**  | Phys slice 3: batch queries at scale, sleeping/islands pressure                                                                                                                                                                            | 5                 |                                                                              |
+| **S3**  | **Sample: horde**                                                                                                                                                                                                                          | —                 | 10k enemies @60; perf numbers recorded; web demo (smaller budget)            |
+| **P9**  | Assets + scenes: `AssetSource` (Dir/Fetch), glTF import, RON scene format, hot reload; `crcbl import`; glTF corpus e2e                                                                                                                     | 6, 11, 12         | Sponza-class scene through full path                                         |
+| **P10** | UI slice 2 + debug tools: widget set, panels/splitters, profiler HUD, inspector, console; music streaming + ducking + cue inspector                                                                                                        | 7, 13             | Debug overlay live over loaded scene                                         |
+| **S4**  | **Sample: viewer** (native tool; web build stretch)                                                                                                                                                                                        | —                 | Arbitrary glTF opens, panels work                                            |
+| **P11** | Phys slice 4 (L1 full): sector frames + SOI, gravity/drag/atmosphere, Kepler on-rails, bubbles, timewarp                                                                                                                                   | 5                 | Physics stage exit nears                                                     |
+| **S5**  | **Sample: orbit** — physics acceptance test                                                                                                                                                                                                | —                 | Full mission; **flashiest web demo**                                         |
+| **P12** | Editor: edit-mode schedule, viewport+picking (phys raycast), outliner, properties, gizmos, undo commands, play mode; `crcbl scene`/`edit --serve` CLI protocol + command/undo property suite                                               | 8, 11, 12         | Scene authored start-to-finish in editor **and** modifiable headless via CLI |
+| **S6**  | **Sample: towers** (flagship) — solo loop first, then editor-authored map                                                                                                                                                                  | —                 | Solo TD on editor-built map; web demo                                        |
+| **P13** | WebTransport/WebSocket transport + dedicated headless server; lobby-lite                                                                                                                                                                   | 10 (rest)         | Browser client ↔ native server                                               |
+| **S6+** | **towers co-op** — marquee demo                                                                                                                                                                                                            | —                 | 4-player mixed native/browser session                                        |
+| **P14** | Metal + DX12 backends (MoltenVK spike gate first)                                                                                                                                                                                          | 9                 | Sandbox + samples on macOS/Windows                                           |
+| post    | L2 contacts → **arena** (prediction/lag-comp forcing function), L3 joints, QUIC native, packaging                                                                                                                                          | 5, post           |                                                                              |
+
+## Demo site (GitHub Pages)
+
+- `gh-pages` deploy workflow: on main push, build all wasm-ready samples
+  (`wasm32-unknown-unknown` + bindgen), assemble static site (index page listing
+  demos + engine README blurb), deploy to `https://kryptic-sh.github.io/crcbl/`.
+- Every wasm sample = a Pages demo from the moment it exists; the site grows one
+  demo per S-phase. Broken wasm build = broken CI = blocked merge — the browser
+  target can't rot.
+- (Later, optional) front the same builds from the unified `kryptic.sh` site.
+
+## Cross-cutting tracks
+
+Four pillars deliver in slices across every phase (their own docs carry the
+slice tables):
+
+- **CLI/headless** ([11-cli-headless.md](11-cli-headless.md)) — `crcbl` binary
+  grows a phase at a time; every subsystem is scriptable the phase it lands.
+- **Testing** ([12-testing.md](12-testing.md)) — unit + property + e2e per
+  subsystem, in the same phase as the subsystem, never later. Golden
+  images/buffers, determinism hashes, lavapipe CI.
+- **Audio** ([13-audio.md](13-audio.md)) — spatial cue grammar lands P4A, before
+  the first sample; every sample ships with directional sound.
+- **Debug tools** (in [07-ui-debug.md](07-ui-debug.md)) — each system lands with
+  its overlay/inspector hooks.
+
+## Notes
+
+- Stage-doc numbering (01–10) is **topic identity, not order**. Topics 11–13
+  (CLI, testing, audio) are cross-cutting tracks. Where this roadmap and a stage
+  doc disagree on sequencing, the roadmap wins.
+- Physics slices P3/P6/P8/P11 are the demand-driven delivery from
+  [05-physics.md](05-physics.md); the slice↔sample mapping there matches the
+  S-phases here.
+- Sample docs renumbered to build order: 01 breakout, 02 asteroids, 03 horde, 04
+  viewer, 05 orbit, 06 towers, 07 arena.
+- HAL freeze moves in practice to P5 exit: the seam isn't frozen until _two_
+  backends (vk + wgpu) implement it — earlier and stronger than the old "freeze
+  at stage 2 exit", superseding it.

@@ -17,6 +17,9 @@ Deliberately the smallest thing that is a _game_ and not a demo.
 - **Physics slice it drives** (interleaved build): first `crcbl-phys` L0
   vertical — box/sphere colliders, swept-sphere TOI, contact normal response.
   Smallest possible physics consumer; the API is designed against this game.
+- **First audio consumer**: bounce/brick-break cues through the spatial grammar
+  — ball position pans audibly left/right (rule 2 in its simplest form). Also
+  the first Pages web demo once P5 lands.
 
 ## Scope
 

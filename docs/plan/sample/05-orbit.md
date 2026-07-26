@@ -1,4 +1,4 @@
-# Sample 07 — orbit
+# Sample 05 — orbit
 
 KSP-lite slice: launch a rocket from a planet surface, punch through the
 atmosphere, reach stable orbit, deorbit, land. One planet, one moon, one rocket.

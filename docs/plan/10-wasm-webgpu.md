@@ -1,5 +1,12 @@
 # Stage 10 — Wasm + WebGPU
 
+> **Scheduling note (ROADMAP wins):** this doc's _backend/platform_ half
+> (crcbl-wgpu, canvas/rAF, Slang→WGSL, FetchSource, AudioWorklet) lands
+> **early**, at roadmap phase P5 — right after the first sample — so every
+> sample publishes to the GitHub Pages demo site from then on. The _networking_
+> half (WebTransport/WebSocket + dedicated-server listener) lands at P13 for
+> towers co-op.
+
 Run games (and eventually the editor) in the browser. The browser has no Vulkan
 — WebGPU is the graphics API, wasm32 is the target, and several platform
 assumptions (threads, blocking IO, UDP) change. This stage exists as its own

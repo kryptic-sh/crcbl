@@ -1,4 +1,4 @@
-# Sample 04 — horde
+# Sample 03 — horde
 
 Survivors-lite: one player, auto-firing weapon, thousands of enemies converge,
 survive N minutes. The renderer-at-scale sample — the stage 3 "flat CPU cost"

@@ -1,25 +1,35 @@
 # Crucible (`crcbl`) — Engine Plan Overview
 
-Cross-platform GPU rendering/game engine in Rust. Vulkan first (Linux), Metal
-and DX12 later, behind a hard backend seam. Wasm/WebGPU is a supported target —
-its constraints shape earlier stages (renderer tiers, async IO, transport seam).
-Server→client architecture from day one. From-scratch physics is a first-class
-pillar: galaxy-scale sector-tiled space, simulator-grade dynamics, swept
-collision (CCD). 3D-first; 2D is an orthographic projection with `z` as z-index.
+Cross-platform GPU rendering/game engine in Rust, everything from scratch as a
+learning exercise. Vulkan first (Linux), Metal and DX12 later, behind a hard
+backend seam. Wasm/WebGPU arrives **early** — every sample publishes as a
+browser demo on GitHub Pages. Server→client architecture from day one.
+First-class pillars beyond rendering: from-scratch **physics** (galaxy-scale
+sector-tiled space, simulator-grade dynamics, swept CCD), from-scratch **audio**
+(learnable spatial cue grammar, esports-legible), **CLI/headless** control of
+engine and editor, and **test infra** (unit + e2e per subsystem). 3D-first; 2D
+is an orthographic projection with `z` as z-index.
+
+> **Build order lives in [ROADMAP.md](ROADMAP.md)** — it interleaves component →
+> system → sample slices across these docs and is canonical where orderings
+> disagree. Stage/topic numbers below are document identity, not sequence.
 
 ## Locked decisions
 
-| Decision     | Choice                                               | Rationale                                                                                                              |
-| ------------ | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Vulkan layer | `ash` (raw Vulkan)                                   | GPU-driven design needs bindless, indirect draws, fine-grained sync. wgpu abstracts these away.                        |
-| Windowing    | `winit`                                              | Proven cross-platform; needed for Metal/DX12 stages anyway.                                                            |
-| GUI          | Own immediate-mode GUI                               | Editor is built on the engine; game GUI and editor GUI share one draw path.                                            |
-| Math         | `glam`                                               | SIMD, ecosystem standard, no reason to hand-roll.                                                                      |
-| Scene format | glTF 2.0 for meshes/materials; own format for scenes | **Revisitable** — flagged for discussion. glTF in from any DCC; engine-native scene format maps directly onto ECS.     |
-| ECS          | System-owned arrays                                  | Systems track arrays of the objects belonging to them (SoA), not objects with components attached.                     |
-| Networking   | Server-authoritative, transport seam                 | In-memory channel for single player; real network transport is the same interface. Multiplayer is first-class.         |
-| Wasm target  | WebGPU via `wgpu` as portability backend (Tier B)    | Browser has no Vulkan. `crcbl-wgpu` covers wasm + doubles as native fallback tier. Perf tier stays ash/mtl/dx12.       |
-| Physics      | From scratch (`crcbl-phys`), layered L0–L3           | First-class pillar. Sector-tiled `WorldPos` (galaxy scale), simulator-grade forces, CCD. f64, same-binary determinism. |
+| Decision     | Choice                                               | Rationale                                                                                                                                                                                 |
+| ------------ | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Vulkan layer | `ash` (raw Vulkan)                                   | GPU-driven design needs bindless, indirect draws, fine-grained sync. wgpu abstracts these away.                                                                                           |
+| Windowing    | `winit`                                              | Proven cross-platform; needed for Metal/DX12 stages anyway.                                                                                                                               |
+| GUI          | Own immediate-mode GUI                               | Editor is built on the engine; game GUI and editor GUI share one draw path.                                                                                                               |
+| Math         | `glam`                                               | SIMD, ecosystem standard, no reason to hand-roll.                                                                                                                                         |
+| Scene format | glTF 2.0 for meshes/materials; own format for scenes | **Revisitable** — flagged for discussion. glTF in from any DCC; engine-native scene format maps directly onto ECS.                                                                        |
+| ECS          | System-owned arrays                                  | Systems track arrays of the objects belonging to them (SoA), not objects with components attached.                                                                                        |
+| Networking   | Server-authoritative, transport seam                 | In-memory channel for single player; real network transport is the same interface. Multiplayer is first-class.                                                                            |
+| Wasm target  | WebGPU via `wgpu` as portability backend (Tier B)    | Browser has no Vulkan. `crcbl-wgpu` covers wasm + doubles as native fallback tier. Perf tier stays ash/mtl/dx12.                                                                          |
+| Physics      | From scratch (`crcbl-phys`), layered L0–L3           | First-class pillar. Sector-tiled `WorldPos` (galaxy scale), simulator-grade forces, CCD. f64, same-binary determinism.                                                                    |
+| Audio        | From scratch (`crcbl-audio`), stylized spatializer   | First-class pillar, lands before first sample. Deterministic ITD/ILD/pitch/occlusion cue grammar — learnable player skill, not realistic HRTF. cpal/AudioWorklet at the device seam only. |
+| CLI/headless | `crcbl` binary drives everything                     | Editor edits are transport commands → CLI is just another client. Scriptable scenes, sims, screenshots; agent/CI-friendly.                                                                |
+| Testing      | Unit + property + e2e per subsystem, same phase      | Golden images (lavapipe CI) + golden audio buffers + determinism hashes. No subsystem lands untested.                                                                                     |
 
 ## Core design principles
 
@@ -42,6 +52,15 @@ collision (CCD). 3D-first; 2D is an orthographic projection with `z` as z-index.
    ordinary server-side ECS systems (SoA arrays, replicated results,
    deterministic per-tick hash). The world is sector-tiled from the core types
    up — galaxy-scale coordinates are foundational, not a retrofit.
+7. **Nothing is GUI-only.** Every engine and editor capability works headless
+   through the `crcbl` CLI — same command protocol the GUI uses. If it only
+   works with a window, it's an architecture regression.
+8. **Audio is information.** The spatializer is a deterministic cue grammar
+   players can learn and exploit; sounds are replicated server events rendered
+   client-side, exactly like graphics.
+9. **Untested is unfinished.** Each subsystem ships unit + e2e coverage in the
+   same roadmap phase; samples double as CI fixtures (determinism scripts,
+   golden frames, golden audio).
 
 ## Stages
 
@@ -58,36 +77,53 @@ collision (CCD). 3D-first; 2D is an orthographic projection with `z` as z-index.
 | 9     | [09-backends-metal-dx12.md](09-backends-metal-dx12.md)   | Metal and DX12 implementations of the HAL                  |
 | 10    | [10-wasm-webgpu.md](10-wasm-webgpu.md)                   | Wasm target: wgpu backend, WebTransport, browser platform  |
 
-Stages 1–8 are the MVP. Stages 9–10 make it cross-platform. Ordering within a
-stage is suggested, not sacred; stages themselves are dependency-ordered
-(physics slots after ECS because physics systems _are_ server systems; stages
-6–8 may interleave with physics L2 stretch work). Stage 10's constraints
-(renderer Tier B, async assets, message-shaped transport, `tick(dt)` loop) are
-baked into stages 1/3/4/6 — wasm is a first-class target, not a port.
+Cross-cutting topic docs (identity, no ordering implied):
 
-Each stage exit is proven by a **sample project** — small complete games/tools
-in `apps/`, laddered against the stages: see
+| Topic | Doc                                      | Theme                                                     |
+| ----- | ---------------------------------------- | --------------------------------------------------------- |
+| 11    | [11-cli-headless.md](11-cli-headless.md) | `crcbl` CLI: headless engine/editor control, scripting    |
+| 12    | [12-testing.md](12-testing.md)           | Test infra: unit/property/e2e, golden images, determinism |
+| 13    | [13-audio.md](13-audio.md)               | Spatial cue grammar, mixer, occlusion, audio testing      |
+
+Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
+engine base (window → render → sim → physics slice → UI slice → audio) before
+the first sample; wasm + the GitHub Pages demo site land immediately after the
+first sample (P5). Stages 1–8 + topics 11–13 slices are the MVP; Metal/DX12 (9)
+and the WebTransport half of 10 complete cross-platform. Stage 10's constraints
+(renderer Tier B, async assets, message-shaped transport, `tick(dt)` loop) are
+baked in from the start — wasm is a first-class target, not a port.
+
+Each roadmap S-phase is proven by a **sample project** — small complete
+games/tools in `apps/`, numbered in build order: see
 [sample/00-samples-overview.md](sample/00-samples-overview.md) (breakout,
-asteroids, viewer, horde, orbit, flagship co-op tower defense, post-MVP arena).
+asteroids, horde, viewer, orbit, flagship co-op tower defense, post-MVP arena).
+Every game sample ships as a browser demo on the Pages site.
 
 ## MVP feature → stage map
 
-| MVP feature                        | Stage(s) |
-| ---------------------------------- | -------- |
-| Render engine                      | 2, 3     |
-| Physics (L0+L1+CCD, sector space)  | 1, 5     |
-| Scene loader                       | 6        |
-| ECS (system-owned arrays)          | 4        |
-| Scene editor                       | 8        |
-| Immediate-mode GUI (editor + game) | 7        |
-| Editor built on the engine         | 8        |
-| Debug tools throughout             | 2–8      |
-| Server→client from day 1           | 1, 4     |
-| 3D-first, 2D as ortho projection   | 2, 3     |
+| MVP feature                          | Doc(s)  |
+| ------------------------------------ | ------- |
+| Render engine                        | 2, 3    |
+| Physics (L0+L1+CCD, sector space)    | 1, 5    |
+| Audio (spatial cue grammar + mixing) | 13      |
+| CLI/headless engine + editor control | 11      |
+| Test infra (unit + e2e everywhere)   | 12      |
+| Wasm target + Pages demo site        | 10      |
+| Scene loader                         | 6       |
+| ECS (system-owned arrays)            | 4       |
+| Scene editor                         | 8       |
+| Immediate-mode GUI (editor + game)   | 7       |
+| Editor built on the engine           | 8       |
+| Debug tools throughout               | 2–8, 13 |
+| Server→client from day 1             | 1, 4    |
+| 3D-first, 2D as ortho projection     | 2, 3    |
 
 ## Out of MVP scope (explicitly)
 
-- Audio, animation blending/state machines, scripting.
+- Animation blending/state machines, scripting.
+- Audio: reverb zones, portal/room-graph propagation, doppler, surround — the
+  cue grammar (incl. occlusion) and mixing are MVP; see
+  [13-audio.md](13-audio.md).
 - Physics L2 contact solver is stretch (non-gating); L3 constraints/joints are
   post-MVP — see the layer table in [05-physics.md](05-physics.md). L0/L1/CCD
   are MVP.

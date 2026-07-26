@@ -20,21 +20,24 @@ its charter gets its scope cut, not the engine bent around it.
 
 ## The ladder
 
-| #   | Sample                       | Playable after stage | Proves                                                                       |
-| --- | ---------------------------- | -------------------- | ---------------------------------------------------------------------------- |
-| 01  | [breakout](01-breakout.md)   | 5 (first L0 slice)   | 2D path, minimal ECS, in-memory server loop, game UI, swept-sphere CCD       |
-| 02  | [asteroids](02-asteroids.md) | 5 (nicer after 6)    | Entity churn, generational ids, broadphase churn, segment CCD                |
-| 03  | [viewer](03-viewer.md)       | 6 (UI after 7)       | Asset pipeline as a _usable tool_, camera, inspector                         |
-| 04  | [horde](04-horde.md)         | 6                    | GPU-driven renderer at scale, flat CPU cost claim                            |
-| 05  | [towers](05-towers.md)       | 8 (wasm after 10)    | **Flagship**: everything — editor content, co-op multiplayer, browser client |
-| 06  | [arena](06-arena.md)         | post-MVP             | Client prediction driver — pulls netcode forward                             |
-| 07  | [orbit](07-orbit.md)         | 5 (UI after 7)       | Physics acceptance test: sector space, orbits, drag, CCD, on-rails handoff   |
+Sample numbering **is build order** (see [../ROADMAP.md](../ROADMAP.md) —
+S-phases). Every sample starts only when all its engine dependencies exist,
+ships with spatial audio, and (except viewer) publishes as a wasm demo on the
+GitHub Pages site.
 
-Order is dependency order, not build-one-then-next: 01–04 and 07 stay tiny
-(days, not weeks, each). 05 is the real game and the long-lived dogfood. 06
-exists to force post-MVP netcode work and is explicitly not started before MVP
-ends. 07 is numbered late but lands with stage 5 — it is the physics stage's
-exit-criteria artifact.
+| #   | Sample                       | Roadmap gate | Proves                                                                                           |
+| --- | ---------------------------- | ------------ | ------------------------------------------------------------------------------------------------ |
+| 01  | [breakout](01-breakout.md)   | S1 (P0–P4A)  | 2D path, minimal ECS, in-memory server loop, game UI, swept-sphere CCD, panning audio            |
+| 02  | [asteroids](02-asteroids.md) | S2 (P5–P6)   | Entity churn, generational ids, broadphase churn, segment CCD, first forces                      |
+| 03  | [horde](03-horde.md)         | S3 (P7–P8)   | GPU-driven renderer at scale, flat CPU cost claim, 10k-body queries                              |
+| 04  | [viewer](04-viewer.md)       | S4 (P9–P10)  | Asset pipeline as a _usable tool_, camera, inspector panels                                      |
+| 05  | [orbit](05-orbit.md)         | S5 (P11)     | Physics acceptance test: sector space, orbits, drag, CCD, on-rails handoff                       |
+| 06  | [towers](06-towers.md)       | S6 (P12–P13) | **Flagship**: everything — editor content, co-op multiplayer, browser client, esports audio cues |
+| 07  | [arena](07-arena.md)         | post-MVP     | Client prediction driver — pulls netcode forward; audio grammar under fire                       |
+
+01–05 stay tiny (days, not weeks, each). 06 is the real game and the long-lived
+dogfood. 07 exists to force post-MVP netcode work and is explicitly not started
+before MVP ends.
 
 ## Rules for all samples
 
@@ -52,8 +55,15 @@ exit-criteria artifact.
 5. **CI-built, clippy-clean, same bar as engine crates.** Playtest scripts
    (input-script determinism runs from stage 4) where feasible.
 6. **Scope charters are hard caps.** Each sample doc lists non-goals; feature
-   ideas beyond them go to the flagship (05) or die.
-7. **All collision and motion through `crcbl-phys`.** No game-code collision
+   ideas beyond them go to the flagship (06) or die.
+7. **Web demo on the ladder.** Every game sample builds for wasm and deploys to
+   the GitHub Pages demo site as part of its exit criteria (viewer exempt as a
+   native tool; web build stretch). A sample that breaks the wasm build breaks
+   CI.
+8. **Sound through `crcbl-audio`, spatial by default.** Positional game events
+   use the cue grammar (topic 13) — samples are how players (and we) learn the
+   grammar. No sample ships silent after P4A.
+9. **All collision and motion through `crcbl-phys`.** No game-code collision
    math, ever — even breakout's ball reflection is an L0 sweep + contact normal.
    Physics is built **interleaved with the samples, demand-driven**: each sample
    doc names the physics slice it drives (breakout → first L0 sweep vertical;

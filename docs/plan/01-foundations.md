@@ -27,6 +27,8 @@ crcbl/
 │   ├── crcbl-phys/         # stage 5: physics — queries, forces, CCD
 │   ├── crcbl-scene/        # stage 6: scene format, glTF import
 │   ├── crcbl-ui/           # stage 7: immediate-mode GUI
+│   ├── crcbl-audio/        # topic 13: mixer + spatial cue grammar
+│   ├── crcbl-cli/          # topic 11: `crcbl` binary — headless control
 │   └── crcbl/              # umbrella: re-exports, engine setup helpers
 ├── apps/
 │   ├── sandbox/            # dev playground, first window lives here

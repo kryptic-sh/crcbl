@@ -1,4 +1,4 @@
-# Sample 03 — viewer
+# Sample 04 — viewer
 
 glTF model viewer. Open a file, orbit it, inspect it. Not a game — a genuinely
 usable tool, and the asset pipeline's acceptance test.

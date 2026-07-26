@@ -1,4 +1,4 @@
-# Sample 06 — arena (post-MVP)
+# Sample 07 — arena (post-MVP)
 
 Multiplayer twin-stick arena shooter, 2–8 players. Deliberately the sample the
 MVP netcode _cannot_ serve well — it exists to force the post-MVP netcode work
