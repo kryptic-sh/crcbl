@@ -113,6 +113,8 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 34    | [34-inventory.md](34-inventory.md)             | UI drag-drop + optional grid-inventory kit (looting, slots)             |
 | 35    | [35-ragdolls.md](35-ragdolls.md)               | Ragdolls: server settles / client performs, anim→physics handoff        |
 | 36    | [36-contact-solver.md](36-contact-solver.md)   | Physics L2/L3: substepped impulses, islands, sleeping, joints           |
+| 37    | [37-materials.md](37-materials.md)             | Material authoring: templates+instances, render↔surface link, lint      |
+| 38    | [38-weapons.md](38-weapons.md)                 | Weapon kit: attachments, server-authoritative fire, recoil patterns     |
 
 Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before
