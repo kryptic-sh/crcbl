@@ -54,10 +54,30 @@ audio) stay native forever; the module seam is for _game_ logic.
 > batch-oriented API is deliberately tiny (~dozens of functions, POD records) —
 > per-language binding cost is small by construction; (4) foreign generated glue
 > vs "we own all the bugs". The contract lives in `sdk/abi/` as data; **our own
-> generator** emits `crcbl.h`, Zig bindings, and Rust extern decls from it —
+> generator (`crcbl-abigen`) emits complete native SDKs** from it —
 > programmatic, drift-proof, zero foreign toolchain. ABI stays WIT-shaped (flat
 > funcs, POD records, no callbacks) so migration remains cheap if the calculus
 > ever flips.
+
+### `crcbl-abigen`: full native SDKs from the spec
+
+Not just extern declarations — each language backend emits the **whole idiomatic
+SDK**: typed wrappers over the raw ABI (safe array-view slices, builder-style
+component declaration, event enums), the module entrypoint scaffold, and the
+`hello-module` example. What stays hand-written per SDK is only what codegen
+can't know: docs prose and language-taste review of the templates themselves.
+
+- One backend per language inside `crcbl-abigen` (Rust, C header (+`.hpp`), Zig,
+  Lua glue for the VM template, C# later). A backend is a template module over
+  the spec's IR — tractable because the IR is tiny (POD records, flat funcs,
+  versioned capability groups) and **only needs to cover our features**, never
+  general-IDL completeness.
+- Generated SDKs are committed (reviewable diffs) and **CI regenerates + diffs**
+  — drift between spec and any SDK fails the build. ABI change = edit spec,
+  regenerate, conformance suite validates every language in one commit.
+- Adding a language = writing one backend (mechanical — LLM-amenable against the
+  spec + existing backends as reference) and passing conformance. The suite
+  judges, not the author.
 
 Flat C-style, versioned, no host-side codegen required of guests (language SDKs
 are sugar, Rust SDK first):
@@ -182,6 +202,7 @@ Rules:
 | Module API (trait) + static binding — samples use it from the start      | P2            |
 | Component schema declaration + generic inspect/save/replicate            | P2–P4         |
 | `sdk/` scaffold: `abi/` source of truth + conformance suite + `sdk/rust` | **P6A**       |
+| `crcbl-abigen` core + Rust backend (full-SDK generation, CI drift check) | **P6A**       |
 | Wasm host (`wasmtime` seam, NaN canon, fuel), Rust guest SDK             | **P6A**       |
 | breakout-as-`.wasm` equivalence gate (hash == static build)              | P6A           |
 | Browser nested-module instantiation via JS shim                          | P7–P10 window |
