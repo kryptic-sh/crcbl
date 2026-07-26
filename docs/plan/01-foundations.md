@@ -35,6 +35,7 @@ crcbl/
 ├── apps/
 │   ├── sandbox/            # dev playground, first window lives here
 │   └── editor/             # stage 8
+├── sdk/                    # topic 16: per-language guest SDKs + abi/ + conformance
 └── docs/plan/
 ```
 

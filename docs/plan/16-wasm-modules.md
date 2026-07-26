@@ -107,6 +107,39 @@ gamedev (C class), scripting/modding (Lua), managed mainstream (C#). Other tiers
 remain possible by construction (flat C ABI) — just no first-party SDK until
 demanded. WasmGC tracked as future-proofing for tier 3.
 
+## SDK layout: in-repo, one dir per language
+
+SDKs live in the engine repo — versioned with the ABI they bind, tested in the
+same CI, released together:
+
+```
+sdk/
+  README.md          # ABI overview, versioning policy, how to add a language
+  abi/               # the single source of truth: ABI types/ids/version
+  rust/              # crcbl-sdk crate (guest-side; workspace member, wasm32 target)
+  c/                 # crcbl.h (generated from abi/, CI-checked in sync) + make example
+  lua/               # Lua VM module template + engine-API lua glue
+  csharp/            # .NET project template (lands when NativeAOT-wasm settles)
+```
+
+Rules:
+
+- **`sdk/abi/` is the single source of truth** (Rust crate with the type/id/
+  version definitions); the host imports it, `sdk/rust` re-exports it, and
+  `crcbl.h` is generated from it — a drifted header fails CI, not a user.
+- **Every SDK ships a `hello-module` example** (spawn an entity, tick it, emit
+  an event) that CI compiles to `.wasm` and runs through the **shared
+  conformance suite**: host loads it, runs N ticks, asserts exports, schema
+  registration, and state hash. One suite, N languages — the ABI's
+  cross-language regression net. A host ABI change that breaks any SDK breaks
+  the build immediately, not a modder three weeks later.
+- Each SDK dir is self-contained for its users (copy dir / add dep, build to
+  wasm, done) — engine repo checkout not required to _use_ a released SDK
+  (published per ecosystem: crates.io, header download, LuaRocks-style template
+  zip, NuGet — release job grows per SDK).
+- `crcbl new --lang rust|c|lua|csharp` scaffolds from the matching SDK template
+  (topic 11).
+
 ## Consequences elsewhere (kept honest)
 
 - **`crcbl new` scaffolds a module project**, not an engine fork; `crcbl run`
@@ -121,18 +154,19 @@ demanded. WasmGC tracked as future-proofing for tier 3.
 
 ## Delivery (interleaved — see ROADMAP)
 
-| Slice                                                                 | Roadmap phase |
-| --------------------------------------------------------------------- | ------------- |
-| Module API (trait) + static binding — samples use it from the start   | P2            |
-| Component schema declaration + generic inspect/save/replicate         | P2–P4         |
-| Wasm host (`wasmtime` seam, NaN canon, fuel), Rust guest SDK          | **P6A**       |
-| breakout-as-`.wasm` equivalence gate (hash == static build)           | P6A           |
-| Browser nested-module instantiation via JS shim                       | P7–P10 window |
-| `crcbl mod` CLI (build/check/sign-later), hot reload of modules       | P9–P10        |
-| C header (ABI reference — unlocks C/C++/Zig/Nim/D/Odin class)         | post-MVP #1   |
-| Lua VM module template (scripts = hot-reloadable assets)              | post-MVP #2   |
-| C# SDK (NativeAOT-wasm when it settles)                               | post-MVP #3   |
-| Modding polish (capability manifests, version negotiation, mod packs) | post-MVP      |
+| Slice                                                                    | Roadmap phase |
+| ------------------------------------------------------------------------ | ------------- |
+| Module API (trait) + static binding — samples use it from the start      | P2            |
+| Component schema declaration + generic inspect/save/replicate            | P2–P4         |
+| `sdk/` scaffold: `abi/` source of truth + conformance suite + `sdk/rust` | **P6A**       |
+| Wasm host (`wasmtime` seam, NaN canon, fuel), Rust guest SDK             | **P6A**       |
+| breakout-as-`.wasm` equivalence gate (hash == static build)              | P6A           |
+| Browser nested-module instantiation via JS shim                          | P7–P10 window |
+| `crcbl mod` CLI (build/check/sign-later), hot reload of modules          | P9–P10        |
+| C header (ABI reference — unlocks C/C++/Zig/Nim/D/Odin class)            | post-MVP #1   |
+| Lua VM module template (scripts = hot-reloadable assets)                 | post-MVP #2   |
+| C# SDK (NativeAOT-wasm when it settles)                                  | post-MVP #3   |
+| Modding polish (capability manifests, version negotiation, mod packs)    | post-MVP      |
 
 ## Exit criteria (MVP)
 
