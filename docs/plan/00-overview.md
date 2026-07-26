@@ -109,6 +109,7 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 30    | [30-player-kit.md](30-player-kit.md)           | Optional player kit: predicted movement, GTA-style 3P cam, 1P binding   |
 | 31    | [31-vis-culling.md](31-vis-culling.md)         | Optional anti-wallhack: PVS + ray envelopes, leak auditor               |
 | 32    | [32-voip.md](32-voip.md)                       | Voice: team/direct + proximity, Opus, gate-safe (no positions)          |
+| 33    | [33-decals.md](33-decals.md)                   | Decals: projected/parallax/carve-volume tiers, impact + decoration      |
 
 Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before
