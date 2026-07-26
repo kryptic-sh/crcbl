@@ -102,6 +102,7 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 23    | [23-netcode.md](23-netcode.md)                 | Transports (UDP+own reliability, WebTransport/WS), protocol foundations |
 | 24    | [24-navigation.md](24-navigation.md)           | Navmesh gen (Recast-lineage, sector-tiled), A\*+funnel, crowds          |
 | 25    | [25-lod.md](25-lod.md)                         | LOD: hand-first + QEM auto fallback, GPU selection in cull pass         |
+| 26    | [26-prediction.md](26-prediction.md)           | Client prediction/rollback + query-only lag comp, fairness harness      |
 
 Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before
