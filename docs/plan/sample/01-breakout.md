@@ -23,7 +23,7 @@ Deliberately the smallest thing that is a _game_ and not a demo.
 
 ## Scope
 
-- One screen, fixed brick layout (hardcoded pre-stage-5, `.scn.ron` after).
+- One screen, fixed brick layout (hardcoded pre-stage-6, `.scn/` dir after).
 - Ball/paddle/brick collision through `crcbl-phys` L0: ball = swept-sphere CCD
   vs box colliders (never tunnels at high speed — first CCD consumer),
   reflection from contact normal. Paddle = kinematic body. No game-code

@@ -48,9 +48,9 @@ force post-MVP netcode work and is explicitly not started before MVP ends.
 2. **Server-authoritative always.** Even breakout runs client+server over the
    in-memory transport. No sample gets a "simple mode" that bypasses the
    architecture — the architecture is what's being proven.
-3. **Scenes from files** (once stage 6 exists): samples load `.scn.ron`, and
-   after stage 8 their scenes are maintained _in the editor_. Hand-edited scene
-   files after that point are a smell.
+3. **Scenes from files** (once stage 6 exists): samples load `.scn/` scene dirs,
+   and after stage 8 their scenes are maintained _in the editor_. Hand-edited
+   scene files after that point are a smell.
 4. **Debug overlay on by default in dev builds.** Samples are also the test bed
    for the debug tools.
 5. **CI-built, clippy-clean, same bar as engine crates.** Playtest scripts

@@ -36,8 +36,8 @@ open scene, move things, edit properties, save, play.
    for their data; edits become update commands.
 4. **Transform gizmos** — translate/rotate/scale, axis/plane constrained,
    snapping. Drawn via debug-draw layer, interact via viewport input.
-5. **Scene IO** — open/save `.scn.ron` (stage 6 loader in both directions),
-   dirty-state tracking, revert (= stage 6 scene-reload path).
+5. **Scene IO** — open/save `.scn/` scene dirs (stage 6 loader in both
+   directions), dirty-state tracking, revert (= stage 6 scene-reload path).
 6. **Asset browser** — list `AssetSource` contents, drag mesh into viewport →
    spawn command with placement.
 7. **Play mode** — play/pause/stop toolbar; state restore on stop; debug overlay

@@ -14,8 +14,8 @@ without needing prediction.
   stage 10 WebTransport). `PlaceTower`/`UpgradeTower`/`StartWave` are commands —
   server validates, replicates; latency is invisible by genre design.
 - **Editor as content pipeline**: maps (path splines, build plots, spawn points,
-  props) are authored in the stage 8 editor and shipped as `.scn.ron`. The
-  editor's real-world usability is measured by building towers maps in it.
+  props) are authored in the stage 8 editor and shipped as `.scn/` scene dirs.
+  The editor's real-world usability is measured by building towers maps in it.
 - **GPU-driven at gameplay scale**: creep waves (hundreds–thousands),
   projectiles, tower instances — horde's lessons applied in a real game.
 - **Full UI surface**: build menu, tower select/upgrade panel, wave timer,
