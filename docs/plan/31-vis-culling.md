@@ -111,18 +111,94 @@ from the audio wire entirely:
   full replication — zero added server cost, right for co-op/PvE/towers. Gate
   on: both filters, budgets shared, leak auditor covering both channels.
 
-## What still gets through (by design — and catalogued)
+## The other side-channels (all under the same gate)
 
-- **Audio information at perceptual resolution** — by design, capped as above.
-  The distinction: **no coordinates ≠ no information** — the grammar cone is the
-  sanctioned channel.
-- Create/destroy churn rides the 23 machinery (visibility flip = same wire
-  semantics as sector enter/leave; ack-baselines handle it).
-- **The leak checklist** (engine docs, game responsibility): minimap markers,
-  kill feed, scoreboard pings, voice positional data, spectator streams handed
-  to clients — the engine filters _its_ stream; games must not re-leak through
-  theirs. The checklist ships in the kit docs because every competitive team
-  rediscovers it the hard way otherwise.
+Transforms and audio are the obvious two. A position leak through _any_ other
+channel makes the filter theatre, so the gate closes all of them:
+
+### VFX events (the biggest remaining hole)
+
+Muzzle flashes, tracers, impacts, footstep dust and blood all carry world
+positions — "muzzle flash at X,Y,Z" behind a wall is an exact fix, at arbitrary
+precision, on every shot fired. Gunfire is constant and it is precisely what a
+cheat wants to locate.
+
+- Gate on: **VFX events are visibility-filtered like transforms** — an effect
+  whose source is culled for client C is not sent to C at all.
+- **Legitimately-visible consequences still play, without source coordinates**:
+  a tracer crossing your window, muzzle light on your wall, impact sparks on
+  your side of cover are real information a player would see — those are emitted
+  as **effects at the visible location** (the impact point, the light's contact
+  geometry) or as camera-relative visual-only params, never as "effect at the
+  shooter's position."
+- Impacts on _your_ geometry are visible by definition and pass through
+  unfiltered — that's the intended peek-detection channel, same role audio
+  plays.
+
+### Streaming + preload timing
+
+What the server asks you to load reveals where people are (the classic
+preload-pattern leak):
+
+- **Sector subscription is driven by your own bubble only** (already the 23
+  design — restated as a security invariant): never demand-driven by another
+  entity's presence.
+- **Entity-driven asset loads are eager and batched, never on-demand**: loadout
+  meshes, skins, weapon assets for all possible participants load at match start
+  (or on roster join), so an enemy's appearance triggers zero new fetches. A
+  first-appearance hitch is _also_ a leak.
+- Wasm/`FetchSource` builds: same rule, and their fetch logs are visible to the
+  page — batch-or-bundle is doubly required there.
+
+### Bandwidth + timing side-channel
+
+Even with perfect content filtering, packet size and rate correlate with nearby
+entity count — measurable with off-the-shelf tooling, and used in practice
+against shipped shooters:
+
+- Gate on: **snapshot padding to bucket boundaries** (pad to the next bucket
+  rather than sending a size that counts entities) + **rate smoothing** (fixed
+  send cadence per client regardless of content).
+- Cost is bandwidth — stated in the gate's docs and measured by the leak auditor
+  (bytes wasted vs correlation reduction). Bucket granularity is the knob.
+
+### Creation/spawn events + roster data
+
+- **Create messages are filtered with transforms**: a spawn/join message
+  carrying an initial position for a culled entity leaks exactly what the
+  transform filter withholds. Entity creation for tagged entities is deferred
+  until first visibility (the ack-baseline machinery handles late creation
+  natively — 23).
+- **Roster discipline**: PlayerIds (27) are fine; live per-player state in a
+  scoreboard/roster broadcast is not. The engine ships identity, games must not
+  broadcast health/position/status of enemies as "UI data" — the leak checklist
+  covers it.
+
+### The leak checklist (game responsibility)
+
+Engine filters _its_ streams; games must not re-leak through theirs: minimap
+markers, kill feed with locations, scoreboard/live stats, ping systems, voice
+positional metadata, spectator streams handed to participating clients,
+telemetry endpoints. Ships in the kit docs because every competitive team
+rediscovers this list the hard way.
+
+## Scope of protection (say it plainly)
+
+The `competitive_integrity` gate stops **information wallhacks**: cheats that
+read data the client shouldn't have. It does **not** stop aimbots, triggerbots,
+or ESP built from legitimately visible data (an enemy in your line of sight is
+on your screen and in your memory — necessarily). Nor is it anti-cheat software.
+Games that need client-integrity enforcement add that separately; nothing here
+conflicts. This paragraph is required in the gate's user-facing docs — a false
+sense of protection is worse than none.
+
+## What still gets through (by design)
+
+- **Audio information at perceptual resolution** — capped as above. **No
+  coordinates ≠ no information**: the grammar cone is the sanctioned channel,
+  the same way visible impacts are.
+- Visible-consequence VFX (impacts, tracers crossing your view).
+- Reveal-early/hide-late grace windows (measured, tuned by the auditor).
 
 ## Debug + measurement
 
@@ -145,6 +221,17 @@ from the audio wire entirely:
 - Audio-mode leak property: in authoritative-audio mode, no message on the audio
   path contains world coordinates (schema-level assert), and param quantization
   steps meet the configured JND floors.
+- **All-channel leak property** (the gate's headline test): over a scripted
+  match, for every tagged entity and every client, **no message of any kind** —
+  transform, create, VFX, audio, event — carries that entity's position while it
+  is culled beyond grace. Enumerated by schema tagging (position-bearing fields
+  are marked), so a new message type that leaks fails CI by construction rather
+  than by reviewer memory.
+- Streaming property: no asset fetch is triggered by another entity's first
+  appearance (fetch log diffed across appearance events).
+- Timing property: snapshot byte-size distribution is uncorrelated with
+  visible-entity count beyond the bucket granularity (statistical test over
+  bot-match traces); send cadence variance within bound.
 - Perceptual equivalence golden: a scene rendered from server params vs from
   positions (reference mode) produces per-ear output within the quantization
   tolerance — the mode changes the wire, not the experience.
@@ -157,12 +244,23 @@ from the audio wire entirely:
 
 ## Delivery (FPS-era, after 26 lands — envelopes need the tick-horizon machinery)
 
+0. **Schema position-tagging** (mark every position-bearing field across all
+   message types) — the prerequisite that makes the all-channel leak property
+   mechanically checkable rather than aspirational. Cheap, and done first.
 1. Filter seam + `vis_culled` tag + policy fn + raycast stage w/ budget/ cache
-   (raycast-only mode, works on any map).
+   (raycast-only mode, works on any map); **transform + create/spawn filtering
+   together** (creation deferred to first visibility).
 2. Envelopes + optic-aware FOV + hysteresis/grace knobs.
-3. Leak auditor + server vis view + netgraph rows.
-4. PVS bake + pre-filter + occluder lint.
-5. Audio-position quantization knob; checklist docs in the kit.
+3. **VFX event filtering** + visible-consequence emission rules (impact point /
+   camera-relative params).
+4. Server-authoritative audio mode (params, polar+rotation correction, shared
+   occlusion rays).
+5. Leak auditor (all channels) + server vis view + netgraph rows.
+6. **Streaming discipline** (eager/batched entity assets, subscription
+   invariant) + fetch-log property test.
+7. **Padding + rate smoothing** with bucket knob; timing property test.
+8. PVS bake + pre-filter + occluder lint.
+9. Gate docs: scope-of-protection paragraph + leak checklist in the kit.
 
 ## Risks
 
