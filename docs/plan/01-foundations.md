@@ -8,7 +8,7 @@ Nothing draws yet; everything after this stage has a place to live.
 - Cargo workspace with the full crate skeleton so later stages add code, not
   structure.
 - `crcbl-hal` trait surface defined well enough that stage 2 (Vulkan) and stage
-  8 (Metal/DX12) implement the same contract.
+  9 (Metal/DX12) implement the same contract.
 - Window + event loop + swapchain-ready surface handle on Linux.
 - CI: fmt, clippy `-D warnings`, tests on Linux from day one.
 
@@ -24,12 +24,13 @@ crcbl/
 │   ├── crcbl-render/       # render graph, frame loop, meshes, materials
 │   ├── crcbl-ecs/          # stage 4: system-owned arrays
 │   ├── crcbl-net/          # stage 4: transport seam, replication
-│   ├── crcbl-scene/        # stage 5: scene format, glTF import
-│   ├── crcbl-ui/           # stage 6: immediate-mode GUI
+│   ├── crcbl-phys/         # stage 5: physics — queries, forces, CCD
+│   ├── crcbl-scene/        # stage 6: scene format, glTF import
+│   ├── crcbl-ui/           # stage 7: immediate-mode GUI
 │   └── crcbl/              # umbrella: re-exports, engine setup helpers
 ├── apps/
 │   ├── sandbox/            # dev playground, first window lives here
-│   └── editor/             # stage 7
+│   └── editor/             # stage 8
 └── docs/plan/
 ```
 
@@ -52,6 +53,12 @@ elsewhere — an empty `lib.rs` is fine.
 
 - `Handle<T>`: 32-bit index + 32-bit generation, typed. Slotmap-style arena
   (`Pool<T>`) that recycles slots and invalidates stale handles.
+- **`WorldPos` sector-tiled position** (physics pillar, foundational):
+  `{ sector: IVec3, local: DVec3 }` — sparse 3D sector grid, f64 local offset,
+  exact rebase on sector crossing. All simulation positions use this from day
+  one; plain `Vec3` is only ever camera-relative render space. Retrofitting
+  galaxy-scale coordinates is a rewrite — so they land here, in stage 1, even
+  though physics proper is stage 5.
 - Frame-scoped bump allocator for per-frame transient data.
 - `Instant`-based frame clock: fixed-timestep accumulator (server tick) +
   variable render dt, since stage 4 needs the split and the loop shape should
@@ -71,7 +78,7 @@ Core objects (traits or handle-based, decided here):
 - Resources: `Buffer`, `Image`, `Sampler` — created from POD descriptor structs
   (`BufferDesc { size, usage, memory }`).
 - `ShaderModule` (SPIR-V in; Metal/DX12 backends consume SPIR-V via
-  cross-compilation — see stage 8).
+  cross-compilation — see stage 9).
 - `Pipeline` (graphics + compute) from POD state descriptions.
 - `CommandEncoder`: render pass scope, compute scope, copies, `draw_indirect` /
   `draw_indexed_indirect` / `dispatch_indirect` from day one — GPU-driven

@@ -1,4 +1,4 @@
-# Stage 8 — Metal + DX12 Backends
+# Stage 9 — Metal + DX12 Backends
 
 Implement the frozen HAL on Metal (macOS) and DX12 (Windows). The renderer, ECS,
 UI, and editor don't change — that's the point of the seam. Vulkan also runs

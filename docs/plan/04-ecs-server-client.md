@@ -13,7 +13,7 @@ replication to a rendering client. After this stage the sandbox is a real
   crate boundaries, not discipline.
 - Transport is a trait from day one; in-memory channel is the first impl and the
   permanent single-player path. Wasm constraint noted: the future network
-  transport must have a WebSocket/WebTransport impl (stage 9), so the trait is
+  transport must have a WebSocket/WebTransport impl (stage 10), so the trait is
   message-oriented and async-agnostic — no UDP assumptions in the interface.
 
 ## ECS model (`crcbl-ecs`)
@@ -92,7 +92,7 @@ crates/crcbl-net      — transport trait, in-memory impl, replication protocol
   (enforced in CI via `cargo tree` check).
 - Tick determinism smoke test: same input script → same state hash over 1000
   ticks (foundation for future rollback/replay debugging).
-- Inspector registry lists all systems with live counts (consumed by stage 6
+- Inspector registry lists all systems with live counts (consumed by stage 7
   UI).
 
 ## Risks

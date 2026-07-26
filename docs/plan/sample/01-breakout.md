@@ -14,11 +14,17 @@ Deliberately the smallest thing that is a _game_ and not a demo.
   interpolated render. If this feels heavy here, the API needs sugar — that
   finding is the point.
 - Game UI minimum: score, lives, start/game-over states via `crcbl-ui`.
+- **Physics slice it drives** (interleaved build): first `crcbl-phys` L0
+  vertical — box/sphere colliders, swept-sphere TOI, contact normal response.
+  Smallest possible physics consumer; the API is designed against this game.
 
 ## Scope
 
 - One screen, fixed brick layout (hardcoded pre-stage-5, `.scn.ron` after).
-- Ball/paddle/brick collision = AABB + reflection. Speed ramps per hit.
+- Ball/paddle/brick collision through `crcbl-phys` L0: ball = swept-sphere CCD
+  vs box colliders (never tunnels at high speed — first CCD consumer),
+  reflection from contact normal. Paddle = kinematic body. No game-code
+  collision math. Speed ramps per hit.
 - 3 lives, score, restart. Keyboard + mouse paddle input.
 - Sound: none (audio is out of engine MVP).
 
@@ -29,9 +35,10 @@ local multiplayer. Any of these appearing = scope violation.
 
 ## Milestones
 
-1. Paddle + ball bouncing (stage 4 exit demo candidate).
+1. Paddle + ball bouncing (first playable: stage 4 loop + first stage 5 L0
+   slice).
 2. Bricks + scoring + lives + states.
-3. (After stage 5) layout from scene file. (After stage 7) layout edited in
+3. (After stage 6) layout from scene file. (After stage 8) layout edited in
    editor — breakout becomes the smallest editor round-trip test.
 
 ## Exit criteria

@@ -5,16 +5,16 @@ usable tool, and the asset pipeline's acceptance test.
 
 ## Proves
 
-- Stage 5 asset pipeline against the real world: arbitrary glTF files from DCC
+- Stage 6 asset pipeline against the real world: arbitrary glTF files from DCC
   tools, Sketchfab, the glTF sample-model repo — not just the blessed Sponza.
   Unsupported-feature handling (log-and-skip loudly) gets exercised by files we
   didn't curate.
 - Hot reload as a user feature: re-export from Blender, viewer picks it up. This
   is the artist-loop demo.
 - Camera controls polish: orbit/pan/zoom/frame-selected — written once here,
-  properly, then reused by the stage 7 editor (viewer is the editor viewport's
+  properly, then reused by the stage 8 editor (viewer is the editor viewport's
   warm-up act).
-- UI as a tool-building kit (stage 6): file dialog (or drop target), material
+- UI as a tool-building kit (stage 7): file dialog (or drop target), material
   list, node/mesh tree, stats panel — the first UI-heavy app that isn't the
   debug overlay itself.
 
@@ -37,8 +37,8 @@ light + exposure.
 
 ## Milestones
 
-1. Load + orbit + grid (stage 5 exit demo).
-2. Panels + debug views (stage 6 exit ladder).
+1. Load + orbit + grid (stage 6 exit demo).
+2. Panels + debug views (stage 7 exit ladder).
 3. Hot-reload-on-reexport demo recorded (doubles as engine marketing).
 
 ## Exit criteria

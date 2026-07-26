@@ -1,4 +1,4 @@
-# Stage 9 — Wasm + WebGPU
+# Stage 10 — Wasm + WebGPU
 
 Run games (and eventually the editor) in the browser. The browser has no Vulkan
 — WebGPU is the graphics API, wasm32 is the target, and several platform
@@ -11,7 +11,7 @@ below and back-referenced from the relevant stage docs.
 | Constraint                              | Where it's handled                                                                                           |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | No bindless / no MDI / no BDA in WebGPU | Stage 3 renderer tiers: Tier B data layout rules                                                             |
-| No blocking file IO                     | Stage 5 `AssetSource` async from day one; `FetchSource`                                                      |
+| No blocking file IO                     | Stage 6 `AssetSource` async from day one; `FetchSource`                                                      |
 | No UDP/QUIC sockets                     | Stage 4 transport trait is message-oriented, not socket-shaped                                               |
 | No spawning blocking threads by default | Engine core loop is single-thread-capable; job system (if added post-MVP) must have a single-thread fallback |
 | Main loop owned by browser (rAF)        | Stage 1 frame loop is a `fn tick(dt)` driven by an outer loop, not a `loop {}` that owns the thread          |

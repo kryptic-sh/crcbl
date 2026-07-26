@@ -1,8 +1,8 @@
-# Stage 6 — Immediate-Mode GUI + Debug Tools
+# Stage 7 — Immediate-Mode GUI + Debug Tools
 
 Own imgui (`crcbl-ui`) rendered through the engine's own draw path, then the
 debug tooling built on top of it: profiler HUD, inspector, console. This is the
-toolkit the stage 7 editor is made of.
+toolkit the stage 8 editor is made of.
 
 ## Goals
 
@@ -10,7 +10,7 @@ toolkit the stage 7 editor is made of.
   draw path.
 - GUI renders as ordinary engine content: vertices into a per-frame buffer, one
   pass in the render graph, textures from the bindless/material system.
-- Debug tools become visible: everything instrumented in stages 2–5 gets a live
+- Debug tools become visible: everything instrumented in stages 2–6 gets a live
   surface.
 
 ## GUI architecture (`crcbl-ui`)
@@ -68,7 +68,7 @@ Surfaces for instrumentation that already exists:
 4. Widget set, driven by building tool #1 (profiler HUD) first as the proving
    ground.
 5. Inspector + console + stats panels.
-6. Sandbox: full debug overlay over the Sponza scene from stage 5.
+6. Sandbox: full debug overlay over the Sponza scene from stage 6.
 
 ## Exit criteria
 
@@ -88,6 +88,6 @@ Surfaces for instrumentation that already exists:
   sizes. Shaping/RTL/emoji are post-MVP; the atlas design just mustn't preclude
   them.
 - **Docking complexity.** Simple splitters only. Full docking is the classic
-  imgui time sink; the editor layout (stage 7) is designed around splitters.
+  imgui time sink; the editor layout (stage 8) is designed around splitters.
 - **Input-latency purism.** One-frame hit-test latency is fine; do not build the
   two-pass layout engine in MVP.

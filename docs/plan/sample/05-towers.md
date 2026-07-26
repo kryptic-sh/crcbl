@@ -11,10 +11,10 @@ without needing prediction.
 - **Everything at once**: the integration test the small samples can't be.
 - **Multiplayer as first-class citizen**: same build runs solo (in-memory
   transport) and co-op (network transport when it lands; browser client via
-  stage 9 WebTransport). `PlaceTower`/`UpgradeTower`/`StartWave` are commands —
+  stage 10 WebTransport). `PlaceTower`/`UpgradeTower`/`StartWave` are commands —
   server validates, replicates; latency is invisible by genre design.
 - **Editor as content pipeline**: maps (path splines, build plots, spawn points,
-  props) are authored in the stage 7 editor and shipped as `.scn.ron`. The
+  props) are authored in the stage 8 editor and shipped as `.scn.ron`. The
   editor's real-world usability is measured by building towers maps in it.
 - **GPU-driven at gameplay scale**: creep waves (hundreds–thousands),
   projectiles, tower instances — horde's lessons applied in a real game.
@@ -24,12 +24,19 @@ without needing prediction.
 - **System-owned-array ECS as textbook**: `CreepSystem`, `TowerSystem`,
   `ProjectileSystem`, `WaveSystem`, `EconomySystem`, `PathSystem` — the sample's
   code is the ECS documentation.
+- **Physics slice it drives** (interleaved build): CCD vs moving targets (TOI
+  where both bodies move), kinematic spline-followers in the broadphase, trigger
+  volumes (creep-reaches-exit), character controller (dev fly/walk camera on the
+  map — the controller's first real terrain).
 
 ## Scope (MVP of the sample)
 
-- 1 map (editor-built), fixed creep path (spline-follow; no dynamic
-  pathfinding/maze-building — that's the RTS trap).
-- 3 tower types (single-target, splash, slow) + 1 upgrade tier each.
+- 1 map (editor-built), fixed creep path (spline-follow kinematic bodies; no
+  dynamic pathfinding/maze-building — that's the RTS trap).
+- 3 tower types (single-target, splash, slow) + 1 upgrade tier each. All combat
+  through `crcbl-phys`: tower acquisition = sphere overlap (range),
+  single-target = swept-projectile CCD vs _moving_ creeps, splash = overlap
+  burst at impact point.
 - 3 creep types (fast, tanky, swarm), 10 scripted waves, shared team lives +
   shared gold.
 - 1–4 players co-op; solo = same game over in-memory transport.
@@ -43,10 +50,10 @@ cosmetics, matchmaking (direct connect only), audio (engine gap).
 ## Milestones
 
 1. Solo loop on hardcoded map: creeps walk spline, towers shoot, gold, waves
-   (buildable from stage 6; genuinely fun checkpoint).
-2. Map from editor: author the real map in stage 7 editor — this milestone _is_
-   stage 7 dogfood.
-3. Co-op over real transport + browser client (stage 9 exit demo: wasm client
+   (buildable from stage 7; genuinely fun checkpoint).
+2. Map from editor: author the real map in stage 8 editor — this milestone _is_
+   stage 8 dogfood.
+3. Co-op over real transport + browser client (stage 10 exit demo: wasm client
    into native dedicated server).
 4. Polish pass: world-space health bars, minimap, game-feel cheap wins.
 

@@ -1,4 +1,4 @@
-# Stage 5 — Assets + Scenes
+# Stage 6 — Assets + Scenes
 
 Stop hardcoding cubes. glTF meshes/materials in, engine-native scene format,
 stable asset ids, hot reload for the dev loop.
@@ -21,8 +21,9 @@ stable asset ids, hot reload for the dev loop.
   `AssetHandle<T>` = runtime generational handle (from `crcbl-core`).
 - Load states: `Unloaded → Loading → Ready | Failed` — **async from day one**,
   because wasm has no blocking filesystem: all IO goes through an `AssetSource`
-  trait (`DirSource` native; `FetchSource` wasm in stage 9; `PackSource`
-  post-MVP for shipped builds).
+  trait (`DirSource` native; `FetchSource` wasm in stage 10; `PackSource`
+  post-MVP for shipped builds). Physics sector streaming (stage 5) rides the
+  same trait.
 - Dependency tracking: scene → meshes → materials → textures. Refcounted
   release; the GPU pools get retire calls through the stage 2 deletion queue.
 

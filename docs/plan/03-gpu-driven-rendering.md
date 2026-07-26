@@ -11,7 +11,7 @@ decides what actually draws.
 - Host↔GPU round trips minimized: no per-object descriptor updates, no
   per-object buffer binds, no readbacks in the frame loop.
 - Two renderer tiers defined (native full-featured vs portable/WebGPU), with the
-  tier seam explicit from the start — see wasm stage (09).
+  tier seam explicit from the start — see wasm stage (10).
 
 ## Renderer tiers
 
@@ -71,7 +71,7 @@ via HAL capability flags (added to the HAL this stage).
 
 ### 3.5 Debug instrumentation (built now, not later)
 
-- Per-pass GPU timestamps aggregated into a rolling frame report (feeds stage 6
+- Per-pass GPU timestamps aggregated into a rolling frame report (feeds stage 7
   HUD).
 - Culling stats readback (visible/total counts) on a delayed ring — the one
   permitted readback, N frames latent, debug builds only.
@@ -86,11 +86,11 @@ via HAL capability flags (added to the HAL this stage).
 - Zero per-frame descriptor writes in steady state (RenderDoc-verified); zero
   frame-loop readbacks except the delayed debug ring.
 - Tier flags exist in HAL; Tier B data-layout constraints documented in
-  `crcbl-render` (even though the WebGPU backend arrives in stage 9).
+  `crcbl-render` (even though the WebGPU backend arrives in stage 10).
 
 ## Risks
 
-- **Tier B forgotten until stage 9 → bindless assumptions everywhere.**
+- **Tier B forgotten until stage 10 → bindless assumptions everywhere.**
   Mitigation: tier flags + layout rules land now; CI grep-level lint for direct
   bindless use outside the tier-A draw tail.
 - **Suballocator complexity.** MVP: free-list + offline compaction on load only.

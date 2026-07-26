@@ -1,4 +1,4 @@
-# Stage 7 — Scene Editor
+# Stage 8 — Scene Editor
 
 `apps/editor`: the editor is a client of the engine (locked decision). It uses
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
@@ -24,20 +24,20 @@ open scene, move things, edit properties, save, play.
 ## Features (MVP)
 
 1. **Viewport** — engine-rendered scene view in a UI pane; editor camera
-   (orbit + fly); click-pick via ray from camera against instance AABBs
-   (server-side query command; a GPU picking pass is post-MVP).
+   (orbit + fly); click-pick via `crcbl-phys` L0 raycast (stage 5 BVH,
+   server-side query command; a GPU picking pass is post-MVP).
 2. **Hierarchy/outliner panel** — scene entities grouped by system (the natural
    shape of scene files); select, rename, delete, duplicate.
-3. **Property panel** — reuses the stage 6 inspector: systems render editable UI
+3. **Property panel** — reuses the stage 7 inspector: systems render editable UI
    for their data; edits become update commands.
 4. **Transform gizmos** — translate/rotate/scale, axis/plane constrained,
    snapping. Drawn via debug-draw layer, interact via viewport input.
-5. **Scene IO** — open/save `.scn.ron` (stage 5 loader in both directions),
-   dirty-state tracking, revert (= stage 5 scene-reload path).
+5. **Scene IO** — open/save `.scn.ron` (stage 6 loader in both directions),
+   dirty-state tracking, revert (= stage 6 scene-reload path).
 6. **Asset browser** — list `AssetSource` contents, drag mesh into viewport →
    spawn command with placement.
 7. **Play mode** — play/pause/stop toolbar; state restore on stop; debug overlay
-   (stage 6) available in play mode.
+   (stage 7) available in play mode.
 
 ## Explicitly not in MVP editor
 

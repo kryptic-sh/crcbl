@@ -17,10 +17,17 @@ churn sample — entities spawn and die constantly.
   glance here.
 - Debug tools on a moving target: entity inspector on entities that keep dying
   (stale selection handling), debug draw of collision radii.
+- **Physics slice it drives** (interleaved build): dynamic broadphase (BVH
+  insert/remove churn from bullets/splits), sphere overlap queries, segment CCD,
+  ship thrust/inertia through the L1 integrator (first force-pipeline consumer:
+  thrust + damping).
 
 ## Scope
 
-- One ship, wrap-around playfield, sphere collision everywhere.
+- One ship, wrap-around playfield. All collision via `crcbl-phys`: bullets = L0
+  segment CCD (prev→cur, never miss at any speed), ship/asteroid = sphere
+  overlap queries against the broadphase. Wrap teleport exercises `WorldPos`
+  rebase + broadphase re-insertion (sector-crossing machinery in miniature).
 - Asteroids: 3 sizes, split twice, wave count scales.
 - Score + lives + game-over/restart. Keyboard input.
 - Rendering: flat-shaded meshes or sprites — whatever stage state provides; this
@@ -32,9 +39,10 @@ UFOs, hyperspace, power-ups, particles, sound, two-player.
 
 ## Milestones
 
-1. Ship flight + wrap + shooting (stage 4 exit ladder, after breakout).
+1. Ship flight + wrap + shooting (stage 4 loop + stage 5 L0 slices, after
+   breakout).
 2. Splits, waves, score/lives/states.
-3. (After stage 5) tuning constants from a data file — first use of data-driven
+3. (After stage 6) tuning constants from a data file — first use of data-driven
    balance outside scenes.
 
 ## Exit criteria

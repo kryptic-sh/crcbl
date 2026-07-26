@@ -54,7 +54,7 @@ clearly and exit. Fallbacks are post-MVP scope creep.
 ### 2.3 Pipelines + shaders
 
 - SPIR-V loading; shaders written in Slang, compiled to SPIR-V at build time
-  (build.rs) with a runtime-recompile dev path for stage 5 hot reload.
+  (build.rs) with a runtime-recompile dev path for stage 6 hot reload.
   - Why Slang over GLSL: first-class SPIR-V target, HLSL-compatible syntax eases
     the DX12 stage, good buffer-device-address support.
 - Graphics + compute pipeline creation from HAL POD descriptors; pipeline cache
@@ -69,7 +69,7 @@ clearly and exit. Fallbacks are post-MVP scope creep.
   non-overlapping passes.
 - Graph debug output: dump pass order + barriers as text (debug-tools principle
   — the graph must be able to explain itself).
-- GPU timestamp per pass, exposed as a frame-timing report (feeds the stage 6
+- GPU timestamp per pass, exposed as a frame-timing report (feeds the stage 7
   profiler HUD).
 
 ### 2.5 First pixels
@@ -92,7 +92,7 @@ Milestone ladder, each a sandbox commit:
   all correct; zero validation errors/warnings.
 - RenderDoc capture shows named objects and passes.
 - Graph dump readable and correct for the sandbox frame.
-- HAL seam frozen — stage 8 backends implement it as-is; changes after this
+- HAL seam frozen — stage 9 backends implement it as-is; changes after this
   point need explicit justification.
 - CI: shader compilation in build, `crcbl-vk` unit tests (allocator retire,
   graph compile) green. Lavapipe/swiftshader smoke test in CI if practical;
