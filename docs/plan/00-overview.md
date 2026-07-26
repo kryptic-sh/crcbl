@@ -111,6 +111,8 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 32    | [32-voip.md](32-voip.md)                       | Voice: team/direct + proximity, Opus, gate-safe (no positions)          |
 | 33    | [33-decals.md](33-decals.md)                   | Decals: projected/parallax/carve-volume tiers, impact + decoration      |
 | 34    | [34-inventory.md](34-inventory.md)             | UI drag-drop + optional grid-inventory kit (looting, slots)             |
+| 35    | [35-ragdolls.md](35-ragdolls.md)               | Ragdolls: server settles / client performs, anim→physics handoff        |
+| 36    | [36-contact-solver.md](36-contact-solver.md)   | Physics L2/L3: substepped impulses, islands, sleeping, joints           |
 
 Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before
@@ -159,7 +161,9 @@ Every game sample ships as a browser demo on the Pages site.
 - Audio: reverb zones, portal/room-graph propagation, doppler, surround — the
   cue grammar (incl. occlusion) and mixing are MVP; see
   [13-audio.md](13-audio.md).
-- Physics L2 contact solver is stretch (non-gating); L3 constraints/joints are
+- Physics L2 contact solver is MVP-stretch (non-gating); L2 + L3 joints get a
+  full design in [36-contact-solver.md](36-contact-solver.md) and land wave 2
+  (ragdolls, 35, are their flagship consumer). L3 constraints/joints are
   post-MVP — see the layer table in [05-physics.md](05-physics.md). L0/L1/CCD
   are MVP.
 - Real network transport for native (QUIC/UDP) — the seam exists from stage 4;

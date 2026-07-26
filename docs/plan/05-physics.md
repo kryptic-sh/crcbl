@@ -25,9 +25,12 @@ ones.
 | **L2**  | Contact solver: sequential impulses, warm starting, islands + sleeping                                                  | Stretch — may land parallel to stages 6–8; not an MVP gate |
 | **L3**  | Constraints/joints (hinges, motors, vehicle-as-constraints)                                                             | Post-MVP                                                   |
 
-Rationale: every planned sample runs on L0+L1+CCD. L2 makes stacked/resting
-rigid bodies possible and is the "generic 3D game" enabler — wanted soon, but
-nothing in the MVP ladder blocks on it.
+Rationale: every MVP sample runs on L0+L1+CCD. **L2/L3 now have their own design
+doc — see [36-contact-solver.md](36-contact-solver.md)** (substepped sequential
+impulses, islands, sleeping, joints); they land wave 2, driven by ragdolls (35),
+grenades, and dropped loot. L2 makes stacked/resting rigid bodies possible and
+is the "generic 3D game" enabler — wanted soon, but nothing in the MVP ladder
+blocks on it.
 
 ## Interleaved, demand-driven delivery
 
