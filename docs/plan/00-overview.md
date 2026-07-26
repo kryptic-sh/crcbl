@@ -107,6 +107,7 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 28    | [28-ballistics.md](28-ballistics.md)           | Penetrating sweeps: material energy loss, ricochet, media drag          |
 | 29    | [29-fp-rendering.md](29-fp-rendering.md)       | First-person: viewmodel pass, ADS cameras, PiP optics, kill-cam POV     |
 | 30    | [30-player-kit.md](30-player-kit.md)           | Optional player kit: predicted movement, GTA-style 3P cam, 1P binding   |
+| 31    | [31-vis-culling.md](31-vis-culling.md)         | Optional anti-wallhack: PVS + ray envelopes, leak auditor               |
 
 Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before
