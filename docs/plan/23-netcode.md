@@ -106,9 +106,30 @@ Designed against InMemory first; every later transport inherits them:
   half-float. Schema-declared, applied at snapshot encode; the determinism hash
   uses unquantized server state (quantization is a wire concern, not a sim
   concern).
-- **Delta compression** stays as planned (dirty-sets MVP, per-field deltas
-  post-MVP); adaptive snapshot rate under sustained over-budget is the
-  congestion response (drop to 30/20 Hz gracefully rather than queue).
+- **Ack-baseline deltas (the design of record — supersedes "dirty-sets per
+  tick")**: the server tracks each client's last-acked snapshot (free from the
+  ack bitfield) and encodes every snapshot as a **delta vs that client's acked
+  baseline**. This makes sparse sync automatic and loss-safe with zero game-code
+  involvement:
+  - unchanged since baseline → zero bytes;
+  - lost packet, value changed again → old update never resent, current value
+    ships in the next delta;
+  - lost packet, value unchanged → still differs from baseline →
+    auto-re-included ("desync detected" without detection logic — the baseline
+    diff _is_ the detector). State never touches the reliable channel; discrete
+    events (kills, wave-start) are the only reliable-ordered traffic. Server
+    cost: bounded per-client snapshot ring + ack pointer — the same buffer
+    prediction/rollback (arena) and the spectator/replay ring (topic 22) already
+    want. Dirty-flags remain as a server-side _encoding accelerator_ (skip
+    diffing clean systems), not the wire model.
+- **Game code writes values; the engine syncs them.** Declaring a replicated
+  component schema is the entirety of a game's netcode surface — no sync calls,
+  no RPCs, no per-field flags in gameplay logic. (Modules — topic 16 — get this
+  identically: engine owns their arrays.)
+- **Delta encoding detail** (per-field vs whole-component) stays MVP-pragmatic:
+  whole-component-on-change first, per-field masks when towers numbers justify;
+  adaptive snapshot rate under sustained over-budget is the congestion response
+  (drop to 30/20 Hz gracefully rather than queue).
 
 ## Interest management (the intended design, for the record)
 

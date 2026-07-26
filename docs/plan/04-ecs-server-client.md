@@ -61,8 +61,11 @@ crates/crcbl-net      — transport trait, in-memory impl, replication protocol
   zero-alloc hot path).
 - Snapshots: per-system replication — each server system with replicated state
   provides `replicate(&self, out: &mut SnapshotWriter)`; the client-side twin
-  consumes it. Delta compression post-MVP; MVP sends changed-entity sets (dirty
-  flags per tick), full state on join.
+  consumes it. Wire model = **ack-baseline deltas** (topic 23): each client's
+  snapshot is a delta vs their last-acked snapshot — only-on-change and
+  loss-safe by construction, no game-code sync logic ever (game code writes
+  values; declaring the schema is its entire netcode surface). Full state on
+  join. Dirty flags are a server-side encoding accelerator only.
 - Interest management (per-client visibility) — post-MVP; the snapshot writer
   API takes a client id now so it can be added without resurfacing every system.
 - Transport trait: reliable-ordered channel + unreliable-sequenced channel
