@@ -64,8 +64,14 @@ standard under meshoptimizer/Simplygon-class tools):
   coarser levels — casters are cheap where it never shows.
 - Global **LOD bias** = a quality setting (topic 14 settings UI; also the Tier
   B/web lever — web demos ship a default bias).
-- Physics, nav, audio: untouched — colliders/navmesh/emitters don't LOD; this is
-  a render concern only.
+- **Graphics-only (LOCKED)**: LOD never touches simulation. Colliders are always
+  full fidelity — physics, navmesh, audio occlusion, and every sim query run
+  against the same geometry at every distance and every quality setting. This is
+  structural, not policy: colliders live server-side and LOD selection is a
+  client render concern — a client's LOD bias _cannot_ reach the sim by
+  construction (fairness: two players with different quality settings play the
+  identical physical world; determinism: the tick hash never depends on anyone's
+  graphics).
 
 ## Far ranges (scheduled later, designed now)
 
