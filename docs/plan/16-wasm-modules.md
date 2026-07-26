@@ -117,7 +117,9 @@ sdk/
   README.md          # ABI overview, versioning policy, how to add a language
   abi/               # the single source of truth: ABI types/ids/version
   rust/              # crcbl-sdk crate (guest-side; workspace member, wasm32 target)
-  c/                 # crcbl.h (generated from abi/, CI-checked in sync) + make example
+  c/                 # crcbl.h (generated from abi/, CI-checked in sync; extern "C"
+                     #   guarded — C++ consumes it directly) + make example;
+                     #   optional crcbl.hpp RAII/span wrapper when demanded
   lua/               # Lua VM module template + engine-API lua glue
   csharp/            # .NET project template (lands when NativeAOT-wasm settles)
 ```
