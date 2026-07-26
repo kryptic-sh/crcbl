@@ -104,6 +104,7 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 25    | [25-lod.md](25-lod.md)                         | LOD: hand-first + QEM auto fallback, GPU selection in cull pass         |
 | 26    | [26-prediction.md](26-prediction.md)           | Client prediction/rollback + query-only lag comp, fairness harness      |
 | 27    | [27-auth.md](27-auth.md)                       | Trust tiers (open/PSK/token), identity, ranked chain, crcbl-mint        |
+| 28    | [28-ballistics.md](28-ballistics.md)           | Penetrating sweeps: material energy loss, ricochet, media drag          |
 
 Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before
