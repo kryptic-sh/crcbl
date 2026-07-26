@@ -42,6 +42,21 @@ open scene, move things, edit properties, save, play.
    spawn command with placement.
 7. **Play mode** — play/pause/stop toolbar; state restore on stop; debug overlay
    (stage 7) available in play mode.
+8. **Copy/paste + drag-drop** (shell clipboard, topic 15):
+   - **Fields**: any property-panel value copies as plain text; paste parses
+     through the same serde path the scene loader uses (bad paste = validation
+     error, not corruption). Text inputs get standard select/copy/paste.
+   - **Entities**: copy = selected entities serialized by the stage 6
+     deterministic RON writer onto the clipboard (dual-mime: engine RON + plain
+     text — pasteable into a text editor or a chat, readable either way). Paste
+     = spawn commands through the normal command protocol → full undo, works
+     cross-instance (two editors, or editor → CLI via `crcbl scene paste -`),
+     and entity IDs are re-minted on paste (no collisions by construction).
+   - **Assets (future-proofed now, full support post-MVP)**: OS file paste and
+     OS drag-drop into the asset browser = import (same `crcbl import`
+     pipeline); asset-browser-internal drag already covered by drag-spawn. Shell
+     carries file-list clipboard/DnD mimes from day one so this is editor work,
+     not seam work, when it lands.
 
 ## Explicitly not in MVP editor
 

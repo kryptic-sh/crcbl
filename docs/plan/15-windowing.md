@@ -100,7 +100,21 @@ pub trait Shell {
   raw motion for gameplay, pointer lock/confine), wheel, text input events (full
   IME post-MVP; commit-string basics MVP), cursor set/hide.
 - Raw surface handles for the HAL (wl_surface/xcb window/HWND/NSView/canvas).
-- Clipboard (text), drag-drop file paths (viewer/editor need them).
+- **Clipboard**: mime-typed get/set — `text/plain` always, plus the custom mime
+  `application/x-crcbl+ron` so engine↔engine copies are lossless while outside
+  apps still receive readable RON text (offer both, reader picks). Backend
+  realities owned like everything else: Wayland `data-device` offers; X11
+  selections protocol incl. `TARGETS` negotiation + `INCR` chunked transfers
+  (the classic X11 clipboard iceberg — scoped to what we offer/accept); Win32
+  `OpenClipboard`/`CF_UNICODETEXT` + registered format; macOS NSPasteboard; web
+  async `navigator.clipboard` (permission-gated, paste requires user gesture —
+  surfaced via `ShellCaps.clipboard` so the editor UI degrades gracefully
+  in-browser). File-list transfers ride the same machinery (`text/uri-list` on
+  Linux, `CF_HDROP`, NSPasteboard file URLs) — enables OS-file paste into the
+  editor's asset browser later with zero seam changes.
+- Drag-drop: file paths in (viewer/editor import), same mime set as clipboard —
+  DnD and clipboard share the offer/receive plumbing on Wayland/X11 anyway (one
+  implementation, two triggers).
 
 Explicitly out (post-MVP or never): exclusive fullscreen, multi-window MVP
 (editor is single-window until it isn't), gamepad (separate input topic later),
