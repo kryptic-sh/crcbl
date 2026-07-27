@@ -35,6 +35,14 @@
 //! swapchain owns them and hands them out through
 //! [`AcquiredFrame`](crate::AcquiredFrame).
 //!
+//! P0's seam review asked whether "semaphore" is Vulkan-only vocabulary, since
+//! DX12 has fences and Metal has `MTLSharedEvent`. The answer recorded here so
+//! it is not re-litigated: **the name describes the thing.** `Timeline` maps
+//! one-for-one onto both of those, and `Binary` names a real object that WSI
+//! acquire genuinely needs — a one-shot GPU-only signal with no value to read.
+//! Renaming it "fence" would import DX12's noun for a concept DX12 does not
+//! have in this shape, which is the same mistake in the other direction.
+//!
 //! # WebGPU has no semaphores at all
 //!
 //! WebGPU serialises queue submission and inserts hazard barriers itself. A

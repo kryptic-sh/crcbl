@@ -71,7 +71,7 @@ use crate::{
     GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageCopy, ImageDesc, ImageHandle,
     ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, IndexFormat, Instance, Limits,
     MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, PresentMode, QueryKind,
-    QuerySetDesc, QuerySetHandle, QueueFamily, QueueHandle, ReadbackDesc, ReadbackHandle,
+    QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle,
     ReadbackState, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle, SemaphoreDesc,
     SemaphoreHandle, SemaphoreKind, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle,
     ShaderStages, SubmitInfo, SurfaceCaps, SurfaceError, SurfaceHandle, SwapchainDesc,
@@ -318,7 +318,7 @@ struct NullDevice {
     device_id: u64,
     caps: DeviceCaps,
     /// Everything the adapter can do, which may exceed what this device
-    /// enabled. Used to decide which queue families exist.
+    /// enabled. Used to decide which queues exist.
     adapter_features: Features,
     implicit_acquire: bool,
 }
@@ -397,14 +397,14 @@ impl Device for NullDevice {
         self.caps
     }
 
-    fn queue(&self, family: QueueFamily) -> Option<QueueHandle> {
-        match family {
-            QueueFamily::Graphics => Some(queue_handle(0)),
-            QueueFamily::Compute => self
+    fn queue(&self, kind: QueueKind) -> Option<QueueHandle> {
+        match kind {
+            QueueKind::Graphics => Some(queue_handle(0)),
+            QueueKind::Compute => self
                 .adapter_features
                 .contains(Features::ASYNC_COMPUTE_QUEUE)
                 .then(|| queue_handle(1)),
-            QueueFamily::Transfer => self
+            QueueKind::Transfer => self
                 .adapter_features
                 .contains(Features::TRANSFER_QUEUE)
                 .then(|| queue_handle(2)),

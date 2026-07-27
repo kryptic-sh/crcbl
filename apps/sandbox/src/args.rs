@@ -1,0 +1,155 @@
+//! Argument parsing, by hand.
+//!
+//! Four flags do not justify a dependency — see `crates/crcbl-cli/src/args.rs`,
+//! which makes the same argument at the length it deserves and is the one that
+//! had a real choice to make.
+
+use crate::app::Options;
+
+/// `--help` text, and the definition of the flag set.
+pub const USAGE: &str = "\
+crcbl sandbox — the engine's development playground
+
+USAGE:
+    sandbox [OPTIONS]
+
+OPTIONS:
+        --headless        Run against HeadlessShell with a hand-driven clock.
+                          Deterministic, needs no display, always terminates.
+        --frames <N>      Stop after N presented frames.
+                          Default: unlimited windowed, 120 headless.
+        --tick-hz <N>     Simulation rate. Default: 60.
+        --title <TITLE>   Window title. Default: \"Crucible sandbox\".
+    -h, --help            Print this text.
+
+ENVIRONMENT:
+    CRCBL_SHELL   Force a shell backend (wayland, x11, headless).
+    CRCBL_LOG     Log filter; `debug` prints every shell event.
+
+EXIT CODES:
+    0  ran to completion   1  failed   2  bad invocation";
+
+/// What the command line asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Invocation {
+    /// Run with these options.
+    Run(Box<Options>),
+    /// Print [`USAGE`].
+    Help,
+    /// The arguments do not make sense, for this reason.
+    BadUsage(String),
+}
+
+/// Parses arguments, which must **not** include the program name.
+pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
+    let mut options = Options::default();
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--headless" => options.headless = true,
+            "-h" | "--help" => return Invocation::Help,
+            "--frames" => match take_number(&mut args, "--frames") {
+                Ok(frames) => options.frames = Some(frames),
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            "--tick-hz" => match take_number(&mut args, "--tick-hz") {
+                Ok(0) => {
+                    return Invocation::BadUsage("--tick-hz must be at least 1".to_string());
+                }
+                Ok(hz) => match u32::try_from(hz) {
+                    Ok(hz) => options.tick_hz = hz,
+                    Err(_) => {
+                        return Invocation::BadUsage(format!("--tick-hz {hz} is out of range"));
+                    }
+                },
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            "--title" => match args.next() {
+                Some(title) => options.title = title,
+                None => return Invocation::BadUsage("--title needs a value".to_string()),
+            },
+            other => {
+                return Invocation::BadUsage(format!("unrecognized argument `{other}`"));
+            }
+        }
+    }
+    Invocation::Run(Box::new(options))
+}
+
+fn take_number(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<u64, String> {
+    let Some(value) = args.next() else {
+        return Err(format!("{flag} needs a value"));
+    };
+    value
+        .parse()
+        .map_err(|_| format!("{flag} needs a number, not `{value}`"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_args(args: &[&str]) -> Invocation {
+        parse(args.iter().map(|arg| (*arg).to_string()))
+    }
+
+    fn options(args: &[&str]) -> Options {
+        match parse_args(args) {
+            Invocation::Run(options) => *options,
+            other => panic!("expected a run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_arguments_is_a_windowed_run() {
+        let options = options(&[]);
+        assert!(!options.headless);
+        assert_eq!(options.frames, None);
+        assert_eq!(options.tick_hz, 60);
+    }
+
+    #[test]
+    fn every_flag_parses() {
+        let options = options(&[
+            "--headless",
+            "--frames",
+            "12",
+            "--tick-hz",
+            "30",
+            "--title",
+            "a b",
+        ]);
+        assert!(options.headless);
+        assert_eq!(options.frames, Some(12));
+        assert_eq!(options.tick_hz, 30);
+        assert_eq!(options.title, "a b");
+    }
+
+    #[test]
+    fn help_wins_wherever_it_appears() {
+        assert_eq!(parse_args(&["--headless", "-h"]), Invocation::Help);
+        assert_eq!(parse_args(&["--help"]), Invocation::Help);
+    }
+
+    /// Every bad-usage path, because exit code 2 is a contract and a flag that
+    /// silently parsed as something else would break a CI script quietly.
+    #[test]
+    fn bad_usage_is_named_rather_than_guessed() {
+        for args in [
+            vec!["--frames"],
+            vec!["--frames", "lots"],
+            vec!["--tick-hz"],
+            vec!["--tick-hz", "0"],
+            vec!["--tick-hz", "5000000000"],
+            vec!["--title"],
+            vec!["--nope"],
+            vec!["stray"],
+        ] {
+            assert!(
+                matches!(parse_args(&args), Invocation::BadUsage(_)),
+                "{args:?} should be rejected"
+            );
+        }
+    }
+}

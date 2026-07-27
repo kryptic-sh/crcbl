@@ -547,8 +547,9 @@ pub trait Shell: core::fmt::Debug {
     /// Opaque to everyone except a HAL backend. Re-query it after a
     /// [`set_mode`](Self::set_mode): some backends recreate the underlying
     /// surface on a mode switch, and a cached target then names a dead object.
+    /// **A resize is not such an event** — see below.
     ///
-    /// # Available before the window is configured
+    /// # Available before the window is configured, and unchanged by a resize
     ///
     /// The *handle* exists as soon as the window does — a `wl_surface` is
     /// created up front and only its size is pending — so this succeeds
@@ -556,12 +557,16 @@ pub trait Shell: core::fmt::Debug {
     /// the **swapchain** has to wait, because only the swapchain needs an
     /// extent.
     ///
-    /// Where a variant carries a size at all ([`SurfaceTarget::Offscreen`]),
-    /// an unconfigured window reports `0x0`. That is deliberately not an error:
-    /// it is the same thing a minimized Win32 window reports, every backend
-    /// must already reject it (Vulkan forbids a zero-extent swapchain), and
-    /// [`PhysicalSize::is_empty`] is the existing check. What it must never be
-    /// is a plausible-looking guess at the size the window is about to have.
+    /// **No variant carries a size**, so the value this returns does not change
+    /// when the window is resized, and a HAL surface created before the first
+    /// configure stays correct forever. That is what makes "re-query after a
+    /// mode change" a complete rule. [`SurfaceTarget::Offscreen`] used to carry
+    /// `width`/`height` and was the one exception; P0.7 removed it, because an
+    /// exception in this rule means a surface silently describing a size the
+    /// window no longer has. The extent reaches a backend through
+    /// [`WindowState::size`] and the swapchain descriptor, and only there —
+    /// `crcbl-hal`'s `swapchain` module states that precedence as a backend
+    /// obligation.
     ///
     /// # Errors
     ///

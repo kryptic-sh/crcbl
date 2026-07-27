@@ -150,3 +150,33 @@ if [ -z "$RAN" ] || [ "$RAN" -eq 0 ]; then
     exit 1
 fi
 echo "crcbl e2e: $RAN tests ran against headless sway"
+
+# `docs/plan/01-foundations.md`'s sandbox exit criterion is about the *sample*,
+# not about the shell crate's tests: "sandbox opens a window on Linux/Wayland
+# and X11". So the sandbox runs here too, against this compositor, with a frame
+# budget so it terminates. It is the only thing in CI that drives the whole
+# join — window, first configure, `SurfaceTarget`, HAL surface, swapchain,
+# acquire/present — against a real window system.
+#
+# `CRCBL_SHELL=wayland` rather than letting the registry choose: this job exists
+# to test *this* backend, and a silent fallback would report success for the
+# other one.
+echo "crcbl e2e: running the sandbox against sway"
+SANDBOX_LOG="${RUNTIME_DIR}/sandbox.log"
+set +e
+CRCBL_SHELL=wayland cargo run --locked --quiet --package sandbox -- \
+    --frames 30 --title "crcbl e2e sandbox" 2>&1 | tee "$SANDBOX_LOG"
+SANDBOX_STATUS=${PIPESTATUS[0]}
+set -e
+if [ "$SANDBOX_STATUS" -ne 0 ]; then
+    echo "crcbl e2e: the sandbox failed against sway (exit $SANDBOX_STATUS)" >&2
+    log_tail
+    exit "$SANDBOX_STATUS"
+fi
+if ! grep -q "30 frames" "$SANDBOX_LOG" || ! grep -q "wayland shell" "$SANDBOX_LOG"; then
+    echo "crcbl e2e: the sandbox did not report 30 frames on the wayland shell" >&2
+    cat "$SANDBOX_LOG" >&2
+    log_tail
+    exit 1
+fi
+echo "crcbl e2e: the sandbox presented 30 frames through the wayland backend"

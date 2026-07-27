@@ -43,6 +43,51 @@
 //! never destroy and recreate a swapchain to resize, so the handle stays stable
 //! across a resize storm and nothing above has to re-fetch it.
 //!
+//! # The extent has one source of truth — implementation obligations
+//!
+//! Two things claim to know how big a swapchain should be, and they disagree in
+//! practice:
+//!
+//! * the **shell**'s `WindowState::size()`, delivered as a
+//!   `ShellEvent::Resized` when the window system configures the window; and
+//! * [`SurfaceCaps::current_extent`], queried here.
+//!
+//! Vulkan makes the disagreement structural rather than hypothetical.
+//! `VkSurfaceCapabilitiesKHR::currentExtent` is a real size on X11 (the server
+//! knows), and is deliberately `0xFFFFFFFF, 0xFFFFFFFF` on Wayland, which means
+//! "you choose — the compositor is not going to tell you". WebGPU has no such
+//! query at all. A seam that left this unstated would get one answer from
+//! `crcbl-vk` and a different one from `crcbl-wgpu`, and the bug would look
+//! like a window that renders at the wrong size on exactly one backend.
+//!
+//! So the rule is fixed here, and it binds backends:
+//!
+//! 1. **The shell's size is authoritative.** [`SwapchainDesc::extent`] is what
+//!    the swapchain is configured at. A backend **must not** silently
+//!    substitute [`SurfaceCaps::current_extent`] for it, and **must not** fail a
+//!    create or reconfigure merely because the two differ.
+//! 2. **`current_extent` is a cross-check, and it is optional.** Report it when
+//!    the platform supplies a real one; report `None` when it does not.
+//!    `0xFFFFFFFF` is **not** a value to pass through — it is the platform
+//!    saying "no opinion", so a Vulkan backend maps it to `None` and never lets
+//!    that sentinel escape into the seam.
+//! 3. **A caller reads the size from the shell, not from here.** The shell is
+//!    the only thing that receives a configure event, so it is the only thing
+//!    that knows the size *now*; `current_extent` can be a frame stale on a
+//!    resize. Where the two differ, log it and use the shell's — `apps/sandbox`
+//!    is the reference implementation of exactly that.
+//! 4. **A zero or absent extent is the caller's problem, not a fallback.** An
+//!    unconfigured or minimized window has no size, a zero-extent swapchain is
+//!    forbidden in Vulkan, and the answer is to *not create one yet* — never to
+//!    guess from `current_extent`.
+//!
+//! The corollary for [`SurfaceTarget`](crcbl_core::SurfaceTarget): no variant
+//! carries a size, including
+//! [`Offscreen`](crcbl_core::SurfaceTarget::Offscreen), which used to and no
+//! longer does. A target names handles; handles survive a resize; the extent
+//! travels in the descriptor. That is what makes "re-query the target after a
+//! mode change" a complete rule rather than one with an exception in it.
+//!
 //! # Offscreen is a swapchain too
 //!
 //! [`SurfaceTarget::Offscreen`](crcbl_core::SurfaceTarget::Offscreen) produces a
@@ -103,6 +148,19 @@ pub enum CompositeAlpha {
 /// Queried with [`Instance::surface_caps`](crate::Instance::surface_caps)
 /// *before* a device exists, because present-queue selection on Vulkan needs
 /// the answer at device-creation time.
+///
+/// # Decision: WSI vocabulary is correct here
+///
+/// P0's seam review flagged [`min_image_count`](Self::min_image_count) /
+/// [`max_image_count`](Self::max_image_count) as Vulkan-shaped, since WebGPU
+/// has no notion of a swapchain image count. Recorded so it is not
+/// re-litigated: *surface capabilities are inherently a WSI concept* — this
+/// whole struct describes what a window system will accept — so WSI vocabulary
+/// is the right vocabulary in it. A Tier B backend reports the range its
+/// platform actually offers (`2..=2` for a WebGPU canvas, which has one
+/// implicit ring) and the caller's clamp code is unchanged. The alternative,
+/// removing the fields, would take a real knob away from the three backends
+/// that have one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SurfaceCaps {
     /// Formats the surface can be configured with, best first.
@@ -116,6 +174,13 @@ pub struct SurfaceCaps {
     /// Most images the surface will accept.
     pub max_image_count: u32,
     /// Current size in pixels, if the window system reports one.
+    ///
+    /// **A cross-check, never the source of truth** — see the [module
+    /// docs](self#the-extent-has-one-source-of-truth--implementation-obligations).
+    /// The shell's `WindowState::size()` is what a swapchain is configured at;
+    /// this is what the *surface* believes, which on Wayland is nothing at all
+    /// (`None`, never the `0xFFFFFFFF` sentinel) and on X11 can be a frame
+    /// behind a resize.
     pub current_extent: Option<(u32, u32)>,
 }
 
@@ -138,9 +203,18 @@ pub struct SwapchainDesc<'a> {
     /// resolves into it — HDR from P1, per `docs/plan/ROADMAP.md`. The swapchain
     /// format is therefore a display format, never a shading one.
     pub format: Format,
-    /// Size in pixels. In borderless mode this is the *native* surface size;
-    /// render scale is a renderer feature applied to an offscreen target
-    /// (topic 15), not a smaller swapchain.
+    /// Size in pixels, **from the shell**.
+    ///
+    /// Authoritative: a backend configures at this size and never substitutes
+    /// [`SurfaceCaps::current_extent`] for it. See the [module
+    /// docs](self#the-extent-has-one-source-of-truth--implementation-obligations)
+    /// for why the rule is stated rather than left to each backend, and note
+    /// that a zero extent is a caller bug — an unconfigured or minimized window
+    /// means "do not create a swapchain yet", not "pick something".
+    ///
+    /// In borderless mode this is the *native* surface size; render scale is a
+    /// renderer feature applied to an offscreen target (topic 15), not a
+    /// smaller swapchain.
     pub extent: (u32, u32),
     /// Requested image count. The backend clamps to
     /// [`SurfaceCaps::min_image_count`]/[`max`](SurfaceCaps::max_image_count).

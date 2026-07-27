@@ -14,7 +14,24 @@ DX12.
 
 ## Status
 
-Early scaffold. Not yet usable.
+Early scaffold. Nothing draws yet — the P0 foundations are in place (core
+vocabulary, the GPU seam with a recording null backend, from-scratch Wayland and
+X11 windowing) and the Vulkan backend is P1.
+
+## Try it
+
+```sh
+# The sandbox: a window, an event loop, and a null-backend frame.
+cargo run -p sandbox                      # needs Wayland or X11
+cargo run -p sandbox -- --headless        # needs nothing; what CI runs
+
+# The CLI. Everything the engine can do must be reachable without a window.
+cargo build -p crcbl-cli                  # target/debug/crcbl
+target/debug/crcbl new mygame
+cd mygame && ../target/debug/crcbl run --headless
+```
+
+`CRCBL_SHELL=x11` forces a backend, `CRCBL_LOG=debug` prints every shell event.
 
 ## License
 

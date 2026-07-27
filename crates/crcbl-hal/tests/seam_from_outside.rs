@@ -32,10 +32,10 @@ use crcbl_hal::{
     DrawIndirectCount, Extent3d, Features, Format, GraphicsPipelineDesc, GraphicsPipelineHandle,
     HalError, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
     ImageViewHandle, ImageViewType, Instance, LoadOp, MemoryLocation, MultisampleState,
-    PresentInfo, PresentMode, PrimitiveState, QueueFamily, QueueHandle, ReadbackDesc,
-    ReadbackHandle, ReadbackState, Rect2d, RenderPassDesc, RendererTier, ShaderEntry,
-    ShaderModuleDesc, ShaderModuleHandle, StoreOp, SubmitInfo, SurfaceCaps, SurfaceHandle,
-    SurfaceTarget, SwapchainDesc, SwapchainHandle, Viewport, depth,
+    PresentInfo, PresentMode, PrimitiveState, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle,
+    ReadbackState, Rect2d, RenderPassDesc, RendererTier, ShaderEntry, ShaderModuleDesc,
+    ShaderModuleHandle, StoreOp, SubmitInfo, SurfaceCaps, SurfaceHandle, SurfaceTarget,
+    SwapchainDesc, SwapchainHandle, Viewport, depth,
 };
 
 /// A minimal valid SPIR-V header — magic word plus version.
@@ -88,19 +88,14 @@ fn setup(instance: &dyn Instance) -> Frame {
     assert_eq!(device.caps().tier(), tier);
 
     let queue: QueueHandle = device
-        .queue(QueueFamily::Graphics)
-        .expect("the graphics family always exists");
+        .queue(QueueKind::Graphics)
+        .expect("the graphics queue always exists");
 
     // SAFETY: `Offscreen` carries no platform pointers, so
     // `create_surface`'s contract — live handles that outlive the surface — is
     // vacuously satisfied.
-    let surface: SurfaceHandle = unsafe {
-        instance.create_surface(&SurfaceTarget::Offscreen {
-            width: WIDTH,
-            height: HEIGHT,
-        })
-    }
-    .expect("offscreen surface");
+    let surface: SurfaceHandle =
+        unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("offscreen surface");
 
     let surface_caps: SurfaceCaps = instance
         .surface_caps(surface, adapters[0].id)
@@ -528,7 +523,7 @@ fn the_screenshot_readback_path_polls_instead_of_blocking() {
             ..DeviceDesc::for_adapter(adapters[0].id)
         })
         .expect("tier B device");
-    let queue = device.queue(QueueFamily::Graphics).expect("queue");
+    let queue = device.queue(QueueKind::Graphics).expect("queue");
 
     let pixels = WIDTH as u64 * HEIGHT as u64 * u64::from(Format::Rgba8Unorm.block_size());
     let staging: BufferHandle = device

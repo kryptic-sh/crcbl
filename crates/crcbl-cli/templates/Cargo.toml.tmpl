@@ -1,0 +1,24 @@
+[package]
+name = "{{name}}"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# An empty `[workspace]` table makes this project its own workspace root, so
+# dropping it inside a Cargo workspace (including the engine's own checkout)
+# cannot silently absorb it as a member and change how it builds.
+[workspace]
+
+[dependencies]
+# The engine, by path, because Crucible is not on crates.io yet. When it
+# publishes this becomes `crcbl = "{{version}}"` and the `path` key goes away —
+# that is the only line in this file that has to change.
+crcbl = { path = "{{engine}}", version = "{{version}}" }
+log = "0.4"
+
+[lints.rust]
+missing_debug_implementations = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

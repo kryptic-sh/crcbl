@@ -139,12 +139,23 @@ pub enum SurfaceTarget {
     /// images, which is what makes the P1 golden-image e2e run through the
     /// *same* acquire/present code path as a real window instead of a
     /// second, less-tested one.
-    Offscreen {
-        /// Width in physical pixels.
-        width: u32,
-        /// Height in physical pixels.
-        height: u32,
-    },
+    ///
+    /// # It deliberately carries no size
+    ///
+    /// It used to carry `width` and `height`, and that was a defect. Every
+    /// other variant names *handles*, which a resize does not touch — which is
+    /// exactly why `crcbl-shell` only requires a target to be re-queried after
+    /// a **mode** change. A size made this one variant change value on every
+    /// resize, so a surface created from an earlier target silently described
+    /// the wrong extent, and the seam had one rule for five variants and
+    /// another for the sixth.
+    ///
+    /// The extent comes from where it comes from for every other target: the
+    /// shell's `WindowState::size`, passed to the backend in the swapchain
+    /// descriptor. `crcbl-hal`'s `swapchain` module states that precedence as
+    /// a backend obligation. (No intra-doc link: this crate must not depend on
+    /// `crcbl-shell` — see the module docs.)
+    Offscreen,
 }
 
 impl SurfaceTarget {
@@ -160,7 +171,7 @@ impl SurfaceTarget {
             Self::Win32 { .. } => "win32",
             Self::AppKit { .. } => "appkit",
             Self::Web { .. } => "web",
-            Self::Offscreen { .. } => "offscreen",
+            Self::Offscreen => "offscreen",
         }
     }
 
@@ -170,7 +181,7 @@ impl SurfaceTarget {
     /// WSI extension checks and present-queue selection.
     #[must_use]
     pub const fn is_windowed(&self) -> bool {
-        !matches!(self, Self::Offscreen { .. })
+        !matches!(self, Self::Offscreen)
     }
 }
 
@@ -200,10 +211,7 @@ mod tests {
             },
             SurfaceTarget::AppKit { layer: dangling() },
             SurfaceTarget::Web { canvas_id: 7 },
-            SurfaceTarget::Offscreen {
-                width: 320,
-                height: 200,
-            },
+            SurfaceTarget::Offscreen,
         ];
         let mut names: Vec<_> = targets.iter().map(SurfaceTarget::platform_name).collect();
         let count = names.len();
@@ -218,13 +226,7 @@ mod tests {
             SurfaceTarget::Web { canvas_id: 0 }.is_windowed(),
             "a canvas is a real presentation target"
         );
-        assert!(
-            !SurfaceTarget::Offscreen {
-                width: 1,
-                height: 1,
-            }
-            .is_windowed()
-        );
+        assert!(!SurfaceTarget::Offscreen.is_windowed());
     }
 
     #[test]

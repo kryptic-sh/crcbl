@@ -1,5 +1,101 @@
-//! Umbrella crate for the Crucible engine.
+//! Umbrella crate for the Crucible engine: one dependency for a game.
 //!
-//! Re-exports nothing yet: the sibling crates it will surface are still empty.
-//! Placeholder crate — the workspace skeleton lands before the code so later
-//! slices add implementations, not structure.
+//! A game written against Crucible names `crcbl` and nothing else. This crate
+//! re-exports the engine crates that exist at the current phase, so a project
+//! scaffolded by `crcbl new` — and `apps/sandbox`, which is the same shape —
+//! never spells out a workspace path per subsystem, and never gains a
+//! dependency on a *backend*.
+//!
+//! ```text
+//! crcbl::core   → crcbl-core    handles, WorldPos, FrameArena, FrameClock, input
+//! crcbl::shell  → crcbl-shell   the windowing seam and its backends
+//! crcbl::hal    → crcbl-hal     the GPU seam, plus the recording null backend
+//! ```
+//!
+//! # What is deliberately not here
+//!
+//! * **No backend.** `crcbl-vk` lands at P1 and is selected *behind* the
+//!   [`hal`] seam. `docs/plan/11-cli-headless.md` names "a sample linking
+//!   `crcbl-vk` directly" as an architecture regression, so the umbrella every
+//!   sample depends on is precisely the place that must not offer one.
+//! * **No engine loop.** There is no `crcbl::run(game)`. The loop shape is
+//!   `fn tick(dt)` driven by an *outer* loop the host owns —
+//!   `docs/plan/10-wasm-webgpu.md` requires it, because on wasm that outer loop
+//!   is `requestAnimationFrame`, which calls the engine and cannot be called by
+//!   it. `crcbl-shell`'s crate docs spell out the consequence: a
+//!   framework-shaped `run()` would compile on wasm and deadlock on the first
+//!   frame. `apps/sandbox` and the `crcbl new` template each own their loop,
+//!   and each is short because owning it is cheap.
+//!
+//! # Stability
+//!
+//! Provisional, like both seams below it. The re-export list grows one line per
+//! phase (`crcbl-render` at P1, `crcbl-ecs` / `crcbl-net` at P2, …); nothing
+//! here is expected to be removed.
+
+/// [`crcbl-core`](crcbl_core): handles, `WorldPos`, the frame arena, the frame
+/// clock, the input vocabulary and `SurfaceTarget`.
+///
+/// Named `core` at the cost of shadowing the `core` sysroot crate *inside this
+/// crate only*, which is why this crate's own code uses `std::` paths
+/// throughout. Consumers get the name they want: `crcbl::core::FrameClock`.
+pub use crcbl_core as core;
+/// [`crcbl-hal`](crcbl_hal): the GPU backend seam, and the recording
+/// [`null`](crcbl_hal::null) backend standing in for one until P1.
+pub use crcbl_hal as hal;
+/// [`crcbl-shell`](crcbl_shell): the windowing seam, its Linux backends and
+/// [`HeadlessShell`](crcbl_shell::HeadlessShell).
+pub use crcbl_shell as shell;
+
+/// The names a game touches on every frame.
+///
+/// `use crcbl::prelude::*;` is the first line of the `crcbl new` template. It is
+/// deliberately small — vocabulary and seam entry points, never a whole
+/// namespace — so a glob import cannot collide with a game's own types.
+pub mod prelude {
+    pub use crcbl_core::time::{ManualTime, MonotonicTime, TimeSource};
+    pub use crcbl_core::{FrameClock, SurfaceTarget};
+    pub use crcbl_hal::null::NullInstance;
+    pub use crcbl_hal::{Device, HalError, Instance, SurfaceError};
+    pub use crcbl_shell::{
+        CloseReply, PhysicalSize, Shell, ShellBackend, ShellError, ShellEvent, WindowDesc, WindowId,
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::prelude::*;
+
+    /// The re-exports are this crate's entire contract, so the test that
+    /// matters is that all three resolve, and that the type crossing the two
+    /// seams is *one* type rather than two that happen to match.
+    #[test]
+    fn the_umbrella_re_exports_every_seam_a_game_needs() {
+        let mut shell: Box<dyn Shell> = Box::new(crate::shell::HeadlessShell::new());
+        assert_eq!(shell.backend(), ShellBackend::Headless);
+        let window = shell
+            .create_window(&WindowDesc::default())
+            .expect("headless always creates a window");
+
+        let mut clock = FrameClock::new(60);
+        // The first update only establishes the baseline — it covers no time,
+        // so a loop's first frame legitimately runs zero ticks.
+        clock.update(std::time::Duration::ZERO);
+        clock.update(std::time::Duration::from_millis(100));
+        assert!(clock.consume_tick());
+
+        let instance: Box<dyn Instance> = Box::new(NullInstance::tier_a());
+        let target: SurfaceTarget = shell
+            .surface_target(window)
+            .expect("the handle is live, and the target exists before configure");
+        // The join: `crcbl::shell` produced it, `crcbl::hal` consumes it, and
+        // neither crate names the other.
+        //
+        // SAFETY: the target came from a live headless window in this process,
+        // it names no platform object at all (`Offscreen`), and it outlives the
+        // surface — which is destroyed two lines down.
+        let surface = unsafe { instance.create_surface(&target) }
+            .expect("the null backend accepts every target");
+        instance.destroy_surface(surface);
+    }
+}

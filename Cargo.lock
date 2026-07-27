@@ -38,6 +38,11 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 [[package]]
 name = "crcbl"
 version = "0.1.0"
+dependencies = [
+ "crcbl-core",
+ "crcbl-hal",
+ "crcbl-shell",
+]
 
 [[package]]
 name = "crcbl-audio"
@@ -333,6 +338,10 @@ dependencies = [
 [[package]]
 name = "sandbox"
 version = "0.1.0"
+dependencies = [
+ "crcbl",
+ "log",
+]
 
 [[package]]
 name = "syn"

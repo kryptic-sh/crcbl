@@ -16,5 +16,15 @@ path = "src/main.rs"
 # are the ones worth publishing; the CLI documents itself through `--help`.
 doc = false
 
+[features]
+# The scaffold end-to-end suite: `crcbl new` → the project compiles → it runs
+# headless. Off by default because it compiles a whole engine into a throwaway
+# target directory; `tests/run-cli-e2e.sh` is the only thing that turns it on,
+# and the tests are additionally `#[ignore]`d. Same shape as `crcbl-shell`'s
+# `wayland-e2e` / `x11-e2e`, and for the same reason `docs/plan/12-testing.md`
+# gives: a plain `cargo nextest run` has to stay fast, and a silently-skipped
+# e2e job is a known trap.
+cli-e2e = []
+
 [lints]
 workspace = true

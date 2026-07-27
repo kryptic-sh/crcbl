@@ -209,3 +209,28 @@ if [ -z "$RAN" ] || [ "$RAN" -eq 0 ]; then
     exit 1
 fi
 echo "crcbl e2e: $RAN tests ran against Xvfb on ${DISPLAY}"
+
+# The X11 half of `docs/plan/01-foundations.md`'s sandbox exit criterion — see
+# the same block in `run-wayland-e2e.sh`. `CRCBL_SHELL=x11` because Wayland is
+# tried first by the registry and a silent fallback would report success for
+# the wrong backend; here it would in fact fail (nothing is listening), but
+# stating the intent is what keeps this job honest if that ever changes.
+echo "crcbl e2e: running the sandbox against Xvfb"
+SANDBOX_LOG="${RUNTIME_DIR}/sandbox.log"
+set +e
+CRCBL_SHELL=x11 cargo run --locked --quiet --package sandbox -- \
+    --frames 30 --title "crcbl e2e sandbox" 2>&1 | tee "$SANDBOX_LOG"
+SANDBOX_STATUS=${PIPESTATUS[0]}
+set -e
+if [ "$SANDBOX_STATUS" -ne 0 ]; then
+    echo "crcbl e2e: the sandbox failed against Xvfb (exit $SANDBOX_STATUS)" >&2
+    log_tail
+    exit "$SANDBOX_STATUS"
+fi
+if ! grep -q "30 frames" "$SANDBOX_LOG" || ! grep -q "x11 shell" "$SANDBOX_LOG"; then
+    echo "crcbl e2e: the sandbox did not report 30 frames on the x11 shell" >&2
+    cat "$SANDBOX_LOG" >&2
+    log_tail
+    exit 1
+fi
+echo "crcbl e2e: the sandbox presented 30 frames through the x11 backend"

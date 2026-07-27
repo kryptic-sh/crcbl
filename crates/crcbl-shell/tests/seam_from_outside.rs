@@ -198,17 +198,11 @@ fn a_scripted_session_runs_the_engine_loop_through_a_trait_object() {
     // The HAL side of the seam: an opaque target, and the only thing this test
     // is allowed to know about it is that it is the offscreen one. It is
     // available *immediately* — the surface handle exists as soon as the window
-    // does — but its extent is empty until the window system configures the
-    // window, so a swapchain built from it now would be rejected rather than
-    // plausibly wrong.
+    // does — and it carries no size, so there is nothing in it for an eager
+    // consumer to mistake for an extent. The swapchain still has to wait, and
+    // the rest of this test is that wait.
     let target: SurfaceTarget = shell.surface_target(window).expect("surface target");
-    assert_eq!(
-        target,
-        SurfaceTarget::Offscreen {
-            width: 0,
-            height: 0,
-        }
-    );
+    assert_eq!(target, SurfaceTarget::Offscreen);
     assert!(!target.is_windowed());
     assert_eq!(target.platform_name(), "offscreen");
 
@@ -285,12 +279,13 @@ fn a_scripted_session_runs_the_engine_loop_through_a_trait_object() {
     // The last drag left the window at 1350x720 physical at scale 1.0, i.e.
     // 1350x720 logical; at scale 2.0 that is 2700x1440.
     assert_eq!(engine.size, Some(PhysicalSize::new(2700, 1440)));
+    // Through a resize storm, a scale change and a mode switch, the target
+    // never moved. A HAL surface created before the first configure is still
+    // valid, which is the property that lets a consumer create one up front.
     assert_eq!(
         shell.surface_target(window).expect("target"),
-        SurfaceTarget::Offscreen {
-            width: 2700,
-            height: 1440,
-        }
+        target,
+        "the target is invariant under everything a window does"
     );
 
     // Closing is a question the engine answers.
@@ -604,13 +599,11 @@ fn a_swapchain_cannot_be_created_before_the_first_configure() {
     );
 
     // The surface *handle* is available meanwhile — only the extent is pending
-    // — so a HAL surface can be created up front.
+    // — so a HAL surface can be created up front, and no size travels in the
+    // target for it to be wrong about.
     assert_eq!(
         shell.surface_target(window).expect("the handle exists"),
-        SurfaceTarget::Offscreen {
-            width: 0,
-            height: 0,
-        }
+        SurfaceTarget::Offscreen
     );
 
     // The mandatory loop. It really loops: the default configure delay is one

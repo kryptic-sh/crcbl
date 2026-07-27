@@ -249,6 +249,37 @@ jobs:
       - name: Run the suite under Xvfb
         run: crates/crcbl-shell/tests/run-x11-e2e.sh
 
+  # The CLI/headless pillar's own end-to-end check: `crcbl new` scaffolds a
+  # project, the project *compiles*, it lints clean, and it runs its loop
+  # headless. `docs/plan/11-cli-headless.md` makes the CLI the substrate every
+  # later suite is built on, and `docs/plan/12-testing.md` calls a
+  # silently-skipped e2e job a known trap — so this job is required like every
+  # other one, and the harness fails when the suite reports zero tests run.
+  #
+  # It needs no display and no GPU: the scaffolded game runs against
+  # `HeadlessShell`. What it does need is a full engine compile into a throwaway
+  # target directory, which is why the suite is feature-gated and `#[ignore]`d
+  # rather than part of `test-linux`.
+  cli-e2e:
+    name: cli e2e (scaffold builds and runs)
+    runs-on: ubuntu-latest
+    # A cold engine compile plus the scaffolded project's own.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - uses: taiki-e/install-action@nextest
+      # Scaffolds into a temporary directory, builds it with its own
+      # `CARGO_TARGET_DIR`, checks `rustfmt` and `clippy` on the generated
+      # source, and runs `crcbl run --headless`.
+      - name: Run the scaffold suite
+        run: crates/crcbl-cli/tests/run-cli-e2e.sh
+
   coverage:
     name: coverage (linux)
     runs-on: ubuntu-latest

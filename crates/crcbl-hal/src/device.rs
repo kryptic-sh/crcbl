@@ -22,7 +22,7 @@
 //! three. The plurality that matters — async compute and a dedicated transfer
 //! queue, which `docs/plan/02-vulkan-backend.md` says must be *modelled* even
 //! though the MVP uses one — is fully expressible: [`Device::queue`] returns a
-//! handle per [`QueueFamily`], and [`QueueTransfer`](crate::QueueTransfer)
+//! handle per [`QueueKind`], and [`QueueTransfer`](crate::QueueTransfer)
 //! already carries ownership transfers between them.
 //!
 //! # `&self`, not `&mut self`
@@ -147,8 +147,23 @@ pub enum Queue {}
 pub type QueueHandle = Handle<Queue>;
 
 /// Which class of work a queue accepts.
+///
+/// # Decision: `QueueKind`, not `QueueFamily`
+///
+/// "Queue family" is a Vulkan noun and nothing else's: Metal has one
+/// `MTLCommandQueue` type and no families at all, and DX12 has *command list
+/// types* (`D3D12_COMMAND_LIST_TYPE_DIRECT` / `_COMPUTE` / `_COPY`), which is
+/// exactly this enum's three variants under a different name. Since
+/// `docs/plan/01-foundations.md`'s P0 exit criterion is "no obviously vk-only
+/// concept in the trait names", the noun that maps onto all three APIs is the
+/// one the seam uses, and `Kind` is already this crate's word for it
+/// ([`SemaphoreKind`](crate::SemaphoreKind), [`QueryKind`](crate::QueryKind),
+/// [`BindingKind`](crate::BindingKind), [`BackendKind`]).
+///
+/// A Vulkan backend still maps each variant to a real queue family index; that
+/// is a backend's business and not the seam's vocabulary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum QueueFamily {
+pub enum QueueKind {
     /// Graphics, compute and transfer. Always present; the MVP uses only this
     /// one.
     Graphics,
@@ -236,6 +251,21 @@ pub trait Instance: core::fmt::Debug + Send + Sync {
     /// because this is the only place the handles are dereferenced; see
     /// [`crcbl_core::surface`] for the full argument.
     ///
+    /// # TODO(P1): this `unsafe` currently lands in application code
+    ///
+    /// P0.7 drove the first shell→HAL join (`apps/sandbox`) and found the
+    /// ergonomic cost: obligation 2 above — "the window outlives the surface" —
+    /// can only be discharged by code holding *both* the shell and the device,
+    /// which is a game's own startup path. The result is an `unsafe` block in
+    /// an application that otherwise contains none, repeated in every sample
+    /// and in the `crcbl new` template.
+    ///
+    /// The likely answer is a shell-aware constructor in `crcbl-render`, which
+    /// owns both objects anyway and can tie their lifetimes together once. That
+    /// crate does not exist yet, so this is a note rather than a change; the
+    /// seam does not have to move for it, because a safe wrapper *above* the
+    /// seam is exactly what the obligation permits.
+    ///
     /// # Errors
     ///
     /// [`HalError::Unsupported`] if the backend has no support for that
@@ -279,12 +309,12 @@ pub trait Device: core::fmt::Debug + Send + Sync {
     /// [`DeviceCaps::tier`].
     fn caps(&self) -> DeviceCaps;
 
-    /// A queue of the given family.
+    /// A queue of the given kind.
     ///
-    /// Returns `None` when the device has no such family — check
+    /// Returns `None` when the device has no such queue — check
     /// [`Features::ASYNC_COMPUTE_QUEUE`] / [`Features::TRANSFER_QUEUE`] first,
-    /// or just fall back to [`QueueFamily::Graphics`], which always exists.
-    fn queue(&self, family: QueueFamily) -> Option<QueueHandle>;
+    /// or just fall back to [`QueueKind::Graphics`], which always exists.
+    fn queue(&self, kind: QueueKind) -> Option<QueueHandle>;
 
     // --- resources ---
 

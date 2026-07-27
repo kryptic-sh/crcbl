@@ -6,5 +6,18 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# The umbrella exists so a *game* names one dependency, not four. It therefore
+# depends on every crate a game needs at the current phase and re-exports them;
+# it must never grow logic of its own beyond the engine-setup helpers
+# `docs/plan/01-foundations.md`'s workspace layout allows it.
+#
+# `crcbl-vk` is deliberately absent and stays absent: a backend is reached
+# through the `crcbl-hal` seam, and `docs/plan/11-cli-headless.md` names a
+# sample linking `crcbl-vk` directly as an architecture regression.
+[dependencies]
+crcbl-core = { workspace = true }
+crcbl-hal = { workspace = true }
+crcbl-shell = { workspace = true }
+
 [lints]
 workspace = true

@@ -1,0 +1,31 @@
+name: CI
+
+# Heads-up: Crucible is not on crates.io yet, so `Cargo.toml` depends on it by
+# path. This workflow builds as-is only where that path resolves — a monorepo
+# holding both, or a runner that checks the engine out beside this project. Once
+# the engine publishes, the `path` key in `Cargo.toml` goes away and this file
+# needs no change at all.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      # The headless loop is the point of Crucible's CLI/headless pillar: the
+      # game runs in CI with no display, no GPU and no window, so a crash is a
+      # failed job rather than something nobody sees until release day.
+      - run: cargo run -- --headless --frames 120

@@ -1,0 +1,27 @@
+# {{name}}
+
+A game built on [Crucible](https://github.com/kryptic-sh/crcbl).
+
+```sh
+crcbl run                  # open a window
+crcbl run --headless       # no window; what CI runs
+crcbl build --release
+```
+
+`crcbl run --headless` is not a lesser mode: it is the same loop with
+`HeadlessShell` in place of a window system, so a determinism check or a
+regression test needs no display and no GPU. `.github/workflows/ci.yml` runs it
+on every push.
+
+## Layout
+
+| Path | What |
+| --- | --- |
+| `src/main.rs` | The engine loop: pump events, tick at a fixed rate, present. |
+| `scenes/` | Scene files. The format lands with `crcbl-scene`; the directory is here so the path is stable. |
+
+## The engine dependency
+
+`Cargo.toml` points at a Crucible checkout by path, because the engine is not
+published yet. Moving this project without moving the engine breaks the build;
+fix it by editing that one path, or re-run `crcbl new --engine <checkout>`.

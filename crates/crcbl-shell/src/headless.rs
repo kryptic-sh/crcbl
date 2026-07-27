@@ -1378,16 +1378,13 @@ impl Shell for HeadlessShell {
     }
 
     fn surface_target(&self, window: WindowId) -> Result<SurfaceTarget, ShellError> {
-        let state = self.window(window)?;
         // Available from creation — the *handle* exists as soon as the window
-        // does — but 0x0 until the first configure, which every HAL backend
-        // already has to reject. See the trait method's docs for why an empty
-        // extent is the right answer rather than an error.
-        let size = state.size().unwrap_or(PhysicalSize::new(0, 0));
-        Ok(SurfaceTarget::Offscreen {
-            width: size.width,
-            height: size.height,
-        })
+        // does — and constant thereafter. It deliberately carries no size: the
+        // extent travels through `WindowState::size` and the swapchain
+        // descriptor, so nothing here goes stale on a resize. The only thing
+        // this call can fail on is a dead handle.
+        self.window(window)?;
+        Ok(SurfaceTarget::Offscreen)
     }
 
     fn set_pointer_mode(&mut self, window: WindowId, mode: PointerMode) -> Result<(), ShellError> {
@@ -1633,19 +1630,12 @@ mod tests {
         );
 
         // And the surface handle *is* available meanwhile — only the extent is
-        // pending — carrying an extent every backend already rejects.
+        // pending. The target carries no size at all, which is the stronger
+        // version of the same guarantee: there is no plausible-looking number
+        // in it for a consumer to mistake for the size the window is about to
+        // have.
         let target = shell.surface_target(window).expect("the handle exists");
-        assert_eq!(
-            target,
-            SurfaceTarget::Offscreen {
-                width: 0,
-                height: 0,
-            }
-        );
-        let SurfaceTarget::Offscreen { width, height } = target else {
-            panic!("wrong variant");
-        };
-        assert!(PhysicalSize::new(width, height).is_empty());
+        assert_eq!(target, SurfaceTarget::Offscreen);
 
         // The loop a consumer must write.
         let size = loop {
@@ -1655,12 +1645,12 @@ mod tests {
             }
         };
         assert_eq!(size, PhysicalSize::new(1280, 720));
+        // Configuring the window did not change the target: a HAL surface made
+        // from the pre-configure value is still describing the right object.
         assert_eq!(
             shell.surface_target(window).expect("target"),
-            SurfaceTarget::Offscreen {
-                width: 1280,
-                height: 720,
-            }
+            target,
+            "the target is invariant under a configure"
         );
     }
 
@@ -1868,12 +1858,13 @@ mod tests {
         assert_eq!(state.size(), Some(PhysicalSize::new(2560, 1440)));
         assert_eq!(state.scale_factor(), Some(2.0));
         assert!(state.effective_mode().expect("configured").is_borderless());
+        // A mode change is the one event the seam says can invalidate a target.
+        // Here it does not, because this backend's target names nothing that a
+        // mode switch recreates — and, crucially, it does not encode the new
+        // size either.
         assert_eq!(
             shell.surface_target(window).expect("target"),
-            SurfaceTarget::Offscreen {
-                width: 2560,
-                height: 1440,
-            }
+            SurfaceTarget::Offscreen
         );
 
         assert!(matches!(

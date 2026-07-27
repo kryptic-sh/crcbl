@@ -1,0 +1,276 @@
+//! `{{name}}` — a Crucible game.
+//!
+//! ```text
+//! cargo run                             # open a window
+//! cargo run -- --headless --frames 60   # no window, terminates, CI-friendly
+//! ```
+//!
+//! This is the whole engine loop, and it is deliberately yours rather than the
+//! engine's: the outer loop is a `loop {}` here and a `requestAnimationFrame`
+//! callback on the web, so an engine that owned it could not run in a browser.
+//! Everything inside the `pump` / `tick` / `render` skeleton is where your game
+//! goes.
+
+use std::process::ExitCode;
+use std::time::Duration;
+
+use crcbl::core::time::{ManualTime, MonotonicTime};
+use crcbl::hal::{
+    Barriers, CommandEncoderDesc, CompositeAlpha, DeviceDesc, Features, ImageBarrier,
+    ImageSubresourceRange, PresentInfo, PresentMode, QueueKind, ResourceState, SemaphoreSignal,
+    SemaphoreWait, SubmitInfo, SwapchainDesc,
+};
+use crcbl::prelude::*;
+use crcbl::shell::{ShellBackend, open, open_backend};
+
+/// This game's name: window title, app id, log prefix.
+///
+/// One constant rather than the name repeated in eight string literals, so
+/// `cargo fmt --check` — which this project's CI runs — cannot start failing
+/// because a longer name pushed a line over the width limit.
+const NAME: &str = "{{name}}";
+
+/// The simulation rate. Fixed, and independent of the frame rate.
+const TICK_HZ: u32 = 60;
+
+fn main() -> ExitCode {
+    // `CRCBL_LOG=debug` turns on per-event logging.
+    crcbl::core::log::init_logging();
+
+    let mut headless = false;
+    let mut frames: Option<u64> = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--headless" => headless = true,
+            "--frames" => frames = args.next().and_then(|value| value.parse().ok()),
+            other => {
+                eprintln!("{NAME}: unrecognized argument `{other}`");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    // A headless run has to terminate on its own: nothing will ever close its
+    // window, because it does not have one.
+    let budget = frames.or(if headless { Some(120) } else { None });
+
+    match game(headless, budget) {
+        Ok(frames) => {
+            println!("{NAME}: {frames} frames");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{NAME}: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn game(headless: bool, budget: Option<u64>) -> Result<u64, Box<dyn std::error::Error>> {
+    // A headless run steps a hand-driven clock, so its tick count comes out the
+    // same on every machine — which is what makes it assertable in CI.
+    let real = MonotonicTime::new();
+    let mut fake = ManualTime::new();
+    let mut now = || {
+        if headless {
+            fake.advance(Duration::from_nanos(1_000_000_000 / 60));
+            fake.elapsed()
+        } else {
+            real.elapsed()
+        }
+    };
+
+    // Headless is never selected automatically: a game that silently ran with
+    // no window would look like a hang.
+    let mut shell = if headless {
+        open_backend(ShellBackend::Headless)?
+    } else {
+        open()?
+    };
+    shell.align_event_clock(now());
+
+    let window = shell.create_window(&WindowDesc {
+        title: NAME,
+        app_id: NAME,
+        ..WindowDesc::default()
+    })?;
+
+    // A window has no size until the window system says so, and a swapchain
+    // needs one. This loop is mandatory, not defensive.
+    let mut extent = loop {
+        shell.pump(&mut |event| log::debug!("{event:?}"));
+        if let Some(size) = shell.window_state(window)?.size() {
+            break (size.width, size.height);
+        }
+        shell.wait_events(Some(Duration::from_millis(8)));
+    };
+
+    // The GPU. `NullInstance` records every call and draws nothing; `crcbl-vk`
+    // replaces this one line at P1 and nothing else here changes.
+    let instance: Box<dyn Instance> = Box::new(NullInstance::tier_a());
+    let adapters = instance.adapters();
+    let adapter = adapters.first().ok_or("no adapter")?.id;
+    let target = shell.surface_target(window)?;
+    // SAFETY: the target names a window that stays live for the rest of this
+    // function, and the surface built from it is destroyed at the bottom of it.
+    let surface = unsafe { instance.create_surface(&target) }?;
+    let caps = instance.surface_caps(surface, adapter)?;
+    let format = caps
+        .preferred_format()
+        .ok_or("the surface offers no format")?;
+    let present_mode = caps.choose_present_mode(&[PresentMode::Mailbox, PresentMode::Fifo]);
+    let device = instance.create_device(&DeviceDesc {
+        label: Some(NAME),
+        adapter,
+        required_features: Features::empty(),
+        optional_features: Features::TIER_A,
+        compatible_surface: Some(surface),
+    })?;
+    let queue = device
+        .queue(QueueKind::Graphics)
+        .ok_or("no graphics queue")?;
+    let configure = |extent: (u32, u32)| SwapchainDesc {
+        label: Some(NAME),
+        surface,
+        format,
+        extent,
+        image_count: caps.min_image_count,
+        present_mode,
+        composite_alpha: CompositeAlpha::Opaque,
+    };
+    let swapchain = device.create_swapchain(&configure(extent))?;
+
+    let mut clock = FrameClock::new(TICK_HZ);
+    let mut frames = 0;
+    loop {
+        if budget.is_some_and(|budget| frames >= budget) {
+            break;
+        }
+        if !headless {
+            // Advisory: sleep until something happens, if the backend can.
+            shell.wait_events(Some(Duration::from_millis(4)));
+        }
+
+        // 1. Drain what arrived. Replies happen after the pump, because the
+        //    sink cannot borrow the shell it is being called from.
+        let mut resized = None;
+        let mut closing = false;
+        shell.pump(&mut |event| {
+            log::debug!("{event:?}");
+            match event {
+                ShellEvent::Resized { size, .. } => resized = Some((size.width, size.height)),
+                ShellEvent::CloseRequested { .. } | ShellEvent::WindowDestroyed { .. } => {
+                    closing = true;
+                }
+                _ => {}
+            }
+        });
+        if closing {
+            // A close request is a question — answer it, or the window stays.
+            let _ = shell.reply_close_request(window, CloseReply::Close);
+            break;
+        }
+        if let Some(size) = resized
+            && size != extent
+            && size.0 > 0
+            && size.1 > 0
+        {
+            extent = size;
+            device.reconfigure_swapchain(swapchain, &configure(extent))?;
+        }
+
+        // 2. Simulate. Fixed steps, however long the frame took.
+        clock.update(now());
+        while clock.consume_tick() {
+            tick(clock.tick_dt_secs());
+        }
+
+        // 3. Render. `alpha` is how far this frame sits between the last two
+        //    ticks; read it *after* the tick loop.
+        render(clock.alpha());
+        let acquired = match device.acquire_next_frame(swapchain) {
+            Ok(acquired) => acquired,
+            // Expected traffic after a resize, not an error.
+            Err(SurfaceError::OutOfDate) => {
+                device.reconfigure_swapchain(swapchain, &configure(extent))?;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        // Nothing draws yet, and a frame still owes this: an acquired image's
+        // contents are undefined, and the compositor may only be handed one in
+        // `Present`.
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("frame"),
+            queue,
+        });
+        encoder.pipeline_barrier(&Barriers {
+            images: &[ImageBarrier::new(
+                acquired.image,
+                ImageSubresourceRange::all(format),
+                ResourceState::Undefined,
+                ResourceState::Present,
+            )],
+            ..Barriers::default()
+        });
+        let commands = encoder.finish()?;
+        // Empty on a backend with an implicit acquire, which is why the splice
+        // is written once and never branched on.
+        let waits: Vec<SemaphoreWait> = acquired
+            .acquire_semaphore
+            .map(|semaphore| SemaphoreWait {
+                semaphore,
+                value: 0,
+            })
+            .into_iter()
+            .collect();
+        let signals: Vec<SemaphoreSignal> = acquired
+            .present_semaphore
+            .map(|semaphore| SemaphoreSignal {
+                semaphore,
+                value: 0,
+            })
+            .into_iter()
+            .collect();
+        device.submit(
+            queue,
+            &SubmitInfo {
+                command_buffers: &[commands],
+                waits: &waits,
+                signals: &signals,
+            },
+        )?;
+        device.present(
+            queue,
+            &PresentInfo {
+                swapchain,
+                waits: acquired.present_semaphore.as_slice(),
+            },
+        )?;
+        // A command buffer may not be destroyed until its submission has
+        // finished. Waiting for the whole device is the simple answer and it
+        // costs all pipelining; a real game keeps a ring of command buffers
+        // keyed on a timeline semaphore instead — `apps/sandbox` in the engine
+        // checkout is that version.
+        device.wait_idle()?;
+        device.destroy_command_buffer(commands);
+        frames += 1;
+    }
+
+    // Teardown order is not negotiable: swapchain, then surface, then window.
+    device.wait_idle()?;
+    device.destroy_swapchain(swapchain);
+    instance.destroy_surface(surface);
+    shell.destroy_window(window)?;
+    Ok(frames)
+}
+
+/// One fixed simulation step. Your game goes here.
+fn tick(dt: f64) {
+    let _ = dt;
+}
+
+/// One rendered frame. `alpha` interpolates between the last two ticks.
+fn render(alpha: f32) {
+    let _ = alpha;
+}

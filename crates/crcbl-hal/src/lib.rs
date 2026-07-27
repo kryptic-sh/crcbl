@@ -211,7 +211,7 @@ pub use command::{
     DepthStencilAttachment, DrawIndirect, DrawIndirectCount, ImageBarrier, ImageCopy, LoadOp,
     QueueTransfer, RenderPassDesc, ResourceState, StoreOp, depth,
 };
-pub use device::{Device, DeviceDesc, Instance, Queue, QueueFamily, QueueHandle};
+pub use device::{Device, DeviceDesc, Instance, Queue, QueueHandle, QueueKind};
 pub use error::{HalError, SurfaceError};
 pub use format::{Format, IndexFormat};
 pub use pipeline::{

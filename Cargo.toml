@@ -24,7 +24,10 @@ thiserror = "2.0"
 # than once and the dependency direction is readable from one place. The
 # redundant-looking `version` is load-bearing: `cargo deny check bans` treats a
 # bare `{ path = … }` as a wildcard dependency and fails the build.
+crcbl = { path = "crates/crcbl", version = "0.1.0" }
 crcbl-core = { path = "crates/crcbl-core", version = "0.1.0" }
+crcbl-hal = { path = "crates/crcbl-hal", version = "0.1.0" }
+crcbl-shell = { path = "crates/crcbl-shell", version = "0.1.0" }
 crcbl-wl-scanner = { path = "crates/crcbl-wl-scanner", version = "0.1.0" }
 
 [workspace.lints.rust]

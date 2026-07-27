@@ -1,9 +1,73 @@
-//! The `crcbl` command-line driver.
+//! `crcbl` — the Crucible engine's headless control CLI.
 //!
-//! Placeholder: `new` / `run` / `build` land in slice P0.7 together with the
-//! argument parser. Until then any invocation is a bad invocation, so exit 2.
+//! `docs/plan/11-cli-headless.md` makes this a first-class pillar rather than a
+//! convenience: **everything the engine and the editor can do must be reachable
+//! without a window**, from a terminal, a script, a CI job or a coding agent.
+//! The invariant it protects is that no capability is implemented GUI-side, and
+//! the way it is protected is that the CLI is the thing CI runs.
+//!
+//! P0 ships the first three subcommands the topic schedules — `new`, `run`,
+//! `build` — plus the design rules that are not per-command and would be
+//! expensive to retrofit:
+//!
+//! | Rule | Where |
+//! | --- | --- |
+//! | `--json` on every subcommand, human output otherwise | `report::emit` |
+//! | Exit 0 ok / 1 failed / 2 bad invocation | `report`, and `main` below |
+//! | No prompt unless a TTY, and never required | `new` |
+//! | Stable JSON schemas | `json`, and each command's field list |
+//!
+//! `scene`, `import`, `screenshot`, `sim`, `phys` and `edit` land from P1
+//! onwards; the argument parser is written so adding one is a `match` arm.
+//!
+//! # This binary depends on nothing
+//!
+//! Not on `clap` (`args` argues that at length), not on `serde`, and — the one
+//! that is architecture rather than taste — **not on any engine crate**. A
+//! Crucible project is a Cargo project, so `crcbl run` is Cargo plus this CLI's
+//! conventions, and the CLI never links a renderer or a backend. Topic 11 names
+//! "a sample linking `crcbl-vk` directly" as an architecture regression; a CLI
+//! that did it would be a worse one, because every user of the engine runs this
+//! binary.
 
-fn main() -> std::process::ExitCode {
-    eprintln!("crcbl: not implemented yet (CLI subcommands land in slice P0.7)");
-    std::process::ExitCode::from(2)
+mod args;
+mod cargo;
+mod json;
+mod new;
+mod report;
+
+use std::process::ExitCode;
+
+use crate::args::{Command, Invocation};
+use crate::report::EXIT_USAGE;
+
+fn main() -> ExitCode {
+    match args::parse(std::env::args().skip(1)) {
+        Invocation::Command(command) => {
+            let json = command.json();
+            let name = command.name();
+            let result = match &command {
+                Command::New(args) => new::run(args),
+                Command::Run(args) => cargo::run(args),
+                Command::Build(args) => cargo::build(args),
+            };
+            report::emit(name, json, result)
+        }
+        Invocation::Help(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Invocation::Version => {
+            println!("crcbl {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
+        Invocation::BadUsage(message) => {
+            // Bad invocations are the one thing with no `--json` rendering: the
+            // flag itself may be what failed to parse, so there is no reliable
+            // way to know it was asked for.
+            eprintln!("crcbl: {message}");
+            eprintln!("\n{}", args::USAGE);
+            ExitCode::from(EXIT_USAGE)
+        }
+    }
 }

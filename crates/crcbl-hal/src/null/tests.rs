@@ -93,12 +93,12 @@ fn unknown_adapters_are_rejected() {
 fn queue_families_follow_the_adapter_features() {
     let instance = NullInstance::tier_a();
     let device = open(&instance);
-    assert!(device.queue(QueueFamily::Graphics).is_some());
-    assert!(device.queue(QueueFamily::Compute).is_some());
-    assert!(device.queue(QueueFamily::Transfer).is_some());
+    assert!(device.queue(QueueKind::Graphics).is_some());
+    assert!(device.queue(QueueKind::Compute).is_some());
+    assert!(device.queue(QueueKind::Transfer).is_some());
     assert_ne!(
-        device.queue(QueueFamily::Graphics),
-        device.queue(QueueFamily::Compute),
+        device.queue(QueueKind::Graphics),
+        device.queue(QueueKind::Compute),
         "distinct families must have distinct handles"
     );
 
@@ -110,11 +110,11 @@ fn queue_families_follow_the_adapter_features() {
         })
         .expect("tier B has compute");
     assert!(
-        device.queue(QueueFamily::Graphics).is_some(),
-        "the graphics family always exists"
+        device.queue(QueueKind::Graphics).is_some(),
+        "the graphics queue always exists"
     );
-    assert!(device.queue(QueueFamily::Compute).is_none());
-    assert!(device.queue(QueueFamily::Transfer).is_none());
+    assert!(device.queue(QueueKind::Compute).is_none());
+    assert!(device.queue(QueueKind::Transfer).is_none());
 }
 
 #[test]
@@ -352,13 +352,8 @@ fn swapchain_acquire_matches_the_tiers_sync_model() {
             .expect("device");
         // SAFETY: the offscreen target holds no pointers, so the contract on
         // `create_surface` is vacuous for it.
-        let surface = unsafe {
-            instance.create_surface(&SurfaceTarget::Offscreen {
-                width: 320,
-                height: 200,
-            })
-        }
-        .expect("offscreen surface");
+        let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+            .expect("offscreen surface");
 
         let caps = instance
             .surface_caps(surface, AdapterId(0))
@@ -392,7 +387,7 @@ fn swapchain_acquire_matches_the_tiers_sync_model() {
         assert_eq!(wrapped.index, 0);
         assert_eq!(wrapped.image, first.image);
 
-        let queue = device.queue(QueueFamily::Graphics).expect("graphics queue");
+        let queue = device.queue(QueueKind::Graphics).expect("graphics queue");
         let waits: Vec<_> = wrapped.present_semaphore.into_iter().collect();
         device
             .present(
@@ -435,13 +430,7 @@ fn destroying_a_swapchain_releases_its_images_and_semaphores() {
     let recorder = instance.recorder();
     let device = open(&instance);
     // SAFETY: an offscreen target holds no platform pointers.
-    let surface = unsafe {
-        instance.create_surface(&SurfaceTarget::Offscreen {
-            width: 8,
-            height: 8,
-        })
-    }
-    .expect("surface");
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
     let before_images = recorder.live_objects(ObjectKind::Image);
     let before_semaphores = recorder.live_objects(ObjectKind::Semaphore);
 
@@ -478,13 +467,7 @@ fn a_swapchain_needs_a_live_surface_and_a_real_extent() {
     let instance = NullInstance::tier_a();
     let device = open(&instance);
     // SAFETY: an offscreen target holds no platform pointers.
-    let surface = unsafe {
-        instance.create_surface(&SurfaceTarget::Offscreen {
-            width: 8,
-            height: 8,
-        })
-    }
-    .expect("surface");
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
     let desc = SwapchainDesc {
         label: None,
         surface,
@@ -514,7 +497,7 @@ fn a_swapchain_needs_a_live_surface_and_a_real_extent() {
 fn scope_violations_are_recorded() {
     let (recorder, instance) = boxed(NullInstance::tier_a());
     let device = open(instance.as_ref());
-    let queue = device.queue(QueueFamily::Graphics).expect("queue");
+    let queue = device.queue(QueueKind::Graphics).expect("queue");
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
         label: Some("bad frame"),
@@ -593,7 +576,7 @@ fn scope_violations_are_recorded() {
 fn nested_passes_are_rejected() {
     let (recorder, instance) = boxed(NullInstance::tier_a());
     let device = open(instance.as_ref());
-    let queue = device.queue(QueueFamily::Graphics).expect("queue");
+    let queue = device.queue(QueueKind::Graphics).expect("queue");
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
     encoder.begin_compute_pass(&ComputePassDesc {
         label: Some("outer"),
@@ -625,7 +608,7 @@ fn nested_passes_are_rejected() {
 fn a_gpu_driven_frame_records_the_expected_stream() {
     let (recorder, instance) = boxed(NullInstance::tier_a());
     let device = open(instance.as_ref());
-    let queue = device.queue(QueueFamily::Graphics).expect("queue");
+    let queue = device.queue(QueueKind::Graphics).expect("queue");
 
     // Resources.
     let instances = device
@@ -1069,13 +1052,7 @@ fn a_surface_from_another_instance_is_a_foreign_object() {
     let second = NullInstance::tier_a().with_recorder(recorder.clone());
 
     // SAFETY: an offscreen target holds no platform pointers.
-    let foreign = unsafe {
-        second.create_surface(&SurfaceTarget::Offscreen {
-            width: 8,
-            height: 8,
-        })
-    }
-    .expect("surface");
+    let foreign = unsafe { second.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
 
     let error = first
         .surface_caps(foreign, AdapterId(0))
@@ -1167,7 +1144,7 @@ fn commands_naming_a_foreign_handle_are_recorded_as_such() {
     let (recorder, instance) = boxed(NullInstance::tier_a());
     let first = open(instance.as_ref());
     let second = open(instance.as_ref());
-    let queue = first.queue(QueueFamily::Graphics).expect("queue");
+    let queue = first.queue(QueueKind::Graphics).expect("queue");
 
     let foreign = second
         .create_buffer(&BufferDesc {
@@ -1209,13 +1186,7 @@ fn destroying_a_surface_out_of_order_is_detected_not_undefined() {
     let instance = NullInstance::tier_a();
     let device = open(&instance);
     // SAFETY: an offscreen target holds no platform pointers.
-    let surface = unsafe {
-        instance.create_surface(&SurfaceTarget::Offscreen {
-            width: 8,
-            height: 8,
-        })
-    }
-    .expect("surface");
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
     let desc = SwapchainDesc {
         label: None,
         surface,

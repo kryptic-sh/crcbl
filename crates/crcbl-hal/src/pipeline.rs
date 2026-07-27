@@ -203,8 +203,31 @@ pub struct BindGroupDesc<'a> {
 /// A push-constant / root-constant range.
 ///
 /// Requires [`Features::PUSH_CONSTANTS`](crate::Features::PUSH_CONSTANTS).
-/// WebGPU has none; Tier B pipelines declare a dynamic-offset uniform buffer
-/// instead — see [`BindingKind::UniformBuffer`].
+///
+/// # Tier B has none — an obligation, not a footnote
+///
+/// WebGPU has no push constants at all, so a Tier B backend **must** report
+/// [`Features::PUSH_CONSTANTS`](crate::Features::PUSH_CONSTANTS) absent and
+/// `max_push_constant_size` as `0`, and **must** fail
+/// [`PipelineLayoutDesc::push_constants`] loudly at layout creation rather than
+/// accepting the layout and dropping every
+/// [`CommandEncoder::push_constants`](crate::CommandEncoder::push_constants)
+/// silently. The renderer's substitute is a dynamic-offset uniform buffer — see
+/// [`BindingKind::UniformBuffer`] — which is a *data-layout* decision the
+/// renderer makes up front, not something a backend can paper over per draw.
+/// That is why push constants are deliberately not part of
+/// [`Features::TIER_A`](crate::Features::TIER_A).
+///
+/// # Decision: the name stays
+///
+/// P0's seam review flagged "push constant" as Vulkan vocabulary. It is also
+/// DX12's concept under the name *root constants* and Metal's under
+/// `setBytes`, so it is the common cross-API term rather than a vk-only one —
+/// and renaming it would not close the real gap, which is that WebGPU lacks the
+/// feature entirely. That gap is a **tier fact**, and it belongs in
+/// [`DeviceCaps`](crate::DeviceCaps) where a backend declares it and a caller
+/// branches on it, not in the name of a type that three of four backends
+/// implement natively.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PushConstantRange {
     /// Stages that read it.
