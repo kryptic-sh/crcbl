@@ -43,7 +43,7 @@ pub enum ServerToClient {
 }
 
 /// A single system's snapshot data.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SystemSnapshot {
     /// Unique identifier for the system that produced this data.
     pub system_id: u32,
