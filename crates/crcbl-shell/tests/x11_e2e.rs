@@ -58,10 +58,35 @@ mod keycode {
 
 /// How long any single wait may take before the test fails.
 ///
-/// Generous for a cold CI runner and still far inside nextest's 60s
-/// `slow-timeout`, so a hang is reported by this file — naming what it was
-/// waiting for and what it saw — rather than by a SIGKILL with no context.
-const WAIT: Duration = Duration::from_secs(10);
+/// Deliberately far larger than anything here needs on an idle machine, where
+/// the slowest of these waits is the two-second clipboard deadline the backend
+/// is *supposed* to take. A CI runner sharing its cores can be an order of
+/// magnitude slower than a dev box and still be perfectly healthy, and a
+/// deadline tight enough to notice that is a deadline that reports the runner
+/// rather than the backend.
+///
+/// Bounded all the same, and bounded *here*: nextest reports a test as SLOW at
+/// 60s and kills it at 4× that, so a wait that expires inside this file fails
+/// with a message naming what never happened, while one left to nextest is a
+/// SIGKILL with no context at all.
+const WAIT: Duration = Duration::from_secs(20);
+
+/// The most any single [`Session::pump`] may take before the frame loop is
+/// judged to have blocked.
+///
+/// **Not a performance budget**, and it cannot be one: under contention this
+/// process can be descheduled in the middle of a `pump` for as long as the
+/// scheduler likes, and that says nothing whatever about the backend. What it
+/// still catches, cheaply, is the failure it was written for — a `pump` that
+/// *waits on another client* is not late by a scheduling quantum, it is late by
+/// the whole conversation: the backend's own two-second selection deadline, or
+/// the hundreds of round trips an `INCR` transfer takes.
+///
+/// The load-independent statement of the same property is the pump **count** —
+/// see [`Session::pumps`] — and where a test can make that statement it does,
+/// because a blocking implementation completes the transfer in one `pump` at
+/// any load and no clock is involved in noticing.
+const SLOWEST_PUMP: Duration = Duration::from_millis(1_500);
 
 /// The screen `run-x11-e2e.sh` asks Xvfb for.
 const SCREEN: PhysicalSize = PhysicalSize::new(1920, 1080);
@@ -79,6 +104,15 @@ struct Session {
     /// here means every test that pastes is also a test that the frame loop
     /// kept running.
     slowest_pump: Duration,
+    /// How many times [`pump`](Self::pump) has been called.
+    ///
+    /// The load-independent half of the same question. A backend that answered
+    /// a 334-chunk `INCR` transfer by blocking would finish it inside a single
+    /// `pump`; one that alternates with the peer, as the seam requires, cannot
+    /// take fewer turns than there are chunks. Counting the turns states that
+    /// without consulting a clock, so it means the same thing on an idle
+    /// machine and on a runner with nothing left to give.
+    pumps: u32,
 }
 
 impl Session {
@@ -108,6 +142,7 @@ impl Session {
             peer: Peer::new().expect("libxcb-xtest and a second connection"),
             events: Vec::new(),
             slowest_pump: Duration::ZERO,
+            pumps: 0,
         }
     }
 
@@ -127,6 +162,7 @@ impl Session {
         let events = &mut self.events;
         self.shell.pump(&mut |event| events.push(event));
         self.slowest_pump = self.slowest_pump.max(started.elapsed());
+        self.pumps += 1;
     }
 
     /// Pumps until `ready`, or fails naming what never happened.
@@ -134,7 +170,13 @@ impl Session {
     /// A deadline and a poll, never a fixed sleep: `docs/plan/12-testing.md`
     /// makes that the rule for anything asynchronous, and another X client
     /// answering is the asynchronous case the rule was written for.
-    fn pump_until(&mut self, what: &str, ready: impl Fn(&Self) -> bool) {
+    ///
+    /// `ready` takes `&mut Session` because some of what has to be waited for
+    /// is only observable by *asking the peer* — reading a property off the
+    /// server needs an interned atom, and interning caches. A probe that could
+    /// only read state the shell had already delivered would push those tests
+    /// back onto a fixed pump, which is the trap this exists to close.
+    fn pump_until(&mut self, what: &str, mut ready: impl FnMut(&mut Self) -> bool) {
         let deadline = Instant::now() + WAIT;
         loop {
             self.pump();
@@ -457,12 +499,16 @@ fn the_window_carries_the_properties_a_desktop_reads() {
         .collect();
     assert!(protocols.contains(&delete), "{protocols:?}");
 
+    // A rename is one client writing a property and another reading it, and
+    // the two conversations are on **different connections**: X11 orders
+    // requests within a connection and promises nothing between them, so the
+    // peer's `GetProperty` may well be served before our `ChangeProperty`. A
+    // fixed pump here is not "one pump is enough", it is a race that happens to
+    // be won on an idle machine — it was lost outright on the first loaded run.
     session.shell.set_title(window, "renamed").expect("title");
-    session.pump();
-    assert_eq!(
-        session.peer.window_property(xid, "_NET_WM_NAME").as_deref(),
-        Some(&b"renamed"[..])
-    );
+    session.pump_until("the peer to see the new title", |session| {
+        session.peer.window_property(xid, "_NET_WM_NAME").as_deref() == Some(&b"renamed"[..])
+    });
 }
 
 /// The aspect lock reaches `WM_NORMAL_HINTS`, which is the property that makes
@@ -851,16 +897,20 @@ fn a_held_key_repeats_and_the_repeats_are_flagged() {
             .any(|event| matches!(event, ShellEvent::Key { repeat: true, .. }))
     });
     session.peer.key(keycode::A, false);
-    session.pump_until("the real release", |session| {
-        session.events.iter().any(|event| {
-            matches!(
-                event,
-                ShellEvent::Key {
-                    state: ButtonState::Released,
-                    ..
-                }
-            )
-        })
+    // Demands the release as the **last** key event, not merely as one of them.
+    // `any` is satisfied by a release that was already in the list, which is
+    // exactly what a backend forwarding the fake release in front of an
+    // auto-repeat produces — so the probe would stop mid-repeat, and the
+    // assertions below would be describing the wrong moment. Insisting on the
+    // terminal element means this waits for the release it asked for.
+    session.pump_until("the real release, last", |session| {
+        matches!(
+            session.events.iter().rev().find_map(|event| match event {
+                ShellEvent::Key { state, .. } => Some(*state),
+                _ => None,
+            }),
+            Some(ButtonState::Released)
+        )
     });
 
     let keys: Vec<_> = session
@@ -946,13 +996,21 @@ fn modifiers_are_stamped_on_the_event_they_modify() {
 
     session.peer.key(keycode::LEFT_SHIFT, true);
     session.peer.key(keycode::A, true);
+    // Waits for *the A press*, not for two key events of any kind. Counting is
+    // the trap: hold Shift long enough — which a loaded machine does for you —
+    // and the server's own auto-repeat supplies the second event, the count is
+    // satisfied with no A in sight, and the `expect` below fires on a backend
+    // that was about to be right.
     session.pump_until("shift+a", |session| {
-        session
-            .events
-            .iter()
-            .filter(|event| matches!(event, ShellEvent::Key { .. }))
-            .count()
-            >= 2
+        session.events.iter().any(|event| {
+            matches!(
+                event,
+                ShellEvent::Key {
+                    key_code: Some(KeyCode::KeyA),
+                    ..
+                }
+            )
+        })
     });
     let shifted = session
         .events
@@ -1067,8 +1125,18 @@ fn raw_relative_motion_is_delivered_for_mouselook() {
     assert!(session.shell.caps().has_mouselook());
     let window = session.window(&desc("mouselook"));
     session.focus(window);
+    // The pointer has to be *parked* before the measured move, not merely
+    // asked to park: a single pump that did not yet contain the first motion
+    // leaves it to arrive after the clear, and the delta then measured is the
+    // one from wherever the pointer started — which points in no particular
+    // direction and fails the sign check at random.
     session.peer.motion(300, 300);
-    session.pump();
+    session.pump_until("the pointer to park", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::PointerMotion { .. }))
+    });
     session.events.clear();
 
     session.peer.motion(340, 320);
@@ -1108,8 +1176,17 @@ fn a_locked_pointer_reports_no_absolute_position() {
     let mut session = Session::open();
     let window = session.window(&desc("lock"));
     session.focus(window);
+    // Drained before the lock, not merely pumped once: a motion produced while
+    // the pointer was still free carries a position, and one still in flight
+    // when `events` is cleared below would be read as a locked-pointer motion
+    // that leaked an absolute position — a failure of a passing backend.
     session.peer.motion(300, 300);
-    session.pump();
+    session.pump_until("the pointer to park", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::PointerMotion { .. }))
+    });
 
     session
         .shell
@@ -1129,7 +1206,16 @@ fn a_locked_pointer_reports_no_absolute_position() {
         session.peer.motion(300 + step * 7, 300 + step * 5);
         session.pump();
     }
-    session.pump();
+    // Waiting for at least one is what makes the loop below an assertion rather
+    // than a formality: eight fixed pumps on a loaded machine can deliver
+    // nothing at all, and a `for` over an empty list passes without having
+    // looked at anything.
+    session.pump_until("motion while locked", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::PointerMotion { .. }))
+    });
     for event in &session.events {
         if let ShellEvent::PointerMotion { abs, .. } = event {
             assert_eq!(*abs, None, "a locked pointer has no meaningful position");
@@ -1157,8 +1243,17 @@ fn warping_the_pointer_moves_it() {
     let mut session = Session::open();
     let window = session.window(&desc("warp"));
     session.focus(window);
+    // Parked and drained before the warp: a motion from this move still in
+    // flight when `events` is cleared is indistinguishable from the warp's own,
+    // and the assertion below would then be checking that the pointer landed at
+    // (500, 500) — which it did, at the wrong step.
     session.peer.motion(500, 500);
-    session.pump();
+    session.pump_until("the pointer to park", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::PointerMotion { .. }))
+    });
     session.events.clear();
 
     session
@@ -1226,7 +1321,7 @@ fn an_unowned_clipboard_answers_empty_immediately() {
         "no peer spelling to report, so the format that was asked for"
     );
     assert!(
-        session.slowest_pump < Duration::from_millis(500),
+        session.slowest_pump < SLOWEST_PUMP,
         "pump stayed non-blocking: {:?}",
         session.slowest_pump
     );
@@ -1256,7 +1351,7 @@ fn a_peer_selection_is_read_and_keeps_the_peers_spelling() {
         "the peer chose the spelling and it survives verbatim"
     );
     assert!(
-        session.slowest_pump < Duration::from_millis(500),
+        session.slowest_pump < SLOWEST_PUMP,
         "pump stayed non-blocking: {:?}",
         session.slowest_pump
     );
@@ -1270,14 +1365,17 @@ fn a_peer_selection_is_read_and_keeps_the_peers_spelling() {
 #[test]
 #[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
 fn an_incremental_transfer_is_reassembled() {
+    /// Bytes per chunk, which is what makes this 334 chunks rather than one.
+    const CHUNK: usize = 3;
     let mut session = Session::open();
     let window = session.window(&desc("incr"));
     let payload: Vec<u8> = (0..1_000u32).map(|byte| (byte % 251) as u8).collect();
+    let chunks = payload.len().div_ceil(CHUNK);
     session
         .peer
-        .own_clipboard_incrementally(&[("UTF8_STRING", &payload)], 3);
-    session.pump();
+        .own_clipboard_incrementally(&[("UTF8_STRING", &payload)], CHUNK);
 
+    let before = session.pumps;
     let request = session
         .shell
         .clipboard_request(window, MimeType::TextUtf8)
@@ -1288,9 +1386,23 @@ fn an_incremental_transfer_is_reassembled() {
         Some(&payload[..]),
         "every chunk, in order, and nothing duplicated"
     );
+
+    // That the frame loop never stalled, said without a clock. The peer writes
+    // the next chunk only when it is serviced, and it is serviced only at the
+    // top of a pump, so a transfer that really did alternate cannot have taken
+    // fewer turns than it had chunks — and a backend that blocked waiting for
+    // the peer would have finished inside one. This is the same claim the
+    // wall-clock bound below makes, in a form that a busy machine cannot
+    // falsify in either direction.
+    let turns = session.pumps - before;
     assert!(
-        session.slowest_pump < Duration::from_millis(500),
-        "334 chunks and the frame loop never stalled: {:?}",
+        turns as usize >= chunks,
+        "{chunks} chunks were fed through {turns} pumps; a transfer this size \
+         cannot have alternated with the peer in fewer"
+    );
+    assert!(
+        session.slowest_pump < SLOWEST_PUMP,
+        "{chunks} chunks and the frame loop never stalled: {:?}",
         session.slowest_pump
     );
 }
@@ -1321,11 +1433,13 @@ fn a_stalled_transfer_answers_unavailable_rather_than_never() {
     // Pump the *shell* only: the peer is alive and owns the selection, and
     // simply never answers. That is a crashed clipboard owner, exactly.
     let deadline = Instant::now() + WAIT;
+    let before = session.pumps;
     loop {
         let started = Instant::now();
         let events = &mut session.events;
         session.shell.pump(&mut |event| events.push(event));
         session.slowest_pump = session.slowest_pump.max(started.elapsed());
+        session.pumps += 1;
         if session
             .events
             .iter()
@@ -1344,8 +1458,17 @@ fn a_stalled_transfer_answers_unavailable_rather_than_never() {
         "there may well be something on the clipboard, which is why this is \
          not Empty"
     );
+    // Where the two seconds were spent, said without a clock. A backend that
+    // waited for the peer inside `pump` would have answered on the *first* one;
+    // this one gave the frame loop back every time and checked the deadline on
+    // the way past, which is the only version of obligation 4 an editor can
+    // survive.
     assert!(
-        session.slowest_pump < Duration::from_millis(500),
+        session.pumps - before > 1,
+        "the deadline was reached across many pumps, not inside one"
+    );
+    assert!(
+        session.slowest_pump < SLOWEST_PUMP,
         "the wait was bounded but never inside pump: {:?}",
         session.slowest_pump
     );
@@ -1433,12 +1556,21 @@ fn a_large_offer_is_sent_incrementally() {
         .expect("claim");
 
     session.peer.read_clipboard("UTF8_STRING");
+    let before = session.pumps;
     session.pump_until("the whole INCR transfer", |session| session.peer_answered());
     let received = session.peer.take_read().expect("answered").expect("bytes");
     assert_eq!(received.len(), text.len());
     assert_eq!(received, text.as_bytes());
+    // The sending half of the same claim the receiving test makes: the peer
+    // pulls each chunk by deleting the property, and it can only do that when
+    // it is serviced, so a transfer fed through the frame loop takes a turn per
+    // chunk and one fed inside a single `pump` takes exactly one.
     assert!(
-        session.slowest_pump < Duration::from_millis(500),
+        session.pumps - before > 1,
+        "the payload went out across many pumps, not inside one"
+    );
+    assert!(
+        session.slowest_pump < SLOWEST_PUMP,
         "the frame loop never stalled feeding it: {:?}",
         session.slowest_pump
     );
@@ -1468,7 +1600,7 @@ fn pasting_our_own_copy_does_not_deadlock() {
     let (_, content) = session.clipboard_answer(request);
     assert_eq!(content.text(), Some("round trip"));
     assert!(
-        session.slowest_pump < Duration::from_millis(500),
+        session.slowest_pump < SLOWEST_PUMP,
         "owner and requestor alternated inside one loop: {:?}",
         session.slowest_pump
     );

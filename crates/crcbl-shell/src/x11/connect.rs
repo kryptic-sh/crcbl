@@ -156,6 +156,99 @@ impl Conn {
         Some(opcode)
     }
 
+    /// Asks the server to stop faking a `KeyRelease` in front of every
+    /// auto-repeat, and reports whether it agreed.
+    ///
+    /// # Why this is not an optimisation
+    ///
+    /// The default X11 wire form of an auto-repeat is a `KeyRelease` followed
+    /// **immediately** by a `KeyPress` of the same keycode at the same server
+    /// millisecond, and neither half means what it says: the key never came up.
+    /// The standard client-side answer is a one-event lookahead, which
+    /// [`input`](super::input) implements — and which is only sound while both
+    /// halves are in the same batch of events.
+    ///
+    /// **They are not always in the same batch.** A batch is whatever
+    /// `xcb_poll_for_event` had buffered when `pump` asked, which is a
+    /// socket-read boundary and not a protocol unit. On a loaded machine the
+    /// pair splits, the lookahead sees a lone `KeyRelease`, and the backend
+    /// emits a release for a key that is still down followed by a press that is
+    /// not flagged as a repeat — the exact "jump button fires thirty times a
+    /// second while held" failure the lookahead exists to prevent, appearing
+    /// only under load. This was reproduced against `Xvfb`: two events, same
+    /// keycode, same timestamp, one in each of two consecutive pumps.
+    ///
+    /// `XkbPerClientFlags(DetectableAutoRepeat)` removes the ambiguity at the
+    /// source rather than guessing at it: the server stops synthesizing the
+    /// release, a repeat arrives as a bare `KeyPress` of a key already held,
+    /// and no lookahead — and therefore no batching assumption — is involved.
+    /// It is per **client**, so nothing about any other application changes.
+    ///
+    /// `false` when libxcb-xkb is missing or the server has no XKB, and then
+    /// the lookahead is what there is; see [`input`](super::input)'s module
+    /// documentation for what that costs.
+    pub(super) fn setup_detectable_auto_repeat(&self) -> bool {
+        let Some(xkb) = self.ext.xkb else {
+            return false;
+        };
+        // XKB refuses every other request from a client that has not announced
+        // itself, so this round trip is mandatory rather than a version probe.
+        // SAFETY: the connection is live; a null error pointer discards the
+        // error and a null reply is handled below.
+        let reply = unsafe {
+            let cookie =
+                (xkb.use_extension)(self.raw(), ffi::value::XKB_MAJOR, ffi::value::XKB_MINOR);
+            (xkb.use_extension_reply)(self.raw(), cookie, core::ptr::null_mut())
+        };
+        if reply.is_null() {
+            log::debug!("the X server has no XKB extension");
+            return false;
+        }
+        // SAFETY: `reply` is a live reply this call owns.
+        let supported = unsafe { (*reply).supported };
+        // SAFETY: freed exactly once.
+        unsafe { ffi::free_reply(reply) };
+        if supported == 0 {
+            log::debug!("the X server declined XKB 1.0");
+            return false;
+        }
+
+        // SAFETY: the connection is live. The three trailing zeros are
+        // `ctrlsToChange`, `autoCtrls` and `autoCtrlsValues`, none of which is
+        // being touched — this changes one per-client flag and no keyboard
+        // control.
+        let reply = unsafe {
+            let cookie = (xkb.per_client_flags)(
+                self.raw(),
+                ffi::value::XKB_USE_CORE_KBD,
+                ffi::value::XKB_DETECTABLE_AUTO_REPEAT,
+                ffi::value::XKB_DETECTABLE_AUTO_REPEAT,
+                0,
+                0,
+                0,
+            );
+            (xkb.per_client_flags_reply)(self.raw(), cookie, core::ptr::null_mut())
+        };
+        if reply.is_null() {
+            log::debug!("XkbPerClientFlags failed; auto-repeat stays undetectable");
+            return false;
+        }
+        // The reply is read back rather than assumed: a server may answer
+        // without having set the bit, and a backend that believed the request
+        // would then stop looking for repeat pairs that are still arriving.
+        // SAFETY: `reply` is a live reply this call owns.
+        let value = unsafe { (*reply).value };
+        // SAFETY: freed exactly once.
+        unsafe { ffi::free_reply(reply) };
+        let enabled = value & ffi::value::XKB_DETECTABLE_AUTO_REPEAT != 0;
+        if enabled {
+            log::debug!("detectable auto-repeat is on; a repeat is a press of a held key");
+        } else {
+            log::debug!("the X server does not implement detectable auto-repeat");
+        }
+        enabled
+    }
+
     /// Whether an EWMH-compliant window manager is running.
     ///
     /// The protocol's own two-step check, and both steps matter: the root

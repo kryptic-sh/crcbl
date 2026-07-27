@@ -430,34 +430,64 @@ impl Peer {
                 bytes: (*bytes).to_vec(),
             })
             .collect();
-        let clipboard = self.atom("CLIPBOARD");
-        // SAFETY: the connection and window are live.
-        unsafe {
-            (self.lib.set_selection_owner)(
-                self.connection,
-                self.window,
-                clipboard,
-                ffi::value::CURRENT_TIME,
-            );
-        }
-        self.flush();
+        self.set_owner(self.window);
     }
 
     /// Gives up the selection, so nobody owns it.
     pub fn release_clipboard(&mut self) {
-        let clipboard = self.atom("CLIPBOARD");
         self.offers.clear();
         self.outgoing.clear();
-        // SAFETY: the connection is live and `XCB_NONE` is a valid owner.
+        self.set_owner(ffi::value::NONE);
+    }
+
+    /// Takes or releases `CLIPBOARD`, and **does not return until the server
+    /// has done it**.
+    ///
+    /// The barrier is the point, and it is a protocol guarantee rather than a
+    /// wait: X11 processes one client's requests strictly in order, so a
+    /// `GetSelectionOwner` *reply* on this connection proves the
+    /// `SetSelectionOwner` before it has already taken effect.
+    ///
+    /// Without it every clipboard test here is a race between two connections.
+    /// The shell asks `GetSelectionOwner` from its own connection the moment
+    /// [`Shell::clipboard_request`](crate::Shell::clipboard_request) is called,
+    /// and the server is under no obligation to have read this one's socket
+    /// first — so a claim that has been *sent* but not yet *processed* reads
+    /// back as an unowned clipboard, and the shell correctly answers
+    /// [`Empty`](crate::ClipboardContent::Empty) to a test expecting the
+    /// payload. Pumping first does not help: pumping drives the shell, and this
+    /// request is not the shell's.
+    fn set_owner(&mut self, owner: u32) {
+        let clipboard = self.atom("CLIPBOARD");
+        // SAFETY: the connection is live, and `owner` is this peer's own window
+        // or `XCB_NONE`.
         unsafe {
             (self.lib.set_selection_owner)(
                 self.connection,
-                ffi::value::NONE,
+                owner,
                 clipboard,
                 ffi::value::CURRENT_TIME,
             );
         }
         self.flush();
+        // SAFETY: the connection is live; a null error pointer discards the
+        // error and a null reply is handled below.
+        let reply = unsafe {
+            let cookie = (self.lib.get_selection_owner)(self.connection, clipboard);
+            (self.lib.get_selection_owner_reply)(self.connection, cookie, ptr::null_mut())
+        };
+        assert!(
+            !reply.is_null(),
+            "the X server did not answer GetSelectionOwner"
+        );
+        // SAFETY: `reply` is a live reply this call owns.
+        let settled = unsafe { (*reply).owner };
+        // SAFETY: freed exactly once.
+        unsafe { ffi::free_reply(reply) };
+        assert_eq!(
+            settled, owner,
+            "the server did not accept the peer's SetSelectionOwner"
+        );
     }
 
     /// Starts reading whatever owns the clipboard, in `target`.

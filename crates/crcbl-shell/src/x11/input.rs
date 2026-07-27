@@ -1,23 +1,39 @@
 //! Draining the connection, and turning X11 events into [`ShellEvent`]s.
 //!
+//! # Decision: auto-repeat is recognized by holding, not by lookahead
+//!
+//! X11 auto-repeat is the *server's*, so unlike Wayland there is nothing to
+//! synthesize — but the default wire form is a trap. Without the XKB
+//! extension's detectable-autorepeat mode, a repeat arrives as a `KeyRelease`
+//! immediately followed by a `KeyPress` of the same keycode *with the same
+//! timestamp*, and neither half means what it says: the key never came up.
+//! Forwarding both makes a jump button fire thirty times a second while held.
+//!
+//! The textbook client-side answer is a **one-event lookahead** — a
+//! `KeyRelease` whose successor is a `KeyPress` of the same keycode at the same
+//! millisecond is a repeat pair — and this module still implements it, in
+//! [`is_repeat_pair`]. It is also **unsound on its own**, which is the finding
+//! this arrangement exists for: the lookahead can only see events already
+//! collected, and what has been collected is a socket-read boundary rather than
+//! a protocol unit. On a loaded machine the two halves land in different
+//! [`pump`](crate::Shell::pump)s, the lookahead sees a lone `KeyRelease`, and
+//! the backend emits exactly the phantom release the lookahead was written to
+//! prevent — under load only, which is the worst way for it to be wrong.
+//!
+//! So the pair is not relied on.
+//! [`setup_detectable_auto_repeat`](super::Conn::setup_detectable_auto_repeat)
+//! asks the server, at connect time, to stop synthesizing the release at all;
+//! a repeat is then a bare `KeyPress` of a keycode that is **already in
+//! [`X11Shell::held`]**, which no batching can split. The lookahead remains as
+//! the fallback for a server or a machine with no XKB, where it is the best
+//! that can be done.
+//!
 //! # Decision: collect the batch, then interpret it
 //!
 //! [`pump`](crate::Shell::pump) drains everything libxcb has queued into a
 //! `Vec` of raw event bytes *before* interpreting any of it. That costs one
-//! allocation per frame and buys the one thing the interpretation genuinely
-//! needs: **a one-event lookahead**, which is how an auto-repeat is recognized.
-//!
-//! X11 auto-repeat, without the XKB extension's detectable-autorepeat mode,
-//! arrives as a `KeyRelease` immediately followed by a `KeyPress` of the same
-//! keycode *with the same timestamp*. Nothing else produces that pair — a human
-//! cannot release and press a key within one server millisecond — so it is a
-//! reliable test, and it is the test every toolkit uses. Interpreting events
-//! one at a time as they arrive cannot see it, and the result is a jump button
-//! that fires thirty times a second while held.
-//!
-//! Turning on detectable auto-repeat instead would mean loading libxcb-xkb for
-//! one call. The lookahead needs no library and works against an X server that
-//! has no XKB at all.
+//! allocation per frame and is what gives the fallback lookahead anything to
+//! look at.
 //!
 //! # Decision: raw motion is attributed to the focused window
 //!
@@ -108,8 +124,11 @@ impl X11Shell {
         while index < batch.len() {
             let event = &batch[index];
             // The auto-repeat pair: this `KeyRelease` is not a release, and the
-            // `KeyPress` after it is not a fresh press.
-            if is_repeat_pair(event, batch.get(index + 1)) {
+            // `KeyPress` after it is not a fresh press. Only reachable when the
+            // server would not turn detectable auto-repeat on — with it on the
+            // release half is never sent, so there is no pair to find and no
+            // batch boundary to be caught out by.
+            if !self.conn.detectable_auto_repeat && is_repeat_pair(event, batch.get(index + 1)) {
                 self.handle_key(&batch[index + 1], true);
                 index += 2;
                 continue;
@@ -169,12 +188,22 @@ impl X11Shell {
     }
 
     /// A key went down or came up.
-    fn handle_key(&mut self, raw: &Raw, repeat: bool) {
+    ///
+    /// `paired` is the fallback lookahead's verdict — see the [module
+    /// docs](self). With detectable auto-repeat on it is always `false` and the
+    /// repeat is recognized here instead, from the key already being held.
+    fn handle_key(&mut self, raw: &Raw, paired: bool) {
         let event: ffi::InputEvent = read_event(raw);
         let Some(window) = self.window_by_xid(event.event) else {
             return;
         };
         let pressed = event.response_type & 0x7f == ffi::event::KEY_PRESS;
+        // A press of a key that is already down is the server repeating it.
+        // Nothing else can produce one: a second press without an intervening
+        // release is not something a keyboard can send, and `held` is cleared
+        // on every focus change, so a key held while another client had focus
+        // cannot leave a stale entry behind.
+        let repeat = paired || (pressed && self.held.contains(&event.detail));
         self.last_server_time = event.time;
         let time = self.time.event_time(event.time);
 

@@ -53,14 +53,21 @@
 //! | `libxcb.so.1` | the connection, windows, properties, selections, grabs | no backend at all — [`open`](super::X11Shell::open) fails |
 //! | `libxcb-randr.so.0` | monitor geometry, refresh, primary | one monitor covering the whole screen, refresh `0` |
 //! | `libxcb-xinput.so.0` | XI2 raw motion — unaccelerated aim | [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION) cleared, no mouselook |
+//! | `libxcb-xkb.so.1` | detectable auto-repeat — a repeat with no fake release | the release/press lookahead in [`input`](super::input), which cannot see a pair the socket split |
 //!
 //! Deliberately absent: `libxcb-xfixes` (pointer barriers are not needed —
 //! `GrabPointer`'s `confine_to` *is* [`PointerMode::Confined`](crate::PointerMode)
 //! and hiding the cursor is a core-protocol empty pixmap), `libxcb-cursor`
 //! (a themed cursor needs an XCursor theme loader, which is the same gap the
-//! Wayland backend documents and defers), `libxcb-icccm`/`libxcb-ewmh` (policy,
-//! see above), and `libxcb-xkb` (libxkbcommon-x11 owns that conversation and
-//! links it itself).
+//! Wayland backend documents and defers), and `libxcb-icccm`/`libxcb-ewmh`
+//! (policy, see above).
+//!
+//! libxcb-xkb is used for **one request**. The keymap itself still comes from
+//! libxkbcommon-x11, which links libxcb-xkb itself and is where that
+//! conversation belongs; what is taken directly here is `XkbPerClientFlags`,
+//! which libxkbcommon deliberately does not expose because it is an input-policy
+//! decision rather than a keymap one. See
+//! [`setup_detectable_auto_repeat`](super::Conn::setup_detectable_auto_repeat).
 
 use core::ffi::{CStr, c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use core::ptr;
@@ -351,6 +358,57 @@ pub struct QueryPointerReply {
     pub mask: u16,
     /// Padding.
     pub pad0: [u8; 2],
+}
+
+/// `xcb_xkb_use_extension_reply_t`.
+///
+/// XKB requires every client to announce itself with `UseExtension` before any
+/// other XKB request; one that skips it gets a `BadAccess` on the next one.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct XkbUseExtensionReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// Whether the server will speak the version that was asked for. **Zero is
+    /// a successful reply saying no**, which is why this is read rather than
+    /// the reply merely being checked for null.
+    pub supported: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length.
+    pub length: u32,
+    /// The version the server offers.
+    pub server_major: u16,
+    /// See [`server_major`](Self::server_major).
+    pub server_minor: u16,
+    /// Padding.
+    pub pad0: [u8; 20],
+}
+
+/// `xcb_xkb_per_client_flags_reply_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct XkbPerClientFlagsReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// The device the flags apply to.
+    pub device_id: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length.
+    pub length: u32,
+    /// Which flags this server implements at all.
+    pub supported: u32,
+    /// Which flags are now **set for this client**. The authority on whether
+    /// the request took effect: a server may reply happily and leave the bit
+    /// clear.
+    pub value: u32,
+    /// Auto-reset controls; unused here.
+    pub auto_ctrls: u32,
+    /// See [`auto_ctrls`](Self::auto_ctrls).
+    pub auto_ctrls_values: u32,
+    /// Padding.
+    pub pad0: [u8; 8],
 }
 
 /// `xcb_get_selection_owner_reply_t`.
@@ -1095,6 +1153,17 @@ pub mod value {
     pub const RANDR_CRTC_CHANGE_MASK: u16 = 1 << 1;
     /// `XCB_RANDR_NOTIFY_MASK_OUTPUT_CHANGE`.
     pub const RANDR_OUTPUT_CHANGE_MASK: u16 = 1 << 2;
+    /// `XCB_XKB_ID_USE_CORE_KBD` — the device spec meaning "whichever keyboard
+    /// the core protocol is reporting", which is the one core `KeyPress` events
+    /// come from and therefore the only one this backend has an opinion about.
+    pub const XKB_USE_CORE_KBD: u16 = 0x0100;
+    /// `XCB_XKB_PER_CLIENT_FLAG_DETECTABLE_AUTO_REPEAT`.
+    pub const XKB_DETECTABLE_AUTO_REPEAT: u32 = 1;
+    /// The XKB version this backend asks for. 1.0 is the version that defined
+    /// `XkbPerClientFlags`, so anything newer also has it.
+    pub const XKB_MAJOR: u16 = 1;
+    /// See [`XKB_MAJOR`](Self::XKB_MAJOR).
+    pub const XKB_MINOR: u16 = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1150,7 +1219,8 @@ mod prototype {
         GetPropertyReply, GetSelectionOwnerReply, GrabPointerReply, InternAtomReply,
         QueryExtensionReply, QueryPointerReply, RandrCrtcInfoReply, RandrOutputInfoReply,
         RandrOutputPrimaryReply, RandrQueryVersionReply, RandrScreenResourcesReply, ScreenIterator,
-        Setup, TranslateCoordinatesReply, XiEventMask, XiQueryVersionReply, c_char, c_int, c_void,
+        Setup, TranslateCoordinatesReply, XiEventMask, XiQueryVersionReply, XkbPerClientFlagsReply,
+        XkbUseExtensionReply, c_char, c_int, c_void,
     };
 
     /// `xcb_connection_t *xcb_connect(const char *displayname, int *screenp)`
@@ -1331,6 +1401,28 @@ mod prototype {
     /// `xcb_void_cookie_t xcb_free_pixmap(xcb_connection_t *, xcb_pixmap_t)`,
     /// and `xcb_free_cursor`, which is the same shape.
     pub type FreeResource = unsafe extern "C" fn(*mut Connection, u32) -> Cookie;
+
+    /// `xcb_xkb_use_extension_cookie_t xcb_xkb_use_extension(
+    /// xcb_connection_t *, uint16_t wantedMajor, uint16_t wantedMinor)`
+    pub type XkbUseExtension = unsafe extern "C" fn(*mut Connection, u16, u16) -> Cookie;
+    /// `xcb_xkb_use_extension_reply_t *xcb_xkb_use_extension_reply(…)`
+    pub type XkbUseExtensionReplyFn = unsafe extern "C" fn(
+        *mut Connection,
+        Cookie,
+        *mut *mut GenericError,
+    ) -> *mut XkbUseExtensionReply;
+    /// `xcb_xkb_per_client_flags_cookie_t xcb_xkb_per_client_flags(
+    /// xcb_connection_t *, xcb_xkb_device_spec_t deviceSpec, uint32_t change,
+    /// uint32_t value, uint32_t ctrlsToChange, uint32_t autoCtrls,
+    /// uint32_t autoCtrlsValues)`
+    pub type XkbPerClientFlags =
+        unsafe extern "C" fn(*mut Connection, u16, u32, u32, u32, u32, u32) -> Cookie;
+    /// `xcb_xkb_per_client_flags_reply_t *xcb_xkb_per_client_flags_reply(…)`
+    pub type XkbPerClientFlagsReplyFn = unsafe extern "C" fn(
+        *mut Connection,
+        Cookie,
+        *mut *mut GenericError,
+    ) -> *mut XkbPerClientFlagsReply;
 
     /// `xcb_randr_query_version_cookie_t xcb_randr_query_version(
     /// xcb_connection_t *, uint32_t major, uint32_t minor)`
@@ -1517,6 +1609,24 @@ impl core::fmt::Debug for XiLib {
     }
 }
 
+/// libxcb-xkb, when it is there. See [`RandrLib`].
+///
+/// Two requests, for one purpose: turning on detectable auto-repeat. No
+/// extension descriptor is held because neither entry point needs one from the
+/// caller — libxcb resolves `xcb_xkb_id` internally.
+pub struct XkbLib {
+    pub use_extension: prototype::XkbUseExtension,
+    pub use_extension_reply: prototype::XkbUseExtensionReplyFn,
+    pub per_client_flags: prototype::XkbPerClientFlags,
+    pub per_client_flags_reply: prototype::XkbPerClientFlagsReplyFn,
+}
+
+impl core::fmt::Debug for XkbLib {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("XkbLib(libxcb-xkb)")
+    }
+}
+
 /// Which optional extension libraries loaded.
 #[derive(Debug)]
 pub struct Ext {
@@ -1524,6 +1634,9 @@ pub struct Ext {
     pub randr: Option<&'static RandrLib>,
     /// XInput 2, or `None` — then there is no unaccelerated pointer motion.
     pub xi: Option<&'static XiLib>,
+    /// XKB, or `None` — then auto-repeat is recognized by the lookahead in
+    /// [`input`](super::input), which a split socket read can defeat.
+    pub xkb: Option<&'static XkbLib>,
 }
 
 /// The sonames tried, in order.
@@ -1536,10 +1649,13 @@ const SONAMES: [&CStr; 2] = [c"libxcb.so.1", c"libxcb.so"];
 const RANDR_SONAMES: [&CStr; 2] = [c"libxcb-randr.so.0", c"libxcb-randr.so"];
 /// As [`SONAMES`], for libxcb-xinput.
 const XI_SONAMES: [&CStr; 2] = [c"libxcb-xinput.so.0", c"libxcb-xinput.so"];
+/// As [`SONAMES`], for libxcb-xkb.
+const XKB_SONAMES: [&CStr; 2] = [c"libxcb-xkb.so.1", c"libxcb-xkb.so"];
 
 static LIB: OnceLock<Result<Lib, String>> = OnceLock::new();
 static RANDR: OnceLock<Option<RandrLib>> = OnceLock::new();
 static XI: OnceLock<Option<XiLib>> = OnceLock::new();
+static XKB: OnceLock<Option<XkbLib>> = OnceLock::new();
 
 /// The `xcb_extension_t*` an [`Ext`] entry holds, as libxcb wants it.
 ///
@@ -1577,6 +1693,7 @@ pub fn load_ext() -> Ext {
     Ext {
         randr: RANDR.get_or_init(load_randr).as_ref(),
         xi: XI.get_or_init(load_xi).as_ref(),
+        xkb: XKB.get_or_init(load_xkb).as_ref(),
     }
 }
 
@@ -1820,6 +1937,44 @@ fn load_xi() -> Option<XiLib> {
     })
 }
 
+fn load_xkb() -> Option<XkbLib> {
+    let handle = open_library(&XKB_SONAMES);
+    if handle.is_null() {
+        log::warn!(
+            "libxcb-xkb is not available: auto-repeat falls back to the release/press \
+             lookahead, which misreads a repeat whose two halves arrive in different reads"
+        );
+        return None;
+    }
+    /// Resolves one symbol or gives up on the whole extension.
+    macro_rules! symbol {
+        ($name:literal, $ty:ty) => {{
+            // SAFETY: `handle` is a live `dlopen` handle and the name is a
+            // NUL-terminated literal.
+            let raw = unsafe { dlsym(handle, concat!($name, "\0").as_ptr().cast()) };
+            if raw.is_null() {
+                log::warn!("libxcb-xkb has no symbol {}; degrading", $name);
+                return None;
+            }
+            // SAFETY: `$ty` is the prototype `xcb/xkb.h` declares for this
+            // symbol.
+            unsafe { core::mem::transmute::<*mut c_void, $ty>(raw) }
+        }};
+    }
+    Some(XkbLib {
+        use_extension: symbol!("xcb_xkb_use_extension", prototype::XkbUseExtension),
+        use_extension_reply: symbol!(
+            "xcb_xkb_use_extension_reply",
+            prototype::XkbUseExtensionReplyFn
+        ),
+        per_client_flags: symbol!("xcb_xkb_per_client_flags", prototype::XkbPerClientFlags),
+        per_client_flags_reply: symbol!(
+            "xcb_xkb_per_client_flags_reply",
+            prototype::XkbPerClientFlagsReplyFn
+        ),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1901,6 +2056,8 @@ mod tests {
         assert_eq!(size_of::<QueryPointerReply>(), 28);
         assert_eq!(size_of::<TranslateCoordinatesReply>(), 16);
         assert_eq!(size_of::<GetSelectionOwnerReply>(), 12);
+        assert_eq!(size_of::<XkbUseExtensionReply>(), 32);
+        assert_eq!(size_of::<XkbPerClientFlagsReply>(), 32);
         assert_eq!(size_of::<InternAtomReply>(), 12);
         assert_eq!(size_of::<GrabPointerReply>(), 8);
         assert_eq!(size_of::<QueryExtensionReply>(), 12);

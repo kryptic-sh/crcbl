@@ -113,12 +113,16 @@
 //! the user is tapping the key very fast. A repeat is a `KeyPress` whose
 //! keycode is already held, and [`ShellEvent::Key`] carries
 //! [`repeat: true`](ShellEvent::Key) for it. The intervening `KeyRelease` is
-//! **suppressed**, because it is not a release — the key is still down, and
+//! **not delivered**, because it is not a release — the key is still down, and
 //! forwarding it would make a jump button fire on every repeat interval.
-//! Detecting that is a one-event lookahead: a `KeyRelease` immediately followed
-//! by a `KeyPress` of the same keycode at the same timestamp is a repeat pair,
-//! which is the standard test and the only one that works without querying the
-//! server's auto-repeat state.
+//!
+//! Getting it not to arrive at all is
+//! [`Conn::setup_detectable_auto_repeat`], one XKB request at connect time.
+//! The alternative every toolkit reaches for first — a one-event lookahead for
+//! a `KeyRelease`/`KeyPress` pair at the same timestamp — is kept in
+//! [`input`] as the fallback, and is documented there as unsound on its own:
+//! the two halves are not guaranteed to be read together, and under load they
+//! are not.
 
 mod atoms;
 pub mod ffi;
@@ -340,6 +344,13 @@ struct Conn {
     randr_event_base: Option<u8>,
     /// XInput's major opcode, or `None`.
     xi_opcode: Option<u8>,
+    /// Whether the server agreed to stop faking a `KeyRelease` in front of
+    /// every auto-repeat; see
+    /// [`setup_detectable_auto_repeat`](Self::setup_detectable_auto_repeat).
+    ///
+    /// Read by [`input`] to decide *how* a repeat is recognized, never whether
+    /// one is: the flag on [`ShellEvent::Key`] is set either way.
+    detectable_auto_repeat: bool,
 }
 
 impl core::fmt::Debug for Conn {
@@ -734,9 +745,11 @@ impl X11Shell {
             max_property_bytes: selection::max_property_bytes(max_request_length),
             randr_event_base: None,
             xi_opcode: None,
+            detectable_auto_repeat: false,
         };
         conn.randr_event_base = conn.setup_randr();
         conn.xi_opcode = conn.setup_xinput2();
+        conn.detectable_auto_repeat = conn.setup_detectable_auto_repeat();
 
         // SAFETY: the connection is live; libxkbcommon-x11 round-trips on it
         // and this shell is not `Send`, so nothing else can be using it.

@@ -45,6 +45,21 @@ mod evdev {
 /// waiting for and what it saw — rather than by a SIGKILL with no context.
 const WAIT: Duration = Duration::from_secs(10);
 
+/// The most any single [`Session::pump`] may take before the frame loop is
+/// judged to have blocked.
+///
+/// **Not a performance budget**, and it cannot be one: under contention this
+/// process can be descheduled in the middle of a `pump` for as long as the
+/// scheduler likes, and that says nothing whatever about the backend. What it
+/// still catches is the failure it was written for — a `pump` that *waits on a
+/// peer* is not late by a scheduling quantum, it is late by the whole
+/// conversation: the stalled-transfer deadline, or every pipe-full of a 512 KiB
+/// paste.
+///
+/// The same constant, for the same reasons, as the X11 suite's `SLOWEST_PUMP`;
+/// the two backends must not disagree about what "the loop kept running" means.
+const SLOWEST_PUMP: Duration = Duration::from_millis(1_500);
+
 /// The `app_id` the sway config matches on to float the window. Changing it
 /// here without changing `wayland-e2e-sway.conf` makes the borderless test
 /// vacuous, since a tiled window already fills the output.
@@ -551,7 +566,12 @@ fn a_close_request_is_a_question_and_keep_really_keeps() {
         "replying twice is a caller state-machine bug, not a no-op"
     );
 
-    // And Close really closes.
+    // And Close really closes. The first `CloseRequested` is still in the list,
+    // and a probe that merely looks for the name would be satisfied by it — so
+    // the wait below would not wait, and `reply_close_request` would be
+    // answering a request the compositor has not sent yet. Clearing first is
+    // what makes the probe demand a *new* one.
+    session.take_names();
     assert!(swaymsg(&[&format!("[app_id=\"{APP_ID}\"]"), "kill"]));
     session.pump_until("a second close request", |session| {
         session.names().contains(&"CloseRequested")
@@ -987,6 +1007,37 @@ fn a_held_key_repeats_and_the_repeats_are_flagged() {
     assert_eq!(real[0].3, ButtonState::Pressed);
     assert_eq!(real[1].3, ButtonState::Released);
 
+    // The key timestamps rise monotonically and are spaced by the compositor's
+    // rate, not quantized to whenever `pump` happened to run.
+    //
+    // Collected *before* the clear below, which is the repeat sequence this is
+    // about. Reading them after it — as this did — left the list empty and the
+    // `windows(2)` check vacuously true, which reads as coverage and is not.
+    //
+    // Over `Key` events specifically, and that is not a narrowing: it is the
+    // claim the comment above has always made. Mixing kinds does not test it,
+    // because `wl_keyboard.key` carries a **millisecond** and `wl_pointer.enter`
+    // carries no timestamp at all, so the backend stamps the latter from its own
+    // clock at full precision. Two events in the same millisecond then order
+    // either way — a truncation artefact of the protocol rather than anything
+    // the backend chose, and an assertion that failed on it would be reporting
+    // Wayland's units as a defect.
+    let times: Vec<Duration> = session
+        .events
+        .iter()
+        .filter(|event| matches!(event, ShellEvent::Key { .. }))
+        .filter_map(|event| event.time().map(crcbl_shell::EventTime::as_duration))
+        .collect();
+    assert!(
+        times.len() > repeats.len(),
+        "every repeat carried a timestamp, and so did the press and release \
+         around them: {times:?}"
+    );
+    assert!(
+        times.windows(2).all(|pair| pair[1] >= pair[0]),
+        "timestamps never go backwards: {times:?}"
+    );
+
     // And repeats stop on release rather than running forever.
     session.events.clear();
     session.settle(Duration::from_millis(300));
@@ -994,18 +1045,6 @@ fn a_held_key_repeats_and_the_repeats_are_flagged() {
         session.keys().is_empty(),
         "the release stopped the repeat: {:?}",
         session.keys()
-    );
-
-    // Timestamps rise monotonically and are spaced by the compositor's rate,
-    // not quantized to whenever `pump` happened to run.
-    let times: Vec<Duration> = session
-        .events
-        .iter()
-        .filter_map(|event| event.time().map(crcbl_shell::EventTime::as_duration))
-        .collect();
-    assert!(
-        times.windows(2).all(|pair| pair[1] >= pair[0]),
-        "timestamps never go backwards: {times:?}"
     );
 
     drop(input);
@@ -1993,7 +2032,7 @@ fn a_peer_that_never_writes_does_not_block_the_event_loop() {
         session.shell.wait_events(Some(Duration::from_millis(20)));
     }
     assert!(
-        session.slowest_pump < Duration::from_millis(250),
+        session.slowest_pump < SLOWEST_PUMP,
         "no single pump may wait on the peer; the slowest took {:?}",
         session.slowest_pump
     );
@@ -2153,7 +2192,7 @@ fn a_client_can_paste_its_own_selection_without_deadlocking() {
     assert_eq!(data, payload.as_bytes());
     assert!(mime.matches(crcbl_shell::MimeType::TextUtf8));
     assert!(
-        session.slowest_pump < Duration::from_millis(500),
+        session.slowest_pump < SLOWEST_PUMP,
         "no single pump may stall on the transfer; the slowest took {:?}",
         session.slowest_pump
     );
