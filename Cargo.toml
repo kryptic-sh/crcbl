@@ -46,6 +46,7 @@ crcbl-ecs = { path = "crates/crcbl-ecs", version = "0.1.0" }
 crcbl-net = { path = "crates/crcbl-net", version = "0.1.0" }
 crcbl-server = { path = "crates/crcbl-server", version = "0.1.0" }
 crcbl-vk = { path = "crates/crcbl-vk", version = "0.1.0" }
+crcbl-input = { path = "crates/crcbl-input", version = "0.1.0" }
 crcbl-wl-scanner = { path = "crates/crcbl-wl-scanner", version = "0.1.0" }
 
 [workspace.lints.rust]

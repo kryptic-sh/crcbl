@@ -127,6 +127,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-input"
+version = "0.1.0"
+dependencies = [
+ "crcbl-core",
+]
+
+[[package]]
 name = "crcbl-net"
 version = "0.1.0"
 dependencies = [

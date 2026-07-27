@@ -1,0 +1,13 @@
+[package]
+name = "crcbl-input"
+description = "Crucible input system: action mapping, patterns, contexts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+crcbl-core = { workspace = true }
+
+[lints]
+workspace = true
