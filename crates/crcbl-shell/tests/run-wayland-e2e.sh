@@ -136,7 +136,14 @@ fi
 
 # The trap `docs/plan/12-testing.md` names by name: a job that skips everything
 # and reports success is worse than no job. `Summary [ 0.1s] 7 tests run: …`
-RAN="$(grep -Eo '[0-9]+ tests? run' "$OUTPUT" | tail -1 | grep -Eo '^[0-9]+' || true)"
+#
+# Parse a colour-stripped copy: CI sets `CARGO_TERM_COLOR: always`, so nextest
+# emits the count as `\e[1m10\e[0m tests run` and a plain-text match sees no
+# digits next to "tests run". That is how this guard first fired — on a run
+# where all ten tests had in fact passed.
+PLAIN="${RUNTIME_DIR}/nextest.plain.log"
+sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$OUTPUT" >"$PLAIN"
+RAN="$(grep -Eo '[0-9]+ tests? run' "$PLAIN" | tail -1 | grep -Eo '^[0-9]+' || true)"
 if [ -z "$RAN" ] || [ "$RAN" -eq 0 ]; then
     echo "crcbl e2e: the suite reported no tests run — the gate is not gating" >&2
     log_tail
