@@ -229,7 +229,15 @@ struct TimeBase {
     epoch_nanos: u64,
     /// `CLOCK_MONOTONIC` nanoseconds that server-millisecond zero corresponds
     /// to, once an event has been seen. `None` until then.
-    server_origin_nanos: Option<u64>,
+    ///
+    /// **Signed on purpose.** The server's clock counts from *its* start, on a
+    /// machine that may not be this one, so millisecond zero can easily fall
+    /// before this machine booted — an X server up longer than we have been is
+    /// the ordinary remote-display case, and a freshly booted machine makes it
+    /// the ordinary local case too. Unsigned arithmetic here saturates to zero
+    /// and forwards every event by the difference; CI caught exactly that,
+    /// reporting an event 3950s in the future on a runner with 49s of uptime.
+    server_origin_nanos: Option<i128>,
     /// The widest server timestamp seen so far, for wrap detection.
     high_water_millis: u64,
 }
@@ -272,17 +280,31 @@ impl TimeBase {
 
     /// This base applied to a server millisecond timestamp.
     fn event_time(&mut self, server_millis: u32) -> EventTime {
-        let now = ffi::monotonic_nanos();
+        self.event_time_at(ffi::monotonic_nanos(), server_millis)
+    }
+
+    /// [`event_time`](Self::event_time) with the clock passed in.
+    ///
+    /// Split out so calibration is testable without depending on this
+    /// machine's uptime — the bug this shape prevents only appeared on a host
+    /// whose `CLOCK_MONOTONIC` was smaller than the server's timestamp, which
+    /// is not something a test can arrange by reading the real clock. Same rule
+    /// as `crcbl-core`'s `TimeSource`: nothing reads a clock where a test needs
+    /// to drive it.
+    fn event_time_at(&mut self, now_nanos: u64, server_millis: u32) -> EventTime {
         let widened = Self::widen(self.high_water_millis, server_millis);
         self.high_water_millis = self.high_water_millis.max(widened);
-        let origin = *self.server_origin_nanos.get_or_insert_with(|| {
+        let server_nanos = i128::from(widened) * 1_000_000;
+        let origin = *self
+            .server_origin_nanos
             // Calibration: this event happened *now*, so millisecond zero was
-            // `widened` milliseconds ago.
-            now.saturating_sub(widened.saturating_mul(1_000_000))
-        });
-        let absolute = origin.saturating_add(widened.saturating_mul(1_000_000));
+            // `widened` milliseconds ago — possibly before this machine booted.
+            .get_or_insert_with(|| i128::from(now_nanos) - server_nanos);
+        let since_epoch = origin + server_nanos - i128::from(self.epoch_nanos);
+        // An event before the epoch reads as the epoch: `EventTime` is a
+        // duration since it, and there is no such thing as a negative one.
         EventTime::from_duration(Duration::from_nanos(
-            absolute.saturating_sub(self.epoch_nanos),
+            u64::try_from(since_epoch.max(0)).unwrap_or(u64::MAX),
         ))
     }
 }
@@ -857,26 +879,70 @@ mod xselection;
 mod tests {
     use super::*;
 
+    /// A `TimeBase` whose epoch is `uptime_nanos`, as if the shell had been
+    /// created at that point on this machine's monotonic clock.
+    fn base_at(uptime_nanos: u64) -> TimeBase {
+        TimeBase {
+            epoch_nanos: uptime_nanos,
+            server_origin_nanos: None,
+            high_water_millis: 0,
+        }
+    }
+
     #[test]
     fn the_server_clock_is_calibrated_on_the_first_event_and_not_before() {
         // The X11-specific problem: server milliseconds count from an origin
         // this process has never read. Calibration makes the *first* event read
         // as "now", and everything after it is exact relative to that.
-        // The engine epoch is a `CLOCK_MONOTONIC` reading, as `TimeBase::now`
-        // takes it — not zero, which would be the machine's boot.
-        let mut base = TimeBase::now();
+        let mut base = base_at(9_000_000_000_000);
         assert_eq!(base.server_origin_nanos, None, "nothing to calibrate from");
-        let first = base.event_time(4_000_000);
+        // The shell was created 3s ago; the server says 4000s.
+        let first = base.event_time_at(9_003_000_000_000, 4_000_000);
         assert!(
             base.server_origin_nanos.is_some(),
             "the first timestamp calibrates"
         );
-        // A server that has been up 4000 seconds must not report an event as
-        // having happened 4000 seconds after the engine started.
-        assert!(
-            first.as_duration() < Duration::from_secs(10),
+        assert_eq!(
+            first.as_duration(),
+            Duration::from_secs(3),
+            "the first event reads as now, not as the server's uptime"
+        );
+    }
+
+    #[test]
+    fn a_server_clock_ahead_of_this_machines_uptime_still_calibrates() {
+        // The case CI caught and a local run could not: a host booted 49s ago
+        // talking to a server that has been up 4000s — ordinary for a remote
+        // display, and ordinary locally on a fresh machine. Millisecond zero
+        // then falls ~3951s before this machine booted, which is only
+        // representable because the origin is signed. The unsigned form
+        // saturated to zero and reported the event 3950.86s in the future.
+        let mut base = base_at(49_000_000_000);
+        let first = base.event_time_at(49_500_000_000, 4_000_000);
+        assert_eq!(
+            first.as_duration(),
+            Duration::from_millis(500),
             "calibrated, not forwarded: {first:?}"
         );
+        assert!(
+            base.server_origin_nanos.expect("calibrated") < 0,
+            "millisecond zero predates this machine's boot"
+        );
+    }
+
+    #[test]
+    fn an_event_stamped_before_the_epoch_reads_as_the_epoch() {
+        // Alignment can move the epoch forward past an already-calibrated
+        // origin. `EventTime` is a duration since the epoch, so there is no
+        // negative to report; clamping is the honest answer and is what the
+        // Wayland backend's pre-epoch case already does.
+        let mut base = TimeBase {
+            epoch_nanos: 10_000_000_000,
+            server_origin_nanos: Some(0),
+            high_water_millis: 0,
+        };
+        let early = base.event_time_at(10_000_000_000, 1_000);
+        assert_eq!(early.as_duration(), Duration::ZERO);
     }
 
     #[test]
