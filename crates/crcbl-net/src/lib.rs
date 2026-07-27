@@ -15,13 +15,19 @@
 //!   for the server → client snapshot path.
 
 pub mod condition;
+pub mod delta;
+pub mod handshake;
 pub mod messages;
+pub mod session;
 pub mod transport;
 pub mod types;
 
 pub use condition::{ConditionSimulator, SimConditions};
+pub use delta::{Baseline, BaselineStore};
+pub use handshake::{HandshakeGate, HandshakeResult, Hello, RejectReason};
 pub use messages::{
     ClientToServer, ServerToClient, SnapshotReader, SnapshotWriter, SystemSnapshot,
 };
+pub use session::{SessionConfig, SessionManager, SessionState};
 pub use transport::{InMemoryTransport, Message, MessageKind, Transport, TransportError};
 pub use types::{EntityBits, EntityData, SectorId, SessionId};
