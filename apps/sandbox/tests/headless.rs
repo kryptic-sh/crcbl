@@ -19,6 +19,23 @@ fn sandbox(args: &[&str]) -> Output {
         .expect("the sandbox binary runs")
 }
 
+/// The sandbox with the null GPU backend pinned.
+///
+/// These tests are about the *loop* — frame and tick counts, exit codes,
+/// determinism — none of which involve a GPU. Auto-selection deliberately
+/// refuses to fall through to `null` (`crcbl::backend`: a game that silently
+/// rendered nothing is worse than one that failed), so a machine without a
+/// usable Vulkan driver has no auto-selectable backend at all. That is every
+/// macOS and Windows runner, and the Linux `test` job, which installs no ICD.
+/// Pinning the backend is what makes these assertions mean the same thing on
+/// all three platforms; real Vulkan is covered by `run-vk-e2e.sh` and by the
+/// two shell harnesses, which run against an ICD on purpose.
+fn sandbox_null(args: &[&str]) -> Output {
+    let mut argv = vec!["--backend", "null"];
+    argv.extend_from_slice(args);
+    sandbox(&argv)
+}
+
 fn code(output: &Output) -> i32 {
     output.status.code().expect("not killed by a signal")
 }
@@ -31,7 +48,7 @@ fn stdout(output: &Output) -> String {
 /// did.
 #[test]
 fn a_headless_run_exits_zero_with_a_summary() {
-    let output = sandbox(&["--headless", "--frames", "24"]);
+    let output = sandbox_null(&["--headless", "--frames", "24"]);
     assert_eq!(
         code(&output),
         0,
@@ -50,8 +67,8 @@ fn a_headless_run_exits_zero_with_a_summary() {
 /// the loop ever started reading the wall clock in headless mode.
 #[test]
 fn two_headless_runs_produce_identical_output() {
-    let first = sandbox(&["--headless", "--frames", "24"]);
-    let second = sandbox(&["--headless", "--frames", "24"]);
+    let first = sandbox_null(&["--headless", "--frames", "24"]);
+    let second = sandbox_null(&["--headless", "--frames", "24"]);
     assert_eq!(stdout(&first), stdout(&second));
     // 24 frames of 1/60 s, the first of which only establishes the clock's
     // baseline: 23 ticks at the default 60 Hz.
@@ -62,7 +79,7 @@ fn two_headless_runs_produce_identical_output() {
 /// end, because nothing will ever close a window that does not exist.
 #[test]
 fn headless_terminates_without_being_given_a_budget() {
-    let output = sandbox(&["--headless"]);
+    let output = sandbox_null(&["--headless"]);
     assert_eq!(code(&output), 0);
     assert!(
         stdout(&output).contains("120 frames"),
@@ -88,7 +105,7 @@ fn a_bad_invocation_exits_two_and_help_exits_zero() {
 /// frame rate — the property a fixed-timestep accumulator exists to have.
 #[test]
 fn the_tick_rate_changes_ticks_and_not_frames() {
-    let output = sandbox(&["--headless", "--frames", "62", "--tick-hz", "30"]);
+    let output = sandbox_null(&["--headless", "--frames", "62", "--tick-hz", "30"]);
     assert_eq!(code(&output), 0);
     let summary = stdout(&output);
     assert!(summary.contains("62 frames"), "{summary}");
