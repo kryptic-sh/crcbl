@@ -96,6 +96,74 @@ passes with no Vulkan driver present at all, and the shell suites pass under
 - The seam does **not** freeze until P5 exit, when a second backend
   (`crcbl-wgpu`) implements it. Changes before then are expected and cheap.
 
+### How work proceeds (read this before starting a phase)
+
+Phases are cut into **slices** small enough to review in one sitting. Each slice
+is a branch, verified in full, merged fast-forward into `main`, pushed, and
+watched through CI before the next one starts. A slice is not done when it
+compiles; it is done when the gates below are green and CI agrees.
+
+**The gates.** Every one of these must pass before a merge, and CI runs all of
+them:
+
+```
+cargo build --workspace --locked
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo nextest run --workspace --all-features --locked
+cargo test --doc --workspace --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+cargo machete
+cargo deny --all-features check
+```
+
+**The e2e harnesses.** These need real display servers or a GPU, so they are
+feature-gated and `#[ignore]`d — a plain `nextest` run skips them, which is why
+each has a script that sets the environment up and **fails if zero tests ran**:
+
+| Harness                                       | What it needs        | Tests |
+| --------------------------------------------- | -------------------- | ----- |
+| `crates/crcbl-shell/tests/run-wayland-e2e.sh` | nested headless sway | 33    |
+| `crates/crcbl-shell/tests/run-x11-e2e.sh`     | Xvfb                 | 29    |
+| `crates/crcbl-vk/tests/run-vk-e2e.sh`         | any Vulkan ICD       | 26    |
+| `crates/crcbl-cli/tests/run-cli-e2e.sh`       | nothing              | 1     |
+
+**Two runs that are not optional**, because both have caught bugs a normal run
+could not:
+
+```
+# No GPU at all — the plain `test (linux)`, macOS and Windows CI condition.
+VK_ICD_FILENAMES=/nonexistent.json cargo nextest run --workspace --all-features --locked
+
+# Under contention — a shared CI runner is far slower than a dev box.
+for i in $(seq 1 32); do (while :; do :; done) & done
+./crates/crcbl-shell/tests/run-x11-e2e.sh
+jobs -p | xargs -r kill
+```
+
+**Lessons this project has already paid for.** Each of these was a real CI
+failure that a green local run had reported as fine:
+
+- **The dev machine is the unusual one.** A long uptime hid a signed-arithmetic
+  bug in the X11 event clock; a local GPU hid a missing-ICD failure; a Linux
+  checkout hid a CRLF hash mismatch on Windows. If a test can only fail on a
+  machine unlike this one, it is not yet a test.
+- **A check that cannot run is not a check.** Sync validation was enabled for
+  two phases without actually being on; a golden gate conditional on an optional
+  shader compiler would have run nowhere; a test-count guard silently matched
+  nothing because CI colours its output. Verify the checker, not just the code —
+  the pattern is to break the thing deliberately and confirm the test notices.
+- **A flaky test is a bug.** `.config/nextest.toml` says so and CI adds no
+  retries. Two "flakes" turned out to be a phantom key-release under load and a
+  missing cross-frame barrier.
+- **Poll for the condition, never sleep**, and demand a _new_ event rather than
+  accepting a stale one. Both harnesses do this; new tests must too.
+
+**Conventions.** Conventional Commits; stage explicit paths, never `git add -A`
+blindly; nothing above `crcbl-hal` may name a Vulkan type; every `unsafe` block
+carries a `SAFETY:` comment naming its invariant; and a seam gap found mid-slice
+gets recorded in the relevant crate's docs rather than worked around silently.
+
 ## Phase table
 
 | Phase     | Build                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | From stage        | Gate / deliverable                                                                 |
