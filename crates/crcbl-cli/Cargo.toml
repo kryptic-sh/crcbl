@@ -1,0 +1,16 @@
+[package]
+name = "crcbl-cli"
+description = "Crucible headless control CLI — the `crcbl` binary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The package is `crcbl-cli` so it does not collide with the `crcbl` umbrella
+# library package; the shipped binary is still `crcbl`.
+[[bin]]
+name = "crcbl"
+path = "src/main.rs"
+
+[lints]
+workspace = true

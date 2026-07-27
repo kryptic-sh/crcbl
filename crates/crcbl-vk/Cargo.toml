@@ -1,0 +1,10 @@
+[package]
+name = "crcbl-vk"
+description = "Crucible Vulkan backend (ash) implementing the HAL seam"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

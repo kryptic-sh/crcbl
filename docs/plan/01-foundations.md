@@ -99,10 +99,13 @@ seam compiles as a trait object / generic and nothing leaks backend types.
 ### 1.4 Window + event loop (`crcbl-shell`, topic 15)
 
 - From-scratch windowing: shell trait + own Wayland wire-protocol backend (wayr
-  as donor) + own X11 backend. Zero third-party code — OS boundary only. Two
-  display modes only — windowed (freeform or aspect-locked) and borderless
-  (render-scale handled by the renderer). See
-  [15-windowing.md](15-windowing.md).
+  as donor) + own X11 backend. **Bindings, not frameworks**: no framework owns
+  policy (winit/SDL/GLFW are rejected), but libwayland-client / libxcb are
+  linked for the connection and proxy objects, because Vulkan WSI requires a
+  real `wl_display*` / `xcb_connection_t*` by ABI — protocol selection, event
+  loop, window lifecycle, DPI, input and modes are all ours. Two display modes
+  only — windowed (freeform or aspect-locked) and borderless (render-scale
+  handled by the renderer). See [15-windowing.md](15-windowing.md).
 - `apps/sandbox`: shell window, event loop, raw surface handle plumbed to where
   the HAL surface will be created. `HeadlessShell` for CI.
 - Input event normalization into engine types (`crcbl-core::input`): keyboard,

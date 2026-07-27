@@ -1,1 +1,10 @@
 /target
+
+# cargo-llvm-cov report output (nextest/JUnit output already lives in /target)
+/lcov.info
+/coverage/
+
+# Cargo.lock is committed: this workspace ships binaries (`crcbl`, `sandbox`)
+# and CI builds with `--locked`. Un-ignore it explicitly — a global
+# `core.excludesFile` with `*.lock` would otherwise hide it.
+!Cargo.lock

@@ -1,0 +1,20 @@
+# cargo-nextest configuration — https://nexte.st/docs/configuration/
+
+[profile.default]
+retries = 0
+fail-fast = true
+failure-output = "immediate"
+status-level = "pass"
+
+# Used by CI: never retry (a flaky test is a bug, not a retry candidate), run
+# the whole suite so one failure does not mask the rest, and emit JUnit XML for
+# the test-report artifact.
+[profile.ci]
+retries = 0
+fail-fast = false
+failure-output = "immediate-final"
+status-level = "skip"
+final-status-level = "flaky"
+
+[profile.ci.junit]
+path = "junit.xml"

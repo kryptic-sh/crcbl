@@ -1,0 +1,21 @@
+# Normalize line endings for text files; Git decides what is text.
+* text=auto
+
+# Binary assets: never diffed or line-ending-mangled as text.
+*.png  binary
+*.ktx2 binary
+*.bin  binary
+*.gltf binary
+*.glb  binary
+*.wav  binary
+*.qoa  binary
+*.spv  binary
+
+# Git LFS is deliberately NOT enabled yet. Everything binary through P8 is small
+# (golden images are a few KB and get re-blessed often, which LFS handles worse
+# than plain Git), and an `filter=lfs` line breaks `git commit` outright on any
+# clone without the git-lfs binary installed. LFS turns on when the P9 glTF
+# corpus lands — and when it does, every `actions/checkout` step in CI must gain
+# `lfs: true` in the same commit, or CI silently tests against pointer files.
+#
+#   *.glb filter=lfs diff=lfs merge=lfs -text

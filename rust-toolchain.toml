@@ -1,0 +1,8 @@
+# CI installs the same toolchain from this file, so local and CI never drift.
+# `llvm-tools-preview` is deliberately NOT listed: only the coverage job needs
+# it, and demanding it from every local `cargo` invocation forces a rustup
+# component install on contributors who never run coverage. The CI coverage
+# job requests it explicitly instead.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

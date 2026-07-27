@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny --all-features check
+
+  # Linux is the developer's daily driver, so it carries the full gate.
+  test-linux:
+    name: test (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --workspace --all-features --locked --profile ci
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-linux
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
+  # Development happens on Linux only: macOS and Windows code paths are
+  # validated *exclusively* here, so these jobs are load-bearing from day one
+  # and must stay green even while the platform crates are empty.
+  test-cross-platform:
+    name: build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - run: cargo build --workspace --locked
+      # Clippy runs here too, not just on Linux: `cfg`-gated platform code is
+      # invisible to the Linux lint pass, so a macOS/Windows-only backend would
+      # otherwise never be linted at all.
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo nextest run --workspace --all-features --locked --profile ci
+
+  coverage:
+    name: coverage (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # Not in rust-toolchain.toml — see the comment there.
+          components: llvm-tools-preview
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+      - name: Run tests under instrumentation
+        run: cargo llvm-cov --no-report nextest --workspace --all-features --locked
+      - name: Generate lcov report
+        run: cargo llvm-cov report --lcov --output-path lcov.info
+      - name: Coverage summary
+        run: cargo llvm-cov report --summary-only
+      # TODO(P1): turn the gate on. `docs/plan/12-testing.md` calls for per-crate
+      # floors (core/phys/net high, backend crates measured but looser). Every
+      # crate is empty in P0, so any threshold here would pass on nothing and
+      # measure nothing — the tooling is wired, the gate is deliberately off.
+      # Enable with `--fail-under-lines <n>` once P1 lands real code.
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: warn

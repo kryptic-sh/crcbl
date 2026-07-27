@@ -1,11 +1,29 @@
-[package]
-name = "crcbl"
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*"]
+
+# `apps/editor` is intentionally absent until the editor phase — there is
+# nothing to put in it yet, and an empty bin crate would only slow every build.
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "Crucible — a cross-platform GPU rendering engine (Vulkan, Metal, DX12) in Rust"
 license = "MIT"
 repository = "https://github.com/kryptic-sh/crcbl"
-keywords = ["gamedev", "graphics", "vulkan", "metal", "dx12"]
-categories = ["game-engines", "graphics", "rendering"]
 
-[dependencies]
+# Shared dependency versions. Add a crate here only in the slice that first uses
+# it — `ash`, `wgpu`, `objc2`, `windows-rs` and friends land with their backends.
+[workspace.dependencies]
+glam = "0.33"
+log = "0.4"
+thiserror = "2.0"
+
+[workspace.lints.rust]
+# Groups need a lower priority than the individual lints beside them, otherwise
+# Cargo cannot order them (clippy::lint_groups_priority).
+rust_2018_idioms = { level = "warn", priority = -1 }
+missing_debug_implementations = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

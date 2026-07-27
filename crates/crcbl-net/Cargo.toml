@@ -1,0 +1,10 @@
+[package]
+name = "crcbl-net"
+description = "Crucible networking: transport seam and replication"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
