@@ -29,7 +29,10 @@ pub use codec::{
     encode_hello, encode_server_to_client,
 };
 pub use condition::{ConditionSimulator, SimConditions};
-pub use delta::{Baseline, BaselineStore};
+pub use delta::{
+    Baseline, BaselineStore, Delta, DeltaCodec, DeltaDecodeError, SystemDelta, decode_delta,
+    encode_delta, hash_encoded,
+};
 pub use handshake::{HandshakeGate, HandshakeResult, Hello, RejectReason};
 pub use messages::{
     ClientToServer, ServerToClient, SnapshotReader, SnapshotWriter, SystemSnapshot,
