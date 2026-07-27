@@ -30,7 +30,7 @@ was intended.
 | ----------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | **P0** — base     | **done**               | `f922ca3`, `3198f7a`, `6dd4b46`, `84af231`, `c058f45`, `bad7186`, `a991e42`, `063fd99`, `421ce69`, `f06e6cd`, `36dd636`, `e094d39` |
 | **P1** — Vulkan   | **done**               | `91fd871`, `236f19b`, `c6dc4a4`, `a54990d`, `dc36d32`, `8a4e303`, `cbd6153`                                                        |
-| **P2** — sim core | not started (P2a next) | —                                                                                                                                  |
+| **P2** — sim core | **P2a done**, P2b next | `7b8efb5` scaffold, `f8e8117` net, `9e55569` ecs, `9d31e2d` input, `2b2e5bd` server/client, `d4d0330` sim harness                  |
 
 ### What exists now
 
@@ -64,11 +64,31 @@ was intended.
 - **`crcbl-cli`** (`new`/`run`/`build`) and **`apps/sandbox`**, which draws a
   reversed-Z lit spinning cube through the graph into an HDR target on both
   Wayland and X11.
+- **`crcbl-ecs`** (P2a): system-owned-array ECS — `World`, `System<T>` (dense
+  SoA + sparse entity→index), `Schedule` (ordered tick sequence), `Inspector`
+  (per-system stats). Entity lifecycle: spawn, deferred despawn, generational
+  sweep across all systems.
+- **`crcbl-net`** (P2a): transport seam and replication protocol — `Transport`
+  trait (reliable/unreliable channels, non-blocking), `InMemoryTransport` (SPSC
+  pair for single-player and tests), `SnapshotWriter`/`SnapshotReader`
+  (per-system snapshot encoding).
+- **`crcbl-input`** (P2a): device-agnostic action system — `ActionMap`
+  (bindings→actions, WASD composite, mouse motion/scroll), `ButtonAction` with
+  just-pressed/just-released edges, `InputTickState` for client→server tick
+  snapshots.
+- **`crcbl-server`** (P2a): authoritative fixed-tick server — drains client
+  inputs, advances the ECS schedule, emits per-tick snapshots over the
+  transport. Headless-runnable; no render dependency.
+- **`crcbl-client`** (P2a): rendering client — sends input each tick, buffers
+  the two most recent snapshots for interpolation, handles snapshot reordering.
+- **`crcbl-sim`** (P2a): determinism harness — runs N ticks of a seed-generated
+  world using `ManualTime`, prints a state hash. Same input → same hash across
+  runs, verified.
 
-**620 unit/integration tests**, plus 26 Vulkan e2e (run on both radv and
-lavapipe), 33 Wayland e2e, 29 X11 e2e and 1 CLI e2e. The whole workspace suite
-passes with no Vulkan driver present at all, and the shell suites pass under
-32-way CPU contention.
+**734 unit/integration tests** (109 new from P2a), plus 26 Vulkan e2e (run on
+both radv and lavapipe), 33 Wayland e2e, 29 X11 e2e and 1 CLI e2e. The whole
+workspace suite passes with no Vulkan driver present at all, and the shell
+suites pass under 32-way CPU contention.
 
 ### Known gaps, carried forward deliberately
 
