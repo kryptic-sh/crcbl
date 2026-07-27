@@ -73,7 +73,7 @@ mod tests {
             data: vec![1, 2, 3],
         };
         let s = format!("{ed:?}");
-        assert!(s.contains("DEADBEEF"));
+        assert!(s.contains("3735928559"));
         assert!(s.contains("1, 2, 3"));
     }
 }
