@@ -13,20 +13,52 @@
 
 use crcbl_wl_scanner::{Options, Source, emit, parse_protocol};
 
-const WAYLAND_XML: &str = include_str!("../../crcbl-shell/wayland-protocols/wayland.xml");
-const XDG_SHELL_XML: &str = include_str!("../../crcbl-shell/wayland-protocols/xdg-shell.xml");
+/// Every XML the shell's `build.rs` feeds the generator outside the
+/// `wayland-e2e` feature, in the same order — so this test pins the file the
+/// build actually produces rather than a subset of it.
+const PROTOCOLS: &[(&str, &str)] = &[
+    (
+        "wayland",
+        include_str!("../../crcbl-shell/wayland-protocols/wayland.xml"),
+    ),
+    (
+        "xdg_shell",
+        include_str!("../../crcbl-shell/wayland-protocols/xdg-shell.xml"),
+    ),
+    (
+        "viewporter",
+        include_str!("../../crcbl-shell/wayland-protocols/viewporter.xml"),
+    ),
+    (
+        "fractional_scale",
+        include_str!("../../crcbl-shell/wayland-protocols/fractional-scale-v1.xml"),
+    ),
+    (
+        "xdg_output",
+        include_str!("../../crcbl-shell/wayland-protocols/xdg-output-unstable-v1.xml"),
+    ),
+    (
+        "xdg_decoration",
+        include_str!("../../crcbl-shell/wayland-protocols/xdg-decoration-unstable-v1.xml"),
+    ),
+    (
+        "relative_pointer",
+        include_str!("../../crcbl-shell/wayland-protocols/relative-pointer-unstable-v1.xml"),
+    ),
+    (
+        "pointer_constraints",
+        include_str!("../../crcbl-shell/wayland-protocols/pointer-constraints-unstable-v1.xml"),
+    ),
+];
 
 fn generated() -> String {
-    let sources = vec![
-        Source {
-            module: "wayland",
-            protocol: parse_protocol(WAYLAND_XML).expect("wayland.xml parses"),
-        },
-        Source {
-            module: "xdg_shell",
-            protocol: parse_protocol(XDG_SHELL_XML).expect("xdg-shell.xml parses"),
-        },
-    ];
+    let sources: Vec<Source<'_>> = PROTOCOLS
+        .iter()
+        .map(|(module, xml)| Source {
+            module,
+            protocol: parse_protocol(xml).unwrap_or_else(|error| panic!("{module}.xml: {error}")),
+        })
+        .collect();
     emit(&sources, &Options::default()).expect("every interface reference resolves")
 }
 
@@ -376,5 +408,177 @@ fn request_wrappers_and_event_decoders_are_generated_for_the_slice_we_need() {
     assert!(
         generated[destroy..destroy + 900].contains("crate::wayland::ffi::MARSHAL_FLAG_DESTROY"),
         "a destructor must marshal with WL_MARSHAL_FLAG_DESTROY"
+    );
+}
+
+/// The protocols P0.5b added, pinned the same way: against
+/// `wayland-scanner private-code` on the same vendored XML.
+///
+/// These are the ones whose type tables are *not* trivial — every one of them
+/// points across a protocol boundary into `wayland.xml` or `xdg-shell.xml`, and
+/// a generator that resolved interfaces per file would emit a `NULL` there. A
+/// `NULL` in a `new_id`'s type slot is not a compile error and not a protocol
+/// error: libwayland encodes the request against the wrong descriptor and the
+/// compositor reads garbage.
+#[test]
+fn the_p05b_protocol_tables_match_wayland_scanner() {
+    let generated = generated();
+    // (message table entry, the `wayland-scanner` line it reproduces)
+    let expected = [
+        // viewporter_types[] = { NULL, NULL, NULL, NULL, &wp_viewport, &wl_surface }
+        (
+            r#"c"get_viewport", c"no", core::ptr::from_ref(&super::TYPES[4])"#,
+            "wp_viewporter.get_viewport",
+        ),
+        (
+            r#"c"set_destination", c"ii", core::ptr::from_ref(&super::TYPES[0])"#,
+            "wp_viewport.set_destination",
+        ),
+        (
+            r#"c"set_source", c"ffff", core::ptr::from_ref(&super::TYPES[0])"#,
+            "wp_viewport.set_source",
+        ),
+        // fractional_scale_v1_types[] = { NULL, &wp_fractional_scale_v1, &wl_surface }
+        (
+            r#"c"get_fractional_scale", c"no", core::ptr::from_ref(&super::TYPES[1])"#,
+            "wp_fractional_scale_manager_v1.get_fractional_scale",
+        ),
+        (
+            r#"c"preferred_scale", c"u", core::ptr::from_ref(&super::TYPES[0])"#,
+            "wp_fractional_scale_v1.preferred_scale",
+        ),
+        // xdg_output_unstable_v1_types[] = { NULL, NULL, &zxdg_output_v1, &wl_output }
+        (
+            r#"c"get_xdg_output", c"no", core::ptr::from_ref(&super::TYPES[2])"#,
+            "zxdg_output_manager_v1.get_xdg_output",
+        ),
+        (
+            r#"c"logical_position", c"ii", core::ptr::from_ref(&super::TYPES[0])"#,
+            "zxdg_output_v1.logical_position",
+        ),
+        // A `since` prefix on an event of an unstable protocol.
+        (
+            r#"c"name", c"2s", core::ptr::from_ref(&super::TYPES[0])"#,
+            "zxdg_output_v1.name",
+        ),
+        // xdg_decoration_unstable_v1_types[] = { NULL, &zxdg_toplevel_decoration_v1, &xdg_toplevel }
+        (
+            r#"c"get_toplevel_decoration", c"no", core::ptr::from_ref(&super::TYPES[1])"#,
+            "zxdg_decoration_manager_v1.get_toplevel_decoration",
+        ),
+        // relative_pointer_unstable_v1_types[] has a six-NULL run, because
+        // `relative_motion`'s "uuffff" is the widest all-null message.
+        (
+            r#"c"get_relative_pointer", c"no", core::ptr::from_ref(&super::TYPES[6])"#,
+            "zwp_relative_pointer_manager_v1.get_relative_pointer",
+        ),
+        (
+            r#"c"relative_motion", c"uuffff", core::ptr::from_ref(&super::TYPES[0])"#,
+            "zwp_relative_pointer_v1.relative_motion",
+        ),
+        // The most interesting one: a typed `new_id`, two objects, a *nullable*
+        // object and a uint, twice over, into a table with a two-NULL run.
+        (
+            r#"c"lock_pointer", c"noo?ou", core::ptr::from_ref(&super::TYPES[2])"#,
+            "zwp_pointer_constraints_v1.lock_pointer",
+        ),
+        (
+            r#"c"confine_pointer", c"noo?ou", core::ptr::from_ref(&super::TYPES[7])"#,
+            "zwp_pointer_constraints_v1.confine_pointer",
+        ),
+        (
+            r#"c"set_cursor_position_hint", c"ff", core::ptr::from_ref(&super::TYPES[0])"#,
+            "zwp_locked_pointer_v1.set_cursor_position_hint",
+        ),
+        (
+            r#"c"set_region", c"?o", core::ptr::from_ref(&super::TYPES[12])"#,
+            "zwp_locked_pointer_v1.set_region",
+        ),
+    ];
+    for (needle, message) in expected {
+        assert!(
+            generated.contains(needle),
+            "{message} does not match wayland-scanner: expected to find\n  {needle}"
+        );
+    }
+}
+
+/// `pointer-constraints`' table, entry for entry against
+/// `pointer_constraints_unstable_v1_types[]`.
+///
+/// Chosen over the other five because it is the only one with more than one
+/// row *and* a cross-protocol reference in the middle of a row: getting the
+/// null run wrong by one would still produce a plausible-looking table with
+/// `wl_pointer` where `wl_surface` belongs, and `lock_pointer` would then send
+/// the pointer as the surface.
+#[test]
+fn the_pointer_constraints_type_table_matches_wayland_scanner_entry_for_entry() {
+    let generated = generated();
+    let table = type_table(&generated, "pointer_constraints");
+    let null = "crate::wayland::ffi::WlInterfacePtr::NULL";
+    let named = |module: &str, path: &str| {
+        format!("crate::wayland::ffi::WlInterfacePtr::new(&super::{module}::{path}::INTERFACE)")
+    };
+
+    assert_eq!(
+        table.len(),
+        14,
+        "pointer_constraints_unstable_v1_types[] has 14 entries"
+    );
+    // The shared leading null run is two long: `set_cursor_position_hint`'s
+    // "ff" is the widest message naming no interface.
+    assert_eq!(table[0], null);
+    assert_eq!(table[1], null);
+    // lock_pointer: new_id, surface, pointer, ?region, uint
+    assert_eq!(
+        table[2],
+        named("pointer_constraints", "zwp_locked_pointer_v1")
+    );
+    assert_eq!(table[3], named("wayland", "wl_surface"));
+    assert_eq!(table[4], named("wayland", "wl_pointer"));
+    assert_eq!(table[5], named("wayland", "wl_region"));
+    assert_eq!(table[6], null, "the lifetime enum names no interface");
+    // confine_pointer, same shape.
+    assert_eq!(
+        table[7],
+        named("pointer_constraints", "zwp_confined_pointer_v1")
+    );
+    assert_eq!(table[8], named("wayland", "wl_surface"));
+    assert_eq!(table[9], named("wayland", "wl_pointer"));
+    assert_eq!(table[10], named("wayland", "wl_region"));
+    assert_eq!(table[11], null);
+    // The two `set_region` requests, one per constraint interface.
+    assert_eq!(table[12], named("wayland", "wl_region"));
+    assert_eq!(table[13], named("wayland", "wl_region"));
+}
+
+/// The versions and enum values the backend binds and compares against.
+#[test]
+fn the_p05b_interface_versions_and_enums_survive_the_trip() {
+    let generated = generated();
+    for needle in [
+        r#"pub const NAME: &core::ffi::CStr = c"zwp_pointer_constraints_v1";"#,
+        r#"pub const NAME: &core::ffi::CStr = c"zwp_relative_pointer_manager_v1";"#,
+        r#"pub const NAME: &core::ffi::CStr = c"zxdg_output_manager_v1";"#,
+        r#"pub const NAME: &core::ffi::CStr = c"zxdg_decoration_manager_v1";"#,
+        r#"pub const NAME: &core::ffi::CStr = c"wp_fractional_scale_manager_v1";"#,
+        r#"pub const NAME: &core::ffi::CStr = c"wp_viewporter";"#,
+        // `zwp_pointer_constraints_v1.lifetime`, which `set_pointer_mode`
+        // passes: `oneshot` would silently lose the constraint on the first
+        // alt-tab.
+        "pub const PERSISTENT: u32 = 2;",
+        // `zxdg_toplevel_decoration_v1.mode`, which `create_window` requests.
+        "pub const SERVER_SIDE: u32 = 2;",
+        // `wl_pointer.axis_value120`, the reason `wl_seat` is bound at 8.
+        "pub const EVT_AXIS_VALUE120: u32 = 9;",
+        // `wl_keyboard.keymap_format.xkb_v1`, the format the keymap arrives in.
+        "pub const XKB_V1: u32 = 1;",
+    ] {
+        assert!(generated.contains(needle), "missing: {needle}");
+    }
+    // The unstable protocols are all at the version the vendored XML declares.
+    assert!(
+        generated.contains("pub const VERSION: u32 = 3;"),
+        "zxdg_output_manager_v1 is v3"
     );
 }

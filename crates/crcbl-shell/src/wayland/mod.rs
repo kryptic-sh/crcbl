@@ -1,46 +1,56 @@
-//! The Wayland backend: connection, registry, `xdg-shell` window lifecycle.
+//! The Wayland backend: connection, registry, `xdg-shell` window lifecycle,
+//! `wl_seat` input, pointer constraints, fractional scale and decorations.
 //!
 //! `docs/plan/15-windowing.md`'s Linux policy in one sentence:
 //! **libwayland-client owns the connection and the proxy objects; the protocol
 //! layer above `wl_proxy_marshal_array_flags` is ours.** [`ffi`] is the first
-//! half — fourteen hand-written `extern "C"` declarations, reached by `dlopen`
-//! for the reasons that module states. [`protocol`] is the second — generated
-//! at build time by `crcbl-wl-scanner` from the vendored XML.
+//! half — hand-written `extern "C"` declarations, reached by `dlopen` for the
+//! reasons that module states. [`protocol`] is the second — generated at build
+//! time by `crcbl-wl-scanner` from the vendored XML. [`xkb`] applies the same
+//! test to libxkbcommon and reaches the same answer, for reasons written out
+//! there.
 //!
-//! # What is in this slice (P0.5a)
+//! # What is in this backend
 //!
-//! Window lifecycle only: connect, bind `wl_compositor` / `xdg_wm_base` /
-//! `wl_output`, create `wl_surface` + `xdg_surface` + `xdg_toplevel`, the
-//! configure/ack handshake, title, size constraints, windowed ↔ borderless, the
-//! close request, and monitor enumeration.
+//! P0.5a landed the window lifecycle: connect, bind `wl_compositor` /
+//! `xdg_wm_base` / `wl_output`, create `wl_surface` + `xdg_surface` +
+//! `xdg_toplevel`, the configure/ack handshake, title, size constraints,
+//! windowed ↔ borderless, the close request, and monitor enumeration.
 //!
-//! Deliberately absent: `wl_seat` and everything downstream of it (P0.5b), and
-//! `data-device` (P0.5c). [`ShellCaps`] reflects that exactly — see
-//! [`WaylandShell::caps`] — so a consumer that checks capabilities gets a
-//! correct answer today and does not have to be rewritten when they arrive.
+//! P0.5b added everything downstream of `wl_seat`:
+//!
+//! | Protocol | What it gives the engine |
+//! | --- | --- |
+//! | `wl_seat` / `wl_pointer` / `wl_keyboard` | [`ShellEvent::Key`], [`PointerMotion`](ShellEvent::PointerMotion), [`Button`](ShellEvent::Button), [`Wheel`](ShellEvent::Wheel), [`PointerFocus`](ShellEvent::PointerFocus), [`Focus`](ShellEvent::Focus), [`TextCommit`](ShellEvent::TextCommit) |
+//! | `pointer-constraints-v1` | [`PointerMode::Locked`] and [`PointerMode::Confined`] |
+//! | `relative-pointer-v1` | `raw_delta` — unaccelerated aim input |
+//! | `fractional-scale-v1` + `wp_viewporter` | non-integer [`WindowConfiguration::scale_factor`] |
+//! | `xdg-output-v1` | [`MonitorInfo::bounds`] that means something above scale 1 |
+//! | `xdg-decoration-v1` | server-side title bars where the compositor does them |
+//!
+//! Still deliberately absent: `data-device` (clipboard and drag-and-drop,
+//! P0.5c), touch, tablet and IME pre-edit. [`ShellCaps`] reflects that exactly
+//! — see [`WaylandShell::caps`].
 //!
 //! # What a real compositor does that `HeadlessShell` does not model
 //!
-//! Three differences, all of which this backend absorbs rather than papering
-//! over. They are worth reading before writing any consumer:
+//! Findings from the nested-sway suite, in the order they cost time:
 //!
 //! 1. **The first configure usually carries no size.** `xdg-shell` says the
 //!    compositor answers the initial commit with an `xdg_surface.configure`,
 //!    and that a `0 × 0` in the accompanying `xdg_toplevel.configure` means
 //!    "you choose". [`HeadlessShell`](crate::HeadlessShell) always dictates a
-//!    size. Both shapes satisfy the seam's contract — the window is unconfigured
-//!    until a configure arrives, and configured after — but a backend has to
+//!    size. Both shapes satisfy the seam's contract, but a backend has to
 //!    supply the fallback, and this one falls back to
 //!    [`WindowDesc::size`](crate::WindowDesc::size) scaled by the current
 //!    factor.
-//! 2. **Size arrives before scale.** A window's scale factor comes from
+//! 2. **Size arrives before scale.** A window's integer scale comes from
 //!    `wl_surface.enter`, which a compositor only sends once the surface is
-//!    *mapped* — and mapping requires a buffer, which requires a swapchain,
-//!    which requires the size from the configure. So the first configure is
-//!    necessarily at scale 1.0, and the true scale arrives later as a
-//!    [`ShellEvent::ScaleFactorChanged`]. `WindowConfiguration` groups size and
-//!    scale because they arrive together *in one message*; it does not promise
-//!    the first message is correct about both.
+//!    *mapped* — and mapping requires a buffer. So the first configure is
+//!    necessarily at scale 1.0 and the true scale arrives later as a
+//!    [`ShellEvent::ScaleFactorChanged`]. `fractional-scale-v1` improves on
+//!    this but does not fix it: `wp_fractional_scale_v1.preferred_scale` is
+//!    also only sent for a mapped surface.
 //! 3. **Configures arrive in two messages and take effect on the third.**
 //!    `xdg_toplevel.configure` carries the size and the states,
 //!    `xdg_surface.configure` carries the serial and means "that is the whole
@@ -48,24 +58,63 @@
 //!    accumulates and only publishes a [`WindowConfiguration`] on the
 //!    `xdg_surface.configure`, which is what keeps a consumer from ever seeing
 //!    a size without its states.
-//! 4. **Configured is not the same as managed** — the finding with real
-//!    consequences. A surface is mapped exactly while it has a *buffer*, and an
-//!    unmapped `xdg_toplevel` gets its one initial configure and nothing else
-//!    ever again: no compositor-chosen geometry, no answer to
-//!    `set_fullscreen`, and no entry in the window manager's tree at all
-//!    (`swaymsg [app_id=…] …` matches nothing). Attaching a buffer is the
-//!    renderer's job — `crcbl-vk`'s swapchain, at P1 — so **this backend cannot
-//!    map a window on its own, by design**, and the correct sequence for a
-//!    consumer is: configure → create swapchain → present → *then* expect the
-//!    compositor's real geometry as a second [`ShellEvent::Resized`]. The
-//!    end-to-end suite reaches the same state with a stand-in `wl_shm` buffer;
-//!    see [`e2e`], which exists only under the `wayland-e2e` feature and is
-//!    deleted when P1 can do it for real.
+//! 4. **Configured is not the same as managed.** A surface is mapped exactly
+//!    while it has a *buffer*, and an unmapped `xdg_toplevel` gets its one
+//!    initial configure and nothing else ever again: no compositor-chosen
+//!    geometry, no answer to `set_fullscreen`, no entry in the window
+//!    manager's tree, **and no `wl_pointer.enter` or `wl_keyboard.enter`** —
+//!    an unmapped surface cannot receive input, because there is nothing on
+//!    screen to point at. Attaching a buffer is the renderer's job, so this
+//!    backend cannot map a window on its own, by design; see [`e2e`].
+//! 5. **A seat can have no devices at all.** `wl_seat.capabilities` is `0` on
+//!    a headless compositor and changes at runtime when a device is plugged
+//!    in. There is no "the keyboard" — there is whatever the seat currently
+//!    has, and it can go away mid-session.
+//!
+//! # Decision: the shell synthesizes key repeats
+//!
+//! `wl_keyboard.repeat_info` hands the client a rate and a delay and **no
+//! repeat events**: on Wayland, generating them is the client's job by
+//! protocol design. The choice is therefore where in the client they are
+//! generated, and this backend does it, marking every one
+//! [`repeat: true`](ShellEvent::Key).
+//!
+//! The case for pushing it up to `docs/plan/19-input.md`'s action layer is
+//! real — a shell that fabricates edges can confuse hold-pattern detection —
+//! and it loses on three counts:
+//!
+//! * **The seam already decided.** [`ShellEvent::Key`] carries `repeat`, and
+//!   its documentation is explicit that filtering repeats at the source breaks
+//!   text fields while dropping the flag breaks jump buttons, "so the fact is
+//!   carried and the consumer decides".
+//!   [`HeadlessShell::key_repeat`](crate::HeadlessShell::key_repeat) already
+//!   produces them. A Wayland backend that never did would make the flag dead
+//!   on the only real platform and `HeadlessShell` a model of nothing.
+//! * **Hold patterns are protected by construction, not by luck.** A repeat is
+//!   `repeat: true` and never `Released`, so `hold(400ms)` — which measures
+//!   press edge to release edge — cannot see one. A pattern evaluator that
+//!   keys on `repeat == false` is correct with no coordination.
+//! * **Nobody else can do it better.** The timer has to live next to the
+//!   socket. Repeats here are scheduled on `CLOCK_MONOTONIC` and stamped with
+//!   the instant they were *due*, not the instant the queue was drained, so a
+//!   16 ms frame does not quantize them — the exact property
+//!   [`event`](crate::event) says timestamps exist for.
+//!   [`wait_events`](Shell::wait_events) shortens its timeout to the next
+//!   repeat, so an editor idling at zero frames per second still repeats.
+//!
+//! Guards, because a fabricated event stream needs them: no repeat is
+//! generated for a key XKB says does not repeat (modifiers, Caps Lock); a
+//! repeat stops on release, on focus loss, on the pointer's seat losing its
+//! keyboard, and on a keymap change; and a run that falls more than four
+//! intervals behind resynchronises instead of emitting the backlog.
 
 pub mod ffi;
+pub mod keymap;
 pub mod protocol;
+pub mod xkb;
 
-/// Test-only: maps a window's surface with a stand-in buffer.
+/// Test-only: maps a window's surface with a stand-in buffer, and drives real
+/// input through virtual devices.
 ///
 /// Behind the `wayland-e2e` feature because it is scaffolding, not shell — see
 /// the module's own docs for why the end-to-end suite cannot do without it and
@@ -79,7 +128,8 @@ use core::time::Duration;
 use std::collections::VecDeque;
 use std::ffi::CString;
 
-use crcbl_core::{EventTime, Pool, SurfaceTarget};
+use crcbl_core::input::{ButtonState, DeviceId, Keysym, Modifiers, Scancode, ScrollDelta};
+use crcbl_core::{EventTime, KeyCode, Pool, SurfaceTarget};
 
 use crate::{
     ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode, LogicalSize, MimeType,
@@ -89,7 +139,17 @@ use crate::{
 };
 
 use ffi::{Lib, WlArgument, WlDisplay, WlMessage, WlProxy};
-use protocol::wayland::{wl_compositor, wl_output, wl_registry, wl_surface};
+use protocol::fractional_scale::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1};
+use protocol::pointer_constraints::{
+    zwp_confined_pointer_v1, zwp_locked_pointer_v1, zwp_pointer_constraints_v1,
+};
+use protocol::relative_pointer::{zwp_relative_pointer_manager_v1, zwp_relative_pointer_v1};
+use protocol::viewporter::{wp_viewport, wp_viewporter};
+use protocol::wayland::{
+    wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_surface,
+};
+use protocol::xdg_decoration::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1};
+use protocol::xdg_output::{zxdg_output_manager_v1, zxdg_output_v1};
 use protocol::xdg_shell::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
 /// Versions this backend binds globals at.
@@ -102,10 +162,30 @@ use protocol::xdg_shell::{xdg_surface, xdg_toplevel, xdg_wm_base};
 const COMPOSITOR_VERSION: u32 = 4;
 /// See [`COMPOSITOR_VERSION`]. `xdg_wm_base` 1 is all the window lifecycle
 /// needs; 4 and 5 add `configure_bounds` and `wm_capabilities`, which this
-/// slice does not act on.
+/// backend does not act on.
 const WM_BASE_VERSION: u32 = 1;
 /// See [`COMPOSITOR_VERSION`].
 const OUTPUT_VERSION: u32 = 4;
+/// `wl_seat` 8 is the lowest version whose `wl_pointer` sends
+/// [`axis_value120`](protocol::wayland::wl_pointer) — the high-resolution wheel
+/// event a smooth-scrolling UI needs, and the reason not to stop at 5.
+///
+/// 9 adds `axis_relative_direction` (which physical direction produced an
+/// already-inverted value — informational) and 10 adds
+/// `key_state.repeated`, a compositor-generated repeat. Neither is acted on
+/// here, and binding 10 in particular would give this backend two repeat
+/// sources with no way to reconcile them — see the [module docs](self).
+const SEAT_VERSION: u32 = 8;
+/// `zxdg_output_manager_v1` 2 deprecates `name`/`description` in favour of
+/// `wl_output` 4's, and 3 stops sending `zxdg_output_v1.done` in favour of
+/// `wl_output.done`. This backend settles outputs on `wl_output.done` either
+/// way, so 3 is free.
+const XDG_OUTPUT_VERSION: u32 = 3;
+/// `zxdg_decoration_manager_v1` 1 is the whole protocol; 2 only adds an error
+/// code for a case this backend cannot reach (it never orphans a decoration).
+const DECORATION_VERSION: u32 = 1;
+/// `wp_fractional_scale_v1` reports scale as a fraction of this.
+const FRACTIONAL_SCALE_DENOMINATOR: f64 = 120.0;
 
 // ---------------------------------------------------------------------------
 // Timestamps
@@ -136,12 +216,7 @@ impl TimeBase {
 
     /// Moves the epoch so that this instant reads as `elapsed`.
     ///
-    /// See [`WaylandShell::align_time_base`].
-    #[allow(
-        dead_code,
-        reason = "reachable only through WaylandShell::align_time_base, which \
-                  has no caller until the engine loop lands"
-    )]
+    /// See [`WaylandShell::align_event_clock`].
     fn align(&mut self, elapsed: Duration) {
         let now = ffi::monotonic_nanos();
         self.epoch_nanos =
@@ -168,15 +243,44 @@ impl TimeBase {
         EventTime::from_millis(full.saturating_sub(epoch_millis))
     }
 
-    /// This base applied to a compositor timestamp.
+    /// This base applied to a compositor millisecond timestamp.
     ///
-    /// Unused in P0.5a — no event this slice produces carries a timestamp,
-    /// because every timestamped [`ShellEvent`] is an input event and input is
-    /// P0.5b. It exists and is tested now so that the epoch contract is settled
-    /// before the first `wl_pointer.motion` rather than after.
-    #[allow(dead_code, reason = "P0.5b's input events are the first consumers")]
+    /// What every `wl_pointer` and `wl_keyboard` event goes through.
     fn event_time(self, wayland_millis: u32) -> EventTime {
         Self::rebase(self.epoch_nanos, ffi::monotonic_nanos(), wayland_millis)
+    }
+
+    /// This base applied to a 64-bit `CLOCK_MONOTONIC` microsecond timestamp.
+    ///
+    /// `zwp_relative_pointer_v1.relative_motion` carries one, split across two
+    /// `uint`s. It needs no wrap handling at all — 64 bits of microseconds is
+    /// half a million years — which is why relative motion is the more accurate
+    /// of the two clocks a pointer event can arrive on, and why a merged
+    /// motion event prefers it.
+    fn event_time_micros(self, micros: u64) -> EventTime {
+        EventTime::from_micros(micros.saturating_sub(self.epoch_nanos / 1_000))
+    }
+
+    /// The current instant, on the engine epoch.
+    ///
+    /// For the events a compositor sends with **no timestamp at all**:
+    /// `wl_pointer.enter` and `wl_pointer.leave` carry a serial and a position
+    /// and no time, and neither does a focus change synthesized because a seat
+    /// lost its pointer. [`EventTime`] states the rule for exactly this case —
+    /// "it stamps the event with the *current* time rather than
+    /// [`EventTime::ZERO`], because a zero timestamp reads as 'this happened at
+    /// process start' to every consumer downstream".
+    fn event_time_now(self) -> EventTime {
+        self.event_time_nanos(ffi::monotonic_nanos())
+    }
+
+    /// This base applied to a raw `CLOCK_MONOTONIC` nanosecond reading.
+    ///
+    /// Used for synthesized key repeats, which are stamped with the instant
+    /// they were *due* rather than the instant the queue happened to be
+    /// drained.
+    fn event_time_nanos(self, nanos: u64) -> EventTime {
+        EventTime::from_duration(Duration::from_nanos(nanos.saturating_sub(self.epoch_nanos)))
     }
 }
 
@@ -190,9 +294,22 @@ enum ObjectKind {
     Registry,
     WmBase,
     Output,
+    XdgOutput,
     Surface,
     XdgSurface,
     XdgToplevel,
+    Decoration,
+    FractionalScale,
+    Seat,
+    Pointer,
+    Keyboard,
+    RelativePointer,
+    /// A proxy whose events we deliberately do not read.
+    ///
+    /// Attaching a do-nothing dispatcher rather than leaving the proxy bare:
+    /// libwayland logs a warning for every event delivered to a listener-less
+    /// proxy, which buries the compositor log the e2e harness prints on failure.
+    Ignored,
 }
 
 /// One decoded event, with every borrow already copied out.
@@ -237,6 +354,16 @@ enum RawEvent {
     OutputDone {
         output: usize,
     },
+    XdgOutputPosition {
+        xdg_output: usize,
+        x: i32,
+        y: i32,
+    },
+    XdgOutputSize {
+        xdg_output: usize,
+        width: i32,
+        height: i32,
+    },
     SurfaceEnter {
         surface: usize,
         output: usize,
@@ -257,6 +384,103 @@ enum RawEvent {
     },
     ToplevelClose {
         toplevel: usize,
+    },
+    DecorationConfigure {
+        decoration: usize,
+        mode: u32,
+    },
+    PreferredScale {
+        object: usize,
+        scale: u32,
+    },
+    SeatCapabilities {
+        seat: usize,
+        capabilities: u32,
+    },
+    PointerEnter {
+        pointer: usize,
+        serial: u32,
+        surface: usize,
+        x: i32,
+        y: i32,
+    },
+    PointerLeave {
+        pointer: usize,
+        surface: usize,
+    },
+    PointerMotion {
+        pointer: usize,
+        time: u32,
+        x: i32,
+        y: i32,
+    },
+    PointerButton {
+        pointer: usize,
+        time: u32,
+        button: u32,
+        state: u32,
+    },
+    PointerAxis {
+        pointer: usize,
+        time: u32,
+        axis: u32,
+        value: i32,
+    },
+    PointerAxisSource {
+        pointer: usize,
+        source: u32,
+    },
+    PointerAxisDiscrete {
+        pointer: usize,
+        axis: u32,
+        discrete: i32,
+    },
+    PointerAxisValue120 {
+        pointer: usize,
+        axis: u32,
+        value120: i32,
+    },
+    PointerFrame {
+        pointer: usize,
+    },
+    RelativeMotion {
+        relative: usize,
+        utime_hi: u32,
+        utime_lo: u32,
+        dx_unaccel: i32,
+        dy_unaccel: i32,
+    },
+    KeyboardKeymap {
+        keyboard: usize,
+        format: u32,
+        fd: i32,
+        size: u32,
+    },
+    KeyboardEnter {
+        keyboard: usize,
+        surface: usize,
+    },
+    KeyboardLeave {
+        keyboard: usize,
+        surface: usize,
+    },
+    KeyboardKey {
+        keyboard: usize,
+        time: u32,
+        key: u32,
+        state: u32,
+    },
+    KeyboardModifiers {
+        keyboard: usize,
+        depressed: u32,
+        latched: u32,
+        locked: u32,
+        group: u32,
+    },
+    KeyboardRepeatInfo {
+        keyboard: usize,
+        rate: i32,
+        delay: i32,
     },
 }
 
@@ -320,11 +544,13 @@ unsafe extern "C" fn dispatch(
     };
     let args: *const WlArgument = args.cast_const();
 
-    // SAFETY (all decoders): `args` is the argument array libwayland built for
-    // `opcode` on a proxy of this interface — that is exactly the dispatcher
-    // contract — and every borrow is copied out before this function returns,
-    // which is the lifetime the decoders document.
+    // SAFETY (all decoders): `kind` records which interface this proxy was
+    // created as, so `args` is that interface's argument array for `opcode` —
+    // which is exactly the dispatcher contract — and every borrow is copied out
+    // before this function returns, which is the lifetime the decoders
+    // document.
     match kind {
+        ObjectKind::Ignored => {}
         ObjectKind::Registry => {
             if let Some(event) = unsafe { wl_registry::decode_event(opcode, args) } {
                 sink.events.push(match event {
@@ -342,9 +568,7 @@ unsafe extern "C" fn dispatch(
             }
         }
         ObjectKind::WmBase => {
-            // SAFETY: `kind` says this proxy is a `xdg_wm_base`, so `args` is that
-            // interface's argument array for `opcode`; every borrow is copied out
-            // before this function returns. See the note above the `match`.
+            // SAFETY: see the note above the `match`.
             if let Some(xdg_wm_base::Event::Ping { serial }) =
                 unsafe { xdg_wm_base::decode_event(opcode, args) }
             {
@@ -352,9 +576,7 @@ unsafe extern "C" fn dispatch(
             }
         }
         ObjectKind::Output => {
-            // SAFETY: `kind` says this proxy is a `wl_output`, so `args` is that
-            // interface's argument array for `opcode`; every borrow is copied out
-            // before this function returns. See the note above the `match`.
+            // SAFETY: see the note above the `match`.
             if let Some(event) = unsafe { wl_output::decode_event(opcode, args) } {
                 let raw = match event {
                     wl_output::Event::Geometry { x, y, .. } => Some(RawEvent::OutputGeometry {
@@ -388,10 +610,34 @@ unsafe extern "C" fn dispatch(
                 sink.events.extend(raw);
             }
         }
+        ObjectKind::XdgOutput => {
+            // SAFETY: see the note above the `match`.
+            if let Some(event) = unsafe { zxdg_output_v1::decode_event(opcode, args) } {
+                let raw = match event {
+                    zxdg_output_v1::Event::LogicalPosition { x, y } => {
+                        Some(RawEvent::XdgOutputPosition {
+                            xdg_output: proxy,
+                            x,
+                            y,
+                        })
+                    }
+                    zxdg_output_v1::Event::LogicalSize { width, height } => {
+                        Some(RawEvent::XdgOutputSize {
+                            xdg_output: proxy,
+                            width,
+                            height,
+                        })
+                    }
+                    // `done` is deprecated from version 3: `wl_output.done` is
+                    // the atomic signal, and this backend settles on that one
+                    // for every version so the two paths cannot disagree.
+                    _ => None,
+                };
+                sink.events.extend(raw);
+            }
+        }
         ObjectKind::Surface => {
-            // SAFETY: `kind` says this proxy is a `wl_surface`, so `args` is that
-            // interface's argument array for `opcode`; every borrow is copied out
-            // before this function returns. See the note above the `match`.
+            // SAFETY: see the note above the `match`.
             if let Some(event) = unsafe { wl_surface::decode_event(opcode, args) } {
                 let raw = match event {
                     wl_surface::Event::Enter { output } => Some(RawEvent::SurfaceEnter {
@@ -410,9 +656,7 @@ unsafe extern "C" fn dispatch(
             }
         }
         ObjectKind::XdgSurface => {
-            // SAFETY: `kind` says this proxy is a `xdg_surface`, so `args` is that
-            // interface's argument array for `opcode`; every borrow is copied out
-            // before this function returns. See the note above the `match`.
+            // SAFETY: see the note above the `match`.
             if let Some(xdg_surface::Event::Configure { serial }) =
                 unsafe { xdg_surface::decode_event(opcode, args) }
             {
@@ -423,9 +667,7 @@ unsafe extern "C" fn dispatch(
             }
         }
         ObjectKind::XdgToplevel => {
-            // SAFETY: `kind` says this proxy is a `xdg_toplevel`, so `args` is that
-            // interface's argument array for `opcode`; every borrow is copied out
-            // before this function returns. See the note above the `match`.
+            // SAFETY: see the note above the `match`.
             if let Some(event) = unsafe { xdg_toplevel::decode_event(opcode, args) } {
                 let raw = match event {
                     xdg_toplevel::Event::Configure {
@@ -444,8 +686,194 @@ unsafe extern "C" fn dispatch(
                 sink.events.extend(raw);
             }
         }
+        ObjectKind::Decoration => {
+            // SAFETY: see the note above the `match`.
+            if let Some(zxdg_toplevel_decoration_v1::Event::Configure { mode }) =
+                unsafe { zxdg_toplevel_decoration_v1::decode_event(opcode, args) }
+            {
+                sink.events.push(RawEvent::DecorationConfigure {
+                    decoration: proxy,
+                    mode,
+                });
+            }
+        }
+        ObjectKind::FractionalScale => {
+            // SAFETY: see the note above the `match`.
+            if let Some(wp_fractional_scale_v1::Event::PreferredScale { scale }) =
+                unsafe { wp_fractional_scale_v1::decode_event(opcode, args) }
+            {
+                sink.events.push(RawEvent::PreferredScale {
+                    object: proxy,
+                    scale,
+                });
+            }
+        }
+        ObjectKind::Seat => {
+            // SAFETY: see the note above the `match`.
+            if let Some(wl_seat::Event::Capabilities { capabilities }) =
+                unsafe { wl_seat::decode_event(opcode, args) }
+            {
+                sink.events.push(RawEvent::SeatCapabilities {
+                    seat: proxy,
+                    capabilities,
+                });
+            }
+        }
+        ObjectKind::Pointer => {
+            // SAFETY: see the note above the `match`.
+            if let Some(event) = unsafe { wl_pointer::decode_event(opcode, args) } {
+                sink.events.extend(decode_pointer(proxy, event));
+            }
+        }
+        ObjectKind::Keyboard => {
+            // SAFETY: see the note above the `match`.
+            if let Some(event) = unsafe { wl_keyboard::decode_event(opcode, args) } {
+                sink.events.extend(decode_keyboard(proxy, event));
+            }
+        }
+        ObjectKind::RelativePointer => {
+            // SAFETY: see the note above the `match`.
+            if let Some(zwp_relative_pointer_v1::Event::RelativeMotion {
+                utime_hi,
+                utime_lo,
+                dx_unaccel,
+                dy_unaccel,
+                ..
+            }) = unsafe { zwp_relative_pointer_v1::decode_event(opcode, args) }
+            {
+                sink.events.push(RawEvent::RelativeMotion {
+                    relative: proxy,
+                    utime_hi,
+                    utime_lo,
+                    dx_unaccel,
+                    dy_unaccel,
+                });
+            }
+        }
     }
     0
+}
+
+/// Splits `wl_pointer`'s ten events out of the dispatcher, purely so
+/// [`dispatch`] stays readable.
+fn decode_pointer(proxy: usize, event: wl_pointer::Event) -> Option<RawEvent> {
+    Some(match event {
+        wl_pointer::Event::Enter {
+            serial,
+            surface,
+            surface_x,
+            surface_y,
+        } => RawEvent::PointerEnter {
+            pointer: proxy,
+            serial,
+            surface: surface as usize,
+            x: surface_x,
+            y: surface_y,
+        },
+        wl_pointer::Event::Leave { surface, .. } => RawEvent::PointerLeave {
+            pointer: proxy,
+            surface: surface as usize,
+        },
+        wl_pointer::Event::Motion {
+            time,
+            surface_x,
+            surface_y,
+        } => RawEvent::PointerMotion {
+            pointer: proxy,
+            time,
+            x: surface_x,
+            y: surface_y,
+        },
+        wl_pointer::Event::Button {
+            time,
+            button,
+            state,
+            ..
+        } => RawEvent::PointerButton {
+            pointer: proxy,
+            time,
+            button,
+            state,
+        },
+        wl_pointer::Event::Axis { time, axis, value } => RawEvent::PointerAxis {
+            pointer: proxy,
+            time,
+            axis,
+            value,
+        },
+        wl_pointer::Event::AxisSource { axis_source } => RawEvent::PointerAxisSource {
+            pointer: proxy,
+            source: axis_source,
+        },
+        wl_pointer::Event::AxisDiscrete { axis, discrete } => RawEvent::PointerAxisDiscrete {
+            pointer: proxy,
+            axis,
+            discrete,
+        },
+        wl_pointer::Event::AxisValue120 { axis, value120 } => RawEvent::PointerAxisValue120 {
+            pointer: proxy,
+            axis,
+            value120,
+        },
+        wl_pointer::Event::Frame => RawEvent::PointerFrame { pointer: proxy },
+        // `axis_stop` says a kinetic scroll ended, which produces no delta and
+        // nothing this seam reports; `axis_relative_direction` is version 9,
+        // which this backend does not bind.
+        _ => return None,
+    })
+}
+
+/// Splits `wl_keyboard`'s six events out of the dispatcher; see
+/// [`decode_pointer`].
+fn decode_keyboard(proxy: usize, event: wl_keyboard::Event<'_>) -> Option<RawEvent> {
+    Some(match event {
+        wl_keyboard::Event::Keymap { format, fd, size } => RawEvent::KeyboardKeymap {
+            keyboard: proxy,
+            format,
+            fd,
+            size,
+        },
+        // The `keys` array lists what was already held when focus arrived. It
+        // is deliberately dropped: those presses happened before this window
+        // had focus, and synthesizing edges for them would make the action
+        // layer fire a jump for a key the player was holding in another
+        // application. `ShellEvent::Focus` already tells a consumer to treat
+        // focus as a clean slate.
+        wl_keyboard::Event::Enter { surface, .. } => RawEvent::KeyboardEnter {
+            keyboard: proxy,
+            surface: surface as usize,
+        },
+        wl_keyboard::Event::Leave { surface, .. } => RawEvent::KeyboardLeave {
+            keyboard: proxy,
+            surface: surface as usize,
+        },
+        wl_keyboard::Event::Key {
+            time, key, state, ..
+        } => RawEvent::KeyboardKey {
+            keyboard: proxy,
+            time,
+            key,
+            state,
+        },
+        wl_keyboard::Event::Modifiers {
+            mods_depressed,
+            mods_latched,
+            mods_locked,
+            group,
+            ..
+        } => RawEvent::KeyboardModifiers {
+            keyboard: proxy,
+            depressed: mods_depressed,
+            latched: mods_latched,
+            locked: mods_locked,
+            group,
+        },
+        wl_keyboard::Event::RepeatInfo { rate, delay } => RawEvent::KeyboardRepeatInfo {
+            keyboard: proxy,
+            rate,
+            delay,
+        },
+    })
 }
 
 /// `xdg_toplevel.configure`'s states array is a `wl_array` of native-endian
@@ -469,6 +897,12 @@ struct Conn {
     registry: *mut WlProxy,
     compositor: *mut WlProxy,
     wm_base: *mut WlProxy,
+    xdg_output_manager: *mut WlProxy,
+    decoration_manager: *mut WlProxy,
+    fractional_scale_manager: *mut WlProxy,
+    viewporter: *mut WlProxy,
+    relative_pointer_manager: *mut WlProxy,
+    pointer_constraints: *mut WlProxy,
     /// Owned by the connection, reached only as a raw pointer; see [`Sink`].
     sink: *mut Sink,
 }
@@ -490,6 +924,9 @@ impl Conn {
 
     /// Attaches the dispatcher to `proxy` and records what it is.
     fn watch(&mut self, proxy: *mut WlProxy, kind: ObjectKind) {
+        if proxy.is_null() {
+            return;
+        }
         self.sink().objects.push((proxy as usize, kind));
         // SAFETY: `proxy` was just created on this connection and has no
         // listener yet; `dispatch` matches libwayland's `wl_dispatcher_func_t`;
@@ -500,7 +937,12 @@ impl Conn {
         }
     }
 
-    /// Destroys a proxy and stops routing its events.
+    /// Destroys a proxy client-side and stops routing its events.
+    ///
+    /// For an object whose interface has **no** destructor request. Anything
+    /// with one must go through [`release`](Self::release) instead, or the
+    /// compositor never learns the object is gone — which for a
+    /// `zwp_locked_pointer_v1` means the pointer stays locked forever.
     fn destroy(&mut self, proxy: *mut WlProxy) {
         if proxy.is_null() {
             return;
@@ -509,6 +951,57 @@ impl Conn {
         // SAFETY: `proxy` is live on this connection and is not used again —
         // every caller clears its own copy of the pointer.
         unsafe { (self.lib.proxy_destroy)(proxy) };
+    }
+
+    /// Sends a protocol destructor and stops routing the proxy's events.
+    ///
+    /// The generated destructor wrappers marshal with `WL_MARSHAL_FLAG_DESTROY`,
+    /// which both tells the compositor and frees the proxy, so this must not be
+    /// followed by a [`destroy`](Self::destroy).
+    ///
+    /// # Safety
+    ///
+    /// `destructor` must be the generated destructor request of `proxy`'s own
+    /// interface, and `proxy` must be live on this connection.
+    unsafe fn release(&mut self, proxy: *mut WlProxy, destructor: unsafe fn(*mut WlProxy)) {
+        if proxy.is_null() {
+            return;
+        }
+        self.sink().forget(proxy as usize);
+        // SAFETY: the caller guarantees `destructor` belongs to this proxy's
+        // interface and that the proxy is live.
+        unsafe { destructor(proxy) };
+    }
+
+    /// [`release`](Self::release), but only if the proxy was bound at a
+    /// version that has the destructor.
+    ///
+    /// `wl_pointer.release` and `wl_keyboard.release` arrived in `wl_seat`
+    /// version 3. Sending a request a proxy's bound version does not have is a
+    /// protocol error that disconnects the client — so on a hypothetical
+    /// version-1 or -2 seat the proxy is dropped client-side instead. The
+    /// server keeps its object until the seat goes, which is the same outcome
+    /// those versions offered in the first place.
+    ///
+    /// # Safety
+    ///
+    /// As [`release`](Self::release).
+    unsafe fn release_since(
+        &mut self,
+        proxy: *mut WlProxy,
+        since: u32,
+        destructor: unsafe fn(*mut WlProxy),
+    ) {
+        if proxy.is_null() {
+            return;
+        }
+        // SAFETY: the caller guarantees the proxy is live.
+        if unsafe { ffi::proxy_version(proxy) } >= since {
+            // SAFETY: the caller guarantees `destructor` is this interface's.
+            unsafe { self.release(proxy, destructor) };
+        } else {
+            self.destroy(proxy);
+        }
     }
 
     fn display_proxy(&self) -> *mut WlProxy {
@@ -591,6 +1084,8 @@ impl Conn {
 #[derive(Debug)]
 struct Output {
     proxy: usize,
+    /// The matching `zxdg_output_v1`, or null before the manager was bound.
+    xdg: *mut WlProxy,
     /// `wl_registry.global`'s name, for the matching `global_remove`.
     global: u32,
     id: MonitorId,
@@ -600,6 +1095,12 @@ struct Output {
     height: i32,
     refresh_millihertz: u32,
     scale: i32,
+    /// `zxdg_output_v1.logical_position`, in the compositor's logical space.
+    logical_x: i32,
+    logical_y: i32,
+    /// `zxdg_output_v1.logical_size`; zero until it arrives.
+    logical_width: i32,
+    logical_height: i32,
     name: String,
     /// Whether a `wl_output.done` has been seen, i.e. whether the fields above
     /// are a consistent snapshot rather than a half-applied update.
@@ -607,27 +1108,271 @@ struct Output {
 }
 
 impl Output {
+    /// The output's true scale, which is not necessarily `wl_output.scale`.
+    ///
+    /// `wl_output.scale` is an **integer**, so a compositor running an output
+    /// at 150 % reports `2` — it is defined as the buffer scale a client should
+    /// use, not as the desktop's scale. `xdg_output`'s logical size is the same
+    /// output measured in the desktop's own units, so the ratio between the
+    /// mode and it is the real number. This is how a monitor at 1.5 stops
+    /// claiming to be at 2.
+    fn scale_factor(&self) -> f64 {
+        if self.logical_width > 0 && self.width > 0 {
+            f64::from(self.width) / f64::from(self.logical_width)
+        } else {
+            f64::from(self.scale.max(1))
+        }
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a desktop coordinate that overflows i32 after scaling would \
+                  need a monitor layout billions of pixels wide; the clamp \
+                  keeps it defined regardless"
+    )]
     fn info(&self, is_primary: bool) -> MonitorInfo {
         let width = self.width.max(0).unsigned_abs();
         let height = self.height.max(0).unsigned_abs();
+        let scale = self.scale_factor();
+        // Position from `xdg_output`, scaled back into this output's device
+        // pixels so that it and the size below are in one unit.
+        //
+        // The honest caveat, which nothing may paper over: on a desktop whose
+        // outputs have *different* scales there is no single device-pixel
+        // coordinate space, and these rectangles will not tile. The compositor's
+        // logical space is the only globally coherent one, and `PhysicalRect`
+        // cannot express it. `ShellCaps::WINDOW_POSITION` stays clear, so
+        // nothing is entitled to treat this as a desktop layout — it is good
+        // enough to name a monitor and to tell a settings screen which one is
+        // on the left.
+        let (x, y) = if self.logical_width > 0 {
+            let to_pixels = |value: i32| (f64::from(value) * scale).round();
+            (
+                to_pixels(self.logical_x).clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32,
+                to_pixels(self.logical_y).clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32,
+            )
+        } else {
+            // No `xdg_output`: `wl_output.geometry`'s position is logical while
+            // the size is physical, so they only agree at scale 1. Kept as the
+            // fallback because it is what the protocol guarantees.
+            (self.x, self.y)
+        };
         MonitorInfo {
             id: self.id,
             name: self.name.clone(),
-            // No `xdg_output`, so the position is `wl_output.geometry`'s, which
-            // is in compositor-global *logical* coordinates while the size is
-            // in physical pixels. They agree at scale 1 and disagree above it.
-            // Nothing may treat this as a reliable desktop layout — the seam
-            // says so through `ShellCaps::WINDOW_POSITION`, which this backend
-            // does not set.
-            bounds: PhysicalRect::new(self.x, self.y, width, height),
+            bounds: PhysicalRect::new(x, y, width, height),
             // Wayland has no work-area protocol at all. `MonitorInfo` documents
             // that a backend which cannot find out reports the full area.
-            work_area: PhysicalRect::new(self.x, self.y, width, height),
-            scale_factor: f64::from(self.scale.max(1)),
+            work_area: PhysicalRect::new(x, y, width, height),
+            scale_factor: scale,
             refresh_millihertz: self.refresh_millihertz,
             is_primary,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Seats
+// ---------------------------------------------------------------------------
+
+/// One `wl_seat` and the devices it currently has.
+///
+/// # One [`DeviceId`] per seat, not per physical device
+///
+/// `docs/plan/19-input.md` wants per-device ids so that local multiplayer can
+/// assign devices to players later. On Wayland the *seat* is that unit and
+/// there is no finer one: libinput merges every physical keyboard on a seat
+/// into one `wl_keyboard` and every mouse into one `wl_pointer`, and the
+/// protocol exposes no device list at all. Reporting a made-up id per physical
+/// device would be a fiction; reporting the seat is the true grouping, and a
+/// multi-seat session — which is exactly how Linux does local multiplayer —
+/// produces exactly the distinct ids that layer needs.
+struct Seat {
+    proxy: *mut WlProxy,
+    global: u32,
+    device: DeviceId,
+    capabilities: u32,
+    pointer: *mut WlProxy,
+    keyboard: *mut WlProxy,
+    relative_pointer: *mut WlProxy,
+    /// The serial of the last `wl_pointer.enter`, which `set_cursor` and
+    /// `set_shape` both have to quote.
+    enter_serial: u32,
+    pointer_focus: Option<WindowId>,
+    /// Last known position, in the focused window's device pixels.
+    pointer_position: PhysicalPoint,
+    frame: PointerFrame,
+    keyboard_focus: Option<WindowId>,
+    keymap: Option<xkb::Keymap>,
+    modifiers: Modifiers,
+    /// Held keys, for the degraded modifier path only; see [`xkb`].
+    held: Vec<KeyCode>,
+    repeat: Repeat,
+}
+
+impl core::fmt::Debug for Seat {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Seat")
+            .field("device", &self.device)
+            .field("capabilities", &self.capabilities)
+            .field("keymap", &self.keymap.is_some())
+            .finish()
+    }
+}
+
+/// Everything a `wl_pointer` said between two `wl_pointer.frame`s.
+///
+/// The protocol groups pointer events into frames precisely so a client does
+/// not treat one physical movement as several logical ones: a diagonal move
+/// arrives as one `motion`, a wheel click as an `axis` plus an `axis_value120`
+/// plus an `axis_source`, and a locked pointer's motion arrives on a *different
+/// object* (`zwp_relative_pointer_v1`) inside the same frame. Accumulating and
+/// emitting once per frame is what turns that into one
+/// [`ShellEvent::PointerMotion`] and one [`ShellEvent::Wheel`].
+#[derive(Clone, Copy, Debug, Default)]
+struct PointerFrame {
+    /// Compositor milliseconds, from whichever event carried one.
+    time: u32,
+    /// Surface-local position, in logical units.
+    motion: Option<(f64, f64)>,
+    /// Unaccelerated relative motion, in the device's own units.
+    raw: Option<(f64, f64)>,
+    /// `CLOCK_MONOTONIC` microseconds from `relative_motion`, which is the more
+    /// precise of the two clocks a motion can arrive on.
+    raw_micros: Option<u64>,
+    /// `[vertical, horizontal]`, in 1/120ths of a detent.
+    value120: [f64; 2],
+    /// `[vertical, horizontal]`, in whole detents (`wl_pointer` 5 to 7).
+    discrete: [f64; 2],
+    /// `[vertical, horizontal]`, in surface-local units.
+    continuous: [f64; 2],
+    axis_source: Option<u32>,
+    has_axis: bool,
+}
+
+impl PointerFrame {
+    fn is_empty(&self) -> bool {
+        self.motion.is_none() && self.raw.is_none() && !self.has_axis
+    }
+
+    /// The scroll this frame describes, or `None` when it describes none.
+    ///
+    /// # Detents versus pixels
+    ///
+    /// [`ScrollDelta`] refuses to collapse the two, and this is where the
+    /// distinction is made. A notched wheel reports `axis_value120` (or
+    /// `axis_discrete` before version 8) *in addition to* a continuous `axis`
+    /// value, so preferring the discrete number is what stops a wheel click
+    /// being reported as "15 pixels" — a number the compositor made up from its
+    /// own scroll-speed setting. A touchpad reports only `axis`, and gets
+    /// pixels, which is the truth about a touchpad.
+    ///
+    /// # Sign
+    ///
+    /// Wayland's vertical axis is positive **downwards** (content moves up as
+    /// the value grows) and its horizontal axis positive rightwards.
+    /// [`ScrollDelta`] documents positive `y` as "scrolls the content up (away
+    /// from the user)", the convention every other platform uses, so both axes
+    /// are negated here — once, in one place.
+    fn scroll(&self, scale: f64) -> Option<ScrollDelta> {
+        if !self.has_axis {
+            return None;
+        }
+        let detents = |raw: [f64; 2], divisor: f64| ScrollDelta::Lines {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "ScrollDelta::Lines is f32 by seam definition; a detent \
+                          count is a small integer"
+            )]
+            x: (-raw[1] / divisor) as f32,
+            #[expect(clippy::cast_possible_truncation, reason = "as above")]
+            y: (-raw[0] / divisor) as f32,
+        };
+        if self.value120 != [0.0, 0.0] {
+            return Some(detents(self.value120, 120.0));
+        }
+        if self.discrete != [0.0, 0.0] {
+            return Some(detents(self.discrete, 1.0));
+        }
+        if self.continuous != [0.0, 0.0] {
+            return Some(ScrollDelta::Pixels {
+                x: -self.continuous[1] * scale,
+                y: -self.continuous[0] * scale,
+            });
+        }
+        // An `axis_stop`, or a frame whose only axis content was a zero. The
+        // seam's `ScrollDelta::is_zero` exists for consumers that want these;
+        // producing one here would mean a `Wheel` event per kinetic-scroll
+        // teardown, which is noise.
+        None
+    }
+}
+
+/// Key-repeat parameters and the key currently repeating.
+///
+/// See the [module docs](self) for why this lives in the backend at all.
+#[derive(Clone, Copy, Debug, Default)]
+struct Repeat {
+    /// Repeats per second; `0` disables repeat entirely, which is what
+    /// `wl_keyboard.repeat_info` means by it.
+    rate: i32,
+    /// Milliseconds before the first repeat.
+    delay: i32,
+    key: Option<RepeatKey>,
+}
+
+/// The one key a seat is repeating.
+#[derive(Clone, Copy, Debug)]
+struct RepeatKey {
+    window: WindowId,
+    scancode: u32,
+    key_code: Option<KeyCode>,
+    keysym: Keysym,
+    /// `CLOCK_MONOTONIC` nanoseconds at which the next repeat is due.
+    next_nanos: u64,
+    /// Nanoseconds between repeats.
+    interval_nanos: u64,
+}
+
+impl Repeat {
+    /// Starts repeating `key`, if repeat is enabled at all.
+    fn start(&mut self, now_nanos: u64, key: RepeatKeyRequest) {
+        if self.rate <= 0 {
+            self.key = None;
+            return;
+        }
+        let interval_nanos = 1_000_000_000 / u64::try_from(self.rate).unwrap_or(1).max(1);
+        let delay_nanos = u64::try_from(self.delay.max(0)).unwrap_or(0) * 1_000_000;
+        self.key = Some(RepeatKey {
+            window: key.window,
+            scancode: key.scancode,
+            key_code: key.key_code,
+            keysym: key.keysym,
+            next_nanos: now_nanos.saturating_add(delay_nanos),
+            interval_nanos,
+        });
+    }
+
+    /// Stops repeating, if `scancode` is what is repeating.
+    fn stop(&mut self, scancode: u32) {
+        if self.key.is_some_and(|key| key.scancode == scancode) {
+            self.key = None;
+        }
+    }
+
+    /// `CLOCK_MONOTONIC` nanoseconds at which the next repeat is due.
+    fn due_at(&self) -> Option<u64> {
+        self.key.map(|key| key.next_nanos)
+    }
+}
+
+/// What [`Repeat::start`] needs to know, so it does not take six arguments.
+#[derive(Clone, Copy, Debug)]
+struct RepeatKeyRequest {
+    window: WindowId,
+    scancode: u32,
+    key_code: Option<KeyCode>,
+    keysym: Keysym,
 }
 
 // ---------------------------------------------------------------------------
@@ -649,6 +1394,9 @@ struct WlWindow {
     surface: *mut WlProxy,
     xdg_surface: *mut WlProxy,
     toplevel: *mut WlProxy,
+    decoration: *mut WlProxy,
+    fractional_scale: *mut WlProxy,
+    viewport: *mut WlProxy,
     title: String,
     requested_size: LogicalSize,
     requested_mode: DisplayMode,
@@ -659,6 +1407,19 @@ struct WlWindow {
     /// surface is mapped, which is why the first configure is always scale 1.
     outputs: Vec<usize>,
     scale: i32,
+    /// `wp_fractional_scale_v1.preferred_scale`, in 1/120ths, once it arrives.
+    preferred_scale: Option<u32>,
+    pointer_mode: PointerMode,
+    /// Live `zwp_locked_pointer_v1`/`zwp_confined_pointer_v1` objects as
+    /// `(the wl_pointer they name, the constraint)`.
+    ///
+    /// Keyed by the pointer because a constraint is a per-`(surface, pointer)`
+    /// object: when one seat unplugs its mouse, only *its* constraint may be
+    /// torn down, and another seat's has to keep working.
+    constraints: Vec<(usize, *mut WlProxy)>,
+    /// The cursor last asked for. The outer `Option` distinguishes "never set",
+    /// where the compositor's default stands, from "set to hidden".
+    cursor: Option<Option<CursorIcon>>,
     focused: bool,
     visible: bool,
     close_pending: bool,
@@ -676,6 +1437,19 @@ impl WlWindow {
             })
         })
     }
+
+    /// Device pixels per logical unit for this window.
+    ///
+    /// `fractional-scale-v1` when the compositor offered it, and the integer
+    /// `wl_surface.enter` scale otherwise. The two are mutually exclusive by
+    /// protocol: a surface using a `wp_viewport` to express its size must not
+    /// also set a buffer scale.
+    fn scale_factor(&self) -> f64 {
+        match self.preferred_scale {
+            Some(scale) if scale > 0 => f64::from(scale) / FRACTIONAL_SCALE_DENOMINATOR,
+            _ => f64::from(self.scale.max(1)),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -686,23 +1460,21 @@ impl WlWindow {
 ///
 /// Constructed through [`open`](crate::open) or
 /// [`open_backend`](crate::open_backend); see the [module docs](self) for what
-/// this slice implements and how a real compositor differs from
+/// this backend implements and how a real compositor differs from
 /// [`HeadlessShell`](crate::HeadlessShell).
 pub struct WaylandShell {
     conn: Conn,
     windows: Pool<WlWindow>,
     outputs: Vec<Output>,
+    seats: Vec<Seat>,
     monitors: Vec<MonitorInfo>,
     next_monitor_id: u32,
+    next_device_id: u32,
     queue: VecDeque<ShellEvent>,
     /// The epoch every event timestamp is measured from.
-    ///
-    /// Nothing reads it yet because no [`ShellEvent`] this slice produces
-    /// carries a timestamp — every timestamped variant is an input event, and
-    /// input is P0.5b. It is established and tested now so the epoch contract
-    /// is settled before the first `wl_pointer.motion` rather than after.
-    #[allow(dead_code, reason = "P0.5b's input events are the first readers")]
     time: TimeBase,
+    /// Latched at [`open`](Self::open); see [`caps`](Shell::caps).
+    caps: ShellCaps,
     lost: Option<String>,
 }
 
@@ -711,6 +1483,7 @@ impl core::fmt::Debug for WaylandShell {
         f.debug_struct("WaylandShell")
             .field("windows", &self.windows.len())
             .field("monitors", &self.monitors.len())
+            .field("seats", &self.seats.len())
             .field("queued_events", &self.queue.len())
             .field("connected", &self.lost.is_none())
             .finish()
@@ -720,11 +1493,11 @@ impl core::fmt::Debug for WaylandShell {
 impl WaylandShell {
     /// Connects to the compositor named by `WAYLAND_DISPLAY`.
     ///
-    /// Binds `wl_compositor`, `xdg_wm_base` and every `wl_output`, and
-    /// round-trips twice: once for the registry listing, once for the output
-    /// properties. Blocking here is correct — there is no frame loop yet, and
-    /// the alternative is a shell that reports no monitors for the first few
-    /// frames.
+    /// Binds every global this backend understands and round-trips twice: once
+    /// for the registry listing, once for the properties of what was bound.
+    /// Blocking here is correct — there is no frame loop yet, and the
+    /// alternative is a shell that reports no monitors and no capabilities for
+    /// the first few frames.
     ///
     /// # Errors
     ///
@@ -761,6 +1534,12 @@ impl WaylandShell {
             registry: ptr::null_mut(),
             compositor: ptr::null_mut(),
             wm_base: ptr::null_mut(),
+            xdg_output_manager: ptr::null_mut(),
+            decoration_manager: ptr::null_mut(),
+            fractional_scale_manager: ptr::null_mut(),
+            viewporter: ptr::null_mut(),
+            relative_pointer_manager: ptr::null_mut(),
+            pointer_constraints: ptr::null_mut(),
             sink: Box::into_raw(Box::new(Sink::default())),
         };
 
@@ -768,10 +1547,13 @@ impl WaylandShell {
             conn,
             windows: Pool::new(),
             outputs: Vec::new(),
+            seats: Vec::new(),
             monitors: Vec::new(),
             next_monitor_id: 1,
+            next_device_id: 1,
             queue: VecDeque::new(),
             time: TimeBase::now(),
+            caps: ShellCaps::empty(),
             lost: None,
         };
 
@@ -791,7 +1573,8 @@ impl WaylandShell {
         // First round trip: the registry listing.
         shell.conn.roundtrip()?;
         shell.process_raw();
-        // Second: the properties of everything bound in the first.
+        // Second: the properties of everything bound in the first, including
+        // the `xdg_output`s and the seat capabilities the first round created.
         shell.conn.roundtrip()?;
         shell.process_raw();
 
@@ -809,27 +1592,54 @@ impl WaylandShell {
                     .to_string(),
             });
         }
+        shell.caps = shell.latch_caps();
         // The registry listing and the initial output properties are startup
         // facts, not events anyone asked for.
         shell.queue.clear();
         Ok(shell)
     }
 
+    /// The capability set, computed once from the globals that actually bound.
+    ///
+    /// [`caps`](crate::caps) requires this to be latched: a Wayland compositor
+    /// may advertise a global after startup, and a renderer that chose the blit
+    /// path at init cannot be told mid-frame that it should have chosen the
+    /// viewport path. So this runs at the end of [`open`](Self::open) and never
+    /// again — a protocol that appears later stays unavailable until the next
+    /// run.
+    fn latch_caps(&self) -> ShellCaps {
+        let mut caps = ShellCaps::MULTI_WINDOW | ShellCaps::EVENT_WAIT;
+        caps.set(ShellCaps::HW_UPSCALE, !self.conn.viewporter.is_null());
+        caps.set(
+            ShellCaps::FRACTIONAL_SCALE,
+            !self.conn.fractional_scale_manager.is_null() && !self.conn.viewporter.is_null(),
+        );
+        caps.set(
+            ShellCaps::SERVER_DECORATIONS,
+            !self.conn.decoration_manager.is_null(),
+        );
+        caps.set(
+            ShellCaps::RAW_POINTER_MOTION,
+            !self.conn.relative_pointer_manager.is_null(),
+        );
+        // `pointer-constraints` advertises both forms in one global; the seam
+        // keeps them as separate bits because other platforms do not.
+        let constraints = !self.conn.pointer_constraints.is_null();
+        caps.set(ShellCaps::POINTER_LOCK, constraints);
+        caps.set(ShellCaps::POINTER_CONFINE, constraints);
+        // Not "there is an input method": the seam's own wording is that this
+        // bit "says only that the commit path is wired to an input method".
+        // What it is really asserting here is that composed text can reach the
+        // engine at all, which on Wayland means libxkbcommon resolved. Full
+        // `text-input-v3` pre-edit is post-MVP; a compositor-side IME that
+        // commits through the keyboard still works today.
+        caps.set(ShellCaps::TEXT_IME, xkb::available());
+        caps
+    }
+
     /// Aligns event timestamps with an engine [`TimeSource`](crcbl_core::TimeSource).
     ///
-    /// [`EventTime`]'s epoch is "the same origin as the `TimeSource` driving
-    /// [`FrameClock`](crcbl_core::FrameClock)", which this backend cannot know:
-    /// it is created some time after the clock is. Pass `time.elapsed()` once,
-    /// at startup, and the offset is removed. Without it, timestamps are
-    /// measured from the shell's own creation — off by however long startup
-    /// took, and consistent, which is enough for durations but not for
-    /// comparing against a frame time.
-    ///
-    /// Mirrors [`HeadlessShell::set_time`](crate::HeadlessShell::set_time).
-    #[allow(
-        dead_code,
-        reason = "the engine loop that owns the TimeSource lands after this slice"
-    )]
+    /// See [`Shell::align_event_clock`], which this implements.
     pub fn align_time_base(&mut self, elapsed: Duration) {
         self.time.align(elapsed);
     }
@@ -860,37 +1670,64 @@ impl WaylandShell {
             .map(|(handle, _)| handle.cast())
     }
 
+    fn seat_index(&self, proxy: usize, pick: fn(&Seat) -> usize) -> Option<usize> {
+        self.seats.iter().position(|seat| pick(seat) == proxy)
+    }
+
     /// Binds one global, if it is one we want.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per protocol; splitting it would only move the same \
+                  list somewhere a reader has to follow to"
+    )]
     fn bind_global(&mut self, name: u32, interface: &str, version: u32) {
         let registry = self.conn.registry;
+        /// Binds a global into a field of [`Conn`], at the version we cap it to.
+        macro_rules! bind {
+            ($field:ident, $module:path, $version:expr) => {{
+                use $module as target;
+                if self.conn.$field.is_null() {
+                    // SAFETY: `registry` is live, and `bind` marshals the
+                    // interface descriptor's own name and the version asked for.
+                    self.conn.$field = unsafe {
+                        wl_registry::bind(registry, name, &target::INTERFACE, version.min($version))
+                    };
+                }
+            }};
+        }
         match interface {
-            "wl_compositor" if self.conn.compositor.is_null() => {
-                // SAFETY: `registry` is live, and `bind` marshals the interface
-                // descriptor's own name and the version we ask for.
-                self.conn.compositor = unsafe {
-                    wl_registry::bind(
-                        registry,
-                        name,
-                        &wl_compositor::INTERFACE,
-                        version.min(COMPOSITOR_VERSION),
-                    )
-                };
-            }
-            "xdg_wm_base" if self.conn.wm_base.is_null() => {
-                // SAFETY: as above.
-                let proxy = unsafe {
-                    wl_registry::bind(
-                        registry,
-                        name,
-                        &xdg_wm_base::INTERFACE,
-                        version.min(WM_BASE_VERSION),
-                    )
-                };
-                self.conn.wm_base = proxy;
+            "wl_compositor" => bind!(compositor, wl_compositor, COMPOSITOR_VERSION),
+            "xdg_wm_base" => {
+                bind!(wm_base, xdg_wm_base, WM_BASE_VERSION);
+                let proxy = self.conn.wm_base;
                 self.conn.watch(proxy, ObjectKind::WmBase);
             }
+            "wp_viewporter" => bind!(viewporter, wp_viewporter, 1),
+            "wp_fractional_scale_manager_v1" => {
+                bind!(fractional_scale_manager, wp_fractional_scale_manager_v1, 1);
+            }
+            "zxdg_output_manager_v1" => {
+                bind!(
+                    xdg_output_manager,
+                    zxdg_output_manager_v1,
+                    XDG_OUTPUT_VERSION
+                );
+            }
+            "zxdg_decoration_manager_v1" => {
+                bind!(
+                    decoration_manager,
+                    zxdg_decoration_manager_v1,
+                    DECORATION_VERSION
+                );
+            }
+            "zwp_relative_pointer_manager_v1" => {
+                bind!(relative_pointer_manager, zwp_relative_pointer_manager_v1, 1);
+            }
+            "zwp_pointer_constraints_v1" => {
+                bind!(pointer_constraints, zwp_pointer_constraints_v1, 1);
+            }
             "wl_output" => {
-                // SAFETY: as above.
+                // SAFETY: `registry` is live; see the macro above.
                 let proxy = unsafe {
                     wl_registry::bind(
                         registry,
@@ -909,6 +1746,7 @@ impl WaylandShell {
                 self.next_monitor_id += 1;
                 self.outputs.push(Output {
                     proxy: proxy as usize,
+                    xdg: ptr::null_mut(),
                     global: name,
                     id,
                     x: 0,
@@ -917,8 +1755,47 @@ impl WaylandShell {
                     height: 0,
                     refresh_millihertz: 0,
                     scale: 1,
+                    logical_x: 0,
+                    logical_y: 0,
+                    logical_width: 0,
+                    logical_height: 0,
                     name: format!("wl-output-{}", id.0),
                     settled: false,
+                });
+            }
+            "wl_seat" => {
+                // SAFETY: `registry` is live; see the macro above.
+                let proxy = unsafe {
+                    wl_registry::bind(
+                        registry,
+                        name,
+                        &wl_seat::INTERFACE,
+                        version.min(SEAT_VERSION),
+                    )
+                };
+                if proxy.is_null() {
+                    return;
+                }
+                self.conn.watch(proxy, ObjectKind::Seat);
+                let device = DeviceId(self.next_device_id);
+                self.next_device_id += 1;
+                self.seats.push(Seat {
+                    proxy,
+                    global: name,
+                    device,
+                    capabilities: 0,
+                    pointer: ptr::null_mut(),
+                    keyboard: ptr::null_mut(),
+                    relative_pointer: ptr::null_mut(),
+                    enter_serial: 0,
+                    pointer_focus: None,
+                    pointer_position: PhysicalPoint::ORIGIN,
+                    frame: PointerFrame::default(),
+                    keyboard_focus: None,
+                    keymap: None,
+                    modifiers: Modifiers::empty(),
+                    held: Vec::new(),
+                    repeat: Repeat::default(),
                 });
             }
             _ => {}
@@ -927,6 +1804,36 @@ impl WaylandShell {
 
     fn output_mut(&mut self, proxy: usize) -> Option<&mut Output> {
         self.outputs.iter_mut().find(|output| output.proxy == proxy)
+    }
+
+    /// Creates a `zxdg_output_v1` for every output that has none.
+    ///
+    /// Called after each registry batch rather than inside
+    /// [`bind_global`](Self::bind_global) because the order globals arrive in
+    /// is the compositor's choice: `wl_output` can and does precede
+    /// `zxdg_output_manager_v1`, and an output bound before the manager would
+    /// otherwise never get its logical geometry.
+    fn ensure_xdg_outputs(&mut self) {
+        if self.conn.xdg_output_manager.is_null() {
+            return;
+        }
+        let manager = self.conn.xdg_output_manager;
+        let pending: Vec<usize> = self
+            .outputs
+            .iter()
+            .filter(|output| output.xdg.is_null())
+            .map(|output| output.proxy)
+            .collect();
+        for proxy in pending {
+            // SAFETY: the manager and the `wl_output` are both live on this
+            // connection; `get_xdg_output` creates the add-on object.
+            let xdg =
+                unsafe { zxdg_output_manager_v1::get_xdg_output(manager, proxy as *mut WlProxy) };
+            self.conn.watch(xdg, ObjectKind::XdgOutput);
+            if let Some(output) = self.output_mut(proxy) {
+                output.xdg = xdg;
+            }
+        }
     }
 
     /// Rebuilds [`monitors`](Shell::monitors) from the settled outputs.
@@ -951,6 +1858,11 @@ impl WaylandShell {
     ///
     /// Runs *after* libwayland has returned, never inside it, so it can take
     /// `&mut self` freely.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a flat routing table from wire events to handlers; every arm \
+                  is one or two lines and splitting it hides the routing"
+    )]
     fn process_raw(&mut self) {
         let events = core::mem::take(&mut self.conn.sink().events);
         let mut monitors_dirty = false;
@@ -966,8 +1878,12 @@ impl WaylandShell {
                         self.outputs.iter().position(|output| output.global == name)
                     {
                         let output = self.outputs.remove(index);
+                        self.conn.destroy(output.xdg);
                         self.conn.destroy(output.proxy as *mut WlProxy);
                         monitors_dirty = true;
+                    }
+                    if let Some(index) = self.seats.iter().position(|seat| seat.global == name) {
+                        self.remove_seat(index);
                     }
                 }
                 RawEvent::Ping { serial } => {
@@ -1016,6 +1932,34 @@ impl WaylandShell {
                         monitors_dirty = true;
                     }
                 }
+                // Both arms mark the monitor list dirty. On a version-3
+                // manager that is belt and braces — the protocol requires a
+                // `wl_output.done` after the `xdg_output` burst, and that is
+                // what settles the output. On version 1 and 2 it is the only
+                // thing that works: those send `zxdg_output_v1.done` instead,
+                // which this backend does not listen for (it would be a second
+                // settle signal that could disagree with the first), so without
+                // this the monitor list would keep the pre-`xdg_output`
+                // fallback for the whole session and every fractional scale
+                // would read as an integer.
+                RawEvent::XdgOutputPosition { xdg_output, x, y } => {
+                    if let Some(output) = self.output_by_xdg(xdg_output) {
+                        output.logical_x = x;
+                        output.logical_y = y;
+                        monitors_dirty = true;
+                    }
+                }
+                RawEvent::XdgOutputSize {
+                    xdg_output,
+                    width,
+                    height,
+                } => {
+                    if let Some(output) = self.output_by_xdg(xdg_output) {
+                        output.logical_width = width;
+                        output.logical_height = height;
+                        monitors_dirty = true;
+                    }
+                }
                 RawEvent::SurfaceEnter { surface, output } => {
                     self.surface_output_changed(surface, output, true);
                 }
@@ -1055,12 +1999,653 @@ impl WaylandShell {
                     self.queue
                         .push_back(ShellEvent::CloseRequested { window: id });
                 }
+                RawEvent::DecorationConfigure { decoration, mode } => {
+                    self.decoration_configured(decoration, mode);
+                }
+                RawEvent::PreferredScale { object, scale } => {
+                    self.preferred_scale_changed(object, scale);
+                }
+                RawEvent::SeatCapabilities { seat, capabilities } => {
+                    self.seat_capabilities_changed(seat, capabilities);
+                }
+                other => self.process_input(other),
             }
         }
+        self.ensure_xdg_outputs();
         if monitors_dirty {
             self.republish_monitors();
         }
+        // A compositor is not obliged to end a burst with a `wl_pointer.frame`
+        // before the socket goes quiet — and a version-4 pointer has no frame
+        // event at all. Flushing here as well means a motion is never held back
+        // to the next pump.
+        self.flush_pointer_frames();
     }
+
+    fn output_by_xdg(&mut self, xdg: usize) -> Option<&mut Output> {
+        self.outputs
+            .iter_mut()
+            .find(|output| output.xdg as usize == xdg)
+    }
+
+    // -----------------------------------------------------------------------
+    // Seats and input
+    // -----------------------------------------------------------------------
+
+    /// Adds or removes a seat's devices to match what it now advertises.
+    ///
+    /// A seat gains and loses capabilities at runtime — plugging in a mouse is
+    /// the everyday case, and a headless compositor starts with *neither* a
+    /// pointer nor a keyboard — so this is a diff against the previous set, not
+    /// a one-time setup.
+    fn seat_capabilities_changed(&mut self, proxy: usize, capabilities: u32) {
+        let Some(index) = self.seat_index(proxy, |seat| seat.proxy as usize) else {
+            return;
+        };
+        let previous = self.seats[index].capabilities;
+        self.seats[index].capabilities = capabilities;
+
+        let had_pointer = previous & wl_seat::capability::POINTER != 0;
+        let has_pointer = capabilities & wl_seat::capability::POINTER != 0;
+        if has_pointer && !had_pointer {
+            self.add_pointer(index);
+        } else if !has_pointer && had_pointer {
+            self.remove_pointer(index);
+        }
+
+        let had_keyboard = previous & wl_seat::capability::KEYBOARD != 0;
+        let has_keyboard = capabilities & wl_seat::capability::KEYBOARD != 0;
+        if has_keyboard && !had_keyboard {
+            // SAFETY: the seat proxy is live and advertises the capability, so
+            // `get_keyboard` cannot raise `missing_capability`.
+            let keyboard = unsafe { wl_seat::get_keyboard(self.seats[index].proxy) };
+            self.conn.watch(keyboard, ObjectKind::Keyboard);
+            self.seats[index].keyboard = keyboard;
+        } else if !has_keyboard && had_keyboard {
+            self.remove_keyboard(index);
+        }
+        self.conn.flush();
+    }
+
+    /// Creates the objects that hang off a new `wl_pointer`.
+    fn add_pointer(&mut self, index: usize) {
+        // SAFETY: the seat proxy is live and advertises the capability.
+        let pointer = unsafe { wl_seat::get_pointer(self.seats[index].proxy) };
+        self.conn.watch(pointer, ObjectKind::Pointer);
+        self.seats[index].pointer = pointer;
+
+        if !self.conn.relative_pointer_manager.is_null() {
+            // SAFETY: both proxies are live; `get_relative_pointer` creates the
+            // add-on object that carries unaccelerated motion.
+            let relative = unsafe {
+                zwp_relative_pointer_manager_v1::get_relative_pointer(
+                    self.conn.relative_pointer_manager,
+                    pointer,
+                )
+            };
+            self.conn.watch(relative, ObjectKind::RelativePointer);
+            self.seats[index].relative_pointer = relative;
+        }
+        // A window that asked to be locked before any pointer existed gets its
+        // constraint now. This is the hotplug case that would otherwise leave a
+        // first-person camera with a free cursor until the next mode change.
+        self.reapply_constraints();
+    }
+
+    /// Tears down a seat's pointer and everything that hangs off it.
+    fn remove_pointer(&mut self, index: usize) {
+        self.flush_pointer_frame(index);
+        if let Some(window) = self.seats[index].pointer_focus.take() {
+            let device = self.seats[index].device;
+            self.queue.push_back(ShellEvent::PointerFocus {
+                window,
+                device,
+                // Synthesized because the device went away, so there is no
+                // compositor timestamp at all; see `TimeBase::event_time_now`.
+                time: self.time.event_time_now(),
+                entered: false,
+                position: None,
+            });
+        }
+        // Before the pointer goes: a constraint names it, and the destructor
+        // has to reach the compositor while the object it refers to still
+        // exists.
+        self.drop_window_constraints_for_seat(index);
+        let (pointer, relative) = (
+            self.seats[index].pointer,
+            self.seats[index].relative_pointer,
+        );
+        // SAFETY: each proxy is live and each destructor belongs to its own
+        // interface. Order is innermost first: the relative pointer is an
+        // add-on object that references the pointer.
+        unsafe {
+            self.conn
+                .release(relative, zwp_relative_pointer_v1::destroy);
+            self.conn.release(pointer, wl_pointer::release);
+        }
+        self.seats[index].pointer = ptr::null_mut();
+        self.seats[index].relative_pointer = ptr::null_mut();
+    }
+
+    /// Tears down a seat's keyboard, clearing focus and any repeat with it.
+    fn remove_keyboard(&mut self, index: usize) {
+        self.seats[index].repeat.key = None;
+        self.seats[index].held.clear();
+        self.seats[index].keymap = None;
+        if let Some(window) = self.seats[index].keyboard_focus.take() {
+            self.set_focus(window, false);
+        }
+        let keyboard = self.seats[index].keyboard;
+        // SAFETY: the proxy is live and `release` is `wl_keyboard`'s own
+        // destructor.
+        unsafe { self.conn.release_since(keyboard, 3, wl_keyboard::release) };
+        self.seats[index].keyboard = ptr::null_mut();
+    }
+
+    /// Drops a seat entirely, which is what `wl_registry.global_remove` means
+    /// for one.
+    fn remove_seat(&mut self, index: usize) {
+        if !self.seats[index].pointer.is_null() {
+            self.remove_pointer(index);
+        }
+        if !self.seats[index].keyboard.is_null() {
+            self.remove_keyboard(index);
+        }
+        let proxy = self.seats[index].proxy;
+        self.conn.destroy(proxy);
+        self.seats.remove(index);
+    }
+
+    /// Routes one pointer, keyboard or relative-motion event.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the input routing table; see process_raw"
+    )]
+    fn process_input(&mut self, event: RawEvent) {
+        match event {
+            RawEvent::PointerEnter {
+                pointer,
+                serial,
+                surface,
+                x,
+                y,
+            } => {
+                let Some(index) = self.seat_index(pointer, |seat| seat.pointer as usize) else {
+                    return;
+                };
+                let Some(window) = self.window_by_proxy(surface, |w| w.surface as usize) else {
+                    return;
+                };
+                let scale = self.window(window).map_or(1.0, WlWindow::scale_factor);
+                let position = PhysicalPoint::new(
+                    keymap::fixed_to_f64(x) * scale,
+                    keymap::fixed_to_f64(y) * scale,
+                );
+                self.seats[index].enter_serial = serial;
+                self.seats[index].pointer_focus = Some(window);
+                self.seats[index].pointer_position = position;
+                // Wayland requires the cursor to be set again on every enter:
+                // the compositor resets it to the default when it crosses a
+                // surface boundary, so a game that hid its cursor once would
+                // see it flicker back on every re-entry.
+                self.apply_cursor(index, window);
+                let device = self.seats[index].device;
+                self.queue.push_back(ShellEvent::PointerFocus {
+                    window,
+                    device,
+                    // `wl_pointer.enter` has no `time` argument; see
+                    // `TimeBase::event_time_now`.
+                    time: self.time.event_time_now(),
+                    entered: true,
+                    position: Some(position),
+                });
+            }
+            RawEvent::PointerLeave { pointer, surface } => {
+                let Some(index) = self.seat_index(pointer, |seat| seat.pointer as usize) else {
+                    return;
+                };
+                self.flush_pointer_frame(index);
+                let window = self.window_by_proxy(surface, |w| w.surface as usize);
+                self.seats[index].pointer_focus = None;
+                let Some(window) = window else { return };
+                let device = self.seats[index].device;
+                self.queue.push_back(ShellEvent::PointerFocus {
+                    window,
+                    device,
+                    // As for `enter`: the protocol carries no timestamp.
+                    time: self.time.event_time_now(),
+                    entered: false,
+                    position: None,
+                });
+            }
+            RawEvent::PointerMotion {
+                pointer,
+                time,
+                x,
+                y,
+            } => {
+                let Some(index) = self.seat_index(pointer, |seat| seat.pointer as usize) else {
+                    return;
+                };
+                self.seats[index].frame.time = time;
+                self.seats[index].frame.motion =
+                    Some((keymap::fixed_to_f64(x), keymap::fixed_to_f64(y)));
+            }
+            RawEvent::PointerButton {
+                pointer,
+                time,
+                button,
+                state,
+            } => {
+                let Some(index) = self.seat_index(pointer, |seat| seat.pointer as usize) else {
+                    return;
+                };
+                // Motion accumulated so far happened *before* this button, and
+                // a click's position is the point of the whole event.
+                self.seats[index].frame.time = time;
+                self.flush_pointer_frame(index);
+                let Some(window) = self.seats[index].pointer_focus else {
+                    return;
+                };
+                let locked = self
+                    .window(window)
+                    .is_ok_and(|w| w.pointer_mode == PointerMode::Locked);
+                let seat = &self.seats[index];
+                self.queue.push_back(ShellEvent::Button {
+                    window,
+                    device: seat.device,
+                    time: self.time.event_time(time),
+                    button: keymap::pointer_button(button),
+                    state: ButtonState::from_pressed(state == wl_pointer::button_state::PRESSED),
+                    position: (!locked).then_some(seat.pointer_position),
+                    modifiers: seat.modifiers,
+                });
+            }
+            RawEvent::PointerAxis {
+                pointer,
+                time,
+                axis,
+                value,
+            } => {
+                let Some(index) = self.seat_index(pointer, |seat| seat.pointer as usize) else {
+                    return;
+                };
+                let Some(slot) = axis_slot(axis) else { return };
+                let frame = &mut self.seats[index].frame;
+                frame.time = time;
+                frame.continuous[slot] += keymap::fixed_to_f64(value);
+                frame.has_axis = true;
+            }
+            RawEvent::PointerAxisSource { pointer, source } => {
+                if let Some(index) = self.seat_index(pointer, |seat| seat.pointer as usize) {
+                    self.seats[index].frame.axis_source = Some(source);
+                }
+            }
+            RawEvent::PointerAxisDiscrete {
+                pointer,
+                axis,
+                discrete,
+            } => {
+                let Some(index) = self.seat_index(pointer, |seat| seat.pointer as usize) else {
+                    return;
+                };
+                let Some(slot) = axis_slot(axis) else { return };
+                let frame = &mut self.seats[index].frame;
+                frame.discrete[slot] += f64::from(discrete);
+                frame.has_axis = true;
+            }
+            RawEvent::PointerAxisValue120 {
+                pointer,
+                axis,
+                value120,
+            } => {
+                let Some(index) = self.seat_index(pointer, |seat| seat.pointer as usize) else {
+                    return;
+                };
+                let Some(slot) = axis_slot(axis) else { return };
+                let frame = &mut self.seats[index].frame;
+                frame.value120[slot] += f64::from(value120);
+                frame.has_axis = true;
+            }
+            RawEvent::PointerFrame { pointer } => {
+                if let Some(index) = self.seat_index(pointer, |seat| seat.pointer as usize) {
+                    self.flush_pointer_frame(index);
+                }
+            }
+            RawEvent::RelativeMotion {
+                relative,
+                utime_hi,
+                utime_lo,
+                dx_unaccel,
+                dy_unaccel,
+            } => {
+                let Some(index) = self.seat_index(relative, |seat| seat.relative_pointer as usize)
+                else {
+                    return;
+                };
+                let frame = &mut self.seats[index].frame;
+                let (dx, dy) = frame.raw.unwrap_or((0.0, 0.0));
+                frame.raw = Some((
+                    dx + keymap::fixed_to_f64(dx_unaccel),
+                    dy + keymap::fixed_to_f64(dy_unaccel),
+                ));
+                frame.raw_micros = Some((u64::from(utime_hi) << 32) | u64::from(utime_lo));
+            }
+            RawEvent::KeyboardKeymap {
+                keyboard,
+                format,
+                fd,
+                size,
+            } => self.keymap_changed(keyboard, format, fd, size),
+            RawEvent::KeyboardEnter { keyboard, surface } => {
+                let Some(index) = self.seat_index(keyboard, |seat| seat.keyboard as usize) else {
+                    return;
+                };
+                self.seats[index].held.clear();
+                let window = self.window_by_proxy(surface, |w| w.surface as usize);
+                self.seats[index].keyboard_focus = window;
+                if let Some(window) = window {
+                    self.set_focus(window, true);
+                }
+            }
+            RawEvent::KeyboardLeave { keyboard, surface } => {
+                let Some(index) = self.seat_index(keyboard, |seat| seat.keyboard as usize) else {
+                    return;
+                };
+                // Focus loss ends every repeat: nothing will deliver the
+                // release, and a shell that kept fabricating presses would hold
+                // a key down in a window that is not even focused.
+                self.seats[index].repeat.key = None;
+                self.seats[index].held.clear();
+                self.seats[index].keyboard_focus = None;
+                if let Some(window) = self.window_by_proxy(surface, |w| w.surface as usize) {
+                    self.set_focus(window, false);
+                }
+            }
+            RawEvent::KeyboardKey {
+                keyboard,
+                time,
+                key,
+                state,
+            } => self.key_event(keyboard, time, key, state),
+            RawEvent::KeyboardModifiers {
+                keyboard,
+                depressed,
+                latched,
+                locked,
+                group,
+            } => {
+                let Some(index) = self.seat_index(keyboard, |seat| seat.keyboard as usize) else {
+                    return;
+                };
+                if let Some(keymap) = self.seats[index].keymap.as_mut() {
+                    keymap.update(depressed, latched, locked, group);
+                }
+                self.refresh_modifiers(index);
+            }
+            RawEvent::KeyboardRepeatInfo {
+                keyboard,
+                rate,
+                delay,
+            } => {
+                let Some(index) = self.seat_index(keyboard, |seat| seat.keyboard as usize) else {
+                    return;
+                };
+                self.seats[index].repeat.rate = rate;
+                self.seats[index].repeat.delay = delay;
+                if rate <= 0 {
+                    self.seats[index].repeat.key = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Compiles a new keymap, replacing whatever the seat had.
+    fn keymap_changed(&mut self, keyboard: usize, format: u32, fd: i32, size: u32) {
+        let index = self.seat_index(keyboard, |seat| seat.keyboard as usize);
+        let Some(index) = index else {
+            // The keyboard went away between the event and the drain. The
+            // descriptor is still ours and still has to be returned.
+            xkb::close_fd(fd);
+            return;
+        };
+        // A layout switch invalidates which key was repeating — the keysym it
+        // would produce has changed under it.
+        self.seats[index].repeat.key = None;
+        if format != wl_keyboard::keymap_format::XKB_V1 {
+            // `no_keymap` is a real value: a compositor may say "there is no
+            // layout at all". Keys still map to `KeyCode`; see `xkb`.
+            xkb::close_fd(fd);
+            self.seats[index].keymap = None;
+            return;
+        }
+        self.seats[index].keymap = xkb::Keymap::from_fd(fd, size);
+        self.refresh_modifiers(index);
+    }
+
+    /// Recomputes a seat's modifier set from whichever source it has.
+    fn refresh_modifiers(&mut self, index: usize) {
+        let seat = &mut self.seats[index];
+        seat.modifiers = match seat.keymap.as_ref() {
+            Some(keymap) => keymap.modifiers(),
+            None => xkb::modifiers_from_held(&seat.held),
+        };
+    }
+
+    /// One `wl_keyboard.key`.
+    fn key_event(&mut self, keyboard: usize, time: u32, key: u32, state: u32) {
+        let Some(index) = self.seat_index(keyboard, |seat| seat.keyboard as usize) else {
+            return;
+        };
+        let Some(window) = self.seats[index].keyboard_focus else {
+            return;
+        };
+        let pressed = state == wl_keyboard::key_state::PRESSED;
+        let key_code = keymap::key_code(key);
+
+        // Held-key bookkeeping feeds the degraded modifier path and nothing
+        // else; with a keymap, XKB's `modifiers` event is authoritative.
+        if let Some(code) = key_code {
+            let held = &mut self.seats[index].held;
+            if pressed {
+                if !held.contains(&code) {
+                    held.push(code);
+                }
+            } else {
+                held.retain(|candidate| *candidate != code);
+            }
+        }
+        if self.seats[index].keymap.is_none() {
+            self.refresh_modifiers(index);
+        }
+
+        let seat = &self.seats[index];
+        let keysym = seat
+            .keymap
+            .as_ref()
+            .map_or(Keysym::NONE, |keymap| keymap.keysym(key));
+        let text = pressed
+            .then(|| seat.keymap.as_ref().and_then(|keymap| keymap.text(key)))
+            .flatten();
+        let event_time = self.time.event_time(time);
+        self.queue.push_back(ShellEvent::Key {
+            window,
+            device: seat.device,
+            time: event_time,
+            scancode: Scancode(key),
+            key_code,
+            keysym,
+            state: ButtonState::from_pressed(pressed),
+            repeat: false,
+            modifiers: seat.modifiers,
+        });
+        // Text follows its key, never precedes it: a field that inserts a
+        // character before it has seen the keystroke cannot implement "Ctrl
+        // suppresses text".
+        if let Some(text) = text {
+            self.queue.push_back(ShellEvent::TextCommit {
+                window,
+                time: event_time,
+                text,
+            });
+        }
+
+        let repeats = self.seats[index]
+            .keymap
+            .as_ref()
+            // With no keymap there is nothing that knows which keys repeat, and
+            // repeating a modifier would hold Shift down forever. Repeat is
+            // therefore off entirely in the degraded path.
+            .is_some_and(|keymap| keymap.repeats(key));
+        if pressed && repeats {
+            let now = ffi::monotonic_nanos();
+            self.seats[index].repeat.start(
+                now,
+                RepeatKeyRequest {
+                    window,
+                    scancode: key,
+                    key_code,
+                    keysym,
+                },
+            );
+        } else if !pressed {
+            self.seats[index].repeat.stop(key);
+        }
+    }
+
+    /// Emits every repeat that has come due, on every seat.
+    ///
+    /// Called from [`pump`](Shell::pump) rather than driven by a timer thread:
+    /// the shell is thread-affine, and a repeat that arrived between frames
+    /// would have to be queued anyway. The timestamp is the instant the repeat
+    /// was *due*, so a slow frame does not smear the interval.
+    fn drive_repeats(&mut self) {
+        let now = ffi::monotonic_nanos();
+        for index in 0..self.seats.len() {
+            let Some(mut key) = self.seats[index].repeat.key else {
+                continue;
+            };
+            if key.next_nanos > now {
+                continue;
+            }
+            // A stall — a long frame, a breakpoint, a suspended laptop — must
+            // not release a backlog of presses into the action layer. Four
+            // intervals is the point at which catching up stops being catching
+            // up and starts being a burst.
+            let behind = now.saturating_sub(key.next_nanos);
+            if behind > key.interval_nanos.saturating_mul(4) {
+                key.next_nanos = now;
+            }
+            let mut emitted = 0;
+            while key.next_nanos <= now && emitted < 8 {
+                let seat = &self.seats[index];
+                self.queue.push_back(ShellEvent::Key {
+                    window: key.window,
+                    device: seat.device,
+                    time: self.time.event_time_nanos(key.next_nanos),
+                    scancode: Scancode(key.scancode),
+                    key_code: key.key_code,
+                    keysym: key.keysym,
+                    state: ButtonState::Pressed,
+                    repeat: true,
+                    modifiers: seat.modifiers,
+                });
+                key.next_nanos = key.next_nanos.saturating_add(key.interval_nanos);
+                emitted += 1;
+            }
+            self.seats[index].repeat.key = Some(key);
+        }
+    }
+
+    /// How long until the earliest repeat is due, if any is.
+    fn next_repeat_in(&self) -> Option<Duration> {
+        let now = ffi::monotonic_nanos();
+        self.seats
+            .iter()
+            .filter_map(|seat| seat.repeat.due_at())
+            .min()
+            .map(|due| Duration::from_nanos(due.saturating_sub(now)))
+    }
+
+    fn flush_pointer_frames(&mut self) {
+        for index in 0..self.seats.len() {
+            self.flush_pointer_frame(index);
+        }
+    }
+
+    /// Turns one accumulated [`PointerFrame`] into at most one motion and at
+    /// most one wheel event.
+    fn flush_pointer_frame(&mut self, index: usize) {
+        if self.seats[index].frame.is_empty() {
+            return;
+        }
+        let frame = core::mem::take(&mut self.seats[index].frame);
+        // The frame's time survives the take: it is the seat's clock, not the
+        // frame's payload, and the next event without one should still be
+        // stamped sensibly.
+        self.seats[index].frame.time = frame.time;
+        let Some(window) = self.seats[index].pointer_focus else {
+            return;
+        };
+        let scale = self.window(window).map_or(1.0, WlWindow::scale_factor);
+        let locked = self
+            .window(window)
+            .is_ok_and(|w| w.pointer_mode == PointerMode::Locked);
+
+        if let Some((x, y)) = frame.motion {
+            self.seats[index].pointer_position = PhysicalPoint::new(x * scale, y * scale);
+        }
+        let seat = &self.seats[index];
+        if frame.motion.is_some() || frame.raw.is_some() {
+            let time = frame.raw_micros.map_or_else(
+                || self.time.event_time(frame.time),
+                |micros| self.time.event_time_micros(micros),
+            );
+            self.queue.push_back(ShellEvent::PointerMotion {
+                window,
+                device: seat.device,
+                time,
+                // Under a lock the pointer does not move, so reporting the
+                // frozen position would make anything that reads it appear to
+                // work until the day it does not. `PointerMode::Locked` says so.
+                abs: (!locked).then_some(seat.pointer_position),
+                raw_delta: frame.raw,
+            });
+        }
+        if let Some(delta) = frame.scroll(scale) {
+            self.queue.push_back(ShellEvent::Wheel {
+                window,
+                device: seat.device,
+                time: self.time.event_time(frame.time),
+                delta,
+                position: (!locked).then_some(seat.pointer_position),
+                modifiers: seat.modifiers,
+            });
+        }
+    }
+
+    /// Sets a window's focus flag, emitting only on a change.
+    ///
+    /// Two sources say a window is focused — `wl_keyboard.enter`/`leave` and
+    /// `xdg_toplevel.state.activated` — and on every compositor worth the name
+    /// they agree. Funnelling both through one diffing setter means a consumer
+    /// sees one [`ShellEvent::Focus`] rather than two, and that a compositor
+    /// restating `activated` on every resize does not look like a focus change.
+    fn set_focus(&mut self, window: WindowId, focused: bool) {
+        let Ok(state) = self.window_mut(window) else {
+            return;
+        };
+        if state.focused == focused {
+            return;
+        }
+        state.focused = focused;
+        self.queue.push_back(ShellEvent::Focus { window, focused });
+    }
+
+    // -----------------------------------------------------------------------
+    // Scale, configure, cursor, constraints
+    // -----------------------------------------------------------------------
 
     fn surface_output_changed(&mut self, surface: usize, output: usize, entered: bool) {
         let Some(id) = self.window_by_proxy(surface, |w| w.surface as usize) else {
@@ -1102,29 +2687,65 @@ impl WaylandShell {
             return;
         }
         window.scale = scale;
-        let surface_proxy = window.surface;
-        // SAFETY: the surface is live and `set_buffer_scale` takes one int.
-        unsafe { wl_surface::set_buffer_scale(surface_proxy, scale) };
+        // `wl_surface.set_buffer_scale` and a `wp_viewport` destination are two
+        // ways of saying the same thing, and the viewporter protocol forbids
+        // using both. When the compositor is driving the scale fractionally,
+        // the viewport is the one in effect.
+        if window.preferred_scale.is_none() {
+            let surface_proxy = window.surface;
+            // SAFETY: the surface is live and `set_buffer_scale` takes one int.
+            unsafe { wl_surface::set_buffer_scale(surface_proxy, scale) };
+        }
+        self.rescale(id);
+    }
 
-        let Some(config) = window.configuration else {
-            // Not configured yet: the scale will be folded into the first
-            // configure rather than announced on its own.
+    /// A `wp_fractional_scale_v1.preferred_scale`.
+    fn preferred_scale_changed(&mut self, object: usize, scale: u32) {
+        let Some(id) = self.window_by_proxy(object, |w| w.fractional_scale as usize) else {
             return;
         };
+        let Ok(window) = self.window_mut(id) else {
+            return;
+        };
+        if window.preferred_scale == Some(scale) {
+            return;
+        }
+        window.preferred_scale = Some(scale);
+        self.rescale(id);
+    }
+
+    /// Republishes a window's configuration after its scale changed.
+    fn rescale(&mut self, id: WindowId) {
+        let Ok(window) = self.window_mut(id) else {
+            return;
+        };
+        let Some(config) = window.configuration else {
+            // Not configured yet: the scale folds into the first configure
+            // rather than being announced on its own.
+            return;
+        };
+        let scale_factor = window.scale_factor();
+        if (config.scale_factor - scale_factor).abs() < f64::EPSILON {
+            return;
+        }
         let logical = window.logical_size();
-        let size = logical.to_physical(f64::from(scale));
+        let size = logical.to_physical(scale_factor);
         window.configuration = Some(WindowConfiguration {
             size,
-            scale_factor: f64::from(scale),
+            scale_factor,
             mode: config.mode,
         });
-        let surface_proxy = window.surface;
-        // SAFETY: the surface is live; a scale change is only in effect after a
-        // commit.
-        unsafe { wl_surface::commit(surface_proxy) };
+        let (surface, viewport) = (window.surface, window.viewport);
+        // SAFETY: both proxies are live; a scale change is only in effect after
+        // a commit, and the viewport destination is what tells the compositor
+        // how large the (physical) buffer should appear.
+        unsafe {
+            set_viewport(viewport, logical);
+            wl_surface::commit(surface);
+        }
         self.queue.push_back(ShellEvent::ScaleFactorChanged {
             window: id,
-            scale_factor: f64::from(scale),
+            scale_factor,
             size,
         });
         self.conn.flush();
@@ -1149,7 +2770,7 @@ impl WaylandShell {
         } else {
             DisplayMode::Windowed
         };
-        let scale_factor = f64::from(window.scale.max(1));
+        let scale_factor = window.scale_factor();
         let logical = window.logical_size();
         // Constraints are hints the compositor may ignore, so they are applied
         // here too — the same thing `SizeConstraints::apply` does for
@@ -1168,23 +2789,24 @@ impl WaylandShell {
             .configuration
             .is_some_and(|previous| previous.scale_factor != scale_factor);
         window.configuration = Some(config);
-        // `xdg_toplevel.state.activated` is the only focus signal there is
-        // without a `wl_seat`, and it is the one a window manager sets. Compare
-        // against the previous value rather than emitting on every configure: a
-        // compositor restates the full state set every time, so a backend that
-        // did not diff would deliver a `Focus` per resize.
+        // `xdg_toplevel.state.activated` is a focus signal a compositor sets
+        // even before a `wl_seat` has a keyboard. Compare against the previous
+        // value rather than emitting on every configure: a compositor restates
+        // the full state set every time.
         let focused = window
             .pending
             .states
             .contains(&xdg_toplevel::state::ACTIVATED);
-        let focus_changed = window.focused != focused;
-        window.focused = focused;
         let xdg = window.xdg_surface;
         let surface = window.surface;
+        let viewport = window.viewport;
 
-        // SAFETY: both proxies are live. `ack_configure` must precede the
-        // commit, and the commit is what makes the acknowledged state current.
+        // SAFETY: every proxy is live. `ack_configure` must precede the commit,
+        // and the commit is what makes the acknowledged state current. The
+        // viewport destination is the logical size the compositor just asked
+        // for, which is exactly what `wp_viewport` wants.
         unsafe {
+            set_viewport(viewport, logical);
             xdg_surface::ack_configure(xdg, serial);
             wl_surface::commit(surface);
         }
@@ -1204,24 +2826,259 @@ impl WaylandShell {
                 scale_factor,
             });
         }
-        if focus_changed {
-            self.queue.push_back(ShellEvent::Focus {
-                window: id,
-                focused,
-            });
+        self.set_focus(id, focused);
+    }
+
+    /// Sends the cursor a window asked for on a seat that has just entered it.
+    ///
+    /// Only the hidden case is expressible; see [`Shell::set_cursor`].
+    fn apply_cursor(&mut self, index: usize, window: WindowId) {
+        let Ok(state) = self.window(window) else {
+            return;
+        };
+        // `Some(None)` is "hide"; `None` (never set) and `Some(Some(_))` (a
+        // shape) both leave the compositor's cursor alone.
+        if state.cursor != Some(None) {
+            return;
+        }
+        let seat = &self.seats[index];
+        let (pointer, serial) = (seat.pointer, seat.enter_serial);
+        if pointer.is_null() {
+            return;
+        }
+        // SAFETY: the pointer is live and a null surface argument is the
+        // documented way to say "no cursor" in core Wayland.
+        unsafe { wl_pointer::set_cursor(pointer, serial, ptr::null_mut(), 0, 0) };
+        self.conn.flush();
+    }
+
+    /// Rebuilds every window's pointer constraint against the current seats.
+    ///
+    /// Called when a mode changes and when a seat gains a pointer, because a
+    /// constraint is a per-`(surface, pointer)` object and a pointer that did
+    /// not exist yet could not have one.
+    fn reapply_constraints(&mut self) {
+        let windows: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|(_, window)| window.pointer_mode.is_captured())
+            .map(|(handle, _)| handle.cast())
+            .collect();
+        for window in windows {
+            let mode = self
+                .window(window)
+                .map_or(PointerMode::Free, |w| w.pointer_mode);
+            self.rebuild_constraint(window, mode);
         }
     }
 
+    /// Destroys and recreates one window's constraints for `mode`.
+    fn rebuild_constraint(&mut self, window: WindowId, mode: PointerMode) {
+        let existing = match self.window_mut(window) {
+            Ok(state) => {
+                state.pointer_mode = mode;
+                core::mem::take(&mut state.constraints)
+            }
+            Err(_) => return,
+        };
+        for (_, proxy) in existing {
+            // SAFETY: each proxy is a live constraint object created below. The
+            // two interfaces have byte-identical destructors at opcode 0, but
+            // the correct one is still named per kind by `constraint_destructor`.
+            unsafe { self.conn.release(proxy, constraint_destructor()) };
+        }
+        if mode == PointerMode::Free || self.conn.pointer_constraints.is_null() {
+            self.conn.flush();
+            return;
+        }
+        let Ok(surface) = self.window(window).map(|state| state.surface) else {
+            return;
+        };
+        let manager = self.conn.pointer_constraints;
+        let pointers: Vec<*mut WlProxy> = self
+            .seats
+            .iter()
+            .map(|seat| seat.pointer)
+            .filter(|pointer| !pointer.is_null())
+            .collect();
+        let mut created = Vec::with_capacity(pointers.len());
+        for pointer in pointers {
+            // A null region means "the whole surface", and `persistent` means
+            // the constraint reactivates whenever the compositor is willing
+            // again — the behaviour a game wants across an alt-tab, rather than
+            // a one-shot that silently never comes back.
+            // SAFETY: the manager, surface and pointer are all live on this
+            // connection; a null region is the protocol's own "entire surface".
+            let proxy = unsafe {
+                match mode {
+                    PointerMode::Locked => zwp_pointer_constraints_v1::lock_pointer(
+                        manager,
+                        surface,
+                        pointer,
+                        ptr::null_mut(),
+                        zwp_pointer_constraints_v1::lifetime::PERSISTENT,
+                    ),
+                    _ => zwp_pointer_constraints_v1::confine_pointer(
+                        manager,
+                        surface,
+                        pointer,
+                        ptr::null_mut(),
+                        zwp_pointer_constraints_v1::lifetime::PERSISTENT,
+                    ),
+                }
+            };
+            // The `locked`/`unlocked` and `confined`/`unconfined` events say
+            // whether the constraint is currently active. Nothing in the seam
+            // reports that — `WindowState::pointer_mode` is what was asked for
+            // — so they are swallowed rather than left to warn.
+            self.conn.watch(proxy, ObjectKind::Ignored);
+            created.push((pointer as usize, proxy));
+        }
+        if let Ok(state) = self.window_mut(window) {
+            state.constraints = created;
+        }
+        self.conn.flush();
+    }
+
+    /// Destroys the constraints that name a seat's pointer, because it is going
+    /// away.
+    ///
+    /// Sent as the protocol destructor and sent **first**, before the
+    /// `wl_pointer` itself is released: a constraint whose proxy is merely
+    /// freed client-side leaves the server-side object alive for the rest of
+    /// the session, and on a compositor that keys the lock off the object
+    /// rather than the pointer that is a pointer that never comes back.
+    ///
+    /// Only this seat's constraints go — another seat's mouse is still plugged
+    /// in and still locked. The windows keep their
+    /// [`PointerMode`](crate::PointerMode), so
+    /// [`add_pointer`](Self::add_pointer) restores this seat's when a pointer
+    /// reappears.
+    fn drop_window_constraints_for_seat(&mut self, index: usize) {
+        let pointer = self.seats[index].pointer as usize;
+        let windows: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|(_, window)| {
+                window
+                    .constraints
+                    .iter()
+                    .any(|(owner, _)| *owner == pointer)
+            })
+            .map(|(handle, _)| handle.cast())
+            .collect();
+        for window in windows {
+            let doomed: Vec<*mut WlProxy> = match self.window_mut(window) {
+                Ok(state) => {
+                    let (mine, theirs) = state
+                        .constraints
+                        .iter()
+                        .partition::<Vec<_>, _>(|(owner, _)| *owner == pointer);
+                    state.constraints = theirs;
+                    mine.into_iter().map(|(_, proxy)| proxy).collect()
+                }
+                Err(_) => continue,
+            };
+            for proxy in doomed {
+                // SAFETY: each is a live constraint object created by
+                // `rebuild_constraint`, destroyed exactly once.
+                unsafe { self.conn.release(proxy, constraint_destructor()) };
+            }
+        }
+        self.conn.flush();
+    }
+
     /// Tears one window's objects down, innermost first.
-    fn destroy_objects(&mut self, window: &WlWindow) {
+    fn destroy_objects(&mut self, id: WindowId, window: &WlWindow) {
+        for (_, proxy) in &window.constraints {
+            // SAFETY: each is a live constraint object; see `rebuild_constraint`.
+            unsafe { self.conn.release(*proxy, constraint_destructor()) };
+        }
+        // SAFETY: each proxy is live and each destructor is its own interface's.
+        unsafe {
+            self.conn
+                .release(window.decoration, zxdg_toplevel_decoration_v1::destroy);
+            self.conn
+                .release(window.fractional_scale, wp_fractional_scale_v1::destroy);
+            self.conn.release(window.viewport, wp_viewport::destroy);
+        }
         // Order matters: `xdg_toplevel` before `xdg_surface` before
         // `wl_surface`. Destroying a `wl_surface` that still has a role object
         // is a protocol error and disconnects the client.
         self.conn.destroy(window.toplevel);
         self.conn.destroy(window.xdg_surface);
         self.conn.destroy(window.surface);
+        // A seat pointing at a window that no longer exists would keep
+        // reporting motion into a stale handle. Only *this* window's focus is
+        // cleared: destroying one window must not make a seat forget that it is
+        // pointing at another.
+        for seat in &mut self.seats {
+            if seat.pointer_focus == Some(id) {
+                seat.pointer_focus = None;
+                seat.frame = PointerFrame::default();
+            }
+            if seat.keyboard_focus == Some(id) {
+                seat.keyboard_focus = None;
+                seat.held.clear();
+            }
+            if seat.repeat.key.is_some_and(|key| key.window == id) {
+                seat.repeat.key = None;
+            }
+        }
         self.conn.flush();
     }
+}
+
+/// The destructor request shared by both constraint interfaces.
+///
+/// `zwp_locked_pointer_v1.destroy` and `zwp_confined_pointer_v1.destroy` are
+/// the same opcode on interfaces whose only other requests we never send, so
+/// one function serves both — and the choice is made here rather than at four
+/// call sites.
+const fn constraint_destructor() -> unsafe fn(*mut WlProxy) {
+    // Named through `zwp_locked_pointer_v1` because a constraint is far more
+    // often a lock; `zwp_confined_pointer_v1::destroy` is byte-identical.
+    let _ = zwp_confined_pointer_v1::REQ_DESTROY;
+    zwp_locked_pointer_v1::destroy
+}
+
+/// `wl_pointer.axis`'s enum as an index into a `[vertical, horizontal]` pair.
+const fn axis_slot(axis: u32) -> Option<usize> {
+    match axis {
+        wl_pointer::axis::VERTICAL_SCROLL => Some(0),
+        wl_pointer::axis::HORIZONTAL_SCROLL => Some(1),
+        _ => None,
+    }
+}
+
+/// Sets a viewport's destination to a logical size, if there is a viewport.
+///
+/// # Safety
+///
+/// `viewport` must be null or a live `wp_viewport`.
+unsafe fn set_viewport(viewport: *mut WlProxy, logical: LogicalSize) {
+    if viewport.is_null() {
+        return;
+    }
+    // `wp_viewport` rejects a non-positive destination with `bad_value`, and a
+    // window can legitimately be asked to be zero-sized before its first real
+    // configure.
+    let round = |value: f64| {
+        let rounded = value.round();
+        if rounded.is_finite() && rounded >= 1.0 {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "clamped to i32::MAX on the line above"
+            )]
+            let clamped = rounded.min(f64::from(i32::MAX)) as i32;
+            clamped
+        } else {
+            1
+        }
+    };
+    // SAFETY: the caller guarantees the proxy is live; both arguments are
+    // positive integers, which is what the protocol requires.
+    unsafe { wp_viewport::set_destination(viewport, round(logical.width), round(logical.height)) };
 }
 
 impl Drop for WaylandShell {
@@ -1233,18 +3090,39 @@ impl Drop for WaylandShell {
             .collect();
         for id in windows {
             if let Some(window) = self.windows.remove(id.cast()) {
-                self.destroy_objects(&window);
+                self.destroy_objects(id, &window);
             }
         }
-        let (wm_base, compositor, registry) =
-            (self.conn.wm_base, self.conn.compositor, self.conn.registry);
-        self.conn.destroy(wm_base);
-        self.conn.destroy(compositor);
-        self.conn.destroy(registry);
+        for index in (0..self.seats.len()).rev() {
+            self.remove_seat(index);
+        }
+        let outputs: Vec<(*mut WlProxy, *mut WlProxy)> = self
+            .outputs
+            .iter()
+            .map(|output| (output.xdg, output.proxy as *mut WlProxy))
+            .collect();
+        for (xdg, output) in outputs {
+            self.conn.destroy(xdg);
+            self.conn.destroy(output);
+        }
+        let globals = [
+            self.conn.pointer_constraints,
+            self.conn.relative_pointer_manager,
+            self.conn.fractional_scale_manager,
+            self.conn.viewporter,
+            self.conn.decoration_manager,
+            self.conn.xdg_output_manager,
+            self.conn.wm_base,
+            self.conn.compositor,
+            self.conn.registry,
+        ];
+        for global in globals {
+            self.conn.destroy(global);
+        }
         self.conn.flush();
         // SAFETY: the display was returned live by `wl_display_connect` and no
-        // proxy on it survives — every window was destroyed above, and the
-        // globals with them.
+        // proxy on it survives — every window, seat and output was destroyed
+        // above, and the globals with them.
         unsafe { (self.conn.lib.display_disconnect)(self.conn.display.as_ptr()) };
         // SAFETY: `sink` came from `Box::into_raw` in `open`, is freed exactly
         // once here, and no proxy that could dispatch into it is alive.
@@ -1257,18 +3135,32 @@ impl Shell for WaylandShell {
         ShellBackend::Wayland
     }
 
-    /// What this slice actually implements — no more.
+    /// What the compositor and this build between them can actually do.
     ///
-    /// Capabilities are latched, and a bit set here is a promise to every
-    /// consumer that checked it at startup. `POINTER_LOCK`, `RAW_POINTER_MOTION`,
-    /// `TEXT_IME`, `CLIPBOARD` and `DRAG_DROP` all need a `wl_seat` or a
-    /// `wl_data_device` and land in P0.5b/c; `HW_UPSCALE` needs
-    /// `wp_viewporter`, `FRACTIONAL_SCALE` needs `fractional-scale-v1`, and
-    /// `SERVER_DECORATIONS` needs `xdg-decoration` — none of which this slice
-    /// binds. `POINTER_WARP` and `WINDOW_POSITION` are absent permanently:
-    /// Wayland forbids both by design.
+    /// Latched at connection time by [`latch_caps`](Self::latch_caps) — a bit
+    /// here is a promise to every consumer that checked it at startup, so it
+    /// never changes afterwards even though a Wayland global can appear
+    /// mid-session.
+    ///
+    /// Two bits are absent permanently rather than pending:
+    ///
+    /// * [`POINTER_WARP`](ShellCaps::POINTER_WARP) — Wayland has no request to
+    ///   move the cursor and will not grow one, because a client that can move
+    ///   the cursor can spoof clicks.
+    /// * [`WINDOW_POSITION`](ShellCaps::WINDOW_POSITION) — `xdg_output` now
+    ///   gives a real *monitor* layout, but the bit is about *windows*, and a
+    ///   Wayland client is neither told where its window is nor allowed to ask
+    ///   to be moved. `xdg-shell` has no equivalent of `XMoveWindow` by design.
+    ///
+    /// [`ASPECT_HINT_HONORED`](ShellCaps::ASPECT_HINT_HONORED) is also absent
+    /// permanently: `xdg_toplevel` has min and max size and no aspect hint, so
+    /// the renderer letterboxes.
+    ///
+    /// [`CLIPBOARD`](ShellCaps::CLIPBOARD) and
+    /// [`DRAG_DROP`](ShellCaps::DRAG_DROP) need `wl_data_device` and land at
+    /// P0.5c.
     fn caps(&self) -> ShellCaps {
-        ShellCaps::MULTI_WINDOW | ShellCaps::EVENT_WAIT
+        self.caps
     }
 
     fn create_window(&mut self, desc: &WindowDesc<'_>) -> Result<WindowId, ShellError> {
@@ -1315,6 +3207,31 @@ impl Shell for WaylandShell {
         self.conn.watch(xdg, ObjectKind::XdgSurface);
         self.conn.watch(toplevel, ObjectKind::XdgToplevel);
 
+        // Every add-on object has to exist before the initial commit:
+        // `xdg-decoration` says so explicitly, and a `wp_viewport` or
+        // `wp_fractional_scale_v1` created afterwards would miss the first
+        // configure — which is the one a swapchain is built from.
+        // SAFETY: every manager is either null (checked inside each helper) or
+        // a live global, and `surface`/`toplevel` were just created.
+        let (decoration, fractional_scale, viewport) = unsafe {
+            (
+                optional(self.conn.decoration_manager, |manager| {
+                    zxdg_decoration_manager_v1::get_toplevel_decoration(manager, toplevel)
+                }),
+                optional(self.conn.fractional_scale_manager, |manager| {
+                    wp_fractional_scale_manager_v1::get_fractional_scale(manager, surface)
+                }),
+                optional(self.conn.viewporter, |manager| {
+                    wp_viewporter::get_viewport(manager, surface)
+                }),
+            )
+        };
+        self.conn.watch(decoration, ObjectKind::Decoration);
+        self.conn
+            .watch(fractional_scale, ObjectKind::FractionalScale);
+        // `wp_viewport` has no events.
+        self.conn.watch(viewport, ObjectKind::Ignored);
+
         let fullscreen_output = match desc.mode {
             DisplayMode::Windowed => None,
             DisplayMode::Borderless { monitor } => Some(self.output_proxy_for(monitor)),
@@ -1326,6 +3243,17 @@ impl Shell for WaylandShell {
             xdg_toplevel::set_title(toplevel, &title);
             xdg_toplevel::set_app_id(toplevel, &app_id);
             apply_constraints(toplevel, desc.constraints, desc.resizable, desc.size);
+            if !decoration.is_null() {
+                // Always ask for server side. The seam has no per-window
+                // decoration request, the engine has no renderer to draw
+                // client-side decorations with until P1, and a compositor that
+                // only does CSD answers `client_side` — which is then a known
+                // state in `WindowState`, not a surprise.
+                zxdg_toplevel_decoration_v1::set_mode(
+                    decoration,
+                    zxdg_toplevel_decoration_v1::mode::SERVER_SIDE,
+                );
+            }
             if let Some(output) = fullscreen_output {
                 xdg_toplevel::set_fullscreen(toplevel, output);
             }
@@ -1341,6 +3269,9 @@ impl Shell for WaylandShell {
                 surface,
                 xdg_surface: xdg,
                 toplevel,
+                decoration,
+                fractional_scale,
+                viewport,
                 title: desc.title.to_string(),
                 requested_size: desc.size,
                 requested_mode: desc.mode,
@@ -1352,6 +3283,10 @@ impl Shell for WaylandShell {
                 pending: PendingConfigure::default(),
                 outputs: Vec::new(),
                 scale: 1,
+                preferred_scale: None,
+                pointer_mode: PointerMode::Free,
+                constraints: Vec::new(),
+                cursor: None,
                 focused: false,
                 visible: desc.visible,
                 close_pending: false,
@@ -1365,7 +3300,7 @@ impl Shell for WaylandShell {
             .windows
             .remove(window.cast())
             .ok_or_else(|| ShellError::invalid_window(window))?;
-        self.destroy_objects(&removed);
+        self.destroy_objects(window, &removed);
         self.queue.push_back(ShellEvent::WindowDestroyed { window });
         Ok(())
     }
@@ -1378,7 +3313,7 @@ impl Shell for WaylandShell {
             requested_constraints: state.requested_constraints,
             focused: state.focused,
             visible: state.visible,
-            pointer_mode: PointerMode::Free,
+            pointer_mode: state.pointer_mode,
             close_pending: state.close_pending,
         })
     }
@@ -1395,14 +3330,23 @@ impl Shell for WaylandShell {
         Ok(())
     }
 
-    /// Records the requested visibility.
+    /// Records the requested visibility. **Intent only, and it will stay that
+    /// way until P1.**
     ///
     /// Wayland has no hide request: a surface is mapped exactly while it has a
-    /// buffer, so unmapping means `wl_surface.attach(null)` and mapping means
-    /// attaching a real one. Neither is possible in this slice, which never
-    /// attaches a buffer — the renderer does, at P1. Until then this records
-    /// the intent and [`WindowState::visible`] reports it, which is what
-    /// `HeadlessShell` does too.
+    /// buffer. Hiding is therefore `wl_surface.attach(null)` — which this
+    /// backend *could* send today — and showing is attaching a real buffer,
+    /// which it cannot, because buffers are the renderer's and the renderer is
+    /// P1.
+    ///
+    /// Implementing only the direction that works would be worse than
+    /// implementing neither: `xdg-shell` says an unmapped toplevel returns to
+    /// its initial state and has to redo the whole configure handshake before
+    /// it can be shown again, so a window hidden through this call would be a
+    /// window that can never be shown again. So this records the intent,
+    /// [`WindowState::visible`] reports it — matching
+    /// [`HeadlessShell`](crate::HeadlessShell) — and the pair closes when the
+    /// swapchain lands.
     fn set_visible(&mut self, window: WindowId, visible: bool) -> Result<(), ShellError> {
         self.window_mut(window)?.visible = visible;
         Ok(())
@@ -1472,6 +3416,10 @@ impl Shell for WaylandShell {
     /// in the middle — and it is the same sequence [`wait_events`](Shell::wait_events)
     /// runs with a real timeout, so the blocking and non-blocking paths cannot
     /// drift apart.
+    ///
+    /// Key repeats are generated here, after the socket and before delivery, so
+    /// that a repeat and the real events around it arrive in one batch and in
+    /// timestamp order.
     fn pump(&mut self, sink: &mut dyn FnMut(ShellEvent)) {
         if self.lost.is_none()
             && let Err(error) = self.conn.drain(0)
@@ -1480,6 +3428,7 @@ impl Shell for WaylandShell {
             self.lost = Some(error.to_string());
         }
         self.process_raw();
+        self.drive_repeats();
         // Drain by count, not `while let`: a sink that creates a window must
         // not be able to spin this loop, and whatever it queued belongs to the
         // next frame — which is what the socket would have done anyway.
@@ -1491,12 +3440,23 @@ impl Shell for WaylandShell {
         }
     }
 
+    /// Blocks until an event arrives, `timeout` elapses, or a key repeat comes
+    /// due.
+    ///
+    /// The last clause is what makes repeat work for an editor that idles at
+    /// zero frames per second: without it, holding Backspace in a text field
+    /// would delete one character and then wait for an unrelated event.
     fn wait_events(&mut self, timeout: Option<Duration>) {
         if self.lost.is_some() {
             return;
         }
-        let timeout_ms = timeout.map_or(-1, |timeout| {
-            c_int::try_from(timeout.as_millis()).unwrap_or(c_int::MAX)
+        let deadline = match (timeout, self.next_repeat_in()) {
+            (Some(timeout), Some(repeat)) => Some(timeout.min(repeat)),
+            (Some(timeout), None) => Some(timeout),
+            (None, repeat) => repeat,
+        };
+        let timeout_ms = deadline.map_or(-1, |deadline| {
+            c_int::try_from(deadline.as_millis()).unwrap_or(c_int::MAX)
         });
         if let Err(error) = self.conn.drain(timeout_ms) {
             log::error!("wayland connection lost: {error}");
@@ -1526,27 +3486,93 @@ impl Shell for WaylandShell {
         })
     }
 
+    /// Locks or confines the pointer through `pointer-constraints-v1`.
+    ///
+    /// The constraint is created per seat that currently has a pointer, and is
+    /// rebuilt when one appears later — so a game that locks the pointer before
+    /// a mouse is plugged in is locked the moment it is.
+    ///
+    /// `persistent` lifetime, not `oneshot`: the compositor deactivates a
+    /// constraint whenever it wants (an alt-tab, a compositor keybinding) and a
+    /// one-shot constraint would then be gone for good, leaving a first-person
+    /// camera with a free cursor and no indication why.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::Unsupported`] if the compositor has no
+    /// `zwp_pointer_constraints_v1`, or [`ShellError::InvalidWindow`] for a
+    /// stale handle.
     fn set_pointer_mode(&mut self, window: WindowId, mode: PointerMode) -> Result<(), ShellError> {
         self.window(window)?;
-        match mode {
-            PointerMode::Free => Ok(()),
-            PointerMode::Confined => Err(Self::unsupported("pointer confinement")),
-            PointerMode::Locked => Err(Self::unsupported("pointer lock")),
+        if !self.caps.contains(mode.required_cap()) {
+            return Err(Self::unsupported(match mode {
+                PointerMode::Locked => "pointer lock",
+                _ => "pointer confinement",
+            }));
         }
+        self.rebuild_constraint(window, mode);
+        Ok(())
     }
 
-    /// Accepted and inert until there is a pointer to set it on.
+    /// Hides the cursor with `None`. **A shape is recorded and not yet
+    /// applied** — the honest half of this call, and why.
     ///
-    /// A cursor is set through `wl_pointer.set_cursor`, which needs a `wl_seat`
-    /// (P0.5b). Failing here instead would make every UI that sets a resize
-    /// cursor error-handle a case that is about to start working.
+    /// # Hiding is real
+    ///
+    /// `wl_pointer.set_cursor` with a **null** surface *is* "no cursor" in core
+    /// Wayland. It needs no buffer, no theme and no extra protocol, so
+    /// [`set_cursor(window, None)`](Shell::set_cursor) works on every
+    /// compositor — which is the case a first-person game and
+    /// [`PointerMode::Locked`] actually need.
+    ///
+    /// The request is re-sent on every `wl_pointer.enter`, because a compositor
+    /// resets the cursor when it crosses a surface boundary; a client that set
+    /// it once would watch it flicker back on every re-entry.
+    ///
+    /// # A shape is not, and this is a real gap
+    ///
+    /// Naming a shape needs one of two things, and this slice has neither:
+    ///
+    /// * **A cursor buffer.** Load the user's XCursor theme, pick the image for
+    ///   the right shape at the right scale, wrap it in a `wl_shm` buffer and
+    ///   attach it to a cursor surface. That is a theme loader plus a second
+    ///   presentation path inside the shell, and it is how the cursor ends up
+    ///   *disagreeing* with the user's theme the moment either side changes.
+    /// * **`cursor-shape-v1`**, which is the right answer — it hands the
+    ///   compositor a name from the same CSS vocabulary
+    ///   [`CursorIcon::as_css_name`] already speaks and lets the compositor
+    ///   draw its own themed, correctly-scaled cursor. It is **not** vendored
+    ///   here for one concrete reason: its `wl_interface` type table references
+    ///   `zwp_tablet_tool_v2`, so generating it requires vendoring the whole
+    ///   50 KB deprecated `tablet-unstable-v2` protocol to satisfy a single
+    ///   pointer for a request this engine will never send. That trade is worth
+    ///   revisiting when the editor needs resize cursors (P10); it is not worth
+    ///   it for a slice with no renderer.
+    ///
+    /// So a shape request is **accepted and recorded** rather than failed: a UI
+    /// calls this on every hover, and erroring there would make every consumer
+    /// handle a case that is going to start working. It also *stops hiding* —
+    /// but because un-hiding likewise needs a buffer, the compositor's arrow
+    /// returns at the next `wl_pointer.enter` rather than immediately.
+    /// [`WindowState`] does not claim otherwise, because the seam has no
+    /// effective-cursor field.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
     fn set_cursor(
         &mut self,
         window: WindowId,
         cursor: Option<CursorIcon>,
     ) -> Result<(), ShellError> {
-        let _ = cursor;
-        self.window(window).map(|_| ())
+        self.window_mut(window)?.cursor = Some(cursor);
+        let focused: Vec<usize> = (0..self.seats.len())
+            .filter(|index| self.seats[*index].pointer_focus == Some(window))
+            .collect();
+        for index in focused {
+            self.apply_cursor(index, window);
+        }
+        Ok(())
     }
 
     fn warp_pointer(
@@ -1596,6 +3622,10 @@ impl Shell for WaylandShell {
         self.window(window)?;
         Err(Self::unsupported("clipboard"))
     }
+
+    fn align_event_clock(&mut self, elapsed: Duration) {
+        self.align_time_base(elapsed);
+    }
 }
 
 impl WaylandShell {
@@ -1615,6 +3645,53 @@ impl WaylandShell {
             .find(|output| output.id == id)
             .map_or(ptr::null_mut(), |output| output.proxy as *mut WlProxy)
     }
+
+    /// Records the compositor's answer to our `set_mode(server_side)`.
+    ///
+    /// Deliberately **not** exposed as state on the seam.
+    /// [`ShellCaps::SERVER_DECORATIONS`] is the portable question — "can this
+    /// session have server-side decorations at all" — and it is latched from
+    /// whether `zxdg_decoration_manager_v1` bound. The per-window answer is a
+    /// Wayland-shaped detail with no equivalent anywhere else, and adding a
+    /// `u32` from an unstable protocol to [`WindowState`] would put a platform
+    /// type in the seam this crate exists to keep platform-free.
+    ///
+    /// What matters is that a compositor answering `client_side` is a *known*
+    /// state rather than a surprise when the UI layer starts drawing at P1, so
+    /// it is logged at warning level — the engine has no client-side
+    /// decorations, so on such a compositor a window has no title bar and no
+    /// resize grips, and somebody has to be told why.
+    fn decoration_configured(&mut self, decoration: usize, mode: u32) {
+        let Some(window) = self.window_by_proxy(decoration, |state| state.decoration as usize)
+        else {
+            return;
+        };
+        if mode == zxdg_toplevel_decoration_v1::mode::SERVER_SIDE {
+            log::debug!("{window:?}: the compositor draws this window's decorations");
+        } else {
+            log::warn!(
+                "{window:?}: the compositor refused server-side decorations \
+                 (xdg-decoration mode {mode}); this window has no title bar until \
+                 the UI layer can draw one"
+            );
+        }
+    }
+}
+
+/// Creates an add-on object, or nothing if the manager global was never bound.
+///
+/// # Safety
+///
+/// `manager` must be null or a live global, and `create` must marshal a request
+/// on it.
+unsafe fn optional(
+    manager: *mut WlProxy,
+    create: impl FnOnce(*mut WlProxy) -> *mut WlProxy,
+) -> *mut WlProxy {
+    if manager.is_null() {
+        return ptr::null_mut();
+    }
+    create(manager)
 }
 
 /// Sends `set_min_size`/`set_max_size` for a constraint set.
@@ -1635,6 +3712,10 @@ unsafe fn apply_constraints(
     // xdg-shell takes these in logical units, and zero means "no limit".
     let to_pair = |size: Option<LogicalSize>| {
         size.map_or((0, 0), |size| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "clamped into i32's range on the line above the cast"
+            )]
             (
                 size.width.round().clamp(0.0, f64::from(i32::MAX)) as i32,
                 size.height.round().clamp(0.0, f64::from(i32::MAX)) as i32,
@@ -1658,6 +3739,14 @@ unsafe fn apply_constraints(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PhysicalSize;
+
+    /// A handle to nothing, for the pure-logic tests: `Repeat` stores one and
+    /// never dereferences it.
+    fn window_id() -> WindowId {
+        let mut pool: Pool<u8> = Pool::new();
+        pool.insert(0).cast()
+    }
 
     #[test]
     fn wayland_timestamps_rebase_onto_the_engine_epoch() {
@@ -1714,6 +3803,307 @@ mod tests {
     }
 
     #[test]
+    fn events_the_protocol_gives_no_time_for_are_stamped_now_not_zero() {
+        // `wl_pointer.enter` and `leave` carry a serial and no timestamp at
+        // all. Stamping them with the last frame's time reads as "at process
+        // start" before the pointer has ever moved — which is what
+        // `EventTime`'s own rule about missing timestamps forbids.
+        let base = TimeBase {
+            epoch_nanos: ffi::monotonic_nanos().saturating_sub(3_000_000_000),
+        };
+        let stamped = base.event_time_now();
+        assert!(
+            stamped >= EventTime::from_millis(2_900),
+            "an event with no compositor time is stamped now, got {stamped:?}"
+        );
+        assert_ne!(stamped, EventTime::ZERO);
+    }
+
+    #[test]
+    fn the_microsecond_clock_needs_no_wrap_handling_and_keeps_its_precision() {
+        // `relative_motion`'s 64-bit microseconds are the more precise of the
+        // two clocks a pointer event arrives on, which is why a merged motion
+        // event prefers them.
+        let base = TimeBase {
+            epoch_nanos: 5_000_000_000,
+        };
+        assert_eq!(
+            base.event_time_micros(5_000_500),
+            EventTime::from_micros(500),
+            "half a millisecond after the epoch, not rounded to zero"
+        );
+        // A timestamp before the epoch saturates rather than wrapping.
+        assert_eq!(base.event_time_micros(1), EventTime::ZERO);
+    }
+
+    #[test]
+    fn aligning_the_time_base_moves_the_epoch_backwards() {
+        // The contract `Shell::align_event_clock` exists for: after alignment,
+        // "now" reads as the elapsed time the engine clock reports.
+        let mut base = TimeBase::now();
+        let before = base.epoch_nanos;
+        base.align(Duration::from_secs(2));
+        assert!(
+            base.epoch_nanos <= before,
+            "an epoch two seconds ago is earlier than one taken now"
+        );
+        assert!(
+            before.saturating_sub(base.epoch_nanos) >= 1_900_000_000,
+            "the shift is the elapsed time, give or take the call overhead"
+        );
+    }
+
+    #[test]
+    fn repeats_start_after_the_delay_and_then_run_at_the_rate() {
+        let mut repeat = Repeat {
+            rate: 25,
+            delay: 600,
+            key: None,
+        };
+        let now = 1_000_000_000;
+        repeat.start(
+            now,
+            RepeatKeyRequest {
+                window: window_id(),
+                scancode: 30,
+                key_code: Some(KeyCode::KeyA),
+                keysym: Keysym::from_char('a'),
+            },
+        );
+        let key = repeat.key.expect("repeat armed");
+        assert_eq!(
+            key.next_nanos - now,
+            600_000_000,
+            "the first repeat waits the whole delay"
+        );
+        assert_eq!(key.interval_nanos, 40_000_000, "25 Hz is 40ms apart");
+
+        // Releasing the key that is repeating stops it; releasing another does
+        // not, which is what makes Shift+held-A keep repeating A.
+        repeat.stop(31);
+        assert!(repeat.key.is_some());
+        repeat.stop(30);
+        assert!(repeat.key.is_none());
+    }
+
+    #[test]
+    fn a_zero_rate_disables_repeat_entirely() {
+        // `wl_keyboard.repeat_info` defines rate 0 as "no repeat", and a user
+        // who turned repeat off in their compositor must not get repeats from
+        // us.
+        let mut repeat = Repeat {
+            rate: 0,
+            delay: 300,
+            key: None,
+        };
+        repeat.start(
+            0,
+            RepeatKeyRequest {
+                window: window_id(),
+                scancode: 30,
+                key_code: Some(KeyCode::KeyA),
+                keysym: Keysym::NONE,
+            },
+        );
+        assert!(repeat.key.is_none());
+        assert_eq!(repeat.due_at(), None);
+    }
+
+    #[test]
+    fn value120_accumulates_into_detents_with_the_engine_sign_convention() {
+        // One notch of a real wheel, scrolled away from the user: Wayland
+        // reports -120 on the vertical axis, and the engine's convention is
+        // that away-from-the-user is positive.
+        let mut frame = PointerFrame {
+            has_axis: true,
+            ..PointerFrame::default()
+        };
+        frame.value120[0] = -120.0;
+        assert_eq!(
+            frame.scroll(1.0),
+            Some(ScrollDelta::Lines { x: 0.0, y: 1.0 })
+        );
+
+        // A high-resolution wheel sends fractions of a detent, and they add up
+        // across the frame rather than each becoming an event.
+        let mut frame = PointerFrame {
+            has_axis: true,
+            ..PointerFrame::default()
+        };
+        frame.value120[0] = -30.0;
+        frame.value120[0] += -30.0;
+        assert_eq!(
+            frame.scroll(1.0),
+            Some(ScrollDelta::Lines { x: 0.0, y: 0.5 }),
+            "two eighth-turns are a quarter of a detent, not two detents"
+        );
+
+        // Horizontal lands in `x`, and the sign flips there too.
+        let mut frame = PointerFrame {
+            has_axis: true,
+            ..PointerFrame::default()
+        };
+        frame.value120[1] = 120.0;
+        assert_eq!(
+            frame.scroll(1.0),
+            Some(ScrollDelta::Lines { x: -1.0, y: 0.0 })
+        );
+    }
+
+    #[test]
+    fn a_wheel_prefers_detents_and_a_touchpad_gets_pixels() {
+        // The distinction `ScrollDelta` refuses to collapse. A notched wheel
+        // sends both a discrete count and a continuous value; reporting the
+        // continuous one would turn a click into whatever number the
+        // compositor's scroll-speed setting produced.
+        let mut frame = PointerFrame {
+            has_axis: true,
+            axis_source: Some(wl_pointer::axis_source::WHEEL),
+            ..PointerFrame::default()
+        };
+        frame.value120[0] = -120.0;
+        frame.continuous[0] = -15.0;
+        assert_eq!(
+            frame.scroll(1.0),
+            Some(ScrollDelta::Lines { x: 0.0, y: 1.0 })
+        );
+
+        // A touchpad sends only the continuous value, and gets pixels — scaled
+        // into device pixels, because the wire value is surface-local.
+        let frame = PointerFrame {
+            has_axis: true,
+            axis_source: Some(wl_pointer::axis_source::FINGER),
+            continuous: [-13.0, 0.0],
+            ..PointerFrame::default()
+        };
+        assert_eq!(
+            frame.scroll(2.0),
+            Some(ScrollDelta::Pixels { x: 0.0, y: 26.0 })
+        );
+
+        // `axis_discrete` is the pre-version-8 spelling and behaves the same.
+        let frame = PointerFrame {
+            has_axis: true,
+            discrete: [1.0, 0.0],
+            ..PointerFrame::default()
+        };
+        assert_eq!(
+            frame.scroll(1.0),
+            Some(ScrollDelta::Lines { x: 0.0, y: -1.0 })
+        );
+    }
+
+    #[test]
+    fn an_axis_frame_with_no_movement_produces_no_wheel_event() {
+        // `axis_stop` ends a kinetic scroll and carries no delta; emitting a
+        // zero-length `Wheel` for it would be one event per touchpad lift.
+        let frame = PointerFrame {
+            has_axis: true,
+            ..PointerFrame::default()
+        };
+        assert_eq!(frame.scroll(1.0), None);
+        assert!(PointerFrame::default().is_empty());
+        assert_eq!(PointerFrame::default().scroll(1.0), None);
+    }
+
+    #[test]
+    fn a_frame_carrying_only_relative_motion_is_not_empty() {
+        // The locked-pointer case: no `wl_pointer.motion` arrives at all, and a
+        // flush that keyed on absolute motion would drop every aim sample.
+        let frame = PointerFrame {
+            raw: Some((3.0, -2.0)),
+            ..PointerFrame::default()
+        };
+        assert!(!frame.is_empty());
+    }
+
+    #[test]
+    fn axis_slots_are_vertical_then_horizontal() {
+        assert_eq!(axis_slot(wl_pointer::axis::VERTICAL_SCROLL), Some(0));
+        assert_eq!(axis_slot(wl_pointer::axis::HORIZONTAL_SCROLL), Some(1));
+        assert_eq!(axis_slot(7), None, "an axis a later version might add");
+    }
+
+    #[test]
+    fn an_outputs_scale_comes_from_the_logical_size_not_from_wl_output_scale() {
+        // The finding `xdg_output` exists to fix. A 1920x1080 output run at
+        // 150% reports `wl_output.scale = 2`, because that field is an integer
+        // buffer scale and not the desktop's scale. The logical size says 1.5.
+        let mut output = Output {
+            proxy: 1,
+            xdg: ptr::null_mut(),
+            global: 1,
+            id: MonitorId(1),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            refresh_millihertz: 60_000,
+            scale: 2,
+            logical_x: 0,
+            logical_y: 0,
+            logical_width: 1280,
+            logical_height: 720,
+            name: "HEADLESS-1".to_string(),
+            settled: true,
+        };
+        assert!((output.scale_factor() - 1.5).abs() < 1e-9);
+        let info = output.info(true);
+        assert_eq!(
+            info.size(),
+            PhysicalSize::new(1920, 1080),
+            "the size stays the mode, which is what a swapchain is built from"
+        );
+
+        // Without xdg_output there is nothing better than the integer.
+        output.logical_width = 0;
+        assert!((output.scale_factor() - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_monitors_position_is_scaled_out_of_the_logical_desktop_space() {
+        // A second output placed to the right of a 1280-logical-wide first one,
+        // itself at 2x. Its logical position is 1280; in its own device pixels
+        // that is 2560. Reporting the raw 1280 next to a physical size would
+        // put the two monitors on top of each other.
+        let output = Output {
+            proxy: 2,
+            xdg: ptr::null_mut(),
+            global: 2,
+            id: MonitorId(2),
+            x: 1280,
+            y: 0,
+            width: 3840,
+            height: 2160,
+            refresh_millihertz: 60_000,
+            scale: 2,
+            logical_x: 1280,
+            logical_y: 0,
+            logical_width: 1920,
+            logical_height: 1080,
+            name: "DP-2".to_string(),
+            settled: true,
+        };
+        assert_eq!(output.info(false).bounds.x, 2560);
+        assert_eq!(output.info(false).bounds.y, 0);
+        assert_eq!(output.info(false).work_area, output.info(false).bounds);
+    }
+
+    #[test]
+    fn a_windows_scale_prefers_the_fractional_one() {
+        let mut window = test_window();
+        window.scale = 2;
+        assert!((window.scale_factor() - 2.0).abs() < f64::EPSILON);
+        // 150%, in the 1/120ths the protocol reports.
+        window.preferred_scale = Some(180);
+        assert!((window.scale_factor() - 1.5).abs() < 1e-9);
+        // A compositor that sends a nonsense zero falls back rather than
+        // dividing the window down to nothing.
+        window.preferred_scale = Some(0);
+        assert!((window.scale_factor() - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn the_toplevel_state_array_decodes_as_native_endian_u32s() {
         // `xdg_toplevel.configure` carries its states as a `wl_array` of
         // `uint32_t`. Reading it a byte at a time — or as big endian — would
@@ -1737,13 +4127,36 @@ mod tests {
     #[test]
     fn the_protocol_descriptors_carry_the_names_the_registry_advertises() {
         // A sanity check that the generated code is wired to the right
-        // interfaces at all: `bind` matches on these strings, and a wrong one
-        // means a global is silently never bound.
+        // interfaces at all: `bind_global` matches on these strings, and a
+        // wrong one means a global is silently never bound.
         assert_eq!(wl_compositor::NAME, c"wl_compositor");
         assert_eq!(xdg_wm_base::NAME, c"xdg_wm_base");
         assert_eq!(wl_output::NAME, c"wl_output");
+        assert_eq!(wl_seat::NAME, c"wl_seat");
+        assert_eq!(zxdg_output_manager_v1::NAME, c"zxdg_output_manager_v1");
+        assert_eq!(
+            zxdg_decoration_manager_v1::NAME,
+            c"zxdg_decoration_manager_v1"
+        );
+        assert_eq!(
+            wp_fractional_scale_manager_v1::NAME,
+            c"wp_fractional_scale_manager_v1"
+        );
+        assert_eq!(wp_viewporter::NAME, c"wp_viewporter");
+        assert_eq!(
+            zwp_relative_pointer_manager_v1::NAME,
+            c"zwp_relative_pointer_manager_v1"
+        );
+        assert_eq!(
+            zwp_pointer_constraints_v1::NAME,
+            c"zwp_pointer_constraints_v1"
+        );
         assert_eq!(xdg_toplevel::state::FULLSCREEN, 2);
         assert_eq!(wl_output::mode::CURRENT, 1);
+        assert_eq!(wl_seat::capability::POINTER, 1);
+        assert_eq!(wl_seat::capability::KEYBOARD, 2);
+        assert_eq!(wl_keyboard::keymap_format::XKB_V1, 1);
+        assert_eq!(zxdg_toplevel_decoration_v1::mode::SERVER_SIDE, 2);
     }
 
     #[test]
@@ -1769,5 +4182,32 @@ mod tests {
             ),
             "{error}"
         );
+    }
+
+    /// A window with no proxies, for the pure-logic tests above.
+    fn test_window() -> WlWindow {
+        WlWindow {
+            surface: ptr::null_mut(),
+            xdg_surface: ptr::null_mut(),
+            toplevel: ptr::null_mut(),
+            decoration: ptr::null_mut(),
+            fractional_scale: ptr::null_mut(),
+            viewport: ptr::null_mut(),
+            title: String::new(),
+            requested_size: LogicalSize::new(640.0, 480.0),
+            requested_mode: DisplayMode::Windowed,
+            requested_constraints: SizeConstraints::default(),
+            configuration: None,
+            pending: PendingConfigure::default(),
+            outputs: Vec::new(),
+            scale: 1,
+            preferred_scale: None,
+            pointer_mode: PointerMode::Free,
+            constraints: Vec::new(),
+            cursor: None,
+            focused: false,
+            visible: true,
+            close_pending: false,
+        }
     }
 }

@@ -175,10 +175,13 @@ jobs:
         with:
           shared-key: test
       - uses: taiki-e/install-action@nextest
-      # `libwayland-client0`, not `libwayland-dev`: the backend resolves the
-      # library with `dlopen` at runtime rather than linking it, so the runtime
-      # package is all it needs — and the fact that this job passes without the
-      # `-dev` package is itself the check that no `DT_NEEDED` crept in.
+      # `libwayland-client0` and `libxkbcommon0`, not their `-dev` packages:
+      # the backend resolves both with `dlopen` at runtime rather than linking
+      # them, so the runtime packages are all it needs — and the fact that this
+      # job passes without the `-dev` packages is itself the check that no
+      # `DT_NEEDED` crept in. libxkbcommon is what turns a keymap into keysyms
+      # and text; without it the suite's `ShellCaps::TEXT_IME` assertion is the
+      # thing that fails, which is the intended signal.
       # `mesa-vulkan-drivers` is for wlroots, which wants *a* renderer even on
       # a headless backend.
       - name: Install sway
@@ -187,6 +190,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             sway \
             libwayland-client0 \
+            libxkbcommon0 \
             mesa-vulkan-drivers
       # Starts headless sway in a private XDG_RUNTIME_DIR, polls for the socket
       # with a deadline and a liveness check on the child, runs the

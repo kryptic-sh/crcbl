@@ -1,0 +1,81 @@
+xkb_keymap {
+xkb_keycodes "crcbl" {
+    minimum = 8;
+    maximum = 255;
+    <ESC>  = 9;
+    <AE01> = 10;
+    <AD01> = 24;
+    <AD02> = 25;
+    <AC01> = 38;
+    <AC02> = 39;
+    <AD03> = 26;
+    <AB03> = 54;
+    <LFSH> = 50;
+    <RTSH> = 62;
+    <LCTL> = 37;
+    <LALT> = 64;
+    <CAPS> = 66;
+    <SPCE> = 65;
+    <RTRN> = 36;
+    <BKSP> = 22;
+    <LEFT> = 113;
+};
+xkb_types "crcbl" {
+    virtual_modifiers NumLock,Alt,LevelThree;
+    type "ONE_LEVEL" {
+        modifiers = none;
+        map[none] = Level1;
+        level_name[Level1] = "Any";
+    };
+    type "TWO_LEVEL" {
+        modifiers = Shift;
+        map[none] = Level1;
+        map[Shift] = Level2;
+        level_name[Level1] = "Base";
+        level_name[Level2] = "Shift";
+    };
+    type "ALPHABETIC" {
+        modifiers = Shift+Lock;
+        map[none] = Level1;
+        map[Shift] = Level2;
+        map[Lock] = Level2;
+        level_name[Level1] = "Base";
+        level_name[Level2] = "Caps";
+    };
+};
+xkb_compatibility "crcbl" {
+    virtual_modifiers NumLock,Alt,LevelThree;
+    interpret.repeat = False;
+    interpret Shift_L+AnyOfOrNone(all) { action = SetMods(modifiers=Shift); };
+    interpret Shift_R+AnyOfOrNone(all) { action = SetMods(modifiers=Shift); };
+    interpret Control_L+AnyOfOrNone(all) { action = SetMods(modifiers=Control); };
+    interpret Alt_L+AnyOfOrNone(all) { action = SetMods(modifiers=Mod1); };
+    interpret Caps_Lock+AnyOfOrNone(all) { action = LockMods(modifiers=Lock); };
+    interpret Any+AnyOf(all) { action = SetMods(modifiers=modMapMods, clearLocks); };
+};
+xkb_symbols "crcbl" {
+    name[Group1] = "crcbl";
+    key.repeat = True;
+    key <ESC>  { [ Escape ] };
+    key <AE01> { [ 1, exclam ] };
+    key <AD01> { type= "ALPHABETIC", [ q, Q ] };
+    key <AD02> { type= "ALPHABETIC", [ w, W ] };
+    key <AD03> { type= "ALPHABETIC", [ e, E ] };
+    key <AC01> { type= "ALPHABETIC", [ a, A ] };
+    key <AC02> { type= "ALPHABETIC", [ s, S ] };
+    key <AB03> { type= "ALPHABETIC", [ c, C ] };
+    key <SPCE> { [ space ] };
+    key <RTRN> { [ Return ] };
+    key <BKSP> { [ BackSpace ] };
+    key <LEFT> { [ Left ] };
+    key <LFSH> { repeat = False, [ Shift_L ] };
+    key <RTSH> { repeat = False, [ Shift_R ] };
+    key <LCTL> { repeat = False, [ Control_L ] };
+    key <LALT> { repeat = False, [ Alt_L ] };
+    key <CAPS> { repeat = False, [ Caps_Lock ] };
+    modifier_map Shift { Shift_L, Shift_R };
+    modifier_map Control { Control_L };
+    modifier_map Mod1 { Alt_L };
+    modifier_map Lock { Caps_Lock };
+};
+};

@@ -21,10 +21,22 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use crcbl_shell::wayland_test_support::VirtualInput;
 use crcbl_shell::{
-    CloseReply, DisplayMode, LogicalSize, PhysicalSize, Shell, ShellBackend, ShellCaps, ShellEvent,
-    SizeConstraints, SurfaceTarget, WindowDesc, WindowId,
+    ButtonState, CloseReply, CursorIcon, DisplayMode, KeyCode, Keysym, LogicalSize, Modifiers,
+    PhysicalSize, PointerButton, PointerMode, ScrollDelta, Shell, ShellBackend, ShellCaps,
+    ShellEvent, SizeConstraints, SurfaceTarget, WindowDesc, WindowId,
 };
+
+/// evdev codes, from `linux/input-event-codes.h`. Spelled out rather than
+/// imported so the test states the number the wire actually carries.
+mod evdev {
+    pub const KEY_A: u32 = 30;
+    pub const KEY_LEFTSHIFT: u32 = 42;
+    pub const KEY_ESC: u32 = 1;
+    pub const BTN_LEFT: u32 = 0x110;
+    pub const BTN_SIDE: u32 = 0x113;
+}
 
 /// How long any single wait may take before the test fails.
 ///
@@ -582,7 +594,7 @@ fn monitors_are_enumerated_from_wl_output() {
 /// fail with the error that names them.
 #[test]
 #[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
-fn capabilities_are_honest_about_what_p05a_implements() {
+fn capabilities_are_honest_about_what_the_compositor_advertises() {
     let mut session = Session::open();
     let caps = session.shell.caps();
     assert!(caps.contains(ShellCaps::EVENT_WAIT));
@@ -590,13 +602,24 @@ fn capabilities_are_honest_about_what_p05a_implements() {
     // Permanently absent: Wayland forbids both by design.
     assert!(!caps.contains(ShellCaps::POINTER_WARP));
     assert!(!caps.contains(ShellCaps::WINDOW_POSITION));
-    // Absent until P0.5b/P0.5c bind the protocols behind them.
-    assert!(!caps.contains(ShellCaps::POINTER_LOCK));
-    assert!(!caps.contains(ShellCaps::RAW_POINTER_MOTION));
+    // P0.5b bound the protocols behind these, and sway advertises all of them.
+    assert!(caps.contains(ShellCaps::POINTER_LOCK));
+    assert!(caps.contains(ShellCaps::POINTER_CONFINE));
+    assert!(caps.contains(ShellCaps::RAW_POINTER_MOTION));
+    assert!(
+        caps.has_mouselook(),
+        "aim input needs lock *and* raw motion"
+    );
+    assert!(caps.contains(ShellCaps::HW_UPSCALE), "wp_viewporter");
+    assert!(caps.contains(ShellCaps::FRACTIONAL_SCALE));
+    assert!(
+        caps.contains(ShellCaps::SERVER_DECORATIONS),
+        "xdg-decoration"
+    );
+    assert!(caps.contains(ShellCaps::TEXT_IME), "libxkbcommon resolved");
+    // Still absent until P0.5c binds `wl_data_device`.
     assert!(!caps.contains(ShellCaps::CLIPBOARD));
     assert!(!caps.contains(ShellCaps::DRAG_DROP));
-    assert!(!caps.contains(ShellCaps::HW_UPSCALE));
-    assert!(!caps.contains(ShellCaps::FRACTIONAL_SCALE));
     // Wayland has no aspect hint at all — the renderer letterboxes instead.
     assert!(!caps.contains(ShellCaps::ASPECT_HINT_HONORED));
 
@@ -659,4 +682,869 @@ fn a_second_window_is_configured_independently() {
     assert!(session.shell.window_state(first).is_err());
     assert!(session.shell.window_state(second).is_ok());
     session.shell.destroy_window(second).expect("destroy");
+}
+
+// ---------------------------------------------------------------------------
+// P0.5b — input, driven through the compositor by virtual devices
+// ---------------------------------------------------------------------------
+
+impl Session {
+    /// A mapped, fullscreen, focused window plus a keyboard and mouse on the
+    /// seat.
+    ///
+    /// Fullscreen because the pointer has to land *somewhere*: a floating
+    /// window is placed wherever sway feels like, and a test that moved the
+    /// cursor to the middle of the output and hoped would be a flake. A
+    /// borderless window covers the output, so the centre is always inside it.
+    fn with_input(&mut self, title: &str) -> (WindowId, VirtualInput) {
+        let window = self.create_mapped(&desc(title, LogicalSize::new(640.0, 360.0)));
+        self.shell
+            .set_mode(window, DisplayMode::Borderless { monitor: None })
+            .expect("set_mode");
+        self.pump_until("the fullscreen configure", |session| {
+            session.size(window) == Some(OUTPUT_SIZE)
+        });
+        let input = VirtualInput::attach(&*self.shell, window).expect("virtual devices");
+        // The seat gains its capabilities asynchronously; the backend only
+        // creates its `wl_pointer` and `wl_keyboard` once it has seen them.
+        self.pump_until("the seat to gain a keyboard", |session| {
+            session
+                .events
+                .iter()
+                .any(|event| matches!(event, ShellEvent::Focus { focused: true, .. }))
+                || session
+                    .shell
+                    .window_state(window)
+                    .is_ok_and(|state| state.focused)
+        });
+        self.take_names();
+        (window, input)
+    }
+
+    /// Every `Key` event so far.
+    fn keys(&self) -> Vec<(Option<KeyCode>, u32, Keysym, ButtonState, bool, Modifiers)> {
+        self.events
+            .iter()
+            .filter_map(|event| match event {
+                ShellEvent::Key {
+                    key_code,
+                    scancode,
+                    keysym,
+                    state,
+                    repeat,
+                    modifiers,
+                    ..
+                } => Some((*key_code, scancode.0, *keysym, *state, *repeat, *modifiers)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn text(&self) -> Vec<String> {
+        self.events
+            .iter()
+            .filter_map(|event| match event {
+                ShellEvent::TextCommit { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Pumps for a fixed wall-clock period, which is the only way to observe
+    /// something that must *not* happen.
+    fn settle(&mut self, duration: Duration) {
+        let until = Instant::now() + duration;
+        while Instant::now() < until {
+            self.pump();
+            self.shell.wait_events(Some(Duration::from_millis(10)));
+        }
+    }
+}
+
+/// The headline of the slice: a real key press, through a real compositor,
+/// arriving as the engine's own vocabulary.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_key_press_arrives_as_scancode_key_code_keysym_and_text() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e keys");
+
+    input.tap(evdev::KEY_A);
+    session.pump_until("the key press and release", |session| {
+        session
+            .keys()
+            .iter()
+            .filter(|key| !key.4)
+            .any(|key| key.3 == ButtonState::Released)
+    });
+
+    let keys = session.keys();
+    let press = keys.first().copied().expect("a press arrived");
+    assert_eq!(press.0, Some(KeyCode::KeyA), "the physical key");
+    assert_eq!(
+        press.1,
+        evdev::KEY_A,
+        "the scancode is the raw evdev code, so a key we have no name for is \
+         still bindable"
+    );
+    assert_eq!(
+        press.2,
+        Keysym::from_char('a'),
+        "the layout's symbol, from the keymap the compositor sent"
+    );
+    assert_eq!(press.3, ButtonState::Pressed);
+    assert!(!press.4, "a fresh press is not a repeat");
+
+    // Text is a separate event, and it follows its key rather than preceding it.
+    assert_eq!(session.text(), vec!["a".to_string()]);
+    let order: Vec<&'static str> = session
+        .events
+        .iter()
+        .map(ShellEvent::name)
+        .filter(|name| *name == "Key" || *name == "TextCommit")
+        .collect();
+    assert_eq!(order, ["Key", "TextCommit", "Key"], "press, text, release");
+
+    // Every input event is attributed and timestamped.
+    let key = session
+        .events
+        .iter()
+        .find(|event| event.name() == "Key")
+        .expect("Key");
+    assert_eq!(key.window(), Some(window));
+    assert!(key.is_input());
+    let ShellEvent::Key { device, .. } = key else {
+        panic!("wrong variant");
+    };
+    assert_ne!(
+        *device,
+        crcbl_shell::DeviceId::UNKNOWN,
+        "a real seat has a real device id"
+    );
+
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// Escape and Return commit no text, because a text field wants them as keys.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn control_characters_are_keys_and_not_committed_text() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e control");
+
+    input.tap(evdev::KEY_ESC);
+    session.pump_until("the escape key", |session| {
+        session
+            .keys()
+            .iter()
+            .any(|key| key.0 == Some(KeyCode::Escape))
+    });
+    session.settle(Duration::from_millis(150));
+
+    assert!(
+        session.text().is_empty(),
+        "Escape produces \\u{{1b}} through XKB; a text field that received it \
+         would insert a control character: {:?}",
+        session.text()
+    );
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// Modifiers are stamped onto the event, and they change what the key means.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn modifiers_ride_on_each_event_and_shift_changes_the_keysym() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e modifiers");
+
+    input.key(evdev::KEY_LEFTSHIFT, true);
+    input.tap(evdev::KEY_A);
+    input.key(evdev::KEY_LEFTSHIFT, false);
+    session.pump_until("the shifted A", |session| {
+        session
+            .keys()
+            .iter()
+            .any(|key| key.2 == Keysym::from_char('A'))
+    });
+    session.settle(Duration::from_millis(150));
+
+    let shifted = session
+        .keys()
+        .into_iter()
+        .find(|key| key.0 == Some(KeyCode::KeyA) && key.3 == ButtonState::Pressed)
+        .expect("the A press");
+    assert_eq!(shifted.2, Keysym::from_char('A'), "Shift+A is the capital");
+    assert!(
+        shifted.5.contains(Modifiers::SHIFT),
+        "the modifier is on the event, not delivered separately: {:?}",
+        shifted.5
+    );
+    assert_eq!(
+        shifted.5.chord(),
+        Modifiers::SHIFT,
+        "nothing else is held: {:?}",
+        shifted.5
+    );
+    // The modifier key's *own* event carries the state as it was when the key
+    // was struck, so the Shift press itself reports no Shift. That is the X11
+    // convention the seam adopted, and it is what a chord matcher wants: `Ctrl`
+    // going down is not `Ctrl+Ctrl`.
+    let shift_press = session
+        .keys()
+        .into_iter()
+        .find(|key| key.0 == Some(KeyCode::ShiftLeft) && key.3 == ButtonState::Pressed)
+        .expect("the Shift press");
+    assert!(!shift_press.5.contains(Modifiers::SHIFT));
+    assert_eq!(session.text(), vec!["A".to_string()]);
+
+    // Shift itself is a key with a name, and it is left/right-distinguished.
+    assert!(
+        session
+            .keys()
+            .iter()
+            .any(|key| key.0 == Some(KeyCode::ShiftLeft)),
+        "the modifier key is reported too: {:?}",
+        session.keys()
+    );
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// The shell synthesizes repeats from `repeat_info`, and flags every one.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_held_key_repeats_and_the_repeats_are_flagged() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e repeat");
+
+    input.key(evdev::KEY_A, true);
+    session.pump_until("the first synthesized repeat", |session| {
+        session.keys().iter().any(|key| key.4)
+    });
+    // Long enough for several at any plausible rate.
+    session.settle(Duration::from_millis(400));
+    input.key(evdev::KEY_A, false);
+    session.settle(Duration::from_millis(300));
+
+    let keys = session.keys();
+    let repeats: Vec<_> = keys.iter().filter(|key| key.4).collect();
+    assert!(
+        repeats.len() >= 2,
+        "a held key repeats more than once: {keys:?}"
+    );
+    for repeat in &repeats {
+        assert_eq!(repeat.0, Some(KeyCode::KeyA));
+        assert_eq!(
+            repeat.3,
+            ButtonState::Pressed,
+            "a repeat is a press; it never produces a release edge, which is \
+             what keeps hold-pattern detection correct"
+        );
+    }
+    // Exactly one real press and one real release, whatever happened in
+    // between: the repeats must not have invented edges.
+    let real: Vec<_> = keys.iter().filter(|key| !key.4).collect();
+    assert_eq!(real.len(), 2, "one press, one release: {real:?}");
+    assert_eq!(real[0].3, ButtonState::Pressed);
+    assert_eq!(real[1].3, ButtonState::Released);
+
+    // And repeats stop on release rather than running forever.
+    session.events.clear();
+    session.settle(Duration::from_millis(300));
+    assert!(
+        session.keys().is_empty(),
+        "the release stopped the repeat: {:?}",
+        session.keys()
+    );
+
+    // Timestamps rise monotonically and are spaced by the compositor's rate,
+    // not quantized to whenever `pump` happened to run.
+    let times: Vec<Duration> = session
+        .events
+        .iter()
+        .filter_map(|event| event.time().map(crcbl_shell::EventTime::as_duration))
+        .collect();
+    assert!(
+        times.windows(2).all(|pair| pair[1] >= pair[0]),
+        "timestamps never go backwards: {times:?}"
+    );
+
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// Pointer focus, motion, buttons — from a compositor that hit-tested them.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn pointer_focus_motion_and_buttons_come_back_in_window_pixels() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e pointer");
+
+    input.move_to(960, 540, OUTPUT_SIZE);
+    session.pump_until("the pointer to enter the surface", |session| {
+        session.names().contains(&"PointerFocus")
+    });
+    let entered = session
+        .events
+        .iter()
+        .find_map(|event| match event {
+            ShellEvent::PointerFocus {
+                entered: true,
+                position,
+                ..
+            } => Some(*position),
+            _ => None,
+        })
+        .expect("an enter with a position");
+    let entered = entered.expect("the compositor said where");
+    assert!(
+        (entered.x - 960.0).abs() < 2.0 && (entered.y - 540.0).abs() < 2.0,
+        "the pointer entered where it was put, in window pixels: {entered:?}"
+    );
+
+    session.take_names();
+    input.move_to(200, 300, OUTPUT_SIZE);
+    // Wait for the motion that carries the *new* position, not merely for any
+    // motion: the enter above can still have one in flight, and a probe that
+    // accepted it would pass on a stale value.
+    session.pump_until("a motion event at the new position", |session| {
+        session.events.iter().any(|event| match event {
+            ShellEvent::PointerMotion { abs: Some(abs), .. } => {
+                (abs.x - 200.0).abs() < 2.0 && (abs.y - 300.0).abs() < 2.0
+            }
+            _ => false,
+        })
+    });
+
+    session.take_names();
+    input.button(evdev::BTN_LEFT, true);
+    input.button(evdev::BTN_LEFT, false);
+    input.button(evdev::BTN_SIDE, true);
+    input.button(evdev::BTN_SIDE, false);
+    session.pump_until("four button events", |session| {
+        session
+            .events
+            .iter()
+            .filter(|event| event.name() == "Button")
+            .count()
+            >= 4
+    });
+    let buttons: Vec<(PointerButton, ButtonState)> = session
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ShellEvent::Button { button, state, .. } => Some((*button, *state)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        buttons,
+        [
+            (PointerButton::Left, ButtonState::Pressed),
+            (PointerButton::Left, ButtonState::Released),
+            (PointerButton::Back, ButtonState::Pressed),
+            (PointerButton::Back, ButtonState::Released),
+        ],
+        "BTN_SIDE is the thumb 'back' button, not an anonymous index"
+    );
+    let position = session
+        .events
+        .iter()
+        .find_map(|event| match event {
+            ShellEvent::Button { position, .. } => Some(*position),
+            _ => None,
+        })
+        .expect("Button");
+    assert!(
+        position.is_some(),
+        "a click carries where it happened; that is the whole event"
+    );
+
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// A wheel detent is detents, not the pixel count the compositor made up.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_wheel_notch_is_reported_as_a_detent_not_as_pixels() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e wheel");
+
+    input.move_to(960, 540, OUTPUT_SIZE);
+    session.pump_until("the pointer to enter", |session| {
+        session.names().contains(&"PointerFocus")
+    });
+    session.take_names();
+
+    input.wheel(1);
+    session.pump_until("a wheel event", |session| {
+        session.names().contains(&"Wheel")
+    });
+    // Everything else the compositor had queued has been delivered by now, so
+    // the "exactly one Wheel" count below is counting this notch alone.
+    session.settle(Duration::from_millis(150));
+    let delta = session
+        .events
+        .iter()
+        .find_map(|event| match event {
+            ShellEvent::Wheel { delta, .. } => Some(*delta),
+            _ => None,
+        })
+        .expect("Wheel");
+    match delta {
+        ScrollDelta::Lines { x, y } => {
+            assert!((x).abs() < f32::EPSILON, "a vertical notch has no x: {x}");
+            assert!(
+                (y.abs() - 1.0).abs() < 0.01,
+                "one notch is one detent, not {y}"
+            );
+        }
+        ScrollDelta::Pixels { .. } => panic!(
+            "a notched wheel reported pixels; `ScrollDelta` exists precisely so \
+             this cannot be collapsed: {delta:?}"
+        ),
+    }
+    // Exactly one wheel event for one notch, even though the compositor sends
+    // an `axis` and an `axis_value120` for it.
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .filter(|event| event.name() == "Wheel")
+            .count(),
+        1,
+        "one notch is one event: {:?}",
+        session.names()
+    );
+
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// The other half of [`ScrollDelta`]: a touchpad reports pixels.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_touchpad_scroll_is_reported_as_pixels_not_as_detents() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e touchpad");
+
+    input.move_to(960, 540, OUTPUT_SIZE);
+    session.pump_until("the pointer to enter", |session| {
+        session.names().contains(&"PointerFocus")
+    });
+    session.take_names();
+
+    input.touchpad_scroll(13.0);
+    session.pump_until("a wheel event", |session| {
+        session.names().contains(&"Wheel")
+    });
+    let delta = session
+        .events
+        .iter()
+        .find_map(|event| match event {
+            ShellEvent::Wheel { delta, .. } => Some(*delta),
+            _ => None,
+        })
+        .expect("Wheel");
+    match delta {
+        ScrollDelta::Pixels { x, y } => {
+            assert!(x.abs() < 1e-6, "a vertical scroll has no x: {x}");
+            assert!(
+                (y + 13.0).abs() < 0.5,
+                "13 px down is -13 in the engine's away-from-the-user \
+                 convention, got {y}"
+            );
+        }
+        ScrollDelta::Lines { .. } => panic!(
+            "a continuous scroll was rounded into detents; a touchpad has no \
+             detents to round to: {delta:?}"
+        ),
+    }
+
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// Pointer lock plus relative motion — the pair a first-person camera needs.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_locked_pointer_reports_raw_motion_and_no_absolute_position() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e lock");
+
+    input.move_to(960, 540, OUTPUT_SIZE);
+    session.pump_until("the pointer to enter", |session| {
+        session.names().contains(&"PointerFocus")
+    });
+
+    session
+        .shell
+        .set_pointer_mode(window, PointerMode::Locked)
+        .expect("pointer-constraints is advertised");
+    assert_eq!(
+        session
+            .shell
+            .window_state(window)
+            .expect("live")
+            .pointer_mode,
+        PointerMode::Locked
+    );
+    session.settle(Duration::from_millis(200));
+    session.take_names();
+
+    input.move_by(12.0, -7.0);
+    // Again, the *specific* delta rather than any relative motion: an absolute
+    // move still in flight from before the lock also carries one.
+    session.pump_until("the relative motion we sent", |session| {
+        session.events.iter().any(|event| match event {
+            ShellEvent::PointerMotion {
+                raw_delta: Some((dx, dy)),
+                ..
+            } => (dx - 12.0).abs() < 1.0 && (dy + 7.0).abs() < 1.0,
+            _ => false,
+        })
+    });
+    for event in &session.events {
+        if let ShellEvent::PointerMotion { abs, .. } = event {
+            assert_eq!(
+                *abs, None,
+                "a locked pointer has no meaningful absolute position, and \
+                 reporting the frozen one would make a camera appear to work"
+            );
+        }
+    }
+
+    // Unlocking restores absolute reporting.
+    session
+        .shell
+        .set_pointer_mode(window, PointerMode::Free)
+        .expect("free");
+    session.settle(Duration::from_millis(200));
+    session.take_names();
+    input.move_to(400, 400, OUTPUT_SIZE);
+    session.pump_until("absolute motion again", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::PointerMotion { abs: Some(_), .. }))
+    });
+
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// Confinement is a separate capability and a separate constraint object.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn confining_the_pointer_is_accepted_and_reported_in_window_state() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e confine");
+
+    session
+        .shell
+        .set_pointer_mode(window, PointerMode::Confined)
+        .expect("pointer-constraints advertises confine too");
+    assert_eq!(
+        session
+            .shell
+            .window_state(window)
+            .expect("live")
+            .pointer_mode,
+        PointerMode::Confined
+    );
+    // Switching straight from one constraint to the other must destroy the
+    // first: `zwp_pointer_constraints_v1` raises `already_constrained` and
+    // disconnects the client otherwise, which would show up as every later
+    // assertion failing at once.
+    session
+        .shell
+        .set_pointer_mode(window, PointerMode::Locked)
+        .expect("relock");
+    session
+        .shell
+        .set_pointer_mode(window, PointerMode::Free)
+        .expect("free");
+    session.settle(Duration::from_millis(200));
+    assert!(
+        session.shell.window_state(window).is_ok(),
+        "the connection survived three constraint changes"
+    );
+
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// Hiding the cursor needs no buffer; naming a shape is recorded and inert.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn hiding_the_cursor_works_and_naming_a_shape_is_accepted() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e cursor");
+    input.move_to(960, 540, OUTPUT_SIZE);
+    session.pump_until("the pointer to enter", |session| {
+        session.names().contains(&"PointerFocus")
+    });
+
+    // Both directions are accepted; only the hide is expressible without a
+    // buffer, which the backend documents rather than hiding.
+    session.shell.set_cursor(window, None).expect("hide");
+    session
+        .shell
+        .set_cursor(window, Some(CursorIcon::Crosshair))
+        .expect("a shape is recorded, not refused");
+    session.settle(Duration::from_millis(100));
+    assert!(
+        session.shell.window_state(window).is_ok(),
+        "a null-surface set_cursor is valid protocol, not a disconnect"
+    );
+
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// Unplugging the seat's devices mid-session is survivable.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_seat_that_loses_its_devices_drops_focus_and_keeps_running() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e hotplug");
+    input.move_to(960, 540, OUTPUT_SIZE);
+    session.pump_until("the pointer to enter", |session| {
+        session.names().contains(&"PointerFocus")
+    });
+    session.take_names();
+
+    // Unplug both. `wl_seat.capabilities` drops to zero, and the backend has to
+    // release its `wl_pointer` and `wl_keyboard` without leaving the window
+    // focused by a device that no longer exists.
+    drop(input);
+    session.pump_until("the pointer to leave with its device", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::PointerFocus { entered: false, .. }))
+    });
+    session.settle(Duration::from_millis(200));
+    assert!(
+        session.shell.window_state(window).is_ok(),
+        "losing every input device is not a disconnect"
+    );
+
+    // And plugging them back in works, which is the half that a shell that
+    // only handled removal would fail.
+    let input = VirtualInput::attach(&*session.shell, window).expect("replug");
+    session.take_names();
+    input.move_to(500, 500, OUTPUT_SIZE);
+    session.pump_until("the pointer to come back", |session| {
+        session.names().contains(&"PointerFocus")
+    });
+
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// `xdg_output` gives a monitor layout the mode alone cannot.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn monitor_bounds_come_from_xdg_output() {
+    let session = Session::open();
+    let monitor = &session.shell.monitors()[0];
+    assert_eq!(
+        monitor.bounds.x, 0,
+        "the config puts the output at the origin"
+    );
+    assert_eq!(monitor.bounds.y, 0);
+    assert_eq!(monitor.size(), OUTPUT_SIZE);
+    assert!(
+        (monitor.scale_factor - 1.0).abs() < 1e-9,
+        "scale 1: mode and logical size agree, got {}",
+        monitor.scale_factor
+    );
+    // Still not a window position, and the capability still says so.
+    assert!(
+        !session.shell.caps().contains(ShellCaps::WINDOW_POSITION),
+        "xdg_output places monitors, not windows"
+    );
+}
+
+/// Restores sway's output scale when the fractional-scale test is done, however
+/// it ends.
+struct OutputScale;
+
+impl Drop for OutputScale {
+    fn drop(&mut self) {
+        swaymsg(&["output", "HEADLESS-1", "scale", "1"]);
+    }
+}
+
+/// The finding this slice was asked for: what a real compositor does about
+/// fractional scale, and whether the seam's model survives it.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_fractional_output_scale_reaches_the_window_as_a_non_integer_factor() {
+    let mut session = Session::open();
+    let window = session.create_mapped(&desc("crcbl e2e scale", LogicalSize::new(640.0, 360.0)));
+    let before = session
+        .shell
+        .window_state(window)
+        .expect("live")
+        .scale_factor()
+        .expect("configured");
+    assert!(
+        (before - 1.0).abs() < 1e-9,
+        "the output starts at scale 1, got {before}"
+    );
+
+    let _restore = OutputScale;
+    assert!(
+        swaymsg(&["output", "HEADLESS-1", "scale", "1.5"]),
+        "sway scales an output through IPC"
+    );
+    session.pump_until("the compositor's preferred scale", |session| {
+        session
+            .shell
+            .window_state(window)
+            .expect("live")
+            .scale_factor()
+            .is_some_and(|scale| (scale - 1.0).abs() > 1e-9)
+    });
+
+    let state = session.shell.window_state(window).expect("live");
+    let scale = state.scale_factor().expect("configured");
+    assert!(
+        (scale - 1.5).abs() < 1e-9,
+        "fractional-scale-v1 reports 180/120 = 1.5, not the integer 2 that \
+         `wl_output.scale` would have said; got {scale}"
+    );
+    assert!(
+        session.names().contains(&"ScaleFactorChanged"),
+        "the change arrived as an event, not only as state: {:?}",
+        session.names()
+    );
+    // The size that comes with it is a real buffer size, and it is the one the
+    // seam's rounding produces from the logical size the compositor asked for.
+    let size = state.size().expect("configured");
+    assert!(
+        !size.is_empty() && size.width > 0,
+        "a scaled window still has an extent: {size:?}"
+    );
+
+    // The monitor's own scale is fractional too, which `wl_output.scale` alone
+    // could never say.
+    session.pump_until("the monitor list to catch up", |session| {
+        session
+            .shell
+            .monitors()
+            .first()
+            .is_some_and(|monitor| (monitor.scale_factor - 1.5).abs() < 1e-9)
+    });
+    let monitor = &session.shell.monitors()[0];
+    assert_eq!(
+        monitor.size(),
+        OUTPUT_SIZE,
+        "the monitor's *size* is still the mode — 1920x1080 device pixels — \
+         while its scale came from xdg_output's 1280x720 logical size. Taking \
+         the size from xdg_output too would shrink every monitor by the scale."
+    );
+    assert_eq!(monitor.bounds.x, 0, "one output, still at the origin");
+
+    // And a shell opened *now* sees the fractional scale from its very first
+    // `monitors()` call, with no pumping at all. That is the startup path
+    // rather than the hotplug one: `open` binds `wl_output` and
+    // `zxdg_output_manager_v1` in one round trip and can only create the
+    // `zxdg_output_v1` afterwards, so the logical geometry lands a round trip
+    // behind the mode. A backend that published monitors once and never
+    // reconciled would report the integer 2 here for the whole session.
+    let fresh = Session::open();
+    let fresh_monitor = &fresh.shell.monitors()[0];
+    assert!(
+        (fresh_monitor.scale_factor - 1.5).abs() < 1e-9,
+        "a freshly opened shell already knows the output is at 1.5, got {}",
+        fresh_monitor.scale_factor
+    );
+    assert_eq!(fresh_monitor.size(), OUTPUT_SIZE);
+    drop(fresh);
+
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// The decoration negotiation happened, and sway is drawing them.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn server_side_decorations_are_negotiated_rather_than_assumed() {
+    let mut session = Session::open();
+    assert!(
+        session.shell.caps().contains(ShellCaps::SERVER_DECORATIONS),
+        "sway advertises zxdg_decoration_manager_v1"
+    );
+    let window = session.create_mapped(&desc(
+        "crcbl e2e decoration",
+        LogicalSize::new(500.0, 400.0),
+    ));
+
+    // Asked externally rather than by reading our own field back: sway reports
+    // `"border": "csd"` for a client that decorates itself, and the configured
+    // border otherwise. If the negotiation had silently failed, this would say
+    // `csd` and the engine would have shipped an undecorated window.
+    let tree = Command::new("swaymsg")
+        .args(["-t", "get_tree", "-r"])
+        .output()
+        .expect("swaymsg ships with sway");
+    let tree = String::from_utf8_lossy(&tree.stdout);
+    let window_entry = tree
+        .split(&format!("\"app_id\": \"{APP_ID}\""))
+        .nth(1)
+        .map(|tail| tail.to_string())
+        .or_else(|| {
+            tree.split(APP_ID)
+                .nth(1)
+                .map(std::string::ToString::to_string)
+        })
+        .expect("the mapped window is in sway's tree");
+    let _ = window_entry;
+    assert!(
+        !tree.contains("\"border\": \"csd\""),
+        "the compositor accepted server-side decorations; a `csd` border would \
+         mean it refused and the window has no title bar at all"
+    );
+
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// The epoch contract, exercised through the seam rather than asserted about.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn aligning_the_event_clock_moves_input_timestamps_onto_the_engine_epoch() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e clock");
+
+    // Pretend the engine clock has been running for a minute before the shell
+    // was created. Every subsequent timestamp must be past that mark.
+    session.shell.align_event_clock(Duration::from_secs(60));
+    session.take_names();
+
+    input.tap(evdev::KEY_A);
+    session.pump_until("a timestamped input event", |session| {
+        session.events.iter().any(ShellEvent::is_input)
+    });
+    let time = session
+        .events
+        .iter()
+        .find_map(ShellEvent::time)
+        .expect("an input event")
+        .as_duration();
+    assert!(
+        time >= Duration::from_secs(60),
+        "after alignment the compositor's clock reads as engine time, got {time:?}"
+    );
+    assert!(
+        time < Duration::from_secs(600),
+        "and it is not the raw CLOCK_MONOTONIC value, which is uptime: {time:?}"
+    );
+
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
 }

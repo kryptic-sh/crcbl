@@ -22,13 +22,17 @@
 //! # What is in this crate
 //!
 //! P0.4 added the seam and [`HeadlessShell`]. P0.5a added the **Wayland
-//! backend** — window lifecycle only: connection, registry, `xdg-shell`,
-//! configure/ack, modes, monitors. It is compiled only on Linux, reached only
+//! backend**'s window lifecycle — connection, registry, `xdg-shell`,
+//! configure/ack, modes, monitors. P0.5b added everything downstream of
+//! `wl_seat`: keyboard and pointer input with XKB keymaps, pointer lock and
+//! confinement, raw relative motion, fractional scale, `xdg_output` monitor
+//! geometry and `xdg-decoration`. It is compiled only on Linux, reached only
 //! through [`open`], and built on hand-written `extern "C"` declarations for
-//! libwayland-client plus protocol marshalling generated at build time from
-//! vendored XML by `crcbl-wl-scanner`. Input (`wl_seat`) is P0.5b and clipboard
-//! (`data-device`) is P0.5c; [`ShellCaps`] says so rather than leaving a
-//! consumer to find out. There is still no X11 code and no `libxcb` — P0.6.
+//! libwayland-client (plus libxkbcommon, on the same terms) with protocol
+//! marshalling generated at build time from vendored XML by `crcbl-wl-scanner`.
+//! Clipboard and drag-and-drop (`data-device`) are P0.5c; [`ShellCaps`] says so
+//! rather than leaving a consumer to find out. There is still no X11 code and
+//! no `libxcb` — P0.6.
 //!
 //! `HeadlessShell` is not a stub standing in for the real thing: per
 //! `docs/plan/15-windowing.md` it is a first-class implementation that CI,
@@ -418,6 +422,41 @@ pub trait Shell: core::fmt::Debug {
     /// without the capability still means "immediately".
     fn wait_events(&mut self, timeout: Option<Duration>) {
         let _ = timeout;
+    }
+
+    /// Puts input timestamps on the engine's clock.
+    ///
+    /// Call this **once, at startup**, with the reading of the
+    /// [`TimeSource`](crcbl_core::time::TimeSource) that will drive
+    /// [`FrameClock::update`](crcbl_core::FrameClock::update).
+    ///
+    /// [`EventTime`]'s epoch is defined as "the same origin as" that source,
+    /// and no backend can know it: a shell is created some time *after* the
+    /// clock starts, and the window system's own clock has a third origin
+    /// again. Without this call, timestamps are measured from the shell's own
+    /// creation — internally consistent, so durations between two input events
+    /// are already correct, but offset from a
+    /// [`FrameClock`](crcbl_core::FrameClock) reading by however long startup
+    /// took. That offset is exactly what `docs/plan/26`'s input-to-photon
+    /// latency measurement is a subtraction across.
+    ///
+    /// A provided method with a no-op default, because it is only meaningful
+    /// for a backend whose event clock is not already the engine's — the
+    /// browser's `event.timeStamp` needs nothing done to it. The obligation it
+    /// discharges is the "Timestamps are rebased" one in this trait's
+    /// [implementor notes](Self), which previously had no way to be satisfied
+    /// from outside the crate.
+    ///
+    /// ```
+    /// # use core::time::Duration;
+    /// # use crcbl_shell::{HeadlessShell, Shell};
+    /// let mut shell = HeadlessShell::new();
+    /// // The engine clock has been running for 40 ms by the time the window
+    /// // system is up; input stamped "now" should read as 40 ms, not as zero.
+    /// shell.align_event_clock(Duration::from_millis(40));
+    /// ```
+    fn align_event_clock(&mut self, elapsed: Duration) {
+        let _ = elapsed;
     }
 
     /// The native handles a HAL backend needs to create a surface for this

@@ -1,8 +1,32 @@
 //! Test-only scaffolding: map a window's surface so a compositor will manage
-//! it.
+//! it, and give its seat real input devices.
 //!
 //! **Compiled only with the `wayland-e2e` feature**, which nothing but
 //! `tests/run-wayland-e2e.sh` and the CI job it drives turns on.
+//!
+//! # Why there is a virtual keyboard and pointer in here
+//!
+//! A wlroots **headless** compositor has no input devices, so its `wl_seat`
+//! advertises `capabilities = 0` and a client bound to it receives no key, no
+//! button and no motion, ever. Driving sway's IPC does not help:
+//! `swaymsg seat seat0 cursor move 100 100` returns `"success": true` and moves
+//! nothing, because there is no cursor to move.
+//!
+//! [`VirtualInput`](crate::wayland_test_support::VirtualInput) creates a
+//! `zwp_virtual_keyboard_v1` and a
+//! `zwlr_virtual_pointer_v1` on that seat instead. Everything they send goes
+//! through the compositor's **whole** input path — focus, surface hit-testing,
+//! serials, XKB state, frame batching — before it comes back to the client
+//! under test, which cannot tell it from a physical mouse. That is the
+//! difference between testing our own plumbing and testing the thing that has
+//! to work.
+//!
+//! It also gets the seat-capability lifecycle for free: the seat starts empty,
+//! gains `pointer | keyboard` when
+//! [`VirtualInput::attach`](crate::wayland_test_support::VirtualInput::attach)
+//! runs, and loses
+//! them again when it is dropped — the mid-session hotplug the backend has to
+//! survive.
 //!
 //! # Why this has to exist, and why it is not in the shell
 //!
@@ -40,12 +64,15 @@ use core::ptr;
 use crcbl_core::SurfaceTarget;
 
 use super::ffi::{self, WlArgument, WlDisplay, WlMessage, WlProxy};
-use super::protocol::wayland::{wl_registry, wl_shm, wl_shm_pool, wl_surface};
-use crate::{Shell, ShellError, WindowId};
+use super::protocol::virtual_keyboard::{zwp_virtual_keyboard_manager_v1, zwp_virtual_keyboard_v1};
+use super::protocol::virtual_pointer::{zwlr_virtual_pointer_manager_v1, zwlr_virtual_pointer_v1};
+use super::protocol::wayland::{wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
+use crate::{PhysicalSize, Shell, ShellError, WindowId};
 
 unsafe extern "C" {
     fn memfd_create(name: *const c_char, flags: c_uint) -> c_int;
     fn ftruncate(fd: c_int, length: i64) -> c_int;
+    fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
     fn close(fd: c_int) -> c_int;
 }
 
@@ -212,4 +239,454 @@ pub fn map_window(shell: &dyn Shell, window: WindowId) -> Result<(), ShellError>
         close(fd);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Virtual input devices
+// ---------------------------------------------------------------------------
+
+/// The XKB keymap [`VirtualInput`] uploads.
+///
+/// **Hand-written and self-contained on purpose.** Two properties matter:
+///
+/// * **Determinism.** A test that asserts `KeyW` produces the keysym `w` must
+///   not depend on the developer's or the runner's configured layout. This
+///   keymap always says `w`.
+/// * **No `include`.** The usual `include "complete"` in `xkb_types` and
+///   `xkb_compat` reads `xkeyboard-config`'s data files off disk, so a runner
+///   without that package would fail in a way that looks like our bug. Every
+///   key type, interpretation and modifier map this suite needs is spelled out
+///   here.
+///
+/// It covers a deliberately small keyboard: enough letters to type with, both
+/// Shift keys, Control, Alt, Caps Lock, Space, Return, Backspace and an arrow.
+/// Modifier keys carry `repeat = False`, which is what makes the key-repeat
+/// test meaningful — a keymap where everything repeats would prove nothing
+/// about the `xkb_keymap_key_repeats` guard.
+///
+/// Verified to compile with `xkbcli compile-keymap --keymap`.
+pub const TEST_KEYMAP: &str = include_str!("e2e-keymap.xkb");
+
+/// Globals the virtual-input registry below binds.
+struct InputGlobals {
+    registry: *mut WlProxy,
+    seat: *mut WlProxy,
+    keyboard_manager: *mut WlProxy,
+    pointer_manager: *mut WlProxy,
+}
+
+/// Binds `wl_seat` and the two virtual-device managers, ignoring everything
+/// else.
+///
+/// A private registry rather than the shell's: the shell must not know that
+/// virtual input exists, and binding a second `wl_seat` on the same connection
+/// is ordinary Wayland.
+unsafe extern "C" fn bind_input(
+    user_data: *const c_void,
+    _target: *mut c_void,
+    opcode: u32,
+    _message: *const WlMessage,
+    args: *mut WlArgument,
+) -> c_int {
+    // SAFETY: `user_data` is the `*mut InputGlobals` passed to
+    // `wl_proxy_add_dispatcher` in `VirtualInput::attach`, which lives for
+    // strictly longer than the roundtrip that can call this.
+    let state = unsafe { &mut *user_data.cast::<InputGlobals>().cast_mut() };
+    // SAFETY: this dispatcher is attached only to a `wl_registry`, so `args`
+    // matches that interface's events for `opcode`.
+    let event = unsafe { wl_registry::decode_event(opcode, args.cast_const()) };
+    let Some(wl_registry::Event::Global {
+        name,
+        interface,
+        version,
+    }) = event
+    else {
+        return 0;
+    };
+    // SAFETY: the registry is live, and binding from inside a dispatch is
+    // ordinary libwayland usage — the request is queued, not reentrant.
+    unsafe {
+        if interface == wl_seat::NAME && state.seat.is_null() {
+            state.seat = wl_registry::bind(state.registry, name, &wl_seat::INTERFACE, 1);
+        } else if interface == zwp_virtual_keyboard_manager_v1::NAME
+            && state.keyboard_manager.is_null()
+        {
+            state.keyboard_manager = wl_registry::bind(
+                state.registry,
+                name,
+                &zwp_virtual_keyboard_manager_v1::INTERFACE,
+                1,
+            );
+        } else if interface == zwlr_virtual_pointer_manager_v1::NAME
+            && state.pointer_manager.is_null()
+        {
+            state.pointer_manager = wl_registry::bind(
+                state.registry,
+                name,
+                &zwlr_virtual_pointer_manager_v1::INTERFACE,
+                version.min(2),
+            );
+        }
+    }
+    0
+}
+
+/// A keyboard and a pointer plugged into the compositor's seat.
+///
+/// Dropping it unplugs them, which is itself a test: the seat's capabilities go
+/// back to zero and the backend has to tear its `wl_pointer` and `wl_keyboard`
+/// down without leaving a window focused by a device that no longer exists.
+///
+/// Every method flushes, so the compositor sees the event before the caller
+/// pumps for it. None of them block: the answer comes back through the shell's
+/// own event stream, which is the point.
+pub struct VirtualInput {
+    lib: &'static ffi::Lib,
+    display: *mut WlDisplay,
+    globals: Box<InputGlobals>,
+    keyboard: *mut WlProxy,
+    pointer: *mut WlProxy,
+    /// Real-modifier masks, in [`TEST_KEYMAP`]'s numbering.
+    ///
+    /// **The compositor does not track these for a virtual keyboard.** wlroots
+    /// builds its `wlr_keyboard_key_event` with `update_state = false`, because
+    /// `zwp_virtual_keyboard_v1` makes the *client* responsible for saying what
+    /// the modifier state is — the protocol has a `modifiers` request for
+    /// exactly that. A harness that only sent `key` would press Shift and see
+    /// the compositor's XKB state never move, so every shifted keysym would
+    /// come back unshifted. Emulating the driver here is what makes the
+    /// modifier assertions test *our* backend rather than a hole in the
+    /// harness.
+    depressed: core::cell::Cell<u32>,
+    locked: core::cell::Cell<u32>,
+}
+
+impl core::fmt::Debug for VirtualInput {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("VirtualInput")
+            .field("keyboard", &!self.keyboard.is_null())
+            .field("pointer", &!self.pointer.is_null())
+            .finish()
+    }
+}
+
+impl VirtualInput {
+    /// Plugs a keyboard and a pointer into the seat of `shell`'s compositor.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::Backend`] if the compositor advertises no `wl_seat` or
+    /// none of the virtual-device protocols, or if the keymap could not be put
+    /// in an anonymous file.
+    ///
+    /// # Panics
+    ///
+    /// Never; every fallible step is reported as an error.
+    pub fn attach(shell: &dyn Shell, window: WindowId) -> Result<Self, ShellError> {
+        let SurfaceTarget::Wayland { display, .. } = shell.surface_target(window)? else {
+            return Err(ShellError::Backend(
+                "not a Wayland window; this helper is only for the Wayland backend".to_string(),
+            ));
+        };
+        let lib = ffi::load().map_err(|detail| ShellError::Backend(detail.to_string()))?;
+        let display: *mut WlDisplay = display.as_ptr().cast();
+
+        let mut globals = Box::new(InputGlobals {
+            registry: ptr::null_mut(),
+            seat: ptr::null_mut(),
+            keyboard_manager: ptr::null_mut(),
+            pointer_manager: ptr::null_mut(),
+        });
+        // SAFETY: the display belongs to the shell and is live for as long as
+        // the shell is borrowed. `globals` is boxed, so the pointer handed to
+        // the dispatcher stays valid while this value lives, and the dispatcher
+        // only runs inside the round trips below.
+        unsafe {
+            globals.registry =
+                super::protocol::wayland::wl_display::get_registry(ffi::display_as_proxy(display));
+            if globals.registry.is_null() {
+                return Err(ShellError::Backend("wl_display.get_registry".to_string()));
+            }
+            (lib.proxy_add_dispatcher)(
+                globals.registry,
+                bind_input,
+                ptr::from_mut(globals.as_mut()).cast(),
+                ptr::null_mut(),
+            );
+            if (lib.display_roundtrip)(display) < 0 {
+                return Err(ShellError::Backend("roundtrip failed".to_string()));
+            }
+        }
+        if globals.seat.is_null() {
+            return Err(ShellError::Backend(
+                "the compositor has no wl_seat".to_string(),
+            ));
+        }
+        // SAFETY: the seat is live; `wl_seat`'s own events are not read here.
+        unsafe { (lib.proxy_add_dispatcher)(globals.seat, ignore, ptr::null(), ptr::null_mut()) };
+
+        let mut input = Self {
+            lib,
+            display,
+            globals,
+            keyboard: ptr::null_mut(),
+            pointer: ptr::null_mut(),
+            depressed: core::cell::Cell::new(0),
+            locked: core::cell::Cell::new(0),
+        };
+        input.attach_keyboard()?;
+        input.attach_pointer()?;
+        // SAFETY: the display is live; this lets the compositor process both
+        // device creations before the caller starts sending events.
+        unsafe { (lib.display_roundtrip)(display) };
+        Ok(input)
+    }
+
+    fn attach_keyboard(&mut self) -> Result<(), ShellError> {
+        if self.globals.keyboard_manager.is_null() {
+            return Err(ShellError::Backend(
+                "the compositor has no zwp_virtual_keyboard_manager_v1".to_string(),
+            ));
+        }
+        // wlroots refuses a `key` before a keymap, so this has to come first.
+        // The trailing NUL is counted: the compositor mmaps `size` bytes and
+        // hands them to `xkb_keymap_new_from_string`, which needs one.
+        let bytes = TEST_KEYMAP.as_bytes();
+        let size = bytes.len() + 1;
+        // SAFETY: the name is a NUL-terminated literal, and `memfd_create`
+        // either returns a fresh descriptor or -1.
+        let fd = unsafe { memfd_create(c"crcbl-e2e-keymap".as_ptr(), 0) };
+        if fd < 0 {
+            return Err(ShellError::Backend("memfd_create failed".to_string()));
+        }
+        // SAFETY: `fd` is the descriptor just opened, `bytes` is a live slice of
+        // exactly the length passed, and the extra NUL is written from a
+        // one-byte local. `write` may return short, which is checked.
+        let written = unsafe {
+            let head = write(fd, bytes.as_ptr().cast(), bytes.len());
+            let nul = 0u8;
+            let tail = write(fd, ptr::from_ref(&nul).cast(), 1);
+            head.max(0) + tail.max(0)
+        };
+        if usize::try_from(written).unwrap_or(0) != size {
+            // SAFETY: closing the descriptor we just opened, once.
+            unsafe { close(fd) };
+            return Err(ShellError::Backend("short write of the keymap".to_string()));
+        }
+        // SAFETY: the manager and seat are live; `keymap` takes ownership of
+        // nothing — the descriptor is duplicated across the socket — so it is
+        // closed here afterwards.
+        unsafe {
+            self.keyboard = zwp_virtual_keyboard_manager_v1::create_virtual_keyboard(
+                self.globals.keyboard_manager,
+                self.globals.seat,
+            );
+            (self.lib.proxy_add_dispatcher)(self.keyboard, ignore, ptr::null(), ptr::null_mut());
+            zwp_virtual_keyboard_v1::keymap(
+                self.keyboard,
+                1, // WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1
+                fd,
+                u32::try_from(size).unwrap_or(u32::MAX),
+            );
+            (self.lib.display_flush)(self.display);
+            close(fd);
+        }
+        Ok(())
+    }
+
+    fn attach_pointer(&mut self) -> Result<(), ShellError> {
+        if self.globals.pointer_manager.is_null() {
+            return Err(ShellError::Backend(
+                "the compositor has no zwlr_virtual_pointer_manager_v1".to_string(),
+            ));
+        }
+        // SAFETY: the manager and seat are live on this connection.
+        unsafe {
+            self.pointer = zwlr_virtual_pointer_manager_v1::create_virtual_pointer(
+                self.globals.pointer_manager,
+                self.globals.seat,
+            );
+            (self.lib.proxy_add_dispatcher)(self.pointer, ignore, ptr::null(), ptr::null_mut());
+            (self.lib.display_flush)(self.display);
+        }
+        Ok(())
+    }
+
+    /// A plausible, monotonically increasing event time in milliseconds.
+    fn now(&self) -> u32 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the compositor's own timestamps are 32-bit milliseconds too"
+        )]
+        let millis = (ffi::monotonic_nanos() / 1_000_000) as u32;
+        millis
+    }
+
+    fn flush(&self) {
+        // SAFETY: the display is live for as long as the shell that owns it.
+        unsafe { (self.lib.display_flush)(self.display) };
+    }
+
+    /// Presses or releases a key, by **evdev** code — the same numbering
+    /// `wl_keyboard.key` reports back.
+    ///
+    /// Sends the matching `modifiers` request when the key is one
+    /// [`TEST_KEYMAP`] puts in a modifier map, because the compositor does not
+    /// track them for a virtual keyboard — see this type's own docs.
+    pub fn key(&self, evdev: u32, pressed: bool) {
+        // Real-modifier bit positions, in the order `TEST_KEYMAP`'s
+        // `modifier_map` statements assign them: Shift, Lock, Control, Mod1.
+        let bit = match evdev {
+            42 | 54 => Some(1 << 0), // KEY_LEFTSHIFT, KEY_RIGHTSHIFT
+            29 => Some(1 << 2),      // KEY_LEFTCTRL
+            56 => Some(1 << 3),      // KEY_LEFTALT
+            _ => None,
+        };
+        if let Some(bit) = bit {
+            let mask = self.depressed.get();
+            self.depressed
+                .set(if pressed { mask | bit } else { mask & !bit });
+        } else if evdev == 58 && pressed {
+            // KEY_CAPSLOCK is a *lock*: it toggles on press and stays.
+            self.locked.set(self.locked.get() ^ (1 << 1));
+        }
+        // SAFETY: the virtual keyboard is live and has a keymap, which is what
+        // wlroots checks before accepting a key.
+        unsafe {
+            zwp_virtual_keyboard_v1::key(self.keyboard, self.now(), evdev, u32::from(pressed));
+            zwp_virtual_keyboard_v1::modifiers(
+                self.keyboard,
+                self.depressed.get(),
+                0,
+                self.locked.get(),
+                0,
+            );
+        }
+        self.flush();
+    }
+
+    /// Presses and releases a key.
+    pub fn tap(&self, evdev: u32) {
+        self.key(evdev, true);
+        self.key(evdev, false);
+    }
+
+    /// Moves the pointer to an absolute position within an extent.
+    ///
+    /// The extent is the output's size, because that is the space
+    /// `zwlr_virtual_pointer_v1.motion_absolute` is defined in — the compositor
+    /// then decides which surface the position lands on, exactly as it would
+    /// for a real device.
+    pub fn move_to(&self, x: u32, y: u32, extent: PhysicalSize) {
+        // SAFETY: the virtual pointer is live; every argument is a plain
+        // integer, and `frame` is what makes the compositor act on the batch.
+        unsafe {
+            zwlr_virtual_pointer_v1::motion_absolute(
+                self.pointer,
+                self.now(),
+                x,
+                y,
+                extent.width,
+                extent.height,
+            );
+            zwlr_virtual_pointer_v1::frame(self.pointer);
+        }
+        self.flush();
+    }
+
+    /// Moves the pointer by a relative amount, which is what produces
+    /// unaccelerated `relative_motion`.
+    pub fn move_by(&self, dx: f64, dy: f64) {
+        // SAFETY: the virtual pointer is live; the deltas are `wl_fixed`.
+        unsafe {
+            zwlr_virtual_pointer_v1::motion(self.pointer, self.now(), to_fixed(dx), to_fixed(dy));
+            zwlr_virtual_pointer_v1::frame(self.pointer);
+        }
+        self.flush();
+    }
+
+    /// Presses or releases a pointer button, by **evdev** code (`BTN_LEFT` is
+    /// `0x110`).
+    pub fn button(&self, evdev: u32, pressed: bool) {
+        // SAFETY: the virtual pointer is live.
+        unsafe {
+            zwlr_virtual_pointer_v1::button(self.pointer, self.now(), evdev, u32::from(pressed));
+            zwlr_virtual_pointer_v1::frame(self.pointer);
+        }
+        self.flush();
+    }
+
+    /// Scrolls `pixels` of continuous, finger-driven motion on the vertical
+    /// axis — a touchpad, not a wheel.
+    ///
+    /// No `axis_discrete`, because a touchpad has no detents. That is the
+    /// difference [`ScrollDelta`](crate::ScrollDelta) refuses to collapse, and
+    /// this is the half of it a wheel cannot produce.
+    pub fn touchpad_scroll(&self, pixels: f64) {
+        let time = self.now();
+        // SAFETY: the virtual pointer is live; axis 0 is
+        // `wl_pointer.axis.vertical_scroll` and source 1 is `finger`.
+        unsafe {
+            zwlr_virtual_pointer_v1::axis_source(self.pointer, 1);
+            zwlr_virtual_pointer_v1::axis(self.pointer, time, 0, to_fixed(pixels));
+            zwlr_virtual_pointer_v1::frame(self.pointer);
+        }
+        self.flush();
+    }
+
+    /// Scrolls `detents` notches of a real wheel on the vertical axis.
+    ///
+    /// Sends the discrete count *and* the continuous equivalent, which is what
+    /// a notched wheel does — and is what makes the "detents, not pixels"
+    /// assertion meaningful.
+    pub fn wheel(&self, detents: i32) {
+        let time = self.now();
+        // 15 units is one notch by the convention libinput uses for a wheel.
+        let value = to_fixed(f64::from(detents) * 15.0);
+        // SAFETY: the virtual pointer is live; the axis is
+        // `wl_pointer.axis.vertical_scroll`.
+        unsafe {
+            zwlr_virtual_pointer_v1::axis_source(self.pointer, 0);
+            zwlr_virtual_pointer_v1::axis_discrete(self.pointer, time, 0, value, detents);
+            zwlr_virtual_pointer_v1::frame(self.pointer);
+        }
+        self.flush();
+    }
+}
+
+impl Drop for VirtualInput {
+    fn drop(&mut self) {
+        // SAFETY: every proxy was created on this connection and each
+        // destructor belongs to its own interface. Destroying the devices is
+        // what makes the seat drop back to zero capabilities, which the
+        // hotplug test depends on.
+        unsafe {
+            if !self.pointer.is_null() {
+                zwlr_virtual_pointer_v1::destroy(self.pointer);
+            }
+            if !self.keyboard.is_null() {
+                zwp_virtual_keyboard_v1::destroy(self.keyboard);
+            }
+            if !self.globals.seat.is_null() {
+                (self.lib.proxy_destroy)(self.globals.seat);
+            }
+            if !self.globals.keyboard_manager.is_null() {
+                (self.lib.proxy_destroy)(self.globals.keyboard_manager);
+            }
+            if !self.globals.pointer_manager.is_null() {
+                zwlr_virtual_pointer_manager_v1::destroy(self.globals.pointer_manager);
+            }
+            (self.lib.proxy_destroy)(self.globals.registry);
+            (self.lib.display_flush)(self.display);
+        }
+    }
+}
+
+/// An `f64` as the signed 24.8 fixed point the wire carries.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-only input amounts are single-digit pixels"
+)]
+fn to_fixed(value: f64) -> i32 {
+    (value * 256.0).round() as i32
 }

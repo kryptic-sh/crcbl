@@ -71,10 +71,21 @@ pub struct MonitorInfo {
     /// negative ones.
     ///
     /// On Wayland this comes from `xdg_output` logical geometry scaled back to
-    /// pixels; a compositor that does not implement `xdg_output` leaves every
-    /// monitor at the origin, which is why nothing may treat these as a
-    /// reliable global layout — see
-    /// [`ShellCaps::WINDOW_POSITION`](crate::ShellCaps::WINDOW_POSITION).
+    /// pixels by *that output's own* scale; a compositor without `xdg_output`
+    /// falls back to `wl_output.geometry`, whose position is logical while its
+    /// size is physical, so the two only agree at scale 1.
+    ///
+    /// **There is a limit to how meaningful this can be**, and it is worth
+    /// knowing before building a layout on it: on a desktop whose outputs run
+    /// at *different* scales there is no single device-pixel coordinate space
+    /// at all, and these rectangles will not tile — a 1× monitor beside a 2×
+    /// one has two device-pixel spaces, and only the compositor's logical space
+    /// is globally coherent. This type cannot express that, so it reports each
+    /// monitor in its own pixels. Use it to name a monitor and to tell a
+    /// settings screen which one is on the left; do not use it as a desktop
+    /// layout. [`ShellCaps::WINDOW_POSITION`](crate::ShellCaps::WINDOW_POSITION)
+    /// is the bit that says a *window* can be placed, and Wayland never sets
+    /// it.
     pub bounds: PhysicalRect,
 
     /// The part of [`bounds`](Self::bounds) not covered by panels, docks or

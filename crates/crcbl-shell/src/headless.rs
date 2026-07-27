@@ -1132,6 +1132,16 @@ impl Shell for HeadlessShell {
         self.waits += 1;
     }
 
+    /// The seam-level spelling of [`set_time`](Self::set_time).
+    ///
+    /// Both exist because a test drives this shell through the concrete type
+    /// and calls `set_time` every frame, while a consumer written against
+    /// `dyn Shell` can only reach the trait — and the trait method is the one
+    /// a real backend has to implement, so it must be exercised here too.
+    fn align_event_clock(&mut self, elapsed: Duration) {
+        self.set_time(elapsed);
+    }
+
     fn surface_target(&self, window: WindowId) -> Result<SurfaceTarget, ShellError> {
         let state = self.window(window)?;
         // Available from creation — the *handle* exists as soon as the window
