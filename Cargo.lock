@@ -106,6 +106,9 @@ dependencies = [
 [[package]]
 name = "crcbl-ecs"
 version = "0.1.0"
+dependencies = [
+ "crcbl-core",
+]
 
 [[package]]
 name = "crcbl-golden"
