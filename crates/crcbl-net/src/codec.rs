@@ -3,6 +3,7 @@
 //! Every decoder is length-gated: malformed input returns [`DecodeError`] and
 //! no function panics on arbitrary byte slices.
 
+use crate::handshake::{HandshakeResult, Hello, RejectReason};
 use crate::messages::{ClientToServer, ServerToClient, SystemSnapshot};
 use crate::types::{SectorId, SessionId};
 use crcbl_core::TickId;
@@ -255,38 +256,6 @@ pub fn decode_server_to_client(payload: &[u8]) -> Result<ServerToClient, DecodeE
         }
         _ => Err(DecodeError::UnknownTag { tag }),
     }
-}
-
-// ── Handshake types ───────────────────────────────────────────────────────────
-
-/// Hello message sent by client to initiate connection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Hello {
-    pub protocol_version: u32,
-    pub engine_build_id: u64,
-    pub schema_hash: u64,
-    /// `None` means a fresh join (no existing session).
-    pub session_token: Option<SessionId>,
-}
-
-/// Server response to a Hello.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HandshakeResult {
-    Accept {
-        session_id: SessionId,
-        server_tick: TickId,
-    },
-    Reject {
-        reason: RejectReason,
-    },
-}
-
-/// Reason a server rejected a handshake.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RejectReason {
-    /// 0x01 = version, 0x02 = schema, 0x03 = server_full
-    pub code: u8,
-    pub msg: String,
 }
 
 // ── Handshake encode/decode ───────────────────────────────────────────────────
@@ -830,11 +799,8 @@ mod tests {
 
     #[test]
     fn fuzz_random_never_panics() {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        // Deterministic pseudo-random sequence seeded by 0xCRCBL
-        let mut state: u64 = 0x435243424c_000000; // "CRCBL\0\0\0"
+        // Deterministic pseudo-random sequence seeded by "CRCBL\0\0\0".
+        let mut state: u64 = 0x4352_4342_4c00_0000;
         for _ in 0..1000 {
             // Simple xorshift64
             state ^= state << 13;

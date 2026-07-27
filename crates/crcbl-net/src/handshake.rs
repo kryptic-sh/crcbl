@@ -10,7 +10,7 @@ use crcbl_core::TickId;
 // ── Hello ─────────────────────────────────────────────────────────────────────
 
 /// Sent by a client to initiate (or resume) a connection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
     /// Protocol version — bump on breaking wire changes.
     pub protocol_version: u32,
@@ -28,7 +28,7 @@ pub struct Hello {
 // ── RejectReason ──────────────────────────────────────────────────────────────
 
 /// Why the server rejected a handshake.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectReason {
     /// Machine-readable rejection code:
     ///
@@ -46,7 +46,7 @@ pub struct RejectReason {
 // ── HandshakeResult ───────────────────────────────────────────────────────────
 
 /// Outcome of validating a [`Hello`] against the server's expectations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandshakeResult {
     Accept {
         session_id: SessionId,
