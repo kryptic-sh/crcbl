@@ -1,6 +1,6 @@
 //! Network condition simulator for testing.
 //!
-//! Wraps any [`Transport`](crate::Transport) and introduces configurable
+//! Wraps any [`Transport`] and introduces configurable
 //! impairments: packet loss, latency, jitter, duplication, and reordering.
 //! Uses a deterministic LCG-based RNG so the same seed always produces the
 //! same impairment pattern.
