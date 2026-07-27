@@ -54,15 +54,20 @@
 //! mode a "zero validation errors" criterion silently passes on otherwise. See
 //! [`debug`].
 //!
-//! # Scope: milestone 1
+//! # Scope: milestones 1 and 2
 //!
 //! `docs/plan/02-vulkan-backend.md`'s ladder is (1) clear colour through the
 //! graph, (2) triangle, (3) depth-tested mesh, (4) forward lit, (5) ortho. This
-//! crate implements **milestone 1** and the seam surface a clear needs: device
-//! and queues, surfaces and swapchains (including the offscreen ring), command
-//! recording with `sync2` barriers and dynamic rendering, timeline-semaphore
-//! submission, buffers with readback, image views, timestamp queries, and the
-//! deletion queue behind `destroy_*`.
+//! crate implements **milestones 1 and 2**: device and queues, surfaces and
+//! swapchains (including the offscreen ring), command recording with `sync2`
+//! barriers and dynamic rendering, timeline-semaphore submission, buffers with
+//! readback, image views, timestamp queries, the deletion queue behind
+//! `destroy_*` — and, since P1.2, shader modules, descriptor layouts, bind
+//! groups, samplers and graphics/compute pipelines.
+//!
+//! Milestone 2 is a triangle whose vertices are **pulled from a storage
+//! buffer**: `pipeline.rs` never fills in a vertex-input state, because the seam
+//! has none to fill in.
 //!
 //! The one thing that does *not* go through the deletion queue is a swapchain:
 //! the queue is keyed on the submission timeline, and `vkQueuePresentKHR` is
@@ -70,11 +75,14 @@
 //! explicit device idle instead; `device::DeviceInner::retire_swapchain` is
 //! where that is spelled out.
 //!
-//! Shader modules, pipelines, bind groups and samplers return
-//! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported) naming P1.2 —
-//! deliberately, because the shader-toolchain decision (Slang vs glslang) is
-//! P1.2's to make, and a pipeline handle that exists but draws nothing is worse
-//! than one that could never be created.
+//! What is still absent is milestone 3 onward — depth attachments in anger, the
+//! render graph, and a pipeline cache. [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported)
+//! now only ever names a genuine *device* limitation, never a phase.
+//!
+//! Shaders are authored in **Slang** and their SPIR-V is committed; see
+//! `crcbl-shaders` for that decision and for the three checks that stop the
+//! artifacts rotting. Nothing in this crate depends on that one — a backend
+//! takes `&[u32]`.
 //!
 //! # What this backend changed in the seam
 //!
@@ -96,7 +104,40 @@
 //!   the semaphores, owned and reissued by the swapchain, for exactly the
 //!   reason they do.
 //!
-//! Three are recorded and deliberately left alone:
+//! P1.2 added four more, all still open because the seam does not freeze until
+//! P5 exit:
+//!
+//! * **`bind_group` and `push_constants` carry no pipeline layout.** Vulkan's
+//!   `vkCmdBindDescriptorSets` and `vkCmdPushConstants` both need one, and the
+//!   seam supplies none — correctly, since Metal and WebGPU have no such
+//!   object. This backend therefore remembers the layout of the last pipeline
+//!   bound, which makes **pipeline-before-bind-group an ordering rule the seam
+//!   does not state**, and makes the bind point follow the open pass scope
+//!   because that is the only signal available. Both are documented on
+//!   `command.rs` and are clean errors rather than surprises; a
+//!   `bind_group(…, layout)` or a pass-scoped encoder would settle it.
+//! * **`BindGroupDesc` cannot express a variable descriptor count.**
+//!   `VARIABLE_COUNT` makes the layout's count an upper bound and the *group*
+//!   chooses the real length, but the descriptor has no field for it — so this
+//!   backend infers "one past the highest array index written". That is right
+//!   for "write them all now" and wrong for the shape bindless is built on:
+//!   allocate 4096 slots, write twelve, stream the rest through
+//!   `update_bind_group` later. P3 needs a `BindGroupDesc::array_size` before
+//!   it builds on this; see `pipeline::variable_count_from_entries`.
+//! * **Vertex pulling needs `shaderDrawParameters`.** `SV_VertexID` lowers to
+//!   `gl_VertexIndex - gl_BaseVertex`, which declares SPIR-V's
+//!   `DrawParameters` capability. It is Vulkan 1.1 core-optional and present on
+//!   radv and lavapipe, so it joins this backend's floor rather than becoming a
+//!   `Features` bit the renderer would branch on — but it *is* a requirement
+//!   the seam's vocabulary cannot express.
+//! * **Synchronisation validation had never run.**
+//!   `VK_EXT_validation_features` is a *layer* extension, and the probe only
+//!   enumerated the loader's implicit list, so `CRCBL_VK_SYNC_VALIDATION=1`
+//!   bought a log line and no checking — here and in CI. Fixed in `instance.rs`,
+//!   and `tests/vk_e2e.rs` now provokes a deliberate read-after-write so the
+//!   mitigation cannot go quiet again.
+//!
+//! Three from P1.1 are recorded and deliberately left alone:
 //!
 //! * **`present` cannot report `suboptimal`.** `vkQueuePresentKHR` returns it,
 //!   and `AcquiredFrame` is the only place the seam carries it, so this backend
@@ -111,11 +152,11 @@
 //!   contract, and which this backend relies on: under Xvfb a discrete radv GPU
 //!   cannot present at all while lavapipe beside it can. wgpu takes a
 //!   `compatible_surface` at `request_adapter`; settling that belongs with
-//!   `crcbl-render` owning device selection at P1.2.
+//!   `crcbl-render` owning device selection at P1.3.
 //! * **`crcbl-vk` is a dependency of the `crcbl` umbrella.**
 //!   `docs/plan/11-cli-headless.md`'s rule is about a *sample* naming a
 //!   backend, and `apps/sandbox` names none — it asks the registry for one by
-//!   value. The registry moves to `crcbl-render` at P1.2.
+//!   value. The registry moves to `crcbl-render` at P1.3.
 
 // The crate's public surface is deliberately four types: an entry point, a
 // device, and the validation report that makes the P1 gate checkable. Every
@@ -131,6 +172,8 @@ pub(crate) mod deletion;
 pub(crate) mod device;
 pub(crate) mod instance;
 pub(crate) mod mem;
+pub(crate) mod pipeline;
+pub(crate) mod spirv;
 pub(crate) mod swapchain;
 
 pub use debug::{Severity, ValidationMessage, ValidationReport, ValidationSink};

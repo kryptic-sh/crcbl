@@ -381,16 +381,55 @@ impl VkInstance {
             enabled_names.push(ext::debug_utils::NAME);
         }
         let want_sync_validation = validation_enabled && debug::sync_validation_wanted();
-        let validation_features_ext =
-            want_sync_validation && has_extension(ext::validation_features::NAME);
+        // **`VK_EXT_validation_features` is a *layer* extension, not an instance
+        // one.** `vkEnumerateInstanceExtensionProperties(NULL, …)` returns only
+        // what the loader and the ICDs provide, and the validation layer's own
+        // extensions are invisible to it — so probing the implicit list alone
+        // finds nothing, and synchronisation validation is silently never
+        // enabled. `CRCBL_VK_SYNC_VALIDATION=1` then buys a log line and no
+        // checking, on the developer's machine *and* in CI, which is precisely
+        // the vacuous-gate failure `ValidationReport::assert_clean` exists to
+        // prevent one level up.
+        //
+        // Found at P1.2: `docs/plan/02-vulkan-backend.md` names sync bugs as
+        // this stage's headline risk and sync validation as the mitigation, and
+        // the mitigation had never run.
+        let layer_extensions = if validation_enabled {
+            // SAFETY: `entry` is valid and `VALIDATION_LAYER_C` is a NUL-
+            // terminated name the loader just reported as available.
+            unsafe {
+                entry.enumerate_instance_extension_properties(Some(debug::VALIDATION_LAYER_C))
+            }
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let has_layer_extension = |name: &CStr| {
+            layer_extensions.iter().any(|properties| {
+                properties
+                    .extension_name_as_c_str()
+                    .is_ok_and(|available| available == name)
+            })
+        };
+        let validation_features_ext = want_sync_validation
+            && (has_extension(ext::validation_features::NAME)
+                || has_layer_extension(ext::validation_features::NAME));
         if validation_features_ext {
             extensions.push(ext::validation_features::NAME.as_ptr());
             enabled_names.push(ext::validation_features::NAME);
         } else if want_sync_validation {
             log::warn!(
-                "crcbl-vk: synchronisation validation was asked for but {} is absent",
-                ext::validation_features::NAME.to_string_lossy()
+                "crcbl-vk: synchronisation validation was asked for but {} is absent from both \
+                 the loader's extensions and {}'s",
+                ext::validation_features::NAME.to_string_lossy(),
+                debug::VALIDATION_LAYER
             );
+        }
+        if validation_features_ext {
+            // At info, not debug: "sync validation is on" is the fact that makes
+            // a green run mean something, and a run where it is off must not
+            // look identical in the log to one where it is on.
+            log::info!("crcbl-vk: synchronisation validation enabled");
         }
         log::debug!(
             "crcbl-vk: instance extensions {:?}",

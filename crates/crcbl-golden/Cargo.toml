@@ -1,0 +1,23 @@
+[package]
+name = "crcbl-golden"
+description = "Crucible golden-image comparison for render tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# `png` is the one dependency, and it is here rather than hand-rolled on
+# purpose. A golden image has to be a file a human opens from a CI artifact —
+# `docs/plan/12-testing.md` asks for "diffs uploaded as CI artifacts on failure",
+# which is worth nothing if the artifact needs a bespoke viewer. Writing a PNG
+# encoder is tractable; writing a *decoder* that survives someone re-saving the
+# file from an image editor is not, and a golden that silently fails to load is
+# the worst possible failure for a gate.
+#
+# It reaches no shipped binary: this crate is a dev-dependency of the render
+# test suites and of nothing else in the engine graph.
+[dependencies]
+png = { workspace = true }
+
+[lints]
+workspace = true

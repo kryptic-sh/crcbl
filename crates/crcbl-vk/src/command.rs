@@ -20,16 +20,30 @@
 //! exactly one encoder cannot be raced on by construction. It is also
 //! wasteful — a pool per frame is a driver allocation per frame — and
 //! `docs/plan/02-vulkan-backend.md` §2.2 asks for per-frame pools recycled by
-//! the frame loop instead. That belongs with the render graph at P1.2, which is
+//! the frame loop instead. That belongs with the render graph at P1.3, which is
 //! the thing that will own the frame ring; doing it here first would mean
 //! guessing the ring's shape.
 //!
-//! # What a missing object does
+//! # The encoder remembers the pipeline layout, because the seam does not
 //!
-//! Pipelines, bind groups and push-constant layouts cannot be created yet, so
-//! the calls that take one can never be reached with a valid handle. They still
-//! have to exist — the trait is the trait — and they record what they can and
-//! log once otherwise, rather than panicking inside a `dyn` call.
+//! `vkCmdBindDescriptorSets` and `vkCmdPushConstants` both take a
+//! `VkPipelineLayout`. The seam's
+//! [`bind_group`](crcbl_hal::CommandEncoder::bind_group) and
+//! [`push_constants`](crcbl_hal::CommandEncoder::push_constants) take none —
+//! correctly, because Metal and WebGPU have no such object — so this encoder
+//! keeps the layout from the last
+//! [`bind_graphics_pipeline`](crcbl_hal::CommandEncoder::bind_graphics_pipeline)
+//! or [`bind_compute_pipeline`](crcbl_hal::CommandEncoder::bind_compute_pipeline)
+//! and uses that.
+//!
+//! Two consequences a caller has to know, and neither is written down at the
+//! seam (P1.2 finding, recorded in the crate docs):
+//!
+//! 1. **The pipeline must be bound before the bind group.** The reverse order
+//!    is legal Vulkan with an explicit layout and is a clean error here.
+//! 2. **The bind point follows the open scope.** Inside a compute pass a bind
+//!    group goes to `COMPUTE`, otherwise to `GRAPHICS`, because the seam has one
+//!    `bind_group` for both and the scope is the only signal it carries.
 
 use core::ops::Range;
 use std::sync::Arc;
@@ -42,6 +56,8 @@ use crcbl_hal::{
     DrawIndirectCount, GraphicsPipelineHandle, HalError, ImageCopy, IndexFormat, QuerySetHandle,
     Rect2d, RenderPassDesc, ShaderStages, Viewport,
 };
+
+use crcbl_core::Handle;
 
 use crate::conv;
 use crate::device::{CommandBufferEntry, DeviceInner};
@@ -62,6 +78,25 @@ pub(crate) struct VkCommandEncoder {
     /// Debug label nesting, so an unbalanced label does not corrupt the
     /// capture tool's tree.
     label_depth: u32,
+    /// The layout of the last graphics pipeline bound, for `bind_group` and
+    /// `push_constants`. See the module docs.
+    graphics: Option<BoundPipeline>,
+    /// The same, for compute.
+    compute: Option<BoundPipeline>,
+}
+
+/// What the encoder has to remember about a bound pipeline.
+#[derive(Clone, Copy, Debug)]
+struct BoundPipeline {
+    layout: vk::PipelineLayout,
+    /// The stages the layout's push-constant range names. Used in preference to
+    /// the caller's `stages`, because Vulkan requires the mask passed to
+    /// `vkCmdPushConstants` to match the range exactly, while the seam lets a
+    /// caller name any subset it likes.
+    push_constant_stages: vk::ShaderStageFlags,
+    /// The declared range's size, so a write past its end is caught here rather
+    /// than as a driver-side VUID naming neither the offset nor the layout.
+    push_constant_size: u32,
 }
 
 impl core::fmt::Debug for VkCommandEncoder {
@@ -83,6 +118,8 @@ impl VkCommandEncoder {
             in_render_pass: false,
             in_compute_pass: false,
             label_depth: 0,
+            graphics: None,
+            compute: None,
         };
         if let Err(error) = encoder.begin(desc) {
             encoder.failed = Some(error);
@@ -659,9 +696,17 @@ impl CommandEncoder for VkCommandEncoder {
     }
 
     fn bind_graphics_pipeline(&mut self, pipeline: GraphicsPipelineHandle) {
-        // Unreachable with a valid handle: `create_graphics_pipeline` returns
-        // `Unsupported` until P1.2, so no such handle exists.
-        self.fail(HalError::invalid_handle("graphics pipeline", pipeline));
+        let Some(bound) = self.resolve_pipeline(pipeline.cast(), "graphics pipeline") else {
+            return;
+        };
+        self.graphics = Some(bound.1);
+        // SAFETY: `self.raw` is recording inside a rendering scope and `bound.0`
+        // is a live graphics pipeline of this device.
+        unsafe {
+            self.device
+                .raw
+                .cmd_bind_pipeline(self.raw, vk::PipelineBindPoint::GRAPHICS, bound.0);
+        }
     }
 
     fn bind_index_buffer(&mut self, buffer: BufferHandle, offset: u64, format: IndexFormat) {
@@ -690,18 +735,104 @@ impl CommandEncoder for VkCommandEncoder {
 
     // --- bindings ---
 
-    fn bind_group(&mut self, _slot: u32, group: BindGroupHandle, _dynamic_offsets: &[u32]) {
-        // As `bind_graphics_pipeline`: no bind group can exist yet.
-        self.fail(HalError::invalid_handle("bind group", group));
+    fn bind_group(&mut self, slot: u32, group: BindGroupHandle, dynamic_offsets: &[u32]) {
+        if !self.ok() {
+            return;
+        }
+        let (bind_point, bound) = self.current_bind_point();
+        let Some(bound) = bound else {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "bind_group({slot}) with no {bind_point:?} pipeline bound; Vulkan needs the \
+                 pipeline layout, and this backend takes it from the last pipeline bound. Bind \
+                 the pipeline first."
+            )));
+            return;
+        };
+        let state = self.device.state();
+        let record =
+            match crate::device::lookup(&state.bind_groups, "bind group", group, self.device.id) {
+                Ok(record) => record.raw,
+                Err(error) => {
+                    drop(state);
+                    self.fail(error);
+                    return;
+                }
+            };
+        drop(state);
+        // SAFETY: `self.raw` is recording, `record` is a live descriptor set of
+        // this device, and `bound.layout` is the layout of the pipeline bound
+        // immediately above — which is what makes the set compatible.
+        unsafe {
+            self.device.raw.cmd_bind_descriptor_sets(
+                self.raw,
+                bind_point,
+                bound.layout,
+                slot,
+                &[record],
+                dynamic_offsets,
+            );
+        }
     }
 
-    fn push_constants(&mut self, _stages: ShaderStages, _offset: u32, _data: &[u8]) {
-        // Push constants need a pipeline layout, which cannot exist yet. The
-        // seam is explicit that a backend must fail loudly rather than dropping
-        // the write.
-        self.fail(HalError::InvalidDescriptor(
-            "push_constants needs a pipeline layout, which lands at P1.2".to_string(),
-        ));
+    fn push_constants(&mut self, stages: ShaderStages, offset: u32, data: &[u8]) {
+        if !self.ok() {
+            return;
+        }
+        if data.is_empty() {
+            return;
+        }
+        if !data.len().is_multiple_of(4) || !offset.is_multiple_of(4) {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "push_constants writes {} bytes at offset {offset}; both must be multiples of 4",
+                data.len()
+            )));
+            return;
+        }
+        let (bind_point, bound) = self.current_bind_point();
+        let Some(bound) = bound else {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "push_constants with no {bind_point:?} pipeline bound; Vulkan needs the pipeline \
+                 layout, and this backend takes it from the last pipeline bound"
+            )));
+            return;
+        };
+        if bound.push_constant_stages.is_empty() {
+            // The seam is explicit that a backend must fail loudly rather than
+            // dropping the write.
+            self.fail(HalError::InvalidDescriptor(
+                "push_constants on a pipeline whose layout declares no push-constant range"
+                    .to_string(),
+            ));
+            return;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let end = offset.saturating_add(data.len() as u32);
+        if end > bound.push_constant_size {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "push_constants writes {offset}..{end}, but the pipeline layout declares only \
+                 {} bytes",
+                bound.push_constant_size
+            )));
+            return;
+        }
+        // The layout's stages, not the caller's: `vkCmdPushConstants` requires
+        // the mask to match the declared range exactly, while the seam lets a
+        // caller name a subset. Passing the caller's would be a validation error
+        // for a call that is, at the seam's level, correct.
+        let _ = stages;
+        // SAFETY: `self.raw` is recording, `bound.layout` is live, the stage
+        // mask is the one the layout declared, and the range was checked to be
+        // 4-byte aligned. Its upper bound was checked against
+        // `max_push_constant_size` when the layout was created.
+        unsafe {
+            self.device.raw.cmd_push_constants(
+                self.raw,
+                bound.layout,
+                bound.push_constant_stages,
+                offset,
+                data,
+            );
+        }
     }
 
     // --- draws ---
@@ -710,8 +841,10 @@ impl CommandEncoder for VkCommandEncoder {
         if !self.ok() {
             return;
         }
-        // SAFETY: `self.raw` is recording inside a render pass with a pipeline
-        // bound — which, until P1.2, means this is unreachable in practice.
+        // SAFETY: `self.raw` is recording inside a render pass with a graphics
+        // pipeline bound. The seam makes both the caller's responsibility, and
+        // the validation layer is what holds them to it — this layer never
+        // infers a pass or a pipeline.
         unsafe {
             self.device.raw.cmd_draw(
                 self.raw,
@@ -788,15 +921,25 @@ impl CommandEncoder for VkCommandEncoder {
     }
 
     fn bind_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {
-        self.fail(HalError::invalid_handle("compute pipeline", pipeline));
+        let Some(bound) = self.resolve_pipeline(pipeline.cast(), "compute pipeline") else {
+            return;
+        };
+        self.compute = Some(bound.1);
+        // SAFETY: `self.raw` is recording and `bound.0` is a live compute
+        // pipeline of this device.
+        unsafe {
+            self.device
+                .raw
+                .cmd_bind_pipeline(self.raw, vk::PipelineBindPoint::COMPUTE, bound.0);
+        }
     }
 
     fn dispatch(&mut self, x: u32, y: u32, z: u32) {
         if !self.ok() {
             return;
         }
-        // SAFETY: `self.raw` is recording with a compute pipeline bound —
-        // unreachable until P1.2, for the same reason as `draw`.
+        // SAFETY: `self.raw` is recording with a compute pipeline bound, which
+        // the seam makes the caller's responsibility, as for `draw`.
         unsafe { self.device.raw.cmd_dispatch(self.raw, x, y, z) };
     }
 
@@ -963,6 +1106,52 @@ impl Drop for VkCommandEncoder {
 }
 
 impl VkCommandEncoder {
+    /// Resolves a pipeline handle to its `VkPipeline` and what must be
+    /// remembered about it.
+    fn resolve_pipeline(
+        &mut self,
+        pipeline: Handle<crcbl_hal::GraphicsPipeline>,
+        kind: &'static str,
+    ) -> Option<(vk::Pipeline, BoundPipeline)> {
+        if !self.ok() {
+            return None;
+        }
+        let state = self.device.state();
+        let resolved =
+            crate::device::lookup(&state.pipelines, kind, pipeline, self.device.id).map(|entry| {
+                (
+                    entry.raw,
+                    BoundPipeline {
+                        layout: entry.layout,
+                        push_constant_stages: entry.push_constant_stages,
+                        push_constant_size: entry.push_constant_size,
+                    },
+                )
+            });
+        drop(state);
+        match resolved {
+            Ok(resolved) => Some(resolved),
+            Err(error) => {
+                self.fail(error);
+                None
+            }
+        }
+    }
+
+    /// Which bind point `bind_group` and `push_constants` address, and what is
+    /// bound there.
+    ///
+    /// The open scope is the only signal the seam carries — see the module
+    /// docs. Outside a compute pass this is graphics, which is also the right
+    /// answer for a bind issued before `begin_render_pass`.
+    fn current_bind_point(&self) -> (vk::PipelineBindPoint, Option<BoundPipeline>) {
+        if self.in_compute_pass {
+            (vk::PipelineBindPoint::COMPUTE, self.compute)
+        } else {
+            (vk::PipelineBindPoint::GRAPHICS, self.graphics)
+        }
+    }
+
     fn indirect(&mut self, draw: &DrawIndirect, indexed: bool) {
         if !self.ok() {
             return;

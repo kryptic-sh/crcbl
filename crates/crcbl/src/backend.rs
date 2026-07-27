@@ -19,7 +19,7 @@
 //!   because it is already the one dependency a game names.
 //!
 //! The alternative — putting it in `crcbl-render` — is better and is where this
-//! should move once that crate exists (P1.2). It is not a reason to make
+//! should move once that crate exists (P1.3). It is not a reason to make
 //! `apps/sandbox` depend on `crcbl-vk` in the meantime, which is the thing the
 //! rule actually forbids.
 //!

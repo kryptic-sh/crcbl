@@ -10,6 +10,7 @@
 //! crcbl::core    → crcbl-core    handles, WorldPos, FrameArena, FrameClock, input
 //! crcbl::shell   → crcbl-shell   the windowing seam and its backends
 //! crcbl::hal     → crcbl-hal     the GPU seam, plus the recording null backend
+//! crcbl::shaders → crcbl-shaders the engine's shaders, as SPIR-V
 //! crcbl::backend → (this crate)  runtime GPU backend selection
 //! ```
 //!
@@ -48,6 +49,14 @@ pub use crcbl_core as core;
 /// [`crcbl-hal`](crcbl_hal): the GPU backend seam, and the recording
 /// [`null`](crcbl_hal::null) backend standing in for one until P1.
 pub use crcbl_hal as hal;
+/// [`crcbl-shaders`](crcbl_shaders): the engine's Slang sources and the SPIR-V
+/// compiled from them.
+///
+/// Re-exported so a game — and `apps/sandbox`, which is the same shape — reaches
+/// the engine's own shaders without a second workspace path. It names no
+/// backend and no seam type: it hands out `&[u32]` and entry-point names, which
+/// is exactly what [`hal::ShaderModuleDesc`] takes.
+pub use crcbl_shaders as shaders;
 /// [`crcbl-shell`](crcbl_shell): the windowing seam, its Linux backends and
 /// [`HeadlessShell`](crcbl_shell::HeadlessShell).
 pub use crcbl_shell as shell;

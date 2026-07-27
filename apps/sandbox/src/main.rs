@@ -16,6 +16,7 @@
 mod app;
 mod args;
 mod gpu;
+mod triangle;
 
 use std::process::ExitCode;
 

@@ -305,7 +305,10 @@ jobs:
   # the developer's. Lavapipe and radv disagree in ways that matter — P1.1 found
   # a spec violation that radv shrugs off and lavapipe segfaults on — and any
   # code that quietly assumes one vendor's feature set is a bug this job exists
-  # to catch.
+  # to catch. Since P1.2 it also carries the golden-image gate, where the two
+  # disagreeing is not a bug but the measurement the tolerance is built from:
+  # they differ by one level on 3.8% of the triangle, which `crcbl-golden`'s
+  # docs record and its tolerance is calibrated against.
   vk-e2e:
     name: vk e2e (lavapipe)
     runs-on: ubuntu-latest
@@ -341,6 +344,67 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           CRCBL_VK_SYNC_VALIDATION: "1"
         run: crates/crcbl-vk/tests/run-vk-e2e.sh
+      # `docs/plan/12-testing.md`: "diffs uploaded as CI artifacts on failure".
+      # The reference, what lavapipe actually rendered, and a red-marked diff of
+      # the two — enough to tell "the tolerance is too tight" from "the triangle
+      # moved" without reproducing the run. `if: failure()` because a passing run
+      # writes nothing.
+      - name: Upload golden-image diffs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: golden-diff-lavapipe
+          path: target/golden-diff/
+          if-no-files-found: ignore
+
+  # The anti-rot gate for the committed SPIR-V. `crates/crcbl-shaders` ships
+  # Slang sources *and* the compiled artifacts, because
+  # `docs/plan/02-vulkan-backend.md`'s risk list sanctions exactly that ("Slang
+  # toolchain friction in build.rs. Fallback: check in compiled SPIR-V alongside
+  # sources until the toolchain story is smooth") and because it is what lets
+  # every other job — and every contributor — build with no shader compiler at
+  # all.
+  #
+  # The cost of committing generated files is that they rot, so this job is the
+  # thing that stops them: it installs the *pinned* `slangc`, recompiles every
+  # source, and demands the result be byte-for-byte what is in the repository.
+  # It is a separate job rather than a step in `test-linux` because it is the
+  # only one that needs the toolchain, and burying it in a job that does not
+  # would make the "no compiler required" property invisible.
+  #
+  # The version is pinned in `tools/compile-shaders.sh` and repeated here; two
+  # Slang releases legitimately emit different SPIR-V for identical source, so an
+  # unpinned comparison would fail for a reason that is not drift. Bumping it is
+  # a deliberate act that re-blesses every artifact — and any golden image the
+  # new codegen moves — in the same commit.
+  shaders:
+    name: shaders (committed SPIR-V matches its source)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SLANG_VERSION: "2026.14"
+    steps:
+      - uses: actions/checkout@v7
+      # `spirv-val` and `spirv-dis`: the script validates every fresh artifact
+      # against Vulkan 1.3 and reads the entry points back out of it rather than
+      # trusting the manifest to have been written by hand.
+      - name: Install spirv-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends spirv-tools
+      # The `glibc-2.27` build, not the default one: the default is linked
+      # against a newer glibc than the runner image is guaranteed to carry, and
+      # a toolchain that works on one runner generation and not the next is the
+      # failure mode this whole design exists to avoid.
+      - name: Install the pinned slangc
+        run: |
+          curl -fsSL -o slang.tar.gz \
+            "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-${SLANG_VERSION}-linux-x86_64-glibc-2.27.tar.gz"
+          mkdir -p "${RUNNER_TEMP}/slang"
+          tar xzf slang.tar.gz -C "${RUNNER_TEMP}/slang"
+          echo "CRCBL_SLANGC=${RUNNER_TEMP}/slang/bin/slangc" >>"$GITHUB_ENV"
+      - name: Check the committed SPIR-V against its sources
+        run: crates/crcbl-shaders/tools/compile-shaders.sh --check
 
   coverage:
     name: coverage (linux)

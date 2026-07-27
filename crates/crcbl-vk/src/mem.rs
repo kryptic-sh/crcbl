@@ -11,7 +11,7 @@
 //! fragmentation behaviour to get wrong, and is trivially replaced.
 //!
 //! What it must not do is become load-bearing. Real geometry and texture pools
-//! arrive with the shader toolchain at P1.2, and `maxMemoryAllocationCount` is
+//! arrive with the render graph at P1.3, and `maxMemoryAllocationCount` is
 //! guaranteed to be only 4096 — so a per-resource allocation stops working at
 //! exactly the point the engine starts allocating per mesh. The suballocator
 //! lands there.

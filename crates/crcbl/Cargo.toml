@@ -22,6 +22,7 @@ repository.workspace = true
 [dependencies]
 crcbl-core = { workspace = true }
 crcbl-hal = { workspace = true }
+crcbl-shaders = { workspace = true }
 crcbl-shell = { workspace = true }
 crcbl-vk = { workspace = true }
 log = { workspace = true }

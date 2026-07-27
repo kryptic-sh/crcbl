@@ -16,6 +16,14 @@ crcbl-hal = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 
+# Test-only. `crcbl-shaders` supplies the SPIR-V and the geometry the triangle
+# and golden-image suites render; `crcbl-golden` is the comparator. Neither
+# reaches a shipped binary — a backend must not depend on the engine's shaders,
+# and this crate does not.
+[dev-dependencies]
+crcbl-golden = { workspace = true }
+crcbl-shaders = { workspace = true }
+
 [features]
 # The suite in `tests/vk_e2e.rs`, which needs a real Vulkan implementation.
 # Feature-gated *and* `#[ignore]`d, exactly like `crcbl-shell`'s two

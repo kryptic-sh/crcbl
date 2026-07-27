@@ -20,14 +20,15 @@
 //!
 //! ```text
 //! acquire → encode(barrier Undefined → ColorAttachment
-//!                  render pass: LoadOp::Clear
+//!                  render pass: LoadOp::Clear, then draw the triangle
 //!                  barrier ColorAttachment → Present)
 //!         → submit(wait acquire, signal present + timeline)
 //!         → present(wait present) → retire the command buffer
 //! ```
 //!
 //! — which is `docs/plan/02-vulkan-backend.md`'s **milestone 1**, "clear colour
-//! through the graph". The clear is a real render pass with
+//! through the graph", plus **milestone 2**, the triangle. The clear is a real
+//! render pass with
 //! [`LoadOp::Clear`](crcbl::hal::LoadOp), not a `vkCmdClearColorImage`: the
 //! attachment, the load op and the layout transition into
 //! `COLOR_ATTACHMENT_OPTIMAL` are the machinery every later milestone is built
@@ -121,10 +122,12 @@ use crcbl::hal::{
     DeviceDesc, Features, Format, HalError, ImageBarrier, ImageSubresourceRange, LoadOp,
     PresentInfo, PresentMode, QueueHandle, QueueKind, Rect2d, RenderPassDesc, ResourceState,
     SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreSignal, SemaphoreWait, StoreOp,
-    SubmitInfo, SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle,
+    SubmitInfo, SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle, Viewport,
 };
 use crcbl::prelude::*;
 use crcbl::shell::WindowId;
+
+use crate::triangle::Triangle;
 
 /// How many frames may be in flight before the loop waits for the oldest.
 ///
@@ -183,6 +186,13 @@ pub struct Gpu {
     /// Scratch, reused every frame so a steady-state frame allocates nothing.
     waits: Vec<SemaphoreWait>,
     signals: Vec<SemaphoreSignal>,
+    /// Milestone 2. Created once, drawn every frame, destroyed in [`Gpu::destroy`].
+    ///
+    /// Its pipeline names `config.format` as its colour target, and a
+    /// reconfigure never changes the format — only the extent — so it survives a
+    /// resize untouched. A format change would need a new pipeline, which is
+    /// the render graph's business at P1.3.
+    triangle: Triangle,
 }
 
 /// The swapchain parameters, kept so a reconfigure changes exactly one of them.
@@ -407,6 +417,10 @@ impl Gpu {
             None
         };
 
+        // Milestone 2. Built after the swapchain because the pipeline has to
+        // name the colour format the pass will actually render to.
+        let triangle = Triangle::new(device.as_ref(), queue, format)?;
+
         Ok(Self {
             instance,
             device,
@@ -420,6 +434,7 @@ impl Gpu {
             configured_extent: extent,
             waits: Vec::with_capacity(1),
             signals: Vec::with_capacity(2),
+            triangle,
         })
     }
 
@@ -528,12 +543,11 @@ impl Gpu {
             )],
             ..Barriers::default()
         });
-        // `docs/plan/02-vulkan-backend.md`'s milestone 1. Nothing draws yet, so
-        // the pass contains no draws — but it is a real pass with a real load
-        // op, which is what makes the clear go through the attachment machinery
-        // every later milestone needs rather than around it.
+        // `docs/plan/02-vulkan-backend.md`'s milestones 1 and 2: a real pass
+        // with a real load op, and a triangle drawn into it by pulling its
+        // vertices out of a storage buffer.
         encoder.begin_render_pass(&RenderPassDesc {
-            label: Some("clear"),
+            label: Some("clear + triangle"),
             color_attachments: &[ColorAttachment {
                 // The swapchain's own view of its own image — obligation-free
                 // on this side of the seam since P1.1.
@@ -550,6 +564,13 @@ impl Gpu {
             // would put the render area outside the attachment.
             render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
         });
+        // Viewport and scissor are dynamic state, so they are set per pass
+        // rather than baked into the pipeline — which is what lets one pipeline
+        // survive every resize. Both use the *configured* extent, obligation 3,
+        // for the same reason the render area does.
+        encoder.set_viewport(&Viewport::from_size(acquired.extent.0, acquired.extent.1));
+        encoder.set_scissor(&Rect2d::from_size(acquired.extent.0, acquired.extent.1));
+        self.triangle.draw(encoder.as_mut());
         encoder.end_render_pass();
         // The compositor may only be handed an image in `Present`. Presenting
         // one that was never transitioned is a validation error and, on some
@@ -677,6 +698,7 @@ impl Gpu {
         // Nothing may be destroyed while the device might still be using it.
         self.device.wait_idle()?;
         self.retire_to(0)?;
+        self.triangle.destroy(self.device.as_ref());
         if let Some(semaphore) = self.timeline.take() {
             self.device.destroy_semaphore(semaphore);
         }

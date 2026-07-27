@@ -305,6 +305,284 @@ pub fn subresource_layers(layers: crcbl_hal::ImageSubresourceLayers) -> vk::Imag
     }
 }
 
+// --- pipeline state ------------------------------------------------------
+//
+// Everything below is milestone 2's vocabulary. It is here rather than in
+// `pipeline.rs` for the reason the module docs give: these are *decisions*, and
+// keeping them beside the other decisions is what keeps them all unit-tested
+// against a table rather than spot-checked against whichever value a test
+// happened to use.
+
+/// Maps a seam comparison onto a Vulkan one.
+///
+/// The seam names these by the comparison performed, never by what it means for
+/// visibility, so this is the one mapping in the file that is a pure rename —
+/// and it must stay one. `CompareOp::Greater` is the engine's reversed-Z depth
+/// test; turning it into anything but `GREATER` here would silently invert the
+/// depth convention for every pipeline at once.
+#[must_use]
+pub fn compare_op(op: crcbl_hal::CompareOp) -> vk::CompareOp {
+    use crcbl_hal::CompareOp as C;
+    match op {
+        C::Never => vk::CompareOp::NEVER,
+        C::Less => vk::CompareOp::LESS,
+        C::Equal => vk::CompareOp::EQUAL,
+        C::LessOrEqual => vk::CompareOp::LESS_OR_EQUAL,
+        C::Greater => vk::CompareOp::GREATER,
+        C::NotEqual => vk::CompareOp::NOT_EQUAL,
+        C::GreaterOrEqual => vk::CompareOp::GREATER_OR_EQUAL,
+        C::Always => vk::CompareOp::ALWAYS,
+    }
+}
+
+/// Maps a seam stencil operation onto a Vulkan one.
+#[must_use]
+pub fn stencil_op(op: crcbl_hal::StencilOp) -> vk::StencilOp {
+    use crcbl_hal::StencilOp as S;
+    match op {
+        S::Keep => vk::StencilOp::KEEP,
+        S::Zero => vk::StencilOp::ZERO,
+        S::Replace => vk::StencilOp::REPLACE,
+        S::Invert => vk::StencilOp::INVERT,
+        S::IncrementClamp => vk::StencilOp::INCREMENT_AND_CLAMP,
+        S::DecrementClamp => vk::StencilOp::DECREMENT_AND_CLAMP,
+        S::IncrementWrap => vk::StencilOp::INCREMENT_AND_WRAP,
+        S::DecrementWrap => vk::StencilOp::DECREMENT_AND_WRAP,
+    }
+}
+
+/// Builds one facing's Vulkan stencil state.
+///
+/// The masks and the reference live on [`StencilState`](crcbl_hal::StencilState)
+/// rather than per face, because no API this engine targets lets the two facings
+/// disagree about them.
+pub fn stencil_face(
+    face: crcbl_hal::StencilFaceState,
+    state: crcbl_hal::StencilState,
+) -> vk::StencilOpState {
+    vk::StencilOpState {
+        fail_op: stencil_op(face.fail_op),
+        pass_op: stencil_op(face.pass_op),
+        depth_fail_op: stencil_op(face.depth_fail_op),
+        compare_op: compare_op(face.compare),
+        compare_mask: state.read_mask,
+        write_mask: state.write_mask,
+        reference: state.reference,
+    }
+}
+
+/// Maps a seam blend factor onto a Vulkan one.
+#[must_use]
+pub fn blend_factor(factor: crcbl_hal::BlendFactor) -> vk::BlendFactor {
+    use crcbl_hal::BlendFactor as B;
+    match factor {
+        B::Zero => vk::BlendFactor::ZERO,
+        B::One => vk::BlendFactor::ONE,
+        B::Src => vk::BlendFactor::SRC_COLOR,
+        B::OneMinusSrc => vk::BlendFactor::ONE_MINUS_SRC_COLOR,
+        B::SrcAlpha => vk::BlendFactor::SRC_ALPHA,
+        B::OneMinusSrcAlpha => vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+        B::Dst => vk::BlendFactor::DST_COLOR,
+        B::OneMinusDst => vk::BlendFactor::ONE_MINUS_DST_COLOR,
+        B::DstAlpha => vk::BlendFactor::DST_ALPHA,
+        B::OneMinusDstAlpha => vk::BlendFactor::ONE_MINUS_DST_ALPHA,
+    }
+}
+
+/// Maps a seam blend operation onto a Vulkan one.
+#[must_use]
+pub fn blend_op(op: crcbl_hal::BlendOp) -> vk::BlendOp {
+    use crcbl_hal::BlendOp as B;
+    match op {
+        B::Add => vk::BlendOp::ADD,
+        B::Subtract => vk::BlendOp::SUBTRACT,
+        B::ReverseSubtract => vk::BlendOp::REVERSE_SUBTRACT,
+        B::Min => vk::BlendOp::MIN,
+        B::Max => vk::BlendOp::MAX,
+    }
+}
+
+/// Maps seam colour-write flags onto Vulkan colour components.
+#[must_use]
+pub fn color_writes(writes: crcbl_hal::ColorWrites) -> vk::ColorComponentFlags {
+    use crcbl_hal::ColorWrites as W;
+    let mut flags = vk::ColorComponentFlags::empty();
+    if writes.contains(W::R) {
+        flags |= vk::ColorComponentFlags::R;
+    }
+    if writes.contains(W::G) {
+        flags |= vk::ColorComponentFlags::G;
+    }
+    if writes.contains(W::B) {
+        flags |= vk::ColorComponentFlags::B;
+    }
+    if writes.contains(W::A) {
+        flags |= vk::ColorComponentFlags::A;
+    }
+    flags
+}
+
+/// Maps a seam topology onto a Vulkan one.
+#[must_use]
+pub fn topology(topology: crcbl_hal::PrimitiveTopology) -> vk::PrimitiveTopology {
+    use crcbl_hal::PrimitiveTopology as T;
+    match topology {
+        T::PointList => vk::PrimitiveTopology::POINT_LIST,
+        T::LineList => vk::PrimitiveTopology::LINE_LIST,
+        T::LineStrip => vk::PrimitiveTopology::LINE_STRIP,
+        T::TriangleList => vk::PrimitiveTopology::TRIANGLE_LIST,
+        T::TriangleStrip => vk::PrimitiveTopology::TRIANGLE_STRIP,
+    }
+}
+
+/// Maps a seam winding onto a Vulkan front face.
+///
+/// # The viewport flip changes what this means, and it is not this function's
+/// job to compensate
+///
+/// The encoder submits a **negative-height viewport** so the seam's Y-up
+/// convention survives Vulkan's inverted clip space. Front-facing determination
+/// happens in framebuffer space, *after* that transform, so a negative height
+/// reverses the observed winding of every triangle. `Ccw` therefore reaches the
+/// rasteriser as `COUNTER_CLOCKWISE` and means "counter-clockwise **in the
+/// seam's coordinate system**", which is the only definition a caller can
+/// author geometry against.
+///
+/// Flipping it here instead would make `FrontFace::Ccw` mean one thing on
+/// Vulkan and another everywhere else. It costs nothing at P1.2, where
+/// [`CullMode::None`](crcbl_hal::CullMode) is the default and nothing is
+/// discarded; it is the first thing to check when P1.3's depth-tested mesh
+/// renders inside-out.
+#[must_use]
+pub fn front_face(face: crcbl_hal::FrontFace) -> vk::FrontFace {
+    match face {
+        crcbl_hal::FrontFace::Ccw => vk::FrontFace::COUNTER_CLOCKWISE,
+        crcbl_hal::FrontFace::Cw => vk::FrontFace::CLOCKWISE,
+    }
+}
+
+/// Maps a seam cull mode onto Vulkan cull flags.
+#[must_use]
+pub fn cull_mode(mode: crcbl_hal::CullMode) -> vk::CullModeFlags {
+    match mode {
+        crcbl_hal::CullMode::None => vk::CullModeFlags::NONE,
+        crcbl_hal::CullMode::Front => vk::CullModeFlags::FRONT,
+        crcbl_hal::CullMode::Back => vk::CullModeFlags::BACK,
+    }
+}
+
+/// Maps a seam fill mode onto a Vulkan polygon mode.
+#[must_use]
+pub fn polygon_mode(mode: crcbl_hal::PolygonMode) -> vk::PolygonMode {
+    match mode {
+        crcbl_hal::PolygonMode::Fill => vk::PolygonMode::FILL,
+        crcbl_hal::PolygonMode::Line => vk::PolygonMode::LINE,
+    }
+}
+
+/// Maps a seam filter onto a Vulkan one.
+#[must_use]
+pub fn filter(mode: crcbl_hal::FilterMode) -> vk::Filter {
+    match mode {
+        crcbl_hal::FilterMode::Nearest => vk::Filter::NEAREST,
+        crcbl_hal::FilterMode::Linear => vk::Filter::LINEAR,
+    }
+}
+
+/// Maps a seam mip filter onto a Vulkan sampler mipmap mode.
+#[must_use]
+pub fn mipmap_mode(mode: crcbl_hal::FilterMode) -> vk::SamplerMipmapMode {
+    match mode {
+        crcbl_hal::FilterMode::Nearest => vk::SamplerMipmapMode::NEAREST,
+        crcbl_hal::FilterMode::Linear => vk::SamplerMipmapMode::LINEAR,
+    }
+}
+
+/// Maps a seam address mode onto a Vulkan one.
+///
+/// `ClampToBorder` picks **transparent black**, which is what the seam's docs
+/// promise; Vulkan makes the border colour a separate enum, and opaque black is
+/// the value a shadow atlas must never get.
+#[must_use]
+pub fn address_mode(mode: crcbl_hal::SamplerAddressMode) -> vk::SamplerAddressMode {
+    use crcbl_hal::SamplerAddressMode as A;
+    match mode {
+        A::Repeat => vk::SamplerAddressMode::REPEAT,
+        A::MirrorRepeat => vk::SamplerAddressMode::MIRRORED_REPEAT,
+        A::ClampToEdge => vk::SamplerAddressMode::CLAMP_TO_EDGE,
+        A::ClampToBorder => vk::SamplerAddressMode::CLAMP_TO_BORDER,
+    }
+}
+
+/// Maps seam stage flags onto Vulkan shader stages.
+#[must_use]
+pub fn shader_stages(stages: crcbl_hal::ShaderStages) -> vk::ShaderStageFlags {
+    use crcbl_hal::ShaderStages as S;
+    let mut flags = vk::ShaderStageFlags::empty();
+    if stages.contains(S::VERTEX) {
+        flags |= vk::ShaderStageFlags::VERTEX;
+    }
+    if stages.contains(S::FRAGMENT) {
+        flags |= vk::ShaderStageFlags::FRAGMENT;
+    }
+    if stages.contains(S::COMPUTE) {
+        flags |= vk::ShaderStageFlags::COMPUTE;
+    }
+    flags
+}
+
+/// Maps a seam binding kind onto a Vulkan descriptor type.
+///
+/// `read_only` does **not** change the descriptor type: Vulkan has one
+/// `STORAGE_BUFFER` and expresses read-only-ness with the shader's
+/// `NonWritable` decoration, which comes from the shader rather than from here.
+/// The flag still matters — it is what the render graph reads to decide a
+/// read→read pair needs no barrier — so it is carried on the layout record and
+/// simply has no descriptor-type consequence.
+#[must_use]
+pub fn descriptor_type(kind: crcbl_hal::BindingKind) -> vk::DescriptorType {
+    use crcbl_hal::BindingKind as K;
+    match kind {
+        K::UniformBuffer { dynamic: false } => vk::DescriptorType::UNIFORM_BUFFER,
+        K::UniformBuffer { dynamic: true } => vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
+        K::StorageBuffer { dynamic: false, .. } => vk::DescriptorType::STORAGE_BUFFER,
+        K::StorageBuffer { dynamic: true, .. } => vk::DescriptorType::STORAGE_BUFFER_DYNAMIC,
+        K::SampledImage => vk::DescriptorType::SAMPLED_IMAGE,
+        K::StorageImage { .. } => vk::DescriptorType::STORAGE_IMAGE,
+        K::Sampler => vk::DescriptorType::SAMPLER,
+    }
+}
+
+/// Maps seam binding flags onto Vulkan descriptor-binding flags.
+#[must_use]
+pub fn binding_flags(flags: crcbl_hal::BindingFlags) -> vk::DescriptorBindingFlags {
+    use crcbl_hal::BindingFlags as F;
+    let mut out = vk::DescriptorBindingFlags::empty();
+    if flags.contains(F::PARTIALLY_BOUND) {
+        out |= vk::DescriptorBindingFlags::PARTIALLY_BOUND;
+    }
+    if flags.contains(F::UPDATE_AFTER_BIND) {
+        out |= vk::DescriptorBindingFlags::UPDATE_AFTER_BIND;
+    }
+    if flags.contains(F::VARIABLE_COUNT) {
+        out |= vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT;
+    }
+    out
+}
+
+/// Maps a sample count onto a Vulkan flag, rejecting a non-power-of-two.
+///
+/// `SampleCountFlags` is a bitmask whose bits *are* the counts, so
+/// `from_raw(n)` is correct for 1, 2, 4, … and silently wrong for 3 — it would
+/// produce `1 | 2`, which a driver reads as a different count than the one
+/// asked for. `None` is what makes that an `InvalidDescriptor` instead.
+pub fn sample_count(samples: u32) -> Option<vk::SampleCountFlags> {
+    if samples == 0 || !samples.is_power_of_two() || samples > 64 {
+        return None;
+    }
+    Some(vk::SampleCountFlags::from_raw(samples))
+}
+
 /// How a [`ResourceState`] is expressed to a `sync2` barrier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StateMasks {
@@ -645,5 +923,298 @@ mod tests {
             hal_error("x", vk::Result::ERROR_DEVICE_LOST),
             crcbl_hal::HalError::DeviceLost(_)
         ));
+    }
+    /// The locked decision, restated where it is actually consumed:
+    /// `docs/plan/02-vulkan-backend.md` fixes reversed-Z with compare op
+    /// `GREATER`, and `crcbl-hal` makes it the default. If this mapping ever
+    /// becomes anything else, every pipeline in the engine inverts its depth
+    /// test at once and every golden image needs re-blessing.
+    #[test]
+    fn the_reversed_z_compare_op_survives_the_mapping() {
+        assert_eq!(
+            compare_op(crcbl_hal::CompareOp::Greater),
+            vk::CompareOp::GREATER
+        );
+        assert_eq!(
+            compare_op(crcbl_hal::CompareOp::default()),
+            vk::CompareOp::GREATER,
+            "the seam's default is the engine's depth test"
+        );
+        assert_eq!(
+            compare_op(crcbl_hal::DepthStencilState::default().depth_compare),
+            vk::CompareOp::GREATER
+        );
+        // And the prepass-matching pair, which is the other half of the
+        // convention.
+        assert_eq!(
+            compare_op(crcbl_hal::CompareOp::GreaterOrEqual),
+            vk::CompareOp::GREATER_OR_EQUAL
+        );
+    }
+
+    /// Every comparison must map to a *distinct* Vulkan op. A duplicated arm
+    /// would make two different depth tests behave identically, which is
+    /// invisible until a shadow pass.
+    #[test]
+    fn every_comparison_maps_somewhere_distinct() {
+        use crcbl_hal::CompareOp as C;
+        let all = [
+            C::Never,
+            C::Less,
+            C::Equal,
+            C::LessOrEqual,
+            C::Greater,
+            C::NotEqual,
+            C::GreaterOrEqual,
+            C::Always,
+        ];
+        let mut mapped: Vec<i32> = all.iter().map(|op| compare_op(*op).as_raw()).collect();
+        mapped.sort_unstable();
+        mapped.dedup();
+        assert_eq!(mapped.len(), all.len());
+    }
+
+    #[test]
+    fn every_stencil_and_blend_operation_maps_somewhere_distinct() {
+        use crcbl_hal::{BlendFactor as B, BlendOp as O, StencilOp as S};
+        let stencils = [
+            S::Keep,
+            S::Zero,
+            S::Replace,
+            S::Invert,
+            S::IncrementClamp,
+            S::DecrementClamp,
+            S::IncrementWrap,
+            S::DecrementWrap,
+        ];
+        let mut raw: Vec<i32> = stencils.iter().map(|op| stencil_op(*op).as_raw()).collect();
+        raw.sort_unstable();
+        raw.dedup();
+        assert_eq!(raw.len(), stencils.len());
+
+        let factors = [
+            B::Zero,
+            B::One,
+            B::Src,
+            B::OneMinusSrc,
+            B::SrcAlpha,
+            B::OneMinusSrcAlpha,
+            B::Dst,
+            B::OneMinusDst,
+            B::DstAlpha,
+            B::OneMinusDstAlpha,
+        ];
+        let mut raw: Vec<i32> = factors
+            .iter()
+            .map(|factor| blend_factor(*factor).as_raw())
+            .collect();
+        raw.sort_unstable();
+        raw.dedup();
+        assert_eq!(raw.len(), factors.len());
+
+        let ops = [O::Add, O::Subtract, O::ReverseSubtract, O::Min, O::Max];
+        let mut raw: Vec<i32> = ops.iter().map(|op| blend_op(*op).as_raw()).collect();
+        raw.sort_unstable();
+        raw.dedup();
+        assert_eq!(raw.len(), ops.len());
+    }
+
+    /// The seam's blend presets must survive into the values that actually
+    /// produce them: straight alpha and premultiplied differ in exactly one
+    /// factor, and swapping them is the classic "UI has dark fringes" bug.
+    #[test]
+    fn the_blend_presets_map_to_the_factors_that_define_them() {
+        let alpha = crcbl_hal::BlendState::alpha();
+        assert_eq!(blend_factor(alpha.color_src), vk::BlendFactor::SRC_ALPHA);
+        assert_eq!(
+            blend_factor(alpha.color_dst),
+            vk::BlendFactor::ONE_MINUS_SRC_ALPHA
+        );
+
+        let premultiplied = crcbl_hal::BlendState::premultiplied();
+        assert_eq!(blend_factor(premultiplied.color_src), vk::BlendFactor::ONE);
+        assert_eq!(
+            blend_factor(premultiplied.color_dst),
+            vk::BlendFactor::ONE_MINUS_SRC_ALPHA
+        );
+    }
+
+    #[test]
+    fn colour_writes_decompose_into_components() {
+        assert_eq!(
+            color_writes(crcbl_hal::ColorWrites::ALL),
+            vk::ColorComponentFlags::RGBA
+        );
+        assert_eq!(
+            color_writes(crcbl_hal::ColorWrites::R | crcbl_hal::ColorWrites::A),
+            vk::ColorComponentFlags::R | vk::ColorComponentFlags::A
+        );
+        assert!(
+            color_writes(crcbl_hal::ColorWrites::empty()).is_empty(),
+            "an empty mask must stay empty, not default to RGBA"
+        );
+    }
+
+    /// The seam's winding reaches the rasteriser unflipped; the negative-height
+    /// viewport is what accounts for Vulkan's inverted clip space. See
+    /// [`front_face`] for why compensating here would be wrong.
+    #[test]
+    fn winding_is_passed_through_rather_than_compensated() {
+        assert_eq!(
+            front_face(crcbl_hal::FrontFace::Ccw),
+            vk::FrontFace::COUNTER_CLOCKWISE
+        );
+        assert_eq!(
+            front_face(crcbl_hal::FrontFace::Cw),
+            vk::FrontFace::CLOCKWISE
+        );
+        assert_eq!(
+            front_face(crcbl_hal::FrontFace::default()),
+            vk::FrontFace::COUNTER_CLOCKWISE
+        );
+        // The default must discard nothing: a caller cannot know the winding of
+        // imported geometry, and silently culling half of it is the worst
+        // possible default.
+        assert_eq!(
+            cull_mode(crcbl_hal::CullMode::default()),
+            vk::CullModeFlags::NONE
+        );
+    }
+
+    /// A dynamic binding is a *different descriptor type* in Vulkan, not a flag
+    /// on the same one. Getting this wrong makes every `bind_group` with a
+    /// dynamic offset a validation error.
+    #[test]
+    fn dynamic_bindings_select_the_dynamic_descriptor_type() {
+        use crcbl_hal::BindingKind as K;
+        assert_eq!(
+            descriptor_type(K::UniformBuffer { dynamic: false }),
+            vk::DescriptorType::UNIFORM_BUFFER
+        );
+        assert_eq!(
+            descriptor_type(K::UniformBuffer { dynamic: true }),
+            vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
+        );
+        assert_eq!(
+            descriptor_type(K::StorageBuffer {
+                read_only: true,
+                dynamic: true
+            }),
+            vk::DescriptorType::STORAGE_BUFFER_DYNAMIC
+        );
+        // `read_only` is a graph hint, not a descriptor type: Vulkan expresses
+        // it with the shader's `NonWritable` decoration.
+        assert_eq!(
+            descriptor_type(K::StorageBuffer {
+                read_only: true,
+                dynamic: false
+            }),
+            descriptor_type(K::StorageBuffer {
+                read_only: false,
+                dynamic: false
+            })
+        );
+        assert_eq!(
+            descriptor_type(K::Sampler),
+            vk::DescriptorType::SAMPLER,
+            "separate samplers, never a combined image-sampler"
+        );
+    }
+
+    #[test]
+    fn every_binding_flag_maps_and_an_empty_set_stays_empty() {
+        use crcbl_hal::BindingFlags as F;
+        assert_eq!(
+            binding_flags(F::PARTIALLY_BOUND),
+            vk::DescriptorBindingFlags::PARTIALLY_BOUND
+        );
+        assert_eq!(
+            binding_flags(F::UPDATE_AFTER_BIND),
+            vk::DescriptorBindingFlags::UPDATE_AFTER_BIND
+        );
+        assert_eq!(
+            binding_flags(F::VARIABLE_COUNT),
+            vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT
+        );
+        assert_eq!(
+            binding_flags(F::all()),
+            vk::DescriptorBindingFlags::PARTIALLY_BOUND
+                | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND
+                | vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT
+        );
+        assert!(binding_flags(F::empty()).is_empty());
+    }
+
+    /// `SampleCountFlags`' bits *are* the counts, so a non-power-of-two would
+    /// silently become a different count rather than an error.
+    #[test]
+    fn sample_counts_must_be_powers_of_two() {
+        assert_eq!(sample_count(1), Some(vk::SampleCountFlags::TYPE_1));
+        assert_eq!(sample_count(4), Some(vk::SampleCountFlags::TYPE_4));
+        assert_eq!(sample_count(64), Some(vk::SampleCountFlags::TYPE_64));
+        assert_eq!(sample_count(3), None, "3 would decode as 1|2");
+        assert_eq!(sample_count(0), None);
+        assert_eq!(sample_count(128), None);
+    }
+
+    /// The seam's default sampler is trilinear and repeating, and the mip
+    /// filter is a *different Vulkan enum* from the min/mag filter — the one
+    /// place a copy-paste produces a sampler that is bilinear per mip and
+    /// point-sampled between them.
+    #[test]
+    fn sampler_state_maps_including_the_separate_mip_enum() {
+        let sampler = crcbl_hal::SamplerDesc::default();
+        assert_eq!(filter(sampler.mag_filter), vk::Filter::LINEAR);
+        assert_eq!(
+            mipmap_mode(sampler.mip_filter),
+            vk::SamplerMipmapMode::LINEAR
+        );
+        assert_eq!(
+            mipmap_mode(crcbl_hal::FilterMode::Nearest),
+            vk::SamplerMipmapMode::NEAREST
+        );
+        assert_eq!(
+            address_mode(sampler.address_mode[0]),
+            vk::SamplerAddressMode::REPEAT
+        );
+        assert_eq!(
+            address_mode(crcbl_hal::SamplerAddressMode::ClampToBorder),
+            vk::SamplerAddressMode::CLAMP_TO_BORDER
+        );
+    }
+
+    #[test]
+    fn shader_stage_groups_expand_to_every_member() {
+        assert_eq!(
+            shader_stages(crcbl_hal::ShaderStages::GRAPHICS),
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT
+        );
+        assert_eq!(
+            shader_stages(crcbl_hal::ShaderStages::ALL),
+            vk::ShaderStageFlags::VERTEX
+                | vk::ShaderStageFlags::FRAGMENT
+                | vk::ShaderStageFlags::COMPUTE
+        );
+        assert!(shader_stages(crcbl_hal::ShaderStages::empty()).is_empty());
+    }
+
+    #[test]
+    fn topology_and_polygon_mode_map() {
+        assert_eq!(
+            topology(crcbl_hal::PrimitiveTopology::default()),
+            vk::PrimitiveTopology::TRIANGLE_LIST
+        );
+        assert_eq!(
+            topology(crcbl_hal::PrimitiveTopology::LineStrip),
+            vk::PrimitiveTopology::LINE_STRIP
+        );
+        assert_eq!(
+            polygon_mode(crcbl_hal::PolygonMode::default()),
+            vk::PolygonMode::FILL
+        );
+        assert_eq!(
+            polygon_mode(crcbl_hal::PolygonMode::Line),
+            vk::PolygonMode::LINE
+        );
     }
 }

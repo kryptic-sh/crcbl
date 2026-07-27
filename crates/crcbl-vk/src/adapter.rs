@@ -237,7 +237,7 @@ pub(crate) fn features_of(
         features |= Features::DEBUG_MARKERS;
     }
     // SHADER_DEBUG_PRINTF needs the validation layer's printf feature wired to
-    // a message handler; it lands with the shader toolchain at P1.2 and is
+    // a message handler; it lands with the debug UI at P7 and is
     // reported absent until it works, rather than claimed and dropped.
 
     features

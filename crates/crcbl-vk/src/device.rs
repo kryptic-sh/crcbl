@@ -22,14 +22,12 @@
 //! has completed" — so the caller has already done the waiting and the pool is
 //! freed inline.
 //!
-//! # What is not implemented yet, and says so
+//! # Where the rest of the `Device` surface lives
 //!
-//! Shaders, pipelines, bind groups and samplers return
-//! [`HalError::Unsupported`] naming P1.2. That is a deliberate choice over a
-//! stub that silently succeeds: this slice is milestone 1 of
-//! `docs/plan/02-vulkan-backend.md`'s ladder ("clear colour through the graph"),
-//! the shader toolchain decision is P1.2's, and a pipeline handle that exists
-//! but draws nothing is worse than a handle that could never be created.
+//! Shader modules, descriptor layouts, bind groups, samplers and pipelines
+//! landed at P1.2 and their bodies are in [`crate::pipeline`]; the `Device` impl
+//! here forwards to them so it stays a readable index of the seam. Everything
+//! else — resources, queries, sync, submission, presentation — is in this file.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -55,6 +53,10 @@ use crate::conv;
 use crate::deletion::RetireQueue;
 use crate::instance::{InstanceInner, next_owner_id};
 use crate::mem::{self, MemoryRequest};
+use crate::pipeline::{
+    BindGroupEntryRecord, BindGroupLayoutEntryRecord, PipelineEntry, PipelineLayoutEntry,
+    SamplerEntry, ShaderModuleEntry,
+};
 use crate::swapchain::{self, FrameSync, SwapchainEntry};
 
 /// Anything the object tables hold, so one lookup helper serves them all.
@@ -162,6 +164,12 @@ owned!(
     CommandBufferEntry,
     ReadbackEntry,
     SwapchainEntry,
+    ShaderModuleEntry,
+    BindGroupLayoutEntryRecord,
+    BindGroupEntryRecord,
+    PipelineLayoutEntry,
+    PipelineEntry,
+    SamplerEntry,
 );
 
 /// A driver object parked until the GPU is done with it.
@@ -172,6 +180,14 @@ pub(crate) enum Trash {
     ImageView(vk::ImageView),
     Semaphore(vk::Semaphore),
     QueryPool(vk::QueryPool),
+    ShaderModule(vk::ShaderModule),
+    DescriptorSetLayout(vk::DescriptorSetLayout),
+    /// A pool and, implicitly, the one set allocated from it — see
+    /// `pipeline.rs` on why a bind group owns a whole pool.
+    DescriptorPool(vk::DescriptorPool),
+    PipelineLayout(vk::PipelineLayout),
+    Pipeline(vk::Pipeline),
+    Sampler(vk::Sampler),
     /// A whole swapchain, including the surface reference it holds. The surface
     /// release is what lets `Instance::destroy_surface` be honoured lazily —
     /// obligation 2.
@@ -205,6 +221,15 @@ pub(crate) struct DeviceState {
     command_buffers: Pool<CommandBufferEntry>,
     readbacks: Pool<ReadbackEntry>,
     swapchains: Pool<SwapchainEntry>,
+    // Milestone 2's tables. `pub(crate)` because `pipeline.rs` owns their
+    // creation logic; the older fields stay private because everything that
+    // touches them lives in this file.
+    pub(crate) shader_modules: Pool<ShaderModuleEntry>,
+    pub(crate) bind_group_layouts: Pool<BindGroupLayoutEntryRecord>,
+    pub(crate) bind_groups: Pool<BindGroupEntryRecord>,
+    pub(crate) pipeline_layouts: Pool<PipelineLayoutEntry>,
+    pub(crate) pipelines: Pool<PipelineEntry>,
+    pub(crate) samplers: Pool<SamplerEntry>,
     trash: RetireQueue<Trash>,
 }
 
@@ -288,6 +313,28 @@ pub struct VkDevice {
 }
 
 impl VkDevice {
+    /// The shared state, for the sibling modules that implement parts of the
+    /// `Device` surface — `pipeline.rs` owns everything from
+    /// `create_shader_module` down.
+    pub(crate) fn inner(&self) -> &Arc<DeviceInner> {
+        &self.inner
+    }
+
+    /// Retires a graphics or compute pipeline.
+    ///
+    /// One body for both, because `GraphicsPipeline` and `ComputePipeline` are
+    /// distinct marker types above the seam and the same `VkPipeline` below it.
+    fn destroy_pipeline_handle(&self, pipeline: Handle<crcbl_hal::GraphicsPipeline>) {
+        let mut state = self.inner.state();
+        let Some(entry) = state.pipelines.remove(pipeline.cast()) else {
+            return;
+        };
+        if entry.owner != self.inner.id {
+            return;
+        }
+        self.inner.park(&mut state, Trash::Pipeline(entry.raw));
+    }
+
     pub(crate) fn open(
         instance: Arc<InstanceInner>,
         record: &AdapterRecord,
@@ -390,6 +437,18 @@ impl VkDevice {
             // Not optional: the seam's whole sync model is timeline semaphores,
             // and the device floor already requires Vulkan 1.3.
             .timeline_semaphore(true);
+        // Not optional, and not a seam `Feature`: `SV_VertexID` in Slang lowers
+        // to `gl_VertexIndex - gl_BaseVertex`, which declares the SPIR-V
+        // `DrawParameters` capability, and **every** vertex-pulling shader this
+        // engine has uses it. It is Vulkan 1.1 core-optional and present on
+        // radv, lavapipe and every desktop driver, so it joins `dynamicRendering`
+        // and friends in this backend's floor rather than becoming a capability
+        // the renderer would have to branch on. `AdapterRecord::core_1_3` is
+        // where the floor is checked; this feature is checked by
+        // `vkCreateDevice` failing, which is loud enough for something no
+        // supported driver lacks.
+        let mut vulkan_1_1 =
+            vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
         let mut vulkan_1_3 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true)
@@ -403,6 +462,7 @@ impl VkDevice {
             .queue_create_infos(&queue_infos)
             .enabled_features(&core_features)
             .enabled_extension_names(&device_extensions)
+            .push_next(&mut vulkan_1_1)
             .push_next(&mut vulkan_1_2)
             .push_next(&mut vulkan_1_3);
 
@@ -623,7 +683,7 @@ impl DeviceInner {
     ///
     /// So this waits. A full device idle per resize is heavy and rare, and it
     /// is the boring correct answer; `VK_EXT_swapchain_maintenance1`'s present
-    /// fences are the surgical one, and belong with the frame ring at P1.2.
+    /// fences are the surgical one, and belong with the frame ring at P1.3.
     fn retire_swapchain(&self, entry: SwapchainEntry) {
         // SAFETY: `raw` is a live device; waiting is always legal.
         let _ = unsafe { self.raw.device_wait_idle() };
@@ -731,6 +791,14 @@ unsafe fn destroy_trash(
             Trash::ImageView(view) => raw.destroy_image_view(view, None),
             Trash::Semaphore(semaphore) => raw.destroy_semaphore(semaphore, None),
             Trash::QueryPool(pool) => raw.destroy_query_pool(pool, None),
+            Trash::ShaderModule(module) => raw.destroy_shader_module(module, None),
+            Trash::DescriptorSetLayout(layout) => raw.destroy_descriptor_set_layout(layout, None),
+            // Destroying the pool frees the set with it, which is the whole
+            // reason a bind group owns one.
+            Trash::DescriptorPool(pool) => raw.destroy_descriptor_pool(pool, None),
+            Trash::PipelineLayout(layout) => raw.destroy_pipeline_layout(layout, None),
+            Trash::Pipeline(pipeline) => raw.destroy_pipeline(pipeline, None),
+            Trash::Sampler(sampler) => raw.destroy_sampler(sampler, None),
             Trash::Swapchain(entry) => {
                 let TrashSwapchain {
                     swapchain,
@@ -797,7 +865,7 @@ fn forget_swapchain_rows(state: &mut DeviceState, entry: &SwapchainEntry) {
 }
 
 /// Resolves a handle against a pool and an owner.
-fn lookup<'p, E: Owned, M>(
+pub(crate) fn lookup<'p, E: Owned, M>(
     pool: &'p Pool<E>,
     kind: &'static str,
     handle: Handle<M>,
@@ -831,7 +899,10 @@ fn lookup_mut<'p, E: Owned, M>(
     }
 }
 
-/// The "this lands at P1.2" answer, in one place so the message is uniform.
+/// The "this device cannot" answer, in one place so the message is uniform.
+///
+/// P1.1 used this for the whole pipeline surface; P1.2 implemented it, so what
+/// is left are the genuine per-device capability refusals.
 fn not_yet(what: &'static str) -> HalError {
     HalError::Unsupported {
         backend: BackendKind::Vulkan,
@@ -1203,76 +1274,134 @@ impl Device for VkDevice {
         self.inner.park(&mut state, Trash::ImageView(entry.raw));
     }
 
-    fn create_sampler(&self, _desc: &SamplerDesc<'_>) -> Result<SamplerHandle, HalError> {
-        Err(not_yet("samplers land at P1.2 with the shader toolchain"))
+    fn create_sampler(&self, desc: &SamplerDesc<'_>) -> Result<SamplerHandle, HalError> {
+        self.create_sampler_impl(desc)
     }
 
-    fn destroy_sampler(&self, _sampler: SamplerHandle) {}
+    fn destroy_sampler(&self, sampler: SamplerHandle) {
+        let mut state = self.inner.state();
+        let Some(entry) = state.samplers.remove(sampler.cast()) else {
+            return;
+        };
+        if entry.owner != self.inner.id {
+            return;
+        }
+        self.inner.park(&mut state, Trash::Sampler(entry.raw));
+    }
 
     // --- shaders and pipelines ---
+    //
+    // The bodies live in `pipeline.rs`; these forward so the `Device` impl stays
+    // a readable index of the seam rather than a second thousand lines.
 
     fn create_shader_module(
         &self,
-        _desc: &ShaderModuleDesc<'_>,
+        desc: &ShaderModuleDesc<'_>,
     ) -> Result<ShaderModuleHandle, HalError> {
-        Err(not_yet(
-            "shader modules land at P1.2, once the Slang-vs-glslang decision is made",
-        ))
+        self.create_shader_module_impl(desc)
     }
 
-    fn destroy_shader_module(&self, _module: ShaderModuleHandle) {}
+    fn destroy_shader_module(&self, module: ShaderModuleHandle) {
+        let mut state = self.inner.state();
+        let Some(entry) = state.shader_modules.remove(module.cast()) else {
+            return;
+        };
+        if entry.owner != self.inner.id {
+            return;
+        }
+        // The seam promises "pipelines built from it stay valid", and Vulkan
+        // agrees: a `VkShaderModule` is consumed by pipeline creation and may be
+        // destroyed immediately after. It still goes through the deletion queue
+        // rather than being freed inline, because a *pipeline* creation could be
+        // in flight on another thread holding this same lock's other side.
+        self.inner.park(&mut state, Trash::ShaderModule(entry.raw));
+    }
 
     fn create_bind_group_layout(
         &self,
-        _desc: &BindGroupLayoutDesc<'_>,
+        desc: &BindGroupLayoutDesc<'_>,
     ) -> Result<BindGroupLayoutHandle, HalError> {
-        Err(not_yet("bind-group layouts land at P1.2"))
+        self.create_bind_group_layout_impl(desc)
     }
 
-    fn destroy_bind_group_layout(&self, _layout: BindGroupLayoutHandle) {}
+    fn destroy_bind_group_layout(&self, layout: BindGroupLayoutHandle) {
+        let mut state = self.inner.state();
+        let Some(entry) = state.bind_group_layouts.remove(layout.cast()) else {
+            return;
+        };
+        if entry.owner != self.inner.id {
+            return;
+        }
+        self.inner
+            .park(&mut state, Trash::DescriptorSetLayout(entry.raw));
+    }
 
-    fn create_bind_group(&self, _desc: &BindGroupDesc<'_>) -> Result<BindGroupHandle, HalError> {
-        Err(not_yet("bind groups land at P1.2"))
+    fn create_bind_group(&self, desc: &BindGroupDesc<'_>) -> Result<BindGroupHandle, HalError> {
+        self.create_bind_group_impl(desc)
     }
 
     fn update_bind_group(
         &self,
-        _group: BindGroupHandle,
-        _entries: &[BindGroupEntry],
+        group: BindGroupHandle,
+        entries: &[BindGroupEntry],
     ) -> Result<(), HalError> {
-        Err(not_yet("bind groups land at P1.2"))
+        self.update_bind_group_impl(group, entries)
     }
 
-    fn destroy_bind_group(&self, _group: BindGroupHandle) {}
+    fn destroy_bind_group(&self, group: BindGroupHandle) {
+        let mut state = self.inner.state();
+        let Some(entry) = state.bind_groups.remove(group.cast()) else {
+            return;
+        };
+        if entry.owner != self.inner.id {
+            return;
+        }
+        // The pool, not the set: freeing the pool frees the one set in it, which
+        // is why a bind group owns a whole pool. See `pipeline.rs`.
+        self.inner
+            .park(&mut state, Trash::DescriptorPool(entry.pool));
+    }
 
     fn create_pipeline_layout(
         &self,
-        _desc: &PipelineLayoutDesc<'_>,
+        desc: &PipelineLayoutDesc<'_>,
     ) -> Result<PipelineLayoutHandle, HalError> {
-        Err(not_yet("pipeline layouts land at P1.2"))
+        self.create_pipeline_layout_impl(desc)
     }
 
-    fn destroy_pipeline_layout(&self, _layout: PipelineLayoutHandle) {}
+    fn destroy_pipeline_layout(&self, layout: PipelineLayoutHandle) {
+        let mut state = self.inner.state();
+        let Some(entry) = state.pipeline_layouts.remove(layout.cast()) else {
+            return;
+        };
+        if entry.owner != self.inner.id {
+            return;
+        }
+        self.inner
+            .park(&mut state, Trash::PipelineLayout(entry.raw));
+    }
 
     fn create_graphics_pipeline(
         &self,
-        _desc: &GraphicsPipelineDesc<'_>,
+        desc: &GraphicsPipelineDesc<'_>,
     ) -> Result<GraphicsPipelineHandle, HalError> {
-        Err(not_yet(
-            "graphics pipelines land at P1.2 — this slice is milestone 1, the clear",
-        ))
+        self.create_graphics_pipeline_impl(desc)
     }
 
-    fn destroy_graphics_pipeline(&self, _pipeline: GraphicsPipelineHandle) {}
+    fn destroy_graphics_pipeline(&self, pipeline: GraphicsPipelineHandle) {
+        self.destroy_pipeline_handle(pipeline.cast());
+    }
 
     fn create_compute_pipeline(
         &self,
-        _desc: &ComputePipelineDesc<'_>,
+        desc: &ComputePipelineDesc<'_>,
     ) -> Result<ComputePipelineHandle, HalError> {
-        Err(not_yet("compute pipelines land at P1.2"))
+        self.create_compute_pipeline_impl(desc)
     }
 
-    fn destroy_compute_pipeline(&self, _pipeline: ComputePipelineHandle) {}
+    fn destroy_compute_pipeline(&self, pipeline: ComputePipelineHandle) {
+        self.destroy_pipeline_handle(pipeline.cast());
+    }
 
     // --- queries ---
 
@@ -2060,7 +2189,7 @@ impl VkDevice {
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
             // `TRANSFER_SRC` is what makes this a screenshot target;
-            // `SAMPLED` is what will make it a tonemap input at P1.2.
+            // `SAMPLED` is what will make it a tonemap input at P1.3.
             .usage(
                 vk::ImageUsageFlags::COLOR_ATTACHMENT
                     | vk::ImageUsageFlags::TRANSFER_SRC
@@ -2351,7 +2480,13 @@ impl Drop for DeviceInner {
             + state.semaphores.len()
             + state.query_sets.len()
             + state.command_buffers.len()
-            + state.swapchains.len();
+            + state.swapchains.len()
+            + state.shader_modules.len()
+            + state.bind_group_layouts.len()
+            + state.bind_groups.len()
+            + state.pipeline_layouts.len()
+            + state.pipelines.len()
+            + state.samplers.len();
         if live > 0 {
             log::warn!(
                 "crcbl-vk: {live} object(s) still alive at device teardown, \
@@ -2469,6 +2604,47 @@ impl Drop for DeviceInner {
         }
         state.semaphores.clear();
 
+        // **Order matters here too**: a pipeline names its layout and a
+        // descriptor set names its set layout, so the dependents go first. The
+        // driver does not require it — a `VkPipelineLayout` may be destroyed
+        // while pipelines built from it live — but destroying a set's pool
+        // before the layout keeps the sweep readable as one direction.
+        for (_, entry) in state.pipelines.iter() {
+            // SAFETY: the device is idle.
+            unsafe { self.raw.destroy_pipeline(entry.raw, None) };
+        }
+        state.pipelines.clear();
+
+        for (_, entry) in state.bind_groups.iter() {
+            // SAFETY: the device is idle. Freeing the pool frees its one set.
+            unsafe { self.raw.destroy_descriptor_pool(entry.pool, None) };
+        }
+        state.bind_groups.clear();
+
+        for (_, entry) in state.pipeline_layouts.iter() {
+            // SAFETY: the device is idle.
+            unsafe { self.raw.destroy_pipeline_layout(entry.raw, None) };
+        }
+        state.pipeline_layouts.clear();
+
+        for (_, entry) in state.bind_group_layouts.iter() {
+            // SAFETY: the device is idle.
+            unsafe { self.raw.destroy_descriptor_set_layout(entry.raw, None) };
+        }
+        state.bind_group_layouts.clear();
+
+        for (_, entry) in state.shader_modules.iter() {
+            // SAFETY: the device is idle.
+            unsafe { self.raw.destroy_shader_module(entry.raw, None) };
+        }
+        state.shader_modules.clear();
+
+        for (_, entry) in state.samplers.iter() {
+            // SAFETY: the device is idle.
+            unsafe { self.raw.destroy_sampler(entry.raw, None) };
+        }
+        state.samplers.clear();
+
         for (_, entry) in state.query_sets.iter() {
             // SAFETY: the device is idle.
             unsafe { self.raw.destroy_query_pool(entry.raw, None) };
@@ -2509,13 +2685,13 @@ mod tests {
         assert_eq!(queue_index(QueueKind::Graphics), 0);
     }
 
-    /// The "not yet" answer must name the phase, because a caller hitting it
-    /// needs to know whether to wait or to file a bug.
+    /// The refusal must name the backend and the capability, because a caller
+    /// hitting it needs to know whether to branch on a tier or to file a bug.
     #[test]
     fn unimplemented_paths_name_the_slice_that_lands_them() {
-        let error = not_yet("graphics pipelines land at P1.2");
+        let error = not_yet("this device has no timestamp queries");
         let text = error.to_string();
         assert!(text.contains("vulkan"), "{text}");
-        assert!(text.contains("P1.2"), "{text}");
+        assert!(text.contains("timestamp"), "{text}");
     }
 }

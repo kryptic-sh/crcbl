@@ -1,0 +1,21 @@
+[package]
+name = "crcbl-shaders"
+description = "Crucible shader sources (Slang) and their compiled SPIR-V"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# **No dependencies, on purpose — not even `crcbl-hal`.** This crate hands out
+# `&[u32]` and entry-point names, which is exactly what `ShaderModuleDesc` takes,
+# so it stays usable by a backend that has not been written yet (P5's wgpu, P14's
+# Metal/DX12) and cannot drag the seam into the build graph of anything that only
+# wants bytes.
+#
+# There is no build-dependency either: `build.rs` verifies the committed
+# artifacts with a SHA-256 implemented in `src/sha256.rs`, which the library
+# compiles too — so the code doing the checking is the code the library's tests
+# cover. See the crate docs for why the artifacts are committed at all.
+
+[lints]
+workspace = true

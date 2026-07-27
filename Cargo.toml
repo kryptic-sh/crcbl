@@ -24,6 +24,9 @@ ash = "0.38"
 bitflags = "2.9"
 glam = "0.33"
 log = "0.4"
+# Golden-image I/O for `crcbl-golden`; see that crate's manifest for why it is
+# a dependency rather than a hand-rolled encoder.
+png = "0.18"
 proptest = "1.9"
 thiserror = "2.0"
 
@@ -33,7 +36,9 @@ thiserror = "2.0"
 # bare `{ path = … }` as a wildcard dependency and fails the build.
 crcbl = { path = "crates/crcbl", version = "0.1.0" }
 crcbl-core = { path = "crates/crcbl-core", version = "0.1.0" }
+crcbl-golden = { path = "crates/crcbl-golden", version = "0.1.0" }
 crcbl-hal = { path = "crates/crcbl-hal", version = "0.1.0" }
+crcbl-shaders = { path = "crates/crcbl-shaders", version = "0.1.0" }
 crcbl-shell = { path = "crates/crcbl-shell", version = "0.1.0" }
 crcbl-vk = { path = "crates/crcbl-vk", version = "0.1.0" }
 crcbl-wl-scanner = { path = "crates/crcbl-wl-scanner", version = "0.1.0" }

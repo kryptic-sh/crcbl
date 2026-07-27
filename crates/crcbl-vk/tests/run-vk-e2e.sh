@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run `crcbl-vk`'s end-to-end suite against a real Vulkan implementation.
 #
-#   crates/crcbl-vk/tests/run-vk-e2e.sh [extra nextest args…]
+#   crates/crcbl-vk/tests/run-vk-e2e.sh [--bless] [extra nextest args…]
 #
 # The tests are feature-gated *and* `#[ignore]`d, so a plain
 # `cargo nextest run --workspace --all-features` on a machine with no Vulkan
@@ -25,8 +25,29 @@
 #                             `docs/plan/02-vulkan-backend.md` names sync bugs
 #                             as this stage's headline risk and this as the
 #                             mitigation.
+#   CRCBL_BLESS               `1` regenerates golden images instead of comparing
+#                             against them. `--bless` sets it; see below.
+#
+# GOLDEN IMAGES
+#   `--bless` regenerates `tests/golden/*.png` rather than comparing against
+#   them, which is the spelling `docs/plan/12-testing.md` asks for. A blessed run
+#   deliberately **fails**: it has not checked anything, and a gate that any
+#   missing reference switches off is not a gate. Review the regenerated image,
+#   commit it, and re-run without the flag.
+#
+#   Bless on the driver the reference is meant to represent. The tolerance in
+#   `crcbl-golden` is calibrated for the radv/lavapipe difference (see that
+#   crate's docs for the measurements), so either works — but re-blessing on a
+#   third driver and committing it silently moves the reference.
 
 set -euo pipefail
+
+if [ "${1:-}" = "--bless" ]; then
+    export CRCBL_BLESS=1
+    shift
+    echo "crcbl vk e2e: CRCBL_BLESS=1 — golden images will be regenerated, and the"
+    echo "              golden tests will fail on purpose because a blessed run checks nothing."
+fi
 
 CRATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "${CRATE_DIR}/../.." && pwd)"
@@ -114,6 +135,13 @@ set -e
 
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl vk e2e: the suite failed" >&2
+    # `docs/plan/12-testing.md`: "diffs uploaded as CI artifacts on failure".
+    # Naming the directory here is what makes the CI step's `if: failure()`
+    # upload obvious rather than folklore.
+    if [ -d "${REPO_ROOT}/target/golden-diff" ]; then
+        echo "crcbl vk e2e: golden-image diffs are in target/golden-diff:" >&2
+        ls -la "${REPO_ROOT}/target/golden-diff" >&2 || true
+    fi
     exit "$STATUS"
 fi
 
