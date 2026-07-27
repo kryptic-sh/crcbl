@@ -87,6 +87,12 @@ impl World {
         self.pool.contains(entity)
     }
 
+    /// Hash every system's component state into `hasher` for determinism
+    /// checks.  Delegates to [`Schedule::hash_state`].
+    pub fn hash_state(&self, hasher: &mut dyn std::hash::Hasher) {
+        self.schedule.hash_state(hasher);
+    }
+
     /// Number of live entities.
     #[must_use]
     pub fn entity_count(&self) -> usize {

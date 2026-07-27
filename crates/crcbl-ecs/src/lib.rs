@@ -2,7 +2,7 @@
 //!
 //! # Model
 //!
-//! * **Entity** — a generational id ([`Handle<EntityMarker>`]) from
+//! * **Entity** — a generational id ([`crcbl_core::Handle<EntityMarker>`]) from
 //!   [`crcbl_core::Pool`]. An entity carries no data of its own.
 //! * **System** — owns a dense `Vec<T>` of component data plus a sparse
 //!   entity→index map. Systems iterate their own arrays linearly (SoA,

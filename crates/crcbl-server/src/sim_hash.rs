@@ -1,8 +1,8 @@
 //! Determinism harness: hash the server world state after N ticks.
 //!
-//! The hash covers every system's entity count and the total entity count, so
-//! two runs with identical inputs produce identical hashes. When per-entity
-//! component data lands (P3), the hash grows to cover that too.
+//! The hash covers the tick id, every system's name, and every system's
+//! component data (raw bytes).  Same input → same hash → provably
+//! deterministic tick loop.
 //!
 //! Uses [`std::collections::hash_map::DefaultHasher`] — SipHash, which is
 //! stable for the lifetime of a Rust version and deterministic within a process.
@@ -11,7 +11,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use crcbl_core::TickId;
-use crcbl_ecs::{Inspector, World};
+use crcbl_ecs::World;
 
 /// The result of a determinism check: world state hash + tick count.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,21 +26,13 @@ pub struct SimHash {
 
 /// Hash the current state of `world` at `tick`.
 ///
-/// The hash is computed from every system's name, entity count, and the total
-/// entity count — deterministic as long as the schedule is populated the same
-/// way and the same ticks have run.
+/// The hash covers the tick id and every system's name + component data.
+/// Systems are sorted by name so registration order does not affect the
+/// hash.
 pub fn hash_world(world: &World, tick: TickId) -> u64 {
     let mut hasher = DefaultHasher::new();
     tick.hash(&mut hasher);
-    let stats = Inspector::collect(world);
-    // Sort by name so insertion order doesn't affect the hash.
-    let mut sorted: Vec<_> = stats.iter().collect();
-    sorted.sort_by(|a, b| a.name.cmp(&b.name));
-    for stat in &sorted {
-        stat.name.hash(&mut hasher);
-        stat.entity_count.hash(&mut hasher);
-    }
-    world.entity_count().hash(&mut hasher);
+    world.hash_state(&mut hasher);
     hasher.finish()
 }
 
@@ -122,6 +114,29 @@ mod tests {
         assert_eq!(
             hash_world(&world_a, TickId::ZERO),
             hash_world(&world_b, TickId::ZERO)
+        );
+    }
+
+    #[test]
+    fn different_component_values_produce_different_hash() {
+        // Same entity counts, different component values — hash must differ.
+        // This is the probe from docs/audit.md turned into a regression test.
+        let mut world_a = World::new();
+        let ea = world_a.spawn();
+        let mut sa = System::<f32>::new("pos");
+        sa.attach(ea, 1.0);
+        world_a.register_system(Box::new(sa));
+
+        let mut world_b = World::new();
+        let eb = world_b.spawn();
+        let mut sb = System::<f32>::new("pos");
+        sb.attach(eb, 999_999.0);
+        world_b.register_system(Box::new(sb));
+
+        assert_ne!(
+            hash_world(&world_a, TickId::ZERO),
+            hash_world(&world_b, TickId::ZERO),
+            "two worlds whose component values differ must hash differently"
         );
     }
 }

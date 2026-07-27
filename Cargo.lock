@@ -187,6 +187,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-sim"
+version = "0.1.0"
+dependencies = [
+ "crcbl-core",
+ "crcbl-ecs",
+ "crcbl-server",
+]
+
+[[package]]
 name = "crcbl-store"
 version = "0.1.0"
 

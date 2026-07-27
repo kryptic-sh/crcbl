@@ -127,7 +127,7 @@ impl<T: Transport> Server<T> {
         }
     }
 
-    /// Feed the current time from a [`crcbl_core::TimeSource`].
+    /// Feed the current time from a [`crcbl_core::time::TimeSource`].
     ///
     /// Returns how many ticks ran this frame.
     pub fn update(&mut self, now: std::time::Duration) -> u32 {

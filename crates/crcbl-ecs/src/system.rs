@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::Hasher;
 
 use crate::entity::Entity;
 
@@ -48,6 +49,13 @@ pub trait SystemTrait {
     /// The default implementation is a no-op; override this rather than
     /// setting a callback if the system needs access to its own data.
     fn debug_draw(&mut self, ctx: &DebugCtx);
+
+    /// Hash the system's component state into `hasher`.
+    ///
+    /// The default implementation is a no-op.  Override this to feed
+    /// per-entity component data into a determinism hash (used by
+    /// `crcbl-server`'s sim-hash harness).
+    fn hash_state(&self, _hasher: &mut dyn Hasher) {}
 }
 
 impl fmt::Debug for dyn SystemTrait {
@@ -213,6 +221,23 @@ impl<T> SystemTrait for System<T> {
         if let Some(ref mut f) = self.debug_draw_fn {
             f(ctx);
         }
+    }
+
+    fn hash_state(&self, hasher: &mut dyn Hasher) {
+        if self.data.is_empty() {
+            return;
+        }
+        // Hash component data as raw bytes.  Sound for primitives (f32,
+        // u32, …) which have no padding bytes.  Types that contain padding
+        // must not rely on byte-level hashing for determinism; P3 adds
+        // per-type stable encoding.
+        let byte_len = self.data.len() * std::mem::size_of::<T>();
+        // SAFETY: the slice points to initialized T values.  The caller is
+        // responsible for only using this path with types that have a
+        // stable, padding-free byte representation.
+        let ptr = self.data.as_ptr().cast::<u8>();
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, byte_len) };
+        hasher.write(bytes);
     }
 }
 

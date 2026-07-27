@@ -1,4 +1,5 @@
 use std::fmt;
+use std::hash::Hasher;
 
 use crate::entity::Entity;
 use crate::system::{DebugCtx, SystemTrait};
@@ -66,6 +67,21 @@ impl Schedule {
         self.systems
             .iter()
             .map(|s| (s.name().to_string(), s.entity_count()))
+    }
+
+    /// Hash every system's state (name + component data) into `hasher`,
+    /// sorted by name so insertion order does not affect the hash.
+    pub fn hash_state(&self, hasher: &mut dyn Hasher) {
+        let mut systems: Vec<(&str, &dyn SystemTrait)> = self
+            .systems
+            .iter()
+            .map(|s| (s.name(), s.as_ref()))
+            .collect();
+        systems.sort_by_key(|(name, _)| *name);
+        for (name, system) in &systems {
+            hasher.write(name.as_bytes());
+            system.hash_state(hasher);
+        }
     }
 }
 

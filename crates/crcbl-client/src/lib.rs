@@ -161,38 +161,16 @@ impl<T: Transport> Client<T> {
         self.pending_input = input;
     }
 
-    /// Get interpolated state for rendering.
+    /// Stub: always returns an empty [`InterpolatedState`].
     ///
-    /// Lerps entity positions between the two most recent snapshots using
-    /// the current interpolation alpha.
+    /// Real interpolation that lerps entity positions between the two most
+    /// recent snapshots lands when snapshots carry per-entity component data
+    /// rather than just entity counts (P3).
     #[must_use]
     pub fn interpolate(&self) -> InterpolatedState {
-        let alpha = self.clock.alpha();
-
-        let prev_systems = match &self.prev_snapshot {
-            Some(ServerToClient::Snapshot { systems, .. }) => systems.as_slice(),
-            _ => {
-                return InterpolatedState {
-                    positions: Vec::new(),
-                };
-            }
-        };
-        let current_systems = match &self.current_snapshot {
-            Some(ServerToClient::Snapshot { systems, .. }) => systems.as_slice(),
-            _ => {
-                return InterpolatedState {
-                    positions: Vec::new(),
-                };
-            }
-        };
-
-        // For now snapshots only carry entity counts — no per-entity
-        // component data.  The real interpolation that lerps positions
-        // lands when the replication encoding does (P3).
-        let _ = alpha;
-        let _ = prev_systems;
-        let _ = current_systems;
-
+        // Snapshots only carry entity counts right now — no per-entity
+        // component data to interpolate between.  Real interpolation lands
+        // with the replication encoding in P3.
         InterpolatedState {
             positions: Vec::new(),
         }
@@ -539,6 +517,39 @@ mod tests {
         let state = client.interpolate();
         // One snapshot is enough for current but not prev; positions empty.
         assert!(state.positions.is_empty());
+    }
+
+    #[test]
+    fn interpolate_is_stub_returns_empty_even_with_two_snapshots() {
+        // P2a: snapshots carry only entity counts, not per-entity component
+        // data, so interpolation is a stub.  This test documents that
+        // limitation; when P3 implements real interpolation this test must
+        // be updated to assert non-empty positions.
+        let (client_transport, server_transport) = InMemoryTransport::pair();
+        let mut client = Client::new(empty_world(), client_transport, 60);
+
+        // Feed two snapshots into the buffer.
+        let payload1 = snapshot_msg(1, &[(0, vec![1, 0, 0, 0])]);
+        let mut peer = server_transport;
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: payload1,
+        })
+        .unwrap();
+        client.update(std::time::Duration::ZERO);
+        client.update(std::time::Duration::from_nanos(1));
+
+        let payload2 = snapshot_msg(2, &[(0, vec![1, 0, 0, 0])]);
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: payload2,
+        })
+        .unwrap();
+        drop(peer);
+        client.update(std::time::Duration::from_nanos(1));
+
+        let state = client.interpolate();
+        assert!(state.positions.is_empty(), "stub returns empty");
     }
 
     // ── Debug ──────────────────────────────────────────────────────────────
