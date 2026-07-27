@@ -16,10 +16,13 @@
 
 use crcbl_core::TickId;
 
+pub mod condition;
+pub use condition::{ConditionSimulator, SimConditions};
+
 // ── Messages ──────────────────────────────────────────────────────────────────
 
 /// A wire-level message with a reliability hint and a binary payload.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Message {
     /// Delivery semantics.
     pub kind: MessageKind,
