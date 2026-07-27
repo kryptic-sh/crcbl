@@ -81,6 +81,17 @@ fn main() {
     let final_tick = clock.tick();
     let hash = hash_world(&world, final_tick);
 
+    // Warn about any systems that do not contribute to the determinism hash
+    // (custom SystemTrait implementations using the default no-op hash_state).
+    let non_contrib = world.non_contributing_systems();
+    if !non_contrib.is_empty() {
+        eprintln!(
+            "sim: WARNING — {} system(s) do not contribute to the determinism hash: {}",
+            non_contrib.len(),
+            non_contrib.join(", ")
+        );
+    }
+
     println!("hash:{hash:016x} ticks:{ran} final_tick:{final_tick}");
 }
 

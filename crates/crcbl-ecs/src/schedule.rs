@@ -83,6 +83,21 @@ impl Schedule {
             system.hash_state(hasher);
         }
     }
+
+    /// Returns the names of systems that do NOT contribute component data
+    /// to the determinism hash (their [`SystemTrait::contributes_to_hash`]
+    /// returns `false`).
+    ///
+    /// These systems are likely custom `SystemTrait` implementations that
+    /// forgot to override [`SystemTrait::hash_state`]; the determinism harness
+    /// should warn about them.
+    pub fn non_contributing_systems(&self) -> Vec<&str> {
+        self.systems
+            .iter()
+            .filter(|s| !s.contributes_to_hash())
+            .map(|s| s.name())
+            .collect()
+    }
 }
 
 impl fmt::Debug for Schedule {

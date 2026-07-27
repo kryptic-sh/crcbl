@@ -93,6 +93,12 @@ impl World {
         self.schedule.hash_state(hasher);
     }
 
+    /// Returns the names of systems that do NOT contribute component data
+    /// to the determinism hash.  See [`Schedule::non_contributing_systems`].
+    pub fn non_contributing_systems(&self) -> Vec<&str> {
+        self.schedule.non_contributing_systems()
+    }
+
     /// Number of live entities.
     #[must_use]
     pub fn entity_count(&self) -> usize {

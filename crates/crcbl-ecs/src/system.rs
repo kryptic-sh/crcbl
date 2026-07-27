@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hasher;
 
+use crate::component_hash::ComponentHash;
 use crate::entity::Entity;
 
 /// Stub struct for debug-draw context.
@@ -56,6 +57,17 @@ pub trait SystemTrait {
     /// per-entity component data into a determinism hash (used by
     /// `crcbl-server`'s sim-hash harness).
     fn hash_state(&self, _hasher: &mut dyn Hasher) {}
+
+    /// Whether this system's `SystemTrait::hash_state` contributes
+    /// component data to the determinism hash.
+    ///
+    /// Returns `false` by default — systems that override `hash_state`
+    /// must also override this to return `true`, otherwise the
+    /// determinism harness will warn that they are not contributing.
+    /// The concrete [`System<T>`] returns `true`.
+    fn contributes_to_hash(&self) -> bool {
+        false
+    }
 }
 
 impl fmt::Debug for dyn SystemTrait {
@@ -197,7 +209,7 @@ impl<T> System<T> {
     }
 }
 
-impl<T> SystemTrait for System<T> {
+impl<T: ComponentHash> SystemTrait for System<T> {
     fn name(&self) -> &str {
         &self.name
     }
@@ -224,20 +236,13 @@ impl<T> SystemTrait for System<T> {
     }
 
     fn hash_state(&self, hasher: &mut dyn Hasher) {
-        if self.data.is_empty() {
-            return;
+        for item in &self.data {
+            item.hash_component(hasher);
         }
-        // Hash component data as raw bytes.  Sound for primitives (f32,
-        // u32, …) which have no padding bytes.  Types that contain padding
-        // must not rely on byte-level hashing for determinism; P3 adds
-        // per-type stable encoding.
-        let byte_len = self.data.len() * std::mem::size_of::<T>();
-        // SAFETY: the slice points to initialized T values.  The caller is
-        // responsible for only using this path with types that have a
-        // stable, padding-free byte representation.
-        let ptr = self.data.as_ptr().cast::<u8>();
-        let bytes = unsafe { std::slice::from_raw_parts(ptr, byte_len) };
-        hasher.write(bytes);
+    }
+
+    fn contributes_to_hash(&self) -> bool {
+        true
     }
 }
 

@@ -42,12 +42,14 @@
 //! assert_eq!(world.entity_count(), 1);
 //! ```
 
+mod component_hash;
 mod entity;
 mod inspector;
 mod schedule;
 mod system;
 mod world;
 
+pub use component_hash::ComponentHash;
 pub use entity::{Entity, EntityMarker};
 pub use inspector::{Inspector, SystemStats};
 pub use schedule::Schedule;
