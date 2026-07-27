@@ -17,9 +17,11 @@
 pub mod condition;
 pub mod messages;
 pub mod transport;
+pub mod types;
 
 pub use condition::{ConditionSimulator, SimConditions};
 pub use messages::{
     ClientToServer, ServerToClient, SnapshotReader, SnapshotWriter, SystemSnapshot,
 };
 pub use transport::{InMemoryTransport, Message, MessageKind, Transport, TransportError};
+pub use types::{EntityBits, EntityData, SectorId, SessionId};
