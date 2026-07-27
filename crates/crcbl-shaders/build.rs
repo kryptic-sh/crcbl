@@ -156,6 +156,22 @@ fn check_hash(path: &Path, expected: &str, record: &ShaderRecord, what: &str) {
     };
     let actual = sha256_hex(&bytes);
     if actual != expected {
+        // Distinguish "someone edited the shader" from "the checkout rewrote
+        // the line endings". The second happened for real: `.gitattributes`
+        // said `* text=auto`, so a Windows checkout turned every LF into CRLF
+        // and the source hash could not match a manifest generated on Linux.
+        // `*.slang eol=lf` is the fix; this branch exists so the *next*
+        // occurrence names itself instead of looking like an uncommitted edit.
+        if sha256_hex(&strip_cr(&bytes)) == expected {
+            fail(&format!(
+                "shader `{name}`: {what} `{path}` differs from the manifest only in line \
+                 endings — this checkout converted LF to CRLF.\n\nThe file is marked \
+                 `eol=lf` in .gitattributes; re-clone, or run `git add --renormalize .`, \
+                 rather than regenerating the manifest.",
+                name = record.name,
+                path = path.display(),
+            ));
+        }
         fail(&format!(
             "shader `{name}`: the committed {what} has changed without the manifest \
              being regenerated.\n  {path}\n  expected sha256 {expected}\n  actual   sha256 \
@@ -166,6 +182,26 @@ fn check_hash(path: &Path, expected: &str, record: &ShaderRecord, what: &str) {
             path = path.display(),
         ));
     }
+}
+
+/// `bytes` with every `\r\n` collapsed to `\n`.
+///
+/// Only used to explain a hash mismatch — never to accept one. Normalising
+/// before hashing would paper over the line-ending problem instead of naming
+/// it, and would make `build.rs` and `compile-shaders.sh` compute different
+/// numbers for the same file.
+fn strip_cr(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+            index += 1;
+            continue;
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    out
 }
 
 /// A `slangc` on `PATH` (or at `CRCBL_SLANGC`) whose version is the pinned one.

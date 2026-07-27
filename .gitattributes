@@ -1,6 +1,19 @@
 # Normalize line endings for text files; Git decides what is text.
 * text=auto
 
+# Content-hashed sources: LF everywhere, on every platform.
+#
+# `crates/crcbl-shaders` records a SHA-256 of each shader source so a build
+# with no compiler can still tell that the committed SPIR-V matches what it was
+# built from. `text=auto` above would hand a Windows checkout CRLF, changing
+# those bytes and failing the check on a file nobody edited — which is exactly
+# what happened on the first Windows run after the manifest landed. Anything
+# whose *bytes* are part of a checked invariant belongs here.
+*.slang text eol=lf
+
+# Shell harnesses: LF regardless of platform, since they run under bash.
+*.sh text eol=lf
+
 # Binary assets: never diffed or line-ending-mangled as text.
 *.png  binary
 *.ktx2 binary
