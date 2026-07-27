@@ -6,17 +6,33 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Least privilege by default; a future release job opts itself up to
+# `contents: write` at job level.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
+  # A CI panic with no backtrace costs a whole re-run.
+  RUST_BACKTRACE: 1
+  # Opt JS-based actions into Node 24 ahead of the GitHub default flip, so
+  # upstream incompatibility surfaces here rather than on a release day.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Never cancel a tag run mid-flight — a half-cancelled release is worse than a
+  # slow one. No tags exist yet; wiring it now costs nothing.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
+# Every job carries `timeout-minutes`. A wedged step otherwise burns the full
+# 6-hour runner budget silently; the nextest `slow-timeout` in
+# `.config/nextest.toml` is the same guard one level down, per test.
 jobs:
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -27,17 +43,54 @@ jobs:
   clippy:
     name: clippy (linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Explicit scopes so it is visible which jobs share a cache. Coverage
+          # can never share (llvm-cov injects `-C instrument-coverage`); the
+          # cross-platform legs are keyed by runner OS automatically.
+          shared-key: lint
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  docs:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: docs
+      # `--no-deps`: only our own docs are our problem. Catches broken
+      # intra-doc links, which is what a workspace of cross-referencing crates
+      # accumulates fastest.
+      - run: cargo doc --workspace --all-features --no-deps --locked
+
+  machete:
+    name: cargo-machete (unused deps)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+      - run: cargo machete
 
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: taiki-e/install-action@v2
@@ -49,17 +102,26 @@ jobs:
   test-linux:
     name: test (linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
+      # NOTE: when Git LFS is enabled (P9, per `.gitattributes`), every
+      # `actions/checkout` in this file must gain `lfs: true` in the same
+      # commit, or CI silently tests against pointer files.
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --all-features --locked --profile ci
+      # nextest does not run doctests — without this step every `//!`/`///`
+      # example in the engine is unexecuted documentation.
+      - run: cargo test --doc --workspace --all-features --locked
       - name: Upload JUnit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: junit-linux
           path: target/nextest/ci/junit.xml
@@ -71,6 +133,8 @@ jobs:
   test-cross-platform:
     name: build + test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Windows and macOS runners are roughly 2x slower than Linux.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -81,6 +145,8 @@ jobs:
         with:
           cache: false
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
       - uses: taiki-e/install-action@nextest
       - run: cargo build --workspace --locked
       # Clippy runs here too, not just on Linux: `cfg`-gated platform code is
@@ -92,6 +158,8 @@ jobs:
   coverage:
     name: coverage (linux)
     runs-on: ubuntu-latest
+    # Instrumented build plus a full suite re-run.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -100,6 +168,8 @@ jobs:
           components: llvm-tools-preview
           cache: false
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
@@ -116,7 +186,7 @@ jobs:
       # Enable with `--fail-under-lines <n>` once P1 lands real code.
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov
           path: lcov.info

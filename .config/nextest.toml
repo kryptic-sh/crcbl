@@ -1,20 +1,28 @@
 # cargo-nextest configuration — https://nexte.st/docs/configuration/
 
+# Hard per-test timeout. nextest prints SLOW at each period, naming the culprit,
+# then SIGKILLs it at 4x. Without this a deadlocked test hangs the whole CI job
+# with no signal at all — a sibling project burned >24h of runner time that way
+# before adding this line. Raise `period` when GPU/lavapipe render e2e lands at
+# P1: a cold software-rasterizer frame is slow, but never 60s slow.
 [profile.default]
 retries = 0
 fail-fast = true
 failure-output = "immediate"
 status-level = "pass"
+slow-timeout = { period = "60s", terminate-after = 4 }
 
 # Used by CI: never retry (a flaky test is a bug, not a retry candidate), run
 # the whole suite so one failure does not mask the rest, and emit JUnit XML for
-# the test-report artifact.
+# the test-report artifact. `slow-timeout` is repeated because profiles do not
+# inherit it.
 [profile.ci]
 retries = 0
 fail-fast = false
 failure-output = "immediate-final"
 status-level = "skip"
 final-status-level = "flaky"
+slow-timeout = { period = "60s", terminate-after = 4 }
 
 [profile.ci.junit]
 path = "junit.xml"

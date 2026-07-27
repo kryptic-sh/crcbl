@@ -1,0 +1,35 @@
+name: Cron
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Monday 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+# P0 cron runs cargo-deny only. The PR-triggered `deny` job in ci.yml checks
+# against whatever advisory DB was current when the PR ran; this one re-checks a
+# quiet repo against a freshly fetched DB, so a new RustSec advisory does not
+# wait for the next commit to be noticed.
+#
+# Two jobs land here later: miri when nontrivial unsafe arrives (crcbl-vk at P1,
+# crcbl-jobs at P8) and cargo-fuzz with net decode hardening (P13). Both need
+# `RUSTUP_TOOLCHAIN: nightly` set at job level — `rust-toolchain.toml` claims
+# authority over rustup and will otherwise refuse the channel.
+jobs:
+  deny:
+    name: cargo-deny (fresh advisory DB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny --all-features check
