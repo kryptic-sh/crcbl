@@ -51,6 +51,7 @@ version = "0.1.0"
 name = "crcbl-core"
 version = "0.1.0"
 dependencies = [
+ "bitflags",
  "glam",
  "log",
  "proptest",
@@ -88,6 +89,12 @@ version = "0.1.0"
 [[package]]
 name = "crcbl-shell"
 version = "0.1.0"
+dependencies = [
+ "bitflags",
+ "crcbl-core",
+ "log",
+ "thiserror",
+]
 
 [[package]]
 name = "crcbl-store"

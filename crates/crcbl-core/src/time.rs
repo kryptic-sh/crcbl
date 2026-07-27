@@ -173,6 +173,124 @@ impl TimeSource for ManualTime {
     }
 }
 
+/// When an input event happened, on the engine's monotonic clock.
+///
+/// # The epoch is the contract
+///
+/// A timestamp whose origin is unspecified is worth nothing: you cannot
+/// subtract two of them across subsystems, and you cannot compare one to
+/// "now". So this type states its epoch and makes matching it a backend
+/// obligation:
+///
+/// > An `EventTime` is a duration measured from the same origin as the
+/// > [`TimeSource`] driving [`FrameClock::update`] — that is, from
+/// > [`MonotonicTime::new`] (process start) in a real run, and from
+/// > [`ManualTime`]'s zero in a deterministic one.
+///
+/// That makes `event.time` and `clock.render_dt()` live on one timeline, which
+/// is what the P2 input pipeline needs to age an input against the tick it
+/// belongs to, and what topic 26's client prediction needs to compute
+/// input-to-photon latency.
+///
+/// # What backends have to do about it
+///
+/// No window system hands us this directly, so rebasing is part of writing a
+/// backend, not an optimization:
+///
+/// * **Wayland** stamps events with `CLOCK_MONOTONIC` milliseconds
+///   (microseconds under `wp_presentation` and the high-resolution input
+///   protocols). Subtract the clock reading taken when the shell was created.
+/// * **X11** stamps events with the X *server's* time: a 32-bit millisecond
+///   counter with an unspecified origin that wraps every 49.7 days. The backend
+///   estimates the offset once at connection time and must detect the wrap; a
+///   backend that forwards the raw value produces an input pipeline that
+///   silently breaks after a month and a half of uptime.
+/// * **Win32** has `GetMessageTime` (a `GetTickCount` sample, also wrapping) and
+///   raw input's `QPC` timestamps.
+/// * **The browser** gives `event.timeStamp`, already a
+///   `performance.now()`-relative double.
+///
+/// When a backend genuinely has no timestamp for an event — a synthesized
+/// focus-loss key release, for instance — it stamps the event with the *current*
+/// time rather than [`EventTime::ZERO`], because a zero timestamp reads as "this
+/// happened at process start" to every consumer downstream.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+pub struct EventTime(Duration);
+
+impl EventTime {
+    /// The clock's origin.
+    pub const ZERO: Self = Self(Duration::ZERO);
+
+    /// Wraps a duration measured from the epoch described in the [type
+    /// docs](Self).
+    #[inline]
+    #[must_use]
+    pub const fn from_duration(since_epoch: Duration) -> Self {
+        Self(since_epoch)
+    }
+
+    /// Microseconds since the epoch — the unit Wayland's high-resolution input
+    /// protocols and libinput both use.
+    #[inline]
+    #[must_use]
+    pub const fn from_micros(micros: u64) -> Self {
+        Self(Duration::from_micros(micros))
+    }
+
+    /// Milliseconds since the epoch — the unit core Wayland and X11 use.
+    #[inline]
+    #[must_use]
+    pub const fn from_millis(millis: u64) -> Self {
+        Self(Duration::from_millis(millis))
+    }
+
+    /// Time since the epoch.
+    #[inline]
+    #[must_use]
+    pub const fn as_duration(self) -> Duration {
+        self.0
+    }
+
+    /// Time since the epoch in seconds.
+    #[inline]
+    #[must_use]
+    pub fn as_secs_f64(self) -> f64 {
+        self.0.as_secs_f64()
+    }
+
+    /// How long after `earlier` this timestamp is, saturating at zero.
+    ///
+    /// Saturating rather than panicking because event queues are not perfectly
+    /// ordered in practice — a compositor can deliver a relative-motion event
+    /// stamped fractionally before the absolute-motion event it accompanies —
+    /// and an input pipeline must not die of it.
+    #[inline]
+    #[must_use]
+    pub fn saturating_since(self, earlier: Self) -> Duration {
+        self.0.saturating_sub(earlier.0)
+    }
+
+    /// This timestamp moved forward by `delta`.
+    #[inline]
+    #[must_use]
+    pub const fn saturating_add(self, delta: Duration) -> Self {
+        Self(self.0.saturating_add(delta))
+    }
+}
+
+impl From<Duration> for EventTime {
+    #[inline]
+    fn from(since_epoch: Duration) -> Self {
+        Self(since_epoch)
+    }
+}
+
+impl fmt::Display for EventTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "t+{:.6}s", self.0.as_secs_f64())
+    }
+}
+
 /// Default ticks the simulation may catch up in a single frame — see
 /// [`FrameClock::set_max_catch_up_ticks`].
 pub const DEFAULT_MAX_CATCH_UP_TICKS: u32 = 8;
@@ -617,5 +735,37 @@ mod tests {
     #[should_panic(expected = "tick rate must be positive")]
     fn zero_tick_rate_is_rejected() {
         let _ = FrameClock::new(0);
+    }
+
+    #[test]
+    fn event_times_share_the_time_sources_epoch() {
+        let mut time = ManualTime::new();
+        time.advance_secs(1.5);
+
+        // The load-bearing property: a timestamp taken from the same source the
+        // frame clock is driven by is directly comparable with it.
+        let pressed = EventTime::from_duration(time.elapsed());
+        time.advance(Duration::from_millis(120));
+        let released = EventTime::from_duration(time.elapsed());
+
+        assert_eq!(
+            released.saturating_since(pressed),
+            Duration::from_millis(120)
+        );
+        // Out-of-order delivery saturates instead of panicking.
+        assert_eq!(pressed.saturating_since(released), Duration::ZERO);
+
+        assert_eq!(EventTime::from_millis(1500), pressed);
+        assert_eq!(EventTime::from_micros(1_500_000), pressed);
+        assert_eq!(EventTime::from(Duration::from_millis(1500)), pressed);
+        assert!((pressed.as_secs_f64() - 1.5).abs() < 1e-9);
+        assert_eq!(pressed.as_duration(), Duration::from_millis(1500));
+        assert!(EventTime::ZERO < pressed);
+        assert_eq!(EventTime::default(), EventTime::ZERO);
+        assert_eq!(
+            EventTime::ZERO.saturating_add(Duration::from_secs(2)),
+            EventTime::from_millis(2000)
+        );
+        assert_eq!(pressed.to_string(), "t+1.500000s");
     }
 }

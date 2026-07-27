@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# `bitflags` is vocabulary, not machinery: `input::Modifiers` is a flag set that
+# every layer above the shell reads, and hand-rolling it would mean hand-rolling
+# `Debug`, the bit operators and the set predicates too.
+bitflags = { workspace = true }
 glam = { workspace = true }
 log = { workspace = true }
 

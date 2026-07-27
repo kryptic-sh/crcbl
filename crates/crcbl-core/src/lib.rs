@@ -11,19 +11,22 @@
 //! * [`alloc`] — [`FrameArena`], a fixed-capacity bump allocator for per-frame
 //!   transient data.
 //! * [`time`] — [`FrameClock`], the fixed-timestep server tick accumulator plus
-//!   variable render delta, and [`TickId`].
+//!   variable render delta, [`TickId`], and [`EventTime`], the stated-epoch
+//!   timestamp every input event carries.
+//! * [`input`] — the names for keys, buttons and axes ([`KeyCode`],
+//!   [`Keysym`](input::Keysym), [`PointerButton`](input::PointerButton),
+//!   [`Modifiers`](input::Modifiers)). Vocabulary only: the *event* enum lives
+//!   in `crcbl-shell`, which is the only crate that produces one.
 //! * [`log`] — stderr logging behind the [`log`](::log) facade, filtered by
 //!   `CRCBL_LOG`.
 //! * [`surface`] — [`SurfaceTarget`], the native window handles the shell
 //!   produces and a HAL backend consumes. It lives here, and not in either of
 //!   those crates, because neither may depend on the other; see the module docs
 //!   for the dependency argument.
-//!
-//! Input normalization (`crcbl-core::input`) lands with the shell slice, not
-//! here.
 
 pub mod alloc;
 pub mod handle;
+pub mod input;
 pub mod log;
 pub mod surface;
 pub mod time;
@@ -31,6 +34,7 @@ pub mod world;
 
 pub use alloc::FrameArena;
 pub use handle::{Handle, Pool};
+pub use input::KeyCode;
 pub use surface::SurfaceTarget;
-pub use time::{FrameClock, TickId};
+pub use time::{EventTime, FrameClock, TickId};
 pub use world::{SECTOR_SIZE, WorldPos};
