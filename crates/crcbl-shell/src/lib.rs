@@ -26,13 +26,26 @@
 //! configure/ack, modes, monitors. P0.5b added everything downstream of
 //! `wl_seat`: keyboard and pointer input with XKB keymaps, pointer lock and
 //! confinement, raw relative motion, fractional scale, `xdg_output` monitor
-//! geometry and `xdg-decoration`. It is compiled only on Linux, reached only
-//! through [`open`], and built on hand-written `extern "C"` declarations for
-//! libwayland-client (plus libxkbcommon, on the same terms) with protocol
-//! marshalling generated at build time from vendored XML by `crcbl-wl-scanner`.
-//! Clipboard and drag-and-drop (`data-device`) are P0.5c; [`ShellCaps`] says so
-//! rather than leaving a consumer to find out. There is still no X11 code and
-//! no `libxcb` — P0.6.
+//! geometry and `xdg-decoration`. P0.5c added `data-device`: the clipboard in
+//! both directions and drag-and-drop *reception*, with the payload transfers
+//! run across pipes without ever blocking the frame loop. It is compiled only
+//! on Linux, reached only through [`open`], and built on hand-written
+//! `extern "C"` declarations for libwayland-client (plus libxkbcommon, on the
+//! same terms) with protocol marshalling generated at build time from vendored
+//! XML by `crcbl-wl-scanner`. There is still no X11 code and no `libxcb` —
+//! P0.6.
+//!
+//! Two properties of the Wayland clipboard shaped the seam rather than being
+//! worked around in the backend, because they are properties of the *platform*
+//! and X11 will meet the same obligations trivially: a client may only read the
+//! selection while one of its windows has keyboard focus, and may only *claim*
+//! it while holding a serial from real user input. So
+//! [`Shell::clipboard_readable`] says whether a read would answer now,
+//! [`Shell::clipboard_request`] **holds** a read it cannot yet answer instead of
+//! reporting an empty clipboard, [`ClipboardContent`] separates "empty" from
+//! "could not be read", and [`ShellError::NeedsUserInteraction`] names the
+//! refusal. [`HeadlessShell`] can simulate all three, so a consumer is tested
+//! against them with no compositor in the room.
 //!
 //! `HeadlessShell` is not a stub standing in for the real thing: per
 //! `docs/plan/15-windowing.md` it is a first-class implementation that CI,
@@ -221,7 +234,9 @@ pub use wayland::e2e as wayland_test_support;
 
 pub use backend::{BACKEND_ENV_VAR, ShellBackend, open, open_backend};
 pub use caps::ShellCaps;
-pub use clipboard::{ClipboardOffer, ClipboardRequestId, MimeType, ReceivedMime};
+pub use clipboard::{
+    ClipboardContent, ClipboardOffer, ClipboardRequestId, MimeType, ReceivedMime, parse_uri_list,
+};
 pub use cursor::{CursorIcon, PointerMode};
 pub use error::ShellError;
 pub use event::ShellEvent;
@@ -253,7 +268,9 @@ use core::time::Duration;
 ///
 /// # Implementing this
 ///
-/// Three obligations that are not visible in the signatures:
+/// Six obligations that are not visible in the signatures. The first three are
+/// P0.4's; the last three are P0.5c's, written down because a real compositor
+/// showed that leaving them unstated pushes the work onto every consumer.
 ///
 /// 1. **Stale handles fail cleanly.** Every method taking a [`WindowId`] must
 ///    return [`ShellError::InvalidWindow`] for a destroyed or foreign one, never
@@ -265,6 +282,31 @@ use core::time::Duration;
 ///    value for the shell's lifetime, so a consumer that branched on it at
 ///    startup is never contradicted mid-session. See [`caps`] for the
 ///    Wayland-binds-a-global-late edge this rules out.
+/// 4. **Every accepted clipboard read is answered exactly once, and within a
+///    bounded time.** [`clipboard_request`](Self::clipboard_request) that
+///    returns `Ok` promises exactly one
+///    [`ShellEvent::ClipboardData`] carrying that
+///    [`ClipboardRequestId`]. A backend that cannot complete the read answers
+///    [`ClipboardContent::Unavailable`] rather than dropping the request; a
+///    request with no answer is a UI stuck on "pasting…" forever, which no
+///    consumer can detect.
+/// 5. **A read that cannot be answered *yet* is held, never answered "empty".**
+///    If the backend does not yet know what is on the clipboard — Wayland's
+///    focus-gated, asynchronous `wl_data_device.selection` is the case this
+///    exists for — it holds the request until it does, and bounds that wait.
+///    Reporting [`Empty`](ClipboardContent::Empty) for "I have not looked yet"
+///    is indistinguishable from an empty clipboard, so it makes every consumer
+///    write a retry loop with a timeout it cannot choose correctly. Where the
+///    answer is always immediately available (X11 asks the server who owns the
+///    selection; a headless shell owns it), holding costs nothing and this
+///    obligation is discharged by answering.
+/// 6. **A refusal for want of user interaction is named.** Where the window
+///    system requires a recent input event to claim the clipboard — Wayland
+///    does, the browser does, X11 and Win32 do not —
+///    [`clipboard_offer`](Self::clipboard_offer) returns
+///    [`ShellError::NeedsUserInteraction`] and not a generic backend error, so
+///    a caller can distinguish "ask the user to press the key again" from "this
+///    is broken". A backend on a platform without the rule never returns it.
 pub trait Shell: core::fmt::Debug {
     /// Which implementation this is. Logs and bug reports only — behaviour
     /// branches on [`caps`](Self::caps).
@@ -543,10 +585,17 @@ pub trait Shell: core::fmt::Debug {
     /// bytes transfer later, on demand. Offer both [`MimeType::TextUtf8`] and
     /// [`MimeType::CrcblRon`] for engine data; see [`clipboard`].
     ///
+    /// An empty `offers` slice releases the clipboard, where the platform can
+    /// express that.
+    ///
     /// # Errors
     ///
-    /// [`ShellError::Unsupported`] without [`ShellCaps::CLIPBOARD`], or
-    /// [`ShellError::InvalidWindow`] for a stale handle.
+    /// [`ShellError::Unsupported`] without [`ShellCaps::CLIPBOARD`],
+    /// [`ShellError::InvalidWindow`] for a stale handle, or
+    /// [`ShellError::NeedsUserInteraction`] where the window system requires a
+    /// recent input event to claim the clipboard and there has not been one —
+    /// implementor obligation 6 above, and **not** a failure a caller should
+    /// retry blindly.
     fn clipboard_offer(
         &mut self,
         window: WindowId,
@@ -556,18 +605,54 @@ pub trait Shell: core::fmt::Debug {
     /// Asks for the clipboard's content in `mime`.
     ///
     /// Asynchronous by necessity — the answer arrives as
-    /// [`ShellEvent::ClipboardData`] carrying the returned id. [`clipboard`] has
-    /// the full argument; briefly, X11 `INCR` transfers, Wayland file
-    /// descriptors and the browser's Promise make the synchronous shape
-    /// unimplementable on three of five backends.
+    /// [`ShellEvent::ClipboardData`] carrying the returned id, and **exactly one
+    /// answer arrives for every `Ok` return** (implementor obligations 4 and 5).
+    /// [`clipboard`] has the full argument; briefly, X11 `INCR` transfers,
+    /// Wayland file descriptors and the browser's Promise make the synchronous
+    /// shape unimplementable on three of five backends.
+    ///
+    /// The answer may be several frames away, and on a backend whose clipboard
+    /// is not readable at the moment of asking it is *held* until it is, rather
+    /// than being answered [`Empty`](ClipboardContent::Empty). A caller
+    /// therefore never needs to poll or retry: ask once, handle the event.
+    /// [`clipboard_readable`](Self::clipboard_readable) is the way to find out
+    /// in advance that the answer will not be immediate.
     ///
     /// # Errors
     ///
     /// [`ShellError::Unsupported`] without [`ShellCaps::CLIPBOARD`], or
-    /// [`ShellError::InvalidWindow`] for a stale handle.
+    /// [`ShellError::InvalidWindow`] for a stale handle. An empty clipboard is
+    /// **not** an error — it is an answer.
     fn clipboard_request(
         &mut self,
         window: WindowId,
         mime: MimeType,
     ) -> Result<ClipboardRequestId, ShellError>;
+
+    /// Whether a [`clipboard_request`](Self::clipboard_request) issued for
+    /// `window` right now could be answered without waiting.
+    ///
+    /// What a "Paste" menu item greys out on, and the visible form of a
+    /// platform rule that is otherwise invisible: **on Wayland a client is told
+    /// what is on the clipboard only while one of its windows has keyboard
+    /// focus**, and only asynchronously, so a background window genuinely
+    /// cannot read the clipboard. `clipboard_request` still works there — it
+    /// holds the request — but it may take until focus arrives, and a UI that
+    /// would rather not offer the action than offer a slow one asks here first.
+    ///
+    /// `false` for a stale handle, and for a backend without
+    /// [`ShellCaps::CLIPBOARD`].
+    ///
+    /// # A provided method, because most platforms have nothing to say
+    ///
+    /// The default is "readable whenever the capability is present", which is
+    /// exactly right for X11 (any window may `ConvertSelection` at any time,
+    /// focus is not involved), for Win32, and for [`HeadlessShell`] in its
+    /// default configuration. Only a backend that really has a gate overrides
+    /// it — so this is a fact a consumer can rely on, not ceremony every
+    /// backend has to perform.
+    fn clipboard_readable(&self, window: WindowId) -> bool {
+        let _ = window;
+        self.caps().contains(ShellCaps::CLIPBOARD)
+    }
 }

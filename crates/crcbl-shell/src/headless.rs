@@ -98,6 +98,28 @@
 //!    window before its first present is exercising something a compositor
 //!    would not have done.
 //!
+//! # The clipboard's hard cases are settable (P0.5c)
+//!
+//! P0.5c found the same "test double only knows the easy path" problem in the
+//! clipboard that P0.4 had fixed for window sizes: a real compositor's
+//! clipboard is *not* always readable and *not* always claimable, and a shell
+//! that always answered instantly would let a consumer grow exactly the
+//! assumption Wayland then breaks. All three cases are now scriptable, and none
+//! of them needs a compositor:
+//!
+//! | Real behaviour | Modelled by | What a consumer learns |
+//! | --- | --- | --- |
+//! | Wayland delivers `wl_data_device.selection` only to the focused client, asynchronously | [`set_clipboard_readable`](HeadlessShell::set_clipboard_readable) | a read is **held** until it can be answered, and is never answered [`Empty`](ClipboardContent::Empty) for "I have not looked yet" |
+//! | A peer takes the transfer descriptor and never writes | [`set_clipboard_stalled`](HeadlessShell::set_clipboard_stalled) | the read ends as [`Unavailable`](ClipboardContent::Unavailable) — a failure, not an empty clipboard |
+//! | `set_selection` needs a serial from real user input | [`require_user_interaction`](HeadlessShell::require_user_interaction) | [`clipboard_offer`](Shell::clipboard_offer) can fail with [`ShellError::NeedsUserInteraction`], and that is a policy rather than a bug |
+//!
+//! The deadline a held read gives up after is
+//! [`clipboard_deadline`](HeadlessShell::clipboard_deadline), counted in
+//! **pumps** rather than milliseconds so a test asserting the timeout is not a
+//! flake. Defaults are the permissive ones — readable, not stalled, no
+//! interaction required — because most platforms have no such rules and a test
+//! that does not care about them should not have to say so.
+//!
 //! # Capabilities are settable, which is the point
 //!
 //! [`HeadlessShell::new`] reports [`ShellCaps::DESKTOP`] — everything. But
@@ -120,10 +142,10 @@ use crcbl_core::time::{ManualTime, TimeSource};
 use crcbl_core::{EventTime, Pool, SurfaceTarget};
 
 use crate::{
-    ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode, KeyCode, MimeType,
-    MonitorId, MonitorInfo, PhysicalPoint, PhysicalRect, PhysicalSize, PointerMode, ReceivedMime,
-    Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints, WindowConfiguration,
-    WindowDesc, WindowId, WindowState,
+    ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
+    KeyCode, MimeType, MonitorId, MonitorInfo, PhysicalPoint, PhysicalRect, PhysicalSize,
+    PointerMode, ReceivedMime, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent,
+    SizeConstraints, WindowConfiguration, WindowDesc, WindowId, WindowState,
 };
 
 /// Resolution of the virtual monitor [`HeadlessShell::new`] creates.
@@ -148,6 +170,29 @@ pub const DEFAULT_CONFIGURE_DELAY: u32 = 1;
 /// A real id rather than [`DeviceId::UNKNOWN`], so a consumer that routes by
 /// device is exercised rather than short-circuited.
 pub const VIRTUAL_DEVICE: DeviceId = DeviceId(1);
+
+/// Pumps a held clipboard read waits before giving up.
+///
+/// The modelled form of the deadline every real backend needs: a read that
+/// cannot be answered has to *end* rather than stay outstanding, and
+/// [`ClipboardContent::Unavailable`] is how it ends. Counted in pumps rather
+/// than in milliseconds, because a headless shell has no wall clock and a test
+/// that waited on one would be a flake.
+pub const DEFAULT_CLIPBOARD_DEADLINE: u32 = 4;
+
+/// A clipboard read that has been accepted and not yet answered.
+///
+/// The seam's obligation 5 — "a read that cannot be answered yet is held, never
+/// answered empty" — made into state. `HeadlessShell` models the case because
+/// it is the one a consumer written only against the easy path gets wrong.
+#[derive(Clone, Debug)]
+struct PendingRead {
+    window: WindowId,
+    request: ClipboardRequestId,
+    mime: MimeType,
+    /// Pumps still to go before this is reported unavailable.
+    countdown: u32,
+}
 
 /// A configure the window system has decided on but not yet delivered.
 ///
@@ -228,6 +273,23 @@ pub struct HeadlessShell {
     modifiers: Modifiers,
     clipboard: Vec<(ReceivedMime, Vec<u8>)>,
     next_request_id: u32,
+    /// Reads that have been accepted and not yet answered; see
+    /// [`PendingRead`].
+    reads: Vec<PendingRead>,
+    /// Whether the clipboard can be read at all right now — the modelled form
+    /// of Wayland's focus gate. See
+    /// [`set_clipboard_readable`](HeadlessShell::set_clipboard_readable).
+    clipboard_readable: bool,
+    /// Whether a peer holds the clipboard and never delivers.
+    clipboard_stalled: bool,
+    /// Whether claiming the clipboard requires a recent input event.
+    clipboard_needs_interaction: bool,
+    /// Whether any input has been injected since the last
+    /// [`clear_user_interaction`](HeadlessShell::clear_user_interaction).
+    saw_interaction: bool,
+    /// Pumps a held read waits before it reports
+    /// [`ClipboardContent::Unavailable`].
+    clipboard_deadline: u32,
     waits: u32,
     configure_delay: u32,
 }
@@ -270,6 +332,12 @@ impl HeadlessShell {
             modifiers: Modifiers::empty(),
             clipboard: Vec::new(),
             next_request_id: 1,
+            reads: Vec::new(),
+            clipboard_readable: true,
+            clipboard_stalled: false,
+            clipboard_needs_interaction: false,
+            saw_interaction: false,
+            clipboard_deadline: DEFAULT_CLIPBOARD_DEADLINE,
             waits: 0,
             configure_delay: DEFAULT_CONFIGURE_DELAY,
         }
@@ -568,6 +636,7 @@ impl HeadlessShell {
         repeat: bool,
     ) -> Result<(), ShellError> {
         self.check_window(window)?;
+        self.saw_interaction = true;
         let event = ShellEvent::Key {
             window,
             device: VIRTUAL_DEVICE,
@@ -605,6 +674,7 @@ impl HeadlessShell {
         } else {
             None
         };
+        self.saw_interaction = true;
         let event = ShellEvent::PointerMotion {
             window,
             device: VIRTUAL_DEVICE,
@@ -652,6 +722,7 @@ impl HeadlessShell {
         position: Option<PhysicalPoint>,
     ) -> Result<(), ShellError> {
         self.check_window(window)?;
+        self.saw_interaction = true;
         let event = ShellEvent::Button {
             window,
             device: VIRTUAL_DEVICE,
@@ -677,6 +748,7 @@ impl HeadlessShell {
         position: Option<PhysicalPoint>,
     ) -> Result<(), ShellError> {
         self.check_window(window)?;
+        self.saw_interaction = true;
         let event = ShellEvent::Wheel {
             window,
             device: VIRTUAL_DEVICE,
@@ -819,6 +891,94 @@ impl HeadlessShell {
             .map(|(_, bytes)| bytes.as_slice())
     }
 
+    /// Whether the clipboard can be read at all right now.
+    ///
+    /// **The focus gate, modelled.** On Wayland a client learns what is on the
+    /// clipboard from `wl_data_device.selection`, which arrives only while one
+    /// of its windows has keyboard focus — so a background window cannot read
+    /// the clipboard, and a read issued a moment before focus arrives has
+    /// nothing to answer from. `HeadlessShell` is readable by default, because
+    /// most platforms have no such gate; set this to `false` to make a test
+    /// walk the path a Wayland consumer will walk.
+    ///
+    /// A read issued while this is `false` is **held**, not answered: it is
+    /// answered as soon as this becomes `true` again, or reported
+    /// [`ClipboardContent::Unavailable`] once
+    /// [`clipboard_deadline`](Self::clipboard_deadline) pumps have gone by.
+    /// That is the seam's obligation 5, and this is how a consumer is tested
+    /// against it.
+    pub fn set_clipboard_readable(&mut self, readable: bool) {
+        self.clipboard_readable = readable;
+    }
+
+    /// Whether a peer holds the clipboard and never hands the data over.
+    ///
+    /// The other way a read can fail to complete, and the one that has no
+    /// protocol event behind it: on Wayland the transfer is a pipe another
+    /// application writes, and an application that accepts the descriptor and
+    /// then hangs produces exactly this. The read is held and then reported
+    /// [`ClipboardContent::Unavailable`] — never `Empty`, because there really
+    /// is something on the clipboard.
+    pub fn set_clipboard_stalled(&mut self, stalled: bool) {
+        self.clipboard_stalled = stalled;
+    }
+
+    /// Whether claiming the clipboard requires a recent user interaction.
+    ///
+    /// **The serial requirement, modelled.** Off by default, because X11 and
+    /// Win32 have no such rule; on, [`clipboard_offer`](Shell::clipboard_offer)
+    /// fails with [`ShellError::NeedsUserInteraction`] until an input event has
+    /// been injected — a key, a pointer button, a scroll or a motion. That is
+    /// what Wayland's `set_selection` serial and the browser's user-gesture gate
+    /// both amount to, and it is a *feature*: it is what stops a background
+    /// process taking the clipboard.
+    ///
+    /// ```
+    /// use crcbl_shell::{ClipboardOffer, HeadlessShell, KeyCode, Shell, ShellError, WindowDesc};
+    ///
+    /// let mut shell = HeadlessShell::new();
+    /// let window = shell.create_window(&WindowDesc::default())?;
+    /// shell.require_user_interaction(true);
+    ///
+    /// // Nobody has touched anything, so the clipboard is not ours to take.
+    /// let refused = shell.clipboard_offer(window, &[ClipboardOffer::text("x")]);
+    /// assert!(matches!(refused, Err(ShellError::NeedsUserInteraction { .. })));
+    ///
+    /// // The copy the user actually asked for goes through.
+    /// shell.key_press(window, KeyCode::KeyC)?;
+    /// shell.clipboard_offer(window, &[ClipboardOffer::text("x")])?;
+    /// # Ok::<(), ShellError>(())
+    /// ```
+    pub fn require_user_interaction(&mut self, required: bool) {
+        self.clipboard_needs_interaction = required;
+    }
+
+    /// Forgets that any input has been injected.
+    ///
+    /// For a test that wants a *second* refusal after a successful copy — a
+    /// real serial goes stale the same way.
+    pub fn clear_user_interaction(&mut self) {
+        self.saw_interaction = false;
+    }
+
+    /// How many pumps a held read waits before it reports
+    /// [`ClipboardContent::Unavailable`].
+    ///
+    /// Defaults to [`DEFAULT_CLIPBOARD_DEADLINE`]. Zero means the very next
+    /// pump gives up, which is the shortest way to write the timeout case.
+    pub fn clipboard_deadline(&mut self, pumps: u32) {
+        self.clipboard_deadline = pumps;
+    }
+
+    /// How many reads have been accepted and not yet answered.
+    ///
+    /// Headless-only, so a test can assert that a request really is being
+    /// *held* rather than having been answered and missed.
+    #[must_use]
+    pub fn held_clipboard_reads(&self) -> usize {
+        self.reads.len()
+    }
+
     /// Replaces the clipboard with content spelled the way *another*
     /// application would spell it.
     ///
@@ -828,6 +988,80 @@ impl HeadlessShell {
     /// one of ours. This can.
     pub fn set_foreign_clipboard(&mut self, offers: Vec<(ReceivedMime, Vec<u8>)>) {
         self.clipboard = offers;
+    }
+
+    /// Whether a read issued now could be answered from what this shell knows.
+    ///
+    /// Two ways to say no, and they model different real things: the clipboard
+    /// is not readable at all (Wayland's focus gate), or a peer owns it and
+    /// never delivers (a hung application on the other end of the pipe).
+    fn answerable(&self) -> bool {
+        self.clipboard_readable && !self.clipboard_stalled
+    }
+
+    /// The answer to one read, from the current clipboard.
+    fn answer(&self, window: WindowId, request: ClipboardRequestId, mime: MimeType) -> ShellEvent {
+        // Match on format, not on spelling: a peer offering `text/plain`
+        // satisfies a request for `text/plain;charset=utf-8`. The answer
+        // reports the peer's spelling, because that is what a real backend has
+        // in hand and what an editor may need to echo back.
+        let found = self
+            .clipboard
+            .iter()
+            .find(|(offered, _)| offered.matches(mime));
+        let (mime, content) = match found {
+            Some((offered, bytes)) => (offered.clone(), ClipboardContent::Bytes(bytes.clone())),
+            // Nothing on the clipboard, or nothing in this format — one case,
+            // and emphatically not the same as "could not read it".
+            None => (ReceivedMime::from(mime), ClipboardContent::Empty),
+        };
+        ShellEvent::ClipboardData {
+            window,
+            request,
+            mime,
+            content,
+        }
+    }
+
+    /// Answers every held read that has become answerable, and gives up on the
+    /// ones that have run out of pumps.
+    ///
+    /// Runs at the top of [`pump`](Shell::pump), beside the configure delivery,
+    /// because a read is the same kind of thing: something the window system
+    /// will get to, not something that has already happened.
+    fn resolve_reads(&mut self) {
+        if self.reads.is_empty() {
+            return;
+        }
+        let answerable = self.answerable();
+        let mut held = Vec::with_capacity(self.reads.len());
+        for mut read in core::mem::take(&mut self.reads) {
+            // A window destroyed while its read was outstanding: the answer
+            // would name a stale handle, which the seam forbids. Obligation 4
+            // is about *accepted* requests, and this one's window is gone.
+            if self.window(read.window).is_err() {
+                continue;
+            }
+            if answerable {
+                let answer = self.answer(read.window, read.request, read.mime);
+                self.queue.push_back(answer);
+                continue;
+            }
+            if read.countdown > 0 {
+                read.countdown -= 1;
+                held.push(read);
+                continue;
+            }
+            // Out of time. Ending the request is the obligation; ending it with
+            // `Empty` would be the lie this whole shape exists to prevent.
+            self.queue.push_back(ShellEvent::ClipboardData {
+                window: read.window,
+                request: read.request,
+                mime: ReceivedMime::from(read.mime),
+                content: ClipboardContent::Unavailable,
+            });
+        }
+        self.reads = held;
     }
 
     /// Delivers every configure whose countdown has run out, and ticks the
@@ -1116,6 +1350,7 @@ impl Shell for HeadlessShell {
 
     fn pump(&mut self, sink: &mut dyn FnMut(ShellEvent)) {
         self.deliver_due_configures();
+        self.resolve_reads();
         // Drain by count rather than `while let`: a sink that injects further
         // events (a UI that opens a window on a click) must not be able to spin
         // this loop forever, and the events it queued belong to the next frame
@@ -1214,6 +1449,16 @@ impl Shell for HeadlessShell {
         }
     }
 
+    /// Claims the in-process clipboard.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::Unsupported`] without [`ShellCaps::CLIPBOARD`],
+    /// [`ShellError::InvalidWindow`] for a stale handle, or
+    /// [`ShellError::NeedsUserInteraction`] when
+    /// [`require_user_interaction`](Self::require_user_interaction) is on and
+    /// no input has been injected since — the modelled form of Wayland's serial
+    /// requirement and the browser's user-gesture gate.
     fn clipboard_offer(
         &mut self,
         window: WindowId,
@@ -1223,6 +1468,12 @@ impl Shell for HeadlessShell {
             return Err(self.unsupported("clipboard"));
         }
         self.check_window(window)?;
+        if self.clipboard_needs_interaction && !self.saw_interaction {
+            return Err(ShellError::NeedsUserInteraction {
+                backend: ShellBackend::Headless,
+                what: "claiming the clipboard",
+            });
+        }
         self.clipboard = offers
             .iter()
             .map(|offer| (ReceivedMime::from(offer.mime), offer.bytes.to_vec()))
@@ -1230,6 +1481,19 @@ impl Shell for HeadlessShell {
         Ok(())
     }
 
+    /// Accepts a read, answering it now if the clipboard is readable and
+    /// **holding** it if it is not.
+    ///
+    /// The held path is the seam's obligation 5, modelled: with
+    /// [`set_clipboard_readable(false)`](Self::set_clipboard_readable) the
+    /// answer waits, exactly as it does on Wayland while another client has
+    /// focus, and a consumer that assumed an immediate empty answer sees the
+    /// difference here rather than on someone's desktop.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::Unsupported`] without [`ShellCaps::CLIPBOARD`], or
+    /// [`ShellError::InvalidWindow`] for a stale handle.
     fn clipboard_request(
         &mut self,
         window: WindowId,
@@ -1241,28 +1505,30 @@ impl Shell for HeadlessShell {
         self.check_window(window)?;
         let request = ClipboardRequestId(self.next_request_id);
         self.next_request_id += 1;
-        // Match on format, not on spelling: a peer offering `text/plain`
-        // satisfies a request for `text/plain;charset=utf-8`. The answer
-        // reports the peer's spelling, because that is what a real backend has
-        // in hand and what an editor may need to echo back.
-        let answer = self
-            .clipboard
-            .iter()
-            .find(|(offered, _)| offered.matches(mime));
-        let (mime, data) = match answer {
-            Some((offered, bytes)) => (offered.clone(), Some(bytes.clone())),
-            None => (ReceivedMime::from(mime), None),
-        };
-        // Queued rather than returned: the whole point of the asynchronous
-        // shape is that a consumer written against it also works on X11, where
-        // the answer is several round trips away.
-        self.queue.push_back(ShellEvent::ClipboardData {
-            window,
-            request,
-            mime,
-            data,
-        });
+        if self.answerable() {
+            let answer = self.answer(window, request, mime);
+            // Queued rather than returned: the whole point of the asynchronous
+            // shape is that a consumer written against it also works on X11,
+            // where the answer is several round trips away.
+            self.queue.push_back(answer);
+        } else {
+            self.reads.push(PendingRead {
+                window,
+                request,
+                mime,
+                countdown: self.clipboard_deadline,
+            });
+        }
         Ok(request)
+    }
+
+    /// Whether a read would be answered without waiting.
+    ///
+    /// The default would be "yes, always"; this one can be told otherwise, so
+    /// that a consumer can be tested against a backend that has a focus gate
+    /// without there being a compositor in the room.
+    fn clipboard_readable(&self, window: WindowId) -> bool {
+        self.caps.contains(ShellCaps::CLIPBOARD) && self.window(window).is_ok() && self.answerable()
     }
 }
 
@@ -2054,11 +2320,12 @@ mod tests {
                 window,
                 request,
                 mime: ReceivedMime::from(MimeType::CrcblRon),
-                data: Some(b"(kind:\"node\")".to_vec()),
+                content: ClipboardContent::Bytes(b"(kind:\"node\")".to_vec()),
             }
         );
 
-        // A format nobody offered comes back empty rather than failing.
+        // A format nobody offered comes back `Empty` — an answer, and a
+        // different one from "the read failed".
         let request = shell
             .clipboard_request(window, MimeType::UriList)
             .expect("request");
@@ -2068,8 +2335,211 @@ mod tests {
                 window,
                 request,
                 mime: ReceivedMime::from(MimeType::UriList),
-                data: None,
+                content: ClipboardContent::Empty,
             }
+        );
+
+        // A published payload of zero bytes is a *successful* read of nothing,
+        // which the old `Option<Vec<u8>>` shape could not say.
+        shell
+            .clipboard_offer(window, &[ClipboardOffer::text("")])
+            .expect("offer");
+        let request = shell
+            .clipboard_request(window, MimeType::TextUtf8)
+            .expect("request");
+        assert_eq!(
+            drain(&mut shell)[0],
+            ShellEvent::ClipboardData {
+                window,
+                request,
+                mime: ReceivedMime::from(MimeType::TextUtf8),
+                content: ClipboardContent::Bytes(Vec::new()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_read_taken_while_the_clipboard_is_unreadable_is_held_not_answered_empty() {
+        // The Wayland focus gate, modelled. A consumer written only against a
+        // clipboard that answers instantly cannot tell "empty" from "I have
+        // not looked yet" — which is exactly what the seam's obligation 5
+        // exists to stop backends doing, and what this shell can now reproduce
+        // with no compositor in the room.
+        let (mut shell, window) = shell_with_configured_window();
+        shell
+            .clipboard_offer(window, &[ClipboardOffer::text("published")])
+            .expect("offer");
+        shell.set_clipboard_readable(false);
+        assert!(!shell.clipboard_readable(window));
+
+        let request = shell
+            .clipboard_request(window, MimeType::TextUtf8)
+            .expect("a read is accepted even when it cannot be answered yet");
+        assert_eq!(shell.held_clipboard_reads(), 1);
+        assert!(
+            drain(&mut shell).is_empty(),
+            "a held read produces no event at all — least of all an empty one"
+        );
+
+        // Focus arrives. The *same* request answers; the caller asked once.
+        shell.set_clipboard_readable(true);
+        let events = drain(&mut shell);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            ShellEvent::ClipboardData {
+                window,
+                request,
+                mime: ReceivedMime::from(MimeType::TextUtf8),
+                content: ClipboardContent::Bytes(b"published".to_vec()),
+            }
+        );
+        assert_eq!(shell.held_clipboard_reads(), 0);
+    }
+
+    #[test]
+    fn a_read_that_never_becomes_answerable_ends_as_unavailable() {
+        // Obligation 4: every accepted request is answered, within a bounded
+        // time. A request that stayed outstanding forever is a UI stuck on
+        // "pasting…" that no consumer can detect.
+        let (mut shell, window) = shell_with_configured_window();
+        shell
+            .clipboard_offer(window, &[ClipboardOffer::text("unreachable")])
+            .expect("offer");
+        shell.set_clipboard_readable(false);
+        shell.clipboard_deadline(2);
+
+        let request = shell
+            .clipboard_request(window, MimeType::TextUtf8)
+            .expect("request");
+        assert!(drain(&mut shell).is_empty(), "pump 1: still held");
+        assert!(drain(&mut shell).is_empty(), "pump 2: still held");
+        let events = drain(&mut shell);
+        assert_eq!(
+            events[0],
+            ShellEvent::ClipboardData {
+                window,
+                request,
+                mime: ReceivedMime::from(MimeType::TextUtf8),
+                // Not `Empty`: there is something on the clipboard, and this
+                // shell simply could not get at it.
+                content: ClipboardContent::Unavailable,
+            }
+        );
+        assert_eq!(shell.held_clipboard_reads(), 0);
+    }
+
+    #[test]
+    fn a_peer_that_holds_the_clipboard_and_never_delivers_is_unavailable() {
+        // The other failure with no protocol event behind it: on Wayland the
+        // transfer is a pipe another application writes, and an application
+        // that takes the descriptor and hangs produces exactly this.
+        let (mut shell, window) = shell_with_configured_window();
+        shell.set_foreign_clipboard(vec![(
+            ReceivedMime::new("text/plain"),
+            b"never sent".to_vec(),
+        )]);
+        shell.set_clipboard_stalled(true);
+        shell.clipboard_deadline(1);
+        assert!(
+            !shell.clipboard_readable(window),
+            "a clipboard whose owner will not answer is not readable"
+        );
+
+        let request = shell
+            .clipboard_request(window, MimeType::TextUtf8)
+            .expect("request");
+        assert!(drain(&mut shell).is_empty());
+        let events = drain(&mut shell);
+        let ShellEvent::ClipboardData {
+            request: answered,
+            content,
+            ..
+        } = &events[0]
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(*answered, request);
+        assert_eq!(*content, ClipboardContent::Unavailable);
+
+        // The peer wakes up; a fresh read now succeeds.
+        shell.set_clipboard_stalled(false);
+        let request = shell
+            .clipboard_request(window, MimeType::TextUtf8)
+            .expect("request");
+        assert_eq!(
+            drain(&mut shell)[0],
+            ShellEvent::ClipboardData {
+                window,
+                request,
+                mime: ReceivedMime::new("text/plain"),
+                content: ClipboardContent::Bytes(b"never sent".to_vec()),
+            }
+        );
+    }
+
+    #[test]
+    fn claiming_the_clipboard_can_require_a_user_interaction() {
+        // Wayland's `set_selection` serial and the browser's user-gesture gate,
+        // modelled as one thing — because they are one thing: a background
+        // process must not be able to take the clipboard.
+        let (mut shell, window) = shell_with_configured_window();
+        shell.require_user_interaction(true);
+
+        let refused = shell.clipboard_offer(window, &[ClipboardOffer::text("stolen")]);
+        assert!(
+            matches!(
+                refused,
+                Err(ShellError::NeedsUserInteraction {
+                    backend: ShellBackend::Headless,
+                    ..
+                })
+            ),
+            "{refused:?}"
+        );
+        assert!(
+            shell.clipboard_bytes(MimeType::TextUtf8).is_none(),
+            "a refused claim must not have taken the clipboard anyway"
+        );
+
+        // The copy the user actually asked for. Any injected input counts, as
+        // any real input serial would.
+        shell.key_press(window, KeyCode::KeyC).expect("key");
+        shell
+            .clipboard_offer(window, &[ClipboardOffer::text("copied")])
+            .expect("with a serial in hand, the claim goes through");
+        assert_eq!(
+            shell.clipboard_bytes(MimeType::TextUtf8),
+            Some(&b"copied"[..])
+        );
+
+        // And the permission goes stale, exactly as a serial does.
+        shell.clear_user_interaction();
+        assert!(matches!(
+            shell.clipboard_offer(window, &[ClipboardOffer::text("later")]),
+            Err(ShellError::NeedsUserInteraction { .. })
+        ));
+    }
+
+    #[test]
+    fn a_held_read_for_a_destroyed_window_is_dropped_rather_than_answered() {
+        // Obligation 1 outranks obligation 4: an answer naming a window that no
+        // longer exists is a stale handle in a consumer's hands.
+        let (mut shell, window) = shell_with_configured_window();
+        shell.set_clipboard_readable(false);
+        let _request = shell
+            .clipboard_request(window, MimeType::TextUtf8)
+            .expect("request");
+        assert_eq!(shell.held_clipboard_reads(), 1);
+
+        shell.destroy_window(window).expect("destroy");
+        let events = drain(&mut shell);
+        assert_eq!(shell.held_clipboard_reads(), 0);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ShellEvent::ClipboardData { .. })),
+            "no clipboard answer may name a destroyed window: {events:?}"
         );
     }
 
@@ -2094,14 +2564,14 @@ mod tests {
         let ShellEvent::ClipboardData {
             request: answered,
             mime,
-            data,
+            content,
             ..
         } = &events[0]
         else {
             panic!("wrong variant");
         };
         assert_eq!(*answered, request);
-        assert_eq!(data.as_deref(), Some(&b"from gedit"[..]));
+        assert_eq!(content.bytes(), Some(&b"from gedit"[..]));
         // … and the answer reports what the peer actually called it.
         assert_eq!(mime.as_str(), "text/plain");
         assert!(mime.matches(MimeType::TextUtf8));

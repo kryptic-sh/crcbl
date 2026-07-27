@@ -1,9 +1,11 @@
 //! Clipboard and drag-and-drop payloads.
 //!
-//! # Decision: the trait surface ships now, the backends do not
+//! # Decision: the trait surface shipped a slice before the backends
 //!
-//! P0.4 implements no platform clipboard — there is no platform code in this
-//! slice at all. The *shape* is here anyway, and that is a deliberate trade:
+//! P0.4 implemented no platform clipboard — there was no platform code in that
+//! slice at all — and P0.5c implemented the Wayland one against this shape
+//! unchanged, which is the outcome the trade below was made for. The *shape*
+//! was here first, and that was deliberate:
 //! adding a method to a trait that three backends already implement means
 //! touching three backends, whereas leaving an unimplemented method on the
 //! trait costs nothing but the `Unsupported` arm each of them writes once.
@@ -41,14 +43,49 @@
 //! *transfer* happens later, on demand, and the shell owns the bytes until it
 //! does.
 //!
+//! # Decision: a read that cannot be answered yet is *held*, not answered
+//!
+//! P0.5c's revision, and the reason for it is a finding rather than a
+//! preference. On Wayland a client is told what is on the clipboard by
+//! `wl_data_device.selection`, which arrives **asynchronously** and **only
+//! while one of its windows has keyboard focus**. A read issued a millisecond
+//! too early — during the focus change a Ctrl+V *itself* may have caused — has
+//! nothing to answer from.
+//!
+//! Answering "empty" there is a lie a consumer cannot detect, and the end-to-end
+//! suite proved it: it needed a retry loop that no editor's paste command would
+//! ever contain. So the shape is that a backend **holds** the request until it
+//! is answerable and only then emits
+//! [`ShellEvent::ClipboardData`](crate::ShellEvent::ClipboardData). There is
+//! deliberately no "try again later" outcome; see [`ClipboardContent`].
+//!
+//! This costs X11 nothing, which is the test every seam change here has to
+//! pass: an X11 backend can answer immediately (`XGetSelectionOwner` says
+//! whether anyone owns the selection, with no focus involved), so "hold until
+//! answerable" collapses to "answer". A backend where the wait is real bounds
+//! it and reports [`ClipboardContent::Unavailable`] rather than waiting
+//! forever, and [`Shell::clipboard_readable`](crate::Shell::clipboard_readable)
+//! lets a UI ask in advance instead of discovering it by waiting.
+//!
 //! # Two mime types, always offered together
 //!
 //! `15-windowing.md` specifies `text/plain` plus the custom
 //! `application/x-crcbl+ron` so that engine↔engine copies are lossless while
 //! outside applications still receive readable text. Offering both is the
 //! caller's job, and [`ClipboardOffer`] is a slice for exactly that reason.
+//!
+//! # `text/uri-list` is parsed here, not in a backend
+//!
+//! A file drop and a "copy file" paste both arrive as a `text/uri-list` blob,
+//! on Wayland (`wl_data_offer`), on X11 (`XdndSelection`) and in a browser
+//! (`DataTransfer`). The format is RFC 2483's, the same on all three, and
+//! getting it wrong — percent-encoding, `file://` authorities, CRLF, comment
+//! lines — is wrong in the same way on all three. So [`parse_uri_list`] lives
+//! next to the mime types rather than being written once per backend, which is
+//! how the second and third copies drift.
 
 use core::fmt;
+use std::path::PathBuf;
 
 /// The format of a clipboard or drag-and-drop payload.
 ///
@@ -241,6 +278,101 @@ impl<'a> ClipboardOffer<'a> {
     }
 }
 
+/// What a clipboard read produced.
+///
+/// # Decision: three outcomes, because two of them were being conflated
+///
+/// This started life as `Option<Vec<u8>>`, on the argument that "the clipboard
+/// was empty", "it held no compatible format" and "the transfer failed" all
+/// mean *there is nothing to paste* and a caller does the same thing for each.
+/// P0.5c found that wrong against a real compositor, in two ways that a caller
+/// genuinely must tell apart:
+///
+/// * **A successful transfer of zero bytes is not a failure.** A peer may
+///   publish an empty selection, and [`Bytes(vec![])`](Self::Bytes) says so.
+///   Reporting `None` there tells an editor its paste failed when it did not.
+/// * **"Could not be read" is not "there is nothing there".** A transfer whose
+///   peer went away mid-write, or which never became readable at all, is a
+///   failure a UI may want to surface ("the clipboard could not be read") and
+///   which an automation script must not silently treat as an empty clipboard.
+///
+/// [`Empty`](Self::Empty) still merges "the clipboard holds nothing" with "it
+/// holds nothing in *that* format", because those two really are one case: the
+/// caller named the format, and the answer is that it is not on offer. A caller
+/// that wants a different format asks for it, which is one more request either
+/// way.
+///
+/// What is deliberately **not** here is "not yet". A read that cannot be
+/// answered yet is *held* until it can be — see
+/// [`clipboard_request`](crate::Shell::clipboard_request) — because a variant
+/// meaning "ask again later" is a retry loop in every consumer, and the
+/// consumer has no idea how long to wait.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClipboardContent {
+    /// The payload, in the format [`ClipboardData::mime`](crate::ShellEvent::ClipboardData)
+    /// names. May be empty: that is a successful transfer of nothing.
+    Bytes(Vec<u8>),
+
+    /// The clipboard holds nothing, or nothing in the requested format.
+    Empty,
+
+    /// The read could not be completed.
+    ///
+    /// The window system refused it, the peer holding the data went away or
+    /// never delivered, or the window never became able to read the clipboard
+    /// within the backend's deadline. Distinct from [`Empty`](Self::Empty):
+    /// there may well be something on the clipboard.
+    Unavailable,
+}
+
+impl ClipboardContent {
+    /// The payload, if the read succeeded.
+    ///
+    /// `None` for both [`Empty`](Self::Empty) and
+    /// [`Unavailable`](Self::Unavailable) — the "just give me the bytes"
+    /// accessor, for a caller that treats every non-answer the same.
+    #[inline]
+    #[must_use]
+    pub fn bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Bytes(bytes) => Some(bytes),
+            Self::Empty | Self::Unavailable => None,
+        }
+    }
+
+    /// The payload, consumed. See [`bytes`](Self::bytes).
+    #[inline]
+    #[must_use]
+    pub fn into_bytes(self) -> Option<Vec<u8>> {
+        match self {
+            Self::Bytes(bytes) => Some(bytes),
+            Self::Empty | Self::Unavailable => None,
+        }
+    }
+
+    /// The payload as text, when it is valid UTF-8.
+    ///
+    /// The overwhelmingly common paste, and the one place it is worth saving
+    /// every caller the same three lines. Invalid UTF-8 answers `None` rather
+    /// than being lossily replaced: a paste that silently corrupts what was
+    /// copied is worse than one that refuses.
+    #[must_use]
+    pub fn text(&self) -> Option<&str> {
+        core::str::from_utf8(self.bytes()?).ok()
+    }
+
+    /// A short, stable name for logs and test assertions.
+    #[inline]
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Bytes(_) => "Bytes",
+            Self::Empty => "Empty",
+            Self::Unavailable => "Unavailable",
+        }
+    }
+}
+
 /// Identifies an outstanding [`clipboard_request`](crate::Shell::clipboard_request).
 ///
 /// Matched against
@@ -255,6 +387,165 @@ impl fmt::Display for ClipboardRequestId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "clipboard request {}", self.0)
     }
+}
+
+/// The local paths named by a [`MimeType::UriList`] payload.
+///
+/// A dropped file does not arrive as a path. It arrives as RFC 2483's
+/// `text/uri-list`: CRLF-separated URIs, percent-encoded, with `#` comment
+/// lines permitted. This turns that into the paths
+/// [`ShellEvent::DroppedFile`](crate::ShellEvent::DroppedFile) carries.
+///
+/// # What is dropped, and why
+///
+/// * **Comment lines and blank lines.** The format defines both.
+/// * **Non-`file:` URIs.** A file manager can put `https://…`, `trash:///…` or
+///   `smb://host/share` in a drop, and none of them is a path — turning
+///   `https://example.com/a` into the relative path `example.com/a` would be a
+///   plausible-looking lie that only fails once something tries to open it.
+///   They are skipped, so a drop of three URLs and one file produces one
+///   [`DroppedFile`](crate::ShellEvent::DroppedFile).
+/// * **`file://` with a remote authority.** `file://host/path` names a file on
+///   *that* host. `file:///path` (empty authority) and `file://localhost/path`
+///   are this machine and are kept; anything else is not reachable through a
+///   `PathBuf`.
+///
+/// Percent-decoding happens **after** the scheme and authority are stripped, so
+/// a `%2F` inside a filename decodes to a `/` in the name rather than to a path
+/// separator that changes the URI's structure — the ordering RFC 3986 requires
+/// and the one a naive "decode the whole line first" gets wrong.
+///
+/// Paths are bytes on Unix, so a name that is not valid UTF-8 survives intact.
+///
+/// ```
+/// use crcbl_shell::parse_uri_list;
+/// use std::path::PathBuf;
+///
+/// let dropped = b"# comment\r\nfile:///tmp/my%20scene.ron\r\nhttps://example.com/x\r\n";
+/// assert_eq!(
+///     parse_uri_list(dropped),
+///     vec![PathBuf::from("/tmp/my scene.ron")],
+///     "the URL is not a path and the space is decoded",
+/// );
+/// ```
+#[must_use]
+pub fn parse_uri_list(bytes: &[u8]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    // Split on LF and trim a trailing CR, rather than splitting on CRLF: the
+    // format says CRLF, real senders send both, and a parser that insisted on
+    // CRLF would silently return nothing for half of them.
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let line = trim_ascii(line);
+        // `#` is a comment *line*; a `#` inside a URI is a fragment and is not
+        // this case.
+        if line.is_empty() || line[0] == b'#' {
+            continue;
+        }
+        if let Some(path) = file_uri_to_path(line) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+/// One `file:` URI as a path, or `None` for anything that is not a local file.
+fn file_uri_to_path(uri: &[u8]) -> Option<PathBuf> {
+    const SCHEME: &[u8] = b"file:";
+    let (prefix, rest) = uri.split_at_checked(SCHEME.len())?;
+    if !prefix.eq_ignore_ascii_case(SCHEME) {
+        return None;
+    }
+
+    let path = if let Some(authority) = rest.strip_prefix(b"//") {
+        // `file://<authority>/<path>`. The authority ends at the first `/`,
+        // which is also the first byte of the path.
+        let split = authority.iter().position(|byte| *byte == b'/')?;
+        let (host, path) = authority.split_at(split);
+        if !(host.is_empty() || host.eq_ignore_ascii_case(b"localhost")) {
+            return None;
+        }
+        path
+    } else if rest.starts_with(b"/") {
+        // `file:/path` — RFC 8089 permits the authority to be omitted entirely.
+        rest
+    } else {
+        // `file:relative` is not a thing this can resolve against anything.
+        return None;
+    };
+
+    let decoded = percent_decode(path);
+    if decoded.is_empty() {
+        return None;
+    }
+    bytes_to_path(decoded)
+}
+
+/// RFC 3986 percent-decoding, byte-wise.
+///
+/// A `%` that is not followed by two hex digits is a literal `%`: senders do
+/// emit them, and refusing the whole line over one would lose a real file.
+fn percent_decode(bytes: &[u8]) -> Vec<u8> {
+    const fn hex(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && let (Some(high), Some(low)) = (
+                bytes.get(index + 1).copied().and_then(hex),
+                bytes.get(index + 2).copied().and_then(hex),
+            )
+        {
+            out.push((high << 4) | low);
+            index += 3;
+            continue;
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    out
+}
+
+/// Decoded URI bytes as a path.
+///
+/// Unix paths are arbitrary bytes, and a file whose name is not valid UTF-8 is
+/// still a file that can be dropped on a window, so the bytes are taken as-is.
+#[cfg(unix)]
+fn bytes_to_path(bytes: Vec<u8>) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
+
+/// As above. Everywhere else a path is not a byte string, and `text/uri-list`
+/// is defined as UTF-8, so anything else is rejected rather than mangled.
+#[cfg(not(unix))]
+fn bytes_to_path(bytes: Vec<u8>) -> Option<PathBuf> {
+    String::from_utf8(bytes).ok().map(PathBuf::from)
+}
+
+/// `[u8]::trim_ascii`, plus the CR of a CRLF.
+const fn trim_ascii(mut line: &[u8]) -> &[u8] {
+    while let [first, rest @ ..] = line {
+        if first.is_ascii_whitespace() {
+            line = rest;
+        } else {
+            break;
+        }
+    }
+    while let [rest @ .., last] = line {
+        if last.is_ascii_whitespace() {
+            line = rest;
+        } else {
+            break;
+        }
+    }
+    line
 }
 
 #[cfg(test)]
@@ -327,6 +618,95 @@ mod tests {
             assert_eq!(received.recognized(), Some(known));
             assert!(received.matches(known));
         }
+    }
+
+    #[test]
+    fn a_uri_list_is_crlf_separated_percent_encoded_and_may_carry_comments() {
+        // What a file manager actually sends for a two-file drop, byte for
+        // byte: a comment line the format permits, CRLF endings, and a space
+        // encoded as `%20`.
+        let dropped = b"#comment\r\n\
+                        file:///home/dev/My%20Scene.ron\r\n\
+                        file:///tmp/a%2Bb%2Fc.png\r\n";
+        assert_eq!(
+            parse_uri_list(dropped),
+            vec![
+                PathBuf::from("/home/dev/My Scene.ron"),
+                // `%2F` is a slash *in the name*, decoded after the URI has
+                // been split — decoding first would invent a directory.
+                PathBuf::from("/tmp/a+b/c.png"),
+            ]
+        );
+
+        // Bare LF, no trailing newline, and leading whitespace: senders do all
+        // three, and insisting on the letter of the spec would return nothing.
+        assert_eq!(
+            parse_uri_list(b"  file:///tmp/one\nfile:///tmp/two"),
+            vec![PathBuf::from("/tmp/one"), PathBuf::from("/tmp/two")]
+        );
+        assert!(parse_uri_list(b"").is_empty());
+        assert!(parse_uri_list(b"\r\n\r\n# only comments\r\n").is_empty());
+    }
+
+    #[test]
+    fn a_uri_that_is_not_a_local_file_is_not_turned_into_a_path() {
+        // The decision this function is most likely to get wrong: a URL is not
+        // a path, and producing `example.com/x` from one would look like it
+        // worked until something opened it.
+        for hostile in [
+            &b"https://example.com/x"[..],
+            b"trash:///deleted",
+            b"smb://server/share/file",
+            b"file://remotehost/etc/passwd",
+            b"file:relative/path",
+            b"file://",
+            b"not a uri at all",
+        ] {
+            assert!(
+                parse_uri_list(hostile).is_empty(),
+                "{}",
+                String::from_utf8_lossy(hostile)
+            );
+        }
+
+        // An empty authority and an explicit `localhost` are both this machine,
+        // and `file:/path` is RFC 8089's authority-less form.
+        assert_eq!(
+            parse_uri_list(b"FILE:///tmp/x\nfile://localhost/tmp/y\nfile:/tmp/z"),
+            vec![
+                PathBuf::from("/tmp/x"),
+                PathBuf::from("/tmp/y"),
+                PathBuf::from("/tmp/z"),
+            ],
+            "the scheme is case-insensitive and the authority may be omitted"
+        );
+        assert_eq!(
+            parse_uri_list(b"file:///"),
+            vec![PathBuf::from("/")],
+            "the root directory is a real path, degenerate as a drop is"
+        );
+
+        // A stray `%` is a literal `%`, not a reason to lose the file.
+        assert_eq!(
+            parse_uri_list(b"file:///tmp/100%%20done"),
+            vec![PathBuf::from("/tmp/100% done")]
+        );
+        assert_eq!(
+            parse_uri_list(b"file:///tmp/trailing%"),
+            vec![PathBuf::from("/tmp/trailing%")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf8_survives_the_round_trip() {
+        // Unix filenames are bytes. A backend that went through `String` would
+        // replace this one with U+FFFD and hand back a path that does not
+        // exist.
+        use std::os::unix::ffi::OsStrExt;
+        let paths = parse_uri_list(b"file:///tmp/%FF%FE.bin");
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].as_os_str().as_bytes(), b"/tmp/\xff\xfe.bin");
     }
 
     #[test]

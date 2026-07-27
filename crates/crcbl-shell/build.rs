@@ -12,8 +12,9 @@
 //! One line in [`PROTOCOLS`], plus the XML in `wayland-protocols/`. Nothing
 //! else — not this file's logic, not the generator. P0.5b added six protocols
 //! that way (`xdg-decoration`, `pointer-constraints`, `relative-pointer`,
-//! `xdg-output`, `fractional-scale`, `viewporter`) and P0.5c's `data-device` is
-//! already in `wayland.xml`.
+//! `xdg-output`, `fractional-scale`, `viewporter`), and P0.5c added **no**
+//! lines at all: `wl_data_device_manager` and the three interfaces under it are
+//! part of `wayland.xml` and were already being generated.
 //!
 //! [`E2E_PROTOCOLS`] is the same list for protocols only the end-to-end suite
 //! needs — they are generated **only** under the `wayland-e2e` feature, because

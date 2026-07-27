@@ -124,6 +124,34 @@ pub enum ShellError {
     /// Anything else the backend wants to report verbatim.
     #[error("{0}")]
     Backend(String),
+
+    /// The window system requires a recent user interaction for this, and there
+    /// has not been one.
+    ///
+    /// # Why this is a named case rather than a backend string
+    ///
+    /// It is a **policy**, not a fault, and the policy is the same one on three
+    /// platforms:
+    ///
+    /// * Wayland's `wl_data_device.set_selection` quotes the serial of the
+    ///   input event that caused the copy, and a compositor checks it. A client
+    ///   that has received no input on a seat cannot take the clipboard.
+    /// * A browser gates `navigator.clipboard.write()` and Pointer Lock behind
+    ///   a *user gesture*, with the same reasoning and the same failure.
+    /// * X11 has no such requirement at all, and neither does Win32.
+    ///
+    /// What it prevents is a background process silently taking the clipboard —
+    /// so a caller must treat it as "ask the user to do that again", never as a
+    /// bug to work around. A backend on a platform without the rule **never
+    /// returns this**, and that is obviously correct rather than obviously
+    /// incomplete.
+    #[error("{backend} needs a recent user interaction for {what}")]
+    NeedsUserInteraction {
+        /// Which backend refused.
+        backend: ShellBackend,
+        /// What was being attempted, for the log line.
+        what: &'static str,
+    },
 }
 
 impl ShellError {

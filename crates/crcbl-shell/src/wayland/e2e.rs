@@ -66,7 +66,10 @@ use crcbl_core::SurfaceTarget;
 use super::ffi::{self, WlArgument, WlDisplay, WlMessage, WlProxy};
 use super::protocol::virtual_keyboard::{zwp_virtual_keyboard_manager_v1, zwp_virtual_keyboard_v1};
 use super::protocol::virtual_pointer::{zwlr_virtual_pointer_manager_v1, zwlr_virtual_pointer_v1};
-use super::protocol::wayland::{wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface};
+use super::protocol::wayland::{
+    wl_data_device, wl_data_device_manager, wl_data_source, wl_pointer, wl_registry, wl_seat,
+    wl_shm, wl_shm_pool, wl_surface,
+};
 use crate::{PhysicalSize, Shell, ShellError, WindowId};
 
 unsafe extern "C" {
@@ -677,6 +680,363 @@ impl Drop for VirtualInput {
                 zwlr_virtual_pointer_manager_v1::destroy(self.globals.pointer_manager);
             }
             (self.lib.proxy_destroy)(self.globals.registry);
+            (self.lib.display_flush)(self.display);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A drag origin
+// ---------------------------------------------------------------------------
+
+/// Starts a drag-and-drop from one of the shell's own surfaces.
+///
+/// # Why the drag *source* is scaffolding rather than shell
+///
+/// P0.5c implements the drag **destination**: a drop that arrives becomes a
+/// [`ShellEvent::DroppedFile`](crate::ShellEvent::DroppedFile). Starting a drag
+/// is a different feature — the editor will want it, the engine does not — and
+/// it needs two things this slice deliberately does not have: a seam request to
+/// trigger it, and a **drag icon**, which is a `wl_surface` with a buffer, and
+/// buffers are the renderer's. Adding a half of it to [`Shell`] now would put a
+/// method there that no backend can honour until P1.
+///
+/// But the destination cannot be tested without one, so the minimum lives here,
+/// beside the stand-in buffer and the virtual devices, for the same reason and
+/// under the same feature flag.
+///
+/// # How it gets a serial without asking the shell
+///
+/// `wl_data_device.start_drag` must quote the serial of an **implicit pointer
+/// grab** — wlroots checks it against the seat's own last button-press serial,
+/// requires the button to still be held, and requires the pointer's focus to be
+/// the origin surface. The shell has that serial (it is on the
+/// [`Button`](crate::ShellEvent::Button) event's seat) and the seam has no way
+/// to expose it, which is exactly as it should be.
+///
+/// So this binds *its own* `wl_pointer` on the same connection. A compositor
+/// sends a button event to **every** pointer resource the focused client holds,
+/// with one serial for all of them, so watching that second pointer yields the
+/// same number the shell saw — without a test-only hole in the shell.
+pub struct DragSource {
+    lib: &'static ffi::Lib,
+    display: *mut WlDisplay,
+    state: Box<DragState>,
+}
+
+/// The dispatcher's side of a [`DragSource`].
+struct DragState {
+    registry: *mut WlProxy,
+    seat: *mut WlProxy,
+    manager: *mut WlProxy,
+    device: *mut WlProxy,
+    pointer: *mut WlProxy,
+    source: *mut WlProxy,
+    /// The serial of the last `wl_pointer.button` press, which is the implicit
+    /// grab a `start_drag` has to name.
+    press_serial: core::cell::Cell<u32>,
+    /// What a `wl_data_source.send` should answer with.
+    payload: core::cell::RefCell<Vec<u8>>,
+    /// Whether the compositor has asked for the payload yet.
+    sent: core::cell::Cell<bool>,
+    /// Whether the drag ended without a drop.
+    cancelled: core::cell::Cell<bool>,
+}
+
+impl core::fmt::Debug for DragSource {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DragSource")
+            .field("press_serial", &self.state.press_serial.get())
+            .field("sent", &self.state.sent.get())
+            .finish()
+    }
+}
+
+/// Binds `wl_seat` and `wl_data_device_manager` for a [`DragSource`].
+unsafe extern "C" fn bind_drag(
+    user_data: *const c_void,
+    _target: *mut c_void,
+    opcode: u32,
+    _message: *const WlMessage,
+    args: *mut WlArgument,
+) -> c_int {
+    // SAFETY: `user_data` is the boxed `DragState` handed to
+    // `wl_proxy_add_dispatcher` in `DragSource::attach`, which outlives every
+    // dispatch that can reach it.
+    let state = unsafe { &mut *user_data.cast::<DragState>().cast_mut() };
+    // SAFETY: attached only to a `wl_registry`.
+    let event = unsafe { wl_registry::decode_event(opcode, args.cast_const()) };
+    let Some(wl_registry::Event::Global {
+        name,
+        interface,
+        version,
+    }) = event
+    else {
+        return 0;
+    };
+    // SAFETY: the registry is live, and binding from inside a dispatch is
+    // ordinary libwayland usage.
+    unsafe {
+        if interface == wl_seat::NAME && state.seat.is_null() {
+            state.seat = wl_registry::bind(state.registry, name, &wl_seat::INTERFACE, 1);
+        } else if interface == wl_data_device_manager::NAME && state.manager.is_null() {
+            state.manager = wl_registry::bind(
+                state.registry,
+                name,
+                &wl_data_device_manager::INTERFACE,
+                version.min(3),
+            );
+        }
+    }
+    0
+}
+
+/// Watches this connection's second `wl_pointer` for the grab serial, and
+/// answers the source's `send`.
+unsafe extern "C" fn drag_dispatch(
+    user_data: *const c_void,
+    target: *mut c_void,
+    opcode: u32,
+    _message: *const WlMessage,
+    args: *mut WlArgument,
+) -> c_int {
+    // SAFETY: as `bind_drag`.
+    let state = unsafe { &mut *user_data.cast::<DragState>().cast_mut() };
+    let args = args.cast_const();
+    if target == state.pointer.cast() {
+        // SAFETY: this branch is only reached for the `wl_pointer` proxy.
+        if let Some(wl_pointer::Event::Button {
+            serial,
+            state: down,
+            ..
+        }) = unsafe { wl_pointer::decode_event(opcode, args) }
+            && down == wl_pointer::button_state::PRESSED
+        {
+            state.press_serial.set(serial);
+        }
+        return 0;
+    }
+    if target == state.source.cast() {
+        // SAFETY: this branch is only reached for the `wl_data_source` proxy.
+        match unsafe { wl_data_source::decode_event(opcode, args) } {
+            Some(wl_data_source::Event::Send { fd, .. }) => {
+                let payload = state.payload.borrow();
+                // A blocking write, deliberately: the harness's payload is a
+                // handful of bytes, far below the 64 KiB a pipe holds, so it
+                // cannot block — and the reader is the shell under test, on
+                // this very thread, which is precisely why a *large* payload
+                // would have to be written the way `fd::Writing` does.
+                // SAFETY: `fd` is the descriptor the compositor handed over,
+                // owned by this process and closed exactly once below.
+                unsafe {
+                    write(fd, payload.as_ptr().cast(), payload.len());
+                    close(fd);
+                }
+                state.sent.set(true);
+            }
+            Some(wl_data_source::Event::Cancelled) => state.cancelled.set(true),
+            _ => {}
+        }
+    }
+    0
+}
+
+impl DragSource {
+    /// Prepares a drag origin on the seat of `shell`'s compositor.
+    ///
+    /// Attach it **after** [`VirtualInput`], which is what gives the seat a
+    /// pointer at all.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::Backend`] if the compositor advertises no `wl_seat` or no
+    /// `wl_data_device_manager`.
+    ///
+    /// # Panics
+    ///
+    /// Never; every fallible step is reported as an error.
+    pub fn attach(shell: &dyn Shell, window: WindowId) -> Result<Self, ShellError> {
+        let SurfaceTarget::Wayland { display, .. } = shell.surface_target(window)? else {
+            return Err(ShellError::Backend(
+                "not a Wayland window; this helper is only for the Wayland backend".to_string(),
+            ));
+        };
+        let lib = ffi::load().map_err(|detail| ShellError::Backend(detail.to_string()))?;
+        let display: *mut WlDisplay = display.as_ptr().cast();
+
+        let mut state = Box::new(DragState {
+            registry: ptr::null_mut(),
+            seat: ptr::null_mut(),
+            manager: ptr::null_mut(),
+            device: ptr::null_mut(),
+            pointer: ptr::null_mut(),
+            source: ptr::null_mut(),
+            press_serial: core::cell::Cell::new(0),
+            payload: core::cell::RefCell::new(Vec::new()),
+            sent: core::cell::Cell::new(false),
+            cancelled: core::cell::Cell::new(false),
+        });
+        // SAFETY: the display belongs to the shell and is live while it is
+        // borrowed; `state` is boxed, so the pointer handed to the dispatcher
+        // stays valid for this value's lifetime.
+        unsafe {
+            state.registry =
+                super::protocol::wayland::wl_display::get_registry(ffi::display_as_proxy(display));
+            if state.registry.is_null() {
+                return Err(ShellError::Backend("wl_display.get_registry".to_string()));
+            }
+            (lib.proxy_add_dispatcher)(
+                state.registry,
+                bind_drag,
+                ptr::from_mut(state.as_mut()).cast(),
+                ptr::null_mut(),
+            );
+            if (lib.display_roundtrip)(display) < 0 {
+                return Err(ShellError::Backend("roundtrip failed".to_string()));
+            }
+        }
+        if state.seat.is_null() || state.manager.is_null() {
+            return Err(ShellError::Backend(
+                "the compositor has no wl_seat or no wl_data_device_manager".to_string(),
+            ));
+        }
+        // SAFETY: every proxy below is created live on this connection, and the
+        // dispatcher outlives all of them.
+        unsafe {
+            (lib.proxy_add_dispatcher)(state.seat, ignore, ptr::null(), ptr::null_mut());
+            state.pointer = wl_seat::get_pointer(state.seat);
+            state.device = wl_data_device_manager::get_data_device(state.manager, state.seat);
+            let data = ptr::from_mut(state.as_mut()).cast::<c_void>();
+            (lib.proxy_add_dispatcher)(state.pointer, drag_dispatch, data, ptr::null_mut());
+            // This second data device would otherwise receive the drag's own
+            // enter/leave events with no listener, which libwayland logs.
+            (lib.proxy_add_dispatcher)(state.device, ignore, ptr::null(), ptr::null_mut());
+            (lib.display_roundtrip)(display);
+        }
+        Ok(Self {
+            lib,
+            display,
+            state,
+        })
+    }
+
+    /// The serial of the last button press the compositor sent this connection.
+    ///
+    /// Zero until one has happened, which is itself the assertion a test wants:
+    /// a drag cannot be started without one.
+    #[must_use]
+    pub fn press_serial(&self) -> u32 {
+        self.state.press_serial.get()
+    }
+
+    /// Whether the compositor has asked for the payload.
+    #[must_use]
+    pub fn was_asked_for_data(&self) -> bool {
+        self.state.sent.get()
+    }
+
+    /// Whether the drag ended with no drop.
+    #[must_use]
+    pub fn was_cancelled(&self) -> bool {
+        self.state.cancelled.get()
+    }
+
+    /// Starts dragging `payload`, offered as `mime`, from `window`'s surface.
+    ///
+    /// The caller must have pressed a pointer button over that surface and must
+    /// still be holding it: that press is the implicit grab, and a compositor
+    /// refuses a drag without one.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::Backend`] if no button press has been seen or the source
+    /// could not be created.
+    pub fn start(
+        &mut self,
+        shell: &dyn Shell,
+        window: WindowId,
+        mime: &core::ffi::CStr,
+        payload: &[u8],
+    ) -> Result<(), ShellError> {
+        let SurfaceTarget::Wayland { surface, .. } = shell.surface_target(window)? else {
+            return Err(ShellError::Backend("not a Wayland window".to_string()));
+        };
+        let serial = self.state.press_serial.get();
+        if serial == 0 {
+            return Err(ShellError::Backend(
+                "no pointer button has been pressed, so there is no implicit grab to drag from"
+                    .to_string(),
+            ));
+        }
+        self.state.payload.replace(payload.to_vec());
+        let origin: *mut WlProxy = surface.as_ptr().cast();
+        // SAFETY: the manager, device and surface are all live on this
+        // connection. `set_actions` must precede `start_drag`, and a null icon
+        // is the protocol's own "no drag image" — the compositor draws nothing,
+        // which is all a headless test needs.
+        unsafe {
+            self.state.source = wl_data_device_manager::create_data_source(self.state.manager);
+            if self.state.source.is_null() {
+                return Err(ShellError::Backend("create_data_source failed".to_string()));
+            }
+            let data = ptr::from_mut(self.state.as_mut()).cast::<c_void>();
+            (self.lib.proxy_add_dispatcher)(
+                self.state.source,
+                drag_dispatch,
+                data,
+                ptr::null_mut(),
+            );
+            wl_data_source::offer(self.state.source, mime);
+            if ffi::proxy_version(self.state.source) >= 3 {
+                // Without an action the destination's `wl_data_offer.finish`
+                // would be a protocol error, so the harness has to negotiate
+                // one for the backend's accept path to be exercised at all.
+                wl_data_source::set_actions(self.state.source, 1 /* copy */);
+            }
+            wl_data_device::start_drag(
+                self.state.device,
+                self.state.source,
+                origin,
+                ptr::null_mut(),
+                serial,
+            );
+            (self.lib.display_flush)(self.display);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for DragSource {
+    fn drop(&mut self) {
+        // SAFETY: every proxy was created on this connection and each
+        // destructor belongs to its own interface.
+        unsafe {
+            if !self.state.source.is_null() {
+                wl_data_source::destroy(self.state.source);
+            }
+            if !self.state.device.is_null() {
+                // `release` arrived in version 2 of the interface; sending a
+                // request the bound version does not have is a protocol error
+                // that disconnects the whole client, test and all.
+                if ffi::proxy_version(self.state.device) >= 2 {
+                    wl_data_device::release(self.state.device);
+                } else {
+                    (self.lib.proxy_destroy)(self.state.device);
+                }
+            }
+            if !self.state.pointer.is_null() {
+                // The seat above is bound at version 1, which has no
+                // `wl_pointer.release` at all — so the proxy is dropped
+                // client-side and the server-side object goes with the seat.
+                (self.lib.proxy_destroy)(self.state.pointer);
+            }
+            if !self.state.manager.is_null() {
+                (self.lib.proxy_destroy)(self.state.manager);
+            }
+            if !self.state.seat.is_null() {
+                (self.lib.proxy_destroy)(self.state.seat);
+            }
+            (self.lib.proxy_destroy)(self.state.registry);
             (self.lib.display_flush)(self.display);
         }
     }

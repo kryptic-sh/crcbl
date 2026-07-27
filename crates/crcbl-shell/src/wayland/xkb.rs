@@ -57,15 +57,18 @@
 
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr;
+use std::os::fd::AsRawFd;
 use std::sync::OnceLock;
 
 use crcbl_core::KeyCode;
 use crcbl_core::input::{Keysym, Modifiers};
 
 // `mmap`/`munmap` are how the keymap gets out of the file descriptor the
-// compositor sent, and `close` returns it. Declared here rather than pulled
-// from a crate for the same reason `ffi` declares `dlopen`: three functions
-// with a frozen ABI that `std` already links.
+// compositor sent. Declared here rather than pulled from a crate for the same
+// reason `ffi` declares `dlopen`: two functions with a frozen ABI that `std`
+// already links. **Closing** the descriptor is not here — that discipline is
+// shared with the clipboard and lives in [`fd`](super::fd), which states why
+// the mapping stayed behind.
 unsafe extern "C" {
     fn mmap(
         addr: *mut c_void,
@@ -76,7 +79,6 @@ unsafe extern "C" {
         offset: i64,
     ) -> *mut c_void;
     fn munmap(addr: *mut c_void, length: usize) -> c_int;
-    fn close(fd: c_int) -> c_int;
     fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
 }
@@ -257,21 +259,6 @@ fn load_uncached() -> Option<Lib> {
     })
 }
 
-/// Returns a keymap descriptor we are not going to compile.
-///
-/// `wl_keyboard.keymap` transfers ownership of the descriptor to the client,
-/// and the compositor cannot reclaim the memory behind it until every client
-/// has closed its copy. A leak here is one descriptor *per layout switch*.
-pub fn close_fd(fd: i32) {
-    if fd < 0 {
-        return;
-    }
-    // SAFETY: `fd` was handed to this process by the dispatcher and is closed
-    // exactly once, on the only path that does not go through
-    // [`Keymap::from_fd`].
-    unsafe { close(fd) };
-}
-
 /// The XKB modifier names this engine's [`Modifiers`] bits correspond to.
 ///
 /// Names rather than bit positions, because a keymap decides for itself which
@@ -328,12 +315,12 @@ impl Keymap {
     /// column of the [module docs](self) rather than to an error.
     #[must_use]
     pub fn from_fd(fd: i32, size: u32) -> Option<Self> {
-        let result = Self::compile(fd, size as usize);
-        // SAFETY: `fd` was handed to us by the dispatcher and is ours to close.
-        // Nothing above kept it: `mmap` maps a copy and `close` after `mmap` is
-        // the documented sequence.
-        unsafe { close(fd) };
-        result
+        // Adopting the descriptor is what closes it: the mapping outlives the
+        // descriptor (`mmap` keeps its own reference), so the file may be
+        // dropped as soon as `compile` returns, on every path including the
+        // early `None`s inside it.
+        let file = super::fd::adopt(fd)?;
+        Self::compile(file.as_raw_fd(), size as usize)
     }
 
     fn compile(fd: i32, size: usize) -> Option<Self> {

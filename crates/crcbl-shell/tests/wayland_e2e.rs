@@ -21,11 +21,11 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crcbl_shell::wayland_test_support::VirtualInput;
+use crcbl_shell::wayland_test_support::{DragSource, VirtualInput};
 use crcbl_shell::{
     ButtonState, CloseReply, CursorIcon, DisplayMode, KeyCode, Keysym, LogicalSize, Modifiers,
     PhysicalSize, PointerButton, PointerMode, ScrollDelta, Shell, ShellBackend, ShellCaps,
-    ShellEvent, SizeConstraints, SurfaceTarget, WindowDesc, WindowId,
+    ShellError, ShellEvent, SizeConstraints, SurfaceTarget, WindowDesc, WindowId,
 };
 
 /// evdev codes, from `linux/input-event-codes.h`. Spelled out rather than
@@ -57,6 +57,13 @@ const OUTPUT_SIZE: PhysicalSize = PhysicalSize::new(1920, 1080);
 struct Session {
     shell: Box<dyn Shell>,
     events: Vec<ShellEvent>,
+    /// The longest any single [`pump`](Self::pump) has taken.
+    ///
+    /// `Shell::pump` promises to be finite and non-blocking, and the clipboard
+    /// is the first thing in this backend that could break that promise — it
+    /// reads a pipe another application writes. Recording it here means every
+    /// test that pastes is also a test that the frame loop kept running.
+    slowest_pump: Duration,
 }
 
 impl Session {
@@ -67,12 +74,15 @@ impl Session {
         Self {
             shell,
             events: Vec::new(),
+            slowest_pump: Duration::ZERO,
         }
     }
 
     fn pump(&mut self) {
+        let started = Instant::now();
         let events = &mut self.events;
         self.shell.pump(&mut |event| events.push(event));
+        self.slowest_pump = self.slowest_pump.max(started.elapsed());
     }
 
     /// Pumps until `ready`, or fails naming what never happened.
@@ -617,9 +627,9 @@ fn capabilities_are_honest_about_what_the_compositor_advertises() {
         "xdg-decoration"
     );
     assert!(caps.contains(ShellCaps::TEXT_IME), "libxkbcommon resolved");
-    // Still absent until P0.5c binds `wl_data_device`.
-    assert!(!caps.contains(ShellCaps::CLIPBOARD));
-    assert!(!caps.contains(ShellCaps::DRAG_DROP));
+    // P0.5c: both come from `wl_data_device_manager`, which sway advertises.
+    assert!(caps.contains(ShellCaps::CLIPBOARD));
+    assert!(caps.contains(ShellCaps::DRAG_DROP));
     // Wayland has no aspect hint at all — the renderer letterboxes instead.
     assert!(!caps.contains(ShellCaps::ASPECT_HINT_HONORED));
 
@@ -631,11 +641,32 @@ fn capabilities_are_honest_about_what_the_compositor_advertises() {
             .is_err(),
         "a missing capability produces an error naming it, not a silent no-op"
     );
+
+    // This window is unmapped, so it has never had keyboard focus, so the
+    // compositor has never told this client what is on the clipboard. That is
+    // *not* an empty clipboard, and the seam now says so in two ways.
     assert!(
-        session
-            .shell
-            .clipboard_request(window, crcbl_shell::MimeType::TextUtf8)
-            .is_err()
+        !session.shell.clipboard_readable(window),
+        "a window that cannot receive wl_data_device.selection is not readable"
+    );
+    let request = session
+        .shell
+        .clipboard_request(window, crcbl_shell::MimeType::TextUtf8)
+        .expect("the capability is present, so the read is accepted");
+    // Held rather than answered: obligation 5. It still *ends*, which is
+    // obligation 4 — a request with no answer is a UI stuck on "pasting…".
+    session.pump_until("the held read to give up", |session| {
+        session.clipboard_answer(request).is_some()
+    });
+    let (mime, content) = session.clipboard_answer(request).expect("answered");
+    assert_eq!(
+        content,
+        crcbl_shell::ClipboardContent::Unavailable,
+        "never readable is not the same as empty"
+    );
+    assert!(
+        mime.matches(crcbl_shell::MimeType::TextUtf8),
+        "the answer names the format that was asked for"
     );
     // Title and constraints are in this slice and must work.
     session.shell.set_title(window, "renamed").expect("title");
@@ -697,7 +728,13 @@ impl Session {
     /// cursor to the middle of the output and hoped would be a flake. A
     /// borderless window covers the output, so the centre is always inside it.
     fn with_input(&mut self, title: &str) -> (WindowId, VirtualInput) {
-        let window = self.create_mapped(&desc(title, LogicalSize::new(640.0, 360.0)));
+        self.with_input_desc(&desc(title, LogicalSize::new(640.0, 360.0)))
+    }
+
+    /// [`with_input`](Self::with_input) for a window that needs a different
+    /// descriptor — a drop target, above all.
+    fn with_input_desc(&mut self, description: &WindowDesc<'_>) -> (WindowId, VirtualInput) {
+        let window = self.create_mapped(description);
         self.shell
             .set_mode(window, DisplayMode::Borderless { monitor: None })
             .expect("set_mode");
@@ -1546,5 +1583,688 @@ fn aligning_the_event_clock_moves_input_timestamps_onto_the_engine_epoch() {
     );
 
     drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+// ---------------------------------------------------------------------------
+// P0.5c — clipboard and drag-and-drop, with a real second client
+// ---------------------------------------------------------------------------
+
+/// The `app_id` of the *peer* client, so `swaymsg` can tell the two apart when
+/// a test has to move keyboard focus between them.
+const PEER_APP_ID: &str = "sh.kryptic.crcbl.e2e.peer";
+
+/// A window belonging to the peer client.
+fn peer_desc(title: &str) -> WindowDesc<'_> {
+    WindowDesc {
+        title,
+        app_id: PEER_APP_ID,
+        size: LogicalSize::new(480.0, 320.0),
+        ..WindowDesc::default()
+    }
+}
+
+/// Moves keyboard focus to the named application, and fails if sway will not.
+///
+/// Focus is load-bearing rather than cosmetic here: `wl_data_device.selection`
+/// is delivered **only** to the client with keyboard focus on that seat, so a
+/// clipboard test that does not control focus is testing nothing.
+fn focus_app(app_id: &str) {
+    // Anchored, and with the dots escaped: sway matches criteria as **regular
+    // expressions**, unanchored, so a bare `sh.kryptic.crcbl.e2e` also matches
+    // `sh.kryptic.crcbl.e2e.peer` — and focusing "either of the two windows"
+    // is not a test, it is a coin flip.
+    let pattern = format!("^{}$", app_id.replace('.', "\\."));
+    assert!(
+        swaymsg(&[&format!("[app_id=\"{pattern}\"]"), "focus"]),
+        "swaymsg could not focus {app_id}; the clipboard tests need it and must \
+         not quietly pass without it"
+    );
+}
+
+impl Session {
+    /// The answer to one [`Shell::clipboard_request`], if it has arrived.
+    fn clipboard_answer(
+        &self,
+        request: crcbl_shell::ClipboardRequestId,
+    ) -> Option<(crcbl_shell::ReceivedMime, crcbl_shell::ClipboardContent)> {
+        self.events.iter().find_map(|event| match event {
+            ShellEvent::ClipboardData {
+                request: which,
+                mime,
+                content,
+                ..
+            } if *which == request => Some((mime.clone(), content.clone())),
+            _ => None,
+        })
+    }
+
+    /// Every file dropped so far.
+    fn drops(&self) -> Vec<(std::path::PathBuf, Option<crcbl_shell::PhysicalPoint>)> {
+        self.events
+            .iter()
+            .filter_map(|event| match event {
+                ShellEvent::DroppedFile { path, position, .. } => Some((path.clone(), *position)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A focused, mapped window with a keyboard on its seat, and **not**
+    /// fullscreen.
+    ///
+    /// The clipboard needs focus (that is where `wl_data_device.selection` is
+    /// delivered) and a serial (that is what `set_selection` quotes), and
+    /// neither needs the pointer. Fullscreen is worse than unnecessary here: a
+    /// fullscreen window on sway keeps focus when a second client maps a
+    /// window, so a peer would never receive the selection at all.
+    fn with_keyboard(&mut self, title: &str) -> (WindowId, VirtualInput) {
+        let window = self.create_mapped(&desc(title, LogicalSize::new(640.0, 360.0)));
+        let input = VirtualInput::attach(&*self.shell, window).expect("virtual devices");
+        // Waited for by *typing*, not by reading `WindowState::focused`. The
+        // flag is already true from `xdg_toplevel.state.activated`, which a
+        // compositor sets before the seat even has a keyboard — and what a
+        // clipboard write needs is not focus, it is a **serial**, which only a
+        // real input event carries. A key that comes back is proof of both.
+        let deadline = Instant::now() + WAIT;
+        loop {
+            input.tap(evdev::KEY_A);
+            self.pump();
+            if self
+                .events
+                .iter()
+                .any(|event| matches!(event, ShellEvent::Key { .. }))
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for a key to reach {title}, so the seat has \
+                 no serial to claim the selection with"
+            );
+            self.shell.wait_events(Some(Duration::from_millis(20)));
+        }
+        self.take_names();
+        (window, input)
+    }
+
+    /// A focused, mapped, fullscreen window with input devices, which either
+    /// does or does not accept drops.
+    fn dropping_window(&mut self, title: &str, accept_drops: bool) -> (WindowId, VirtualInput) {
+        self.with_input_desc(&WindowDesc {
+            accept_drops,
+            ..desc(title, LogicalSize::new(640.0, 360.0))
+        })
+    }
+
+    /// A mapped window on this connection that the compositor has focused.
+    fn mapped_peer_window(&mut self, title: &str) -> WindowId {
+        let window = self.create_mapped(&peer_desc(title));
+        // Explicitly, rather than trusting sway's new-window focus policy,
+        // which depends on what else is on the workspace.
+        focus_app(PEER_APP_ID);
+        self.pump_until("the peer window to be focused", |session| {
+            session
+                .shell
+                .window_state(window)
+                .is_ok_and(|state| state.focused)
+        });
+        window
+    }
+}
+
+/// Pumps two clients until `ready`, or fails naming what never happened.
+///
+/// Both have to be pumped: a clipboard transfer is one client writing while the
+/// other reads, and a test that only drove the reader would deadlock against
+/// its own peer — which is exactly the failure a blocking implementation has
+/// against a real one.
+fn pump_pair(
+    ours: &mut Session,
+    peer: &mut Session,
+    what: &str,
+    ready: impl Fn(&Session, &Session) -> bool,
+) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        ours.pump();
+        peer.pump();
+        if ready(ours, peer) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {WAIT:?} waiting for {what}; ours: {:?}, peer: {:?}",
+            ours.names(),
+            peer.names()
+        );
+        ours.shell.wait_events(Some(Duration::from_millis(10)));
+        peer.shell.wait_events(Some(Duration::from_millis(10)));
+    }
+}
+
+/// Pastes once, and returns the bytes.
+///
+/// **There is no retry loop here, and that is the assertion.** Before P0.5c's
+/// seam revision there had to be one: `wl_data_device.selection` is
+/// asynchronous and focus-gated, so a request issued a moment early was
+/// answered "there is nothing to paste", and only asking again got the bytes —
+/// a loop no editor's paste command would ever contain. The backend now holds
+/// the request until it can answer it, so one request is enough, and anything
+/// other than [`ClipboardContent::Bytes`] here is a regression rather than a
+/// reason to ask again.
+fn paste_bytes(
+    ours: &mut Session,
+    mut peer: Option<&mut Session>,
+    window: WindowId,
+    mime: crcbl_shell::MimeType,
+    what: &str,
+) -> (crcbl_shell::ReceivedMime, Vec<u8>) {
+    let request = ours
+        .shell
+        .clipboard_request(window, mime)
+        .expect("clipboard capability");
+    let deadline = Instant::now() + WAIT;
+    loop {
+        ours.pump();
+        if let Some(peer) = peer.as_deref_mut() {
+            peer.pump();
+        }
+        if let Some((spelling, content)) = ours.clipboard_answer(request) {
+            let crcbl_shell::ClipboardContent::Bytes(bytes) = content else {
+                panic!(
+                    "{what} was answered {} on the first and only request; \
+                     the seam is back to making consumers retry",
+                    content.name()
+                );
+            };
+            return (spelling, bytes);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}; events: {:?}",
+            ours.names()
+        );
+        ours.shell.wait_events(Some(Duration::from_millis(10)));
+        if let Some(peer) = peer.as_deref_mut() {
+            peer.shell.wait_events(Some(Duration::from_millis(10)));
+        }
+    }
+}
+
+/// We publish a selection and a genuinely separate Wayland client reads it.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_selection_we_publish_is_read_by_another_client() {
+    let mut session = Session::open();
+    let (window, input) = session.with_keyboard("crcbl e2e copy");
+
+    // `set_selection` quotes an input serial, so a window that has never been
+    // touched cannot claim the clipboard. This one has keyboard focus, which is
+    // where its serial comes from.
+    session
+        .shell
+        .clipboard_offer(
+            window,
+            &[
+                crcbl_shell::ClipboardOffer::text("engine text"),
+                crcbl_shell::ClipboardOffer::ron("(node:1)"),
+            ],
+        )
+        .expect("claiming the selection");
+    session.pump();
+
+    // A second connection is a second client as far as the compositor is
+    // concerned: its own `wl_data_device`, its own offers, its own everything.
+    let mut peer = Session::open();
+    let peer_window = peer.mapped_peer_window("crcbl e2e paste");
+
+    // The peer only receives `wl_data_device.selection` once it has focus,
+    // which mapping its window gave it.
+    let (mime, data) = paste_bytes(
+        &mut peer,
+        Some(&mut session),
+        peer_window,
+        crcbl_shell::MimeType::CrcblRon,
+        "the peer's paste",
+    );
+    assert_eq!(
+        data, b"(node:1)",
+        "the lossless engine format crossed the compositor intact"
+    );
+    assert_eq!(mime.as_str(), "application/x-crcbl+ron");
+
+    // The other half of "offer both": a peer that wants text gets text, from
+    // the same selection, without a second copy.
+    let (_, text) = paste_bytes(
+        &mut peer,
+        Some(&mut session),
+        peer_window,
+        crcbl_shell::MimeType::TextUtf8,
+        "the peer's text paste",
+    );
+    assert_eq!(text, b"engine text");
+
+    drop(input);
+    peer.shell.destroy_window(peer_window).expect("destroy");
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// Another client publishes, we read — including a format this engine cannot
+/// name and a spelling it would never produce.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_peers_selection_arrives_spelled_the_way_the_peer_spelled_it() {
+    let mut session = Session::open();
+    let (window, input) = session.with_keyboard("crcbl e2e paste");
+
+    let mut peer = Session::open();
+    let peer_window = peer.mapped_peer_window("crcbl e2e copy");
+    // Bare `text/plain` — the spelling GTK and every X11 client use, and one
+    // `MimeType::TextUtf8` never produces — plus a vendor format the engine has
+    // no variant for at all. This is what `ReceivedMime` exists for.
+    peer.shell
+        .clipboard_offer(
+            peer_window,
+            &[
+                crcbl_shell::ClipboardOffer {
+                    mime: crcbl_shell::MimeType::Other("text/plain"),
+                    bytes: b"from another application",
+                },
+                crcbl_shell::ClipboardOffer {
+                    mime: crcbl_shell::MimeType::Other("application/vnd.some-editor.scene+json"),
+                    bytes: b"{\"scene\":1}",
+                },
+            ],
+        )
+        .expect("the peer claims the selection");
+    peer.pump();
+
+    // The selection reaches us only when we have focus again.
+    focus_app(APP_ID);
+    pump_pair(&mut session, &mut peer, "focus to come back", |ours, _| {
+        ours.shell
+            .window_state(window)
+            .is_ok_and(|state| state.focused)
+    });
+
+    let (mime, data) = paste_bytes(
+        &mut session,
+        Some(&mut peer),
+        window,
+        crcbl_shell::MimeType::TextUtf8,
+        "our paste",
+    );
+    assert_eq!(data, b"from another application");
+    assert_eq!(
+        mime.as_str(),
+        "text/plain",
+        "the peer's spelling survives; canonicalizing it would make an X11 \
+         backend answer a target atom nobody asked for"
+    );
+    assert!(
+        mime.matches(crcbl_shell::MimeType::TextUtf8),
+        "and a paste handler asking for utf-8 text still recognises it"
+    );
+    assert_ne!(
+        mime,
+        crcbl_shell::ReceivedMime::from(crcbl_shell::MimeType::TextUtf8),
+        "which is not the same thing as being equal to our own spelling"
+    );
+
+    // A format the engine cannot name in its own source is still readable, and
+    // still reported with the string the peer chose.
+    let (mime, data) = paste_bytes(
+        &mut session,
+        Some(&mut peer),
+        window,
+        crcbl_shell::MimeType::Other("application/vnd.some-editor.scene+json"),
+        "the foreign paste",
+    );
+    assert_eq!(data, b"{\"scene\":1}");
+    assert_eq!(mime.recognized(), None, "not a format the engine knows");
+    assert_eq!(mime.as_str(), "application/vnd.some-editor.scene+json");
+
+    // A format nobody offered is an answer, not an error, and not a hang.
+    let missing = session
+        .shell
+        .clipboard_request(window, crcbl_shell::MimeType::UriList)
+        .expect("clipboard capability");
+    pump_pair(&mut session, &mut peer, "the empty answer", |ours, _| {
+        ours.clipboard_answer(missing).is_some()
+    });
+    assert_eq!(
+        session.clipboard_answer(missing).expect("answered").1,
+        crcbl_shell::ClipboardContent::Empty,
+        "the clipboard is readable and holds no uri-list — an answer, not a failure"
+    );
+
+    drop(input);
+    peer.shell.destroy_window(peer_window).expect("destroy");
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// A peer that takes the descriptor and never writes must not stall the frame
+/// loop — and must eventually answer.
+///
+/// This is the failure a blocking `read` on the event-loop thread turns into a
+/// hang, and there is no protocol event for it: the transfer is over a pipe the
+/// compositor only brokered.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_peer_that_never_writes_does_not_block_the_event_loop() {
+    let mut session = Session::open();
+    let (window, input) = session.with_keyboard("crcbl e2e stall");
+
+    let mut peer = Session::open();
+    let peer_window = peer.mapped_peer_window("crcbl e2e stall peer");
+    peer.shell
+        .clipboard_offer(
+            peer_window,
+            &[crcbl_shell::ClipboardOffer::text("never delivered")],
+        )
+        .expect("the peer claims the selection");
+    peer.pump();
+
+    focus_app(APP_ID);
+    pump_pair(&mut session, &mut peer, "focus to come back", |ours, _| {
+        ours.shell
+            .window_state(window)
+            .is_ok_and(|state| state.focused)
+    });
+
+    // From here the peer is never pumped again: its `wl_data_source.send`
+    // arrives and is never serviced, so nothing is ever written to the pipe.
+    let request = session
+        .shell
+        .clipboard_request(window, crcbl_shell::MimeType::TextUtf8)
+        .expect("clipboard capability");
+
+    session.slowest_pump = Duration::ZERO;
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while session.clipboard_answer(request).is_none() {
+        session.pump();
+        assert!(
+            Instant::now() < deadline,
+            "a stalled transfer must answer rather than staying outstanding forever"
+        );
+        // A short blocking wait, which is what an editor idling at zero frames
+        // per second does. It must not swallow the transfer's deadline.
+        session.shell.wait_events(Some(Duration::from_millis(20)));
+    }
+    assert!(
+        session.slowest_pump < Duration::from_millis(250),
+        "no single pump may wait on the peer; the slowest took {:?}",
+        session.slowest_pump
+    );
+    assert_eq!(
+        session.clipboard_answer(request).expect("answered").1,
+        crcbl_shell::ClipboardContent::Unavailable,
+        "a transfer that never delivered is a failure, not an empty clipboard — \
+         there is something on it, we just could not get it"
+    );
+
+    drop(input);
+    peer.shell.destroy_window(peer_window).expect("destroy");
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// A drop delivers a real path, parsed out of a `text/uri-list`.
+///
+/// The drag is started by [`DragSource`], which is harness scaffolding rather
+/// than shell — see its docs for why the drag *source* is not in this slice.
+/// The payload is transferred over a pipe between two objects on the same
+/// connection, which is also the self-transfer case that deadlocks a backend
+/// reading on its event-loop thread.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_drop_delivers_a_path_parsed_out_of_a_uri_list() {
+    let mut session = Session::open();
+    let (window, input) = session.dropping_window("crcbl e2e drop", true);
+    let mut drag = DragSource::attach(&*session.shell, window).expect("drag origin");
+
+    // The implicit grab: a press over our own surface, which is what a
+    // compositor requires before it will start a drag at all.
+    input.move_to(400, 300, OUTPUT_SIZE);
+    input.button(evdev::BTN_LEFT, true);
+    session.pump_until("the button press to reach the drag origin", |_| {
+        drag.press_serial() != 0
+    });
+
+    // Two files and a comment line, with a percent-encoded space: what a file
+    // manager sends, rather than what is convenient to parse.
+    let uri_list = b"#dropped\r\nfile:///tmp/crcbl%20e2e.ron\r\nfile:///tmp/second.png\r\n";
+    drag.start(&*session.shell, window, c"text/uri-list", uri_list)
+        .expect("start_drag");
+    session.settle(Duration::from_millis(200));
+
+    // Move under the grab so the compositor sends `enter`/`motion`, then let go.
+    input.move_to(900, 500, OUTPUT_SIZE);
+    session.settle(Duration::from_millis(100));
+    input.button(evdev::BTN_LEFT, false);
+
+    session.pump_until("the dropped files", |session| session.drops().len() >= 2);
+    let drops = session.drops();
+    assert_eq!(
+        drops[0].0,
+        std::path::PathBuf::from("/tmp/crcbl e2e.ron"),
+        "percent-encoding is decoded and the comment line is not a file"
+    );
+    assert_eq!(drops[1].0, std::path::PathBuf::from("/tmp/second.png"));
+    let position = drops[0].1.expect("a drop has a position");
+    assert!(
+        position.x > 0.0 && position.y > 0.0,
+        "the drop position is where the pointer was, in window pixels: {position:?}"
+    );
+    assert!(
+        drag.was_asked_for_data(),
+        "the source was asked for the payload, so the transfer was real"
+    );
+
+    drop(drag);
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// A window that did not ask for drops does not get them.
+///
+/// `WindowDesc::accept_drops` is off by default, and the reason it is a request
+/// rather than a note is here: the source is told we accept nothing, so its
+/// cursor says so, and the payload is never even read.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_window_that_did_not_ask_for_drops_receives_none() {
+    let mut session = Session::open();
+    let (window, input) = session.dropping_window("crcbl e2e no drop", false);
+    let mut drag = DragSource::attach(&*session.shell, window).expect("drag origin");
+
+    input.move_to(400, 300, OUTPUT_SIZE);
+    input.button(evdev::BTN_LEFT, true);
+    session.pump_until("the button press to reach the drag origin", |_| {
+        drag.press_serial() != 0
+    });
+    drag.start(
+        &*session.shell,
+        window,
+        c"text/uri-list",
+        b"file:///tmp/rejected.ron\r\n",
+    )
+    .expect("start_drag");
+    session.settle(Duration::from_millis(200));
+    input.move_to(900, 500, OUTPUT_SIZE);
+    session.settle(Duration::from_millis(100));
+    input.button(evdev::BTN_LEFT, false);
+
+    // The only way to assert that something does *not* happen is to wait.
+    session.settle(Duration::from_millis(800));
+    assert!(
+        session.drops().is_empty(),
+        "a window without accept_drops must not receive DroppedFile: {:?}",
+        session.drops()
+    );
+    assert!(
+        !drag.was_asked_for_data(),
+        "and the payload must never even be requested"
+    );
+
+    drop(drag);
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// Pasting our **own** selection, which is the case that deadlocks a backend
+/// that reads on the event-loop thread.
+///
+/// The compositor asks *this* client for the bytes, over a pipe *this* client
+/// is reading, on the connection it is pumping. A blocking read waits for a
+/// write that only a later pump could perform, and a blocking write waits for a
+/// read that only a later pump could perform; the payload here is eight times
+/// the size of a pipe buffer, so both halves have to be interleaved for it to
+/// complete at all. `docs/plan/15-windowing.md`'s clipboard notes name the same
+/// hazard for X11, where the owner answering its own `ConvertSelection` is the
+/// textbook deadlock.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_client_can_paste_its_own_selection_without_deadlocking() {
+    let mut session = Session::open();
+    let (window, input) = session.with_keyboard("crcbl e2e self paste");
+
+    // 512 KiB — a Linux pipe holds 64.
+    let payload: String = core::iter::repeat_n("crcbl", 512 * 1024 / 5 + 1).collect();
+    session
+        .shell
+        .clipboard_offer(window, &[crcbl_shell::ClipboardOffer::text(&payload)])
+        .expect("claiming the selection");
+    session.pump();
+
+    session.slowest_pump = Duration::ZERO;
+    let (mime, data) = paste_bytes(
+        &mut session,
+        None,
+        window,
+        crcbl_shell::MimeType::TextUtf8,
+        "our own selection, pasted back",
+    );
+    assert_eq!(
+        data.len(),
+        payload.len(),
+        "every byte came back, across as many pipe-fulls as it took"
+    );
+    assert_eq!(data, payload.as_bytes());
+    assert!(mime.matches(crcbl_shell::MimeType::TextUtf8));
+    assert!(
+        session.slowest_pump < Duration::from_millis(500),
+        "no single pump may stall on the transfer; the slowest took {:?}",
+        session.slowest_pump
+    );
+
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// A read issued while another client has focus is **held** until focus comes
+/// back, and then answered with the bytes.
+///
+/// This is the exact race that used to be papered over by a retry loop in the
+/// suite, driven deliberately instead: at the moment of asking, this client
+/// cannot see the clipboard at all, and the seam's obligation 5 is that the
+/// request waits rather than being answered "there is nothing to paste".
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_read_issued_before_the_clipboard_is_readable_is_held_not_answered_empty() {
+    let mut session = Session::open();
+    let (window, input) = session.with_keyboard("crcbl e2e held");
+
+    let mut peer = Session::open();
+    let peer_window = peer.mapped_peer_window("crcbl e2e held peer");
+    peer.shell
+        .clipboard_offer(
+            peer_window,
+            &[crcbl_shell::ClipboardOffer::text("published while focused")],
+        )
+        .expect("the peer claims the selection");
+    peer.pump();
+
+    // The peer has focus, so this client is not told what is on the clipboard.
+    // The seam says so out loud rather than leaving it to be discovered.
+    pump_pair(
+        &mut session,
+        &mut peer,
+        "focus to move to the peer",
+        |ours, _| !ours.shell.clipboard_readable(window),
+    );
+    assert!(
+        !session.shell.clipboard_readable(window),
+        "a background window cannot read the Wayland clipboard"
+    );
+
+    let request = session
+        .shell
+        .clipboard_request(window, crcbl_shell::MimeType::TextUtf8)
+        .expect("a read is still accepted — it is held, not refused");
+    // Held: several frames go by with no answer at all. Answering `Empty` here
+    // would be the lie the whole revision exists to prevent.
+    for _ in 0..10 {
+        session.pump();
+        peer.pump();
+        assert!(
+            session.clipboard_answer(request).is_none(),
+            "an unreadable clipboard must not be answered as an empty one"
+        );
+        session.shell.wait_events(Some(Duration::from_millis(5)));
+    }
+
+    // Focus returns — which is all that was missing — and the *same* request
+    // answers, with no second request from the caller.
+    focus_app(APP_ID);
+    pump_pair(
+        &mut session,
+        &mut peer,
+        "the held read to answer",
+        |ours, _| ours.clipboard_answer(request).is_some(),
+    );
+    let (_, content) = session.clipboard_answer(request).expect("answered");
+    assert_eq!(
+        content.bytes(),
+        Some(&b"published while focused"[..]),
+        "the held request was answered with the bytes, not with Empty"
+    );
+    assert!(
+        session.shell.clipboard_readable(window),
+        "and the clipboard reads as readable again"
+    );
+
+    drop(input);
+    peer.shell.destroy_window(peer_window).expect("destroy");
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// Claiming the clipboard without an input serial is refused by name.
+///
+/// Not a bug and not a backend quirk: a Wayland client may not take the
+/// selection without a serial from real user input, which is what stops a
+/// background process stealing the clipboard. The seam has a named error for it
+/// so that a caller can tell "ask the user to press the key again" apart from
+/// "this is broken", and so that an X11 backend which never returns it is
+/// obviously correct.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn claiming_the_clipboard_without_user_input_is_refused_by_name() {
+    let mut session = Session::open();
+    // A window that exists and has never been touched: no key, no button, so
+    // no serial on any seat.
+    let window = session.create(&desc("crcbl e2e serial", LogicalSize::new(320.0, 240.0)));
+    session.pump_until("the first configure", |session| {
+        session.size(window).is_some()
+    });
+
+    let refused = session
+        .shell
+        .clipboard_offer(window, &[crcbl_shell::ClipboardOffer::text("stolen")]);
+    assert!(
+        matches!(refused, Err(ShellError::NeedsUserInteraction { .. })),
+        "expected a named refusal, got {refused:?}"
+    );
+
     session.shell.destroy_window(window).expect("destroy");
 }

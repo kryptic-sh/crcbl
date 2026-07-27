@@ -30,8 +30,8 @@ use std::time::Duration;
 use crcbl_core::time::{ManualTime, TimeSource};
 use crcbl_core::{EventTime, FrameClock, SurfaceTarget};
 use crcbl_shell::{
-    AspectRatio, ButtonState, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon,
-    DisplayMode, HeadlessShell, KeyCode, LogicalSize, MimeType, MonitorId, MonitorInfo,
+    AspectRatio, ButtonState, ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply,
+    CursorIcon, DisplayMode, HeadlessShell, KeyCode, LogicalSize, MimeType, MonitorId, MonitorInfo,
     PhysicalPoint, PhysicalSize, PointerButton, PointerMode, ReceivedMime, ScrollDelta, Shell,
     ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints, WindowDesc, WindowId,
     WindowState,
@@ -417,24 +417,29 @@ fn a_clipboard_read_completes_through_the_event_stream() {
 
     // The caller keeps running; the answer arrives on a later pump, exactly as
     // it would after an X11 INCR transfer.
-    let mut pasted: Option<Vec<u8>> = None;
+    let mut pasted: Option<ClipboardContent> = None;
     for _ in 0..4 {
         shell.pump(&mut |event: ShellEvent| {
             if let ShellEvent::ClipboardData {
                 request: answered,
-                data,
+                content,
                 ..
             } = event
                 && answered == request
             {
-                pasted = data;
+                pasted = Some(content);
             }
         });
         if pasted.is_some() {
             break;
         }
     }
-    assert_eq!(pasted.as_deref(), Some(&b"(name:\"Node\")"[..]));
+    // No retry loop, and none is permitted: one request, one answer. See the
+    // `Shell` trait's implementor obligations 4 and 5.
+    assert_eq!(
+        pasted.as_ref().and_then(ClipboardContent::bytes),
+        Some(&b"(name:\"Node\")"[..])
+    );
 }
 
 /// Runtime backend selection: the factory exists, is honest about what it has,
@@ -678,22 +683,22 @@ fn a_foreign_clipboard_mime_survives_the_seam() {
         .clipboard_request(window, MimeType::TextUtf8)
         .expect("request");
 
-    let mut answer: Option<(ReceivedMime, Option<Vec<u8>>)> = None;
+    let mut answer: Option<(ReceivedMime, ClipboardContent)> = None;
     shell.pump(&mut |event: ShellEvent| {
         if let ShellEvent::ClipboardData {
             request: answered,
             mime,
-            data,
+            content,
             ..
         } = event
             && answered == request
         {
-            answer = Some((mime, data));
+            answer = Some((mime, content));
         }
     });
 
-    let (mime, data) = answer.expect("the request was answered");
-    assert_eq!(data.as_deref(), Some(&b"from another app"[..]));
+    let (mime, content) = answer.expect("the request was answered");
+    assert_eq!(content.bytes(), Some(&b"from another app"[..]));
     // Verbatim, not canonicalized — an X11 backend has to echo the exact target
     // atom back.
     assert_eq!(mime.as_str(), "text/plain");

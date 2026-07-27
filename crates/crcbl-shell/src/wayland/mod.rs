@@ -28,9 +28,20 @@
 //! | `xdg-output-v1` | [`MonitorInfo::bounds`] that means something above scale 1 |
 //! | `xdg-decoration-v1` | server-side title bars where the compositor does them |
 //!
-//! Still deliberately absent: `data-device` (clipboard and drag-and-drop,
-//! P0.5c), touch, tablet and IME pre-edit. [`ShellCaps`] reflects that exactly
-//! — see [`WaylandShell::caps`].
+//! P0.5c added `wl_data_device_manager` and the three interfaces under it:
+//!
+//! | Protocol | What it gives the engine |
+//! | --- | --- |
+//! | `wl_data_device` + `wl_data_offer` | [`Shell::clipboard_request`] → [`ClipboardData`](ShellEvent::ClipboardData), and drops → [`DroppedFile`](ShellEvent::DroppedFile) |
+//! | `wl_data_source` | [`Shell::clipboard_offer`] — we own the selection and produce the bytes on demand |
+//!
+//! Still deliberately absent: touch, tablet, IME pre-edit, the *primary*
+//! selection (`wp_primary_selection_v1` — middle-click paste, which the seam
+//! has no vocabulary for) and starting a drag from one of our own windows. That
+//! last one is a real gap and is stated as one: the destination half is here,
+//! the origin half needs a seam request and a drag icon, and an icon is a
+//! surface with a buffer, which is the renderer's. [`ShellCaps`] reflects all of
+//! this exactly — see [`WaylandShell::caps`].
 //!
 //! # What a real compositor does that `HeadlessShell` does not model
 //!
@@ -70,6 +81,31 @@
 //!    a headless compositor and changes at runtime when a device is plugged
 //!    in. There is no "the keyboard" — there is whatever the seat currently
 //!    has, and it can go away mid-session.
+//! 6. **The clipboard is focus-gated and arrives late.**
+//!    `wl_data_device.selection` is delivered *only* to the client that has
+//!    keyboard focus on that seat, and again whenever focus arrives — so a
+//!    client's knowledge of the clipboard is acquired on focus and goes stale
+//!    when focus leaves, and a background window cannot read the clipboard at
+//!    all. This is what [`Shell::clipboard_readable`] reports and why
+//!    [`clipboard_request`](Shell::clipboard_request) *holds* a read it cannot
+//!    yet answer: answering "empty" would be indistinguishable from an empty
+//!    clipboard, and the end-to-end suite proved the cost of that by needing a
+//!    retry loop no editor would contain.
+//!
+//!    A corollary that only showed up once "held, not empty" was enforced:
+//!    **claiming the selection invalidates what we know until the compositor
+//!    echoes it back.** Between `set_selection` and the `selection` event it
+//!    provokes, this client's own offer describes the clipboard it *replaced*
+//!    — so pasting one's own copy answered `Empty` until
+//!    [`clipboard_offer`](Shell::clipboard_offer) started clearing
+//!    `selection_seen` too.
+//! 7. **Claiming the selection needs an input serial.** A client that has
+//!    received no input on a seat cannot take the clipboard, because
+//!    `set_selection` quotes the serial of the event that caused it and a
+//!    compositor checks it. That is a *feature* — it is what stops a background
+//!    process stealing the clipboard — and it means
+//!    [`clipboard_offer`](Shell::clipboard_offer) can legitimately fail on a
+//!    window nobody has touched.
 //!
 //! # Decision: the shell synthesizes key repeats
 //!
@@ -108,6 +144,8 @@
 //! keyboard, and on a keymap change; and a run that falls more than four
 //! intervals behind resynchronises instead of emitting the backlog.
 
+mod data;
+mod fd;
 pub mod ffi;
 pub mod keymap;
 pub mod protocol;
@@ -127,17 +165,19 @@ use core::ptr::{self, NonNull};
 use core::time::Duration;
 use std::collections::VecDeque;
 use std::ffi::CString;
+use std::os::fd::AsRawFd;
 
 use crcbl_core::input::{ButtonState, DeviceId, Keysym, Modifiers, Scancode, ScrollDelta};
 use crcbl_core::{EventTime, KeyCode, Pool, SurfaceTarget};
 
 use crate::{
-    ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode, LogicalSize, MimeType,
-    MonitorId, MonitorInfo, PhysicalPoint, PhysicalRect, PointerMode, Shell, ShellBackend,
-    ShellCaps, ShellError, ShellEvent, SizeConstraints, WindowConfiguration, WindowDesc, WindowId,
-    WindowState,
+    ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
+    LogicalSize, MimeType, MonitorId, MonitorInfo, PhysicalPoint, PhysicalRect, PointerMode,
+    ReceivedMime, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints,
+    WindowConfiguration, WindowDesc, WindowId, WindowState,
 };
 
+use data::{Delivery, HeldRead, Resolution, Transfer};
 use ffi::{Lib, WlArgument, WlDisplay, WlMessage, WlProxy};
 use protocol::fractional_scale::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1};
 use protocol::pointer_constraints::{
@@ -146,7 +186,8 @@ use protocol::pointer_constraints::{
 use protocol::relative_pointer::{zwp_relative_pointer_manager_v1, zwp_relative_pointer_v1};
 use protocol::viewporter::{wp_viewport, wp_viewporter};
 use protocol::wayland::{
-    wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_surface,
+    wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer, wl_data_source,
+    wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_surface,
 };
 use protocol::xdg_decoration::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1};
 use protocol::xdg_output::{zxdg_output_manager_v1, zxdg_output_v1};
@@ -184,8 +225,26 @@ const XDG_OUTPUT_VERSION: u32 = 3;
 /// `zxdg_decoration_manager_v1` 1 is the whole protocol; 2 only adds an error
 /// code for a case this backend cannot reach (it never orphans a decoration).
 const DECORATION_VERSION: u32 = 1;
+/// `wl_data_device_manager` 3 is the version that has drag-and-drop actions:
+/// `wl_data_offer.set_actions`/`finish` and `wl_data_source.set_actions`. A
+/// version-1 or -2 device works for the clipboard and negotiates no action at
+/// all, which is why every `set_actions` below is version-guarded.
+///
+/// 4 adds only `wl_data_device_manager.release`, a destructor for the manager
+/// itself. This backend destroys the manager proxy client-side at shutdown, on
+/// a connection that is being closed in the same breath, so there is nothing to
+/// tell the compositor and nothing to gain — see [`COMPOSITOR_VERSION`] for the
+/// rule about binding versions the code does not implement.
+const DATA_DEVICE_VERSION: u32 = 3;
 /// `wp_fractional_scale_v1` reports scale as a fraction of this.
 const FRACTIONAL_SCALE_DENOMINATOR: f64 = 120.0;
+/// The longest [`wait_events`](Shell::wait_events) may sleep while a clipboard
+/// transfer is in flight.
+///
+/// The descriptors are in the poll, so a peer that writes wakes the wait
+/// immediately; this bounds only the case where nothing happens at all, so that
+/// [`fd::TIMEOUT`] is reached instead of slept through.
+const TRANSFER_POLL: Duration = Duration::from_millis(50);
 
 // ---------------------------------------------------------------------------
 // Timestamps
@@ -304,6 +363,9 @@ enum ObjectKind {
     Pointer,
     Keyboard,
     RelativePointer,
+    DataDevice,
+    DataOffer,
+    DataSource,
     /// A proxy whose events we deliberately do not read.
     ///
     /// Attaching a do-nothing dispatcher rather than leaving the proxy bare:
@@ -406,6 +468,7 @@ enum RawEvent {
     },
     PointerLeave {
         pointer: usize,
+        serial: u32,
         surface: usize,
     },
     PointerMotion {
@@ -416,6 +479,7 @@ enum RawEvent {
     },
     PointerButton {
         pointer: usize,
+        serial: u32,
         time: u32,
         button: u32,
         state: u32,
@@ -458,20 +522,24 @@ enum RawEvent {
     },
     KeyboardEnter {
         keyboard: usize,
+        serial: u32,
         surface: usize,
     },
     KeyboardLeave {
         keyboard: usize,
+        serial: u32,
         surface: usize,
     },
     KeyboardKey {
         keyboard: usize,
+        serial: u32,
         time: u32,
         key: u32,
         state: u32,
     },
     KeyboardModifiers {
         keyboard: usize,
+        serial: u32,
         depressed: u32,
         latched: u32,
         locked: u32,
@@ -481,6 +549,56 @@ enum RawEvent {
         keyboard: usize,
         rate: i32,
         delay: i32,
+    },
+    /// A `wl_data_offer` has been created. The dispatcher has already attached
+    /// itself to it; see [`Sink::watch`].
+    DataOffer {
+        device: usize,
+        offer: usize,
+    },
+    /// One `wl_data_offer.offer` — a mime type the peer can produce.
+    OfferMime {
+        offer: usize,
+        mime: String,
+    },
+    /// The clipboard changed. `offer` is zero when it was cleared.
+    Selection {
+        device: usize,
+        offer: usize,
+    },
+    DragEnter {
+        device: usize,
+        serial: u32,
+        surface: usize,
+        x: i32,
+        y: i32,
+        offer: usize,
+    },
+    DragLeave {
+        device: usize,
+    },
+    DragMotion {
+        device: usize,
+        time: u32,
+        x: i32,
+        y: i32,
+    },
+    DragDrop {
+        device: usize,
+    },
+    /// A peer wants the bytes behind a format we published.
+    ///
+    /// **Carries an owned file descriptor.** Every path out of
+    /// [`WaylandShell::process_data`] either adopts it or closes it; a leak
+    /// here is one descriptor per paste, in a process that may run for days.
+    SourceSend {
+        source: usize,
+        mime: String,
+        fd: i32,
+    },
+    /// Another client took the selection, so our source is dead.
+    SourceCancelled {
+        source: usize,
     },
 }
 
@@ -492,8 +610,11 @@ enum RawEvent {
 /// this allocation at the same time the two would alias. Keeping the raw
 /// pointer as the sole root means the shell's `&mut Sink` and the dispatcher's
 /// exist at strictly disjoint times.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Sink {
+    /// libwayland, so that [`watch`](Self::watch) can be called from inside the
+    /// dispatcher — see that method for the event that forces it.
+    lib: &'static Lib,
     /// Proxies we have attached the dispatcher to, and what they are.
     objects: Vec<(usize, ObjectKind)>,
     /// Decoded events awaiting the pump.
@@ -501,6 +622,14 @@ struct Sink {
 }
 
 impl Sink {
+    fn new(lib: &'static Lib) -> Self {
+        Self {
+            lib,
+            objects: Vec::new(),
+            events: Vec::new(),
+        }
+    }
+
     fn kind_of(&self, proxy: usize) -> Option<ObjectKind> {
         self.objects
             .iter()
@@ -510,6 +639,44 @@ impl Sink {
 
     fn forget(&mut self, proxy: usize) {
         self.objects.retain(|(candidate, _)| *candidate != proxy);
+    }
+
+    /// Starts routing `proxy`'s events, recording what it is.
+    ///
+    /// # Why this is on the sink rather than only on [`Conn`]
+    ///
+    /// Almost every object this backend owns is created by a request *it*
+    /// sends, so the dispatcher can be attached from ordinary code with the
+    /// connection in hand. `wl_data_offer` is the exception: the **compositor**
+    /// creates it, with `wl_data_device.data_offer`, and then immediately sends
+    /// the `wl_data_offer.offer` events listing its mime types — all inside the
+    /// same `wl_display_dispatch_pending`. An offer whose dispatcher were
+    /// attached afterwards, from `process_raw`, would have missed every one of
+    /// them, and a clipboard offer with no mime types is a clipboard that is
+    /// always empty.
+    ///
+    /// So the dispatcher attaches to the new object from inside itself, which
+    /// is ordinary libwayland usage — `wl_proxy_add_dispatcher` is not
+    /// reentrant into the client — and the reason the sink holds [`Lib`] at
+    /// all.
+    fn watch(&mut self, proxy: *mut WlProxy, kind: ObjectKind) {
+        if proxy.is_null() {
+            return;
+        }
+        self.objects.push((proxy as usize, kind));
+        // SAFETY: `proxy` is live on this connection and has no dispatcher yet;
+        // `dispatch` matches libwayland's `wl_dispatcher_func_t`; and the
+        // `*mut Sink` handed over is this allocation, which outlives every
+        // proxy because `WaylandShell::drop` destroys them all before freeing
+        // it.
+        unsafe {
+            (self.lib.proxy_add_dispatcher)(
+                proxy,
+                dispatch,
+                ptr::from_mut(self).cast(),
+                ptr::null_mut(),
+            );
+        }
     }
 }
 
@@ -731,6 +898,53 @@ unsafe extern "C" fn dispatch(
                 sink.events.extend(decode_keyboard(proxy, event));
             }
         }
+        ObjectKind::DataDevice => {
+            // SAFETY: see the note above the `match`.
+            if let Some(event) = unsafe { wl_data_device::decode_event(opcode, args) } {
+                // `data_offer` introduces an object the compositor created for
+                // us, and its mime types follow immediately — so the dispatcher
+                // has to be attached here rather than after the drain. See
+                // `Sink::watch`.
+                if let wl_data_device::Event::DataOffer { id } = event {
+                    sink.watch(id, ObjectKind::DataOffer);
+                }
+                sink.events.extend(decode_data_device(proxy, event));
+            }
+        }
+        ObjectKind::DataOffer => {
+            // SAFETY: see the note above the `match`.
+            if let Some(wl_data_offer::Event::Offer { mime_type }) =
+                unsafe { wl_data_offer::decode_event(opcode, args) }
+            {
+                sink.events.push(RawEvent::OfferMime {
+                    offer: proxy,
+                    mime: mime_type.to_string_lossy().into_owned(),
+                });
+            }
+            // `source_actions` and `action` report which drag action the
+            // compositor settled on. This backend asks for `copy` and nothing
+            // else, so there is no negotiation to observe.
+        }
+        ObjectKind::DataSource => {
+            // SAFETY: see the note above the `match`.
+            if let Some(event) = unsafe { wl_data_source::decode_event(opcode, args) } {
+                let raw = match event {
+                    wl_data_source::Event::Send { mime_type, fd } => Some(RawEvent::SourceSend {
+                        source: proxy,
+                        mime: mime_type.to_string_lossy().into_owned(),
+                        fd,
+                    }),
+                    wl_data_source::Event::Cancelled => {
+                        Some(RawEvent::SourceCancelled { source: proxy })
+                    }
+                    // `target`, `dnd_drop_performed`, `dnd_finished` and
+                    // `action` are all drag-*source* events, and this backend
+                    // starts no drags outside its own test scaffolding.
+                    _ => None,
+                };
+                sink.events.extend(raw);
+            }
+        }
         ObjectKind::RelativePointer => {
             // SAFETY: see the note above the `match`.
             if let Some(zwp_relative_pointer_v1::Event::RelativeMotion {
@@ -770,8 +984,9 @@ fn decode_pointer(proxy: usize, event: wl_pointer::Event) -> Option<RawEvent> {
             x: surface_x,
             y: surface_y,
         },
-        wl_pointer::Event::Leave { surface, .. } => RawEvent::PointerLeave {
+        wl_pointer::Event::Leave { serial, surface } => RawEvent::PointerLeave {
             pointer: proxy,
+            serial,
             surface: surface as usize,
         },
         wl_pointer::Event::Motion {
@@ -785,12 +1000,13 @@ fn decode_pointer(proxy: usize, event: wl_pointer::Event) -> Option<RawEvent> {
             y: surface_y,
         },
         wl_pointer::Event::Button {
+            serial,
             time,
             button,
             state,
-            ..
         } => RawEvent::PointerButton {
             pointer: proxy,
+            serial,
             time,
             button,
             state,
@@ -839,30 +1055,39 @@ fn decode_keyboard(proxy: usize, event: wl_keyboard::Event<'_>) -> Option<RawEve
         // layer fire a jump for a key the player was holding in another
         // application. `ShellEvent::Focus` already tells a consumer to treat
         // focus as a clean slate.
-        wl_keyboard::Event::Enter { surface, .. } => RawEvent::KeyboardEnter {
+        wl_keyboard::Event::Enter {
+            serial, surface, ..
+        } => RawEvent::KeyboardEnter {
             keyboard: proxy,
+            serial,
             surface: surface as usize,
         },
-        wl_keyboard::Event::Leave { surface, .. } => RawEvent::KeyboardLeave {
+        wl_keyboard::Event::Leave { serial, surface } => RawEvent::KeyboardLeave {
             keyboard: proxy,
+            serial,
             surface: surface as usize,
         },
         wl_keyboard::Event::Key {
-            time, key, state, ..
+            serial,
+            time,
+            key,
+            state,
         } => RawEvent::KeyboardKey {
             keyboard: proxy,
+            serial,
             time,
             key,
             state,
         },
         wl_keyboard::Event::Modifiers {
+            serial,
             mods_depressed,
             mods_latched,
             mods_locked,
             group,
-            ..
         } => RawEvent::KeyboardModifiers {
             keyboard: proxy,
+            serial,
             depressed: mods_depressed,
             latched: mods_latched,
             locked: mods_locked,
@@ -873,6 +1098,48 @@ fn decode_keyboard(proxy: usize, event: wl_keyboard::Event<'_>) -> Option<RawEve
             rate,
             delay,
         },
+    })
+}
+
+/// Splits `wl_data_device`'s six events out of the dispatcher; see
+/// [`decode_pointer`].
+///
+/// The proxy arguments are flattened to addresses here, exactly as the pointer
+/// and keyboard decoders flatten surfaces: the raw pointer must not outlive the
+/// dispatcher, and an address is all `process_data` needs to find the object
+/// again.
+fn decode_data_device(proxy: usize, event: wl_data_device::Event) -> Option<RawEvent> {
+    Some(match event {
+        wl_data_device::Event::DataOffer { id } => RawEvent::DataOffer {
+            device: proxy,
+            offer: id as usize,
+        },
+        wl_data_device::Event::Selection { id } => RawEvent::Selection {
+            device: proxy,
+            offer: id as usize,
+        },
+        wl_data_device::Event::Enter {
+            serial,
+            surface,
+            x,
+            y,
+            id,
+        } => RawEvent::DragEnter {
+            device: proxy,
+            serial,
+            surface: surface as usize,
+            x,
+            y,
+            offer: id as usize,
+        },
+        wl_data_device::Event::Leave => RawEvent::DragLeave { device: proxy },
+        wl_data_device::Event::Motion { time, x, y } => RawEvent::DragMotion {
+            device: proxy,
+            time,
+            x,
+            y,
+        },
+        wl_data_device::Event::Drop => RawEvent::DragDrop { device: proxy },
     })
 }
 
@@ -903,6 +1170,7 @@ struct Conn {
     viewporter: *mut WlProxy,
     relative_pointer_manager: *mut WlProxy,
     pointer_constraints: *mut WlProxy,
+    data_device_manager: *mut WlProxy,
     /// Owned by the connection, reached only as a raw pointer; see [`Sink`].
     sink: *mut Sink,
 }
@@ -924,17 +1192,7 @@ impl Conn {
 
     /// Attaches the dispatcher to `proxy` and records what it is.
     fn watch(&mut self, proxy: *mut WlProxy, kind: ObjectKind) {
-        if proxy.is_null() {
-            return;
-        }
-        self.sink().objects.push((proxy as usize, kind));
-        // SAFETY: `proxy` was just created on this connection and has no
-        // listener yet; `dispatch` matches libwayland's `wl_dispatcher_func_t`;
-        // `self.sink` outlives the proxy because `WaylandShell::drop` destroys
-        // every proxy before freeing it.
-        unsafe {
-            (self.lib.proxy_add_dispatcher)(proxy, dispatch, self.sink.cast(), ptr::null_mut());
-        }
+        self.sink().watch(proxy, kind);
     }
 
     /// Destroys a proxy client-side and stops routing its events.
@@ -1029,7 +1287,11 @@ impl Conn {
     }
 
     /// Non-blocking read + dispatch. See [`WaylandShell::pump`].
-    fn drain(&self, timeout_ms: c_int) -> Result<(), ShellError> {
+    ///
+    /// `aux` are clipboard-transfer pipes: they never drive the protocol, and
+    /// they are in the wait so that a blocked editor wakes when a paste's bytes
+    /// arrive rather than sleeping on them.
+    fn drain(&self, timeout_ms: c_int, aux: &[c_int]) -> Result<(), ShellError> {
         let display = self.display.as_ptr();
         // SAFETY (whole block): `display` is live, and this is libwayland's
         // documented non-blocking read sequence. Every `prepare_read` is paired
@@ -1054,7 +1316,7 @@ impl Conn {
                 (self.lib.display_cancel_read)(display);
                 return Ok(());
             }
-            if !ffi::poll_readable(self.fd, timeout_ms) {
+            if !ffi::poll_readable_with(self.fd, aux, timeout_ms) {
                 (self.lib.display_cancel_read)(display);
             } else if (self.lib.display_read_events)(display) < 0 {
                 return Err(self.disconnected());
@@ -1195,9 +1457,29 @@ struct Seat {
     pointer: *mut WlProxy,
     keyboard: *mut WlProxy,
     relative_pointer: *mut WlProxy,
+    /// This seat's `wl_data_device`, once the manager global exists.
+    ///
+    /// One per seat, not one per shell: the clipboard *is* a seat's, and a
+    /// multi-seat session has as many independent clipboards as it has seats.
+    data: Option<data::Device>,
     /// The serial of the last `wl_pointer.enter`, which `set_cursor` and
     /// `set_shape` both have to quote.
     enter_serial: u32,
+    /// The serial of the most recent input event of **any** kind on this seat.
+    ///
+    /// `wl_data_device.set_selection` takes "the serial of the event that
+    /// triggered this request", and a compositor is entitled to check it —
+    /// wlroots compares it against the serial of the selection currently in
+    /// effect and drops a request that looks older, so a backend that passed
+    /// zero would have its clipboard writes silently ignored. Tracking every
+    /// serial the seat delivers is what makes "the user pressed Ctrl+C, so this
+    /// copy is current" expressible from a seam that has no serials in it.
+    last_serial: u32,
+    /// The serial of the last pointer **press**, which is the implicit grab a
+    /// `wl_data_device.start_drag` has to name. Distinct from
+    /// [`last_serial`](Self::last_serial) because any later event would
+    /// invalidate the grab.
+    press_serial: u32,
     pointer_focus: Option<WindowId>,
     /// Last known position, in the focused window's device pixels.
     pointer_position: PhysicalPoint,
@@ -1216,6 +1498,7 @@ impl core::fmt::Debug for Seat {
             .field("device", &self.device)
             .field("capabilities", &self.capabilities)
             .field("keymap", &self.keymap.is_some())
+            .field("data_device", &self.data.is_some())
             .finish()
     }
 }
@@ -1420,6 +1703,10 @@ struct WlWindow {
     /// The cursor last asked for. The outer `Option` distinguishes "never set",
     /// where the compositor's default stands, from "set to hidden".
     cursor: Option<Option<CursorIcon>>,
+    /// [`WindowDesc::accept_drops`], which this backend enforces rather than
+    /// records: a window that did not ask for drops answers
+    /// `wl_data_offer.accept(null)` and never reads the dropped data.
+    accept_drops: bool,
     focused: bool,
     visible: bool,
     close_pending: bool,
@@ -1470,6 +1757,14 @@ pub struct WaylandShell {
     monitors: Vec<MonitorInfo>,
     next_monitor_id: u32,
     next_device_id: u32,
+    next_request_id: u32,
+    /// Pipes being drained into a clipboard answer or a drop, and the payloads
+    /// being fed into pipes a peer is reading. Both are serviced once per
+    /// [`pump`](Shell::pump) and neither ever blocks; see [`fd`].
+    transfers: Vec<Transfer>,
+    writes: Vec<fd::Writing>,
+    /// Reads accepted while the clipboard was not readable; see [`HeldRead`].
+    held: Vec<HeldRead>,
     queue: VecDeque<ShellEvent>,
     /// The epoch every event timestamp is measured from.
     time: TimeBase,
@@ -1484,6 +1779,10 @@ impl core::fmt::Debug for WaylandShell {
             .field("windows", &self.windows.len())
             .field("monitors", &self.monitors.len())
             .field("seats", &self.seats.len())
+            .field(
+                "transfers",
+                &(self.transfers.len() + self.writes.len() + self.held.len()),
+            )
             .field("queued_events", &self.queue.len())
             .field("connected", &self.lost.is_none())
             .finish()
@@ -1540,7 +1839,8 @@ impl WaylandShell {
             viewporter: ptr::null_mut(),
             relative_pointer_manager: ptr::null_mut(),
             pointer_constraints: ptr::null_mut(),
-            sink: Box::into_raw(Box::new(Sink::default())),
+            data_device_manager: ptr::null_mut(),
+            sink: Box::into_raw(Box::new(Sink::new(lib))),
         };
 
         let mut shell = Self {
@@ -1551,6 +1851,10 @@ impl WaylandShell {
             monitors: Vec::new(),
             next_monitor_id: 1,
             next_device_id: 1,
+            next_request_id: 1,
+            transfers: Vec::new(),
+            writes: Vec::new(),
+            held: Vec::new(),
             queue: VecDeque::new(),
             time: TimeBase::now(),
             caps: ShellCaps::empty(),
@@ -1627,6 +1931,14 @@ impl WaylandShell {
         let constraints = !self.conn.pointer_constraints.is_null();
         caps.set(ShellCaps::POINTER_LOCK, constraints);
         caps.set(ShellCaps::POINTER_CONFINE, constraints);
+        // Both bits come from one global, because on Wayland they are one
+        // protocol: a `wl_data_device` is the clipboard *and* the drop target,
+        // and a compositor cannot offer one without the other. The seam keeps
+        // them separate because other platforms can — a browser has a clipboard
+        // behind a permission prompt and file drops without one.
+        let data_device = !self.conn.data_device_manager.is_null();
+        caps.set(ShellCaps::CLIPBOARD, data_device);
+        caps.set(ShellCaps::DRAG_DROP, data_device);
         // Not "there is an input method": the seam's own wording is that this
         // bit "says only that the commit path is wired to an input method".
         // What it is really asserting here is that composed text can reach the
@@ -1726,6 +2038,13 @@ impl WaylandShell {
             "zwp_pointer_constraints_v1" => {
                 bind!(pointer_constraints, zwp_pointer_constraints_v1, 1);
             }
+            "wl_data_device_manager" => {
+                bind!(
+                    data_device_manager,
+                    wl_data_device_manager,
+                    DATA_DEVICE_VERSION
+                );
+            }
             "wl_output" => {
                 // SAFETY: `registry` is live; see the macro above.
                 let proxy = unsafe {
@@ -1787,7 +2106,10 @@ impl WaylandShell {
                     pointer: ptr::null_mut(),
                     keyboard: ptr::null_mut(),
                     relative_pointer: ptr::null_mut(),
+                    data: None,
                     enter_serial: 0,
+                    last_serial: 0,
+                    press_serial: 0,
                     pointer_focus: None,
                     pointer_position: PhysicalPoint::ORIGIN,
                     frame: PointerFrame::default(),
@@ -1800,6 +2122,37 @@ impl WaylandShell {
             }
             _ => {}
         }
+    }
+
+    /// Gives every seat a `wl_data_device`, once there is a manager to make one
+    /// with.
+    ///
+    /// Called after each registry batch for the same reason
+    /// [`ensure_xdg_outputs`](Self::ensure_xdg_outputs) is: the order globals
+    /// arrive in is the compositor's choice, and a `wl_seat` announced before
+    /// `wl_data_device_manager` would otherwise never get a clipboard. A seat
+    /// that appears *later* is covered too, because it goes through the same
+    /// registry batch.
+    fn ensure_data_devices(&mut self) {
+        if self.conn.data_device_manager.is_null() {
+            return;
+        }
+        let manager = self.conn.data_device_manager;
+        for index in 0..self.seats.len() {
+            if self.seats[index].data.is_some() {
+                continue;
+            }
+            let seat = self.seats[index].proxy;
+            // SAFETY: the manager and the seat are both live on this
+            // connection; `get_data_device` creates the per-seat endpoint.
+            let device = unsafe { wl_data_device_manager::get_data_device(manager, seat) };
+            if device.is_null() {
+                continue;
+            }
+            self.conn.watch(device, ObjectKind::DataDevice);
+            self.seats[index].data = Some(data::Device::new(device));
+        }
+        self.conn.flush();
     }
 
     fn output_mut(&mut self, proxy: usize) -> Option<&mut Output> {
@@ -2008,10 +2361,20 @@ impl WaylandShell {
                 RawEvent::SeatCapabilities { seat, capabilities } => {
                     self.seat_capabilities_changed(seat, capabilities);
                 }
+                event @ (RawEvent::DataOffer { .. }
+                | RawEvent::OfferMime { .. }
+                | RawEvent::Selection { .. }
+                | RawEvent::DragEnter { .. }
+                | RawEvent::DragLeave { .. }
+                | RawEvent::DragMotion { .. }
+                | RawEvent::DragDrop { .. }
+                | RawEvent::SourceSend { .. }
+                | RawEvent::SourceCancelled { .. }) => self.process_data(event),
                 other => self.process_input(other),
             }
         }
         self.ensure_xdg_outputs();
+        self.ensure_data_devices();
         if monitors_dirty {
             self.republish_monitors();
         }
@@ -2151,6 +2514,7 @@ impl WaylandShell {
         if !self.seats[index].keyboard.is_null() {
             self.remove_keyboard(index);
         }
+        self.remove_data_device(index);
         let proxy = self.seats[index].proxy;
         self.conn.destroy(proxy);
         self.seats.remove(index);
@@ -2182,6 +2546,7 @@ impl WaylandShell {
                     keymap::fixed_to_f64(y) * scale,
                 );
                 self.seats[index].enter_serial = serial;
+                self.seats[index].last_serial = serial;
                 self.seats[index].pointer_focus = Some(window);
                 self.seats[index].pointer_position = position;
                 // Wayland requires the cursor to be set again on every enter:
@@ -2200,10 +2565,15 @@ impl WaylandShell {
                     position: Some(position),
                 });
             }
-            RawEvent::PointerLeave { pointer, surface } => {
+            RawEvent::PointerLeave {
+                pointer,
+                serial,
+                surface,
+            } => {
                 let Some(index) = self.seat_index(pointer, |seat| seat.pointer as usize) else {
                     return;
                 };
+                self.seats[index].last_serial = serial;
                 self.flush_pointer_frame(index);
                 let window = self.window_by_proxy(surface, |w| w.surface as usize);
                 self.seats[index].pointer_focus = None;
@@ -2233,6 +2603,7 @@ impl WaylandShell {
             }
             RawEvent::PointerButton {
                 pointer,
+                serial,
                 time,
                 button,
                 state,
@@ -2240,6 +2611,11 @@ impl WaylandShell {
                 let Some(index) = self.seat_index(pointer, |seat| seat.pointer as usize) else {
                     return;
                 };
+                self.seats[index].last_serial = serial;
+                if state == wl_pointer::button_state::PRESSED {
+                    // The implicit grab a drag would be started from.
+                    self.seats[index].press_serial = serial;
+                }
                 // Motion accumulated so far happened *before* this button, and
                 // a click's position is the point of the whole event.
                 self.seats[index].frame.time = time;
@@ -2337,10 +2713,15 @@ impl WaylandShell {
                 fd,
                 size,
             } => self.keymap_changed(keyboard, format, fd, size),
-            RawEvent::KeyboardEnter { keyboard, surface } => {
+            RawEvent::KeyboardEnter {
+                keyboard,
+                serial,
+                surface,
+            } => {
                 let Some(index) = self.seat_index(keyboard, |seat| seat.keyboard as usize) else {
                     return;
                 };
+                self.seats[index].last_serial = serial;
                 self.seats[index].held.clear();
                 let window = self.window_by_proxy(surface, |w| w.surface as usize);
                 self.seats[index].keyboard_focus = window;
@@ -2348,10 +2729,23 @@ impl WaylandShell {
                     self.set_focus(window, true);
                 }
             }
-            RawEvent::KeyboardLeave { keyboard, surface } => {
+            RawEvent::KeyboardLeave {
+                keyboard,
+                serial,
+                surface,
+            } => {
                 let Some(index) = self.seat_index(keyboard, |seat| seat.keyboard as usize) else {
                     return;
                 };
+                self.seats[index].last_serial = serial;
+                // Our knowledge of the clipboard goes with the focus: another
+                // client may replace the selection while we are not looking,
+                // and the compositor will not tell us until focus comes back.
+                // Reads issued in the meantime are held rather than answered
+                // from a stale offer.
+                if let Some(device) = self.seats[index].data.as_mut() {
+                    device.selection_seen = false;
+                }
                 // Focus loss ends every repeat: nothing will deliver the
                 // release, and a shell that kept fabricating presses would hold
                 // a key down in a window that is not even focused.
@@ -2364,12 +2758,14 @@ impl WaylandShell {
             }
             RawEvent::KeyboardKey {
                 keyboard,
+                serial,
                 time,
                 key,
                 state,
-            } => self.key_event(keyboard, time, key, state),
+            } => self.key_event(keyboard, serial, time, key, state),
             RawEvent::KeyboardModifiers {
                 keyboard,
+                serial,
                 depressed,
                 latched,
                 locked,
@@ -2378,6 +2774,7 @@ impl WaylandShell {
                 let Some(index) = self.seat_index(keyboard, |seat| seat.keyboard as usize) else {
                     return;
                 };
+                self.seats[index].last_serial = serial;
                 if let Some(keymap) = self.seats[index].keymap.as_mut() {
                     keymap.update(depressed, latched, locked, group);
                 }
@@ -2407,7 +2804,7 @@ impl WaylandShell {
         let Some(index) = index else {
             // The keyboard went away between the event and the drain. The
             // descriptor is still ours and still has to be returned.
-            xkb::close_fd(fd);
+            fd::close(fd);
             return;
         };
         // A layout switch invalidates which key was repeating — the keysym it
@@ -2416,7 +2813,7 @@ impl WaylandShell {
         if format != wl_keyboard::keymap_format::XKB_V1 {
             // `no_keymap` is a real value: a compositor may say "there is no
             // layout at all". Keys still map to `KeyCode`; see `xkb`.
-            xkb::close_fd(fd);
+            fd::close(fd);
             self.seats[index].keymap = None;
             return;
         }
@@ -2434,10 +2831,15 @@ impl WaylandShell {
     }
 
     /// One `wl_keyboard.key`.
-    fn key_event(&mut self, keyboard: usize, time: u32, key: u32, state: u32) {
+    fn key_event(&mut self, keyboard: usize, serial: u32, time: u32, key: u32, state: u32) {
         let Some(index) = self.seat_index(keyboard, |seat| seat.keyboard as usize) else {
             return;
         };
+        // Recorded before the focus check below: a key pressed while no window
+        // of ours has focus still advances the seat's serial, and a
+        // `set_selection` quoting a stale one is a clipboard write a compositor
+        // may drop.
+        self.seats[index].last_serial = serial;
         let Some(window) = self.seats[index].keyboard_focus else {
             return;
         };
@@ -2988,6 +3390,648 @@ impl WaylandShell {
         self.conn.flush();
     }
 
+    // -----------------------------------------------------------------------
+    // Clipboard and drag-and-drop
+    // -----------------------------------------------------------------------
+
+    /// The seat whose `wl_data_device` is `proxy`.
+    fn data_seat(&self, proxy: usize) -> Option<usize> {
+        self.seats.iter().position(|seat| {
+            seat.data
+                .as_ref()
+                .is_some_and(|device| device.proxy as usize == proxy)
+        })
+    }
+
+    /// The seat whose `wl_data_source` is `proxy`.
+    fn source_seat(&self, proxy: usize) -> Option<usize> {
+        self.seats.iter().position(|seat| {
+            seat.data
+                .as_ref()
+                .and_then(|device| device.source.as_ref())
+                .is_some_and(|source| source.proxy as usize == proxy)
+        })
+    }
+
+    /// Seats in the order a clipboard operation for `window` should try them.
+    ///
+    /// The clipboard belongs to a **seat**, and the seam names a *window*. The
+    /// bridge is focus: the seat that is typing into this window is the one
+    /// whose Ctrl+C this is. Seats that are not focused on it come after, so a
+    /// single-seat session — every desktop — behaves identically either way,
+    /// and a multi-seat one prefers the right clipboard instead of the first.
+    fn seats_for_window(&self, window: WindowId) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.seats.len())
+            .filter(|index| self.seats[*index].data.is_some())
+            .collect();
+        order.sort_by_key(|index| {
+            let seat = &self.seats[*index];
+            match (seat.keyboard_focus, seat.pointer_focus) {
+                (Some(focused), _) if focused == window => 0,
+                (_, Some(hovered)) if hovered == window => 1,
+                _ => 2,
+            }
+        });
+        order
+    }
+
+    /// What this shell currently knows about the clipboard, for `window` and
+    /// `mime`.
+    ///
+    /// The three-way answer the seam's obligation 5 turns on:
+    /// [`Ready`](Resolution::Ready) starts a transfer,
+    /// [`Empty`](Resolution::Empty) is an answer, and
+    /// [`Unknown`](Resolution::Unknown) means **hold** — the compositor has not
+    /// told us what is on the clipboard, which is not the same as it being
+    /// empty.
+    fn resolve_selection(&self, window: WindowId, mime: MimeType) -> Resolution {
+        let mut known = false;
+        for index in self.seats_for_window(window) {
+            let Some(device) = self.seats[index].data.as_ref() else {
+                continue;
+            };
+            if !device.selection_seen {
+                continue;
+            }
+            known = true;
+            if let Some(offer) = device.selection.as_ref()
+                && let Some(spelling) = offer.pick(mime)
+            {
+                return Resolution::Ready {
+                    offer: offer.proxy,
+                    spelling: spelling.to_string(),
+                };
+            }
+        }
+        if known {
+            Resolution::Empty
+        } else {
+            Resolution::Unknown
+        }
+    }
+
+    /// Queues one [`ShellEvent::ClipboardData`].
+    fn answer_read(
+        &mut self,
+        window: WindowId,
+        request: ClipboardRequestId,
+        mime: ReceivedMime,
+        content: ClipboardContent,
+    ) {
+        self.queue.push_back(ShellEvent::ClipboardData {
+            window,
+            request,
+            mime,
+            content,
+        });
+    }
+
+    /// Starts, answers or keeps holding every read that is waiting for the
+    /// clipboard to become readable.
+    ///
+    /// Called from [`pump`](Shell::pump) and whenever a `selection` event
+    /// arrives, which is the moment a held read most often becomes answerable.
+    fn resolve_held_reads(&mut self) {
+        if self.held.is_empty() {
+            return;
+        }
+        let now = ffi::monotonic_nanos();
+        for read in core::mem::take(&mut self.held) {
+            // The window went away while its read was outstanding. Obligation 4
+            // is about answering an accepted request; an answer naming a
+            // destroyed window would break obligation 1 instead.
+            if self.window(read.window).is_err() {
+                continue;
+            }
+            match self.resolve_selection(read.window, read.mime) {
+                Resolution::Ready { offer, spelling } => {
+                    let delivery = Delivery::Clipboard {
+                        window: read.window,
+                        request: read.request,
+                        mime: ReceivedMime::new(&spelling),
+                    };
+                    if self.start_receive(offer, &spelling, delivery).is_err() {
+                        self.answer_read(
+                            read.window,
+                            read.request,
+                            ReceivedMime::new(&spelling),
+                            ClipboardContent::Unavailable,
+                        );
+                    }
+                }
+                Resolution::Empty => self.answer_read(
+                    read.window,
+                    read.request,
+                    ReceivedMime::from(read.mime),
+                    ClipboardContent::Empty,
+                ),
+                Resolution::Unknown if now < read.deadline_nanos => self.held.push(read),
+                Resolution::Unknown => {
+                    // Out of time: no window of ours has had keyboard focus for
+                    // the whole wait, so there is nothing to read from and
+                    // never was anything to report. `Unavailable`, not `Empty`
+                    // — there may well be something on the clipboard.
+                    log::debug!(
+                        "{:?}: the clipboard never became readable; \
+                         no window of this client had keyboard focus",
+                        read.window
+                    );
+                    self.answer_read(
+                        read.window,
+                        read.request,
+                        ReceivedMime::from(read.mime),
+                        ClipboardContent::Unavailable,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Sends a `wl_data_offer` destructor, if the offer still has a proxy.
+    fn destroy_offer(&mut self, offer: &data::Offer) {
+        if offer.proxy.is_null() {
+            return;
+        }
+        // SAFETY: the proxy is a live `wl_data_offer` created by the compositor
+        // on this connection, and `destroy` is that interface's own destructor.
+        unsafe { self.conn.release(offer.proxy, wl_data_offer::destroy) };
+    }
+
+    /// Routes one `data-device` event.
+    ///
+    /// Every path that can see a [`RawEvent::SourceSend`] either adopts its
+    /// descriptor or closes it; see that variant.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the data-device routing table; see process_raw"
+    )]
+    fn process_data(&mut self, event: RawEvent) {
+        match event {
+            RawEvent::DataOffer { device, offer } => {
+                let proxy = offer as *mut WlProxy;
+                let Some(index) = self.data_seat(device) else {
+                    // The seat went away between the event and the drain.
+                    self.destroy_offer(&data::Offer::new(proxy));
+                    return;
+                };
+                if let Some(device) = self.seats[index].data.as_mut() {
+                    device.incoming.push(data::Offer::new(proxy));
+                }
+            }
+            RawEvent::OfferMime { offer, mime } => {
+                for seat in &mut self.seats {
+                    if let Some(device) = seat.data.as_mut()
+                        && let Some(offer) = device.announced_mut(offer)
+                    {
+                        offer.mimes.push(mime);
+                        return;
+                    }
+                }
+            }
+            RawEvent::Selection { device, offer } => {
+                let Some(index) = self.data_seat(device) else {
+                    return;
+                };
+                // "The client must destroy the previous selection data_offer,
+                // if any, upon receiving this event" — and the *new* offer was
+                // announced first, so both are in hand at once.
+                let (previous, claimed) = match self.seats[index].data.as_mut() {
+                    Some(device) => (device.selection.take(), device.claim(offer)),
+                    None => return,
+                };
+                if let Some(previous) = previous {
+                    self.destroy_offer(&previous);
+                }
+                if let Some(device) = self.seats[index].data.as_mut() {
+                    device.selection = claimed;
+                    // Including for the null offer: "the clipboard was cleared"
+                    // is knowledge, and it is what lets a read be answered
+                    // `Empty` rather than held.
+                    device.selection_seen = true;
+                }
+                // A read that was waiting for exactly this can now be answered.
+                self.resolve_held_reads();
+            }
+            RawEvent::DragEnter {
+                device,
+                serial,
+                surface,
+                x,
+                y,
+                offer,
+            } => self.drag_entered(device, serial, surface, x, y, offer),
+            RawEvent::DragMotion {
+                device, x, y, time, ..
+            } => {
+                let _ = time;
+                let Some(index) = self.data_seat(device) else {
+                    return;
+                };
+                let scale = self.seats[index]
+                    .data
+                    .as_ref()
+                    .and_then(|device| device.drag.as_ref())
+                    .and_then(|drag| drag.window)
+                    .and_then(|window| self.window(window).ok())
+                    .map_or(1.0, WlWindow::scale_factor);
+                if let Some(drag) = self.seats[index]
+                    .data
+                    .as_mut()
+                    .and_then(|device| device.drag.as_mut())
+                {
+                    drag.position = PhysicalPoint::new(
+                        keymap::fixed_to_f64(x) * scale,
+                        keymap::fixed_to_f64(y) * scale,
+                    );
+                }
+            }
+            RawEvent::DragLeave { device } => {
+                let Some(index) = self.data_seat(device) else {
+                    return;
+                };
+                // `None` when the drag already became a transfer at `drop`; a
+                // compositor is entitled to send `leave` after one.
+                let drag = self.seats[index]
+                    .data
+                    .as_mut()
+                    .and_then(|device| device.drag.take());
+                if let Some(drag) = drag {
+                    self.destroy_offer(&drag.offer);
+                }
+            }
+            RawEvent::DragDrop { device } => self.drag_dropped(device),
+            RawEvent::SourceSend { source, mime, fd } => {
+                let Some(file) = fd::adopt(fd) else { return };
+                let Some(index) = self.source_seat(source) else {
+                    // Our source is already gone; closing the descriptor is the
+                    // end-of-file that tells the peer there is nothing coming.
+                    return;
+                };
+                let bytes = self.seats[index]
+                    .data
+                    .as_ref()
+                    .and_then(|device| device.source.as_ref())
+                    .and_then(|source| source.bytes_for(&mime))
+                    .map(<[u8]>::to_vec);
+                let Some(bytes) = bytes else {
+                    log::debug!("a peer asked for {mime}, which this selection does not offer");
+                    return;
+                };
+                // Never written here: the peer may be reading slowly, or may be
+                // *this process* pasting its own selection, in which case the
+                // read that would drain the pipe cannot happen until this
+                // function has returned. See `fd`.
+                self.writes
+                    .push(fd::Writing::new(file, bytes, ffi::monotonic_nanos()));
+                self.service_transfers();
+            }
+            RawEvent::SourceCancelled { source } => {
+                let Some(index) = self.source_seat(source) else {
+                    return;
+                };
+                // Another client took the selection. The source is dead and the
+                // protocol says to destroy it; the bytes go with it, because
+                // nothing will ever ask for them again.
+                self.clear_source(index);
+            }
+            _ => {}
+        }
+    }
+
+    /// A drag arrived over one of our surfaces.
+    fn drag_entered(
+        &mut self,
+        device: usize,
+        serial: u32,
+        surface: usize,
+        x: i32,
+        y: i32,
+        offer: usize,
+    ) {
+        let Some(index) = self.data_seat(device) else {
+            return;
+        };
+        let Some(offer) = self.seats[index]
+            .data
+            .as_mut()
+            .and_then(|device| device.claim(offer))
+        else {
+            return;
+        };
+        // A window that did not ask for drops is not a drop target: the source
+        // is told we accept nothing, which is what makes its cursor say so, and
+        // the payload is never read. `WindowDesc::accept_drops` is opt-in
+        // precisely so a game does not show a drop cursor it will ignore.
+        let target = self
+            .window_by_proxy(surface, |window| window.surface as usize)
+            .filter(|window| self.window(*window).is_ok_and(|state| state.accept_drops));
+        let scale = target
+            .and_then(|window| self.window(window).ok())
+            .map_or(1.0, WlWindow::scale_factor);
+        // `text/uri-list` is the only drag format this seam can express: a
+        // `DroppedFile` carries a path. A drag of text or of an image is
+        // refused rather than half-accepted.
+        let mime = target
+            .and(offer.pick(MimeType::UriList))
+            .map(str::to_string);
+
+        let version = if offer.proxy.is_null() {
+            0
+        } else {
+            // SAFETY: the offer proxy is live on this connection.
+            unsafe { ffi::proxy_version(offer.proxy) }
+        };
+        let encoded = mime.as_deref().and_then(|mime| CString::new(mime).ok());
+        // SAFETY: the offer is live; `accept` takes a nullable string, and a
+        // null one is the protocol's own way of saying "nothing here suits me".
+        unsafe {
+            wl_data_offer::accept(offer.proxy, serial, encoded.as_deref());
+            if version >= 3 {
+                // Only `copy`: see `data::ACTION_COPY`. A source that offers
+                // only `move` gets no action, which is a refused drop rather
+                // than a promise this engine cannot keep.
+                let action = if encoded.is_some() {
+                    data::ACTION_COPY
+                } else {
+                    0
+                };
+                wl_data_offer::set_actions(offer.proxy, action, action);
+            }
+        }
+        self.conn.flush();
+
+        if let Some(device) = self.seats[index].data.as_mut() {
+            device.drag = Some(data::Drag {
+                offer,
+                window: target,
+                position: PhysicalPoint::new(
+                    keymap::fixed_to_f64(x) * scale,
+                    keymap::fixed_to_f64(y) * scale,
+                ),
+                mime,
+            });
+        }
+    }
+
+    /// The drag was released. Starts the read that becomes
+    /// [`ShellEvent::DroppedFile`].
+    fn drag_dropped(&mut self, device: usize) {
+        let Some(index) = self.data_seat(device) else {
+            return;
+        };
+        let Some(drag) = self.seats[index]
+            .data
+            .as_mut()
+            .and_then(|device| device.drag.take())
+        else {
+            return;
+        };
+        let (Some(window), Some(mime)) = (drag.window, drag.mime.clone()) else {
+            // Refused on `enter`, so there is nothing to read and the offer is
+            // ours to dispose of.
+            self.destroy_offer(&drag.offer);
+            return;
+        };
+        let delivery = Delivery::Drop {
+            window,
+            position: drag.position,
+            device,
+            offer: drag.offer.proxy as usize,
+        };
+        if self
+            .start_receive(drag.offer.proxy, &mime, delivery)
+            .is_err()
+        {
+            self.destroy_offer(&drag.offer);
+        }
+    }
+
+    /// Asks a peer for `mime` over a fresh pipe, and records what the bytes
+    /// become.
+    ///
+    /// The pipe's write end goes to the peer and is dropped here immediately:
+    /// the descriptor is duplicated across the socket by the compositor, and a
+    /// client that kept its own copy open would keep the pipe from ever
+    /// reaching end-of-file — which is the only signal that a transfer is
+    /// complete.
+    fn start_receive(
+        &mut self,
+        offer: *mut WlProxy,
+        mime: &str,
+        delivery: Delivery,
+    ) -> Result<(), ShellError> {
+        let encoded = CString::new(mime)
+            .map_err(|_| ShellError::Backend("a mime type with a NUL byte".to_string()))?;
+        let (reader, writer) = std::io::pipe()
+            .map_err(|error| ShellError::Backend(format!("cannot create a pipe: {error}")))?;
+        // SAFETY: the offer is live on this connection, and the descriptor is
+        // valid for the duration of the call — which is all `receive` needs,
+        // since the compositor duplicates it out of the message.
+        unsafe { wl_data_offer::receive(offer, &encoded, writer.as_raw_fd()) };
+        self.conn.flush();
+        drop(writer);
+        self.transfers.push(Transfer {
+            reading: fd::Reading::new(
+                std::fs::File::from(std::os::fd::OwnedFd::from(reader)),
+                ffi::monotonic_nanos(),
+            ),
+            delivery,
+        });
+        Ok(())
+    }
+
+    /// Destroys the selection source this seat published, if any.
+    fn clear_source(&mut self, index: usize) {
+        let source = self.seats[index]
+            .data
+            .as_mut()
+            .and_then(|device| device.source.take());
+        let Some(source) = source else { return };
+        if source.proxy.is_null() {
+            return;
+        }
+        // SAFETY: the proxy is a live `wl_data_source` this backend created,
+        // and `destroy` is its own destructor.
+        unsafe { self.conn.release(source.proxy, wl_data_source::destroy) };
+    }
+
+    /// Tears down one seat's `wl_data_device` and everything hanging off it.
+    ///
+    /// Order matters: the offers and the source are objects the *device* owns,
+    /// so they go first, exactly as a pointer's constraints go before the
+    /// pointer.
+    fn remove_data_device(&mut self, index: usize) {
+        let Some(device) = self.seats[index].data.take() else {
+            return;
+        };
+        // A drop whose device is going away can never be finished, and its
+        // offer would outlive the device that owns it. Both end here, while the
+        // device is still alive to destroy the offer against.
+        let doomed: Vec<usize> = self
+            .transfers
+            .iter()
+            .filter(|transfer| {
+                matches!(transfer.delivery, Delivery::Drop { device: owner, .. }
+                    if owner == device.proxy as usize)
+            })
+            .filter_map(|transfer| transfer.delivery.drop_offer())
+            .collect();
+        self.transfers.retain(|transfer| {
+            !matches!(transfer.delivery, Delivery::Drop { device: owner, .. }
+                if owner == device.proxy as usize)
+        });
+        let offers = device
+            .incoming
+            .iter()
+            .chain(device.selection.iter())
+            .chain(device.drag.as_ref().map(|drag| &drag.offer))
+            .map(|offer| offer.proxy)
+            .chain(doomed.into_iter().map(|offer| offer as *mut WlProxy))
+            .collect::<Vec<_>>();
+        for proxy in offers {
+            self.destroy_offer(&data::Offer::new(proxy));
+        }
+        if let Some(source) = device.source.as_ref() {
+            // SAFETY: a live `wl_data_source` this backend created.
+            unsafe { self.conn.release(source.proxy, wl_data_source::destroy) };
+        }
+        // SAFETY: the device is live and `release` is `wl_data_device`'s own
+        // destructor — which arrived in version 2, so an older one is dropped
+        // client-side instead.
+        unsafe {
+            self.conn
+                .release_since(device.proxy, 2, wl_data_device::release);
+        }
+        self.conn.flush();
+    }
+
+    /// The descriptors a blocking wait should include; see [`Conn::drain`].
+    ///
+    /// **Reads only.** A pending write is nearly always writable — that is what
+    /// "pending" means for one whose peer is merely slow — so putting it in the
+    /// poll would make every wait return immediately and turn an idle editor
+    /// into a spin loop for the length of the transfer. Writes are covered by
+    /// [`TRANSFER_POLL`] instead, which is a bound on the sleep rather than an
+    /// invitation to skip it.
+    fn transfer_fds(&self) -> Vec<c_int> {
+        self.transfers
+            .iter()
+            .map(|transfer| transfer.reading.raw_fd())
+            .collect()
+    }
+
+    /// Moves every transfer as far as it will go without blocking, and turns
+    /// the finished ones into events.
+    ///
+    /// # Why this is a loop
+    ///
+    /// The two ends of a transfer can both be this process — pasting our own
+    /// selection is the ordinary case, and it is the one that deadlocks a
+    /// backend that reads on the event-loop thread. Writing fills the pipe,
+    /// reading empties it, and neither can finish alone, so the pass repeats
+    /// while *anything* moved. It terminates because every iteration that
+    /// repeats has moved bytes and no payload is infinite.
+    fn service_transfers(&mut self) {
+        while !self.transfers.is_empty() || !self.writes.is_empty() {
+            let now = ffi::monotonic_nanos();
+            let mut moved = false;
+
+            // Writes first: a read of our own selection cannot progress until
+            // the bytes it is waiting for have been put in the pipe.
+            let mut index = 0;
+            while index < self.writes.len() {
+                let (state, progressed) = self.writes[index].service(now);
+                moved |= progressed;
+                if state == fd::State::Pending {
+                    index += 1;
+                } else {
+                    // Dropping the writer closes the descriptor, which is the
+                    // end-of-file the peer reads as "that was all".
+                    self.writes.remove(index);
+                }
+            }
+
+            let mut finished = Vec::new();
+            let mut index = 0;
+            while index < self.transfers.len() {
+                let (state, progressed) = self.transfers[index].reading.service(now);
+                moved |= progressed;
+                match state {
+                    fd::State::Pending => index += 1,
+                    fd::State::Done => finished.push((self.transfers.remove(index), true)),
+                    fd::State::Failed => finished.push((self.transfers.remove(index), false)),
+                }
+            }
+            for (transfer, complete) in finished {
+                self.deliver(transfer, complete);
+            }
+            if !moved {
+                break;
+            }
+        }
+    }
+
+    /// Turns one finished transfer into the events it promised.
+    fn deliver(&mut self, transfer: Transfer, complete: bool) {
+        let Transfer { reading, delivery } = transfer;
+        let bytes = reading.take();
+        match delivery {
+            Delivery::Clipboard {
+                window,
+                request,
+                mime,
+            } => {
+                // A transfer that completed reports its bytes even when there
+                // are none of them: a peer is entitled to publish an empty
+                // selection, and `Bytes(vec![])` says the read worked. One that
+                // broke — the peer went away mid-write, or never wrote at all —
+                // is `Unavailable`, which is emphatically not `Empty`: there
+                // *is* something on the clipboard, we just could not get it.
+                let content = if complete {
+                    ClipboardContent::Bytes(bytes)
+                } else {
+                    ClipboardContent::Unavailable
+                };
+                self.answer_read(window, request, mime, content);
+            }
+            Delivery::Drop {
+                window,
+                position,
+                offer,
+                ..
+            } => {
+                let offer = offer as *mut WlProxy;
+                if complete {
+                    let time = self.time.event_time_now();
+                    // One event per file, which is what `DroppedFile`
+                    // specifies; a URI that is not a local path produces none.
+                    for path in crate::parse_uri_list(&bytes) {
+                        self.queue.push_back(ShellEvent::DroppedFile {
+                            window,
+                            time,
+                            path,
+                            position: Some(position),
+                        });
+                    }
+                }
+                // SAFETY: the offer is live — nothing destroys it between the
+                // `drop` event and here — and both requests belong to its
+                // interface.
+                unsafe {
+                    // `finish` tells the source the transfer is over so it can
+                    // release its own copy. It arrived with the actions in
+                    // version 3, and calling it on an older offer is a protocol
+                    // error that disconnects the client.
+                    if !offer.is_null() && ffi::proxy_version(offer) >= 3 && complete {
+                        wl_data_offer::finish(offer);
+                    }
+                    self.conn.release(offer, wl_data_offer::destroy);
+                }
+                self.conn.flush();
+            }
+        }
+    }
+
     /// Tears one window's objects down, innermost first.
     fn destroy_objects(&mut self, id: WindowId, window: &WlWindow) {
         for (_, proxy) in &window.constraints {
@@ -3012,6 +4056,38 @@ impl WaylandShell {
         // reporting motion into a stale handle. Only *this* window's focus is
         // cleared: destroying one window must not make a seat forget that it is
         // pointing at another.
+        // A transfer whose answer names a window that no longer exists would
+        // deliver an event with a stale handle, which the seam forbids. The
+        // descriptors close with the transfer, and a drop's offer — which
+        // nothing else owns once the drag became a transfer — is destroyed
+        // rather than leaked.
+        let doomed: Vec<usize> = self
+            .transfers
+            .iter()
+            .filter(|transfer| transfer.delivery.window() == id)
+            .filter_map(|transfer| transfer.delivery.drop_offer())
+            .collect();
+        self.transfers
+            .retain(|transfer| transfer.delivery.window() != id);
+        for offer in doomed {
+            self.destroy_offer(&data::Offer::new(offer as *mut WlProxy));
+        }
+        let drags: Vec<data::Offer> = self
+            .seats
+            .iter_mut()
+            .filter_map(|seat| {
+                let device = seat.data.as_mut()?;
+                let over_this_window = device
+                    .drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.window == Some(id));
+                over_this_window.then(|| device.drag.take()).flatten()
+            })
+            .map(|drag| drag.offer)
+            .collect();
+        for offer in &drags {
+            self.destroy_offer(offer);
+        }
         for seat in &mut self.seats {
             if seat.pointer_focus == Some(id) {
                 seat.pointer_focus = None;
@@ -3106,6 +4182,7 @@ impl Drop for WaylandShell {
             self.conn.destroy(output);
         }
         let globals = [
+            self.conn.data_device_manager,
             self.conn.pointer_constraints,
             self.conn.relative_pointer_manager,
             self.conn.fractional_scale_manager,
@@ -3157,8 +4234,9 @@ impl Shell for WaylandShell {
     /// the renderer letterboxes.
     ///
     /// [`CLIPBOARD`](ShellCaps::CLIPBOARD) and
-    /// [`DRAG_DROP`](ShellCaps::DRAG_DROP) need `wl_data_device` and land at
-    /// P0.5c.
+    /// [`DRAG_DROP`](ShellCaps::DRAG_DROP) are one bit's worth of information
+    /// on this platform — both come from `wl_data_device_manager` — and are
+    /// set together or not at all.
     fn caps(&self) -> ShellCaps {
         self.caps
     }
@@ -3287,6 +4365,7 @@ impl Shell for WaylandShell {
                 pointer_mode: PointerMode::Free,
                 constraints: Vec::new(),
                 cursor: None,
+                accept_drops: desc.accept_drops,
                 focused: false,
                 visible: desc.visible,
                 close_pending: false,
@@ -3422,12 +4501,21 @@ impl Shell for WaylandShell {
     /// timestamp order.
     fn pump(&mut self, sink: &mut dyn FnMut(ShellEvent)) {
         if self.lost.is_none()
-            && let Err(error) = self.conn.drain(0)
+            && let Err(error) = self.conn.drain(0, &[])
         {
             log::error!("wayland connection lost: {error}");
             self.lost = Some(error.to_string());
         }
         self.process_raw();
+        // After the socket, because a `wl_data_source.send` that arrived in
+        // this batch is what a read of our own selection is waiting for, and
+        // before delivery, so a transfer that completed here is answered in
+        // the same frame it finished.
+        self.service_transfers();
+        // After the socket, so a `selection` that arrived in this batch has
+        // already been recorded: a held read most often becomes answerable the
+        // instant keyboard focus does.
+        self.resolve_held_reads();
         self.drive_repeats();
         // Drain by count, not `while let`: a sink that creates a window must
         // not be able to spin this loop, and whatever it queued belongs to the
@@ -3450,15 +4538,24 @@ impl Shell for WaylandShell {
         if self.lost.is_some() {
             return;
         }
-        let deadline = match (timeout, self.next_repeat_in()) {
+        let mut deadline = match (timeout, self.next_repeat_in()) {
             (Some(timeout), Some(repeat)) => Some(timeout.min(repeat)),
             (Some(timeout), None) => Some(timeout),
             (None, repeat) => repeat,
         };
+        // A transfer in flight is waited on two ways: its descriptor goes into
+        // the poll below, which wakes the moment a peer writes, and the wait is
+        // capped so that a peer which *never* writes still has its deadline
+        // checked. Without the cap, an editor idling with `timeout: None` would
+        // sleep through a stalled paste's timeout and answer nothing.
+        let aux = self.transfer_fds();
+        if !aux.is_empty() || !self.writes.is_empty() || !self.held.is_empty() {
+            deadline = Some(deadline.map_or(TRANSFER_POLL, |deadline| deadline.min(TRANSFER_POLL)));
+        }
         let timeout_ms = deadline.map_or(-1, |deadline| {
             c_int::try_from(deadline.as_millis()).unwrap_or(c_int::MAX)
         });
-        if let Err(error) = self.conn.drain(timeout_ms) {
+        if let Err(error) = self.conn.drain(timeout_ms, &aux) {
             log::error!("wayland connection lost: {error}");
             self.lost = Some(error.to_string());
         }
@@ -3603,24 +4700,234 @@ impl Shell for WaylandShell {
         }
     }
 
+    /// Claims the seat's selection and holds the bytes until somebody asks.
+    ///
+    /// # The serial, and why a window with no input cannot copy
+    ///
+    /// `wl_data_device.set_selection` takes "the serial of the event that
+    /// triggered this request", and a compositor may check it — wlroots
+    /// compares it against the serial of the selection currently in effect and
+    /// silently drops anything that looks older. The seam has no serials in it,
+    /// so this quotes the seat's most recent input serial, which is the one
+    /// belonging to whatever the user did to cause the copy.
+    ///
+    /// A window that has never received input on any seat therefore cannot
+    /// claim the selection, and this reports
+    /// [`ShellError::NeedsUserInteraction`] rather than sending a request the
+    /// compositor will ignore. That is not a limitation this backend invented:
+    /// a Wayland client genuinely may not take the clipboard without user
+    /// interaction, which is the whole point of the serial — it is what stops a
+    /// background process stealing the clipboard, and the browser gates its own
+    /// clipboard write the same way.
+    ///
+    /// An empty `offers` slice releases the selection.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::Unsupported`] if the compositor has no
+    /// `wl_data_device_manager`, [`ShellError::InvalidWindow`] for a stale
+    /// handle, [`ShellError::NeedsUserInteraction`] if no seat can name a
+    /// serial, or [`ShellError::Backend`] if there is no seat at all.
     fn clipboard_offer(
         &mut self,
         window: WindowId,
         offers: &[ClipboardOffer<'_>],
     ) -> Result<(), ShellError> {
-        let _ = offers;
         self.window(window)?;
-        Err(Self::unsupported("clipboard"))
+        if !self.caps.contains(ShellCaps::CLIPBOARD) {
+            return Err(Self::unsupported("clipboard"));
+        }
+        let index = *self
+            .seats_for_window(window)
+            .first()
+            .ok_or_else(|| ShellError::Backend("no seat has a wl_data_device".to_string()))?;
+        // Replacing our own selection: the old source is destroyed *after* the
+        // new one is in effect, so nothing observes a moment with no clipboard.
+        let previous = self.seats[index]
+            .data
+            .as_mut()
+            .and_then(|device| device.source.take());
+
+        let serial = self.seats[index].last_serial;
+        let mut published = None;
+        if !offers.is_empty() {
+            if serial == 0 {
+                if let Some(source) = previous.as_ref() {
+                    // SAFETY: a live `wl_data_source` this backend created.
+                    unsafe { self.conn.release(source.proxy, wl_data_source::destroy) };
+                }
+                if let Some(device) = self.seats[index].data.as_mut() {
+                    device.source = None;
+                }
+                return Err(ShellError::NeedsUserInteraction {
+                    backend: ShellBackend::Wayland,
+                    what: "claiming the clipboard",
+                });
+            }
+            let manager = self.conn.data_device_manager;
+            // SAFETY: the manager is a live global; `create_data_source` takes
+            // no arguments beyond the object it creates.
+            let source = unsafe { wl_data_device_manager::create_data_source(manager) };
+            if source.is_null() {
+                return Err(ShellError::Backend(
+                    "wl_data_device_manager.create_data_source failed".to_string(),
+                ));
+            }
+            self.conn.watch(source, ObjectKind::DataSource);
+            let mut payload = Vec::with_capacity(offers.len());
+            for offer in offers {
+                let Ok(mime) = CString::new(offer.mime.as_str()) else {
+                    continue;
+                };
+                // SAFETY: the source is live and the string outlives the call.
+                unsafe { wl_data_source::offer(source, &mime) };
+                payload.push((offer.mime.as_str().to_string(), offer.bytes.to_vec()));
+            }
+            published = Some(data::Source {
+                proxy: source,
+                payload,
+            });
+        }
+
+        let device = self.seats[index]
+            .data
+            .as_ref()
+            .map_or(ptr::null_mut(), |device| device.proxy);
+        let source = published
+            .as_ref()
+            .map_or(ptr::null_mut(), |source| source.proxy);
+        // SAFETY: the device is live, and a null source is the protocol's own
+        // way of releasing the selection.
+        unsafe { wl_data_device::set_selection(device, source, serial) };
+        self.conn.flush();
+        if let Some(previous) = previous.as_ref() {
+            // SAFETY: a live `wl_data_source` this backend created, destroyed
+            // exactly once.
+            unsafe { self.conn.release(previous.proxy, wl_data_source::destroy) };
+        }
+        if let Some(device) = self.seats[index].data.as_mut() {
+            device.source = published;
+            // We have just changed the clipboard and have **not** been told the
+            // result. The offer this device still holds describes the *old*
+            // selection, and answering a read from it — or worse, answering
+            // `Empty` because the old one had no matching format — would report
+            // a clipboard that no longer exists. The compositor echoes the new
+            // selection back to us (a client sees its own, which is what makes
+            // pasting one's own copy work at all), and that event is what makes
+            // this true again.
+            //
+            // Found by the end-to-end suite the moment "held, not empty" was
+            // enforced: pasting our own copy answered `Empty`, because the
+            // answer was computed from what we knew a microsecond before we
+            // changed it.
+            device.selection_seen = false;
+        }
+        Ok(())
     }
 
+    /// Starts reading the selection, over a pipe, without blocking.
+    ///
+    /// The answer arrives as [`ShellEvent::ClipboardData`] from a later
+    /// [`pump`](Shell::pump) — never from this call, and never from a `read`
+    /// on the event-loop thread. See [`fd`] for the mechanism and for what
+    /// happens when the peer never writes.
+    ///
+    /// # There is nothing to read unless a window of ours has focus
+    ///
+    /// `wl_data_device.selection` is delivered only to the client with keyboard
+    /// focus on that seat, and again whenever focus arrives — so a Wayland
+    /// client's clipboard knowledge is *acquired on focus* and goes stale when
+    /// focus leaves. A read issued while this shell has not been told what is
+    /// on the clipboard is therefore **held** until it has been, and only then
+    /// answered. It is not answered `Empty`, which would be indistinguishable
+    /// from a clipboard that really is empty and is what forced a retry loop
+    /// into the end-to-end suite before this was fixed.
+    ///
+    /// The wait is bounded by [`fd::TIMEOUT`], after which the answer is
+    /// [`ClipboardContent::Unavailable`] — obligation 4 requires every accepted
+    /// request to end. [`clipboard_readable`](Shell::clipboard_readable) is how
+    /// a UI finds out in advance that the answer will not be immediate.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::Unsupported`] if the compositor has no
+    /// `wl_data_device_manager`, or [`ShellError::InvalidWindow`] for a stale
+    /// handle. A clipboard that holds nothing compatible is *not* an error —
+    /// it is an answer — and neither is one this client cannot see yet, which
+    /// is a wait.
     fn clipboard_request(
         &mut self,
         window: WindowId,
         mime: MimeType,
     ) -> Result<ClipboardRequestId, ShellError> {
-        let _ = mime;
         self.window(window)?;
-        Err(Self::unsupported("clipboard"))
+        if !self.caps.contains(ShellCaps::CLIPBOARD) {
+            return Err(Self::unsupported("clipboard"));
+        }
+        let request = ClipboardRequestId(self.next_request_id);
+        self.next_request_id += 1;
+
+        match self.resolve_selection(window, mime) {
+            Resolution::Ready { offer, spelling } => {
+                let delivery = Delivery::Clipboard {
+                    window,
+                    request,
+                    // The *peer's* spelling, not the one that was asked for: a
+                    // peer offering bare `text/plain` answers a request for
+                    // `text/plain;charset=utf-8`, and `ReceivedMime` exists so
+                    // the difference survives to the consumer.
+                    mime: ReceivedMime::new(&spelling),
+                };
+                if let Err(error) = self.start_receive(offer, &spelling, delivery) {
+                    log::warn!("clipboard read could not be started: {error}");
+                    self.answer_read(
+                        window,
+                        request,
+                        ReceivedMime::new(&spelling),
+                        ClipboardContent::Unavailable,
+                    );
+                }
+            }
+            // Queued rather than returned, so that a consumer written against
+            // the asynchronous shape takes the same path whether or not there
+            // was anything on the clipboard.
+            Resolution::Empty => self.answer_read(
+                window,
+                request,
+                ReceivedMime::from(mime),
+                ClipboardContent::Empty,
+            ),
+            // **Held**, not answered. See this method's docs and the seam's
+            // obligation 5: answering `Empty` here would be a lie a consumer
+            // cannot detect, and it is the lie that made the end-to-end suite
+            // grow a retry loop no editor would contain.
+            Resolution::Unknown => self.held.push(HeldRead {
+                window,
+                request,
+                mime,
+                deadline_nanos: ffi::monotonic_nanos()
+                    .saturating_add(u64::try_from(fd::TIMEOUT.as_nanos()).unwrap_or(u64::MAX)),
+            }),
+        }
+        Ok(request)
+    }
+
+    /// Whether a read issued now could be answered without waiting.
+    ///
+    /// True exactly when the compositor has told us what is on the clipboard
+    /// and has not since taken keyboard focus away — which is the honest
+    /// Wayland answer, and the reason this method is on the seam at all. A
+    /// background window reports `false` and a paste button greys out, instead
+    /// of a paste that appears to do nothing.
+    fn clipboard_readable(&self, window: WindowId) -> bool {
+        self.caps.contains(ShellCaps::CLIPBOARD)
+            && self.window(window).is_ok()
+            && self.seats_for_window(window).into_iter().any(|index| {
+                self.seats[index]
+                    .data
+                    .as_ref()
+                    .is_some_and(|device| device.selection_seen)
+            })
     }
 
     fn align_event_clock(&mut self, elapsed: Duration) {
@@ -4205,6 +5512,7 @@ mod tests {
             pointer_mode: PointerMode::Free,
             constraints: Vec::new(),
             cursor: None,
+            accept_drops: false,
             focused: false,
             visible: true,
             close_pending: false,

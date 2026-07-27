@@ -56,7 +56,10 @@ use crcbl_core::input::{
     ButtonState, DeviceId, Keysym, Modifiers, PointerButton, Scancode, ScrollDelta,
 };
 
-use crate::{ClipboardRequestId, KeyCode, PhysicalPoint, PhysicalSize, ReceivedMime, WindowId};
+use crate::{
+    ClipboardContent, ClipboardRequestId, KeyCode, PhysicalPoint, PhysicalSize, ReceivedMime,
+    WindowId,
+};
 
 /// Something the window system reported.
 ///
@@ -303,7 +306,12 @@ pub enum ShellEvent {
 
     /// The answer to a [`clipboard_request`](crate::Shell::clipboard_request).
     ///
-    /// See [`clipboard`](crate::clipboard) for why reads are asynchronous.
+    /// **Exactly one of these arrives for every accepted request**, and it is
+    /// the only thing that ever answers one. It may be several frames late: a
+    /// backend holds a read until it can answer it rather than reporting an
+    /// empty clipboard it has not actually looked at. See
+    /// [`clipboard`](crate::clipboard) for why reads are asynchronous and why
+    /// there is no "ask again later" outcome.
     ClipboardData {
         /// Which window asked.
         window: WindowId,
@@ -317,12 +325,15 @@ pub enum ShellEvent {
         /// not us: asking for `text/plain;charset=utf-8` and being answered
         /// with `text/plain` is normal and must round-trip verbatim. Compare
         /// with [`ReceivedMime::matches`], never with string equality.
+        ///
+        /// For [`Empty`](ClipboardContent::Empty) and
+        /// [`Unavailable`](ClipboardContent::Unavailable) there is no peer
+        /// spelling to report, so this is the format that was *asked* for.
         mime: ReceivedMime,
-        /// The payload, or `None` if the clipboard was empty, held no
-        /// compatible format, or the transfer failed. Distinguishing those
-        /// three is not useful to a caller — all three mean "there is nothing
-        /// to paste" — so they are one case.
-        data: Option<Vec<u8>>,
+        /// What the read produced — bytes, an empty clipboard, or a failure.
+        /// See [`ClipboardContent`], which exists because the three are not one
+        /// case.
+        content: ClipboardContent,
     },
 }
 
@@ -444,13 +455,27 @@ mod tests {
             window: window_id(),
             request: ClipboardRequestId(3),
             mime: ReceivedMime::new("text/plain"),
-            data: Some(b"pasted".to_vec()),
+            content: ClipboardContent::Bytes(b"pasted".to_vec()),
         };
-        let ShellEvent::ClipboardData { mime, .. } = &event else {
+        let ShellEvent::ClipboardData { mime, content, .. } = &event else {
             panic!("wrong variant");
         };
         assert_eq!(mime.as_str(), "text/plain");
         assert!(mime.matches(crate::MimeType::TextUtf8));
+        assert_eq!(content.bytes(), Some(&b"pasted"[..]));
+        assert_eq!(content.text(), Some("pasted"));
+
+        // The three outcomes a caller must be able to tell apart. An empty
+        // *payload* is a successful read; an empty *clipboard* is not the same
+        // thing; and neither is a failure.
+        assert_eq!(ClipboardContent::Bytes(Vec::new()).bytes(), Some(&[][..]));
+        assert_ne!(ClipboardContent::Bytes(Vec::new()), ClipboardContent::Empty);
+        assert_eq!(ClipboardContent::Empty.bytes(), None);
+        assert_eq!(ClipboardContent::Unavailable.bytes(), None);
+        assert_ne!(ClipboardContent::Empty, ClipboardContent::Unavailable);
+        assert_eq!(ClipboardContent::Unavailable.name(), "Unavailable");
+        // Invalid UTF-8 is refused rather than lossily replaced.
+        assert_eq!(ClipboardContent::Bytes(vec![0xff]).text(), None);
         assert_eq!(
             event.time(),
             None,
@@ -551,7 +576,7 @@ mod tests {
                 window,
                 request: ClipboardRequestId(1),
                 mime: ReceivedMime::from(crate::MimeType::TextUtf8),
-                data: None,
+                content: ClipboardContent::Empty,
             },
             ShellEvent::MonitorsChanged,
         ];
