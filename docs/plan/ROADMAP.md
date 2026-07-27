@@ -29,7 +29,7 @@ was intended.
 | Phase             | Status                 | Landed as                                                                                                                          |
 | ----------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | **P0** — base     | **done**               | `f922ca3`, `3198f7a`, `6dd4b46`, `84af231`, `c058f45`, `bad7186`, `a991e42`, `063fd99`, `421ce69`, `f06e6cd`, `36dd636`, `e094d39` |
-| **P1** — Vulkan   | **done**               | `91fd871`, `236f19b`, `c6dc4a4`, `a54990d`, `dc36d32`, `8a4e303`                                                                   |
+| **P1** — Vulkan   | **done**               | `91fd871`, `236f19b`, `c6dc4a4`, `a54990d`, `dc36d32`, `8a4e303`, `cbd6153`                                                        |
 | **P2** — sim core | not started (P2a next) | —                                                                                                                                  |
 
 ### What exists now
@@ -65,7 +65,7 @@ was intended.
   reversed-Z lit spinning cube through the graph into an HDR target on both
   Wayland and X11.
 
-**616 unit/integration tests**, plus 26 Vulkan e2e (run on both radv and
+**620 unit/integration tests**, plus 26 Vulkan e2e (run on both radv and
 lavapipe), 33 Wayland e2e, 29 X11 e2e and 1 CLI e2e. The whole workspace suite
 passes with no Vulkan driver present at all, and the shell suites pass under
 32-way CPU contention.
@@ -86,6 +86,13 @@ passes with no Vulkan driver present at all, and the shell suites pass under
   carries a debug label and `DEBUG_MARKERS` is requested.
 - The render graph has **no sub-resource vocabulary** (an `ImageId` names a
   whole image), which P7's depth pyramid will need.
+- **A green local Vulkan run is weaker than CI's.** Synchronisation validation
+  has three reaches, and many installed layers report hazards at record time and
+  within one submission but **not across submissions** — which is where every
+  cross-frame hazard lives. `run-vk-e2e.sh` measures its own reach, prints it,
+  and says so loudly when the run is weaker than the CI job it stands in for.
+  The real gate for that bug class is the no-GPU cross-frame graph suite, which
+  runs everywhere.
 - The seam does **not** freeze until P5 exit, when a second backend
   (`crcbl-wgpu`) implements it. Changes before then are expected and cheap.
 
