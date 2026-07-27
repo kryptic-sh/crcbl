@@ -11,6 +11,10 @@ repository.workspace = true
 [[bin]]
 name = "crcbl"
 path = "src/main.rs"
+# The binary shares its name with the umbrella *library* crate, so both would
+# write `target/doc/crcbl/index.html` (rust-lang/cargo#6313). The library's docs
+# are the ones worth publishing; the CLI documents itself through `--help`.
+doc = false
 
 [lints]
 workspace = true

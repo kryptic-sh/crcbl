@@ -59,11 +59,14 @@ elsewhere — an empty `lib.rs` is fine.
 - `Handle<T>`: 32-bit index + 32-bit generation, typed. Slotmap-style arena
   (`Pool<T>`) that recycles slots and invalidates stale handles.
 - **`WorldPos` sector-tiled position** (physics pillar, foundational):
-  `{ sector: IVec3, local: DVec3 }` — sparse 3D sector grid, f64 local offset,
-  exact rebase on sector crossing. All simulation positions use this from day
-  one; plain `Vec3` is only ever camera-relative render space. Retrofitting
-  galaxy-scale coordinates is a rewrite — so they land here, in stage 1, even
-  though physics proper is stage 5.
+  `{ sector: I64Vec3, local: DVec3 }` — sparse 3D sector grid, f64 local offset,
+  exact rebase on sector crossing. Sector edge is `2^20 m` (~1048 km), sized to
+  be a usable streaming/broadphase cell rather than merely a precision trick;
+  the index is 64-bit because a cell that small needs one to stay
+  galaxy-addressable (`2^84 m` ≈ 2.04 billion ly per axis). All simulation
+  positions use this from day one; plain `Vec3` is only ever camera-relative
+  render space. Retrofitting galaxy-scale coordinates is a rewrite — so they
+  land here, in stage 1, even though physics proper is stage 5.
 - Frame-scoped bump allocator for per-frame transient data.
 - `Instant`-based frame clock: fixed-timestep accumulator (server tick) +
   variable render dt, since stage 4 needs the split and the loop shape should

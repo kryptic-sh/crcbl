@@ -1,14 +1,30 @@
-//! Core primitives: typed handles, slot pools, sector-tiled world positions, frame clock, logging.
+//! Core primitives shared by every Crucible crate.
 //!
-//! Placeholder crate — the workspace skeleton lands before the code so later
-//! slices add implementations, not structure.
+//! Nothing here depends on a backend, a window, or a renderer — this is the
+//! vocabulary layer that the rest of the engine is written in:
+//!
+//! * [`handle`] — [`Handle`], a typed generational id, and [`Pool`], the slot
+//!   arena that issues and invalidates them.
+//! * [`world`] — [`WorldPos`], the sector-tiled absolute position that every
+//!   simulated thing in the engine uses. Plain `Vec3` is *only* ever
+//!   camera-relative render space; see [`WorldPos::relative_to`].
+//! * [`alloc`] — [`FrameArena`], a fixed-capacity bump allocator for per-frame
+//!   transient data.
+//! * [`time`] — [`FrameClock`], the fixed-timestep server tick accumulator plus
+//!   variable render delta, and [`TickId`].
+//! * [`log`] — stderr logging behind the [`log`](::log) facade, filtered by
+//!   `CRCBL_LOG`.
+//!
+//! Input normalization (`crcbl-core::input`) lands with the shell slice, not
+//! here.
 
-#[cfg(test)]
-mod tests {
-    /// PLACEHOLDER: replaced in P0.2 by the handle/pool and `WorldPos` rebase
-    /// property tests listed in `docs/plan/12-testing.md`.
-    #[test]
-    fn crate_builds() {
-        assert_eq!(env!("CARGO_PKG_NAME"), "crcbl-core");
-    }
-}
+pub mod alloc;
+pub mod handle;
+pub mod log;
+pub mod time;
+pub mod world;
+
+pub use alloc::FrameArena;
+pub use handle::{Handle, Pool};
+pub use time::{FrameClock, TickId};
+pub use world::{SECTOR_SIZE, WorldPos};

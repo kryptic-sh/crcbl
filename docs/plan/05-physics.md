@@ -56,10 +56,14 @@ early.
 ## Galaxy-scale space (with stage 1 foundations)
 
 - **Sector-tiled positions** (lands in `crcbl-core` at stage 1, used
-  everywhere): `WorldPos = { sector: IVec3, local: DVec3 }` — sparse 3D grid of
-  sectors, f64 local offset, rebase on sector crossing (exact, cheap). Physics
-  always computes in local/relative space; no absolute galactic float
-  coordinates ever exist.
+  everywhere): `WorldPos = { sector: I64Vec3, local: DVec3 }` — sparse 3D grid
+  of sectors, f64 local offset, rebase on sector crossing (exact, cheap).
+  Physics always computes in local/relative space; no absolute galactic float
+  coordinates ever exist. The sector edge is `2^20 m` (~1048 km) — chosen as a
+  real streaming/broadphase/interest cell (an FPS map fits in one, Earth spans
+  ~12, a planet surface a few hundred), which forces the 64-bit index: a
+  planet-scale cell only reaches galactic extent (`2^84 m` ≈ 2.04 billion ly per
+  axis) with 64-bit sector coordinates.
 - **Camera-relative rendering** (stage 3 note): instance transforms upload
   relative to camera sector+position each frame; GPU stays f32, no jitter.
 - **Hierarchical reference frames**: bodies parent to dominant gravity source
