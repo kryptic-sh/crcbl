@@ -126,6 +126,10 @@ dependencies = [
 [[package]]
 name = "crcbl-net"
 version = "0.1.0"
+dependencies = [
+ "crcbl-core",
+ "thiserror",
+]
 
 [[package]]
 name = "crcbl-phys"
