@@ -147,9 +147,15 @@
 mod data;
 mod fd;
 pub mod ffi;
-pub mod keymap;
 pub mod protocol;
-pub mod xkb;
+
+/// The evdev table and libxkbcommon, which are Linux facts rather than Wayland
+/// ones and are therefore shared with the X11 backend.
+///
+/// Re-exported under this module's own namespace so that everything below
+/// spells them `keymap::` and `xkb::` the way it always did; see
+/// [`crate::linux`] for why they live one level up.
+pub(crate) use crate::linux::{keymap, xkb};
 
 /// Test-only: maps a window's surface with a stand-in buffer, and drives real
 /// input through virtual devices.

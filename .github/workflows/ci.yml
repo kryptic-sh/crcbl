@@ -199,6 +199,56 @@ jobs:
       - name: Run the suite under headless sway
         run: crates/crcbl-shell/tests/run-wayland-e2e.sh
 
+  # The only job that runs the X11 backend against a real X server.
+  # `docs/plan/12-testing.md` schedules "scripted resize/mode-switch sequences
+  # against the real backends under a nested compositor (sway headless / Xvfb)
+  # in CI" for P0 — this is the Xvfb half — and calls a silently-skipped e2e
+  # job a known trap, so this job is required like every other one (no
+  # `continue-on-error`), and the harness itself fails when the suite reports
+  # zero tests run.
+  x11-e2e:
+    name: x11 e2e (Xvfb)
+    runs-on: ubuntu-latest
+    # Server startup plus a full compile of the shell crate's test targets.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - uses: taiki-e/install-action@nextest
+      # Runtime packages, not their `-dev` counterparts: the backend resolves
+      # every one of these with `dlopen` rather than linking them, so the
+      # runtime packages are all it needs — and the fact that this job passes
+      # without the `-dev` packages is itself the check that no `DT_NEEDED`
+      # crept in. `libxcb-randr0` and `libxcb-xinput0` are the monitor and
+      # raw-motion extensions, both of which the suite asserts are present;
+      # `libxcb-xtest0` is used only by the harness's peer client, to
+      # synthesize real input. `libxkbcommon-x11-0` is what turns the server's
+      # keymap into keysyms and text, and without it the suite's
+      # `ShellCaps::TEXT_IME` assertion is what fails — the intended signal.
+      - name: Install Xvfb and the X client libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb \
+            libxcb1 \
+            libxcb-randr0 \
+            libxcb-xinput0 \
+            libxcb-xtest0 \
+            libxkbcommon0 \
+            libxkbcommon-x11-0
+      # Starts Xvfb on a private display number, polls for its socket with a
+      # deadline and a liveness check on the child, runs the `#[ignore]`d suite
+      # with `--features x11-e2e`, and dumps the server log tail on any
+      # failure. Deliberately *without* a window manager — see the script's
+      # header for which behaviours that pins down and which it cannot.
+      - name: Run the suite under Xvfb
+        run: crates/crcbl-shell/tests/run-x11-e2e.sh
+
   coverage:
     name: coverage (linux)
     runs-on: ubuntu-latest

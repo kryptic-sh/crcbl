@@ -450,24 +450,27 @@ fn the_factory_selects_a_backend_at_runtime() {
         crcbl_shell::open_backend(ShellBackend::Headless).expect("headless is registered");
     assert_eq!(shell.backend(), ShellBackend::Headless);
 
-    // P0.6 registers X11 here; today asking for it is an honest error rather
-    // than a silent fallback onto something else.
+    // Win32 lands at P14; asking for it today is an honest error rather than a
+    // silent fallback onto something else.
     assert!(matches!(
-        crcbl_shell::open_backend(ShellBackend::X11),
+        crcbl_shell::open_backend(ShellBackend::Win32),
         Err(ShellError::UnknownBackend { .. })
     ));
 
-    // Wayland *is* registered on Linux (P0.5a), so asking for it by name gets
-    // either a real shell or a connection error — never `UnknownBackend`. This
-    // test runs on machines with and without a compositor, and both are correct
-    // answers; what must not happen is a fallback to something else.
+    // Wayland (P0.5a) and X11 (P0.6) *are* registered on Linux, so asking for
+    // either by name gets a real shell or a connection error — never
+    // `UnknownBackend`. This test runs on machines with a compositor, with an X
+    // server, and with neither, and all three are correct answers; what must
+    // not happen is a fallback to something else.
     #[cfg(target_os = "linux")]
-    match crcbl_shell::open_backend(ShellBackend::Wayland) {
-        Ok(shell) => assert_eq!(shell.backend(), ShellBackend::Wayland),
-        Err(error) => assert!(
-            matches!(error, ShellError::Connect { .. }),
-            "expected a connection error without a compositor, got {error}"
-        ),
+    for backend in [ShellBackend::Wayland, ShellBackend::X11] {
+        match crcbl_shell::open_backend(backend) {
+            Ok(shell) => assert_eq!(shell.backend(), backend),
+            Err(error) => assert!(
+                matches!(error, ShellError::Connect { .. }),
+                "expected a connection error with no {backend} display server, got {error}"
+            ),
+        }
     }
 }
 

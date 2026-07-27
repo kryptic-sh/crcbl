@@ -38,5 +38,10 @@ crcbl-wl-scanner = { workspace = true }
 # `#[ignore]`d and the harness asserts that a non-zero number of them ran.
 wayland-e2e = []
 
+# The Xvfb end-to-end suite, on the same terms and for the same reasons: off by
+# default so a plain `cargo nextest run` on a machine with no display stays
+# green, and `tests/run-x11-e2e.sh` is the only thing that turns it on.
+x11-e2e = []
+
 [lints]
 workspace = true

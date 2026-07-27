@@ -24,25 +24,28 @@
 //!
 //! # What is registered today
 //!
-//! Wayland on Linux, and [`HeadlessShell`] everywhere — the latter only when
-//! asked for by name. P0.6 adds X11 by inserting one more entry here and
-//! nothing else in this crate changes, which is the property this module was
-//! shaped to have and which P0.5 confirmed: adding Wayland touched
-//! [`REGISTRY`](self) and these tests, and no other file outside
-//! `src/wayland/`.
+//! Wayland then X11 on Linux, and [`HeadlessShell`] everywhere — the latter
+//! only when asked for by name. **P0.6 confirmed the property this module was
+//! shaped to have**: adding a whole X11 backend touched
+//! [`REGISTRY`](self) and these tests, and no other file outside `src/x11/`
+//! (plus `src/linux/`, which is the evdev table and libxkbcommon moving up one
+//! level to be shared rather than copied). No consumer changed, no trait method
+//! was added, and no `#[cfg]` appeared anywhere above this crate.
 //!
 //! Headless is registered with `auto: false`, so [`open`] never selects it
 //! implicitly. A game that silently ran headless because a compositor was
 //! missing would look like a hang; failing with
 //! [`ShellError::NoBackend`] names the actual problem.
 //!
-//! # Why the Wayland entry is `dlopen`-backed
+//! # Why both Linux entries are `dlopen`-backed
 //!
 //! The registry is a fall-through list, so every entry has to be able to *fail*
-//! at runtime. A backend linked against `libwayland-client.so.0` with
-//! `DT_NEEDED` cannot: the process dies in `ld.so` before `main`, on any
-//! machine without the library, and this list never runs. `src/wayland/ffi.rs`
-//! has the full argument.
+//! at runtime. A backend linked against `libwayland-client.so.0` — or
+//! `libxcb.so.1` — with `DT_NEEDED` cannot: the process dies in `ld.so` before
+//! `main`, on any machine without the library, and this list never runs.
+//! `src/wayland/ffi.rs` has the full argument and `src/x11/ffi.rs` sharpens it,
+//! since X11 is the *fallback* and is reached only after Wayland has already
+//! failed.
 
 use crate::{HeadlessShell, Shell, ShellError};
 
@@ -120,8 +123,10 @@ struct Registration {
 
 /// Every backend compiled into this build, in the order [`open`] tries them.
 ///
-/// P0.6 inserts X11 after Wayland. The order is the preference order from
-/// `docs/plan/15-windowing.md`: Wayland first, X11 as the fallback.
+/// The order is the preference order from `docs/plan/15-windowing.md`: Wayland
+/// first, X11 as the fallback. On a session running both — which is every
+/// XWayland-capable compositor — Wayland wins, and `CRCBL_SHELL=x11` is how a
+/// developer reproduces an X11 bug without logging out.
 static REGISTRY: &[Registration] = &[
     // `#[cfg]` on the element, not on the whole table: on macOS and Windows
     // the entry simply is not there, so nothing else in this file mentions a
@@ -131,6 +136,12 @@ static REGISTRY: &[Registration] = &[
         backend: ShellBackend::Wayland,
         auto: true,
         open: || Ok(Box::new(crate::wayland::WaylandShell::open()?)),
+    },
+    #[cfg(target_os = "linux")]
+    Registration {
+        backend: ShellBackend::X11,
+        auto: true,
+        open: || Ok(Box::new(crate::x11::X11Shell::open()?)),
     },
     Registration {
         backend: ShellBackend::Headless,
@@ -165,7 +176,8 @@ fn registry_names(entries: impl Iterator<Item = ShellBackend>) -> String {
 ///
 /// # Today
 ///
-/// On Linux, Wayland is tried and `CRCBL_SHELL=wayland` forces it. On macOS and
+/// On Linux, Wayland is tried and then X11; `CRCBL_SHELL=wayland` or
+/// `CRCBL_SHELL=x11` forces one of them. On macOS and
 /// Windows only [`HeadlessShell`] is compiled in and it is not auto-selected,
 /// so this returns [`ShellError::NoBackend`] unless `CRCBL_SHELL=headless` is
 /// set — the honest answer for a build with no window-system backend in it.
@@ -259,7 +271,14 @@ mod tests {
         // deliberate edit here too.
         let backends: Vec<ShellBackend> = REGISTRY.iter().map(|entry| entry.backend).collect();
         if cfg!(target_os = "linux") {
-            assert_eq!(backends, [ShellBackend::Wayland, ShellBackend::Headless]);
+            assert_eq!(
+                backends,
+                [
+                    ShellBackend::Wayland,
+                    ShellBackend::X11,
+                    ShellBackend::Headless
+                ]
+            );
         } else {
             assert_eq!(backends, [ShellBackend::Headless]);
         }
@@ -281,9 +300,10 @@ mod tests {
         let shell = open_backend(ShellBackend::Headless).expect("headless is registered");
         assert_eq!(shell.backend(), ShellBackend::Headless);
 
-        // X11 is P0.6, so it is not in any build yet — which makes it the
-        // stable example of a backend this build does not have.
-        let error = open_backend(ShellBackend::X11).expect_err("not registered yet");
+        // Win32 lands at P14, so it is the stable example of a backend this
+        // build does not have. (X11 was that example until P0.6 registered it,
+        // which is the point.)
+        let error = open_backend(ShellBackend::Win32).expect_err("not registered yet");
         let ShellError::UnknownBackend {
             requested,
             available,
@@ -291,7 +311,7 @@ mod tests {
         else {
             panic!("wrong variant");
         };
-        assert_eq!(requested, "x11");
+        assert_eq!(requested, "win32");
         assert!(available.contains("headless"), "{available}");
     }
 
@@ -301,18 +321,19 @@ mod tests {
         // correct behaviour and not something to assert against; the point of
         // the test is the failure path's message.
         match open_auto() {
-            Ok(shell) => assert_eq!(
-                shell.backend(),
-                ShellBackend::Wayland,
-                "the only auto-selectable backend today"
+            Ok(shell) => assert!(
+                matches!(shell.backend(), ShellBackend::Wayland | ShellBackend::X11),
+                "the auto-selectable backends are the two Linux ones, and \
+                 Wayland is tried first: {}",
+                shell.backend()
             ),
             Err(ShellError::NoBackend { tried }) => {
                 let expected = if cfg!(target_os = "linux") {
-                    "wayland"
+                    "wayland, x11"
                 } else {
                     "none"
                 };
-                assert_eq!(tried, expected);
+                assert_eq!(tried, expected, "every attempt is named, in order");
             }
             Err(error) => panic!("unexpected error: {error}"),
         }

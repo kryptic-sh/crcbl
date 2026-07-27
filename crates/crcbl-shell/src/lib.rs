@@ -28,24 +28,39 @@
 //! confinement, raw relative motion, fractional scale, `xdg_output` monitor
 //! geometry and `xdg-decoration`. P0.5c added `data-device`: the clipboard in
 //! both directions and drag-and-drop *reception*, with the payload transfers
-//! run across pipes without ever blocking the frame loop. It is compiled only
-//! on Linux, reached only through [`open`], and built on hand-written
-//! `extern "C"` declarations for libwayland-client (plus libxkbcommon, on the
-//! same terms) with protocol marshalling generated at build time from vendored
-//! XML by `crcbl-wl-scanner`. There is still no X11 code and no `libxcb` —
-//! P0.6.
+//! run across pipes without ever blocking the frame loop.
+//!
+//! P0.6 added the **X11 backend**: libxcb through `dlopen`, the window
+//! lifecycle with ICCCM and EWMH properties, RandR monitor enumeration, XKB
+//! keymaps read from the server, XInput 2 raw motion, pointer grabs, and the
+//! selection protocol with `TARGETS` negotiation and `INCR` transfers in both
+//! directions. Drag and drop (XDND) is deliberately *not* in it and
+//! [`ShellCaps::DRAG_DROP`] says so. Both backends are compiled only on Linux,
+//! reached only through [`open`], and built on hand-written `extern "C"`
+//! declarations — for libwayland-client, libxcb and libxkbcommon — with the
+//! Wayland protocol marshalling generated at build time from vendored XML by
+//! `crcbl-wl-scanner`. There is no `wayland-client`, no `x11rb` and no `winit`.
 //!
 //! Two properties of the Wayland clipboard shaped the seam rather than being
-//! worked around in the backend, because they are properties of the *platform*
-//! and X11 will meet the same obligations trivially: a client may only read the
-//! selection while one of its windows has keyboard focus, and may only *claim*
-//! it while holding a serial from real user input. So
-//! [`Shell::clipboard_readable`] says whether a read would answer now,
+//! worked around in the backend, because they are properties of the *platform*:
+//! a client may only read the selection while one of its windows has keyboard
+//! focus, and may only *claim* it while holding a serial from real user input.
+//! So [`Shell::clipboard_readable`] says whether a read would answer now,
 //! [`Shell::clipboard_request`] **holds** a read it cannot yet answer instead of
 //! reporting an empty clipboard, [`ClipboardContent`] separates "empty" from
 //! "could not be read", and [`ShellError::NeedsUserInteraction`] names the
 //! refusal. [`HeadlessShell`] can simulate all three, so a consumer is tested
 //! against them with no compositor in the room.
+//!
+//! P0.6 checked that prediction against the other platform, and it held with
+//! one correction worth recording: X11 needs none of the *holding* (its
+//! `GetSelectionOwner` answers synchronously and there is no focus gate) and
+//! never returns [`ShellError::NeedsUserInteraction`] (there is no such rule),
+//! but it does **not** get "answered within a bounded time" for free. A stalled
+//! `INCR` transfer has no descriptor to poll and no protocol event for "the
+//! owner gave up", so the X11 backend carries its own deadline. The seam did
+//! not move; one backend obligation turned out to cost more than predicted, and
+//! that is written down where it is paid.
 //!
 //! `HeadlessShell` is not a stub standing in for the real thing: per
 //! `docs/plan/15-windowing.md` it is a first-class implementation that CI,
@@ -212,6 +227,13 @@ pub mod headless;
 pub mod monitor;
 pub mod window;
 
+/// What the two Linux backends share: the evdev key table and libxkbcommon.
+///
+/// Not `pub`, like the backends themselves. See the module's own docs for why
+/// exactly two things are in it and nothing protocol-shaped ever will be.
+#[cfg(target_os = "linux")]
+pub(crate) mod linux;
+
 /// The Wayland backend (P0.5).
 ///
 /// Not `pub`: [`backend`] is the only way to reach a real shell, because
@@ -222,6 +244,15 @@ pub mod window;
 #[cfg(target_os = "linux")]
 pub(crate) mod wayland;
 
+/// The X11 backend (P0.6).
+///
+/// Same terms as [`wayland`]: private, reached only through [`open`], and
+/// Linux-only. libxcb is loaded with `dlopen` for the reason the registry
+/// exists — a hard link would kill the process in `ld.so` on a machine with no
+/// X libraries and the Wayland entry above would never be tried.
+#[cfg(target_os = "linux")]
+pub(crate) mod x11;
+
 /// Scaffolding for the nested-compositor end-to-end suite, behind the
 /// `wayland-e2e` feature.
 ///
@@ -231,6 +262,15 @@ pub(crate) mod wayland;
 /// the module's docs for the full finding.
 #[cfg(all(target_os = "linux", feature = "wayland-e2e"))]
 pub use wayland::e2e as wayland_test_support;
+
+/// Scaffolding for the Xvfb end-to-end suite, behind the `x11-e2e` feature.
+///
+/// Not part of the seam and not for consumers. Where the Wayland version exists
+/// because a surface needs a buffer, this one exists because on X11 the window
+/// manager, the input devices and the clipboard owner are all *other programs* —
+/// see the module's docs.
+#[cfg(all(target_os = "linux", feature = "x11-e2e"))]
+pub use x11::e2e as x11_test_support;
 
 pub use backend::{BACKEND_ENV_VAR, ShellBackend, open, open_backend};
 pub use caps::ShellCaps;
@@ -645,14 +685,22 @@ pub trait Shell: core::fmt::Debug {
     ///
     /// # A provided method, because most platforms have nothing to say
     ///
-    /// The default is "readable whenever the capability is present", which is
-    /// exactly right for X11 (any window may `ConvertSelection` at any time,
-    /// focus is not involved), for Win32, and for [`HeadlessShell`] in its
-    /// default configuration. Only a backend that really has a gate overrides
-    /// it — so this is a fact a consumer can rely on, not ceremony every
-    /// backend has to perform.
+    /// The default is "readable whenever the capability is present and the
+    /// handle is live", which is exactly right for X11 (any window may
+    /// `ConvertSelection` at any time, focus is not involved), for Win32, and
+    /// for [`HeadlessShell`] in its default configuration. Only a backend that
+    /// really has a gate overrides it — so this is a fact a consumer can rely
+    /// on, not ceremony every backend has to perform.
+    ///
+    /// The staleness half goes through
+    /// [`window_state`](Self::window_state) rather than being left to each
+    /// implementation. P0.6 found the earlier default — which ignored `window`
+    /// entirely — contradicting the "`false` for a stale handle" sentence
+    /// above: both backends that existed had *overridden* it and so had
+    /// covered for it, and the first backend to accept the default inherited
+    /// the bug. A default that cannot keep its own promise is worse than no
+    /// default.
     fn clipboard_readable(&self, window: WindowId) -> bool {
-        let _ = window;
-        self.caps().contains(ShellCaps::CLIPBOARD)
+        self.caps().contains(ShellCaps::CLIPBOARD) && self.window_state(window).is_ok()
     }
 }

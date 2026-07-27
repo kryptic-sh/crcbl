@@ -149,6 +149,13 @@ pub trait Shell {
 - Drag-drop: file paths in (viewer/editor import), same mime set as clipboard —
   DnD and clipboard share the offer/receive plumbing on Wayland/X11 anyway (one
   implementation, two triggers).
+  - **Status:** implemented on Wayland (P0.5c). **XDND is deferred on X11** — it
+    is a five-message handshake over a _second_ selection with its own version
+    and timestamp rules, i.e. the whole selection machinery again with a
+    protocol on top, and it was its own slice on Wayland. `ShellCaps::DRAG_DROP`
+    is honestly clear on the X11 backend and `DroppedFile` is never emitted
+    there. Owed before the editor's asset browser needs OS-file drops (P12), and
+    the `accept_drops` gate plus `parse_uri_list` already carry over unchanged.
 
 Explicitly out (post-MVP or never): exclusive fullscreen, multi-window MVP
 (editor is single-window until it isn't), gamepad raw backends

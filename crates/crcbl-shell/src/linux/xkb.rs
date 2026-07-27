@@ -1,5 +1,15 @@
 //! `dlopen`'d bindings to libxkbcommon, for keymap interpretation.
 //!
+//! Shared by both Linux backends, because the *keymap* is a Linux artefact and
+//! not a protocol one — see [the module above](super). What differs between
+//! them is only where the keymap comes from, and that is two constructors on
+//! one type:
+//!
+//! | Backend | Source | Constructor |
+//! | --- | --- | --- |
+//! | Wayland | `wl_keyboard.keymap` sends a descriptor to `mmap` | [`Keymap::from_fd`] |
+//! | X11 | the keymap lives on the server; libxkbcommon-x11 reads it over the connection | [`Keymap::from_x11_device`] |
+//!
 //! # Decision: libxkbcommon, not our own XKB parser
 //!
 //! `docs/plan/15-windowing.md` names "keymap handling (XKB parsing)" as a
@@ -13,7 +23,7 @@
 //!   Writing our own parser would mean reverse-engineering a *reference
 //!   implementation*, which is precisely the situation where the ABI, not the
 //!   framework, is the dependency. It is the same argument
-//!   [`ffi`](super::ffi) makes about libwayland: the compositor hands us bytes
+//!   [`ffi`](crate::wayland::ffi) makes about libwayland: the compositor hands us bytes
 //!   in someone else's format and we do not get a vote.
 //! * **It is genuinely large.** An `xkb_keymap` is four sections
 //!   (`xkb_keycodes`, `xkb_types`, `xkb_compat`, `xkb_symbols`) of a real
@@ -37,7 +47,7 @@
 //! # Degrading, not failing
 //!
 //! `dlopen` rather than `#[link]`, for exactly the reasons
-//! [`ffi`](super::ffi) states — a machine without libxkbcommon must produce a
+//! [`ffi`](crate::wayland::ffi) states — a machine without libxkbcommon must produce a
 //! working shell, not a process that dies in `ld.so`. When [`load`] fails, or
 //! when the compositor sends `keymap_format.no_keymap`:
 //!
@@ -57,7 +67,7 @@
 
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::OnceLock;
 
 use crcbl_core::KeyCode;
@@ -66,9 +76,9 @@ use crcbl_core::input::{Keysym, Modifiers};
 // `mmap`/`munmap` are how the keymap gets out of the file descriptor the
 // compositor sent. Declared here rather than pulled from a crate for the same
 // reason `ffi` declares `dlopen`: two functions with a frozen ABI that `std`
-// already links. **Closing** the descriptor is not here — that discipline is
-// shared with the clipboard and lives in [`fd`](super::fd), which states why
-// the mapping stayed behind.
+// already links. Closing the descriptor is `std::fs::File`'s job — see
+// [`Keymap::from_fd`], which adopts it so that every failure path below closes
+// it exactly once.
 unsafe extern "C" {
     fn mmap(
         addr: *mut c_void,
@@ -90,7 +100,7 @@ const PROT_READ: c_int = 1;
 const MAP_PRIVATE: c_int = 2;
 /// `MAP_FAILED`.
 const MAP_FAILED: *mut c_void = usize::MAX as *mut c_void;
-/// `RTLD_NOW`; see [`ffi`](super::ffi).
+/// `RTLD_NOW`; see [`ffi`](crate::wayland::ffi).
 const RTLD_NOW: c_int = 2;
 
 /// `XKB_KEYMAP_FORMAT_TEXT_V1` — the only format there is.
@@ -125,7 +135,7 @@ struct XkbState {
 
 /// The C prototypes this module asserts about libxkbcommon.
 ///
-/// Same convention as [`ffi::prototype`](super::ffi) — the type is named once
+/// Same convention as [`ffi::prototype`](crate::wayland::ffi) — the type is named once
 /// and used both in [`Lib`] and in the `transmute` that fills it. Every one is
 /// copied from `xkbcommon/xkbcommon.h` and is ABI-stable across libxkbcommon
 /// 1.x.
@@ -164,12 +174,53 @@ mod prototype {
     /// `int xkb_state_mod_index_is_active(struct xkb_state *, xkb_mod_index_t,
     /// enum xkb_state_component)`
     pub type StateModIndexIsActive = unsafe extern "C" fn(*mut XkbState, u32, c_int) -> c_int;
+    /// `enum xkb_state_component xkb_state_update_key(struct xkb_state *,
+    /// xkb_keycode_t, enum xkb_key_direction)`
+    pub type StateUpdateKey = unsafe extern "C" fn(*mut XkbState, u32, c_int) -> c_int;
 }
 
-/// Every libxkbcommon entry point this backend uses.
+/// The C prototypes this module asserts about **libxkbcommon-x11**.
 ///
-/// Eleven functions, all of them used; the same "audited by use" rule
-/// [`ffi::Lib`](super::ffi::Lib) states.
+/// A second library, loaded separately, because it is separately packaged: a
+/// Wayland-only machine has libxkbcommon and no `-x11`, and the X11 backend has
+/// to degrade rather than refuse to start. The objects it returns are ordinary
+/// `xkb_keymap`/`xkb_state` values freed with the plain libxkbcommon
+/// destructors, which is why [`Keymap`] needs no second handle to drop them.
+///
+/// Copied from `xkbcommon/xkbcommon-x11.h`.
+mod x11_prototype {
+    use super::{XkbContext, XkbKeymap, XkbState, c_int, c_void};
+
+    /// `int xkb_x11_setup_xkb_extension(xcb_connection_t *, uint16_t major,
+    /// uint16_t minor, enum xkb_x11_setup_xkb_extension_flags, uint16_t
+    /// *major_out, uint16_t *minor_out, uint8_t *base_event_out, uint8_t
+    /// *base_error_out)`
+    pub type SetupXkbExtension = unsafe extern "C" fn(
+        *mut c_void,
+        u16,
+        u16,
+        c_int,
+        *mut u16,
+        *mut u16,
+        *mut u8,
+        *mut u8,
+    ) -> c_int;
+    /// `int32_t xkb_x11_get_core_keyboard_device_id(xcb_connection_t *)`
+    pub type GetCoreKeyboardDeviceId = unsafe extern "C" fn(*mut c_void) -> i32;
+    /// `struct xkb_keymap *xkb_x11_keymap_new_from_device(struct xkb_context *,
+    /// xcb_connection_t *, int32_t device_id, enum xkb_keymap_compile_flags)`
+    pub type KeymapNewFromDevice =
+        unsafe extern "C" fn(*mut XkbContext, *mut c_void, i32, c_int) -> *mut XkbKeymap;
+    /// `struct xkb_state *xkb_x11_state_new_from_device(struct xkb_keymap *,
+    /// xcb_connection_t *, int32_t device_id)`
+    pub type StateNewFromDevice =
+        unsafe extern "C" fn(*mut XkbKeymap, *mut c_void, i32) -> *mut XkbState;
+}
+
+/// Every libxkbcommon entry point these backends use.
+///
+/// Thirteen functions, all of them used; the same "audited by use" rule
+/// [`ffi::Lib`](crate::wayland::ffi::Lib) states.
 struct Lib {
     context_new: prototype::ContextNew,
     context_unref: prototype::ContextUnref,
@@ -180,18 +231,46 @@ struct Lib {
     state_new: prototype::StateNew,
     state_unref: prototype::StateUnref,
     state_update_mask: prototype::StateUpdateMask,
+    state_update_key: prototype::StateUpdateKey,
     state_key_get_one_sym: prototype::StateKeyGetOneSym,
     state_key_get_utf8: prototype::StateKeyGetUtf8,
     state_mod_index_is_active: prototype::StateModIndexIsActive,
 }
 
-/// The sonames tried, in order; see [`ffi::SONAMES`](super::ffi).
+/// Every libxkbcommon-x11 entry point the X11 backend uses.
+struct X11Lib {
+    setup_xkb_extension: x11_prototype::SetupXkbExtension,
+    get_core_keyboard_device_id: x11_prototype::GetCoreKeyboardDeviceId,
+    keymap_new_from_device: x11_prototype::KeymapNewFromDevice,
+    state_new_from_device: x11_prototype::StateNewFromDevice,
+}
+
+/// The sonames tried, in order; see [`ffi::SONAMES`](crate::wayland::ffi).
 const SONAMES: [&CStr; 2] = [c"libxkbcommon.so.0", c"libxkbcommon.so"];
 
+/// As [`SONAMES`], for the X11 companion library.
+const X11_SONAMES: [&CStr; 2] = [c"libxkbcommon-x11.so.0", c"libxkbcommon-x11.so"];
+
 static LIB: OnceLock<Option<Lib>> = OnceLock::new();
+static X11_LIB: OnceLock<Option<X11Lib>> = OnceLock::new();
 
 fn load() -> Option<&'static Lib> {
     LIB.get_or_init(load_uncached).as_ref()
+}
+
+fn load_x11() -> Option<&'static X11Lib> {
+    X11_LIB.get_or_init(load_x11_uncached).as_ref()
+}
+
+/// Whether libxkbcommon-x11 is available in this process.
+///
+/// Distinct from [`available`]: an X11 session can have libxkbcommon (every
+/// GTK application pulls it in) and not its X11 companion, and the backend then
+/// runs the degraded column of the [module docs](self) table rather than
+/// failing.
+#[must_use]
+pub fn x11_available() -> bool {
+    load().is_some() && load_x11().is_some()
 }
 
 /// Whether libxkbcommon is available in this process.
@@ -250,11 +329,67 @@ fn load_uncached() -> Option<Lib> {
         state_new: symbol!("xkb_state_new", prototype::StateNew),
         state_unref: symbol!("xkb_state_unref", prototype::StateUnref),
         state_update_mask: symbol!("xkb_state_update_mask", prototype::StateUpdateMask),
+        state_update_key: symbol!("xkb_state_update_key", prototype::StateUpdateKey),
         state_key_get_one_sym: symbol!("xkb_state_key_get_one_sym", prototype::StateKeyGetOneSym),
         state_key_get_utf8: symbol!("xkb_state_key_get_utf8", prototype::StateKeyGetUtf8),
         state_mod_index_is_active: symbol!(
             "xkb_state_mod_index_is_active",
             prototype::StateModIndexIsActive
+        ),
+    })
+}
+
+fn load_x11_uncached() -> Option<X11Lib> {
+    let mut handle = ptr::null_mut();
+    for soname in X11_SONAMES {
+        // SAFETY: `soname` is a NUL-terminated literal and `RTLD_NOW` is a
+        // valid flag. `dlopen` returns a handle or null and takes ownership of
+        // nothing.
+        handle = unsafe { dlopen(soname.as_ptr(), RTLD_NOW) };
+        if !handle.is_null() {
+            break;
+        }
+    }
+    if handle.is_null() {
+        log::warn!(
+            "libxkbcommon-x11 is not available: keys still map to KeyCode, but there \
+             will be no keysyms and no text input on X11"
+        );
+        return None;
+    }
+
+    /// Resolves one symbol or gives up on the whole library.
+    macro_rules! symbol {
+        ($name:literal, $ty:ty) => {{
+            // SAFETY: `handle` is a live `dlopen` handle and the name is a
+            // NUL-terminated literal.
+            let raw = unsafe { dlsym(handle, concat!($name, "\0").as_ptr().cast()) };
+            if raw.is_null() {
+                log::warn!("libxkbcommon-x11 has no symbol {}; degrading", $name);
+                return None;
+            }
+            // SAFETY: `$ty` is the prototype `xkbcommon/xkbcommon-x11.h`
+            // declares for this symbol, and the ABI is stable across 1.x.
+            unsafe { core::mem::transmute::<*mut c_void, $ty>(raw) }
+        }};
+    }
+
+    Some(X11Lib {
+        setup_xkb_extension: symbol!(
+            "xkb_x11_setup_xkb_extension",
+            x11_prototype::SetupXkbExtension
+        ),
+        get_core_keyboard_device_id: symbol!(
+            "xkb_x11_get_core_keyboard_device_id",
+            x11_prototype::GetCoreKeyboardDeviceId
+        ),
+        keymap_new_from_device: symbol!(
+            "xkb_x11_keymap_new_from_device",
+            x11_prototype::KeymapNewFromDevice
+        ),
+        state_new_from_device: symbol!(
+            "xkb_x11_state_new_from_device",
+            x11_prototype::StateNewFromDevice
         ),
     })
 }
@@ -281,8 +416,10 @@ const MODIFIER_NAMES: [(&CStr, Modifiers); 7] = [
 
 /// A compiled keymap and the state tracking which modifiers are active on it.
 ///
-/// One per `wl_keyboard`. Replaced wholesale when the compositor sends a new
-/// keymap, which it does when the user switches layout.
+/// One per `wl_keyboard` on Wayland, one per connection on X11 (there is one
+/// core keyboard, and per-device keymaps are XInput2 territory the seam has no
+/// vocabulary for). Replaced wholesale when the layout changes — a
+/// `wl_keyboard.keymap` event on Wayland, a `MappingNotify` on X11.
 pub struct Keymap {
     lib: &'static Lib,
     context: *mut XkbContext,
@@ -315,12 +452,126 @@ impl Keymap {
     /// column of the [module docs](self) rather than to an error.
     #[must_use]
     pub fn from_fd(fd: i32, size: u32) -> Option<Self> {
+        if fd < 0 {
+            // The negative value libwayland yields for a malformed message.
+            // There is nothing to close.
+            return None;
+        }
         // Adopting the descriptor is what closes it: the mapping outlives the
         // descriptor (`mmap` keeps its own reference), so the file may be
         // dropped as soon as `compile` returns, on every path including the
         // early `None`s inside it.
-        let file = super::fd::adopt(fd)?;
+        //
+        // SAFETY: `fd` was created by libwayland's own `recvmsg` of an
+        // `SCM_RIGHTS` message and handed to the dispatcher, which transfers
+        // ownership to the client. Every call site takes the value out of the
+        // decoded event and never reads it again, so this adopts it exactly
+        // once and no other owner can close it.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
         Self::compile(file.as_raw_fd(), size as usize)
+    }
+
+    /// Reads the keymap the X server holds for the core keyboard.
+    ///
+    /// The X11 half of the [module docs](self) table. There is no descriptor
+    /// and no buffer: libxkbcommon-x11 asks the server for the keymap over the
+    /// *same* `xcb_connection_t` the backend is already using, which is why
+    /// this takes a connection pointer rather than bytes.
+    ///
+    /// Returns `None` when either library is missing, when the server has no
+    /// XKB extension (a 1990s X server, or a proxy that filters it), or when
+    /// the keymap does not compile. Every one of those degrades to the
+    /// no-keysym column rather than to an error, exactly as the Wayland path
+    /// does.
+    ///
+    /// # Safety
+    ///
+    /// `connection` must be a live `xcb_connection_t*` with no error latched.
+    /// libxkbcommon-x11 issues synchronous round trips on it, so it must not be
+    /// used concurrently from another thread — which a [`Shell`](crate::Shell)
+    /// already forbids by not being `Send`.
+    #[must_use]
+    pub unsafe fn from_x11_device(connection: *mut c_void) -> Option<Self> {
+        let lib = load()?;
+        let x11 = load_x11()?;
+
+        // `xkb_x11_setup_xkb_extension` must succeed before anything else in
+        // the library may be called; it is what negotiates the XKB version on
+        // this connection. 1.0 is the minimum libxkbcommon itself asks for.
+        // SAFETY: the caller guarantees a live connection; every out-parameter
+        // is a live local, and `0` is `XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS`.
+        let ok = unsafe {
+            (x11.setup_xkb_extension)(
+                connection,
+                1,
+                0,
+                0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            log::warn!("the X server has no usable XKB extension; no keysyms this session");
+            return None;
+        }
+        // SAFETY: as above, and the extension is now set up.
+        let device = unsafe { (x11.get_core_keyboard_device_id)(connection) };
+        if device == -1 {
+            log::warn!("the X server reports no core keyboard device");
+            return None;
+        }
+
+        // SAFETY: a null context flag set is `XKB_CONTEXT_NO_FLAGS`, and every
+        // pointer is checked before use. Each object is released exactly once —
+        // here on the failure paths, or in `Drop` on success.
+        unsafe {
+            let context = (lib.context_new)(0);
+            if context.is_null() {
+                return None;
+            }
+            let keymap = (x11.keymap_new_from_device)(context, connection, device, 0);
+            if keymap.is_null() {
+                (lib.context_unref)(context);
+                log::warn!("the X server's keymap did not compile; no keysyms this session");
+                return None;
+            }
+            // `state_new_from_device` rather than `state_new`: it seeds the
+            // state with the modifiers and layout group that are *already*
+            // latched on the server, so a session started with Caps Lock on
+            // does not think it is off until the key is pressed.
+            let state = (x11.state_new_from_device)(keymap, connection, device);
+            if state.is_null() {
+                (lib.keymap_unref)(keymap);
+                (lib.context_unref)(context);
+                return None;
+            }
+            Some(Self {
+                lib,
+                context,
+                keymap,
+                state,
+                modifiers: Self::modifier_indices(lib, keymap),
+            })
+        }
+    }
+
+    /// `(xkb modifier index, engine bit)` for every modifier this keymap has.
+    ///
+    /// # Safety
+    ///
+    /// `keymap` must be live.
+    unsafe fn modifier_indices(lib: &'static Lib, keymap: *mut XkbKeymap) -> Vec<(u32, Modifiers)> {
+        MODIFIER_NAMES
+            .iter()
+            .filter_map(|(name, bit)| {
+                // SAFETY: the caller guarantees `keymap` is live, and the names
+                // are NUL-terminated literals.
+                let index = unsafe { (lib.keymap_mod_get_index)(keymap, name.as_ptr()) };
+                (index != MOD_INVALID).then_some((index, *bit))
+            })
+            .collect()
     }
 
     fn compile(fd: i32, size: usize) -> Option<Self> {
@@ -374,19 +625,12 @@ impl Keymap {
                 (lib.context_unref)(context);
                 return Self::unmap(mapped, size, None);
             }
-            let modifiers = MODIFIER_NAMES
-                .iter()
-                .filter_map(|(name, bit)| {
-                    let index = (lib.keymap_mod_get_index)(keymap, name.as_ptr());
-                    (index != MOD_INVALID).then_some((index, *bit))
-                })
-                .collect();
             Self {
                 lib,
                 context,
                 keymap,
                 state,
-                modifiers,
+                modifiers: Self::modifier_indices(lib, keymap),
             }
         };
         Self::unmap(mapped, size, Some(compiled))
@@ -411,6 +655,68 @@ impl Keymap {
         unsafe {
             (self.lib.state_update_mask)(self.state, depressed, latched, locked, 0, 0, group);
         }
+    }
+
+    /// Applies one key transition, for a backend with no modifier event.
+    ///
+    /// # Why X11 needs this and Wayland does not
+    ///
+    /// Wayland has `wl_keyboard.modifiers`, an authoritative message carrying
+    /// the four masks XKB wants, sent whenever any of them changes. X11 has no
+    /// such event outside the XKB extension's own `StateNotify` — what it has
+    /// instead is a 16-bit `state` field stapled to every key, button and
+    /// motion event, which is a *flattened* view: it cannot distinguish
+    /// depressed from latched, it is sampled **before** the key in the same
+    /// event is applied, and it has no room for the group beyond two bits.
+    ///
+    /// So the X11 backend drives the state the way libxkbcommon's own
+    /// documentation recommends when no `StateNotify` is available: feed it
+    /// every key transition and let it do the modifier bookkeeping, which is
+    /// the only path that gets latches, locks and level-3 shifts right.
+    /// [`resync_from_x11_state`](Self::resync_from_x11_state) repairs the one
+    /// thing this cannot see — transitions that happened while another window
+    /// had focus.
+    ///
+    /// `keycode` is the **X11** keycode, i.e. evdev plus
+    /// [`EVDEV_OFFSET`]; that is already XKB's own numbering, so it is passed
+    /// through unchanged.
+    pub fn update_key(&mut self, keycode: u32, pressed: bool) {
+        /// `XKB_KEY_UP`.
+        const UP: c_int = 0;
+        /// `XKB_KEY_DOWN`.
+        const DOWN: c_int = 1;
+        // SAFETY: `self.state` is live; an out-of-range keycode is a no-op
+        // inside libxkbcommon rather than a fault.
+        unsafe {
+            (self.lib.state_update_key)(self.state, keycode, if pressed { DOWN } else { UP });
+        }
+    }
+
+    /// Re-seeds the state from an X11 event's `state` mask and layout group.
+    ///
+    /// Called on `FocusIn`, and only there. While another client had focus this
+    /// process saw none of its key events, so a Shift pressed and released
+    /// elsewhere would still read as held — the classic "stuck modifier after
+    /// alt-tab" bug. The event that *restores* focus carries the server's own
+    /// view of the modifiers, which is the authority, so focus is exactly the
+    /// moment to throw away the incrementally-tracked state.
+    ///
+    /// The mask is flattened, so this is lossy in a way
+    /// [`update_key`](Self::update_key) is not: everything that is not a lock
+    /// is reported as depressed. That is the correct approximation — a latch
+    /// misread as a press is released by the very next key, whereas a lock
+    /// misread as a press would stick.
+    pub fn resync_from_x11_state(&mut self, state: u16) {
+        /// `LockMask` (Caps Lock) and `Mod2Mask` (Num Lock) — the two bits in
+        /// an X11 event mask that mean *locked* rather than *held*.
+        const LOCKED: u16 = (1 << 1) | (1 << 4);
+        /// The two bits X11 reserves for the keyboard group, as XKB defines
+        /// them in `XkbGroupForCoreState`.
+        const GROUP_SHIFT: u16 = 13;
+        let group = u32::from((state >> GROUP_SHIFT) & 0x3);
+        let depressed = u32::from(state & !LOCKED & 0xff);
+        let locked = u32::from(state & LOCKED);
+        self.update(depressed, 0, locked, group);
     }
 
     /// The engine modifiers currently in effect.
