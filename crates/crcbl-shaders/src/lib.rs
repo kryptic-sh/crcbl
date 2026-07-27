@@ -77,6 +77,10 @@ pub mod sha256;
 /// shader hash (`docs/plan/06-assets-scenes.md`).
 pub mod manifest;
 
+/// The geometry and uniform block `mesh.slang` reads, in the layouts that
+/// shader declares.
+pub mod mesh;
+
 /// The geometry `triangle.slang` pulls, in the layout that shader declares.
 pub mod triangle;
 

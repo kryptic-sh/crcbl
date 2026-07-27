@@ -38,6 +38,7 @@ crcbl = { path = "crates/crcbl", version = "0.1.0" }
 crcbl-core = { path = "crates/crcbl-core", version = "0.1.0" }
 crcbl-golden = { path = "crates/crcbl-golden", version = "0.1.0" }
 crcbl-hal = { path = "crates/crcbl-hal", version = "0.1.0" }
+crcbl-render = { path = "crates/crcbl-render", version = "0.1.0" }
 crcbl-shaders = { path = "crates/crcbl-shaders", version = "0.1.0" }
 crcbl-shell = { path = "crates/crcbl-shell", version = "0.1.0" }
 crcbl-vk = { path = "crates/crcbl-vk", version = "0.1.0" }

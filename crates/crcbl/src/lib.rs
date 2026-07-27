@@ -10,7 +10,9 @@
 //! crcbl::core    → crcbl-core    handles, WorldPos, FrameArena, FrameClock, input
 //! crcbl::shell   → crcbl-shell   the windowing seam and its backends
 //! crcbl::hal     → crcbl-hal     the GPU seam, plus the recording null backend
+//! crcbl::render  → crcbl-render  the render graph, cameras, the forward frame
 //! crcbl::shaders → crcbl-shaders the engine's shaders, as SPIR-V
+//! crcbl::math    → glam          the maths the renderer's types are spelled in
 //! crcbl::backend → (this crate)  runtime GPU backend selection
 //! ```
 //!
@@ -49,6 +51,14 @@ pub use crcbl_core as core;
 /// [`crcbl-hal`](crcbl_hal): the GPU backend seam, and the recording
 /// [`null`](crcbl_hal::null) backend standing in for one until P1.
 pub use crcbl_hal as hal;
+/// [`crcbl-render`](crcbl_render): the render graph, the transient pool, the
+/// per-pass GPU timers, cameras, and the forward frame.
+///
+/// Everything above the seam. A game builds a
+/// [`RenderGraph`](crcbl_render::RenderGraph) and never writes a barrier —
+/// `docs/plan/02-vulkan-backend.md` §2.4's rule is "no manual barriers outside
+/// the graph, ever", and this is the crate that makes it keepable.
+pub use crcbl_render as render;
 /// [`crcbl-shaders`](crcbl_shaders): the engine's Slang sources and the SPIR-V
 /// compiled from them.
 ///
@@ -60,6 +70,14 @@ pub use crcbl_shaders as shaders;
 /// [`crcbl-shell`](crcbl_shell): the windowing seam, its Linux backends and
 /// [`HeadlessShell`](crcbl_shell::HeadlessShell).
 pub use crcbl_shell as shell;
+/// [`glam`]: the linear algebra `crcbl::render`'s cameras and transforms are
+/// spelled in.
+///
+/// Re-exported rather than left to the caller because a game handing a
+/// `Mat4` to [`render::ForwardRenderer::begin_frame`] has to be handing it *the
+/// same* `Mat4` — two versions of glam in one binary is a type error whose
+/// message names neither crate helpfully.
+pub use glam as math;
 
 pub mod backend;
 
@@ -74,6 +92,9 @@ pub mod prelude {
     pub use crcbl_core::{FrameClock, SurfaceTarget};
     pub use crcbl_hal::null::NullInstance;
     pub use crcbl_hal::{Device, HalError, Instance, SurfaceError};
+    pub use crcbl_render::{
+        Camera, DirectionalLight, ForwardRenderer, GraphError, Projection, RenderGraph,
+    };
     pub use crcbl_shell::{
         CloseReply, PhysicalSize, Shell, ShellBackend, ShellError, ShellEvent, WindowDesc, WindowId,
     };

@@ -65,9 +65,11 @@ version = "0.1.0"
 dependencies = [
  "crcbl-core",
  "crcbl-hal",
+ "crcbl-render",
  "crcbl-shaders",
  "crcbl-shell",
  "crcbl-vk",
+ "glam",
  "log",
  "thiserror",
 ]
@@ -121,6 +123,14 @@ version = "0.1.0"
 [[package]]
 name = "crcbl-render"
 version = "0.1.0"
+dependencies = [
+ "crcbl-core",
+ "crcbl-hal",
+ "crcbl-shaders",
+ "glam",
+ "log",
+ "thiserror",
+]
 
 [[package]]
 name = "crcbl-scene"
@@ -157,7 +167,9 @@ dependencies = [
  "crcbl-core",
  "crcbl-golden",
  "crcbl-hal",
+ "crcbl-render",
  "crcbl-shaders",
+ "glam",
  "log",
  "thiserror",
 ]

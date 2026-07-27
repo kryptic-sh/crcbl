@@ -1857,3 +1857,1303 @@ fn synchronisation_validation_catches_a_missing_barrier() {
     device.destroy_swapchain(headless.swapchain);
     headless.instance.destroy_surface(headless.surface);
 }
+
+// --- milestones 3, 4 and 5: the lit mesh, through the render graph -----------
+
+/// The size the mesh suite renders at.
+///
+/// The same 256×192 as the triangle, and for the same reason: the golden's
+/// structural metric works on 8×8 blocks, and a smaller frame gives it too few
+/// to average over.
+const MESH_EXTENT: (u32, u32) = (256, 192);
+
+/// Where the camera is for every mesh golden.
+///
+/// Far enough back that the cube does not touch the frame edge under either
+/// projection, and off-axis on two of three axes so **three faces are visible at
+/// once** — which is what makes a directional light legible and an orientation
+/// mistake a different picture rather than a plausible one.
+fn mesh_camera(projection: crcbl_render::Projection) -> crcbl_render::Camera {
+    crcbl_render::Camera {
+        eye: glam::Vec3::new(1.6, 1.2, 2.2),
+        target: glam::Vec3::ZERO,
+        up: glam::Vec3::Y,
+        projection,
+    }
+}
+
+/// The animation time every mesh golden renders at.
+///
+/// A constant, not a clock: a golden image of a spinning cube is only evidence
+/// if the cube is in the same place every run.
+///
+/// Chosen so **three faces are visible at once**, which is not automatic — at
+/// `0.7` the cube's `+X` face is edge-on to this camera to within a fifth of a
+/// degree, and a two-face frame cannot show a lighting gradient however correct
+/// the shader is. Three faces also means no symmetry is left for a transposed
+/// matrix or a mirrored axis to hide behind.
+const MESH_SECONDS: f32 = 0.35;
+
+impl Headless {
+    /// Opens a ring at a pinned format for the mesh suite. See
+    /// [`Headless::open_for_triangle`] on why the format is pinned rather than
+    /// preferred.
+    fn open_for_mesh() -> Self {
+        let instance = instance();
+        let adapter = instance.adapters().remove(0);
+        // SAFETY: `Offscreen` names no platform object at all.
+        let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+            .expect("offscreen always works");
+        let device = instance
+            .create_device(&DeviceDesc {
+                label: Some("vk e2e mesh"),
+                adapter: adapter.id,
+                required_features: Features::empty(),
+                optional_features: Features::TIER_A
+                    | Features::TIMESTAMP_QUERY
+                    | Features::DEBUG_MARKERS,
+                compatible_surface: Some(surface),
+            })
+            .expect("a device opens");
+        let queue = device
+            .queue(crcbl_hal::QueueKind::Graphics)
+            .expect("a graphics queue always exists");
+        let format = Format::Rgba8UnormSrgb;
+        let swapchain = device
+            .create_swapchain(&SwapchainDesc {
+                label: Some("vk e2e mesh ring"),
+                surface,
+                format,
+                extent: MESH_EXTENT,
+                image_count: 2,
+                present_mode: PresentMode::Fifo,
+                composite_alpha: CompositeAlpha::Opaque,
+            })
+            .expect("the ring is created");
+        Self {
+            instance,
+            device,
+            surface,
+            swapchain,
+            queue,
+            format,
+        }
+    }
+
+    /// Reads a whole image back into `out`, polling with a deadline.
+    fn readback(&self, staging: crcbl_hal::BufferHandle, size: u64, out: &mut [u8]) {
+        let device = self.device.as_ref();
+        let readback = device
+            .request_readback(&ReadbackDesc {
+                label: Some("vk e2e pixels"),
+                buffer: staging,
+                offset: 0,
+                size,
+                after: None,
+            })
+            .expect("a readback request");
+        // Poll with a deadline, never a fixed sleep — `docs/plan/12-testing.md`.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match device
+                .poll_readback(readback, out)
+                .expect("the readback did not fail")
+            {
+                ReadbackState::Ready => break,
+                ReadbackState::Pending => assert!(
+                    std::time::Instant::now() < deadline,
+                    "the readback never completed"
+                ),
+            }
+            std::thread::yield_now();
+        }
+        device.destroy_readback(readback);
+    }
+}
+
+/// What one mesh frame produced.
+struct MeshFrame {
+    /// The tonemapped swapchain image.
+    image: crcbl_golden::Image,
+    /// The raw `Rgba16Float` scene target, as half-floats.
+    hdr: Vec<u8>,
+}
+
+impl MeshFrame {
+    /// The linear HDR value at a texel, decoded from `Rgba16Float`.
+    fn hdr_pixel(&self, x: u32, y: u32) -> [f32; 4] {
+        let index = ((y * MESH_EXTENT.0 + x) * 4) as usize * 2;
+        let mut out = [0.0f32; 4];
+        for (channel, value) in out.iter_mut().enumerate() {
+            let bits = u16::from_le_bytes(
+                self.hdr[index + channel * 2..index + channel * 2 + 2]
+                    .try_into()
+                    .expect("two bytes"),
+            );
+            *value = half_to_f32(bits);
+        }
+        out
+    }
+
+    /// The brightest linear channel anywhere in the HDR target.
+    fn peak_hdr(&self) -> f32 {
+        let mut peak = 0.0f32;
+        for y in 0..MESH_EXTENT.1 {
+            for x in 0..MESH_EXTENT.0 {
+                // Alpha is a constant 1.0 and would mask the interesting number.
+                for channel in self.hdr_pixel(x, y).iter().take(3) {
+                    peak = peak.max(*channel);
+                }
+            }
+        }
+        peak
+    }
+}
+
+/// Decodes an IEEE binary16 into an `f32`.
+///
+/// Written out rather than pulled in: this is the only place in the engine that
+/// reads a `Rgba16Float` on the CPU, and a dependency for twelve lines of shifts
+/// would be a `cargo deny` conversation about a test helper.
+fn half_to_f32(bits: u16) -> f32 {
+    let sign = u32::from(bits >> 15) << 31;
+    let exponent = u32::from((bits >> 10) & 0x1f);
+    let mantissa = u32::from(bits & 0x3ff);
+    let value = match exponent {
+        // Zero or subnormal.
+        0 => {
+            if mantissa == 0 {
+                0
+            } else {
+                // Renormalise: shift the mantissa up until its leading bit
+                // falls off, decrementing the exponent as it goes.
+                let leading = mantissa.leading_zeros() - 21;
+                let mantissa = (mantissa << (leading + 1)) & 0x3ff;
+                ((127 - 15 - leading) << 23) | (mantissa << 13)
+            }
+        }
+        // Infinity or NaN.
+        31 => 0xff << 23 | (mantissa << 13),
+        _ => ((exponent + 127 - 15) << 23) | (mantissa << 13),
+    };
+    f32::from_bits(sign | value)
+}
+
+/// Renders one frame of the forward pipeline **through the real render graph**
+/// and reads back both the swapchain image and the HDR scene target.
+///
+/// Deliberately `crcbl_render::ForwardRenderer` and `crcbl_render::RenderGraph`
+/// rather than a hand-built copy: a golden image is only evidence about the code
+/// the sandbox runs if it *is* the code the sandbox runs.
+fn render_mesh(
+    headless: &Headless,
+    renderer: &mut crcbl_render::ForwardRenderer,
+    pool: &mut crcbl_render::TransientPool,
+    camera: &crcbl_render::Camera,
+) -> MeshFrame {
+    use crcbl_render::{ForwardRenderer, RenderGraph};
+
+    let device = headless.device.as_ref();
+    let (width, height) = MESH_EXTENT;
+    let acquired = device
+        .acquire_next_frame(headless.swapchain)
+        .expect("the ring always has an image");
+    assert_eq!(acquired.extent, MESH_EXTENT);
+
+    let color_bytes = u64::from(width) * u64::from(height) * 4;
+    // `Rgba16Float`: four channels of two bytes.
+    let hdr_bytes = u64::from(width) * u64::from(height) * 8;
+    let staging = |label, size| {
+        device
+            .create_buffer(&BufferDesc {
+                label: Some(label),
+                size,
+                usage: BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::HostReadback,
+            })
+            .expect("a readback buffer")
+    };
+    let color_staging = staging("mesh readback", color_bytes);
+    let hdr_staging = staging("mesh hdr readback", hdr_bytes);
+
+    renderer
+        .begin_frame(
+            device,
+            camera,
+            &crcbl_render::DirectionalLight::default(),
+            ForwardRenderer::spin(MESH_SECONDS),
+            MESH_EXTENT,
+        )
+        .expect("the uniform buffer is writable");
+
+    // Where the graph's realised HDR handle lands, so the copy below can name
+    // it. `Cell` rather than a channel: the pass body runs synchronously inside
+    // `execute`, on this thread.
+    let hdr_handle: std::cell::Cell<Option<crcbl_hal::ImageHandle>> = std::cell::Cell::new(None);
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("mesh frame"),
+        queue: headless.queue,
+    });
+
+    let compiled = {
+        let mut graph = RenderGraph::new(headless.queue);
+        let target = graph.import_image(
+            "swapchain",
+            crcbl_render::ImportedImage {
+                image: acquired.image,
+                view: acquired.view,
+                format: headless.format,
+                extent: MESH_EXTENT,
+                initial: ResourceState::Undefined,
+                // **Not `Present`**: this frame is read back rather than shown,
+                // so the graph is asked to leave it as a copy source and the
+                // copy below needs no barrier of its own. Saying so in the
+                // import is the whole point — there is still not one
+                // hand-written barrier anywhere in this file's mesh path.
+                final_state: ResourceState::TransferSrc,
+            },
+        );
+        let scene = renderer.add_passes(&mut graph, target, MESH_EXTENT);
+        // One extra declaration, and the graph works out that the HDR target
+        // has to move from `ShaderRead` (the tonemap sampled it) to
+        // `TransferSrc` (this wants to copy it).
+        let sink = &hdr_handle;
+        graph
+            .add_compute_pass("hdr probe")
+            .use_image(scene, ResourceState::TransferSrc)
+            .execute(move |ctx| sink.set(Some(ctx.image(scene))));
+        graph.compile().expect("a legal frame")
+    };
+    eprintln!("vk e2e: {}", compiled.dump());
+    compiled
+        .execute(device, pool, encoder.as_mut(), None)
+        .expect("the graph executed");
+
+    let scene_image = hdr_handle.get().expect("the probe pass ran");
+    let layers = ImageSubresourceLayers {
+        aspect: ImageAspect::COLOR,
+        mip: 0,
+        base_layer: 0,
+        layer_count: 1,
+    };
+    // Both copies are outside every pass and need no barrier: the graph left
+    // both images in `TransferSrc` because both were declared that way.
+    encoder.copy_image_to_buffer(&BufferImageCopy {
+        buffer: color_staging,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: acquired.image,
+        image_subresource: layers,
+        image_offset: crcbl_hal::Offset3d::default(),
+        image_extent: Extent3d::d2(width, height),
+    });
+    encoder.copy_image_to_buffer(&BufferImageCopy {
+        buffer: hdr_staging,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: scene_image,
+        image_subresource: layers,
+        image_offset: crcbl_hal::Offset3d::default(),
+        image_extent: Extent3d::d2(width, height),
+    });
+
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device
+        .present(
+            headless.queue,
+            &PresentInfo {
+                swapchain: headless.swapchain,
+                waits: acquired.present_semaphore.as_slice(),
+            },
+        )
+        .expect("present");
+
+    let mut color = vec![0u8; color_bytes as usize];
+    headless.readback(color_staging, color_bytes, &mut color);
+    let mut hdr = vec![0u8; hdr_bytes as usize];
+    headless.readback(hdr_staging, hdr_bytes, &mut hdr);
+
+    device.destroy_command_buffer(commands);
+    device.destroy_buffer(color_staging);
+    device.destroy_buffer(hdr_staging);
+
+    let order = match headless.format {
+        Format::Bgra8Unorm | Format::Bgra8UnormSrgb => crcbl_golden::ChannelOrder::Bgra,
+        _ => crcbl_golden::ChannelOrder::Rgba,
+    };
+    MeshFrame {
+        image: crcbl_golden::Image::from_readback(width, height, &color, order)
+            .expect("the readback is exactly one image"),
+        hdr,
+    }
+}
+
+/// Milestones 3 and 4: a depth-tested, lit, spinning cube drawn through the
+/// render graph, against a checked-in reference.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_lit_mesh_through_the_graph_matches_its_golden_image() {
+    let headless = Headless::open_for_mesh();
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+    )
+    .expect("the forward renderer builds");
+    let frame = render_mesh(
+        &headless,
+        &mut renderer,
+        &mut pool,
+        &mesh_camera(crcbl_render::Projection::default()),
+    );
+
+    // Something drew, and it is not the whole frame: the clear must still be
+    // visible in the corners, or the "cube" is a full-screen quad.
+    let corner = frame.image.pixel(1, 1).expect("inside");
+    assert!(
+        corner[0] < 40 && corner[1] < 40 && corner[2] < 50,
+        "the corner must still be the clear colour, got {corner:?}"
+    );
+    let centre = frame.image.pixel(128, 96).expect("inside");
+    assert!(
+        u32::from(centre[0]) + u32::from(centre[1]) + u32::from(centre[2]) > 60,
+        "the centre must be the cube, not the clear, got {centre:?}"
+    );
+
+    let reference = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/mesh.png");
+    let golden = crcbl_golden::Golden::new(reference);
+    let outcome = golden
+        .check(&frame.image)
+        .expect("the reference is readable");
+    let comparison = match outcome.into_result() {
+        Ok(comparison) => comparison,
+        Err(message) => {
+            renderer.destroy(headless.device.as_ref());
+            pool.destroy(headless.device.as_ref());
+            headless.device.wait_idle().expect("idle");
+            panic!("{message}");
+        }
+    };
+    eprintln!("vk e2e: golden mesh — {}", comparison.summary());
+
+    renderer.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
+/// Milestone 5: the orthographic camera is a **projection-matrix swap and
+/// nothing else**.
+///
+/// The assertion is in two halves, and both matter. The golden proves the
+/// orthographic frame is the one that was reviewed; comparing it against the
+/// perspective frame proves the swap actually did something, so a
+/// `Projection::Orthographic` that silently fell through to perspective could
+/// not pass.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn the_orthographic_camera_is_a_projection_swap_and_matches_its_golden() {
+    let headless = Headless::open_for_mesh();
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+    )
+    .expect("the forward renderer builds");
+
+    let ortho = crcbl_render::Projection::Orthographic {
+        half_height: 0.9,
+        near: 0.1,
+        far: 100.0,
+    };
+    // The *same* renderer, the same pipeline, the same geometry, the same
+    // shader, the same graph. One field differs.
+    let perspective_frame = render_mesh(
+        &headless,
+        &mut renderer,
+        &mut pool,
+        &mesh_camera(crcbl_render::Projection::default()),
+    );
+    let frame = render_mesh(&headless, &mut renderer, &mut pool, &mesh_camera(ortho));
+
+    let differing = (0..MESH_EXTENT.1)
+        .flat_map(|y| (0..MESH_EXTENT.0).map(move |x| (x, y)))
+        .filter(|(x, y)| frame.image.pixel(*x, *y) != perspective_frame.image.pixel(*x, *y))
+        .count();
+    assert!(
+        differing > (MESH_EXTENT.0 * MESH_EXTENT.1) as usize / 100,
+        "swapping the projection must change the picture; only {differing} pixels moved"
+    );
+
+    let reference =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/mesh_ortho.png");
+    let golden = crcbl_golden::Golden::new(reference);
+    let outcome = golden
+        .check(&frame.image)
+        .expect("the reference is readable");
+    let comparison = match outcome.into_result() {
+        Ok(comparison) => comparison,
+        Err(message) => {
+            renderer.destroy(headless.device.as_ref());
+            pool.destroy(headless.device.as_ref());
+            headless.device.wait_idle().expect("idle");
+            panic!("{message}");
+        }
+    };
+    eprintln!("vk e2e: golden ortho mesh — {}", comparison.summary());
+
+    renderer.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
+/// Milestone 4, measured rather than eyeballed: the directional light produces a
+/// real gradient across the cube's faces.
+///
+/// A shader that returned the vertex colour unchanged would draw a perfectly
+/// good cube and pass a golden image the day it was blessed. What it could not
+/// do is make two faces of *different* colours differ in brightness by the same
+/// factor the Lambert term predicts — which is what this checks, using the HDR
+/// target so the sRGB transfer function is not in the way.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn the_directional_light_actually_shades_the_mesh() {
+    let headless = Headless::open_for_mesh();
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+    )
+    .expect("the forward renderer builds");
+    let frame = render_mesh(
+        &headless,
+        &mut renderer,
+        &mut pool,
+        &mesh_camera(crcbl_render::Projection::default()),
+    );
+
+    // Collect the linear luminance of every pixel the cube covers, in the HDR
+    // target — where the values are the shader's own output rather than an sRGB
+    // encoding of it.
+    let mut lit: Vec<f32> = Vec::new();
+    for y in 0..MESH_EXTENT.1 {
+        for x in 0..MESH_EXTENT.0 {
+            let [r, g, b, _] = frame.hdr_pixel(x, y);
+            let luminance = 0.2126f32.mul_add(r, 0.7152f32.mul_add(g, 0.0722 * b));
+            // Anything above the clear colour's luminance is geometry.
+            if luminance > 0.05 {
+                lit.push(luminance);
+            }
+        }
+    }
+    assert!(
+        lit.len() > 1000,
+        "the cube must cover a meaningful part of the frame; got {} pixels",
+        lit.len()
+    );
+    lit.sort_by(f32::total_cmp);
+    let dimmest = lit[lit.len() / 20];
+    let brightest = lit[lit.len() - lit.len() / 20 - 1];
+    assert!(
+        brightest > dimmest * 1.5,
+        "a directional light must produce a gradient across the faces: the 95th \
+         percentile is {brightest} and the 5th is {dimmest}, a ratio of {}",
+        brightest / dimmest
+    );
+    // And nothing is pure black: the ambient term exists so an unlit face is
+    // dark rather than invisible.
+    assert!(dimmest > 0.0, "the ambient term must lift the unlit faces");
+
+    renderer.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
+/// **HDR from P1 is real**, not a format enum.
+///
+/// `docs/plan/ROADMAP.md`'s correction asks for an `Rgba16Float` scene target
+/// and a trivial tonemap from the first lit mesh. This reads the scene target
+/// back and asserts it carries a value above 1.0 — which an `Rgba8` attachment
+/// could not have held — and that the tonemapped swapchain pixel underneath it
+/// is at the top of its range, which is the tonemap doing the one thing it does.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn the_hdr_target_carries_values_an_eight_bit_target_could_not() {
+    let headless = Headless::open_for_mesh();
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+    )
+    .expect("the forward renderer builds");
+    let frame = render_mesh(
+        &headless,
+        &mut renderer,
+        &mut pool,
+        &mesh_camera(crcbl_render::Projection::default()),
+    );
+
+    let peak = frame.peak_hdr();
+    eprintln!("vk e2e: peak linear value in the HDR target — {peak}");
+    assert!(
+        peak > 1.0,
+        "the Blinn highlight must exceed 1.0 somewhere, or the RGBA16F target is \
+         carrying nothing an Rgba8 one could not; peak was {peak}"
+    );
+    assert!(
+        peak.is_finite() && peak < 100.0,
+        "a peak of {peak} is a NaN or a runaway, not a specular highlight"
+    );
+
+    // Find the brightest texel and check the tonemap clamped it rather than
+    // letting it wrap or go black.
+    let mut hottest = (0u32, 0u32, 0.0f32);
+    for y in 0..MESH_EXTENT.1 {
+        for x in 0..MESH_EXTENT.0 {
+            let value = frame
+                .hdr_pixel(x, y)
+                .iter()
+                .take(3)
+                .fold(0.0f32, |peak, channel| peak.max(*channel));
+            if value > hottest.2 {
+                hottest = (x, y, value);
+            }
+        }
+    }
+    let pixel = frame
+        .image
+        .pixel(hottest.0, hottest.1)
+        .expect("inside the frame");
+    let brightest_channel = pixel[..3].iter().copied().max().expect("three channels");
+    assert_eq!(
+        brightest_channel, 255,
+        "the tonemap must clamp a linear {} to the top of the swapchain's range, \
+         got {pixel:?} at ({}, {})",
+        hottest.2, hottest.0, hottest.1
+    );
+
+    renderer.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
+/// Per-pass GPU timers, against a real clock.
+///
+/// `docs/plan/02-vulkan-backend.md` §2.4 asks for "GPU timestamp per pass,
+/// exposed as a frame-timing report". `crcbl-render`'s own tests cover the
+/// report's shape; this is the half that needs a driver — that the numbers are
+/// non-zero, ordered, and attached to the right pass names.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn per_pass_gpu_timers_report_real_numbers() {
+    let headless = Headless::open_for_mesh();
+    let device = headless.device.as_ref();
+    if !device.caps().features.contains(Features::TIMESTAMP_QUERY) {
+        eprintln!("vk e2e: no timestamp queries on this device; the report degrades to empty");
+        headless.finish();
+        return;
+    }
+
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(device, headless.queue, headless.format)
+        .expect("the forward renderer builds");
+    let mut timers =
+        crcbl_render::PassTimers::new(device, 2, 8).expect("the device reports timestamps");
+    let camera = mesh_camera(crcbl_render::Projection::default());
+
+    // Enough frames for the timer ring to come round and resolve a slot.
+    for _ in 0..6 {
+        let acquired = device
+            .acquire_next_frame(headless.swapchain)
+            .expect("an image");
+        renderer
+            .begin_frame(
+                device,
+                &camera,
+                &crcbl_render::DirectionalLight::default(),
+                crcbl_render::ForwardRenderer::spin(MESH_SECONDS),
+                MESH_EXTENT,
+            )
+            .expect("uniforms");
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("timed frame"),
+            queue: headless.queue,
+        });
+        let compiled = {
+            let mut graph = crcbl_render::RenderGraph::new(headless.queue);
+            let target = graph.import_image(
+                "swapchain",
+                crcbl_render::ForwardRenderer::present_target(
+                    acquired.image,
+                    acquired.view,
+                    headless.format,
+                    MESH_EXTENT,
+                ),
+            );
+            let _ = renderer.add_passes(&mut graph, target, MESH_EXTENT);
+            graph.compile().expect("a legal frame")
+        };
+        compiled
+            .execute(device, &mut pool, encoder.as_mut(), Some(&mut timers))
+            .expect("executed");
+        let commands = encoder.finish().expect("recorded");
+        device
+            .submit(headless.queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+        device
+            .present(
+                headless.queue,
+                &PresentInfo {
+                    swapchain: headless.swapchain,
+                    waits: acquired.present_semaphore.as_slice(),
+                },
+            )
+            .expect("present");
+        // The timers resolve a slot only when it comes back round, and this
+        // suite submits without pipelining, so an idle here is what stands in
+        // for the frame loop's timeline wait.
+        device.wait_idle().expect("idle");
+        device.destroy_command_buffer(commands);
+    }
+
+    let timings = timers.latest();
+    eprintln!("vk e2e: {}", timings.report());
+    assert_eq!(
+        timings
+            .passes
+            .iter()
+            .map(|pass| pass.label.as_str())
+            .collect::<Vec<_>>(),
+        vec!["forward", "tonemap"],
+        "the report must name the passes the graph ran, in order"
+    );
+    assert!(
+        timings.total_nanos() > 0,
+        "a real GPU took a measurable amount of time: {}",
+        timings.report()
+    );
+    // A loose ceiling on purpose. The failure this guards against is a *unit*
+    // mistake — raw ticks reported as nanoseconds, which on radv's 1.0 ns period
+    // would be invisible and on another device would be out by orders of
+    // magnitude — not slowness. A tight bound would instead be a load-dependent
+    // flake, and lavapipe's "GPU" time is CPU time on a machine that may be
+    // running thirty other things.
+    assert!(
+        timings.total_nanos() < 10_000_000_000,
+        "a 256x192 frame reporting over ten seconds is a unit mistake, not a slow \
+         machine: {}",
+        timings.report()
+    );
+
+    timers.destroy(device);
+    renderer.destroy(device);
+    pool.destroy(device);
+    headless.finish();
+}
+
+// --- reversed-Z, proved rather than asserted --------------------------------
+
+/// Two overlapping quads, the **near one drawn first**, so the depth test is the
+/// only thing deciding what is visible.
+///
+/// This is the fixture that makes reversed-Z a test result. `crcbl-render`'s
+/// `camera` module proves the *maths* on the CPU — two surfaces a centimetre
+/// apart at 300 m quantise to the same `f32` under a conventional projection and
+/// to different ones under the engine's. This proves the *pipeline*: the same
+/// geometry, the same shader, the same `CompareOp::Greater`, the same clear of
+/// 0.0, and **only the projection matrix differs** between the two runs. One
+/// produces a red square, the other a blue one.
+///
+/// Why the near quad is drawn first: with the far quad first, a broken depth
+/// test would still leave the near one on top by draw order, and the test would
+/// pass for the wrong reason.
+struct DepthProbe {
+    vertices: crcbl_hal::BufferHandle,
+    indices: crcbl_hal::BufferHandle,
+    uniforms: crcbl_hal::BufferHandle,
+    layout: crcbl_hal::BindGroupLayoutHandle,
+    group: crcbl_hal::BindGroupHandle,
+    pipeline_layout: crcbl_hal::PipelineLayoutHandle,
+    pipeline: crcbl_hal::GraphicsPipelineHandle,
+}
+
+/// Where the probe's camera sits, on the +Z axis looking at the origin.
+const PROBE_EYE: f32 = 2.0;
+/// The probe's near plane. The only number that controls depth precision.
+const PROBE_NEAR: f32 = 0.1;
+/// The probe's far plane — used **only** by the conventional control matrix; the
+/// engine's own projection has none.
+const PROBE_FAR: f32 = 100.0;
+
+impl DepthProbe {
+    /// The two quads, near-first, in `crcbl_shaders::mesh::MeshVertex` layout.
+    fn geometry() -> (Vec<u8>, Vec<u8>) {
+        // (z, half-extent, colour). The near quad is smaller, so a correct
+        // frame is a red square inside a blue ring and a *wrong* one is a plain
+        // blue rectangle — two visibly different pictures, not two shades.
+        let quads = [
+            (0.3f32, 0.25f32, [0.9f32, 0.05, 0.05]),
+            (-0.3, 0.6, [0.05, 0.1, 0.9]),
+        ];
+        let mut vertices = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        for (quad, (z, half, color)) in quads.iter().enumerate() {
+            let base = u32::try_from(quad * 4).expect("two quads");
+            for (x, y) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                for value in [x * half, y * half, *z, 1.0] {
+                    vertices.extend_from_slice(&value.to_le_bytes());
+                }
+                // Facing the camera, so both quads are lit identically and the
+                // only difference between them is their albedo.
+                for value in [0.0f32, 0.0, 1.0, 0.0] {
+                    vertices.extend_from_slice(&value.to_le_bytes());
+                }
+                for value in [color[0], color[1], color[2], 1.0] {
+                    vertices.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        let index_bytes = indices
+            .iter()
+            .flat_map(|index| index.to_le_bytes())
+            .collect();
+        (vertices, index_bytes)
+    }
+
+    fn new(headless: &Headless) -> Self {
+        let device = headless.device.as_ref();
+        let (vertex_bytes, index_bytes) = Self::geometry();
+
+        let upload = |label, usage, bytes: &[u8], state| {
+            let size = bytes.len() as u64;
+            let staging = device
+                .create_buffer(&BufferDesc {
+                    label: Some("probe staging"),
+                    size,
+                    usage: BufferUsage::TRANSFER_SRC,
+                    memory: MemoryLocation::HostUpload,
+                })
+                .expect("a staging buffer");
+            device.write_buffer(staging, 0, bytes).expect("write");
+            let target = device
+                .create_buffer(&BufferDesc {
+                    label: Some(label),
+                    size,
+                    usage: usage | BufferUsage::TRANSFER_DST,
+                    memory: MemoryLocation::DeviceLocal,
+                })
+                .expect("a device-local buffer");
+            let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+                label: Some("probe upload"),
+                queue: headless.queue,
+            });
+            encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+                src: staging,
+                src_offset: 0,
+                dst: target,
+                dst_offset: 0,
+                size,
+            });
+            encoder.pipeline_barrier(&Barriers {
+                buffers: &[crcbl_hal::BufferBarrier::new(
+                    target,
+                    ResourceState::TransferDst,
+                    state,
+                )],
+                ..Barriers::default()
+            });
+            let commands = encoder.finish().expect("recorded");
+            device
+                .submit(headless.queue, &SubmitInfo::new(&[commands]))
+                .expect("submit");
+            device.wait_idle().expect("idle");
+            device.destroy_command_buffer(commands);
+            device.destroy_buffer(staging);
+            target
+        };
+
+        let vertices = upload(
+            "probe vertices",
+            BufferUsage::STORAGE,
+            &vertex_bytes,
+            ResourceState::ShaderRead,
+        );
+        let indices = upload(
+            "probe indices",
+            BufferUsage::INDEX,
+            &index_bytes,
+            ResourceState::IndexBuffer,
+        );
+        let uniforms = device
+            .create_buffer(&BufferDesc {
+                label: Some("probe uniforms"),
+                size: crcbl_shaders::mesh::FRAME_UNIFORMS_SIZE as u64,
+                usage: BufferUsage::UNIFORM,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a uniform buffer");
+
+        let entries = [
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: crcbl_hal::ShaderStages::VERTEX
+                    .union(crcbl_hal::ShaderStages::FRAGMENT),
+                kind: crcbl_hal::BindingKind::UniformBuffer { dynamic: false },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: crcbl_hal::ShaderStages::VERTEX,
+                kind: crcbl_hal::BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
+        ];
+        let layout = device
+            .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+                label: Some("probe"),
+                entries: &entries,
+            })
+            .expect("a layout");
+        let group_entries = [
+            crcbl_hal::BindGroupEntry {
+                binding: 0,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(uniforms),
+            },
+            crcbl_hal::BindGroupEntry {
+                binding: 1,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(vertices),
+            },
+        ];
+        let group = device
+            .create_bind_group(&crcbl_hal::BindGroupDesc {
+                label: Some("probe"),
+                layout,
+                entries: &group_entries,
+            })
+            .expect("a bind group");
+        let set_layouts = [layout];
+        let pipeline_layout = device
+            .create_pipeline_layout(&crcbl_hal::PipelineLayoutDesc {
+                label: Some("probe"),
+                bind_group_layouts: &set_layouts,
+                push_constants: None,
+            })
+            .expect("a pipeline layout");
+
+        let module = device
+            .create_shader_module(&crcbl_hal::ShaderModuleDesc {
+                label: Some("mesh.slang"),
+                spirv: crcbl_shaders::MESH.spirv(),
+            })
+            .expect("the committed SPIR-V is accepted");
+        let color_targets = [crcbl_hal::ColorTargetState::opaque(headless.format)];
+        let pipeline = device.create_graphics_pipeline(&crcbl_hal::GraphicsPipelineDesc {
+            label: Some("depth probe"),
+            layout: pipeline_layout,
+            vertex: crcbl_hal::ShaderEntry {
+                module,
+                entry_point: "vertexMain",
+            },
+            fragment: Some(crcbl_hal::ShaderEntry {
+                module,
+                entry_point: "fragmentMain",
+            }),
+            primitive: crcbl_hal::PrimitiveState {
+                // No culling: the point is the depth test, and a winding
+                // mistake would otherwise delete a quad and look like one.
+                cull_mode: crcbl_hal::CullMode::None,
+                ..crcbl_hal::PrimitiveState::default()
+            },
+            // The seam's default, unchanged: `Greater` on `D32Float` with
+            // writes on. **This is what the two projections are tested
+            // against, and it is not adjusted between runs.**
+            depth_stencil: Some(crcbl_hal::DepthStencilState::default()),
+            multisample: crcbl_hal::MultisampleState::default(),
+            color_targets: &color_targets,
+        });
+        device.destroy_shader_module(module);
+
+        Self {
+            vertices,
+            indices,
+            uniforms,
+            layout,
+            group,
+            pipeline_layout,
+            pipeline: pipeline.expect("a graphics pipeline"),
+        }
+    }
+
+    fn destroy(self, device: &dyn Device) {
+        device.destroy_graphics_pipeline(self.pipeline);
+        device.destroy_pipeline_layout(self.pipeline_layout);
+        device.destroy_bind_group(self.group);
+        device.destroy_bind_group_layout(self.layout);
+        device.destroy_buffer(self.uniforms);
+        device.destroy_buffer(self.indices);
+        device.destroy_buffer(self.vertices);
+    }
+}
+
+/// Renders the probe with `view_proj` and reads the frame back.
+fn render_probe(
+    headless: &Headless,
+    probe: &DepthProbe,
+    pool: &mut crcbl_render::TransientPool,
+    view_proj: glam::Mat4,
+) -> crcbl_golden::Image {
+    let device = headless.device.as_ref();
+    let (width, height) = MESH_EXTENT;
+
+    let uniforms = crcbl_shaders::mesh::FrameUniforms {
+        view_proj: view_proj.to_cols_array(),
+        model: glam::Mat4::IDENTITY.to_cols_array(),
+        camera_position: [0.0, 0.0, PROBE_EYE, 1.0],
+        // Straight at the quads, so both are lit identically and the only
+        // difference between them is their albedo.
+        light_direction: [0.0, 0.0, 1.0, 0.0],
+        light_color: [0.8, 0.8, 0.8, 0.0],
+        ambient: [0.2, 0.2, 0.2, 0.0],
+    };
+    device
+        .write_buffer(probe.uniforms, 0, &uniforms.to_bytes())
+        .expect("write");
+
+    let acquired = device
+        .acquire_next_frame(headless.swapchain)
+        .expect("an image");
+    let bytes = u64::from(width) * u64::from(height) * 4;
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("probe readback"),
+            size: bytes,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a readback buffer");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("probe frame"),
+        queue: headless.queue,
+    });
+    let compiled = {
+        let mut graph = crcbl_render::RenderGraph::new(headless.queue);
+        let target = graph.import_image(
+            "swapchain",
+            crcbl_render::ImportedImage {
+                image: acquired.image,
+                view: acquired.view,
+                format: headless.format,
+                extent: MESH_EXTENT,
+                initial: ResourceState::Undefined,
+                final_state: ResourceState::TransferSrc,
+            },
+        );
+        let depth = graph.create_image(
+            "probe-depth",
+            crcbl_render::TransientImageDesc::scene_depth(MESH_EXTENT),
+        );
+        graph
+            .add_render_pass("probe")
+            .clear_color(target, [0.0, 0.0, 0.0, 1.0])
+            // The reversed-Z clear: `depth::CLEAR` = 0.0, so any geometry beats
+            // the empty buffer under `Greater`.
+            .clear_depth(depth)
+            .execute(|ctx| {
+                let encoder = ctx.encoder();
+                encoder.bind_graphics_pipeline(probe.pipeline);
+                encoder.bind_group(0, probe.group, &[]);
+                encoder.bind_index_buffer(probe.indices, 0, crcbl_hal::IndexFormat::Uint32);
+                encoder.draw_indexed(0..12, 0, 0..1);
+            });
+        graph.compile().expect("a legal frame")
+    };
+    compiled
+        .execute(device, pool, encoder.as_mut(), None)
+        .expect("executed");
+
+    encoder.copy_image_to_buffer(&BufferImageCopy {
+        buffer: staging,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: acquired.image,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: crcbl_hal::Offset3d::default(),
+        image_extent: Extent3d::d2(width, height),
+    });
+    let commands = encoder.finish().expect("recorded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device
+        .present(
+            headless.queue,
+            &PresentInfo {
+                swapchain: headless.swapchain,
+                waits: acquired.present_semaphore.as_slice(),
+            },
+        )
+        .expect("present");
+
+    let mut pixels = vec![0u8; bytes as usize];
+    headless.readback(staging, bytes, &mut pixels);
+    device.destroy_command_buffer(commands);
+    device.destroy_buffer(staging);
+
+    let order = match headless.format {
+        Format::Bgra8Unorm | Format::Bgra8UnormSrgb => crcbl_golden::ChannelOrder::Bgra,
+        _ => crcbl_golden::ChannelOrder::Rgba,
+    };
+    crcbl_golden::Image::from_readback(width, height, &pixels, order).expect("one image")
+}
+
+/// **Reversed-Z, on the GPU, discriminated against the alternative.**
+///
+/// `docs/plan/02-vulkan-backend.md` locks reversed-Z, and it is the kind of
+/// decision a comment can claim and nothing checks. This renders the *same*
+/// geometry through the *same* pipeline with the *same* `Greater` compare op and
+/// the *same* clear of 0.0, twice, changing one thing: the projection matrix.
+///
+/// * With the engine's reversed-Z projection, the near quad wins → **red**.
+/// * With a conventional `0 at near, 1 at far` projection, the far quad has the
+///   larger depth value, passes `Greater`, and overwrites it → **blue**.
+///
+/// So this test would fail under standard-Z, in the direction that says which
+/// convention is in force — which is the point.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
+    let headless = Headless::open_for_mesh();
+    let probe = DepthProbe::new(&headless);
+    let mut pool = crcbl_render::TransientPool::new();
+
+    #[allow(clippy::cast_precision_loss)]
+    let aspect = MESH_EXTENT.0 as f32 / MESH_EXTENT.1 as f32;
+    let view = glam::camera::rh::view::look_at_mat4(
+        glam::Vec3::new(0.0, 0.0, PROBE_EYE),
+        glam::Vec3::ZERO,
+        glam::Vec3::Y,
+    );
+    let fov = core::f32::consts::FRAC_PI_4;
+
+    // The engine's own projection, straight out of `crcbl-render`.
+    let reversed = crcbl_render::Projection::Perspective {
+        fov_y: fov,
+        near: PROBE_NEAR,
+    }
+    .matrix(aspect)
+        * view;
+    // The control: conventional depth, 0 at the near plane and 1 at the far one.
+    // `crcbl-render` deliberately has no constructor for this, which is why the
+    // suite reaches for glam directly.
+    let standard =
+        glam::camera::rh::proj::directx::perspective(fov, aspect, PROBE_NEAR, PROBE_FAR) * view;
+
+    let centre = (MESH_EXTENT.0 / 2, MESH_EXTENT.1 / 2);
+
+    let reversed_frame = render_probe(&headless, &probe, &mut pool, reversed);
+    let pixel = reversed_frame.pixel(centre.0, centre.1).expect("inside");
+    assert!(
+        pixel[0] > pixel[2] && pixel[0] > 100,
+        "under reversed-Z the *near* quad must win the depth test, so the centre \
+         must be red; got {pixel:?}. If it is blue, the projection matrix is not \
+         reversed and every depth comparison in the engine is inverted."
+    );
+
+    // And the far quad really is there, around the edge of the near one — so
+    // "red at the centre" is a depth test rather than the blue quad having
+    // failed to draw at all.
+    // Between the two quads' silhouettes. At this camera the near quad reaches
+    // 34 pixels from the centre and the far one 60, so 48 is comfortably inside
+    // the blue ring and comfortably outside the red square — worth deriving
+    // rather than guessing, because a sample point that lands on neither reads
+    // as a depth-test failure.
+    let ring = (MESH_EXTENT.0 / 2, MESH_EXTENT.1 / 2 + 48);
+    let pixel = reversed_frame.pixel(ring.0, ring.1).expect("inside");
+    assert!(
+        pixel[2] > pixel[0] && pixel[2] > 100,
+        "the far quad is larger, so it must be visible around the near one; got \
+         {pixel:?} at {ring:?}"
+    );
+
+    let standard_frame = render_probe(&headless, &probe, &mut pool, standard);
+    let pixel = standard_frame.pixel(centre.0, centre.1).expect("inside");
+    assert!(
+        pixel[2] > pixel[0] && pixel[2] > 100,
+        "the control is only meaningful if a conventional projection really does \
+         invert the outcome under the engine's `Greater` test; it gave {pixel:?}, \
+         which is not blue. Re-derive the quad depths rather than relaxing this."
+    );
+
+    eprintln!(
+        "vk e2e: reversed-Z centre {:?}, conventional-Z centre {:?} — the same \
+         pipeline, the same compare op, only the projection differs",
+        reversed_frame.pixel(centre.0, centre.1).expect("inside"),
+        standard_frame.pixel(centre.0, centre.1).expect("inside"),
+    );
+
+    probe.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
+/// A resize storm, driven through the **render graph** rather than around it.
+///
+/// This is the path with the most new moving parts at P1.3 and the least
+/// obvious failure mode. Every size change invalidates both scene transients,
+/// so the pool must hand out new ones and retire the old; and the tonemap's bind
+/// group names a *graph-owned* view, so it must be rebuilt when that view
+/// changes and destroyed when it does — while a previous frame may still be
+/// reading it.
+///
+/// Getting any of that wrong is a validation error rather than a wrong picture,
+/// which is why the assertion is the report: `Headless::finish` fails on any
+/// error or warning, and on the layer never having loaded.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn the_graph_and_its_pool_survive_a_resize_storm() {
+    let headless = Headless::open_for_mesh();
+    let device = headless.device.as_ref();
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(device, headless.queue, headless.format)
+        .expect("the forward renderer builds");
+    let camera = mesh_camera(crcbl_render::Projection::default());
+
+    // Sizes chosen to be genuinely different rather than a nudge — including one
+    // that is not a multiple of anything, because a row-pitch assumption hides
+    // behind round numbers.
+    let sizes = [
+        MESH_EXTENT,
+        (64, 48),
+        (300, 130),
+        (17, 5),
+        (256, 192),
+        (64, 48),
+        MESH_EXTENT,
+    ];
+    for extent in sizes {
+        device
+            .reconfigure_swapchain(
+                headless.swapchain,
+                &SwapchainDesc {
+                    label: Some("vk e2e mesh ring"),
+                    surface: headless.surface,
+                    format: headless.format,
+                    extent,
+                    image_count: 2,
+                    present_mode: PresentMode::Fifo,
+                    composite_alpha: CompositeAlpha::Opaque,
+                },
+            )
+            .expect("reconfigure keeps the handle valid");
+
+        // Two frames per size, so the second one exercises the *reuse* path
+        // rather than only the create path.
+        for _ in 0..2 {
+            let acquired = device
+                .acquire_next_frame(headless.swapchain)
+                .expect("an image");
+            assert_eq!(acquired.extent, extent);
+            renderer
+                .begin_frame(
+                    device,
+                    &camera,
+                    &crcbl_render::DirectionalLight::default(),
+                    crcbl_render::ForwardRenderer::spin(MESH_SECONDS),
+                    extent,
+                )
+                .expect("uniforms");
+
+            let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+                label: Some("resize frame"),
+                queue: headless.queue,
+            });
+            let compiled = {
+                let mut graph = crcbl_render::RenderGraph::new(headless.queue);
+                let target = graph.import_image(
+                    "swapchain",
+                    crcbl_render::ForwardRenderer::present_target(
+                        acquired.image,
+                        acquired.view,
+                        headless.format,
+                        extent,
+                    ),
+                );
+                let _ = renderer.add_passes(&mut graph, target, extent);
+                graph.compile().expect("a legal frame")
+            };
+            // Every pass renders at the size that was just configured, which is
+            // the graph deriving its render area from the attachments rather
+            // than from anything remembered.
+            for pass in compiled.passes() {
+                assert_eq!(
+                    (pass.render_area().width, pass.render_area().height),
+                    extent,
+                    "pass {:?} rendered at the wrong size",
+                    pass.label()
+                );
+            }
+            compiled
+                .execute(device, &mut pool, encoder.as_mut(), None)
+                .expect("executed");
+            let commands = encoder.finish().expect("recorded");
+            device
+                .submit(headless.queue, &SubmitInfo::new(&[commands]))
+                .expect("submit");
+            device
+                .present(
+                    headless.queue,
+                    &PresentInfo {
+                        swapchain: headless.swapchain,
+                        waits: acquired.present_semaphore.as_slice(),
+                    },
+                )
+                .expect("present");
+            // Nothing is pipelined here, so an idle stands in for the frame
+            // loop's timeline wait before the pool retires anything.
+            device.wait_idle().expect("idle");
+            device.destroy_command_buffer(commands);
+            pool.retire_unused(device);
+        }
+
+        // The pool must converge rather than accumulate one pair of targets per
+        // size the window passed through. Two live transients, plus at most
+        // `RETIRE_AFTER_FRAMES` generations of stale ones.
+        let ceiling = 2 * (crcbl_render::transient::RETIRE_AFTER_FRAMES as usize + 1);
+        assert!(
+            pool.image_count() <= ceiling,
+            "after resizing to {extent:?} the pool holds {} images, over the {ceiling} \
+             a bounded retirement allows",
+            pool.image_count()
+        );
+    }
+
+    renderer.destroy(device);
+    pool.destroy(device);
+    // The report is the assertion: a bind group destroyed while in flight, a
+    // transient freed too early, or a stale view sampled would all land here.
+    headless.finish();
+}

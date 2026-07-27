@@ -74,6 +74,54 @@ const WINDOWED_IDLE: Duration = Duration::from_millis(4);
 /// exactly 120 ticks on every machine.
 const HEADLESS_FRAME_STEP: Duration = Duration::from_nanos(1_000_000_000 / 60);
 
+/// Which projection the camera uses.
+///
+/// **Milestone 5, entire.** `docs/plan/02-vulkan-backend.md`'s rung 5 is
+/// "orthographic camera mode proving the 2D story (z = z-index) is just a
+/// projection matrix swap", and this enum is the proof's user-facing half:
+/// [`CameraMode::projection`] is the only place the two differ, and nothing
+/// downstream of it — not the pipeline, not the shader, not the render graph —
+/// is told which one was chosen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CameraMode {
+    /// Infinite-far reversed-Z perspective. The 3D default.
+    #[default]
+    Perspective,
+    /// Reversed-Z orthographic. The 2D mode, where world z is a z-index and a
+    /// larger one draws on top.
+    Orthographic,
+}
+
+impl CameraMode {
+    /// Parses `perspective` / `ortho` / `orthographic`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "perspective" | "persp" => Some(Self::Perspective),
+            "ortho" | "orthographic" => Some(Self::Orthographic),
+            _ => None,
+        }
+    }
+
+    /// The projection this mode means.
+    ///
+    /// The orthographic half-height is chosen so the unit cube fills a similar
+    /// share of the frame as it does under the default perspective camera, which
+    /// is what makes the two modes comparable at a glance rather than one of
+    /// them looking broken.
+    #[must_use]
+    pub fn projection(self) -> crcbl::render::Projection {
+        match self {
+            Self::Perspective => crcbl::render::Projection::default(),
+            Self::Orthographic => crcbl::render::Projection::Orthographic {
+                half_height: 0.9,
+                near: 0.1,
+                far: 100.0,
+            },
+        }
+    }
+}
+
 /// How the sandbox was asked to run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
@@ -94,6 +142,8 @@ pub struct Options {
     pub tick_hz: u32,
     /// Window title.
     pub title: String,
+    /// Which projection the camera uses — milestone 5.
+    pub camera: CameraMode,
 }
 
 impl Default for Options {
@@ -104,6 +154,7 @@ impl Default for Options {
             frames: None,
             tick_hz: 60,
             title: "Crucible sandbox".to_string(),
+            camera: CameraMode::default(),
         }
     }
 }
@@ -348,7 +399,13 @@ impl<S: Shell + ?Sized> Loop<S> {
         let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
         log::info!("shell: first configure at {}x{}", extent.0, extent.1);
 
-        let gpu = Gpu::open(shell.as_ref(), window, extent, options.backend)?;
+        let gpu = Gpu::open(
+            shell.as_ref(),
+            window,
+            extent,
+            options.backend,
+            options.camera.projection(),
+        )?;
 
         Ok(Self {
             windowed: !options.headless,
@@ -410,6 +467,12 @@ impl<S: Shell + ?Sized> Loop<S> {
         while self.frame_clock.consume_tick() {
             self.ticks += 1;
             tick(self.frame_clock.tick_dt_secs());
+            // The cube spins on the **fixed** timestep, not on the frame rate.
+            // That is what makes `--headless --frames N` render a
+            // bit-reproducible picture on every machine, and therefore what
+            // makes a golden image of it evidence rather than a coincidence.
+            #[allow(clippy::cast_possible_truncation)]
+            self.gpu.advance(self.frame_clock.tick_dt_secs() as f32);
         }
 
         // `alpha` is read after the tick loop, never before: before, the
@@ -427,6 +490,15 @@ impl<S: Shell + ?Sized> Loop<S> {
     ///
     /// [`SandboxError`] if teardown failed.
     pub fn finish(mut self, exit: ExitReason) -> Result<Summary, SandboxError> {
+        // `docs/plan/02-vulkan-backend.md` §2.4: "GPU timestamp per pass,
+        // exposed as a frame-timing report". At `info` so a normal run shows
+        // what the frame cost without `CRCBL_LOG=debug`; empty on a device with
+        // no timestamp queries, which says so rather than printing zeros.
+        if let Some(timings) = self.gpu.timings()
+            && !timings.is_empty()
+        {
+            log::info!("{}", timings.report().trim_end());
+        }
         let summary = Summary {
             backend: self.shell.backend(),
             frames: self.frames,
@@ -573,6 +645,7 @@ mod tests {
             frames: Some(frames),
             tick_hz: 60,
             title: "test".to_string(),
+            camera: CameraMode::Perspective,
         }
     }
 

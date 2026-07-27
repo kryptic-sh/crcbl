@@ -1,52 +1,51 @@
 //! Where the two seams meet: a `crcbl-shell` window becomes a `crcbl-hal`
-//! surface, a swapchain, and an acquire/present pair.
+//! surface, a swapchain, and — since P1.3 — a **render graph**.
 //!
 //! This module was the whole point of P0.7: `crcbl-shell` had been complete
 //! since P0.6 and `crcbl-hal` since P0.3, but nothing had ever *joined* them,
 //! and the join is where a seam mismatch shows up. P0.7 drove it against
-//! [`NullBackend`](crcbl::hal::null); **P1.1 drives the same code against real
-//! Vulkan**, and the only thing that changed is which backend
-//! [`crcbl::backend::open_backend`] returns.
+//! [`NullBackend`](crcbl::hal::null); P1.1 drove the same code against real
+//! Vulkan; P1.2 drew a triangle through it. **P1.3 hands the frame to
+//! `crcbl-render`.**
 //!
-//! # The frame is a real frame, not a stub
+//! # There are no barriers in this file
 //!
-//! It would be shorter to acquire an image and present it immediately. That
-//! shape is wrong in a way the null backend cannot catch: **a swapchain image
-//! is acquired in an undefined layout and must be transitioned to
-//! [`ResourceState::Present`] before the compositor may have it.** On Vulkan,
-//! presenting an image that was never transitioned is a validation error and,
-//! on some drivers, a black window. So the frame here is the smallest *correct*
-//! one —
+//! There used to be two, hand-written, around the render pass:
 //!
 //! ```text
-//! acquire → encode(barrier Undefined → ColorAttachment
-//!                  render pass: LoadOp::Clear, then draw the triangle
-//!                  barrier ColorAttachment → Present)
+//! barrier Undefined → ColorAttachment
+//! render pass: clear + triangle
+//! barrier ColorAttachment → Present
+//! ```
+//!
+//! `docs/plan/02-vulkan-backend.md` §2.4 says "**no manual barriers outside the
+//! graph, ever**", and both of those are gone. What replaced them is a
+//! *declaration* — the swapchain image is imported into the graph saying "it
+//! arrives [`Undefined`](crcbl::hal::ResourceState::Undefined) and must leave
+//! [`Present`](crcbl::hal::ResourceState::Present)" — and the graph computes the
+//! rest, including the transition of the HDR scene target from a colour
+//! attachment into a sampled texture, which the hand-written version never had
+//! to think about because there was no second pass.
+//!
+//! The frame is now:
+//!
+//! ```text
+//! acquire → build the graph → compile → execute (barriers computed)
 //!         → submit(wait acquire, signal present + timeline)
 //!         → present(wait present) → retire the command buffer
 //! ```
 //!
-//! — which is `docs/plan/02-vulkan-backend.md`'s **milestone 1**, "clear colour
-//! through the graph", plus **milestone 2**, the triangle. The clear is a real
-//! render pass with
-//! [`LoadOp::Clear`](crcbl::hal::LoadOp), not a `vkCmdClearColorImage`: the
-//! attachment, the load op and the layout transition into
-//! `COLOR_ATTACHMENT_OPTIMAL` are the machinery every later milestone is built
-//! on, and a clear that skipped them would prove almost nothing.
+//! and the graph's own dump explains it — `CRCBL_LOG=debug` prints it once, and
+//! once per resize.
 //!
-//! # The swapchain hands over its view and its extent
+//! # HDR from P1
 //!
-//! A render pass needs an `ImageViewHandle` and a render area. Neither is
-//! derived here: [`AcquiredFrame`] carries both, so a frame is
-//! acquire-and-render with no per-image bookkeeping and no allocation.
-//!
-//! Both fields exist *because of this module*. P1.1 first built the view cache
-//! by hand — one view per ring slot, keyed on `AcquiredFrame::index`, rebuilt
-//! whenever a reconfigure reissued the image handles — and that is duplicated
-//! work every consumer and every backend would repeat, which is the same
-//! argument that already put the two semaphores on `AcquiredFrame`. The extent
-//! is there because the size a swapchain was *configured* at is not always the
-//! size that was *asked for*: see finding 5 below.
+//! The mesh is drawn into a transient `Rgba16Float` target with a `D32Float`
+//! reversed-Z depth buffer, and a second pass tonemaps that into the swapchain.
+//! `docs/plan/ROADMAP.md`'s correction asks for exactly that from the first lit
+//! mesh, "even with no HDR content", so P7's real stack does not re-bless every
+//! golden image in the repository. Both targets are graph transients: this file
+//! never names an image, a view or a size for either.
 //!
 //! # Frames in flight, not `wait_idle`
 //!
@@ -56,85 +55,73 @@
 //! documents as "a shutdown and test primitive" that "destroys pipelining". So
 //! this keeps a two-deep ring keyed on a timeline semaphore value, and falls
 //! back to `wait_idle` only on a Tier B device that has no timeline semaphores.
-//! It costs about fifteen lines and it is the shape P1 keeps.
 //!
 //! # What the join revealed
 //!
 //! P0.7 was the first time anything drove both seams at once, and
-//! `docs/plan/01-foundations.md` freezes neither at P0. Two of the four
-//! findings turned into seam changes; the other two are recorded where they
-//! are still live.
+//! `docs/plan/01-foundations.md` freezes neither at P0. The findings are kept
+//! here because this is where they were found.
 //!
 //! 1. **Two sources of truth for the swapchain extent, with no stated
 //!    precedence** — *fixed in the seam.*
 //!    [`WindowState::size`](crcbl::shell::WindowState::size) is one;
 //!    [`SurfaceCaps::current_extent`](crcbl::hal::SurfaceCaps::current_extent)
 //!    is the other, and on Vulkan it is a real size on X11 and deliberately
-//!    `0xFFFFFFFF` ("you choose") on Wayland. The null backend reports `None`,
-//!    so nothing forced the question until something joined the two seams.
-//!    `crcbl-hal`'s [`swapchain`](crcbl::hal::swapchain) module now states the
-//!    rule as four numbered backend obligations — the shell's size is
-//!    authoritative, `current_extent` is an optional cross-check, the sentinel
-//!    never escapes into the seam, and a zero extent means "do not create one
-//!    yet". [`Gpu::open`] is the reference implementation of the caller's half.
+//!    `0xFFFFFFFF` ("you choose") on Wayland. `crcbl-hal`'s
+//!    [`swapchain`](crcbl::hal::swapchain) module now states the rule as four
+//!    numbered backend obligations, and [`Gpu::open`] is the reference
+//!    implementation of the caller's half.
 //! 2. **[`SurfaceTarget::Offscreen`](crcbl::core::SurfaceTarget) embedded a
 //!    size, so a headless target went stale on resize** — *fixed by deleting
-//!    the size.* Every other variant names handles, which a resize does not
-//!    touch, which is why the seam only requires re-querying a target after a
-//!    *mode* change. One variant carrying an extent made that rule wrong for
-//!    one backend, so `Offscreen` is now fieldless and the rule is complete
-//!    again. [`Gpu::resize`] therefore reconfigures the swapchain and nothing
-//!    else, on every backend.
+//!    the size.* [`Gpu::resize`] therefore reconfigures the swapchain and
+//!    nothing else, on every backend.
 //! 3. **`unsafe` at the join is unavoidable and lands in application code.**
 //!    [`Instance::create_surface`] is `unsafe` because it dereferences platform
 //!    handles, and the safety obligation ("these outlive the surface") is one
-//!    only the code holding *both* the shell and the device can discharge. That
-//!    is this module, in an app that otherwise contains no `unsafe` at all.
-//!    Left as-is for P0 and written down at the seam: the likely answer is a
-//!    shell-aware constructor in `crcbl-render`, which does not exist yet.
+//!    only the code holding *both* the shell and the device can discharge.
+//!    Still open at P1.3: the seam's own TODO suggests "a shell-aware
+//!    constructor in `crcbl-render`", and P1.3 deliberately did not add one —
+//!    `crcbl-render` owning window handles would put a `SurfaceTarget` in the
+//!    renderer's constructor and make the render graph's crate the place
+//!    windowing lives. The right home is an engine-setup helper in the `crcbl`
+//!    umbrella, which is where both seams already meet.
 //! 4. **Teardown order is stated in three places and enforced in none.** The
 //!    swapchain must die before the surface, the surface before the window, and
 //!    the device may outlive its instance. [`Gpu::destroy`] does it by hand;
-//!    nothing would have caught getting it wrong except a real driver — and at
-//!    P1.1 a real driver *is* in the room, with validation on, and it agrees.
-//!
-//! # What P1.1 added to the list
-//!
+//!    at P1.1 a real driver with validation on agreed.
 //! 5. **The swapchain's configured extent was unobservable** — *fixed in the
-//!    seam.* `crcbl-vk` may legally have to configure at a size other than the
-//!    one asked for: on X11 `minImageExtent == maxImageExtent ==
-//!    currentExtent`, so a resize event still in flight leaves *no* legal
-//!    swapchain at the shell's size. The backend must clamp, and the seam had
-//!    no way to say what it clamped to, so a frame could be rendered at a size
-//!    the swapchain did not have. [`AcquiredFrame::extent`] now carries it, the
-//!    obligations are reworded around request-versus-answer, and
-//!    [`Gpu::extent`] reports what was configured rather than what was asked
-//!    for.
+//!    seam*, [`AcquiredFrame::extent`].
 //! 6. **A render pass needed a view the seam would not give it** — *fixed in
-//!    the seam.* [`AcquiredFrame::view`] now sits beside the semaphores, for
-//!    the reason they do.
+//!    the seam*, [`AcquiredFrame::view`].
 
 use std::collections::VecDeque;
 
 use crcbl::backend::GpuBackend;
 use crcbl::hal::{
-    AcquiredFrame, Barriers, ClearValue, ColorAttachment, CommandBufferHandle, CommandEncoderDesc,
-    DeviceDesc, Features, Format, HalError, ImageBarrier, ImageSubresourceRange, LoadOp,
-    PresentInfo, PresentMode, QueueHandle, QueueKind, Rect2d, RenderPassDesc, ResourceState,
-    SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreSignal, SemaphoreWait, StoreOp,
-    SubmitInfo, SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle, Viewport,
+    AcquiredFrame, CommandBufferHandle, CommandEncoderDesc, DeviceDesc, Features, Format, HalError,
+    PresentInfo, PresentMode, QueueHandle, QueueKind, SemaphoreDesc, SemaphoreHandle,
+    SemaphoreKind, SemaphoreSignal, SemaphoreWait, SubmitInfo, SurfaceError, SurfaceHandle,
+    SwapchainDesc, SwapchainHandle,
 };
 use crcbl::prelude::*;
+use crcbl::render::{
+    Camera, DirectionalLight, ForwardRenderer, PassTimers, RenderGraph, TransientPool,
+};
 use crcbl::shell::WindowId;
-
-use crate::triangle::Triangle;
 
 /// How many frames may be in flight before the loop waits for the oldest.
 ///
 /// Two is the classic double-buffered default: one frame being recorded while
-/// one is executing. The number is here rather than inline because P1's render
-/// graph will want to configure it.
-const FRAMES_IN_FLIGHT: usize = 2;
+/// one is executing. It is `crcbl-render`'s constant because the uniform ring
+/// has to be the same depth — one buffer per frame in flight, or a spinning
+/// camera is a read-after-write hazard across submissions.
+const FRAMES_IN_FLIGHT: usize = crcbl::render::forward::FRAMES_IN_FLIGHT;
+
+/// How many passes the per-pass GPU timers can bracket.
+///
+/// The frame has two. Eight leaves room for a debug pass or two without a
+/// resize of the query sets, and costs sixteen timestamps.
+const MAX_TIMED_PASSES: u32 = 8;
 
 /// What one [`Gpu::frame`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,13 +132,6 @@ pub enum FrameOutcome {
     /// this frame was skipped. Expected traffic during a resize, not an error.
     Reconfigured,
 }
-
-/// The colour every frame clears to.
-///
-/// A recognisable non-grey so "the window is black" and "the clear ran" are
-/// distinguishable at a glance, and so a channel swap is visible rather than
-/// plausible.
-const CLEAR_COLOR: [f32; 4] = [0.05, 0.10, 0.18, 1.0];
 
 /// The engine's GPU side, driven entirely through the `crcbl-hal` seam.
 ///
@@ -176,23 +156,29 @@ pub struct Gpu {
     submitted: u64,
     in_flight: VecDeque<(u64, CommandBufferHandle)>,
     /// The extent the swapchain was last *configured* at, from
-    /// [`AcquiredFrame::extent`].
-    ///
-    /// Distinct from `config.extent`, which is what the shell asked for. The
-    /// two differ while a window is being dragged on a platform that pins the
-    /// permitted range — obligations 2 and 3. Seeded from the request, because
-    /// there is no frame to ask until the first acquire.
+    /// [`AcquiredFrame::extent`]. Distinct from `config.extent`, which is what
+    /// the shell asked for.
     configured_extent: (u32, u32),
     /// Scratch, reused every frame so a steady-state frame allocates nothing.
     waits: Vec<SemaphoreWait>,
     signals: Vec<SemaphoreSignal>,
-    /// Milestone 2. Created once, drawn every frame, destroyed in [`Gpu::destroy`].
-    ///
-    /// Its pipeline names `config.format` as its colour target, and a
-    /// reconfigure never changes the format — only the extent — so it survives a
-    /// resize untouched. A format change would need a new pipeline, which is
-    /// the render graph's business at P1.3.
-    triangle: Triangle,
+
+    // --- P1.3: the frame is a graph ---
+    renderer: ForwardRenderer,
+    pool: TransientPool,
+    /// `None` on a device without timestamp queries — the report degrades, the
+    /// frame does not.
+    timers: Option<PassTimers>,
+    /// Where the camera is and how it projects. Milestone 5 is a write to
+    /// `camera.projection` and nothing else.
+    pub camera: Camera,
+    /// The single directional light of milestone 4.
+    pub light: DirectionalLight,
+    /// Seconds of animation, advanced by the loop rather than read from a clock
+    /// here — a headless run must produce the same picture on every machine.
+    elapsed: f32,
+    /// Whether the graph dump has been logged since the last shape change.
+    dumped: bool,
 }
 
 /// The swapchain parameters, kept so a reconfigure changes exactly one of them.
@@ -215,6 +201,8 @@ pub enum GpuError {
     Hal(HalError),
     /// A surface or swapchain call failed.
     Surface(SurfaceError),
+    /// The render graph refused the frame.
+    Graph(crcbl::render::GraphError),
 }
 
 impl std::fmt::Display for GpuError {
@@ -229,6 +217,7 @@ impl std::fmt::Display for GpuError {
             Self::Unusable(what) => write!(f, "the backend is unusable: {what}"),
             Self::Hal(error) => write!(f, "{error}"),
             Self::Surface(error) => write!(f, "{error}"),
+            Self::Graph(error) => write!(f, "render graph: {error}"),
         }
     }
 }
@@ -253,8 +242,15 @@ impl From<SurfaceError> for GpuError {
     }
 }
 
+impl From<crcbl::render::GraphError> for GpuError {
+    fn from(error: crcbl::render::GraphError) -> Self {
+        Self::Graph(error)
+    }
+}
+
 impl Gpu {
-    /// Creates an instance, a surface for `window`, a device and a swapchain.
+    /// Creates an instance, a surface for `window`, a device, a swapchain and
+    /// the forward renderer.
     ///
     /// `extent` must come from the window system — call this only after the
     /// first configure, because a swapchain needs a size and an unconfigured
@@ -269,11 +265,11 @@ impl Gpu {
         window: WindowId,
         extent: (u32, u32),
         backend: Option<GpuBackend>,
+        projection: crcbl::render::Projection,
     ) -> Result<Self, GpuError> {
         // The line that used to name `NullInstance`. It now names a *value*
         // from a registry, which is the whole difference between "the sandbox
-        // knows about Vulkan" and "the sandbox knows there are backends" — the
-        // same shape `crcbl_shell::backend::open` has had since P0.5.
+        // knows about Vulkan" and "the sandbox knows there are backends".
         let instance: Box<dyn Instance> = match backend {
             Some(backend) => crcbl::backend::open_backend(backend)?,
             None => crcbl::backend::open()?,
@@ -301,18 +297,10 @@ impl Gpu {
         // module is the only place in the app that can discharge it.
         let surface = unsafe { instance.create_surface(&target) }?;
 
-        // **Adapter selection is surface-aware, and has to be.** Taking
-        // `adapters()[0]` was fine against the null backend and is wrong against
-        // a real one: P1.1 found a discrete radv GPU that enumerates first, is
-        // Tier A, and *cannot present to an Xvfb window* because there is no
-        // DRI3 — while the software rasteriser sitting behind it can. The seam
-        // enumerates adapters without reference to a surface, so the only way to
-        // find out is to ask [`Instance::surface_caps`] per adapter, which is
-        // exactly what it is for ("caps known before a device exists").
-        //
-        // An `Err` here therefore means "not this one", not "give up": a backend
-        // has no other way to say that a particular adapter/surface pairing does
-        // not work. Anything left over after the loop is a real failure.
+        // **Adapter selection is surface-aware, and has to be.** P1.1 found a
+        // discrete radv GPU that enumerates first, is Tier A, and *cannot
+        // present to an Xvfb window* — while the software rasteriser behind it
+        // can. An `Err` here means "not this one", not "give up".
         let mut chosen = None;
         let mut last_error = None;
         for adapter in &adapters {
@@ -335,9 +323,6 @@ impl Gpu {
             }
         }
         let Some((adapter, caps)) = chosen else {
-            // Destroy the surface before giving up: the shell's window outlives
-            // this call either way, but a leaked surface is a leaked driver
-            // object, and `crcbl-vk` says so at teardown.
             instance.destroy_surface(surface);
             return Err(match last_error {
                 Some(error) => error.into(),
@@ -352,11 +337,6 @@ impl Gpu {
             adapter.caps.tier()
         );
 
-        // The caller's half of the seam's extent rule (finding 1): the shell's
-        // size wins, `current_extent` is a cross-check, and a mismatch is worth
-        // a line in the log rather than an override — on Wayland the surface
-        // has no opinion at all, and on X11 it can be a frame behind the
-        // configure that has already been handled.
         if let Some(reported) = caps.current_extent
             && reported != extent
         {
@@ -380,10 +360,15 @@ impl Gpu {
             // Nothing here needs a feature, and demanding `TIER_A` would refuse
             // to run on the Tier B devices `docs/plan/02-vulkan-backend.md`
             // requires the engine to support. Ask for everything optionally and
-            // branch on what came back — which is exactly what the timeline
-            // semaphore below does.
+            // branch on what came back.
             required_features: Features::empty(),
-            optional_features: Features::TIER_A,
+            // `TIMESTAMP_QUERY` is deliberately not part of `TIER_A` — topic
+            // 10's browsers may lack it — so the per-pass timers have to be
+            // asked for by name. Absent, `PassTimers::new` declines and the
+            // frame runs untimed.
+            optional_features: Features::TIER_A
+                | Features::TIMESTAMP_QUERY
+                | Features::DEBUG_MARKERS,
             compatible_surface: Some(surface),
         })?;
         let queue = device
@@ -417,9 +402,13 @@ impl Gpu {
             None
         };
 
-        // Milestone 2. Built after the swapchain because the pipeline has to
-        // name the colour format the pass will actually render to.
-        let triangle = Triangle::new(device.as_ref(), queue, format)?;
+        // Milestones 3–5. Built after the swapchain because the tonemap
+        // pipeline has to name the colour format the pass will render to.
+        let renderer = ForwardRenderer::new(device.as_ref(), queue, format)?;
+        let timers = PassTimers::new(device.as_ref(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
+        if timers.is_none() {
+            log::info!("hal: no timestamp queries on this device; per-pass timing is off");
+        }
 
         Ok(Self {
             instance,
@@ -434,25 +423,45 @@ impl Gpu {
             configured_extent: extent,
             waits: Vec::with_capacity(1),
             signals: Vec::with_capacity(2),
-            triangle,
+            renderer,
+            pool: TransientPool::new(),
+            timers,
+            camera: Camera::default().with_projection(projection),
+            light: DirectionalLight::default(),
+            elapsed: 0.0,
+            dumped: false,
         })
     }
 
     /// The swapchain's current size — the one it was **configured** at.
-    ///
-    /// Obligation 3: this is what the last frame actually rendered into, which
-    /// is not always what the shell asked for. Before the first acquire it is
-    /// the request, because there is no answer yet.
     #[must_use]
     pub fn extent(&self) -> (u32, u32) {
         self.configured_extent
     }
 
-    /// The format the swapchain was created with. Test-only; see
-    /// `Loop::format` for why the gate is here rather than a `#[allow]`.
+    /// The format the swapchain was created with. Test-only.
     #[cfg(test)]
     pub fn format(&self) -> Format {
         self.config.format
+    }
+
+    /// The most recent frame whose per-pass GPU timings have landed.
+    ///
+    /// Empty on a device with no timestamp queries, and empty for the first few
+    /// frames — the report is deliberately frames latent; see
+    /// [`crcbl::render::PassTimers`].
+    #[must_use]
+    pub fn timings(&self) -> Option<&crcbl::render::FrameTimings> {
+        self.timers.as_ref().map(PassTimers::latest)
+    }
+
+    /// Advances the animation by `dt` seconds.
+    ///
+    /// Driven by the loop's clock rather than read from one here, so a headless
+    /// run renders the same cube on every machine — which is what makes a
+    /// golden image of it worth anything.
+    pub fn advance(&mut self, dt: f32) {
+        self.elapsed += dt;
     }
 
     /// Records, submits and presents one frame.
@@ -474,10 +483,7 @@ impl Gpu {
             Err(error) => return Err(error.into()),
         };
 
-        // Obligation 3: the answer, not the request. On a platform that pins
-        // the permitted extent this can differ from `config.extent` for as long
-        // as a resize is in flight, and everything downstream — the render
-        // area here, `Gpu::extent` for the summary — must use this one.
+        // Obligation 3: the answer, not the request.
         if acquired.extent != self.configured_extent {
             log::debug!(
                 "hal: swapchain configured at {:?} (the shell asked for {:?})",
@@ -485,6 +491,8 @@ impl Gpu {
                 self.config.extent
             );
             self.configured_extent = acquired.extent;
+            // The graph's shape changed, so the dump is worth printing again.
+            self.dumped = false;
         }
 
         self.record_and_submit(&acquired)?;
@@ -492,21 +500,11 @@ impl Gpu {
             self.queue,
             &PresentInfo {
                 swapchain: self.swapchain,
-                // `Option::as_slice` is the whole cost of the seam's
-                // "the swapchain owns its synchronisation" decision: on a
-                // backend with an implicit present this is an empty slice and
-                // the code above is unchanged.
                 waits: acquired.present_semaphore.as_slice(),
             },
         ) {
             Ok(()) => {}
-            // **Present is the usual place a resize is noticed**, not acquire:
-            // the compositor learns the window changed size when it is handed a
-            // frame, and the acquire that would have reported it never happens.
-            // Handling `OutOfDate` only at acquire meant dragging a window edge
-            // exited the sandbox with an error, which is precisely the bug the
-            // seam warns about — "a caller that treats it as fatal has a bug
-            // that only appears when someone drags a window edge".
+            // **Present is the usual place a resize is noticed**, not acquire.
             Err(SurfaceError::OutOfDate) => {
                 self.reconfigure()?;
                 return Ok(FrameOutcome::Reconfigured);
@@ -515,75 +513,58 @@ impl Gpu {
         }
 
         if acquired.suboptimal {
-            // Legal to ignore for one frame, and the seam says treating it as
-            // fatal is a bug — so the frame is presented first, then fixed.
             log::debug!("hal: swapchain suboptimal; reconfiguring after present");
             self.reconfigure()?;
         }
         Ok(FrameOutcome::Presented)
     }
 
-    /// Encodes milestone 1 — a clear through a real render pass — submits it,
-    /// and retires whatever fell out of the frames-in-flight window.
+    /// Builds this frame's graph, compiles it, executes it and submits.
+    ///
+    /// **The whole frame, and not one barrier in it.**
     fn record_and_submit(&mut self, acquired: &AcquiredFrame) -> Result<(), GpuError> {
-        let range = ImageSubresourceRange::all(self.config.format);
+        let extent = acquired.extent;
+        self.renderer.begin_frame(
+            self.device.as_ref(),
+            &self.camera,
+            &self.light,
+            ForwardRenderer::spin(self.elapsed),
+            extent,
+        )?;
+
+        let compiled = {
+            let mut graph = RenderGraph::new(self.queue);
+            let target = graph.import_image(
+                "swapchain",
+                ForwardRenderer::present_target(
+                    acquired.image,
+                    acquired.view,
+                    self.config.format,
+                    extent,
+                ),
+            );
+            let _hdr = self.renderer.add_passes(&mut graph, target, extent);
+            graph.compile()?
+        };
+
+        // "The graph must be able to explain itself" — §2.4's debug-tools
+        // principle. Once per shape rather than once per frame, because a dump
+        // every frame is a log nobody reads.
+        if !self.dumped {
+            log::debug!("render graph for the sandbox frame:\n{}", compiled.dump());
+            self.dumped = true;
+        }
+
         let mut encoder = self.device.create_command_encoder(&CommandEncoderDesc {
             label: Some("sandbox frame"),
             queue: self.queue,
         });
-        // An acquired image's contents are undefined, so the source state is
-        // `Undefined` — which discards them, which is free, and which is the
-        // only correct source for a swapchain image.
-        encoder.pipeline_barrier(&Barriers {
-            images: &[ImageBarrier::new(
-                acquired.image,
-                range,
-                ResourceState::Undefined,
-                ResourceState::ColorAttachment,
-            )],
-            ..Barriers::default()
-        });
-        // `docs/plan/02-vulkan-backend.md`'s milestones 1 and 2: a real pass
-        // with a real load op, and a triangle drawn into it by pulling its
-        // vertices out of a storage buffer.
-        encoder.begin_render_pass(&RenderPassDesc {
-            label: Some("clear + triangle"),
-            color_attachments: &[ColorAttachment {
-                // The swapchain's own view of its own image — obligation-free
-                // on this side of the seam since P1.1.
-                view: acquired.view,
-                resolve: None,
-                load: LoadOp::Clear,
-                store: StoreOp::Store,
-                clear: ClearValue::color(CLEAR_COLOR),
-            }],
-            depth_stencil_attachment: None,
-            // Obligation 3: the *configured* extent, not the requested one. On
-            // X11 a resize event that has not caught up yet means the swapchain
-            // is a frame behind the shell, and rendering at the shell's size
-            // would put the render area outside the attachment.
-            render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
-        });
-        // Viewport and scissor are dynamic state, so they are set per pass
-        // rather than baked into the pipeline — which is what lets one pipeline
-        // survive every resize. Both use the *configured* extent, obligation 3,
-        // for the same reason the render area does.
-        encoder.set_viewport(&Viewport::from_size(acquired.extent.0, acquired.extent.1));
-        encoder.set_scissor(&Rect2d::from_size(acquired.extent.0, acquired.extent.1));
-        self.triangle.draw(encoder.as_mut());
-        encoder.end_render_pass();
-        // The compositor may only be handed an image in `Present`. Presenting
-        // one that was never transitioned is a validation error and, on some
-        // drivers, a black window.
-        encoder.pipeline_barrier(&Barriers {
-            images: &[ImageBarrier::new(
-                acquired.image,
-                range,
-                ResourceState::ColorAttachment,
-                ResourceState::Present,
-            )],
-            ..Barriers::default()
-        });
+        compiled.execute(
+            self.device.as_ref(),
+            &mut self.pool,
+            encoder.as_mut(),
+            self.timers.as_mut(),
+        )?;
         let command_buffer = encoder.finish()?;
 
         self.submitted += 1;
@@ -619,7 +600,11 @@ impl Gpu {
             },
         )?;
         self.in_flight.push_back((value, command_buffer));
-        self.retire_to(FRAMES_IN_FLIGHT)
+        self.retire_to(FRAMES_IN_FLIGHT)?;
+        // Only after the retire above, so nothing the pool destroys can still be
+        // referenced by a submission that has not completed.
+        self.pool.retire_unused(self.device.as_ref());
+        Ok(())
     }
 
     /// Waits for and destroys command buffers until at most `keep` are in
@@ -646,12 +631,6 @@ impl Gpu {
 
     /// Resizes the swapchain to `extent`.
     ///
-    /// The [`SurfaceTarget`] this surface was created from is *not* re-queried,
-    /// and since finding 2 that is true on every backend rather than on most of
-    /// them: a target names handles — a `wl_surface*`, an `xcb_window_t` — and
-    /// a resize does not touch one. Only a mode change can invalidate a target,
-    /// which is the only case the shell seam asks a caller to re-query for.
-    ///
     /// # Errors
     ///
     /// [`GpuError`] if the reconfigure failed. A zero extent is *not* an error
@@ -662,8 +641,6 @@ impl Gpu {
             return Ok(());
         }
         if extent.0 == 0 || extent.1 == 0 {
-            // Every backend must reject a zero-extent swapchain (Vulkan forbids
-            // one outright), so this is the caller's job and not the seam's.
             log::debug!("hal: window has an empty extent {extent:?}; keeping the swapchain");
             return Ok(());
         }
@@ -681,24 +658,24 @@ impl Gpu {
         // across a resize storm, which is what the seam promises callers.
         self.device
             .reconfigure_swapchain(self.swapchain, &self.config.desc(self.surface))?;
+        self.dumped = false;
         Ok(())
     }
 
     /// Tears everything down in the order the seam requires.
     ///
-    /// Explicit rather than `Drop` because every step can fail and a `Drop` that
-    /// swallows errors is how a leak becomes invisible. The caller destroys the
-    /// window *after* this returns.
-    ///
     /// # Errors
     ///
-    /// [`GpuError`] if waiting for outstanding work failed. Everything after
-    /// the wait is infallible.
+    /// [`GpuError`] if waiting for outstanding work failed.
     pub fn destroy(mut self) -> Result<(), GpuError> {
         // Nothing may be destroyed while the device might still be using it.
         self.device.wait_idle()?;
         self.retire_to(0)?;
-        self.triangle.destroy(self.device.as_ref());
+        self.pool.destroy(self.device.as_ref());
+        if let Some(timers) = self.timers.as_mut() {
+            timers.destroy(self.device.as_ref());
+        }
+        self.renderer.destroy(self.device.as_ref());
         if let Some(semaphore) = self.timeline.take() {
             self.device.destroy_semaphore(semaphore);
         }

@@ -20,9 +20,20 @@ thiserror = { workspace = true }
 # and golden-image suites render; `crcbl-golden` is the comparator. Neither
 # reaches a shipped binary — a backend must not depend on the engine's shaders,
 # and this crate does not.
+#
+# `crcbl-render` is a dev-dependency for the same reason: the only honest way to
+# test a render graph against a real driver is to run the *real* graph, not a
+# second one that resembles it. The dependency direction stays clean — nothing
+# `crcbl-vk` ships depends on anything above the seam — and it is the reason the
+# backend registry deliberately did **not** move into `crcbl-render` at P1.3;
+# see that crate's docs.
 [dev-dependencies]
 crcbl-golden = { workspace = true }
+crcbl-render = { workspace = true }
 crcbl-shaders = { workspace = true }
+# The reversed-Z control: the suite builds a *conventional* projection matrix to
+# compare against, which `crcbl-render` deliberately has no constructor for.
+glam = { workspace = true }
 
 [features]
 # The suite in `tests/vk_e2e.rs`, which needs a real Vulkan implementation.

@@ -6,6 +6,20 @@
 slangc-version = 2026.14
 target = spirv_1_5
 
+[mesh]
+source = shaders/mesh.slang
+source-sha256 = e72a843d9fb62ee128296f027a6aaf0badc713a9e376036113057fedeee640b0
+spirv = spirv/mesh.spv
+spirv-sha256 = d35ede042a1341375f093f94566fb4773a0ae762eccc48a09348f4318fba5a73
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
+[tonemap]
+source = shaders/tonemap.slang
+source-sha256 = e043ab6a3d10df8166631a05b671f8d632eee5c8f83f5cc8fc18a5359d613d4f
+spirv = spirv/tonemap.spv
+spirv-sha256 = 178957f0fee6362ab5c31a5312f289251af2c0d731ff0bf6a2353e06fab03598
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
 [triangle]
 source = shaders/triangle.slang
 source-sha256 = e1a5e7acd7da40b0f27f685827467a36dd49eb8ba5978a3dfd03f36d8a33af66

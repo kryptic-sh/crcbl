@@ -6,7 +6,7 @@
 
 use crcbl::backend::GpuBackend;
 
-use crate::app::Options;
+use crate::app::{CameraMode, Options};
 
 /// `--help` text, and the definition of the flag set.
 pub const USAGE: &str = "\
@@ -21,6 +21,9 @@ OPTIONS:
         --backend <NAME>  GPU backend: `vk` or `null`. Default: choose one,
                           which today means Vulkan. `null` renders nothing and
                           needs no driver, so it is never chosen automatically.
+        --camera <MODE>   `perspective` or `ortho`. Default: perspective.
+                          The 2D story is a projection-matrix swap and nothing
+                          else, which is what this flag exists to demonstrate.
         --frames <N>      Stop after N presented frames.
                           Default: unlimited windowed, 120 headless.
         --tick-hz <N>     Simulation rate. Default: 60.
@@ -65,6 +68,17 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
                     }
                 },
                 None => return Invocation::BadUsage("--backend needs a value".to_string()),
+            },
+            "--camera" => match args.next() {
+                Some(name) => match CameraMode::from_name(&name) {
+                    Some(mode) => options.camera = mode,
+                    None => {
+                        return Invocation::BadUsage(format!(
+                            "unknown --camera `{name}`; try `perspective` or `ortho`"
+                        ));
+                    }
+                },
+                None => return Invocation::BadUsage("--camera needs a value".to_string()),
             },
             "--frames" => match take_number(&mut args, "--frames") {
                 Ok(frames) => options.frames = Some(frames),
@@ -144,6 +158,27 @@ mod tests {
         assert_eq!(options.tick_hz, 30);
         assert_eq!(options.title, "a b");
         assert_eq!(options.backend, Some(GpuBackend::Null));
+        assert_eq!(options.camera, CameraMode::Perspective);
+    }
+
+    /// Milestone 5's flag. The mode reaches the renderer as a
+    /// [`Projection`](crcbl::render::Projection) and changes nothing else — see
+    /// `app::CameraMode`.
+    #[test]
+    fn the_camera_mode_parses_both_spellings_and_defaults_to_perspective() {
+        assert_eq!(options(&[]).camera, CameraMode::Perspective);
+        assert_eq!(
+            options(&["--camera", "ortho"]).camera,
+            CameraMode::Orthographic
+        );
+        assert_eq!(
+            options(&["--camera", "orthographic"]).camera,
+            CameraMode::Orthographic
+        );
+        assert_eq!(
+            options(&["--camera", "perspective"]).camera,
+            CameraMode::Perspective
+        );
     }
 
     /// The default is "choose one", not "null": a sandbox that silently
@@ -182,6 +217,8 @@ mod tests {
             vec!["--title"],
             vec!["--backend"],
             vec!["--backend", "metal"],
+            vec!["--camera"],
+            vec!["--camera", "isometric"],
             vec!["--nope"],
             vec!["stray"],
         ] {

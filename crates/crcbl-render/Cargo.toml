@@ -6,5 +6,22 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# Everything here is **above the seam**: `crcbl-hal` and nothing below it. There
+# is no `ash`, no `crcbl-vk` and no `#[cfg(target_os = …)]` in this crate, which
+# is `docs/plan/01-foundations.md` §1.3's rule — the render graph is named there
+# as living above the seam rather than in it.
+[dependencies]
+crcbl-core = { workspace = true }
+crcbl-hal = { workspace = true }
+# The camera's projection matrices, and nothing else. §1.1 already lists glam as
+# a workspace dependency for exactly this.
+glam = { workspace = true }
+log = { workspace = true }
+# `crcbl-shaders` hands out `&[u32]` and entry-point names and depends on
+# nothing at all, so the forward pass can name the engine's own shaders without
+# this crate learning a backend.
+crcbl-shaders = { workspace = true }
+thiserror = { workspace = true }
+
 [lints]
 workspace = true

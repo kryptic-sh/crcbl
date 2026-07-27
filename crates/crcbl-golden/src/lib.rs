@@ -50,15 +50,47 @@
 //! percent of pixels to be arbitrarily wrong" — would have been calibrated
 //! against the wrong quantity entirely.
 //!
+//! ## P1.3 re-measured it against the HDR path, and the percentage exploded
+//!
+//! The same comparison on P1.3's lit-mesh frame — which renders to
+//! `Rgba16Float`, samples that, tonemaps it and *then* hits the sRGB swapchain:
+//!
+//! | | triangle (P1.2) | lit mesh (P1.3) |
+//! | --- | --- | --- |
+//! | pixels differing at all | 1 882 — **3.83%** | 44 908 — **91.37%** |
+//! | max per-channel delta | **1** | **1** |
+//! | pixels over a delta of 2 | 0 | 0 |
+//! | mean absolute error | 0.0102 | 0.2284 |
+//! | block SSIM | 0.999933 | 0.999996 |
+//!
+//! 91% looks alarming and is not. Of the 44 908 differing pixels, **39 110 are
+//! the flat background** — every single pixel of the clear colour, which radv
+//! writes as `[29, 34, 48]` and lavapipe as `[29, 34, 49]`. A uniform clear
+//! cannot disagree by rasterisation; what disagrees is *arithmetic*. The HDR
+//! path adds a rounding step the triangle never had — linear clear → `f16`
+//! store → sample → tonemap → sRGB encode — and the resulting value sits on a
+//! quantisation boundary, so the two implementations land on opposite sides of
+//! it across the whole frame at once.
+//!
+//! The lesson is that **`max_channel_delta` is the load-bearing number and
+//! `max_failing_ratio` is not**. A tolerance built around "at most 2% of pixels
+//! may differ" — the shape almost every golden-image harness ships with — would
+//! have been correct for the triangle and would have failed the very first HDR
+//! frame, on a difference of one level in one channel of the background. The
+//! ratio here is a backstop for pixels that *exceed* the delta, and nothing has
+//! ever reached it.
+//!
 //! [`Tolerance::RASTERISER`] is set from those numbers:
 //!
 //! * `max_channel_delta: 2` — twice the observed maximum, so a third driver
 //!   that rounds a little differently still passes.
 //! * `max_failing_ratio: 0.02` — the backstop for pixels that exceed that.
-//!   Nothing reaches it today (0 pixels differ by more than 1), and 2% of this
-//!   frame is roughly twice the triangle's perimeter, so a future driver whose
-//!   fill rule genuinely disagreed along an edge would still pass while a
-//!   triangle that *moved* could not.
+//!   Nothing reaches it on either frame (0 pixels differ by more than 1), and 2%
+//!   of this frame is roughly twice the triangle's perimeter, so a future driver
+//!   whose fill rule genuinely disagreed along an edge would still pass while a
+//!   triangle that *moved* could not. Note that this ratio counts only pixels
+//!   **over** `max_channel_delta` — if it counted pixels that differ at all, the
+//!   HDR frame's 91% would blow straight through it for no defect at all.
 //! * `min_ssim: 0.99` — four orders of magnitude below the observed 0.999933,
 //!   and, as `compare`'s tests pin, still comfortably strict enough to reject a
 //!   triangle shifted by six pixels.
