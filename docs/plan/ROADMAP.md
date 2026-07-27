@@ -20,16 +20,17 @@ engine's public face and its continuous cross-backend regression test.
 
 ## Status (as of 2026-07-27)
 
-**P0 and P1 are complete and merged to `main`.** P2 is the next phase to start.
+**P0 and P1 are complete and merged to `main`.** P2a is partially complete (sim
+core ECS, net, input, server/client, sim harness landed); P2b is next.
 
 The phase table below is the plan; this section is the record. Where the two
 disagree about what was built, this section is right and the phase row says what
 was intended.
 
-| Phase             | Status                 | Landed as                                                                                                                          |
-| ----------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| **P0** — base     | **done**               | `f922ca3`, `3198f7a`, `6dd4b46`, `84af231`, `c058f45`, `bad7186`, `a991e42`, `063fd99`, `421ce69`, `f06e6cd`, `36dd636`, `e094d39` |
-| **P1** — Vulkan   | **done**               | `91fd871`, `236f19b`, `c6dc4a4`, `a54990d`, `dc36d32`, `8a4e303`, `cbd6153`                                                        |
+| Phase             | Status                    | Landed as                                                                                                                          |
+| ----------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| **P0** — base     | **done**                  | `f922ca3`, `3198f7a`, `6dd4b46`, `84af231`, `c058f45`, `bad7186`, `a991e42`, `063fd99`, `421ce69`, `f06e6cd`, `36dd636`, `e094d39` |
+| **P1** — Vulkan   | **done**                  | `91fd871`, `236f19b`, `c6dc4a4`, `a54990d`, `dc36d32`, `8a4e303`, `cbd6153`                                                        |
 | **P2** — sim core | **P2a partial**, P2b next | `7b8efb5` scaffold, `f8e8117` net, `9e55569` ecs, `9d31e2d` input, `2b2e5bd` server/client, `d4d0330` sim harness                  |
 
 ### What exists now
@@ -92,9 +93,9 @@ suites pass under 32-way CPU contention.
 
 ### Known gaps, carried forward deliberately
 
-- **P2a exit criterion is partially met.** `crcbl-client::interpolate` is a
-  stub returning empty `InterpolatedState` — real interpolation that lerps
-  entity positions between snapshots lands when the replication encoding carries
+- **P2a exit criterion is partially met.** `crcbl-client::interpolate` is a stub
+  returning empty `InterpolatedState` — real interpolation that lerps entity
+  positions between snapshots lands when the replication encoding carries
   per-entity component data (P3). The determinism hash now covers component data
   (raw bytes), and the probe test
   `different_component_values_produce_different_hash` prevents regression.
