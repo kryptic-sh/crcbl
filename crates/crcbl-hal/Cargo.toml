@@ -6,5 +6,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# Deliberately tiny. This crate is a seam: it must not gain `ash`, `wgpu`, or
+# any other backend dependency, and nothing here allocates GPU memory or opens a
+# window. `crcbl-core` supplies handles and `SurfaceTarget`; `bitflags` and
+# `thiserror` are vocabulary.
+[dependencies]
+bitflags = { workspace = true }
+crcbl-core = { workspace = true }
+thiserror = { workspace = true }
+
 [lints]
 workspace = true

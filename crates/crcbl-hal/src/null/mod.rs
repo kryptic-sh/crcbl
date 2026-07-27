@@ -1,0 +1,1585 @@
+//! `NullBackend` — a complete, recording implementation of the seam that talks
+//! to no GPU.
+//!
+//! It exists for three jobs, in increasing order of usefulness:
+//!
+//! 1. **Prove the seam compiles and leaks nothing.** If a trait method could
+//!    not be implemented without naming a backend type, this module would not
+//!    build. `docs/plan/01-foundations.md` calls exactly this out as the slice's
+//!    deliverable check.
+//! 2. **Be the substrate for the graph-compile suite.** `docs/plan/12-testing.md`
+//!    assigns `crcbl-hal`/`crcbl-vk`/`crcbl-wgpu` a "graph-compile unit suite on
+//!    NullBackend"; the render graph that lands at P1 compiles its pass list
+//!    against this backend in CI, with no GPU and no window.
+//! 3. **Answer questions about a frame.** Every call is recorded, so a test can
+//!    assert which passes ran in which order, which barriers separated them,
+//!    and that nothing leaked. See [`Recorder`].
+//!
+//! # Always compiled
+//!
+//! Not behind a feature. See the crate docs for the argument — briefly: other
+//! crates' *tests* depend on it, so a feature gate would have to be turned on
+//! from their dev-dependencies, and feature unification would then make
+//! `cargo test -p x` and `cargo build -p x` disagree.
+//!
+//! # It validates
+//!
+//! The backend checks pass nesting, that commands appear in the right scope, and
+//! that every handle a command names is still alive. Violations are *recorded*,
+//! not panicked on, so a failing test reports the whole frame's problems at once.
+//! See [`ValidationError`] and [`Recorder::assert_valid`].
+//!
+//! # Two presets
+//!
+//! [`NullInstance::tier_a`] reports a full desktop Tier A device;
+//! [`NullInstance::tier_b`] reports the WebGPU-shaped Tier B floor — no
+//! bindless, no `draw_indirect_count`, no buffer device address, no push
+//! constants, no timeline semaphores, and an implicit swapchain acquire. Running
+//! the same renderer code against both is how the tier system gets tested before
+//! `crcbl-wgpu` exists.
+//!
+//! ```
+//! use crcbl_hal::null::{NullInstance, Recorder};
+//! use crcbl_hal::{Instance, RendererTier};
+//!
+//! let recorder = Recorder::new();
+//! let instance: Box<dyn Instance> =
+//!     Box::new(NullInstance::tier_b().with_recorder(recorder.clone()));
+//!
+//! let adapter = instance.adapters()[0].clone();
+//! assert_eq!(adapter.caps.tier(), RendererTier::B);
+//! assert_eq!(recorder.total_live_objects(), 0);
+//! ```
+
+mod record;
+
+pub use record::{Command, Event, ObjectKind, Recorder, ValidationError};
+
+use record::Detail;
+
+use core::ops::Range;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use crcbl_core::{Handle, SurfaceTarget};
+
+use crate::{
+    AcquiredFrame, AdapterId, AdapterInfo, BackendKind, Barriers, BindGroupDesc, BindGroupEntry,
+    BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutHandle, BufferCopy, BufferDesc,
+    BufferHandle, BufferImageCopy, CommandBufferHandle, CommandEncoder, CommandEncoderDesc,
+    CompositeAlpha, ComputePassDesc, ComputePipelineDesc, ComputePipelineHandle, Device,
+    DeviceCaps, DeviceDesc, DeviceType, DrawIndirect, DrawIndirectCount, Features, Format,
+    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageCopy, ImageDesc, ImageHandle,
+    ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, IndexFormat, Instance, Limits,
+    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, PresentMode, QueryKind,
+    QuerySetDesc, QuerySetHandle, QueueFamily, QueueHandle, ReadbackDesc, ReadbackHandle,
+    ReadbackState, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle, SemaphoreDesc,
+    SemaphoreHandle, SemaphoreKind, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle,
+    ShaderStages, SubmitInfo, SurfaceCaps, SurfaceError, SurfaceHandle, SwapchainDesc,
+    SwapchainHandle, Viewport,
+};
+
+/// Deterministic queue handles.
+///
+/// Queues are not pooled objects — they exist for the device's lifetime and
+/// carry no state — so their handles are synthesised from a fixed generation.
+fn queue_handle(index: u32) -> QueueHandle {
+    Handle::from_bits((1u64 << 32) | u64::from(index)).expect("generation 1 is non-zero")
+}
+
+/// Source of owner ids for instances and devices.
+///
+/// A [`Handle`] has no room for an owner (32-bit index + 32-bit generation are
+/// fully spoken for), so ownership lives in the object side table instead. This
+/// is the mechanism `crate::device`'s rule 3 obliges every backend to provide;
+/// a real backend would key it off its `VkInstance`/`VkDevice` pointer instead
+/// of a counter.
+static NEXT_OWNER_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_owner_id() -> u64 {
+    NEXT_OWNER_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A no-op, recording [`Instance`].
+///
+/// Share its [`Recorder`] with [`NullInstance::with_recorder`] to inspect the
+/// stream after running a frame entirely through `dyn` traits.
+#[derive(Clone, Debug)]
+pub struct NullInstance {
+    recorder: Recorder,
+    caps: DeviceCaps,
+    name: String,
+    /// Owner id stamped into every surface this instance creates. Cloning a
+    /// `NullInstance` keeps the id, because a clone *is* the same instance;
+    /// a separately constructed one gets a fresh id and its surfaces are
+    /// therefore foreign to this one's devices.
+    id: u64,
+}
+
+impl NullInstance {
+    /// A null instance reporting one adapter with `caps`.
+    #[must_use]
+    pub fn new(caps: DeviceCaps) -> Self {
+        Self {
+            recorder: Recorder::new(),
+            caps,
+            name: "null adapter".to_string(),
+            id: next_owner_id(),
+        }
+    }
+
+    /// A full desktop **Tier A** device: bindless, buffer device address,
+    /// `draw_indirect_count`, timeline semaphores, push constants, timestamps.
+    #[must_use]
+    pub fn tier_a() -> Self {
+        Self::new(DeviceCaps {
+            features: Features::TIER_A
+                | Features::INDIRECT_FIRST_INSTANCE
+                | Features::TIMESTAMP_QUERY
+                | Features::PIPELINE_STATISTICS_QUERY
+                | Features::OCCLUSION_QUERY
+                | Features::ASYNC_COMPUTE_QUEUE
+                | Features::TRANSFER_QUEUE
+                | Features::PUSH_CONSTANTS
+                | Features::DEPTH_CLAMP
+                | Features::DEPTH_BIAS_CLAMP
+                | Features::POLYGON_MODE_LINE
+                | Features::TEXTURE_COMPRESSION_BC
+                | Features::SAMPLER_ANISOTROPY
+                | Features::DEBUG_MARKERS,
+            limits: Limits::desktop(),
+        })
+    }
+
+    /// The **Tier B** floor, shaped like WebGPU: compute only.
+    ///
+    /// No descriptor indexing, no buffer device address, no
+    /// `draw_indirect_count`, no multi-draw, no push constants, no timeline
+    /// semaphores, and — the shape that matters most — an **implicit swapchain
+    /// acquire**, so [`AcquiredFrame`] comes back with no semaphores at all.
+    /// Renderer code that works against both presets works against `crcbl-vk`
+    /// and `crcbl-wgpu`.
+    #[must_use]
+    pub fn tier_b() -> Self {
+        let mut instance = Self::new(DeviceCaps {
+            features: Features::COMPUTE | Features::TEXTURE_COMPRESSION_BC,
+            limits: Limits::minimum(),
+        });
+        instance.name = "null adapter (tier B)".to_string();
+        instance
+    }
+
+    /// Uses `recorder` instead of this instance's own, so a caller can keep a
+    /// handle on the stream after the instance is boxed as `dyn Instance`.
+    #[must_use]
+    pub fn with_recorder(mut self, recorder: Recorder) -> Self {
+        self.recorder = recorder;
+        self
+    }
+
+    /// A clone of this instance's recorder.
+    #[must_use]
+    pub fn recorder(&self) -> Recorder {
+        self.recorder.clone()
+    }
+
+    /// Whether this backend models an implicit (WebGPU-style) swapchain
+    /// acquire, in which case [`AcquiredFrame`] carries no semaphores.
+    fn implicit_acquire(&self) -> bool {
+        !self.caps.features.contains(Features::TIMELINE_SEMAPHORE)
+    }
+
+    /// Resolves a surface handle against *this* instance.
+    fn check_surface(&self, surface: SurfaceHandle) -> Result<(), HalError> {
+        let state = self.recorder.lock();
+        if state.is_owned_by(ObjectKind::Surface, surface.to_bits(), self.id) {
+            Ok(())
+        } else if state.is_live(ObjectKind::Surface, surface.to_bits()) {
+            Err(HalError::ForeignObject {
+                kind: "surface",
+                bits: surface.to_bits(),
+            })
+        } else {
+            Err(HalError::invalid_handle("surface", surface))
+        }
+    }
+}
+
+impl Instance for NullInstance {
+    fn backend(&self) -> BackendKind {
+        BackendKind::Null
+    }
+
+    fn adapters(&self) -> Vec<AdapterInfo> {
+        vec![AdapterInfo {
+            id: AdapterId(0),
+            name: self.name.clone(),
+            vendor_id: 0,
+            device_id: 0,
+            device_type: DeviceType::Cpu,
+            driver: format!("crcbl-hal {}", env!("CARGO_PKG_VERSION")),
+            backend: BackendKind::Null,
+            caps: self.caps,
+        }]
+    }
+
+    unsafe fn create_surface(&self, target: &SurfaceTarget) -> Result<SurfaceHandle, HalError> {
+        // Nothing is dereferenced, which is why this implementation is sound for
+        // any input — the `unsafe` on the trait method is a contract real
+        // backends need, not one this one uses.
+        let mut state = self.recorder.lock();
+        Ok(state.insert_owned(
+            ObjectKind::Surface,
+            self.id,
+            Some(target.platform_name().to_string()),
+            Detail::None,
+        ))
+    }
+
+    fn destroy_surface(&self, surface: SurfaceHandle) {
+        // Only this instance's surfaces; another instance's handle may collide
+        // on bits and must not be destroyed by mistake. One lock, not two: a
+        // check-then-act pair on a non-reentrant mutex is both racy and a
+        // deadlock waiting for a scoping change.
+        let mut state = self.recorder.lock();
+        if state.is_owned_by(ObjectKind::Surface, surface.to_bits(), self.id) {
+            state.remove(ObjectKind::Surface, surface.to_bits());
+        }
+    }
+
+    fn surface_caps(
+        &self,
+        surface: SurfaceHandle,
+        adapter: AdapterId,
+    ) -> Result<SurfaceCaps, HalError> {
+        if adapter != AdapterId(0) {
+            return Err(HalError::NoSuchAdapter(adapter.0));
+        }
+        self.check_surface(surface)?;
+        Ok(SurfaceCaps {
+            formats: vec![Format::Bgra8UnormSrgb, Format::Bgra8Unorm],
+            present_modes: if self.implicit_acquire() {
+                vec![PresentMode::Fifo]
+            } else {
+                vec![
+                    PresentMode::Fifo,
+                    PresentMode::Mailbox,
+                    PresentMode::Immediate,
+                ]
+            },
+            composite_alpha: vec![CompositeAlpha::Opaque],
+            min_image_count: 2,
+            max_image_count: 3,
+            current_extent: None,
+        })
+    }
+
+    fn create_device(&self, desc: &DeviceDesc<'_>) -> Result<Box<dyn Device>, HalError> {
+        if desc.adapter != AdapterId(0) {
+            return Err(HalError::NoSuchAdapter(desc.adapter.0));
+        }
+        let missing = self.caps.missing(desc.required_features);
+        if !missing.is_empty() {
+            return Err(HalError::UnsupportedFeatures { missing });
+        }
+        if let Some(surface) = desc.compatible_surface {
+            self.check_surface(surface)?;
+        }
+        Ok(Box::new(NullDevice {
+            recorder: self.recorder.clone(),
+            instance_id: self.id,
+            device_id: next_owner_id(),
+            caps: DeviceCaps {
+                // Optional features are granted only where the adapter has them,
+                // which is the behaviour a caller must handle on a real backend.
+                features: self
+                    .caps
+                    .features
+                    .intersection(desc.required_features.union(desc.optional_features))
+                    .union(desc.required_features),
+                limits: self.caps.limits,
+            },
+            adapter_features: self.caps.features,
+            implicit_acquire: self.implicit_acquire(),
+        }))
+    }
+}
+
+/// A no-op, recording [`Device`].
+///
+/// Reached through `dyn Device` from [`Instance::create_device`]; there is no
+/// reason for a test to name this type.
+#[derive(Debug)]
+struct NullDevice {
+    recorder: Recorder,
+    /// Id of the instance that created this device. Surfaces are checked
+    /// against this, so any device from that instance may use them.
+    instance_id: u64,
+    /// Id stamped into every object this device creates.
+    device_id: u64,
+    caps: DeviceCaps,
+    /// Everything the adapter can do, which may exceed what this device
+    /// enabled. Used to decide which queue families exist.
+    adapter_features: Features,
+    implicit_acquire: bool,
+}
+
+impl NullDevice {
+    /// Resolves a handle against an expected owner.
+    ///
+    /// Three outcomes, kept distinct because their fixes differ: resolved,
+    /// resolved-but-someone-else's ([`HalError::ForeignObject`]), and gone
+    /// ([`HalError::InvalidHandle`]).
+    fn check_owner(
+        &self,
+        kind: ObjectKind,
+        bits: u64,
+        name: &'static str,
+        owner: u64,
+    ) -> Result<(), HalError> {
+        let state = self.recorder.lock();
+        if state.is_owned_by(kind, bits, owner) {
+            Ok(())
+        } else if state.is_live(kind, bits) {
+            Err(HalError::ForeignObject { kind: name, bits })
+        } else {
+            Err(HalError::InvalidHandle { kind: name, bits })
+        }
+    }
+
+    /// Resolves a device-owned handle.
+    fn check(&self, kind: ObjectKind, bits: u64, name: &'static str) -> Result<(), HalError> {
+        self.check_owner(kind, bits, name, self.device_id)
+    }
+
+    /// Resolves an instance-owned handle — surfaces, and only surfaces.
+    fn check_instance_owned(
+        &self,
+        kind: ObjectKind,
+        bits: u64,
+        name: &'static str,
+    ) -> Result<(), HalError> {
+        self.check_owner(kind, bits, name, self.instance_id)
+    }
+
+    fn insert<T>(&self, kind: ObjectKind, label: Option<&str>, detail: Detail) -> Handle<T> {
+        self.recorder.lock().insert_owned(
+            kind,
+            self.device_id,
+            label.map(ToOwned::to_owned),
+            detail,
+        )
+    }
+
+    /// Destroys a handle, but only if this device owns it.
+    ///
+    /// One lock for the check and the removal — see `destroy_surface`.
+    fn remove(&self, kind: ObjectKind, bits: u64) {
+        let mut state = self.recorder.lock();
+        if state.is_owned_by(kind, bits, self.device_id) {
+            state.remove(kind, bits);
+        }
+    }
+
+    fn unsupported(&self, what: &'static str) -> HalError {
+        HalError::Unsupported {
+            backend: BackendKind::Null,
+            what,
+        }
+    }
+}
+
+impl Device for NullDevice {
+    fn backend(&self) -> BackendKind {
+        BackendKind::Null
+    }
+
+    fn caps(&self) -> DeviceCaps {
+        self.caps
+    }
+
+    fn queue(&self, family: QueueFamily) -> Option<QueueHandle> {
+        match family {
+            QueueFamily::Graphics => Some(queue_handle(0)),
+            QueueFamily::Compute => self
+                .adapter_features
+                .contains(Features::ASYNC_COMPUTE_QUEUE)
+                .then(|| queue_handle(1)),
+            QueueFamily::Transfer => self
+                .adapter_features
+                .contains(Features::TRANSFER_QUEUE)
+                .then(|| queue_handle(2)),
+        }
+    }
+
+    // --- resources ---
+
+    fn create_buffer(&self, desc: &BufferDesc<'_>) -> Result<BufferHandle, HalError> {
+        if desc.size == 0 {
+            return Err(HalError::InvalidDescriptor(
+                "buffer size must be non-zero".to_string(),
+            ));
+        }
+        let bytes = if desc.memory.is_mappable() {
+            vec![
+                0u8;
+                usize::try_from(desc.size).map_err(|_| {
+                    HalError::InvalidDescriptor("mappable buffer larger than usize".to_string())
+                })?
+            ]
+        } else {
+            Vec::new()
+        };
+        Ok(self.insert(
+            ObjectKind::Buffer,
+            desc.label,
+            Detail::Buffer {
+                size: desc.size,
+                memory: desc.memory,
+                bytes,
+            },
+        ))
+    }
+
+    fn destroy_buffer(&self, buffer: BufferHandle) {
+        self.remove(ObjectKind::Buffer, buffer.to_bits());
+    }
+
+    fn write_buffer(&self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<(), HalError> {
+        self.check(ObjectKind::Buffer, buffer.to_bits(), "buffer")?;
+        let mut state = self.recorder.lock();
+        let Some(object) = state.get_mut(ObjectKind::Buffer, buffer.to_bits()) else {
+            return Err(HalError::invalid_handle("buffer", buffer));
+        };
+        let Detail::Buffer {
+            size,
+            memory,
+            bytes,
+        } = &mut object.detail
+        else {
+            unreachable!("a buffer handle always carries buffer detail");
+        };
+        if *memory != MemoryLocation::HostUpload {
+            return Err(HalError::InvalidDescriptor(format!(
+                "write_buffer needs HostUpload memory, buffer is {memory:?}"
+            )));
+        }
+        let start = usize::try_from(offset)
+            .map_err(|_| HalError::InvalidDescriptor("offset exceeds usize".to_string()))?;
+        let end = start
+            .checked_add(data.len())
+            .ok_or_else(|| HalError::InvalidDescriptor("offset + len overflows".to_string()))?;
+        if end as u64 > *size {
+            return Err(HalError::InvalidDescriptor(format!(
+                "write of {} bytes at {offset} exceeds the {size}-byte buffer",
+                data.len(),
+            )));
+        }
+        bytes[start..end].copy_from_slice(data);
+        state.events.push(Event::BufferWritten {
+            buffer,
+            offset,
+            len: data.len(),
+        });
+        Ok(())
+    }
+
+    fn request_readback(&self, desc: &ReadbackDesc<'_>) -> Result<ReadbackHandle, HalError> {
+        self.check(ObjectKind::Buffer, desc.buffer.to_bits(), "buffer")?;
+        if let Some(wait) = desc.after {
+            self.check(ObjectKind::Semaphore, wait.semaphore.to_bits(), "semaphore")?;
+        }
+        let (memory, buffer_size) = {
+            let state = self.recorder.lock();
+            let object = state
+                .get(ObjectKind::Buffer, desc.buffer.to_bits())
+                .expect("checked above");
+            let Detail::Buffer { size, memory, .. } = &object.detail else {
+                unreachable!("a buffer handle always carries buffer detail");
+            };
+            (*memory, *size)
+        };
+        if memory != MemoryLocation::HostReadback {
+            return Err(HalError::InvalidDescriptor(format!(
+                "readback needs HostReadback memory, buffer is {memory:?}"
+            )));
+        }
+        let end = desc
+            .offset
+            .checked_add(desc.size)
+            .ok_or_else(|| HalError::InvalidDescriptor("offset + size overflows".to_string()))?;
+        if end > buffer_size {
+            return Err(HalError::InvalidDescriptor(format!(
+                "readback of {} bytes at {} exceeds the {buffer_size}-byte buffer",
+                desc.size, desc.offset
+            )));
+        }
+        let mut state = self.recorder.lock();
+        let polls_remaining = state.readback_latency;
+        let handle = state.insert_owned(
+            ObjectKind::Readback,
+            self.device_id,
+            desc.label.map(ToOwned::to_owned),
+            Detail::Readback {
+                buffer: desc.buffer,
+                offset: desc.offset,
+                size: desc.size,
+                polls_remaining,
+            },
+        );
+        state.events.push(Event::ReadbackRequested {
+            buffer: desc.buffer,
+            offset: desc.offset,
+            size: desc.size,
+        });
+        Ok(handle)
+    }
+
+    fn poll_readback(
+        &self,
+        readback: ReadbackHandle,
+        out: &mut [u8],
+    ) -> Result<ReadbackState, HalError> {
+        self.check(ObjectKind::Readback, readback.to_bits(), "readback")?;
+        let (buffer, offset, size, ready) = {
+            let mut state = self.recorder.lock();
+            let object = state
+                .get_mut(ObjectKind::Readback, readback.to_bits())
+                .expect("checked above");
+            let Detail::Readback {
+                buffer,
+                offset,
+                size,
+                polls_remaining,
+            } = &mut object.detail
+            else {
+                unreachable!("a readback handle always carries readback detail");
+            };
+            let ready = *polls_remaining == 0;
+            if !ready {
+                *polls_remaining -= 1;
+            }
+            (*buffer, *offset, *size, ready)
+        };
+        if out.len() as u64 != size {
+            return Err(HalError::InvalidDescriptor(format!(
+                "poll_readback needs a {size}-byte slice, got {}",
+                out.len()
+            )));
+        }
+        if !ready {
+            return Ok(ReadbackState::Pending);
+        }
+        // The source buffer may have been destroyed between request and poll,
+        // which is a caller bug and must be reported rather than read.
+        self.check(ObjectKind::Buffer, buffer.to_bits(), "buffer")?;
+        let mut state = self.recorder.lock();
+        let object = state
+            .get(ObjectKind::Buffer, buffer.to_bits())
+            .expect("checked above");
+        let Detail::Buffer { bytes, .. } = &object.detail else {
+            unreachable!("a buffer handle always carries buffer detail");
+        };
+        let start = usize::try_from(offset)
+            .map_err(|_| HalError::InvalidDescriptor("offset exceeds usize".to_string()))?;
+        out.copy_from_slice(&bytes[start..start + out.len()]);
+        let len = out.len();
+        state.events.push(Event::BufferRead {
+            buffer,
+            offset,
+            len,
+        });
+        Ok(ReadbackState::Ready)
+    }
+
+    fn destroy_readback(&self, readback: ReadbackHandle) {
+        self.remove(ObjectKind::Readback, readback.to_bits());
+    }
+
+    fn create_image(&self, desc: &ImageDesc<'_>) -> Result<ImageHandle, HalError> {
+        let extent = desc.extent;
+        if extent.width == 0 || extent.height == 0 || extent.depth_or_layers == 0 {
+            return Err(HalError::InvalidDescriptor(
+                "image extent must be non-zero in every dimension".to_string(),
+            ));
+        }
+        let limits = self.caps.limits;
+        let longest = extent.width.max(extent.height);
+        if longest > limits.max_image_2d {
+            return Err(HalError::InvalidDescriptor(format!(
+                "image extent {longest} exceeds max_image_2d {}",
+                limits.max_image_2d
+            )));
+        }
+        if desc.image_type != ImageType::D3
+            && extent.depth_or_layers > limits.max_image_array_layers
+        {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{} array layers exceeds max_image_array_layers {}",
+                extent.depth_or_layers, limits.max_image_array_layers
+            )));
+        }
+        if desc.mip_levels == 0 {
+            return Err(HalError::InvalidDescriptor(
+                "image must have at least one mip level".to_string(),
+            ));
+        }
+        Ok(self.insert(ObjectKind::Image, desc.label, Detail::None))
+    }
+
+    fn destroy_image(&self, image: ImageHandle) {
+        self.remove(ObjectKind::Image, image.to_bits());
+    }
+
+    fn create_image_view(&self, desc: &ImageViewDesc<'_>) -> Result<ImageViewHandle, HalError> {
+        self.check(ObjectKind::Image, desc.image.to_bits(), "image")?;
+        Ok(self.insert(ObjectKind::ImageView, desc.label, Detail::None))
+    }
+
+    fn destroy_image_view(&self, view: ImageViewHandle) {
+        self.remove(ObjectKind::ImageView, view.to_bits());
+    }
+
+    fn create_sampler(&self, desc: &SamplerDesc<'_>) -> Result<SamplerHandle, HalError> {
+        if desc.anisotropy > self.caps.limits.max_sampler_anisotropy {
+            return Err(HalError::InvalidDescriptor(format!(
+                "anisotropy {} exceeds max_sampler_anisotropy {}",
+                desc.anisotropy, self.caps.limits.max_sampler_anisotropy
+            )));
+        }
+        Ok(self.insert(ObjectKind::Sampler, desc.label, Detail::None))
+    }
+
+    fn destroy_sampler(&self, sampler: SamplerHandle) {
+        self.remove(ObjectKind::Sampler, sampler.to_bits());
+    }
+
+    // --- shaders and pipelines ---
+
+    fn create_shader_module(
+        &self,
+        desc: &ShaderModuleDesc<'_>,
+    ) -> Result<ShaderModuleHandle, HalError> {
+        // The SPIR-V magic number. Checking it costs nothing and catches the
+        // classic "passed bytes where words were wanted" mistake, which
+        // otherwise surfaces as a driver error at P1.
+        const SPIRV_MAGIC: u32 = 0x0723_0203;
+        match desc.spirv.first() {
+            Some(&SPIRV_MAGIC) => {}
+            Some(word) => {
+                return Err(HalError::ShaderCompilation(format!(
+                    "not SPIR-V: first word is {word:#010x}, expected {SPIRV_MAGIC:#010x}"
+                )));
+            }
+            None => {
+                return Err(HalError::ShaderCompilation("empty module".to_string()));
+            }
+        }
+        Ok(self.insert(ObjectKind::ShaderModule, desc.label, Detail::None))
+    }
+
+    fn destroy_shader_module(&self, module: ShaderModuleHandle) {
+        self.remove(ObjectKind::ShaderModule, module.to_bits());
+    }
+
+    fn create_bind_group_layout(
+        &self,
+        desc: &BindGroupLayoutDesc<'_>,
+    ) -> Result<BindGroupLayoutHandle, HalError> {
+        let indexing = self.caps.features.contains(Features::DESCRIPTOR_INDEXING);
+        for (index, entry) in desc.entries.iter().enumerate() {
+            if !entry.flags.is_empty() && !indexing {
+                return Err(self.unsupported("descriptor indexing flags"));
+            }
+            if entry.flags.contains(crate::BindingFlags::VARIABLE_COUNT)
+                && index + 1 != desc.entries.len()
+            {
+                return Err(HalError::InvalidDescriptor(
+                    "VARIABLE_COUNT is only legal on the last binding".to_string(),
+                ));
+            }
+            if entry.count == 0 {
+                return Err(HalError::InvalidDescriptor(
+                    "binding count must be non-zero".to_string(),
+                ));
+            }
+        }
+        Ok(self.insert(ObjectKind::BindGroupLayout, desc.label, Detail::None))
+    }
+
+    fn destroy_bind_group_layout(&self, layout: BindGroupLayoutHandle) {
+        self.remove(ObjectKind::BindGroupLayout, layout.to_bits());
+    }
+
+    fn create_bind_group(&self, desc: &BindGroupDesc<'_>) -> Result<BindGroupHandle, HalError> {
+        self.check(
+            ObjectKind::BindGroupLayout,
+            desc.layout.to_bits(),
+            "bind group layout",
+        )?;
+        for entry in desc.entries {
+            self.check_binding(&entry.resource)?;
+        }
+        Ok(self.insert(ObjectKind::BindGroup, desc.label, Detail::None))
+    }
+
+    fn update_bind_group(
+        &self,
+        group: BindGroupHandle,
+        entries: &[BindGroupEntry],
+    ) -> Result<(), HalError> {
+        self.check(ObjectKind::BindGroup, group.to_bits(), "bind group")?;
+        for entry in entries {
+            self.check_binding(&entry.resource)?;
+        }
+        Ok(())
+    }
+
+    fn destroy_bind_group(&self, group: BindGroupHandle) {
+        self.remove(ObjectKind::BindGroup, group.to_bits());
+    }
+
+    fn create_pipeline_layout(
+        &self,
+        desc: &PipelineLayoutDesc<'_>,
+    ) -> Result<PipelineLayoutHandle, HalError> {
+        for layout in desc.bind_group_layouts {
+            self.check(
+                ObjectKind::BindGroupLayout,
+                layout.to_bits(),
+                "bind group layout",
+            )?;
+        }
+        if desc.bind_group_layouts.len() > self.caps.limits.max_bind_groups as usize {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{} bind groups exceeds max_bind_groups {}",
+                desc.bind_group_layouts.len(),
+                self.caps.limits.max_bind_groups
+            )));
+        }
+        if let Some(range) = desc.push_constants {
+            if !self.caps.features.contains(Features::PUSH_CONSTANTS) {
+                // Loudly, at layout creation — not by silently dropping the
+                // writes later. This is the Tier B trap the seam exists to make
+                // visible.
+                return Err(self.unsupported("push constants"));
+            }
+            if range.offset + range.size > self.caps.limits.max_push_constant_size {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "push constant range ends at {} but max_push_constant_size is {}",
+                    range.offset + range.size,
+                    self.caps.limits.max_push_constant_size
+                )));
+            }
+        }
+        Ok(self.insert(ObjectKind::PipelineLayout, desc.label, Detail::None))
+    }
+
+    fn destroy_pipeline_layout(&self, layout: PipelineLayoutHandle) {
+        self.remove(ObjectKind::PipelineLayout, layout.to_bits());
+    }
+
+    fn create_graphics_pipeline(
+        &self,
+        desc: &GraphicsPipelineDesc<'_>,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        self.check(
+            ObjectKind::PipelineLayout,
+            desc.layout.to_bits(),
+            "pipeline layout",
+        )?;
+        self.check(
+            ObjectKind::ShaderModule,
+            desc.vertex.module.to_bits(),
+            "shader module",
+        )?;
+        if let Some(fragment) = desc.fragment {
+            self.check(
+                ObjectKind::ShaderModule,
+                fragment.module.to_bits(),
+                "shader module",
+            )?;
+        }
+        if desc.color_targets.len() > self.caps.limits.max_color_attachments as usize {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{} colour targets exceeds max_color_attachments {}",
+                desc.color_targets.len(),
+                self.caps.limits.max_color_attachments
+            )));
+        }
+        if desc.primitive.polygon_mode == crate::PolygonMode::Line
+            && !self.caps.features.contains(Features::POLYGON_MODE_LINE)
+        {
+            return Err(self.unsupported("wireframe polygon mode"));
+        }
+        if desc.primitive.depth_clamp && !self.caps.features.contains(Features::DEPTH_CLAMP) {
+            return Err(self.unsupported("depth clamping"));
+        }
+        if let Some(depth) = desc.depth_stencil
+            && !depth.format.is_depth_stencil()
+        {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{:?} is not a depth/stencil format",
+                depth.format
+            )));
+        }
+        Ok(self.insert(ObjectKind::GraphicsPipeline, desc.label, Detail::None))
+    }
+
+    fn destroy_graphics_pipeline(&self, pipeline: GraphicsPipelineHandle) {
+        self.remove(ObjectKind::GraphicsPipeline, pipeline.to_bits());
+    }
+
+    fn create_compute_pipeline(
+        &self,
+        desc: &ComputePipelineDesc<'_>,
+    ) -> Result<ComputePipelineHandle, HalError> {
+        if !self.caps.features.contains(Features::COMPUTE) {
+            return Err(self.unsupported("compute shaders"));
+        }
+        self.check(
+            ObjectKind::PipelineLayout,
+            desc.layout.to_bits(),
+            "pipeline layout",
+        )?;
+        self.check(
+            ObjectKind::ShaderModule,
+            desc.compute.module.to_bits(),
+            "shader module",
+        )?;
+        Ok(self.insert(ObjectKind::ComputePipeline, desc.label, Detail::None))
+    }
+
+    fn destroy_compute_pipeline(&self, pipeline: ComputePipelineHandle) {
+        self.remove(ObjectKind::ComputePipeline, pipeline.to_bits());
+    }
+
+    // --- queries ---
+
+    fn create_query_set(&self, desc: &QuerySetDesc<'_>) -> Result<QuerySetHandle, HalError> {
+        let required = match desc.kind {
+            QueryKind::Timestamp => Features::TIMESTAMP_QUERY,
+            QueryKind::Occlusion => Features::OCCLUSION_QUERY,
+            QueryKind::PipelineStatistics => Features::PIPELINE_STATISTICS_QUERY,
+        };
+        if !self.caps.features.contains(required) {
+            return Err(self.unsupported("this query kind"));
+        }
+        if desc.count == 0 {
+            return Err(HalError::InvalidDescriptor(
+                "query set must hold at least one query".to_string(),
+            ));
+        }
+        Ok(self.insert(ObjectKind::QuerySet, desc.label, Detail::None))
+    }
+
+    fn destroy_query_set(&self, set: QuerySetHandle) {
+        self.remove(ObjectKind::QuerySet, set.to_bits());
+    }
+
+    fn query_results(
+        &self,
+        set: QuerySetHandle,
+        _first_query: u32,
+        out: &mut [u64],
+    ) -> Result<(), HalError> {
+        self.check(ObjectKind::QuerySet, set.to_bits(), "query set")?;
+        // Zeros, as a device without timestamp support would report: the
+        // profiler HUD degrades rather than breaking.
+        out.fill(0);
+        Ok(())
+    }
+
+    // --- synchronisation ---
+
+    fn create_semaphore(&self, desc: &SemaphoreDesc<'_>) -> Result<SemaphoreHandle, HalError> {
+        if matches!(desc.kind, SemaphoreKind::Timeline { .. })
+            && !self.caps.features.contains(Features::TIMELINE_SEMAPHORE)
+        {
+            return Err(self.unsupported("timeline semaphores"));
+        }
+        Ok(self.insert(ObjectKind::Semaphore, desc.label, Detail::None))
+    }
+
+    fn destroy_semaphore(&self, semaphore: SemaphoreHandle) {
+        self.remove(ObjectKind::Semaphore, semaphore.to_bits());
+    }
+
+    fn semaphore_value(&self, semaphore: SemaphoreHandle) -> Result<u64, HalError> {
+        self.check(ObjectKind::Semaphore, semaphore.to_bits(), "semaphore")?;
+        // Nothing ever executes, so every submitted signal has already
+        // "completed"; reporting the highest signalled value would need a
+        // per-semaphore counter that no test has asked for yet.
+        Ok(0)
+    }
+
+    fn wait_semaphores(&self, waits: &[SemaphoreWait], _timeout_ns: u64) -> Result<bool, HalError> {
+        for wait in waits {
+            self.check(ObjectKind::Semaphore, wait.semaphore.to_bits(), "semaphore")?;
+        }
+        // No work is ever outstanding, so every wait is satisfied immediately.
+        Ok(true)
+    }
+
+    fn wait_idle(&self) -> Result<(), HalError> {
+        self.recorder.lock().events.push(Event::WaitedIdle);
+        Ok(())
+    }
+
+    // --- commands ---
+
+    fn create_command_encoder(&self, desc: &CommandEncoderDesc<'_>) -> Box<dyn CommandEncoder> {
+        Box::new(NullEncoder {
+            recorder: self.recorder.clone(),
+            device_id: self.device_id,
+            label: desc.label.map(ToOwned::to_owned),
+            commands: Vec::new(),
+            scope: Scope::Outside,
+        })
+    }
+
+    fn destroy_command_buffer(&self, buffer: CommandBufferHandle) {
+        self.remove(ObjectKind::CommandBuffer, buffer.to_bits());
+    }
+
+    fn submit(&self, queue: QueueHandle, submit: &SubmitInfo<'_>) -> Result<(), HalError> {
+        for buffer in submit.command_buffers {
+            self.check(
+                ObjectKind::CommandBuffer,
+                buffer.to_bits(),
+                "command buffer",
+            )?;
+        }
+        for wait in submit.waits {
+            self.check(ObjectKind::Semaphore, wait.semaphore.to_bits(), "semaphore")?;
+        }
+        for signal in submit.signals {
+            self.check(
+                ObjectKind::Semaphore,
+                signal.semaphore.to_bits(),
+                "semaphore",
+            )?;
+        }
+        self.recorder.lock().events.push(Event::Submitted {
+            queue,
+            command_buffers: submit.command_buffers.to_vec(),
+            waits: submit.waits.to_vec(),
+            signals: submit.signals.to_vec(),
+        });
+        Ok(())
+    }
+
+    // --- presentation ---
+
+    fn create_swapchain(&self, desc: &SwapchainDesc<'_>) -> Result<SwapchainHandle, SurfaceError> {
+        self.check_instance_owned(ObjectKind::Surface, desc.surface.to_bits(), "surface")
+            .map_err(SurfaceError::Hal)?;
+        if desc.extent.0 == 0 || desc.extent.1 == 0 {
+            return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
+                "swapchain extent must be non-zero".to_string(),
+            )));
+        }
+        let image_count = desc.image_count.clamp(2, 3);
+        let mut images = Vec::with_capacity(image_count as usize);
+        let mut acquire_semaphores = Vec::with_capacity(image_count as usize);
+        let mut present_semaphores = Vec::with_capacity(image_count as usize);
+        for index in 0..image_count {
+            let image_desc = ImageDesc {
+                label: Some("swapchain image"),
+                image_type: ImageType::D2,
+                extent: crate::Extent3d::d2(desc.extent.0, desc.extent.1),
+                format: desc.format,
+                mip_levels: 1,
+                samples: 1,
+                usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::PRESENT,
+                memory: MemoryLocation::DeviceLocal,
+            };
+            images.push(self.create_image(&image_desc).map_err(SurfaceError::Hal)?);
+            if self.implicit_acquire {
+                // The WebGPU shape: no semaphores at all, so the renderer's
+                // wait/signal splice is a no-op rather than a branch.
+                acquire_semaphores.push(None);
+                present_semaphores.push(None);
+            } else {
+                let label = format!("swapchain acquire {index}");
+                acquire_semaphores.push(Some(self.insert::<crate::Semaphore>(
+                    ObjectKind::Semaphore,
+                    Some(&label),
+                    Detail::None,
+                )));
+                let label = format!("swapchain present {index}");
+                present_semaphores.push(Some(self.insert::<crate::Semaphore>(
+                    ObjectKind::Semaphore,
+                    Some(&label),
+                    Detail::None,
+                )));
+            }
+        }
+        Ok(self.insert(
+            ObjectKind::Swapchain,
+            desc.label,
+            Detail::Swapchain {
+                extent: desc.extent,
+                images,
+                acquire_semaphores,
+                present_semaphores,
+                next: 0,
+            },
+        ))
+    }
+
+    fn reconfigure_swapchain(
+        &self,
+        swapchain: SwapchainHandle,
+        desc: &SwapchainDesc<'_>,
+    ) -> Result<(), SurfaceError> {
+        if desc.extent.0 == 0 || desc.extent.1 == 0 {
+            return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
+                "swapchain extent must be non-zero".to_string(),
+            )));
+        }
+        self.check(ObjectKind::Swapchain, swapchain.to_bits(), "swapchain")
+            .map_err(SurfaceError::Hal)?;
+        let mut state = self.recorder.lock();
+        let Some(object) = state.get_mut(ObjectKind::Swapchain, swapchain.to_bits()) else {
+            return Err(SurfaceError::Hal(HalError::invalid_handle(
+                "swapchain",
+                swapchain,
+            )));
+        };
+        let Detail::Swapchain { extent, next, .. } = &mut object.detail else {
+            unreachable!("a swapchain handle always carries swapchain detail");
+        };
+        *extent = desc.extent;
+        *next = 0;
+        state.events.push(Event::Reconfigured {
+            swapchain,
+            extent: desc.extent,
+        });
+        Ok(())
+    }
+
+    fn destroy_swapchain(&self, swapchain: SwapchainHandle) {
+        let owned = {
+            let state = self.recorder.lock();
+            match state
+                .get(ObjectKind::Swapchain, swapchain.to_bits())
+                .map(|object| &object.detail)
+            {
+                Some(Detail::Swapchain {
+                    images,
+                    acquire_semaphores,
+                    present_semaphores,
+                    ..
+                }) => Some((
+                    images.clone(),
+                    acquire_semaphores.clone(),
+                    present_semaphores.clone(),
+                )),
+                _ => None,
+            }
+        };
+        if let Some((images, acquires, presents)) = owned {
+            for image in images {
+                self.destroy_image(image);
+            }
+            for semaphore in acquires.into_iter().chain(presents).flatten() {
+                self.destroy_semaphore(semaphore);
+            }
+        }
+        self.remove(ObjectKind::Swapchain, swapchain.to_bits());
+    }
+
+    fn acquire_next_frame(
+        &self,
+        swapchain: SwapchainHandle,
+    ) -> Result<AcquiredFrame, SurfaceError> {
+        self.check(ObjectKind::Swapchain, swapchain.to_bits(), "swapchain")
+            .map_err(SurfaceError::Hal)?;
+        let mut state = self.recorder.lock();
+        let Some(object) = state.get_mut(ObjectKind::Swapchain, swapchain.to_bits()) else {
+            return Err(SurfaceError::Hal(HalError::invalid_handle(
+                "swapchain",
+                swapchain,
+            )));
+        };
+        let Detail::Swapchain {
+            images,
+            acquire_semaphores,
+            present_semaphores,
+            next,
+            ..
+        } = &mut object.detail
+        else {
+            unreachable!("a swapchain handle always carries swapchain detail");
+        };
+        let index = *next;
+        let slot = index as usize;
+        *next = (index + 1) % u32::try_from(images.len()).unwrap_or(1);
+        let frame = AcquiredFrame {
+            image: images[slot],
+            index,
+            acquire_semaphore: acquire_semaphores[slot],
+            present_semaphore: present_semaphores[slot],
+            suboptimal: false,
+        };
+        state.events.push(Event::Acquired { swapchain, index });
+        Ok(frame)
+    }
+
+    fn present(&self, _queue: QueueHandle, present: &PresentInfo<'_>) -> Result<(), SurfaceError> {
+        self.check(
+            ObjectKind::Swapchain,
+            present.swapchain.to_bits(),
+            "swapchain",
+        )
+        .map_err(SurfaceError::Hal)?;
+        for semaphore in present.waits {
+            self.check(ObjectKind::Semaphore, semaphore.to_bits(), "semaphore")
+                .map_err(SurfaceError::Hal)?;
+        }
+        let mut state = self.recorder.lock();
+        state.events.push(Event::Presented {
+            swapchain: present.swapchain,
+        });
+        Ok(())
+    }
+}
+
+impl NullDevice {
+    fn check_binding(&self, resource: &crate::BindingResource) -> Result<(), HalError> {
+        match resource {
+            crate::BindingResource::Buffer { buffer, .. } => {
+                self.check(ObjectKind::Buffer, buffer.to_bits(), "buffer")
+            }
+            crate::BindingResource::ImageView(view) => {
+                self.check(ObjectKind::ImageView, view.to_bits(), "image view")
+            }
+            crate::BindingResource::Sampler(sampler) => {
+                self.check(ObjectKind::Sampler, sampler.to_bits(), "sampler")
+            }
+        }
+    }
+}
+
+/// Which pass, if any, is currently open on an encoder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scope {
+    Outside,
+    Render,
+    Compute,
+}
+
+/// A no-op, recording [`CommandEncoder`].
+#[derive(Debug)]
+struct NullEncoder {
+    recorder: Recorder,
+    /// Owner id every handle a recorded command names must match.
+    device_id: u64,
+    label: Option<String>,
+    commands: Vec<Command>,
+    scope: Scope,
+}
+
+impl NullEncoder {
+    /// Records `command` after checking it is legal in the current scope.
+    fn record(&mut self, command: Command) {
+        let name = command.name();
+        match &command {
+            Command::BeginRenderPass { .. } | Command::BeginComputePass { .. } => {
+                if self.scope != Scope::Outside {
+                    self.fail(ValidationError::NestedPass { command: name });
+                }
+                self.scope = match command {
+                    Command::BeginComputePass { .. } => Scope::Compute,
+                    _ => Scope::Render,
+                };
+            }
+            Command::EndRenderPass => {
+                if self.scope != Scope::Render {
+                    self.fail(ValidationError::UnopenedPass { command: name });
+                }
+                self.scope = Scope::Outside;
+            }
+            Command::EndComputePass => {
+                if self.scope != Scope::Compute {
+                    self.fail(ValidationError::UnopenedPass { command: name });
+                }
+                self.scope = Scope::Outside;
+            }
+            _ => {}
+        }
+        self.commands.push(command);
+    }
+
+    fn fail(&self, error: ValidationError) {
+        self.recorder.push_validation(error);
+    }
+
+    /// Requires an open render pass.
+    fn need_render(&self, command: &'static str) {
+        if self.scope != Scope::Render {
+            self.fail(ValidationError::OutsidePass {
+                command,
+                expected: "render",
+            });
+        }
+    }
+
+    /// Requires an open compute pass.
+    fn need_compute(&self, command: &'static str) {
+        if self.scope != Scope::Compute {
+            self.fail(ValidationError::OutsidePass {
+                command,
+                expected: "compute",
+            });
+        }
+    }
+
+    /// Requires some pass to be open — bindings are legal in either.
+    fn need_any_pass(&self, command: &'static str) {
+        if self.scope == Scope::Outside {
+            self.fail(ValidationError::OutsidePass {
+                command,
+                expected: "render or compute",
+            });
+        }
+    }
+
+    /// Requires no pass to be open. Copies, barriers and query writes are
+    /// forbidden inside dynamic rendering.
+    fn need_outside(&self, command: &'static str) {
+        if self.scope != Scope::Outside {
+            self.fail(ValidationError::InsidePass { command });
+        }
+    }
+
+    /// Requires a handle to still resolve *and* to belong to this device.
+    fn need_live(&self, command: &'static str, kind: ObjectKind, bits: u64) {
+        let state = self.recorder.lock();
+        if state.is_owned_by(kind, bits, self.device_id) {
+            return;
+        }
+        let error = if state.is_live(kind, bits) {
+            ValidationError::ForeignHandle {
+                command,
+                kind,
+                bits,
+            }
+        } else {
+            ValidationError::DeadHandle {
+                command,
+                kind,
+                bits,
+            }
+        };
+        drop(state);
+        self.fail(error);
+    }
+}
+
+impl CommandEncoder for NullEncoder {
+    fn begin_debug_label(&mut self, label: &str) {
+        self.record(Command::BeginDebugLabel(label.to_string()));
+    }
+
+    fn end_debug_label(&mut self) {
+        self.record(Command::EndDebugLabel);
+    }
+
+    fn insert_debug_marker(&mut self, label: &str) {
+        self.record(Command::DebugMarker(label.to_string()));
+    }
+
+    fn pipeline_barrier(&mut self, barriers: &Barriers<'_>) {
+        self.need_outside("Barrier");
+        for barrier in barriers.buffers {
+            self.need_live("Barrier", ObjectKind::Buffer, barrier.buffer.to_bits());
+        }
+        for barrier in barriers.images {
+            self.need_live("Barrier", ObjectKind::Image, barrier.image.to_bits());
+        }
+        self.record(Command::Barrier {
+            buffers: barriers.buffers.to_vec(),
+            images: barriers.images.to_vec(),
+            global: barriers.global,
+        });
+    }
+
+    fn copy_buffer_to_buffer(&mut self, copy: &BufferCopy) {
+        self.need_outside("CopyBufferToBuffer");
+        self.need_live("CopyBufferToBuffer", ObjectKind::Buffer, copy.src.to_bits());
+        self.need_live("CopyBufferToBuffer", ObjectKind::Buffer, copy.dst.to_bits());
+        self.record(Command::CopyBufferToBuffer(*copy));
+    }
+
+    fn copy_buffer_to_image(&mut self, copy: &BufferImageCopy) {
+        self.need_outside("CopyBufferToImage");
+        self.need_live(
+            "CopyBufferToImage",
+            ObjectKind::Buffer,
+            copy.buffer.to_bits(),
+        );
+        self.need_live("CopyBufferToImage", ObjectKind::Image, copy.image.to_bits());
+        self.record(Command::CopyBufferToImage(*copy));
+    }
+
+    fn copy_image_to_buffer(&mut self, copy: &BufferImageCopy) {
+        self.need_outside("CopyImageToBuffer");
+        self.need_live("CopyImageToBuffer", ObjectKind::Image, copy.image.to_bits());
+        self.need_live(
+            "CopyImageToBuffer",
+            ObjectKind::Buffer,
+            copy.buffer.to_bits(),
+        );
+        self.record(Command::CopyImageToBuffer(*copy));
+    }
+
+    fn copy_image_to_image(&mut self, copy: &ImageCopy) {
+        self.need_outside("CopyImageToImage");
+        self.need_live("CopyImageToImage", ObjectKind::Image, copy.src.to_bits());
+        self.need_live("CopyImageToImage", ObjectKind::Image, copy.dst.to_bits());
+        self.record(Command::CopyImageToImage(*copy));
+    }
+
+    fn fill_buffer(&mut self, buffer: BufferHandle, offset: u64, size: u64, value: u32) {
+        self.need_outside("FillBuffer");
+        self.need_live("FillBuffer", ObjectKind::Buffer, buffer.to_bits());
+        self.record(Command::FillBuffer {
+            buffer,
+            offset,
+            size,
+            value,
+        });
+    }
+
+    fn begin_render_pass(&mut self, desc: &RenderPassDesc<'_>) {
+        for attachment in desc.color_attachments {
+            self.need_live(
+                "BeginRenderPass",
+                ObjectKind::ImageView,
+                attachment.view.to_bits(),
+            );
+            if let Some(resolve) = attachment.resolve {
+                self.need_live("BeginRenderPass", ObjectKind::ImageView, resolve.to_bits());
+            }
+        }
+        if let Some(attachment) = desc.depth_stencil_attachment {
+            self.need_live(
+                "BeginRenderPass",
+                ObjectKind::ImageView,
+                attachment.view.to_bits(),
+            );
+        }
+        self.record(Command::BeginRenderPass {
+            label: desc.label.map(ToOwned::to_owned),
+            color_attachments: desc.color_attachments.to_vec(),
+            depth_stencil_attachment: desc.depth_stencil_attachment,
+            render_area: desc.render_area,
+        });
+    }
+
+    fn end_render_pass(&mut self) {
+        self.record(Command::EndRenderPass);
+    }
+
+    fn set_viewport(&mut self, viewport: &Viewport) {
+        self.need_render("SetViewport");
+        self.record(Command::SetViewport(*viewport));
+    }
+
+    fn set_scissor(&mut self, rect: &Rect2d) {
+        self.need_render("SetScissor");
+        self.record(Command::SetScissor(*rect));
+    }
+
+    fn set_stencil_reference(&mut self, reference: u32) {
+        self.need_render("SetStencilReference");
+        self.record(Command::SetStencilReference(reference));
+    }
+
+    fn bind_graphics_pipeline(&mut self, pipeline: GraphicsPipelineHandle) {
+        self.need_render("BindGraphicsPipeline");
+        self.need_live(
+            "BindGraphicsPipeline",
+            ObjectKind::GraphicsPipeline,
+            pipeline.to_bits(),
+        );
+        self.record(Command::BindGraphicsPipeline(pipeline));
+    }
+
+    fn bind_index_buffer(&mut self, buffer: BufferHandle, offset: u64, format: IndexFormat) {
+        self.need_render("BindIndexBuffer");
+        self.need_live("BindIndexBuffer", ObjectKind::Buffer, buffer.to_bits());
+        self.record(Command::BindIndexBuffer {
+            buffer,
+            offset,
+            format,
+        });
+    }
+
+    fn bind_group(&mut self, slot: u32, group: BindGroupHandle, dynamic_offsets: &[u32]) {
+        self.need_any_pass("BindGroup");
+        self.need_live("BindGroup", ObjectKind::BindGroup, group.to_bits());
+        self.record(Command::BindGroup {
+            slot,
+            group,
+            dynamic_offsets: dynamic_offsets.to_vec(),
+        });
+    }
+
+    fn push_constants(&mut self, stages: ShaderStages, offset: u32, data: &[u8]) {
+        self.need_any_pass("PushConstants");
+        self.record(Command::PushConstants {
+            stages,
+            offset,
+            len: data.len(),
+        });
+    }
+
+    fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
+        self.need_render("Draw");
+        self.record(Command::Draw {
+            vertices,
+            instances,
+        });
+    }
+
+    fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+        self.need_render("DrawIndexed");
+        self.record(Command::DrawIndexed {
+            indices,
+            base_vertex,
+            instances,
+        });
+    }
+
+    fn draw_indirect(&mut self, draw: &DrawIndirect) {
+        self.need_render("DrawIndirect");
+        self.need_live("DrawIndirect", ObjectKind::Buffer, draw.args.to_bits());
+        self.record(Command::DrawIndirect(*draw));
+    }
+
+    fn draw_indexed_indirect(&mut self, draw: &DrawIndirect) {
+        self.need_render("DrawIndexedIndirect");
+        self.need_live(
+            "DrawIndexedIndirect",
+            ObjectKind::Buffer,
+            draw.args.to_bits(),
+        );
+        self.record(Command::DrawIndexedIndirect(*draw));
+    }
+
+    fn draw_indirect_count(&mut self, draw: &DrawIndirectCount) {
+        self.need_render("DrawIndirectCount");
+        self.need_live("DrawIndirectCount", ObjectKind::Buffer, draw.args.to_bits());
+        self.need_live(
+            "DrawIndirectCount",
+            ObjectKind::Buffer,
+            draw.count_buffer.to_bits(),
+        );
+        self.record(Command::DrawIndirectCount(*draw));
+    }
+
+    fn draw_indexed_indirect_count(&mut self, draw: &DrawIndirectCount) {
+        self.need_render("DrawIndexedIndirectCount");
+        self.need_live(
+            "DrawIndexedIndirectCount",
+            ObjectKind::Buffer,
+            draw.args.to_bits(),
+        );
+        self.need_live(
+            "DrawIndexedIndirectCount",
+            ObjectKind::Buffer,
+            draw.count_buffer.to_bits(),
+        );
+        self.record(Command::DrawIndexedIndirectCount(*draw));
+    }
+
+    fn begin_compute_pass(&mut self, desc: &ComputePassDesc<'_>) {
+        self.record(Command::BeginComputePass {
+            label: desc.label.map(ToOwned::to_owned),
+        });
+    }
+
+    fn end_compute_pass(&mut self) {
+        self.record(Command::EndComputePass);
+    }
+
+    fn bind_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {
+        self.need_compute("BindComputePipeline");
+        self.need_live(
+            "BindComputePipeline",
+            ObjectKind::ComputePipeline,
+            pipeline.to_bits(),
+        );
+        self.record(Command::BindComputePipeline(pipeline));
+    }
+
+    fn dispatch(&mut self, x: u32, y: u32, z: u32) {
+        self.need_compute("Dispatch");
+        self.record(Command::Dispatch { x, y, z });
+    }
+
+    fn dispatch_indirect(&mut self, args: BufferHandle, offset: u64) {
+        self.need_compute("DispatchIndirect");
+        self.need_live("DispatchIndirect", ObjectKind::Buffer, args.to_bits());
+        self.record(Command::DispatchIndirect { args, offset });
+    }
+
+    fn reset_query_set(&mut self, set: QuerySetHandle, range: Range<u32>) {
+        self.need_outside("ResetQuerySet");
+        self.need_live("ResetQuerySet", ObjectKind::QuerySet, set.to_bits());
+        self.record(Command::ResetQuerySet { set, range });
+    }
+
+    fn write_timestamp(&mut self, set: QuerySetHandle, index: u32) {
+        self.need_outside("WriteTimestamp");
+        self.need_live("WriteTimestamp", ObjectKind::QuerySet, set.to_bits());
+        self.record(Command::WriteTimestamp { set, index });
+    }
+
+    fn resolve_query_set(
+        &mut self,
+        set: QuerySetHandle,
+        range: Range<u32>,
+        dst: BufferHandle,
+        dst_offset: u64,
+    ) {
+        self.need_outside("ResolveQuerySet");
+        self.need_live("ResolveQuerySet", ObjectKind::QuerySet, set.to_bits());
+        self.need_live("ResolveQuerySet", ObjectKind::Buffer, dst.to_bits());
+        self.record(Command::ResolveQuerySet {
+            set,
+            range,
+            dst,
+            dst_offset,
+        });
+    }
+
+    fn finish(self: Box<Self>) -> Result<CommandBufferHandle, HalError> {
+        if self.scope != Scope::Outside {
+            self.fail(ValidationError::UnclosedPass);
+        }
+        let mut state = self.recorder.lock();
+        let command_buffer: CommandBufferHandle = state.insert_owned(
+            ObjectKind::CommandBuffer,
+            self.device_id,
+            self.label.clone(),
+            Detail::None,
+        );
+        for command in self.commands {
+            state.events.push(Event::Command {
+                command_buffer,
+                command,
+            });
+        }
+        state.events.push(Event::Finished {
+            label: self.label,
+            command_buffer,
+        });
+        Ok(command_buffer)
+    }
+}
+
+#[cfg(test)]
+mod tests;
