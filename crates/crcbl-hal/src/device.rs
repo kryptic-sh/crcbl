@@ -277,9 +277,34 @@ pub trait Instance: core::fmt::Debug + Send + Sync {
 
     /// What `surface` supports on `adapter`.
     ///
+    /// # This is also how adapter selection works
+    ///
+    /// [`adapters`](Instance::adapters) enumerates without reference to any
+    /// surface, so **this call is the only way to find out whether a given
+    /// adapter can present to a given window** — and the answer is routinely
+    /// "no". A discrete GPU under an X server with no DRI3 cannot present to it
+    /// while the software rasteriser beside it can; the same is true of the
+    /// second GPU in a hybrid laptop. P1.1 hit exactly that, and taking
+    /// `adapters()[0]` is therefore not a shortcut but a bug that only shows up
+    /// on someone else's machine.
+    ///
+    /// The contract, in both directions:
+    ///
+    /// * **Backends** must report an adapter that cannot present to this
+    ///   surface as [`HalError::Unsupported`]. Returning empty
+    ///   [`formats`](SurfaceCaps::formats) is **not** an option — it collides
+    ///   with [`SurfaceCaps::preferred_format`]'s documented meaning — and nor
+    ///   is an empty [`present_modes`](SurfaceCaps::present_modes), which would
+    ///   break the promise that [`PresentMode::Fifo`](crate::PresentMode::Fifo)
+    ///   is always there.
+    /// * **Callers** doing selection must treat an `Err` from this call as "try
+    ///   the next adapter", not as fatal. Only running out of adapters is
+    ///   fatal. `apps/sandbox` is the reference implementation.
+    ///
     /// # Errors
     ///
-    /// [`HalError::InvalidHandle`] for a stale surface,
+    /// [`HalError::Unsupported`] when the adapter cannot present to this
+    /// surface, [`HalError::InvalidHandle`] for a stale surface,
     /// [`HalError::NoSuchAdapter`] for an unknown adapter, or a backend error if
     /// the query failed.
     fn surface_caps(

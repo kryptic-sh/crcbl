@@ -4,6 +4,8 @@
 //! which makes the same argument at the length it deserves and is the one that
 //! had a real choice to make.
 
+use crcbl::backend::GpuBackend;
+
 use crate::app::Options;
 
 /// `--help` text, and the definition of the flag set.
@@ -16,6 +18,9 @@ USAGE:
 OPTIONS:
         --headless        Run against HeadlessShell with a hand-driven clock.
                           Deterministic, needs no display, always terminates.
+        --backend <NAME>  GPU backend: `vk` or `null`. Default: choose one,
+                          which today means Vulkan. `null` renders nothing and
+                          needs no driver, so it is never chosen automatically.
         --frames <N>      Stop after N presented frames.
                           Default: unlimited windowed, 120 headless.
         --tick-hz <N>     Simulation rate. Default: 60.
@@ -24,6 +29,7 @@ OPTIONS:
 
 ENVIRONMENT:
     CRCBL_SHELL   Force a shell backend (wayland, x11, headless).
+    CRCBL_GPU     Force a GPU backend (vk, null); --backend wins over it.
     CRCBL_LOG     Log filter; `debug` prints every shell event.
 
 EXIT CODES:
@@ -49,6 +55,17 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
         match arg.as_str() {
             "--headless" => options.headless = true,
             "-h" | "--help" => return Invocation::Help,
+            "--backend" => match args.next() {
+                Some(name) => match GpuBackend::from_name(&name) {
+                    Some(backend) => options.backend = Some(backend),
+                    None => {
+                        return Invocation::BadUsage(format!(
+                            "unknown --backend `{name}`; try `vk` or `null`"
+                        ));
+                    }
+                },
+                None => return Invocation::BadUsage("--backend needs a value".to_string()),
+            },
             "--frames" => match take_number(&mut args, "--frames") {
                 Ok(frames) => options.frames = Some(frames),
                 Err(message) => return Invocation::BadUsage(message),
@@ -119,11 +136,31 @@ mod tests {
             "30",
             "--title",
             "a b",
+            "--backend",
+            "null",
         ]);
         assert!(options.headless);
         assert_eq!(options.frames, Some(12));
         assert_eq!(options.tick_hz, 30);
         assert_eq!(options.title, "a b");
+        assert_eq!(options.backend, Some(GpuBackend::Null));
+    }
+
+    /// The default is "choose one", not "null": a sandbox that silently
+    /// rendered nothing because a driver was missing would look like a black
+    /// window, which is the same rule `crcbl-shell` applies to headless.
+    #[test]
+    fn no_backend_flag_means_choose_one() {
+        assert_eq!(options(&[]).backend, None);
+        assert_eq!(
+            options(&["--backend", "vk"]).backend,
+            Some(GpuBackend::Vulkan)
+        );
+        assert_eq!(
+            options(&["--backend", "vulkan"]).backend,
+            Some(GpuBackend::Vulkan),
+            "the long spelling is accepted too"
+        );
     }
 
     #[test]
@@ -143,6 +180,8 @@ mod tests {
             vec!["--tick-hz", "0"],
             vec!["--tick-hz", "5000000000"],
             vec!["--title"],
+            vec!["--backend"],
+            vec!["--backend", "metal"],
             vec!["--nope"],
             vec!["stray"],
         ] {

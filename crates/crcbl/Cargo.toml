@@ -11,13 +11,21 @@ repository.workspace = true
 # it must never grow logic of its own beyond the engine-setup helpers
 # `docs/plan/01-foundations.md`'s workspace layout allows it.
 #
-# `crcbl-vk` is deliberately absent and stays absent: a backend is reached
-# through the `crcbl-hal` seam, and `docs/plan/11-cli-headless.md` names a
-# sample linking `crcbl-vk` directly as an architecture regression.
+# `crcbl-vk` IS a dependency, and is deliberately **not** re-exported. P1.1
+# added `src/backend.rs`, the GPU equivalent of `crcbl_shell::backend::open`:
+# something has to depend on the backends or "try Vulkan, fall back" cannot be
+# written at all, and `docs/plan/11-cli-headless.md`'s rule is about *samples*
+# naming a backend, which `apps/sandbox` still does not. See that module's docs
+# for the full argument, including why this should move to `crcbl-render` at
+# P1.2. `log` and `thiserror` are the registry's own, and nothing else here uses
+# them.
 [dependencies]
 crcbl-core = { workspace = true }
 crcbl-hal = { workspace = true }
 crcbl-shell = { workspace = true }
+crcbl-vk = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

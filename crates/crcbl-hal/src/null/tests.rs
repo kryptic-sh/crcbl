@@ -8,8 +8,8 @@ use super::*;
 
 use crate::{
     BindGroupLayoutEntry, BindingKind, ClearValue, ColorAttachment, ColorTargetState,
-    DepthStencilState, LoadOp, MultisampleState, PrimitiveState, PushConstantRange, RendererTier,
-    ResourceState, ShaderEntry, StoreOp, depth,
+    DepthStencilState, ImageSubresourceRange, ImageViewType, LoadOp, MultisampleState,
+    PrimitiveState, PushConstantRange, RendererTier, ResourceState, ShaderEntry, StoreOp, depth,
 };
 
 /// The SPIR-V magic number, so test modules look like modules.
@@ -376,11 +376,19 @@ fn swapchain_acquire_matches_the_tiers_sync_model() {
         assert!(!first.suboptimal);
         assert_eq!(first.acquire_semaphore.is_some(), expect_semaphores);
         assert_eq!(first.present_semaphore.is_some(), expect_semaphores);
+        // The image, the view and the extent are never optional: every backend
+        // has all three, which is why they sit beside the semaphores instead of
+        // being rebuilt by every caller.
+        assert_eq!(first.extent, (320, 200));
 
         // The ring rotates and eventually wraps.
         let second = device.acquire_next_frame(swapchain).expect("acquire");
         assert_eq!(second.index, 1);
         assert_ne!(second.image, first.image);
+        assert_ne!(
+            second.view, first.view,
+            "one view per ring image, not one shared view"
+        );
         let third = device.acquire_next_frame(swapchain).expect("acquire");
         assert_eq!(third.index, 2);
         let wrapped = device.acquire_next_frame(swapchain).expect("acquire");
@@ -414,14 +422,143 @@ fn swapchain_acquire_matches_the_tiers_sync_model() {
                 },
             )
             .expect("reconfigure");
-        assert_eq!(
-            device.acquire_next_frame(swapchain).expect("acquire").index,
-            0
+        let after = device.acquire_next_frame(swapchain).expect("acquire");
+        assert_eq!(after.index, 0);
+        // Obligation 3: the frame reports the size it was configured at, and a
+        // reconfigure shows up in it immediately.
+        assert_eq!(after.extent, (640, 400));
+        // A reconfigure reissues the images *and* their views, so anything held
+        // across it is dead — the generational handle turning a stale reference
+        // into a clean failure rather than an alias. `crcbl-vk` must do the
+        // same, and this is the cheap place to find out that a caller cached
+        // one.
+        assert_ne!(after.image, first.image);
+        assert_ne!(after.view, first.view);
+        assert!(
+            device
+                .create_image_view(&ImageViewDesc {
+                    label: None,
+                    image: first.image,
+                    view_type: ImageViewType::D2,
+                    format,
+                    range: ImageSubresourceRange::all(format),
+                })
+                .is_err(),
+            "an image handle must not survive a reconfigure"
         );
 
         device.destroy_swapchain(swapchain);
         instance.destroy_surface(surface);
     }
+}
+
+/// Regression test. `reconfigure_swapchain` used to replace only the images and
+/// their views, leaving the acquire/present semaphore vectors at their original
+/// length — so growing the image count and acquiring past the old length
+/// indexed off the end of them and panicked. The four vectors are one
+/// invariant; `build_ring` is what keeps them so.
+#[test]
+fn reconfiguring_to_a_larger_ring_reissues_the_semaphores_too() {
+    let instance = NullInstance::tier_a();
+    let device = open(&instance);
+    // SAFETY: an offscreen target holds no platform pointers.
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
+    let desc = SwapchainDesc {
+        label: None,
+        surface,
+        format: Format::Bgra8UnormSrgb,
+        extent: (8, 8),
+        image_count: 2,
+        present_mode: PresentMode::Fifo,
+        composite_alpha: CompositeAlpha::Opaque,
+    };
+    let swapchain = device.create_swapchain(&desc).expect("swapchain");
+    device
+        .reconfigure_swapchain(
+            swapchain,
+            &SwapchainDesc {
+                image_count: 3,
+                ..desc
+            },
+        )
+        .expect("reconfigure");
+
+    // The third acquire is the one that used to panic.
+    for expected in 0..3 {
+        let frame = device.acquire_next_frame(swapchain).expect("acquire");
+        assert_eq!(frame.index, expected);
+        assert!(
+            frame.acquire_semaphore.is_some() && frame.present_semaphore.is_some(),
+            "a tier A ring has a semaphore pair per slot, for every slot"
+        );
+    }
+
+    device.destroy_swapchain(swapchain);
+    instance.destroy_surface(surface);
+}
+
+/// Regression test. `reconfigure_swapchain` used to destroy the old ring before
+/// building the new one, so a reconfigure that *failed* left the swapchain
+/// naming destroyed images and views — a call that returned `Err` having broken
+/// the object it was handed. The seam's promise is that a frame's image and
+/// view are usable; a failed call must not be able to break it.
+#[test]
+fn a_failed_reconfigure_leaves_the_swapchain_usable() {
+    let instance = NullInstance::tier_a();
+    let device = open(&instance);
+    // SAFETY: an offscreen target holds no platform pointers.
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
+    let desc = SwapchainDesc {
+        label: None,
+        surface,
+        format: Format::Bgra8UnormSrgb,
+        extent: (8, 8),
+        image_count: 2,
+        present_mode: PresentMode::Fifo,
+        composite_alpha: CompositeAlpha::Opaque,
+    };
+    let swapchain = device.create_swapchain(&desc).expect("swapchain");
+    let before = device.acquire_next_frame(swapchain).expect("acquire");
+
+    // Past `max_image_2d`, so the ring cannot be built.
+    let limit = device.caps().limits.max_image_2d;
+    device
+        .reconfigure_swapchain(
+            swapchain,
+            &SwapchainDesc {
+                extent: (limit + 1, limit + 1),
+                ..desc
+            },
+        )
+        .expect_err("an oversized extent cannot be configured");
+
+    // The old ring is untouched. The handle `before` named is still alive —
+    // which is the whole property: the failed call destroyed nothing.
+    let probe = device
+        .create_image_view(&ImageViewDesc {
+            label: None,
+            image: before.image,
+            view_type: ImageViewType::D2,
+            format: Format::Bgra8UnormSrgb,
+            range: ImageSubresourceRange::all(Format::Bgra8UnormSrgb),
+        })
+        .expect("the image the earlier frame named must still exist");
+    device.destroy_image_view(probe);
+
+    // And the ring still comes round to exactly the slot it did before, with
+    // the same handles and the same extent, rather than to a reissued one.
+    let mut wrapped = device.acquire_next_frame(swapchain).expect("acquire");
+    while wrapped.index != before.index {
+        wrapped = device.acquire_next_frame(swapchain).expect("acquire");
+    }
+    assert_eq!(
+        (wrapped.image, wrapped.view, wrapped.extent),
+        (before.image, before.view, before.extent),
+        "a failed reconfigure must change nothing"
+    );
+
+    device.destroy_swapchain(swapchain);
+    instance.destroy_surface(surface);
 }
 
 #[test]
@@ -432,6 +569,7 @@ fn destroying_a_swapchain_releases_its_images_and_semaphores() {
     // SAFETY: an offscreen target holds no platform pointers.
     let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
     let before_images = recorder.live_objects(ObjectKind::Image);
+    let before_views = recorder.live_objects(ObjectKind::ImageView);
     let before_semaphores = recorder.live_objects(ObjectKind::Semaphore);
 
     let swapchain = device
@@ -447,6 +585,11 @@ fn destroying_a_swapchain_releases_its_images_and_semaphores() {
         .expect("swapchain");
     assert_eq!(recorder.live_objects(ObjectKind::Image), before_images + 2);
     assert_eq!(
+        recorder.live_objects(ObjectKind::ImageView),
+        before_views + 2,
+        "the swapchain owns a view per image, handed out on AcquiredFrame"
+    );
+    assert_eq!(
         recorder.live_objects(ObjectKind::Semaphore),
         before_semaphores + 4,
         "two images, each with an acquire and a present semaphore"
@@ -455,6 +598,7 @@ fn destroying_a_swapchain_releases_its_images_and_semaphores() {
     device.destroy_swapchain(swapchain);
     instance.destroy_surface(surface);
     assert_eq!(recorder.live_objects(ObjectKind::Image), before_images);
+    assert_eq!(recorder.live_objects(ObjectKind::ImageView), before_views);
     assert_eq!(
         recorder.live_objects(ObjectKind::Semaphore),
         before_semaphores

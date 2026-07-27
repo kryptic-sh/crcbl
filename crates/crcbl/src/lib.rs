@@ -7,17 +7,22 @@
 //! dependency on a *backend*.
 //!
 //! ```text
-//! crcbl::core   → crcbl-core    handles, WorldPos, FrameArena, FrameClock, input
-//! crcbl::shell  → crcbl-shell   the windowing seam and its backends
-//! crcbl::hal    → crcbl-hal     the GPU seam, plus the recording null backend
+//! crcbl::core    → crcbl-core    handles, WorldPos, FrameArena, FrameClock, input
+//! crcbl::shell   → crcbl-shell   the windowing seam and its backends
+//! crcbl::hal     → crcbl-hal     the GPU seam, plus the recording null backend
+//! crcbl::backend → (this crate)  runtime GPU backend selection
 //! ```
 //!
 //! # What is deliberately not here
 //!
-//! * **No backend.** `crcbl-vk` lands at P1 and is selected *behind* the
-//!   [`hal`] seam. `docs/plan/11-cli-headless.md` names "a sample linking
-//!   `crcbl-vk` directly" as an architecture regression, so the umbrella every
-//!   sample depends on is precisely the place that must not offer one.
+//! * **No backend *type*.** `crcbl-vk` is a dependency as of P1.1 — something
+//!   has to be, or [`backend::open`] could not exist — but it is **not**
+//!   re-exported, and no `VkInstance` is reachable from this crate's public
+//!   API. `docs/plan/11-cli-headless.md` names "a sample linking `crcbl-vk`
+//!   directly" as an architecture regression; the registry is what stops a
+//!   sample needing to. `apps/sandbox` asks for
+//!   [`GpuBackend::Vulkan`](backend::GpuBackend::Vulkan) by value and holds a
+//!   `Box<dyn Instance>`. See [`backend`] for the full argument.
 //! * **No engine loop.** There is no `crcbl::run(game)`. The loop shape is
 //!   `fn tick(dt)` driven by an *outer* loop the host owns —
 //!   `docs/plan/10-wasm-webgpu.md` requires it, because on wasm that outer loop
@@ -47,12 +52,15 @@ pub use crcbl_hal as hal;
 /// [`HeadlessShell`](crcbl_shell::HeadlessShell).
 pub use crcbl_shell as shell;
 
+pub mod backend;
+
 /// The names a game touches on every frame.
 ///
 /// `use crcbl::prelude::*;` is the first line of the `crcbl new` template. It is
 /// deliberately small — vocabulary and seam entry points, never a whole
 /// namespace — so a glob import cannot collide with a game's own types.
 pub mod prelude {
+    pub use crate::backend::{GpuBackend, GpuError};
     pub use crcbl_core::time::{ManualTime, MonotonicTime, TimeSource};
     pub use crcbl_core::{FrameClock, SurfaceTarget};
     pub use crcbl_hal::null::NullInstance;

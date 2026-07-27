@@ -158,25 +158,54 @@ echo "crcbl e2e: $RAN tests ran against headless sway"
 # join — window, first configure, `SurfaceTarget`, HAL surface, swapchain,
 # acquire/present — against a real window system.
 #
+# Since P1.1 it runs **twice**: once on `crcbl-vk` and once on the null backend.
+# The Vulkan pass is the one that matters — it is the only place a real
+# `vkCreateWaylandSurfaceKHR` and a real `VkSwapchainKHR` are exercised, and it
+# is where the seam's extent obligations meet Wayland's `0xFFFFFFFF`
+# `currentExtent` for real. The null pass proves the runtime backend choice
+# still works from the same binary.
+#
 # `CRCBL_SHELL=wayland` rather than letting the registry choose: this job exists
 # to test *this* backend, and a silent fallback would report success for the
 # other one.
-echo "crcbl e2e: running the sandbox against sway"
 SANDBOX_LOG="${RUNTIME_DIR}/sandbox.log"
-set +e
-CRCBL_SHELL=wayland cargo run --locked --quiet --package sandbox -- \
-    --frames 30 --title "crcbl e2e sandbox" 2>&1 | tee "$SANDBOX_LOG"
-SANDBOX_STATUS=${PIPESTATUS[0]}
-set -e
-if [ "$SANDBOX_STATUS" -ne 0 ]; then
-    echo "crcbl e2e: the sandbox failed against sway (exit $SANDBOX_STATUS)" >&2
-    log_tail
-    exit "$SANDBOX_STATUS"
+run_sandbox() {
+    local backend="$1"
+    echo "crcbl e2e: running the sandbox against sway on the $backend GPU backend"
+    set +e
+    CRCBL_SHELL=wayland \
+    CRCBL_VK_VALIDATION=1 \
+    CRCBL_LOG="${CRCBL_E2E_SANDBOX_LOG:-info}" \
+        cargo run --locked --quiet --package sandbox -- \
+        --backend "$backend" --frames 30 --title "crcbl e2e sandbox" 2>&1 | tee "$SANDBOX_LOG"
+    local status=${PIPESTATUS[0]}
+    set -e
+    if [ "$status" -ne 0 ]; then
+        echo "crcbl e2e: the sandbox failed against sway on $backend (exit $status)" >&2
+        log_tail
+        exit "$status"
+    fi
+    if ! grep -q "30 frames" "$SANDBOX_LOG" || ! grep -q "wayland shell" "$SANDBOX_LOG"; then
+        echo "crcbl e2e: the sandbox did not report 30 frames on the wayland shell" >&2
+        cat "$SANDBOX_LOG" >&2
+        log_tail
+        exit 1
+    fi
+    echo "crcbl e2e: the sandbox presented 30 frames on wayland/$backend"
+}
+
+# Vulkan first, and only when there is a loader to run it on: this harness is
+# also used on developer machines, and `docs/plan/12-testing.md`'s "no silently
+# skipped gate" rule is served by the message rather than by failing a machine
+# that never claimed to have Vulkan. CI installs the drivers, so CI runs it.
+if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so.1 ] \
+    || ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1'; then
+    run_sandbox vk
+else
+    echo "crcbl e2e: no Vulkan loader; skipping the vk sandbox pass" >&2
+    if [ -n "${CI:-}" ]; then
+        echo "crcbl e2e: ...and this is CI, where the loader is installed on purpose" >&2
+        exit 1
+    fi
 fi
-if ! grep -q "30 frames" "$SANDBOX_LOG" || ! grep -q "wayland shell" "$SANDBOX_LOG"; then
-    echo "crcbl e2e: the sandbox did not report 30 frames on the wayland shell" >&2
-    cat "$SANDBOX_LOG" >&2
-    log_tail
-    exit 1
-fi
-echo "crcbl e2e: the sandbox presented 30 frames through the wayland backend"
+run_sandbox null

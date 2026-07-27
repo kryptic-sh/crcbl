@@ -182,8 +182,13 @@ jobs:
       # `DT_NEEDED` crept in. libxkbcommon is what turns a keymap into keysyms
       # and text; without it the suite's `ShellCaps::TEXT_IME` assertion is the
       # thing that fails, which is the intended signal.
-      # `mesa-vulkan-drivers` is for wlroots, which wants *a* renderer even on
-      # a headless backend.
+      # `mesa-vulkan-drivers` serves two purposes now: wlroots wants *a*
+      # renderer even on a headless backend, and since P1.1 the sandbox runs
+      # here on `crcbl-vk` — against lavapipe, since a CI runner has no GPU.
+      # `vulkan-validationlayers` is not optional: the sandbox is launched with
+      # `CRCBL_VK_VALIDATION=1`, and `docs/plan/02-vulkan-backend.md`'s "zero
+      # validation errors" gate cannot be met by a job that never loaded the
+      # layer.
       - name: Install sway
         run: |
           sudo apt-get update
@@ -191,7 +196,9 @@ jobs:
             sway \
             libwayland-client0 \
             libxkbcommon0 \
-            mesa-vulkan-drivers
+            libvulkan1 \
+            mesa-vulkan-drivers \
+            vulkan-validationlayers
       # Starts headless sway in a private XDG_RUNTIME_DIR, polls for the socket
       # with a deadline and a liveness check on the child, runs the
       # `#[ignore]`d suite with `--features wayland-e2e`, and dumps the
@@ -230,6 +237,11 @@ jobs:
       # synthesize real input. `libxkbcommon-x11-0` is what turns the server's
       # keymap into keysyms and text, and without it the suite's
       # `ShellCaps::TEXT_IME` assertion is what fails — the intended signal.
+      # The three Vulkan packages arrived with P1.1: the sandbox runs here on
+      # `crcbl-vk` against lavapipe, with validation on. X11 is the interesting
+      # half of the seam's extent rule — `currentExtent` is a real size and
+      # `minImageExtent == maxImageExtent == currentExtent`, so the shell and
+      # the server disagreeing has no legal swapchain at all.
       - name: Install Xvfb and the X client libraries
         run: |
           sudo apt-get update
@@ -240,7 +252,10 @@ jobs:
             libxcb-xinput0 \
             libxcb-xtest0 \
             libxkbcommon0 \
-            libxkbcommon-x11-0
+            libxkbcommon-x11-0 \
+            libvulkan1 \
+            mesa-vulkan-drivers \
+            vulkan-validationlayers
       # Starts Xvfb on a private display number, polls for its socket with a
       # deadline and a liveness check on the child, runs the `#[ignore]`d suite
       # with `--features x11-e2e`, and dumps the server log tail on any
@@ -279,6 +294,53 @@ jobs:
       # source, and runs `crcbl run --headless`.
       - name: Run the scaffold suite
         run: crates/crcbl-cli/tests/run-cli-e2e.sh
+
+  # `docs/plan/12-testing.md` schedules "lavapipe render e2e + golden-image
+  # tooling" for P1 and the Vulkan plan's corrections make it "a hard P1 gate,
+  # not 'if practical' — a gate cannot be optional". This is that job: the
+  # `crcbl-vk` suite plus the sandbox's own frame, entirely headless, against
+  # the software rasteriser.
+  #
+  # It is deliberately a *second* implementation rather than a cheaper copy of
+  # the developer's. Lavapipe and radv disagree in ways that matter — P1.1 found
+  # a spec violation that radv shrugs off and lavapipe segfaults on — and any
+  # code that quietly assumes one vendor's feature set is a bug this job exists
+  # to catch.
+  vk-e2e:
+    name: vk e2e (lavapipe)
+    runs-on: ubuntu-latest
+    # A software rasteriser is slow, but this suite renders 64x48.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - uses: taiki-e/install-action@nextest
+      # `libvulkan1` is the loader — which `crcbl-vk` `dlopen`s rather than
+      # links, so its absence is a clean `OpenError::NoLoader` and not a dead
+      # process. `mesa-vulkan-drivers` brings lavapipe. `vulkan-tools` is only
+      # for the harness's `vulkaninfo --summary` dump, which is the first thing
+      # anyone reads when this job goes red.
+      - name: Install the Vulkan loader, lavapipe and the validation layers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan1 \
+            mesa-vulkan-drivers \
+            vulkan-validationlayers \
+            vulkan-tools
+      # The ICD is pinned rather than discovered: a GitHub runner that grew a
+      # GPU tomorrow would otherwise silently stop testing the software path,
+      # which is the one path every other developer's machine does not have.
+      - name: Run the suite against lavapipe
+        env:
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_SYNC_VALIDATION: "1"
+        run: crates/crcbl-vk/tests/run-vk-e2e.sh
 
   coverage:
     name: coverage (linux)

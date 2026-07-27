@@ -527,6 +527,9 @@ pub(super) enum Detail {
     Swapchain {
         extent: (u32, u32),
         images: Vec<ImageHandle>,
+        /// One whole-image view per ring image, owned by the swapchain and
+        /// handed out through [`AcquiredFrame::view`](crate::AcquiredFrame::view).
+        views: Vec<crate::ImageViewHandle>,
         acquire_semaphores: Vec<Option<Handle<crate::Semaphore>>>,
         present_semaphores: Vec<Option<Handle<crate::Semaphore>>>,
         next: u32,

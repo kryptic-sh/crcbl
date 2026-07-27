@@ -43,6 +43,7 @@
 
 use std::time::Duration;
 
+use crcbl::backend::GpuBackend;
 use crcbl::core::time::{ManualTime, MonotonicTime};
 use crcbl::prelude::*;
 use crcbl::shell::{LogicalSize, ShellBackend as Backend, WindowId, open, open_backend};
@@ -79,6 +80,13 @@ pub struct Options {
     /// Run against [`HeadlessShell`](crcbl::shell::HeadlessShell) with a
     /// hand-driven clock instead of opening a window.
     pub headless: bool,
+    /// GPU backend to force, or `None` to let
+    /// [`crcbl::backend::open`] choose.
+    ///
+    /// `None` deliberately does **not** mean "null": see that module's docs for
+    /// why a silent fallback to a backend that renders nothing is the wrong
+    /// default.
+    pub backend: Option<GpuBackend>,
     /// Stop after this many presented frames. `None` means "until the window
     /// closes", which is never the case headless — see [`Options::frames`].
     pub frames: Option<u64>,
@@ -92,6 +100,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             headless: false,
+            backend: None,
             frames: None,
             tick_hz: 60,
             title: "Crucible sandbox".to_string(),
@@ -339,7 +348,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
         log::info!("shell: first configure at {}x{}", extent.0, extent.1);
 
-        let gpu = Gpu::open(shell.as_ref(), window, extent)?;
+        let gpu = Gpu::open(shell.as_ref(), window, extent, options.backend)?;
 
         Ok(Self {
             windowed: !options.headless,
@@ -552,9 +561,15 @@ mod tests {
         Loop::with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
     }
 
+    /// Always `--backend null`. These tests run on the macOS and Windows CI
+    /// legs, where there is no Vulkan loader at all, and they are about the
+    /// *loop* — determinism, tick pacing, resize plumbing — not about a driver.
+    /// The Vulkan path is covered by `crcbl-vk`'s own e2e suite and by the
+    /// sandbox runs in the three harness scripts.
     fn headless(frames: u64) -> Options {
         Options {
             headless: true,
+            backend: Some(GpuBackend::Null),
             frames: Some(frames),
             tick_hz: 60,
             title: "test".to_string(),

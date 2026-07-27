@@ -215,22 +215,49 @@ echo "crcbl e2e: $RAN tests ran against Xvfb on ${DISPLAY}"
 # tried first by the registry and a silent fallback would report success for
 # the wrong backend; here it would in fact fail (nothing is listening), but
 # stating the intent is what keeps this job honest if that ever changes.
-echo "crcbl e2e: running the sandbox against Xvfb"
+#
+# Since P1.1 this runs on `crcbl-vk` as well as on the null backend, and the
+# Vulkan pass is the interesting one: X11 is where
+# `VkSurfaceCapabilitiesKHR::currentExtent` is a *real* size and
+# `minImageExtent == maxImageExtent == currentExtent`, which is the case that
+# tests the seam's extent obligations hardest — the shell's size is
+# authoritative, and Vulkan may still refuse to configure at it.
 SANDBOX_LOG="${RUNTIME_DIR}/sandbox.log"
-set +e
-CRCBL_SHELL=x11 cargo run --locked --quiet --package sandbox -- \
-    --frames 30 --title "crcbl e2e sandbox" 2>&1 | tee "$SANDBOX_LOG"
-SANDBOX_STATUS=${PIPESTATUS[0]}
-set -e
-if [ "$SANDBOX_STATUS" -ne 0 ]; then
-    echo "crcbl e2e: the sandbox failed against Xvfb (exit $SANDBOX_STATUS)" >&2
-    log_tail
-    exit "$SANDBOX_STATUS"
+run_sandbox() {
+    local backend="$1"
+    echo "crcbl e2e: running the sandbox against Xvfb on the $backend GPU backend"
+    set +e
+    CRCBL_SHELL=x11 \
+    CRCBL_VK_VALIDATION=1 \
+    CRCBL_LOG="${CRCBL_E2E_SANDBOX_LOG:-info}" \
+        cargo run --locked --quiet --package sandbox -- \
+        --backend "$backend" --frames 30 --title "crcbl e2e sandbox" 2>&1 | tee "$SANDBOX_LOG"
+    local status=${PIPESTATUS[0]}
+    set -e
+    if [ "$status" -ne 0 ]; then
+        echo "crcbl e2e: the sandbox failed against Xvfb on $backend (exit $status)" >&2
+        log_tail
+        exit "$status"
+    fi
+    if ! grep -q "30 frames" "$SANDBOX_LOG" || ! grep -q "x11 shell" "$SANDBOX_LOG"; then
+        echo "crcbl e2e: the sandbox did not report 30 frames on the x11 shell" >&2
+        cat "$SANDBOX_LOG" >&2
+        log_tail
+        exit 1
+    fi
+    echo "crcbl e2e: the sandbox presented 30 frames on x11/$backend"
+}
+
+# See the equivalent block in `run-wayland-e2e.sh` for why the loader probe is a
+# skip on a developer machine and a hard failure in CI.
+if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so.1 ] \
+    || ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1'; then
+    run_sandbox vk
+else
+    echo "crcbl e2e: no Vulkan loader; skipping the vk sandbox pass" >&2
+    if [ -n "${CI:-}" ]; then
+        echo "crcbl e2e: ...and this is CI, where the loader is installed on purpose" >&2
+        exit 1
+    fi
 fi
-if ! grep -q "30 frames" "$SANDBOX_LOG" || ! grep -q "x11 shell" "$SANDBOX_LOG"; then
-    echo "crcbl e2e: the sandbox did not report 30 frames on the x11 shell" >&2
-    cat "$SANDBOX_LOG" >&2
-    log_tail
-    exit 1
-fi
-echo "crcbl e2e: the sandbox presented 30 frames through the x11 backend"
+run_sandbox null

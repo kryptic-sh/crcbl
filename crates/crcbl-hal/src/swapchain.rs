@@ -35,6 +35,24 @@
 //! an [`ImageHandle`] rather than an index the caller must map: WebGPU has no
 //! stable image index to give, only a texture per frame.
 //!
+//! # The swapchain owns the views too
+//!
+//! [`AcquiredFrame::view`] is there for the same reason as the two semaphores,
+//! and it was added for the same reason: P1.1 found that *every* caller had to
+//! build the identical per-image view cache, because
+//! [`CommandEncoder::begin_render_pass`](crate::CommandEncoder::begin_render_pass)
+//! needs an [`ImageViewHandle`] and acquire yielded only an [`ImageHandle`].
+//! That is duplicated bookkeeping in every consumer *and* an index-keyed
+//! invalidation rule every backend has to document — to save one field.
+//!
+//! The swapchain owns its images, so it is the natural owner of their views.
+//! A backend creates one view per ring image at configure time, reissues them
+//! on [`reconfigure`](crate::Device::reconfigure_swapchain), and destroys them
+//! with the swapchain. The view covers the whole image with the swapchain's own
+//! format, which is what a colour attachment wants; a caller that needs a
+//! different view of a swapchain image — an sRGB reinterpretation, say — still
+//! makes its own with [`Device::create_image_view`](crate::Device::create_image_view).
+//!
 //! # Reconfigure, don't recreate
 //!
 //! [`Device::reconfigure_swapchain`](crate::Device::reconfigure_swapchain) mirrors WebGPU's `configure()` and covers
@@ -43,7 +61,7 @@
 //! never destroy and recreate a swapchain to resize, so the handle stays stable
 //! across a resize storm and nothing above has to re-fetch it.
 //!
-//! # The extent has one source of truth — implementation obligations
+//! # The extent: one request, one answer — implementation obligations
 //!
 //! Two things claim to know how big a swapchain should be, and they disagree in
 //! practice:
@@ -60,23 +78,47 @@
 //! `crcbl-vk` and a different one from `crcbl-wgpu`, and the bug would look
 //! like a window that renders at the wrong size on exactly one backend.
 //!
-//! So the rule is fixed here, and it binds backends:
+//! ## What P1.1 changed, and why
 //!
-//! 1. **The shell's size is authoritative.** [`SwapchainDesc::extent`] is what
-//!    the swapchain is configured at. A backend **must not** silently
-//!    substitute [`SurfaceCaps::current_extent`] for it, and **must not** fail a
-//!    create or reconfigure merely because the two differ.
-//! 2. **`current_extent` is a cross-check, and it is optional.** Report it when
+//! These obligations originally said the shell's size was simply what the
+//! swapchain *is* configured at, and that a backend "must not fail a create or
+//! reconfigure merely because the two differ". Driving them against real
+//! Vulkan proved that unimplementable on X11: `imageExtent` must lie within
+//! `minImageExtent..=maxImageExtent`, and an X server reports
+//! `minImageExtent == maxImageExtent == currentExtent`. So when a resize event
+//! is one frame behind — which is the *normal* state during a resize —
+//! **there is no legal swapchain at the shell's size at all**. A backend can
+//! only clamp, and the old rule left it no way to say so, which meant a caller
+//! could render a frame at a size the swapchain did not have.
+//!
+//! The rule below is the one that survives contact: the shell's size is the
+//! **request**, and the extent that came back is on [`AcquiredFrame`].
+//!
+//! ## The obligations
+//!
+//! 1. **The shell's size is the request, and the only thing a backend may
+//!    start from.** [`SwapchainDesc::extent`] is what the caller asks for. A
+//!    backend **must not** substitute [`SurfaceCaps::current_extent`] for it,
+//!    and **must not** fail a create or reconfigure merely because the two
+//!    differ.
+//! 2. **A backend clamps into the platform's permitted range, and reports what
+//!    it configured.** Where the window system pins that range — X11 pins it to
+//!    `currentExtent` exactly — clamping is forced, not chosen. The configured
+//!    size is then reported on every [`AcquiredFrame::extent`], and a backend
+//!    that had to clamp **should** say so once in a log line, because it means
+//!    the shell and the window system are out of step.
+//! 3. **A caller renders at [`AcquiredFrame::extent`], not at the size it asked
+//!    for.** That is the render area, the viewport and the scissor. Using the
+//!    requested size instead is the bug this field exists to prevent, and it
+//!    only appears while a window is being dragged. The two are equal on every
+//!    platform that does not pin a range, so this costs nothing to obey.
+//! 4. **`current_extent` is a cross-check, and it is optional.** Report it when
 //!    the platform supplies a real one; report `None` when it does not.
 //!    `0xFFFFFFFF` is **not** a value to pass through — it is the platform
 //!    saying "no opinion", so a Vulkan backend maps it to `None` and never lets
-//!    that sentinel escape into the seam.
-//! 3. **A caller reads the size from the shell, not from here.** The shell is
-//!    the only thing that receives a configure event, so it is the only thing
-//!    that knows the size *now*; `current_extent` can be a frame stale on a
-//!    resize. Where the two differ, log it and use the shell's — `apps/sandbox`
-//!    is the reference implementation of exactly that.
-//! 4. **A zero or absent extent is the caller's problem, not a fallback.** An
+//!    that sentinel escape into the seam. Nothing above the seam needs to read
+//!    it; obligation 3 already gives a caller the number it acts on.
+//! 5. **A zero or absent extent is the caller's problem, not a fallback.** An
 //!    unconfigured or minimized window has no size, a zero-extent swapchain is
 //!    forbidden in Vulkan, and the answer is to *not create one yet* — never to
 //!    guess from `current_extent`.
@@ -97,7 +139,7 @@
 
 use crcbl_core::Handle;
 
-use crate::{Format, ImageHandle, SemaphoreHandle};
+use crate::{Format, ImageHandle, ImageViewHandle, SemaphoreHandle};
 
 /// Marker type for surface handles. Uninhabited.
 #[derive(Debug)]
@@ -176,7 +218,7 @@ pub struct SurfaceCaps {
     /// Current size in pixels, if the window system reports one.
     ///
     /// **A cross-check, never the source of truth** — see the [module
-    /// docs](self#the-extent-has-one-source-of-truth--implementation-obligations).
+    /// docs](self#the-extent-one-request-one-answer--implementation-obligations).
     /// The shell's `WindowState::size()` is what a swapchain is configured at;
     /// this is what the *surface* believes, which on Wayland is nothing at all
     /// (`None`, never the `0xFFFFFFFF` sentinel) and on X11 can be a frame
@@ -203,11 +245,14 @@ pub struct SwapchainDesc<'a> {
     /// resolves into it — HDR from P1, per `docs/plan/ROADMAP.md`. The swapchain
     /// format is therefore a display format, never a shading one.
     pub format: Format,
-    /// Size in pixels, **from the shell**.
+    /// Size in pixels, **from the shell** — the *request*.
     ///
-    /// Authoritative: a backend configures at this size and never substitutes
-    /// [`SurfaceCaps::current_extent`] for it. See the [module
-    /// docs](self#the-extent-has-one-source-of-truth--implementation-obligations)
+    /// A backend starts here and never substitutes
+    /// [`SurfaceCaps::current_extent`] for it (obligation 1), but it may have
+    /// to clamp into a range the window system pins, in which case the size it
+    /// actually configured comes back on [`AcquiredFrame::extent`] (obligations
+    /// 2 and 3). **Render at that, not at this.** See the [module
+    /// docs](self#the-extent-one-request-one-answer--implementation-obligations)
     /// for why the rule is stated rather than left to each backend, and note
     /// that a zero extent is a caller bug — an unconfigured or minimized window
     /// means "do not create a swapchain yet", not "pick something".
@@ -240,6 +285,24 @@ pub struct AcquiredFrame {
     /// source, which discards any previous contents. Loading a swapchain image
     /// is never correct.
     pub image: ImageHandle,
+    /// A whole-image view of [`image`](Self::image), in the swapchain's format
+    /// — what a [`ColorAttachment`](crate::ColorAttachment) needs.
+    ///
+    /// **Owned by the swapchain**, like the semaphores: do not destroy it, and
+    /// do not hold it across a
+    /// [`reconfigure`](crate::Device::reconfigure_swapchain), which reissues
+    /// every one. See the [module docs](self#the-swapchain-owns-the-views-too)
+    /// for why this is here rather than left to each caller.
+    pub view: ImageViewHandle,
+    /// The size this swapchain was actually configured at, in pixels.
+    ///
+    /// **Obligation 3**: this is the render area, the viewport and the scissor
+    /// — not [`SwapchainDesc::extent`], which is only what was *asked for*.
+    /// The two differ exactly when the window system pinned a range the
+    /// request fell outside of, which on X11 is any frame where a resize event
+    /// has not caught up yet. See the [module
+    /// docs](self#the-extent-one-request-one-answer--implementation-obligations).
+    pub extent: (u32, u32),
     /// Index within the swapchain's image ring. For debug output and for
     /// indexing per-image caches; do not use it to guess how many images exist.
     pub index: u32,
@@ -254,6 +317,14 @@ pub struct AcquiredFrame {
     /// usually a resize that arrived mid-frame. Render this frame, then
     /// reconfigure. Ignoring it is legal and merely looks slightly wrong for one
     /// frame; treating it as fatal is a bug.
+    ///
+    /// **This is the only place the seam carries "suboptimal".** A present can
+    /// discover it too — `vkQueuePresentKHR` returns `VK_SUBOPTIMAL_KHR` — and
+    /// [`Device::present`](crate::Device::present) has nowhere to put it, since
+    /// it is not an error. That is deliberate rather than an oversight: a
+    /// backend remembers it and folds it into the *next* acquire, which is
+    /// where the caller already handles it, and which costs one `bool` instead
+    /// of a second reporting channel every consumer would have to branch on.
     pub suboptimal: bool,
 }
 
@@ -362,12 +433,17 @@ mod tests {
 
     /// The Tier B shape from the module docs: a backend with an implicit
     /// acquire returns `None` for both semaphores, and the renderer's splice
-    /// becomes a no-op rather than a branch.
+    /// becomes a no-op rather than a branch. The image, the view and the
+    /// extent are **not** optional — every backend has all three, which is the
+    /// whole reason they sit beside the semaphores rather than being left to
+    /// the caller.
     #[test]
     fn an_implicit_acquire_frame_carries_no_semaphores() {
         let mut pool: crcbl_core::Pool<u8> = crcbl_core::Pool::new();
         let frame = AcquiredFrame {
             image: pool.insert(0).cast(),
+            view: pool.insert(1).cast(),
+            extent: (1280, 720),
             index: 0,
             acquire_semaphore: None,
             present_semaphore: None,
@@ -377,6 +453,8 @@ mod tests {
         let signals: Vec<_> = frame.present_semaphore.into_iter().collect();
         assert!(waits.is_empty());
         assert!(signals.is_empty());
+        // Obligation 3: this is the number a caller renders at.
+        assert_eq!(frame.extent, (1280, 720));
     }
 
     #[test]

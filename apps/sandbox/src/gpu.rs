@@ -1,11 +1,12 @@
 //! Where the two seams meet: a `crcbl-shell` window becomes a `crcbl-hal`
 //! surface, a swapchain, and an acquire/present pair.
 //!
-//! This module is the whole point of P0.7. `crcbl-shell` has been complete
-//! since P0.6 and `crcbl-hal` since P0.3, but nothing had ever *joined* them —
-//! and the join is where a seam mismatch would show up. Driving it now, against
-//! [`NullBackend`](crcbl::hal::null), is the cheapest possible version of the
-//! check: no driver, no GPU, no window required, and every call recorded.
+//! This module was the whole point of P0.7: `crcbl-shell` had been complete
+//! since P0.6 and `crcbl-hal` since P0.3, but nothing had ever *joined* them,
+//! and the join is where a seam mismatch shows up. P0.7 drove it against
+//! [`NullBackend`](crcbl::hal::null); **P1.1 drives the same code against real
+//! Vulkan**, and the only thing that changed is which backend
+//! [`crcbl::backend::open_backend`] returns.
 //!
 //! # The frame is a real frame, not a stub
 //!
@@ -18,13 +19,33 @@
 //! one —
 //!
 //! ```text
-//! acquire → encode(barrier Undefined → Present) → submit(wait acquire, signal present)
+//! acquire → encode(barrier Undefined → ColorAttachment
+//!                  render pass: LoadOp::Clear
+//!                  barrier ColorAttachment → Present)
+//!         → submit(wait acquire, signal present + timeline)
 //!         → present(wait present) → retire the command buffer
 //! ```
 //!
-//! — which is exactly the frame `crcbl-vk` will run at P1 with a render pass
-//! inserted in the middle. See the [findings](#what-the-join-revealed) below for
-//! what driving it turned up.
+//! — which is `docs/plan/02-vulkan-backend.md`'s **milestone 1**, "clear colour
+//! through the graph". The clear is a real render pass with
+//! [`LoadOp::Clear`](crcbl::hal::LoadOp), not a `vkCmdClearColorImage`: the
+//! attachment, the load op and the layout transition into
+//! `COLOR_ATTACHMENT_OPTIMAL` are the machinery every later milestone is built
+//! on, and a clear that skipped them would prove almost nothing.
+//!
+//! # The swapchain hands over its view and its extent
+//!
+//! A render pass needs an `ImageViewHandle` and a render area. Neither is
+//! derived here: [`AcquiredFrame`] carries both, so a frame is
+//! acquire-and-render with no per-image bookkeeping and no allocation.
+//!
+//! Both fields exist *because of this module*. P1.1 first built the view cache
+//! by hand — one view per ring slot, keyed on `AcquiredFrame::index`, rebuilt
+//! whenever a reconfigure reissued the image handles — and that is duplicated
+//! work every consumer and every backend would repeat, which is the same
+//! argument that already put the two semaphores on `AcquiredFrame`. The extent
+//! is there because the size a swapchain was *configured* at is not always the
+//! size that was *asked for*: see finding 5 below.
 //!
 //! # Frames in flight, not `wait_idle`
 //!
@@ -73,16 +94,34 @@
 //! 4. **Teardown order is stated in three places and enforced in none.** The
 //!    swapchain must die before the surface, the surface before the window, and
 //!    the device may outlive its instance. [`Gpu::destroy`] does it by hand;
-//!    nothing would have caught getting it wrong except a real driver.
+//!    nothing would have caught getting it wrong except a real driver — and at
+//!    P1.1 a real driver *is* in the room, with validation on, and it agrees.
+//!
+//! # What P1.1 added to the list
+//!
+//! 5. **The swapchain's configured extent was unobservable** — *fixed in the
+//!    seam.* `crcbl-vk` may legally have to configure at a size other than the
+//!    one asked for: on X11 `minImageExtent == maxImageExtent ==
+//!    currentExtent`, so a resize event still in flight leaves *no* legal
+//!    swapchain at the shell's size. The backend must clamp, and the seam had
+//!    no way to say what it clamped to, so a frame could be rendered at a size
+//!    the swapchain did not have. [`AcquiredFrame::extent`] now carries it, the
+//!    obligations are reworded around request-versus-answer, and
+//!    [`Gpu::extent`] reports what was configured rather than what was asked
+//!    for.
+//! 6. **A render pass needed a view the seam would not give it** — *fixed in
+//!    the seam.* [`AcquiredFrame::view`] now sits beside the semaphores, for
+//!    the reason they do.
 
 use std::collections::VecDeque;
 
-use crcbl::hal::null::NullInstance;
+use crcbl::backend::GpuBackend;
 use crcbl::hal::{
-    AcquiredFrame, Barriers, CommandBufferHandle, CommandEncoderDesc, DeviceDesc, Features, Format,
-    HalError, ImageBarrier, ImageSubresourceRange, PresentInfo, PresentMode, QueueHandle,
-    QueueKind, ResourceState, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreSignal,
-    SemaphoreWait, SubmitInfo, SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle,
+    AcquiredFrame, Barriers, ClearValue, ColorAttachment, CommandBufferHandle, CommandEncoderDesc,
+    DeviceDesc, Features, Format, HalError, ImageBarrier, ImageSubresourceRange, LoadOp,
+    PresentInfo, PresentMode, QueueHandle, QueueKind, Rect2d, RenderPassDesc, ResourceState,
+    SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreSignal, SemaphoreWait, StoreOp,
+    SubmitInfo, SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle,
 };
 use crcbl::prelude::*;
 use crcbl::shell::WindowId;
@@ -104,11 +143,20 @@ pub enum FrameOutcome {
     Reconfigured,
 }
 
+/// The colour every frame clears to.
+///
+/// A recognisable non-grey so "the window is black" and "the clear ran" are
+/// distinguishable at a glance, and so a channel swap is visible rather than
+/// plausible.
+const CLEAR_COLOR: [f32; 4] = [0.05, 0.10, 0.18, 1.0];
+
 /// The engine's GPU side, driven entirely through the `crcbl-hal` seam.
 ///
-/// Nothing in this struct names a backend: [`NullInstance`] appears in exactly
-/// one line of [`Gpu::open`] and everything after it is `dyn Instance` /
-/// `dyn Device`. Swapping in `crcbl-vk` at P1 changes that one line.
+/// Nothing in this struct names a backend. [`Gpu::open`] asks
+/// [`crcbl::backend::open_backend`] for one **by value** and everything after
+/// it is `dyn Instance` / `dyn Device` — which is what made P1.1's swap from
+/// the null backend to `crcbl-vk` a change to one argument rather than to this
+/// file.
 #[derive(Debug)]
 pub struct Gpu {
     instance: Box<dyn Instance>,
@@ -124,6 +172,14 @@ pub struct Gpu {
     /// Submissions issued so far, and therefore the value the next one signals.
     submitted: u64,
     in_flight: VecDeque<(u64, CommandBufferHandle)>,
+    /// The extent the swapchain was last *configured* at, from
+    /// [`AcquiredFrame::extent`].
+    ///
+    /// Distinct from `config.extent`, which is what the shell asked for. The
+    /// two differ while a window is being dragged on a platform that pins the
+    /// permitted range — obligations 2 and 3. Seeded from the request, because
+    /// there is no frame to ask until the first acquire.
+    configured_extent: (u32, u32),
     /// Scratch, reused every frame so a steady-state frame allocates nothing.
     waits: Vec<SemaphoreWait>,
     signals: Vec<SemaphoreSignal>,
@@ -141,6 +197,8 @@ struct SwapchainConfig {
 /// What can go wrong between the window and the device.
 #[derive(Debug)]
 pub enum GpuError {
+    /// No GPU backend could be opened at all.
+    NoBackend(crcbl::backend::GpuError),
     /// The backend has no adapter, no graphics queue, or no usable format.
     Unusable(&'static str),
     /// A HAL call failed.
@@ -152,6 +210,12 @@ pub enum GpuError {
 impl std::fmt::Display for GpuError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NoBackend(error) => write!(
+                f,
+                "{error}\n\
+                 hint: `--backend null` runs the same loop against the recording \
+                 no-op backend, which needs no driver."
+            ),
             Self::Unusable(what) => write!(f, "the backend is unusable: {what}"),
             Self::Hal(error) => write!(f, "{error}"),
             Self::Surface(error) => write!(f, "{error}"),
@@ -160,6 +224,12 @@ impl std::fmt::Display for GpuError {
 }
 
 impl std::error::Error for GpuError {}
+
+impl From<crcbl::backend::GpuError> for GpuError {
+    fn from(error: crcbl::backend::GpuError) -> Self {
+        Self::NoBackend(error)
+    }
+}
 
 impl From<HalError> for GpuError {
     fn from(error: HalError) -> Self {
@@ -182,29 +252,27 @@ impl Gpu {
     ///
     /// # Errors
     ///
-    /// [`GpuError`] if the backend exposes no adapter, no graphics queue or no
-    /// surface format, or if any HAL call fails.
+    /// [`GpuError`] if no backend opened, if the backend exposes no adapter, no
+    /// graphics queue or no surface format, or if any HAL call fails.
     pub fn open<S: Shell + ?Sized>(
         shell: &S,
         window: WindowId,
         extent: (u32, u32),
+        backend: Option<GpuBackend>,
     ) -> Result<Self, GpuError> {
-        // The one line that names a backend. P1 replaces it with a registry
-        // shaped like `crcbl_shell::backend::open`, and nothing below changes.
-        let instance: Box<dyn Instance> = Box::new(NullInstance::tier_a());
+        // The line that used to name `NullInstance`. It now names a *value*
+        // from a registry, which is the whole difference between "the sandbox
+        // knows about Vulkan" and "the sandbox knows there are backends" — the
+        // same shape `crcbl_shell::backend::open` has had since P0.5.
+        let instance: Box<dyn Instance> = match backend {
+            Some(backend) => crcbl::backend::open_backend(backend)?,
+            None => crcbl::backend::open()?,
+        };
 
         let adapters = instance.adapters();
-        let adapter = adapters
-            .first()
-            .ok_or(GpuError::Unusable("no adapter"))?
-            .clone();
-        log::info!(
-            "hal: {} adapter {:?} ({:?}), tier {:?}",
-            instance.backend(),
-            adapter.name,
-            adapter.device_type,
-            adapter.caps.tier()
-        );
+        if adapters.is_empty() {
+            return Err(GpuError::Unusable("no adapter"));
+        }
 
         // The join. `shell` produced this; only a HAL backend looks inside it.
         let target = shell
@@ -223,7 +291,57 @@ impl Gpu {
         // module is the only place in the app that can discharge it.
         let surface = unsafe { instance.create_surface(&target) }?;
 
-        let caps = instance.surface_caps(surface, adapter.id)?;
+        // **Adapter selection is surface-aware, and has to be.** Taking
+        // `adapters()[0]` was fine against the null backend and is wrong against
+        // a real one: P1.1 found a discrete radv GPU that enumerates first, is
+        // Tier A, and *cannot present to an Xvfb window* because there is no
+        // DRI3 — while the software rasteriser sitting behind it can. The seam
+        // enumerates adapters without reference to a surface, so the only way to
+        // find out is to ask [`Instance::surface_caps`] per adapter, which is
+        // exactly what it is for ("caps known before a device exists").
+        //
+        // An `Err` here therefore means "not this one", not "give up": a backend
+        // has no other way to say that a particular adapter/surface pairing does
+        // not work. Anything left over after the loop is a real failure.
+        let mut chosen = None;
+        let mut last_error = None;
+        for adapter in &adapters {
+            match instance.surface_caps(surface, adapter.id) {
+                Ok(caps) if caps.preferred_format().is_some() => {
+                    chosen = Some((adapter.clone(), caps));
+                    break;
+                }
+                Ok(_) => log::debug!(
+                    "hal: adapter {:?} offers no usable surface format; trying the next",
+                    adapter.name
+                ),
+                Err(error) => {
+                    log::debug!(
+                        "hal: adapter {:?} cannot serve this surface ({error}); trying the next",
+                        adapter.name
+                    );
+                    last_error = Some(error);
+                }
+            }
+        }
+        let Some((adapter, caps)) = chosen else {
+            // Destroy the surface before giving up: the shell's window outlives
+            // this call either way, but a leaked surface is a leaked driver
+            // object, and `crcbl-vk` says so at teardown.
+            instance.destroy_surface(surface);
+            return Err(match last_error {
+                Some(error) => error.into(),
+                None => GpuError::Unusable("no adapter can present to this window"),
+            });
+        };
+        log::info!(
+            "hal: {} adapter {:?} ({:?}), tier {:?}",
+            instance.backend(),
+            adapter.name,
+            adapter.device_type,
+            adapter.caps.tier()
+        );
+
         // The caller's half of the seam's extent rule (finding 1): the shell's
         // size wins, `current_extent` is a cross-check, and a mismatch is worth
         // a line in the log rather than an override — on Wayland the surface
@@ -232,7 +350,7 @@ impl Gpu {
         if let Some(reported) = caps.current_extent
             && reported != extent
         {
-            log::debug!(
+            log::info!(
                 "hal: surface reports {reported:?} but the shell configured {extent:?}; \
                  using the shell's size"
             );
@@ -299,15 +417,20 @@ impl Gpu {
             timeline,
             submitted: 0,
             in_flight: VecDeque::with_capacity(FRAMES_IN_FLIGHT + 1),
+            configured_extent: extent,
             waits: Vec::with_capacity(1),
             signals: Vec::with_capacity(2),
         })
     }
 
-    /// The swapchain's current size.
+    /// The swapchain's current size — the one it was **configured** at.
+    ///
+    /// Obligation 3: this is what the last frame actually rendered into, which
+    /// is not always what the shell asked for. Before the first acquire it is
+    /// the request, because there is no answer yet.
     #[must_use]
     pub fn extent(&self) -> (u32, u32) {
-        self.config.extent
+        self.configured_extent
     }
 
     /// The format the swapchain was created with. Test-only; see
@@ -336,8 +459,21 @@ impl Gpu {
             Err(error) => return Err(error.into()),
         };
 
+        // Obligation 3: the answer, not the request. On a platform that pins
+        // the permitted extent this can differ from `config.extent` for as long
+        // as a resize is in flight, and everything downstream — the render
+        // area here, `Gpu::extent` for the summary — must use this one.
+        if acquired.extent != self.configured_extent {
+            log::debug!(
+                "hal: swapchain configured at {:?} (the shell asked for {:?})",
+                acquired.extent,
+                self.config.extent
+            );
+            self.configured_extent = acquired.extent;
+        }
+
         self.record_and_submit(&acquired)?;
-        self.device.present(
+        match self.device.present(
             self.queue,
             &PresentInfo {
                 swapchain: self.swapchain,
@@ -347,7 +483,21 @@ impl Gpu {
                 // the code above is unchanged.
                 waits: acquired.present_semaphore.as_slice(),
             },
-        )?;
+        ) {
+            Ok(()) => {}
+            // **Present is the usual place a resize is noticed**, not acquire:
+            // the compositor learns the window changed size when it is handed a
+            // frame, and the acquire that would have reported it never happens.
+            // Handling `OutOfDate` only at acquire meant dragging a window edge
+            // exited the sandbox with an error, which is precisely the bug the
+            // seam warns about — "a caller that treats it as fatal has a bug
+            // that only appears when someone drags a window edge".
+            Err(SurfaceError::OutOfDate) => {
+                self.reconfigure()?;
+                return Ok(FrameOutcome::Reconfigured);
+            }
+            Err(error) => return Err(error.into()),
+        }
 
         if acquired.suboptimal {
             // Legal to ignore for one frame, and the seam says treating it as
@@ -358,21 +508,57 @@ impl Gpu {
         Ok(FrameOutcome::Presented)
     }
 
-    /// Encodes the one barrier a no-draw frame still owes, submits it, and
-    /// retires whatever fell out of the frames-in-flight window.
+    /// Encodes milestone 1 — a clear through a real render pass — submits it,
+    /// and retires whatever fell out of the frames-in-flight window.
     fn record_and_submit(&mut self, acquired: &AcquiredFrame) -> Result<(), GpuError> {
+        let range = ImageSubresourceRange::all(self.config.format);
         let mut encoder = self.device.create_command_encoder(&CommandEncoderDesc {
             label: Some("sandbox frame"),
             queue: self.queue,
         });
-        // Nothing draws yet. The barrier is not a placeholder: an acquired
-        // image's contents are undefined and the compositor may only be handed
-        // one in `Present`, so this is the minimum a correct frame contains.
+        // An acquired image's contents are undefined, so the source state is
+        // `Undefined` — which discards them, which is free, and which is the
+        // only correct source for a swapchain image.
         encoder.pipeline_barrier(&Barriers {
             images: &[ImageBarrier::new(
                 acquired.image,
-                ImageSubresourceRange::all(self.config.format),
+                range,
                 ResourceState::Undefined,
+                ResourceState::ColorAttachment,
+            )],
+            ..Barriers::default()
+        });
+        // `docs/plan/02-vulkan-backend.md`'s milestone 1. Nothing draws yet, so
+        // the pass contains no draws — but it is a real pass with a real load
+        // op, which is what makes the clear go through the attachment machinery
+        // every later milestone needs rather than around it.
+        encoder.begin_render_pass(&RenderPassDesc {
+            label: Some("clear"),
+            color_attachments: &[ColorAttachment {
+                // The swapchain's own view of its own image — obligation-free
+                // on this side of the seam since P1.1.
+                view: acquired.view,
+                resolve: None,
+                load: LoadOp::Clear,
+                store: StoreOp::Store,
+                clear: ClearValue::color(CLEAR_COLOR),
+            }],
+            depth_stencil_attachment: None,
+            // Obligation 3: the *configured* extent, not the requested one. On
+            // X11 a resize event that has not caught up yet means the swapchain
+            // is a frame behind the shell, and rendering at the shell's size
+            // would put the render area outside the attachment.
+            render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
+        });
+        encoder.end_render_pass();
+        // The compositor may only be handed an image in `Present`. Presenting
+        // one that was never transitioned is a validation error and, on some
+        // drivers, a black window.
+        encoder.pipeline_barrier(&Barriers {
+            images: &[ImageBarrier::new(
+                acquired.image,
+                range,
+                ResourceState::ColorAttachment,
                 ResourceState::Present,
             )],
             ..Barriers::default()

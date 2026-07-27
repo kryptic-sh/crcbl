@@ -978,53 +978,8 @@ impl Device for NullDevice {
                 "swapchain extent must be non-zero".to_string(),
             )));
         }
-        let image_count = desc.image_count.clamp(2, 3);
-        let mut images = Vec::with_capacity(image_count as usize);
-        let mut acquire_semaphores = Vec::with_capacity(image_count as usize);
-        let mut present_semaphores = Vec::with_capacity(image_count as usize);
-        for index in 0..image_count {
-            let image_desc = ImageDesc {
-                label: Some("swapchain image"),
-                image_type: ImageType::D2,
-                extent: crate::Extent3d::d2(desc.extent.0, desc.extent.1),
-                format: desc.format,
-                mip_levels: 1,
-                samples: 1,
-                usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::PRESENT,
-                memory: MemoryLocation::DeviceLocal,
-            };
-            images.push(self.create_image(&image_desc).map_err(SurfaceError::Hal)?);
-            if self.implicit_acquire {
-                // The WebGPU shape: no semaphores at all, so the renderer's
-                // wait/signal splice is a no-op rather than a branch.
-                acquire_semaphores.push(None);
-                present_semaphores.push(None);
-            } else {
-                let label = format!("swapchain acquire {index}");
-                acquire_semaphores.push(Some(self.insert::<crate::Semaphore>(
-                    ObjectKind::Semaphore,
-                    Some(&label),
-                    Detail::None,
-                )));
-                let label = format!("swapchain present {index}");
-                present_semaphores.push(Some(self.insert::<crate::Semaphore>(
-                    ObjectKind::Semaphore,
-                    Some(&label),
-                    Detail::None,
-                )));
-            }
-        }
-        Ok(self.insert(
-            ObjectKind::Swapchain,
-            desc.label,
-            Detail::Swapchain {
-                extent: desc.extent,
-                images,
-                acquire_semaphores,
-                present_semaphores,
-                next: 0,
-            },
-        ))
+        let ring = self.build_ring(desc)?;
+        Ok(self.insert(ObjectKind::Swapchain, desc.label, ring))
     }
 
     fn reconfigure_swapchain(
@@ -1039,22 +994,60 @@ impl Device for NullDevice {
         }
         self.check(ObjectKind::Swapchain, swapchain.to_bits(), "swapchain")
             .map_err(SurfaceError::Hal)?;
-        let mut state = self.recorder.lock();
-        let Some(object) = state.get_mut(ObjectKind::Swapchain, swapchain.to_bits()) else {
-            return Err(SurfaceError::Hal(HalError::invalid_handle(
-                "swapchain",
+
+        // Reissue the whole ring — images, views *and* semaphores — which is
+        // what a real backend does, since `crcbl-vk` recreates the
+        // `VkSwapchainKHR`. A caller that wrongly held one of those handles
+        // across a resize therefore fails here, on the backend that needs no
+        // GPU, rather than on the one that does.
+        //
+        // Built **before** anything old is destroyed. The other order looks
+        // tidier and is wrong: `build_ring` can fail (an extent past
+        // `max_image_2d`), and a failed reconfigure that had already destroyed
+        // the old ring would leave the swapchain naming dead handles — a call
+        // that returned `Err` having broken the object it was given.
+        let fresh = self.build_ring(desc)?;
+
+        let stale = {
+            let mut state = self.recorder.lock();
+            let Some(object) = state.get_mut(ObjectKind::Swapchain, swapchain.to_bits()) else {
+                return Err(SurfaceError::Hal(HalError::invalid_handle(
+                    "swapchain",
+                    swapchain,
+                )));
+            };
+            let previous = core::mem::replace(&mut object.detail, fresh);
+            state.events.push(Event::Reconfigured {
                 swapchain,
-            )));
+                extent: desc.extent,
+            });
+            previous
         };
-        let Detail::Swapchain { extent, next, .. } = &mut object.detail else {
+
+        let Detail::Swapchain {
+            images,
+            views,
+            acquire_semaphores,
+            present_semaphores,
+            ..
+        } = stale
+        else {
             unreachable!("a swapchain handle always carries swapchain detail");
         };
-        *extent = desc.extent;
-        *next = 0;
-        state.events.push(Event::Reconfigured {
-            swapchain,
-            extent: desc.extent,
-        });
+        // Views before images: a view must not outlive what it views.
+        for view in views {
+            self.destroy_image_view(view);
+        }
+        for image in images {
+            self.destroy_image(image);
+        }
+        for semaphore in acquire_semaphores
+            .into_iter()
+            .chain(present_semaphores)
+            .flatten()
+        {
+            self.destroy_semaphore(semaphore);
+        }
         Ok(())
     }
 
@@ -1067,18 +1060,25 @@ impl Device for NullDevice {
             {
                 Some(Detail::Swapchain {
                     images,
+                    views,
                     acquire_semaphores,
                     present_semaphores,
                     ..
                 }) => Some((
                     images.clone(),
+                    views.clone(),
                     acquire_semaphores.clone(),
                     present_semaphores.clone(),
                 )),
                 _ => None,
             }
         };
-        if let Some((images, acquires, presents)) = owned {
+        if let Some((images, views, acquires, presents)) = owned {
+            // Views before images: the seam says every view of an image must
+            // already be destroyed when the image is.
+            for view in views {
+                self.destroy_image_view(view);
+            }
             for image in images {
                 self.destroy_image(image);
             }
@@ -1103,11 +1103,12 @@ impl Device for NullDevice {
             )));
         };
         let Detail::Swapchain {
+            extent,
             images,
+            views,
             acquire_semaphores,
             present_semaphores,
             next,
-            ..
         } = &mut object.detail
         else {
             unreachable!("a swapchain handle always carries swapchain detail");
@@ -1117,6 +1118,11 @@ impl Device for NullDevice {
         *next = (index + 1) % u32::try_from(images.len()).unwrap_or(1);
         let frame = AcquiredFrame {
             image: images[slot],
+            view: views[slot],
+            // This backend has no window system to clamp against, so the
+            // configured extent is always the requested one — which is exactly
+            // the case obligation 3 says costs nothing to obey.
+            extent: *extent,
             index,
             acquire_semaphore: acquire_semaphores[slot],
             present_semaphore: present_semaphores[slot],
@@ -1146,6 +1152,77 @@ impl Device for NullDevice {
 }
 
 impl NullDevice {
+    /// Builds a complete swapchain ring: one image, one view and — unless this
+    /// device models an implicit acquire — one acquire and one present
+    /// semaphore per ring slot.
+    ///
+    /// Shared by create and reconfigure so the four vectors can never end up
+    /// with different lengths. They did once: reconfigure used to replace only
+    /// the images and views, so reconfiguring from two images to three left
+    /// two-element semaphore vectors and the third acquire indexed past the end
+    /// of them. The lengths are an invariant, so one constructor establishes it.
+    fn build_ring(&self, desc: &SwapchainDesc<'_>) -> Result<Detail, SurfaceError> {
+        let image_count = desc.image_count.clamp(2, 3);
+        let mut images = Vec::with_capacity(image_count as usize);
+        let mut views = Vec::with_capacity(image_count as usize);
+        let mut acquire_semaphores = Vec::with_capacity(image_count as usize);
+        let mut present_semaphores = Vec::with_capacity(image_count as usize);
+        for index in 0..image_count {
+            let image = self
+                .create_image(&ImageDesc {
+                    label: Some("swapchain image"),
+                    image_type: ImageType::D2,
+                    extent: crate::Extent3d::d2(desc.extent.0, desc.extent.1),
+                    format: desc.format,
+                    mip_levels: 1,
+                    samples: 1,
+                    usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::PRESENT,
+                    memory: MemoryLocation::DeviceLocal,
+                })
+                .map_err(SurfaceError::Hal)?;
+            images.push(image);
+            // The swapchain owns its images, so it owns their views — see
+            // `crate::swapchain`. A caller never creates or destroys one.
+            views.push(
+                self.create_image_view(&ImageViewDesc {
+                    label: Some("swapchain image view"),
+                    image,
+                    view_type: crate::ImageViewType::D2,
+                    format: desc.format,
+                    range: crate::ImageSubresourceRange::all(desc.format),
+                })
+                .map_err(SurfaceError::Hal)?,
+            );
+            if self.implicit_acquire {
+                // The WebGPU shape: no semaphores at all, so the renderer's
+                // wait/signal splice is a no-op rather than a branch.
+                acquire_semaphores.push(None);
+                present_semaphores.push(None);
+            } else {
+                let label = format!("swapchain acquire {index}");
+                acquire_semaphores.push(Some(self.insert::<crate::Semaphore>(
+                    ObjectKind::Semaphore,
+                    Some(&label),
+                    Detail::None,
+                )));
+                let label = format!("swapchain present {index}");
+                present_semaphores.push(Some(self.insert::<crate::Semaphore>(
+                    ObjectKind::Semaphore,
+                    Some(&label),
+                    Detail::None,
+                )));
+            }
+        }
+        Ok(Detail::Swapchain {
+            extent: desc.extent,
+            images,
+            views,
+            acquire_semaphores,
+            present_semaphores,
+            next: 0,
+        })
+    }
+
     fn check_binding(&self, resource: &crate::BindingResource) -> Result<(), HalError> {
         match resource {
             crate::BindingResource::Buffer { buffer, .. } => {
