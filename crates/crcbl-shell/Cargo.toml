@@ -6,16 +6,37 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Deliberately tiny, like `crcbl-hal`. This crate is a seam: `libwayland-client`
-# and `libxcb` arrive with their backends at P0.5/P0.6 and must not appear here,
-# and nothing in this slice opens a socket. `crcbl-core` supplies handles, the
-# input vocabulary and `SurfaceTarget`; `bitflags` and `thiserror` are
-# vocabulary; `log` is how backend selection explains itself.
+# Still tiny. `crcbl-core` supplies handles, the input vocabulary and
+# `SurfaceTarget`; `bitflags` and `thiserror` are vocabulary; `log` is how
+# backend selection and a lost compositor connection explain themselves.
+#
+# There is deliberately **no** `wayland-client`, `wayland-sys`,
+# `wayland-scanner` or `smithay-client-toolkit`: `docs/plan/15-windowing.md`
+# accepts thin bindings to an ABI the driver forces on us and rejects
+# frameworks that own policy. libwayland-client is reached through hand-written
+# `extern "C"` declarations in `src/wayland/ffi.rs`, loaded with `dlopen` (see
+# that module for why not `#[link]`), and the protocol layer above it is
+# generated at build time from the vendored XML.
 [dependencies]
 bitflags = { workspace = true }
 crcbl-core = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
+
+# Build-time only: turns `wayland-protocols/*.xml` into `wl_interface` tables,
+# request wrappers and event decoders. A workspace crate rather than a module in
+# `build.rs` so its output can be unit-tested against `wayland-scanner`'s — see
+# its own docs.
+[build-dependencies]
+crcbl-wl-scanner = { workspace = true }
+
+[features]
+# The nested-compositor end-to-end suite. Off by default so a plain
+# `cargo nextest run` on a machine with no compositor stays green; CI enables it
+# in a job that launches headless sway. `docs/plan/12-testing.md` calls the
+# silently-skipped variant a known trap, so the tests are additionally
+# `#[ignore]`d and the harness asserts that a non-zero number of them ran.
+wayland-e2e = []
 
 [lints]
 workspace = true

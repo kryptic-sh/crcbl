@@ -19,14 +19,23 @@
 //! crcbl-shell ──▶ crcbl-core ◀── crcbl-hal ◀── crcbl-vk / crcbl-wgpu / …
 //! ```
 //!
-//! # What is in this slice
+//! # What is in this crate
 //!
-//! P0.4 is the seam and [`HeadlessShell`], nothing else. There is no Wayland
-//! code, no X11 code, no `libwayland-client`, no `libxcb`, and no `unsafe`
-//! anywhere in the crate. `HeadlessShell` is not a stub standing in for the
-//! real thing: per `docs/plan/15-windowing.md` it is a first-class
-//! implementation that CI, `crcbl screenshot` and `crcbl sim` run the
-//! *identical* engine loop through.
+//! P0.4 added the seam and [`HeadlessShell`]. P0.5a added the **Wayland
+//! backend** — window lifecycle only: connection, registry, `xdg-shell`,
+//! configure/ack, modes, monitors. It is compiled only on Linux, reached only
+//! through [`open`], and built on hand-written `extern "C"` declarations for
+//! libwayland-client plus protocol marshalling generated at build time from
+//! vendored XML by `crcbl-wl-scanner`. Input (`wl_seat`) is P0.5b and clipboard
+//! (`data-device`) is P0.5c; [`ShellCaps`] says so rather than leaving a
+//! consumer to find out. There is still no X11 code and no `libxcb` — P0.6.
+//!
+//! `HeadlessShell` is not a stub standing in for the real thing: per
+//! `docs/plan/15-windowing.md` it is a first-class implementation that CI,
+//! `crcbl screenshot` and `crcbl sim` run the *identical* engine loop through.
+//! Where the real compositor turned out to differ from what it models, the
+//! difference is documented in the Wayland backend rather than smoothed over —
+//! the first configure carrying no size at all is the one to know about.
 //!
 //! # Decision: `dyn`-primary, like the HAL
 //!
@@ -185,6 +194,26 @@ pub mod geom;
 pub mod headless;
 pub mod monitor;
 pub mod window;
+
+/// The Wayland backend (P0.5).
+///
+/// Not `pub`: [`backend`] is the only way to reach a real shell, because
+/// `WaylandShell::new()` in a consumer's source is the platform leak this whole
+/// seam exists to prevent. `#[cfg(target_os = "linux")]` rather than
+/// `#[cfg(unix)]` — macOS is a Unix with no Wayland, and the BSDs are not a
+/// target this engine claims.
+#[cfg(target_os = "linux")]
+pub(crate) mod wayland;
+
+/// Scaffolding for the nested-compositor end-to-end suite, behind the
+/// `wayland-e2e` feature.
+///
+/// Not part of the seam and not for consumers: it exists because a Wayland
+/// surface is only managed by the compositor once it has a *buffer*, and
+/// attaching one is the renderer's job — which does not exist until P1. See
+/// the module's docs for the full finding.
+#[cfg(all(target_os = "linux", feature = "wayland-e2e"))]
+pub use wayland::e2e as wayland_test_support;
 
 pub use backend::{BACKEND_ENV_VAR, ShellBackend, open, open_backend};
 pub use caps::ShellCaps;

@@ -24,14 +24,25 @@
 //!
 //! # What is registered today
 //!
-//! Only [`HeadlessShell`], and only when asked for by
-//! name. P0.5 and P0.6 add Wayland and X11 to this module's registry and nothing else in
-//! this crate changes — that is the property this module is shaped to have.
+//! Wayland on Linux, and [`HeadlessShell`] everywhere — the latter only when
+//! asked for by name. P0.6 adds X11 by inserting one more entry here and
+//! nothing else in this crate changes, which is the property this module was
+//! shaped to have and which P0.5 confirmed: adding Wayland touched
+//! [`REGISTRY`](self) and these tests, and no other file outside
+//! `src/wayland/`.
 //!
 //! Headless is registered with `auto: false`, so [`open`] never selects it
 //! implicitly. A game that silently ran headless because a compositor was
 //! missing would look like a hang; failing with
 //! [`ShellError::NoBackend`] names the actual problem.
+//!
+//! # Why the Wayland entry is `dlopen`-backed
+//!
+//! The registry is a fall-through list, so every entry has to be able to *fail*
+//! at runtime. A backend linked against `libwayland-client.so.0` with
+//! `DT_NEEDED` cannot: the process dies in `ld.so` before `main`, on any
+//! machine without the library, and this list never runs. `src/wayland/ffi.rs`
+//! has the full argument.
 
 use crate::{HeadlessShell, Shell, ShellError};
 
@@ -109,14 +120,24 @@ struct Registration {
 
 /// Every backend compiled into this build, in the order [`open`] tries them.
 ///
-/// P0.5 inserts Wayland ahead of X11 here; P0.6 inserts X11. The order is the
-/// preference order from `docs/plan/15-windowing.md`: Wayland first, X11 as the
-/// fallback.
-static REGISTRY: &[Registration] = &[Registration {
-    backend: ShellBackend::Headless,
-    auto: false,
-    open: || Ok(Box::new(HeadlessShell::new())),
-}];
+/// P0.6 inserts X11 after Wayland. The order is the preference order from
+/// `docs/plan/15-windowing.md`: Wayland first, X11 as the fallback.
+static REGISTRY: &[Registration] = &[
+    // `#[cfg]` on the element, not on the whole table: on macOS and Windows
+    // the entry simply is not there, so nothing else in this file mentions a
+    // platform and `open_auto` needs no conditional compilation of its own.
+    #[cfg(target_os = "linux")]
+    Registration {
+        backend: ShellBackend::Wayland,
+        auto: true,
+        open: || Ok(Box::new(crate::wayland::WaylandShell::open()?)),
+    },
+    Registration {
+        backend: ShellBackend::Headless,
+        auto: false,
+        open: || Ok(Box::new(HeadlessShell::new())),
+    },
+];
 
 fn registry_names(entries: impl Iterator<Item = ShellBackend>) -> String {
     let names: Vec<&str> = entries.map(ShellBackend::as_str).collect();
@@ -144,11 +165,11 @@ fn registry_names(entries: impl Iterator<Item = ShellBackend>) -> String {
 ///
 /// # Today
 ///
-/// Only [`HeadlessShell`] is registered, and it is not
-/// auto-selected, so this returns [`ShellError::NoBackend`] unless
-/// `CRCBL_SHELL=headless` is set. That is the honest answer for a build with no
-/// window-system backend in it; P0.5 changes it by adding a registration and
-/// nothing else.
+/// On Linux, Wayland is tried and `CRCBL_SHELL=wayland` forces it. On macOS and
+/// Windows only [`HeadlessShell`] is compiled in and it is not auto-selected,
+/// so this returns [`ShellError::NoBackend`] unless `CRCBL_SHELL=headless` is
+/// set — the honest answer for a build with no window-system backend in it.
+/// P14 changes that by adding a registration and nothing else.
 pub fn open() -> Result<Box<dyn Shell>, ShellError> {
     match std::env::var(BACKEND_ENV_VAR) {
         Ok(value) if !value.trim().is_empty() => {
@@ -233,13 +254,26 @@ mod tests {
     }
 
     #[test]
-    fn only_headless_is_registered_today_and_it_is_not_automatic() {
-        // This test is the tripwire for P0.5/P0.6: adding a registration must
-        // be a deliberate edit here too.
-        assert_eq!(REGISTRY.len(), 1);
-        assert_eq!(REGISTRY[0].backend, ShellBackend::Headless);
-        assert!(!REGISTRY[0].auto, "a game must never silently run headless");
-        assert!(REGISTRY.iter().all(|entry| !entry.auto));
+    fn the_table_matches_the_platform_and_headless_is_never_automatic() {
+        // The tripwire for every backend slice: adding a registration must be a
+        // deliberate edit here too.
+        let backends: Vec<ShellBackend> = REGISTRY.iter().map(|entry| entry.backend).collect();
+        if cfg!(target_os = "linux") {
+            assert_eq!(backends, [ShellBackend::Wayland, ShellBackend::Headless]);
+        } else {
+            assert_eq!(backends, [ShellBackend::Headless]);
+        }
+        let headless = REGISTRY
+            .iter()
+            .find(|entry| entry.backend == ShellBackend::Headless)
+            .expect("headless is always compiled in");
+        assert!(!headless.auto, "a game must never silently run headless");
+        assert!(
+            REGISTRY
+                .iter()
+                .filter(|entry| entry.auto)
+                .all(|entry| entry.backend != ShellBackend::Headless)
+        );
     }
 
     #[test]
@@ -247,7 +281,9 @@ mod tests {
         let shell = open_backend(ShellBackend::Headless).expect("headless is registered");
         assert_eq!(shell.backend(), ShellBackend::Headless);
 
-        let error = open_backend(ShellBackend::Wayland).expect_err("not registered yet");
+        // X11 is P0.6, so it is not in any build yet — which makes it the
+        // stable example of a backend this build does not have.
+        let error = open_backend(ShellBackend::X11).expect_err("not registered yet");
         let ShellError::UnknownBackend {
             requested,
             available,
@@ -255,16 +291,30 @@ mod tests {
         else {
             panic!("wrong variant");
         };
-        assert_eq!(requested, "wayland");
-        assert_eq!(available, "headless");
+        assert_eq!(requested, "x11");
+        assert!(available.contains("headless"), "{available}");
     }
 
     #[test]
     fn automatic_selection_reports_what_it_tried() {
-        let error = open_auto().expect_err("nothing is auto-selectable yet");
-        let ShellError::NoBackend { tried } = error else {
-            panic!("wrong variant");
-        };
-        assert_eq!(tried, "none");
+        // On a machine with a compositor this genuinely connects, which is the
+        // correct behaviour and not something to assert against; the point of
+        // the test is the failure path's message.
+        match open_auto() {
+            Ok(shell) => assert_eq!(
+                shell.backend(),
+                ShellBackend::Wayland,
+                "the only auto-selectable backend today"
+            ),
+            Err(ShellError::NoBackend { tried }) => {
+                let expected = if cfg!(target_os = "linux") {
+                    "wayland"
+                } else {
+                    "none"
+                };
+                assert_eq!(tried, expected);
+            }
+            Err(error) => panic!("unexpected error: {error}"),
+        }
     }
 }

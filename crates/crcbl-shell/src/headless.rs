@@ -66,6 +66,38 @@
 //! They are also the escape hatch for a test that wants a configured window in
 //! one line.
 //!
+//! # Where the model is now known to be wrong (P0.5a)
+//!
+//! The Wayland backend's end-to-end suite is the first thing that could check
+//! any of this against a real compositor. Three differences came back, and they
+//! are recorded here rather than only in the backend, because this is the file
+//! consumers are written against:
+//!
+//! 1. **A first configure usually dictates no size at all.** Headless always
+//!    delivers one. `xdg-shell` defines `0 × 0` as "you choose", and it is what
+//!    sway sends for a freshly created toplevel — so a real backend supplies
+//!    the fallback and the requested size stands. A consumer is unaffected
+//!    (both shapes are "a size arrived"), but a *backend* author reading only
+//!    this file would not expect it.
+//! 2. **Size arrives before scale.** A window's scale factor comes from
+//!    `wl_surface.enter`, which only fires once the surface is mapped — which
+//!    needs a buffer, which needs the size. So the first configure is at scale
+//!    1.0 and the true scale follows as a separate
+//!    [`ScaleFactorChanged`](ShellEvent::ScaleFactorChanged).
+//!    [`WindowConfiguration`] groups the two because they arrive in *one
+//!    message*; it does not promise the first message is right about both.
+//!    [`change_scale_factor`](HeadlessShell::change_scale_factor) is how a test
+//!    reproduces the sequence.
+//! 3. **Configured is not the same as managed.** A Wayland window that has
+//!    never been given a buffer is answered once and then ignored: no
+//!    compositor-chosen geometry, no fullscreen configure, not even present in
+//!    the window manager's tree. Headless has no such state, and nothing in the
+//!    seam expresses it. It is not a defect in the seam — the sequence a
+//!    consumer must write (configure → swapchain → present → *then* expect real
+//!    geometry) is the same either way — but a test that resizes a headless
+//!    window before its first present is exercising something a compositor
+//!    would not have done.
+//!
 //! # Capabilities are settable, which is the point
 //!
 //! [`HeadlessShell::new`] reports [`ShellCaps::DESKTOP`] — everything. But

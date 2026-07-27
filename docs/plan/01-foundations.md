@@ -20,6 +20,7 @@ crcbl/
 ├── crates/
 │   ├── crcbl-core/         # ids, handles, arenas, slotmaps, time, logging
 │   ├── crcbl-shell/        # topic 15: windowing — own wire-protocol backends
+│   ├── crcbl-wl-scanner/   # topic 15: Wayland protocol codegen (build-time)
 │   ├── crcbl-hal/          # backend seam: traits + POD descriptors only
 │   ├── crcbl-vk/           # stage 2: ash implementation of the HAL
 │   ├── crcbl-render/       # render graph, frame loop, meshes, materials

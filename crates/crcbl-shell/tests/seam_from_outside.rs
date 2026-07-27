@@ -445,12 +445,25 @@ fn the_factory_selects_a_backend_at_runtime() {
         crcbl_shell::open_backend(ShellBackend::Headless).expect("headless is registered");
     assert_eq!(shell.backend(), ShellBackend::Headless);
 
-    // P0.5 and P0.6 register Wayland and X11 here; today asking is an honest
-    // error rather than a silent fallback.
+    // P0.6 registers X11 here; today asking for it is an honest error rather
+    // than a silent fallback onto something else.
     assert!(matches!(
-        crcbl_shell::open_backend(ShellBackend::Wayland),
+        crcbl_shell::open_backend(ShellBackend::X11),
         Err(ShellError::UnknownBackend { .. })
     ));
+
+    // Wayland *is* registered on Linux (P0.5a), so asking for it by name gets
+    // either a real shell or a connection error — never `UnknownBackend`. This
+    // test runs on machines with and without a compositor, and both are correct
+    // answers; what must not happen is a fallback to something else.
+    #[cfg(target_os = "linux")]
+    match crcbl_shell::open_backend(ShellBackend::Wayland) {
+        Ok(shell) => assert_eq!(shell.backend(), ShellBackend::Wayland),
+        Err(error) => assert!(
+            matches!(error, ShellError::Connect { .. }),
+            "expected a connection error without a compositor, got {error}"
+        ),
+    }
 }
 
 /// Timestamps survive the trip across the seam intact and on one clock — the
