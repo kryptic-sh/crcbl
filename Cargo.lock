@@ -83,6 +83,17 @@ name = "crcbl-cli"
 version = "0.1.0"
 
 [[package]]
+name = "crcbl-client"
+version = "0.1.0"
+dependencies = [
+ "crcbl-core",
+ "crcbl-ecs",
+ "crcbl-net",
+ "glam",
+ "log",
+]
+
+[[package]]
 name = "crcbl-core"
 version = "0.1.0"
 dependencies = [
@@ -135,6 +146,16 @@ dependencies = [
 [[package]]
 name = "crcbl-scene"
 version = "0.1.0"
+
+[[package]]
+name = "crcbl-server"
+version = "0.1.0"
+dependencies = [
+ "crcbl-core",
+ "crcbl-ecs",
+ "crcbl-net",
+ "log",
+]
 
 [[package]]
 name = "crcbl-shaders"

@@ -1,0 +1,17 @@
+[package]
+name = "crcbl-client"
+description = "Crucible rendering client: interpolation, input send, snapshot apply"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+crcbl-core = { workspace = true }
+crcbl-ecs = { workspace = true }
+crcbl-net = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+
+[lints]
+workspace = true

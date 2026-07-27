@@ -1,0 +1,16 @@
+[package]
+name = "crcbl-server"
+description = "Crucible authoritative server: fixed-tick simulation and snapshot emission"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+crcbl-core = { workspace = true }
+crcbl-ecs = { workspace = true }
+crcbl-net = { workspace = true }
+log = { workspace = true }
+
+[lints]
+workspace = true
