@@ -4,6 +4,8 @@
 //! advances the ECS world, and broadcasts a per-system snapshot over an
 //! unreliable transport channel.
 
+pub mod sim_hash;
+
 use std::fmt;
 
 use crcbl_core::{FrameClock, TickId};
