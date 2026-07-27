@@ -24,7 +24,9 @@ use crcbl_hal::{
     CommandEncoderDesc, Device, DeviceDesc, Format, ImageUsage, Instance, QueueHandle, QueueKind,
     ResourceState,
 };
-use crcbl_render::graph::{GraphBarriers, GraphError, ImportedBuffer, ImportedImage, RenderGraph};
+use crcbl_render::graph::{
+    GraphBarriers, GraphError, ImageId, ImportedBuffer, ImportedImage, RenderGraph,
+};
 use crcbl_render::transient::{TransientBufferDesc, TransientImageDesc, TransientPool};
 
 const EXTENT: (u32, u32) = (256, 192);
@@ -136,6 +138,7 @@ fn scene_depth() -> TransientImageDesc {
 #[test]
 fn the_sandbox_frame_compiles_to_the_passes_and_barriers_it_should() {
     let harness = Harness::open();
+    let mut pool = TransientPool::new();
     let target = harness.target(Format::Bgra8UnormSrgb);
 
     let mut graph = harness.graph();
@@ -163,7 +166,7 @@ fn the_sandbox_frame_compiles_to_the_passes_and_barriers_it_should() {
             ctx.encoder().draw(0..3, 0..1);
         });
 
-    let compiled = graph.compile().expect("a legal frame");
+    let compiled = graph.compile(&pool).expect("a legal frame");
     assert_eq!(compiled.passes().len(), 2);
     assert_eq!(compiled.passes()[0].label(), "forward");
     assert_eq!(compiled.passes()[1].label(), "tonemap");
@@ -209,7 +212,6 @@ fn the_sandbox_frame_compiles_to_the_passes_and_barriers_it_should() {
         .into_iter()
         .cloned()
         .collect::<Vec<_>>();
-    let mut pool = TransientPool::new();
     harness.record(|encoder| {
         compiled
             .execute(harness.device.as_ref(), &mut pool, encoder, None)
@@ -253,6 +255,285 @@ fn the_sandbox_frame_compiles_to_the_passes_and_barriers_it_should() {
     pool.destroy(harness.device.as_ref());
 }
 
+/// Builds the sandbox frame — forward into an HDR target plus depth, then
+/// tonemap into an imported target — against `pool`, and returns what compiled.
+///
+/// A helper rather than three copies, because the cross-frame tests below are
+/// only interesting if the *second* frame is the same frame as the first.
+fn sandbox_frame<'a>(
+    harness: &Harness,
+    pool: &TransientPool,
+    target: ImportedImage,
+) -> (crcbl_render::CompiledGraph<'a>, ImageId) {
+    let mut graph = harness.graph();
+    let color = graph.create_image("scene-color", scene_color());
+    let depth = graph.create_image("scene-depth", scene_depth());
+    let swap = graph.import_image("swapchain", target);
+    graph
+        .add_render_pass("forward")
+        .clear_color(color, [0.0; 4])
+        .clear_depth(depth)
+        .execute(|ctx| {
+            ctx.encoder().draw(0..36, 0..1);
+        });
+    graph
+        .add_render_pass("tonemap")
+        .color(
+            swap,
+            crcbl_hal::LoadOp::DontCare,
+            crcbl_hal::StoreOp::Store,
+            crcbl_hal::ClearValue::default(),
+        )
+        .read_image(color)
+        .execute(|ctx| {
+            ctx.encoder().draw(0..3, 0..1);
+        });
+    (graph.compile(pool).expect("a legal frame"), swap)
+}
+
+/// **The second frame is barriered against the first, not against nothing.**
+///
+/// A transient is transient in the graph, not in the pool: the second frame gets
+/// the same `VkImage` back, while the first frame's writes to it may still be in
+/// flight — the frame loop keeps two submissions going and nothing in between
+/// them says "wait". So the first barrier the second frame emits against a
+/// pooled resource is the *only* thing that can order the two, and a barrier out
+/// of [`ResourceState::Undefined`] cannot: on Vulkan it expands to
+/// `srcStageMask = NONE, srcAccessMask = NONE`, which is a write-after-write
+/// hazard with `write_barriers: 0` and a picture that depends on the driver.
+///
+/// This is the regression test for exactly that. It needs no GPU, no ICD and no
+/// validation layer — which is the point: the bug it covers was found by a
+/// driver on one CI leg, and finding it that way is luck.
+#[test]
+fn a_second_frame_barriers_against_what_the_first_one_left() {
+    let harness = Harness::open();
+    let mut pool = TransientPool::new();
+    let target = harness.target(Format::Bgra8UnormSrgb);
+
+    // Frame one, through a pool that has never been used. Nothing has written
+    // these images, so `Undefined` is the truth and not an omission.
+    let (first, _) = sandbox_frame(&harness, &pool, target);
+    let opening = first.passes()[0].barriers();
+    assert_eq!(opening.images[0].from, ResourceState::Undefined);
+    assert_eq!(opening.images[1].from, ResourceState::Undefined);
+    harness.record(|encoder| {
+        first
+            .execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("executed");
+    });
+    assert_eq!(pool.image_count(), 2, "one colour target, one depth target");
+
+    // Frame two, through the same pool. Same declarations, different barriers —
+    // because the resources are not in the same place they were.
+    let (second, swap) = sandbox_frame(&harness, &pool, target);
+    let opening = second.passes()[0].barriers();
+    assert_eq!(opening.images.len(), 2, "{opening:?}");
+
+    // The colour target: the previous frame's tonemap sampled it last, so this
+    // frame's colour writes have to be ordered after that read.
+    assert_eq!(
+        (opening.images[0].from, opening.images[0].to),
+        (ResourceState::ShaderRead, ResourceState::ColorAttachment),
+        "the scene target's first barrier must cover the previous frame's read \
+         of it, or this frame overwrites pixels the last one is still sampling"
+    );
+
+    // The depth target: the previous frame's forward pass wrote it and nothing
+    // read it afterwards, so this is the write-after-write the driver caught.
+    assert_eq!(
+        (opening.images[1].from, opening.images[1].to),
+        (
+            ResourceState::DepthStencilWrite,
+            ResourceState::DepthStencilWrite
+        ),
+        "the depth target's first barrier must cover the previous frame's depth \
+         writes; `Undefined` here is `srcStageMask = NONE` and covers nothing"
+    );
+
+    // Said once more as a property rather than as two cases, so a third
+    // transient added to the frame cannot quietly reintroduce the hole. The
+    // imported target is exempt and stays exempt: its owner declares
+    // `Undefined`, and for an acquired swapchain image that is correct — the
+    // acquire semaphore carries the ordering the barrier does not.
+    for batch in second.barrier_batches() {
+        for barrier in &batch.images {
+            assert!(
+                barrier.from != ResourceState::Undefined || barrier.image == swap,
+                "a pooled resource the graph has already used cannot re-enter a \
+                 frame as `Undefined`: {barrier:?}"
+            );
+        }
+    }
+
+    // And the backend really sees it, rather than the plan merely saying so.
+    let expected: Vec<GraphBarriers> = second.barrier_batches().into_iter().cloned().collect();
+    harness.recorder.clear();
+    harness.record(|encoder| {
+        second
+            .execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("executed");
+    });
+    assert_eq!(
+        pool.image_count(),
+        2,
+        "a steady-state frame reuses; if it allocated, the states above would be \
+         describing images this frame never touched"
+    );
+    let recorded = harness.recorded_barriers();
+    assert_eq!(recorded.len(), expected.len());
+    for (index, (command, plan)) in recorded.iter().zip(&expected).enumerate() {
+        let Command::Barrier { images, .. } = command else {
+            unreachable!("filtered to barriers");
+        };
+        for (recorded, planned) in images.iter().zip(&plan.images) {
+            assert_eq!(recorded.from, planned.from, "batch {index}");
+            assert_eq!(recorded.to, planned.to, "batch {index}");
+        }
+    }
+    harness.recorder.assert_valid();
+    pool.destroy(harness.device.as_ref());
+}
+
+/// A frame that is compiled and then dropped must not move the pool on.
+///
+/// The handover happens in `execute`, after the commands exist, precisely so a
+/// graph that was compiled speculatively — or that failed before it ran — cannot
+/// leave the next frame ordering itself against writes the GPU never performed.
+/// That direction of the mistake is the dangerous one: it produces barriers that
+/// *look* right and synchronise nothing.
+#[test]
+fn compiling_a_frame_that_never_runs_leaves_the_pool_where_it_was() {
+    let harness = Harness::open();
+    let mut pool = TransientPool::new();
+    let target = harness.target(Format::Bgra8UnormSrgb);
+
+    let (executed, _) = sandbox_frame(&harness, &pool, target);
+    harness.record(|encoder| {
+        executed
+            .execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("executed");
+    });
+
+    // Compiled, inspected, dropped.
+    let (after_a_dropped_frame, _) = sandbox_frame(&harness, &pool, target);
+    let dropped_opening = after_a_dropped_frame.passes()[0].barriers().clone();
+    drop(after_a_dropped_frame);
+
+    // The next frame that *does* run sees exactly what the dropped one saw.
+    let (next, _) = sandbox_frame(&harness, &pool, target);
+    assert_eq!(
+        next.passes()[0].barriers(),
+        &dropped_opening,
+        "a compiled-and-dropped frame moved the pool's idea of where its \
+         resources are"
+    );
+    harness.record(|encoder| {
+        next.execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("executed");
+    });
+    pool.destroy(harness.device.as_ref());
+}
+
+/// A resize gives the pool a resource it has never seen, and the graph must say
+/// `Undefined` for it rather than inherit the old size's history.
+///
+/// The description is the pool's key, so a new extent is a new resource with no
+/// past — and carrying a state across that boundary would name a layout the new
+/// image is not in, which is a validation error rather than a wrong picture.
+#[test]
+fn a_resize_starts_the_new_targets_from_undefined_again() {
+    let harness = Harness::open();
+    let mut pool = TransientPool::new();
+    let target = harness.target(Format::Bgra8UnormSrgb);
+
+    let (first, _) = sandbox_frame(&harness, &pool, target);
+    harness.record(|encoder| {
+        first
+            .execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("executed");
+    });
+
+    let mut graph = harness.graph();
+    let color = graph.create_image(
+        "scene-color",
+        TransientImageDesc::scene_color((320, 200)), // A different size.
+    );
+    graph
+        .add_render_pass("forward")
+        .clear_color(color, [0.0; 4])
+        .execute(|_| {});
+    let resized = graph.compile(&pool).expect("a legal frame");
+    assert_eq!(
+        resized.passes()[0].barriers().images[0].from,
+        ResourceState::Undefined,
+        "a target the pool has never handed out has no history to carry"
+    );
+
+    harness.record(|encoder| {
+        resized
+            .execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("executed");
+    });
+    harness.recorder.assert_valid();
+    pool.destroy(harness.device.as_ref());
+}
+
+/// Transient **buffers** carry across frames on the same rule as images.
+///
+/// A pooled scratch buffer is the same `VkBuffer` next frame, so a frame that
+/// opens by writing it has to be ordered after the previous frame's writes. It
+/// has no layout, which is exactly why it is worth its own test: the image case
+/// would still look right in a capture from the layout alone, and this one would
+/// not look like anything at all until it produced wrong numbers.
+#[test]
+fn a_transient_buffers_state_carries_across_frames_too() {
+    let harness = Harness::open();
+    let mut pool = TransientPool::new();
+
+    let frame = |pool: &TransientPool| {
+        let mut graph = harness.graph();
+        let scratch = graph.create_buffer("cull-args", TransientBufferDesc::storage(4096));
+        graph
+            .add_compute_pass("cull")
+            .use_buffer(scratch, ResourceState::ShaderWrite)
+            .execute(|ctx| {
+                ctx.encoder().dispatch(1, 1, 1);
+            });
+        graph.compile(pool).expect("a legal frame")
+    };
+
+    let first = frame(&pool);
+    assert_eq!(
+        first.passes()[0].barriers().buffers[0].from,
+        ResourceState::Undefined,
+        "nothing has written this buffer yet"
+    );
+    harness.record(|encoder| {
+        first
+            .execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("executed");
+    });
+
+    let second = frame(&pool);
+    assert_eq!(
+        (
+            second.passes()[0].barriers().buffers[0].from,
+            second.passes()[0].barriers().buffers[0].to
+        ),
+        (ResourceState::ShaderWrite, ResourceState::ShaderWrite),
+        "the second frame's writes must be ordered after the first frame's"
+    );
+    harness.record(|encoder| {
+        second
+            .execute(harness.device.as_ref(), &mut pool, encoder, None)
+            .expect("executed");
+    });
+    assert_eq!(pool.buffer_count(), 1, "one buffer, reused");
+    harness.recorder.assert_valid();
+    pool.destroy(harness.device.as_ref());
+}
+
 /// The graph's own dump, checked against the frame it describes.
 ///
 /// `docs/plan/02-vulkan-backend.md` §2.4's debug principle is that "the graph
@@ -262,6 +543,7 @@ fn the_sandbox_frame_compiles_to_the_passes_and_barriers_it_should() {
 #[test]
 fn the_dump_describes_every_pass_and_every_barrier() {
     let harness = Harness::open();
+    let pool = TransientPool::new();
     let target = harness.target(Format::Bgra8UnormSrgb);
 
     let mut graph = harness.graph();
@@ -284,7 +566,7 @@ fn the_dump_describes_every_pass_and_every_barrier() {
         .read_image(color)
         .execute(|_| {});
 
-    let compiled = graph.compile().expect("a legal frame");
+    let compiled = graph.compile(&pool).expect("a legal frame");
     let dump = compiled.dump();
     eprintln!("{dump}");
 
@@ -327,12 +609,13 @@ fn the_dump_describes_every_pass_and_every_barrier() {
     );
 }
 
-/// Two transients whose lifetimes do not overlap share one physical image; the
-/// second one's first use starts from `Undefined`, because the pixels in it
-/// belong to the first.
+/// Two transients whose lifetimes do not overlap share one physical image, and
+/// the hand-over between them is a **real** barrier rather than a re-acquire
+/// from `Undefined`.
 #[test]
 fn non_overlapping_transients_alias_onto_one_physical_image() {
     let harness = Harness::open();
+    let mut pool = TransientPool::new();
     let target = harness.target(Format::Bgra8UnormSrgb);
 
     let mut graph = harness.graph();
@@ -360,7 +643,7 @@ fn non_overlapping_transients_alias_onto_one_physical_image() {
         .read_image(second)
         .execute(|_| {});
 
-    let compiled = graph.compile().expect("a legal frame");
+    let compiled = graph.compile(&pool).expect("a legal frame");
     assert!(
         compiled.images_alias(first, second),
         "identical descriptions with disjoint lifetimes must share one image"
@@ -371,20 +654,30 @@ fn non_overlapping_transients_alias_onto_one_physical_image() {
         "two transients packed onto one physical image"
     );
 
-    // The aliased slot is re-acquired from `Undefined`: whatever `blur-a` left
-    // there is not `blur-b`'s, and discarding it is both correct and free.
+    // `blur-b` takes the slot from `blur-a`, and its first barrier names what
+    // `blur-a` left it in — **not** `Undefined`.
+    //
+    // `Undefined` would read as the cheaper answer: the pixels in the slot are
+    // `blur-a`'s and `blur-b` does not want them, so discard. But aliasing here
+    // means *one `VkImage`*, not two images over one allocation — there is no
+    // layout to change and nothing to decompress, so the discard buys nothing —
+    // and `Undefined` on this seam is not only "discard", it is
+    // `srcStageMask = NONE, srcAccessMask = NONE`. It would throw away the only
+    // thing this barrier is for: ordering `blur-b`'s colour writes after
+    // `blur-a`'s. Two passes writing one image with no dependency between them
+    // is a write-after-write hazard whichever names they were declared under.
     let reuse = compiled.passes()[1].barriers();
     assert_eq!(reuse.images.len(), 1);
     assert_eq!(
         reuse.images[0].from,
-        ResourceState::Undefined,
-        "an aliased slot must not claim to hold the previous resource's state"
+        ResourceState::ColorAttachment,
+        "the slot's incoming barrier must carry a source scope covering the \
+         writes the outgoing resource made to the same image"
     );
     assert_eq!(reuse.images[0].to, ResourceState::ColorAttachment);
 
     assert!(compiled.dump().contains("aliasing saved 1 physical image"));
 
-    let mut pool = TransientPool::new();
     harness.record(|encoder| {
         compiled
             .execute(harness.device.as_ref(), &mut pool, encoder, None)
@@ -401,6 +694,7 @@ fn non_overlapping_transients_alias_onto_one_physical_image() {
 #[test]
 fn overlapping_transients_do_not_alias() {
     let harness = Harness::open();
+    let pool = TransientPool::new();
     let mut graph = harness.graph();
     let first = graph.create_image("a", scene_color());
     let second = graph.create_image("b", scene_color());
@@ -411,7 +705,7 @@ fn overlapping_transients_do_not_alias() {
         .clear_color(second, [0.0; 4])
         .execute(|_| {});
 
-    let compiled = graph.compile().expect("a legal frame");
+    let compiled = graph.compile(&pool).expect("a legal frame");
     assert!(!compiled.images_alias(first, second));
     assert_eq!(compiled.physical_image_count(), 2);
     assert!(!compiled.dump().contains("aliasing saved"));
@@ -423,6 +717,7 @@ fn overlapping_transients_do_not_alias() {
 #[test]
 fn a_read_extends_a_transients_lifetime_and_delays_reuse() {
     let harness = Harness::open();
+    let pool = TransientPool::new();
     let mut graph = harness.graph();
     let first = graph.create_image("a", scene_color());
     let second = graph.create_image("b", scene_color());
@@ -437,7 +732,7 @@ fn a_read_extends_a_transients_lifetime_and_delays_reuse() {
         .read_image(first)
         .execute(|_| {});
 
-    let compiled = graph.compile().expect("a legal frame");
+    let compiled = graph.compile(&pool).expect("a legal frame");
     assert!(
         !compiled.images_alias(first, second),
         "`b` is written while `a` is still being read; sharing would corrupt both"
@@ -451,6 +746,7 @@ fn a_read_extends_a_transients_lifetime_and_delays_reuse() {
 #[test]
 fn read_after_read_emits_nothing() {
     let harness = Harness::open();
+    let mut pool = TransientPool::new();
     let target = harness.target(Format::Bgra8UnormSrgb);
 
     let mut graph = harness.graph();
@@ -482,7 +778,7 @@ fn read_after_read_emits_nothing() {
         .read_image(color)
         .execute(|_| {});
 
-    let compiled = graph.compile().expect("a legal frame");
+    let compiled = graph.compile(&pool).expect("a legal frame");
     let third = compiled.passes()[2].barriers();
     assert!(
         !third.images.iter().any(|barrier| barrier.image == color),
@@ -503,7 +799,6 @@ fn read_after_read_emits_nothing() {
         "{third:?}"
     );
 
-    let mut pool = TransientPool::new();
     harness.record(|encoder| {
         compiled
             .execute(harness.device.as_ref(), &mut pool, encoder, None)
@@ -522,6 +817,7 @@ fn read_after_read_emits_nothing() {
 #[test]
 fn a_read_only_depth_attachment_uses_the_read_state() {
     let harness = Harness::open();
+    let pool = TransientPool::new();
     let mut graph = harness.graph();
     let color = graph.create_image("color", scene_color());
     let depth = graph.create_image("depth", scene_depth());
@@ -547,7 +843,7 @@ fn a_read_only_depth_attachment_uses_the_read_state() {
         .depth_read(depth)
         .execute(|_| {});
 
-    let compiled = graph.compile().expect("a legal frame");
+    let compiled = graph.compile(&pool).expect("a legal frame");
     let second = compiled.passes()[1].barriers();
     let depth_barrier = second
         .images
@@ -562,6 +858,7 @@ fn a_read_only_depth_attachment_uses_the_read_state() {
 #[test]
 fn buffers_transition_and_return_to_their_final_state() {
     let harness = Harness::open();
+    let mut pool = TransientPool::new();
     let target = harness.target(Format::Bgra8UnormSrgb);
     let uniform = harness
         .device
@@ -599,7 +896,7 @@ fn buffers_transition_and_return_to_their_final_state() {
         .read_buffer(camera)
         .execute(|_| {});
 
-    let compiled = graph.compile().expect("a legal frame");
+    let compiled = graph.compile(&pool).expect("a legal frame");
 
     // The single most important barrier in a GPU-driven frame, per the seam's
     // own docs: the culling output reaching `IndirectArgument` before the draws
@@ -639,7 +936,6 @@ fn buffers_transition_and_return_to_their_final_state() {
         "an imported buffer must be returned to its owner's state: {last:?}"
     );
 
-    let mut pool = TransientPool::new();
     harness.record(|encoder| {
         compiled
             .execute(harness.device.as_ref(), &mut pool, encoder, None)
@@ -665,6 +961,7 @@ fn buffers_transition_and_return_to_their_final_state() {
 #[test]
 fn a_resource_crossing_queues_gets_an_ownership_transfer() {
     let harness = Harness::open();
+    let pool = TransientPool::new();
     let transfer = harness
         .device
         .queue(QueueKind::Transfer)
@@ -684,7 +981,7 @@ fn a_resource_crossing_queues_gets_an_ownership_transfer() {
         .use_image(color, ResourceState::TransferSrc)
         .execute(|_| {});
 
-    let compiled = graph.compile().expect("a legal frame");
+    let compiled = graph.compile(&pool).expect("a legal frame");
     let second = compiled.passes()[1].barriers();
     let barrier = second.images[0];
     assert_eq!(barrier.from, ResourceState::ColorAttachment);
@@ -703,8 +1000,8 @@ fn a_resource_crossing_queues_gets_an_ownership_transfer() {
 #[test]
 fn a_frame_leaks_nothing() {
     let harness = Harness::open();
-    let before = harness.recorder.total_live_objects();
     let mut pool = TransientPool::new();
+    let before = harness.recorder.total_live_objects();
 
     for frame in 0..8 {
         let mut graph = harness.graph();
@@ -715,7 +1012,7 @@ fn a_frame_leaks_nothing() {
             .clear_color(color, [0.0; 4])
             .clear_depth(depth)
             .execute(|_| {});
-        let compiled = graph.compile().expect("a legal frame");
+        let compiled = graph.compile(&pool).expect("a legal frame");
         harness.record(|encoder| {
             compiled
                 .execute(harness.device.as_ref(), &mut pool, encoder, None)
@@ -747,6 +1044,7 @@ fn a_frame_leaks_nothing() {
 #[test]
 fn the_graph_opens_the_pass_and_sets_the_dynamic_state() {
     let harness = Harness::open();
+    let mut pool = TransientPool::new();
     let mut graph = harness.graph();
     let color = graph.create_image("scene", scene_color());
     graph
@@ -758,8 +1056,7 @@ fn the_graph_opens_the_pass_and_sets_the_dynamic_state() {
             ctx.encoder().draw(0..3, 0..1);
         });
 
-    let compiled = graph.compile().expect("a legal frame");
-    let mut pool = TransientPool::new();
+    let compiled = graph.compile(&pool).expect("a legal frame");
     harness.record(|encoder| {
         compiled
             .execute(harness.device.as_ref(), &mut pool, encoder, None)
@@ -800,6 +1097,7 @@ fn the_graph_opens_the_pass_and_sets_the_dynamic_state() {
 #[test]
 fn timers_bracket_every_pass_outside_its_scope() {
     let harness = Harness::open();
+    let mut pool = TransientPool::new();
     let mut timers = crcbl_render::PassTimers::new(harness.device.as_ref(), 2, 8)
         .expect("the tier A null adapter has timestamp queries");
 
@@ -814,8 +1112,7 @@ fn timers_bracket_every_pass_outside_its_scope() {
         .use_image(color, ResourceState::ShaderReadWrite)
         .execute(|_| {});
 
-    let compiled = graph.compile().expect("a legal frame");
-    let mut pool = TransientPool::new();
+    let compiled = graph.compile(&pool).expect("a legal frame");
     harness.record(|encoder| {
         compiled
             .execute(
@@ -860,6 +1157,7 @@ fn timers_bracket_every_pass_outside_its_scope() {
 #[test]
 fn a_pass_that_wants_one_resource_in_two_states_is_refused() {
     let harness = Harness::open();
+    let pool = TransientPool::new();
     let mut graph = harness.graph();
     let color = graph.create_image("scene", scene_color());
     graph
@@ -868,7 +1166,7 @@ fn a_pass_that_wants_one_resource_in_two_states_is_refused() {
         .read_image(color)
         .execute(|_| {});
 
-    let error = graph.compile().expect_err("one state per pass");
+    let error = graph.compile(&pool).expect_err("one state per pass");
     assert!(
         matches!(error, GraphError::ConflictingAccess { .. }),
         "{error}"
@@ -879,6 +1177,7 @@ fn a_pass_that_wants_one_resource_in_two_states_is_refused() {
 #[test]
 fn a_render_pass_with_no_attachments_is_refused() {
     let harness = Harness::open();
+    let pool = TransientPool::new();
     let mut graph = harness.graph();
     let color = graph.create_image("scene", scene_color());
     graph
@@ -887,7 +1186,7 @@ fn a_render_pass_with_no_attachments_is_refused() {
         .execute(|_| {});
 
     let error = graph
-        .compile()
+        .compile(&pool)
         .expect_err("a render pass renders somewhere");
     assert!(matches!(error, GraphError::NoAttachments { .. }), "{error}");
 }
@@ -895,6 +1194,7 @@ fn a_render_pass_with_no_attachments_is_refused() {
 #[test]
 fn attachments_of_different_sizes_are_refused() {
     let harness = Harness::open();
+    let pool = TransientPool::new();
     let mut graph = harness.graph();
     let color = graph.create_image("scene-color", scene_color());
     let depth = graph.create_image(
@@ -907,7 +1207,7 @@ fn attachments_of_different_sizes_are_refused() {
         .clear_depth(depth)
         .execute(|_| {});
 
-    let error = graph.compile().expect_err("attachments must agree");
+    let error = graph.compile(&pool).expect_err("attachments must agree");
     assert!(
         matches!(error, GraphError::AttachmentExtentMismatch { .. }),
         "{error}"
@@ -918,6 +1218,7 @@ fn attachments_of_different_sizes_are_refused() {
 #[test]
 fn two_depth_attachments_are_refused() {
     let harness = Harness::open();
+    let pool = TransientPool::new();
     let mut graph = harness.graph();
     let color = graph.create_image("color", scene_color());
     let first = graph.create_image("depth-a", scene_depth());
@@ -929,7 +1230,7 @@ fn two_depth_attachments_are_refused() {
         .clear_depth(second)
         .execute(|_| {});
 
-    let error = graph.compile().expect_err("one depth attachment");
+    let error = graph.compile(&pool).expect_err("one depth attachment");
     assert!(
         matches!(error, GraphError::DuplicateDepthAttachment { .. }),
         "{error}"
@@ -939,6 +1240,7 @@ fn two_depth_attachments_are_refused() {
 #[test]
 fn an_attachment_on_a_compute_pass_is_refused() {
     let harness = Harness::open();
+    let pool = TransientPool::new();
     let mut graph = harness.graph();
     let color = graph.create_image("scene", scene_color());
     graph
@@ -947,7 +1249,7 @@ fn an_attachment_on_a_compute_pass_is_refused() {
         .execute(|_| {});
 
     let error = graph
-        .compile()
+        .compile(&pool)
         .expect_err("compute passes have no attachments");
     assert!(
         matches!(error, GraphError::AttachmentInComputePass { .. }),
@@ -960,6 +1262,7 @@ fn an_attachment_on_a_compute_pass_is_refused() {
 #[test]
 fn an_unused_transient_is_refused_rather_than_silently_allocated() {
     let harness = Harness::open();
+    let pool = TransientPool::new();
     let mut graph = harness.graph();
     let used = graph.create_image("used", scene_color());
     let _forgotten = graph.create_image("forgotten", scene_color());
@@ -969,7 +1272,7 @@ fn an_unused_transient_is_refused_rather_than_silently_allocated() {
         .execute(|_| {});
 
     let error = graph
-        .compile()
+        .compile(&pool)
         .expect_err("an unused transient is a mistake");
     assert!(
         matches!(error, GraphError::UnusedTransient { .. }),
@@ -984,6 +1287,7 @@ fn an_unused_transient_is_refused_rather_than_silently_allocated() {
 #[test]
 fn an_untouched_import_is_transitioned_rather_than_refused() {
     let harness = Harness::open();
+    let pool = TransientPool::new();
     let target = harness.target(Format::Bgra8UnormSrgb);
     let mut graph = harness.graph();
     let color = graph.create_image("scene", scene_color());
@@ -994,7 +1298,7 @@ fn an_untouched_import_is_transitioned_rather_than_refused() {
         .clear_color(color, [0.0; 4])
         .execute(|_| {});
 
-    let compiled = graph.compile().expect("an untouched import is legal");
+    let compiled = graph.compile(&pool).expect("an untouched import is legal");
     let last = compiled.final_barriers();
     assert_eq!(last.images.len(), 1);
     assert_eq!(last.images[0].from, ResourceState::Undefined);
@@ -1008,6 +1312,7 @@ fn an_untouched_import_is_transitioned_rather_than_refused() {
 #[test]
 fn an_import_left_in_its_final_state_gets_no_trailing_barrier() {
     let harness = Harness::open();
+    let pool = TransientPool::new();
     let mut target = harness.target(Format::Bgra8UnormSrgb);
     target.final_state = ResourceState::ColorAttachment;
 
@@ -1018,7 +1323,7 @@ fn an_import_left_in_its_final_state_gets_no_trailing_barrier() {
         .clear_color(swap, [0.0; 4])
         .execute(|_| {});
 
-    let compiled = graph.compile().expect("a legal frame");
+    let compiled = graph.compile(&pool).expect("a legal frame");
     assert!(
         compiled.final_barriers().is_empty(),
         "{:?}",
@@ -1031,6 +1336,7 @@ fn an_import_left_in_its_final_state_gets_no_trailing_barrier() {
 #[test]
 fn passes_run_in_the_order_they_were_declared() {
     let harness = Harness::open();
+    let mut pool = TransientPool::new();
     let mut graph = harness.graph();
     let color = graph.create_image("scene", scene_color());
 
@@ -1054,11 +1360,10 @@ fn passes_run_in_the_order_they_were_declared() {
             .execute(|_| {});
     }
 
-    let compiled = graph.compile().expect("a legal frame");
+    let compiled = graph.compile(&pool).expect("a legal frame");
     let order: Vec<&str> = compiled.passes().iter().map(|pass| pass.label()).collect();
     assert_eq!(order, names);
 
-    let mut pool = TransientPool::new();
     harness.record(|encoder| {
         compiled
             .execute(harness.device.as_ref(), &mut pool, encoder, None)

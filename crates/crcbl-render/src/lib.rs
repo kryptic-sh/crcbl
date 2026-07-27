@@ -60,12 +60,16 @@
 //! use crcbl_hal::null::NullInstance;
 //! use crcbl_hal::{DeviceDesc, Instance, QueueKind, ResourceState};
 //! use crcbl_render::graph::RenderGraph;
-//! use crcbl_render::transient::TransientImageDesc;
+//! use crcbl_render::transient::{TransientImageDesc, TransientPool};
 //!
 //! let instance = NullInstance::tier_a();
 //! let adapter = instance.adapters().remove(0);
 //! let device = instance.create_device(&DeviceDesc::for_adapter(adapter.id))?;
 //! let queue = device.queue(QueueKind::Graphics).expect("always present");
+//!
+//! // The pool outlives the graph: it owns the physical images, and it is what
+//! // remembers what the last frame left them in.
+//! let mut pool = TransientPool::new();
 //!
 //! let mut graph = RenderGraph::new(queue);
 //! let scene = graph.create_image("scene", TransientImageDesc::scene_color((64, 48)));
@@ -74,9 +78,12 @@
 //!     .clear_color(scene, [0.0, 0.0, 0.0, 1.0])
 //!     .execute(|_| {});
 //!
-//! let compiled = graph.compile()?;
+//! let compiled = graph.compile(&pool)?;
 //! assert_eq!(compiled.passes().len(), 1);
-//! // A fresh transient starts undefined, so the graph transitions it before use.
+//! // Nothing has ever used this pool, so the transient really is undefined and
+//! // the graph transitions it before use. A second frame through the same pool
+//! // would start from `ColorAttachment` — which is the barrier that orders it
+//! // after this one.
 //! let barriers = compiled.passes()[0].barriers();
 //! assert_eq!(barriers.images[0].from, ResourceState::Undefined);
 //! assert_eq!(barriers.images[0].to, ResourceState::ColorAttachment);
@@ -97,4 +104,4 @@ pub use graph::{
     PassContext, PassKind, RenderGraph,
 };
 pub use timing::{FrameTimings, PassTimers, PassTiming};
-pub use transient::{TransientBufferDesc, TransientImageDesc, TransientPool};
+pub use transient::{TransientBufferDesc, TransientImageDesc, TransientPool, TransientUse};

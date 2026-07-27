@@ -44,14 +44,60 @@
 //! them into one call per pass, alias transients whose lifetimes do not overlap,
 //! and return every imported resource to the state its owner requires.
 //!
+//! # The physical resource outlives the frame
+//!
+//! A graph is built and thrown away every frame. The *images* are not: a
+//! steady-state frame gets the same [`ImageHandle`] out of the
+//! [`TransientPool`] it got last frame, and a graph is aliasing when two of its
+//! virtual images land on one of them. So state tracking is per **physical**
+//! resource — and a physical resource's history does not start at this frame's
+//! first pass.
+//!
+//! Treating it as though it did is a real bug and not a subtle one. A barrier
+//! whose source state is [`ResourceState::Undefined`] carries *no source scope*
+//! at all — on Vulkan it expands to `srcStageMask = NONE, srcAccessMask = NONE`
+//! — so a frame that opens by transitioning its depth buffer from `Undefined`
+//! orders that transition against nothing, while the previous frame's
+//! depth writes to the very same image may still be in flight. Two submissions,
+//! no dependency, both writing: a write-after-write hazard that
+//! `CRCBL_VK_SYNC_VALIDATION=1` reports as `write_barriers: 0`, and that a
+//! driver is free to resolve either way.
+//!
+//! So the graph asks the pool what it left each physical resource in, and the
+//! first barrier that touches one names *that* as its source:
+//!
+//! ```text
+//! frame n-1 ─ forward pass writes depth ─▶ pool remembers DepthStencilWrite
+//!                                                │
+//! frame n   ─ compile(&pool) ────────────────────┘
+//!             first barrier: DepthStencilWrite ──▶ DepthStencilWrite
+//!             (a real source scope, so the two frames are ordered)
+//! ```
+//!
+//! Aliasing *within* a frame is the same story one scale down, and used to have
+//! the same hole: handing a slot from one virtual image to the next does not
+//! change which `VkImage` it is, so the incoming resource's barrier must name
+//! the state the outgoing one left, not `Undefined`. Discarding contents is only
+//! free when there are contents worth discarding — with one handle and one
+//! description there is nothing to discard, and pretending otherwise costs the
+//! source scope that made the two passes ordered.
+//!
+//! **Imported resources are the owner's problem**, deliberately: the graph
+//! cannot know what happened to a swapchain image before it was handed one, so
+//! [`ImportedImage::initial`] is a declaration and the owner is the one who has
+//! to be right. See its docs for what makes `Undefined` correct there.
+//!
 //! # Compilation is pure, and that is what makes it testable
 //!
-//! [`RenderGraph::compile`] takes no device and touches no GPU. It produces a
+//! [`RenderGraph::compile`] takes no device and touches no GPU. It reads the
+//! pool — a plain table of "what was this last used for" — and produces a
 //! [`CompiledGraph`] whose barriers name *virtual* resources; only
 //! [`CompiledGraph::execute`] resolves those to handles. That split is why
 //! `docs/plan/12-testing.md` can call the graph-compile suite a
 //! non-negotiable anchor and have it mean something: the interesting half runs
-//! on any machine, in microseconds, with no ICD in the room.
+//! on any machine, in microseconds, with no ICD in the room — including the
+//! cross-frame half, which needs two `compile` calls against one
+//! [`TransientPool::new`] and no driver at all.
 //!
 //! # The graph explains itself
 //!
@@ -71,7 +117,7 @@ use crcbl_hal::{
 };
 
 use crate::timing::PassTimers;
-use crate::transient::{TransientBufferDesc, TransientImageDesc, TransientPool};
+use crate::transient::{TransientBufferDesc, TransientImageDesc, TransientPool, TransientUse};
 
 /// A virtual image inside one graph.
 ///
@@ -119,6 +165,17 @@ pub struct ImportedImage {
     /// [`ResourceState::Undefined`] for a freshly acquired swapchain image —
     /// which discards its contents, which is free, and which is the only
     /// correct source for one.
+    ///
+    /// Unlike a transient, this is a **declaration the owner makes**, not
+    /// something the graph can look up: the graph never saw this image before
+    /// today and has no way to know what was done to it. `Undefined` is right
+    /// for an acquired swapchain image because the acquire's semaphore — waited
+    /// on by the submission that runs this graph — already orders the frame
+    /// after everything the presentation engine and the previous frame did with
+    /// it, so the barrier has no ordering left to carry and only has to reach
+    /// the layout. An importer with no such semaphore in the chain owes the
+    /// graph the truth here instead, or it is asking for the same
+    /// write-after-write the module docs describe.
     pub initial: ResourceState,
     /// The state the graph must leave it in.
     ///
@@ -371,13 +428,22 @@ impl<'a> RenderGraph<'a> {
     /// Pure: no device, no allocation of GPU memory, no side effects. See the
     /// module docs for why that split exists.
     ///
+    /// `pool` is read, never touched: it is the same [`TransientPool`]
+    /// [`CompiledGraph::execute`] will realise against, and the only thing
+    /// asked of it is what it left each physical transient in last frame. That
+    /// is what lets the first barrier of a frame carry a source scope covering
+    /// the *previous* frame's writes rather than `Undefined`, which covers
+    /// nothing — see the module docs. Passing a pool the graph will not execute
+    /// against is the one way to get this wrong, which is why the parameter is
+    /// the pool itself rather than a detachable snapshot of it.
+    ///
     /// # Errors
     ///
     /// [`GraphError`] for a graph that cannot be executed as written —
     /// conflicting accesses within one pass, a render pass with no attachments
     /// or with attachments of different sizes, a transient nothing uses.
-    pub fn compile(self) -> Result<CompiledGraph<'a>, GraphError> {
-        compile(self)
+    pub fn compile(self, pool: &TransientPool) -> Result<CompiledGraph<'a>, GraphError> {
+        compile(self, pool)
     }
 }
 
@@ -704,6 +770,13 @@ pub struct CompiledGraph<'a> {
     buffer_slots: Vec<Slot>,
     transient_images: Vec<TransientImageDesc>,
     transient_buffers: Vec<TransientBufferDesc>,
+    /// What this frame leaves each physical transient image in, parallel to
+    /// `transient_images`. Handed to the pool by
+    /// [`CompiledGraph::execute`] so the *next* frame's first barrier has a
+    /// source scope; computed here because compilation is what knows it.
+    transient_image_end: Vec<TransientUse>,
+    /// The same for buffers.
+    transient_buffer_end: Vec<TransientUse>,
 }
 
 impl fmt::Debug for CompiledGraph<'_> {
@@ -920,7 +993,12 @@ impl<'a> CompiledGraph<'a> {
     /// writes a start timestamp, emits its barrier batch as one call, opens the
     /// pass, sets a full-target viewport and scissor, runs the body, closes the
     /// pass and writes an end timestamp. Finally emits the barriers that return
-    /// imported resources to their required states.
+    /// imported resources to their required states, and tells `pool` what this
+    /// frame left each physical transient in — which is what the *next* frame's
+    /// first barrier uses as its source scope.
+    ///
+    /// `pool` must be the one [`RenderGraph::compile`] was given, or the
+    /// barriers name states the resources are not in.
     ///
     /// The encoder is left outside any pass, with nothing to clean up.
     ///
@@ -940,6 +1018,10 @@ impl<'a> CompiledGraph<'a> {
             images,
             passes,
             final_barriers,
+            transient_images,
+            transient_buffers,
+            transient_image_end,
+            transient_buffer_end,
             ..
         } = self;
 
@@ -1000,6 +1082,26 @@ impl<'a> CompiledGraph<'a> {
         }
 
         emit(encoder, &images, &realised, &final_barriers);
+
+        // The handover to the next frame. It happens after the commands are
+        // recorded rather than during compilation because a graph that is
+        // compiled and dropped ran nothing, and a pool that remembered a frame
+        // that never happened would order the following frame against writes
+        // the GPU never performed.
+        for (slot, desc) in transient_images.iter().enumerate() {
+            pool.set_image_use(
+                *desc,
+                ordinal(&transient_images, slot),
+                transient_image_end[slot],
+            );
+        }
+        for (slot, desc) in transient_buffers.iter().enumerate() {
+            pool.set_buffer_use(
+                *desc,
+                ordinal(&transient_buffers, slot),
+                transient_buffer_end[slot],
+            );
+        }
         Ok(())
     }
 
@@ -1299,17 +1401,52 @@ pub enum GraphError {
 }
 
 /// Per-physical-resource tracking during compilation.
+///
+/// Keyed on the *physical* resource, and seeded from what that resource was
+/// last used for — [`ImportedImage::initial`] for an import, the pool's memory
+/// of the previous frame for a transient. There is no "and now the slot is
+/// fresh" case: a slot handed from one virtual resource to another is the same
+/// object, in the state the previous one left it, and the module docs explain
+/// why pretending otherwise loses the barrier.
 #[derive(Clone, Copy, Debug)]
 struct Tracked {
     state: ResourceState,
     queue: Option<QueueHandle>,
-    /// Which virtual resource currently occupies this slot. A change means the
-    /// slot was aliased and its contents are garbage, so the next transition
-    /// starts from [`ResourceState::Undefined`].
-    owner: Option<u32>,
 }
 
-fn compile(graph: RenderGraph<'_>) -> Result<CompiledGraph<'_>, GraphError> {
+impl Tracked {
+    const fn carried(last: TransientUse) -> Self {
+        Self {
+            state: last.state,
+            queue: last.queue,
+        }
+    }
+
+    const fn end(self) -> TransientUse {
+        TransientUse {
+            state: self.state,
+            queue: self.queue,
+        }
+    }
+}
+
+/// How many earlier entries of `descs` carry the same description as `descs[at]`.
+///
+/// The pool hands out the *n*-th resource of a description for the *n*-th
+/// request, and [`CompiledGraph::realise`] requests them in slot order — so this
+/// is the number that turns "physical slot 3" into "the pool entry slot 3 will
+/// get", both before it has been realised and after.
+fn ordinal<D: PartialEq>(descs: &[D], at: usize) -> usize {
+    descs[..at]
+        .iter()
+        .filter(|other| **other == descs[at])
+        .count()
+}
+
+fn compile<'a>(
+    graph: RenderGraph<'a>,
+    pool: &TransientPool,
+) -> Result<CompiledGraph<'a>, GraphError> {
     let RenderGraph {
         images,
         buffers,
@@ -1354,6 +1491,11 @@ fn compile(graph: RenderGraph<'_>) -> Result<CompiledGraph<'_>, GraphError> {
     // State tracking is per **physical** resource, because that is what a
     // barrier actually names. Imported resources get one tracker each (keyed by
     // their own id); transients share one per physical slot.
+    //
+    // Every tracker starts where its resource actually is. For an import that
+    // is what the owner declared; for a transient it is what the pool remembers
+    // of the last frame that used the very same handle, which is the whole of
+    // the cross-frame fix.
     let mut image_state: Vec<Tracked> = images
         .iter()
         .zip(&image_slots)
@@ -1363,17 +1505,15 @@ fn compile(graph: RenderGraph<'_>) -> Result<CompiledGraph<'_>, GraphError> {
                 _ => ResourceState::Undefined,
             },
             queue: None,
-            owner: None,
         })
         .collect();
-    let mut transient_image_state: Vec<Tracked> = vec![
-        Tracked {
-            state: ResourceState::Undefined,
-            queue: None,
-            owner: None,
-        };
-        transient_images.len()
-    ];
+    let mut transient_image_state: Vec<Tracked> = (0..transient_images.len())
+        .map(|slot| {
+            Tracked::carried(
+                pool.image_use(transient_images[slot], ordinal(&transient_images, slot)),
+            )
+        })
+        .collect();
     let mut buffer_state: Vec<Tracked> = buffers
         .iter()
         .zip(&buffer_slots)
@@ -1383,17 +1523,15 @@ fn compile(graph: RenderGraph<'_>) -> Result<CompiledGraph<'_>, GraphError> {
                 _ => ResourceState::Undefined,
             },
             queue: None,
-            owner: None,
         })
         .collect();
-    let mut transient_buffer_state: Vec<Tracked> = vec![
-        Tracked {
-            state: ResourceState::Undefined,
-            queue: None,
-            owner: None,
-        };
-        transient_buffers.len()
-    ];
+    let mut transient_buffer_state: Vec<Tracked> = (0..transient_buffers.len())
+        .map(|slot| {
+            Tracked::carried(
+                pool.buffer_use(transient_buffers[slot], ordinal(&transient_buffers, slot)),
+            )
+        })
+        .collect();
 
     let mut compiled = Vec::with_capacity(passes.len());
     for pass in passes {
@@ -1406,7 +1544,7 @@ fn compile(graph: RenderGraph<'_>) -> Result<CompiledGraph<'_>, GraphError> {
                 &mut image_state,
                 &mut transient_image_state,
             );
-            if let Some(barrier) = transition(tracked, access.image.0, access.state, pass.queue) {
+            if let Some(barrier) = transition(tracked, access.state, pass.queue) {
                 barriers.images.push(GraphImageBarrier {
                     image: access.image,
                     from: barrier.0,
@@ -1422,7 +1560,7 @@ fn compile(graph: RenderGraph<'_>) -> Result<CompiledGraph<'_>, GraphError> {
                 &mut buffer_state,
                 &mut transient_buffer_state,
             );
-            if let Some(barrier) = transition(tracked, access.buffer.0, access.state, pass.queue) {
+            if let Some(barrier) = transition(tracked, access.state, pass.queue) {
                 barriers.buffers.push(GraphBufferBarrier {
                     buffer: access.buffer,
                     from: barrier.0,
@@ -1482,6 +1620,12 @@ fn compile(graph: RenderGraph<'_>) -> Result<CompiledGraph<'_>, GraphError> {
         }
     }
 
+    // What the pool is told once these commands are actually recorded. Read off
+    // the trackers rather than re-derived, so the state the next frame barriers
+    // against is by construction the state this frame's last barrier reached.
+    let transient_image_end = transient_image_state.iter().map(|t| t.end()).collect();
+    let transient_buffer_end = transient_buffer_state.iter().map(|t| t.end()).collect();
+
     Ok(CompiledGraph {
         images,
         buffers,
@@ -1491,6 +1635,8 @@ fn compile(graph: RenderGraph<'_>) -> Result<CompiledGraph<'_>, GraphError> {
         buffer_slots,
         transient_images,
         transient_buffers,
+        transient_image_end,
+        transient_buffer_end,
     })
 }
 
@@ -1509,22 +1655,21 @@ fn tracker<'s>(
 /// Decides whether a transition is needed, and updates the tracker.
 ///
 /// Returns `(from, queue_transfer)` when a barrier must be emitted.
+///
+/// There is no special case for a physical slot changing hands. It used to
+/// start such a transition from [`ResourceState::Undefined`], on the argument
+/// that the outgoing resource's pixels are garbage to the incoming one and
+/// discarding them is free. The pixels are indeed garbage — but `Undefined` on
+/// this seam does not only mean "discard", it means "no source scope", and the
+/// outgoing resource's *writes* are not garbage: they are in flight. Naming the
+/// real previous state costs nothing here (one handle, one description, so
+/// there is no layout change and nothing to decompress) and is the difference
+/// between the two uses being ordered and racing.
 fn transition(
     tracked: &mut Tracked,
-    owner: u32,
     want: ResourceState,
     queue: QueueHandle,
 ) -> Option<(ResourceState, Option<QueueTransfer>)> {
-    // A physical slot that has changed hands holds another resource's pixels.
-    // Whatever state it was in describes contents this resource does not want,
-    // so the transition starts from `Undefined` — which discards them, which is
-    // free, and which is the whole reason aliasing is safe.
-    if tracked.owner != Some(owner) {
-        tracked.owner = Some(owner);
-        tracked.state = ResourceState::Undefined;
-        tracked.queue = None;
-    }
-
     let queue_transfer = match tracked.queue {
         Some(previous) if previous != queue => Some(QueueTransfer {
             from: previous,

@@ -544,7 +544,10 @@ impl Gpu {
                 ),
             );
             let _hdr = self.renderer.add_passes(&mut graph, target, extent);
-            graph.compile()?
+            // The pool is what remembers the previous frame, so the barriers
+            // that open this one are ordered against it rather than against
+            // nothing.
+            graph.compile(&self.pool)?
         };
 
         // "The graph must be able to explain itself" — §2.4's debug-tools

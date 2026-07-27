@@ -17,6 +17,31 @@
 # Exits non-zero if there is no Vulkan loader, if no ICD is visible, if no tests
 # ran, or if any test fails.
 #
+# WHAT A GREEN RUN HERE IS AND IS NOT EVIDENCE OF
+#   This script is what a developer runs to see what CI sees, so it has to say
+#   what it actually checked rather than only how many tests passed. Two things
+#   were silently inherited before and are now reported by name:
+#
+#   * **which driver ran**, taken from the suite's own adapter line rather than
+#     from the manifest path that was asked for; and
+#   * **how far this machine's validation layer can see**, because sync
+#     validation is not one switch. A hazard inside one command buffer is caught
+#     while it is recorded; a hazard that spans two *submissions* can only be
+#     caught when the queue is submitted, and layer builds differ in whether
+#     they model that. Every cross-frame hazard is of the second kind.
+#
+#   That difference is not hypothetical. A missing cross-frame barrier on the
+#   render graph's depth transient was reported by the CI leg's layer and by
+#   nothing at all on an Arch box running VK_LAYER_KHRONOS_validation 1.4.350 —
+#   same driver, same flags, same tests, 26/26 green. A harness that reports
+#   26/26 without saying that is worse than no harness, so it now prints the
+#   layer's reach and shouts when the reach is short.
+#
+#   The gate for that *class* of bug is therefore deliberately not here: it is
+#   `crcbl-render`'s graph-compile suite, which compiles two frames against one
+#   `TransientPool` and asserts the second one's barriers name what the first
+#   left behind. No layer, no ICD, no GPU, no packaging opinions.
+#
 # ENVIRONMENT
 #   CRCBL_VK_ICD              Pin an ICD manifest, e.g. lavapipe's `lvp_icd.json`.
 #                             CI sets this so a runner that grows a GPU does not
@@ -109,6 +134,17 @@ if command -v vulkaninfo >/dev/null 2>&1; then
     echo "crcbl vk e2e: --- vulkaninfo --summary ---"
     vulkaninfo --summary 2>&1 | sed -n '1,80p' || true
     echo "crcbl vk e2e: --- end vulkaninfo ---"
+    # Named, rather than left in eighty lines of dump: a run gated by a
+    # validation layer is only evidence about the layer that gated it, and
+    # `vulkaninfo --summary`'s layer table is the one place that says which.
+    LAYER_LINE="$(vulkaninfo --summary 2>/dev/null | grep -E '^VK_LAYER_KHRONOS_validation' || true)"
+    if [ -n "$LAYER_LINE" ]; then
+        # `NAME  description…  <spec version>  version <impl>`, so the three
+        # trailing fields are the two numbers that identify a build.
+        echo "crcbl vk e2e: validation layer $(echo "$LAYER_LINE" | awk '{print $1, "spec", $(NF-2), $(NF-1), $NF}')"
+    else
+        echo "crcbl vk e2e: vulkaninfo does not list VK_LAYER_KHRONOS_validation" >&2
+    fi
 fi
 
 cd "$REPO_ROOT"
@@ -133,6 +169,11 @@ cargo nextest run \
 STATUS=${PIPESTATUS[0]}
 set -e
 
+# The colour-stripped copy is load-bearing for every match below — CI sets
+# `CARGO_TERM_COLOR: always`, so nextest wraps its counts in escapes and a
+# plain-text match sees no digits next to "tests run".
+sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$OUTPUT" >"${OUTPUT}.plain"
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl vk e2e: the suite failed" >&2
     # `docs/plan/12-testing.md`: "diffs uploaded as CI artifacts on failure".
@@ -146,16 +187,59 @@ if [ "$STATUS" -ne 0 ]; then
 fi
 
 # The trap `docs/plan/12-testing.md` names by name: a job that skips everything
-# and reports success is worse than no job. The colour-stripped copy is
-# load-bearing — CI sets `CARGO_TERM_COLOR: always`, so nextest emits the count
-# wrapped in escapes and a plain-text match sees no digits next to "tests run".
-sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$OUTPUT" >"${OUTPUT}.plain"
+# and reports success is worse than no job.
 RAN="$(grep -Eo '[0-9]+ tests? run' "${OUTPUT}.plain" | tail -1 | grep -Eo '^[0-9]+' || true)"
 if [ -z "$RAN" ] || [ "$RAN" -eq 0 ]; then
     echo "crcbl vk e2e: the suite reported no tests run — the gate is not gating" >&2
     exit 1
 fi
+
+# Which driver actually ran, from the suite rather than from the manifest that
+# was asked for. A pinned ICD the loader quietly ignored, or a sibling manifest
+# that turned out to be a different driver, both show up here and nowhere else.
+DRIVER="$(grep -Eo 'vk e2e: adapter .*' "${OUTPUT}.plain" | head -1 || true)"
+if [ -n "$DRIVER" ]; then
+    echo "crcbl vk e2e: ${DRIVER#vk e2e: }"
+else
+    echo "crcbl vk e2e: the suite never named an adapter — it did not open a device" >&2
+    exit 1
+fi
+
 echo "crcbl vk e2e: $RAN tests ran against a real Vulkan implementation"
+
+# How far this machine's validation layer can see. The suite measures it; this
+# is what turns the measurement into something a reader cannot miss.
+REACH="$(grep -Eo 'sync-validation reach: .*' "${OUTPUT}.plain" | tail -1 || true)"
+if [ -z "$REACH" ]; then
+    # Not a soft warning: the suite is supposed to publish this, and a harness
+    # that silently stopped measuring its own blind spot is the failure this
+    # whole section exists to prevent.
+    echo "crcbl vk e2e: the suite did not report its sync-validation reach." >&2
+    echo "              crates/crcbl-vk/tests/vk_e2e.rs must print it, and this" >&2
+    echo "              script must be able to find it, or a green run here" >&2
+    echo "              claims evidence it does not have." >&2
+    exit 1
+fi
+echo "crcbl vk e2e: $REACH"
+case "$REACH" in
+    *cross-submission=no*)
+        echo "crcbl vk e2e: ############################################################" >&2
+        echo "crcbl vk e2e: # THIS RUN IS WEAKER THAN THE CI JOB IT STANDS IN FOR.     #" >&2
+        echo "crcbl vk e2e: ############################################################" >&2
+        echo "crcbl vk e2e: This machine's validation layer reports hazards inside a" >&2
+        echo "              submission and not hazards *between* submissions. Every" >&2
+        echo "              missing cross-frame barrier is of the second kind, so the" >&2
+        echo "              green result above says nothing about them — CI's layer" >&2
+        echo "              has caught one that this configuration cannot see." >&2
+        echo "              Rely on 'cargo nextest run -p crcbl-render' for that" >&2
+        echo "              class: it compiles consecutive frames against one pool" >&2
+        echo "              and needs no layer at all." >&2
+        ;;
+    *)
+        echo "crcbl vk e2e: the layer sees across submissions, so cross-frame hazards \
+were in scope"
+        ;;
+esac
 
 # The sandbox's own frame, headless, against the same implementation. This is
 # the thing `docs/plan/02-vulkan-backend.md`'s milestone 1 is measured by — a

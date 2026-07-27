@@ -1794,6 +1794,28 @@ fn samplers_honour_the_seams_defaults_and_its_limits() {
 /// between the two copies. It is recorded and thrown away, never submitted, for
 /// the reason the sibling test gives: a spec violation is undefined behaviour,
 /// and lavapipe is under no obligation to survive one.
+///
+/// # Sync validation has two halves, and only one of them is asserted here
+///
+/// A hazard inside one command buffer is caught while it is being *recorded*.
+/// A hazard that spans two command buffers — or two submissions — can only be
+/// caught when the queue is submitted, which is a separate piece of the layer
+/// (`syncval_submit_time_validation`) and, on some builds, not one that runs.
+/// **Every cross-frame hazard is in the second category**, including the
+/// write-after-write on the graph's depth transient that this branch fixes: it
+/// was reported by the CI leg's layer and by nothing on the developer's, which
+/// is how a harness that claims to stand in for CI stops doing so.
+///
+/// So the second half is *measured* and printed rather than asserted. Asserting
+/// it would fail a machine whose layer simply does not implement it, which is
+/// not a bug in this repository; leaving it unmeasured is worse, because then
+/// "26 tests passed" reads as "I saw what CI sees" when it may not be. The
+/// marker line this prints is what `tests/run-vk-e2e.sh` turns into a banner.
+///
+/// The gate for the *bug class* is deliberately not here at all — it is
+/// `crcbl-render`'s `a_second_frame_barriers_against_what_the_first_one_left`,
+/// which needs no layer, no ICD and no GPU and therefore cannot be switched off
+/// by a distribution's packaging choices.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
 fn synchronisation_validation_catches_a_missing_barrier() {
@@ -1856,6 +1878,115 @@ fn synchronisation_validation_catches_a_missing_barrier() {
     device.wait_idle().expect("idle");
     device.destroy_swapchain(headless.swapchain);
     headless.instance.destroy_surface(headless.surface);
+
+    // And the two halves the recording checks cannot see. The marker line is
+    // grepped by `tests/run-vk-e2e.sh`; keep the spelling.
+    eprintln!(
+        "vk e2e: sync-validation reach: record-time=yes one-submission={} cross-submission={}",
+        yes_no(queue_hazard_reported(HazardShape::OneSubmission)),
+        yes_no(queue_hazard_reported(HazardShape::TwoSubmissions)),
+    );
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+/// How far apart the two halves of a deliberate hazard are placed.
+#[derive(Clone, Copy, Debug)]
+enum HazardShape {
+    /// Two command buffers inside one `vkQueueSubmit2`.
+    OneSubmission,
+    /// Two separate `vkQueueSubmit2` calls, which is where **every** hazard
+    /// that spans a frame boundary lives.
+    TwoSubmissions,
+}
+
+/// Whether this validation layer reports a write-after-write the *recording*
+/// checks cannot see, at the given distance.
+///
+/// Both shapes are the same hazard — two copies into one buffer with nothing
+/// ordering them — and a layer may model one and not the other. The distinction
+/// is the whole point of measuring: a frame's barriers are ordered against the
+/// *previous frame's submission*, so a layer that reports `OneSubmission` and
+/// not `TwoSubmissions` is blind to every cross-frame bug while looking, from
+/// a green test run, exactly like one that is not.
+///
+/// The payload is deliberately large. A layer retires a batch it can prove has
+/// completed, and this backend queries the retire timeline after every submit,
+/// so a four-kilobyte copy can finish before the next submission is validated
+/// and turn a real answer into "no". Thirty-two megabytes will still be in
+/// flight; a wrong answer here is then the layer's behaviour rather than the
+/// GPU's speed.
+///
+/// Its own instance, because the report it produces is dirty by construction and
+/// must not land on a caller's.
+fn queue_hazard_reported(shape: HazardShape) -> bool {
+    /// Big enough to still be running when the next submission is validated.
+    const PAYLOAD: u64 = 32 << 20;
+
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+
+    let buffer = |label| {
+        device
+            .create_buffer(&BufferDesc {
+                label: Some(label),
+                size: PAYLOAD,
+                usage: BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a buffer")
+    };
+    let (source, shared, other) = (buffer("reach a"), buffer("reach b"), buffer("reach c"));
+
+    let record = |src, dst| {
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("reach probe"),
+            queue: headless.queue,
+        });
+        encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+            src,
+            src_offset: 0,
+            dst,
+            dst_offset: 0,
+            size: PAYLOAD,
+        });
+        encoder.finish().expect("recorded")
+    };
+    let commands = [record(source, shared), record(other, shared)];
+
+    match shape {
+        HazardShape::OneSubmission => {
+            device
+                .submit(headless.queue, &SubmitInfo::new(&commands))
+                .expect("submit");
+        }
+        HazardShape::TwoSubmissions => {
+            for handle in commands {
+                device
+                    .submit(headless.queue, &SubmitInfo::new(&[handle]))
+                    .expect("submit");
+            }
+        }
+    }
+
+    device.wait_idle().expect("idle");
+    let report = headless.instance.validation_report();
+    let seen = report
+        .messages
+        .iter()
+        .any(|message| message.id.contains("SYNC-HAZARD") || message.text.contains("SYNC-HAZARD"));
+
+    for handle in commands {
+        device.destroy_command_buffer(handle);
+    }
+    for handle in [source, shared, other] {
+        device.destroy_buffer(handle);
+    }
+    device.destroy_swapchain(headless.swapchain);
+    headless.instance.destroy_surface(headless.surface);
+    seen
 }
 
 // --- milestones 3, 4 and 5: the lit mesh, through the render graph -----------
@@ -2123,7 +2254,9 @@ fn render_mesh(
             .add_compute_pass("hdr probe")
             .use_image(scene, ResourceState::TransferSrc)
             .execute(move |ctx| sink.set(Some(ctx.image(scene))));
-        graph.compile().expect("a legal frame")
+        // `&*pool`: the same pool the frame is about to be realised
+        // against, so the barriers open where the last frame left off.
+        graph.compile(&*pool).expect("a legal frame")
     };
     eprintln!("vk e2e: {}", compiled.dump());
     compiled
@@ -2500,7 +2633,7 @@ fn per_pass_gpu_timers_report_real_numbers() {
                 ),
             );
             let _ = renderer.add_passes(&mut graph, target, MESH_EXTENT);
-            graph.compile().expect("a legal frame")
+            graph.compile(&pool).expect("a legal frame")
         };
         compiled
             .execute(device, &mut pool, encoder.as_mut(), Some(&mut timers))
@@ -2883,7 +3016,7 @@ fn render_probe(
                 encoder.bind_index_buffer(probe.indices, 0, crcbl_hal::IndexFormat::Uint32);
                 encoder.draw_indexed(0..12, 0, 0..1);
             });
-        graph.compile().expect("a legal frame")
+        graph.compile(&*pool).expect("a legal frame")
     };
     compiled
         .execute(device, pool, encoder.as_mut(), None)
@@ -3103,7 +3236,7 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
                     ),
                 );
                 let _ = renderer.add_passes(&mut graph, target, extent);
-                graph.compile().expect("a legal frame")
+                graph.compile(&pool).expect("a legal frame")
             };
             // Every pass renders at the size that was just configured, which is
             // the graph deriving its render area from the attachments rather

@@ -25,13 +25,29 @@
 //! dead now*; it does **not** promise the GPU is finished with the object", and
 //! frames are in flight. Waiting more frames than the loop keeps in flight makes
 //! the destroy safe without a device-wide idle.
+//!
+//! # The pool remembers what each resource was last used for
+//!
+//! "Transient" names the *virtual* resource's lifetime, not the physical one: a
+//! steady-state frame reuses the very same [`ImageHandle`] it used last frame,
+//! and the frame before that. So the state a frame leaves a pooled resource in
+//! is the state the *next* frame's first barrier has to name as its source, or
+//! that barrier orders itself against nothing and the two frames' writes race.
+//! That is what [`TransientUse`] carries and what
+//! [`TransientPool::image_use`] hands to
+//! [`RenderGraph::compile`](crate::graph::RenderGraph::compile); see that
+//! module's "the physical resource outlives the frame" section for the failure
+//! it fixes.
+//!
+//! The state lives **on the pooled entry**, so retirement takes it with the
+//! resource and a resize cannot leave one resource wearing another's history.
 
 use std::collections::HashMap;
 
 use crcbl_hal::{
     BufferDesc, BufferHandle, BufferUsage, Device, Format, HalError, ImageDesc, ImageHandle,
     ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
-    MemoryLocation,
+    MemoryLocation, QueueHandle, ResourceState,
 };
 
 /// Frames a pooled resource may go unused before it is destroyed.
@@ -68,6 +84,22 @@ pub struct TransientBufferDesc {
     pub usage: BufferUsage,
 }
 
+/// What the last frame to use a pooled resource left it in.
+///
+/// The source scope of the next frame's first barrier against that resource.
+/// [`ResourceState::Undefined`] with no queue is the honest answer for a
+/// resource no frame has touched yet — nothing has been written, so there is
+/// nothing to order against, which is exactly what `Undefined` means.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TransientUse {
+    /// The state the last access left it in.
+    pub state: ResourceState,
+    /// The queue that access ran on, so a frame that uses the resource from a
+    /// different queue emits the acquire half of a queue-family transfer rather
+    /// than reading memory the other queue never released.
+    pub queue: Option<QueueHandle>,
+}
+
 #[derive(Debug)]
 struct PooledImage {
     image: ImageHandle,
@@ -76,6 +108,8 @@ struct PooledImage {
     idle_frames: u32,
     /// Whether it has already been handed out this frame.
     taken: bool,
+    /// What the last frame that used it left it in.
+    last: TransientUse,
 }
 
 #[derive(Debug)]
@@ -83,6 +117,7 @@ struct PooledBuffer {
     buffer: BufferHandle,
     idle_frames: u32,
     taken: bool,
+    last: TransientUse,
 }
 
 /// Physical backing for the graph's transients.
@@ -171,6 +206,7 @@ impl TransientPool {
             view,
             idle_frames: 0,
             taken: true,
+            last: TransientUse::default(),
         });
         Ok((image, view))
     }
@@ -203,8 +239,77 @@ impl TransientPool {
             buffer,
             idle_frames: 0,
             taken: true,
+            last: TransientUse::default(),
         });
         Ok(buffer)
+    }
+
+    /// What the last frame left the `ordinal`-th pooled image matching `desc`
+    /// in.
+    ///
+    /// `ordinal` counts within one description, in the order
+    /// [`TransientPool::image`] hands them out — so the *n*-th request for a
+    /// description in a frame is the *n*-th entry here, and a graph that has
+    /// packed its transients onto physical slots can ask about a slot it has not
+    /// realised yet. [`TransientUse::default`] for a description the pool has
+    /// never been asked for, which is the correct answer: there is no resource,
+    /// so nothing has written one.
+    #[must_use]
+    pub fn image_use(&self, desc: TransientImageDesc, ordinal: usize) -> TransientUse {
+        self.images
+            .get(&desc)
+            .and_then(|entries| entries.get(ordinal))
+            .map_or_else(TransientUse::default, |pooled| pooled.last)
+    }
+
+    /// What the last frame left the `ordinal`-th pooled buffer matching `desc`
+    /// in. See [`TransientPool::image_use`].
+    #[must_use]
+    pub fn buffer_use(&self, desc: TransientBufferDesc, ordinal: usize) -> TransientUse {
+        self.buffers
+            .get(&desc)
+            .and_then(|entries| entries.get(ordinal))
+            .map_or_else(TransientUse::default, |pooled| pooled.last)
+    }
+
+    /// Records what this frame left the `ordinal`-th pooled image in.
+    ///
+    /// Deliberately not public: the only caller that can know this is
+    /// [`CompiledGraph::execute`](crate::graph::CompiledGraph::execute), which
+    /// computed the state at compile time and has just recorded the commands
+    /// that reach it. A caller who wrote a different number here would move
+    /// every following frame's first barrier onto a source scope the GPU never
+    /// visits.
+    pub(crate) fn set_image_use(
+        &mut self,
+        desc: TransientImageDesc,
+        ordinal: usize,
+        last: TransientUse,
+    ) {
+        if let Some(pooled) = self
+            .images
+            .get_mut(&desc)
+            .and_then(|entries| entries.get_mut(ordinal))
+        {
+            pooled.last = last;
+        }
+    }
+
+    /// Records what this frame left the `ordinal`-th pooled buffer in. See
+    /// [`TransientPool::set_image_use`].
+    pub(crate) fn set_buffer_use(
+        &mut self,
+        desc: TransientBufferDesc,
+        ordinal: usize,
+        last: TransientUse,
+    ) {
+        if let Some(pooled) = self
+            .buffers
+            .get_mut(&desc)
+            .and_then(|entries| entries.get_mut(ordinal))
+        {
+            pooled.last = last;
+        }
     }
 
     /// Destroys anything that has gone unused for [`RETIRE_AFTER_FRAMES`]
