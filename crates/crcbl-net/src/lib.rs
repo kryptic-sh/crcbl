@@ -14,6 +14,7 @@
 //! * [`SnapshotWriter`] / [`SnapshotReader`] — encode and decode per-system state
 //!   for the server → client snapshot path.
 
+pub mod codec;
 pub mod condition;
 pub mod delta;
 pub mod handshake;
@@ -22,6 +23,11 @@ pub mod session;
 pub mod transport;
 pub mod types;
 
+pub use codec::{
+    DecodeError, HandshakeResult, Hello, RejectReason, decode_ack, decode_client_to_server,
+    decode_handshake_result, decode_hello, decode_server_to_client, encode_ack,
+    encode_client_to_server, encode_handshake_result, encode_hello, encode_server_to_client,
+};
 pub use condition::{ConditionSimulator, SimConditions};
 pub use delta::{Baseline, BaselineStore};
 pub use handshake::{HandshakeGate, HandshakeResult, Hello, RejectReason};

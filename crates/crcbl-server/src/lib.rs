@@ -20,7 +20,11 @@ use crcbl_net::{Message, MessageKind, SnapshotWriter, Transport};
 /// [`Message`].
 fn encode_server_to_client(msg: &crcbl_net::ServerToClient) -> Vec<u8> {
     match msg {
-        crcbl_net::ServerToClient::Snapshot { tick, systems } => {
+        crcbl_net::ServerToClient::Snapshot {
+            sector: _sector,
+            tick,
+            systems,
+        } => {
             let mut buf = Vec::new();
             buf.push(0u8); // tag: Snapshot
             buf.extend_from_slice(&tick.get().to_le_bytes());
@@ -461,7 +465,11 @@ mod tests {
                     offset += data_len;
                     systems.push(crcbl_net::SystemSnapshot { system_id, data });
                 }
-                Some(crcbl_net::ServerToClient::Snapshot { tick, systems })
+                Some(crcbl_net::ServerToClient::Snapshot {
+                    sector: crcbl_net::SectorId::ZERO,
+                    tick,
+                    systems,
+                })
             }
             _ => None,
         }

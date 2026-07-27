@@ -8,7 +8,9 @@ use std::fmt;
 
 use crcbl_core::{FrameClock, TickId};
 use crcbl_ecs::World;
-use crcbl_net::{Message, MessageKind, ServerToClient, SystemSnapshot, Transport, TransportError};
+use crcbl_net::{
+    Message, MessageKind, SectorId, ServerToClient, SystemSnapshot, Transport, TransportError,
+};
 use glam::Vec3;
 
 // ---------------------------------------------------------------------------
@@ -45,7 +47,11 @@ fn decode_server_to_client(payload: &[u8]) -> Option<ServerToClient> {
                 offset += data_len;
                 systems.push(SystemSnapshot { system_id, data });
             }
-            Some(ServerToClient::Snapshot { tick, systems })
+            Some(ServerToClient::Snapshot {
+                sector: SectorId::ZERO,
+                tick,
+                systems,
+            })
         }
         1 => {
             // Event

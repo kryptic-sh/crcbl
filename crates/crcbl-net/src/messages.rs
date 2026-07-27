@@ -2,6 +2,8 @@
 
 use crcbl_core::TickId;
 
+use crate::types::SectorId;
+
 // ── Typed protocol messages ───────────────────────────────────────────────────
 
 /// Messages sent from the client to the server.
@@ -26,6 +28,8 @@ pub enum ClientToServer {
 pub enum ServerToClient {
     /// A world snapshot for a given tick.
     Snapshot {
+        /// The sector this snapshot covers.
+        sector: SectorId,
         /// The server tick this snapshot represents.
         tick: TickId,
         /// Per-system snapshot data.
@@ -53,14 +57,25 @@ pub struct SystemSnapshot {
 pub struct SnapshotWriter {
     systems: Vec<SystemSnapshot>,
     tick: TickId,
+    sector: SectorId,
 }
 
 impl SnapshotWriter {
-    /// Create a writer for the given server tick.
+    /// Create a writer for the given server tick using the default (zero) sector.
     pub fn new(tick: TickId) -> Self {
         Self {
             systems: Vec::new(),
             tick,
+            sector: SectorId::ZERO,
+        }
+    }
+
+    /// Create a writer for the given sector and server tick.
+    pub fn new_with_sector(sector: SectorId, tick: TickId) -> Self {
+        Self {
+            systems: Vec::new(),
+            tick,
+            sector,
         }
     }
 
@@ -72,6 +87,7 @@ impl SnapshotWriter {
     /// Consume the writer and produce the finished [`ServerToClient`] message.
     pub fn finish(self) -> ServerToClient {
         ServerToClient::Snapshot {
+            sector: self.sector,
             tick: self.tick,
             systems: self.systems,
         }
@@ -89,6 +105,7 @@ impl std::fmt::Debug for SnapshotWriter {
 
 /// Reads per-system data out of a [`ServerToClient::Snapshot`].
 pub struct SnapshotReader<'a> {
+    sector: SectorId,
     tick: TickId,
     systems: &'a [SystemSnapshot],
 }
@@ -99,12 +116,22 @@ impl<'a> SnapshotReader<'a> {
     /// Returns `None` if the message is not a snapshot.
     pub fn from_snapshot(msg: &'a ServerToClient) -> Option<Self> {
         match msg {
-            ServerToClient::Snapshot { tick, systems } => Some(Self {
+            ServerToClient::Snapshot {
+                sector,
+                tick,
+                systems,
+            } => Some(Self {
+                sector: *sector,
                 tick: *tick,
                 systems,
             }),
             ServerToClient::Event { .. } => None,
         }
+    }
+
+    /// The sector this snapshot covers.
+    pub fn sector(&self) -> SectorId {
+        self.sector
     }
 
     /// The server tick this snapshot represents.
@@ -131,6 +158,7 @@ impl<'a> SnapshotReader<'a> {
 impl<'a> std::fmt::Debug for SnapshotReader<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SnapshotReader")
+            .field("sector", &self.sector)
             .field("tick", &self.tick)
             .field("system_count", &self.systems.len())
             .finish()
@@ -146,7 +174,8 @@ mod tests {
     #[test]
     fn snapshot_writer_reader_roundtrip() {
         let tick = TickId::from_raw(42);
-        let mut writer = SnapshotWriter::new(tick);
+        let sector = SectorId { x: 1, y: 2, z: 3 };
+        let mut writer = SnapshotWriter::new_with_sector(sector, tick);
 
         writer.write_system(1, b"physics".to_vec());
         writer.write_system(2, b"render".to_vec());
@@ -155,6 +184,7 @@ mod tests {
         let msg = writer.finish();
         let reader = SnapshotReader::from_snapshot(&msg).unwrap();
 
+        assert_eq!(reader.sector(), sector);
         assert_eq!(reader.tick(), tick);
         assert_eq!(reader.system_data(1), Some(b"physics".as_slice()));
         assert_eq!(reader.system_data(2), Some(b"render".as_slice()));
@@ -208,6 +238,7 @@ mod tests {
         let _ = format!(
             "{:?}",
             ServerToClient::Snapshot {
+                sector: SectorId::ZERO,
                 tick: TickId::from_raw(2),
                 systems: vec![SystemSnapshot {
                     system_id: 1,
@@ -228,6 +259,7 @@ mod tests {
         let _ = format!("{writer:?}");
 
         let msg = ServerToClient::Snapshot {
+            sector: SectorId::ZERO,
             tick: TickId::from_raw(3),
             systems: vec![],
         };
