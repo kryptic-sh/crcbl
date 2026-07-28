@@ -13,8 +13,8 @@ use std::time::Instant;
 use crcbl_core::{FrameClock, TickId};
 use crcbl_ecs::{Inspector, World};
 use crcbl_net::{
-    Baseline, DeltaCodec, HandshakeGate, HandshakeResult, Message, MessageKind, SessionConfig,
-    SessionId, SessionManager, SessionState, SnapshotWriter, Transport,
+    Baseline, DeltaCodec, HandshakeGate, HandshakeResult, Message, MessageKind, RejectReason,
+    SessionConfig, SessionId, SessionManager, SessionState, SnapshotWriter, Transport,
 };
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -76,10 +76,11 @@ impl<T: Transport> Server<T> {
     /// Run one tick: consume inputs from transport (including acks), tick the
     /// world, emit delta-encoded snapshot.
     fn tick(&mut self) {
+        let was_connected = self.session.state() == SessionState::Connected;
         self.drain_inputs();
         self.update_session_for_transport();
         self.world.tick();
-        if self.session.state() == SessionState::Connected {
+        if was_connected && self.session.state() == SessionState::Connected {
             self.emit_snapshot();
         }
     }
@@ -119,30 +120,43 @@ impl<T: Transport> Server<T> {
     }
 
     fn handle_hello(&mut self, hello: crcbl_net::Hello) {
-        let result =
+        let mut result =
             self.handshake_gate
                 .validate(&hello, self.session.session_id(), self.clock.tick());
         if matches!(result, HandshakeResult::Accept { .. }) {
+            let expected_token = self.session.session_id();
             match self.session.state() {
                 SessionState::Disconnected => {
-                    self.session.begin_handshake();
-                    self.session
-                        .on_connected(hello.engine_build_id, hello.schema_hash);
+                    if hello.session_token.is_some() {
+                        result = Self::invalid_session_token(
+                            "fresh handshake must not include a session token",
+                        );
+                    } else {
+                        self.session.begin_handshake();
+                        self.session
+                            .on_connected(hello.engine_build_id, hello.schema_hash);
+                    }
                 }
                 SessionState::Reconnecting => {
-                    if !self.session.try_reconnect(
+                    if hello.session_token != Some(expected_token) {
+                        result =
+                            Self::invalid_session_token("reconnect session token does not match");
+                    } else if !self.session.try_reconnect(
                         Instant::now(),
                         hello.engine_build_id,
                         hello.schema_hash,
                         &self.session_config,
                     ) {
-                        self.processing_error_count += 1;
-                        return;
+                        result = Self::invalid_session_token("reconnect grace period expired");
                     }
                 }
-                SessionState::Handshaking | SessionState::Connected => {
-                    self.processing_error_count += 1;
-                    return;
+                SessionState::Handshaking => {
+                    result = Self::invalid_session_token("handshake is already in progress");
+                }
+                SessionState::Connected => {
+                    if hello.session_token != Some(expected_token) {
+                        result = Self::invalid_session_token("session token does not match");
+                    }
                 }
             }
         }
@@ -155,6 +169,15 @@ impl<T: Transport> Server<T> {
             .is_err()
         {
             self.processing_error_count += 1;
+        }
+    }
+
+    fn invalid_session_token(message: &str) -> HandshakeResult {
+        HandshakeResult::Reject {
+            reason: RejectReason {
+                code: 0x04,
+                msg: message.into(),
+            },
         }
     }
 

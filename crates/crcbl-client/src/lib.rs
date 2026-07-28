@@ -233,7 +233,11 @@ impl<T: Transport> Client<T> {
                 continue;
             }
 
-            let delta = match crcbl_net::decode_delta(&msg.payload) {
+            let delta = match if self.session_id.is_some() {
+                crcbl_net::decode_trusted_delta(&msg.payload)
+            } else {
+                crcbl_net::decode_delta(&msg.payload)
+            } {
                 Ok(delta) => delta,
                 Err(_) => {
                     self.processing_error_count += 1;
@@ -259,7 +263,11 @@ impl<T: Transport> Client<T> {
             }
 
             // Apply the delta to our baseline, reconstruct full snapshots.
-            let full_snapshots = match DeltaCodec::apply(&delta, &mut self.baseline) {
+            let full_snapshots = match if self.session_id.is_some() {
+                DeltaCodec::apply_trusted(&delta, &mut self.baseline)
+            } else {
+                DeltaCodec::apply(&delta, &mut self.baseline)
+            } {
                 Ok(full_snapshots) => full_snapshots,
                 Err(_) => {
                     self.processing_error_count += 1;

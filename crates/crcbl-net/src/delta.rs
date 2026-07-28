@@ -23,9 +23,8 @@ pub const MAX_DELTA_BYTES: usize = 64 * 1024;
 /// Largest individual component payload accepted from a delta packet.
 pub const MAX_COMPONENT_BYTES: usize = 60 * 1024;
 /// Maximum systems accepted from an untrusted delta packet.
-///
-/// Bounded by the minimum 16-byte wire representation and [`MAX_DELTA_BYTES`].
-pub const MAX_DECODE_SYSTEMS: usize = MAX_DELTA_BYTES / 16;
+pub const MAX_BASELINE_SYSTEMS: usize = 256;
+const MAX_TRUSTED_DELTA_SYSTEMS: usize = MAX_DELTA_BYTES / 16;
 /// Maximum entities retained across all baseline systems.
 pub const MAX_BASELINE_ENTITIES: usize = 4_096;
 /// Maximum encoded entity bytes retained in one baseline.
@@ -113,7 +112,7 @@ impl Baseline {
             map.insert(sys.system_id, decode_entity_blobs(&sys.data)?);
         }
         if enforce_limits {
-            validate_baseline_limits(&map)?;
+            validate_baseline_limits(&map, MAX_BASELINE_SYSTEMS)?;
         }
 
         Ok(Self { tick, systems: map })
@@ -203,8 +202,9 @@ fn decode_entity_blobs(blob: &[u8]) -> Result<HashMap<u64, Vec<u8>>, BaselineDec
 
 fn validate_baseline_limits(
     systems: &HashMap<u32, HashMap<u64, Vec<u8>>>,
+    max_systems: usize,
 ) -> Result<(), BaselineDecodeError> {
-    if systems.len() > MAX_DECODE_SYSTEMS {
+    if systems.len() > max_systems {
         return Err(BaselineDecodeError::BaselineTooLarge);
     }
 
@@ -225,6 +225,12 @@ fn validate_baseline_limits(
         return Err(BaselineDecodeError::BaselineTooLarge);
     }
     Ok(())
+}
+
+fn validate_trusted_baseline_limits(
+    systems: &HashMap<u32, HashMap<u64, Vec<u8>>>,
+) -> Result<(), BaselineDecodeError> {
+    validate_baseline_limits(systems, MAX_TRUSTED_DELTA_SYSTEMS)
 }
 
 // ── BaselineStore ─────────────────────────────────────────────────────────────
@@ -464,6 +470,23 @@ impl DeltaCodec {
         delta: &Delta,
         baseline: &mut Baseline,
     ) -> Result<Vec<SystemSnapshot>, BaselineDecodeError> {
+        Self::apply_inner(delta, baseline, true)
+    }
+
+    /// Apply a delta received from an authenticated peer negotiated by the
+    /// session handshake. The packet-size and component-size checks still apply.
+    pub fn apply_trusted(
+        delta: &Delta,
+        baseline: &mut Baseline,
+    ) -> Result<Vec<SystemSnapshot>, BaselineDecodeError> {
+        Self::apply_inner(delta, baseline, false)
+    }
+
+    fn apply_inner(
+        delta: &Delta,
+        baseline: &mut Baseline,
+        enforce_limits: bool,
+    ) -> Result<Vec<SystemSnapshot>, BaselineDecodeError> {
         validate_delta_metadata(delta, baseline)?;
         validate_delta_operations(delta)?;
         let mut systems = if delta.is_keyframe {
@@ -516,7 +539,11 @@ impl DeltaCodec {
                 system_entities.insert(ed.entity_bits, ed.data.clone());
             }
         }
-        validate_baseline_limits(&systems)?;
+        if enforce_limits {
+            validate_baseline_limits(&systems, MAX_BASELINE_SYSTEMS)?;
+        } else {
+            validate_trusted_baseline_limits(&systems)?;
+        }
 
         let next = Baseline {
             tick: delta.tick,
@@ -705,8 +732,20 @@ pub fn encode_delta(delta: &Delta) -> Result<Vec<u8>, BaselineDecodeError> {
     Ok(buf)
 }
 
-/// Decode a [`Delta`] from the wire format (see [`encode_delta`]).
+/// Decode a [`Delta`] from an untrusted wire packet (see [`encode_delta`]).
 pub fn decode_delta(payload: &[u8]) -> Result<Delta, DeltaDecodeError> {
+    decode_delta_inner(payload, MAX_BASELINE_SYSTEMS)
+}
+
+/// Decode a delta from an authenticated peer negotiated by the session handshake.
+///
+/// Packet, component, and duplicate-id validation still applies; only the
+/// 256-system hostile-input cap is raised to the packet's physical maximum.
+pub fn decode_trusted_delta(payload: &[u8]) -> Result<Delta, DeltaDecodeError> {
+    decode_delta_inner(payload, MAX_TRUSTED_DELTA_SYSTEMS)
+}
+
+fn decode_delta_inner(payload: &[u8], max_systems: usize) -> Result<Delta, DeltaDecodeError> {
     if payload.len() > MAX_DELTA_BYTES {
         return Err(DeltaDecodeError::InvalidLength(payload.len() as u32));
     }
@@ -753,7 +792,7 @@ pub fn decode_delta(payload: &[u8]) -> Result<Delta, DeltaDecodeError> {
     }
     let system_count = u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap()) as usize;
     cursor += 4;
-    if system_count > MAX_DECODE_SYSTEMS {
+    if system_count > max_systems {
         return Err(DeltaDecodeError::InvalidLength(system_count as u32));
     }
     if system_count > (payload.len() - cursor) / 16 {
@@ -1095,6 +1134,36 @@ mod tests {
         let baseline = Baseline::from_snapshot(TickId::from_raw(1), &systems)
             .expect("trusted snapshots are not packet-limited");
         assert_eq!(baseline.system_count(), 300);
+    }
+
+    #[test]
+    fn untrusted_decoder_rejects_more_than_256_systems() {
+        let delta = Delta {
+            tick: TickId::from_raw(1),
+            baseline_tick: None,
+            is_keyframe: true,
+            systems: (0..=MAX_BASELINE_SYSTEMS as u32)
+                .map(|system_id| SystemDelta {
+                    system_id,
+                    added: Vec::new(),
+                    removed: Vec::new(),
+                    modified: Vec::new(),
+                    unchanged_count: 0,
+                })
+                .collect(),
+        };
+        let payload = encode_delta(&delta).expect("packet remains below byte limit");
+        assert!(matches!(
+            decode_delta(&payload),
+            Err(DeltaDecodeError::InvalidLength(_))
+        ));
+        assert_eq!(
+            decode_trusted_delta(&payload)
+                .expect("authenticated peer may exceed hostile system cap")
+                .systems
+                .len(),
+            MAX_BASELINE_SYSTEMS + 1
+        );
     }
 
     // ── Baseline::entity_count_for ────────────────────────────────────────

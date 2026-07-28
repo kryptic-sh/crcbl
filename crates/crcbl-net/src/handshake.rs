@@ -34,10 +34,11 @@ pub struct RejectReason {
     ///
     /// | Code | Meaning                |
     /// |------|------------------------|
-    /// | 0x01 | version_mismatch       |
-    /// | 0x02 | schema_mismatch        |
-    /// | 0x03 | server_full            |
-    /// | 0x04 | invalid_session_token  |
+    /// | 0x01 | protocol_version_mismatch |
+    /// | 0x02 | schema_mismatch           |
+    /// | 0x03 | server_full               |
+    /// | 0x04 | invalid_session_token     |
+    /// | 0x05 | engine_build_id_mismatch  |
     pub code: u8,
     /// Human-readable message for logs and diagnostics.
     pub msg: String,
@@ -115,7 +116,7 @@ impl HandshakeGate {
         if hello.engine_build_id != self.expected_engine_build_id {
             return HandshakeResult::Reject {
                 reason: RejectReason {
-                    code: 0x01,
+                    code: 0x05,
                     msg: format!(
                         "engine build id mismatch: client 0x{:016x}, server 0x{:016x}",
                         hello.engine_build_id, self.expected_engine_build_id,
@@ -222,6 +223,25 @@ mod tests {
             }
             HandshakeResult::Accept { .. } => {
                 panic!("expected Reject for schema mismatch");
+            }
+        }
+    }
+
+    #[test]
+    fn engine_build_id_mismatch_is_rejected() {
+        let g = gate();
+        let hello = Hello {
+            engine_build_id: 0xBAD,
+            ..matching_hello()
+        };
+        let result = g.validate(&hello, SessionId(1), TickId::ZERO);
+        match result {
+            HandshakeResult::Reject { reason } => {
+                assert_eq!(reason.code, 0x05);
+                assert!(reason.msg.contains("engine build id mismatch"));
+            }
+            HandshakeResult::Accept { .. } => {
+                panic!("expected Reject for engine build id mismatch");
             }
         }
     }

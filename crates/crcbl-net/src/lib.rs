@@ -31,8 +31,8 @@ pub use codec::{
 pub use condition::{ConditionSimulator, SimConditions};
 pub use delta::{
     Baseline, BaselineDecodeError, BaselineStore, Delta, DeltaCodec, DeltaDecodeError,
-    MAX_BASELINE_ENCODED_BYTES, MAX_BASELINE_ENTITIES, MAX_DECODE_SYSTEMS, SystemDelta,
-    decode_delta, encode_delta, hash_encoded,
+    MAX_BASELINE_ENCODED_BYTES, MAX_BASELINE_ENTITIES, MAX_BASELINE_SYSTEMS, SystemDelta,
+    decode_delta, decode_trusted_delta, encode_delta, hash_encoded,
 };
 pub use handshake::{HandshakeGate, HandshakeResult, Hello, RejectReason};
 pub use messages::{
