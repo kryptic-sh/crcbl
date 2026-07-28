@@ -90,7 +90,6 @@ dependencies = [
  "crcbl-ecs",
  "crcbl-net",
  "glam",
- "log",
 ]
 
 [[package]]
@@ -169,7 +168,6 @@ dependencies = [
  "crcbl-core",
  "crcbl-ecs",
  "crcbl-net",
- "log",
 ]
 
 [[package]]
