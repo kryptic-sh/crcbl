@@ -63,6 +63,28 @@ impl Baseline {
     pub fn entity_count_for(&self, system_id: u32) -> usize {
         self.systems.get(&system_id).map(|m| m.len()).unwrap_or(0)
     }
+
+    /// Deterministic hash of the full baseline state.
+    ///
+    /// Hashes every `(system_id, entity_bits, entity_data)` tuple in
+    /// deterministic order (systems and entities sorted by id), suitable for
+    /// state-equality checks across replica boundaries.
+    pub fn state_hash(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        let mut sys_ids: Vec<u32> = self.systems.keys().copied().collect();
+        sys_ids.sort();
+        for &sys_id in &sys_ids {
+            sys_id.hash(&mut hasher);
+            let entities = &self.systems[&sys_id];
+            let mut entity_ids: Vec<u64> = entities.keys().copied().collect();
+            entity_ids.sort();
+            for &eb in &entity_ids {
+                eb.hash(&mut hasher);
+                entities[&eb].hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
 }
 
 /// Decode a flat binary blob into `entity_bits → Vec<u8>`.
@@ -762,6 +784,35 @@ mod tests {
     }
 
     // ── Baseline::entity_count_for ────────────────────────────────────────
+
+    #[test]
+    fn baseline_state_hash_deterministic() {
+        let b1 = make_snapshot(TickId::from_raw(1), 1, &[(10, b"pos"), (20, b"vel")]);
+        let b2 = make_snapshot(TickId::from_raw(2), 1, &[(10, b"pos"), (20, b"vel")]);
+        // Same data, different tick → same state hash.
+        assert_eq!(b1.state_hash(), b2.state_hash());
+    }
+
+    #[test]
+    fn baseline_state_hash_detects_data_difference() {
+        let b1 = make_snapshot(TickId::from_raw(1), 1, &[(10, b"pos")]);
+        let b2 = make_snapshot(TickId::from_raw(1), 1, &[(10, b"vel")]);
+        assert_ne!(b1.state_hash(), b2.state_hash());
+    }
+
+    #[test]
+    fn baseline_state_hash_detects_entity_count_difference() {
+        let b1 = make_snapshot(TickId::from_raw(1), 1, &[(10, b"a")]);
+        let b2 = make_snapshot(TickId::from_raw(1), 1, &[(10, b"a"), (20, b"b")]);
+        assert_ne!(b1.state_hash(), b2.state_hash());
+    }
+
+    #[test]
+    fn baseline_state_hash_detects_system_id_difference() {
+        let b1 = make_snapshot(TickId::from_raw(1), 1, &[(10, b"a")]);
+        let b2 = make_snapshot(TickId::from_raw(1), 2, &[(10, b"a")]);
+        assert_ne!(b1.state_hash(), b2.state_hash());
+    }
 
     #[test]
     fn baseline_entity_count_for() {

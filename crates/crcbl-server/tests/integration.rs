@@ -6,6 +6,7 @@
 //! applies them, acks, and the server advances its baseline accordingly.
 
 use crcbl_client::Client;
+use crcbl_core::TickId;
 use crcbl_ecs::{System, World};
 use crcbl_net::InMemoryTransport;
 use crcbl_server::Server;
@@ -55,7 +56,8 @@ fn server_to_client_roundtrip() {
 
     // The client's world is empty (it doesn't mirror the ECS — snapshots
     // are applied to its baseline, not its World).  We verify that the
-    // plumbing runs without panic and both sides stay connected.
+    // plumbing runs without panic, both sides stay connected, and the
+    // client received and applied the server's delta-encoded snapshots.
     assert!(
         server.is_connected(),
         "server transport must stay connected after multi-tick exchange"
@@ -63,6 +65,15 @@ fn server_to_client_roundtrip() {
     assert!(
         client.is_connected(),
         "client transport must stay connected after multi-tick exchange"
+    );
+
+    // Client must have received and applied snapshots — its baseline
+    // tick should be past zero. (Entity data is stub — per-entity
+    // component encoding lands in P3.)
+    assert!(
+        client.last_applied_tick() > TickId::ZERO,
+        "client must have applied at least one snapshot; last_applied_tick={:?}",
+        client.last_applied_tick()
     );
 }
 
@@ -92,5 +103,12 @@ fn server_and_client_survive_multiple_ticks() {
     assert!(
         server.tick_id().get() > 0,
         "server tick id must advance beyond zero"
+    );
+
+    // Client must have received and applied snapshots.
+    assert!(
+        client.last_applied_tick() > TickId::ZERO,
+        "client must have applied at least one snapshot; last_applied_tick={:?}",
+        client.last_applied_tick()
     );
 }

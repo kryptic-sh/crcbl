@@ -104,6 +104,19 @@ impl<T: Transport> Client<T> {
         }
     }
 
+    /// The tick id of the most recently applied delta-encoded snapshot.
+    #[must_use]
+    pub fn last_applied_tick(&self) -> TickId {
+        self.baseline.tick
+    }
+
+    /// Number of entities in the client's reconstructed baseline across
+    /// all systems.
+    #[must_use]
+    pub fn baseline_entity_count(&self) -> usize {
+        self.baseline.entity_count()
+    }
+
     /// Whether the transport is connected.
     #[must_use]
     pub fn is_connected(&self) -> bool {
@@ -470,6 +483,64 @@ mod tests {
 
         let state = client.interpolate();
         assert!(state.positions.is_empty(), "stub returns empty");
+    }
+
+    // ── last_applied_tick / baseline_entity_count ──────────────────────────
+
+    #[test]
+    fn last_applied_tick_starts_at_zero() {
+        let (transport, _peer) = InMemoryTransport::pair();
+        let client = Client::new(empty_world(), transport, 60);
+        assert_eq!(client.last_applied_tick(), TickId::ZERO);
+    }
+
+    #[test]
+    fn last_applied_tick_advances_after_delta_apply() {
+        let (client_transport, server_transport) = InMemoryTransport::pair();
+        let mut client = Client::new(empty_world(), client_transport, 60);
+
+        let payload = keyframe_snapshot(1, &[(0, vec![1, 0, 0, 0])]);
+        let mut peer = server_transport;
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload,
+        })
+        .unwrap();
+        drop(peer);
+
+        client.update(std::time::Duration::ZERO);
+        client.update(std::time::Duration::from_nanos(1));
+
+        assert_eq!(client.last_applied_tick(), TickId::from_raw(1));
+    }
+
+    #[test]
+    fn baseline_entity_count_tracks_applied_snapshot() {
+        let (client_transport, server_transport) = InMemoryTransport::pair();
+        let mut client = Client::new(empty_world(), client_transport, 60);
+
+        // Build a snapshot with 3 entities in system 1.
+        let mut data = Vec::new();
+        for i in 0u64..3u64 {
+            let component = (i * 10) as u32;
+            data.extend_from_slice(&i.to_le_bytes());
+            data.extend_from_slice(&4u32.to_le_bytes());
+            data.extend_from_slice(&component.to_le_bytes());
+        }
+        let payload = keyframe_snapshot(5, &[(1, data)]);
+
+        let mut peer = server_transport;
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload,
+        })
+        .unwrap();
+        drop(peer);
+
+        client.update(std::time::Duration::ZERO);
+        client.update(std::time::Duration::from_nanos(1));
+
+        assert_eq!(client.baseline_entity_count(), 3);
     }
 
     // ── Debug ──────────────────────────────────────────────────────────────

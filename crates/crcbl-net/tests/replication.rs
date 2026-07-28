@@ -126,6 +126,20 @@ fn replication_roundtrip_lossless() {
     // Client's baseline must have 5 entities.
     assert_eq!(client.baseline.entity_count(), n_entities as usize);
     assert!(client.baseline.tick > TickId::ZERO);
+
+    // Value equality: the client's reconstructed state must match the
+    // server's latest stored baseline byte-for-byte.
+    let server_hash = server
+        .session
+        .baseline_store()
+        .newest()
+        .expect("server must have at least one stored baseline")
+        .state_hash();
+    assert_eq!(
+        client.baseline.state_hash(),
+        server_hash,
+        "client state hash must match server's after lossless roundtrip"
+    );
 }
 
 #[test]
@@ -276,6 +290,20 @@ fn replication_with_condition_simulator() {
         n_entities as usize,
         "client must reconstruct all {n_entities} entities after {n_ticks} lossy ticks"
     );
+
+    // Value equality: despite loss, the client's final state must match
+    // the server's latest stored baseline (delta encode+apply is idempotent).
+    let server_hash = server
+        .session
+        .baseline_store()
+        .newest()
+        .expect("server must have at least one stored baseline")
+        .state_hash();
+    assert_eq!(
+        client.baseline.state_hash(),
+        server_hash,
+        "client state hash must match server's after lossy roundtrip"
+    );
 }
 
 #[test]
@@ -345,5 +373,19 @@ fn replication_with_loss_reorder_and_duplication() {
         client.baseline.entity_count_for(1),
         n_entities as usize,
         "client must reconstruct all {n_entities} entities after {n_ticks} ticks with loss + reorder + duplication"
+    );
+
+    // Value equality: despite loss, reorder, and duplication, the
+    // client's final state must match the server's latest baseline.
+    let server_hash = server
+        .session
+        .baseline_store()
+        .newest()
+        .expect("server must have at least one stored baseline")
+        .state_hash();
+    assert_eq!(
+        client.baseline.state_hash(),
+        server_hash,
+        "client state hash must match server's after loss + reorder + duplication roundtrip"
     );
 }
