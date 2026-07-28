@@ -118,12 +118,14 @@ impl<T: Transport> Server<T> {
         };
         let last_acked = self.session.last_acked_tick();
         let previous = last_acked.and_then(|t| self.session.baseline_store().get(t).cloned());
-        let delta = DeltaCodec::encode(tick, &systems, previous.as_ref());
+        let Ok(delta) = DeltaCodec::encode(tick, &systems, previous.as_ref()) else {
+            return;
+        };
 
         // Store this full snapshot as a new baseline for future deltas.
         self.session.baseline_store_mut().insert(baseline);
 
-        let payload = crcbl_net::encode_delta(&delta);
+        let payload = crcbl_net::encode_delta(&delta).expect("valid delta");
         let _ = self.transport.send_unreliable(Message {
             kind: MessageKind::Unreliable,
             payload,

@@ -29,14 +29,14 @@ impl Server {
     fn encode(&mut self, tick: TickId, systems: &[SystemSnapshot]) -> Vec<u8> {
         let last_acked = self.session.last_acked_tick();
         let baseline = last_acked.and_then(|t| self.session.baseline_store().get(t).cloned());
-        let delta = DeltaCodec::encode(tick, systems, baseline.as_ref());
+        let delta = DeltaCodec::encode(tick, systems, baseline.as_ref()).expect("valid snapshot");
 
         // Store full snapshot as new baseline.
         self.session
             .baseline_store_mut()
             .insert(Baseline::from_snapshot(tick, systems).expect("test snapshots are valid"));
 
-        crcbl_net::encode_delta(&delta)
+        crcbl_net::encode_delta(&delta).expect("valid delta")
     }
 
     fn handle_ack(&mut self, tick: TickId) {
@@ -62,7 +62,7 @@ impl Client {
     fn apply(&mut self, payload: &[u8]) -> Option<TickId> {
         let delta = crcbl_net::decode_delta(payload).ok()?;
         let tick = delta.tick;
-        let _ = DeltaCodec::apply(&delta, &mut self.baseline);
+        let _ = DeltaCodec::apply(&delta, &mut self.baseline).ok()?;
         Some(tick)
     }
 }
@@ -170,7 +170,8 @@ fn unchanged_state_produces_empty_delta() {
         Baseline::from_snapshot(TickId::from_raw(1), &systems).expect("test snapshots are valid");
 
     // Re-encode the same snapshot against this baseline.
-    let delta = DeltaCodec::encode(TickId::from_raw(2), &systems, Some(&baseline));
+    let delta =
+        DeltaCodec::encode(TickId::from_raw(2), &systems, Some(&baseline)).expect("valid snapshot");
 
     assert!(!delta.is_keyframe);
     assert!(delta.systems[0].added.is_empty());

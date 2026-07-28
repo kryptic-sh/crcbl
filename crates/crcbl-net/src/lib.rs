@@ -30,7 +30,8 @@ pub use codec::{
 };
 pub use condition::{ConditionSimulator, SimConditions};
 pub use delta::{
-    Baseline, BaselineDecodeError, BaselineStore, Delta, DeltaCodec, DeltaDecodeError, SystemDelta,
+    Baseline, BaselineDecodeError, BaselineStore, Delta, DeltaCodec, DeltaDecodeError,
+    MAX_BASELINE_ENCODED_BYTES, MAX_BASELINE_ENTITIES, MAX_BASELINE_SYSTEMS, SystemDelta,
     decode_delta, encode_delta, hash_encoded,
 };
 pub use handshake::{HandshakeGate, HandshakeResult, Hello, RejectReason};

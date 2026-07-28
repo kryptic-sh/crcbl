@@ -3,6 +3,8 @@
 //! Every decoder is length-gated: malformed input returns [`DecodeError`] and
 //! no function panics on arbitrary byte slices.
 
+use std::collections::HashSet;
+
 use crate::handshake::{HandshakeResult, Hello, RejectReason};
 use crate::messages::{ClientToServer, ServerToClient, SystemSnapshot};
 use crate::types::{SectorId, SessionId};
@@ -25,6 +27,8 @@ pub enum DecodeError {
     InvalidLength(u32),
     #[error("trailing bytes after message: {0} bytes")]
     TrailingBytes(usize),
+    #[error("duplicate system id: {0}")]
+    DuplicateSystem(u32),
 }
 
 /// Maximum accepted wire payload. Snapshots target a single UDP datagram.
@@ -257,8 +261,12 @@ pub fn decode_server_to_client(payload: &[u8]) -> Result<ServerToClient, DecodeE
                 return Err(DecodeError::InvalidLength(system_count as u32));
             }
             let mut systems = Vec::with_capacity(system_count);
+            let mut system_ids = HashSet::with_capacity(system_count);
             for _ in 0..system_count {
                 let system_id = r.read_u32()?;
+                if !system_ids.insert(system_id) {
+                    return Err(DecodeError::DuplicateSystem(system_id));
+                }
                 let data_len = r.read_u32()? as usize;
                 validate_field_len(data_len, r.remaining())?;
                 let data = r.read_bytes(data_len)?.to_vec();
@@ -890,6 +898,24 @@ mod tests {
     }
 
     // ── Error display ──────────────────────────────────────────────────────
+
+    #[test]
+    fn decode_server_snapshot_rejects_duplicate_system_ids() {
+        let mut payload = vec![0x10];
+        payload.extend_from_slice(&0i64.to_le_bytes());
+        payload.extend_from_slice(&0i64.to_le_bytes());
+        payload.extend_from_slice(&0i64.to_le_bytes());
+        payload.extend_from_slice(&1u64.to_le_bytes());
+        payload.extend_from_slice(&2u32.to_le_bytes());
+        for _ in 0..2 {
+            payload.extend_from_slice(&7u32.to_le_bytes());
+            payload.extend_from_slice(&0u32.to_le_bytes());
+        }
+        assert!(matches!(
+            decode_server_to_client(&payload),
+            Err(DecodeError::DuplicateSystem(7))
+        ));
+    }
 
     #[test]
     fn decode_error_display() {

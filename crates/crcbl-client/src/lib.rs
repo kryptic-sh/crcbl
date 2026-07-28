@@ -165,8 +165,17 @@ impl<T: Transport> Client<T> {
                 continue;
             };
 
+            if delta.tick <= self.baseline.tick
+                || (!delta.is_keyframe && delta.baseline_tick != Some(self.baseline.tick))
+                || (delta.is_keyframe && delta.baseline_tick.is_some())
+            {
+                continue;
+            }
+
             // Apply the delta to our baseline, reconstruct full snapshots.
-            let full_snapshots = DeltaCodec::apply(&delta, &mut self.baseline);
+            let Ok(full_snapshots) = DeltaCodec::apply(&delta, &mut self.baseline) else {
+                continue;
+            };
 
             // Send ack for this tick.
             let ack_payload = crcbl_net::encode_ack(delta.tick);
@@ -239,13 +248,117 @@ mod tests {
     fn keyframe_snapshot(tick: u64, system_data: &[(u32, Vec<u8>)]) -> Vec<u8> {
         let snapshots: Vec<_> = system_data
             .iter()
-            .map(|&(sys_id, ref data)| crcbl_net::SystemSnapshot {
-                system_id: sys_id,
-                data: data.clone(),
+            .map(|&(sys_id, ref data)| {
+                let mut entity_blob = data.clone();
+                let mut cursor = 0usize;
+                let is_entity_blob = loop {
+                    if cursor == entity_blob.len() {
+                        break true;
+                    }
+                    if entity_blob.len() - cursor < 12 {
+                        break false;
+                    }
+                    let len = u32::from_le_bytes(
+                        entity_blob[cursor + 8..cursor + 12].try_into().unwrap(),
+                    ) as usize;
+                    cursor += 12;
+                    if len > entity_blob.len() - cursor {
+                        break false;
+                    }
+                    cursor += len;
+                };
+                if !is_entity_blob {
+                    entity_blob.clear();
+                    entity_blob.extend_from_slice(&0u64.to_le_bytes());
+                    entity_blob.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                    entity_blob.extend_from_slice(data);
+                }
+                crcbl_net::SystemSnapshot {
+                    system_id: sys_id,
+                    data: entity_blob,
+                }
             })
             .collect();
-        let delta = DeltaCodec::encode(TickId::from_raw(tick), &snapshots, None);
-        crcbl_net::encode_delta(&delta)
+        let delta =
+            DeltaCodec::encode(TickId::from_raw(tick), &snapshots, None).expect("valid snapshot");
+        crcbl_net::encode_delta(&delta).expect("valid delta")
+    }
+
+    fn delta_payload(delta: crcbl_net::Delta) -> Vec<u8> {
+        crcbl_net::encode_delta(&delta).expect("valid delta")
+    }
+
+    #[test]
+    fn rejects_reordered_and_wrong_baseline_deltas_without_acks() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = Client::new(empty_world(), client_transport, 60);
+
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: keyframe_snapshot(5, &[]),
+        })
+        .unwrap();
+        client.update(std::time::Duration::ZERO);
+        assert_eq!(
+            crcbl_net::decode_ack(&peer.recv().unwrap().unwrap().payload).unwrap(),
+            TickId::from_raw(5)
+        );
+
+        let wrong_baseline = crcbl_net::Delta {
+            tick: TickId::from_raw(6),
+            baseline_tick: Some(TickId::from_raw(4)),
+            is_keyframe: false,
+            systems: Vec::new(),
+        };
+        let stale = crcbl_net::Delta {
+            tick: TickId::from_raw(5),
+            baseline_tick: Some(TickId::from_raw(5)),
+            is_keyframe: false,
+            systems: Vec::new(),
+        };
+        for delta in [wrong_baseline, stale] {
+            peer.send_unreliable(Message {
+                kind: MessageKind::Unreliable,
+                payload: delta_payload(delta),
+            })
+            .unwrap();
+        }
+        client.update(std::time::Duration::from_nanos(1));
+
+        assert_eq!(client.last_applied_tick(), TickId::from_raw(5));
+        assert!(peer.recv().unwrap().is_none());
+    }
+
+    #[test]
+    fn accepts_matching_baseline_delta_and_acks_it() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = Client::new(empty_world(), client_transport, 60);
+
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: keyframe_snapshot(1, &[]),
+        })
+        .unwrap();
+        client.update(std::time::Duration::ZERO);
+        let _ = peer.recv().unwrap().unwrap();
+
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: delta_payload(crcbl_net::Delta {
+                tick: TickId::from_raw(2),
+                baseline_tick: Some(TickId::from_raw(1)),
+                is_keyframe: false,
+                systems: Vec::new(),
+            }),
+        })
+        .unwrap();
+        client.update(std::time::Duration::from_nanos(1));
+
+        assert_eq!(client.last_applied_tick(), TickId::from_raw(2));
+        assert_eq!(
+            crcbl_net::decode_ack(&peer.recv().unwrap().unwrap().payload).unwrap(),
+            TickId::from_raw(2)
+        );
     }
 
     // ── Creation ───────────────────────────────────────────────────────────
