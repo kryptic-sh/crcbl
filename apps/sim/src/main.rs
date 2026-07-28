@@ -12,11 +12,12 @@
 //! Outputs one line: `hash:<hex> ticks:<n> final_tick:<n>`
 
 use std::env;
+use std::hash::Hasher;
 use std::process;
 
 use crcbl_core::FrameClock;
 use crcbl_core::time::{ManualTime, TimeSource};
-use crcbl_ecs::{System, World};
+use crcbl_ecs::{ComponentHash, DebugCtx, Entity, System, SystemTrait, World};
 use crcbl_server::sim_hash::hash_world;
 
 fn main() {
@@ -99,6 +100,10 @@ fn main() {
 ///
 /// The world layout is simple but varied: a few systems with different entity
 /// counts, derived from the seed so different seeds test different shapes.
+///
+/// One system (`CounterSystem`) has real per-tick behaviour — it increments
+/// each entity's f32 component by 1.0 every tick, so the state hash genuinely
+/// depends on tick count, not just on `(seed, ticks)`.
 fn build_world(seed: u64) -> World {
     let mut world = World::new();
 
@@ -123,7 +128,76 @@ fn build_world(seed: u64) -> World {
     }
     world.register_system(Box::new(velocities));
 
+    // A system with real per-tick behaviour: each tick increments every
+    // entity's f32 by 1.0.  This ensures the determinism hash actually
+    // changes with simulation state, not just with (seed, tick_count).
+    let mut counters = CounterSystem::new("counter");
+    for i in 0..5 {
+        let e = world.spawn();
+        counters.attach(e, (i as f32) * 10.0);
+    }
+    world.register_system(Box::new(counters));
+
     world
+}
+
+// ---------------------------------------------------------------------------
+// CounterSystem — a custom SystemTrait impl with real per-tick mutation
+// ---------------------------------------------------------------------------
+
+/// A simple system that increments every entity's `f32` component by 1.0
+/// each tick.  Exists so the determinism harness has real mutable state to
+/// hash, not just inert storage.
+struct CounterSystem {
+    name: String,
+    data: Vec<(Entity, f32)>,
+}
+
+impl CounterSystem {
+    fn new(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            data: Vec::new(),
+        }
+    }
+
+    fn attach(&mut self, entity: Entity, value: f32) {
+        self.data.push((entity, value));
+    }
+}
+
+impl SystemTrait for CounterSystem {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn tick(&mut self) {
+        for (_, val) in &mut self.data {
+            *val += 1.0;
+        }
+    }
+
+    fn entity_count(&self) -> usize {
+        self.data.len()
+    }
+
+    fn sweep(&mut self, dead: &[Entity]) {
+        self.data.retain(|(e, _)| !dead.contains(e));
+    }
+
+    fn debug_draw(&mut self, _ctx: &DebugCtx) {
+        // No debug visuals.
+    }
+
+    fn hash_state(&self, hasher: &mut dyn Hasher) {
+        for (_, val) in &self.data {
+            val.hash_component(hasher);
+        }
+    }
+
+    fn contributes_to_hash(&self) -> bool {
+        true
+    }
 }
 
 fn print_help() {

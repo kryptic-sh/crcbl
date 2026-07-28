@@ -165,6 +165,7 @@ version = "0.1.0"
 name = "crcbl-server"
 version = "0.1.0"
 dependencies = [
+ "crcbl-client",
  "crcbl-core",
  "crcbl-ecs",
  "crcbl-net",

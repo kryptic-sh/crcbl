@@ -12,5 +12,8 @@ crcbl-ecs = { workspace = true }
 crcbl-net = { workspace = true }
 log = { workspace = true }
 
+[dev-dependencies]
+crcbl-client = { workspace = true }
+
 [lints]
 workspace = true

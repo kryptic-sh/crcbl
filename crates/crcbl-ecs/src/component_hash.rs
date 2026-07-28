@@ -44,13 +44,17 @@ impl_component_hash_int!(i8, i16, i32, i64, i128, isize);
 
 impl ComponentHash for f32 {
     fn hash_component(&self, hasher: &mut dyn Hasher) {
-        // to_bits() handles NaN deterministically (canonical payload).
+        // to_bits() preserves the NaN payload as-is (no canonicalisation);
+        // same computation on the same binary yields the same bits, which
+        // is sufficient for the determinism harness.
         hasher.write(&self.to_bits().to_le_bytes());
     }
 }
 
 impl ComponentHash for f64 {
     fn hash_component(&self, hasher: &mut dyn Hasher) {
+        // Same rationale as f32 above: to_bits() preserves the NaN payload
+        // as-is; no canonicalisation, but sufficient for same-binary determinism.
         hasher.write(&self.to_bits().to_le_bytes());
     }
 }

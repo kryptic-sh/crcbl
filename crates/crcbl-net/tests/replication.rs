@@ -270,9 +270,80 @@ fn replication_with_condition_simulator() {
         }
     }
 
-    assert!(
-        client.baseline.entity_count() > 0,
-        "client must have entities in baseline after {:?} ticks with loss",
-        n_ticks
+    // All 4 entities in system 1 must be reconstructed.
+    assert_eq!(
+        client.baseline.entity_count_for(1),
+        n_entities as usize,
+        "client must reconstruct all {n_entities} entities after {n_ticks} lossy ticks"
+    );
+}
+
+#[test]
+fn replication_with_loss_reorder_and_duplication() {
+    // Server sends through a lossy+reordered+duplicated channel, client
+    // eventually catches up with correct entity count.
+    let (server_tx, client_rx) = InMemoryTransport::pair();
+    let (client_tx, mut server_rx) = InMemoryTransport::pair();
+
+    let mut server_side = ConditionSimulator::new(
+        server_tx,
+        SimConditions {
+            loss_rate: 0.10,
+            duplicate_rate: 0.10,
+            reorder_window: 4,
+            seed: 99,
+            ..Default::default()
+        },
+    );
+    let mut client_side = ConditionSimulator::new(
+        client_rx,
+        SimConditions {
+            seed: 1,
+            ..Default::default()
+        },
+    );
+    let mut client_send = client_tx;
+
+    let mut server = Server::new();
+    let mut client = Client::new();
+
+    let n_ticks = 120;
+    let n_entities = 4;
+
+    for i in 0..n_ticks {
+        let tick = TickId::from_raw(i + 1);
+        let snap = snapshot(tick, 1, n_entities);
+        let payload = server.encode(tick, &[snap]);
+
+        server_side
+            .send_unreliable(Message {
+                kind: MessageKind::Unreliable,
+                payload,
+            })
+            .unwrap();
+
+        for msg in drain_all(&mut client_side) {
+            if let Some(acked) = client.apply(&msg.payload) {
+                let ack_payload = crcbl_net::encode_ack(acked);
+                client_send
+                    .send_unreliable(Message {
+                        kind: MessageKind::Unreliable,
+                        payload: ack_payload,
+                    })
+                    .unwrap();
+            }
+        }
+
+        for msg in drain_all(&mut server_rx) {
+            if let Ok(tick) = crcbl_net::decode_ack(&msg.payload) {
+                server.handle_ack(tick);
+            }
+        }
+    }
+
+    assert_eq!(
+        client.baseline.entity_count_for(1),
+        n_entities as usize,
+        "client must reconstruct all {n_entities} entities after {n_ticks} ticks with loss + reorder + duplication"
     );
 }
