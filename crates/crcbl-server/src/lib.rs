@@ -8,18 +8,22 @@
 pub mod sim_hash;
 
 use std::fmt;
-use std::time::Instant;
+use std::time::Duration;
 
 use crcbl_core::{FrameClock, TickId};
 use crcbl_ecs::{Inspector, World};
 use crcbl_net::{
-    Baseline, DeltaCodec, HandshakeGate, HandshakeResult, Message, MessageKind, RejectReason,
-    SessionConfig, SessionId, SessionManager, SessionState, SnapshotWriter, Transport,
+    Baseline, DeltaCodec, HandshakeGate, HandshakeResult, Message, MessageKind,
+    ProtocolCompatibility, RejectReason, ResumeToken, SessionConfig, SessionId, SessionManager,
+    SessionState, SnapshotWriter, Transport,
 };
 
-const PROTOCOL_VERSION: u32 = 1;
-const ENGINE_BUILD_ID: u64 = 0;
-const SCHEMA_HASH: u64 = 0;
+#[cfg(test)]
+const PROTOCOL_VERSION: u32 = ProtocolCompatibility::DEFAULT.protocol_version;
+#[cfg(test)]
+const ENGINE_BUILD_ID: u64 = ProtocolCompatibility::DEFAULT.engine_build_id;
+#[cfg(test)]
+const SCHEMA_HASH: u64 = ProtocolCompatibility::DEFAULT.schema_hash;
 
 // ---------------------------------------------------------------------------
 // Server
@@ -34,36 +38,68 @@ pub struct Server<T: Transport> {
     clock: FrameClock,
     session: SessionManager,
     session_config: SessionConfig,
+    resume_token: ResumeToken,
     handshake_gate: HandshakeGate,
+    now: Duration,
     processing_error_count: u64,
 }
 
 impl<T: Transport> Server<T> {
-    /// Create a server running at `tick_hz` (e.g. 60).
+    /// Create a server with the default protocol compatibility identifiers.
     ///
     /// # Panics
     ///
-    /// If `tick_hz` is zero.
+    /// Panics if `tick_hz` is zero or the operating system CSPRNG is unavailable.
     #[must_use]
     pub fn new(world: World, transport: T, tick_hz: u32) -> Self {
+        Self::try_new(world, transport, tick_hz)
+            .expect("operating system CSPRNG must be available to create a server")
+    }
+
+    /// Create a server with the default protocol compatibility identifiers.
+    ///
+    /// Returns the operating-system entropy error rather than issuing a predictable
+    /// resume credential.
+    pub fn try_new(world: World, transport: T, tick_hz: u32) -> Result<Self, getrandom::Error> {
+        Self::try_new_with_compatibility(world, transport, tick_hz, ProtocolCompatibility::DEFAULT)
+    }
+
+    /// Create a server with explicit protocol compatibility identifiers.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `tick_hz` is zero.
+    ///
+    /// Returns the operating-system entropy error rather than issuing a predictable
+    /// resume credential.
+    pub fn try_new_with_compatibility(
+        world: World,
+        transport: T,
+        tick_hz: u32,
+        compatibility: ProtocolCompatibility,
+    ) -> Result<Self, getrandom::Error> {
         let config = SessionConfig::default();
-        // Single-client server: use a fixed session id.
         let session_id = SessionId(1);
-        Self {
+        let mut token = [0; 32];
+        getrandom::fill(&mut token)?;
+        Ok(Self {
             world,
             transport,
             clock: FrameClock::new(tick_hz),
             session: SessionManager::new(session_id, &config),
             session_config: config,
-            handshake_gate: HandshakeGate::new(PROTOCOL_VERSION, ENGINE_BUILD_ID, SCHEMA_HASH),
+            resume_token: ResumeToken(token),
+            handshake_gate: HandshakeGate::new(compatibility),
+            now: Duration::ZERO,
             processing_error_count: 0,
-        }
+        })
     }
 
     /// Feed the current time from a [`crcbl_core::time::TimeSource`].
     ///
     /// Returns how many ticks ran this frame.
     pub fn update(&mut self, now: std::time::Duration) -> u32 {
+        self.now = now;
         self.clock.update(now);
         let mut ticks = 0u32;
         while self.clock.consume_tick() {
@@ -86,14 +122,10 @@ impl<T: Transport> Server<T> {
     }
 
     fn update_session_for_transport(&mut self) {
-        if self.transport.is_connected() {
-            return;
+        if !self.transport.is_connected() && self.session.state() == SessionState::Connected {
+            self.session.on_disconnect(self.now, &self.session_config);
         }
-        if self.session.state() == SessionState::Connected {
-            self.session
-                .on_disconnect(Instant::now(), &self.session_config);
-        }
-        self.session.expire_if_timed_out(Instant::now());
+        self.session.expire_if_timed_out(self.now);
     }
 
     /// Consume queued client messages: handshake, inputs (discarded — P3), and acks.
@@ -120,11 +152,14 @@ impl<T: Transport> Server<T> {
     }
 
     fn handle_hello(&mut self, hello: crcbl_net::Hello) {
-        let mut result =
-            self.handshake_gate
-                .validate(&hello, self.session.session_id(), self.clock.tick());
+        let mut result = self.handshake_gate.validate(
+            &hello,
+            self.session.session_id(),
+            self.resume_token,
+            self.clock.tick(),
+        );
         if matches!(result, HandshakeResult::Accept { .. }) {
-            let expected_token = self.session.session_id();
+            let expected_token = self.resume_token;
             match self.session.state() {
                 SessionState::Disconnected => {
                     if hello.session_token.is_some() {
@@ -138,11 +173,14 @@ impl<T: Transport> Server<T> {
                     }
                 }
                 SessionState::Reconnecting => {
-                    if hello.session_token != Some(expected_token) {
+                    if !hello
+                        .session_token
+                        .is_some_and(|token| token.constant_time_eq(expected_token))
+                    {
                         result =
                             Self::invalid_session_token("reconnect session token does not match");
                     } else if !self.session.try_reconnect(
-                        Instant::now(),
+                        self.now,
                         hello.engine_build_id,
                         hello.schema_hash,
                         &self.session_config,
@@ -154,7 +192,10 @@ impl<T: Transport> Server<T> {
                     result = Self::invalid_session_token("handshake is already in progress");
                 }
                 SessionState::Connected => {
-                    if hello.session_token != Some(expected_token) {
+                    if !hello
+                        .session_token
+                        .is_some_and(|token| token.constant_time_eq(expected_token))
+                    {
                         result = Self::invalid_session_token("session token does not match");
                     }
                 }
@@ -205,7 +246,7 @@ impl<T: Transport> Server<T> {
         };
 
         // Delta-encode against the client's baseline.
-        let baseline = match Baseline::from_snapshot(tick, &systems) {
+        let baseline = match Baseline::from_trusted_snapshot(tick, &systems) {
             Ok(baseline) => baseline,
             Err(_) => {
                 self.processing_error_count += 1;
@@ -249,6 +290,11 @@ impl<T: Transport> Server<T> {
     /// within the configured grace period returns the session to `Connected`.
     pub fn reconnect(&mut self, transport: T) {
         self.transport = transport;
+    }
+
+    /// Reconnect grace configuration for deterministic tests and embeddings.
+    pub fn set_session_config(&mut self, session_config: SessionConfig) {
+        self.session_config = session_config;
     }
 
     /// Current session lifecycle state.

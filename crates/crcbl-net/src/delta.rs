@@ -78,24 +78,21 @@ pub struct Baseline {
 }
 
 impl Baseline {
-    /// Build a [`Baseline`] from trusted local [`SystemSnapshot`] entity blobs.
-    ///
-    /// This constructor is for snapshots produced locally before encoding. Incoming
-    /// data must use [`Self::from_untrusted_snapshot`] or [`DeltaCodec::apply`].
+    /// Build a [`Baseline`] from snapshots, enforcing all retained-state limits.
     pub fn from_snapshot(
         tick: TickId,
         systems: &[SystemSnapshot],
     ) -> Result<Self, BaselineDecodeError> {
-        Self::from_snapshot_inner(tick, systems, false)
+        Self::from_snapshot_inner(tick, systems, true)
     }
 
-    /// Build a [`Baseline`] from an untrusted decoded snapshot, enforcing all
-    /// retained-state limits.
-    pub fn from_untrusted_snapshot(
+    /// Build a [`Baseline`] from trusted local snapshots while retaining the
+    /// negotiated system limit required by the server-to-client path.
+    pub fn from_trusted_snapshot(
         tick: TickId,
         systems: &[SystemSnapshot],
     ) -> Result<Self, BaselineDecodeError> {
-        Self::from_snapshot_inner(tick, systems, true)
+        Self::from_snapshot_inner(tick, systems, false)
     }
 
     fn from_snapshot_inner(
@@ -974,7 +971,7 @@ mod tests {
             system_id,
             data: blob,
         };
-        Baseline::from_snapshot(tick, &[snap]).expect("valid test snapshot")
+        Baseline::from_trusted_snapshot(tick, &[snap]).expect("valid test snapshot")
     }
 
     /// Build a `Vec<SystemSnapshot>` from a list of (system_id, entities).
@@ -1117,7 +1114,7 @@ mod tests {
             },
         };
 
-        let baseline = Baseline::from_snapshot(TickId::from_raw(7), &[sys1, sys2])
+        let baseline = Baseline::from_trusted_snapshot(TickId::from_raw(7), &[sys1, sys2])
             .expect("valid test snapshots");
         assert_eq!(baseline.system_count(), 2);
         assert_eq!(baseline.entity_count(), 3);
@@ -1131,7 +1128,11 @@ mod tests {
                 data: Vec::new(),
             })
             .collect();
-        let baseline = Baseline::from_snapshot(TickId::from_raw(1), &systems)
+        assert!(matches!(
+            Baseline::from_snapshot(TickId::from_raw(1), &systems),
+            Err(BaselineDecodeError::BaselineTooLarge)
+        ));
+        let baseline = Baseline::from_trusted_snapshot(TickId::from_raw(1), &systems)
             .expect("trusted snapshots are not packet-limited");
         assert_eq!(baseline.system_count(), 300);
     }
@@ -1220,7 +1221,7 @@ mod tests {
             },
         };
 
-        let baseline = Baseline::from_snapshot(TickId::from_raw(7), &[sys1, sys2])
+        let baseline = Baseline::from_trusted_snapshot(TickId::from_raw(7), &[sys1, sys2])
             .expect("valid test snapshots");
         assert_eq!(baseline.entity_count_for(10), 1);
         assert_eq!(baseline.entity_count_for(20), 1);
@@ -1282,7 +1283,8 @@ mod tests {
         let tick_b = TickId::from_raw(2);
         let snaps = make_snapshots(&[(1, &[(10, b"pos"), (20, b"vel")])]);
 
-        let baseline = Baseline::from_snapshot(tick_a, &snaps).expect("valid test snapshots");
+        let baseline =
+            Baseline::from_trusted_snapshot(tick_a, &snaps).expect("valid test snapshots");
         let delta = DeltaCodec::encode(tick_b, &snaps, Some(&baseline)).expect("valid snapshot");
 
         assert!(!delta.is_keyframe);
@@ -1303,7 +1305,8 @@ mod tests {
         let snaps_a = make_snapshots(&[(1, &[(10, b"pos")])]);
         let snaps_b = make_snapshots(&[(1, &[(10, b"pos"), (20, b"vel")])]);
 
-        let baseline = Baseline::from_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
+        let baseline =
+            Baseline::from_trusted_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
         let delta = DeltaCodec::encode(tick_b, &snaps_b, Some(&baseline)).expect("valid snapshot");
 
         assert!(!delta.is_keyframe);
@@ -1324,7 +1327,8 @@ mod tests {
         let snaps_a = make_snapshots(&[(1, &[(10, b"pos"), (20, b"vel")])]);
         let snaps_b = make_snapshots(&[(1, &[(10, b"pos")])]);
 
-        let baseline = Baseline::from_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
+        let baseline =
+            Baseline::from_trusted_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
         let delta = DeltaCodec::encode(tick_b, &snaps_b, Some(&baseline)).expect("valid snapshot");
 
         assert!(!delta.is_keyframe);
@@ -1345,7 +1349,8 @@ mod tests {
         let snaps_a = make_snapshots(&[(1, &[(10, b"old_data")])]);
         let snaps_b = make_snapshots(&[(1, &[(10, b"new_data")])]);
 
-        let baseline = Baseline::from_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
+        let baseline =
+            Baseline::from_trusted_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
         let delta = DeltaCodec::encode(tick_b, &snaps_b, Some(&baseline)).expect("valid snapshot");
 
         assert!(!delta.is_keyframe);
@@ -1367,7 +1372,8 @@ mod tests {
         // Same bytes, different tick — should be unchanged.
         let snaps_b = make_snapshots(&[(1, &[(10, b"same")])]);
 
-        let baseline = Baseline::from_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
+        let baseline =
+            Baseline::from_trusted_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
         let delta = DeltaCodec::encode(tick_b, &snaps_b, Some(&baseline)).expect("valid snapshot");
 
         assert_eq!(delta.systems[0].modified.len(), 0);
@@ -1382,8 +1388,8 @@ mod tests {
     fn delta_apply_roundtrip() {
         // Tick 1: entity 10 with "a"
         let snaps_t1 = make_snapshots(&[(1, &[(10, b"a")])]);
-        let mut baseline =
-            Baseline::from_snapshot(TickId::from_raw(1), &snaps_t1).expect("valid test snapshots");
+        let mut baseline = Baseline::from_trusted_snapshot(TickId::from_raw(1), &snaps_t1)
+            .expect("valid test snapshots");
 
         // Tick 2: add entity 20 with "b"
         let snaps_t2 = make_snapshots(&[(1, &[(10, b"a"), (20, b"b")])]);
@@ -1422,7 +1428,8 @@ mod tests {
         let snaps_a = make_snapshots(&[(1, &[(10, b"pos"), (20, b"vel")])]);
         let snaps_b = make_snapshots(&[(1, &[(10, b"pos")])]);
 
-        let mut baseline = Baseline::from_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
+        let mut baseline =
+            Baseline::from_trusted_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
         let delta = DeltaCodec::encode(tick_b, &snaps_b, Some(&baseline)).expect("valid snapshot");
         let reconstructed = DeltaCodec::apply(&delta, &mut baseline).expect("valid delta");
 
@@ -1437,8 +1444,8 @@ mod tests {
     fn encode_decode_delta_roundtrip() {
         let tick = TickId::from_raw(5);
         let snaps = make_snapshots(&[(1, &[(10, b"a"), (20, b"bb")]), (2, &[(30, b"ccc")])]);
-        let baseline =
-            Baseline::from_snapshot(TickId::from_raw(4), &snaps).expect("valid test snapshots");
+        let baseline = Baseline::from_trusted_snapshot(TickId::from_raw(4), &snaps)
+            .expect("valid test snapshots");
 
         // Add entity 40 to system 1, modify entity 20, remove entity 30 from system 2.
         let snaps_next = make_snapshots(&[
@@ -1509,7 +1516,8 @@ mod tests {
         // System 2 is gone in the next tick.
         let snaps_b = make_snapshots(&[(1, &[(10, b"pos")])]);
 
-        let baseline = Baseline::from_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
+        let baseline =
+            Baseline::from_trusted_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
         let delta = DeltaCodec::encode(tick_b, &snaps_b, Some(&baseline)).expect("valid snapshot");
 
         // Should have a removed entry for system 2.
@@ -1528,7 +1536,8 @@ mod tests {
         // System 2 is new in this tick.
         let snaps_b = make_snapshots(&[(1, &[(10, b"pos")]), (2, &[(20, b"new")])]);
 
-        let baseline = Baseline::from_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
+        let baseline =
+            Baseline::from_trusted_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
         let delta = DeltaCodec::encode(tick_b, &snaps_b, Some(&baseline)).expect("valid snapshot");
 
         let sys2_delta: Vec<_> = delta.systems.iter().filter(|s| s.system_id == 2).collect();
@@ -1543,7 +1552,8 @@ mod tests {
         let tick_b = TickId::from_raw(2);
 
         let snaps_a = make_snapshots(&[(1, &[(10, b"old")])]);
-        let mut baseline = Baseline::from_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
+        let mut baseline =
+            Baseline::from_trusted_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
 
         // Keyframe with completely different entities.
         let snaps_b = make_snapshots(&[(1, &[(99, b"new")])]);
@@ -1560,8 +1570,8 @@ mod tests {
     #[test]
     fn apply_rejects_wrong_baseline_tick_without_mutating() {
         let snapshots = make_snapshots(&[(1, &[(10, b"old")])]);
-        let mut baseline =
-            Baseline::from_snapshot(TickId::from_raw(2), &snapshots).expect("valid test snapshots");
+        let mut baseline = Baseline::from_trusted_snapshot(TickId::from_raw(2), &snapshots)
+            .expect("valid test snapshots");
         let original_hash = baseline.state_hash();
         let delta = Delta {
             tick: TickId::from_raw(3),
@@ -1584,8 +1594,8 @@ mod tests {
     #[test]
     fn apply_rejects_stale_tick_without_mutating() {
         let snapshots = make_snapshots(&[(1, &[(10, b"old")])]);
-        let mut baseline =
-            Baseline::from_snapshot(TickId::from_raw(2), &snapshots).expect("valid test snapshots");
+        let mut baseline = Baseline::from_trusted_snapshot(TickId::from_raw(2), &snapshots)
+            .expect("valid test snapshots");
         let original_hash = baseline.state_hash();
         let delta = Delta {
             tick: TickId::from_raw(2),
@@ -1605,8 +1615,8 @@ mod tests {
     #[test]
     fn apply_rejects_malformed_keyframe_without_mutating() {
         let snapshots = make_snapshots(&[(1, &[(10, b"old")])]);
-        let mut baseline =
-            Baseline::from_snapshot(TickId::from_raw(2), &snapshots).expect("valid test snapshots");
+        let mut baseline = Baseline::from_trusted_snapshot(TickId::from_raw(2), &snapshots)
+            .expect("valid test snapshots");
         let original_hash = baseline.state_hash();
         let delta = Delta {
             tick: TickId::from_raw(3),
@@ -1632,8 +1642,8 @@ mod tests {
     #[test]
     fn apply_rejects_invalid_entity_lifecycle_without_mutating() {
         let snapshots = make_snapshots(&[(1, &[(10, b"old")])]);
-        let baseline =
-            Baseline::from_snapshot(TickId::from_raw(2), &snapshots).expect("valid test snapshots");
+        let baseline = Baseline::from_trusted_snapshot(TickId::from_raw(2), &snapshots)
+            .expect("valid test snapshots");
 
         let cases = [
             SystemDelta {
@@ -1713,7 +1723,7 @@ mod tests {
         let baseline_tick = TickId::from_raw(41);
         let snaps = make_snapshots(&[(1, &[(10, b"a"), (20, b"bb")])]);
         let baseline =
-            Baseline::from_snapshot(baseline_tick, &snaps).expect("valid test snapshots");
+            Baseline::from_trusted_snapshot(baseline_tick, &snaps).expect("valid test snapshots");
 
         let snaps_next = make_snapshots(&[(1, &[(10, b"a_modified"), (30, b"cc")])]);
         let delta = DeltaCodec::encode(tick, &snaps_next, Some(&baseline)).expect("valid snapshot");
@@ -1748,7 +1758,7 @@ mod tests {
             .concat(),
         };
         assert!(matches!(
-            Baseline::from_snapshot(tick, &[truncated]),
+            Baseline::from_trusted_snapshot(tick, &[truncated]),
             Err(BaselineDecodeError::Truncated)
         ));
 
@@ -1757,7 +1767,7 @@ mod tests {
             data: vec![0],
         };
         assert!(matches!(
-            Baseline::from_snapshot(tick, &[trailing]),
+            Baseline::from_trusted_snapshot(tick, &[trailing]),
             Err(BaselineDecodeError::TrailingBytes(1))
         ));
 
@@ -1772,7 +1782,7 @@ mod tests {
             data: duplicate_data,
         };
         assert!(matches!(
-            Baseline::from_snapshot(tick, &[duplicate]),
+            Baseline::from_trusted_snapshot(tick, &[duplicate]),
             Err(BaselineDecodeError::DuplicateEntity(7))
         ));
     }
@@ -1883,7 +1893,7 @@ mod tests {
             },
         ];
         assert!(matches!(
-            Baseline::from_snapshot(TickId::from_raw(1), &systems),
+            Baseline::from_trusted_snapshot(TickId::from_raw(1), &systems),
             Err(BaselineDecodeError::DuplicateSystem(1))
         ));
     }
@@ -1940,7 +1950,8 @@ mod tests {
 
     #[test]
     fn apply_rejects_growth_without_mutating_baseline() {
-        let mut baseline = Baseline::from_snapshot(TickId::ZERO, &[]).expect("empty baseline");
+        let mut baseline =
+            Baseline::from_trusted_snapshot(TickId::ZERO, &[]).expect("empty baseline");
         for entity_bits in 0..MAX_BASELINE_ENTITIES as u64 {
             let delta = Delta {
                 tick: TickId::from_raw(entity_bits + 1),

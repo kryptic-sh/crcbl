@@ -16,9 +16,53 @@ impl SectorId {
     pub const ZERO: Self = Self { x: 0, y: 0, z: 0 };
 }
 
-/// Opaque session token that survives transport drops.
+/// Opaque routing identifier for a session. This is not a credential.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId(pub u64);
+
+/// Cryptographically random credential required to resume a session.
+///
+/// Its `Debug` implementation deliberately redacts the secret.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ResumeToken(pub [u8; 32]);
+
+impl ResumeToken {
+    /// Compare two credentials without returning early on a mismatched byte.
+    #[must_use]
+    pub fn constant_time_eq(self, other: Self) -> bool {
+        let mut difference = 0u8;
+        for (left, right) in self.0.iter().zip(other.0) {
+            difference |= left ^ right;
+        }
+        difference == 0
+    }
+}
+
+impl std::fmt::Debug for ResumeToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ResumeToken([REDACTED])")
+    }
+}
+
+/// Immutable identifiers which must agree before two peers exchange state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProtocolCompatibility {
+    /// Protocol version, incremented for breaking wire changes.
+    pub protocol_version: u32,
+    /// Engine and game build identifier supplied by the embedding application.
+    pub engine_build_id: u64,
+    /// Replicated schema identifier supplied by the embedding application.
+    pub schema_hash: u64,
+}
+
+impl ProtocolCompatibility {
+    /// Compatibility values retained for existing callers until applications configure them.
+    pub const DEFAULT: Self = Self {
+        protocol_version: 1,
+        engine_build_id: 0,
+        schema_hash: 0,
+    };
+}
 
 /// Entity identifier in packed form (generation + index from `crcbl_core::Pool`).
 pub type EntityBits = u64;
@@ -64,6 +108,19 @@ mod tests {
         let c = SessionId(7);
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn resume_token_redacts_debug_output() {
+        let token = ResumeToken([0xA5; 32]);
+        assert!(!format!("{token:?}").contains("165"));
+        assert!(token.constant_time_eq(token));
+        assert!(!token.constant_time_eq(ResumeToken([0; 32])));
+    }
+
+    #[test]
+    fn protocol_compatibility_default_is_explicit() {
+        assert_eq!(ProtocolCompatibility::DEFAULT.protocol_version, 1);
     }
 
     #[test]

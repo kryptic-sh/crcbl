@@ -32,9 +32,9 @@ impl Server {
         let delta = DeltaCodec::encode(tick, systems, baseline.as_ref()).expect("valid snapshot");
 
         // Store full snapshot as new baseline.
-        self.session
-            .baseline_store_mut()
-            .insert(Baseline::from_snapshot(tick, systems).expect("test snapshots are valid"));
+        self.session.baseline_store_mut().insert(
+            Baseline::from_trusted_snapshot(tick, systems).expect("test snapshots are valid"),
+        );
 
         crcbl_net::encode_delta(&delta).expect("valid delta")
     }
@@ -54,7 +54,7 @@ impl Client {
     fn new() -> Self {
         let empty: &[SystemSnapshot] = &[];
         Self {
-            baseline: Baseline::from_snapshot(TickId::ZERO, empty)
+            baseline: Baseline::from_trusted_snapshot(TickId::ZERO, empty)
                 .expect("empty snapshot is valid"),
         }
     }
@@ -166,8 +166,8 @@ fn unchanged_state_produces_empty_delta() {
     let systems = vec![snap1];
 
     // Build baseline from the snapshot.
-    let baseline =
-        Baseline::from_snapshot(TickId::from_raw(1), &systems).expect("test snapshots are valid");
+    let baseline = Baseline::from_trusted_snapshot(TickId::from_raw(1), &systems)
+        .expect("test snapshots are valid");
 
     // Re-encode the same snapshot against this baseline.
     let delta =

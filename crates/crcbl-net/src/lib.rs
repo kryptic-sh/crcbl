@@ -40,4 +40,4 @@ pub use messages::{
 };
 pub use session::{SessionConfig, SessionManager, SessionState};
 pub use transport::{InMemoryTransport, Message, MessageKind, Transport, TransportError};
-pub use types::{EntityBits, EntityData, SectorId, SessionId};
+pub use types::{EntityBits, EntityData, ProtocolCompatibility, ResumeToken, SectorId, SessionId};

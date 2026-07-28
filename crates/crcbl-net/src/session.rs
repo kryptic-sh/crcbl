@@ -4,7 +4,7 @@
 //! state, maintains a ring of [`crate::delta::Baseline`] snapshots for
 //! delta encoding, and handles the reconnect grace window.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crcbl_core::TickId;
 
@@ -56,7 +56,7 @@ impl Default for SessionConfig {
 pub struct SessionManager {
     state: SessionState,
     session_id: SessionId,
-    reconnect_deadline: Option<Instant>,
+    reconnect_deadline: Option<Duration>,
     last_acked_tick: Option<TickId>,
     baseline_store: BaselineStore,
     /// Set once on first successful handshake; validated on reconnect.
@@ -160,7 +160,7 @@ impl SessionManager {
     /// # Panics (debug only)
     ///
     /// Panics if the session is not [`SessionState::Connected`].
-    pub fn on_disconnect(&mut self, now: Instant, config: &SessionConfig) {
+    pub fn on_disconnect(&mut self, now: Duration, config: &SessionConfig) {
         debug_assert_eq!(
             self.state,
             SessionState::Connected,
@@ -180,7 +180,7 @@ impl SessionManager {
     /// On success, transitions back to [`SessionState::Connected`].
     pub fn try_reconnect(
         &mut self,
-        now: Instant,
+        now: Duration,
         engine_build_id: u64,
         schema_hash: u64,
         _config: &SessionConfig,
@@ -214,7 +214,7 @@ impl SessionManager {
     /// Transitions [`SessionState::Reconnecting`] → [`SessionState::Disconnected`]
     /// if the grace period has elapsed. Safe to call at any time; a no-op for
     /// non-reconnecting sessions or those still within their window.
-    pub fn expire_if_timed_out(&mut self, now: Instant) {
+    pub fn expire_if_timed_out(&mut self, now: Duration) {
         if self.state != SessionState::Reconnecting {
             return;
         }
@@ -240,8 +240,8 @@ mod tests {
         }
     }
 
-    fn now() -> Instant {
-        Instant::now()
+    fn now() -> Duration {
+        Duration::ZERO
     }
 
     // ── Fresh session ─────────────────────────────────────────────────────
@@ -370,7 +370,7 @@ mod tests {
 
     fn insert_baseline(mgr: &mut SessionManager, tick: u64) {
         mgr.baseline_store_mut().insert(
-            crate::delta::Baseline::from_snapshot(TickId::from_raw(tick), &[])
+            crate::delta::Baseline::from_trusted_snapshot(TickId::from_raw(tick), &[])
                 .expect("empty snapshot is valid"),
         );
     }
@@ -414,7 +414,8 @@ mod tests {
         // Mutable access.
         use crate::delta::Baseline;
         mgr.baseline_store_mut().insert(
-            Baseline::from_snapshot(TickId::from_raw(1), &[]).expect("empty snapshot is valid"),
+            Baseline::from_trusted_snapshot(TickId::from_raw(1), &[])
+                .expect("empty snapshot is valid"),
         );
         assert!(mgr.baseline_store().newest().is_some());
     }

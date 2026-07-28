@@ -168,6 +168,7 @@ dependencies = [
  "crcbl-core",
  "crcbl-ecs",
  "crcbl-net",
+ "getrandom 0.4.3",
 ]
 
 [[package]]

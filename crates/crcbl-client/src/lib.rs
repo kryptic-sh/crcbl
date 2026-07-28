@@ -10,14 +10,10 @@ use std::fmt;
 use crcbl_core::{FrameClock, TickId};
 use crcbl_ecs::World;
 use crcbl_net::{
-    Baseline, DeltaCodec, HandshakeResult, Hello, Message, MessageKind, SessionId, Transport,
-    TransportError,
+    Baseline, DeltaCodec, HandshakeResult, Hello, Message, MessageKind, ProtocolCompatibility,
+    ResumeToken, SessionId, Transport, TransportError,
 };
 use glam::Vec3;
-
-const PROTOCOL_VERSION: u32 = 1;
-const ENGINE_BUILD_ID: u64 = 0;
-const SCHEMA_HASH: u64 = 0;
 
 // ---------------------------------------------------------------------------
 // InterpolatedState
@@ -57,18 +53,27 @@ pub struct Client<T: Transport> {
     /// of the server's world state.
     baseline: Baseline,
     session_id: Option<SessionId>,
+    resume_token: Option<ResumeToken>,
+    compatibility: ProtocolCompatibility,
     hello_sent: bool,
     processing_error_count: u64,
 }
 
 impl<T: Transport> Client<T> {
-    /// Create a client running at the same `tick_hz` as the server.
-    ///
-    /// # Panics
-    ///
-    /// If `tick_hz` is zero.
+    /// Create a client with the default protocol compatibility identifiers.
     #[must_use]
     pub fn new(world: World, transport: T, tick_hz: u32) -> Self {
+        Self::new_with_compatibility(world, transport, tick_hz, ProtocolCompatibility::DEFAULT)
+    }
+
+    /// Create a client with explicit protocol compatibility identifiers.
+    #[must_use]
+    pub fn new_with_compatibility(
+        world: World,
+        transport: T,
+        tick_hz: u32,
+        compatibility: ProtocolCompatibility,
+    ) -> Self {
         Self {
             world,
             transport,
@@ -76,8 +81,11 @@ impl<T: Transport> Client<T> {
             prev_snapshot: None,
             current_snapshot: None,
             pending_input: Vec::new(),
-            baseline: Baseline::from_snapshot(TickId::ZERO, &[]).expect("empty snapshot is valid"),
+            baseline: Baseline::from_trusted_snapshot(TickId::ZERO, &[])
+                .expect("empty snapshot is valid"),
             session_id: None,
+            resume_token: None,
+            compatibility,
             hello_sent: false,
             processing_error_count: 0,
         }
@@ -189,10 +197,10 @@ impl<T: Transport> Client<T> {
         let result = self.transport.send_reliable(Message {
             kind: MessageKind::Reliable,
             payload: crcbl_net::encode_hello(&Hello {
-                protocol_version: PROTOCOL_VERSION,
-                engine_build_id: ENGINE_BUILD_ID,
-                schema_hash: SCHEMA_HASH,
-                session_token: self.session_id,
+                protocol_version: self.compatibility.protocol_version,
+                engine_build_id: self.compatibility.engine_build_id,
+                schema_hash: self.compatibility.schema_hash,
+                session_token: self.resume_token,
             }),
         });
         if result.is_ok() {
@@ -225,8 +233,13 @@ impl<T: Transport> Client<T> {
         while let Some(msg) = self.transport.recv()? {
             if let Ok(result) = crcbl_net::decode_handshake_result(&msg.payload) {
                 match result {
-                    HandshakeResult::Accept { session_id, .. } => {
-                        self.session_id = Some(session_id)
+                    HandshakeResult::Accept {
+                        session_id,
+                        resume_token,
+                        ..
+                    } => {
+                        self.session_id = Some(session_id);
+                        self.resume_token = Some(resume_token);
                     }
                     HandshakeResult::Reject { .. } => self.processing_error_count += 1,
                 }

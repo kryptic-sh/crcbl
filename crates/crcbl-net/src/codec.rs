@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use crate::handshake::{HandshakeResult, Hello, RejectReason};
 use crate::messages::{ClientToServer, ServerToClient, SystemSnapshot};
-use crate::types::{SectorId, SessionId};
+use crate::types::{ResumeToken, SectorId, SessionId};
 use crcbl_core::TickId;
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -297,17 +297,17 @@ pub fn decode_server_to_client(payload: &[u8]) -> Result<ServerToClient, DecodeE
 // ── Handshake encode/decode ───────────────────────────────────────────────────
 
 /// Tag 0x20 = Hello { protocol_version: u32 LE, engine_build_id: u64 LE,
-///   schema_hash: u64 LE, has_session: u8, session_token: u64 LE (if has_session) }
+///   schema_hash: u64 LE, has_session: u8, resume_token: [u8; 32] (if has_session) }
 pub fn encode_hello(hello: &Hello) -> Vec<u8> {
     let has_session = hello.session_token.is_some();
-    let mut buf = Vec::with_capacity(1 + 4 + 8 + 8 + 1 + 8);
+    let mut buf = Vec::with_capacity(1 + 4 + 8 + 8 + 1 + usize::from(has_session) * 32);
     buf.push(0x20);
     buf.extend_from_slice(&hello.protocol_version.to_le_bytes());
     buf.extend_from_slice(&hello.engine_build_id.to_le_bytes());
     buf.extend_from_slice(&hello.schema_hash.to_le_bytes());
     buf.push(if has_session { 1u8 } else { 0u8 });
     if let Some(token) = &hello.session_token {
-        buf.extend_from_slice(&token.0.to_le_bytes());
+        buf.extend_from_slice(&token.0);
     }
     buf
 }
@@ -325,7 +325,7 @@ pub fn decode_hello(payload: &[u8]) -> Result<Hello, DecodeError> {
     let has_session = r.read_u8()?;
     let session_token = match has_session {
         0 => None,
-        1 => Some(SessionId(r.read_u64()?)),
+        1 => Some(ResumeToken(r.read_bytes(32)?.try_into().unwrap())),
         _ => return Err(DecodeError::InvalidLength(has_session.into())),
     };
     r.assert_empty()?;
@@ -337,17 +337,19 @@ pub fn decode_hello(payload: &[u8]) -> Result<Hello, DecodeError> {
     })
 }
 
-/// Tag 0x21 = Accept { session_id: u64 LE, server_tick: u64 LE }
+/// Tag 0x21 = Accept { session_id: u64 LE, resume_token: [u8; 32], server_tick: u64 LE }
 /// Tag 0x22 = Reject { code: u8, msg_len: u16 LE, msg: UTF-8 bytes }
 pub fn encode_handshake_result(result: &HandshakeResult) -> Vec<u8> {
     match result {
         HandshakeResult::Accept {
             session_id,
+            resume_token,
             server_tick,
         } => {
-            let mut buf = Vec::with_capacity(1 + 8 + 8);
+            let mut buf = Vec::with_capacity(1 + 8 + 32 + 8);
             buf.push(0x21);
             buf.extend_from_slice(&session_id.0.to_le_bytes());
+            buf.extend_from_slice(&resume_token.0);
             buf.extend_from_slice(&server_tick.get().to_le_bytes());
             buf
         }
@@ -370,10 +372,12 @@ pub fn decode_handshake_result(payload: &[u8]) -> Result<HandshakeResult, Decode
     match tag {
         0x21 => {
             let raw_session = r.read_u64()?;
+            let resume_token = ResumeToken(r.read_bytes(32)?.try_into().unwrap());
             let raw_tick = r.read_u64()?;
             r.assert_empty()?;
             Ok(HandshakeResult::Accept {
                 session_id: SessionId(raw_session),
+                resume_token,
                 server_tick: TickId::from_raw(raw_tick),
             })
         }
@@ -526,14 +530,14 @@ mod tests {
             protocol_version: 1,
             engine_build_id: 0xCAFE_BABE,
             schema_hash: 0xDEAD_BEEF,
-            session_token: Some(SessionId(12345)),
+            session_token: Some(ResumeToken([0xA5; 32])),
         };
         let encoded = encode_hello(&hello);
         let decoded = decode_hello(&encoded).unwrap();
         assert_eq!(decoded.protocol_version, 1);
         assert_eq!(decoded.engine_build_id, 0xCAFE_BABE);
         assert_eq!(decoded.schema_hash, 0xDEAD_BEEF);
-        assert_eq!(decoded.session_token, Some(SessionId(12345)));
+        assert_eq!(decoded.session_token, Some(ResumeToken([0xA5; 32])));
 
         // Without session token (fresh join)
         let hello_fresh = Hello {
@@ -552,6 +556,7 @@ mod tests {
         // Accept
         let accept = HandshakeResult::Accept {
             session_id: SessionId(999),
+            resume_token: ResumeToken([0; 32]),
             server_tick: TickId::from_raw(5),
         };
         let encoded = encode_handshake_result(&accept);
@@ -559,9 +564,11 @@ mod tests {
         match decoded {
             HandshakeResult::Accept {
                 session_id,
+                resume_token,
                 server_tick,
             } => {
                 assert_eq!(session_id, SessionId(999));
+                assert_eq!(resume_token, ResumeToken([0; 32]));
                 assert_eq!(server_tick.get(), 5);
             }
             _ => panic!("expected Accept"),
@@ -705,7 +712,7 @@ mod tests {
             protocol_version: 1,
             engine_build_id: 2,
             schema_hash: 3,
-            session_token: Some(SessionId(4)),
+            session_token: Some(ResumeToken([4; 32])),
         });
         assert!(matches!(
             decode_hello(&hello_enc[..5]),
@@ -715,6 +722,7 @@ mod tests {
         // Handshake Accept truncated
         let accept_enc = encode_handshake_result(&HandshakeResult::Accept {
             session_id: SessionId(1),
+            resume_token: ResumeToken([0; 32]),
             server_tick: TickId::from_raw(1),
         });
         assert!(matches!(
@@ -772,6 +780,7 @@ mod tests {
         // HandshakeResult with trailing bytes
         let mut enc = encode_handshake_result(&HandshakeResult::Accept {
             session_id: SessionId(1),
+            resume_token: ResumeToken([0; 32]),
             server_tick: TickId::from_raw(1),
         });
         enc.push(0xBB);
@@ -950,7 +959,7 @@ mod tests {
             protocol_version: 1,
             engine_build_id: 2,
             schema_hash: 3,
-            session_token: Some(SessionId(4)),
+            session_token: Some(ResumeToken([4; 32])),
         };
         let _ = format!("{h:?}");
 
@@ -962,6 +971,7 @@ mod tests {
 
         let accept = HandshakeResult::Accept {
             session_id: SessionId(5),
+            resume_token: ResumeToken([0; 32]),
             server_tick: TickId::from_raw(6),
         };
         let _ = format!("{accept:?}");
@@ -997,16 +1007,19 @@ mod tests {
     fn handshake_result_partial_eq() {
         let a = HandshakeResult::Accept {
             session_id: SessionId(1),
+            resume_token: ResumeToken([0; 32]),
             server_tick: TickId::from_raw(2),
         };
         let b = HandshakeResult::Accept {
             session_id: SessionId(1),
+            resume_token: ResumeToken([0; 32]),
             server_tick: TickId::from_raw(2),
         };
         assert_eq!(a, b);
 
         let c = HandshakeResult::Accept {
             session_id: SessionId(2),
+            resume_token: ResumeToken([0; 32]),
             server_tick: TickId::from_raw(2),
         };
         assert_ne!(a, c);

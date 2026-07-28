@@ -4,7 +4,7 @@
 //! This module defines the wire-level handshake types. The codec module
 //! will later use/re-export them for serialisation.
 
-use crate::types::SessionId;
+use crate::types::{ProtocolCompatibility, ResumeToken, SessionId};
 use crcbl_core::TickId;
 
 // ── Hello ─────────────────────────────────────────────────────────────────────
@@ -22,7 +22,7 @@ pub struct Hello {
     pub schema_hash: u64,
     /// `None` for a fresh join; `Some` when attempting to resume a previous
     /// session (the server still decides whether the token is valid).
-    pub session_token: Option<SessionId>,
+    pub session_token: Option<ResumeToken>,
 }
 
 // ── RejectReason ──────────────────────────────────────────────────────────────
@@ -51,6 +51,7 @@ pub struct RejectReason {
 pub enum HandshakeResult {
     Accept {
         session_id: SessionId,
+        resume_token: ResumeToken,
         server_tick: TickId,
     },
     Reject {
@@ -68,24 +69,13 @@ pub enum HandshakeResult {
 /// [`HandshakeResult::Accept`] result.
 #[derive(Debug)]
 pub struct HandshakeGate {
-    expected_protocol_version: u32,
-    #[allow(dead_code)]
-    expected_engine_build_id: u64,
-    expected_schema_hash: u64,
+    compatibility: ProtocolCompatibility,
 }
 
 impl HandshakeGate {
     /// Create a gate configured with the server's identifiers.
-    pub fn new(
-        expected_protocol_version: u32,
-        expected_engine_build_id: u64,
-        expected_schema_hash: u64,
-    ) -> Self {
-        Self {
-            expected_protocol_version,
-            expected_engine_build_id,
-            expected_schema_hash,
-        }
+    pub fn new(compatibility: ProtocolCompatibility) -> Self {
+        Self { compatibility }
     }
 
     /// Validate a client hello.
@@ -93,52 +83,54 @@ impl HandshakeGate {
     /// Returns `HandshakeResult::Accept` when all checks pass, or
     /// `HandshakeResult::Reject` with an appropriate reason code otherwise.
     ///
-    /// The caller supplies `next_session_id` and `server_tick` for the accept
-    /// path; the gate does not generate session ids itself.
+    /// The caller supplies the assigned session values and server tick for the accept
+    /// path; the gate does not generate credentials itself.
     pub fn validate(
         &self,
         hello: &Hello,
-        next_session_id: SessionId,
+        session_id: SessionId,
+        resume_token: ResumeToken,
         server_tick: TickId,
     ) -> HandshakeResult {
-        if hello.protocol_version != self.expected_protocol_version {
+        if hello.protocol_version != self.compatibility.protocol_version {
             return HandshakeResult::Reject {
                 reason: RejectReason {
                     code: 0x01,
                     msg: format!(
                         "protocol version mismatch: client {}, server {}",
-                        hello.protocol_version, self.expected_protocol_version,
+                        hello.protocol_version, self.compatibility.protocol_version,
                     ),
                 },
             };
         }
 
-        if hello.engine_build_id != self.expected_engine_build_id {
+        if hello.engine_build_id != self.compatibility.engine_build_id {
             return HandshakeResult::Reject {
                 reason: RejectReason {
                     code: 0x05,
                     msg: format!(
                         "engine build id mismatch: client 0x{:016x}, server 0x{:016x}",
-                        hello.engine_build_id, self.expected_engine_build_id,
+                        hello.engine_build_id, self.compatibility.engine_build_id,
                     ),
                 },
             };
         }
 
-        if hello.schema_hash != self.expected_schema_hash {
+        if hello.schema_hash != self.compatibility.schema_hash {
             return HandshakeResult::Reject {
                 reason: RejectReason {
                     code: 0x02,
                     msg: format!(
                         "schema hash mismatch: client 0x{:016x}, server 0x{:016x}",
-                        hello.schema_hash, self.expected_schema_hash,
+                        hello.schema_hash, self.compatibility.schema_hash,
                     ),
                 },
             };
         }
 
         HandshakeResult::Accept {
-            session_id: next_session_id,
+            session_id,
+            resume_token,
             server_tick,
         }
     }
@@ -151,7 +143,15 @@ mod tests {
     use super::*;
 
     fn gate() -> HandshakeGate {
-        HandshakeGate::new(1, 0xABCD, 0xDEAD_BEEF_CAFE)
+        HandshakeGate::new(ProtocolCompatibility {
+            protocol_version: 1,
+            engine_build_id: 0xABCD,
+            schema_hash: 0xDEAD_BEEF_CAFE,
+        })
+    }
+
+    fn token() -> ResumeToken {
+        ResumeToken([0xA5; 32])
     }
 
     fn matching_hello() -> Hello {
@@ -168,11 +168,17 @@ mod tests {
     #[test]
     fn valid_hello_is_accepted() {
         let g = gate();
-        let result = g.validate(&matching_hello(), SessionId(42), TickId::from_raw(100));
+        let result = g.validate(
+            &matching_hello(),
+            SessionId(42),
+            token(),
+            TickId::from_raw(100),
+        );
         match result {
             HandshakeResult::Accept {
                 session_id,
                 server_tick,
+                ..
             } => {
                 assert_eq!(session_id, SessionId(42));
                 assert_eq!(server_tick, TickId::from_raw(100));
@@ -192,7 +198,7 @@ mod tests {
             protocol_version: 999,
             ..matching_hello()
         };
-        let result = g.validate(&hello, SessionId(1), TickId::ZERO);
+        let result = g.validate(&hello, SessionId(1), token(), TickId::ZERO);
         match result {
             HandshakeResult::Reject { reason } => {
                 assert_eq!(reason.code, 0x01);
@@ -215,7 +221,7 @@ mod tests {
             schema_hash: 0xBAD,
             ..matching_hello()
         };
-        let result = g.validate(&hello, SessionId(1), TickId::ZERO);
+        let result = g.validate(&hello, SessionId(1), token(), TickId::ZERO);
         match result {
             HandshakeResult::Reject { reason } => {
                 assert_eq!(reason.code, 0x02);
@@ -234,7 +240,7 @@ mod tests {
             engine_build_id: 0xBAD,
             ..matching_hello()
         };
-        let result = g.validate(&hello, SessionId(1), TickId::ZERO);
+        let result = g.validate(&hello, SessionId(1), token(), TickId::ZERO);
         match result {
             HandshakeResult::Reject { reason } => {
                 assert_eq!(reason.code, 0x05);
@@ -252,10 +258,10 @@ mod tests {
     fn hello_with_session_token_forwards_to_session() {
         let g = gate();
         let hello = Hello {
-            session_token: Some(SessionId(98765)),
+            session_token: Some(token()),
             ..matching_hello()
         };
-        let result = g.validate(&hello, SessionId(1), TickId::from_raw(10));
+        let result = g.validate(&hello, SessionId(1), token(), TickId::from_raw(10));
         // The gate accepts; session-token validation is the caller's
         // responsibility. The test verifies the token is preserved in the
         // Hello and doesn't affect accept/reject by the gate.
@@ -283,6 +289,7 @@ mod tests {
 
         let ha = HandshakeResult::Accept {
             session_id: SessionId(1),
+            resume_token: ResumeToken([0; 32]),
             server_tick: TickId::ZERO,
         };
         let _ = format!("{ha:?}");
@@ -290,7 +297,11 @@ mod tests {
 
     #[test]
     fn gate_new_stores_expected_values() {
-        let g = HandshakeGate::new(7, 0xF00, 0xBA2);
+        let g = HandshakeGate::new(ProtocolCompatibility {
+            protocol_version: 7,
+            engine_build_id: 0xF00,
+            schema_hash: 0xBA2,
+        });
         // Indirectly verify by matching and mismatching.
         let ok = g.validate(
             &Hello {
@@ -300,6 +311,7 @@ mod tests {
                 session_token: None,
             },
             SessionId(1),
+            token(),
             TickId::ZERO,
         );
         assert!(matches!(ok, HandshakeResult::Accept { .. }));
@@ -312,6 +324,7 @@ mod tests {
                 session_token: None,
             },
             SessionId(1),
+            token(),
             TickId::ZERO,
         );
         assert!(matches!(bad, HandshakeResult::Reject { .. }));
