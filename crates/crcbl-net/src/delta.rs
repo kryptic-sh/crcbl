@@ -46,6 +46,17 @@ pub enum BaselineDecodeError {
     BaselineTooLarge,
     #[error("component data length exceeds limit: {0}")]
     ComponentTooLarge(u32),
+    #[error("delta tick {delta:?} is not newer than baseline tick {baseline:?}")]
+    StaleDeltaTick { delta: TickId, baseline: TickId },
+    #[error("delta baseline tick {actual:?} does not match baseline tick {expected:?}")]
+    WrongBaselineTick {
+        expected: TickId,
+        actual: Option<TickId>,
+    },
+    #[error("keyframe must not specify a baseline tick")]
+    KeyframeHasBaselineTick,
+    #[error("keyframe contains removed or modified entities")]
+    InvalidKeyframeOperations,
 }
 
 // ── Baseline ──────────────────────────────────────────────────────────────────
@@ -188,9 +199,9 @@ fn validate_baseline_limits(
 
 /// Bounded ring buffer of [`Baseline`]s keyed by [`TickId`].
 ///
-/// Older baselines are evicted once capacity is reached. The store answers
-/// "is this tick too old to delta against?" efficiently by checking whether
-/// the tick falls behind the oldest retained tick.
+/// Older baselines are evicted once capacity is reached. A capacity of zero
+/// disables storage. The store answers "is this tick too old to delta against?"
+/// efficiently by checking whether the tick falls behind the oldest retained tick.
 #[derive(Debug)]
 pub struct BaselineStore {
     capacity: usize,
@@ -208,6 +219,9 @@ impl BaselineStore {
 
     /// Insert a baseline. Evicts the oldest if at capacity.
     pub fn insert(&mut self, baseline: Baseline) {
+        if self.capacity == 0 {
+            return;
+        }
         if self.ring.len() >= self.capacity {
             self.ring.pop_front();
         }
@@ -418,6 +432,7 @@ impl DeltaCodec {
         delta: &Delta,
         baseline: &mut Baseline,
     ) -> Result<Vec<SystemSnapshot>, BaselineDecodeError> {
+        validate_delta_metadata(delta, baseline)?;
         validate_delta_operations(delta)?;
         let mut systems = if delta.is_keyframe {
             HashMap::new()
@@ -447,6 +462,33 @@ impl DeltaCodec {
         *baseline = next;
         Ok(snapshots)
     }
+}
+
+fn validate_delta_metadata(delta: &Delta, baseline: &Baseline) -> Result<(), BaselineDecodeError> {
+    if delta.tick <= baseline.tick {
+        return Err(BaselineDecodeError::StaleDeltaTick {
+            delta: delta.tick,
+            baseline: baseline.tick,
+        });
+    }
+    if delta.is_keyframe {
+        if delta.baseline_tick.is_some() {
+            return Err(BaselineDecodeError::KeyframeHasBaselineTick);
+        }
+        if delta
+            .systems
+            .iter()
+            .any(|system| !system.removed.is_empty() || !system.modified.is_empty())
+        {
+            return Err(BaselineDecodeError::InvalidKeyframeOperations);
+        }
+    } else if delta.baseline_tick != Some(baseline.tick) {
+        return Err(BaselineDecodeError::WrongBaselineTick {
+            expected: baseline.tick,
+            actual: delta.baseline_tick,
+        });
+    }
+    Ok(())
 }
 
 fn validate_delta_operations(delta: &Delta) -> Result<(), BaselineDecodeError> {
@@ -867,6 +909,13 @@ mod tests {
     fn baseline_store_get_missing() {
         let store = BaselineStore::new(4);
         assert!(store.get(TickId::from_raw(99)).is_none());
+    }
+
+    #[test]
+    fn baseline_store_zero_capacity_stays_empty() {
+        let mut store = BaselineStore::new(0);
+        store.insert(make_snapshot(TickId::from_raw(1), 1, &[(1, b"a")]));
+        assert!(store.newest().is_none());
     }
 
     // ── Eviction ──────────────────────────────────────────────────────────
@@ -1347,6 +1396,78 @@ mod tests {
         assert!(sys.contains_key(&99));
         assert!(!sys.contains_key(&10)); // Old entity gone.
         assert_eq!(baseline.tick, tick_b);
+    }
+
+    #[test]
+    fn apply_rejects_wrong_baseline_tick_without_mutating() {
+        let snapshots = make_snapshots(&[(1, &[(10, b"old")])]);
+        let mut baseline =
+            Baseline::from_snapshot(TickId::from_raw(2), &snapshots).expect("valid test snapshots");
+        let original_hash = baseline.state_hash();
+        let delta = Delta {
+            tick: TickId::from_raw(3),
+            baseline_tick: Some(TickId::from_raw(1)),
+            is_keyframe: false,
+            systems: Vec::new(),
+        };
+
+        assert!(matches!(
+            DeltaCodec::apply(&delta, &mut baseline),
+            Err(BaselineDecodeError::WrongBaselineTick {
+                expected,
+                actual: Some(actual),
+            }) if expected == TickId::from_raw(2) && actual == TickId::from_raw(1)
+        ));
+        assert_eq!(baseline.tick, TickId::from_raw(2));
+        assert_eq!(baseline.state_hash(), original_hash);
+    }
+
+    #[test]
+    fn apply_rejects_stale_tick_without_mutating() {
+        let snapshots = make_snapshots(&[(1, &[(10, b"old")])]);
+        let mut baseline =
+            Baseline::from_snapshot(TickId::from_raw(2), &snapshots).expect("valid test snapshots");
+        let original_hash = baseline.state_hash();
+        let delta = Delta {
+            tick: TickId::from_raw(2),
+            baseline_tick: Some(TickId::from_raw(2)),
+            is_keyframe: false,
+            systems: Vec::new(),
+        };
+
+        assert!(matches!(
+            DeltaCodec::apply(&delta, &mut baseline),
+            Err(BaselineDecodeError::StaleDeltaTick { .. })
+        ));
+        assert_eq!(baseline.tick, TickId::from_raw(2));
+        assert_eq!(baseline.state_hash(), original_hash);
+    }
+
+    #[test]
+    fn apply_rejects_malformed_keyframe_without_mutating() {
+        let snapshots = make_snapshots(&[(1, &[(10, b"old")])]);
+        let mut baseline =
+            Baseline::from_snapshot(TickId::from_raw(2), &snapshots).expect("valid test snapshots");
+        let original_hash = baseline.state_hash();
+        let delta = Delta {
+            tick: TickId::from_raw(3),
+            baseline_tick: None,
+            is_keyframe: true,
+            systems: vec![SystemDelta {
+                system_id: 1,
+                added: Vec::new(),
+                removed: vec![10],
+                modified: Vec::new(),
+                unchanged_count: 0,
+            }],
+        };
+
+        assert!(matches!(
+            DeltaCodec::apply(&delta, &mut baseline),
+            Err(BaselineDecodeError::InvalidKeyframeOperations)
+        ));
+        assert_eq!(baseline.tick, TickId::from_raw(2));
+        assert_eq!(baseline.state_hash(), original_hash);
     }
 
     #[test]

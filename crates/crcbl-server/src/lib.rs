@@ -98,9 +98,11 @@ impl<T: Transport> Server<T> {
 
         let stats = Inspector::collect(&self.world);
         for (idx, stat) in stats.iter().enumerate() {
-            // Payload: entity count (4 bytes LE) — real per-entity component
-            // data lands with P3 replication encoding.
-            let mut data = Vec::with_capacity(4);
+            // Payload: one synthetic entity with its count (4 bytes LE); real
+            // per-entity component data lands with P3 replication encoding.
+            let mut data = Vec::with_capacity(16);
+            data.extend_from_slice(&0u64.to_le_bytes());
+            data.extend_from_slice(&4u32.to_le_bytes());
             data.extend_from_slice(&(stat.entity_count as u32).to_le_bytes());
             writer.write_system(idx as u32, data);
         }
@@ -122,10 +124,13 @@ impl<T: Transport> Server<T> {
             return;
         };
 
+        let Ok(payload) = crcbl_net::encode_delta(&delta) else {
+            return;
+        };
+
         // Store this full snapshot as a new baseline for future deltas.
         self.session.baseline_store_mut().insert(baseline);
 
-        let payload = crcbl_net::encode_delta(&delta).expect("valid delta");
         let _ = self.transport.send_unreliable(Message {
             kind: MessageKind::Unreliable,
             payload,

@@ -141,9 +141,15 @@ impl SessionManager {
         self.schema_hash = Some(schema_hash);
     }
 
-    /// Record the client's ack of a server tick.
+    /// Record the client's ack of a retained server tick.
     pub fn handle_ack(&mut self, tick: TickId) {
-        self.last_acked_tick = Some(tick);
+        if self.baseline_store.get(tick).is_some()
+            && self
+                .last_acked_tick
+                .is_none_or(|last_acked| tick > last_acked)
+        {
+            self.last_acked_tick = Some(tick);
+        }
     }
 
     /// Handle a transport disconnect.
@@ -362,20 +368,40 @@ mod tests {
 
     // ── Ack tracking ──────────────────────────────────────────────────────
 
-    #[test]
-    fn ack_updates_last_acked_tick() {
-        let mut mgr = SessionManager::new(SessionId(9), &config());
-        assert_eq!(mgr.last_acked_tick(), None);
-        mgr.handle_ack(TickId::from_raw(42));
-        assert_eq!(mgr.last_acked_tick(), Some(TickId::from_raw(42)));
+    fn insert_baseline(mgr: &mut SessionManager, tick: u64) {
+        mgr.baseline_store_mut().insert(
+            crate::delta::Baseline::from_snapshot(TickId::from_raw(tick), &[])
+                .expect("empty snapshot is valid"),
+        );
     }
 
     #[test]
-    fn ack_overwrites_previous() {
+    fn ack_accepts_increasing_retained_ticks() {
+        let mut mgr = SessionManager::new(SessionId(9), &config());
+        insert_baseline(&mut mgr, 1);
+        insert_baseline(&mut mgr, 2);
+        mgr.handle_ack(TickId::from_raw(1));
+        mgr.handle_ack(TickId::from_raw(2));
+        assert_eq!(mgr.last_acked_tick(), Some(TickId::from_raw(2)));
+    }
+
+    #[test]
+    fn delayed_ack_does_not_regress_last_acked_tick() {
         let mut mgr = SessionManager::new(SessionId(10), &config());
-        mgr.handle_ack(TickId::from_raw(10));
-        mgr.handle_ack(TickId::from_raw(20));
-        assert_eq!(mgr.last_acked_tick(), Some(TickId::from_raw(20)));
+        insert_baseline(&mut mgr, 1);
+        insert_baseline(&mut mgr, 2);
+        mgr.handle_ack(TickId::from_raw(2));
+        mgr.handle_ack(TickId::from_raw(2));
+        mgr.handle_ack(TickId::from_raw(1));
+        assert_eq!(mgr.last_acked_tick(), Some(TickId::from_raw(2)));
+    }
+
+    #[test]
+    fn unknown_ack_is_ignored() {
+        let mut mgr = SessionManager::new(SessionId(11), &config());
+        insert_baseline(&mut mgr, 1);
+        mgr.handle_ack(TickId::from_raw(2));
+        assert_eq!(mgr.last_acked_tick(), None);
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────
