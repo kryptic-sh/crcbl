@@ -27,6 +27,25 @@ pub enum DecodeError {
     TrailingBytes(usize),
 }
 
+/// Maximum accepted wire payload. Snapshots target a single UDP datagram.
+pub const MAX_WIRE_PAYLOAD_BYTES: usize = 64 * 1024;
+/// Largest individual opaque field accepted from the wire.
+pub const MAX_FIELD_BYTES: usize = 60 * 1024;
+
+fn validate_payload_size(payload: &[u8]) -> Result<(), DecodeError> {
+    if payload.len() > MAX_WIRE_PAYLOAD_BYTES {
+        return Err(DecodeError::InvalidLength(payload.len() as u32));
+    }
+    Ok(())
+}
+
+fn validate_field_len(len: usize, _remaining: usize) -> Result<(), DecodeError> {
+    if len > MAX_FIELD_BYTES {
+        return Err(DecodeError::InvalidLength(len as u32));
+    }
+    Ok(())
+}
+
 // ── ByteReader helper ─────────────────────────────────────────────────────────
 
 struct ByteReader<'a> {
@@ -156,12 +175,14 @@ pub fn encode_client_to_server(msg: &ClientToServer) -> Vec<u8> {
 }
 
 pub fn decode_client_to_server(payload: &[u8]) -> Result<ClientToServer, DecodeError> {
+    validate_payload_size(payload)?;
     let mut r = ByteReader::new(payload);
     let tag = r.read_u8()?;
     match tag {
         0x00 => {
             let tick_raw = r.read_u64()?;
             let data_len = r.read_u32()? as usize;
+            validate_field_len(data_len, r.remaining())?;
             let data = r.read_bytes(data_len)?.to_vec();
             r.assert_empty()?;
             Ok(ClientToServer::Input {
@@ -171,6 +192,7 @@ pub fn decode_client_to_server(payload: &[u8]) -> Result<ClientToServer, DecodeE
         }
         0x01 => {
             let data_len = r.read_u32()? as usize;
+            validate_field_len(data_len, r.remaining())?;
             let data = r.read_bytes(data_len)?.to_vec();
             r.assert_empty()?;
             Ok(ClientToServer::Command { data })
@@ -221,6 +243,7 @@ pub fn encode_server_to_client(msg: &ServerToClient) -> Vec<u8> {
 }
 
 pub fn decode_server_to_client(payload: &[u8]) -> Result<ServerToClient, DecodeError> {
+    validate_payload_size(payload)?;
     let mut r = ByteReader::new(payload);
     let tag = r.read_u8()?;
     match tag {
@@ -230,10 +253,14 @@ pub fn decode_server_to_client(payload: &[u8]) -> Result<ServerToClient, DecodeE
             let sz = r.read_i64()?;
             let tick_raw = r.read_u64()?;
             let system_count = r.read_u32()? as usize;
+            if system_count > r.remaining() / 8 {
+                return Err(DecodeError::InvalidLength(system_count as u32));
+            }
             let mut systems = Vec::with_capacity(system_count);
             for _ in 0..system_count {
                 let system_id = r.read_u32()?;
                 let data_len = r.read_u32()? as usize;
+                validate_field_len(data_len, r.remaining())?;
                 let data = r.read_bytes(data_len)?.to_vec();
                 systems.push(SystemSnapshot { system_id, data });
             }
@@ -250,6 +277,7 @@ pub fn decode_server_to_client(payload: &[u8]) -> Result<ServerToClient, DecodeE
         }
         0x11 => {
             let data_len = r.read_u32()? as usize;
+            validate_field_len(data_len, r.remaining())?;
             let data = r.read_bytes(data_len)?.to_vec();
             r.assert_empty()?;
             Ok(ServerToClient::Event { data })
@@ -277,6 +305,7 @@ pub fn encode_hello(hello: &Hello) -> Vec<u8> {
 }
 
 pub fn decode_hello(payload: &[u8]) -> Result<Hello, DecodeError> {
+    validate_payload_size(payload)?;
     let mut r = ByteReader::new(payload);
     let tag = r.read_u8()?;
     if tag != 0x20 {
@@ -286,11 +315,10 @@ pub fn decode_hello(payload: &[u8]) -> Result<Hello, DecodeError> {
     let engine_build_id = r.read_u64()?;
     let schema_hash = r.read_u64()?;
     let has_session = r.read_u8()?;
-    let session_token = if has_session != 0 {
-        let raw = r.read_u64()?;
-        Some(SessionId(raw))
-    } else {
-        None
+    let session_token = match has_session {
+        0 => None,
+        1 => Some(SessionId(r.read_u64()?)),
+        _ => return Err(DecodeError::InvalidLength(has_session.into())),
     };
     r.assert_empty()?;
     Ok(Hello {
@@ -328,6 +356,7 @@ pub fn encode_handshake_result(result: &HandshakeResult) -> Vec<u8> {
 }
 
 pub fn decode_handshake_result(payload: &[u8]) -> Result<HandshakeResult, DecodeError> {
+    validate_payload_size(payload)?;
     let mut r = ByteReader::new(payload);
     let tag = r.read_u8()?;
     match tag {
@@ -343,6 +372,7 @@ pub fn decode_handshake_result(payload: &[u8]) -> Result<HandshakeResult, Decode
         0x22 => {
             let code = r.read_u8()?;
             let msg_len = r.read_u16()? as usize;
+            validate_field_len(msg_len, r.remaining())?;
             let msg_bytes = r.read_bytes(msg_len)?;
             let msg = String::from_utf8(msg_bytes.to_vec())
                 .map_err(|_| DecodeError::InvalidLength(msg_len as u32))?;
@@ -366,6 +396,7 @@ pub fn encode_ack(tick: TickId) -> Vec<u8> {
 }
 
 pub fn decode_ack(payload: &[u8]) -> Result<TickId, DecodeError> {
+    validate_payload_size(payload)?;
     let mut r = ByteReader::new(payload);
     let tag = r.read_u8()?;
     if tag != 0x30 {
@@ -750,6 +781,38 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn decode_rejects_huge_declared_lengths_and_counts() {
+        let command = [0x01, 0xff, 0xff, 0xff, 0xff];
+        assert!(matches!(
+            decode_client_to_server(&command),
+            Err(DecodeError::InvalidLength(_))
+        ));
+
+        let mut snapshot = vec![0x10];
+        snapshot.extend_from_slice(&[0; 32]);
+        snapshot.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            decode_server_to_client(&snapshot),
+            Err(DecodeError::InvalidLength(_))
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_non_canonical_session_flag() {
+        let mut payload = encode_hello(&Hello {
+            protocol_version: 1,
+            engine_build_id: 2,
+            schema_hash: 3,
+            session_token: None,
+        });
+        payload[21] = 2;
+        assert!(matches!(
+            decode_hello(&payload),
+            Err(DecodeError::InvalidLength(2))
+        ));
+    }
+
     // ── Fuzz / panic tests ─────────────────────────────────────────────────
 
     #[test]
@@ -794,6 +857,7 @@ mod tests {
             let _ = decode_hello(payload);
             let _ = decode_handshake_result(payload);
             let _ = decode_ack(payload);
+            let _ = crate::delta::decode_delta(payload);
         }
     }
 

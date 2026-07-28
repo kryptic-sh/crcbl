@@ -66,7 +66,7 @@ impl<T: Transport> Client<T> {
             prev_snapshot: None,
             current_snapshot: None,
             pending_input: Vec::new(),
-            baseline: Baseline::from_snapshot(TickId::ZERO, &[]),
+            baseline: Baseline::from_snapshot(TickId::ZERO, &[]).expect("empty snapshot is valid"),
         }
     }
 

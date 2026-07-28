@@ -387,8 +387,9 @@ mod tests {
         assert!(mgr.baseline_store().newest().is_none());
         // Mutable access.
         use crate::delta::Baseline;
-        mgr.baseline_store_mut()
-            .insert(Baseline::from_snapshot(TickId::from_raw(1), &[]));
+        mgr.baseline_store_mut().insert(
+            Baseline::from_snapshot(TickId::from_raw(1), &[]).expect("empty snapshot is valid"),
+        );
         assert!(mgr.baseline_store().newest().is_some());
     }
 
