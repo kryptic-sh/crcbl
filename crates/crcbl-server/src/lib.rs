@@ -39,6 +39,8 @@ pub struct Server<T: Transport> {
     session: SessionManager,
     session_config: SessionConfig,
     resume_token: ResumeToken,
+    next_session_id: u64,
+    session_terminated: bool,
     handshake_gate: HandshakeGate,
     now: Duration,
     processing_error_count: u64,
@@ -89,6 +91,8 @@ impl<T: Transport> Server<T> {
             session: SessionManager::new(session_id, &config),
             session_config: config,
             resume_token: ResumeToken(token),
+            next_session_id: session_id.0 + 1,
+            session_terminated: false,
             handshake_gate: HandshakeGate::new(compatibility),
             now: Duration::ZERO,
             processing_error_count: 0,
@@ -125,7 +129,11 @@ impl<T: Transport> Server<T> {
         if !self.transport.is_connected() && self.session.state() == SessionState::Connected {
             self.session.on_disconnect(self.now, &self.session_config);
         }
+        let was_reconnecting = self.session.state() == SessionState::Reconnecting;
         self.session.expire_if_timed_out(self.now);
+        if was_reconnecting && self.session.state() == SessionState::Disconnected {
+            self.session_terminated = true;
+        }
     }
 
     /// Consume queued client messages: handshake, inputs (discarded — P3), and acks.
@@ -152,6 +160,15 @@ impl<T: Transport> Server<T> {
     }
 
     fn handle_hello(&mut self, hello: crcbl_net::Hello) {
+        if self.session_terminated
+            && self.session.state() == SessionState::Disconnected
+            && hello.session_token.is_none()
+            && let Err(error) = self.rotate_session()
+        {
+            self.processing_error_count += 1;
+            self.send_handshake_result(Self::entropy_failure(error));
+            return;
+        }
         let mut result = self.handshake_gate.validate(
             &hello,
             self.session.session_id(),
@@ -201,6 +218,21 @@ impl<T: Transport> Server<T> {
                 }
             }
         }
+        self.send_handshake_result(result);
+    }
+
+    fn rotate_session(&mut self) -> Result<(), getrandom::Error> {
+        let mut token = [0; 32];
+        getrandom::fill(&mut token)?;
+        let session_id = SessionId(self.next_session_id);
+        self.next_session_id = self.next_session_id.wrapping_add(1);
+        self.session = SessionManager::new(session_id, &self.session_config);
+        self.resume_token = ResumeToken(token);
+        self.session_terminated = false;
+        Ok(())
+    }
+
+    fn send_handshake_result(&mut self, result: HandshakeResult) {
         if self
             .transport
             .send_reliable(Message {
@@ -210,6 +242,15 @@ impl<T: Transport> Server<T> {
             .is_err()
         {
             self.processing_error_count += 1;
+        }
+    }
+
+    fn entropy_failure(error: getrandom::Error) -> HandshakeResult {
+        HandshakeResult::Reject {
+            reason: RejectReason {
+                code: 0x06,
+                msg: format!("unable to generate resume credential: {error}"),
+            },
         }
     }
 
@@ -402,6 +443,27 @@ mod tests {
     }
 
     // ── Creation ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn rotating_session_clears_baselines_and_acks() {
+        let (transport, _peer) = InMemoryTransport::pair();
+        let mut server = Server::new(World::new(), transport, 60);
+        let old_session_id = server.session.session_id();
+        let old_token = server.resume_token;
+        let tick = TickId::from_raw(1);
+        server
+            .session
+            .baseline_store_mut()
+            .insert(Baseline::from_trusted_snapshot(tick, &[]).expect("empty snapshot is valid"));
+        server.session.handle_ack(tick);
+
+        server.rotate_session().expect("OS CSPRNG available");
+
+        assert_ne!(server.session.session_id(), old_session_id);
+        assert_ne!(server.resume_token, old_token);
+        assert_eq!(server.session.last_acked_tick(), None);
+        assert!(server.session.baseline_store().newest().is_none());
+    }
 
     #[test]
     fn server_starts_at_tick_zero() {

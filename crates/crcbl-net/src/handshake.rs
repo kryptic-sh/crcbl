@@ -144,7 +144,7 @@ mod tests {
 
     fn gate() -> HandshakeGate {
         HandshakeGate::new(ProtocolCompatibility {
-            protocol_version: 1,
+            protocol_version: 2,
             engine_build_id: 0xABCD,
             schema_hash: 0xDEAD_BEEF_CAFE,
         })
@@ -156,7 +156,7 @@ mod tests {
 
     fn matching_hello() -> Hello {
         Hello {
-            protocol_version: 1,
+            protocol_version: 2,
             engine_build_id: 0xABCD,
             schema_hash: 0xDEAD_BEEF_CAFE,
             session_token: None,
@@ -192,6 +192,25 @@ mod tests {
     // ── Version mismatch ──────────────────────────────────────────────────
 
     #[test]
+    fn protocol_version_two_rejects_legacy_version_one() {
+        let result = gate().validate(
+            &Hello {
+                protocol_version: 1,
+                ..matching_hello()
+            },
+            SessionId(1),
+            token(),
+            TickId::ZERO,
+        );
+        assert!(matches!(
+            result,
+            HandshakeResult::Reject {
+                reason: RejectReason { code: 0x01, .. }
+            }
+        ));
+    }
+
+    #[test]
     fn version_mismatch_is_rejected() {
         let g = gate();
         let hello = Hello {
@@ -204,7 +223,7 @@ mod tests {
                 assert_eq!(reason.code, 0x01);
                 assert!(reason.msg.contains("version mismatch"));
                 assert!(reason.msg.contains("999"));
-                assert!(reason.msg.contains('1'));
+                assert!(reason.msg.contains('2'));
             }
             HandshakeResult::Accept { .. } => {
                 panic!("expected Reject for version mismatch");

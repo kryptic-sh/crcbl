@@ -86,8 +86,8 @@ impl Baseline {
         Self::from_snapshot_inner(tick, systems, true)
     }
 
-    /// Build a [`Baseline`] from trusted local snapshots while retaining the
-    /// negotiated system limit required by the server-to-client path.
+    /// Build a [`Baseline`] from trusted local snapshots with the larger
+    /// packet-derived system cap used by the negotiated server-to-client path.
     pub fn from_trusted_snapshot(
         tick: TickId,
         systems: &[SystemSnapshot],

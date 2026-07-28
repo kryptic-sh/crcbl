@@ -56,9 +56,13 @@ pub struct ProtocolCompatibility {
 }
 
 impl ProtocolCompatibility {
-    /// Compatibility values retained for existing callers until applications configure them.
+    /// Compatibility defaults for the wire format introduced in protocol version 2.
+    ///
+    /// `engine_build_id` and `schema_hash` are placeholders only: both zero values
+    /// provide no engine or schema protection. Production embeddings must use
+    /// explicit, non-placeholder identifiers.
     pub const DEFAULT: Self = Self {
-        protocol_version: 1,
+        protocol_version: 2,
         engine_build_id: 0,
         schema_hash: 0,
     };
@@ -79,6 +83,9 @@ pub struct EntityData {
 
 #[cfg(test)]
 mod tests {
+    use crate::handshake::HandshakeResult;
+    use crcbl_core::TickId;
+
     use super::*;
 
     #[test]
@@ -119,8 +126,21 @@ mod tests {
     }
 
     #[test]
+    fn accept_debug_redacts_resume_token() {
+        let token = ResumeToken([0xA5; 32]);
+        let result = HandshakeResult::Accept {
+            session_id: SessionId(1),
+            resume_token: token,
+            server_tick: TickId::ZERO,
+        };
+        let debug = format!("{result:?}");
+        assert!(!debug.contains("165"));
+        assert!(debug.contains("REDACTED"));
+    }
+
+    #[test]
     fn protocol_compatibility_default_is_explicit() {
-        assert_eq!(ProtocolCompatibility::DEFAULT.protocol_version, 1);
+        assert_eq!(ProtocolCompatibility::DEFAULT.protocol_version, 2);
     }
 
     #[test]
