@@ -1,140 +1,134 @@
-# Audit — P2a (`crcbl-ecs`, `-net`, `-input`, `-server`, `-client`, `apps/sim`)
+# Audit — P2a / P2b (`crcbl-ecs`, `-net`, `-input`, `-server`, `-client`, `apps/sim`)
 
-**Last updated:** 2026-07-27, after the fixes in `1eaedbf`. **Subject:** the P2a
-commits `7b8efb5`..`1eaedbf` on `main`. **Method:** the eight gates and the
-harnesses from the ROADMAP's "How work proceeds" section, plus throwaway probe
-tests and Miri to check claims no existing test covers. Every finding was
-produced by running something, not by reading.
+**Last updated:** 2026-07-28, after P2b (`1ab4669`..`fb7e7bf`). **Method:** the
+eight gates and the harnesses from the ROADMAP's "How work proceeds" section,
+plus throwaway probe tests and Miri. Every finding was produced by running
+something, not by reading.
 
-**Verdict:** all eight gates now pass and the phase's record is honest. One
-**soundness** defect remains — the determinism hash reads uninitialized memory
-and hashes pointers — and the harness is still vacuous for the systems most
-likely to hold simulation logic. Fix before building P2b on top of it.
+**Verdict:** **no blocking defects.** All eight gates pass, 823 tests. The
+previous round's soundness defect is properly fixed, and P2b's replication is
+_stronger than its own tests demonstrate_ — I verified by probe that it survives
+loss, reorder and duplication with full state equality, none of which the
+shipped tests actually assert. The open items are coverage and claim accuracy,
+not correctness.
 
-**Resolved in `1eaedbf`** (detail pruned): the `Cargo.lock` omission that failed
-`--locked`, the failing rustdoc links, the `interpolate()` doc comment that
-contradicted its body, the inflated test count, and the premature "P2a done"
-tick. The originally reported hash case — two worlds differing only in component
-value — now hashes differently and has a regression test.
+**Resolved since the last round** (detail pruned): the raw-byte `hash_state`
+that read uninitialized padding (Miri-confirmed UB) and hashed pointers for heap
+types; the silent abstention of custom `SystemTrait` impls; and, before that,
+the `Cargo.lock`/rustdoc gate failures, the misleading `interpolate()` docs, and
+the inflated test count.
 
 ---
 
 ## Open findings
 
-### 1. `hash_state` reads uninitialized padding (blocking — undefined behaviour)
+### 1. The replication test asserts far less than its header claims
 
-`crates/crcbl-ecs/src/system.rs` implements `hash_state` for `System<T>` over an
-**unconstrained** `T`, reading `size_of::<T>() * len` raw bytes:
+`crates/crcbl-net/tests/replication.rs` opens with _"replication survives
+scripted loss/reorder with state equality … after N ticks the client's
+reconstructed state matches the server's."_ Of those three claims:
 
-```rust
-let ptr = self.data.as_ptr().cast::<u8>();
-let bytes = unsafe { std::slice::from_raw_parts(ptr, byte_len) };
-hasher.write(bytes);
-```
-
-The `SAFETY:` comment assigns responsibility to "the caller", but no caller can
-comply: `hash_world` reaches this through `dyn SystemTrait` for every registered
-system, and nothing bounds `T`.
-
-Miri, on a `System<struct { flag: u8, value: u32 }>`:
-
-```
-Uninitialized memory occurred at alloc43120[0x3..0x4]
-alloc43120 (stack variable, size: 4, align: 4) {
-    00 00 01 __
-}
-```
-
-It reads the padding byte. That is UB, and it makes the hash nondeterministic
-inside the harness whose entire job is to detect nondeterminism.
-
-### 2. Heap components hash their pointers (blocking — false nondeterminism)
-
-Two worlds holding identical logical state hash **differently**, because the
-bytes hashed are the pointer, not the contents:
+| Claim          | Status                                                 |
+| -------------- | ------------------------------------------------------ |
+| loss           | exercised (`loss_rate: 0.15`)                          |
+| reorder        | **never exercised** — `reorder_window` is not set once |
+| state equality | **not asserted** — the only check is `> 0`             |
 
 ```rust
-let a = world_with(String::from("player"));
-let b = world_with(String::from("player"));
-assert_eq!(hash_world(&a, TickId::ZERO), hash_world(&b, TickId::ZERO));
-// fails: identical logical state produced different hashes
+assert!(client.baseline.entity_count() > 0, "…");
 ```
 
-The original defect was a false pass; this is the opposite failure. A sim whose
-components hold any heap type would be reported as nondeterministic on every
-run.
+That passes with one entity out of four, or with every value wrong.
 
-### 3. The harness is still vacuous for systems that contain logic
+**Both missing properties do in fact hold.** Probes I added and ran:
+`entity_count_for(1) == 4` after 80 lossy ticks, and again after 120 ticks with
+`loss_rate: 0.10, reorder_window: 4, duplicate_rate: 0.10`. So this is a
+test-strength gap rather than a bug — the code earns a stronger assertion than
+it is being given.
 
-`SystemTrait::hash_state` defaults to a no-op, and `system.rs` tells users that
-per-tick behaviour means _"implement `SystemTrait` on their own type"_. Such a
-system therefore contributes **nothing** to the determinism hash unless it
-remembers to override `hash_state` — and nothing warns when it does not.
+**Fix:** replace the `> 0` check with the equality the header promises, and add
+the reorder/duplication case. Both are ~10 lines against the existing harness.
 
-This is the original finding, preserved for exactly the systems that will hold
-the simulation. `System<T>` covers the storage case; the behaviour case, which
-is where determinism bugs actually live, is still uncovered.
+### 2. The wired server and client have no integration coverage
+
+`ec0597e` wires `crcbl-server` and `crcbl-client` to the P2b codec, but nothing
+drives them together. The "integration" test defines its own `Server`/`Client`
+structs locally and tests the codec against those; outside their own crates, the
+only reference to either crate anywhere is `apps/sim` importing `sim_hash`.
+
+So the shipped wiring — the thing a game actually links — is exercised by unit
+tests only, while the integration test validates a parallel hand-rolled driver.
+If the two drift, nothing notices.
+
+**Fix:** point the integration test at the real crates, or add one that does.
+
+### 3. The determinism harness now works, but is aimed at an inert world
+
+The hash is capable after the `ComponentHash` fix. What it hashes has not caught
+up: `System<T>::tick()` is still a documented no-op, and `apps/sim::build_world`
+registers only `System<f32>` storage systems, so `crcbl-sim --ticks 1000` runs a
+thousand ticks in which nothing mutates. The output remains a pure function of
+`(seed, ticks)`.
+
+The harness can now _detect_ divergence; it is not yet _exposed_ to any. A
+nondeterminism source — map iteration order, float accumulation order, thread
+interleaving — has nothing to perturb.
+
+**Fix:** give the sim at least one system with real per-tick behaviour over its
+component data. Until then, treat a green `crcbl-sim` as "the plumbing works",
+not "the simulation is deterministic".
+
+### 4. Minor: the NaN comment overstates `to_bits()`
+
+`component_hash.rs` says `to_bits()` "handles NaN deterministically (canonical
+payload)". It does not canonicalise:
+
+```
+NAN=0x7fc00000  -NAN=0xffc00000  0.0/0.0=0x7fc00000
+```
+
+Sign-differing NaNs hash differently. Harmless for same-binary determinism (the
+same computation yields the same bits), but two equivalent code paths producing
+differently-signed NaNs would read as divergence. Reword, or canonicalise
+explicitly if NaN components are ever expected.
 
 ---
 
-## Suggested direction
+## What the last two rounds got right
 
-**For findings 1 and 2 — replace raw bytes with an explicit contract.** A small
-`ComponentHash` trait in `crcbl-ecs`, implemented for the component types the
-engine actually uses (`f32`/`f64` via `to_bits()`, the integer types, glam
-vectors as their bit arrays), with `System<T>`'s `hash_state` bounded on it. No
-`unsafe`, no padding, no pointers, and a `String` component either hashes
-correctly or fails to compile rather than silently misbehaving. `to_bits()` also
-settles NaN, which byte hashing gets right only by accident.
-
-If byte hashing is preferred, bounding on `bytemuck::Pod` buys the padding-free
-guarantee for one dependency — but it does not address finding 3.
-
-**For finding 3 — make abstention visible.** Have the harness report which
-systems contributed to the hash (the `Inspector` already walks them), so a
-system that silently hashes nothing shows up in the output instead of being
-assumed covered. A determinism harness that cannot say what it covered is
-halfway back to the original problem.
-
----
-
-## What P2a got right
-
-Worth preserving as the fixes land:
-
-- **The architecture follows the plan rather than a generic template.**
-  System-owned arrays are dense SoA with a sparse entity→index map; despawn is
-  deferred with a generational sweep across every system; the transport is a
-  trait with reliable/unreliable channels and an in-memory pair for
-  single-player — the shapes
-  [`plan/04-ecs-server-client.md`](plan/04-ecs-server-client.md) specifies.
-- **The server is genuinely headless**, with no render dependency — the stage-4
-  exit criterion, and what makes `crcbl sim` possible at all.
-- **Dependency direction is correct.** `crcbl-input` builds on `crcbl-core`'s
-  input vocabulary rather than on `crcbl-shell`, so the action layer does not
-  drag a windowing library — the split P0.4 established.
-- **The stub is now honest, and self-policing.** `interpolate()`'s test carries
-  a note that it must be changed to assert non-empty positions when P3
-  implements interpolation, so the stub cannot quietly outlive its excuse.
-- **All eight gates pass**, including `nextest` under
-  `VK_ICD_FILENAMES=/nonexistent.json`, and the X11 e2e suite still passes 29/29
-  — nothing regressed in the existing engine.
+- **The `ComponentHash` fix is the right shape.** No `unsafe` anywhere in
+  `crcbl-ecs`; `f32`/`f64` go through `to_bits()`; and the bound sits where it
+  bites — `System::<Padded>` and `System::<String>` are rejected at
+  `register_system` with
+  `the trait bound 'Padded: ComponentHash' is not satisfied`. Unsound component
+  types are now a compile error rather than a silent wrong answer.
+- **Abstention was made visible, as recommended.**
+  `SystemTrait::contributes_to_hash` plus `Schedule::non_contributing_systems`,
+  surfaced as a `sim: WARNING — N system(s) do not contribute…` line. A system
+  that hashes nothing now announces itself.
+- **Decode hardening is genuine.** A hand-built hostile corpus (empty, unknown
+  tags, truncated bodies, `0xFFFFFFFF` declared lengths, all-`0xFF` blobs) plus
+  a random fuzz test, run through every decoder, asserting no panic. This is
+  what `plan/23-netcode.md` asks for and it was not skimped.
+- **The replication implementation is solid**, per finding 1 — it survives
+  conditions its tests never subject it to.
 
 ---
 
 ## The pattern worth carrying forward
 
-The first round of findings shared a root: **work marked complete on the
-strength of a check that cannot fail.** The remaining findings are the same
-root, one layer down — the check now runs, but is unsound for some inputs, wrong
-for others, and silent for the case that matters most.
+The correctness problems are gone; what persists is **documentation and tests
+claiming more than they establish**. A test file header promising
+loss/reorder/equality while asserting `> 0`; a comment promising canonical NaN;
+an "integration" test integrating mocks. Earlier rounds had the same shape at
+higher severity — a hash that hashed nothing, an interpolator whose docs claimed
+lerping.
 
-The repo's own rule covers it: _"a check that cannot run is not a check"_, and
-the prescription is to break the thing deliberately and confirm the test
-notices. Both remaining correctness findings were found that way, in minutes,
-with one probe test and one Miri run — and Miri is the tool this workspace
-already reaches for whenever `unsafe` appears (see `crcbl-core`'s `FrameArena`
-and `crcbl-shell`'s FFI).
+The repo's rule still applies, one level up from correctness: **a claim that no
+test establishes is a claim to delete or a test to write.** Where the code is
+genuinely good — as it is here — the cheaper of the two is usually the test, and
+it converts an unverified assertion into a guarantee.
 
-**Any `unsafe` block added from here should get a Miri run before it is
-committed**, not after it is audited.
+Worth noting the trajectory: round 1 was blocking CI failures, round 2 was
+soundness, round 3 is assertion strength. Each round the findings get less
+severe, which is the direction it should go.
