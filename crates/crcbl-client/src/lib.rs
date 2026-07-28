@@ -165,10 +165,19 @@ impl<T: Transport> Client<T> {
                 continue;
             };
 
-            if delta.tick <= self.baseline.tick
-                || (!delta.is_keyframe && delta.baseline_tick != Some(self.baseline.tick))
-                || (delta.is_keyframe && delta.baseline_tick.is_some())
-            {
+            if delta.tick <= self.baseline.tick {
+                continue;
+            }
+            if !delta.is_keyframe && delta.baseline_tick != Some(self.baseline.tick) {
+                if delta
+                    .baseline_tick
+                    .is_some_and(|baseline_tick| baseline_tick < self.baseline.tick)
+                {
+                    self.send_ack(self.baseline.tick);
+                }
+                continue;
+            }
+            if delta.is_keyframe && delta.baseline_tick.is_some() {
                 continue;
             }
 
@@ -178,11 +187,7 @@ impl<T: Transport> Client<T> {
             };
 
             // Send ack for this tick.
-            let ack_payload = crcbl_net::encode_ack(delta.tick);
-            let _ = self.transport.send_unreliable(Message {
-                kind: MessageKind::Unreliable,
-                payload: ack_payload,
-            });
+            self.send_ack(delta.tick);
 
             // Build a ServerToClient from the reconstructed full snapshot
             // for the interpolation buffer.
@@ -204,6 +209,13 @@ impl<T: Transport> Client<T> {
             }
         }
         Ok(())
+    }
+
+    fn send_ack(&mut self, tick: TickId) {
+        let _ = self.transport.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: crcbl_net::encode_ack(tick),
+        });
     }
 }
 
@@ -289,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_reordered_and_wrong_baseline_deltas_without_acks() {
+    fn rejects_reordered_deltas_and_reacks_for_an_older_baseline() {
         let (client_transport, mut peer) = InMemoryTransport::pair();
         let mut client = Client::new(empty_world(), client_transport, 60);
 
@@ -326,7 +338,60 @@ mod tests {
         client.update(std::time::Duration::from_nanos(1));
 
         assert_eq!(client.last_applied_tick(), TickId::from_raw(5));
+        assert_eq!(
+            crcbl_net::decode_ack(&peer.recv().unwrap().unwrap().payload).unwrap(),
+            TickId::from_raw(5)
+        );
         assert!(peer.recv().unwrap().is_none());
+    }
+
+    #[test]
+    fn reacks_current_baseline_when_server_uses_an_older_baseline() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = Client::new(empty_world(), client_transport, 60);
+
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: keyframe_snapshot(1, &[]),
+        })
+        .unwrap();
+        client.update(std::time::Duration::ZERO);
+        let _ = peer.recv().unwrap().unwrap();
+
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: delta_payload(crcbl_net::Delta {
+                tick: TickId::from_raw(2),
+                baseline_tick: Some(TickId::from_raw(1)),
+                is_keyframe: false,
+                systems: Vec::new(),
+            }),
+        })
+        .unwrap();
+        client.update(std::time::Duration::from_nanos(1));
+        let dropped_ack = peer.recv().unwrap().unwrap();
+        assert_eq!(
+            crcbl_net::decode_ack(&dropped_ack.payload).unwrap(),
+            TickId::from_raw(2)
+        );
+
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: delta_payload(crcbl_net::Delta {
+                tick: TickId::from_raw(3),
+                baseline_tick: Some(TickId::from_raw(1)),
+                is_keyframe: false,
+                systems: Vec::new(),
+            }),
+        })
+        .unwrap();
+        client.update(std::time::Duration::from_nanos(2));
+
+        assert_eq!(client.last_applied_tick(), TickId::from_raw(2));
+        assert_eq!(
+            crcbl_net::decode_ack(&peer.recv().unwrap().unwrap().payload).unwrap(),
+            TickId::from_raw(2)
+        );
     }
 
     #[test]

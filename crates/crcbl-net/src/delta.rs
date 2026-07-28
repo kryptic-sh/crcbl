@@ -46,6 +46,12 @@ pub enum BaselineDecodeError {
     BaselineTooLarge,
     #[error("component data length exceeds limit: {0}")]
     ComponentTooLarge(u32),
+    #[error("invalid {operation} for entity {entity_bits} in system {system_id}")]
+    InvalidEntityOperation {
+        system_id: u32,
+        entity_bits: u64,
+        operation: &'static str,
+    },
     #[error("delta tick {delta:?} is not newer than baseline tick {baseline:?}")]
     StaleDeltaTick { delta: TickId, baseline: TickId },
     #[error("delta baseline tick {actual:?} does not match baseline tick {expected:?}")]
@@ -441,6 +447,38 @@ impl DeltaCodec {
         };
 
         for sys_delta in &delta.systems {
+            let existing = systems.get(&sys_delta.system_id);
+            if !delta.is_keyframe {
+                for entity in &sys_delta.added {
+                    if existing.is_some_and(|entities| entities.contains_key(&entity.entity_bits)) {
+                        return Err(BaselineDecodeError::InvalidEntityOperation {
+                            system_id: sys_delta.system_id,
+                            entity_bits: entity.entity_bits,
+                            operation: "add",
+                        });
+                    }
+                }
+                for &entity_bits in &sys_delta.removed {
+                    if !existing.is_some_and(|entities| entities.contains_key(&entity_bits)) {
+                        return Err(BaselineDecodeError::InvalidEntityOperation {
+                            system_id: sys_delta.system_id,
+                            entity_bits,
+                            operation: "remove",
+                        });
+                    }
+                }
+                for entity in &sys_delta.modified {
+                    if !existing.is_some_and(|entities| entities.contains_key(&entity.entity_bits))
+                    {
+                        return Err(BaselineDecodeError::InvalidEntityOperation {
+                            system_id: sys_delta.system_id,
+                            entity_bits: entity.entity_bits,
+                            operation: "modify",
+                        });
+                    }
+                }
+            }
+
             let system_entities = systems.entry(sys_delta.system_id).or_default();
             for ed in &sys_delta.added {
                 system_entities.insert(ed.entity_bits, ed.data.clone());
@@ -499,7 +537,12 @@ fn validate_delta_operations(delta: &Delta) -> Result<(), BaselineDecodeError> {
         }
         let mut entity_ids = HashSet::new();
         for entity in &system.added {
-            if entity.data.len() > MAX_COMPONENT_BYTES || !entity_ids.insert(entity.entity_bits) {
+            if entity.data.len() > MAX_COMPONENT_BYTES {
+                return Err(BaselineDecodeError::ComponentTooLarge(
+                    entity.data.len() as u32
+                ));
+            }
+            if !entity_ids.insert(entity.entity_bits) {
                 return Err(BaselineDecodeError::DuplicateEntity(entity.entity_bits));
             }
         }
@@ -509,7 +552,12 @@ fn validate_delta_operations(delta: &Delta) -> Result<(), BaselineDecodeError> {
             }
         }
         for entity in &system.modified {
-            if entity.data.len() > MAX_COMPONENT_BYTES || !entity_ids.insert(entity.entity_bits) {
+            if entity.data.len() > MAX_COMPONENT_BYTES {
+                return Err(BaselineDecodeError::ComponentTooLarge(
+                    entity.data.len() as u32
+                ));
+            }
+            if !entity_ids.insert(entity.entity_bits) {
                 return Err(BaselineDecodeError::DuplicateEntity(entity.entity_bits));
             }
         }
@@ -1468,6 +1516,84 @@ mod tests {
         ));
         assert_eq!(baseline.tick, TickId::from_raw(2));
         assert_eq!(baseline.state_hash(), original_hash);
+    }
+
+    #[test]
+    fn apply_rejects_invalid_entity_lifecycle_without_mutating() {
+        let snapshots = make_snapshots(&[(1, &[(10, b"old")])]);
+        let baseline =
+            Baseline::from_snapshot(TickId::from_raw(2), &snapshots).expect("valid test snapshots");
+
+        let cases = [
+            SystemDelta {
+                system_id: 1,
+                added: vec![EntityData {
+                    entity_bits: 10,
+                    data: b"overwrite".to_vec(),
+                }],
+                removed: Vec::new(),
+                modified: Vec::new(),
+                unchanged_count: 0,
+            },
+            SystemDelta {
+                system_id: 1,
+                added: Vec::new(),
+                removed: Vec::new(),
+                modified: vec![EntityData {
+                    entity_bits: 99,
+                    data: b"created".to_vec(),
+                }],
+                unchanged_count: 0,
+            },
+            SystemDelta {
+                system_id: 1,
+                added: Vec::new(),
+                removed: vec![99],
+                modified: Vec::new(),
+                unchanged_count: 0,
+            },
+        ];
+
+        for system in cases {
+            let mut candidate = baseline.clone();
+            let hash = candidate.state_hash();
+            let delta = Delta {
+                tick: TickId::from_raw(3),
+                baseline_tick: Some(TickId::from_raw(2)),
+                is_keyframe: false,
+                systems: vec![system],
+            };
+            assert!(matches!(
+                DeltaCodec::apply(&delta, &mut candidate),
+                Err(BaselineDecodeError::InvalidEntityOperation { .. })
+            ));
+            assert_eq!(candidate.tick, TickId::from_raw(2));
+            assert_eq!(candidate.state_hash(), hash);
+        }
+    }
+
+    #[test]
+    fn oversized_component_reports_component_too_large() {
+        let delta = Delta {
+            tick: TickId::from_raw(1),
+            baseline_tick: None,
+            is_keyframe: true,
+            systems: vec![SystemDelta {
+                system_id: 1,
+                added: vec![EntityData {
+                    entity_bits: 7,
+                    data: vec![0; MAX_COMPONENT_BYTES + 1],
+                }],
+                removed: Vec::new(),
+                modified: Vec::new(),
+                unchanged_count: 0,
+            }],
+        };
+        assert!(matches!(
+            encode_delta(&delta),
+            Err(BaselineDecodeError::ComponentTooLarge(size))
+                if size as usize == MAX_COMPONENT_BYTES + 1
+        ));
     }
 
     #[test]
