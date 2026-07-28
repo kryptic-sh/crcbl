@@ -8,13 +8,18 @@
 pub mod sim_hash;
 
 use std::fmt;
+use std::time::Instant;
 
 use crcbl_core::{FrameClock, TickId};
 use crcbl_ecs::{Inspector, World};
 use crcbl_net::{
-    Baseline, DeltaCodec, Message, MessageKind, SessionConfig, SessionId, SessionManager,
-    SnapshotWriter, Transport,
+    Baseline, DeltaCodec, HandshakeGate, HandshakeResult, Message, MessageKind, SessionConfig,
+    SessionId, SessionManager, SessionState, SnapshotWriter, Transport,
 };
+
+const PROTOCOL_VERSION: u32 = 1;
+const ENGINE_BUILD_ID: u64 = 0;
+const SCHEMA_HASH: u64 = 0;
 
 // ---------------------------------------------------------------------------
 // Server
@@ -28,6 +33,9 @@ pub struct Server<T: Transport> {
     transport: T,
     clock: FrameClock,
     session: SessionManager,
+    session_config: SessionConfig,
+    handshake_gate: HandshakeGate,
+    processing_error_count: u64,
 }
 
 impl<T: Transport> Server<T> {
@@ -46,6 +54,9 @@ impl<T: Transport> Server<T> {
             transport,
             clock: FrameClock::new(tick_hz),
             session: SessionManager::new(session_id, &config),
+            session_config: config,
+            handshake_gate: HandshakeGate::new(PROTOCOL_VERSION, ENGINE_BUILD_ID, SCHEMA_HASH),
+            processing_error_count: 0,
         }
     }
 
@@ -66,27 +77,84 @@ impl<T: Transport> Server<T> {
     /// world, emit delta-encoded snapshot.
     fn tick(&mut self) {
         self.drain_inputs();
+        self.update_session_for_transport();
         self.world.tick();
-        self.emit_snapshot();
+        if self.session.state() == SessionState::Connected {
+            self.emit_snapshot();
+        }
     }
 
-    /// Consume queued client messages: inputs (discarded — P3) and acks.
+    fn update_session_for_transport(&mut self) {
+        if self.transport.is_connected() {
+            return;
+        }
+        if self.session.state() == SessionState::Connected {
+            self.session
+                .on_disconnect(Instant::now(), &self.session_config);
+        }
+        self.session.expire_if_timed_out(Instant::now());
+    }
+
+    /// Consume queued client messages: handshake, inputs (discarded — P3), and acks.
     fn drain_inputs(&mut self) {
         loop {
             match self.transport.recv() {
                 Ok(Some(msg)) => {
-                    // Try to decode as ack (tag 0x30). If that fails, try
-                    // client-to-server (input/command). Either way, no error
-                    // means the message is consumed.
-                    if let Ok(tick) = crcbl_net::decode_ack(&msg.payload) {
+                    if let Ok(hello) = crcbl_net::decode_hello(&msg.payload) {
+                        self.handle_hello(hello);
+                    } else if let Ok(tick) = crcbl_net::decode_ack(&msg.payload) {
                         self.session.handle_ack(tick);
-                    } else {
-                        let _ = crcbl_net::decode_client_to_server(&msg.payload);
+                    } else if crcbl_net::decode_client_to_server(&msg.payload).is_err() {
+                        self.processing_error_count += 1;
                     }
                 }
                 Ok(None) => break,
-                Err(_) => break,
+                Err(crcbl_net::TransportError::Disconnected) => break,
+                Err(_) => {
+                    self.processing_error_count += 1;
+                    break;
+                }
             }
+        }
+    }
+
+    fn handle_hello(&mut self, hello: crcbl_net::Hello) {
+        let result =
+            self.handshake_gate
+                .validate(&hello, self.session.session_id(), self.clock.tick());
+        if matches!(result, HandshakeResult::Accept { .. }) {
+            match self.session.state() {
+                SessionState::Disconnected => {
+                    self.session.begin_handshake();
+                    self.session
+                        .on_connected(hello.engine_build_id, hello.schema_hash);
+                }
+                SessionState::Reconnecting => {
+                    if !self.session.try_reconnect(
+                        Instant::now(),
+                        hello.engine_build_id,
+                        hello.schema_hash,
+                        &self.session_config,
+                    ) {
+                        self.processing_error_count += 1;
+                        return;
+                    }
+                }
+                SessionState::Handshaking | SessionState::Connected => {
+                    self.processing_error_count += 1;
+                    return;
+                }
+            }
+        }
+        if self
+            .transport
+            .send_reliable(Message {
+                kind: MessageKind::Reliable,
+                payload: crcbl_net::encode_handshake_result(&result),
+            })
+            .is_err()
+        {
+            self.processing_error_count += 1;
         }
     }
 
@@ -116,25 +184,60 @@ impl<T: Transport> Server<T> {
         // Delta-encode against the client's baseline.
         let baseline = match Baseline::from_snapshot(tick, &systems) {
             Ok(baseline) => baseline,
-            Err(_) => return,
+            Err(_) => {
+                self.processing_error_count += 1;
+                return;
+            }
         };
         let last_acked = self.session.last_acked_tick();
         let previous = last_acked.and_then(|t| self.session.baseline_store().get(t).cloned());
-        let Ok(delta) = DeltaCodec::encode(tick, &systems, previous.as_ref()) else {
-            return;
+        let delta = match DeltaCodec::encode(tick, &systems, previous.as_ref()) {
+            Ok(delta) => delta,
+            Err(_) => {
+                self.processing_error_count += 1;
+                return;
+            }
         };
 
-        let Ok(payload) = crcbl_net::encode_delta(&delta) else {
-            return;
+        let payload = match crcbl_net::encode_delta(&delta) {
+            Ok(payload) => payload,
+            Err(_) => {
+                self.processing_error_count += 1;
+                return;
+            }
         };
 
         // Store this full snapshot as a new baseline for future deltas.
         self.session.baseline_store_mut().insert(baseline);
 
-        let _ = self.transport.send_unreliable(Message {
-            kind: MessageKind::Unreliable,
-            payload,
-        });
+        if self
+            .transport
+            .send_unreliable(Message {
+                kind: MessageKind::Unreliable,
+                payload,
+            })
+            .is_err()
+        {
+            self.processing_error_count += 1;
+        }
+    }
+
+    /// Replace the transport after a disconnect. The next valid resume handshake
+    /// within the configured grace period returns the session to `Connected`.
+    pub fn reconnect(&mut self, transport: T) {
+        self.transport = transport;
+    }
+
+    /// Current session lifecycle state.
+    #[must_use]
+    pub fn session_state(&self) -> SessionState {
+        self.session.state()
+    }
+
+    /// Number of unrecoverable transport, encoding, decoding, or lifecycle errors.
+    #[must_use]
+    pub fn processing_error_count(&self) -> u64 {
+        self.processing_error_count
     }
 
     /// Whether the transport is still connected.
@@ -202,6 +305,31 @@ mod tests {
             out.push(msg.payload);
         }
         out
+    }
+
+    fn connect_server(server: &mut Server<InMemoryTransport>, peer: &mut InMemoryTransport) {
+        peer.send_reliable(Message {
+            kind: MessageKind::Reliable,
+            payload: crcbl_net::encode_hello(&crcbl_net::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                engine_build_id: ENGINE_BUILD_ID,
+                schema_hash: SCHEMA_HASH,
+                session_token: None,
+            }),
+        })
+        .unwrap();
+        server.update(std::time::Duration::ZERO);
+        server.update(std::time::Duration::from_nanos(16_666_667));
+        let mut accepted = false;
+        while let Some(result) = peer.recv().unwrap() {
+            if matches!(
+                crcbl_net::decode_handshake_result(&result.payload),
+                Ok(HandshakeResult::Accept { .. })
+            ) {
+                accepted = true;
+            }
+        }
+        assert!(accepted, "server must accept a matching hello");
     }
 
     // ── Creation ───────────────────────────────────────────────────────────
@@ -274,6 +402,7 @@ mod tests {
     fn snapshot_is_sent_after_tick() {
         let (server_transport, mut client_transport) = InMemoryTransport::pair();
         let mut server = Server::new(world_with_one_entity(), server_transport, 60);
+        connect_server(&mut server, &mut client_transport);
 
         server.update(std::time::Duration::ZERO);
         let tick_dt = std::time::Duration::from_nanos(16_666_667);
@@ -289,6 +418,7 @@ mod tests {
         // Verify the emitted payload decodes as a valid Delta (new codec).
         let (server_transport, mut client_transport) = InMemoryTransport::pair();
         let mut server = Server::new(world_with_one_entity(), server_transport, 60);
+        connect_server(&mut server, &mut client_transport);
 
         server.update(std::time::Duration::ZERO);
         server.update(std::time::Duration::from_nanos(16_666_667));
@@ -302,6 +432,7 @@ mod tests {
     fn multiple_ticks_produce_multiple_snapshots() {
         let (server_transport, mut client_transport) = InMemoryTransport::pair();
         let mut server = Server::new(world_with_one_entity(), server_transport, 60);
+        connect_server(&mut server, &mut client_transport);
 
         server.update(std::time::Duration::ZERO);
         server.update(std::time::Duration::from_nanos(3 * 16_666_667));

@@ -24,6 +24,14 @@ fn world_with_entities(n: u32) -> World {
     world
 }
 
+fn world_with_systems(n: u32) -> World {
+    let mut world = World::new();
+    for i in 0..n {
+        world.register_system(Box::new(System::<f32>::new(format!("system_{i}"))));
+    }
+    world
+}
+
 #[test]
 fn server_to_client_roundtrip() {
     let (server_transport, client_transport) = InMemoryTransport::pair();
@@ -67,14 +75,66 @@ fn server_to_client_roundtrip() {
         "client transport must stay connected after multi-tick exchange"
     );
 
-    // Client must have received and applied snapshots — its baseline
-    // tick should be past zero. (Entity data is stub — per-entity
-    // component encoding lands in P3.)
     assert!(
         client.last_applied_tick() > TickId::ZERO,
         "client must have applied at least one snapshot; last_applied_tick={:?}",
         client.last_applied_tick()
     );
+    assert_eq!(client.session_id(), Some(crcbl_net::SessionId(1)));
+    assert_eq!(server.session_state(), crcbl_net::SessionState::Connected);
+    assert_eq!(server.processing_error_count(), 0);
+    assert_eq!(client.processing_error_count(), 0);
+}
+
+#[test]
+fn server_snapshot_with_300_systems_reaches_client() {
+    let (server_transport, client_transport) = InMemoryTransport::pair();
+    let mut server = Server::new(world_with_systems(300), server_transport, 60);
+    let mut client = Client::new(World::new(), client_transport, 60);
+    let tick_dt = std::time::Duration::from_nanos(16_666_667);
+
+    server.update(std::time::Duration::ZERO);
+    client.update(std::time::Duration::ZERO);
+    server.update(tick_dt);
+    client.update(tick_dt);
+
+    assert_eq!(client.baseline_system_count(), 300);
+    assert_eq!(client.baseline_entity_count(), 300);
+    assert_eq!(server.processing_error_count(), 0);
+    assert_eq!(client.processing_error_count(), 0);
+}
+
+#[test]
+fn server_and_client_resume_session_on_replacement_transport() {
+    let (server_transport, client_transport) = InMemoryTransport::pair();
+    let mut server = Server::new(world_with_entities(1), server_transport, 60);
+    let mut client = Client::new(World::new(), client_transport, 60);
+    let tick_dt = std::time::Duration::from_nanos(16_666_667);
+
+    server.update(std::time::Duration::ZERO);
+    client.update(std::time::Duration::ZERO);
+    server.update(tick_dt);
+    client.update(tick_dt);
+    assert_eq!(server.session_state(), crcbl_net::SessionState::Connected);
+    assert_eq!(client.session_id(), Some(crcbl_net::SessionId(1)));
+
+    let (server_transport, client_transport) = InMemoryTransport::pair();
+    client.reconnect(client_transport);
+    server.update(tick_dt * 2);
+    assert_eq!(
+        server.session_state(),
+        crcbl_net::SessionState::Reconnecting
+    );
+
+    server.reconnect(server_transport);
+    client.update(tick_dt * 2);
+    server.update(tick_dt * 3);
+    client.update(tick_dt * 3);
+
+    assert_eq!(server.session_state(), crcbl_net::SessionState::Connected);
+    assert_eq!(client.session_id(), Some(crcbl_net::SessionId(1)));
+    assert_eq!(server.processing_error_count(), 0);
+    assert_eq!(client.processing_error_count(), 0);
 }
 
 #[test]

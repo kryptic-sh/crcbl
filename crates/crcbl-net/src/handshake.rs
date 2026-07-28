@@ -112,6 +112,18 @@ impl HandshakeGate {
             };
         }
 
+        if hello.engine_build_id != self.expected_engine_build_id {
+            return HandshakeResult::Reject {
+                reason: RejectReason {
+                    code: 0x01,
+                    msg: format!(
+                        "engine build id mismatch: client 0x{:016x}, server 0x{:016x}",
+                        hello.engine_build_id, self.expected_engine_build_id,
+                    ),
+                },
+            };
+        }
+
         if hello.schema_hash != self.expected_schema_hash {
             return HandshakeResult::Reject {
                 reason: RejectReason {

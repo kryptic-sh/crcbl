@@ -9,8 +9,15 @@ use std::fmt;
 
 use crcbl_core::{FrameClock, TickId};
 use crcbl_ecs::World;
-use crcbl_net::{Baseline, DeltaCodec, Message, MessageKind, Transport, TransportError};
+use crcbl_net::{
+    Baseline, DeltaCodec, HandshakeResult, Hello, Message, MessageKind, SessionId, Transport,
+    TransportError,
+};
 use glam::Vec3;
+
+const PROTOCOL_VERSION: u32 = 1;
+const ENGINE_BUILD_ID: u64 = 0;
+const SCHEMA_HASH: u64 = 0;
 
 // ---------------------------------------------------------------------------
 // InterpolatedState
@@ -49,6 +56,9 @@ pub struct Client<T: Transport> {
     /// Accumulated baseline for delta application — the client's mirror
     /// of the server's world state.
     baseline: Baseline,
+    session_id: Option<SessionId>,
+    hello_sent: bool,
+    processing_error_count: u64,
 }
 
 impl<T: Transport> Client<T> {
@@ -67,6 +77,9 @@ impl<T: Transport> Client<T> {
             current_snapshot: None,
             pending_input: Vec::new(),
             baseline: Baseline::from_snapshot(TickId::ZERO, &[]).expect("empty snapshot is valid"),
+            session_id: None,
+            hello_sent: false,
+            processing_error_count: 0,
         }
     }
 
@@ -76,11 +89,18 @@ impl<T: Transport> Client<T> {
     /// each consumed tick, and returns the interpolation alpha in `[0, 1)`.
     pub fn update(&mut self, now: std::time::Duration) -> f32 {
         self.clock.update(now);
+        if !self.hello_sent {
+            self.send_hello();
+        }
         while self.clock.consume_tick() {
             let tick = self.clock.tick();
-            let _ = self.send_input(tick);
+            if self.send_input(tick).is_err() {
+                self.processing_error_count += 1;
+            }
         }
-        let _ = self.recv_snapshots();
+        if self.recv_snapshots().is_err() {
+            self.processing_error_count += 1;
+        }
         self.clock.alpha()
     }
 
@@ -117,6 +137,31 @@ impl<T: Transport> Client<T> {
         self.baseline.entity_count()
     }
 
+    /// Number of systems in the client's reconstructed baseline.
+    #[must_use]
+    pub fn baseline_system_count(&self) -> usize {
+        self.baseline.system_count()
+    }
+
+    /// The accepted server session id, if the handshake has completed.
+    #[must_use]
+    pub fn session_id(&self) -> Option<SessionId> {
+        self.session_id
+    }
+
+    /// Request a fresh handshake or resume the accepted session on a replacement
+    /// transport. The caller must provide a newly connected transport.
+    pub fn reconnect(&mut self, transport: T) {
+        self.transport = transport;
+        self.hello_sent = false;
+    }
+
+    /// Number of unrecoverable transport, encoding, or decoding errors.
+    #[must_use]
+    pub fn processing_error_count(&self) -> u64 {
+        self.processing_error_count
+    }
+
     /// Whether the transport is connected.
     #[must_use]
     pub fn is_connected(&self) -> bool {
@@ -139,6 +184,24 @@ impl<T: Transport> Client<T> {
     // Private helpers
     // ------------------------------------------------------------------
 
+    /// Send a fresh or resume handshake.
+    fn send_hello(&mut self) {
+        let result = self.transport.send_reliable(Message {
+            kind: MessageKind::Reliable,
+            payload: crcbl_net::encode_hello(&Hello {
+                protocol_version: PROTOCOL_VERSION,
+                engine_build_id: ENGINE_BUILD_ID,
+                schema_hash: SCHEMA_HASH,
+                session_token: self.session_id,
+            }),
+        });
+        if result.is_ok() {
+            self.hello_sent = true;
+        } else {
+            self.processing_error_count += 1;
+        }
+    }
+
     /// Send pending input to the server for the given tick.
     fn send_input(&mut self, tick: TickId) -> Result<(), TransportError> {
         if self.pending_input.is_empty() {
@@ -160,9 +223,22 @@ impl<T: Transport> Client<T> {
     /// buffer. Sends an ack for each applied tick.
     fn recv_snapshots(&mut self) -> Result<(), TransportError> {
         while let Some(msg) = self.transport.recv()? {
-            // Decode as delta.
-            let Ok(delta) = crcbl_net::decode_delta(&msg.payload) else {
+            if let Ok(result) = crcbl_net::decode_handshake_result(&msg.payload) {
+                match result {
+                    HandshakeResult::Accept { session_id, .. } => {
+                        self.session_id = Some(session_id)
+                    }
+                    HandshakeResult::Reject { .. } => self.processing_error_count += 1,
+                }
                 continue;
+            }
+
+            let delta = match crcbl_net::decode_delta(&msg.payload) {
+                Ok(delta) => delta,
+                Err(_) => {
+                    self.processing_error_count += 1;
+                    continue;
+                }
             };
 
             if delta.tick <= self.baseline.tick {
@@ -178,12 +254,17 @@ impl<T: Transport> Client<T> {
                 continue;
             }
             if delta.is_keyframe && delta.baseline_tick.is_some() {
+                self.processing_error_count += 1;
                 continue;
             }
 
             // Apply the delta to our baseline, reconstruct full snapshots.
-            let Ok(full_snapshots) = DeltaCodec::apply(&delta, &mut self.baseline) else {
-                continue;
+            let full_snapshots = match DeltaCodec::apply(&delta, &mut self.baseline) {
+                Ok(full_snapshots) => full_snapshots,
+                Err(_) => {
+                    self.processing_error_count += 1;
+                    continue;
+                }
             };
 
             // Send ack for this tick.
@@ -212,10 +293,16 @@ impl<T: Transport> Client<T> {
     }
 
     fn send_ack(&mut self, tick: TickId) {
-        let _ = self.transport.send_unreliable(Message {
-            kind: MessageKind::Unreliable,
-            payload: crcbl_net::encode_ack(tick),
-        });
+        if self
+            .transport
+            .send_unreliable(Message {
+                kind: MessageKind::Unreliable,
+                payload: crcbl_net::encode_ack(tick),
+            })
+            .is_err()
+        {
+            self.processing_error_count += 1;
+        }
     }
 }
 
@@ -315,6 +402,7 @@ mod tests {
             crcbl_net::decode_ack(&peer.recv().unwrap().unwrap().payload).unwrap(),
             TickId::from_raw(5)
         );
+        let _ = peer.recv().unwrap().unwrap();
 
         let wrong_baseline = crcbl_net::Delta {
             tick: TickId::from_raw(6),
@@ -467,6 +555,8 @@ mod tests {
         client.update(tick_dt);
 
         let mut peer = server_transport;
+        let hello = peer.recv().unwrap().unwrap();
+        assert!(crcbl_net::decode_hello(&hello.payload).is_ok());
         assert!(peer.recv().unwrap().is_none());
     }
 

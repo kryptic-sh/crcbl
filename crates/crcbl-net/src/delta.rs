@@ -22,8 +22,10 @@ use crate::types::{EntityBits, EntityData};
 pub const MAX_DELTA_BYTES: usize = 64 * 1024;
 /// Largest individual component payload accepted from a delta packet.
 pub const MAX_COMPONENT_BYTES: usize = 60 * 1024;
-/// Maximum systems retained in one baseline.
-pub const MAX_BASELINE_SYSTEMS: usize = 256;
+/// Maximum systems accepted from an untrusted delta packet.
+///
+/// Bounded by the minimum 16-byte wire representation and [`MAX_DELTA_BYTES`].
+pub const MAX_DECODE_SYSTEMS: usize = MAX_DELTA_BYTES / 16;
 /// Maximum entities retained across all baseline systems.
 pub const MAX_BASELINE_ENTITIES: usize = 4_096;
 /// Maximum encoded entity bytes retained in one baseline.
@@ -77,10 +79,30 @@ pub struct Baseline {
 }
 
 impl Baseline {
-    /// Build a [`Baseline`] from validated [`SystemSnapshot`] entity blobs.
+    /// Build a [`Baseline`] from trusted local [`SystemSnapshot`] entity blobs.
+    ///
+    /// This constructor is for snapshots produced locally before encoding. Incoming
+    /// data must use [`Self::from_untrusted_snapshot`] or [`DeltaCodec::apply`].
     pub fn from_snapshot(
         tick: TickId,
         systems: &[SystemSnapshot],
+    ) -> Result<Self, BaselineDecodeError> {
+        Self::from_snapshot_inner(tick, systems, false)
+    }
+
+    /// Build a [`Baseline`] from an untrusted decoded snapshot, enforcing all
+    /// retained-state limits.
+    pub fn from_untrusted_snapshot(
+        tick: TickId,
+        systems: &[SystemSnapshot],
+    ) -> Result<Self, BaselineDecodeError> {
+        Self::from_snapshot_inner(tick, systems, true)
+    }
+
+    fn from_snapshot_inner(
+        tick: TickId,
+        systems: &[SystemSnapshot],
+        enforce_limits: bool,
     ) -> Result<Self, BaselineDecodeError> {
         let mut map: HashMap<u32, HashMap<u64, Vec<u8>>> = HashMap::new();
 
@@ -90,7 +112,9 @@ impl Baseline {
             }
             map.insert(sys.system_id, decode_entity_blobs(&sys.data)?);
         }
-        validate_baseline_limits(&map)?;
+        if enforce_limits {
+            validate_baseline_limits(&map)?;
+        }
 
         Ok(Self { tick, systems: map })
     }
@@ -112,11 +136,13 @@ impl Baseline {
         self.systems.get(&system_id).map(|m| m.len()).unwrap_or(0)
     }
 
-    /// Deterministic hash of the full baseline state.
+    /// Process-local hash of the full baseline state.
     ///
     /// Hashes every `(system_id, entity_bits, entity_data)` tuple in
-    /// deterministic order (systems and entities sorted by id), suitable for
-    /// state-equality checks across replica boundaries.
+    /// deterministic order (systems and entities sorted by id). The result is
+    /// suitable for equality checks in one process using the same Rust version
+    /// and platform; [`DefaultHasher`] does not define a cross-version or
+    /// cross-platform stable format.
     pub fn state_hash(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
         let mut sys_ids: Vec<u32> = self.systems.keys().copied().collect();
@@ -178,7 +204,7 @@ fn decode_entity_blobs(blob: &[u8]) -> Result<HashMap<u64, Vec<u8>>, BaselineDec
 fn validate_baseline_limits(
     systems: &HashMap<u32, HashMap<u64, Vec<u8>>>,
 ) -> Result<(), BaselineDecodeError> {
-    if systems.len() > MAX_BASELINE_SYSTEMS {
+    if systems.len() > MAX_DECODE_SYSTEMS {
         return Err(BaselineDecodeError::BaselineTooLarge);
     }
 
@@ -727,6 +753,9 @@ pub fn decode_delta(payload: &[u8]) -> Result<Delta, DeltaDecodeError> {
     }
     let system_count = u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap()) as usize;
     cursor += 4;
+    if system_count > MAX_DECODE_SYSTEMS {
+        return Err(DeltaDecodeError::InvalidLength(system_count as u32));
+    }
     if system_count > (payload.len() - cursor) / 16 {
         return Err(DeltaDecodeError::InvalidLength(system_count as u32));
     }
@@ -1053,6 +1082,19 @@ mod tests {
             .expect("valid test snapshots");
         assert_eq!(baseline.system_count(), 2);
         assert_eq!(baseline.entity_count(), 3);
+    }
+
+    #[test]
+    fn trusted_baseline_allows_more_than_256_systems() {
+        let systems: Vec<_> = (0..300)
+            .map(|system_id| SystemSnapshot {
+                system_id,
+                data: Vec::new(),
+            })
+            .collect();
+        let baseline = Baseline::from_snapshot(TickId::from_raw(1), &systems)
+            .expect("trusted snapshots are not packet-limited");
+        assert_eq!(baseline.system_count(), 300);
     }
 
     // ── Baseline::entity_count_for ────────────────────────────────────────
