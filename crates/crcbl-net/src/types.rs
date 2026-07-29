@@ -75,7 +75,7 @@ impl ProtocolCompatibility {
     /// embeddings must pass explicit, non-zero engine and schema identifiers to
     /// client and server constructors.
     pub const DEFAULT: Self = Self {
-        protocol_version: 2,
+        protocol_version: 3,
         engine_build_id: 0,
         schema_hash: 0,
     };
@@ -159,6 +159,7 @@ mod tests {
     fn accept_debug_redacts_resume_token() {
         let token = ResumeToken::from_bytes([0xA5; 32]);
         let result = HandshakeResult::Accept {
+            generation: 1,
             session_id: SessionId(1),
             resume_token: token,
             server_tick: TickId::ZERO,
@@ -170,7 +171,7 @@ mod tests {
 
     #[test]
     fn protocol_compatibility_default_is_explicit() {
-        assert_eq!(ProtocolCompatibility::DEFAULT.protocol_version, 2);
+        assert_eq!(ProtocolCompatibility::DEFAULT.protocol_version, 3);
     }
 
     #[test]

@@ -20,6 +20,8 @@ pub struct Hello {
     /// A mismatch means the client was built against different definitions
     /// and must be cleanly rejected.
     pub schema_hash: u64,
+    /// Monotonically increasing identifier binding a response to this hello.
+    pub generation: u64,
     /// `None` for a fresh join; `Some` when attempting to resume a previous
     /// session (the server still decides whether the token is valid).
     pub session_token: Option<ResumeToken>,
@@ -50,11 +52,13 @@ pub struct RejectReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandshakeResult {
     Accept {
+        generation: u64,
         session_id: SessionId,
         resume_token: ResumeToken,
         server_tick: TickId,
     },
     Reject {
+        generation: u64,
         reason: RejectReason,
     },
 }
@@ -94,6 +98,7 @@ impl HandshakeGate {
     ) -> HandshakeResult {
         if hello.protocol_version != self.compatibility.protocol_version {
             return HandshakeResult::Reject {
+                generation: hello.generation,
                 reason: RejectReason {
                     code: 0x01,
                     msg: format!(
@@ -106,6 +111,7 @@ impl HandshakeGate {
 
         if hello.engine_build_id != self.compatibility.engine_build_id {
             return HandshakeResult::Reject {
+                generation: hello.generation,
                 reason: RejectReason {
                     code: 0x05,
                     msg: format!(
@@ -118,6 +124,7 @@ impl HandshakeGate {
 
         if hello.schema_hash != self.compatibility.schema_hash {
             return HandshakeResult::Reject {
+                generation: hello.generation,
                 reason: RejectReason {
                     code: 0x02,
                     msg: format!(
@@ -129,6 +136,7 @@ impl HandshakeGate {
         }
 
         HandshakeResult::Accept {
+            generation: hello.generation,
             session_id,
             resume_token,
             server_tick,
@@ -144,7 +152,7 @@ mod tests {
 
     fn gate() -> HandshakeGate {
         HandshakeGate::new(ProtocolCompatibility {
-            protocol_version: 2,
+            protocol_version: 3,
             engine_build_id: 0xABCD,
             schema_hash: 0xDEAD_BEEF_CAFE,
         })
@@ -156,9 +164,10 @@ mod tests {
 
     fn matching_hello() -> Hello {
         Hello {
-            protocol_version: 2,
+            protocol_version: 3,
             engine_build_id: 0xABCD,
             schema_hash: 0xDEAD_BEEF_CAFE,
+            generation: 1,
             session_token: None,
         }
     }
@@ -183,7 +192,7 @@ mod tests {
                 assert_eq!(session_id, SessionId(42));
                 assert_eq!(server_tick, TickId::from_raw(100));
             }
-            HandshakeResult::Reject { reason } => {
+            HandshakeResult::Reject { reason, .. } => {
                 panic!("expected Accept, got Reject: {reason:?}");
             }
         }
@@ -205,6 +214,7 @@ mod tests {
         assert!(matches!(
             result,
             HandshakeResult::Reject {
+                generation: 1,
                 reason: RejectReason { code: 0x01, .. }
             }
         ));
@@ -219,11 +229,11 @@ mod tests {
         };
         let result = g.validate(&hello, SessionId(1), token(), TickId::ZERO);
         match result {
-            HandshakeResult::Reject { reason } => {
+            HandshakeResult::Reject { reason, .. } => {
                 assert_eq!(reason.code, 0x01);
                 assert!(reason.msg.contains("version mismatch"));
                 assert!(reason.msg.contains("999"));
-                assert!(reason.msg.contains('2'));
+                assert!(reason.msg.contains('3'));
             }
             HandshakeResult::Accept { .. } => {
                 panic!("expected Reject for version mismatch");
@@ -242,7 +252,7 @@ mod tests {
         };
         let result = g.validate(&hello, SessionId(1), token(), TickId::ZERO);
         match result {
-            HandshakeResult::Reject { reason } => {
+            HandshakeResult::Reject { reason, .. } => {
                 assert_eq!(reason.code, 0x02);
                 assert!(reason.msg.contains("schema hash mismatch"));
             }
@@ -261,7 +271,7 @@ mod tests {
         };
         let result = g.validate(&hello, SessionId(1), token(), TickId::ZERO);
         match result {
-            HandshakeResult::Reject { reason } => {
+            HandshakeResult::Reject { reason, .. } => {
                 assert_eq!(reason.code, 0x05);
                 assert!(reason.msg.contains("engine build id mismatch"));
             }
@@ -303,10 +313,14 @@ mod tests {
         };
         let _ = format!("{r:?}");
 
-        let hr = HandshakeResult::Reject { reason: r };
+        let hr = HandshakeResult::Reject {
+            generation: 1,
+            reason: r,
+        };
         let _ = format!("{hr:?}");
 
         let ha = HandshakeResult::Accept {
+            generation: 1,
             session_id: SessionId(1),
             resume_token: ResumeToken::from_bytes([0; 32]),
             server_tick: TickId::ZERO,
@@ -327,6 +341,7 @@ mod tests {
                 protocol_version: 7,
                 engine_build_id: 0xF00,
                 schema_hash: 0xBA2,
+                generation: 1,
                 session_token: None,
             },
             SessionId(1),
@@ -340,6 +355,7 @@ mod tests {
                 protocol_version: 6,
                 engine_build_id: 0xF00,
                 schema_hash: 0xBA2,
+                generation: 1,
                 session_token: None,
             },
             SessionId(1),

@@ -55,7 +55,10 @@ pub struct Client<T: Transport> {
     session_id: Option<SessionId>,
     resume_token: Option<ResumeToken>,
     compatibility: ProtocolCompatibility,
-    hello_sent: bool,
+    handshake_generation: u64,
+    outstanding_handshake_generation: Option<u64>,
+    handshake_complete: bool,
+    handshake_rejected: bool,
     processing_error_count: u64,
 }
 
@@ -98,7 +101,10 @@ impl<T: Transport> Client<T> {
             session_id: None,
             resume_token: None,
             compatibility,
-            hello_sent: false,
+            handshake_generation: 0,
+            outstanding_handshake_generation: None,
+            handshake_complete: false,
+            handshake_rejected: false,
             processing_error_count: 0,
         }
     }
@@ -109,7 +115,10 @@ impl<T: Transport> Client<T> {
     /// each consumed tick, and returns the interpolation alpha in `[0, 1)`.
     pub fn update(&mut self, now: std::time::Duration) -> f32 {
         self.clock.update(now);
-        if !self.hello_sent {
+        if !self.handshake_complete
+            && !self.handshake_rejected
+            && self.outstanding_handshake_generation.is_none()
+        {
             self.send_hello();
         }
         while self.clock.consume_tick() {
@@ -173,7 +182,9 @@ impl<T: Transport> Client<T> {
     /// transport. The caller must provide a newly connected transport.
     pub fn reconnect(&mut self, transport: T) {
         self.transport = transport;
-        self.hello_sent = false;
+        self.outstanding_handshake_generation = None;
+        self.handshake_complete = false;
+        self.handshake_rejected = false;
     }
 
     /// Number of unrecoverable transport, encoding, or decoding errors.
@@ -206,17 +217,23 @@ impl<T: Transport> Client<T> {
 
     /// Send a fresh or resume handshake.
     fn send_hello(&mut self) {
+        self.handshake_generation = self
+            .handshake_generation
+            .checked_add(1)
+            .expect("handshake generation exhausted; recreate the client");
+        let generation = self.handshake_generation;
         let result = self.transport.send_reliable(Message {
             kind: MessageKind::Reliable,
             payload: crcbl_net::encode_hello(&Hello {
                 protocol_version: self.compatibility.protocol_version,
                 engine_build_id: self.compatibility.engine_build_id,
                 schema_hash: self.compatibility.schema_hash,
+                generation,
                 session_token: self.resume_token,
             }),
         });
         if result.is_ok() {
-            self.hello_sent = true;
+            self.outstanding_handshake_generation = Some(generation);
         } else {
             self.processing_error_count += 1;
         }
@@ -244,6 +261,15 @@ impl<T: Transport> Client<T> {
     fn recv_snapshots(&mut self) -> Result<(), TransportError> {
         while let Some(msg) = self.transport.recv()? {
             if let Ok(result) = crcbl_net::decode_handshake_result(&msg.payload) {
+                let generation = match &result {
+                    HandshakeResult::Accept { generation, .. }
+                    | HandshakeResult::Reject { generation, .. } => *generation,
+                };
+                if self.outstanding_handshake_generation != Some(generation) {
+                    self.processing_error_count += 1;
+                    continue;
+                }
+                self.outstanding_handshake_generation = None;
                 match result {
                     HandshakeResult::Accept {
                         session_id,
@@ -252,13 +278,17 @@ impl<T: Transport> Client<T> {
                     } => {
                         self.session_id = Some(session_id);
                         self.resume_token = Some(resume_token);
+                        self.handshake_complete = true;
                     }
-                    HandshakeResult::Reject { .. } => self.processing_error_count += 1,
+                    HandshakeResult::Reject { .. } => {
+                        self.handshake_rejected = true;
+                        self.processing_error_count += 1;
+                    }
                 }
                 continue;
             }
 
-            let delta = match if self.session_id.is_some() {
+            let delta = match if self.handshake_complete {
                 crcbl_net::decode_trusted_delta(&msg.payload)
             } else {
                 crcbl_net::decode_delta(&msg.payload)
@@ -288,7 +318,7 @@ impl<T: Transport> Client<T> {
             }
 
             // Apply the delta to our baseline, reconstruct full snapshots.
-            let full_snapshots = match if self.session_id.is_some() {
+            let full_snapshots = match if self.handshake_complete {
                 DeltaCodec::apply_trusted(&delta, &mut self.baseline)
             } else {
                 DeltaCodec::apply(&delta, &mut self.baseline)
@@ -842,6 +872,162 @@ mod tests {
         client.update(std::time::Duration::from_nanos(1));
 
         assert_eq!(client.baseline_entity_count(), 3);
+    }
+
+    #[test]
+    fn rejects_stale_and_unsolicited_handshake_accepts() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = Client::new(empty_world(), client_transport, 60);
+
+        client.update(std::time::Duration::ZERO);
+        let initial_hello =
+            crcbl_net::decode_hello(&peer.recv().unwrap().unwrap().payload).unwrap();
+        peer.send_reliable(Message {
+            kind: MessageKind::Reliable,
+            payload: crcbl_net::encode_handshake_result(&HandshakeResult::Accept {
+                generation: initial_hello.generation,
+                session_id: SessionId(1),
+                resume_token: ResumeToken::from_bytes([1; 32]),
+                server_tick: TickId::ZERO,
+            }),
+        })
+        .unwrap();
+        client.update(std::time::Duration::from_nanos(1));
+        assert_eq!(client.session_id(), Some(SessionId(1)));
+        assert_eq!(client.resume_token, Some(ResumeToken::from_bytes([1; 32])));
+
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        client.reconnect(client_transport);
+        client.update(std::time::Duration::from_nanos(2));
+        let reconnect_hello =
+            crcbl_net::decode_hello(&peer.recv().unwrap().unwrap().payload).unwrap();
+        assert!(reconnect_hello.generation > initial_hello.generation);
+
+        peer.send_reliable(Message {
+            kind: MessageKind::Reliable,
+            payload: crcbl_net::encode_handshake_result(&HandshakeResult::Accept {
+                generation: initial_hello.generation,
+                session_id: SessionId(99),
+                resume_token: ResumeToken::from_bytes([9; 32]),
+                server_tick: TickId::ZERO,
+            }),
+        })
+        .unwrap();
+        client.update(std::time::Duration::from_nanos(3));
+        assert_eq!(client.session_id(), Some(SessionId(1)));
+        assert_eq!(client.resume_token, Some(ResumeToken::from_bytes([1; 32])));
+        assert_eq!(client.processing_error_count(), 1);
+
+        let oversized_system_set: Vec<_> = (0..=crcbl_net::MAX_BASELINE_SYSTEMS as u32)
+            .map(|system_id| (system_id, Vec::new()))
+            .collect();
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: keyframe_snapshot(1, &oversized_system_set),
+        })
+        .unwrap();
+        client.update(std::time::Duration::from_nanos(4));
+        assert_eq!(client.last_applied_tick(), TickId::ZERO);
+        assert_eq!(client.processing_error_count(), 2);
+
+        peer.send_reliable(Message {
+            kind: MessageKind::Reliable,
+            payload: crcbl_net::encode_handshake_result(&HandshakeResult::Accept {
+                generation: reconnect_hello.generation,
+                session_id: SessionId(1),
+                resume_token: ResumeToken::from_bytes([2; 32]),
+                server_tick: TickId::ZERO,
+            }),
+        })
+        .unwrap();
+        client.update(std::time::Duration::from_nanos(5));
+        assert_eq!(client.session_id(), Some(SessionId(1)));
+        assert_eq!(client.resume_token, Some(ResumeToken::from_bytes([2; 32])));
+
+        peer.send_reliable(Message {
+            kind: MessageKind::Reliable,
+            payload: crcbl_net::encode_handshake_result(&HandshakeResult::Accept {
+                generation: reconnect_hello.generation,
+                session_id: SessionId(100),
+                resume_token: ResumeToken::from_bytes([10; 32]),
+                server_tick: TickId::ZERO,
+            }),
+        })
+        .unwrap();
+        client.update(std::time::Duration::from_nanos(6));
+        assert_eq!(client.session_id(), Some(SessionId(1)));
+        assert_eq!(client.resume_token, Some(ResumeToken::from_bytes([2; 32])));
+        assert_eq!(client.processing_error_count(), 3);
+    }
+
+    #[test]
+    fn matching_reject_is_terminal_and_stale_reject_preserves_new_handshake() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = Client::new(empty_world(), client_transport, 60);
+
+        client.update(std::time::Duration::ZERO);
+        let initial_generation = crcbl_net::decode_hello(&peer.recv().unwrap().unwrap().payload)
+            .unwrap()
+            .generation;
+        peer.send_reliable(Message {
+            kind: MessageKind::Reliable,
+            payload: crcbl_net::encode_handshake_result(&HandshakeResult::Reject {
+                generation: initial_generation,
+                reason: crcbl_net::RejectReason {
+                    code: 1,
+                    msg: "incompatible".into(),
+                },
+            }),
+        })
+        .unwrap();
+        client.update(std::time::Duration::from_nanos(1));
+        client.update(std::time::Duration::from_nanos(2));
+        assert!(peer.recv().unwrap().is_none());
+        assert_eq!(client.session_id(), None);
+        assert_eq!(client.processing_error_count(), 1);
+
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        client.reconnect(client_transport);
+        client.update(std::time::Duration::from_nanos(3));
+        let next_generation = crcbl_net::decode_hello(&peer.recv().unwrap().unwrap().payload)
+            .unwrap()
+            .generation;
+        assert!(next_generation > initial_generation);
+
+        peer.send_reliable(Message {
+            kind: MessageKind::Reliable,
+            payload: crcbl_net::encode_handshake_result(&HandshakeResult::Reject {
+                generation: initial_generation,
+                reason: crcbl_net::RejectReason {
+                    code: 1,
+                    msg: "stale".into(),
+                },
+            }),
+        })
+        .unwrap();
+        client.update(std::time::Duration::from_nanos(4));
+        peer.send_reliable(Message {
+            kind: MessageKind::Reliable,
+            payload: crcbl_net::encode_handshake_result(&HandshakeResult::Accept {
+                generation: next_generation,
+                session_id: SessionId(1),
+                resume_token: ResumeToken::from_bytes([1; 32]),
+                server_tick: TickId::ZERO,
+            }),
+        })
+        .unwrap();
+        client.update(std::time::Duration::from_nanos(5));
+        assert_eq!(client.session_id(), Some(SessionId(1)));
+        assert_eq!(client.processing_error_count(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "handshake generation exhausted; recreate the client")]
+    fn handshake_generation_never_wraps() {
+        let (transport, _peer) = InMemoryTransport::pair();
+        let mut client = Client::new(empty_world(), transport, 60);
+        client.handshake_generation = u64::MAX;
+        client.send_hello();
     }
 
     // ── Debug ──────────────────────────────────────────────────────────────

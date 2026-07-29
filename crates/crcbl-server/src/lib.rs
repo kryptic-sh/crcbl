@@ -176,7 +176,7 @@ impl<T: Transport> Server<T> {
             && let Err(error) = self.rotate_session()
         {
             self.processing_error_count += 1;
-            self.send_handshake_result(Self::entropy_failure(error));
+            self.send_handshake_result(Self::entropy_failure(hello.generation, error));
             return;
         }
         let mut result = self.handshake_gate.validate(
@@ -191,6 +191,7 @@ impl<T: Transport> Server<T> {
                 SessionState::Disconnected => {
                     if hello.session_token.is_some() {
                         result = Self::invalid_session_token(
+                            hello.generation,
                             "fresh handshake must not include a session token",
                         );
                     } else {
@@ -204,8 +205,10 @@ impl<T: Transport> Server<T> {
                         .session_token
                         .is_some_and(|token| token == expected_token)
                     {
-                        result =
-                            Self::invalid_session_token("reconnect session token does not match");
+                        result = Self::invalid_session_token(
+                            hello.generation,
+                            "reconnect session token does not match",
+                        );
                     } else {
                         match Self::generate_resume_token() {
                             Ok(resume_token) => {
@@ -234,25 +237,33 @@ impl<T: Transport> Server<T> {
                                     return;
                                 }
                                 self.session.expire_if_timed_out(self.now);
-                                result =
-                                    Self::invalid_session_token("reconnect grace period expired");
+                                result = Self::invalid_session_token(
+                                    hello.generation,
+                                    "reconnect grace period expired",
+                                );
                             }
                             Err(error) => {
                                 self.processing_error_count += 1;
-                                result = Self::entropy_failure(error);
+                                result = Self::entropy_failure(hello.generation, error);
                             }
                         }
                     }
                 }
                 SessionState::Handshaking => {
-                    result = Self::invalid_session_token("handshake is already in progress");
+                    result = Self::invalid_session_token(
+                        hello.generation,
+                        "handshake is already in progress",
+                    );
                 }
                 SessionState::Connected => {
                     if !hello
                         .session_token
                         .is_some_and(|token| token == expected_token)
                     {
-                        result = Self::invalid_session_token("session token does not match");
+                        result = Self::invalid_session_token(
+                            hello.generation,
+                            "session token does not match",
+                        );
                     }
                 }
             }
@@ -292,8 +303,9 @@ impl<T: Transport> Server<T> {
         }
     }
 
-    fn entropy_failure(error: getrandom::Error) -> HandshakeResult {
+    fn entropy_failure(generation: u64, error: getrandom::Error) -> HandshakeResult {
         HandshakeResult::Reject {
+            generation,
             reason: RejectReason {
                 code: 0x06,
                 msg: format!("unable to generate resume credential: {error}"),
@@ -301,8 +313,9 @@ impl<T: Transport> Server<T> {
         }
     }
 
-    fn invalid_session_token(message: &str) -> HandshakeResult {
+    fn invalid_session_token(generation: u64, message: &str) -> HandshakeResult {
         HandshakeResult::Reject {
+            generation,
             reason: RejectReason {
                 code: 0x04,
                 msg: message.into(),
@@ -471,6 +484,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 engine_build_id: ENGINE_BUILD_ID,
                 schema_hash: SCHEMA_HASH,
+                generation: 1,
                 session_token: None,
             }),
         })
@@ -507,6 +521,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             engine_build_id: ENGINE_BUILD_ID,
             schema_hash: SCHEMA_HASH,
+            generation: 1,
             session_token: Some(token),
         });
 

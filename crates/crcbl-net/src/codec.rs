@@ -297,14 +297,16 @@ pub fn decode_server_to_client(payload: &[u8]) -> Result<ServerToClient, DecodeE
 // ── Handshake encode/decode ───────────────────────────────────────────────────
 
 /// Tag 0x20 = Hello { protocol_version: u32 LE, engine_build_id: u64 LE,
-///   schema_hash: u64 LE, has_session: u8, resume_token: [u8; 32] (if has_session) }
+///   schema_hash: u64 LE, generation: u64 LE, has_session: u8,
+///   resume_token: [u8; 32] (if has_session) }
 pub fn encode_hello(hello: &Hello) -> Vec<u8> {
     let has_session = hello.session_token.is_some();
-    let mut buf = Vec::with_capacity(1 + 4 + 8 + 8 + 1 + usize::from(has_session) * 32);
+    let mut buf = Vec::with_capacity(1 + 4 + 8 + 8 + 8 + 1 + usize::from(has_session) * 32);
     buf.push(0x20);
     buf.extend_from_slice(&hello.protocol_version.to_le_bytes());
     buf.extend_from_slice(&hello.engine_build_id.to_le_bytes());
     buf.extend_from_slice(&hello.schema_hash.to_le_bytes());
+    buf.extend_from_slice(&hello.generation.to_le_bytes());
     buf.push(if has_session { 1u8 } else { 0u8 });
     if let Some(token) = &hello.session_token {
         buf.extend_from_slice(token.as_bytes());
@@ -322,6 +324,7 @@ pub fn decode_hello(payload: &[u8]) -> Result<Hello, DecodeError> {
     let protocol_version = r.read_u32()?;
     let engine_build_id = r.read_u64()?;
     let schema_hash = r.read_u64()?;
+    let generation = r.read_u64()?;
     let has_session = r.read_u8()?;
     let session_token = match has_session {
         0 => None,
@@ -335,30 +338,34 @@ pub fn decode_hello(payload: &[u8]) -> Result<Hello, DecodeError> {
         protocol_version,
         engine_build_id,
         schema_hash,
+        generation,
         session_token,
     })
 }
 
-/// Tag 0x21 = Accept { session_id: u64 LE, resume_token: [u8; 32], server_tick: u64 LE }
-/// Tag 0x22 = Reject { code: u8, msg_len: u16 LE, msg: UTF-8 bytes }
+/// Tag 0x21 = Accept { generation: u64 LE, session_id: u64 LE, resume_token: [u8; 32], server_tick: u64 LE }
+/// Tag 0x22 = Reject { generation: u64 LE, code: u8, msg_len: u16 LE, msg: UTF-8 bytes }
 pub fn encode_handshake_result(result: &HandshakeResult) -> Vec<u8> {
     match result {
         HandshakeResult::Accept {
+            generation,
             session_id,
             resume_token,
             server_tick,
         } => {
-            let mut buf = Vec::with_capacity(1 + 8 + 32 + 8);
+            let mut buf = Vec::with_capacity(1 + 8 + 8 + 32 + 8);
             buf.push(0x21);
+            buf.extend_from_slice(&generation.to_le_bytes());
             buf.extend_from_slice(&session_id.0.to_le_bytes());
             buf.extend_from_slice(resume_token.as_bytes());
             buf.extend_from_slice(&server_tick.get().to_le_bytes());
             buf
         }
-        HandshakeResult::Reject { reason } => {
+        HandshakeResult::Reject { generation, reason } => {
             let msg_bytes = reason.msg.as_bytes();
-            let mut buf = Vec::with_capacity(1 + 1 + 2 + msg_bytes.len());
+            let mut buf = Vec::with_capacity(1 + 8 + 1 + 2 + msg_bytes.len());
             buf.push(0x22);
+            buf.extend_from_slice(&generation.to_le_bytes());
             buf.push(reason.code);
             buf.extend_from_slice(&(msg_bytes.len() as u16).to_le_bytes());
             buf.extend_from_slice(msg_bytes);
@@ -373,17 +380,20 @@ pub fn decode_handshake_result(payload: &[u8]) -> Result<HandshakeResult, Decode
     let tag = r.read_u8()?;
     match tag {
         0x21 => {
+            let generation = r.read_u64()?;
             let raw_session = r.read_u64()?;
             let resume_token = ResumeToken::from_bytes(r.read_bytes(32)?.try_into().unwrap());
             let raw_tick = r.read_u64()?;
             r.assert_empty()?;
             Ok(HandshakeResult::Accept {
+                generation,
                 session_id: SessionId(raw_session),
                 resume_token,
                 server_tick: TickId::from_raw(raw_tick),
             })
         }
         0x22 => {
+            let generation = r.read_u64()?;
             let code = r.read_u8()?;
             let msg_len = r.read_u16()? as usize;
             validate_field_len(msg_len, r.remaining())?;
@@ -392,6 +402,7 @@ pub fn decode_handshake_result(payload: &[u8]) -> Result<HandshakeResult, Decode
                 .map_err(|_| DecodeError::InvalidLength(msg_len as u32))?;
             r.assert_empty()?;
             Ok(HandshakeResult::Reject {
+                generation,
                 reason: RejectReason { code, msg },
             })
         }
@@ -532,6 +543,7 @@ mod tests {
             protocol_version: 1,
             engine_build_id: 0xCAFE_BABE,
             schema_hash: 0xDEAD_BEEF,
+            generation: 1,
             session_token: Some(ResumeToken::from_bytes([0xA5; 32])),
         };
         let encoded = encode_hello(&hello);
@@ -539,6 +551,7 @@ mod tests {
         assert_eq!(decoded.protocol_version, 1);
         assert_eq!(decoded.engine_build_id, 0xCAFE_BABE);
         assert_eq!(decoded.schema_hash, 0xDEAD_BEEF);
+        assert_eq!(decoded.generation, 1);
         assert_eq!(
             decoded.session_token,
             Some(ResumeToken::from_bytes([0xA5; 32]))
@@ -549,6 +562,7 @@ mod tests {
             protocol_version: 2,
             engine_build_id: 0,
             schema_hash: 0,
+            generation: 1,
             session_token: None,
         };
         let encoded = encode_hello(&hello_fresh);
@@ -560,6 +574,7 @@ mod tests {
     fn roundtrip_handshake_result() {
         // Accept
         let accept = HandshakeResult::Accept {
+            generation: 1,
             session_id: SessionId(999),
             resume_token: ResumeToken::from_bytes([0; 32]),
             server_tick: TickId::from_raw(5),
@@ -568,19 +583,23 @@ mod tests {
         let decoded = decode_handshake_result(&encoded).unwrap();
         match decoded {
             HandshakeResult::Accept {
+                generation,
                 session_id,
                 resume_token,
                 server_tick,
+                ..
             } => {
                 assert_eq!(session_id, SessionId(999));
                 assert_eq!(resume_token, ResumeToken::from_bytes([0; 32]));
                 assert_eq!(server_tick.get(), 5);
+                assert_eq!(generation, 1);
             }
             _ => panic!("expected Accept"),
         }
 
         // Reject
         let reject = HandshakeResult::Reject {
+            generation: 1,
             reason: RejectReason {
                 code: 0x01,
                 msg: "version mismatch".to_string(),
@@ -589,7 +608,8 @@ mod tests {
         let encoded = encode_handshake_result(&reject);
         let decoded = decode_handshake_result(&encoded).unwrap();
         match decoded {
-            HandshakeResult::Reject { reason } => {
+            HandshakeResult::Reject { generation, reason } => {
+                assert_eq!(generation, 1);
                 assert_eq!(reason.code, 0x01);
                 assert_eq!(reason.msg, "version mismatch");
             }
@@ -717,6 +737,7 @@ mod tests {
             protocol_version: 1,
             engine_build_id: 2,
             schema_hash: 3,
+            generation: 1,
             session_token: Some(ResumeToken::from_bytes([4; 32])),
         });
         assert!(matches!(
@@ -726,6 +747,7 @@ mod tests {
 
         // Handshake Accept truncated
         let accept_enc = encode_handshake_result(&HandshakeResult::Accept {
+            generation: 1,
             session_id: SessionId(1),
             resume_token: ResumeToken::from_bytes([0; 32]),
             server_tick: TickId::from_raw(1),
@@ -774,6 +796,7 @@ mod tests {
             protocol_version: 1,
             engine_build_id: 0,
             schema_hash: 0,
+            generation: 1,
             session_token: None,
         });
         enc.push(0xAA);
@@ -784,6 +807,7 @@ mod tests {
 
         // HandshakeResult with trailing bytes
         let mut enc = encode_handshake_result(&HandshakeResult::Accept {
+            generation: 1,
             session_id: SessionId(1),
             resume_token: ResumeToken::from_bytes([0; 32]),
             server_tick: TickId::from_raw(1),
@@ -826,9 +850,10 @@ mod tests {
             protocol_version: 1,
             engine_build_id: 2,
             schema_hash: 3,
+            generation: 1,
             session_token: None,
         });
-        payload[21] = 2;
+        payload[29] = 2;
         assert!(matches!(
             decode_hello(&payload),
             Err(DecodeError::InvalidLength(2))
@@ -964,6 +989,7 @@ mod tests {
             protocol_version: 1,
             engine_build_id: 2,
             schema_hash: 3,
+            generation: 1,
             session_token: Some(ResumeToken::from_bytes([4; 32])),
         };
         let _ = format!("{h:?}");
@@ -975,6 +1001,7 @@ mod tests {
         let _ = format!("{r:?}");
 
         let accept = HandshakeResult::Accept {
+            generation: 1,
             session_id: SessionId(5),
             resume_token: ResumeToken::from_bytes([0; 32]),
             server_tick: TickId::from_raw(6),
@@ -982,6 +1009,7 @@ mod tests {
         let _ = format!("{accept:?}");
 
         let reject = HandshakeResult::Reject {
+            generation: 1,
             reason: RejectReason {
                 code: 2,
                 msg: "nope".into(),
@@ -1011,11 +1039,13 @@ mod tests {
     #[test]
     fn handshake_result_partial_eq() {
         let a = HandshakeResult::Accept {
+            generation: 1,
             session_id: SessionId(1),
             resume_token: ResumeToken::from_bytes([0; 32]),
             server_tick: TickId::from_raw(2),
         };
         let b = HandshakeResult::Accept {
+            generation: 1,
             session_id: SessionId(1),
             resume_token: ResumeToken::from_bytes([0; 32]),
             server_tick: TickId::from_raw(2),
@@ -1023,6 +1053,7 @@ mod tests {
         assert_eq!(a, b);
 
         let c = HandshakeResult::Accept {
+            generation: 1,
             session_id: SessionId(2),
             resume_token: ResumeToken::from_bytes([0; 32]),
             server_tick: TickId::from_raw(2),
