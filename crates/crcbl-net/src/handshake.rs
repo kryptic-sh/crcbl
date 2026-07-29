@@ -151,7 +151,7 @@ mod tests {
     }
 
     fn token() -> ResumeToken {
-        ResumeToken([0xA5; 32])
+        ResumeToken::from_bytes([0xA5; 32])
     }
 
     fn matching_hello() -> Hello {
@@ -308,7 +308,7 @@ mod tests {
 
         let ha = HandshakeResult::Accept {
             session_id: SessionId(1),
-            resume_token: ResumeToken([0; 32]),
+            resume_token: ResumeToken::from_bytes([0; 32]),
             server_tick: TickId::ZERO,
         };
         let _ = format!("{ha:?}");

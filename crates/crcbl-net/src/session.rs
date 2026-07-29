@@ -170,6 +170,18 @@ impl SessionManager {
         self.reconnect_deadline = Some(now + config.reconnect_grace_period);
     }
 
+    /// Check whether reconnect credentials and deadline still match without
+    /// changing session state.
+    #[must_use]
+    pub fn can_reconnect(&self, now: Duration, engine_build_id: u64, schema_hash: u64) -> bool {
+        self.state == SessionState::Reconnecting
+            && self
+                .reconnect_deadline
+                .is_none_or(|deadline| now <= deadline)
+            && self.engine_build_id == Some(engine_build_id)
+            && self.schema_hash == Some(schema_hash)
+    }
+
     /// Attempt to reconnect.
     ///
     /// Returns `true` if all of the following hold:

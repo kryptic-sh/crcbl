@@ -22,14 +22,25 @@ pub struct SessionId(pub u64);
 
 /// Cryptographically random credential required to resume a session.
 ///
-/// Its `Debug` implementation deliberately redacts the secret.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct ResumeToken(pub [u8; 32]);
+/// Its `Debug` implementation deliberately redacts the secret, and equality
+/// compares every byte so mismatches do not reveal a prefix length.
+#[derive(Clone, Copy)]
+pub struct ResumeToken([u8; 32]);
 
 impl ResumeToken {
-    /// Compare two credentials without returning early on a mismatched byte.
+    /// Create a credential from its wire representation.
     #[must_use]
-    pub fn constant_time_eq(self, other: Self) -> bool {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl PartialEq for ResumeToken {
+    fn eq(&self, other: &Self) -> bool {
         let mut difference = 0u8;
         for (left, right) in self.0.iter().zip(other.0) {
             difference |= left ^ right;
@@ -37,6 +48,8 @@ impl ResumeToken {
         difference == 0
     }
 }
+
+impl Eq for ResumeToken {}
 
 impl std::fmt::Debug for ResumeToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -56,16 +69,28 @@ pub struct ProtocolCompatibility {
 }
 
 impl ProtocolCompatibility {
-    /// Compatibility defaults for the wire format introduced in protocol version 2.
+    /// Wire-format compatibility with placeholder embedding identifiers.
     ///
-    /// `engine_build_id` and `schema_hash` are placeholders only: both zero values
-    /// provide no engine or schema protection. Production embeddings must use
-    /// explicit, non-placeholder identifiers.
+    /// Tests and protocol tooling may use this value directly. Networked
+    /// embeddings must pass explicit, non-zero engine and schema identifiers to
+    /// client and server constructors.
     pub const DEFAULT: Self = Self {
         protocol_version: 2,
         engine_build_id: 0,
         schema_hash: 0,
     };
+
+    /// Assert that embedding-specific identifiers protect the handshake.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either identifier is zero.
+    pub fn assert_explicit(self) {
+        assert!(
+            self.engine_build_id != 0 && self.schema_hash != 0,
+            "engine_build_id and schema_hash must be non-zero"
+        );
+    }
 }
 
 /// Entity identifier in packed form (generation + index from `crcbl_core::Pool`).
@@ -118,16 +143,21 @@ mod tests {
     }
 
     #[test]
+    fn resume_token_equality_checks_credentials() {
+        let token = ResumeToken::from_bytes([0xA5; 32]);
+        assert_eq!(token, token);
+        assert_ne!(token, ResumeToken::from_bytes([0; 32]));
+    }
+
+    #[test]
     fn resume_token_redacts_debug_output() {
-        let token = ResumeToken([0xA5; 32]);
+        let token = ResumeToken::from_bytes([0xA5; 32]);
         assert!(!format!("{token:?}").contains("165"));
-        assert!(token.constant_time_eq(token));
-        assert!(!token.constant_time_eq(ResumeToken([0; 32])));
     }
 
     #[test]
     fn accept_debug_redacts_resume_token() {
-        let token = ResumeToken([0xA5; 32]);
+        let token = ResumeToken::from_bytes([0xA5; 32]);
         let result = HandshakeResult::Accept {
             session_id: SessionId(1),
             resume_token: token,
@@ -141,6 +171,12 @@ mod tests {
     #[test]
     fn protocol_compatibility_default_is_explicit() {
         assert_eq!(ProtocolCompatibility::DEFAULT.protocol_version, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "engine_build_id and schema_hash must be non-zero")]
+    fn placeholder_compatibility_fails_assertion() {
+        ProtocolCompatibility::DEFAULT.assert_explicit();
     }
 
     #[test]

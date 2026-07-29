@@ -54,7 +54,11 @@ impl<T: Transport> Server<T> {
     /// Panics if `tick_hz` is zero or the operating system CSPRNG is unavailable.
     #[must_use]
     pub fn new(world: World, transport: T, tick_hz: u32) -> Self {
-        Self::try_new(world, transport, tick_hz)
+        let compatibility = ProtocolCompatibility::DEFAULT;
+        if !cfg!(test) {
+            compatibility.assert_explicit();
+        }
+        Self::try_new_with_compatibility(world, transport, tick_hz, compatibility)
             .expect("operating system CSPRNG must be available to create a server")
     }
 
@@ -63,7 +67,11 @@ impl<T: Transport> Server<T> {
     /// Returns the operating-system entropy error rather than issuing a predictable
     /// resume credential.
     pub fn try_new(world: World, transport: T, tick_hz: u32) -> Result<Self, getrandom::Error> {
-        Self::try_new_with_compatibility(world, transport, tick_hz, ProtocolCompatibility::DEFAULT)
+        let compatibility = ProtocolCompatibility::DEFAULT;
+        if !cfg!(test) {
+            compatibility.assert_explicit();
+        }
+        Self::try_new_with_compatibility(world, transport, tick_hz, compatibility)
     }
 
     /// Create a server with explicit protocol compatibility identifiers.
@@ -80,17 +88,19 @@ impl<T: Transport> Server<T> {
         tick_hz: u32,
         compatibility: ProtocolCompatibility,
     ) -> Result<Self, getrandom::Error> {
+        if !cfg!(test) {
+            compatibility.assert_explicit();
+        }
         let config = SessionConfig::default();
         let session_id = SessionId(1);
-        let mut token = [0; 32];
-        getrandom::fill(&mut token)?;
+        let resume_token = Self::generate_resume_token()?;
         Ok(Self {
             world,
             transport,
             clock: FrameClock::new(tick_hz),
             session: SessionManager::new(session_id, &config),
             session_config: config,
-            resume_token: ResumeToken(token),
+            resume_token,
             next_session_id: session_id.0 + 1,
             session_terminated: false,
             handshake_gate: HandshakeGate::new(compatibility),
@@ -192,17 +202,46 @@ impl<T: Transport> Server<T> {
                 SessionState::Reconnecting => {
                     if !hello
                         .session_token
-                        .is_some_and(|token| token.constant_time_eq(expected_token))
+                        .is_some_and(|token| token == expected_token)
                     {
                         result =
                             Self::invalid_session_token("reconnect session token does not match");
-                    } else if !self.session.try_reconnect(
-                        self.now,
-                        hello.engine_build_id,
-                        hello.schema_hash,
-                        &self.session_config,
-                    ) {
-                        result = Self::invalid_session_token("reconnect grace period expired");
+                    } else {
+                        match Self::generate_resume_token() {
+                            Ok(resume_token) => {
+                                let reconnects = self.session.can_reconnect(
+                                    self.now,
+                                    hello.engine_build_id,
+                                    hello.schema_hash,
+                                );
+                                if reconnects {
+                                    if let HandshakeResult::Accept {
+                                        resume_token: accepted_token,
+                                        ..
+                                    } = &mut result
+                                    {
+                                        *accepted_token = resume_token;
+                                    }
+                                    if self.send_handshake_result(result) {
+                                        assert!(self.session.try_reconnect(
+                                            self.now,
+                                            hello.engine_build_id,
+                                            hello.schema_hash,
+                                            &self.session_config,
+                                        ));
+                                        self.resume_token = resume_token;
+                                    }
+                                    return;
+                                }
+                                self.session.expire_if_timed_out(self.now);
+                                result =
+                                    Self::invalid_session_token("reconnect grace period expired");
+                            }
+                            Err(error) => {
+                                self.processing_error_count += 1;
+                                result = Self::entropy_failure(error);
+                            }
+                        }
                     }
                 }
                 SessionState::Handshaking => {
@@ -211,7 +250,7 @@ impl<T: Transport> Server<T> {
                 SessionState::Connected => {
                     if !hello
                         .session_token
-                        .is_some_and(|token| token.constant_time_eq(expected_token))
+                        .is_some_and(|token| token == expected_token)
                     {
                         result = Self::invalid_session_token("session token does not match");
                     }
@@ -221,18 +260,23 @@ impl<T: Transport> Server<T> {
         self.send_handshake_result(result);
     }
 
+    fn generate_resume_token() -> Result<ResumeToken, getrandom::Error> {
+        let mut bytes = [0; 32];
+        getrandom::fill(&mut bytes[..])?;
+        Ok(ResumeToken::from_bytes(bytes))
+    }
+
     fn rotate_session(&mut self) -> Result<(), getrandom::Error> {
-        let mut token = [0; 32];
-        getrandom::fill(&mut token)?;
+        let resume_token = Self::generate_resume_token()?;
         let session_id = SessionId(self.next_session_id);
         self.next_session_id = self.next_session_id.wrapping_add(1);
         self.session = SessionManager::new(session_id, &self.session_config);
-        self.resume_token = ResumeToken(token);
+        self.resume_token = resume_token;
         self.session_terminated = false;
         Ok(())
     }
 
-    fn send_handshake_result(&mut self, result: HandshakeResult) {
+    fn send_handshake_result(&mut self, result: HandshakeResult) -> bool {
         if self
             .transport
             .send_reliable(Message {
@@ -242,6 +286,9 @@ impl<T: Transport> Server<T> {
             .is_err()
         {
             self.processing_error_count += 1;
+            false
+        } else {
+            true
         }
     }
 
@@ -443,6 +490,30 @@ mod tests {
     }
 
     // ── Creation ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn failed_reconnect_accept_keeps_previous_credential() {
+        let (transport, peer) = InMemoryTransport::pair();
+        let mut server = Server::new(World::new(), transport, 60);
+        server.session.begin_handshake();
+        server.session.on_connected(ENGINE_BUILD_ID, SCHEMA_HASH);
+        server
+            .session
+            .on_disconnect(Duration::ZERO, &server.session_config);
+        let token = server.resume_token;
+        drop(peer);
+
+        server.handle_hello(crcbl_net::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            engine_build_id: ENGINE_BUILD_ID,
+            schema_hash: SCHEMA_HASH,
+            session_token: Some(token),
+        });
+
+        assert_eq!(server.session.state(), SessionState::Reconnecting);
+        assert_eq!(server.resume_token, token);
+        assert_eq!(server.processing_error_count, 1);
+    }
 
     #[test]
     fn rotating_session_clears_baselines_and_acks() {

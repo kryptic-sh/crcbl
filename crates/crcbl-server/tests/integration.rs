@@ -11,6 +11,21 @@ use crcbl_ecs::{System, World};
 use crcbl_net::InMemoryTransport;
 use crcbl_server::Server;
 
+const COMPATIBILITY: crcbl_net::ProtocolCompatibility = crcbl_net::ProtocolCompatibility {
+    protocol_version: 2,
+    engine_build_id: 0x0043_5243_424C,
+    schema_hash: 0x0050_3242,
+};
+
+fn server(world: World, transport: InMemoryTransport) -> Server<InMemoryTransport> {
+    Server::try_new_with_compatibility(world, transport, 60, COMPATIBILITY)
+        .expect("OS CSPRNG available")
+}
+
+fn client(world: World, transport: InMemoryTransport) -> Client<InMemoryTransport> {
+    Client::new_with_compatibility(world, transport, 60, COMPATIBILITY)
+}
+
 /// Build a world with one `"counter"` system containing `n` entities whose
 /// component values start at 0.0f32.
 fn world_with_entities(n: u32) -> World {
@@ -34,9 +49,9 @@ fn world_with_systems(n: u32) -> World {
 
 fn hello(session_token: Option<crcbl_net::ResumeToken>) -> crcbl_net::Hello {
     crcbl_net::Hello {
-        protocol_version: 2,
-        engine_build_id: 0,
-        schema_hash: 0,
+        protocol_version: COMPATIBILITY.protocol_version,
+        engine_build_id: COMPATIBILITY.engine_build_id,
+        schema_hash: COMPATIBILITY.schema_hash,
         session_token,
     }
 }
@@ -67,8 +82,8 @@ fn server_to_client_roundtrip() {
 
     let n_entities = 3;
 
-    let mut server = Server::new(world_with_entities(n_entities), server_transport, 60);
-    let mut client = Client::new(World::new(), client_transport, 60);
+    let mut server = server(world_with_entities(n_entities), server_transport);
+    let mut client = client(World::new(), client_transport);
 
     // ---- tick 1: server sends keyframe, client receives ----
     let tick_dt = std::time::Duration::from_nanos(16_666_667);
@@ -118,8 +133,8 @@ fn server_to_client_roundtrip() {
 #[test]
 fn server_snapshot_with_300_systems_reaches_client() {
     let (server_transport, client_transport) = InMemoryTransport::pair();
-    let mut server = Server::new(world_with_systems(300), server_transport, 60);
-    let mut client = Client::new(World::new(), client_transport, 60);
+    let mut server = server(world_with_systems(300), server_transport);
+    let mut client = client(World::new(), client_transport);
     let tick_dt = std::time::Duration::from_nanos(16_666_667);
 
     server.update(std::time::Duration::ZERO);
@@ -138,7 +153,7 @@ fn server_snapshot_with_300_systems_reaches_client() {
 #[test]
 fn server_rejects_invalid_reconnect_tokens_and_resumes_matching_token() {
     let (server_transport, mut peer) = InMemoryTransport::pair();
-    let mut server = Server::new(world_with_entities(1), server_transport, 60);
+    let mut server = server(world_with_entities(1), server_transport);
     let tick_dt = std::time::Duration::from_nanos(16_666_667);
 
     send_hello(&mut peer, None);
@@ -161,7 +176,7 @@ fn server_rejects_invalid_reconnect_tokens_and_resumes_matching_token() {
     );
     server.reconnect(server_transport);
 
-    for (index, token) in [None, Some(crcbl_net::ResumeToken([2; 32]))]
+    for (index, token) in [None, Some(crcbl_net::ResumeToken::from_bytes([2; 32]))]
         .into_iter()
         .enumerate()
     {
@@ -179,6 +194,27 @@ fn server_rejects_invalid_reconnect_tokens_and_resumes_matching_token() {
 
     send_hello(&mut peer, Some(token));
     server.update(tick_dt * 5);
+    let rotated_token = match recv_handshake(&mut peer) {
+        crcbl_net::HandshakeResult::Accept { resume_token, .. } => resume_token,
+        crcbl_net::HandshakeResult::Reject { reason } => {
+            panic!("matching reconnect token rejected: {reason:?}")
+        }
+    };
+    assert_ne!(rotated_token, token);
+    assert_eq!(server.session_state(), crcbl_net::SessionState::Connected);
+
+    drop(peer);
+    let (server_transport, mut peer) = InMemoryTransport::pair();
+    server.update(tick_dt * 6);
+    server.reconnect(server_transport);
+    send_hello(&mut peer, Some(token));
+    server.update(tick_dt * 7);
+    assert!(matches!(
+        recv_handshake(&mut peer),
+        crcbl_net::HandshakeResult::Reject { .. }
+    ));
+    send_hello(&mut peer, Some(rotated_token));
+    server.update(tick_dt * 8);
     assert!(matches!(
         recv_handshake(&mut peer),
         crcbl_net::HandshakeResult::Accept { .. }
@@ -190,10 +226,13 @@ fn server_rejects_invalid_reconnect_tokens_and_resumes_matching_token() {
 #[test]
 fn server_rejects_fresh_hello_with_session_token_and_retries_are_idempotent() {
     let (server_transport, mut peer) = InMemoryTransport::pair();
-    let mut server = Server::new(world_with_entities(1), server_transport, 60);
+    let mut server = server(world_with_entities(1), server_transport);
     let tick_dt = std::time::Duration::from_nanos(16_666_667);
 
-    send_hello(&mut peer, Some(crcbl_net::ResumeToken([99; 32])));
+    send_hello(
+        &mut peer,
+        Some(crcbl_net::ResumeToken::from_bytes([99; 32])),
+    );
     server.update(std::time::Duration::ZERO);
     server.update(tick_dt);
     match recv_handshake(&mut peer) {
@@ -226,8 +265,8 @@ fn server_rejects_fresh_hello_with_session_token_and_retries_are_idempotent() {
 #[test]
 fn server_and_client_resume_session_on_replacement_transport() {
     let (server_transport, client_transport) = InMemoryTransport::pair();
-    let mut server = Server::new(world_with_entities(1), server_transport, 60);
-    let mut client = Client::new(World::new(), client_transport, 60);
+    let mut server = server(world_with_entities(1), server_transport);
+    let mut client = client(World::new(), client_transport);
     let tick_dt = std::time::Duration::from_nanos(16_666_667);
 
     server.update(std::time::Duration::ZERO);
@@ -260,8 +299,8 @@ fn server_and_client_resume_session_on_replacement_transport() {
 fn independently_created_servers_reject_each_others_resume_tokens() {
     let (a_transport, mut a_peer) = InMemoryTransport::pair();
     let (b_transport, mut b_peer) = InMemoryTransport::pair();
-    let mut server_a = Server::new(world_with_entities(1), a_transport, 60);
-    let mut server_b = Server::new(world_with_entities(1), b_transport, 60);
+    let mut server_a = server(world_with_entities(1), a_transport);
+    let mut server_b = server(world_with_entities(1), b_transport);
 
     send_hello(&mut a_peer, None);
     send_hello(&mut b_peer, None);
@@ -339,7 +378,7 @@ fn client_and_server_reject_compatibility_mismatches() {
 #[test]
 fn injected_time_expires_reconnect_without_sleep() {
     let (server_transport, mut peer) = InMemoryTransport::pair();
-    let mut server = Server::new(world_with_entities(1), server_transport, 60);
+    let mut server = server(world_with_entities(1), server_transport);
     server.set_session_config(crcbl_net::SessionConfig {
         reconnect_grace_period: std::time::Duration::from_secs(1),
         baseline_ring_capacity: 64,
@@ -399,8 +438,8 @@ fn injected_time_expires_reconnect_without_sleep() {
 fn server_and_client_survive_multiple_ticks() {
     let (server_transport, client_transport) = InMemoryTransport::pair();
 
-    let mut server = Server::new(world_with_entities(5), server_transport, 60);
-    let mut client = Client::new(World::new(), client_transport, 60);
+    let mut server = server(world_with_entities(5), server_transport);
+    let mut client = client(World::new(), client_transport);
 
     let tick_dt = std::time::Duration::from_nanos(16_666_667);
 

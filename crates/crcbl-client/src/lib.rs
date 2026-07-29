@@ -61,9 +61,18 @@ pub struct Client<T: Transport> {
 
 impl<T: Transport> Client<T> {
     /// Create a client with the default protocol compatibility identifiers.
+    ///
+    /// # Panics
+    ///
+    /// Panics outside unit tests because the default embedding identifiers
+    /// provide no compatibility protection.
     #[must_use]
     pub fn new(world: World, transport: T, tick_hz: u32) -> Self {
-        Self::new_with_compatibility(world, transport, tick_hz, ProtocolCompatibility::DEFAULT)
+        let compatibility = ProtocolCompatibility::DEFAULT;
+        if !cfg!(test) {
+            compatibility.assert_explicit();
+        }
+        Self::new_with_compatibility(world, transport, tick_hz, compatibility)
     }
 
     /// Create a client with explicit protocol compatibility identifiers.
@@ -74,6 +83,9 @@ impl<T: Transport> Client<T> {
         tick_hz: u32,
         compatibility: ProtocolCompatibility,
     ) -> Self {
+        if !cfg!(test) {
+            compatibility.assert_explicit();
+        }
         Self {
             world,
             transport,

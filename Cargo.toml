@@ -23,6 +23,7 @@ repository = "https://github.com/kryptic-sh/crcbl"
 ash = "0.38"
 bitflags = "2.9"
 glam = "0.33"
+getrandom = "0.4.3"
 log = "0.4"
 # Golden-image I/O for `crcbl-golden`; see that crate's manifest for why it is
 # a dependency rather than a hand-rolled encoder.
