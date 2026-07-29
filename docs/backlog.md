@@ -4,7 +4,14 @@ Consolidated from `docs/code-review.md` and `docs/audit.md` on 2026-07-29.
 
 ## Open findings
 
-None.
+### Bind handshake responses to the current request
+
+`crcbl-client` accepts any decodable `HandshakeResult::Accept`, including a
+stale response from an earlier connection, and then enables trusted delta
+decoding and application because `session_id` is set. Add a client nonce or
+handshake generation to `Hello`, echo it in `Accept`, and reject unsolicited or
+stale responses without changing session credentials or trusted-path state.
+Cover a reconnect followed by injection of the previous `Accept`.
 
 ## Resolved findings
 
@@ -49,7 +56,7 @@ None.
 ## Regression coverage
 
 Tests cover resume-token rotation and replay rejection, credential redaction,
-constant-time equality behavior, explicit compatibility enforcement, protocol
-version rejection, injected reconnect expiry, lost-ACK recovery, invalid entity
+token equality correctness, explicit compatibility enforcement, protocol version
+rejection, injected reconnect expiry, lost-ACK recovery, invalid entity
 lifecycle operations, transactional delta rejection, and component-size error
 classification.
