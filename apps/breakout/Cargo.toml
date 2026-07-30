@@ -20,6 +20,7 @@ crcbl-input = { workspace = true }
 crcbl-server = { workspace = true }
 crcbl-client = { workspace = true }
 crcbl-core = { workspace = true }
+crcbl-audio = { workspace = true }
 glam = { workspace = true }
 log = { workspace = true }
 

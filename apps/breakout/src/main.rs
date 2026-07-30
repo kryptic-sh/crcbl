@@ -12,6 +12,7 @@
 
 mod app;
 mod args;
+mod audio;
 mod game;
 mod gpu;
 

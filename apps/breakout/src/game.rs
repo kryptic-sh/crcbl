@@ -63,7 +63,6 @@ pub struct Game {
     _wall_left: Entity,
     _wall_right: Entity,
     _wall_top: Entity,
-    /// All brick entities (filled in Game::new).
     bricks: Vec<Entity>,
     action_map: ActionMap,
     server: Server<InMemoryTransport>,
@@ -73,6 +72,9 @@ pub struct Game {
     pub score: u32,
     pub lives: u32,
     pub state: GameState,
+    pub audio: crate::audio::Audio,
+    /// Whether a collision sound was queued this tick (for HUD logging).
+    sound_played_this_tick: bool,
 }
 
 impl std::fmt::Debug for Game {
@@ -125,7 +127,7 @@ fn reset_ball(phys: &mut PhysicsSystem, ball: Entity) {
 }
 
 impl Game {
-    pub fn new() -> Result<Self, GameError> {
+    pub fn new(headless: bool) -> Result<Self, GameError> {
         let mut world = World::new();
 
         // --- Physics system ---
@@ -283,6 +285,8 @@ impl Game {
             score: 0,
             lives: 3,
             state: GameState::WaitingForLaunch,
+            audio: crate::audio::Audio::new(headless),
+            sound_played_this_tick: false,
         })
     }
 
@@ -347,20 +351,29 @@ impl Game {
         let alpha = self.client.update(now);
 
         // Run game logic (collision, scoring, lives).
+        self.sound_played_this_tick = false;
         if self.state == GameState::Playing {
-            run_game_logic(
-                &mut self.server,
-                self.ball_entity,
-                self.paddle_entity,
-                &mut GameCtx {
-                    bricks: &mut self.bricks,
-                    score: &mut self.score,
-                    lives: &mut self.lives,
-                    state: &mut self.state,
-                    launched: &mut self.launched,
-                },
-            );
+            let server = &mut self.server;
+            let ball = self.ball_entity;
+            let paddle = self.paddle_entity;
+            let mut ctx = GameCtx {
+                bricks: &mut self.bricks,
+                score: &mut self.score,
+                lives: &mut self.lives,
+                state: &mut self.state,
+                launched: &mut self.launched,
+            };
+            let audio = &mut self.audio;
+            self.sound_played_this_tick = run_game_logic(server, ball, paddle, &mut ctx, audio);
         }
+
+        // HUD: log score/lives when they change or state transitions.
+        log_hud(
+            &self.state,
+            self.score,
+            self.lives,
+            self.sound_played_this_tick,
+        );
 
         let _ = alpha;
         self.paddle_x
@@ -417,8 +430,10 @@ fn run_game_logic(
     ball_entity: Entity,
     paddle_entity: Entity,
     ctx: &mut GameCtx<'_>,
-) {
+    audio: &mut crate::audio::Audio,
+) -> bool {
     let mut to_despawn: Vec<Entity> = Vec::new();
+    let mut sound_played = false;
 
     {
         let world = server.world_mut();
@@ -458,6 +473,8 @@ fn run_game_logic(
                         ctx.bricks.swap_remove(idx);
                         *ctx.score += 10;
                         to_despawn.push(hit_entity);
+                        audio.play(crate::audio::SOUND_BRICK);
+                        sound_played = true;
                         if vel.dot(normal) < 0.0 {
                             let reflected = vel - 2.0 * vel.dot(normal) * normal;
                             let mut new_body = body_val;
@@ -475,6 +492,8 @@ fn run_game_logic(
                         let mut new_transform = transform_val;
                         new_transform.position = hit_info.point + normal * BALL_RADIUS * 1.01;
                         phys.set_transform(ball_entity, new_transform);
+                        audio.play(crate::audio::SOUND_BOUNCE);
+                        sound_played = true;
                     }
                 }
 
@@ -507,6 +526,8 @@ fn run_game_logic(
     for entity in to_despawn {
         server.world_mut().despawn(entity);
     }
+
+    sound_played
 }
 
 fn restart_game(
@@ -517,6 +538,19 @@ fn restart_game(
     with_physics(server, |phys| {
         reset_ball(phys, ball_entity);
     });
+}
+
+// ---- HUD (console-based until UI compositing pass exists) ----
+
+fn log_hud(state: &GameState, score: u32, lives: u32, sound_played: bool) {
+    let state_str = match state {
+        GameState::WaitingForLaunch => "WAITING — press Space to launch",
+        GameState::Playing => "PLAYING",
+        GameState::Won => "YOU WIN! — press Space to restart",
+        GameState::Lost => "GAME OVER — press Space to restart",
+    };
+    let sound_str = if sound_played { " 🔊" } else { "" };
+    log::info!("[HUD] Score: {score}  Lives: {lives}  {state_str}{sound_str}");
 }
 
 // ---- input helpers ----

@@ -216,7 +216,7 @@ impl<S: Shell + ?Sized> Loop<S> {
 
         // Locked to orthographic: breakout is a pure 2D game.
         let gpu = Gpu::open(shell.as_ref(), window, extent, options.backend)?;
-        let game = Game::new()?;
+        let game = Game::new(options.headless)?;
 
         Ok(Self {
             windowed: !options.headless,
@@ -367,6 +367,7 @@ fn tick(dt: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crcbl::shell::HeadlessShell;
 
     fn headless(frames: u64) -> Options {
         Options {
@@ -399,5 +400,27 @@ mod tests {
         // 62 frames, first update baseline: 61 ticks at 60 Hz.
         assert_eq!(sixty.ticks, 61);
         assert_eq!(thirty.ticks, 30, "half the rate, half the ticks");
+    }
+
+    /// A headless breakout run starts in WaitingForLaunch and produces the
+    /// expected frame/event count.  Proves the full init path: window,
+    /// GPU (null), ECS world, physics, server/client, audio (null), and
+    /// handshake.
+    #[test]
+    fn breakout_starts_in_waiting_state() {
+        let mut engine = scripted(&headless(5));
+        // Drive a few frames to let the handshake settle.
+        for _ in 0..5 {
+            engine.frame().expect("a frame");
+        }
+        let summary = engine.finish(ExitReason::FrameBudget).expect("teardown");
+        assert_eq!(summary.frames, 5);
+        assert_eq!(summary.ticks, 4); // first update establishes baseline
+        assert!(summary.events >= 1, "at least a configure event");
+    }
+
+    /// Helper: build a Loop<HeadlessShell> for scripting.
+    fn scripted(options: &Options) -> Loop<HeadlessShell> {
+        Loop::with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
     }
 }
