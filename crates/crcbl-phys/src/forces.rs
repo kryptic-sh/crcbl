@@ -84,10 +84,7 @@ impl DragForce {
     #[inline]
     #[must_use]
     pub fn new(coefficient: f64) -> Self {
-        debug_assert!(
-            coefficient >= 0.0,
-            "drag coefficient must be non-negative"
-        );
+        debug_assert!(coefficient >= 0.0, "drag coefficient must be non-negative");
         Self { coefficient }
     }
 }

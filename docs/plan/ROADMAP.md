@@ -20,11 +20,13 @@ engine's public face and its continuous cross-backend regression test.
 
 ## Status (as of 2026-07-30)
 
-**P0 and P1 are complete and merged to `main`.** P2a is partially complete. P2b
-is complete: protocol negotiation and reconnect, condition simulation,
-per-sector ack-baseline streams, replication integration, hostile-input
-hardening, per-client ingress limits, and decoder fuzzing in CI have landed. P2c
-is complete: `crcbl-store` (StorageSource, settings, saves, replay), GameModule
+**P0 and P1 are complete and merged to `main`.** P2a is complete: per-entity
+`Transform` replication (`SystemTrait::replicate` seam, `PhysicsSystem` impl)
+and real client-side interpolation landed on 2026-07-31. P2b is complete:
+protocol negotiation and reconnect, condition simulation, per-sector
+ack-baseline streams, replication integration, hostile-input hardening,
+per-client ingress limits, and decoder fuzzing in CI have landed. P2c is
+complete: `crcbl-store` (StorageSource, settings, saves, replay), GameModule
 API + static binding, and `.crpl` replay writer/reader with FileTransport. **P3
 L0 is done**: overlap queries, dynamic BVH refit, swept-sphere-vs-capsule TOI,
 trigger-volume support, ECS component types (RigidBody, Transform,
@@ -115,13 +117,6 @@ suites pass under 32-way CPU contention.
 
 ### Known gaps, carried forward deliberately
 
-- **P2a exit criterion is partially met.** `crcbl-client::interpolate` is a stub
-  returning empty `InterpolatedState` — real interpolation that lerps entity
-  positions between snapshots remains a gap. P3 L0 delivered the component types
-  (`Transform`, `RigidBody`, `ColliderComponent`) the encoding will carry; the
-  interpolation implementation itself is still owed. The determinism hash now
-  covers component data (raw bytes), and the probe test
-  `different_component_values_produce_different_hash` prevents regression.
 - **XDND on X11** is not implemented (`ShellCaps::DRAG_DROP` is honestly clear
   there); owed before the editor's asset browser at P12.
 - **Three HAL seam findings are open**, all recorded in `crcbl-vk`'s crate docs:

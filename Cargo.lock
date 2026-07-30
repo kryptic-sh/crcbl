@@ -89,6 +89,7 @@ dependencies = [
  "crcbl-core",
  "crcbl-ecs",
  "crcbl-net",
+ "crcbl-phys",
  "glam",
 ]
 
@@ -144,6 +145,7 @@ dependencies = [
 name = "crcbl-phys"
 version = "0.1.0"
 dependencies = [
+ "crcbl-ecs",
  "glam",
 ]
 
@@ -171,7 +173,9 @@ dependencies = [
  "crcbl-core",
  "crcbl-ecs",
  "crcbl-net",
+ "crcbl-phys",
  "getrandom 0.4.3",
+ "glam",
 ]
 
 [[package]]

@@ -415,6 +415,24 @@ impl SystemTrait for PhysicsSystem {
     fn debug_draw(&mut self, _ctx: &DebugCtx) {
         // Future: draw collider AABBs, contacts, swept paths.
     }
+
+    fn replicate(&self, out: &mut Vec<u8>) -> bool {
+        // Per-entity Transform: position (3 × f64 LE) then rotation
+        // quaternion (4 × f64 LE, x/y/z/w). Entities are sorted by bits so
+        // the wire encoding is deterministic across runs and platforms.
+        let mut entries: Vec<_> = self.transforms.iter().collect();
+        entries.sort_by_key(|(entity, _)| entity.to_bits());
+        for (entity, transform) in entries {
+            out.extend_from_slice(&entity.to_bits().to_le_bytes());
+            out.extend_from_slice(&(transform.encoded_len() as u32).to_le_bytes());
+            transform.encode(out);
+        }
+        !self.transforms.is_empty()
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +455,76 @@ mod tests {
     fn empty_system_has_no_colliders() {
         let phys = PhysicsSystem::new();
         assert_eq!(phys.collider_count(), 0);
+    }
+
+    #[test]
+    fn replicate_encodes_sorted_transform_blobs() {
+        let mut phys = PhysicsSystem::new();
+        let e1 = test_entity(9);
+        let e2 = test_entity(2);
+        // Insert out of order — the encoding must still come out sorted.
+        phys.set_transform(e1, Transform::from_position(DVec3::new(1.0, 2.0, 3.0)));
+        phys.set_transform(
+            e2,
+            Transform::new(
+                DVec3::new(-4.0, 0.5, 8.0),
+                glam::DQuat::from_xyzw(0.0, 0.0, 0.0, 1.0),
+            ),
+        );
+
+        let mut out = Vec::new();
+        assert!(SystemTrait::replicate(&phys, &mut out));
+
+        let entity_len = 8 + 4 + Transform::IDENTITY.encoded_len();
+        assert_eq!(out.len(), 2 * entity_len);
+
+        let mut cursor = 0usize;
+        let mut decoded = Vec::new();
+        while cursor < out.len() {
+            let bits = u64::from_le_bytes(out[cursor..cursor + 8].try_into().unwrap());
+            cursor += 8;
+            let len = u32::from_le_bytes(out[cursor..cursor + 4].try_into().unwrap()) as usize;
+            cursor += 4;
+            decoded.push((bits, Transform::decode(&out[cursor..cursor + len]).unwrap()));
+            cursor += len;
+        }
+        assert_eq!(decoded[0].0, e2.to_bits(), "sorted by entity bits");
+        assert_eq!(decoded[1].0, e1.to_bits());
+        assert_eq!(decoded[0].1.position, DVec3::new(-4.0, 0.5, 8.0));
+        assert_eq!(decoded[1].1.position, DVec3::new(1.0, 2.0, 3.0));
+
+        // An empty system writes nothing and reports as non-replicated.
+        let empty = PhysicsSystem::new();
+        let mut out = Vec::new();
+        assert!(!SystemTrait::replicate(&empty, &mut out));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn transform_encode_decode_roundtrips_and_lerp_midpoint() {
+        let t = Transform::new(
+            DVec3::new(1.25, -2.5, 3.75),
+            glam::DQuat::from_rotation_y(1.0),
+        );
+        let mut buf = Vec::new();
+        t.encode(&mut buf);
+        assert_eq!(buf.len(), t.encoded_len());
+        let decoded = Transform::decode(&buf).unwrap();
+        assert_eq!(decoded.position, t.position);
+        assert!((decoded.rotation.dot(t.rotation) - 1.0).abs() < 1e-12);
+
+        // Wrong-length payloads decode to None.
+        assert!(Transform::decode(&buf[..buf.len() - 1]).is_none());
+        assert!(Transform::decode(&[]).is_none());
+
+        let a = Transform::from_position(DVec3::new(0.0, 0.0, 0.0));
+        let b = Transform::from_position(DVec3::new(10.0, -4.0, 2.0));
+        let mid = a.lerp(&b, 0.5);
+        assert_eq!(mid.position, DVec3::new(5.0, -2.0, 1.0));
+        let at_a = a.lerp(&b, 0.0);
+        let at_b = a.lerp(&b, 1.0);
+        assert_eq!(at_a.position, a.position);
+        assert_eq!(at_b.position, b.position);
     }
 
     #[test]

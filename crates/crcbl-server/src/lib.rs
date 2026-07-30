@@ -385,13 +385,16 @@ impl<T: Transport> Server<T> {
         let mut writer = SnapshotWriter::new_with_sector(sector, tick);
 
         let stats = Inspector::collect(&self.world);
-        for (idx, stat) in stats.iter().enumerate() {
-            // Payload: one synthetic entity with its count (4 bytes LE); real
-            // per-entity component data lands with P3 replication encoding.
-            let mut data = Vec::with_capacity(16);
-            data.extend_from_slice(&0u64.to_le_bytes());
-            data.extend_from_slice(&4u32.to_le_bytes());
-            data.extend_from_slice(&(stat.entity_count as u32).to_le_bytes());
+        for (idx, (system, stat)) in self.world.schedule().iter().zip(stats.iter()).enumerate() {
+            // Systems with a replication impl emit their real per-entity
+            // component data; the rest fall back to one synthetic entity
+            // carrying only the entity count (4 bytes LE).
+            let mut data = Vec::new();
+            if !system.replicate(&mut data) {
+                data.extend_from_slice(&0u64.to_le_bytes());
+                data.extend_from_slice(&4u32.to_le_bytes());
+                data.extend_from_slice(&(stat.entity_count as u32).to_le_bytes());
+            }
             writer.write_system(idx as u32, data);
         }
 

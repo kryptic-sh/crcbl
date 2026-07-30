@@ -81,6 +81,12 @@ impl World {
         &self.schedule
     }
 
+    /// Mutably borrows the schedule — used to reach concrete systems via
+    /// [`Schedule::iter_mut`] outside of ticking (setup, tests, tooling).
+    pub fn schedule_mut(&mut self) -> &mut Schedule {
+        &mut self.schedule
+    }
+
     /// Whether `entity` is still alive (in the pool, not yet swept).
     #[must_use]
     pub fn is_alive(&self, entity: Entity) -> bool {
@@ -196,6 +202,9 @@ mod tests {
             }
             fn sweep(&mut self, _dead: &[Entity]) {}
             fn debug_draw(&mut self, _ctx: &crate::system::DebugCtx) {}
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
         }
 
         let rec = Record { ticked: false };

@@ -198,6 +198,10 @@ impl SystemTrait for CounterSystem {
     fn contributes_to_hash(&self) -> bool {
         true
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 fn print_help() {

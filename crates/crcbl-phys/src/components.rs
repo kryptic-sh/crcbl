@@ -154,6 +154,64 @@ impl Transform {
     pub fn up(&self) -> DVec3 {
         self.rotation * DVec3::Y
     }
+
+    /// Byte length of the replication encoding written by [`Self::encode`].
+    ///
+    /// The encoding is position (3 × f64 LE) followed by rotation
+    /// quaternion (4 × f64 LE, x/y/z/w) — 56 bytes.
+    #[inline]
+    #[must_use]
+    pub const fn encoded_len(&self) -> usize {
+        7 * 8
+    }
+
+    /// Append the replication encoding to `out` (little-endian, platform-
+    /// and run-deterministic).
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        for value in [
+            self.position.x,
+            self.position.y,
+            self.position.z,
+            self.rotation.x,
+            self.rotation.y,
+            self.rotation.z,
+            self.rotation.w,
+        ] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    /// Decode a transform from the encoding written by [`Self::encode`].
+    ///
+    /// Returns `None` if `data` is not exactly [`Self::encoded_len`] bytes.
+    #[must_use]
+    pub fn decode(data: &[u8]) -> Option<Self> {
+        if data.len() != Transform::IDENTITY.encoded_len() {
+            return None;
+        }
+        let mut values = [0.0f64; 7];
+        for (i, value) in values.iter_mut().enumerate() {
+            let bytes: [u8; 8] = data[i * 8..(i + 1) * 8].try_into().ok()?;
+            *value = f64::from_le_bytes(bytes);
+        }
+        Some(Self {
+            position: DVec3::new(values[0], values[1], values[2]),
+            rotation: DQuat::from_xyzw(values[3], values[4], values[5], values[6]),
+        })
+    }
+
+    /// Linearly interpolate between `self` and `other` at `alpha ∈ [0, 1]`.
+    ///
+    /// Position is lerped; rotation is glam's nlerp (shortest-path
+    /// corrected, renormalised). This is presentation-only smoothing for
+    /// the client render path — simulation state is never interpolated.
+    #[must_use]
+    pub fn lerp(&self, other: &Self, alpha: f64) -> Self {
+        Self {
+            position: self.position.lerp(other.position, alpha),
+            rotation: self.rotation.lerp(other.rotation, alpha),
+        }
+    }
 }
 
 impl Default for Transform {

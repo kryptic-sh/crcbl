@@ -14,7 +14,7 @@ use crcbl_net::{
     Baseline, DeltaCodec, HandshakeResult, Hello, Message, MessageKind, ProtocolCompatibility,
     ResumeToken, SectorId, SessionId, Transport, TransportError,
 };
-use glam::Vec3;
+use crcbl_phys::Transform;
 
 // ---------------------------------------------------------------------------
 // InterpolatedState
@@ -23,11 +23,43 @@ use glam::Vec3;
 /// Interpolated state for rendering.
 #[derive(Debug, Clone)]
 pub struct InterpolatedState {
-    /// Current interpolated position for each entity (entity_bits -> Vec3).
-    ///
-    /// For now, stores entity ids; real per-component interpolation lands
-    /// with the replication encoding in P3.
-    pub positions: Vec<(u64 /* entity bits */, Vec3)>,
+    /// Interpolated world-space transform for each entity, keyed by entity
+    /// bits ([`crcbl_ecs::Entity::to_bits`]). Entities present in only one of
+    /// the two buffered snapshots appear at their most recent transform.
+    pub transforms: Vec<(u64 /* entity bits */, Transform)>,
+}
+
+/// Decode one system's snapshot blob into `entity_bits → Transform` pairs.
+///
+/// The blob is a sequence of `(entity_bits: u64, data_len: u32, data: [u8])`
+/// triples (all little-endian) — the same framing `crcbl-net`'s delta codec
+/// uses. Entries whose payload is not a valid [`Transform`] encoding (e.g.
+/// the 4-byte synthetic count emitted for non-replicated systems) are
+/// skipped.
+fn decode_transforms(snapshot: &crcbl_net::ServerToClient) -> HashMap<u64, Transform> {
+    let crcbl_net::ServerToClient::Snapshot { systems, .. } = snapshot else {
+        return HashMap::new();
+    };
+    let mut out = HashMap::new();
+    for system in systems {
+        let mut cursor = 0usize;
+        while system.data.len() - cursor >= 12 {
+            let entity_bits =
+                u64::from_le_bytes(system.data[cursor..cursor + 8].try_into().unwrap());
+            cursor += 8;
+            let data_len =
+                u32::from_le_bytes(system.data[cursor..cursor + 4].try_into().unwrap()) as usize;
+            cursor += 4;
+            if data_len > system.data.len() - cursor {
+                break;
+            }
+            if let Some(transform) = Transform::decode(&system.data[cursor..cursor + data_len]) {
+                out.insert(entity_bits, transform);
+            }
+            cursor += data_len;
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -157,16 +189,44 @@ impl<T: Transport> Client<T> {
         self.pending_input = input;
     }
 
-    /// Stub: always returns an empty [`InterpolatedState`].
+    /// Interpolated per-entity transforms for rendering.
     ///
-    /// Real interpolation that lerps entity positions between the two most
-    /// recent snapshots lands when snapshots carry per-entity component data
-    /// rather than just entity counts (P3).
+    /// Lerps between the two most recent buffered snapshots in the default
+    /// sector at the given `alpha` (the value returned by [`Self::update`]).
+    /// Entities present in only one snapshot appear at that snapshot's
+    /// transform; with fewer than two snapshots the newest is used as-is.
     #[must_use]
-    pub fn interpolate(&self) -> InterpolatedState {
-        InterpolatedState {
-            positions: Vec::new(),
+    pub fn interpolate(&self, alpha: f32) -> InterpolatedState {
+        let current = self
+            .current_snapshots
+            .get(&SectorId::ZERO)
+            .map(decode_transforms)
+            .unwrap_or_default();
+        let prev = self
+            .prev_snapshots
+            .get(&SectorId::ZERO)
+            .map(decode_transforms)
+            .unwrap_or_default();
+
+        let alpha = f64::from(alpha.clamp(0.0, 1.0));
+        let mut transforms: Vec<(u64, Transform)> = current
+            .iter()
+            .map(|(&entity_bits, current_transform)| {
+                let transform = prev
+                    .get(&entity_bits)
+                    .map_or(*current_transform, |prev_transform| {
+                        prev_transform.lerp(current_transform, alpha)
+                    });
+                (entity_bits, transform)
+            })
+            .collect();
+        for (&entity_bits, prev_transform) in &prev {
+            if !current.contains_key(&entity_bits) {
+                transforms.push((entity_bits, *prev_transform));
+            }
         }
+        transforms.sort_by_key(|(entity_bits, _)| *entity_bits);
+        InterpolatedState { transforms }
     }
 
     /// The tick id of the most recently applied delta-encoded snapshot in the
@@ -956,36 +1016,111 @@ mod tests {
     fn interpolate_returns_empty_when_no_snapshots() {
         let (transport, _peer) = InMemoryTransport::pair();
         let client = Client::new(empty_world(), transport, 60);
-        let state = client.interpolate();
-        assert!(state.positions.is_empty());
+        let state = client.interpolate(0.5);
+        assert!(state.transforms.is_empty());
     }
 
     #[test]
-    fn interpolate_is_stub_returns_empty_even_with_two_snapshots() {
+    fn interpolate_skips_non_transform_payloads() {
+        // The synthetic count payload emitted for non-replicated systems is
+        // 4 bytes — not a Transform encoding — so it yields no entities.
         let (client_transport, server_transport) = InMemoryTransport::pair();
         let mut client = Client::new(empty_world(), client_transport, 60);
 
-        let payload1 = keyframe_snapshot(1, &[(0, vec![1, 0, 0, 0])]);
         let mut peer = server_transport;
+        for tick in [1, 2] {
+            let payload = keyframe_snapshot(tick, &[(0, vec![1, 0, 0, 0])]);
+            peer.send_unreliable(Message {
+                kind: MessageKind::Unreliable,
+                payload,
+            })
+            .unwrap();
+        }
+        client.update(std::time::Duration::ZERO);
+        client.update(std::time::Duration::from_nanos(1));
+        client.update(std::time::Duration::from_nanos(2));
+        drop(peer);
+
+        let state = client.interpolate(0.5);
+        assert!(state.transforms.is_empty());
+    }
+
+    #[test]
+    fn interpolate_lerps_transforms_between_snapshots() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = Client::new(empty_world(), client_transport, 60);
+
+        let entity_bits = (1u64 << 32) | 7;
+        for (tick, x) in [(1u64, 0.0f64), (2, 10.0)] {
+            let mut data = Vec::new();
+            Transform::from_position(glam::DVec3::new(x, 1.0, -2.0)).encode(&mut data);
+            let mut blob = Vec::new();
+            blob.extend_from_slice(&entity_bits.to_le_bytes());
+            blob.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            blob.extend_from_slice(&data);
+            peer.send_unreliable(Message {
+                kind: MessageKind::Unreliable,
+                payload: keyframe_snapshot(tick, &[(0, blob)]),
+            })
+            .unwrap();
+            client.update(std::time::Duration::from_nanos(tick));
+        }
+
+        let state = client.interpolate(0.25);
+        assert_eq!(state.transforms.len(), 1);
+        let (bits, transform) = state.transforms[0];
+        assert_eq!(bits, entity_bits);
+        assert!((transform.position.x - 2.5).abs() < 1e-9);
+        assert!((transform.position.y - 1.0).abs() < 1e-9);
+        assert!((transform.position.z - -2.0).abs() < 1e-9);
+
+        // alpha = 1 snaps to the newest snapshot; alpha = 0 to the oldest.
+        let newest = client.interpolate(1.0).transforms[0].1;
+        assert!((newest.position.x - 10.0).abs() < 1e-9);
+        let oldest = client.interpolate(0.0).transforms[0].1;
+        assert!((oldest.position.x - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn interpolate_keeps_entities_present_in_only_one_snapshot() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = Client::new(empty_world(), client_transport, 60);
+
+        let gone = (1u64 << 32) | 1;
+        let appeared = (1u64 << 32) | 2;
+        let encode_blob = |entities: &[(u64, f64)]| {
+            let mut blob = Vec::new();
+            for &(bits, x) in entities {
+                let mut data = Vec::new();
+                Transform::from_position(glam::DVec3::new(x, 0.0, 0.0)).encode(&mut data);
+                blob.extend_from_slice(&bits.to_le_bytes());
+                blob.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                blob.extend_from_slice(&data);
+            }
+            blob
+        };
+
         peer.send_unreliable(Message {
             kind: MessageKind::Unreliable,
-            payload: payload1,
+            payload: keyframe_snapshot(1, &[(0, encode_blob(&[(gone, 5.0)]))]),
         })
         .unwrap();
         client.update(std::time::Duration::ZERO);
-        client.update(std::time::Duration::from_nanos(1));
-
-        let payload2 = keyframe_snapshot(2, &[(0, vec![1, 0, 0, 0])]);
         peer.send_unreliable(Message {
             kind: MessageKind::Unreliable,
-            payload: payload2,
+            payload: keyframe_snapshot(2, &[(0, encode_blob(&[(appeared, 7.0)]))]),
         })
         .unwrap();
-        drop(peer);
         client.update(std::time::Duration::from_nanos(1));
 
-        let state = client.interpolate();
-        assert!(state.positions.is_empty(), "stub returns empty");
+        let state = client.interpolate(0.5);
+        assert_eq!(state.transforms.len(), 2);
+        // Despawned entity holds its last known transform; newly spawned
+        // appears at its newest.
+        assert_eq!(state.transforms[0].0, gone);
+        assert!((state.transforms[0].1.position.x - 5.0).abs() < 1e-9);
+        assert_eq!(state.transforms[1].0, appeared);
+        assert!((state.transforms[1].1.position.x - 7.0).abs() < 1e-9);
     }
 
     // ── last_applied_tick / baseline_entity_count ──────────────────────────

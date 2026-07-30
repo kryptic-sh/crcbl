@@ -98,6 +98,20 @@ impl Schedule {
             .map(|s| s.name())
             .collect()
     }
+
+    /// Iterates the systems in schedule order — used by the server's
+    /// snapshot emission to call [`SystemTrait::replicate`] on each.
+    pub fn iter(&self) -> impl Iterator<Item = &dyn SystemTrait> {
+        self.systems.iter().map(AsRef::as_ref)
+    }
+
+    /// Mutably iterates the systems in schedule order — used by game code
+    /// (and tests) to reach a concrete system via [`SystemTrait::as_any_mut`].
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut (dyn SystemTrait + '_)> + '_ {
+        self.systems
+            .iter_mut()
+            .map(|system| &mut **system as &mut (dyn SystemTrait + '_))
+    }
 }
 
 impl fmt::Debug for Schedule {
@@ -144,6 +158,9 @@ mod tests {
             }
             fn sweep(&mut self, _dead: &[Entity]) {}
             fn debug_draw(&mut self, _ctx: &DebugCtx) {}
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
         }
 
         schedule.add_system(Box::new(Probe {

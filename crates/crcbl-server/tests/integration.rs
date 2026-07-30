@@ -520,3 +520,63 @@ fn server_and_client_survive_multiple_ticks() {
         client.last_applied_tick()
     );
 }
+
+#[test]
+fn physics_transforms_replicate_and_interpolate_end_to_end() {
+    // Server world: a `PhysicsSystem` with one entity whose transform moves
+    // +10 m/tick along X (driven by hand to keep the test deterministic).
+    let mut world = World::new();
+    let mut phys = crcbl_phys::PhysicsSystem::new();
+    let entity = world.spawn();
+    phys.set_transform(
+        entity,
+        crcbl_phys::Transform::from_position(glam::DVec3::ZERO),
+    );
+    world.register_system(Box::new(phys));
+
+    let (server_transport, client_transport) = InMemoryTransport::pair();
+    let mut server = server(world, server_transport);
+    let mut client = client(World::new(), client_transport);
+
+    let tick_dt = std::time::Duration::from_nanos(16_666_667);
+
+    // Drive 4 ticks; before each, advance the entity's transform by 10 m.
+    // The physics system is the only registered system.
+    for i in 1..=4u32 {
+        {
+            let world = server.world_mut();
+            let schedule = world.schedule_mut();
+            let phys = schedule
+                .iter_mut()
+                .find_map(|s| s.as_any_mut().downcast_mut::<crcbl_phys::PhysicsSystem>())
+                .expect("physics system registered");
+            phys.set_transform(
+                entity,
+                crcbl_phys::Transform::from_position(glam::DVec3::new(
+                    f64::from(i) * 10.0,
+                    0.0,
+                    0.0,
+                )),
+            );
+        }
+        server.update(tick_dt * i);
+        client.update(tick_dt * i);
+    }
+
+    assert_eq!(server.processing_error_count(), 0);
+    assert_eq!(client.processing_error_count(), 0);
+    assert!(client.last_applied_tick() >= TickId::from_raw(3));
+
+    // The newest two buffered snapshots are ticks 3 and 4 (positions 30 and
+    // 40). alpha = 0.25 must land at 32.5 — interpolation, not a snapshot
+    // copy.
+    let state = client.interpolate(0.25);
+    assert_eq!(state.transforms.len(), 1);
+    let (bits, transform) = state.transforms[0];
+    assert_eq!(bits, entity.to_bits());
+    assert!(
+        (transform.position.x - 32.5).abs() < 1e-9,
+        "interpolated x was {}",
+        transform.position.x
+    );
+}

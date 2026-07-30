@@ -68,6 +68,25 @@ pub trait SystemTrait {
     fn contributes_to_hash(&self) -> bool {
         false
     }
+
+    /// Serialise this system's per-entity component data for replication.
+    ///
+    /// Appends `(entity_bits: u64, data_len: u32, data: [u8])` triples — all
+    /// little-endian — to `out`, one per replicated entity. Returns `true`
+    /// if any data was written.
+    ///
+    /// The default returns `false` (system not replicated); the server then
+    /// emits only the entity count for this system. Custom systems that own
+    /// their component arrays (e.g. `crcbl-phys`' `PhysicsSystem`) override
+    /// this to publish real state.
+    fn replicate(&self, _out: &mut Vec<u8>) -> bool {
+        false
+    }
+
+    /// Downcast support for callers that hold `&mut dyn SystemTrait` (e.g.
+    /// through [`Schedule::iter_mut`]) and need the concrete system type.
+    /// Implementations are the one-liner `self`.
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
 impl fmt::Debug for dyn SystemTrait {
@@ -209,7 +228,7 @@ impl<T> System<T> {
     }
 }
 
-impl<T: ComponentHash> SystemTrait for System<T> {
+impl<T: ComponentHash + 'static> SystemTrait for System<T> {
     fn name(&self) -> &str {
         &self.name
     }
@@ -243,6 +262,10 @@ impl<T: ComponentHash> SystemTrait for System<T> {
 
     fn contributes_to_hash(&self) -> bool {
         true
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 

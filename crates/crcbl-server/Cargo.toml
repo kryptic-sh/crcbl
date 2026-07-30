@@ -14,6 +14,8 @@ getrandom = { workspace = true }
 
 [dev-dependencies]
 crcbl-client = { workspace = true }
+crcbl-phys = { workspace = true }
+glam = { workspace = true }
 
 [lints]
 workspace = true
