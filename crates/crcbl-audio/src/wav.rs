@@ -161,7 +161,7 @@ pub fn decode(bytes: &[u8]) -> Result<WavFile, WavError> {
 
 // ── Raw helpers ──────────────────────────────────────────────────────────────
 
-fn read_fourcc<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<[u8; 4], WavError> {
+fn read_fourcc(bytes: &[u8], pos: &mut usize) -> Result<[u8; 4], WavError> {
     if *pos + 4 > bytes.len() {
         return Err(WavError::Truncated);
     }

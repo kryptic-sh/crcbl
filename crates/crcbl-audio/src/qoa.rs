@@ -187,7 +187,7 @@ pub fn decode(bytes: &[u8]) -> Result<QoaFile, QoaError> {
         }
 
         // Validate frame size.
-        let slices_in_frame = (fsamples + SLICE_LEN - 1) / SLICE_LEN;
+        let slices_in_frame = fsamples.div_ceil(SLICE_LEN);
         let expected_fsize =
             8 + LMS_LEN * 4 * num_channels as usize + 8 * slices_in_frame * num_channels as usize;
         if fsize != expected_fsize {
@@ -195,6 +195,7 @@ pub fn decode(bytes: &[u8]) -> Result<QoaFile, QoaError> {
         }
 
         // ── LMS state per channel ────────────────────────────────────────
+        #[allow(clippy::needless_range_loop)]
         for ch in 0..num_channels as usize {
             for i in 0..LMS_LEN {
                 lms[ch].history[i] = read_i16_be(bytes, &mut pos)? as i32;
@@ -267,6 +268,7 @@ fn decode_partial_slice(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_slice(
     bytes: &[u8],
     pos: &mut usize,
@@ -290,6 +292,7 @@ fn decode_slice(
     // sf_quant occupies bits 63-60; qr bits fill 59-0 (20 × 3 = 60 bits).
     let raw = u64::from_be_bytes(slice);
     let mut qr = [0u8; SLICE_LEN];
+    #[allow(clippy::needless_range_loop)]
     for i in 0..SLICE_LEN {
         qr[i] = ((raw >> (57 - i * 3)) & 0x07) as u8;
     }
@@ -370,11 +373,11 @@ mod tests {
         out.extend_from_slice(b"qoaf");
         out.extend_from_slice(&sample_count.to_be_bytes());
 
-        let frames = (sample_count as usize + FRAME_LEN - 1) / FRAME_LEN;
+        let frames = (sample_count as usize).div_ceil(FRAME_LEN);
         for fi in 0..frames {
             let remaining = sample_count as usize - fi * FRAME_LEN;
             let fsamples = remaining.min(FRAME_LEN);
-            let slices = (fsamples + SLICE_LEN - 1) / SLICE_LEN;
+            let slices = fsamples.div_ceil(SLICE_LEN);
             let fsize = 8 + LMS_LEN * 4 * channels as usize + 8 * slices * channels as usize;
 
             // Frame header.

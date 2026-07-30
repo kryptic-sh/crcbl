@@ -145,7 +145,7 @@ pub fn compute_cue(listener: [f32; 3], emitter: [f32; 3], grammar: &CueGrammar) 
 
     // ── Rule 3: behind attenuation + pitch shift ─────────────────────────
     // Behind: cos_azimuth < 0.  Blend factor = how far behind.
-    let behind = (cos_azimuth * -1.0).clamp(0.0, 1.0);
+    let behind = (-cos_azimuth).clamp(0.0, 1.0);
     let rear_db = behind * grammar.rear_attenuation_db;
     let rear_pitch = behind * grammar.rear_pitch_cents;
 
