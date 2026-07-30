@@ -81,6 +81,8 @@ pub use glam as math;
 
 pub mod backend;
 
+pub mod screenshot;
+
 /// The names a game touches on every frame.
 ///
 /// `use crcbl::prelude::*;` is the first line of the `crcbl new` template. It is

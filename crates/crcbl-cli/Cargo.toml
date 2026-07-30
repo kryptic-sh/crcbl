@@ -28,3 +28,7 @@ cli-e2e = []
 
 [lints]
 workspace = true
+
+[dependencies]
+crcbl = { version = "0.1.0", path = "../crcbl" }
+crcbl-golden = { version = "0.1.0", path = "../crcbl-golden" }

@@ -64,6 +64,7 @@ name = "crcbl"
 version = "0.1.0"
 dependencies = [
  "crcbl-core",
+ "crcbl-golden",
  "crcbl-hal",
  "crcbl-render",
  "crcbl-shaders",
@@ -81,6 +82,10 @@ version = "0.1.0"
 [[package]]
 name = "crcbl-cli"
 version = "0.1.0"
+dependencies = [
+ "crcbl",
+ "crcbl-golden",
+]
 
 [[package]]
 name = "crcbl-client"

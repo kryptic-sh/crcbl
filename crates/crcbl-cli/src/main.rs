@@ -20,21 +20,18 @@
 //! `scene`, `import`, `screenshot`, `sim`, `phys` and `edit` land from P1
 //! onwards; the argument parser is written so adding one is a `match` arm.
 //!
-//! # This binary depends on nothing
+//! # This binary depends on the engine for GPU subcommands
 //!
-//! Not on `clap` (`args` argues that at length), not on `serde`, and — the one
-//! that is architecture rather than taste — **not on any engine crate**. A
-//! Crucible project is a Cargo project, so `crcbl run` is Cargo plus this CLI's
-//! conventions, and the CLI never links a renderer or a backend. Topic 11 names
-//! "a sample linking `crcbl-vk` directly" as an architecture regression; a CLI
-//! that did it would be a worse one, because every user of the engine runs this
-//! binary.
+//! `new`, `run`, and `build` are pure-Cargo subcommands with no engine deps.
+//! `screenshot` links the GPU backend; the binary's Cargo.toml adds the `crcbl`
+//! umbrella to serve it.
 
 mod args;
 mod cargo;
 mod json;
 mod new;
 mod report;
+mod screenshot;
 
 use std::process::ExitCode;
 
@@ -50,6 +47,7 @@ fn main() -> ExitCode {
                 Command::New(args) => new::run(args),
                 Command::Run(args) => cargo::run(args),
                 Command::Build(args) => cargo::build(args),
+                Command::Screenshot(args) => screenshot::run(args),
             };
             report::emit(name, json, result)
         }

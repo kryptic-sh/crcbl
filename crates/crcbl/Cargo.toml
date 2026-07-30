@@ -21,6 +21,7 @@ repository.workspace = true
 # them.
 [dependencies]
 crcbl-core = { workspace = true }
+crcbl-golden = { workspace = true }
 crcbl-hal = { workspace = true }
 crcbl-render = { workspace = true }
 crcbl-shaders = { workspace = true }

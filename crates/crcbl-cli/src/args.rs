@@ -49,6 +49,7 @@ COMMANDS:
     new <NAME>    Scaffold a game project that builds and runs immediately.
     run           Run the project in the current directory.
     build         Build the project in the current directory.
+    screenshot    Offscreen render the scene and write a PNG.
 
 OPTIONS (every command):
         --json    Emit one JSON object instead of human output.
@@ -113,6 +114,22 @@ OPTIONS:
         --json              Emit one JSON object instead of human output.
     -h, --help              Print this text.";
 
+/// `crcbl screenshot --help`.
+pub const SCREENSHOT_USAGE: &str = "\
+crcbl screenshot — offscreen render to PNG
+
+USAGE:
+    crcbl screenshot [OPTIONS]
+
+Renders one frame using the auto-selected GPU backend through an offscreen
+swapchain, reads the pixels back, and writes a PNG.
+
+OPTIONS:
+        --size WxH       Output dimensions. Default: 1920x1080.
+    -o, --output <FILE>  Write the PNG here. Default: screenshot.png.
+        --json           Emit one JSON object instead of human output.
+    -h, --help           Print this text.";
+
 /// What the command line asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Invocation {
@@ -126,7 +143,7 @@ pub enum Invocation {
     BadUsage(String),
 }
 
-/// One of the three P0 subcommands.
+/// One of the four subcommands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     /// Scaffold a project.
@@ -135,6 +152,8 @@ pub enum Command {
     Run(RunArgs),
     /// Build one.
     Build(BuildArgs),
+    /// Offscreen render → PNG.
+    Screenshot(ScreenshotArgs),
 }
 
 impl Command {
@@ -144,6 +163,7 @@ impl Command {
             Self::New(_) => "new",
             Self::Run(_) => "run",
             Self::Build(_) => "build",
+            Self::Screenshot(_) => "screenshot",
         }
     }
 
@@ -153,6 +173,7 @@ impl Command {
             Self::New(args) => args.json,
             Self::Run(args) => args.json,
             Self::Build(args) => args.json,
+            Self::Screenshot(args) => args.json,
         }
     }
 }
@@ -215,6 +236,19 @@ pub enum Target {
     Wasm,
 }
 
+/// `crcbl screenshot`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScreenshotArgs {
+    /// Output width.
+    pub width: u32,
+    /// Output height.
+    pub height: u32,
+    /// Output PNG path.
+    pub output: std::path::PathBuf,
+    /// Machine-readable output.
+    pub json: bool,
+}
+
 /// Parses arguments, which must **not** include the program name.
 pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
     let mut args = args.into_iter().peekable();
@@ -228,6 +262,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
         "new" => parse_new(args),
         "run" => parse_run(args),
         "build" => parse_build(args),
+        "screenshot" => parse_screenshot(args),
         other if other.starts_with('-') => {
             Invocation::BadUsage(format!("unrecognized option `{other}`"))
         }
@@ -350,6 +385,54 @@ fn parse_build(mut args: impl Iterator<Item = String>) -> Invocation {
     Invocation::Command(Command::Build(parsed))
 }
 
+fn parse_screenshot(mut args: impl Iterator<Item = String>) -> Invocation {
+    let mut parsed = ScreenshotArgs {
+        width: 1920,
+        height: 1080,
+        output: std::path::PathBuf::from("screenshot.png"),
+        json: false,
+    };
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => return Invocation::Help(SCREENSHOT_USAGE),
+            "--json" => parsed.json = true,
+            "--size" => match args.next() {
+                Some(value) => match parse_size(&value) {
+                    Some((w, h)) => {
+                        parsed.width = w;
+                        parsed.height = h;
+                    }
+                    None => {
+                        return Invocation::BadUsage(format!(
+                            "`--size` expects WxH, e.g. 1920x1080; got `{value}`"
+                        ));
+                    }
+                },
+                None => return bad("--size needs a value"),
+            },
+            "-o" | "--output" => match args.next() {
+                Some(value) => parsed.output = std::path::PathBuf::from(value),
+                None => return bad("--output needs a path"),
+            },
+            other => {
+                return Invocation::BadUsage(format!("`screenshot` has no argument `{other}`"));
+            }
+        }
+    }
+    Invocation::Command(Command::Screenshot(parsed))
+}
+
+fn parse_size(raw: &str) -> Option<(u32, u32)> {
+    let (w, rest) = raw.split_once('x')?;
+    let w: u32 = w.parse().ok()?;
+    let h: u32 = rest.parse().ok()?;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some((w, h))
+}
+
 fn bad(message: &str) -> Invocation {
     Invocation::BadUsage(message.to_string())
 }
@@ -424,6 +507,7 @@ mod tests {
             vec!["new", "game", "--json"],
             vec!["run", "--json"],
             vec!["build", "--json"],
+            vec!["screenshot", "--json"],
         ] {
             assert!(command(&args).json(), "{args:?} should have set --json");
         }
