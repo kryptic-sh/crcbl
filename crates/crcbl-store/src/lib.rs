@@ -7,6 +7,7 @@
 //! - [`NativeStorage`] — platform-directory-backed storage
 //! - [`write_atomic`] — write-then-rename for crash-safe file writes
 //! - Settings (TOML layers, typed access) — module `settings`
+//! - Saves (binary save/load container) — module `save`
 //!
 //! # Wasm / async design note
 //!
@@ -15,6 +16,7 @@
 //! either by wrapping this trait with an adapter or by introducing a second
 //! trait. The `Result<Vec<u8>>` return is forward-compatible with both.
 
+pub mod save;
 pub mod settings;
 
 use std::io;
