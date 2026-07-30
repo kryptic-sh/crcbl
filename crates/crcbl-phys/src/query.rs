@@ -102,7 +102,12 @@ pub fn ray_vs_sphere(ray: &Ray, sphere: &Sphere) -> Option<ShapeHit> {
         return None;
     }
     let point = ray.origin + ray.dir * t;
-    let normal = (point - sphere.centre).normalize();
+    let to_centre = point - sphere.centre;
+    let normal = if to_centre.length_squared() > 0.0 {
+        to_centre.normalize()
+    } else {
+        DVec3::Y
+    };
     Some(ShapeHit {
         t,
         point,
@@ -138,12 +143,37 @@ pub fn ray_vs_aabb(ray: &Ray, aabb: &Aabb) -> Option<ShapeHit> {
         (aabb.min.z, aabb.max.z)
     };
 
-    let tmin_x = (lox - ray.origin.x) * inv_dir.x;
-    let tmax_x = (hix - ray.origin.x) * inv_dir.x;
-    let tmin_y = (loy - ray.origin.y) * inv_dir.y;
-    let tmax_y = (hiy - ray.origin.y) * inv_dir.y;
-    let tmin_z = (loz - ray.origin.z) * inv_dir.z;
-    let tmax_z = (hiz - ray.origin.z) * inv_dir.z;
+    // Handle zero-direction axes to avoid NaN from 0.0 * INF.
+    let (tmin_x, tmax_x) = if inv_dir.x.is_finite() {
+        (
+            (lox - ray.origin.x) * inv_dir.x,
+            (hix - ray.origin.x) * inv_dir.x,
+        )
+    } else if ray.origin.x < aabb.min.x || ray.origin.x > aabb.max.x {
+        return None;
+    } else {
+        (f64::NEG_INFINITY, f64::INFINITY)
+    };
+    let (tmin_y, tmax_y) = if inv_dir.y.is_finite() {
+        (
+            (loy - ray.origin.y) * inv_dir.y,
+            (hiy - ray.origin.y) * inv_dir.y,
+        )
+    } else if ray.origin.y < aabb.min.y || ray.origin.y > aabb.max.y {
+        return None;
+    } else {
+        (f64::NEG_INFINITY, f64::INFINITY)
+    };
+    let (tmin_z, tmax_z) = if inv_dir.z.is_finite() {
+        (
+            (loz - ray.origin.z) * inv_dir.z,
+            (hiz - ray.origin.z) * inv_dir.z,
+        )
+    } else if ray.origin.z < aabb.min.z || ray.origin.z > aabb.max.z {
+        return None;
+    } else {
+        (f64::NEG_INFINITY, f64::INFINITY)
+    };
 
     let tmin = tmin_x.max(tmin_y).max(tmin_z);
     let tmax = tmax_x.min(tmax_y).min(tmax_z);
@@ -308,8 +338,12 @@ fn ray_vs_capsule_cylinder(ray: &Ray, capsule: &Capsule) -> Option<ShapeHit> {
     }
 
     // Normal is radial from the capsule axis.
-    let normal =
-        DVec3::new(point.x - capsule.centre.x, 0.0, point.z - capsule.centre.z).normalize();
+    let radial = DVec3::new(point.x - capsule.centre.x, 0.0, point.z - capsule.centre.z);
+    let normal = if radial.length_squared() > 0.0 {
+        radial.normalize()
+    } else {
+        DVec3::Y
+    };
 
     Some(ShapeHit {
         t,
@@ -383,7 +417,12 @@ pub fn swept_sphere_vs_sphere(
     };
 
     let point_on_swept = segment.start + dir * t;
-    let normal = (point_on_swept - target.centre).normalize();
+    let to_target = point_on_swept - target.centre;
+    let normal = if to_target.length_squared() > 0.0 {
+        to_target.normalize()
+    } else {
+        DVec3::Y
+    };
     let contact_point = target.centre + normal * target.radius;
 
     Some(ShapeHit {
@@ -453,12 +492,28 @@ pub fn swept_sphere_vs_aabb(
         (inflated.min.z, inflated.max.z)
     };
 
-    let tmin_x = (lox - origin.x) * inv_dir.x;
-    let tmax_x = (hix - origin.x) * inv_dir.x;
-    let tmin_y = (loy - origin.y) * inv_dir.y;
-    let tmax_y = (hiy - origin.y) * inv_dir.y;
-    let tmin_z = (loz - origin.z) * inv_dir.z;
-    let tmax_z = (hiz - origin.z) * inv_dir.z;
+    // Handle zero-direction axes to avoid NaN from 0.0 * INF.
+    let (tmin_x, tmax_x) = if inv_dir.x.is_finite() {
+        ((lox - origin.x) * inv_dir.x, (hix - origin.x) * inv_dir.x)
+    } else if origin.x < inflated.min.x || origin.x > inflated.max.x {
+        return None;
+    } else {
+        (f64::NEG_INFINITY, f64::INFINITY)
+    };
+    let (tmin_y, tmax_y) = if inv_dir.y.is_finite() {
+        ((loy - origin.y) * inv_dir.y, (hiy - origin.y) * inv_dir.y)
+    } else if origin.y < inflated.min.y || origin.y > inflated.max.y {
+        return None;
+    } else {
+        (f64::NEG_INFINITY, f64::INFINITY)
+    };
+    let (tmin_z, tmax_z) = if inv_dir.z.is_finite() {
+        ((loz - origin.z) * inv_dir.z, (hiz - origin.z) * inv_dir.z)
+    } else if origin.z < inflated.min.z || origin.z > inflated.max.z {
+        return None;
+    } else {
+        (f64::NEG_INFINITY, f64::INFINITY)
+    };
 
     let tmin = tmin_x.max(tmin_y).max(tmin_z);
     let tmax = tmax_x.min(tmax_y).min(tmax_z);
@@ -656,6 +711,25 @@ mod tests {
         assert_eq!(hit.normal, DVec3::NEG_Z);
     }
 
+    #[test]
+    fn ray_on_aabb_face_zero_dir_component_hits() {
+        // Ray starts on +Y face with zero Y direction — would NaN before fix.
+        let ray = Ray::new(DVec3::new(0.0, 1.0, 0.0), DVec3::new(1.0, 0.0, 0.0));
+        let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
+        let hit = ray_vs_aabb(&ray, &aabb).unwrap();
+        assert!(hit.started_inside);
+        assert!((hit.t - 1.0).abs() < 0.001);
+        assert_eq!(hit.normal, DVec3::X);
+    }
+
+    #[test]
+    fn ray_parallel_to_axis_outside_misses() {
+        // Ray outside AABB on Y, zero Y direction — should miss.
+        let ray = Ray::new(DVec3::new(0.0, 5.0, 0.0), DVec3::new(1.0, 0.0, 0.0));
+        let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
+        assert!(ray_vs_aabb(&ray, &aabb).is_none());
+    }
+
     // ── Ray vs capsule ────────────────────────────────────────────────
 
     #[test]
@@ -753,6 +827,18 @@ mod tests {
         let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
         let hit = swept_sphere_vs_aabb(&seg, 0.5, &aabb).unwrap();
         assert_eq!(hit.normal, DVec3::NEG_Y);
+    }
+
+    #[test]
+    fn swept_sphere_zero_dir_on_face_hits() {
+        // Sphere starts on inflated Y face with zero Y direction.
+        // AABB half-extent 1.0, radius 0.5 → inflated spans [-1.5, 1.5].
+        // Origin at y=1.5 (on inflated +Y face), dir = (1,0,0) (zero Y).
+        let seg =
+            crate::broadphase::Segment::new(DVec3::new(-2.0, 1.5, 0.0), DVec3::new(2.0, 1.5, 0.0));
+        let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
+        let hit = swept_sphere_vs_aabb(&seg, 0.5, &aabb).unwrap();
+        assert!(hit.t >= 0.0 && hit.t <= 1.0);
     }
 
     // ── Overlap queries ────────────────────────────────────────────────

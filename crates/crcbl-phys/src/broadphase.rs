@@ -439,9 +439,28 @@ impl Aabb {
             (self.min.z, self.max.z)
         };
 
-        let tmin = (lox - origin.x) * inv_dir.x;
-        let tymin = (loy - origin.y) * inv_dir.y;
-        let tzmin = (loz - origin.z) * inv_dir.z;
+        // Handle zero-direction axes to avoid NaN from 0.0 * INF.
+        let tmin = if inv_dir.x.is_finite() {
+            (lox - origin.x) * inv_dir.x
+        } else if origin.x < self.min.x || origin.x > self.max.x {
+            return f64::INFINITY;
+        } else {
+            f64::NEG_INFINITY
+        };
+        let tymin = if inv_dir.y.is_finite() {
+            (loy - origin.y) * inv_dir.y
+        } else if origin.y < self.min.y || origin.y > self.max.y {
+            return f64::INFINITY;
+        } else {
+            f64::NEG_INFINITY
+        };
+        let tzmin = if inv_dir.z.is_finite() {
+            (loz - origin.z) * inv_dir.z
+        } else if origin.z < self.min.z || origin.z > self.max.z {
+            return f64::INFINITY;
+        } else {
+            f64::NEG_INFINITY
+        };
 
         tmin.max(tymin).max(tzmin)
     }
@@ -699,5 +718,19 @@ mod tests {
     fn update_aabb_invalid_index_returns_false() {
         let mut bvh = Bvh::build([unit_box_at(DVec3::ZERO)]);
         assert!(!bvh.update_aabb(999, Aabb::EMPTY));
+    }
+
+    #[test]
+    fn ray_on_face_with_zero_dir_through_bvh_hits() {
+        // Ray starts on +Y face of element with zero Y dir component.
+        // Exercises intersect_ray_entry NaN fix.
+        let centre = DVec3::new(5.0, 0.0, 0.0);
+        let bvh = Bvh::build([unit_box_at(centre)]);
+        // AABB spans: min = (4.5, -0.5, -0.5), max = (5.5, 0.5, 0.5).
+        // Ray origin on +Y face, dir = +X (zero Y component).
+        let ray = Ray::new(DVec3::new(0.0, 0.5, 0.0), DVec3::X);
+        let hits = bvh.traverse_ray(&ray);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].element_id, 0);
     }
 }

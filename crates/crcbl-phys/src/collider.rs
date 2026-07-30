@@ -202,10 +202,21 @@ impl Aabb {
             (self.min.z, self.max.z)
         };
 
-        let tmin = (lox - origin.x) * inv_dir.x;
-        let tmax = (hix - origin.x) * inv_dir.x;
-        let tymin = (loy - origin.y) * inv_dir.y;
-        let tymax = (hiy - origin.y) * inv_dir.y;
+        // Handle zero-direction axes to avoid NaN from 0.0 * INF.
+        let (tmin, tmax) = if inv_dir.x.is_finite() {
+            ((lox - origin.x) * inv_dir.x, (hix - origin.x) * inv_dir.x)
+        } else if origin.x < self.min.x || origin.x > self.max.x {
+            return false;
+        } else {
+            (f64::NEG_INFINITY, f64::INFINITY)
+        };
+        let (tymin, tymax) = if inv_dir.y.is_finite() {
+            ((loy - origin.y) * inv_dir.y, (hiy - origin.y) * inv_dir.y)
+        } else if origin.y < self.min.y || origin.y > self.max.y {
+            return false;
+        } else {
+            (f64::NEG_INFINITY, f64::INFINITY)
+        };
 
         if tmin > tymax || tymin > tmax {
             return false;
@@ -213,8 +224,13 @@ impl Aabb {
         let tmin = tmin.max(tymin);
         let tmax = tmax.min(tymax);
 
-        let tzmin = (loz - origin.z) * inv_dir.z;
-        let tzmax = (hiz - origin.z) * inv_dir.z;
+        let (tzmin, tzmax) = if inv_dir.z.is_finite() {
+            ((loz - origin.z) * inv_dir.z, (hiz - origin.z) * inv_dir.z)
+        } else if origin.z < self.min.z || origin.z > self.max.z {
+            return false;
+        } else {
+            (f64::NEG_INFINITY, f64::INFINITY)
+        };
 
         if tmin > tzmax || tzmin > tmax {
             return false;
@@ -470,6 +486,29 @@ mod tests {
         let inv_dir = dir.recip();
         let neg = [dir.x < 0.0, dir.y < 0.0, dir.z < 0.0];
         assert!(aabb.intersect_ray(origin, inv_dir, neg, 0.0, f64::INFINITY));
+    }
+
+    #[test]
+    fn ray_on_face_with_zero_dir_component_hits() {
+        // Ray starts on +Y face with dir having zero Y component.
+        // Old code: (loy - origin.y) * inv_dir.y = (1.0 - 1.0) * INF = 0.0 * INF = NaN.
+        let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
+        let origin = DVec3::new(0.0, 1.0, 0.0);
+        let dir = DVec3::new(1.0, 0.0, 0.0);
+        let inv_dir = dir.recip();
+        let neg = [dir.x < 0.0, dir.y < 0.0, dir.z < 0.0];
+        assert!(aabb.intersect_ray(origin, inv_dir, neg, 0.0, f64::INFINITY));
+    }
+
+    #[test]
+    fn ray_on_face_with_zero_dir_component_parallel_miss() {
+        // Ray outside AABB on Y, with zero Y direction → parallel miss.
+        let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
+        let origin = DVec3::new(0.0, 5.0, 0.0);
+        let dir = DVec3::new(1.0, 0.0, 0.0);
+        let inv_dir = dir.recip();
+        let neg = [dir.x < 0.0, dir.y < 0.0, dir.z < 0.0];
+        assert!(!aabb.intersect_ray(origin, inv_dir, neg, 0.0, f64::INFINITY));
     }
 
     #[test]
