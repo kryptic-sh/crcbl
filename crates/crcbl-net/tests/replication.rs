@@ -8,7 +8,7 @@
 use crcbl_core::TickId;
 use crcbl_net::{
     Baseline, ConditionSimulator, Delta, DeltaCodec, InMemoryTransport, Message, MessageKind,
-    SessionConfig, SessionId, SessionManager, SimConditions, SystemSnapshot, Transport,
+    SectorId, SessionConfig, SessionId, SessionManager, SimConditions, SystemSnapshot, Transport,
 };
 
 // ── Minimal server (writes SystemSnapshots, delta-encodes them) ────────────
@@ -27,12 +27,17 @@ impl Server {
 
     /// Produce a delta-encoded payload for the given tick and snapshot set.
     fn encode(&mut self, tick: TickId, systems: &[SystemSnapshot]) -> Vec<u8> {
-        let last_acked = self.session.last_acked_tick();
-        let baseline = last_acked.and_then(|t| self.session.baseline_store().get(t).cloned());
+        let last_acked = self.session.last_acked_tick(SectorId::ZERO);
+        let baseline = last_acked.and_then(|t| {
+            self.session
+                .baseline_store(SectorId::ZERO)
+                .and_then(|store| store.get(t))
+                .cloned()
+        });
         let delta = DeltaCodec::encode(tick, systems, baseline.as_ref()).expect("valid snapshot");
 
         // Store full snapshot as new baseline.
-        self.session.baseline_store_mut().insert(
+        self.session.baseline_store_mut(SectorId::ZERO).insert(
             Baseline::from_trusted_snapshot(tick, systems).expect("test snapshots are valid"),
         );
 
@@ -40,7 +45,7 @@ impl Server {
     }
 
     fn handle_ack(&mut self, tick: TickId) {
-        self.session.handle_ack(tick);
+        self.session.handle_ack(SectorId::ZERO, tick);
     }
 }
 
@@ -132,7 +137,8 @@ fn replication_roundtrip_lossless() {
     // server's latest stored baseline byte-for-byte.
     let server_hash = server
         .session
-        .baseline_store()
+        .baseline_store(SectorId::ZERO)
+        .expect("zero sector store")
         .newest()
         .expect("server must have at least one stored baseline")
         .state_hash();
@@ -269,7 +275,7 @@ fn replication_with_condition_simulator() {
         // Client receives.
         for msg in drain_all(&mut client_side) {
             if let Some(acked) = client.apply(&msg.payload) {
-                let ack_payload = crcbl_net::encode_ack(acked);
+                let ack_payload = crcbl_net::encode_ack(SectorId::ZERO, acked);
                 client_send
                     .send_unreliable(Message {
                         kind: MessageKind::Unreliable,
@@ -282,7 +288,7 @@ fn replication_with_condition_simulator() {
         // Server receives acks.
         for msg in drain_all(&mut server_rx) {
             if let Ok(tick) = crcbl_net::decode_ack(&msg.payload) {
-                server.handle_ack(tick);
+                server.handle_ack(tick.tick);
             }
         }
     }
@@ -298,7 +304,8 @@ fn replication_with_condition_simulator() {
     // the server's latest stored baseline (delta encode+apply is idempotent).
     let server_hash = server
         .session
-        .baseline_store()
+        .baseline_store(SectorId::ZERO)
+        .expect("zero sector store")
         .newest()
         .expect("server must have at least one stored baseline")
         .state_hash();
@@ -355,7 +362,7 @@ fn replication_with_loss_reorder_and_duplication() {
 
         for msg in drain_all(&mut client_side) {
             if let Some(acked) = client.apply(&msg.payload) {
-                let ack_payload = crcbl_net::encode_ack(acked);
+                let ack_payload = crcbl_net::encode_ack(SectorId::ZERO, acked);
                 client_send
                     .send_unreliable(Message {
                         kind: MessageKind::Unreliable,
@@ -367,7 +374,7 @@ fn replication_with_loss_reorder_and_duplication() {
 
         for msg in drain_all(&mut server_rx) {
             if let Ok(tick) = crcbl_net::decode_ack(&msg.payload) {
-                server.handle_ack(tick);
+                server.handle_ack(tick.tick);
             }
         }
     }
@@ -382,7 +389,8 @@ fn replication_with_loss_reorder_and_duplication() {
     // client's final state must match the server's latest baseline.
     let server_hash = server
         .session
-        .baseline_store()
+        .baseline_store(SectorId::ZERO)
+        .expect("zero sector store")
         .newest()
         .expect("server must have at least one stored baseline")
         .state_hash();

@@ -24,7 +24,7 @@ pub mod transport;
 pub mod types;
 
 pub use codec::{
-    DecodeError, decode_ack, decode_client_to_server, decode_handshake_result, decode_hello,
+    Ack, DecodeError, decode_ack, decode_client_to_server, decode_handshake_result, decode_hello,
     decode_server_to_client, encode_ack, encode_client_to_server, encode_handshake_result,
     encode_hello, encode_server_to_client,
 };

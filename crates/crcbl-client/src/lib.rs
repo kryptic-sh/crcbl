@@ -5,13 +5,14 @@
 //! to reconstruct the full server state. Between ticks the two most recent
 //! snapshots are used to interpolate entity state for smooth rendering.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crcbl_core::{FrameClock, TickId};
 use crcbl_ecs::World;
 use crcbl_net::{
     Baseline, DeltaCodec, HandshakeResult, Hello, Message, MessageKind, ProtocolCompatibility,
-    ResumeToken, SessionId, Transport, TransportError,
+    ResumeToken, SectorId, SessionId, Transport, TransportError,
 };
 use glam::Vec3;
 
@@ -43,15 +44,16 @@ pub struct Client<T: Transport> {
     transport: T,
     /// Client-side frame clock for input-tick cadence and render alpha.
     clock: FrameClock,
-    /// The older of the two most recent full snapshots (after delta apply).
-    prev_snapshot: Option<crcbl_net::ServerToClient>,
-    /// The newer of the two most recent full snapshots (after delta apply).
-    current_snapshot: Option<crcbl_net::ServerToClient>,
+    /// Sectors this client currently accepts replication for.
+    subscribed_sectors: HashSet<SectorId>,
+    /// Older full snapshots after delta apply, keyed by sector.
+    prev_snapshots: HashMap<SectorId, crcbl_net::ServerToClient>,
+    /// Newer full snapshots after delta apply, keyed by sector.
+    current_snapshots: HashMap<SectorId, crcbl_net::ServerToClient>,
     /// Input data to send on the next tick.
     pending_input: Vec<u8>,
-    /// Accumulated baseline for delta application — the client's mirror
-    /// of the server's world state.
-    baseline: Baseline,
+    /// Accumulated baselines for delta application, keyed by sector.
+    baselines: HashMap<SectorId, Baseline>,
     session_id: Option<SessionId>,
     resume_token: Option<ResumeToken>,
     compatibility: ProtocolCompatibility,
@@ -93,11 +95,11 @@ impl<T: Transport> Client<T> {
             world,
             transport,
             clock: FrameClock::new(tick_hz),
-            prev_snapshot: None,
-            current_snapshot: None,
+            subscribed_sectors: HashSet::from([SectorId::ZERO]),
+            prev_snapshots: HashMap::new(),
+            current_snapshots: HashMap::new(),
             pending_input: Vec::new(),
-            baseline: Baseline::from_trusted_snapshot(TickId::ZERO, &[])
-                .expect("empty snapshot is valid"),
+            baselines: HashMap::new(),
             session_id: None,
             resume_token: None,
             compatibility,
@@ -133,6 +135,20 @@ impl<T: Transport> Client<T> {
         self.clock.alpha()
     }
 
+    /// Replace the accepted replication sector set.
+    ///
+    /// State for sectors omitted from the new set is dropped immediately.
+    /// The default zero sector remains accepted only if included explicitly.
+    pub fn set_subscribed_sectors(&mut self, sectors: impl IntoIterator<Item = SectorId>) {
+        self.subscribed_sectors = sectors.into_iter().collect();
+        self.baselines
+            .retain(|sector, _| self.subscribed_sectors.contains(sector));
+        self.prev_snapshots
+            .retain(|sector, _| self.subscribed_sectors.contains(sector));
+        self.current_snapshots
+            .retain(|sector, _| self.subscribed_sectors.contains(sector));
+    }
+
     /// Set the input data for the next tick.
     ///
     /// The data is sent (unreliably) to the server on each consumed tick
@@ -153,23 +169,55 @@ impl<T: Transport> Client<T> {
         }
     }
 
-    /// The tick id of the most recently applied delta-encoded snapshot.
+    /// The tick id of the most recently applied delta-encoded snapshot in the
+    /// default sector.
     #[must_use]
     pub fn last_applied_tick(&self) -> TickId {
-        self.baseline.tick
+        self.last_applied_tick_in(SectorId::ZERO)
     }
 
-    /// Number of entities in the client's reconstructed baseline across
-    /// all systems.
+    /// The tick id of the most recently applied delta-encoded snapshot in `sector`.
+    #[must_use]
+    pub fn last_applied_tick_in(&self, sector: SectorId) -> TickId {
+        self.baselines
+            .get(&sector)
+            .map_or(TickId::ZERO, |baseline| baseline.tick)
+    }
+
+    /// Number of entities in the client's reconstructed baseline in the default
+    /// sector.
     #[must_use]
     pub fn baseline_entity_count(&self) -> usize {
-        self.baseline.entity_count()
+        self.baseline_entity_count_in(SectorId::ZERO)
     }
 
-    /// Number of systems in the client's reconstructed baseline.
+    /// Number of entities in the client's reconstructed baseline in `sector`.
+    #[must_use]
+    pub fn baseline_entity_count_in(&self, sector: SectorId) -> usize {
+        self.baselines
+            .get(&sector)
+            .map_or(0, Baseline::entity_count)
+    }
+
+    /// Number of systems in the client's reconstructed baseline in the default
+    /// sector.
     #[must_use]
     pub fn baseline_system_count(&self) -> usize {
-        self.baseline.system_count()
+        self.baseline_system_count_in(SectorId::ZERO)
+    }
+
+    /// Number of systems in the client's reconstructed baseline in `sector`.
+    #[must_use]
+    pub fn baseline_system_count_in(&self, sector: SectorId) -> usize {
+        self.baselines
+            .get(&sector)
+            .map_or(0, Baseline::system_count)
+    }
+
+    /// Process-local hash of the reconstructed baseline in `sector`.
+    #[must_use]
+    pub fn baseline_state_hash_in(&self, sector: SectorId) -> Option<u64> {
+        self.baselines.get(&sector).map(Baseline::state_hash)
     }
 
     /// The accepted server session id, if the handshake has completed.
@@ -300,15 +348,24 @@ impl<T: Transport> Client<T> {
                 }
             };
 
-            if delta.tick <= self.baseline.tick {
+            let sector = delta.sector;
+            if !self.subscribed_sectors.contains(&sector) {
+                self.processing_error_count += 1;
                 continue;
             }
-            if !delta.is_keyframe && delta.baseline_tick != Some(self.baseline.tick) {
-                if delta
+            let mut baseline = self.baselines.get(&sector).cloned().unwrap_or_else(|| {
+                Baseline::from_trusted_snapshot(TickId::ZERO, &[]).expect("empty snapshot is valid")
+            });
+            if delta.tick <= baseline.tick {
+                continue;
+            }
+            if !delta.is_keyframe && delta.baseline_tick != Some(baseline.tick) {
+                let ack_tick = delta
                     .baseline_tick
-                    .is_some_and(|baseline_tick| baseline_tick < self.baseline.tick)
-                {
-                    self.send_ack(self.baseline.tick);
+                    .filter(|baseline_tick| *baseline_tick < baseline.tick)
+                    .map(|_| baseline.tick);
+                if let Some(ack_tick) = ack_tick {
+                    self.send_ack(sector, ack_tick);
                 }
                 continue;
             }
@@ -317,11 +374,11 @@ impl<T: Transport> Client<T> {
                 continue;
             }
 
-            // Apply the delta to our baseline, reconstruct full snapshots.
+            // Apply the delta to this sector's baseline, reconstruct full snapshots.
             let full_snapshots = match if self.handshake_complete {
-                DeltaCodec::apply_trusted(&delta, &mut self.baseline)
+                DeltaCodec::apply_trusted(&delta, &mut baseline)
             } else {
-                DeltaCodec::apply(&delta, &mut self.baseline)
+                DeltaCodec::apply(&delta, &mut baseline)
             } {
                 Ok(full_snapshots) => full_snapshots,
                 Err(_) => {
@@ -330,37 +387,41 @@ impl<T: Transport> Client<T> {
                 }
             };
 
-            // Send ack for this tick.
-            self.send_ack(delta.tick);
+            self.baselines.insert(sector, baseline);
+
+            // Send an ack for this sector and tick.
+            self.send_ack(sector, delta.tick);
 
             // Build a ServerToClient from the reconstructed full snapshot
             // for the interpolation buffer.
             let snapshot = crcbl_net::ServerToClient::Snapshot {
-                sector: crcbl_net::SectorId::ZERO,
+                sector,
                 tick: delta.tick,
                 systems: full_snapshots,
             };
 
-            let is_newer = match &self.current_snapshot {
-                Some(crcbl_net::ServerToClient::Snapshot {
-                    tick: current_tick, ..
-                }) => delta.tick > *current_tick,
-                _ => true,
-            };
-            if is_newer {
-                self.prev_snapshot = self.current_snapshot.take();
-                self.current_snapshot = Some(snapshot);
+            let is_newer = self.current_snapshots.get(&sector).is_none_or(|current| {
+                matches!(
+                    current,
+                    crcbl_net::ServerToClient::Snapshot {
+                        tick: current_tick,
+                        ..
+                    } if delta.tick > *current_tick
+                )
+            });
+            if is_newer && let Some(current) = self.current_snapshots.insert(sector, snapshot) {
+                self.prev_snapshots.insert(sector, current);
             }
         }
         Ok(())
     }
 
-    fn send_ack(&mut self, tick: TickId) {
+    fn send_ack(&mut self, sector: SectorId, tick: TickId) {
         if self
             .transport
             .send_unreliable(Message {
                 kind: MessageKind::Unreliable,
-                payload: crcbl_net::encode_ack(tick),
+                payload: crcbl_net::encode_ack(sector, tick),
             })
             .is_err()
         {
@@ -371,14 +432,18 @@ impl<T: Transport> Client<T> {
 
 impl<T: Transport> fmt::Debug for Client<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let prev_tick = match &self.prev_snapshot {
-            Some(crcbl_net::ServerToClient::Snapshot { tick, .. }) => Some(*tick),
-            _ => None,
-        };
-        let current_tick = match &self.current_snapshot {
-            Some(crcbl_net::ServerToClient::Snapshot { tick, .. }) => Some(*tick),
-            _ => None,
-        };
+        let prev_tick = self.prev_snapshots.get(&SectorId::ZERO).map(|snapshot| {
+            let crcbl_net::ServerToClient::Snapshot { tick, .. } = snapshot else {
+                unreachable!("snapshot buffers only contain snapshots");
+            };
+            *tick
+        });
+        let current_tick = self.current_snapshots.get(&SectorId::ZERO).map(|snapshot| {
+            let crcbl_net::ServerToClient::Snapshot { tick, .. } = snapshot else {
+                unreachable!("snapshot buffers only contain snapshots");
+            };
+            *tick
+        });
         f.debug_struct("Client")
             .field("world", &self.world)
             .field("clock", &self.clock)
@@ -407,7 +472,11 @@ mod tests {
 
     /// Build a delta-encoded payload representing a snapshot with
     /// `system_count` at `tick` (all entities in `added` — keyframe shape).
-    fn keyframe_snapshot(tick: u64, system_data: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    fn keyframe_snapshot_for_sector(
+        sector: SectorId,
+        tick: u64,
+        system_data: &[(u32, Vec<u8>)],
+    ) -> Vec<u8> {
         let snapshots: Vec<_> = system_data
             .iter()
             .map(|&(sys_id, ref data)| {
@@ -442,8 +511,13 @@ mod tests {
             })
             .collect();
         let delta =
-            DeltaCodec::encode(TickId::from_raw(tick), &snapshots, None).expect("valid snapshot");
+            DeltaCodec::encode_with_sector(sector, TickId::from_raw(tick), &snapshots, None)
+                .expect("valid snapshot");
         crcbl_net::encode_delta(&delta).expect("valid delta")
+    }
+
+    fn keyframe_snapshot(tick: u64, system_data: &[(u32, Vec<u8>)]) -> Vec<u8> {
+        keyframe_snapshot_for_sector(SectorId::ZERO, tick, system_data)
     }
 
     fn delta_payload(delta: crcbl_net::Delta) -> Vec<u8> {
@@ -462,18 +536,22 @@ mod tests {
         .unwrap();
         client.update(std::time::Duration::ZERO);
         assert_eq!(
-            crcbl_net::decode_ack(&peer.recv().unwrap().unwrap().payload).unwrap(),
+            crcbl_net::decode_ack(&peer.recv().unwrap().unwrap().payload)
+                .unwrap()
+                .tick,
             TickId::from_raw(5)
         );
         let _ = peer.recv().unwrap().unwrap();
 
         let wrong_baseline = crcbl_net::Delta {
+            sector: SectorId::ZERO,
             tick: TickId::from_raw(6),
             baseline_tick: Some(TickId::from_raw(4)),
             is_keyframe: false,
             systems: Vec::new(),
         };
         let stale = crcbl_net::Delta {
+            sector: SectorId::ZERO,
             tick: TickId::from_raw(5),
             baseline_tick: Some(TickId::from_raw(5)),
             is_keyframe: false,
@@ -490,7 +568,9 @@ mod tests {
 
         assert_eq!(client.last_applied_tick(), TickId::from_raw(5));
         assert_eq!(
-            crcbl_net::decode_ack(&peer.recv().unwrap().unwrap().payload).unwrap(),
+            crcbl_net::decode_ack(&peer.recv().unwrap().unwrap().payload)
+                .unwrap()
+                .tick,
             TickId::from_raw(5)
         );
         assert!(peer.recv().unwrap().is_none());
@@ -512,6 +592,7 @@ mod tests {
         peer.send_unreliable(Message {
             kind: MessageKind::Unreliable,
             payload: delta_payload(crcbl_net::Delta {
+                sector: SectorId::ZERO,
                 tick: TickId::from_raw(2),
                 baseline_tick: Some(TickId::from_raw(1)),
                 is_keyframe: false,
@@ -522,13 +603,14 @@ mod tests {
         client.update(std::time::Duration::from_nanos(1));
         let dropped_ack = peer.recv().unwrap().unwrap();
         assert_eq!(
-            crcbl_net::decode_ack(&dropped_ack.payload).unwrap(),
+            crcbl_net::decode_ack(&dropped_ack.payload).unwrap().tick,
             TickId::from_raw(2)
         );
 
         peer.send_unreliable(Message {
             kind: MessageKind::Unreliable,
             payload: delta_payload(crcbl_net::Delta {
+                sector: SectorId::ZERO,
                 tick: TickId::from_raw(3),
                 baseline_tick: Some(TickId::from_raw(1)),
                 is_keyframe: false,
@@ -540,7 +622,9 @@ mod tests {
 
         assert_eq!(client.last_applied_tick(), TickId::from_raw(2));
         assert_eq!(
-            crcbl_net::decode_ack(&peer.recv().unwrap().unwrap().payload).unwrap(),
+            crcbl_net::decode_ack(&peer.recv().unwrap().unwrap().payload)
+                .unwrap()
+                .tick,
             TickId::from_raw(2)
         );
     }
@@ -561,6 +645,7 @@ mod tests {
         peer.send_unreliable(Message {
             kind: MessageKind::Unreliable,
             payload: delta_payload(crcbl_net::Delta {
+                sector: SectorId::ZERO,
                 tick: TickId::from_raw(2),
                 baseline_tick: Some(TickId::from_raw(1)),
                 is_keyframe: false,
@@ -572,7 +657,9 @@ mod tests {
 
         assert_eq!(client.last_applied_tick(), TickId::from_raw(2));
         assert_eq!(
-            crcbl_net::decode_ack(&peer.recv().unwrap().unwrap().payload).unwrap(),
+            crcbl_net::decode_ack(&peer.recv().unwrap().unwrap().payload)
+                .unwrap()
+                .tick,
             TickId::from_raw(2)
         );
     }
@@ -686,8 +773,93 @@ mod tests {
 
         // The client should have sent an ack back.
         let ack_msg = server_transport.recv().unwrap().unwrap();
-        let ack_tick = crcbl_net::decode_ack(&ack_msg.payload).unwrap();
+        let ack_tick = crcbl_net::decode_ack(&ack_msg.payload).unwrap().tick;
         assert_eq!(ack_tick, TickId::from_raw(1));
+    }
+
+    #[test]
+    fn reconstructs_same_tick_different_sector_values_independently() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = Client::new(empty_world(), client_transport, 60);
+        let left = SectorId { x: 1, y: 0, z: 0 };
+        let right = SectorId { x: 2, y: 0, z: 0 };
+        client.set_subscribed_sectors([left, right]);
+
+        for (sector, value) in [(left, 11u32), (right, 22u32)] {
+            peer.send_unreliable(Message {
+                kind: MessageKind::Unreliable,
+                payload: keyframe_snapshot_for_sector(
+                    sector,
+                    7,
+                    &[(42, value.to_le_bytes().to_vec())],
+                ),
+            })
+            .unwrap();
+        }
+        client.update(std::time::Duration::ZERO);
+
+        let first_ack = crcbl_net::decode_ack(&peer.recv().unwrap().unwrap().payload).unwrap();
+        let second_ack = crcbl_net::decode_ack(&peer.recv().unwrap().unwrap().payload).unwrap();
+        assert_eq!(first_ack.tick, TickId::from_raw(7));
+        assert_eq!(second_ack.tick, TickId::from_raw(7));
+        assert_ne!(first_ack.sector, second_ack.sector);
+        assert_eq!(client.last_applied_tick_in(left), TickId::from_raw(7));
+        assert_eq!(client.last_applied_tick_in(right), TickId::from_raw(7));
+        assert_eq!(client.baseline_entity_count_in(left), 1);
+        assert_eq!(client.baseline_entity_count_in(right), 1);
+        assert_ne!(
+            client.baseline_state_hash_in(left),
+            client.baseline_state_hash_in(right),
+            "same tick and system id with distinct values must retain independent baselines"
+        );
+        assert!(client.current_snapshots.contains_key(&left));
+        assert!(client.current_snapshots.contains_key(&right));
+    }
+
+    #[test]
+    fn unknown_sectors_do_not_allocate_replication_state() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = Client::new(empty_world(), client_transport, 60);
+
+        for x in 1..=100 {
+            peer.send_unreliable(Message {
+                kind: MessageKind::Unreliable,
+                payload: keyframe_snapshot_for_sector(SectorId { x, y: 0, z: 0 }, 1, &[]),
+            })
+            .unwrap();
+        }
+        client.update(std::time::Duration::ZERO);
+
+        assert!(client.baselines.is_empty());
+        assert!(client.current_snapshots.is_empty());
+        assert!(client.prev_snapshots.is_empty());
+        assert_eq!(client.processing_error_count(), 100);
+        let hello = peer
+            .recv()
+            .unwrap()
+            .expect("client sends its initial hello");
+        assert!(crcbl_net::decode_hello(&hello.payload).is_ok());
+        assert!(peer.recv().unwrap().is_none());
+    }
+
+    #[test]
+    fn changing_subscriptions_drops_inactive_sector_state() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = Client::new(empty_world(), client_transport, 60);
+        let sector = SectorId { x: 1, y: 0, z: 0 };
+        client.set_subscribed_sectors([sector]);
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: keyframe_snapshot_for_sector(sector, 1, &[]),
+        })
+        .unwrap();
+        client.update(std::time::Duration::ZERO);
+        assert!(client.baselines.contains_key(&sector));
+
+        client.set_subscribed_sectors([]);
+        assert!(client.baselines.is_empty());
+        assert!(client.current_snapshots.is_empty());
+        assert!(client.prev_snapshots.is_empty());
     }
 
     // ── Interpolation buffer sliding (delta-encoded) ───────────────────────

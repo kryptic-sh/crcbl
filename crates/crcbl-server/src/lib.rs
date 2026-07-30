@@ -14,8 +14,8 @@ use crcbl_core::{FrameClock, TickId};
 use crcbl_ecs::{Inspector, World};
 use crcbl_net::{
     Baseline, DeltaCodec, HandshakeGate, HandshakeResult, Message, MessageKind,
-    ProtocolCompatibility, RejectReason, ResumeToken, SessionConfig, SessionId, SessionManager,
-    SessionState, SnapshotWriter, Transport,
+    ProtocolCompatibility, RejectReason, ResumeToken, SectorId, SessionConfig, SessionId,
+    SessionManager, SessionState, SnapshotWriter, Transport,
 };
 
 #[cfg(test)]
@@ -153,8 +153,8 @@ impl<T: Transport> Server<T> {
                 Ok(Some(msg)) => {
                     if let Ok(hello) = crcbl_net::decode_hello(&msg.payload) {
                         self.handle_hello(hello);
-                    } else if let Ok(tick) = crcbl_net::decode_ack(&msg.payload) {
-                        self.session.handle_ack(tick);
+                    } else if let Ok(ack) = crcbl_net::decode_ack(&msg.payload) {
+                        self.session.handle_ack(ack.sector, ack.tick);
                     } else if crcbl_net::decode_client_to_server(&msg.payload).is_err() {
                         self.processing_error_count += 1;
                     }
@@ -327,7 +327,8 @@ impl<T: Transport> Server<T> {
     /// client's baseline, and send.
     fn emit_snapshot(&mut self) {
         let tick = self.clock.tick();
-        let mut writer = SnapshotWriter::new(tick);
+        let sector = SectorId::ZERO;
+        let mut writer = SnapshotWriter::new_with_sector(sector, tick);
 
         let stats = Inspector::collect(&self.world);
         for (idx, stat) in stats.iter().enumerate() {
@@ -354,9 +355,15 @@ impl<T: Transport> Server<T> {
                 return;
             }
         };
-        let last_acked = self.session.last_acked_tick();
-        let previous = last_acked.and_then(|t| self.session.baseline_store().get(t).cloned());
-        let delta = match DeltaCodec::encode(tick, &systems, previous.as_ref()) {
+        let last_acked = self.session.last_acked_tick(sector);
+        let previous = last_acked.and_then(|tick| {
+            self.session
+                .baseline_store(sector)
+                .and_then(|store| store.get(tick))
+                .cloned()
+        });
+        let delta = match DeltaCodec::encode_with_sector(sector, tick, &systems, previous.as_ref())
+        {
             Ok(delta) => delta,
             Err(_) => {
                 self.processing_error_count += 1;
@@ -373,7 +380,7 @@ impl<T: Transport> Server<T> {
         };
 
         // Store this full snapshot as a new baseline for future deltas.
-        self.session.baseline_store_mut().insert(baseline);
+        self.session.baseline_store_mut(sector).insert(baseline);
 
         if self
             .transport
@@ -539,16 +546,16 @@ mod tests {
         let tick = TickId::from_raw(1);
         server
             .session
-            .baseline_store_mut()
+            .baseline_store_mut(SectorId::ZERO)
             .insert(Baseline::from_trusted_snapshot(tick, &[]).expect("empty snapshot is valid"));
-        server.session.handle_ack(tick);
+        server.session.handle_ack(SectorId::ZERO, tick);
 
         server.rotate_session().expect("OS CSPRNG available");
 
         assert_ne!(server.session.session_id(), old_session_id);
         assert_ne!(server.resume_token, old_token);
-        assert_eq!(server.session.last_acked_tick(), None);
-        assert!(server.session.baseline_store().newest().is_none());
+        assert_eq!(server.session.last_acked_tick(SectorId::ZERO), None);
+        assert!(server.session.baseline_store(SectorId::ZERO).is_none());
     }
 
     #[test]
@@ -666,7 +673,7 @@ mod tests {
         let mut server = Server::new(world_with_one_entity(), server_transport, 60);
 
         // Send an ack from the "client" side.
-        let ack_payload = crcbl_net::encode_ack(TickId::from_raw(1));
+        let ack_payload = crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(1));
         client_transport
             .send_unreliable(Message {
                 kind: MessageKind::Unreliable,

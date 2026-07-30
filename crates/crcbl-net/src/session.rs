@@ -4,12 +4,13 @@
 //! state, maintains a ring of [`crate::delta::Baseline`] snapshots for
 //! delta encoding, and handles the reconnect grace window.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crcbl_core::TickId;
 
 use crate::delta::BaselineStore;
-use crate::types::SessionId;
+use crate::types::{SectorId, SessionId};
 
 // ── SessionState ──────────────────────────────────────────────────────────────
 
@@ -57,8 +58,9 @@ pub struct SessionManager {
     state: SessionState,
     session_id: SessionId,
     reconnect_deadline: Option<Duration>,
-    last_acked_tick: Option<TickId>,
-    baseline_store: BaselineStore,
+    last_acked_ticks: HashMap<SectorId, TickId>,
+    baseline_stores: HashMap<SectorId, BaselineStore>,
+    baseline_ring_capacity: usize,
     /// Set once on first successful handshake; validated on reconnect.
     engine_build_id: Option<u64>,
     schema_hash: Option<u64>,
@@ -71,8 +73,9 @@ impl SessionManager {
             state: SessionState::Disconnected,
             session_id,
             reconnect_deadline: None,
-            last_acked_tick: None,
-            baseline_store: BaselineStore::new(config.baseline_ring_capacity),
+            last_acked_ticks: HashMap::new(),
+            baseline_stores: HashMap::new(),
+            baseline_ring_capacity: config.baseline_ring_capacity,
             engine_build_id: None,
             schema_hash: None,
         }
@@ -90,19 +93,21 @@ impl SessionManager {
         self.session_id
     }
 
-    /// The last tick acknowledged by the client.
-    pub fn last_acked_tick(&self) -> Option<TickId> {
-        self.last_acked_tick
+    /// The last tick acknowledged by the client for `sector`.
+    pub fn last_acked_tick(&self, sector: SectorId) -> Option<TickId> {
+        self.last_acked_ticks.get(&sector).copied()
     }
 
-    /// Immutable reference to the baseline store.
-    pub fn baseline_store(&self) -> &BaselineStore {
-        &self.baseline_store
+    /// Immutable reference to the baseline store for `sector`.
+    pub fn baseline_store(&self, sector: SectorId) -> Option<&BaselineStore> {
+        self.baseline_stores.get(&sector)
     }
 
-    /// Mutable reference to the baseline store.
-    pub fn baseline_store_mut(&mut self) -> &mut BaselineStore {
-        &mut self.baseline_store
+    /// Mutable reference to the baseline store for `sector`, creating it on demand.
+    pub fn baseline_store_mut(&mut self, sector: SectorId) -> &mut BaselineStore {
+        self.baseline_stores
+            .entry(sector)
+            .or_insert_with(|| BaselineStore::new(self.baseline_ring_capacity))
     }
 
     // ── Lifecycle transitions ────────────────────────────────────────────
@@ -141,14 +146,16 @@ impl SessionManager {
         self.schema_hash = Some(schema_hash);
     }
 
-    /// Record the client's ack of a retained server tick.
-    pub fn handle_ack(&mut self, tick: TickId) {
-        if self.baseline_store.get(tick).is_some()
+    /// Record the client's ack of a retained server tick in `sector`.
+    pub fn handle_ack(&mut self, sector: SectorId, tick: TickId) {
+        if self
+            .baseline_store(sector)
+            .is_some_and(|store| store.get(tick).is_some())
             && self
-                .last_acked_tick
+                .last_acked_tick(sector)
                 .is_none_or(|last_acked| tick > last_acked)
         {
-            self.last_acked_tick = Some(tick);
+            self.last_acked_ticks.insert(sector, tick);
         }
     }
 
@@ -263,7 +270,7 @@ mod tests {
         let mgr = SessionManager::new(SessionId(1), &config());
         assert_eq!(mgr.state(), SessionState::Disconnected);
         assert_eq!(mgr.session_id(), SessionId(1));
-        assert_eq!(mgr.last_acked_tick(), None);
+        assert_eq!(mgr.last_acked_tick(SectorId::ZERO), None);
     }
 
     // ── Connect flow ──────────────────────────────────────────────────────
@@ -381,7 +388,7 @@ mod tests {
     // ── Ack tracking ──────────────────────────────────────────────────────
 
     fn insert_baseline(mgr: &mut SessionManager, tick: u64) {
-        mgr.baseline_store_mut().insert(
+        mgr.baseline_store_mut(SectorId::ZERO).insert(
             crate::delta::Baseline::from_trusted_snapshot(TickId::from_raw(tick), &[])
                 .expect("empty snapshot is valid"),
         );
@@ -392,9 +399,12 @@ mod tests {
         let mut mgr = SessionManager::new(SessionId(9), &config());
         insert_baseline(&mut mgr, 1);
         insert_baseline(&mut mgr, 2);
-        mgr.handle_ack(TickId::from_raw(1));
-        mgr.handle_ack(TickId::from_raw(2));
-        assert_eq!(mgr.last_acked_tick(), Some(TickId::from_raw(2)));
+        mgr.handle_ack(SectorId::ZERO, TickId::from_raw(1));
+        mgr.handle_ack(SectorId::ZERO, TickId::from_raw(2));
+        assert_eq!(
+            mgr.last_acked_tick(SectorId::ZERO),
+            Some(TickId::from_raw(2))
+        );
     }
 
     #[test]
@@ -402,18 +412,75 @@ mod tests {
         let mut mgr = SessionManager::new(SessionId(10), &config());
         insert_baseline(&mut mgr, 1);
         insert_baseline(&mut mgr, 2);
-        mgr.handle_ack(TickId::from_raw(2));
-        mgr.handle_ack(TickId::from_raw(2));
-        mgr.handle_ack(TickId::from_raw(1));
-        assert_eq!(mgr.last_acked_tick(), Some(TickId::from_raw(2)));
+        mgr.handle_ack(SectorId::ZERO, TickId::from_raw(2));
+        mgr.handle_ack(SectorId::ZERO, TickId::from_raw(2));
+        mgr.handle_ack(SectorId::ZERO, TickId::from_raw(1));
+        assert_eq!(
+            mgr.last_acked_tick(SectorId::ZERO),
+            Some(TickId::from_raw(2))
+        );
     }
 
     #[test]
     fn unknown_ack_is_ignored() {
         let mut mgr = SessionManager::new(SessionId(11), &config());
         insert_baseline(&mut mgr, 1);
-        mgr.handle_ack(TickId::from_raw(2));
-        assert_eq!(mgr.last_acked_tick(), None);
+        mgr.handle_ack(SectorId::ZERO, TickId::from_raw(2));
+        assert_eq!(mgr.last_acked_tick(SectorId::ZERO), None);
+    }
+
+    #[test]
+    fn acks_are_independent_for_same_tick_in_different_sectors() {
+        let mut mgr = SessionManager::new(SessionId(13), &config());
+        let left = SectorId { x: 1, y: 0, z: 0 };
+        let right = SectorId { x: 2, y: 0, z: 0 };
+        for sector in [left, right] {
+            mgr.baseline_store_mut(sector).insert(
+                crate::delta::Baseline::from_trusted_snapshot(TickId::from_raw(7), &[])
+                    .expect("empty snapshot is valid"),
+            );
+        }
+
+        mgr.handle_ack(left, TickId::from_raw(7));
+        assert_eq!(mgr.last_acked_tick(left), Some(TickId::from_raw(7)));
+        assert_eq!(mgr.last_acked_tick(right), None);
+        mgr.handle_ack(right, TickId::from_raw(7));
+        assert_eq!(mgr.last_acked_tick(right), Some(TickId::from_raw(7)));
+    }
+
+    #[test]
+    fn eviction_in_one_sector_does_not_change_another_sector() {
+        let config = SessionConfig {
+            baseline_ring_capacity: 2,
+            ..config()
+        };
+        let mut mgr = SessionManager::new(SessionId(14), &config);
+        let left = SectorId { x: 1, y: 0, z: 0 };
+        let right = SectorId { x: 2, y: 0, z: 0 };
+        let baseline = |tick| {
+            crate::delta::Baseline::from_trusted_snapshot(TickId::from_raw(tick), &[])
+                .expect("empty snapshot is valid")
+        };
+
+        mgr.baseline_store_mut(right).insert(baseline(1));
+        mgr.handle_ack(right, TickId::from_raw(1));
+        for tick in 1..=3 {
+            mgr.baseline_store_mut(left).insert(baseline(tick));
+        }
+
+        assert!(
+            mgr.baseline_store(left)
+                .unwrap()
+                .get(TickId::from_raw(1))
+                .is_none()
+        );
+        assert!(
+            mgr.baseline_store(right)
+                .unwrap()
+                .get(TickId::from_raw(1))
+                .is_some()
+        );
+        assert_eq!(mgr.last_acked_tick(right), Some(TickId::from_raw(1)));
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────
@@ -422,14 +489,17 @@ mod tests {
     fn baseline_store_accessors() {
         let mut mgr = SessionManager::new(SessionId(11), &config());
         // BaselineStore starts empty.
-        assert!(mgr.baseline_store().newest().is_none());
+        assert!(mgr.baseline_store(SectorId::ZERO).is_none());
         // Mutable access.
         use crate::delta::Baseline;
-        mgr.baseline_store_mut().insert(
+        mgr.baseline_store_mut(SectorId::ZERO).insert(
             Baseline::from_trusted_snapshot(TickId::from_raw(1), &[])
                 .expect("empty snapshot is valid"),
         );
-        assert!(mgr.baseline_store().newest().is_some());
+        assert!(
+            mgr.baseline_store(SectorId::ZERO)
+                .is_some_and(|store| store.newest().is_some())
+        );
     }
 
     // ── Debug coverage ────────────────────────────────────────────────────

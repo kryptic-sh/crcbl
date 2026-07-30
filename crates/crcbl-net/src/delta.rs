@@ -16,7 +16,7 @@ use std::hash::{Hash, Hasher};
 use crcbl_core::TickId;
 
 use crate::messages::SystemSnapshot;
-use crate::types::{EntityBits, EntityData};
+use crate::types::{EntityBits, EntityData, SectorId};
 
 /// Maximum accepted delta packet size. Deltas target a single UDP datagram.
 pub const MAX_DELTA_BYTES: usize = 64 * 1024;
@@ -316,6 +316,7 @@ pub struct SystemDelta {
 /// A delta-encoded snapshot against a known baseline.
 #[derive(Debug, Clone)]
 pub struct Delta {
+    pub sector: SectorId,
     pub tick: TickId,
     pub baseline_tick: Option<TickId>,
     pub is_keyframe: bool,
@@ -342,11 +343,20 @@ impl DeltaCodec {
         current: &[SystemSnapshot],
         baseline: Option<&Baseline>,
     ) -> Result<Delta, BaselineDecodeError> {
-        if baseline.is_none() {
-            return Self::encode_keyframe(tick, current);
-        }
+        Self::encode_with_sector(SectorId::ZERO, tick, current, baseline)
+    }
 
-        let baseline = baseline.expect("checked above");
+    /// Compute a sector-scoped delta from `current` snapshots vs an optional baseline.
+    pub fn encode_with_sector(
+        sector: SectorId,
+        tick: TickId,
+        current: &[SystemSnapshot],
+        baseline: Option<&Baseline>,
+    ) -> Result<Delta, BaselineDecodeError> {
+        let Some(baseline) = baseline else {
+            return Self::encode_keyframe(sector, tick, current);
+        };
+
         let mut systems = Vec::new();
         let mut seen_system_ids = HashSet::new();
 
@@ -419,6 +429,7 @@ impl DeltaCodec {
         }
 
         Ok(Delta {
+            sector,
             tick,
             baseline_tick: Some(baseline.tick),
             is_keyframe: false,
@@ -428,6 +439,7 @@ impl DeltaCodec {
 
     /// Keyframe path: every entity in every system goes into `added`.
     fn encode_keyframe(
+        sector: SectorId,
         tick: TickId,
         current: &[SystemSnapshot],
     ) -> Result<Delta, BaselineDecodeError> {
@@ -452,6 +464,7 @@ impl DeltaCodec {
         }
 
         Ok(Delta {
+            sector,
             tick,
             baseline_tick: None,
             is_keyframe: true,
@@ -642,6 +655,7 @@ fn baseline_to_snapshots(baseline: &Baseline) -> Vec<SystemSnapshot> {
 /// Wire format (all LE):
 ///
 /// ```text
+/// sector:          x, y, z as i64
 /// tick:            u64
 /// baseline_tick:   u64 (None = 0)
 /// is_keyframe:     u8
@@ -657,7 +671,7 @@ fn baseline_to_snapshots(baseline: &Baseline) -> Vec<SystemSnapshot> {
 /// ```
 pub fn encode_delta(delta: &Delta) -> Result<Vec<u8>, BaselineDecodeError> {
     validate_delta_operations(delta)?;
-    let mut capacity = 21usize;
+    let mut capacity = 45usize;
     for system in &delta.systems {
         capacity = capacity
             .checked_add(16)
@@ -682,6 +696,11 @@ pub fn encode_delta(delta: &Delta) -> Result<Vec<u8>, BaselineDecodeError> {
         return Err(BaselineDecodeError::BlobTooLarge(capacity));
     }
     let mut buf = Vec::with_capacity(capacity);
+
+    // sector
+    buf.extend_from_slice(&delta.sector.x.to_le_bytes());
+    buf.extend_from_slice(&delta.sector.y.to_le_bytes());
+    buf.extend_from_slice(&delta.sector.z.to_le_bytes());
 
     // tick
     buf.extend_from_slice(&delta.tick.get().to_le_bytes());
@@ -747,6 +766,17 @@ fn decode_delta_inner(payload: &[u8], max_systems: usize) -> Result<Delta, Delta
         return Err(DeltaDecodeError::InvalidLength(payload.len() as u32));
     }
     let mut cursor = 0usize;
+
+    // sector: 3 × i64 LE
+    if cursor + 24 > payload.len() {
+        return Err(DeltaDecodeError::TooShort);
+    }
+    let sector = SectorId {
+        x: i64::from_le_bytes(payload[cursor..cursor + 8].try_into().unwrap()),
+        y: i64::from_le_bytes(payload[cursor + 8..cursor + 16].try_into().unwrap()),
+        z: i64::from_le_bytes(payload[cursor + 16..cursor + 24].try_into().unwrap()),
+    };
+    cursor += 24;
 
     // tick: u64 LE
     if cursor + 8 > payload.len() {
@@ -922,6 +952,7 @@ fn decode_delta_inner(payload: &[u8], max_systems: usize) -> Result<Delta, Delta
     }
 
     Ok(Delta {
+        sector,
         tick,
         baseline_tick,
         is_keyframe,
@@ -1140,6 +1171,7 @@ mod tests {
     #[test]
     fn untrusted_decoder_rejects_more_than_256_systems() {
         let delta = Delta {
+            sector: SectorId::ZERO,
             tick: TickId::from_raw(1),
             baseline_tick: None,
             is_keyframe: true,
@@ -1452,12 +1484,15 @@ mod tests {
             (1, &[(10, b"a"), (20, b"bb_modified"), (40, b"new")]),
             (2, &[]),
         ]);
-        let delta = DeltaCodec::encode(tick, &snaps_next, Some(&baseline)).expect("valid snapshot");
+        let sector = SectorId { x: -4, y: 5, z: 6 };
+        let delta = DeltaCodec::encode_with_sector(sector, tick, &snaps_next, Some(&baseline))
+            .expect("valid snapshot");
 
         let encoded = encode_delta(&delta).expect("valid delta");
         let decoded = decode_delta(&encoded).expect("decode should succeed");
         let re_encoded = encode_delta(&decoded).expect("valid delta");
 
+        assert_eq!(decoded.sector, sector);
         assert_eq!(encoded, re_encoded);
     }
 
@@ -1484,6 +1519,31 @@ mod tests {
             // Must never panic, must return an error.
             assert!(result.is_err(), "truncated at {len} bytes should error");
         }
+    }
+
+    #[test]
+    fn decode_rejects_sector_header_boundaries_and_trailing_bytes() {
+        let delta = DeltaCodec::encode_with_sector(
+            SectorId { x: -1, y: 2, z: 3 },
+            TickId::from_raw(1),
+            &[],
+            None,
+        )
+        .expect("valid keyframe");
+        let full = encode_delta(&delta).expect("valid delta");
+
+        for len in 0..24 {
+            assert!(
+                matches!(decode_delta(&full[..len]), Err(DeltaDecodeError::TooShort)),
+                "sector header truncated at {len} bytes"
+            );
+        }
+        let mut trailing = full;
+        trailing.push(0);
+        assert!(matches!(
+            decode_delta(&trailing),
+            Err(DeltaDecodeError::TrailingBytes(1))
+        ));
     }
 
     /// 12. First tick, no baseline → keyframe.
@@ -1574,6 +1634,7 @@ mod tests {
             .expect("valid test snapshots");
         let original_hash = baseline.state_hash();
         let delta = Delta {
+            sector: SectorId::ZERO,
             tick: TickId::from_raw(3),
             baseline_tick: Some(TickId::from_raw(1)),
             is_keyframe: false,
@@ -1598,6 +1659,7 @@ mod tests {
             .expect("valid test snapshots");
         let original_hash = baseline.state_hash();
         let delta = Delta {
+            sector: SectorId::ZERO,
             tick: TickId::from_raw(2),
             baseline_tick: Some(TickId::from_raw(2)),
             is_keyframe: false,
@@ -1619,6 +1681,7 @@ mod tests {
             .expect("valid test snapshots");
         let original_hash = baseline.state_hash();
         let delta = Delta {
+            sector: SectorId::ZERO,
             tick: TickId::from_raw(3),
             baseline_tick: None,
             is_keyframe: true,
@@ -1679,6 +1742,7 @@ mod tests {
             let mut candidate = baseline.clone();
             let hash = candidate.state_hash();
             let delta = Delta {
+                sector: SectorId::ZERO,
                 tick: TickId::from_raw(3),
                 baseline_tick: Some(TickId::from_raw(2)),
                 is_keyframe: false,
@@ -1696,6 +1760,7 @@ mod tests {
     #[test]
     fn oversized_component_reports_component_too_large() {
         let delta = Delta {
+            sector: SectorId::ZERO,
             tick: TickId::from_raw(1),
             baseline_tick: None,
             is_keyframe: true,
@@ -1790,27 +1855,29 @@ mod tests {
     #[test]
     fn decode_delta_rejects_hostile_metadata_and_lengths() {
         let mut invalid_metadata = encode_delta(&Delta {
+            sector: SectorId::ZERO,
             tick: TickId::from_raw(1),
             baseline_tick: Some(TickId::from_raw(2)),
             is_keyframe: false,
             systems: Vec::new(),
         })
         .expect("valid delta");
-        invalid_metadata[16] = 1;
+        invalid_metadata[40] = 1;
         assert!(matches!(
             decode_delta(&invalid_metadata),
             Err(DeltaDecodeError::InvalidMetadata)
         ));
 
-        let mut huge_system_count = vec![0; 21];
-        huge_system_count[16] = 1;
-        huge_system_count[17..21].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut huge_system_count = vec![0; 45];
+        huge_system_count[40] = 1;
+        huge_system_count[41..45].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(matches!(
             decode_delta(&huge_system_count),
             Err(DeltaDecodeError::InvalidLength(_))
         ));
 
         let mut huge_component = encode_delta(&Delta {
+            sector: SectorId::ZERO,
             tick: TickId::from_raw(1),
             baseline_tick: None,
             is_keyframe: true,
@@ -1826,7 +1893,7 @@ mod tests {
             }],
         })
         .expect("valid delta");
-        huge_component[45..49].copy_from_slice(&u32::MAX.to_le_bytes());
+        huge_component[69..73].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(matches!(
             decode_delta(&huge_component),
             Err(DeltaDecodeError::InvalidLength(_))
@@ -1855,13 +1922,14 @@ mod tests {
     #[test]
     fn decode_rejects_non_canonical_keyframe_flag() {
         let mut payload = encode_delta(&Delta {
+            sector: SectorId::ZERO,
             tick: TickId::from_raw(1),
             baseline_tick: None,
             is_keyframe: true,
             systems: Vec::new(),
         })
         .expect("valid delta");
-        payload[16] = 2;
+        payload[40] = 2;
         assert!(decode_delta(&payload).is_err());
     }
 
@@ -1902,6 +1970,9 @@ mod tests {
     fn decode_delta_rejects_duplicate_entities_and_systems() {
         let header = |system_count: u32| {
             let mut payload = Vec::new();
+            payload.extend_from_slice(&0i64.to_le_bytes());
+            payload.extend_from_slice(&0i64.to_le_bytes());
+            payload.extend_from_slice(&0i64.to_le_bytes());
             payload.extend_from_slice(&1u64.to_le_bytes());
             payload.extend_from_slice(&0u64.to_le_bytes());
             payload.push(1);
@@ -1954,6 +2025,7 @@ mod tests {
             Baseline::from_trusted_snapshot(TickId::ZERO, &[]).expect("empty baseline");
         for entity_bits in 0..MAX_BASELINE_ENTITIES as u64 {
             let delta = Delta {
+                sector: SectorId::ZERO,
                 tick: TickId::from_raw(entity_bits + 1),
                 baseline_tick: Some(baseline.tick),
                 is_keyframe: false,
@@ -1973,6 +2045,7 @@ mod tests {
         let hash = baseline.state_hash();
         let tick = baseline.tick;
         let overflow = Delta {
+            sector: SectorId::ZERO,
             tick: TickId::from_raw(MAX_BASELINE_ENTITIES as u64 + 1),
             baseline_tick: Some(tick),
             is_keyframe: false,

@@ -412,24 +412,38 @@ pub fn decode_handshake_result(payload: &[u8]) -> Result<HandshakeResult, Decode
 
 // ── Ack ───────────────────────────────────────────────────────────────────────
 
-/// Tag 0x30 = Ack { tick: u64 LE }
-pub fn encode_ack(tick: TickId) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(1 + 8);
+/// Tag 0x30 = Ack { sector: SectorId (3×i64 LE), tick: u64 LE }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ack {
+    pub sector: SectorId,
+    pub tick: TickId,
+}
+
+pub fn encode_ack(sector: SectorId, tick: TickId) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + 24 + 8);
     buf.push(0x30);
+    buf.extend_from_slice(&sector.x.to_le_bytes());
+    buf.extend_from_slice(&sector.y.to_le_bytes());
+    buf.extend_from_slice(&sector.z.to_le_bytes());
     buf.extend_from_slice(&tick.get().to_le_bytes());
     buf
 }
 
-pub fn decode_ack(payload: &[u8]) -> Result<TickId, DecodeError> {
+pub fn decode_ack(payload: &[u8]) -> Result<Ack, DecodeError> {
     validate_payload_size(payload)?;
     let mut r = ByteReader::new(payload);
     let tag = r.read_u8()?;
     if tag != 0x30 {
         return Err(DecodeError::UnknownTag { tag });
     }
-    let raw = r.read_u64()?;
+    let sector = SectorId {
+        x: r.read_i64()?,
+        y: r.read_i64()?,
+        z: r.read_i64()?,
+    };
+    let tick = TickId::from_raw(r.read_u64()?);
     r.assert_empty()?;
-    Ok(TickId::from_raw(raw))
+    Ok(Ack { sector, tick })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -619,10 +633,20 @@ mod tests {
 
     #[test]
     fn roundtrip_ack() {
+        let sector = SectorId { x: -1, y: 2, z: 3 };
         let tick = TickId::from_raw(0xABCD);
-        let encoded = encode_ack(tick);
+        let encoded = encode_ack(sector, tick);
         let decoded = decode_ack(&encoded).unwrap();
-        assert_eq!(decoded.get(), 0xABCD);
+        assert_eq!(decoded.sector, sector);
+        assert_eq!(decoded.tick, tick);
+    }
+
+    #[test]
+    fn ack_rejects_truncated_sector() {
+        assert!(matches!(
+            decode_ack(&[0x30; 24]),
+            Err(DecodeError::TooShort { .. })
+        ));
     }
 
     // ── Error tests ────────────────────────────────────────────────────────
@@ -819,7 +843,7 @@ mod tests {
         ));
 
         // Ack with trailing bytes
-        let mut enc = encode_ack(TickId::from_raw(1));
+        let mut enc = encode_ack(SectorId::ZERO, TickId::from_raw(1));
         enc.push(0xCC);
         assert!(matches!(
             decode_ack(&enc),
