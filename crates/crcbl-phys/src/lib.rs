@@ -41,3 +41,13 @@ pub use query::{
 };
 pub use system::PhysicsSystem;
 pub use world::{ColliderId, PhysicsWorld};
+
+/// Builds a test [`Entity`] from raw index + generation for use in
+/// integration tests.
+///
+/// Real entities are only produced by `crcbl_ecs::World::spawn`; this
+/// exists so tests can fabricate handles without a full `World`.
+pub fn test_entity(index: u32) -> crcbl_ecs::Entity {
+    crcbl_ecs::Entity::from_bits(((1u64) << 32) | index as u64)
+        .expect("test entity must have non-zero generation")
+}
