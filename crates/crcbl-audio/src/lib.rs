@@ -19,6 +19,7 @@
 
 pub mod mixer;
 pub mod qoa;
+pub mod spatial;
 pub mod wav;
 
 use std::sync::Arc;
