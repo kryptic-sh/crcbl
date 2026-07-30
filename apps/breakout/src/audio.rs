@@ -23,6 +23,8 @@ struct Voice {
     playhead: usize,
     volume: f32,
     pitch: f32,
+    gain_l: f32,
+    gain_r: f32,
 }
 
 /// Thread-safe voice queue. Game thread pushes, audio thread drains.
@@ -71,8 +73,8 @@ impl Voice {
             let idx = pos as usize & !1; // even index for stereo pair
             let s_l = data[idx];
             let s_r = data.get(idx + 1).copied().unwrap_or(0.0);
-            frame[0] += s_l * self.volume;
-            frame[1] += s_r * self.volume;
+            frame[0] += s_l * self.volume * self.gain_l;
+            frame[1] += s_r * self.volume * self.gain_r;
             pos += step;
         }
 
@@ -122,15 +124,23 @@ impl Audio {
         }
     }
 
-    /// Play a sound. `id` is `SOUND_BOUNCE` (1) or `SOUND_BRICK` (2).
-    pub fn play(&mut self, id: u32) {
+    /// Play a sound with spatial panning based on `emitter_x` (world X).
+    /// Listener is assumed at the screen centre (X=0, Z=1 in front).
+    pub fn play_panned(&mut self, id: u32, emitter_x: f32) {
         let idx = id as usize - 1;
         if let Some(sound) = self.sounds.get(idx) {
+            let cue = crcbl_audio::spatial::compute_cue(
+                [0.0, 0.0, 0.0],       // listener at origin
+                [emitter_x, 0.0, 1.0], // emitter in front plane
+                &crcbl_audio::spatial::CueGrammar::default(),
+            );
             self.queue.push(Voice {
                 sound: Arc::clone(sound),
                 playhead: 0,
-                volume: 0.5,
-                pitch: 1.0,
+                volume: cue.volume * 0.5,
+                pitch: cue.pitch_ratio,
+                gain_l: cue.gain_left,
+                gain_r: cue.gain_right,
             });
         }
     }

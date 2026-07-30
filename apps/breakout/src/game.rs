@@ -73,6 +73,8 @@ pub struct Game {
     pub lives: u32,
     pub state: GameState,
     pub audio: crate::audio::Audio,
+    /// Current ball X for spatial audio panning.
+    pub ball_x: f64,
     /// Whether a collision sound was queued this tick (for HUD logging).
     sound_played_this_tick: bool,
 }
@@ -286,6 +288,7 @@ impl Game {
             lives: 3,
             state: GameState::WaitingForLaunch,
             audio: crate::audio::Audio::new(headless),
+            ball_x: 0.0,
             sound_played_this_tick: false,
         })
     }
@@ -362,6 +365,7 @@ impl Game {
                 lives: &mut self.lives,
                 state: &mut self.state,
                 launched: &mut self.launched,
+                ball_x: &mut self.ball_x,
             };
             let audio = &mut self.audio;
             self.sound_played_this_tick = run_game_logic(server, ball, paddle, &mut ctx, audio);
@@ -422,6 +426,7 @@ struct GameCtx<'a> {
     lives: &'a mut u32,
     state: &'a mut GameState,
     launched: &'a mut bool,
+    ball_x: &'a mut f64,
 }
 
 /// Run the game logic (collision, scoring, lives) after a server tick.
@@ -442,6 +447,11 @@ fn run_game_logic(
             if sys.name() == "physics"
                 && let Some(phys) = sys.as_any_mut().downcast_mut::<PhysicsSystem>()
             {
+                // Read ball X position for spatial audio.
+                if let Some(transform) = phys.transform(ball_entity) {
+                    *ctx.ball_x = transform.position.x;
+                }
+
                 let dt = 1.0 / TICK_HZ as f64;
 
                 let hit = if let (Some(body), Some(transform)) =
@@ -473,7 +483,7 @@ fn run_game_logic(
                         ctx.bricks.swap_remove(idx);
                         *ctx.score += 10;
                         to_despawn.push(hit_entity);
-                        audio.play(crate::audio::SOUND_BRICK);
+                        audio.play_panned(crate::audio::SOUND_BRICK, *ctx.ball_x as f32);
                         sound_played = true;
                         if vel.dot(normal) < 0.0 {
                             let reflected = vel - 2.0 * vel.dot(normal) * normal;
@@ -492,7 +502,7 @@ fn run_game_logic(
                         let mut new_transform = transform_val;
                         new_transform.position = hit_info.point + normal * BALL_RADIUS * 1.01;
                         phys.set_transform(ball_entity, new_transform);
-                        audio.play(crate::audio::SOUND_BOUNCE);
+                        audio.play_panned(crate::audio::SOUND_BOUNCE, *ctx.ball_x as f32);
                         sound_played = true;
                     }
                 }
