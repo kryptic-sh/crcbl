@@ -25,17 +25,22 @@ is complete: protocol negotiation and reconnect, condition simulation,
 per-sector ack-baseline streams, replication integration, hostile-input
 hardening, per-client ingress limits, and decoder fuzzing in CI have landed. P2c
 is complete: `crcbl-store` (StorageSource, settings, saves, replay), GameModule
-API + static binding, and `.crpl` replay writer/reader with FileTransport.
+API + static binding, and `.crpl` replay writer/reader with FileTransport. **P3
+L0 is done**: overlap queries, dynamic BVH refit, swept-sphere-vs-capsule TOI,
+trigger-volume support, ECS component types (RigidBody, Transform,
+ColliderComponent), and PhysicsSystem (SystemTrait impl bridging entities to the
+spatial world).
 
 The phase table below is the plan; this section is the record. Where the two
 disagree about what was built, this section is right and the phase row says what
 was intended.
 
-| Phase             | Status                        | Landed as                                                                                                                                                                                                                                              |
-| ----------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **P0** — base     | **done**                      | `f922ca3`, `3198f7a`, `6dd4b46`, `84af231`, `c058f45`, `bad7186`, `a991e42`, `063fd99`, `421ce69`, `f06e6cd`, `36dd636`, `e094d39`                                                                                                                     |
-| **P1** — Vulkan   | **done**                      | `91fd871`, `236f19b`, `c6dc4a4`, `a54990d`, `dc36d32`, `8a4e303`, `cbd6153`                                                                                                                                                                            |
+| Phase             | Status                                      | Landed as                                                                                                                                                                                                                                                                                                                 |
+| ----------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **P0** — base     | **done**                                    | `f922ca3`, `3198f7a`, `6dd4b46`, `84af231`, `c058f45`, `bad7186`, `a991e42`, `063fd99`, `421ce69`, `f06e6cd`, `36dd636`, `e094d39`                                                                                                                                                                                        |
+| **P1** — Vulkan   | **done**                                    | `91fd871`, `236f19b`, `c6dc4a4`, `a54990d`, `dc36d32`, `8a4e303`, `cbd6153`                                                                                                                                                                                                                                               |
 | **P2** — sim core | **P2a partial**, **P2b done**, **P2c done** | `7b8efb5` scaffold, `f8e8117` net, `9e55569` ecs, `9d31e2d` input, `2b2e5bd` server/client, `d4d0330` sim harness; P2b through `f1e625c`, `e036705`, `ec0597e`, `fb7e7bf`, `9dcc30d`, `b6c9d7d`, `27390fd`, `cb3b110`, `b37e4d5`, `53405f6`, `4156345`; P2c through `4ff402e`, `fa16710`, `c4688f1`, `83362f3`, `1270c72` |
+| **P3** — phys L0  | **done**                                    | `5665da2` overlaps, `cbfd6b1` dynamic BVH refit, `b1924dd` swept-capsule TOI + triggers, `c4db85d` ECS components, `b765640` PhysicsSystem                                                                                                                                                                                |
 
 ### What exists now
 
@@ -94,8 +99,14 @@ was intended.
 - **`crcbl-sim`** (P2a): determinism harness — runs N ticks of a seed-generated
   world using `ManualTime`, prints a state hash. Same input → same hash across
   runs, verified.
+- **`crcbl-phys`** (P3 L0): query + kinematics pillar — `PhysicsWorld` with
+  sphere/box/capsule colliders, static BVH with O(log n) refit, overlap queries
+  (sphere + AABB), ray-vs-shape and swept-sphere TOI (including exact capsule),
+  trigger-volume support, ECS component types (`RigidBody`, `Transform`,
+  `ColliderComponent`), and `PhysicsSystem` (`SystemTrait` impl mapping entities
+  to the spatial world).
 
-**892 unit/integration tests** (171 new from P2), plus 26 Vulkan e2e (run on
+**1086 unit/integration tests** (23 new from P3 L0), plus 26 Vulkan e2e (run on
 both radv and lavapipe), 33 Wayland e2e, 29 X11 e2e and 1 CLI e2e. The whole
 workspace suite passes with no Vulkan driver present at all, and the shell
 suites pass under 32-way CPU contention.
@@ -104,9 +115,10 @@ suites pass under 32-way CPU contention.
 
 - **P2a exit criterion is partially met.** `crcbl-client::interpolate` is a stub
   returning empty `InterpolatedState` — real interpolation that lerps entity
-  positions between snapshots lands when the replication encoding carries
-  per-entity component data (P3). The determinism hash now covers component data
-  (raw bytes), and the probe test
+  positions between snapshots remains a gap. P3 L0 delivered the component types
+  (`Transform`, `RigidBody`, `ColliderComponent`) the encoding will carry; the
+  interpolation implementation itself is still owed. The determinism hash now
+  covers component data (raw bytes), and the probe test
   `different_component_values_produce_different_hash` prevents regression.
 - **XDND on X11** is not implemented (`ShellCaps::DRAG_DROP` is honestly clear
   there); owed before the editor's asset browser at P12.
