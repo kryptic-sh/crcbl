@@ -20,13 +20,14 @@ engine's public face and its continuous cross-backend regression test.
 
 ## Status (as of 2026-07-30)
 
-**P0 and P1 are complete and merged to `main`.** P2a is complete: per-entity
-`Transform` replication (`SystemTrait::replicate` seam, `PhysicsSystem` impl)
-and real client-side interpolation landed on 2026-07-31. P2b is complete:
-protocol negotiation and reconnect, condition simulation, per-sector
-ack-baseline streams, replication integration, hostile-input hardening,
-per-client ingress limits, and decoder fuzzing in CI have landed. P2c is
-complete: `crcbl-store` (StorageSource, settings, saves, replay), GameModule
+**P0 and P1 are complete and merged to `main`.** The `crcbl screenshot` CLI
+subcommand (offscreen render → PNG) landed on 2026-07-31. P2a is complete:
+per-entity `Transform` replication (`SystemTrait::replicate` seam,
+`PhysicsSystem` impl) and real client-side interpolation landed on 2026-07-31.
+P2b is complete: protocol negotiation and reconnect, condition simulation,
+per-sector ack-baseline streams, replication integration, hostile-input
+hardening, per-client ingress limits, and decoder fuzzing in CI have landed. P2c
+is complete: `crcbl-store` (StorageSource, settings, saves, replay), GameModule
 API + static binding, and `.crpl` replay writer/reader with FileTransport. **P3
 L0 is done**: overlap queries, dynamic BVH refit, swept-sphere-vs-capsule TOI,
 trigger-volume support, ECS component types (RigidBody, Transform,
@@ -125,8 +126,6 @@ suites pass under 32-way CPU contention.
   `BindGroupDesc` cannot express a variable descriptor count, which the real
   bindless shape needs before P3/P7 build on it; and vertex pulling depends on
   `shaderDrawParameters`, for which the seam has no vocabulary.
-- **`crcbl screenshot`** is not a CLI subcommand yet — the offscreen render and
-  readback path it needs exists and is what the golden tests already use.
 - **RenderDoc capture** has not been verified by hand; every object and pass
   carries a debug label and `DEBUG_MARKERS` is requested.
 - The render graph has **no sub-resource vocabulary** (an `ImageId` names a
