@@ -558,4 +558,170 @@ mod tests {
         assert!(verts.is_empty());
         assert!(indices.is_empty());
     }
+
+    // ── Snapshot (golden-hash) tests ─────────────────────────────────────
+
+    /// Hash the combined vertex and index data into a single `u64` using
+    /// [`std::collections::hash_map::DefaultHasher`]. Same purpose as the
+    /// state-hash functions in `crcbl-phys` and `crcbl-net`: a
+    /// deterministic, lightweight identity check that catches regressions
+    /// in triangulation output.
+    fn hash_triangles(verts: &[Vertex2d], indices: &[u32]) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        for v in verts {
+            v.pos.x.to_bits().hash(&mut h);
+            v.pos.y.to_bits().hash(&mut h);
+            v.uv.x.to_bits().hash(&mut h);
+            v.uv.y.to_bits().hash(&mut h);
+            v.color[0].to_bits().hash(&mut h);
+            v.color[1].to_bits().hash(&mut h);
+            v.color[2].to_bits().hash(&mut h);
+            v.color[3].to_bits().hash(&mut h);
+        }
+        for &idx in indices {
+            idx.hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// A full HUD scene — score label, health bar, background panels,
+    /// pause button — triangulated with atlas. The hash is a regression
+    /// gate: any change to triangulation vertex order, colour, or UV must
+    /// be intentional and update the golden value.
+    #[test]
+    fn snapshot_hud_scene_hash() {
+        let atlas = FontAtlas::built_in();
+        let mut dl = DrawList::new();
+
+        // Top-left info panel background.
+        dl.rect(
+            Vec2::new(4.0, 4.0),
+            Vec2::new(204.0, 54.0),
+            [0.15, 0.15, 0.15, 0.9],
+        );
+
+        // Score text.
+        dl.text(
+            Vec2::new(10.0, 10.0),
+            "Score: 1,250",
+            [1.0, 1.0, 0.3, 1.0],
+            14.0,
+        );
+
+        // FPS text.
+        dl.text(Vec2::new(10.0, 28.0), "FPS: 60", [0.5, 0.8, 0.5, 1.0], 12.0);
+
+        // Bottom-centre health bar background.
+        dl.rect(
+            Vec2::new(300.0, 560.0),
+            Vec2::new(500.0, 576.0),
+            [0.1, 0.1, 0.1, 0.8],
+        );
+        // Health bar fill.
+        dl.rect(
+            Vec2::new(302.0, 562.0),
+            Vec2::new(450.0, 574.0),
+            [0.8, 0.2, 0.2, 1.0],
+        );
+        // Health bar outline.
+        dl.rect_outline(
+            Vec2::new(300.0, 560.0),
+            Vec2::new(500.0, 576.0),
+            1.0,
+            [0.4, 0.4, 0.4, 1.0],
+        );
+
+        // Pause button in top-right corner.
+        dl.rect(
+            Vec2::new(720.0, 4.0),
+            Vec2::new(796.0, 32.0),
+            [0.15, 0.15, 0.15, 0.9],
+        );
+        dl.text(Vec2::new(732.0, 10.0), "Pause", [1.0, 1.0, 1.0, 1.0], 14.0);
+        dl.rect_outline(
+            Vec2::new(720.0, 4.0),
+            Vec2::new(796.0, 32.0),
+            1.0,
+            [0.4, 0.4, 0.4, 1.0],
+        );
+
+        let (verts, indices) = dl.to_triangles(Some(&atlas), 1.0);
+
+        // Structural assertions: exact vertex/index counts from known scene.
+        assert_eq!(verts.len(), 136, "vertex count changed");
+        assert_eq!(indices.len(), 204, "index count changed");
+
+        let hash = hash_triangles(&verts, &indices);
+
+        // Golden hash. Update only when triangulation output intentionally
+        // changes.
+        assert_eq!(
+            hash, 1_583_942_257_705_471_847,
+            "draw-list snapshot hash mismatch — triangulation output changed"
+        );
+
+        // Determinism: same scene produces the same hash.
+        let mut dl2 = DrawList::new();
+        dl2.rect(
+            Vec2::new(4.0, 4.0),
+            Vec2::new(204.0, 54.0),
+            [0.15, 0.15, 0.15, 0.9],
+        );
+        dl2.text(
+            Vec2::new(10.0, 10.0),
+            "Score: 1,250",
+            [1.0, 1.0, 0.3, 1.0],
+            14.0,
+        );
+        dl2.text(Vec2::new(10.0, 28.0), "FPS: 60", [0.5, 0.8, 0.5, 1.0], 12.0);
+        dl2.rect(
+            Vec2::new(300.0, 560.0),
+            Vec2::new(500.0, 576.0),
+            [0.1, 0.1, 0.1, 0.8],
+        );
+        dl2.rect(
+            Vec2::new(302.0, 562.0),
+            Vec2::new(450.0, 574.0),
+            [0.8, 0.2, 0.2, 1.0],
+        );
+        dl2.rect_outline(
+            Vec2::new(300.0, 560.0),
+            Vec2::new(500.0, 576.0),
+            1.0,
+            [0.4, 0.4, 0.4, 1.0],
+        );
+        dl2.rect(
+            Vec2::new(720.0, 4.0),
+            Vec2::new(796.0, 32.0),
+            [0.15, 0.15, 0.15, 0.9],
+        );
+        dl2.text(Vec2::new(732.0, 10.0), "Pause", [1.0, 1.0, 1.0, 1.0], 14.0);
+        dl2.rect_outline(
+            Vec2::new(720.0, 4.0),
+            Vec2::new(796.0, 32.0),
+            1.0,
+            [0.4, 0.4, 0.4, 1.0],
+        );
+        let (verts2, indices2) = dl2.to_triangles(Some(&atlas), 1.0);
+        let hash2 = hash_triangles(&verts2, &indices2);
+        assert_eq!(hash, hash2, "same scene → same hash");
+
+        // Sanity: a non-trivial scene produces non-trivial geometry.
+        assert!(verts.len() > 20);
+        assert!(indices.len() > 30);
+    }
+
+    /// Snapshot hash for an empty draw list — the zero-input baseline.
+    #[test]
+    fn snapshot_empty_list_hash() {
+        let dl = DrawList::new();
+        let (verts, indices) = dl.to_triangles(None, 1.0);
+        let hash = hash_triangles(&verts, &indices);
+        assert_eq!(
+            hash, 15_130_871_412_783_076_140,
+            "empty draw-list hash changed"
+        );
+    }
 }
