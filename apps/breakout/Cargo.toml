@@ -1,0 +1,17 @@
+[package]
+name = "breakout"
+description = "Breakout — first playable Crucible sample"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# One engine dependency, same pattern as apps/sandbox: the game names `crcbl`
+# and nothing else. `log` is for per-event debug logging.
+[dependencies]
+crcbl = { workspace = true }
+log = { workspace = true }
+
+[lints]
+workspace = true
