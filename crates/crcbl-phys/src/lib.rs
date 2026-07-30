@@ -23,6 +23,7 @@
 pub mod broadphase;
 pub mod collider;
 pub mod components;
+pub mod forces;
 pub mod integrator;
 pub mod query;
 pub mod system;
@@ -31,6 +32,7 @@ pub mod world;
 pub use broadphase::{Bvh, BvhHit, Ray, Segment};
 pub use collider::{Aabb, BoxCollider, Capsule, Sphere};
 pub use components::{ColliderComponent, RigidBody, Transform};
+pub use forces::{DragForce, ForceProvider, GravityForce};
 pub use integrator::{Integrator, SemiImplicitEuler};
 pub use query::{
     ShapeHit, ray_vs_aabb, ray_vs_capsule, ray_vs_sphere, sphere_overlaps_aabb,
