@@ -449,14 +449,14 @@ fn parse_screenshot(mut args: impl Iterator<Item = String>) -> Invocation {
     Invocation::Command(Command::Screenshot(parsed))
 }
 
-fn parse_replay(mut args: impl Iterator<Item = String>) -> Invocation {
+fn parse_replay(args: impl Iterator<Item = String>) -> Invocation {
     let mut parsed = ReplayArgs {
         file: PathBuf::new(),
         json: false,
     };
     let mut file = None;
 
-    while let Some(arg) = args.next() {
+    for arg in args {
         match arg.as_str() {
             "-h" | "--help" => return Invocation::Help(REPLAY_USAGE),
             "--json" => parsed.json = true,
