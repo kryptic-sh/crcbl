@@ -18,6 +18,7 @@
 //! The source must be `Send + Sync + 'static`.
 
 pub mod mixer;
+pub mod wav;
 
 use std::sync::Arc;
 
