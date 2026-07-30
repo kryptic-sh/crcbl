@@ -559,6 +559,37 @@ mod tests {
         assert!(rendered.contains("len: 3"), "{rendered}");
     }
 
+    #[test]
+    fn len_equals_iter_count_after_any_operation() {
+        // If `insert` increments `len` before `Vec::push` and the push
+        // panics (OOM), this invariant would break.  The OOM path cannot
+        // be forced in a normal test, but the invariant itself is what
+        // the `len` move-after-push protects.
+        let mut pool = Pool::new();
+        assert_eq!(pool.len(), pool.iter().count());
+
+        let mut handles = Vec::new();
+        for i in 0..20 {
+            handles.push(pool.insert(i));
+            assert_eq!(pool.len(), pool.iter().count());
+        }
+
+        for h in &handles[..10] {
+            pool.remove(*h);
+            assert_eq!(pool.len(), pool.iter().count());
+        }
+
+        // Insert again — exercises the free-list path.
+        for i in 30..40 {
+            pool.insert(i);
+            assert_eq!(pool.len(), pool.iter().count());
+        }
+
+        pool.clear();
+        assert_eq!(pool.len(), 0);
+        assert_eq!(pool.iter().count(), 0);
+    }
+
     /// Reference-model comparison: a `HashMap` of every handle ever issued and
     /// whether it should still be live.
     #[test]

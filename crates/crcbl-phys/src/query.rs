@@ -667,6 +667,26 @@ mod tests {
         assert!((hit.t - 4.0).abs() < 0.001);
     }
 
+    #[test]
+    fn zero_radius_sphere_normal_is_finite_when_hit_at_centre() {
+        // Bypass Sphere::new's debug_assert to test the query directly
+        // with a degenerate radius=0 sphere.  Before the guard,
+        // `.normalize()` on the zero-length centre-to-point vector
+        // produced NaN.
+        let sphere = Sphere {
+            centre: DVec3::ZERO,
+            radius: 0.0,
+        };
+        let ray = Ray::new(DVec3::new(-5.0, 0.0, 0.0), DVec3::X);
+        let hit =
+            ray_vs_sphere(&ray, &sphere).expect("ray through centre must hit zero-radius sphere");
+        assert!(
+            !hit.normal.x.is_nan() && !hit.normal.y.is_nan() && !hit.normal.z.is_nan(),
+            "normal must be finite for zero-radius sphere hit at centre; got {:?}",
+            hit.normal
+        );
+    }
+
     // ── Ray vs AABB ───────────────────────────────────────────────────
 
     #[test]
