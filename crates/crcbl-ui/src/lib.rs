@@ -1,4 +1,30 @@
-//! Immediate-mode GUI toolkit.
+//! Immediate-mode GUI toolkit for Crucible.
 //!
-//! Placeholder crate — the workspace skeleton lands before the code so later
-//! slices add implementations, not structure.
+//! Each frame the UI code produces a [`DrawList`] — a sequence of draw commands
+//! (rectangles, text spans) that a render backend processes. Text is rendered
+//! from the built-in [`FontAtlas`] which provides a monospace bitmap font.
+//!
+//! # Architecture
+//!
+//! ```text
+//! Widgets (Label, Button, …)   ←  slice 2 (P4-b)
+//!      │
+//!      ▼
+//! DrawList + FontAtlas         ←  this slice (P4-a)
+//!      │
+//!      ▼
+//! Render backend (future)
+//! ```
+//!
+//! The draw list is the only interface between the UI and the renderer. The
+//! render backend takes a [`DrawList`] and emits GPU draw calls.
+//!
+//! See `docs/plan/07-ui-debug.md` for the full design.
+
+pub mod draw_list;
+pub mod text;
+
+pub use draw_list::{DrawCommand, DrawList, Vertex2d};
+pub use text::{
+    FontAtlas, GLYPH_ADVANCE, GLYPH_COUNT, GLYPH_HEIGHT, GLYPH_WIDTH, GlyphMetrics, LINE_HEIGHT,
+};
