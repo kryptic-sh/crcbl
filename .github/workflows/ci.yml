@@ -406,6 +406,50 @@ jobs:
       - name: Check the committed SPIR-V against its sources
         run: crates/crcbl-shaders/tools/compile-shaders.sh --check
 
+  decoder-fuzz:
+    name: decoder fuzz (libFuzzer)
+    runs-on: ubuntu-latest
+    # The fuzzer is independently bounded below; this remains the guard for a
+    # compiler, runner, or libFuzzer regression that ignores its run limit.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-07-02
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: decoder-fuzz
+          workspaces: crates/crcbl-net/fuzz -> target
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz@0.13.1
+      - name: Check fuzz target formatting
+        run: cargo fmt --manifest-path crates/crcbl-net/fuzz/Cargo.toml --check
+      - name: Replay named corpus assertions
+        run: >-
+          cargo test --manifest-path crates/crcbl-net/fuzz/Cargo.toml
+          --locked --test corpus
+      # A fixed seed and nonzero run count make this a bounded, reproducible
+      # execution of every decoder over both the committed corpus and mutations.
+      - name: Fuzz hostile decoder packets
+        run: >-
+          cargo fuzz run --fuzz-dir crates/crcbl-net/fuzz decoder
+          crates/crcbl-net/fuzz/corpus/decoder --
+          -runs=10000 -seed=20260730 -max_len=65537 -timeout=10
+      - name: Verify fuzz lockfile stayed current
+        run: git diff --exit-code -- crates/crcbl-net/fuzz/Cargo.lock
+      - name: Upload decoder fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: decoder-fuzz-artifacts
+          path: |
+            crates/crcbl-net/fuzz/artifacts/decoder/
+            crates/crcbl-net/fuzz/coverage/decoder/
+          if-no-files-found: ignore
+
   coverage:
     name: coverage (linux)
     runs-on: ubuntu-latest
