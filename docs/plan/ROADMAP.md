@@ -18,11 +18,13 @@ Two hard rules govern the ordering:
 breakout onward ships as a browser demo on GitHub Pages. The demo site is the
 engine's public face and its continuous cross-backend regression test.
 
-## Status (as of 2026-07-30)
+## Status (as of 2026-07-31)
 
 **P0 and P1 are complete and merged to `main`.** The `crcbl screenshot` CLI
-subcommand (offscreen render → PNG) landed on 2026-07-31. P2a is complete:
-per-entity `Transform` replication (`SystemTrait::replicate` seam,
+subcommand (offscreen render → PNG), explicit `PipelineLayoutHandle` on
+`bind_group`/`push_constants`, `BindGroupDesc::variable_count`, render-graph
+sub-resource vocabulary, and three HAL seam findings closed on 2026-07-31. P2a
+is complete: per-entity `Transform` replication (`SystemTrait::replicate` seam,
 `PhysicsSystem` impl) and real client-side interpolation landed on 2026-07-31.
 P2b is complete: protocol negotiation and reconnect, condition simulation,
 per-sector ack-baseline streams, replication integration, hostile-input
@@ -38,12 +40,12 @@ The phase table below is the plan; this section is the record. Where the two
 disagree about what was built, this section is right and the phase row says what
 was intended.
 
-| Phase             | Status                                      | Landed as                                                                                                                                                                                                                                                                                                                 |
-| ----------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **P0** — base     | **done**                                    | `f922ca3`, `3198f7a`, `6dd4b46`, `84af231`, `c058f45`, `bad7186`, `a991e42`, `063fd99`, `421ce69`, `f06e6cd`, `36dd636`, `e094d39`                                                                                                                                                                                        |
-| **P1** — Vulkan   | **done**                                    | `91fd871`, `236f19b`, `c6dc4a4`, `a54990d`, `dc36d32`, `8a4e303`, `cbd6153`                                                                                                                                                                                                                                               |
-| **P2** — sim core | **P2a partial**, **P2b done**, **P2c done** | `7b8efb5` scaffold, `f8e8117` net, `9e55569` ecs, `9d31e2d` input, `2b2e5bd` server/client, `d4d0330` sim harness; P2b through `f1e625c`, `e036705`, `ec0597e`, `fb7e7bf`, `9dcc30d`, `b6c9d7d`, `27390fd`, `cb3b110`, `b37e4d5`, `53405f6`, `4156345`; P2c through `4ff402e`, `fa16710`, `c4688f1`, `83362f3`, `1270c72` |
-| **P3** — phys L0  | **done**                                    | `5665da2` overlaps, `cbfd6b1` dynamic BVH refit, `b1924dd` swept-capsule TOI + triggers, `c4db85d` ECS components, `b765640` PhysicsSystem, `a2be1f6` integrator, `6b30532` force providers, `60dd95e` integration loop, `05dd23a` property tests                                                                         |
+| Phase             | Status   | Landed as                                                                                                                                                                                                                                                                                                                                          |
+| ----------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **P0** — base     | **done** | `f922ca3`, `3198f7a`, `6dd4b46`, `84af231`, `c058f45`, `bad7186`, `a991e42`, `063fd99`, `421ce69`, `f06e6cd`, `36dd636`, `e094d39`                                                                                                                                                                                                                 |
+| **P1** — Vulkan   | **done** | `91fd871`, `236f19b`, `c6dc4a4`, `a54990d`, `dc36d32`, `8a4e303`, `cbd6153`                                                                                                                                                                                                                                                                        |
+| **P2** — sim core | **done** | `7b8efb5` scaffold, `f8e8117` net, `9e55569` ecs, `9d31e2d` input, `2b2e5bd` server/client, `d4d0330` sim harness; `7f2d920` interpolation; P2b through `f1e625c`, `e036705`, `ec0597e`, `fb7e7bf`, `9dcc30d`, `b6c9d7d`, `27390fd`, `cb3b110`, `b37e4d5`, `53405f6`, `4156345`; P2c through `4ff402e`, `fa16710`, `c4688f1`, `83362f3`, `1270c72` |
+| **P3** — phys L0  | **done** | `5665da2` overlaps, `cbfd6b1` dynamic BVH refit, `b1924dd` swept-capsule TOI + triggers, `c4db85d` ECS components, `b765640` PhysicsSystem, `a2be1f6` integrator, `6b30532` force providers, `60dd95e` integration loop, `05dd23a` property tests                                                                                                  |
 
 ### What exists now
 
