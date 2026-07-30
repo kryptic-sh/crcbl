@@ -172,6 +172,30 @@ impl FontAtlas {
     pub fn is_empty(&self) -> bool {
         self.metrics.is_empty()
     }
+
+    /// UV u-coordinate of the left edge of the given glyph in the atlas
+    /// texture (range [0, 1]).
+    #[must_use]
+    pub fn glyph_u_min(&self, c: char) -> f32 {
+        let atlas_w = self.texture_size.0 as f32;
+        if atlas_w == 0.0 {
+            return 0.0;
+        }
+        let col = (c as u8).wrapping_sub(FIRST_CHAR) as u32;
+        (col * GLYPH_WIDTH) as f32 / atlas_w
+    }
+
+    /// UV u-coordinate of the right edge of the given glyph in the atlas
+    /// texture (range [0, 1]).
+    #[must_use]
+    pub fn glyph_u_max(&self, c: char) -> f32 {
+        let atlas_w = self.texture_size.0 as f32;
+        if atlas_w == 0.0 {
+            return 0.0;
+        }
+        let col = (c as u8).wrapping_sub(FIRST_CHAR) as u32;
+        ((col + 1) * GLYPH_WIDTH) as f32 / atlas_w
+    }
 }
 
 impl Default for FontAtlas {
@@ -290,5 +314,29 @@ mod tests {
         let atlas = FontAtlas::built_in();
         let s = format!("{atlas:?}");
         assert!(s.contains("glyph_count: 95"));
+    }
+
+    #[test]
+    fn glyph_u_min_for_first_char_is_zero() {
+        let atlas = FontAtlas::built_in();
+        // ' ' is the first glyph, at column 0.
+        let u = atlas.glyph_u_min(' ');
+        assert!((u - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn glyph_u_max_for_last_char_is_one() {
+        let atlas = FontAtlas::built_in();
+        // '~' is the last glyph (codepoint 126 = FIRST_CHAR + 94).
+        let u = atlas.glyph_u_max('~');
+        assert!((u - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn glyph_u_for_letter_a_is_contiguous() {
+        let atlas = FontAtlas::built_in();
+        let u_max = atlas.glyph_u_max('A'); // column 33
+        let u_min_b = atlas.glyph_u_min('B'); // column 34
+        assert!((u_max - u_min_b).abs() < 0.001);
     }
 }

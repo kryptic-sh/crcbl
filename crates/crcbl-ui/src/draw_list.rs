@@ -5,6 +5,8 @@
 //! into GPU draw calls. The draw list is the only interface between the
 //! immediate-mode UI and the renderer.
 
+use crate::text::FontAtlas;
+use crate::text::GLYPH_HEIGHT;
 use glam::Vec2;
 
 // ---------------------------------------------------------------------------
@@ -140,14 +142,20 @@ impl DrawList {
     /// Returns `(vertices, indices)` in a format a render backend can upload
     /// directly. Each `Rect` becomes one quad (4 vertices, 6 indices).
     /// `RectOutline` becomes 4 thin quads — one per side — forming a hollow
-    /// border. `Text` commands are skipped (they need glyph-atlas UV data from
-    /// the text module).
+    /// border.
+    ///
+    /// `Text` commands are expanded when `atlas` is `Some`: each glyph becomes
+    /// one textured quad with UV coordinates into the atlas. When `atlas` is
+    /// `None`, text commands are skipped (the `to_triangles` return from S6).
+    ///
+    /// `scale` is a multiplier on the font size (1.0 = baked-in 8×13 px); also
+    /// multiplied into position for text commands.
     ///
     /// The index buffer uses `u32` indices; callers that need `u16` must
     /// adapt. Vertex positions are in screen-space pixels with Y-up (the UI
     /// convention); the renderer applies an orthographic projection.
     #[must_use]
-    pub fn to_triangles(&self) -> (Vec<Vertex2d>, Vec<u32>) {
+    pub fn to_triangles(&self, atlas: Option<&FontAtlas>, scale: f32) -> (Vec<Vertex2d>, Vec<u32>) {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
@@ -239,8 +247,51 @@ impl DrawList {
                         &mut indices,
                     );
                 }
-                DrawCommand::Text { .. } => {
-                    // Text expands via the FontAtlas in S7.
+                DrawCommand::Text {
+                    pos,
+                    text,
+                    color,
+                    size,
+                } => {
+                    if let Some(atlas) = atlas {
+                        let layout_scale = (*size / GLYPH_HEIGHT as f32) * scale;
+                        let glyphs = atlas.layout_line(text, *pos, layout_scale);
+                        for (c, min, max) in glyphs {
+                            let u_min = atlas.glyph_u_min(c);
+                            let u_max = atlas.glyph_u_max(c);
+                            let v_min = 0.0;
+                            let v_max = 1.0;
+                            let base = vertices.len() as u32;
+                            vertices.push(Vertex2d {
+                                pos: Vec2::new(min.x, max.y),
+                                uv: Vec2::new(u_min, v_min),
+                                color: *color,
+                            });
+                            vertices.push(Vertex2d {
+                                pos: Vec2::new(max.x, max.y),
+                                uv: Vec2::new(u_max, v_min),
+                                color: *color,
+                            });
+                            vertices.push(Vertex2d {
+                                pos: Vec2::new(max.x, min.y),
+                                uv: Vec2::new(u_max, v_max),
+                                color: *color,
+                            });
+                            vertices.push(Vertex2d {
+                                pos: Vec2::new(min.x, min.y),
+                                uv: Vec2::new(u_min, v_max),
+                                color: *color,
+                            });
+                            indices.extend_from_slice(&[
+                                base,
+                                base + 1,
+                                base + 2,
+                                base,
+                                base + 2,
+                                base + 3,
+                            ]);
+                        }
+                    }
                 }
             }
         }
@@ -369,7 +420,7 @@ mod tests {
     #[test]
     fn to_triangles_from_empty_list() {
         let dl = DrawList::new();
-        let (verts, indices) = dl.to_triangles();
+        let (verts, indices) = dl.to_triangles(None, 1.0);
         assert!(verts.is_empty());
         assert!(indices.is_empty());
     }
@@ -382,7 +433,7 @@ mod tests {
             Vec2::new(110.0, 120.0),
             [1.0, 0.5, 0.0, 1.0],
         );
-        let (verts, indices) = dl.to_triangles();
+        let (verts, indices) = dl.to_triangles(None, 1.0);
 
         // One quad = 4 vertices, 6 indices (2 triangles).
         assert_eq!(verts.len(), 4);
@@ -413,7 +464,7 @@ mod tests {
             3.0,
             [0.0, 1.0, 0.0, 1.0],
         );
-        let (verts, indices) = dl.to_triangles();
+        let (verts, indices) = dl.to_triangles(None, 1.0);
 
         // 4 quads = 16 vertices, 24 indices.
         assert_eq!(verts.len(), 16);
@@ -429,7 +480,7 @@ mod tests {
     fn text_commands_are_skipped_in_triangulation() {
         let mut dl = DrawList::new();
         dl.text(Vec2::new(5.0, 5.0), "hello", [1.0; 4], 16.0);
-        let (verts, indices) = dl.to_triangles();
+        let (verts, indices) = dl.to_triangles(None, 1.0);
         assert!(verts.is_empty());
         assert!(indices.is_empty());
     }
@@ -448,7 +499,7 @@ mod tests {
             [0.0, 1.0, 0.0, 1.0],
         );
         dl.text(Vec2::ZERO, "skipped", [0.0; 4], 12.0);
-        let (verts, indices) = dl.to_triangles();
+        let (verts, indices) = dl.to_triangles(None, 1.0);
 
         // 2 rects → 8 verts, 12 indices (text skipped).
         assert_eq!(verts.len(), 8);
@@ -459,5 +510,52 @@ mod tests {
         assert_eq!(verts[4].color, [0.0, 1.0, 0.0, 1.0]);
         assert_eq!(indices[0], 0);
         assert_eq!(indices[6], 4);
+    }
+
+    #[test]
+    fn text_with_atlas_generates_vertex_uvs() {
+        use crate::text::{FontAtlas, GLYPH_WIDTH};
+
+        let atlas = FontAtlas::built_in();
+        let mut dl = DrawList::new();
+        dl.text(Vec2::new(100.0, 200.0), "A", [1.0, 0.0, 0.0, 1.0], 13.0);
+        let (verts, indices) = dl.to_triangles(Some(&atlas), 1.0);
+
+        // One glyph 'A' → one quad.
+        assert_eq!(verts.len(), 4);
+        assert_eq!(indices.len(), 6);
+
+        // 'A' is codepoint 65, atlas column = 65 - 32 = 33.
+        let atlas_w = atlas.texture_size.0 as f32;
+        let expected_u_min = (33.0 * GLYPH_WIDTH as f32) / atlas_w;
+        let expected_u_max = (34.0 * GLYPH_WIDTH as f32) / atlas_w;
+
+        assert!(
+            (verts[0].uv.x - expected_u_min).abs() < 0.001,
+            "u_min mismatch"
+        );
+        assert!(
+            (verts[1].uv.x - expected_u_max).abs() < 0.001,
+            "u_max mismatch"
+        );
+        // v goes from 0 (top of atlas) to 1 (bottom).
+        assert!((verts[0].uv.y - 0.0).abs() < 0.001);
+        assert!((verts[2].uv.y - 1.0).abs() < 0.001);
+
+        // All verts share the text colour.
+        for v in &verts {
+            assert_eq!(v.color, [1.0, 0.0, 0.0, 1.0]);
+        }
+    }
+
+    #[test]
+    fn space_generates_no_vertices() {
+        let atlas = FontAtlas::built_in();
+        let mut dl = DrawList::new();
+        dl.text(Vec2::ZERO, " ", [1.0; 4], 13.0);
+        let (verts, indices) = dl.to_triangles(Some(&atlas), 1.0);
+        // Space glyph has width=0 → no quad.
+        assert!(verts.is_empty());
+        assert!(indices.is_empty());
     }
 }
