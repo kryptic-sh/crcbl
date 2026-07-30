@@ -59,6 +59,9 @@ pub struct PhysicsWorld {
     next_id: u32,
     /// Lazily-rebuilt BVH. `None` when dirty.
     bvh: Option<Bvh>,
+    /// Maps collider slot index → BVH element position. Populated during
+    /// [`PhysicsWorld::rebuild`]. Used by update methods for O(log n) refit.
+    bvh_slot_to_elem: Vec<u32>,
     /// Incremented on every mutation; used to detect staleness.
     generation: u64,
 }
@@ -72,6 +75,7 @@ impl PhysicsWorld {
             free_slots: Vec::new(),
             next_id: 0,
             bvh: None,
+            bvh_slot_to_elem: Vec::new(),
             generation: 0,
         }
     }
@@ -92,6 +96,24 @@ impl PhysicsWorld {
         self.add(ColliderEntry::Capsule(capsule))
     }
 
+    /// Update an existing sphere collider. Returns `true` if the id was valid.
+    ///
+    /// If the BVH is built, this refits the tree in O(log n). Otherwise the
+    /// BVH is simply marked dirty for the next query.
+    pub fn set_sphere(&mut self, id: ColliderId, sphere: Sphere) -> bool {
+        self.set(id, ColliderEntry::Sphere(sphere))
+    }
+
+    /// Update an existing box collider.
+    pub fn set_box(&mut self, id: ColliderId, box_collider: BoxCollider) -> bool {
+        self.set(id, ColliderEntry::Box(box_collider))
+    }
+
+    /// Update an existing capsule collider.
+    pub fn set_capsule(&mut self, id: ColliderId, capsule: Capsule) -> bool {
+        self.set(id, ColliderEntry::Capsule(capsule))
+    }
+
     /// Remove a collider by its id. Returns `true` if the id was valid.
     pub fn remove(&mut self, id: ColliderId) -> bool {
         let idx = id.0 as usize;
@@ -101,6 +123,7 @@ impl PhysicsWorld {
         self.colliders[idx] = None;
         self.free_slots.push(id.0);
         self.bvh = None;
+        self.bvh_slot_to_elem.clear();
         self.generation = self.generation.wrapping_add(1);
         true
     }
@@ -117,6 +140,11 @@ impl PhysicsWorld {
             .enumerate()
             .filter_map(|(idx, entry)| entry.as_ref().map(|e| (e.aabb(), idx as u32)))
             .collect();
+        // Build slot→elem reverse mapping.
+        self.bvh_slot_to_elem = vec![u32::MAX; self.colliders.len()];
+        for (elem_idx, (_, slot)) in elements.iter().enumerate() {
+            self.bvh_slot_to_elem[*slot as usize] = elem_idx as u32;
+        }
         self.bvh = Some(Bvh::build(elements));
     }
 
@@ -238,8 +266,33 @@ impl PhysicsWorld {
             idx
         };
         self.bvh = None;
+        self.bvh_slot_to_elem.clear();
         self.generation = self.generation.wrapping_add(1);
         ColliderId(id)
+    }
+
+    /// Update an existing collider entry, refitting the BVH if built.
+    fn set(&mut self, id: ColliderId, entry: ColliderEntry) -> bool {
+        let slot = id.0 as usize;
+        if slot >= self.colliders.len() || self.colliders[slot].is_none() {
+            return false;
+        }
+        let new_aabb = entry.aabb();
+        self.colliders[slot] = Some(entry);
+        self.generation = self.generation.wrapping_add(1);
+
+        // Try incremental refit.
+        if let Some(ref mut bvh) = self.bvh
+            && slot < self.bvh_slot_to_elem.len()
+        {
+            let elem_idx = self.bvh_slot_to_elem[slot] as usize;
+            bvh.update_aabb(elem_idx, new_aabb);
+        } else {
+            // BVH not built or mapping stale — mark dirty.
+            self.bvh = None;
+            self.bvh_slot_to_elem.clear();
+        }
+        true
     }
 
     fn ensure_bvh(&mut self) {
@@ -501,5 +554,76 @@ mod tests {
         let mut world = PhysicsWorld::new();
         let query = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(10.0));
         assert!(world.overlap_aabb(&query).is_empty());
+    }
+
+    // ── Dynamic update (refit) tests ────────────────────────────────────
+
+    #[test]
+    fn set_sphere_moves_collider_in_ray_cast() {
+        let mut world = PhysicsWorld::new();
+        let id = world.add_sphere(Sphere::new(DVec3::new(5.0, 0.0, 0.0), 1.0));
+        // Initially hits.
+        let ray = Ray::new(DVec3::ZERO, DVec3::X);
+        assert!(world.cast_ray(&ray).is_some());
+
+        // Move the sphere far away via set_sphere.
+        assert!(world.set_sphere(id, Sphere::new(DVec3::new(-50.0, 0.0, 0.0), 1.0)));
+
+        // Should no longer hit with +X ray.
+        assert!(world.cast_ray(&ray).is_none());
+    }
+
+    #[test]
+    fn set_box_updates_overlap_query() {
+        let mut world = PhysicsWorld::new();
+        let id = world.add_box(BoxCollider::new(
+            DVec3::new(5.0, 0.0, 0.0),
+            DVec3::splat(1.0),
+        ));
+
+        // Overlap near origin should not find it.
+        let results = world.overlap_sphere(DVec3::ZERO, 2.0);
+        assert!(results.is_empty());
+
+        // Move it to origin.
+        assert!(world.set_box(
+            id,
+            BoxCollider::new(DVec3::new(1.0, 0.0, 0.0), DVec3::splat(1.0))
+        ));
+
+        // Now overlap should find it.
+        let results = world.overlap_sphere(DVec3::ZERO, 3.0);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], id);
+    }
+
+    #[test]
+    fn set_sphere_on_invalid_id_returns_false() {
+        let mut world = PhysicsWorld::new();
+        assert!(!world.set_sphere(ColliderId(999), Sphere::new(DVec3::ZERO, 1.0)));
+    }
+
+    #[test]
+    fn set_capsule_refits_bvh() {
+        let mut world = PhysicsWorld::new();
+        let id = world.add_capsule(Capsule::new(DVec3::new(5.0, 0.0, 0.0), 0.5, 1.0));
+        let ray = Ray::new(DVec3::ZERO, DVec3::X);
+
+        // Initially hits.
+        assert!(world.cast_ray(&ray).is_some());
+
+        // Move it.
+        assert!(world.set_capsule(id, Capsule::new(DVec3::new(-30.0, 30.0, 0.0), 0.5, 1.0)));
+
+        // Should miss with +X ray.
+        assert!(world.cast_ray(&ray).is_none());
+    }
+
+    #[test]
+    fn set_sphere_after_removal_fails() {
+        let mut world = PhysicsWorld::new();
+        let id = world.add_sphere(Sphere::new(DVec3::ZERO, 1.0));
+        world.remove(id);
+        assert!(!world.set_sphere(id, Sphere::new(DVec3::new(1.0, 0.0, 0.0), 1.0)));
     }
 }

@@ -113,6 +113,9 @@ pub struct BvhHit {
 /// `leaf_count == 0` and stores left/right child indices.  A leaf node has
 /// `leaf_count > 0` and stores the start index into the element-indices array
 /// at `child_left` (child_right is unused).
+///
+/// Every node except the root has a valid `parent` index.  The root's parent
+/// is `u32::MAX`.
 #[derive(Debug, Clone, Copy)]
 struct Node {
     aabb: Aabb,
@@ -120,6 +123,8 @@ struct Node {
     child_left: u32,
     /// Internal: right child index. Leaf: unused (0).
     child_right: u32,
+    /// Parent node index, or `u32::MAX` for the root.
+    parent: u32,
     /// 0 = internal node, > 0 = leaf node with this many elements.
     leaf_count: u32,
 }
@@ -128,10 +133,16 @@ struct Node {
 ///
 /// Construct once via [`Bvh::build`]; then query repeatedly with
 /// [`Bvh::traverse_ray`] or [`Bvh::traverse_segment`].
+///
+/// Individual element AABBs can be updated incrementally via
+/// [`Bvh::update_aabb`], which refits the tree upwards without a full rebuild.
 #[derive(Debug, Clone)]
 pub struct Bvh {
     nodes: Vec<Node>,
     element_indices: Vec<u32>,
+    /// For each element index (position in element_indices), the leaf node
+    /// that owns it.
+    element_node: Vec<u32>,
     root: u32,
 }
 
@@ -149,19 +160,30 @@ impl Bvh {
             return Self {
                 nodes: Vec::new(),
                 element_indices: Vec::new(),
+                element_node: Vec::new(),
                 root: 0,
             };
         }
 
         let mut nodes = Vec::with_capacity(2 * items.len());
         let mut element_indices = Vec::with_capacity(items.len());
+        let mut element_node = vec![0u32; items.len()];
 
         let count = items.len();
-        let root = Self::build_rec(&mut items, &mut nodes, &mut element_indices, 0, count);
+        let root = Self::build_rec(
+            &mut items,
+            &mut nodes,
+            &mut element_indices,
+            &mut element_node,
+            0,
+            count,
+            u32::MAX,
+        );
 
         Self {
             nodes,
             element_indices,
+            element_node,
             root,
         }
     }
@@ -171,8 +193,10 @@ impl Bvh {
         items: &mut [(Aabb, u32)],
         nodes: &mut Vec<Node>,
         element_indices: &mut Vec<u32>,
+        element_node: &mut [u32],
         range_start: usize,
         range_end: usize,
+        parent: u32,
     ) -> u32 {
         let count = range_end - range_start;
 
@@ -184,13 +208,15 @@ impl Bvh {
 
         if count == 1 {
             // Leaf node: store element index.
-            let idx = element_indices.len() as u32;
+            let elem_idx = element_indices.len();
             element_indices.push(items[range_start].1);
             let node_idx = nodes.len() as u32;
+            element_node[elem_idx] = node_idx;
             nodes.push(Node {
                 aabb,
-                child_left: idx,
+                child_left: elem_idx as u32,
                 child_right: 0,
+                parent,
                 leaf_count: 1,
             });
             return node_idx;
@@ -213,16 +239,37 @@ impl Bvh {
         });
 
         let mid = range_start + count / 2;
-        let left = Self::build_rec(items, nodes, element_indices, range_start, mid);
-        let right = Self::build_rec(items, nodes, element_indices, mid, range_end);
-
         let node_idx = nodes.len() as u32;
+        // Reserve the node slot so children's back-references are valid.
         nodes.push(Node {
             aabb,
-            child_left: left,
-            child_right: right,
+            child_left: 0,
+            child_right: 0,
+            parent,
             leaf_count: 0,
         });
+
+        let left = Self::build_rec(
+            items,
+            nodes,
+            element_indices,
+            element_node,
+            range_start,
+            mid,
+            node_idx,
+        );
+        let right = Self::build_rec(
+            items,
+            nodes,
+            element_indices,
+            element_node,
+            mid,
+            range_end,
+            node_idx,
+        );
+
+        nodes[node_idx as usize].child_left = left;
+        nodes[node_idx as usize].child_right = right;
         node_idx
     }
 
@@ -332,6 +379,39 @@ impl Bvh {
             t_max: 1.0,
         };
         self.traverse_ray(&ray)
+    }
+
+    /// Update the AABB of a single element and refit the tree upwards.
+    ///
+    /// `element_index` is the position in the original elements array (0-based).
+    /// Returns `true` if the element exists and the tree was refit.
+    ///
+    /// This is O(log n) — much cheaper than a full rebuild after each move.
+    /// The caller must ensure the new AABB *contains* the shape it represents;
+    /// the BVH only sees AABBs.
+    pub fn update_aabb(&mut self, element_index: usize, new_aabb: Aabb) -> bool {
+        let Some(&leaf_node) = self.element_node.get(element_index) else {
+            return false;
+        };
+        let leaf_node = leaf_node as usize;
+        if leaf_node >= self.nodes.len() {
+            return false;
+        }
+
+        // Update leaf.
+        self.nodes[leaf_node].aabb = new_aabb;
+
+        // Walk up to root, refitting.
+        let mut current = self.nodes[leaf_node].parent;
+        while current != u32::MAX {
+            let node = &self.nodes[current as usize];
+            let left = &self.nodes[node.child_left as usize];
+            let right = &self.nodes[node.child_right as usize];
+            let new_aabb = left.aabb.union(right.aabb);
+            self.nodes[current as usize].aabb = new_aabb;
+            current = self.nodes[current as usize].parent;
+        }
+        true
     }
 }
 
@@ -562,5 +642,62 @@ mod tests {
         )]);
         let query = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(5.0));
         assert!(bvh.traverse_aabb(&query).is_empty());
+    }
+
+    // ── BVH refit ───────────────────────────────────────────────────────
+
+    #[test]
+    fn update_aabb_moves_element_in_ray_query() {
+        let elements = vec![
+            (
+                Aabb::from_centre_half(DVec3::new(5.0, 0.0, 0.0), DVec3::splat(1.0)),
+                100,
+            ),
+            (
+                Aabb::from_centre_half(DVec3::new(100.0, 0.0, 0.0), DVec3::splat(1.0)),
+                200,
+            ),
+        ];
+        let mut bvh = Bvh::build(elements);
+
+        // Element 0 hits at x=5.
+        let hits = bvh.traverse_ray(&Ray::new(DVec3::ZERO, DVec3::X));
+        assert_eq!(hits.len(), 2);
+
+        // Move element 0 far away.
+        let new_aabb = Aabb::from_centre_half(DVec3::new(-50.0, 0.0, 0.0), DVec3::splat(1.0));
+        assert!(bvh.update_aabb(0, new_aabb));
+
+        // Ray going +X should miss it now, only hit element 1.
+        let hits = bvh.traverse_ray(&Ray::new(DVec3::ZERO, DVec3::X));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].element_id, 200);
+    }
+
+    #[test]
+    fn update_aabb_refit_keeps_tree_consistent() {
+        // Build a larger tree to exercise deeper refit paths.
+        let mut elements = Vec::new();
+        for i in 0..20u32 {
+            elements.push((
+                Aabb::from_centre_half(DVec3::new(i as f64 * 2.0, 0.0, 0.0), DVec3::splat(0.5)),
+                i,
+            ));
+        }
+        let mut bvh = Bvh::build(elements);
+
+        // Update element 10.
+        let new_aabb = Aabb::from_centre_half(DVec3::new(10.0 * 2.0, 0.0, 0.0), DVec3::splat(1.0));
+        assert!(bvh.update_aabb(10, new_aabb));
+
+        // The BVH should still find it.
+        let hits = bvh.traverse_ray(&Ray::new(DVec3::ZERO, DVec3::X));
+        assert_eq!(hits.len(), 20);
+    }
+
+    #[test]
+    fn update_aabb_invalid_index_returns_false() {
+        let mut bvh = Bvh::build([unit_box_at(DVec3::ZERO)]);
+        assert!(!bvh.update_aabb(999, Aabb::EMPTY));
     }
 }
