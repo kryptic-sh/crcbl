@@ -40,17 +40,39 @@ const ACTION_LEFT: &str = "move_left";
 const ACTION_RIGHT: &str = "move_right";
 const ACTION_LAUNCH: &str = "launch";
 
+/// Brick grid layout.
+const BRICK_ROWS: usize = 4;
+const BRICK_COLS: usize = 10;
+const BRICK_WIDTH: f64 = 2.4;
+const BRICK_HEIGHT: f64 = 0.8;
+const BRICK_GAP: f64 = 0.2;
+const BRICK_TOP: f64 = 7.0;
+const BRICK_LEFT: f64 = -(BRICK_COLS as f64 * (BRICK_WIDTH + BRICK_GAP)) / 2.0 + BRICK_WIDTH / 2.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GameState {
+    WaitingForLaunch,
+    Playing,
+    Won,
+    Lost,
+}
+
 pub struct Game {
     pub paddle_entity: Entity,
     pub ball_entity: Entity,
     _wall_left: Entity,
     _wall_right: Entity,
     _wall_top: Entity,
+    /// All brick entities (filled in Game::new).
+    bricks: Vec<Entity>,
     action_map: ActionMap,
     server: Server<InMemoryTransport>,
     client: Client<InMemoryTransport>,
     paddle_x: f64,
     launched: bool,
+    pub score: u32,
+    pub lives: u32,
+    pub state: GameState,
 }
 
 impl std::fmt::Debug for Game {
@@ -80,100 +102,26 @@ impl std::fmt::Display for GameError {
 impl std::error::Error for GameError {}
 
 /// Per-tick game logic run after the ECS physics schedule.
-struct BreakoutModule {
-    ball_entity: Entity,
-    paddle_entity: Entity,
-    wall_left: Entity,
-    wall_right: Entity,
-    wall_top: Entity,
-}
+struct BreakoutModule;
 
 impl GameModule for BreakoutModule {
     fn name(&self) -> &str {
         "breakout"
     }
 
-    fn register(&self, _world: &mut World) {
-        // Systems are already registered in Game::new before the module is set.
-    }
-
-    fn tick(&mut self, world: &mut World) {
-        let schedule = world.schedule_mut();
-        for sys in schedule.iter_mut() {
-            if sys.name() == "physics"
-                && let Some(phys) = sys.as_any_mut().downcast_mut::<PhysicsSystem>()
-            {
-                handle_collisions(
-                    phys,
-                    self.ball_entity,
-                    self.paddle_entity,
-                    self.wall_left,
-                    self.wall_right,
-                    self.wall_top,
-                );
-            }
-        }
-    }
+    fn register(&self, _world: &mut World) {}
 }
 
-/// Sweep the ball forward and reflect velocity off any hit surface.
-fn handle_collisions(
-    phys: &mut PhysicsSystem,
-    ball: Entity,
-    paddle: Entity,
-    wall_left: Entity,
-    wall_right: Entity,
-    wall_top: Entity,
-) {
-    // Copy body and transform values, then drop the immutable borrows.
-    let (body_val, transform_val) = {
-        let body = match phys.body(ball) {
-            Some(b) => *b,
-            None => return,
-        };
-        let transform = match phys.transform(ball) {
-            Some(t) => *t,
-            None => return,
-        };
-        (body, transform)
-    };
-
-    let dt = 1.0 / TICK_HZ as f64;
-    let vel = body_val.velocity;
-    let pos = transform_val.position;
-
-    // Sweep the ball along its velocity (CCD).
-    let segment = crcbl_phys::Segment {
-        start: pos,
-        end: pos + vel * dt,
-    };
-
-    if let Some((_hit_entity, hit)) = phys.sweep_sphere(&segment, BALL_RADIUS) {
-        let normal = hit.normal;
-        if vel.dot(normal) < 0.0 {
-            let reflected = vel - 2.0 * vel.dot(normal) * normal;
-            let mut new_body = body_val;
-            new_body.velocity = reflected;
-            phys.set_body(ball, new_body);
-
-            let mut new_transform = transform_val;
-            new_transform.position = hit.point + normal * BALL_RADIUS * 1.01;
-            phys.set_transform(ball, new_transform);
-
-            log::debug!(
-                "ball hit {:?}, normal={:?}, vel_before={:?}, vel_after={:?}",
-                _hit_entity,
-                normal,
-                vel,
-                reflected,
-            );
-        }
+fn reset_ball(phys: &mut PhysicsSystem, ball: Entity) {
+    phys.set_transform(
+        ball,
+        Transform::from_position(DVec3::new(BALL_START_X, BALL_START_Y, 0.0)),
+    );
+    if let Some(body) = phys.body(ball) {
+        let mut new_body = *body;
+        new_body.velocity = DVec3::ZERO;
+        phys.set_body(ball, new_body);
     }
-
-    let _ = paddle;
-    let _ = wall_left;
-    let _ = wall_right;
-    let _ = wall_top;
 }
 
 impl Game {
@@ -267,6 +215,28 @@ impl Game {
             &Transform::from_position(DVec3::new(0.0, WORLD_TOP + 0.5, 0.0)),
         );
 
+        // --- Bricks ---
+        let mut bricks = Vec::with_capacity(BRICK_ROWS * BRICK_COLS);
+        for row in 0..BRICK_ROWS {
+            for col in 0..BRICK_COLS {
+                let bx = BRICK_LEFT + col as f64 * (BRICK_WIDTH + BRICK_GAP);
+                let by = BRICK_TOP - row as f64 * (BRICK_HEIGHT + BRICK_GAP);
+                let entity = world.spawn();
+                phys.set_body(entity, RigidBody::new_kinematic());
+                phys.set_transform(entity, Transform::from_position(DVec3::new(bx, by, 0.0)));
+                phys.set_collider(
+                    entity,
+                    &ColliderComponent::Box {
+                        offset: DVec3::ZERO,
+                        half_extents: DVec3::new(BRICK_WIDTH / 2.0, BRICK_HEIGHT / 2.0, 0.5),
+                        is_trigger: false,
+                    },
+                    &Transform::from_position(DVec3::new(bx, by, 0.0)),
+                );
+                bricks.push(entity);
+            }
+        }
+
         world.register_system(Box::new(phys));
 
         // --- Input ---
@@ -293,13 +263,7 @@ impl Game {
             Server::try_new_with_compatibility(world, server_transport, TICK_HZ, COMPATIBILITY)
                 .map_err(|e| GameError::Server(e.to_string()))?;
 
-        server.set_module(Box::new(BreakoutModule {
-            ball_entity,
-            paddle_entity,
-            wall_left,
-            wall_right,
-            wall_top,
-        }));
+        server.set_module(Box::new(BreakoutModule));
 
         let client =
             Client::new_with_compatibility(World::new(), client_transport, TICK_HZ, COMPATIBILITY);
@@ -310,11 +274,15 @@ impl Game {
             _wall_left: wall_left,
             _wall_right: wall_right,
             _wall_top: wall_top,
+            bricks,
             action_map,
             server,
             client,
             paddle_x: 0.0,
             launched: false,
+            score: 0,
+            lives: 3,
+            state: GameState::WaitingForLaunch,
         })
     }
 
@@ -329,6 +297,32 @@ impl Game {
         let right = action_held(&self.action_map, ACTION_RIGHT);
         let launch = action_just_pressed(&self.action_map, ACTION_LAUNCH);
 
+        // Handle game state transitions.
+        match self.state {
+            GameState::WaitingForLaunch => {
+                if launch {
+                    self.state = GameState::Playing;
+                    self.launched = true;
+                    set_ball_velocity(
+                        &mut self.server,
+                        self.ball_entity,
+                        DVec3::new(BALL_SPEED_X, BALL_SPEED_Y, 0.0),
+                    );
+                }
+            }
+            GameState::Won | GameState::Lost => {
+                if launch {
+                    // Restart.
+                    restart_game(&mut self.server, self.ball_entity, self.paddle_entity);
+                    self.state = GameState::WaitingForLaunch;
+                    self.launched = false;
+                    self.score = 0;
+                    self.lives = 3;
+                }
+            }
+            GameState::Playing => { /* handled by BreakoutModule */ }
+        }
+
         if left {
             self.paddle_x -= PADDLE_SPEED * (1.0 / TICK_HZ as f64);
         }
@@ -340,44 +334,35 @@ impl Game {
             WORLD_RIGHT - PADDLE_HALF_WIDTH,
         );
 
-        // Launch ball.
-        if launch && !self.launched {
-            self.launched = true;
-            set_ball_velocity(
-                &mut self.server,
-                self.ball_entity,
-                DVec3::new(BALL_SPEED_X, BALL_SPEED_Y, 0.0),
-            );
-        }
-
-        // Sync paddle position to physics system.
+        // Sync paddle position.
         set_paddle_position(&mut self.server, self.paddle_entity, self.paddle_x);
 
-        // Send input.
+        // Send input, advance simulation.
         let input_bytes = crcbl_net::encode_client_to_server(&ClientToServer::Input {
             tick: Default::default(),
             data: vec![],
         });
         self.client.set_input(input_bytes);
-
-        // Advance simulation.
         self.server.update(now);
         let alpha = self.client.update(now);
 
-        // Log ball position from interpolated state.
-        let state = self.client.interpolate(alpha);
-        let ball_bits = self.ball_entity.to_bits();
-        for (entity_bits, transform) in state.transforms {
-            if entity_bits == ball_bits {
-                log::debug!(
-                    "ball pos: ({:.2}, {:.2}) vel: {:?}",
-                    transform.position.x,
-                    transform.position.y,
-                    "from snapshot",
-                );
-            }
+        // Run game logic (collision, scoring, lives).
+        if self.state == GameState::Playing {
+            run_game_logic(
+                &mut self.server,
+                self.ball_entity,
+                self.paddle_entity,
+                &mut GameCtx {
+                    bricks: &mut self.bricks,
+                    score: &mut self.score,
+                    lives: &mut self.lives,
+                    state: &mut self.state,
+                    launched: &mut self.launched,
+                },
+            );
         }
 
+        let _ = alpha;
         self.paddle_x
     }
 }
@@ -414,6 +399,123 @@ fn set_ball_velocity(server: &mut Server<InMemoryTransport>, entity: Entity, vel
             new_body.velocity = velocity;
             phys.set_body(entity, new_body);
         }
+    });
+}
+
+/// Mutable game state passed to collision/detection logic.
+struct GameCtx<'a> {
+    bricks: &'a mut Vec<Entity>,
+    score: &'a mut u32,
+    lives: &'a mut u32,
+    state: &'a mut GameState,
+    launched: &'a mut bool,
+}
+
+/// Run the game logic (collision, scoring, lives) after a server tick.
+fn run_game_logic(
+    server: &mut Server<InMemoryTransport>,
+    ball_entity: Entity,
+    paddle_entity: Entity,
+    ctx: &mut GameCtx<'_>,
+) {
+    let mut to_despawn: Vec<Entity> = Vec::new();
+
+    {
+        let world = server.world_mut();
+        let schedule = world.schedule_mut();
+        for sys in schedule.iter_mut() {
+            if sys.name() == "physics"
+                && let Some(phys) = sys.as_any_mut().downcast_mut::<PhysicsSystem>()
+            {
+                let dt = 1.0 / TICK_HZ as f64;
+
+                let hit = if let (Some(body), Some(transform)) =
+                    (phys.body(ball_entity), phys.transform(ball_entity))
+                {
+                    let pos = transform.position;
+                    let segment = crcbl_phys::Segment {
+                        start: pos,
+                        end: pos + body.velocity * dt,
+                    };
+                    phys.sweep_sphere(&segment, BALL_RADIUS)
+                } else {
+                    None
+                };
+
+                if let Some((hit_entity, hit_info)) = hit {
+                    // Copy out body/transform before mutating.
+                    let (body_val, transform_val, vel, normal) = {
+                        if let (Some(body), Some(transform)) =
+                            (phys.body(ball_entity), phys.transform(ball_entity))
+                        {
+                            (*body, *transform, body.velocity, hit_info.normal)
+                        } else {
+                            continue;
+                        }
+                    };
+
+                    if let Some(idx) = ctx.bricks.iter().position(|&e| e == hit_entity) {
+                        ctx.bricks.swap_remove(idx);
+                        *ctx.score += 10;
+                        to_despawn.push(hit_entity);
+                        if vel.dot(normal) < 0.0 {
+                            let reflected = vel - 2.0 * vel.dot(normal) * normal;
+                            let mut new_body = body_val;
+                            new_body.velocity = reflected;
+                            phys.set_body(ball_entity, new_body);
+                            let mut new_transform = transform_val;
+                            new_transform.position = hit_info.point + normal * BALL_RADIUS * 1.01;
+                            phys.set_transform(ball_entity, new_transform);
+                        }
+                    } else if vel.dot(normal) < 0.0 {
+                        let reflected = vel - 2.0 * vel.dot(normal) * normal;
+                        let mut new_body = body_val;
+                        new_body.velocity = reflected;
+                        phys.set_body(ball_entity, new_body);
+                        let mut new_transform = transform_val;
+                        new_transform.position = hit_info.point + normal * BALL_RADIUS * 1.01;
+                        phys.set_transform(ball_entity, new_transform);
+                    }
+                }
+
+                // Ball fell below paddle.
+                if *ctx.state == GameState::Playing
+                    && let Some(transform) = phys.transform(ball_entity)
+                    && transform.position.y < PADDLE_Y - 2.0
+                {
+                    *ctx.lives = ctx.lives.saturating_sub(1);
+                    if *ctx.lives == 0 {
+                        *ctx.state = GameState::Lost;
+                        *ctx.launched = false;
+                    } else {
+                        reset_ball(phys, ball_entity);
+                        *ctx.launched = false;
+                        *ctx.state = GameState::WaitingForLaunch;
+                    }
+                }
+
+                if *ctx.state == GameState::Playing && ctx.bricks.is_empty() {
+                    *ctx.state = GameState::Won;
+                }
+
+                let _ = paddle_entity;
+            }
+        }
+    } // drop schedule and world borrow
+
+    // Despawn hit bricks after the physics borrow is released.
+    for entity in to_despawn {
+        server.world_mut().despawn(entity);
+    }
+}
+
+fn restart_game(
+    server: &mut Server<InMemoryTransport>,
+    ball_entity: Entity,
+    _paddle_entity: Entity,
+) {
+    with_physics(server, |phys| {
+        reset_ball(phys, ball_entity);
     });
 }
 
