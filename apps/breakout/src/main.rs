@@ -15,6 +15,7 @@ mod args;
 mod audio;
 mod game;
 mod gpu;
+mod high_score;
 
 use std::process::ExitCode;
 

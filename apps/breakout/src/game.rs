@@ -73,6 +73,8 @@ pub struct Game {
     pub lives: u32,
     pub state: GameState,
     pub audio: crate::audio::Audio,
+    /// Persistent high score.
+    pub high_score: crate::high_score::HighScore,
     /// Current ball X for spatial audio panning.
     pub ball_x: f64,
     /// Whether a collision sound was queued this tick (for HUD logging).
@@ -288,6 +290,7 @@ impl Game {
             lives: 3,
             state: GameState::WaitingForLaunch,
             audio: crate::audio::Audio::new(headless),
+            high_score: crate::high_score::HighScore::load(headless),
             ball_x: 0.0,
             sound_played_this_tick: false,
         })
@@ -400,8 +403,14 @@ impl Game {
             self.score,
             self.lives,
             self.ball_x,
+            self.high_score.get(),
             self.sound_played_this_tick,
         );
+
+        // Update high score when game ends.
+        if self.state == GameState::Won || self.state == GameState::Lost {
+            self.high_score.update(self.score);
+        }
 
         let _ = alpha;
         self.paddle_x
@@ -576,7 +585,14 @@ fn restart_game(
 
 // ---- HUD (console-based until UI compositing pass exists) ----
 
-fn log_hud(state: &GameState, score: u32, lives: u32, ball_x: f64, sound_played: bool) {
+fn log_hud(
+    state: &GameState,
+    score: u32,
+    lives: u32,
+    ball_x: f64,
+    high_score: u32,
+    sound_played: bool,
+) {
     let state_str = match state {
         GameState::WaitingForLaunch => "WAITING — press Space to launch",
         GameState::Playing => "PLAYING",
@@ -584,7 +600,9 @@ fn log_hud(state: &GameState, score: u32, lives: u32, ball_x: f64, sound_played:
         GameState::Lost => "GAME OVER — press Space to restart",
     };
     let sound_str = if sound_played { " 🔊" } else { "" };
-    log::info!("[HUD] Score: {score}  Lives: {lives}  Ball x: {ball_x:.1}  {state_str}{sound_str}");
+    log::info!(
+        "[HUD] Score: {score} (best: {high_score})  Lives: {lives}  Ball x: {ball_x:.1}  {state_str}{sound_str}"
+    );
 }
 
 // ---- input helpers ----

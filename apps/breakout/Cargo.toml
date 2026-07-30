@@ -21,6 +21,7 @@ crcbl-server = { workspace = true }
 crcbl-client = { workspace = true }
 crcbl-core = { workspace = true }
 crcbl-audio = { workspace = true }
+crcbl-store = { workspace = true }
 glam = { workspace = true }
 log = { workspace = true }
 
