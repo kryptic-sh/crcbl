@@ -7,10 +7,10 @@
 //! # Architecture
 //!
 //! ```text
-//! Widgets (Label, Button, …)   ←  slice 2 (P4-b)
+//! Widgets (Label, Button, …)   ←  this slice (P4-b)
 //!      │
 //!      ▼
-//! DrawList + FontAtlas         ←  this slice (P4-a)
+//! DrawList + FontAtlas         ←  first slice (P4-a)
 //!      │
 //!      ▼
 //! Render backend (future)
@@ -22,9 +22,13 @@
 //! See `docs/plan/07-ui-debug.md` for the full design.
 
 pub mod draw_list;
+pub mod hud;
 pub mod text;
+pub mod widget;
 
 pub use draw_list::{DrawCommand, DrawList, Vertex2d};
+pub use hud::{Anchor, Hud, HudPanel};
 pub use text::{
     FontAtlas, GLYPH_ADVANCE, GLYPH_COUNT, GLYPH_HEIGHT, GLYPH_WIDTH, GlyphMetrics, LINE_HEIGHT,
 };
+pub use widget::{Button, ButtonState, Label, Style};
