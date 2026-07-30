@@ -134,6 +134,152 @@ impl DrawList {
     pub fn clear(&mut self) {
         self.commands.clear();
     }
+
+    /// Expand every draw command into screen-space triangles.
+    ///
+    /// Returns `(vertices, indices)` in a format a render backend can upload
+    /// directly. Each `Rect` becomes one quad (4 vertices, 6 indices).
+    /// `RectOutline` becomes 4 thin quads — one per side — forming a hollow
+    /// border. `Text` commands are skipped (they need glyph-atlas UV data from
+    /// the text module).
+    ///
+    /// The index buffer uses `u32` indices; callers that need `u16` must
+    /// adapt. Vertex positions are in screen-space pixels with Y-up (the UI
+    /// convention); the renderer applies an orthographic projection.
+    #[must_use]
+    pub fn to_triangles(&self) -> (Vec<Vertex2d>, Vec<u32>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        for cmd in &self.commands {
+            match cmd {
+                DrawCommand::Rect { min, max, color } => {
+                    let base = vertices.len() as u32;
+                    // clockwise winding: top-left, top-right, bottom-right, bottom-left
+                    vertices.push(Vertex2d {
+                        pos: Vec2::new(min.x, max.y),
+                        uv: Vec2::ZERO,
+                        color: *color,
+                    });
+                    vertices.push(Vertex2d {
+                        pos: Vec2::new(max.x, max.y),
+                        uv: Vec2::ZERO,
+                        color: *color,
+                    });
+                    vertices.push(Vertex2d {
+                        pos: Vec2::new(max.x, min.y),
+                        uv: Vec2::ZERO,
+                        color: *color,
+                    });
+                    vertices.push(Vertex2d {
+                        pos: Vec2::new(min.x, min.y),
+                        uv: Vec2::ZERO,
+                        color: *color,
+                    });
+                    indices.extend_from_slice(&[
+                        base,
+                        base + 1,
+                        base + 2,
+                        base,
+                        base + 2,
+                        base + 3,
+                    ]);
+                }
+                DrawCommand::RectOutline {
+                    min,
+                    max,
+                    thickness,
+                    color,
+                } => {
+                    // Four narrow quads: top, bottom, left, right. Each quad is
+                    // inset so the border sits *inside* the declared bounds.
+                    let t = *thickness;
+                    let inner_min = Vec2::new(min.x + t, min.y + t);
+                    let inner_max = Vec2::new(max.x - t, max.y - t);
+                    let c = *color;
+
+                    // top edge
+                    push_quad(
+                        Vec2::new(min.x, max.y),
+                        Vec2::new(max.x, max.y),
+                        Vec2::new(inner_max.x, inner_max.y),
+                        Vec2::new(inner_min.x, inner_max.y),
+                        c,
+                        &mut vertices,
+                        &mut indices,
+                    );
+                    // bottom edge
+                    push_quad(
+                        Vec2::new(min.x, inner_min.y),
+                        Vec2::new(max.x, inner_min.y),
+                        Vec2::new(max.x, min.y),
+                        Vec2::new(min.x, min.y),
+                        c,
+                        &mut vertices,
+                        &mut indices,
+                    );
+                    // left edge
+                    push_quad(
+                        Vec2::new(min.x, inner_max.y),
+                        Vec2::new(inner_min.x, inner_max.y),
+                        Vec2::new(inner_min.x, inner_min.y),
+                        Vec2::new(min.x, inner_min.y),
+                        c,
+                        &mut vertices,
+                        &mut indices,
+                    );
+                    // right edge
+                    push_quad(
+                        Vec2::new(inner_max.x, inner_max.y),
+                        Vec2::new(max.x, inner_max.y),
+                        Vec2::new(max.x, inner_min.y),
+                        Vec2::new(inner_max.x, inner_min.y),
+                        c,
+                        &mut vertices,
+                        &mut indices,
+                    );
+                }
+                DrawCommand::Text { .. } => {
+                    // Text expands via the FontAtlas in S7.
+                }
+            }
+        }
+        (vertices, indices)
+    }
+}
+
+/// Push a quad (4 vertices, 6 indices) for use by [`DrawList::to_triangles`].
+fn push_quad(
+    a: Vec2,
+    b: Vec2,
+    c: Vec2,
+    d: Vec2,
+    color: [f32; 4],
+    vertices: &mut Vec<Vertex2d>,
+    indices: &mut Vec<u32>,
+) {
+    let base = vertices.len() as u32;
+    vertices.push(Vertex2d {
+        pos: a,
+        uv: Vec2::ZERO,
+        color,
+    });
+    vertices.push(Vertex2d {
+        pos: b,
+        uv: Vec2::ZERO,
+        color,
+    });
+    vertices.push(Vertex2d {
+        pos: c,
+        uv: Vec2::ZERO,
+        color,
+    });
+    vertices.push(Vertex2d {
+        pos: d,
+        uv: Vec2::ZERO,
+        color,
+    });
+    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 // ---------------------------------------------------------------------------
@@ -216,5 +362,102 @@ mod tests {
         assert_eq!(dl.len(), 2);
         assert!(matches!(dl.commands()[0], DrawCommand::Rect { .. }));
         assert!(matches!(dl.commands()[1], DrawCommand::Text { .. }));
+    }
+
+    // ── triangulation ─────────────────────────────────────────────────
+
+    #[test]
+    fn to_triangles_from_empty_list() {
+        let dl = DrawList::new();
+        let (verts, indices) = dl.to_triangles();
+        assert!(verts.is_empty());
+        assert!(indices.is_empty());
+    }
+
+    #[test]
+    fn rect_becomes_one_quad() {
+        let mut dl = DrawList::new();
+        dl.rect(
+            Vec2::new(10.0, 20.0),
+            Vec2::new(110.0, 120.0),
+            [1.0, 0.5, 0.0, 1.0],
+        );
+        let (verts, indices) = dl.to_triangles();
+
+        // One quad = 4 vertices, 6 indices (2 triangles).
+        assert_eq!(verts.len(), 4);
+        assert_eq!(indices.len(), 6);
+
+        // Vertices are CCW from top-left.
+        assert_eq!(verts[0].pos, Vec2::new(10.0, 120.0)); // top-left
+        assert_eq!(verts[1].pos, Vec2::new(110.0, 120.0)); // top-right
+        assert_eq!(verts[2].pos, Vec2::new(110.0, 20.0)); // bottom-right
+        assert_eq!(verts[3].pos, Vec2::new(10.0, 20.0)); // bottom-left
+
+        // All vertices share the command's color.
+        for v in &verts {
+            assert_eq!(v.color, [1.0, 0.5, 0.0, 1.0]);
+        }
+
+        // Indices form two triangles: (0,1,2) and (0,2,3).
+        assert_eq!(&indices[..3], &[0, 1, 2]);
+        assert_eq!(&indices[3..], &[0, 2, 3]);
+    }
+
+    #[test]
+    fn rect_outline_becomes_four_quads() {
+        let mut dl = DrawList::new();
+        dl.rect_outline(
+            Vec2::new(0.0, 0.0),
+            Vec2::new(100.0, 80.0),
+            3.0,
+            [0.0, 1.0, 0.0, 1.0],
+        );
+        let (verts, indices) = dl.to_triangles();
+
+        // 4 quads = 16 vertices, 24 indices.
+        assert_eq!(verts.len(), 16);
+        assert_eq!(indices.len(), 24);
+
+        // All verts have the outline colour.
+        for v in &verts {
+            assert_eq!(v.color, [0.0, 1.0, 0.0, 1.0]);
+        }
+    }
+
+    #[test]
+    fn text_commands_are_skipped_in_triangulation() {
+        let mut dl = DrawList::new();
+        dl.text(Vec2::new(5.0, 5.0), "hello", [1.0; 4], 16.0);
+        let (verts, indices) = dl.to_triangles();
+        assert!(verts.is_empty());
+        assert!(indices.is_empty());
+    }
+
+    #[test]
+    fn mixed_commands_expand_correctly() {
+        let mut dl = DrawList::new();
+        dl.rect(
+            Vec2::new(0.0, 0.0),
+            Vec2::new(10.0, 10.0),
+            [1.0, 0.0, 0.0, 1.0],
+        );
+        dl.rect(
+            Vec2::new(20.0, 0.0),
+            Vec2::new(30.0, 10.0),
+            [0.0, 1.0, 0.0, 1.0],
+        );
+        dl.text(Vec2::ZERO, "skipped", [0.0; 4], 12.0);
+        let (verts, indices) = dl.to_triangles();
+
+        // 2 rects → 8 verts, 12 indices (text skipped).
+        assert_eq!(verts.len(), 8);
+        assert_eq!(indices.len(), 12);
+
+        // First rect's verts are red, second's are green.
+        assert_eq!(verts[0].color, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(verts[4].color, [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(indices[0], 0);
+        assert_eq!(indices[6], 4);
     }
 }
