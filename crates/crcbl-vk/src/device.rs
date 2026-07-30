@@ -146,7 +146,11 @@ pub(crate) struct CommandBufferEntry {
 #[derive(Debug)]
 pub(crate) struct ReadbackEntry {
     pub(crate) owner: u64,
-    mapped: *mut u8,
+    /// The buffer being read back, stored as a handle so it can be re-resolved
+    /// at poll time. If the buffer was destroyed between request and poll, the
+    /// generational handle fails lookup rather than dereferencing unmapped
+    /// memory.
+    buffer: BufferHandle,
     offset: u64,
     size: u64,
     /// The completion point to watch: an explicit timeline wait when the caller
@@ -1068,8 +1072,6 @@ impl Device for VkDevice {
                 desc.offset, entry.size
             )));
         }
-        let mapped = entry.mapped;
-
         // "Everything submitted to this device before this call" is exactly a
         // snapshot of the submission counter, which is what the retire timeline
         // counts — so a readback with no explicit wait needs no extra object.
@@ -1096,7 +1098,7 @@ impl Device for VkDevice {
             .readbacks
             .insert(ReadbackEntry {
                 owner: self.inner.id,
-                mapped,
+                buffer: desc.buffer,
                 offset: desc.offset,
                 size: desc.size,
                 wait,
@@ -1127,13 +1129,23 @@ impl Device for VkDevice {
             return Ok(ReadbackState::Pending);
         }
         if entry.size > 0 {
+            // Resolve the buffer's mapped pointer from the handle stored at
+            // request time. If the buffer was destroyed between request and
+            // poll, the generational handle fails lookup here — rather than
+            // silently dereferencing unmapped memory.
+            let buffer_entry = lookup(&state.buffers, "buffer", entry.buffer, self.inner.id)?;
+            if buffer_entry.mapped.is_null() {
+                return Err(HalError::InvalidDescriptor(
+                    "buffer for readback is no longer mapped".to_string(),
+                ));
+            }
             // SAFETY: the mapping covers the whole allocation and the range was
             // bounds-checked at request time; the memory is `HOST_COHERENT`, so
             // the writes the GPU made before the timeline value are visible
             // without an explicit invalidate.
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    entry.mapped.add(entry.offset as usize),
+                    buffer_entry.mapped.add(entry.offset as usize),
                     out.as_mut_ptr(),
                     out.len(),
                 );
