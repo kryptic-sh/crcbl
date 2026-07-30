@@ -21,8 +21,8 @@
 
 use crcbl_hal::null::{Command, NullInstance, ObjectKind, Recorder};
 use crcbl_hal::{
-    CommandEncoderDesc, Device, DeviceDesc, Format, ImageUsage, Instance, QueueHandle, QueueKind,
-    ResourceState,
+    CommandEncoderDesc, Device, DeviceDesc, Format, ImageAspect, ImageSubresourceRange, ImageUsage,
+    Instance, QueueHandle, QueueKind, ResourceState,
 };
 use crcbl_render::graph::{
     GraphBarriers, GraphError, ImageId, ImportedBuffer, ImportedImage, RenderGraph,
@@ -1376,5 +1376,104 @@ fn passes_run_in_the_order_they_were_declared() {
     // Successive writes to the same attachment are still hazards, so each of
     // the later two gets its own barrier.
     assert_eq!(harness.recorded_barriers().len(), 3);
+    pool.destroy(harness.device.as_ref());
+}
+
+// --- sub-resource range reaches barriers ------------------------------------
+
+/// `read_subresource` and `use_subresource` propagate their declared range
+/// into the barrier, so a pass that only touches mip 2 emits a barrier
+/// scoped to just mip 2 — not the whole image.
+#[test]
+fn subresource_range_reaches_the_barrier() {
+    let harness = Harness::open();
+    let mut pool = TransientPool::new();
+
+    let mut graph = harness.graph();
+    let image = graph.create_image(
+        "mip-chain",
+        TransientImageDesc {
+            format: Format::Rgba16Float,
+            usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+            extent: EXTENT,
+            samples: 1,
+        },
+    );
+
+    // Pass 1: write mip 0 as `ShaderReadWrite` (storage-image write).
+    graph
+        .add_compute_pass("write-mip0")
+        .use_subresource(
+            image,
+            ResourceState::ShaderReadWrite,
+            ImageSubresourceRange {
+                aspect: ImageAspect::COLOR,
+                base_mip: 0,
+                mip_count: 1,
+                base_layer: 0,
+                layer_count: u32::MAX,
+            },
+        )
+        .execute(|_| {});
+
+    // Pass 2: write mip 1.
+    graph
+        .add_compute_pass("write-mip1")
+        .use_subresource(
+            image,
+            ResourceState::ShaderReadWrite,
+            ImageSubresourceRange {
+                aspect: ImageAspect::COLOR,
+                base_mip: 1,
+                mip_count: 1,
+                base_layer: 0,
+                layer_count: u32::MAX,
+            },
+        )
+        .execute(|_| {});
+
+    // Pass 3: read whole image (default range = whole-image, `None`).
+    graph
+        .add_compute_pass("read-all")
+        .read_image(image)
+        .execute(|_| {});
+
+    let compiled = graph.compile(&pool).expect("a legal frame");
+
+    // Pass 1: one barrier, from `Undefined` on the declared range.
+    let b0 = compiled.passes()[0].barriers();
+    assert_eq!(b0.images.len(), 1);
+    assert_eq!(b0.images[0].from, ResourceState::Undefined);
+    assert_eq!(b0.images[0].to, ResourceState::ShaderReadWrite);
+    let r0 = b0.images[0]
+        .range
+        .expect("pass 1 declares a subresource range");
+    assert_eq!(r0.base_mip, 0);
+    assert_eq!(r0.mip_count, 1);
+
+    // Pass 2: transition from mip-0-write to mip-1-write.
+    let b1 = compiled.passes()[1].barriers();
+    assert_eq!(b1.images.len(), 1);
+    assert_eq!(b1.images[0].from, ResourceState::ShaderReadWrite);
+    assert_eq!(b1.images[0].to, ResourceState::ShaderReadWrite);
+    // State is whole-image tracked, so the transition still fires (from==to) — but
+    // the *range* is scoped to mip 1.
+    let r1 = b1.images[0]
+        .range
+        .expect("pass 2 declares a subresource range");
+    assert_eq!(r1.base_mip, 1);
+    assert_eq!(r1.mip_count, 1);
+
+    // Pass 3: `read_image` leaves range as `None` — resolved to whole-image at
+    // execute time.
+    let b2 = compiled.passes()[2].barriers();
+    assert_eq!(b2.images.len(), 1);
+    assert_eq!(b2.images[0].from, ResourceState::ShaderReadWrite);
+    assert_eq!(b2.images[0].to, ResourceState::ShaderRead);
+    assert!(
+        b2.images[0].range.is_none(),
+        "read_image uses whole-image range (None)"
+    );
+
     pool.destroy(harness.device.as_ref());
 }

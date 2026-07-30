@@ -125,8 +125,6 @@ suites pass under 32-way CPU contention.
   vocabulary.
 - **RenderDoc capture** has not been verified by hand; every object and pass
   carries a debug label and `DEBUG_MARKERS` is requested.
-- The render graph has **no sub-resource vocabulary** (an `ImageId` names a
-  whole image), which P7's depth pyramid will need.
 - **A green local Vulkan run is weaker than CI's.** Synchronisation validation
   has three reaches, and many installed layers report hazards at record time and
   within one submission but **not across submissions** — which is where every

@@ -272,6 +272,11 @@ struct ImageAccess {
     image: ImageId,
     state: ResourceState,
     attachment: Option<Attachment>,
+    /// The sub-resource range this access covers. `None` means the whole image
+    /// (every mip, every layer), resolved at execute time from the image's format.
+    /// Passes that only touch one mip or one layer declare `Some`; the graph then
+    /// emits barriers scoped to just that range rather than the full resource.
+    range: Option<ImageSubresourceRange>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -516,6 +521,7 @@ impl<'g, 'a> PassBuilder<'g, 'a> {
                 store,
                 clear,
             }),
+            range: None,
         });
         self
     }
@@ -548,6 +554,7 @@ impl<'g, 'a> PassBuilder<'g, 'a> {
                 clear,
                 write: true,
             }),
+            range: None,
         });
         self
     }
@@ -583,6 +590,7 @@ impl<'g, 'a> PassBuilder<'g, 'a> {
                 clear: ClearValue::default(),
                 write: false,
             }),
+            range: None,
         });
         self
     }
@@ -592,6 +600,13 @@ impl<'g, 'a> PassBuilder<'g, 'a> {
         self.use_image(image, ResourceState::ShaderRead)
     }
 
+    /// Declares that this pass samples or otherwise shader-reads `image`,
+    /// but only within the given sub-resource `range` (one mip, one layer,
+    /// etc.). The barrier emitted will cover only that range.
+    pub fn read_subresource(self, image: ImageId, range: ImageSubresourceRange) -> Self {
+        self.use_subresource(image, ResourceState::ShaderRead, range)
+    }
+
     /// Declares an image access in an arbitrary state — a storage-image write, a
     /// copy destination, anything the named helpers do not cover.
     pub fn use_image(mut self, image: ImageId, state: ResourceState) -> Self {
@@ -599,6 +614,29 @@ impl<'g, 'a> PassBuilder<'g, 'a> {
             image,
             state,
             attachment: None,
+            range: None,
+        });
+        self
+    }
+
+    /// Declares an image access confined to a specific sub-resource range.
+    ///
+    /// The graph emits a barrier scoped to `range` rather than the whole image.
+    /// Passes that read one mip and write another on the same image declare
+    /// disjoint ranges; the graph still tracks one whole-image state (emitting
+    /// conservative barriers when ranges differ), which is correct for the
+    /// linear pass model.
+    pub fn use_subresource(
+        mut self,
+        image: ImageId,
+        state: ResourceState,
+        range: ImageSubresourceRange,
+    ) -> Self {
+        self.images.push(ImageAccess {
+            image,
+            state,
+            attachment: None,
+            range: Some(range),
         });
         self
     }
@@ -650,6 +688,9 @@ pub struct GraphImageBarrier {
     pub to: ResourceState,
     /// Queue ownership transfer, when the previous user was on another queue.
     pub queue_transfer: Option<QueueTransfer>,
+    /// Sub-resource range this barrier covers. `None` means the whole image,
+    /// resolved at execute time from the image's format.
+    pub range: Option<ImageSubresourceRange>,
 }
 
 /// A barrier the graph computed, in terms of a virtual buffer.
@@ -1249,7 +1290,9 @@ fn emit(
         .iter()
         .map(|barrier| ImageBarrier {
             image: realised.images[barrier.image.index()].0,
-            range: ImageSubresourceRange::all(images[barrier.image.index()].format()),
+            range: barrier.range.unwrap_or_else(|| {
+                ImageSubresourceRange::all(images[barrier.image.index()].format())
+            }),
             from: barrier.from,
             to: barrier.to,
             queue_transfer: barrier.queue_transfer,
@@ -1550,6 +1593,7 @@ fn compile<'a>(
                     from: barrier.0,
                     to: access.state,
                     queue_transfer: barrier.1,
+                    range: access.range,
                 });
             }
         }
@@ -1602,6 +1646,7 @@ fn compile<'a>(
                 from: tracked.state,
                 to: imported.final_state,
                 queue_transfer: None,
+                range: None,
             });
         }
     }
