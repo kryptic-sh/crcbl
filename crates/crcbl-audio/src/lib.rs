@@ -17,6 +17,7 @@
 //! on the OS audio thread, and `source.fill()` is called inside it.
 //! The source must be `Send + Sync + 'static`.
 
+pub mod event;
 pub mod mixer;
 pub mod qoa;
 pub mod spatial;

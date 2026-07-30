@@ -11,6 +11,7 @@ use crate::{AudioSample, AudioSource};
 /// A single playable sound.
 #[derive(Debug)]
 pub struct Voice {
+    /// Interleaved stereo sample data.
     data: Vec<AudioSample>,
     /// Current playback position in samples (not frames).
     playhead: usize,
@@ -20,6 +21,13 @@ pub struct Voice {
     looping: bool,
     /// Stopped voices are removed from the mixer on the next fill.
     stopped: bool,
+    /// Per-channel gains applied during mixing: `[left, right]`.
+    /// Defaults to `(1.0, 1.0)` — un-panned, centre.
+    gains: (f32, f32),
+    /// Pitch ratio for varispeed playback (1.0 = normal).
+    /// Values > 1.0 play faster/higher; < 1.0 play slower/lower.
+    /// Applied by advancing the playhead at the adjusted rate.
+    pitch: f32,
 }
 
 impl Voice {
@@ -32,7 +40,23 @@ impl Voice {
             volume: 1.0,
             looping: false,
             stopped: false,
+            gains: (1.0, 1.0),
+            pitch: 1.0,
         }
+    }
+
+    /// Set per-channel gains (left, right). Both clamped to `[0, 1]`.
+    #[must_use]
+    pub fn with_gains(mut self, left: f32, right: f32) -> Self {
+        self.gains = (left.clamp(0.0, 1.0), right.clamp(0.0, 1.0));
+        self
+    }
+
+    /// Set pitch ratio (varispeed). Clamped to `[0.25, 4.0]`.
+    #[must_use]
+    pub fn with_pitch(mut self, ratio: f32) -> Self {
+        self.pitch = ratio.clamp(0.25, 4.0);
+        self
     }
 
     /// Set playback volume `[0, 1]`.
@@ -62,27 +86,36 @@ impl Voice {
 
     /// Mix this voice into `buffer`, advancing the playhead.
     ///
-    /// The samples in `buffer` are already zeroed so we accumulate.
+    /// `buffer` is interleaved stereo: `[L0,R0, L1,R1, …]`. The voice
+    /// applies per-channel gains and a varispeed pitch ratio.
     /// Returns `true` if the voice is still active after this block.
     fn mix_block(&mut self, buffer: &mut [AudioSample]) -> bool {
         if self.stopped {
             return false;
         }
         let data_len = self.data.len();
-        let mut pos = self.playhead;
+        // f64 playhead for sub-sample precision under pitch shift.
+        let mut pos = self.playhead as f64;
+        let step = self.pitch as f64;
 
-        for sample in buffer.iter_mut() {
-            if pos >= data_len {
+        for (i, sample) in buffer.iter_mut().enumerate() {
+            if pos as usize >= data_len {
                 if self.looping {
-                    pos = 0;
+                    pos = ((pos as usize) % data_len) as f64;
                 } else {
                     return false;
                 }
             }
-            *sample += self.data[pos] * self.volume;
-            pos += 1;
+            let channel = i % crate::CHANNELS;
+            let gain = if channel == 0 {
+                self.gains.0
+            } else {
+                self.gains.1
+            };
+            *sample += self.data[pos as usize] * self.volume * gain;
+            pos += step;
         }
-        self.playhead = pos;
+        self.playhead = (pos as usize).min(data_len);
         true
     }
 }
@@ -136,6 +169,68 @@ impl Mixer {
 impl Default for Mixer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SoundBank
+// ---------------------------------------------------------------------------
+
+/// Pre-loaded sound data keyed by numeric id.
+///
+/// A [`SoundBank`] holds raw interleaved stereo samples that can be
+/// cloned into new [`Voice`]s on demand. It is the server↔client bridge
+/// for audio events: the server sends `(sound_id, position)` and the
+/// client creates a spatial voice from the bank.
+#[derive(Debug, Clone)]
+pub struct SoundBank {
+    sounds: std::collections::HashMap<u32, Vec<AudioSample>>,
+}
+
+impl SoundBank {
+    /// Create an empty sound bank.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            sounds: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Register a sound at `id` with the given interleaved stereo data.
+    pub fn insert(&mut self, id: u32, data: Vec<AudioSample>) {
+        self.sounds.insert(id, data);
+    }
+
+    /// Number of registered sounds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.sounds.len()
+    }
+
+    /// Whether the bank is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sounds.is_empty()
+    }
+
+    /// Create a new [`Voice`] from the stored sound data.
+    ///
+    /// Returns `None` if `id` is not registered.
+    #[must_use]
+    pub fn create_voice(&self, id: u32) -> Option<Voice> {
+        self.sounds.get(&id).map(|data| Voice::new(data.clone()))
+    }
+}
+
+impl Default for SoundBank {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for SoundBank {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SoundBank({} sounds)", self.sounds.len())
     }
 }
 
