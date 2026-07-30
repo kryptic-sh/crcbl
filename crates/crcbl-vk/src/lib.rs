@@ -124,14 +124,12 @@
 //!   because that is the only signal available. Both are documented on
 //!   `command.rs` and are clean errors rather than surprises; a
 //!   `bind_group(…, layout)` or a pass-scoped encoder would settle it.
-//! * **`BindGroupDesc` cannot express a variable descriptor count.**
-//!   `VARIABLE_COUNT` makes the layout's count an upper bound and the *group*
-//!   chooses the real length, but the descriptor has no field for it — so this
-//!   backend infers "one past the highest array index written". That is right
-//!   for "write them all now" and wrong for the shape bindless is built on:
-//!   allocate 4096 slots, write twelve, stream the rest through
-//!   `update_bind_group` later. P3 needs a `BindGroupDesc::array_size` before
-//!   it builds on this; see `pipeline::variable_count_from_entries`.
+//! * **`BindGroupDesc` gained a `variable_count` field on 2026-07-31.**
+//!   The group now provides the actual array length explicitly rather than
+//!   having the backend infer it from entries — which is what the bindless
+//!   model (allocate N, write a subset, stream the rest through
+//!   `update_bind_group` later) needs. See `pipeline::variable_count_from_entries`
+//!   for the fallback inference path.
 //! * **Vertex pulling needs `shaderDrawParameters`.** `SV_VertexID` lowers to
 //!   `gl_VertexIndex - gl_BaseVertex`, which declares SPIR-V's
 //!   `DrawParameters` capability. It is Vulkan 1.1 core-optional and present on

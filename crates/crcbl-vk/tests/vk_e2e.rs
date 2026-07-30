@@ -1242,6 +1242,7 @@ impl TriangleResources {
                 label: Some("triangle vertices"),
                 layout: bind_group_layout,
                 entries: &group_entries,
+                variable_count: None,
             })
             .expect("a bind group");
 
@@ -2879,6 +2880,7 @@ impl DepthProbe {
                 label: Some("probe"),
                 layout,
                 entries: &group_entries,
+                variable_count: None,
             })
             .expect("a bind group");
         let set_layouts = [layout];

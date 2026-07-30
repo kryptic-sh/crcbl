@@ -213,21 +213,15 @@ pub(crate) fn layout_binding_count(entry: &BindGroupLayoutEntry, caps: &DeviceCa
 
 /// How many descriptors to allocate for a `VARIABLE_COUNT` binding.
 ///
-/// # A gap in the seam, reported rather than papered over
+/// The seam now carries a [`BindGroupDesc::variable_count`] field.
+/// When `Some(n)`, the backend uses `n` directly rather than inferring
+/// from entries — which is what the bindless model needs (allocate N
+/// slots, write a subset today, stream the rest later through
+/// [`Device::update_bind_group`](crcbl_hal::Device::update_bind_group)).
+/// When `None`, the inference below applies.
 ///
-/// [`BindGroupDesc`](crcbl_hal::BindGroupDesc) has **no field for the variable
-/// count**. The layout says "up to N" and the entries say which slots are being
-/// written, so the only thing this backend can infer is "one past the highest
-/// slot written" — which is right for the case P1.2 has (write them all now)
-/// and wrong for the case the bindless model is built on: allocate 4096 slots,
-/// write twelve today, stream the rest in later through
-/// [`Device::update_bind_group`](crcbl_hal::Device::update_bind_group). Those
-/// later writes land outside the allocated array.
-///
-/// The seam does not freeze until P5 exit, and this wants a
-/// `BindGroupDesc::array_size: Option<u32>` before P3 builds anything on it.
-/// Until then the inference is documented, tested, and produces a *correct*
-/// small array rather than a silently oversized one.
+/// This function is the fallback: the highest slot written, plus one
+/// (minimum 1). Safe for fixed-size arrays; wrong for deferred fill.
 #[must_use]
 pub(crate) fn variable_count_from_entries(binding: u32, entries: &[BindGroupEntry]) -> u32 {
     entries
@@ -385,8 +379,9 @@ impl VkDevice {
             check_resource_kind(declared.kind, &entry.resource, entry.binding)?;
         }
 
-        let variable_count =
-            variable_binding.map(|binding| variable_count_from_entries(binding, desc.entries));
+        let variable_count = desc.variable_count.or_else(|| {
+            variable_binding.map(|binding| variable_count_from_entries(binding, desc.entries))
+        });
 
         // The pool holds exactly this one set, sized from the layout.
         let mut sizes: Vec<vk::DescriptorPoolSize> = Vec::with_capacity(entries.len());

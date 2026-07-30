@@ -120,12 +120,11 @@ suites pass under 32-way CPU contention.
 
 - **XDND on X11** is not implemented (`ShellCaps::DRAG_DROP` is honestly clear
   there); owed before the editor's asset browser at P12.
-- **Three HAL seam findings are open**, all recorded in `crcbl-vk`'s crate docs:
+- **Two HAL seam findings remain open**, recorded in `crcbl-vk`'s crate docs:
   `bind_group`/`push_constants` carry no pipeline layout, so the encoder infers
-  one from the last bound pipeline and creates an unstated ordering rule;
-  `BindGroupDesc` cannot express a variable descriptor count, which the real
-  bindless shape needs before P3/P7 build on it; and vertex pulling depends on
-  `shaderDrawParameters`, for which the seam has no vocabulary.
+  one from the last bound pipeline and creates an unstated ordering rule; and
+  vertex pulling depends on `shaderDrawParameters`, for which the seam has no
+  vocabulary.
 - **RenderDoc capture** has not been verified by hand; every object and pass
   carries a debug label and `DEBUG_MARKERS` is requested.
 - The render graph has **no sub-resource vocabulary** (an `ImageId` names a

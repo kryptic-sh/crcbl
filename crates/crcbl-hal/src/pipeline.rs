@@ -198,6 +198,13 @@ pub struct BindGroupDesc<'a> {
     /// Assignments. With [`BindingFlags::PARTIALLY_BOUND`] this may cover only
     /// part of an array.
     pub entries: &'a [BindGroupEntry],
+    /// Variable descriptor count. Required when the layout includes a
+    /// binding with [`BindingFlags::VARIABLE_COUNT`]; tells the backend how
+    /// many array elements the caller is *using* (which cannot exceed the
+    /// layout's [`BindGroupLayoutEntry::count`] ceiling). `None` means
+    /// "infer from entries", which matches the behaviour before this field
+    /// existed and is safe for fixed-size arrays.
+    pub variable_count: Option<u32>,
 }
 
 /// A push-constant / root-constant range.

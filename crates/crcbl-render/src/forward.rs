@@ -187,6 +187,7 @@ impl ForwardRenderer {
                 label: Some("mesh frame"),
                 layout: mesh_layout,
                 entries: &entries,
+                variable_count: None,
             })?;
             uniforms.push(buffer);
             mesh_groups.push(group);
@@ -452,6 +453,7 @@ impl ForwardRenderer {
                             label: Some("tonemap scene"),
                             layout,
                             entries: &entries,
+                            variable_count: None,
                         }) {
                             Ok(group) => {
                                 *other = Some((view, group));

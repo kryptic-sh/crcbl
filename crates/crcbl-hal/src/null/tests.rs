@@ -864,6 +864,7 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
                 array_index: 0,
                 resource: crate::BindingResource::whole_buffer(instances),
             }],
+            variable_count: None,
         })
         .expect("bind group");
     let pipeline_layout = device
