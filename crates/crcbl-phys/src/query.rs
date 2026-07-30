@@ -8,6 +8,50 @@ use crate::collider::{Aabb, Capsule, Sphere};
 use glam::DVec3;
 
 // ---------------------------------------------------------------------------
+// Overlap queries
+// ---------------------------------------------------------------------------
+
+/// Test whether two spheres overlap (touching counts as overlapping).
+#[inline]
+#[must_use]
+pub fn sphere_overlaps_sphere(a: &Sphere, b: &Sphere) -> bool {
+    let combined = a.radius + b.radius;
+    (a.centre - b.centre).length_squared() <= combined * combined
+}
+
+/// Test whether a sphere overlaps an AABB.
+#[inline]
+#[must_use]
+pub fn sphere_overlaps_aabb(sphere: &Sphere, aabb: &Aabb) -> bool {
+    let closest = DVec3::new(
+        sphere.centre.x.clamp(aabb.min.x, aabb.max.x),
+        sphere.centre.y.clamp(aabb.min.y, aabb.max.y),
+        sphere.centre.z.clamp(aabb.min.z, aabb.max.z),
+    );
+    (sphere.centre - closest).length_squared() <= sphere.radius * sphere.radius
+}
+
+/// Test whether a sphere overlaps a Y-aligned capsule.
+#[inline]
+#[must_use]
+pub fn sphere_overlaps_capsule(sphere: &Sphere, capsule: &Capsule) -> bool {
+    // Clamp the sphere centre to the capsule segment.
+    let bot = capsule.bottom();
+    let top = capsule.top();
+    let seg_dir = top - bot;
+    let seg_len_sq = seg_dir.length_squared();
+
+    let t = if seg_len_sq < f64::EPSILON {
+        0.5
+    } else {
+        ((sphere.centre - bot).dot(seg_dir) / seg_len_sq).clamp(0.0, 1.0)
+    };
+    let closest = bot + seg_dir * t;
+    let combined = sphere.radius + capsule.radius;
+    (sphere.centre - closest).length_squared() <= combined * combined
+}
+
+// ---------------------------------------------------------------------------
 // Hit result
 // ---------------------------------------------------------------------------
 
@@ -651,5 +695,58 @@ mod tests {
         let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
         let hit = swept_sphere_vs_aabb(&seg, 0.5, &aabb).unwrap();
         assert_eq!(hit.normal, DVec3::NEG_Y);
+    }
+
+    // ── Overlap queries ────────────────────────────────────────────────
+
+    #[test]
+    fn spheres_overlap_when_close() {
+        let a = Sphere::new(DVec3::ZERO, 1.0);
+        let b = Sphere::new(DVec3::new(1.5, 0.0, 0.0), 1.0);
+        assert!(sphere_overlaps_sphere(&a, &b));
+    }
+
+    #[test]
+    fn spheres_do_not_overlap_when_far() {
+        let a = Sphere::new(DVec3::ZERO, 1.0);
+        let b = Sphere::new(DVec3::new(5.0, 0.0, 0.0), 1.0);
+        assert!(!sphere_overlaps_sphere(&a, &b));
+    }
+
+    #[test]
+    fn sphere_overlaps_aabb_when_intersecting() {
+        let sphere = Sphere::new(DVec3::new(2.0, 0.0, 0.0), 1.5);
+        let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
+        assert!(sphere_overlaps_aabb(&sphere, &aabb));
+    }
+
+    #[test]
+    fn sphere_does_not_overlap_distant_aabb() {
+        let sphere = Sphere::new(DVec3::new(5.0, 0.0, 0.0), 1.0);
+        let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
+        assert!(!sphere_overlaps_aabb(&sphere, &aabb));
+    }
+
+    #[test]
+    fn sphere_overlaps_capsule_body() {
+        let sphere = Sphere::new(DVec3::new(1.0, 0.0, 0.0), 0.6);
+        let capsule = Capsule::new(DVec3::ZERO, 0.5, 2.0);
+        assert!(sphere_overlaps_capsule(&sphere, &capsule));
+    }
+
+    #[test]
+    fn sphere_overlaps_capsule_cap() {
+        let sphere = Sphere::new(DVec3::new(0.0, 3.0, 0.0), 0.6);
+        let capsule = Capsule::new(DVec3::ZERO, 0.5, 2.0);
+        // capsule top is at y=2.0, radius 0.5 → top cap spans y ∈ [1.5, 2.5]
+        // sphere at y=3.0, radius 0.6, combined radius 1.1 → distance 1.0 < 1.1
+        assert!(sphere_overlaps_capsule(&sphere, &capsule));
+    }
+
+    #[test]
+    fn sphere_does_not_overlap_distant_capsule() {
+        let sphere = Sphere::new(DVec3::new(10.0, 0.0, 0.0), 1.0);
+        let capsule = Capsule::new(DVec3::ZERO, 0.5, 2.0);
+        assert!(!sphere_overlaps_capsule(&sphere, &capsule));
     }
 }

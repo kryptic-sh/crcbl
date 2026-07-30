@@ -28,7 +28,7 @@ pub mod world;
 pub use broadphase::{Bvh, BvhHit, Ray, Segment};
 pub use collider::{Aabb, BoxCollider, Capsule, Sphere};
 pub use query::{
-    ShapeHit, ray_vs_aabb, ray_vs_capsule, ray_vs_sphere, swept_sphere_vs_aabb,
-    swept_sphere_vs_sphere,
+    ShapeHit, ray_vs_aabb, ray_vs_capsule, ray_vs_sphere, sphere_overlaps_aabb,
+    sphere_overlaps_capsule, sphere_overlaps_sphere, swept_sphere_vs_aabb, swept_sphere_vs_sphere,
 };
 pub use world::{ColliderId, PhysicsWorld};

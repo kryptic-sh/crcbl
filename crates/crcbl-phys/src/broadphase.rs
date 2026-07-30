@@ -226,6 +226,38 @@ impl Bvh {
         node_idx
     }
 
+    /// Walk the BVH and return all element ids whose AABB intersects the
+    /// query AABB. The BVH itself tests AABB↔AABB, so this is a broadphase
+    /// overlap query — the caller must refine with exact shape tests.
+    ///
+    /// Results are unsorted (tree order).
+    #[must_use]
+    pub fn traverse_aabb(&self, query: &Aabb) -> Vec<u32> {
+        if self.nodes.is_empty() {
+            return Vec::new();
+        }
+        let mut result = Vec::new();
+        let mut stack = Vec::with_capacity(64);
+        stack.push(self.root);
+
+        while let Some(node_idx) = stack.pop() {
+            let node = &self.nodes[node_idx as usize];
+            if !node.aabb.intersects(query) {
+                continue;
+            }
+            if node.leaf_count > 0 {
+                let end = (node.child_left + node.leaf_count) as usize;
+                for i in node.child_left as usize..end {
+                    result.push(self.element_indices[i]);
+                }
+            } else {
+                stack.push(node.child_right);
+                stack.push(node.child_left);
+            }
+        }
+        result
+    }
+
     /// Walk the BVH with a ray, returning all intersected element ids and
     /// hit positions.
     ///
@@ -492,5 +524,43 @@ mod tests {
             "expected ~4.5, got {}",
             hits[0].t
         );
+    }
+
+    // ── AABB traversal ─────────────────────────────────────────────────
+
+    #[test]
+    fn traverse_aabb_finds_overlapping() {
+        let elements = [
+            (
+                Aabb::from_centre_half(DVec3::new(3.0, 0.0, 0.0), DVec3::splat(1.0)),
+                10,
+            ),
+            (
+                Aabb::from_centre_half(DVec3::new(10.0, 0.0, 0.0), DVec3::splat(1.0)),
+                20,
+            ),
+        ];
+        let bvh = Bvh::build(elements);
+        let query = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(5.0));
+        let ids = bvh.traverse_aabb(&query);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], 10);
+    }
+
+    #[test]
+    fn traverse_aabb_empty_bvh() {
+        let bvh = Bvh::build([]);
+        let query = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(10.0));
+        assert!(bvh.traverse_aabb(&query).is_empty());
+    }
+
+    #[test]
+    fn traverse_aabb_misses_all() {
+        let bvh = Bvh::build([(
+            Aabb::from_centre_half(DVec3::new(100.0, 0.0, 0.0), DVec3::splat(1.0)),
+            1,
+        )]);
+        let query = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(5.0));
+        assert!(bvh.traverse_aabb(&query).is_empty());
     }
 }

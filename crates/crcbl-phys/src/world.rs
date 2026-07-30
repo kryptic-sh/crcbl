@@ -5,12 +5,11 @@
 //! maintains a lazily-rebuilt BVH over their AABBs, and dispatches rays and
 //! sweeps to the shape-level intersection functions.
 
+use glam::DVec3;
+
 use crate::broadphase::{Bvh, BvhHit, Ray, Segment};
 use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
 use crate::query::{self, ShapeHit};
-
-#[cfg(test)]
-use glam::DVec3;
 
 /// Opaque identifier for a registered collider.
 ///
@@ -134,6 +133,54 @@ impl PhysicsWorld {
     }
 
     // ── Queries ────────────────────────────────────────────────────────
+
+    /// Return all collider ids whose shape overlaps the query sphere.
+    ///
+    /// Uses the BVH for broadphase culling, then tests exact shape overlap
+    /// (sphere-vs-sphere, sphere-vs-AABB, sphere-vs-capsule).
+    #[must_use]
+    pub fn overlap_sphere(&mut self, centre: DVec3, radius: f64) -> Vec<ColliderId> {
+        self.ensure_bvh();
+        let bvh = self.bvh.as_ref().unwrap();
+        let query_aabb = Aabb::from_centre_half(centre, DVec3::splat(radius));
+        let candidates = bvh.traverse_aabb(&query_aabb);
+        let query_sphere = Sphere::new(centre, radius);
+
+        candidates
+            .into_iter()
+            .filter(|&idx| {
+                let idx = idx as usize;
+                self.colliders
+                    .get(idx)
+                    .and_then(|e| e.as_ref())
+                    .is_some_and(|entry| match entry {
+                        ColliderEntry::Sphere(s) => query::sphere_overlaps_sphere(&query_sphere, s),
+                        ColliderEntry::Box(b) => {
+                            query::sphere_overlaps_aabb(&query_sphere, &b.aabb())
+                        }
+                        ColliderEntry::Capsule(c) => {
+                            query::sphere_overlaps_capsule(&query_sphere, c)
+                        }
+                    })
+            })
+            .map(ColliderId)
+            .collect()
+    }
+
+    /// Return all collider ids whose AABB intersects the query AABB.
+    ///
+    /// This is a broadphase-only query — it tests AABB-vs-AABB without
+    /// exact shape overlap. Use [`PhysicsWorld::overlap_sphere`] for exact
+    /// shape-aware overlap.
+    #[must_use]
+    pub fn overlap_aabb(&mut self, aabb: &Aabb) -> Vec<ColliderId> {
+        self.ensure_bvh();
+        let bvh = self.bvh.as_ref().unwrap();
+        bvh.traverse_aabb(aabb)
+            .into_iter()
+            .map(ColliderId)
+            .collect()
+    }
 
     /// Cast a ray against all colliders, returning the closest hit (if any).
     ///
@@ -392,5 +439,67 @@ mod tests {
         world.add_sphere(Sphere::new(DVec3::ZERO, 1.0));
         let s = format!("{world:?}");
         assert!(s.contains("collider_count: 1"));
+    }
+
+    // ── Overlap tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn overlap_sphere_finds_sphere() {
+        let mut world = PhysicsWorld::new();
+        world.add_sphere(Sphere::new(DVec3::new(2.0, 0.0, 0.0), 1.0));
+        let results = world.overlap_sphere(DVec3::ZERO, 4.0);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn overlap_sphere_misses_distant() {
+        let mut world = PhysicsWorld::new();
+        world.add_sphere(Sphere::new(DVec3::new(10.0, 0.0, 0.0), 1.0));
+        let results = world.overlap_sphere(DVec3::ZERO, 2.0);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn overlap_sphere_finds_box() {
+        let mut world = PhysicsWorld::new();
+        world.add_box(BoxCollider::new(DVec3::ZERO, DVec3::splat(1.0)));
+        let results = world.overlap_sphere(DVec3::new(2.0, 0.0, 0.0), 1.5);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn overlap_sphere_finds_capsule() {
+        let mut world = PhysicsWorld::new();
+        world.add_capsule(Capsule::new(DVec3::ZERO, 0.5, 2.0));
+        let results = world.overlap_sphere(DVec3::new(0.0, 0.0, 0.0), 3.0);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn overlap_sphere_finds_multiple() {
+        let mut world = PhysicsWorld::new();
+        world.add_sphere(Sphere::new(DVec3::new(2.0, 0.0, 0.0), 1.0));
+        world.add_sphere(Sphere::new(DVec3::new(-2.0, 0.0, 0.0), 1.0));
+        world.add_sphere(Sphere::new(DVec3::new(0.0, 6.0, 0.0), 1.0));
+        let results = world.overlap_sphere(DVec3::ZERO, 4.0);
+        assert_eq!(results.len(), 2); // only the two on x-axis
+    }
+
+    #[test]
+    fn overlap_aabb_finds_all_intersecting() {
+        let mut world = PhysicsWorld::new();
+        world.add_sphere(Sphere::new(DVec3::new(2.0, 0.0, 0.0), 1.0));
+        world.add_sphere(Sphere::new(DVec3::new(-2.0, 0.0, 0.0), 1.0));
+        world.add_sphere(Sphere::new(DVec3::new(0.0, 10.0, 0.0), 1.0));
+        let query = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(3.0));
+        let results = world.overlap_aabb(&query);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn overlap_aabb_empty_world() {
+        let mut world = PhysicsWorld::new();
+        let query = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(10.0));
+        assert!(world.overlap_aabb(&query).is_empty());
     }
 }
