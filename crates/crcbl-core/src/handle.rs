@@ -244,7 +244,6 @@ impl<T> Pool<T> {
     /// If the pool would exceed `u32::MAX + 1` slots — the index is 32-bit by
     /// design, and a pool that large is a leak, not a workload.
     pub fn insert(&mut self, value: T) -> Handle<T> {
-        self.len += 1;
         if let Some(index) = self.free_head {
             let slot = &mut self.slots[index as usize];
             let Slot::Vacant {
@@ -256,6 +255,7 @@ impl<T> Pool<T> {
             };
             *slot = Slot::Occupied { generation, value };
             self.free_head = next_free;
+            self.len += 1;
             Handle::new(index, generation)
         } else {
             let index = u32::try_from(self.slots.len()).expect("Pool exceeded 2^32 slots");
@@ -263,6 +263,7 @@ impl<T> Pool<T> {
                 generation: FIRST_GENERATION,
                 value,
             });
+            self.len += 1;
             Handle::new(index, FIRST_GENERATION)
         }
     }
