@@ -5,7 +5,10 @@
 //! unreliable transport channel. Snapshots are delta-encoded against the
 //! client's last-acked baseline (P2b protocol).
 
+pub mod rate_limit;
 pub mod sim_hash;
+
+pub use rate_limit::InboundRateLimitConfig;
 
 use std::fmt;
 use std::time::Duration;
@@ -17,6 +20,7 @@ use crcbl_net::{
     ProtocolCompatibility, RejectReason, ResumeToken, SectorId, SessionConfig, SessionId,
     SessionManager, SessionState, SnapshotWriter, Transport,
 };
+use rate_limit::InboundRateLimiter;
 
 #[cfg(test)]
 const PROTOCOL_VERSION: u32 = ProtocolCompatibility::DEFAULT.protocol_version;
@@ -42,8 +46,11 @@ pub struct Server<T: Transport> {
     next_session_id: u64,
     session_terminated: bool,
     handshake_gate: HandshakeGate,
+    inbound_rate_limiter: InboundRateLimiter,
     now: Duration,
     processing_error_count: u64,
+    rate_limited_message_count: u64,
+    rate_limited_byte_count: u64,
 }
 
 impl<T: Transport> Server<T> {
@@ -104,8 +111,14 @@ impl<T: Transport> Server<T> {
             next_session_id: session_id.0 + 1,
             session_terminated: false,
             handshake_gate: HandshakeGate::new(compatibility),
+            inbound_rate_limiter: InboundRateLimiter::new(
+                InboundRateLimitConfig::default(),
+                Duration::ZERO,
+            ),
             now: Duration::ZERO,
             processing_error_count: 0,
+            rate_limited_message_count: 0,
+            rate_limited_byte_count: 0,
         })
     }
 
@@ -149,14 +162,10 @@ impl<T: Transport> Server<T> {
     /// Consume queued client messages: handshake, inputs (discarded — P3), and acks.
     fn drain_inputs(&mut self) {
         loop {
-            match self.transport.recv() {
+            match self.transport.recv_reliable() {
                 Ok(Some(msg)) => {
-                    if let Ok(hello) = crcbl_net::decode_hello(&msg.payload) {
-                        self.handle_hello(hello);
-                    } else if let Ok(ack) = crcbl_net::decode_ack(&msg.payload) {
-                        self.session.handle_ack(ack.sector, ack.tick);
-                    } else if crcbl_net::decode_client_to_server(&msg.payload).is_err() {
-                        self.processing_error_count += 1;
+                    if !self.process_inbound_message(msg) {
+                        break;
                     }
                 }
                 Ok(None) => break,
@@ -167,6 +176,44 @@ impl<T: Transport> Server<T> {
                 }
             }
         }
+        loop {
+            match self.transport.recv() {
+                Ok(Some(msg)) => {
+                    if !self.process_inbound_message(msg) {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(crcbl_net::TransportError::Disconnected) => break,
+                Err(_) => {
+                    self.processing_error_count += 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn process_inbound_message(&mut self, msg: Message) -> bool {
+        let bytes = u64::try_from(msg.payload.len()).unwrap_or(u64::MAX);
+        if let Err((messages_limited, bytes_limited)) =
+            self.inbound_rate_limiter.allow(self.now, bytes)
+        {
+            self.rate_limited_message_count = self
+                .rate_limited_message_count
+                .saturating_add(u64::from(messages_limited));
+            self.rate_limited_byte_count = self
+                .rate_limited_byte_count
+                .saturating_add(u64::from(bytes_limited));
+            return false;
+        }
+        if let Ok(hello) = crcbl_net::decode_hello(&msg.payload) {
+            self.handle_hello(hello);
+        } else if let Ok(ack) = crcbl_net::decode_ack(&msg.payload) {
+            self.session.handle_ack(ack.sector, ack.tick);
+        } else if crcbl_net::decode_client_to_server(&msg.payload).is_err() {
+            self.processing_error_count += 1;
+        }
+        true
     }
 
     fn handle_hello(&mut self, hello: crcbl_net::Hello) {
@@ -405,6 +452,25 @@ impl<T: Transport> Server<T> {
         self.session_config = session_config;
     }
 
+    /// Configure deterministic per-client inbound traffic limits.
+    ///
+    /// Reconfiguration resets the bucket to one second of the new budget.
+    pub fn set_inbound_rate_limit_config(&mut self, config: InboundRateLimitConfig) {
+        self.inbound_rate_limiter.reconfigure(config, self.now);
+    }
+
+    /// Number of messages dropped because their message-rate budget was exhausted.
+    #[must_use]
+    pub fn rate_limited_message_count(&self) -> u64 {
+        self.rate_limited_message_count
+    }
+
+    /// Number of messages dropped because their byte-rate budget was exhausted.
+    #[must_use]
+    pub fn rate_limited_byte_count(&self) -> u64 {
+        self.rate_limited_byte_count
+    }
+
     /// Current session lifecycle state.
     #[must_use]
     pub fn session_state(&self) -> SessionState {
@@ -508,6 +574,18 @@ mod tests {
             }
         }
         assert!(accepted, "server must accept a matching hello");
+    }
+
+    fn retain_ack_baselines(
+        server: &mut Server<InMemoryTransport>,
+        ticks: impl IntoIterator<Item = u64>,
+    ) {
+        for tick in ticks {
+            let tick = TickId::from_raw(tick);
+            server.session.baseline_store_mut(SectorId::ZERO).insert(
+                Baseline::from_trusted_snapshot(tick, &[]).expect("empty snapshot is valid"),
+            );
+        }
     }
 
     // ── Creation ───────────────────────────────────────────────────────────
@@ -705,6 +783,223 @@ mod tests {
 
         server.update(std::time::Duration::ZERO);
         server.update(std::time::Duration::from_nanos(16_666_667));
+    }
+
+    #[test]
+    fn inbound_message_limit_accepts_boundary_then_drops_next() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = Server::new(World::new(), transport, 60);
+        server.set_inbound_rate_limit_config(InboundRateLimitConfig {
+            messages_per_second: 2,
+            bytes_per_second: 1_024,
+        });
+        retain_ack_baselines(&mut server, 1..=2);
+        for tick in 1..=3 {
+            peer.send_unreliable(Message {
+                kind: MessageKind::Unreliable,
+                payload: crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(tick)),
+            })
+            .unwrap();
+        }
+
+        server.update(Duration::ZERO);
+        server.update(Duration::from_nanos(16_666_667));
+
+        assert_eq!(
+            server.session.last_acked_tick(SectorId::ZERO),
+            Some(TickId::from_raw(2))
+        );
+        assert_eq!(server.rate_limited_message_count(), 1);
+        assert_eq!(server.rate_limited_byte_count(), 0);
+        assert_eq!(server.processing_error_count(), 0);
+        assert!(server.is_connected());
+    }
+
+    #[test]
+    fn inbound_byte_limit_is_independent_of_message_limit() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = Server::new(World::new(), transport, 60);
+        let ack = crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(1));
+        server.set_inbound_rate_limit_config(InboundRateLimitConfig {
+            messages_per_second: 2,
+            bytes_per_second: ack.len() as u64,
+        });
+        retain_ack_baselines(&mut server, [1]);
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: ack.clone(),
+        })
+        .unwrap();
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: ack,
+        })
+        .unwrap();
+
+        server.update(Duration::ZERO);
+        server.update(Duration::from_nanos(16_666_667));
+
+        assert_eq!(
+            server.session.last_acked_tick(SectorId::ZERO),
+            Some(TickId::from_raw(1))
+        );
+        assert_eq!(server.rate_limited_message_count(), 0);
+        assert_eq!(server.rate_limited_byte_count(), 1);
+        assert_eq!(server.processing_error_count(), 0);
+    }
+
+    #[test]
+    fn inbound_limits_refill_only_when_injected_time_advances() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = Server::new(World::new(), transport, 60);
+        server.set_inbound_rate_limit_config(InboundRateLimitConfig {
+            messages_per_second: 1,
+            bytes_per_second: 1_024,
+        });
+        retain_ack_baselines(&mut server, 1..=4);
+        for tick in 1..=2 {
+            peer.send_unreliable(Message {
+                kind: MessageKind::Unreliable,
+                payload: crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(tick)),
+            })
+            .unwrap();
+        }
+        server.update(Duration::ZERO);
+        server.update(Duration::from_nanos(16_666_667));
+        server.update(Duration::from_nanos(16_666_667));
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(3)),
+        })
+        .unwrap();
+        server.update(Duration::ZERO);
+        server.update(Duration::from_secs(1) + Duration::from_nanos(16_666_667));
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(4)),
+        })
+        .unwrap();
+        server.update(Duration::from_secs(2) + Duration::from_nanos(16_666_667));
+
+        assert_eq!(
+            server.session.last_acked_tick(SectorId::ZERO),
+            Some(TickId::from_raw(4))
+        );
+        assert_eq!(server.rate_limited_message_count(), 1);
+        assert_eq!(server.rate_limited_byte_count(), 0);
+    }
+
+    #[test]
+    fn oversized_and_malformed_packets_are_limited_before_decode() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = Server::new(World::new(), transport, 60);
+        server.set_inbound_rate_limit_config(InboundRateLimitConfig {
+            messages_per_second: 2,
+            bytes_per_second: 3,
+        });
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: vec![0; 4],
+        })
+        .unwrap();
+        server.update(Duration::ZERO);
+        server.update(Duration::from_nanos(16_666_667));
+        assert_eq!(server.rate_limited_byte_count(), 1);
+        assert_eq!(server.processing_error_count(), 0);
+
+        server.set_inbound_rate_limit_config(InboundRateLimitConfig {
+            messages_per_second: 1,
+            bytes_per_second: 1_024,
+        });
+        retain_ack_baselines(&mut server, [1]);
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: vec![0xff],
+        })
+        .unwrap();
+        peer.send_unreliable(Message {
+            kind: MessageKind::Unreliable,
+            payload: crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(1)),
+        })
+        .unwrap();
+        server.update(Duration::from_nanos(33_333_334));
+
+        assert_eq!(server.processing_error_count(), 1);
+        assert_eq!(server.rate_limited_message_count(), 1);
+        assert_eq!(server.session.last_acked_tick(SectorId::ZERO), None);
+    }
+
+    #[test]
+    fn reliable_handshake_bypasses_unreliable_backlog() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = Server::new(World::new(), transport, 60);
+        for _ in 0..InboundRateLimitConfig::default().messages_per_second {
+            peer.send_unreliable(Message {
+                kind: MessageKind::Unreliable,
+                payload: vec![0xff],
+            })
+            .unwrap();
+        }
+        peer.send_reliable(Message {
+            kind: MessageKind::Reliable,
+            payload: crcbl_net::encode_hello(&crcbl_net::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                engine_build_id: ENGINE_BUILD_ID,
+                schema_hash: SCHEMA_HASH,
+                generation: 1,
+                session_token: None,
+            }),
+        })
+        .unwrap();
+
+        server.update(Duration::ZERO);
+        server.update(Duration::from_nanos(16_666_667));
+
+        assert_eq!(server.session_state(), SessionState::Connected);
+        assert!(matches!(
+            crcbl_net::decode_handshake_result(&peer.recv().unwrap().unwrap().payload),
+            Ok(HandshakeResult::Accept { .. })
+        ));
+        assert_eq!(server.rate_limited_message_count(), 1);
+    }
+
+    #[test]
+    fn inbound_limits_are_isolated_per_server() {
+        let (a_transport, mut a_peer) = InMemoryTransport::pair();
+        let (b_transport, mut b_peer) = InMemoryTransport::pair();
+        let mut server_a = Server::new(World::new(), a_transport, 60);
+        let mut server_b = Server::new(World::new(), b_transport, 60);
+        let limits = InboundRateLimitConfig {
+            messages_per_second: 1,
+            bytes_per_second: 1_024,
+        };
+        server_a.set_inbound_rate_limit_config(limits);
+        server_b.set_inbound_rate_limit_config(limits);
+        retain_ack_baselines(&mut server_a, [1]);
+        retain_ack_baselines(&mut server_b, [1]);
+        for peer in [&mut a_peer, &mut b_peer] {
+            peer.send_unreliable(Message {
+                kind: MessageKind::Unreliable,
+                payload: crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(1)),
+            })
+            .unwrap();
+        }
+
+        server_a.update(Duration::ZERO);
+        server_b.update(Duration::ZERO);
+        server_a.update(Duration::from_nanos(16_666_667));
+        server_b.update(Duration::from_nanos(16_666_667));
+
+        assert_eq!(
+            server_a.session.last_acked_tick(SectorId::ZERO),
+            Some(TickId::from_raw(1))
+        );
+        assert_eq!(
+            server_b.session.last_acked_tick(SectorId::ZERO),
+            Some(TickId::from_raw(1))
+        );
+        assert_eq!(server_a.rate_limited_message_count(), 0);
+        assert_eq!(server_b.rate_limited_message_count(), 0);
     }
 
     // ── Debug ──────────────────────────────────────────────────────────────

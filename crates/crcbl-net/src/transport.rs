@@ -26,6 +26,11 @@ pub enum MessageKind {
 
 // ── Transport trait ───────────────────────────────────────────────────────────
 
+/// Maximum payload retained by an in-memory transport queue.
+pub const MAX_IN_MEMORY_MESSAGE_BYTES: usize = 64 * 1024;
+/// Maximum queued messages per in-memory reliability channel.
+pub const IN_MEMORY_CHANNEL_CAPACITY: usize = 256;
+
 /// Errors the transport can produce.
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
@@ -35,6 +40,12 @@ pub enum TransportError {
     /// An underlying channel or I/O error.
     #[error("channel error: {0}")]
     Channel(String),
+    /// The message exceeds this transport's payload limit.
+    #[error("message payload exceeds transport limit: {size} > {limit}")]
+    MessageTooLarge { size: usize, limit: usize },
+    /// The bounded channel cannot accept another message now.
+    #[error("transport channel is full")]
+    Backpressure,
 }
 
 /// A message-oriented, async-agnostic network transport.
@@ -49,6 +60,13 @@ pub trait Transport: Send {
     /// Queue a message for best-effort delivery. May be dropped or reordered.
     fn send_unreliable(&mut self, msg: Message) -> Result<(), TransportError>;
 
+    /// Receive the next available reliable control message without polling
+    /// unreliable traffic. Transports with separate channels should override
+    /// this so control traffic cannot be starved by lossy state.
+    fn recv_reliable(&mut self) -> Result<Option<Message>, TransportError> {
+        Ok(None)
+    }
+
     /// Receive the next available message, or `Ok(None)` if nothing is queued.
     fn recv(&mut self) -> Result<Option<Message>, TransportError>;
 
@@ -61,14 +79,15 @@ pub trait Transport: Send {
 /// An SPSC in-memory transport pair for testing and local loopback.
 ///
 /// Each [`InMemoryTransport`] owns one end of two independent channels:
-/// a reliable channel and an unreliable channel. [`recv`](InMemoryTransport::recv)
-/// polls the unreliable channel first so stale state is discarded before
-/// reliable commands are processed.
+/// a reliable channel and an unreliable channel. The separate
+/// [`Transport::recv_reliable`] path lets servers prioritize control traffic so
+/// lossy state cannot starve handshakes. Both channels are bounded and reject
+/// oversized payloads before queueing.
 ///
 /// Construct a pair with [`InMemoryTransport::pair`].
 pub struct InMemoryTransport {
-    reliable_tx: std::sync::mpsc::Sender<Message>,
-    unreliable_tx: std::sync::mpsc::Sender<Message>,
+    reliable_tx: std::sync::mpsc::SyncSender<Message>,
+    unreliable_tx: std::sync::mpsc::SyncSender<Message>,
     reliable_rx: std::sync::mpsc::Receiver<Message>,
     unreliable_rx: std::sync::mpsc::Receiver<Message>,
     connected: bool,
@@ -79,10 +98,10 @@ impl InMemoryTransport {
     ///
     /// Messages sent on one end are received on the other.
     pub fn pair() -> (Self, Self) {
-        let (rtx_a, rrx_a) = std::sync::mpsc::channel();
-        let (utx_a, urx_a) = std::sync::mpsc::channel();
-        let (rtx_b, rrx_b) = std::sync::mpsc::channel();
-        let (utx_b, urx_b) = std::sync::mpsc::channel();
+        let (rtx_a, rrx_a) = std::sync::mpsc::sync_channel(IN_MEMORY_CHANNEL_CAPACITY);
+        let (utx_a, urx_a) = std::sync::mpsc::sync_channel(IN_MEMORY_CHANNEL_CAPACITY);
+        let (rtx_b, rrx_b) = std::sync::mpsc::sync_channel(IN_MEMORY_CHANNEL_CAPACITY);
+        let (utx_b, urx_b) = std::sync::mpsc::sync_channel(IN_MEMORY_CHANNEL_CAPACITY);
 
         let a = Self {
             reliable_tx: rtx_a,
@@ -111,23 +130,52 @@ impl InMemoryTransport {
     }
 }
 
+fn validate_message_size(msg: &Message) -> Result<(), TransportError> {
+    if msg.payload.len() > MAX_IN_MEMORY_MESSAGE_BYTES {
+        return Err(TransportError::MessageTooLarge {
+            size: msg.payload.len(),
+            limit: MAX_IN_MEMORY_MESSAGE_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn map_try_send_error(error: std::sync::mpsc::TrySendError<Message>) -> TransportError {
+    match error {
+        std::sync::mpsc::TrySendError::Full(_) => TransportError::Backpressure,
+        std::sync::mpsc::TrySendError::Disconnected(_) => TransportError::Disconnected,
+    }
+}
+
 impl Transport for InMemoryTransport {
     fn send_reliable(&mut self, msg: Message) -> Result<(), TransportError> {
         if !self.connected {
             return Err(TransportError::Disconnected);
         }
-        self.reliable_tx
-            .send(msg)
-            .map_err(|e| TransportError::Channel(e.to_string()))
+        validate_message_size(&msg)?;
+        self.reliable_tx.try_send(msg).map_err(map_try_send_error)
     }
 
     fn send_unreliable(&mut self, msg: Message) -> Result<(), TransportError> {
         if !self.connected {
             return Err(TransportError::Disconnected);
         }
-        self.unreliable_tx
-            .send(msg)
-            .map_err(|e| TransportError::Channel(e.to_string()))
+        validate_message_size(&msg)?;
+        self.unreliable_tx.try_send(msg).map_err(map_try_send_error)
+    }
+
+    fn recv_reliable(&mut self) -> Result<Option<Message>, TransportError> {
+        if !self.connected {
+            return Err(TransportError::Disconnected);
+        }
+        match self.reliable_rx.try_recv() {
+            Ok(msg) => Ok(Some(msg)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.connected = false;
+                Err(TransportError::Disconnected)
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(None),
+        }
     }
 
     fn recv(&mut self) -> Result<Option<Message>, TransportError> {
@@ -135,28 +183,13 @@ impl Transport for InMemoryTransport {
             return Err(TransportError::Disconnected);
         }
 
-        // Poll unreliable first — newest state supersedes old.
         match self.unreliable_rx.try_recv() {
             Ok(msg) => return Ok(Some(msg)),
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                // Treat a disconnected unreliable channel as "no message now"
-                // rather than killing the transport — the reliable channel may
-                // still be alive.
-            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
         }
 
-        match self.reliable_rx.try_recv() {
-            Ok(msg) => return Ok(Some(msg)),
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                // The peer dropped its sender — we are disconnected.
-                self.connected = false;
-                return Err(TransportError::Disconnected);
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
-        }
-
-        Ok(None)
+        self.recv_reliable()
     }
 
     fn is_connected(&self) -> bool {
@@ -215,9 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn unreliable_supersedes_reliable_in_recv() {
-        // When both channels have data, recv() returns the unreliable message
-        // first so the caller processes the newest state before commands.
+    fn reliable_control_can_bypass_unreliable_backlog() {
         let (mut a, mut b) = InMemoryTransport::pair();
 
         a.send_reliable(Message {
@@ -232,13 +263,36 @@ mod tests {
         })
         .unwrap();
 
-        let first = b.recv().unwrap().unwrap();
-        assert_eq!(first.kind, MessageKind::Unreliable);
-        assert_eq!(first.payload, b"snap");
+        let first = b.recv_reliable().unwrap().unwrap();
+        assert_eq!(first.kind, MessageKind::Reliable);
+        assert_eq!(first.payload, b"cmd");
 
         let second = b.recv().unwrap().unwrap();
-        assert_eq!(second.kind, MessageKind::Reliable);
-        assert_eq!(second.payload, b"cmd");
+        assert_eq!(second.kind, MessageKind::Unreliable);
+        assert_eq!(second.payload, b"snap");
+    }
+
+    #[test]
+    fn queues_are_bounded_and_payloads_are_size_gated() {
+        let (mut sender, _receiver) = InMemoryTransport::pair();
+        let message = || Message {
+            kind: MessageKind::Unreliable,
+            payload: vec![0; 1],
+        };
+        for _ in 0..IN_MEMORY_CHANNEL_CAPACITY {
+            sender.send_unreliable(message()).unwrap();
+        }
+        assert!(matches!(
+            sender.send_unreliable(message()),
+            Err(TransportError::Backpressure)
+        ));
+        assert!(matches!(
+            sender.send_reliable(Message {
+                kind: MessageKind::Reliable,
+                payload: vec![0; MAX_IN_MEMORY_MESSAGE_BYTES + 1],
+            }),
+            Err(TransportError::MessageTooLarge { .. })
+        ));
     }
 
     #[test]

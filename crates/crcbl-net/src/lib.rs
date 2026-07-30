@@ -39,5 +39,8 @@ pub use messages::{
     ClientToServer, ServerToClient, SnapshotReader, SnapshotWriter, SystemSnapshot,
 };
 pub use session::{SessionConfig, SessionManager, SessionState};
-pub use transport::{InMemoryTransport, Message, MessageKind, Transport, TransportError};
+pub use transport::{
+    IN_MEMORY_CHANNEL_CAPACITY, InMemoryTransport, MAX_IN_MEMORY_MESSAGE_BYTES, Message,
+    MessageKind, Transport, TransportError,
+};
 pub use types::{EntityBits, EntityData, ProtocolCompatibility, ResumeToken, SectorId, SessionId};

@@ -252,6 +252,11 @@ impl<T: Transport> Transport for ConditionSimulator<T> {
         Ok(())
     }
 
+    fn recv_reliable(&mut self) -> Result<Option<Message>, TransportError> {
+        self.drain_pending();
+        self.inner.recv_reliable()
+    }
+
     fn recv(&mut self) -> Result<Option<Message>, TransportError> {
         self.drain_pending();
         self.inner.recv()
