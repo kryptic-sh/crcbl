@@ -9,8 +9,18 @@ publish = false
 
 # One engine dependency, same pattern as apps/sandbox: the game names `crcbl`
 # and nothing else. `log` is for per-event debug logging.
+# Direct ECS/net/input/server/client deps because the umbrella does not
+# re-export them (per `docs/plan/ROADMAP.md`, samples are the consumers).
 [dependencies]
 crcbl = { workspace = true }
+crcbl-ecs = { workspace = true }
+crcbl-net = { workspace = true }
+crcbl-phys = { workspace = true }
+crcbl-input = { workspace = true }
+crcbl-server = { workspace = true }
+crcbl-client = { workspace = true }
+crcbl-core = { workspace = true }
+glam = { workspace = true }
 log = { workspace = true }
 
 [lints]

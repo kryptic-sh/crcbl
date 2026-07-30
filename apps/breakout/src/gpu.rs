@@ -13,6 +13,7 @@ use crcbl::hal::{
     SemaphoreKind, SemaphoreSignal, SemaphoreWait, SubmitInfo, SurfaceError, SurfaceHandle,
     SwapchainDesc, SwapchainHandle,
 };
+use crcbl::math::{Mat4, Vec3};
 use crcbl::prelude::*;
 use crcbl::render::{
     Camera, DirectionalLight, ForwardRenderer, PassTimers, Projection, RenderGraph, TransientPool,
@@ -122,7 +123,8 @@ pub struct Gpu {
     timers: Option<PassTimers>,
     camera: Camera,
     light: DirectionalLight,
-    elapsed: f32,
+    /// Interpolated paddle X position (updated each frame from game state).
+    paddle_x: f64,
     dumped: bool,
 }
 
@@ -274,7 +276,7 @@ impl Gpu {
             timers,
             camera,
             light: DirectionalLight::default(),
-            elapsed: 0.0,
+            paddle_x: 0.0,
             dumped: false,
         })
     }
@@ -282,6 +284,11 @@ impl Gpu {
     #[must_use]
     pub fn extent(&self) -> (u32, u32) {
         self.configured_extent
+    }
+
+    /// Set the interpolated paddle X for the current frame.
+    pub fn set_paddle_x(&mut self, x: f64) {
+        self.paddle_x = x;
     }
 
     #[must_use]
@@ -340,7 +347,7 @@ impl Gpu {
             self.device.as_ref(),
             &self.camera,
             &self.light,
-            ForwardRenderer::spin(self.elapsed),
+            paddle_model(self.paddle_x),
             extent,
         )?;
 
@@ -467,4 +474,24 @@ impl Gpu {
         self.instance.destroy_surface(self.surface);
         Ok(())
     }
+}
+
+/// Model matrix for the paddle: a wide, flat rectangle at `(x, PADDLE_Y, 0)`.
+///
+/// The cube is 1×1×1 centred at origin. We scale X to the paddle width,
+/// flatten Y and Z, and translate to the paddle position.
+///
+/// # Constants
+const PADDLE_HALF_WIDTH: f64 = 5.0;
+const PADDLE_Y: f64 = -8.0;
+const PADDLE_THICKNESS: f64 = 0.3;
+
+fn paddle_model(x: f64) -> Mat4 {
+    let scale = Vec3::new(
+        PADDLE_HALF_WIDTH as f32 * 2.0,
+        PADDLE_THICKNESS as f32,
+        PADDLE_THICKNESS as f32,
+    );
+    let translation = Vec3::new(x as f32, PADDLE_Y as f32, 0.0);
+    Mat4::from_scale_rotation_translation(scale, glam::Quat::IDENTITY, translation)
 }

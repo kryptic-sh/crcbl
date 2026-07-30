@@ -22,6 +22,7 @@ use crcbl::core::time::{ManualTime, MonotonicTime};
 use crcbl::prelude::*;
 use crcbl::shell::{LogicalSize, ShellBackend as Backend, WindowId, open, open_backend};
 
+use crate::game::{self, Game};
 use crate::gpu::{FrameOutcome, Gpu, GpuError};
 
 // ---- constants --------------------------------------------------------------
@@ -64,6 +65,7 @@ pub enum BreakoutError {
     Shell(ShellError),
     NeverConfigured,
     Gpu(GpuError),
+    Game(game::GameError),
 }
 
 impl std::fmt::Display for BreakoutError {
@@ -82,6 +84,7 @@ impl std::fmt::Display for BreakoutError {
                 CONFIGURE_TIMEOUT.as_secs()
             ),
             Self::Gpu(error) => write!(f, "gpu error: {error}"),
+            Self::Game(error) => write!(f, "game error: {error}"),
         }
     }
 }
@@ -97,6 +100,12 @@ impl From<ShellError> for BreakoutError {
 impl From<GpuError> for BreakoutError {
     fn from(error: GpuError) -> Self {
         Self::Gpu(error)
+    }
+}
+
+impl From<game::GameError> for BreakoutError {
+    fn from(error: game::GameError) -> Self {
+        Self::Game(error)
     }
 }
 
@@ -145,6 +154,7 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
     shell: Box<S>,
     window: WindowId,
     gpu: Gpu,
+    game: Game,
     clock_source: Clock,
     frame_clock: FrameClock,
     frames: u64,
@@ -206,12 +216,14 @@ impl<S: Shell + ?Sized> Loop<S> {
 
         // Locked to orthographic: breakout is a pure 2D game.
         let gpu = Gpu::open(shell.as_ref(), window, extent, options.backend)?;
+        let game = Game::new()?;
 
         Ok(Self {
             windowed: !options.headless,
             shell,
             window,
             gpu,
+            game,
             clock_source,
             frame_clock: FrameClock::new(options.tick_hz),
             frames: 0,
@@ -231,7 +243,19 @@ impl<S: Shell + ?Sized> Loop<S> {
         }
 
         let mut pending = Pending::default();
-        self.shell.pump(&mut |event| pending.observe(&event));
+        self.shell.pump(&mut |event| {
+            pending.observe(&event);
+            // Forward key events to the game's action map.
+            if let ShellEvent::Key {
+                key_code: Some(code),
+                state,
+                ..
+            } = event
+            {
+                let pressed = matches!(state, crcbl::shell::ButtonState::Pressed);
+                self.game.key_event(code, pressed);
+            }
+        });
         self.events += pending.count;
 
         if pending.destroyed {
@@ -252,6 +276,10 @@ impl<S: Shell + ?Sized> Loop<S> {
             self.ticks += 1;
             tick(self.frame_clock.tick_dt_secs());
         }
+
+        // Advance the simulation and get the paddle position.
+        let paddle_x = self.game.step(now);
+        self.gpu.set_paddle_x(paddle_x);
 
         if self.gpu.frame()? == FrameOutcome::Presented {
             self.frames += 1;

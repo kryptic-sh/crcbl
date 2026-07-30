@@ -12,6 +12,7 @@
 
 mod app;
 mod args;
+mod game;
 mod gpu;
 
 use std::process::ExitCode;
