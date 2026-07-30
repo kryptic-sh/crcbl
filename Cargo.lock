@@ -143,6 +143,9 @@ dependencies = [
 [[package]]
 name = "crcbl-phys"
 version = "0.1.0"
+dependencies = [
+ "glam",
+]
 
 [[package]]
 name = "crcbl-render"
