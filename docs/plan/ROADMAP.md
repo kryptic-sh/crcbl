@@ -30,19 +30,20 @@ The phase table below is the plan; this section is the record. Where the two
 disagree about what was built, this section is right and the phase row says what
 was intended.
 
-| Phase             | Status                        | Landed as                                                                                                                                                                                                                        |
-| ----------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **P0** — base     | **done**                      | `f922ca3`, `3198f7a`, `6dd4b46`, `84af231`, `c058f45`, `bad7186`, `a991e42`, `063fd99`, `421ce69`, `f06e6cd`, `36dd636`, `e094d39`                                                                                               |
-| **P1** — Vulkan   | **done**                      | `91fd871`, `236f19b`, `c6dc4a4`, `a54990d`, `dc36d32`, `8a4e303`, `cbd6153`                                                                                                                                                      |
-| **P2** — sim core | **P2a partial**, **P2b done** | `7b8efb5` scaffold, `f8e8117` net, `9e55569` ecs, `9d31e2d` input, `2b2e5bd` server/client, `d4d0330` sim harness; P2b through `f1e625c`, `e036705`, `ec0597e`, `fb7e7bf`, `9dcc30d`, `b6c9d7d`, `27390fd`, `cb3b110`, `b37e4d5` |
+| Phase             | Status                        | Landed as                                                                                                                                                                                                                                              |
+| ----------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **P0** — base     | **done**                      | `f922ca3`, `3198f7a`, `6dd4b46`, `84af231`, `c058f45`, `bad7186`, `a991e42`, `063fd99`, `421ce69`, `f06e6cd`, `36dd636`, `e094d39`                                                                                                                     |
+| **P1** — Vulkan   | **done**                      | `91fd871`, `236f19b`, `c6dc4a4`, `a54990d`, `dc36d32`, `8a4e303`, `cbd6153`                                                                                                                                                                            |
+| **P2** — sim core | **P2a partial**, **P2b done** | `7b8efb5` scaffold, `f8e8117` net, `9e55569` ecs, `9d31e2d` input, `2b2e5bd` server/client, `d4d0330` sim harness; P2b through `f1e625c`, `e036705`, `ec0597e`, `fb7e7bf`, `9dcc30d`, `b6c9d7d`, `27390fd`, `cb3b110`, `b37e4d5`, `53405f6`, `4156345` |
 
 ### What exists now
 
 - **Workspace + CI**: 14 crates, 4 apps/support crates. CI is 14 required jobs —
-  fmt, clippy `-D warnings` on Linux/macOS/Windows, rustdoc `-D warnings`,
-  `cargo-machete`, `cargo-deny`, nextest, coverage, a weekly advisory cron, and
-  five e2e suites (Wayland under nested sway, X11 under Xvfb, Vulkan on
-  lavapipe, the CLI scaffold, and the shader-manifest check).
+  fmt, clippy `-D warnings`, rustdoc `-D warnings`, `cargo-machete`,
+  `cargo-deny`, nextest on Linux and cross-platform (macOS + Windows), coverage,
+  a weekly advisory cron, five e2e suites (Wayland under nested sway, X11 under
+  Xvfb, Vulkan on lavapipe, the CLI scaffold, and the shader-manifest check),
+  and a decoder fuzz job.
 - **`crcbl-core`**: `Handle`/`Pool`, sector-tiled `WorldPos` (`I64Vec3` sectors,
   2^20 m cells), `FrameArena`, `FrameClock` with an injected `TimeSource`, the
   input vocabulary, `SurfaceTarget`, logging.
@@ -75,7 +76,11 @@ was intended.
 - **`crcbl-net`** (P2a): transport seam and replication protocol — `Transport`
   trait (reliable/unreliable channels, non-blocking), `InMemoryTransport` (SPSC
   pair for single-player and tests), `SnapshotWriter`/`SnapshotReader`
-  (per-system snapshot encoding).
+  (per-system snapshot encoding). **P2b additions**: protocol handshake +
+  schema-hash gate, session management + reconnect, `ConditionSimulator`
+  loss/reorder wrapper, hardened wire codec, ack-baseline delta encoding with
+  entity-removal and keyframe fallback, sector-scoped envelopes, per-client
+  ingress limits, and decoder fuzzing in CI.
 - **`crcbl-input`** (P2a): device-agnostic action system — `ActionMap`
   (bindings→actions, WASD composite, mouse motion/scroll), `ButtonAction` with
   just-pressed/just-released edges, `InputTickState` for client→server tick
@@ -89,7 +94,7 @@ was intended.
   world using `ManualTime`, prints a state hash. Same input → same hash across
   runs, verified.
 
-**721 unit/integration tests** (101 new from P2a), plus 26 Vulkan e2e (run on
+**892 unit/integration tests** (171 new from P2), plus 26 Vulkan e2e (run on
 both radv and lavapipe), 33 Wayland e2e, 29 X11 e2e and 1 CLI e2e. The whole
 workspace suite passes with no Vulkan driver present at all, and the shell
 suites pass under 32-way CPU contention.
