@@ -16,7 +16,7 @@ use crate::query::{self, ShapeHit};
 /// Created by [`PhysicsWorld::add_sphere`], [`PhysicsWorld::add_box`], or
 /// [`PhysicsWorld::add_capsule`]. Use it to remove or update the collider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ColliderId(u32);
+pub struct ColliderId(pub(crate) u32);
 
 // ---------------------------------------------------------------------------
 // Collider shape storage

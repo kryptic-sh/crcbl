@@ -24,6 +24,7 @@ pub mod broadphase;
 pub mod collider;
 pub mod components;
 pub mod query;
+pub mod system;
 pub mod world;
 
 pub use broadphase::{Bvh, BvhHit, Ray, Segment};
@@ -34,4 +35,5 @@ pub use query::{
     sphere_overlaps_capsule, sphere_overlaps_sphere, swept_sphere_vs_aabb, swept_sphere_vs_capsule,
     swept_sphere_vs_sphere,
 };
+pub use system::PhysicsSystem;
 pub use world::{ColliderId, PhysicsWorld};
