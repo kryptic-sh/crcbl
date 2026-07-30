@@ -30,6 +30,8 @@ pub struct HudPanel {
     pub offset: Vec2,
     pub labels: Vec<Label>,
     pub buttons: Vec<Button>,
+    /// Whether to draw a semi-transparent background rect behind the panel.
+    pub show_bg: bool,
 }
 
 impl HudPanel {
@@ -41,7 +43,15 @@ impl HudPanel {
             offset,
             labels: Vec::new(),
             buttons: Vec::new(),
+            show_bg: false,
         }
+    }
+
+    /// Draw a background rectangle behind this panel's content.
+    #[must_use]
+    pub fn with_bg(mut self) -> Self {
+        self.show_bg = true;
+        self
     }
 
     /// Add a label.
@@ -52,6 +62,32 @@ impl HudPanel {
     /// Add a button.
     pub fn add_button(&mut self, button: Button) {
         self.buttons.push(button);
+    }
+
+    /// Calculate the total content extent of this panel (width × height in
+    /// pixels) given a font atlas. Used to size the background rectangle.
+    #[must_use]
+    pub fn content_size(&self, atlas: &FontAtlas) -> Vec2 {
+        let mut w = 0.0f32;
+        let mut h = 0.0f32;
+
+        // Labels stack vertically.
+        for label in &self.labels {
+            let lw = label.width(atlas);
+            w = w.max(lw);
+            h += label.height() + 2.0;
+        }
+        // Buttons also stack vertically below labels.
+        for btn in &self.buttons {
+            let (_, max) = btn.rect(Vec2::ZERO, atlas);
+            w = w.max(max.x);
+            h += (max.y - 0.0) + 2.0;
+        }
+        // Remove trailing spacing.
+        if !self.labels.is_empty() || !self.buttons.is_empty() {
+            h -= 2.0;
+        }
+        Vec2::new(w, h)
     }
 
     /// Render all widgets in this panel into the draw list.
@@ -69,7 +105,20 @@ impl HudPanel {
         mouse_released: bool,
         _button_clicked: impl Fn(usize, ButtonState) -> bool,
     ) {
-        let mut cursor = self.anchor_pos(screen_size);
+        let anchor = self.anchor_pos(screen_size);
+
+        // Optional panel background.
+        if self.show_bg {
+            let content = self.content_size(atlas);
+            if content.x > 0.0 && content.y > 0.0 {
+                let pad = 4.0;
+                let min = Vec2::new(anchor.x - pad, anchor.y - pad);
+                let max = Vec2::new(anchor.x + content.x + pad, anchor.y + content.y + pad);
+                dl.rect(min, max, style.bg);
+            }
+        }
+
+        let mut cursor = anchor;
 
         for label in &self.labels {
             label.render(dl, cursor, atlas, style);
@@ -81,15 +130,11 @@ impl HudPanel {
                 if mouse_released {
                     ButtonState::Hovered
                 } else {
-                    // We can't distinguish hover vs pressed without
-                    // mouse-button state — the caller decides.
                     ButtonState::Idle
                 }
             } else {
                 ButtonState::Idle
             };
-            // Rendering the button returns whether it was clicked; we
-            // ignore it here since input handling is not yet integrated.
             let _ = btn.render(dl, cursor, atlas, style, state, mouse_released);
             let (_, max) = btn.rect(cursor, atlas);
             cursor.y = max.y + 2.0;
@@ -164,6 +209,7 @@ impl Default for Hud {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::draw_list::DrawCommand;
 
     fn setup_hud() -> Hud {
         let mut hud = Hud::new();
@@ -224,5 +270,58 @@ mod tests {
         let hud = setup_hud();
         let s = format!("{hud:?}");
         assert!(s.contains("panels"));
+    }
+
+    #[test]
+    fn panel_with_bg_draws_background_rect() {
+        let mut panel = HudPanel::new(Anchor::TopLeft, Vec2::new(10.0, 10.0)).with_bg();
+        panel.add_label(Label::new("FPS: 60"));
+        let mut dl = DrawList::new();
+        panel.render(
+            &mut dl,
+            Vec2::new(800.0, 600.0),
+            &FontAtlas::built_in(),
+            &Style::default(),
+            Vec2::ZERO,
+            false,
+            |_, _| false,
+        );
+        // First command is the panel background rect, then the label text.
+        assert!(
+            dl.len() >= 2,
+            "expected bg rect + label text, got {}",
+            dl.len()
+        );
+        assert!(matches!(dl.commands()[0], DrawCommand::Rect { .. }));
+    }
+
+    #[test]
+    fn panel_content_size_measures_labels() {
+        let mut panel = HudPanel::new(Anchor::TopLeft, Vec2::ZERO);
+        panel.add_label(Label::new("Hello World"));
+        panel.add_label(Label::new("Score: 9999"));
+        let atlas = FontAtlas::built_in();
+        let size = panel.content_size(&atlas);
+        assert!(size.x > 0.0, "width should be positive");
+        assert!(size.y > 0.0, "height should be positive");
+    }
+
+    #[test]
+    fn hud_full_cycle_to_triangles() {
+        let hud = setup_hud();
+        let mut dl = DrawList::new();
+        hud.render(
+            &mut dl,
+            Vec2::new(800.0, 600.0),
+            &FontAtlas::built_in(),
+            &Style::default(),
+        );
+        let (verts, indices) = dl.to_triangles(None, 1.0);
+        // A label ("Score: 0") → text only (no rect since show_bg=false) → skipped
+        // A button ("Pause") → 1 rect + 1 outline + text → 1 + 4 = 5 quads → 20 verts
+        assert!(!verts.is_empty(), "button rect should triangulate");
+        // Label text is skipped (no atlas → None) so only button geometry.
+        assert_eq!(verts.len(), 20);
+        assert_eq!(indices.len(), 30);
     }
 }
