@@ -371,7 +371,7 @@ mod tests {
         inner.insert("vsync".into(), true.into());
         t.insert("video".into(), toml::Value::Table(inner));
 
-        assert_eq!(get_dotted(&t, "video").unwrap().as_table().is_some(), true);
+        assert!(get_dotted(&t, "video").unwrap().as_table().is_some());
         assert_eq!(
             get_dotted(&t, "video.vsync"),
             Some(&toml::Value::Boolean(true))

@@ -54,7 +54,7 @@ pub trait GameModule: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{System, SystemTrait};
+    use crate::System;
 
     struct CounterModule {
         name: String,
