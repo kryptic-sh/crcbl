@@ -44,6 +44,7 @@
 
 mod component_hash;
 mod entity;
+mod game_module;
 mod inspector;
 mod schedule;
 mod system;
@@ -51,6 +52,7 @@ mod world;
 
 pub use component_hash::ComponentHash;
 pub use entity::{Entity, EntityMarker};
+pub use game_module::GameModule;
 pub use inspector::{Inspector, SystemStats};
 pub use schedule::Schedule;
 pub use system::{DebugCtx, DebugDrawFn, System, SystemTrait};

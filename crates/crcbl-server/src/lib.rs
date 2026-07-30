@@ -14,7 +14,7 @@ use std::fmt;
 use std::time::Duration;
 
 use crcbl_core::{FrameClock, TickId};
-use crcbl_ecs::{Inspector, World};
+use crcbl_ecs::{GameModule, Inspector, World};
 use crcbl_net::{
     Baseline, DeltaCodec, HandshakeGate, HandshakeResult, Message, MessageKind,
     ProtocolCompatibility, RejectReason, ResumeToken, SectorId, SessionConfig, SessionId,
@@ -51,6 +51,8 @@ pub struct Server<T: Transport> {
     processing_error_count: u64,
     rate_limited_message_count: u64,
     rate_limited_byte_count: u64,
+    /// Optional game logic module (ticked after the ECS schedule).
+    module: Option<Box<dyn GameModule>>,
 }
 
 impl<T: Transport> Server<T> {
@@ -119,6 +121,7 @@ impl<T: Transport> Server<T> {
             processing_error_count: 0,
             rate_limited_message_count: 0,
             rate_limited_byte_count: 0,
+            module: None,
         })
     }
 
@@ -137,12 +140,16 @@ impl<T: Transport> Server<T> {
     }
 
     /// Run one tick: consume inputs from transport (including acks), tick the
-    /// world, emit delta-encoded snapshot.
+    /// world (ECS schedule), tick the game module (if any), emit delta-encoded
+    /// snapshot.
     fn tick(&mut self) {
         let was_connected = self.session.state() == SessionState::Connected;
         self.drain_inputs();
         self.update_session_for_transport();
         self.world.tick();
+        if let Some(ref mut module) = self.module {
+            module.tick(&mut self.world);
+        }
         if was_connected && self.session.state() == SessionState::Connected {
             self.emit_snapshot();
         }
@@ -457,6 +464,15 @@ impl<T: Transport> Server<T> {
     /// Reconfiguration resets the bucket to one second of the new budget.
     pub fn set_inbound_rate_limit_config(&mut self, config: InboundRateLimitConfig) {
         self.inbound_rate_limiter.reconfigure(config, self.now);
+    }
+
+    /// Attach a [`GameModule`] to drive game-specific per-tick logic.
+    ///
+    /// The module's [`GameModule::tick`] is called every server tick after the
+    /// ECS schedule runs. Only one module can be attached at a time; calling
+    /// this again replaces any existing module.
+    pub fn set_module(&mut self, module: Box<dyn GameModule>) {
+        self.module = Some(module);
     }
 
     /// Number of messages dropped because their message-rate budget was exhausted.
