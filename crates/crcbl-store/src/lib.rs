@@ -16,6 +16,7 @@
 //! either by wrapping this trait with an adapter or by introducing a second
 //! trait. The `Result<Vec<u8>>` return is forward-compatible with both.
 
+pub mod replay;
 pub mod save;
 pub mod settings;
 
