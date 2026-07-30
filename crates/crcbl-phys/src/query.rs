@@ -511,6 +511,64 @@ pub fn swept_sphere_vs_aabb(
 }
 
 // ---------------------------------------------------------------------------
+// Swept sphere vs capsule
+// ---------------------------------------------------------------------------
+
+/// Compute the TOI for a sphere moving along a segment against a static
+/// Y-aligned capsule.
+///
+/// The capsule is inflated by `swept_radius` and the segment (sphere centre
+/// path) is tested against the inflated shape via ray-vs-capsule.
+#[must_use]
+pub fn swept_sphere_vs_capsule(
+    segment: &crate::broadphase::Segment,
+    swept_radius: f64,
+    capsule: &Capsule,
+) -> Option<ShapeHit> {
+    let dir = segment.end - segment.start;
+    let len = dir.length();
+    if len <= 0.0 {
+        // Stationary: test sphere-vs-capsule overlap.
+        let sphere = Sphere::new(segment.start, swept_radius);
+        if sphere_overlaps_capsule(&sphere, capsule) {
+            let to_capsule = segment.start - capsule.centre;
+            let normal = if to_capsule.length_squared() > 0.0 {
+                to_capsule.normalize()
+            } else {
+                DVec3::Y
+            };
+            return Some(ShapeHit {
+                t: 0.0,
+                point: segment.start,
+                normal,
+                started_inside: true,
+            });
+        }
+        return None;
+    }
+
+    // Inflate the capsule by the swept sphere radius.  The segment (sphere
+    // centre path) vs the inflated capsule is a ray-vs-capsule test.
+    let inflated = Capsule::new(
+        capsule.centre,
+        capsule.radius + swept_radius,
+        capsule.half_height,
+    );
+    let ray = Ray::new(segment.start, dir).with_bounds(0.0, 1.0);
+
+    ray_vs_capsule(&ray, &inflated).map(|hit| {
+        // Back out the contact point on the original capsule surface.
+        let contact_point = hit.point - hit.normal * swept_radius;
+        ShapeHit {
+            t: hit.t, // already in [0, 1] because t_max = 1.0
+            point: contact_point,
+            normal: hit.normal,
+            started_inside: hit.started_inside,
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -748,5 +806,40 @@ mod tests {
         let sphere = Sphere::new(DVec3::new(10.0, 0.0, 0.0), 1.0);
         let capsule = Capsule::new(DVec3::ZERO, 0.5, 2.0);
         assert!(!sphere_overlaps_capsule(&sphere, &capsule));
+    }
+
+    // ── Swept sphere vs capsule ────────────────────────────────────────
+
+    #[test]
+    fn swept_sphere_hits_capsule_cylinder() {
+        let seg =
+            crate::broadphase::Segment::new(DVec3::new(-5.0, 0.0, 0.0), DVec3::new(5.0, 0.0, 0.0));
+        let capsule = Capsule::new(DVec3::ZERO, 0.5, 2.0);
+        let hit = swept_sphere_vs_capsule(&seg, 0.5, &capsule).unwrap();
+        // Combined radius = 1.0, capsule at origin, swept sphere starts at -5.
+        // Should hit the cylinder at approximately t = (5 - 1) / 10 = 0.4.
+        assert!(hit.t > 0.0 && hit.t < 1.0);
+        assert!((hit.normal.x + 1.0).abs() < 0.1); // normal is roughly -X
+    }
+
+    #[test]
+    fn swept_sphere_misses_capsule() {
+        let seg =
+            crate::broadphase::Segment::new(DVec3::new(-5.0, 5.0, 0.0), DVec3::new(5.0, 5.0, 0.0));
+        let capsule = Capsule::new(DVec3::ZERO, 0.5, 2.0);
+        assert!(swept_sphere_vs_capsule(&seg, 0.5, &capsule).is_none());
+    }
+
+    #[test]
+    fn swept_sphere_vs_capsule_touches_top_cap() {
+        // Swept sphere moving downward toward the top cap.
+        let seg =
+            crate::broadphase::Segment::new(DVec3::new(0.0, 5.0, 0.0), DVec3::new(0.0, 0.0, 0.0));
+        let capsule = Capsule::new(DVec3::ZERO, 0.5, 2.0);
+        // Capsule top at y=2.0, radius 0.5. Swept sphere radius 0.5.
+        // Combined radius = 1.0. Hit at t = (5 - 2 - 1) / 5 = 2/5 = 0.4.
+        let hit = swept_sphere_vs_capsule(&seg, 0.5, &capsule).unwrap();
+        assert!((hit.t - 0.4).abs() < 0.01); // near t=0.4
+        assert!(hit.normal.y > 0.5); // pointing away from capsule (upward)
     }
 }

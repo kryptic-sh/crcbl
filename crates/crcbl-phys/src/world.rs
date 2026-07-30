@@ -22,6 +22,15 @@ pub struct ColliderId(u32);
 // Collider shape storage
 // ---------------------------------------------------------------------------
 
+/// A collider stored in the [`PhysicsWorld`], with an optional trigger flag.
+#[derive(Debug, Clone)]
+struct ColliderSlot {
+    entry: ColliderEntry,
+    /// When true, this collider is a trigger (generates overlap events rather
+    /// than collision response).
+    is_trigger: bool,
+}
+
 /// A collider instance stored in the [`PhysicsWorld`].
 #[derive(Debug, Clone)]
 enum ColliderEntry {
@@ -52,7 +61,7 @@ impl ColliderEntry {
 /// the next query.
 pub struct PhysicsWorld {
     /// Dense storage of collider entries.
-    colliders: Vec<Option<ColliderEntry>>,
+    colliders: Vec<Option<ColliderSlot>>,
     /// Free slots for reuse (indices into `colliders`).
     free_slots: Vec<u32>,
     /// Next id to assign.
@@ -114,6 +123,26 @@ impl PhysicsWorld {
         self.set(id, ColliderEntry::Capsule(capsule))
     }
 
+    /// Mark a collider as a trigger (non-solid, generates overlap events).
+    /// Returns `false` if the id is invalid.
+    pub fn set_trigger(&mut self, id: ColliderId, is_trigger: bool) -> bool {
+        let slot = id.0 as usize;
+        let Some(slot_data) = self.colliders.get_mut(slot).and_then(|s| s.as_mut()) else {
+            return false;
+        };
+        slot_data.is_trigger = is_trigger;
+        true
+    }
+
+    /// Whether a collider is a trigger.
+    pub fn is_trigger(&self, id: ColliderId) -> bool {
+        let slot = id.0 as usize;
+        self.colliders
+            .get(slot)
+            .and_then(|s| s.as_ref())
+            .is_some_and(|s| s.is_trigger)
+    }
+
     /// Remove a collider by its id. Returns `true` if the id was valid.
     pub fn remove(&mut self, id: ColliderId) -> bool {
         let idx = id.0 as usize;
@@ -138,7 +167,7 @@ impl PhysicsWorld {
             .colliders
             .iter()
             .enumerate()
-            .filter_map(|(idx, entry)| entry.as_ref().map(|e| (e.aabb(), idx as u32)))
+            .filter_map(|(idx, slot)| slot.as_ref().map(|s| (s.entry.aabb(), idx as u32)))
             .collect();
         // Build slot→elem reverse mapping.
         self.bvh_slot_to_elem = vec![u32::MAX; self.colliders.len()];
@@ -151,7 +180,7 @@ impl PhysicsWorld {
     /// Number of colliders currently registered.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.colliders.iter().filter(|e| e.is_some()).count()
+        self.colliders.iter().filter(|s| s.is_some()).count()
     }
 
     /// Whether the world has no colliders.
@@ -180,8 +209,8 @@ impl PhysicsWorld {
                 let idx = idx as usize;
                 self.colliders
                     .get(idx)
-                    .and_then(|e| e.as_ref())
-                    .is_some_and(|entry| match entry {
+                    .and_then(|s| s.as_ref())
+                    .is_some_and(|slot| match &slot.entry {
                         ColliderEntry::Sphere(s) => query::sphere_overlaps_sphere(&query_sphere, s),
                         ColliderEntry::Box(b) => {
                             query::sphere_overlaps_aabb(&query_sphere, &b.aabb())
@@ -243,7 +272,7 @@ impl PhysicsWorld {
         let idx = id.0 as usize;
         self.colliders
             .get(idx)
-            .and_then(|e| e.as_ref().map(|e| e.aabb()))
+            .and_then(|s| s.as_ref().map(|s| s.entry.aabb()))
     }
 
     /// The current generation counter (incremented on every mutation).
@@ -256,13 +285,17 @@ impl PhysicsWorld {
     // ── Internal helpers ───────────────────────────────────────────────
 
     fn add(&mut self, entry: ColliderEntry) -> ColliderId {
+        let slot_data = ColliderSlot {
+            entry,
+            is_trigger: false,
+        };
         let id = if let Some(slot) = self.free_slots.pop() {
-            self.colliders[slot as usize] = Some(entry);
+            self.colliders[slot as usize] = Some(slot_data);
             slot
         } else {
             let idx = self.next_id;
             self.next_id = idx.wrapping_add(1);
-            self.colliders.push(Some(entry));
+            self.colliders.push(Some(slot_data));
             idx
         };
         self.bvh = None;
@@ -274,11 +307,12 @@ impl PhysicsWorld {
     /// Update an existing collider entry, refitting the BVH if built.
     fn set(&mut self, id: ColliderId, entry: ColliderEntry) -> bool {
         let slot = id.0 as usize;
-        if slot >= self.colliders.len() || self.colliders[slot].is_none() {
+        let Some(existing) = self.colliders.get(slot).and_then(|s| s.as_ref()) else {
             return false;
-        }
+        };
+        let is_trigger = existing.is_trigger;
         let new_aabb = entry.aabb();
-        self.colliders[slot] = Some(entry);
+        self.colliders[slot] = Some(ColliderSlot { entry, is_trigger });
         self.generation = self.generation.wrapping_add(1);
 
         // Try incremental refit.
@@ -307,10 +341,10 @@ impl PhysicsWorld {
         let mut best: Option<(f64, ColliderId, ShapeHit)> = None;
         for bvh_hit in bvh_hits {
             let idx = bvh_hit.element_id as usize;
-            let Some(Some(entry)) = self.colliders.get(idx) else {
+            let Some(Some(slot)) = self.colliders.get(idx) else {
                 continue;
             };
-            let hit = match entry {
+            let hit = match &slot.entry {
                 ColliderEntry::Sphere(s) => query::ray_vs_sphere(ray, s),
                 ColliderEntry::Box(b) => query::ray_vs_aabb(ray, &b.aabb()),
                 ColliderEntry::Capsule(c) => query::ray_vs_capsule(ray, c),
@@ -334,18 +368,13 @@ impl PhysicsWorld {
         let mut best: Option<(f64, ColliderId, ShapeHit)> = None;
         for bvh_hit in bvh_hits {
             let idx = bvh_hit.element_id as usize;
-            let Some(Some(entry)) = self.colliders.get(idx) else {
+            let Some(Some(slot)) = self.colliders.get(idx) else {
                 continue;
             };
-            let hit = match entry {
+            let hit = match &slot.entry {
                 ColliderEntry::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
                 ColliderEntry::Box(b) => query::swept_sphere_vs_aabb(segment, radius, &b.aabb()),
-                ColliderEntry::Capsule(_) => {
-                    // Capsule-vs-swept-sphere: approximate as swept-vs-sphere
-                    // on the two hemispheres and the cylindrical section.
-                    // For now, fall back to AABB-level swept test.
-                    query::swept_sphere_vs_aabb(segment, radius, &entry.aabb())
-                }
+                ColliderEntry::Capsule(c) => query::swept_sphere_vs_capsule(segment, radius, c),
             };
             if let Some(hit) = hit
                 && hit.t < best.as_ref().map_or(f64::INFINITY, |&(t, _, _)| t)
@@ -625,5 +654,47 @@ mod tests {
         let id = world.add_sphere(Sphere::new(DVec3::ZERO, 1.0));
         world.remove(id);
         assert!(!world.set_sphere(id, Sphere::new(DVec3::new(1.0, 0.0, 0.0), 1.0)));
+    }
+
+    #[test]
+    fn sweep_sphere_hits_capsule_exact() {
+        let mut world = PhysicsWorld::new();
+        world.add_capsule(Capsule::new(DVec3::ZERO, 0.5, 2.0));
+        let seg = Segment::new(DVec3::new(-5.0, 0.0, 0.0), DVec3::new(5.0, 0.0, 0.0));
+        let result = world.sweep_sphere(&seg, 0.5);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn sweep_sphere_misses_distant_capsule() {
+        let mut world = PhysicsWorld::new();
+        world.add_capsule(Capsule::new(DVec3::new(100.0, 0.0, 0.0), 0.5, 2.0));
+        let seg = Segment::new(DVec3::new(-5.0, 0.0, 0.0), DVec3::new(5.0, 0.0, 0.0));
+        assert!(world.sweep_sphere(&seg, 0.5).is_none());
+    }
+
+    // ── Trigger tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn trigger_defaults_to_false() {
+        let mut world = PhysicsWorld::new();
+        let id = world.add_sphere(Sphere::new(DVec3::ZERO, 1.0));
+        assert!(!world.is_trigger(id));
+    }
+
+    #[test]
+    fn set_trigger_toggles_flag() {
+        let mut world = PhysicsWorld::new();
+        let id = world.add_sphere(Sphere::new(DVec3::ZERO, 1.0));
+        assert!(world.set_trigger(id, true));
+        assert!(world.is_trigger(id));
+        assert!(world.set_trigger(id, false));
+        assert!(!world.is_trigger(id));
+    }
+
+    #[test]
+    fn set_trigger_on_invalid_id_returns_false() {
+        let mut world = PhysicsWorld::new();
+        assert!(!world.set_trigger(ColliderId(42), true));
     }
 }
