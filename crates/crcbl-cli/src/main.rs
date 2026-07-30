@@ -30,6 +30,7 @@ mod args;
 mod cargo;
 mod json;
 mod new;
+mod replay_cmd;
 mod report;
 mod screenshot;
 
@@ -48,6 +49,7 @@ fn main() -> ExitCode {
                 Command::Run(args) => cargo::run(args),
                 Command::Build(args) => cargo::build(args),
                 Command::Screenshot(args) => screenshot::run(args),
+                Command::Replay(args) => replay_cmd::run(args),
             };
             report::emit(name, json, result)
         }

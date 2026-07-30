@@ -50,6 +50,7 @@ COMMANDS:
     run           Run the project in the current directory.
     build         Build the project in the current directory.
     screenshot    Offscreen render the scene and write a PNG.
+    replay        Read a .crpl replay file and dump its metadata.
 
 OPTIONS (every command):
         --json    Emit one JSON object instead of human output.
@@ -154,6 +155,8 @@ pub enum Command {
     Build(BuildArgs),
     /// Offscreen render → PNG.
     Screenshot(ScreenshotArgs),
+    /// Read a .crpl replay file.
+    Replay(ReplayArgs),
 }
 
 impl Command {
@@ -164,6 +167,7 @@ impl Command {
             Self::Run(_) => "run",
             Self::Build(_) => "build",
             Self::Screenshot(_) => "screenshot",
+            Self::Replay(_) => "replay",
         }
     }
 
@@ -174,6 +178,7 @@ impl Command {
             Self::Run(args) => args.json,
             Self::Build(args) => args.json,
             Self::Screenshot(args) => args.json,
+            Self::Replay(args) => args.json,
         }
     }
 }
@@ -249,6 +254,26 @@ pub struct ScreenshotArgs {
     pub json: bool,
 }
 
+/// `crcbl replay`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplayArgs {
+    /// Path to the .crpl file.
+    pub file: PathBuf,
+    /// Machine-readable output.
+    pub json: bool,
+}
+
+/// `crcbl replay --help`.
+pub const REPLAY_USAGE: &str = "\
+crcbl replay — read a .crpl replay file and dump its metadata
+
+USAGE:
+    crcbl replay <FILE> [OPTIONS]
+
+OPTIONS:
+        --json    Emit one JSON object instead of human output.
+    -h, --help    Print this text.";
+
 /// Parses arguments, which must **not** include the program name.
 pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
     let mut args = args.into_iter().peekable();
@@ -263,6 +288,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
         "run" => parse_run(args),
         "build" => parse_build(args),
         "screenshot" => parse_screenshot(args),
+        "replay" => parse_replay(args),
         other if other.starts_with('-') => {
             Invocation::BadUsage(format!("unrecognized option `{other}`"))
         }
@@ -423,6 +449,36 @@ fn parse_screenshot(mut args: impl Iterator<Item = String>) -> Invocation {
     Invocation::Command(Command::Screenshot(parsed))
 }
 
+fn parse_replay(mut args: impl Iterator<Item = String>) -> Invocation {
+    let mut parsed = ReplayArgs {
+        file: PathBuf::new(),
+        json: false,
+    };
+    let mut file = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => return Invocation::Help(REPLAY_USAGE),
+            "--json" => parsed.json = true,
+            other if other.starts_with('-') => {
+                return Invocation::BadUsage(format!("`replay` has no option `{other}`"));
+            }
+            other if file.is_none() => file = Some(PathBuf::from(other)),
+            other => {
+                return Invocation::BadUsage(format!(
+                    "`replay` takes one file; `{other}` is a second one"
+                ));
+            }
+        }
+    }
+
+    let Some(file) = file else {
+        return bad("`replay` needs a .crpl file path");
+    };
+    parsed.file = file;
+    Invocation::Command(Command::Replay(parsed))
+}
+
 fn parse_size(raw: &str) -> Option<(u32, u32)> {
     let (w, rest) = raw.split_once('x')?;
     let w: u32 = w.parse().ok()?;
@@ -508,6 +564,7 @@ mod tests {
             vec!["run", "--json"],
             vec!["build", "--json"],
             vec!["screenshot", "--json"],
+            vec!["replay", "file.crpl", "--json"],
         ] {
             assert!(command(&args).json(), "{args:?} should have set --json");
         }
@@ -598,6 +655,7 @@ mod tests {
             vec!["build", "--target"],
             vec!["build", "--target", "ps5"],
             vec!["build", "stray"],
+            vec!["replay"],
         ] {
             assert!(
                 matches!(parse_args(&args), Invocation::BadUsage(_)),
