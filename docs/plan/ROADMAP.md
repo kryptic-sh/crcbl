@@ -40,7 +40,7 @@ was intended.
 | **P0** — base     | **done**                                    | `f922ca3`, `3198f7a`, `6dd4b46`, `84af231`, `c058f45`, `bad7186`, `a991e42`, `063fd99`, `421ce69`, `f06e6cd`, `36dd636`, `e094d39`                                                                                                                                                                                        |
 | **P1** — Vulkan   | **done**                                    | `91fd871`, `236f19b`, `c6dc4a4`, `a54990d`, `dc36d32`, `8a4e303`, `cbd6153`                                                                                                                                                                                                                                               |
 | **P2** — sim core | **P2a partial**, **P2b done**, **P2c done** | `7b8efb5` scaffold, `f8e8117` net, `9e55569` ecs, `9d31e2d` input, `2b2e5bd` server/client, `d4d0330` sim harness; P2b through `f1e625c`, `e036705`, `ec0597e`, `fb7e7bf`, `9dcc30d`, `b6c9d7d`, `27390fd`, `cb3b110`, `b37e4d5`, `53405f6`, `4156345`; P2c through `4ff402e`, `fa16710`, `c4688f1`, `83362f3`, `1270c72` |
-| **P3** — phys L0  | **done**                                    | `5665da2` overlaps, `cbfd6b1` dynamic BVH refit, `b1924dd` swept-capsule TOI + triggers, `c4db85d` ECS components, `b765640` PhysicsSystem                                                                                                                                                                                |
+| **P3** — phys L0  | **done**                                    | `5665da2` overlaps, `cbfd6b1` dynamic BVH refit, `b1924dd` swept-capsule TOI + triggers, `c4db85d` ECS components, `b765640` PhysicsSystem, `a2be1f6` integrator, `6b30532` force providers, `60dd95e` integration loop, `05dd23a` property tests                                                                         |
 
 ### What exists now
 
@@ -103,10 +103,12 @@ was intended.
   sphere/box/capsule colliders, static BVH with O(log n) refit, overlap queries
   (sphere + AABB), ray-vs-shape and swept-sphere TOI (including exact capsule),
   trigger-volume support, ECS component types (`RigidBody`, `Transform`,
-  `ColliderComponent`), and `PhysicsSystem` (`SystemTrait` impl mapping entities
-  to the spatial world).
+  `ColliderComponent`), `PhysicsSystem` (full integration loop: force providers,
+  SemiImplicitEuler integration, collider sync), L1 dynamics (terminal velocity
+  emergence, determinism, bounded energy drift), and 1000-body stress test with
+  state-hash determinism.
 
-**1086 unit/integration tests** (23 new from P3 L0), plus 26 Vulkan e2e (run on
+**1107 unit/integration tests** (44 new from P3), plus 26 Vulkan e2e (run on
 both radv and lavapipe), 33 Wayland e2e, 29 X11 e2e and 1 CLI e2e. The whole
 workspace suite passes with no Vulkan driver present at all, and the shell
 suites pass under 32-way CPU contention.
