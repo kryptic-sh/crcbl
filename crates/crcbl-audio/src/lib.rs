@@ -17,6 +17,8 @@
 //! on the OS audio thread, and `source.fill()` is called inside it.
 //! The source must be `Send + Sync + 'static`.
 
+pub mod mixer;
+
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
