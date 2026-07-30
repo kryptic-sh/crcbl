@@ -945,16 +945,14 @@ fn a_failed_recording_finishes_with_an_error_rather_than_hanging() {
         depth_stencil_attachment: None,
         render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
     });
-    // Fails: push constants need a pipeline layout, which lands at P1.2.
-    encoder.push_constants(crcbl_hal::ShaderStages::VERTEX, 0, &[0u8; 4]);
-    // The pass is deliberately left open too, so `finish` has both a scope and
-    // a label to close on the failure path.
+    // Leave the pass deliberately open so `finish` returns the error
+    // rather than a command buffer.
     let error = encoder
         .finish()
         .expect_err("a failed recording must not produce a command buffer");
     assert!(
-        error.to_string().contains("pipeline layout"),
-        "the first failure is the one reported, not the unclosed pass: {error}"
+        error.to_string().contains("render pass"),
+        "the unfinished render pass is reported: {error}"
     );
 
     device.wait_idle().expect("idle");
@@ -1355,7 +1353,7 @@ fn render_triangle(headless: &Headless, resources: &TriangleResources) -> crcbl_
     encoder.set_viewport(&crcbl_hal::Viewport::from_size(width, height));
     encoder.set_scissor(&Rect2d::from_size(width, height));
     encoder.bind_graphics_pipeline(resources.pipeline);
-    encoder.bind_group(0, resources.bind_group, &[]);
+    encoder.bind_group(0, resources.bind_group, &[], resources.pipeline_layout);
     // Three vertices, and no geometry bound to the pipeline at all.
     encoder.draw(0..3, 0..1);
     encoder.end_render_pass();
@@ -3014,7 +3012,7 @@ fn render_probe(
             .execute(|ctx| {
                 let encoder = ctx.encoder();
                 encoder.bind_graphics_pipeline(probe.pipeline);
-                encoder.bind_group(0, probe.group, &[]);
+                encoder.bind_group(0, probe.group, &[], probe.pipeline_layout);
                 encoder.bind_index_buffer(probe.indices, 0, crcbl_hal::IndexFormat::Uint32);
                 encoder.draw_indexed(0..12, 0, 0..1);
             });

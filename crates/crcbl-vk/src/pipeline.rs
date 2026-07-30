@@ -109,12 +109,10 @@ pub(crate) struct PipelineLayoutEntry {
 pub(crate) struct PipelineEntry {
     pub(crate) owner: u64,
     pub(crate) raw: vk::Pipeline,
-    /// The layout it was built with. The encoder needs it for `bind_group` and
-    /// `push_constants`, neither of which the seam gives a layout — see
-    /// `command.rs`.
+    /// The layout it was built with. The encoder needs it for pipeline
+    /// handle lifetime tracking; bind_group and push_constants now receive
+    /// the layout explicitly.
     pub(crate) layout: vk::PipelineLayout,
-    pub(crate) push_constant_stages: vk::ShaderStageFlags,
-    pub(crate) push_constant_size: u32,
 }
 
 /// A sampler.
@@ -630,8 +628,6 @@ impl VkDevice {
             inner.id,
         )?;
         let layout_raw = layout.raw;
-        let push_constant_stages = layout.push_constant_stages;
-        let push_constant_size = layout.push_constant_size;
 
         // The entry-point names have to outlive `vkCreateGraphicsPipelines`, so
         // they are owned locals rather than temporaries in the builder chain.
@@ -817,8 +813,6 @@ impl VkDevice {
                 owner: inner.id,
                 raw,
                 layout: layout_raw,
-                push_constant_stages,
-                push_constant_size,
             })
             .cast())
     }
@@ -837,8 +831,6 @@ impl VkDevice {
             inner.id,
         )?;
         let layout_raw = layout.raw;
-        let push_constant_stages = layout.push_constant_stages;
-        let push_constant_size = layout.push_constant_size;
 
         let name = entry_name(&state, &inner, desc.compute, ShaderStages::COMPUTE)?;
         let module = lookup(
@@ -885,8 +877,6 @@ impl VkDevice {
                 owner: inner.id,
                 raw,
                 layout: layout_raw,
-                push_constant_stages,
-                push_constant_size,
             })
             .cast())
     }

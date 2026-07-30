@@ -120,9 +120,7 @@ suites pass under 32-way CPU contention.
 
 - **XDND on X11** is not implemented (`ShellCaps::DRAG_DROP` is honestly clear
   there); owed before the editor's asset browser at P12.
-- **Two HAL seam findings remain open**, recorded in `crcbl-vk`'s crate docs:
-  `bind_group`/`push_constants` carry no pipeline layout, so the encoder infers
-  one from the last bound pipeline and creates an unstated ordering rule; and
+- **One HAL seam finding remains open**, recorded in `crcbl-vk`'s crate docs:
   vertex pulling depends on `shaderDrawParameters`, for which the seam has no
   vocabulary.
 - **RenderDoc capture** has not been verified by hand; every object and pass

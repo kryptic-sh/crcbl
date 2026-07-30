@@ -27,23 +27,10 @@
 //! # The encoder remembers the pipeline layout, because the seam does not
 //!
 //! `vkCmdBindDescriptorSets` and `vkCmdPushConstants` both take a
-//! `VkPipelineLayout`. The seam's
-//! [`bind_group`](crcbl_hal::CommandEncoder::bind_group) and
-//! [`push_constants`](crcbl_hal::CommandEncoder::push_constants) take none —
-//! correctly, because Metal and WebGPU have no such object — so this encoder
-//! keeps the layout from the last
-//! [`bind_graphics_pipeline`](crcbl_hal::CommandEncoder::bind_graphics_pipeline)
-//! or [`bind_compute_pipeline`](crcbl_hal::CommandEncoder::bind_compute_pipeline)
-//! and uses that.
-//!
-//! Two consequences a caller has to know, and neither is written down at the
-//! seam (P1.2 finding, recorded in the crate docs):
-//!
-//! 1. **The pipeline must be bound before the bind group.** The reverse order
-//!    is legal Vulkan with an explicit layout and is a clean error here.
-//! 2. **The bind point follows the open scope.** Inside a compute pass a bind
-//!    group goes to `COMPUTE`, otherwise to `GRAPHICS`, because the seam has one
-//!    `bind_group` for both and the scope is the only signal it carries.
+//! The seam's [`bind_group`](crcbl_hal::CommandEncoder::bind_group) and
+//! [`push_constants`](crcbl_hal::CommandEncoder::push_constants) now carry an
+//! explicit [`PipelineLayoutHandle`] — the implicit layout inference from the
+//! last bound pipeline is gone as of 2026-07-31.
 
 use core::ops::Range;
 use std::sync::Arc;
@@ -53,8 +40,8 @@ use ash::vk;
 use crcbl_hal::{
     Barriers, BindGroupHandle, BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle,
     CommandEncoder, CommandEncoderDesc, ComputePassDesc, ComputePipelineHandle, DrawIndirect,
-    DrawIndirectCount, GraphicsPipelineHandle, HalError, ImageCopy, IndexFormat, QuerySetHandle,
-    Rect2d, RenderPassDesc, ShaderStages, Viewport,
+    DrawIndirectCount, GraphicsPipelineHandle, HalError, ImageCopy, IndexFormat,
+    PipelineLayoutHandle, QuerySetHandle, Rect2d, RenderPassDesc, ShaderStages, Viewport,
 };
 
 use crcbl_core::Handle;
@@ -88,15 +75,9 @@ pub(crate) struct VkCommandEncoder {
 /// What the encoder has to remember about a bound pipeline.
 #[derive(Clone, Copy, Debug)]
 struct BoundPipeline {
+    /// The Vulkan pipeline layout, stored so pipeline handles can stay live.
+    #[allow(dead_code)]
     layout: vk::PipelineLayout,
-    /// The stages the layout's push-constant range names. Used in preference to
-    /// the caller's `stages`, because Vulkan requires the mask passed to
-    /// `vkCmdPushConstants` to match the range exactly, while the seam lets a
-    /// caller name any subset it likes.
-    push_constant_stages: vk::ShaderStageFlags,
-    /// The declared range's size, so a write past its end is caught here rather
-    /// than as a driver-side VUID naming neither the offset nor the layout.
-    push_constant_size: u32,
 }
 
 impl core::fmt::Debug for VkCommandEncoder {
@@ -735,19 +716,17 @@ impl CommandEncoder for VkCommandEncoder {
 
     // --- bindings ---
 
-    fn bind_group(&mut self, slot: u32, group: BindGroupHandle, dynamic_offsets: &[u32]) {
+    fn bind_group(
+        &mut self,
+        slot: u32,
+        group: BindGroupHandle,
+        dynamic_offsets: &[u32],
+        layout: PipelineLayoutHandle,
+    ) {
         if !self.ok() {
             return;
         }
-        let (bind_point, bound) = self.current_bind_point();
-        let Some(bound) = bound else {
-            self.fail(HalError::InvalidDescriptor(format!(
-                "bind_group({slot}) with no {bind_point:?} pipeline bound; Vulkan needs the \
-                 pipeline layout, and this backend takes it from the last pipeline bound. Bind \
-                 the pipeline first."
-            )));
-            return;
-        };
+        let (bind_point, _bound) = self.current_bind_point();
         let state = self.device.state();
         let record =
             match crate::device::lookup(&state.bind_groups, "bind group", group, self.device.id) {
@@ -758,15 +737,27 @@ impl CommandEncoder for VkCommandEncoder {
                     return;
                 }
             };
+        let layout_raw = match crate::device::lookup(
+            &state.pipeline_layouts,
+            "pipeline layout",
+            layout,
+            self.device.id,
+        ) {
+            Ok(record) => record.raw,
+            Err(error) => {
+                drop(state);
+                self.fail(error);
+                return;
+            }
+        };
         drop(state);
-        // SAFETY: `self.raw` is recording, `record` is a live descriptor set of
-        // this device, and `bound.layout` is the layout of the pipeline bound
-        // immediately above — which is what makes the set compatible.
+        // SAFETY: `self.raw` is recording, `record` is a live descriptor set,
+        // and `layout_raw` is the layout this group was created for.
         unsafe {
             self.device.raw.cmd_bind_descriptor_sets(
                 self.raw,
                 bind_point,
-                bound.layout,
+                layout_raw,
                 slot,
                 &[record],
                 dynamic_offsets,
@@ -774,7 +765,13 @@ impl CommandEncoder for VkCommandEncoder {
         }
     }
 
-    fn push_constants(&mut self, stages: ShaderStages, offset: u32, data: &[u8]) {
+    fn push_constants(
+        &mut self,
+        stages: ShaderStages,
+        offset: u32,
+        data: &[u8],
+        layout: PipelineLayoutHandle,
+    ) {
         if !self.ok() {
             return;
         }
@@ -788,30 +785,41 @@ impl CommandEncoder for VkCommandEncoder {
             )));
             return;
         }
-        let (bind_point, bound) = self.current_bind_point();
-        let Some(bound) = bound else {
-            self.fail(HalError::InvalidDescriptor(format!(
-                "push_constants with no {bind_point:?} pipeline bound; Vulkan needs the pipeline \
-                 layout, and this backend takes it from the last pipeline bound"
-            )));
-            return;
+        let state = self.device.state();
+        let layout_entry = match crate::device::lookup(
+            &state.pipeline_layouts,
+            "pipeline layout",
+            layout,
+            self.device.id,
+        ) {
+            Ok(entry) => entry,
+            Err(error) => {
+                drop(state);
+                self.fail(error);
+                return;
+            }
         };
-        if bound.push_constant_stages.is_empty() {
+        let push_constant_stages = layout_entry.push_constant_stages;
+        let push_constant_size = layout_entry.push_constant_size;
+        let layout_raw = layout_entry.raw;
+        drop(state);
+
+        if push_constant_stages.is_empty() {
             // The seam is explicit that a backend must fail loudly rather than
             // dropping the write.
             self.fail(HalError::InvalidDescriptor(
-                "push_constants on a pipeline whose layout declares no push-constant range"
-                    .to_string(),
+                "push_constants on a layout that declares no push-constant range".to_string(),
             ));
             return;
         }
+        let _ = stages;
         #[allow(clippy::cast_possible_truncation)]
         let end = offset.saturating_add(data.len() as u32);
-        if end > bound.push_constant_size {
+        if end > push_constant_size {
             self.fail(HalError::InvalidDescriptor(format!(
                 "push_constants writes {offset}..{end}, but the pipeline layout declares only \
                  {} bytes",
-                bound.push_constant_size
+                push_constant_size
             )));
             return;
         }
@@ -819,16 +827,15 @@ impl CommandEncoder for VkCommandEncoder {
         // the mask to match the declared range exactly, while the seam lets a
         // caller name a subset. Passing the caller's would be a validation error
         // for a call that is, at the seam's level, correct.
-        let _ = stages;
-        // SAFETY: `self.raw` is recording, `bound.layout` is live, the stage
+        // SAFETY: `self.raw` is recording, `layout_raw` is live, the stage
         // mask is the one the layout declared, and the range was checked to be
         // 4-byte aligned. Its upper bound was checked against
         // `max_push_constant_size` when the layout was created.
         unsafe {
             self.device.raw.cmd_push_constants(
                 self.raw,
-                bound.layout,
-                bound.push_constant_stages,
+                layout_raw,
+                push_constant_stages,
                 offset,
                 data,
             );
@@ -1123,8 +1130,6 @@ impl VkCommandEncoder {
                     entry.raw,
                     BoundPipeline {
                         layout: entry.layout,
-                        push_constant_stages: entry.push_constant_stages,
-                        push_constant_size: entry.push_constant_size,
                     },
                 )
             });

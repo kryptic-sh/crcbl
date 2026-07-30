@@ -1494,7 +1494,13 @@ impl CommandEncoder for NullEncoder {
         });
     }
 
-    fn bind_group(&mut self, slot: u32, group: BindGroupHandle, dynamic_offsets: &[u32]) {
+    fn bind_group(
+        &mut self,
+        slot: u32,
+        group: BindGroupHandle,
+        dynamic_offsets: &[u32],
+        _layout: PipelineLayoutHandle,
+    ) {
         self.need_any_pass("BindGroup");
         self.need_live("BindGroup", ObjectKind::BindGroup, group.to_bits());
         self.record(Command::BindGroup {
@@ -1504,7 +1510,13 @@ impl CommandEncoder for NullEncoder {
         });
     }
 
-    fn push_constants(&mut self, stages: ShaderStages, offset: u32, data: &[u8]) {
+    fn push_constants(
+        &mut self,
+        stages: ShaderStages,
+        offset: u32,
+        data: &[u8],
+        _layout: PipelineLayoutHandle,
+    ) {
         self.need_any_pass("PushConstants");
         self.record(Command::PushConstants {
             stages,

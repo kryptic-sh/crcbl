@@ -49,7 +49,8 @@ use crcbl_core::Handle;
 use crate::{
     BindGroupHandle, BufferHandle, ComputePipelineHandle, Extent3d, GraphicsPipelineHandle,
     HalError, ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageViewHandle,
-    IndexFormat, Offset3d, QuerySetHandle, Rect2d, ShaderStages, Viewport, device::QueueHandle,
+    IndexFormat, Offset3d, PipelineLayoutHandle, QuerySetHandle, Rect2d, ShaderStages, Viewport,
+    device::QueueHandle,
 };
 
 /// Marker type for command-buffer handles. Uninhabited.
@@ -623,14 +624,26 @@ pub trait CommandEncoder: core::fmt::Debug + Send {
     ///
     /// `dynamic_offsets` is Tier B's substitute for push constants — see
     /// [`BindingKind::UniformBuffer`](crate::BindingKind::UniformBuffer).
-    fn bind_group(&mut self, slot: u32, group: BindGroupHandle, dynamic_offsets: &[u32]);
+    fn bind_group(
+        &mut self,
+        slot: u32,
+        group: BindGroupHandle,
+        dynamic_offsets: &[u32],
+        layout: PipelineLayoutHandle,
+    );
 
     /// Writes push constants.
     ///
     /// Requires [`Features::PUSH_CONSTANTS`](crate::Features::PUSH_CONSTANTS).
     /// A backend without it must fail loudly at pipeline-layout creation rather
     /// than silently dropping the write here.
-    fn push_constants(&mut self, stages: ShaderStages, offset: u32, data: &[u8]);
+    fn push_constants(
+        &mut self,
+        stages: ShaderStages,
+        offset: u32,
+        data: &[u8],
+        layout: PipelineLayoutHandle,
+    );
 
     // --- draws ---
 

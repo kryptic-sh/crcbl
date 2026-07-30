@@ -935,7 +935,7 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
         label: Some("cull"),
     });
     encoder.bind_compute_pipeline(cull);
-    encoder.bind_group(0, bind_group, &[]);
+    encoder.bind_group(0, bind_group, &[], pipeline_layout);
     encoder.dispatch(64, 1, 1);
     encoder.end_compute_pass();
 
@@ -984,7 +984,7 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
     encoder.set_viewport(&Viewport::from_size(1920, 1080));
     encoder.set_scissor(&Rect2d::from_size(1920, 1080));
     encoder.bind_graphics_pipeline(opaque);
-    encoder.bind_group(0, bind_group, &[]);
+    encoder.bind_group(0, bind_group, &[], pipeline_layout);
     encoder.bind_index_buffer(indices, 0, IndexFormat::Uint32);
     encoder.draw_indexed_indirect_count(&DrawIndirectCount {
         args: draw_args,

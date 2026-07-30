@@ -112,18 +112,12 @@
 //!   the semaphores, owned and reissued by the swapchain, for exactly the
 //!   reason they do.
 //!
-//! P1.2 added four more, all still open because the seam does not freeze until
-//! P5 exit:
+//! P1.2 added four more, three now closed and one still open:
 //!
-//! * **`bind_group` and `push_constants` carry no pipeline layout.** Vulkan's
-//!   `vkCmdBindDescriptorSets` and `vkCmdPushConstants` both need one, and the
-//!   seam supplies none — correctly, since Metal and WebGPU have no such
-//!   object. This backend therefore remembers the layout of the last pipeline
-//!   bound, which makes **pipeline-before-bind-group an ordering rule the seam
-//!   does not state**, and makes the bind point follow the open pass scope
-//!   because that is the only signal available. Both are documented on
-//!   `command.rs` and are clean errors rather than surprises; a
-//!   `bind_group(…, layout)` or a pass-scoped encoder would settle it.
+//! * **`bind_group` and `push_constants` gained explicit `layout` parameters
+//!   on 2026-07-31.** The seam now carries `PipelineLayoutHandle` on both
+//!   commands, ending the implicit pipeline-before-bind-group ordering rule
+//!   and the inference from last-bound-pipeline.
 //! * **`BindGroupDesc` gained a `variable_count` field on 2026-07-31.**
 //!   The group now provides the actual array length explicitly rather than
 //!   having the backend infer it from entries — which is what the bindless

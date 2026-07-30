@@ -388,6 +388,7 @@ impl ForwardRenderer {
 
         let group = self.mesh_groups[self.frame];
         let pipeline = self.mesh_pipeline;
+        let layout = self.mesh_pipeline_layout;
         let vertices = self.vertices;
         let indices = self.indices;
         let index_count = self.index_count;
@@ -398,12 +399,8 @@ impl ForwardRenderer {
             .clear_depth(scene_depth)
             .execute(move |ctx| {
                 let encoder = ctx.encoder();
-                // Pipeline first: `crcbl-vk` takes the pipeline layout that
-                // `bind_group` needs from the last pipeline bound, which is one
-                // of the open seam findings this slice did not close. See the
-                // crate docs.
                 encoder.bind_graphics_pipeline(pipeline);
-                encoder.bind_group(0, group, &[]);
+                encoder.bind_group(0, group, &[], layout);
                 encoder.bind_index_buffer(indices, 0, IndexFormat::Uint32);
                 encoder.draw_indexed(0..index_count, 0, 0..1);
                 let _ = vertices;
@@ -414,6 +411,7 @@ impl ForwardRenderer {
         // and therefore rebuilt only on a resize.
         let sampler = self.sampler;
         let layout = self.tonemap_layout;
+        let pipeline_layout = self.tonemap_pipeline_layout;
         let tonemap_pipeline = self.tonemap_pipeline;
         let cached = &mut self.tonemap_group;
 
@@ -471,7 +469,7 @@ impl ForwardRenderer {
                 };
                 let encoder = ctx.encoder();
                 encoder.bind_graphics_pipeline(tonemap_pipeline);
-                encoder.bind_group(0, group, &[]);
+                encoder.bind_group(0, group, &[], pipeline_layout);
                 // Three vertices, no geometry bound, no vertex buffer anywhere.
                 encoder.draw(0..3, 0..1);
             });
