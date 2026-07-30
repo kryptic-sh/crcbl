@@ -353,6 +353,29 @@ impl Game {
         self.server.update(now);
         let alpha = self.client.update(now);
 
+        // Read client-interpolated ball position for rendering / HUD.
+        {
+            let state = self.client.interpolate(alpha);
+            let ball_bits = self.ball_entity.to_bits();
+            for (entity_bits, transform) in state.transforms {
+                if entity_bits == ball_bits {
+                    // Use interpolated position. If it differs wildly from the
+                    // server-side value (self.ball_x), replication is broken.
+                    let client_x = transform.position.x;
+                    if self.launched && (client_x - self.ball_x).abs() > 1.0 {
+                        log::warn!(
+                            "replication drift: server ball_x={:.2}, client ball_x={:.2}",
+                            self.ball_x,
+                            client_x,
+                        );
+                    }
+                    // For HUD display, use the smoother client-interpolated position.
+                    self.ball_x = client_x;
+                    break;
+                }
+            }
+        }
+
         // Run game logic (collision, scoring, lives).
         self.sound_played_this_tick = false;
         if self.state == GameState::Playing {
@@ -376,6 +399,7 @@ impl Game {
             &self.state,
             self.score,
             self.lives,
+            self.ball_x,
             self.sound_played_this_tick,
         );
 
@@ -552,7 +576,7 @@ fn restart_game(
 
 // ---- HUD (console-based until UI compositing pass exists) ----
 
-fn log_hud(state: &GameState, score: u32, lives: u32, sound_played: bool) {
+fn log_hud(state: &GameState, score: u32, lives: u32, ball_x: f64, sound_played: bool) {
     let state_str = match state {
         GameState::WaitingForLaunch => "WAITING — press Space to launch",
         GameState::Playing => "PLAYING",
@@ -560,7 +584,7 @@ fn log_hud(state: &GameState, score: u32, lives: u32, sound_played: bool) {
         GameState::Lost => "GAME OVER — press Space to restart",
     };
     let sound_str = if sound_played { " 🔊" } else { "" };
-    log::info!("[HUD] Score: {score}  Lives: {lives}  {state_str}{sound_str}");
+    log::info!("[HUD] Score: {score}  Lives: {lives}  Ball x: {ball_x:.1}  {state_str}{sound_str}");
 }
 
 // ---- input helpers ----
