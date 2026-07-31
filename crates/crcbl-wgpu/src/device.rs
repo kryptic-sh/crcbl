@@ -12,7 +12,7 @@ use crcbl_hal::{
 };
 
 use crate::conv;
-use crate::resources::Pools;
+use crate::resources::{CommandBufferSlot, Pools};
 
 pub struct WgpuDevice {
     pub(crate) device: wgpu::Device,
@@ -576,7 +576,20 @@ impl Device for WgpuDevice {
         let enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: desc.label });
-        Box::new(crate::command::WgpuCommandEncoder::new(enc))
+        // Pre-allocate a handle and a slot for the finished command buffer.
+        let handle = {
+            let mut cmds = self.pools.command_buffers.lock().unwrap();
+            cmds.insert(CommandBufferSlot {
+                buffer: None,
+                label: desc.label.unwrap_or("").to_string(),
+            })
+            .cast()
+        };
+        Box::new(crate::command::WgpuCommandEncoder::new(
+            enc,
+            handle,
+            self.pools.command_buffers.clone(),
+        ))
     }
     fn destroy_command_buffer(&self, _b: CommandBufferHandle) {}
 

@@ -4,7 +4,7 @@
 //! wgpu objects. The pools are behind `Mutex` for interior mutability (the HAL
 //! trait methods take `&self`).
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crcbl_core::Pool;
 
@@ -19,7 +19,7 @@ pub struct Pools {
     pub pipeline_layouts: Mutex<Pool<wgpu::PipelineLayout>>,
     pub graphics_pipelines: Mutex<Pool<wgpu::RenderPipeline>>,
     pub compute_pipelines: Mutex<Pool<wgpu::ComputePipeline>>,
-    pub command_buffers: Mutex<Pool<CommandBufferSlot>>,
+    pub command_buffers: Arc<Mutex<Pool<CommandBufferSlot>>>,
     #[allow(dead_code)]
     pub swapchains: Mutex<Pool<SwapchainSlot>>,
     pub semaphores: Mutex<Pool<SemaphoreSlot>>,
@@ -59,7 +59,7 @@ impl Pools {
             pipeline_layouts: Mutex::new(Pool::new()),
             graphics_pipelines: Mutex::new(Pool::new()),
             compute_pipelines: Mutex::new(Pool::new()),
-            command_buffers: Mutex::new(Pool::new()),
+            command_buffers: Arc::new(Mutex::new(Pool::new())),
             swapchains: Mutex::new(Pool::new()),
             semaphores: Mutex::new(Pool::new()),
             query_sets: Mutex::new(Pool::new()),
