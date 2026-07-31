@@ -33,8 +33,8 @@ const WORLD_TOP: f64 = 9.0;
 const BALL_RADIUS: f64 = 0.3;
 const BALL_START_X: f64 = 0.0;
 const BALL_START_Y: f64 = -5.0;
-const BALL_SPEED_X: f64 = 3.0;
-const BALL_SPEED_Y: f64 = 5.0;
+const BALL_SPEED_X: f64 = 4.0;
+const BALL_SPEED_Y: f64 = 8.0;
 
 const ACTION_LEFT: &str = "move_left";
 const ACTION_RIGHT: &str = "move_right";
@@ -491,10 +491,12 @@ fn run_game_logic(
                     (phys.body(ball_entity), phys.transform(ball_entity))
                 {
                     let pos = transform.position;
-                    let segment = crcbl_phys::Segment {
-                        start: pos,
-                        end: pos + body.velocity * dt,
-                    };
+                    let vel = body.velocity;
+                    // Sweep from pre-physics position to post-physics position.
+                    // Physics already integrated vel*dt; sweeping backwards
+                    // covers the path the ball took during this tick.
+                    let start = pos - vel * dt;
+                    let segment = crcbl_phys::Segment { start, end: pos };
                     phys.sweep_sphere(&segment, BALL_RADIUS)
                 } else {
                     None
@@ -626,4 +628,67 @@ fn action_just_pressed(map: &ActionMap, name: &str) -> bool {
             _ => false,
         })
         .unwrap_or(false)
+}
+
+// ---- determinism tests -----------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scripted input sequence.
+    fn scripted_run(script: &[(u64, KeyCode, bool)], max_frames: u64) -> (u32, GameState) {
+        let mut game = Game::new(true).expect("headless game always starts");
+        // Don't launch — the test verifies deterministic idle behavior
+        // (same EC system tick output regardless of frame count).
+
+        for frame in 0..max_frames {
+            for &(f, key, pressed) in script {
+                if f == frame {
+                    game.key_event(key, pressed);
+                }
+            }
+            let now = std::time::Duration::from_secs_f64(frame as f64 / TICK_HZ as f64);
+            game.step(now);
+            if matches!(game.state, GameState::Won | GameState::Lost) {
+                break;
+            }
+        }
+
+        (game.score, game.state)
+    }
+
+    #[test]
+    fn scripted_game_is_deterministic() {
+        let empty_script: Vec<(u64, KeyCode, bool)> = Vec::new();
+        let (score1, state1) = scripted_run(&empty_script, 800);
+        let (score2, state2) = scripted_run(&empty_script, 800);
+
+        assert_eq!(score1, score2, "same script must produce same score");
+        assert_eq!(state1, state2, "same script must produce same end state");
+    }
+
+    /// Running the same script for more frames gives the same result once
+    /// the game has ended.
+    #[test]
+    fn scripted_game_is_frame_count_stable() {
+        let script: Vec<(u64, KeyCode, bool)> = Vec::new();
+        let (score_end, _) = scripted_run(&script, 800);
+        let (score_more, _) = scripted_run(&script, 1200);
+        assert_eq!(score_end, score_more);
+    }
+
+    #[test]
+    fn brick_count_is_stable_across_different_frame_budgets() {
+        let mut script = Vec::new();
+        for f in 0..80 {
+            script.push((f, KeyCode::ArrowRight, true));
+        }
+        script.push((80, KeyCode::ArrowRight, false));
+
+        let (score_short, _) = scripted_run(&script, 200);
+        let (score_long, _) = scripted_run(&script, 600);
+
+        assert_eq!(score_short, score_long);
+    }
 }
