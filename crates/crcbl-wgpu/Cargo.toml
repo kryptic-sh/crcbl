@@ -1,0 +1,24 @@
+[package]
+name = "crcbl-wgpu"
+description = "Crucible wgpu backend — native + WebGPU (Tier B)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# This crate implements `crcbl-hal` on the `wgpu` crate. P5.1 (Slice 2)
+# delivers the crate scaffold: Instance (adapter enumeration, device creation)
+# and Device stubs. Resources, swapchain, and command encoding land in P5.2.
+
+[dependencies]
+crcbl-core = { workspace = true }
+crcbl-hal = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+# wgpu 30 — native backends for dev; `spirv` feature for shader modules.
+wgpu = { version = "30", default-features = false, features = ["spirv"] }
+# Block on async adapter enumeration for native usage.
+pollster = "0.4"
+
+[lints]
+workspace = true

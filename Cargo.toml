@@ -53,6 +53,7 @@ crcbl-net = { path = "crates/crcbl-net", version = "0.1.0" }
 crcbl-phys = { path = "crates/crcbl-phys", version = "0.1.0" }
 crcbl-server = { path = "crates/crcbl-server", version = "0.1.0" }
 crcbl-vk = { path = "crates/crcbl-vk", version = "0.1.0" }
+crcbl-wgpu = { path = "crates/crcbl-wgpu", version = "0.1.0" }
 crcbl-input = { path = "crates/crcbl-input", version = "0.1.0" }
 crcbl-wl-scanner = { path = "crates/crcbl-wl-scanner", version = "0.1.0" }
 crcbl-store = { path = "crates/crcbl-store", version = "0.1.0" }
