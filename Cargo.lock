@@ -449,6 +449,7 @@ dependencies = [
  "crcbl-hal",
  "log",
  "pollster",
+ "raw-window-handle",
  "thiserror 2.0.19",
  "wgpu",
 ]

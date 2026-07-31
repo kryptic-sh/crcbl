@@ -23,7 +23,7 @@ pub struct WgpuDevice {
     pub(crate) queue: wgpu::Queue,
     caps: DeviceCaps,
     graphics_queue: QueueHandle,
-    pools: Pools,
+    pools: Arc<Pools>,
 }
 
 impl std::fmt::Debug for WgpuDevice {
@@ -57,7 +57,7 @@ impl WgpuDevice {
                 limits: hal::Limits::desktop(),
             },
             graphics_queue: QueueHandle::from_bits(1).expect("handle 1 is valid"),
-            pools: Pools::new(surfaces),
+            pools: Arc::new(Pools::new(surfaces)),
         })
     }
 
@@ -596,7 +596,7 @@ impl Device for WgpuDevice {
         Box::new(crate::command::WgpuCommandEncoder::new(
             enc,
             handle,
-            self.pools.command_buffers.clone(),
+            self.pools.clone(),
         ))
     }
     fn destroy_command_buffer(&self, _b: CommandBufferHandle) {}
