@@ -96,9 +96,10 @@ was intended.
   `crcbl_store::write_atomic`, on-screen HUD via `UiRenderer` (glyph atlas
   texture, per-frame vertex/index upload, alpha-blended compositing pass), 7
   unit/e2e tests including scripted-input determinism and persistence RT.
-- **`crcbl-wgpu`** (P5.1): wgpu 30 backend scaffold — `WgpuInstance`
-  (adapter enumeration), `WgpuDevice` (trait stub). Compiles but resources,
-  swapchain, and command encoding are stubbed (P5.2).
+- **`crcbl-wgpu`** (P5): wgpu 30 backend — `WgpuInstance` (adapter enumeration),
+  `WgpuDevice` with full resource/pipeline/bind-group creation and pool-based
+  handle tracking, `conv` mappings (formats, blend states, rasteriser, binding
+  kinds). Swapchain and command-encoder recording remain stubbed (P5.3+).
 - **`crcbl-ecs`** (P2a): system-owned-array ECS — `World`, `System<T>` (dense
   SoA + sparse entity→index), `Schedule` (ordered tick sequence), `Inspector`
   (per-system stats). Entity lifecycle: spawn, deferred despawn, generational
