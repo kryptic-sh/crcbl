@@ -13,7 +13,7 @@ crcbl-hal = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 bytemuck = { workspace = true }
-wgpu = { version = "30", default-features = false, features = ["spirv"] }
+wgpu = { version = "30", features = ["spirv"] }
 pollster = "0.4"
 
 [lints]

@@ -139,6 +139,17 @@ static REGISTRY: &[Registration] = &[
         },
     },
     Registration {
+        backend: GpuBackend::Wgpu,
+        auto: false,
+        open: || match crcbl_wgpu::create_native() {
+            Some(instance) => Ok(Box::new(instance) as Box<dyn Instance>),
+            None => Err(HalError::Unsupported {
+                backend: crcbl_hal::BackendKind::Wgpu,
+                what: "no wgpu adapter found",
+            }),
+        },
+    },
+    Registration {
         backend: GpuBackend::Null,
         auto: false,
         // Tier A so the null backend exercises the same code paths a real
@@ -248,7 +259,10 @@ mod tests {
     #[test]
     fn the_table_is_what_it_says_and_null_is_never_automatic() {
         let backends: Vec<GpuBackend> = REGISTRY.iter().map(|entry| entry.backend).collect();
-        assert_eq!(backends, [GpuBackend::Vulkan, GpuBackend::Null]);
+        assert_eq!(
+            backends,
+            [GpuBackend::Vulkan, GpuBackend::Wgpu, GpuBackend::Null]
+        );
         let null = REGISTRY
             .iter()
             .find(|entry| entry.backend == GpuBackend::Null)
@@ -263,21 +277,21 @@ mod tests {
         assert!(!instance.adapters().is_empty());
     }
 
-    /// Wgpu lands at P5, so it is the stable example of a backend this build
-    /// does not have — and the message must name what it *does* have.
+    /// Wgpu is registered but not auto-selectable; asking for it by name
+    /// either opens it (when a GPU is present) or produces a descriptive
+    /// error (when no adapter was found).
     #[test]
-    fn an_unregistered_backend_is_rejected_by_name() {
-        let error = open_backend(GpuBackend::Wgpu).expect_err("not registered yet");
-        let GpuError::UnknownBackend {
-            requested,
-            available,
-        } = error
-        else {
-            panic!("wrong variant");
-        };
-        assert_eq!(requested, "wgpu");
-        assert!(available.contains("vk"), "{available}");
-        assert!(available.contains("null"), "{available}");
+    fn wgpu_is_registered_and_reachable_by_name() {
+        match open_backend(GpuBackend::Wgpu) {
+            Ok(instance) => {
+                assert_eq!(instance.backend(), crcbl_hal::BackendKind::Wgpu);
+            }
+            Err(GpuError::Backend { backend, source: _ }) => {
+                assert_eq!(backend, GpuBackend::Wgpu);
+                // Expected when no GPU/driver is present.
+            }
+            Err(other) => panic!("unexpected error: {other}"),
+        }
     }
 
     /// On a machine with a driver this genuinely opens Vulkan, which is correct

@@ -36,7 +36,7 @@ impl WgpuInstance {
                             device_id: info.device,
                             device_type: DeviceType::Other,
                             driver: format!("wgpu {}", info.driver),
-                            backend: BackendKind::Vulkan,
+                            backend: BackendKind::Wgpu,
                             caps,
                         },
                         adapter,
@@ -55,7 +55,7 @@ impl WgpuInstance {
 
 impl Instance for WgpuInstance {
     fn backend(&self) -> BackendKind {
-        BackendKind::Vulkan
+        BackendKind::Wgpu
     }
 
     fn adapters(&self) -> Vec<AdapterInfo> {
