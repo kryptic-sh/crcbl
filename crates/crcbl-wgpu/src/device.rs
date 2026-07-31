@@ -11,8 +11,12 @@ use crcbl_hal::{
     ShaderModuleHandle, SubmitInfo, SurfaceError, SwapchainDesc, SwapchainHandle,
 };
 
+use std::sync::{Arc, Mutex};
+
+use crcbl_core::Pool;
+
 use crate::conv;
-use crate::resources::{CommandBufferSlot, Pools};
+use crate::resources::{CommandBufferSlot, Pools, SurfaceSlot, SwapchainSlot};
 
 pub struct WgpuDevice {
     pub(crate) device: wgpu::Device,
@@ -29,7 +33,11 @@ impl std::fmt::Debug for WgpuDevice {
 }
 
 impl WgpuDevice {
-    pub(crate) fn new(adapter: &wgpu::Adapter, _desc: &DeviceDesc<'_>) -> Result<Self, HalError> {
+    pub(crate) fn new(
+        adapter: &wgpu::Adapter,
+        _desc: &DeviceDesc<'_>,
+        surfaces: Arc<Mutex<Pool<SurfaceSlot>>>,
+    ) -> Result<Self, HalError> {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: None,
             required_features: wgpu::Features::empty(),
@@ -49,7 +57,7 @@ impl WgpuDevice {
                 limits: hal::Limits::desktop(),
             },
             graphics_queue: QueueHandle::from_bits(1).expect("handle 1 is valid"),
-            pools: Pools::new(),
+            pools: Pools::new(surfaces),
         })
     }
 
@@ -605,22 +613,210 @@ impl Device for WgpuDevice {
         Ok(())
     }
 
-    // ---------- swapchain (stubs) ----------
-    fn create_swapchain(&self, _d: &SwapchainDesc<'_>) -> Result<SwapchainHandle, SurfaceError> {
-        Err(SurfaceError::Lost)
+    // ---------- swapchain ----------
+    fn create_swapchain(&self, desc: &SwapchainDesc<'_>) -> Result<SwapchainHandle, SurfaceError> {
+        let surfaces = self.pools.surfaces.lock().unwrap();
+        let surface_slot = surfaces
+            .get(desc.surface.cast())
+            .ok_or(SurfaceError::Lost)?;
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: crate::conv::map_format(desc.format),
+            color_space: wgpu::SurfaceColorSpace::Auto,
+            width: desc.extent.0,
+            height: desc.extent.1,
+            present_mode: match desc.present_mode {
+                crcbl_hal::PresentMode::Fifo => wgpu::PresentMode::Fifo,
+                crcbl_hal::PresentMode::FifoRelaxed => wgpu::PresentMode::FifoRelaxed,
+                crcbl_hal::PresentMode::Mailbox => wgpu::PresentMode::Mailbox,
+                crcbl_hal::PresentMode::Immediate => wgpu::PresentMode::Immediate,
+            },
+            desired_maximum_frame_latency: 2,
+            alpha_mode: match desc.composite_alpha {
+                crcbl_hal::CompositeAlpha::Opaque => wgpu::CompositeAlphaMode::Opaque,
+                crcbl_hal::CompositeAlpha::PreMultiplied => wgpu::CompositeAlphaMode::PreMultiplied,
+                crcbl_hal::CompositeAlpha::PostMultiplied => {
+                    wgpu::CompositeAlphaMode::PostMultiplied
+                }
+                crcbl_hal::CompositeAlpha::Inherit => wgpu::CompositeAlphaMode::Inherit,
+            },
+            view_formats: vec![],
+        };
+
+        surface_slot.surface.configure(&self.device, &config);
+
+        let slot = SwapchainSlot {
+            surface_handle_id: desc.surface.index() as u64,
+            surface_handle: desc.surface,
+            config: Some(config),
+            acquired: None,
+            frame_image: None,
+            frame_view: None,
+            extent: desc.extent,
+            format: desc.format,
+            suboptimal: false,
+        };
+        drop(surfaces); // release lock before locking swapchains
+
+        let mut swapchains = self.pools.swapchains.lock().unwrap();
+        Ok(swapchains.insert(slot).cast())
     }
+
     fn reconfigure_swapchain(
         &self,
-        _s: SwapchainHandle,
-        _d: &SwapchainDesc<'_>,
+        swapchain: SwapchainHandle,
+        desc: &SwapchainDesc<'_>,
     ) -> Result<(), SurfaceError> {
-        Err(SurfaceError::Lost)
+        let surfaces = self.pools.surfaces.lock().unwrap();
+        let mut swapchains = self.pools.swapchains.lock().unwrap();
+        let slot = swapchains
+            .get_mut(swapchain.cast())
+            .ok_or(SurfaceError::Lost)?;
+
+        // Drop any pending acquired texture before reconfiguring.
+        slot.acquired = None;
+
+        let surface_slot = surfaces
+            .get(slot.surface_handle.cast())
+            .ok_or(SurfaceError::Lost)?;
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: crate::conv::map_format(desc.format),
+            color_space: wgpu::SurfaceColorSpace::Auto,
+            width: desc.extent.0,
+            height: desc.extent.1,
+            present_mode: match desc.present_mode {
+                crcbl_hal::PresentMode::Fifo => wgpu::PresentMode::Fifo,
+                crcbl_hal::PresentMode::FifoRelaxed => wgpu::PresentMode::FifoRelaxed,
+                crcbl_hal::PresentMode::Mailbox => wgpu::PresentMode::Mailbox,
+                crcbl_hal::PresentMode::Immediate => wgpu::PresentMode::Immediate,
+            },
+            desired_maximum_frame_latency: 2,
+            alpha_mode: match desc.composite_alpha {
+                crcbl_hal::CompositeAlpha::Opaque => wgpu::CompositeAlphaMode::Opaque,
+                crcbl_hal::CompositeAlpha::PreMultiplied => wgpu::CompositeAlphaMode::PreMultiplied,
+                crcbl_hal::CompositeAlpha::PostMultiplied => {
+                    wgpu::CompositeAlphaMode::PostMultiplied
+                }
+                crcbl_hal::CompositeAlpha::Inherit => wgpu::CompositeAlphaMode::Inherit,
+            },
+            view_formats: vec![],
+        };
+
+        surface_slot.surface.configure(&self.device, &config);
+
+        slot.config = Some(config);
+        slot.extent = desc.extent;
+        slot.format = desc.format;
+
+        Ok(())
     }
-    fn destroy_swapchain(&self, _s: SwapchainHandle) {}
-    fn acquire_next_frame(&self, _s: SwapchainHandle) -> Result<AcquiredFrame, SurfaceError> {
-        Err(SurfaceError::OutOfDate)
+
+    fn destroy_swapchain(&self, swapchain: SwapchainHandle) {
+        self.pools
+            .swapchains
+            .lock()
+            .unwrap()
+            .remove(swapchain.cast());
     }
-    fn present(&self, _q: QueueHandle, _p: &PresentInfo<'_>) -> Result<(), SurfaceError> {
-        Err(SurfaceError::OutOfDate)
+
+    fn acquire_next_frame(
+        &self,
+        swapchain: SwapchainHandle,
+    ) -> Result<AcquiredFrame, SurfaceError> {
+        let surfaces = self.pools.surfaces.lock().unwrap();
+        let mut swapchains = self.pools.swapchains.lock().unwrap();
+        let slot = swapchains
+            .get_mut(swapchain.cast())
+            .ok_or(SurfaceError::Lost)?;
+
+        let surface_slot = surfaces
+            .get(slot.surface_handle.cast())
+            .ok_or(SurfaceError::Lost)?;
+
+        let acquired = surface_slot.surface.get_current_texture();
+        match acquired {
+            wgpu::CurrentSurfaceTexture::Success(surface_texture) => {
+                // Clone the texture (Arc-backed) so we can store it separately.
+                let texture = surface_texture.texture.clone();
+                let tex = texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("swapchain_view"),
+                    ..Default::default()
+                });
+
+                let image_id = {
+                    let mut images = self.pools.images.lock().unwrap();
+                    images.insert(texture).index() as u64
+                };
+                let view_id = {
+                    let mut views = self.pools.image_views.lock().unwrap();
+                    views.insert(tex).index() as u64
+                };
+
+                slot.acquired = Some(surface_texture);
+                slot.frame_image = Some(image_id);
+                slot.frame_view = Some(view_id);
+                slot.suboptimal = false;
+
+                Ok(AcquiredFrame {
+                    image: crcbl_hal::ImageHandle::from_bits(image_id).expect("valid handle"),
+                    view: crcbl_hal::ImageViewHandle::from_bits(view_id).expect("valid handle"),
+                    extent: slot.extent,
+                    index: 0,
+                    acquire_semaphore: None,
+                    present_semaphore: None,
+                    suboptimal: false,
+                })
+            }
+            wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => {
+                let texture = surface_texture.texture.clone();
+                let tex = texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("swapchain_view"),
+                    ..Default::default()
+                });
+
+                let image_id = {
+                    let mut images = self.pools.images.lock().unwrap();
+                    images.insert(texture).index() as u64
+                };
+                let view_id = {
+                    let mut views = self.pools.image_views.lock().unwrap();
+                    views.insert(tex).index() as u64
+                };
+
+                slot.acquired = Some(surface_texture);
+                slot.frame_image = Some(image_id);
+                slot.frame_view = Some(view_id);
+                slot.suboptimal = true;
+
+                Ok(AcquiredFrame {
+                    image: crcbl_hal::ImageHandle::from_bits(image_id).expect("valid handle"),
+                    view: crcbl_hal::ImageViewHandle::from_bits(view_id).expect("valid handle"),
+                    extent: slot.extent,
+                    index: 0,
+                    acquire_semaphore: None,
+                    present_semaphore: None,
+                    suboptimal: true,
+                })
+            }
+            wgpu::CurrentSurfaceTexture::Timeout => Err(SurfaceError::Timeout),
+            wgpu::CurrentSurfaceTexture::Outdated => Err(SurfaceError::OutOfDate),
+            wgpu::CurrentSurfaceTexture::Lost => Err(SurfaceError::Lost),
+            _ => Err(SurfaceError::Lost),
+        }
+    }
+
+    fn present(&self, _queue: QueueHandle, present: &PresentInfo<'_>) -> Result<(), SurfaceError> {
+        let mut swapchains = self.pools.swapchains.lock().unwrap();
+        let slot = swapchains
+            .get_mut(present.swapchain.cast())
+            .ok_or(SurfaceError::Lost)?;
+
+        // Dropping the SurfaceTexture auto-presents.
+        slot.acquired = None;
+
+        Ok(())
     }
 }

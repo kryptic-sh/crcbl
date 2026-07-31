@@ -8,6 +8,50 @@ use std::sync::{Arc, Mutex};
 
 use crcbl_core::Pool;
 
+/// A wgpu surface, stored in the instance's surface pool so Device swapchain
+/// methods can reach it. `'static` because the caller (`create_surface_unsafe`)
+/// guarantees the window handles outlive the surface.
+pub struct SurfaceSlot {
+    pub surface: wgpu::Surface<'static>,
+    /// Platform tag from the SurfaceTarget that created it.
+    #[allow(dead_code)]
+    pub platform: &'static str,
+}
+
+/// Per-swapchain state. A wgpu "swapchain" is a configured surface plus an
+/// acquired-texture ring.
+pub struct SwapchainSlot {
+    /// ID of the SurfaceSlot in the surface pool. The surface is owned by the
+    /// instance; the swapchain holds a key for lookups.
+    #[allow(dead_code)]
+    pub surface_handle_id: u64,
+    /// Surface handle (from `Instance::create_surface`) for tracing.
+    pub surface_handle: crcbl_hal::SurfaceHandle,
+    /// The last-configured surface description.
+    pub config: Option<wgpu::SurfaceConfiguration>,
+    /// The currently acquired frame, valid between acquire and present.
+    pub acquired: Option<wgpu::SurfaceTexture>,
+    /// Swapchain image/texture-view handles allocated on acquire.
+    pub frame_image: Option<u64>,
+    pub frame_view: Option<u64>,
+    /// Extent this swapchain was configured at.
+    pub extent: (u32, u32),
+    /// Format the swapchain is configured with.
+    pub format: crcbl_hal::Format,
+    /// Suboptimal flag, carried forward per swapchain module docs.
+    pub suboptimal: bool,
+}
+
+pub struct CommandBufferSlot {
+    pub buffer: Option<wgpu::CommandBuffer>,
+    #[allow(dead_code)]
+    pub label: String,
+}
+
+pub struct SemaphoreSlot {
+    pub value: u64,
+}
+
 pub struct Pools {
     pub buffers: Mutex<Pool<wgpu::Buffer>>,
     pub images: Mutex<Pool<wgpu::Texture>>,
@@ -20,34 +64,16 @@ pub struct Pools {
     pub graphics_pipelines: Mutex<Pool<wgpu::RenderPipeline>>,
     pub compute_pipelines: Mutex<Pool<wgpu::ComputePipeline>>,
     pub command_buffers: Arc<Mutex<Pool<CommandBufferSlot>>>,
-    #[allow(dead_code)]
     pub swapchains: Mutex<Pool<SwapchainSlot>>,
     pub semaphores: Mutex<Pool<SemaphoreSlot>>,
     #[allow(dead_code)]
     pub query_sets: Mutex<Pool<()>>,
-}
-
-#[allow(dead_code)]
-pub struct CommandBufferSlot {
-    pub buffer: Option<wgpu::CommandBuffer>,
-    pub label: String,
-}
-
-#[allow(dead_code)]
-pub struct SwapchainSlot {
-    pub surface: wgpu::Surface<'static>,
-    pub config: wgpu::SurfaceConfiguration,
-    pub texture: Option<wgpu::SurfaceTexture>,
-    pub format: crcbl_hal::Format,
-    pub extent: (u32, u32),
-}
-
-pub struct SemaphoreSlot {
-    pub value: u64,
+    /// Shared surface pool, cloned from the instance.
+    pub surfaces: Arc<Mutex<Pool<SurfaceSlot>>>,
 }
 
 impl Pools {
-    pub fn new() -> Self {
+    pub fn new(surfaces: Arc<Mutex<Pool<SurfaceSlot>>>) -> Self {
         Self {
             buffers: Mutex::new(Pool::new()),
             images: Mutex::new(Pool::new()),
@@ -63,6 +89,7 @@ impl Pools {
             swapchains: Mutex::new(Pool::new()),
             semaphores: Mutex::new(Pool::new()),
             query_sets: Mutex::new(Pool::new()),
+            surfaces,
         }
     }
 }

@@ -237,3 +237,27 @@ pub fn map_binding_kind(k: BindingKind) -> wgpu::BindingType {
         BindingKind::Sampler => wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
     }
 }
+
+/// Reverse of [`map_format`]: wgpu format → HAL format.
+pub fn unmap_format(f: wgpu::TextureFormat) -> crcbl_hal::Format {
+    match f {
+        wgpu::TextureFormat::R8Unorm => crcbl_hal::Format::R8Unorm,
+        wgpu::TextureFormat::Rg8Unorm => crcbl_hal::Format::Rg8Unorm,
+        wgpu::TextureFormat::Rgba8Unorm => crcbl_hal::Format::Rgba8Unorm,
+        wgpu::TextureFormat::Rgba8UnormSrgb => crcbl_hal::Format::Rgba8UnormSrgb,
+        wgpu::TextureFormat::Bgra8Unorm => crcbl_hal::Format::Bgra8Unorm,
+        wgpu::TextureFormat::Bgra8UnormSrgb => crcbl_hal::Format::Bgra8UnormSrgb,
+        wgpu::TextureFormat::Rgba16Float => crcbl_hal::Format::Rgba16Float,
+        wgpu::TextureFormat::Rg32Float => crcbl_hal::Format::Rg32Float,
+        wgpu::TextureFormat::Rg32Uint => crcbl_hal::Format::Rg32Uint,
+        wgpu::TextureFormat::Rg11b10Ufloat => crcbl_hal::Format::R11g11b10Float,
+        wgpu::TextureFormat::Depth32Float => crcbl_hal::Format::D32Float,
+        wgpu::TextureFormat::Depth32FloatStencil8 => crcbl_hal::Format::D32FloatS8Uint,
+        wgpu::TextureFormat::Depth24PlusStencil8 => crcbl_hal::Format::D24UnormS8Uint,
+        wgpu::TextureFormat::Depth16Unorm => crcbl_hal::Format::D16Unorm,
+        other => {
+            log::warn!("crcbl-wgpu: unmapped wgpu format {other:?}, falling back to Rgba8Unorm");
+            crcbl_hal::Format::Rgba8Unorm
+        }
+    }
+}
