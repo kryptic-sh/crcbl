@@ -111,6 +111,12 @@ was intended.
   `Arc`/`Mutex` ↔ `Rc`/`RefCell`). `HalThreadSafe` marker trait in
   `crcbl-hal` relaxes `Send + Sync` bounds on wasm32.
   `create_native()` gated to non-wasm targets.
+- **`crcbl-shell`** (P5): `WebShell` backend — single-canvas window, `extern "C"`
+  entry points for JS→wasm input (resize/key/pointer/frame), event queue over
+  `RefCell<VecDeque>`, `SurfaceTarget::Web { canvas_id }`. Registered in
+  backend table as non-auto (`CRCBL_SHELL=web`). Caps exclude
+  `MULTI_WINDOW`, `POINTER_WARP`, `CLIPBOARD`, `DRAG_DROP`, `EVENT_WAIT`.
+  8 unit tests. JS shim counterpart (P5.3) follows.
 - **`crcbl-shaders`** (P5.3): WGSL artifacts committed alongside SPIR-V —
   `compile-shaders.sh` produces `wgsl/*.wgsl` per shader; `Shader::wgsl()`
   returns the source for wgpu backends. Manifest tracks both formats.
