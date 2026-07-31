@@ -101,8 +101,9 @@ was intended.
   bind-group creation and pool-based handle tracking, command encoder
   finish flow with pre-allocated handle slots, `conv` mappings
   (formats, blend states, rasteriser, binding kinds). Available via
-  `CRCBL_GPU=wgpu` on native. Surface/swapchain and full command
-  recording remain stubbed (P6+).
+  `CRCBL_GPU=wgpu` on native. Surface/swapchain (Wayland, Xcb via
+  raw-window-handle) and command-encoder finish flow implemented.
+  Full command recording remains stubbed (P6+).
 - **`crcbl-shaders`** (P5.3): WGSL artifacts committed alongside SPIR-V —
   `compile-shaders.sh` produces `wgsl/*.wgsl` per shader; `Shader::wgsl()`
   returns the source for wgpu backends. Manifest tracks both formats.
