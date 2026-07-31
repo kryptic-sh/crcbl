@@ -148,6 +148,11 @@ static REGISTRY: &[Registration] = &[
         auto: false,
         open: || Ok(Box::new(HeadlessShell::new())),
     },
+    Registration {
+        backend: ShellBackend::Web,
+        auto: false,
+        open: web_open,
+    },
 ];
 
 fn registry_names(entries: impl Iterator<Item = ShellBackend>) -> String {
@@ -216,6 +221,16 @@ pub fn open_backend(backend: ShellBackend) -> Result<Box<dyn Shell>, ShellError>
     }
 }
 
+/// Opens the web backend. The canvas id is read from the `CRCBL_CANVAS_ID`
+/// environment variable (set by the JS shim during init).
+fn web_open() -> Result<Box<dyn Shell>, ShellError> {
+    let canvas_id: u32 = std::env::var("CRCBL_CANVAS_ID")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    Ok(Box::new(crate::web::open(canvas_id)?))
+}
+
 /// Tries every auto-selectable backend in preference order.
 fn open_auto() -> Result<Box<dyn Shell>, ShellError> {
     let mut tried = Vec::new();
@@ -276,11 +291,12 @@ mod tests {
                 [
                     ShellBackend::Wayland,
                     ShellBackend::X11,
-                    ShellBackend::Headless
+                    ShellBackend::Headless,
+                    ShellBackend::Web,
                 ]
             );
         } else {
-            assert_eq!(backends, [ShellBackend::Headless]);
+            assert_eq!(backends, [ShellBackend::Headless, ShellBackend::Web]);
         }
         let headless = REGISTRY
             .iter()

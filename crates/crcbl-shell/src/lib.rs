@@ -253,6 +253,17 @@ pub(crate) mod wayland;
 #[cfg(target_os = "linux")]
 pub(crate) mod x11;
 
+/// The Web/canvas backend (P5).
+///
+/// Compiled on all targets so it can be tested. The `extern "C"` entry points
+/// are harmless dead code on non-wasm targets; the backend itself is only
+/// useful on wasm32, but the type must be reachable for unit tests and for the
+/// backend registry table.
+#[cfg(not(target_arch = "wasm32"))]
+mod web;
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod web;
+
 /// Scaffolding for the nested-compositor end-to-end suite, behind the
 /// `wayland-e2e` feature.
 ///
