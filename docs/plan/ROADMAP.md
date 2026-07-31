@@ -87,15 +87,18 @@ was intended.
 - **`crcbl-cli`** (`new`/`run`/`build`) and **`apps/sandbox`**, which draws a
   reversed-Z lit spinning cube through the graph into an HDR target on both
   Wayland and X11.
-- **`apps/breakout`** (S1, 11 slices merged): paddle movement via `ActionMap`,
+- **`apps/breakout`** (S1, 12 slices merged): paddle movement via `ActionMap`,
   server-authoritative over `InMemoryTransport`, `PhysicsSystem` with
   swept-sphere CCD (ball, paddle, 40-brick grid, left/right/top walls), game
   state machine (Waiting→Playing→Won/Lost), 3 lives + fall-out detection,
   spatial audio panning (`compute_cue` per ball position), client-interpolated
   ball state with replication drift detection, high score persistence via
-  `crcbl_store::write_atomic`, console HUD with score/lives/ball position, 7
+  `crcbl_store::write_atomic`, on-screen HUD via `UiRenderer` (glyph atlas
+  texture, per-frame vertex/index upload, alpha-blended compositing pass), 7
   unit/e2e tests including scripted-input determinism and persistence RT.
-  Remaining for exit: render-graph UI compositing pass.
+- **`crcbl-wgpu`** (P5.1): wgpu 30 backend scaffold — `WgpuInstance`
+  (adapter enumeration), `WgpuDevice` (trait stub). Compiles but resources,
+  swapchain, and command encoding are stubbed (P5.2).
 - **`crcbl-ecs`** (P2a): system-owned-array ECS — `World`, `System<T>` (dense
   SoA + sparse entity→index), `Schedule` (ordered tick sequence), `Inspector`
   (per-system stats). Entity lifecycle: spawn, deferred despawn, generational
