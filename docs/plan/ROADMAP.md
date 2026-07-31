@@ -100,8 +100,11 @@ was intended.
   registered in backend table), `WgpuDevice` with full resource/pipeline/
   bind-group creation and pool-based handle tracking, `conv` mappings
   (formats, blend states, rasteriser, binding kinds). Available via
-  `CRCBL_GPU=wgpu` on native. Swapchain, surface, and command-encoder
-  recording remain stubbed (P6+).
+  `CRCBL_GPU=wgpu` on native.
+- **`crcbl-shaders`** (P5.3): WGSL artifacts committed alongside SPIR-V —
+  `compile-shaders.sh` produces `wgsl/*.wgsl` per shader; `Shader::wgsl()`
+  returns the source for wgpu backends. Manifest tracks both formats.
+  Swapchain, surface, and command-encoder recording remain stubbed (P6+).
 - **`crcbl-ecs`** (P2a): system-owned-array ECS — `World`, `System<T>` (dense
   SoA + sparse entity→index), `Schedule` (ordered tick sequence), `Inspector`
   (per-system stats). Entity lifecycle: spawn, deferred despawn, generational
