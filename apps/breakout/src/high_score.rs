@@ -54,6 +54,20 @@ impl HighScore {
         Self { root, value }
     }
 
+    /// Load with a specific root directory (for testing).
+    #[cfg(test)]
+    fn with_root(root: std::path::PathBuf) -> Self {
+        let path = root.join(HIGH_SCORE_FILE);
+        let value = match std::fs::read(&path) {
+            Ok(data) if data.len() == 4 => u32::from_le_bytes(data[..4].try_into().unwrap()),
+            _ => 0,
+        };
+        Self {
+            root: Some(root),
+            value,
+        }
+    }
+
     /// Current best score.
     pub fn get(&self) -> u32 {
         self.value
@@ -73,5 +87,38 @@ impl HighScore {
             return true;
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn high_score_persists_and_reloads() {
+        let dir = std::env::temp_dir().join("crcbl_breakout_test_hs");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+
+        // First session: score 50, verify it saves.
+        let mut hs = HighScore::with_root(dir.clone());
+        assert_eq!(hs.get(), 0);
+        assert!(hs.update(50));
+        assert_eq!(hs.get(), 50);
+
+        // Same score should not update.
+        assert!(!hs.update(40));
+        assert_eq!(hs.get(), 50);
+
+        // Higher score should update.
+        assert!(hs.update(100));
+        assert_eq!(hs.get(), 100);
+
+        // Second session: reload from disk, verify value persisted.
+        let hs2 = HighScore::with_root(dir.clone());
+        assert_eq!(hs2.get(), 100);
+
+        // Clean up.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
