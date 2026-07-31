@@ -106,6 +106,11 @@ was intended.
   draw/bind/state calls via forget_lifetime) implemented.
   Push constants remain a no-op (wgpu 30 lacks the API), indirect draws
   and copies remain stubbed (P6+).
+- **`crcbl-wgpu` cross-platform**: Compiles on both native (Vulkan/Metal/DX12)
+  and `wasm32-unknown-unknown` (WebGPU) via `cell` module (polymorphic
+  `Arc`/`Mutex` ↔ `Rc`/`RefCell`). `HalThreadSafe` marker trait in
+  `crcbl-hal` relaxes `Send + Sync` bounds on wasm32.
+  `create_native()` gated to non-wasm targets.
 - **`crcbl-shaders`** (P5.3): WGSL artifacts committed alongside SPIR-V —
   `compile-shaders.sh` produces `wgsl/*.wgsl` per shader; `Shader::wgsl()`
   returns the source for wgpu backends. Manifest tracks both formats.
