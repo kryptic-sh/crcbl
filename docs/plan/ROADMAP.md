@@ -102,8 +102,10 @@ was intended.
   finish flow with pre-allocated handle slots, `conv` mappings
   (formats, blend states, rasteriser, binding kinds). Available via
   `CRCBL_GPU=wgpu` on native. Surface/swapchain (Wayland, Xcb via
-  raw-window-handle) and command-encoder finish flow implemented.
-  Full command recording remains stubbed (P6+).
+  raw-window-handle) and full command recording (render/compute passes,
+  draw/bind/state calls via forget_lifetime) implemented.
+  Push constants remain a no-op (wgpu 30 lacks the API), indirect draws
+  and copies remain stubbed (P6+).
 - **`crcbl-shaders`** (P5.3): WGSL artifacts committed alongside SPIR-V —
   `compile-shaders.sh` produces `wgsl/*.wgsl` per shader; `Shader::wgsl()`
   returns the source for wgpu backends. Manifest tracks both formats.
