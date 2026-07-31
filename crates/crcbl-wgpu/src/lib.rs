@@ -7,8 +7,11 @@
 //! Instance (adapter enumeration, device creation) and Device stub. Resources,
 //! swapchain, and command encoding land in P5.2.
 
+mod command;
+mod conv;
 mod device;
 mod instance;
+mod resources;
 
 pub use instance::WgpuInstance;
 
