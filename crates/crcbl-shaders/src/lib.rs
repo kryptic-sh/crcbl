@@ -135,15 +135,12 @@ pub struct Shader {
     name: &'static str,
     source: &'static str,
     source_sha256: &'static str,
-    bytes: &'static [u8],
+    /// The SPIR-V artifact, as raw bytes.
+    spirv_bytes: &'static [u8],
+    /// The WGSL artifact, as raw UTF-8 bytes. `&[]` when not compiled (P5+).
+    wgsl_bytes: &'static [u8],
     entry_points: &'static [EntryPoint],
-    /// The byte stream decoded into words, once.
-    ///
-    /// Decoding rather than transmuting: `include_bytes!` yields a `&[u8]` with
-    /// no alignment guarantee, and reinterpreting it as `&[u32]` is exactly the
-    /// unaligned-read unsoundness that would earn this crate its first `unsafe`
-    /// block. A shader is a few kilobytes and is decoded once per process, so
-    /// the copy is not worth reasoning about.
+    /// The SPIR-V byte stream decoded into words, once.
     words: OnceLock<Vec<u32>>,
 }
 
@@ -157,14 +154,16 @@ impl Shader {
         name: &'static str,
         source: &'static str,
         source_sha256: &'static str,
-        bytes: &'static [u8],
+        spirv_bytes: &'static [u8],
+        wgsl_bytes: &'static [u8],
         entry_points: &'static [EntryPoint],
     ) -> Self {
         Self {
             name,
             source,
             source_sha256,
-            bytes,
+            spirv_bytes,
+            wgsl_bytes,
             entry_points,
             words: OnceLock::new(),
         }
@@ -197,11 +196,20 @@ impl Shader {
     #[must_use]
     pub fn spirv(&self) -> &[u32] {
         self.words.get_or_init(|| {
-            self.bytes
+            self.spirv_bytes
                 .chunks_exact(4)
                 .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
                 .collect()
         })
+    }
+
+    /// The compiled WGSL source, valid UTF-8.
+    ///
+    /// Returns `""` for shaders that were not compiled to WGSL (pre-P5
+    /// artifacts). The wgpu backend uses this rather than SPIR-V.
+    #[must_use]
+    pub fn wgsl(&self) -> &str {
+        std::str::from_utf8(self.wgsl_bytes).unwrap_or("")
     }
 
     /// Every entry point the module exposes.
@@ -262,7 +270,7 @@ mod tests {
             );
             assert_eq!(
                 shader.spirv().len() * 4,
-                shader.bytes.len(),
+                shader.spirv_bytes.len(),
                 "{}: the artifact is not a whole number of words",
                 shader.name()
             );
@@ -309,19 +317,21 @@ mod tests {
     /// than silently resolved — picking one would draw the wrong thing.
     #[test]
     fn an_ambiguous_stage_resolves_to_nothing() {
-        static AMBIGUOUS: Shader = Shader::new(
+        static ENTRIES: [EntryPoint; 3] = [
+            EntryPoint::new("shadowVs", Stage::Vertex),
+            EntryPoint::new("mainVs", Stage::Vertex),
+            EntryPoint::new("mainFs", Stage::Fragment),
+        ];
+        let ambiguous = Shader::new(
             "ambiguous",
             "shaders/ambiguous.slang",
             "0000000000000000000000000000000000000000000000000000000000000000",
-            &[],
-            &[
-                EntryPoint::new("shadowVs", Stage::Vertex),
-                EntryPoint::new("mainVs", Stage::Vertex),
-                EntryPoint::new("mainFs", Stage::Fragment),
-            ],
+            b"",
+            b"",
+            &ENTRIES,
         );
-        assert_eq!(AMBIGUOUS.entry_point(Stage::Vertex), None);
-        assert_eq!(AMBIGUOUS.entry_point(Stage::Fragment), Some("mainFs"));
+        assert_eq!(ambiguous.entry_point(Stage::Vertex), None);
+        assert_eq!(ambiguous.entry_point(Stage::Fragment), Some("mainFs"));
     }
 
     /// The recorded hash is the drift check's whole basis, so it must actually

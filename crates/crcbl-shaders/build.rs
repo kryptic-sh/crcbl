@@ -73,12 +73,17 @@ fn main() {
         let spirv_path = root.join(&record.spirv);
         println!("cargo::rerun-if-changed={}", record.source);
         println!("cargo::rerun-if-changed={}", record.spirv);
+        if !record.wgsl.is_empty() {
+            let wgsl_path = root.join(&record.wgsl);
+            println!("cargo::rerun-if-changed={}", record.wgsl);
+            check_hash(&wgsl_path, &record.wgsl_sha256, record, "WGSL artifact");
+        }
 
         check_hash(&source_path, &record.source_sha256, record, "source");
-        check_hash(&spirv_path, &record.spirv_sha256, record, "artifact");
+        check_hash(&spirv_path, &record.spirv_sha256, record, "SPIR-V artifact");
 
         if let Some(slangc) = slangc.as_deref() {
-            recompile_and_compare(slangc, &manifest, record, &root, &spirv_path);
+            recompile_spirv(slangc, &manifest, record, &root, &spirv_path);
         }
 
         let ident = record.name.to_uppercase().replace('-', "_");
@@ -100,6 +105,16 @@ fn main() {
             })
             .collect();
 
+        // WGSL include_bytes or empty
+        let wgsl_include = if record.wgsl.is_empty() {
+            "b\"\"".to_string()
+        } else {
+            format!(
+                "include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/{}\"))",
+                record.wgsl
+            )
+        };
+
         generated.push_str(&format!(
             "/// The `{name}` shader, compiled from `{source}`.\n\
              pub static {ident}: Shader = Shader::new(\n    \
@@ -107,6 +122,7 @@ fn main() {
                  {source:?},\n    \
                  {hash:?},\n    \
                  include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/{spirv}\")),\n    \
+                 {wgsl_include},\n    \
                  &[{entries}],\n\
              );\n\n",
             name = record.name,
@@ -228,8 +244,8 @@ fn pinned_slangc(pinned: &str) -> Option<String> {
     }
 }
 
-/// Recompiles one shader and demands byte-for-byte equality.
-fn recompile_and_compare(
+/// Recompiles one shader's SPIR-V and demands byte-for-byte equality.
+fn recompile_spirv(
     slangc: &str,
     manifest: &Manifest,
     record: &ShaderRecord,

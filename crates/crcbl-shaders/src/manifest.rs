@@ -24,10 +24,15 @@ pub struct ShaderRecord {
     pub source: String,
     /// SHA-256 of the source file, lower-case hex. **The drift check.**
     pub source_sha256: String,
-    /// Compiled artifact path, relative to the crate root.
+    /// Compiled SPIR-V artifact path, relative to the crate root.
     pub spirv: String,
-    /// SHA-256 of the artifact, lower-case hex.
+    /// SHA-256 of the SPIR-V artifact, lower-case hex.
     pub spirv_sha256: String,
+    /// Compiled WGSL artifact path, relative to the crate root. Empty when
+    /// this shader has no WGSL output (pre-P5 artifacts).
+    pub wgsl: String,
+    /// SHA-256 of the WGSL artifact, lower-case hex. Empty when `wgsl` is.
+    pub wgsl_sha256: String,
     /// Entry points the artifact exposes, as `(name, stage)`.
     pub entry_points: Vec<(String, String)>,
 }
@@ -80,6 +85,8 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
                 source_sha256: String::new(),
                 spirv: String::new(),
                 spirv_sha256: String::new(),
+                wgsl: String::new(),
+                wgsl_sha256: String::new(),
                 entry_points: Vec::new(),
             });
             continue;
@@ -105,6 +112,8 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
             (Some(record), "source-sha256") => record.source_sha256 = hex(value, line_number)?,
             (Some(record), "spirv") => record.spirv = value.to_string(),
             (Some(record), "spirv-sha256") => record.spirv_sha256 = hex(value, line_number)?,
+            (Some(record), "wgsl") => record.wgsl = value.to_string(),
+            (Some(record), "wgsl-sha256") => record.wgsl_sha256 = hex(value, line_number)?,
             (Some(record), "entry-points") => {
                 for pair in value.split(',') {
                     let pair = pair.trim();
@@ -257,7 +266,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
     #[test]
     fn unknown_keys_are_errors_rather_than_ignored() {
-        let text = format!("{SAMPLE}wgsl = spirv/triangle.wgsl\n");
+        let text = format!("{SAMPLE}mystery = value\n");
         let error = parse_manifest(&text).expect_err("a key nobody reads is a silent hole");
         assert!(error.contains("unknown key"), "{error}");
     }

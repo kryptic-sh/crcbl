@@ -81,6 +81,7 @@ fi
 
 cd "$CRATE_DIR"
 mkdir -p spirv
+mkdir -p wgsl
 
 WORK="$(mktemp -d -t crcbl-shaders.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT INT TERM
@@ -107,13 +108,21 @@ for SOURCE in "${SHADERS[@]}"; do
     NAME="$(basename "$SOURCE" .slang)"
     ARTIFACT="spirv/${NAME}.spv"
     FRESH="$WORK/${NAME}.spv"
+    WGSL_ARTIFACT="wgsl/${NAME}.wgsl"
+    FRESH_WGSL="$WORK/${NAME}.wgsl"
 
-    echo "crcbl shaders: compiling $SOURCE"
+    echo "crcbl shaders: compiling $SOURCE → SPIR-V"
     "$SLANGC" "$SOURCE" \
         -target spirv \
         -profile "$SLANG_PROFILE" \
         -emit-spirv-directly \
         -o "$FRESH"
+
+    echo "crcbl shaders: compiling $SOURCE → WGSL"
+    "$SLANGC" "$SOURCE" \
+        -target wgsl \
+        -profile "$SLANG_PROFILE" \
+        -o "$FRESH_WGSL"
 
     # A compiler that emitted something the driver will reject is worse than one
     # that failed, because the failure moves to `vkCreateShaderModule` on
@@ -151,8 +160,14 @@ for SOURCE in "${SHADERS[@]}"; do
             echo "  image (docs/plan/12-testing.md)." >&2
             STATUS=1
         fi
+        if ! cmp -s "$FRESH_WGSL" "$WGSL_ARTIFACT"; then
+            echo "crcbl shaders: $WGSL_ARTIFACT does not match a fresh compile of $SOURCE." >&2
+            echo "  Run crates/crcbl-shaders/tools/compile-shaders.sh and commit the result." >&2
+            STATUS=1
+        fi
     else
         cp "$FRESH" "$ARTIFACT"
+        cp "$FRESH_WGSL" "$WGSL_ARTIFACT"
     fi
 
     {
@@ -162,6 +177,8 @@ for SOURCE in "${SHADERS[@]}"; do
         echo "source-sha256 = $(sha256sum "$SOURCE" | cut -d' ' -f1)"
         echo "spirv = $ARTIFACT"
         echo "spirv-sha256 = $(sha256sum "$FRESH" | cut -d' ' -f1)"
+        echo "wgsl = $WGSL_ARTIFACT"
+        echo "wgsl-sha256 = $(sha256sum "$FRESH_WGSL" | cut -d' ' -f1)"
         echo "entry-points = $ENTRY_POINTS"
     } >>"$MANIFEST"
 done

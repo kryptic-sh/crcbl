@@ -11,6 +11,8 @@ source = shaders/mesh.slang
 source-sha256 = e72a843d9fb62ee128296f027a6aaf0badc713a9e376036113057fedeee640b0
 spirv = spirv/mesh.spv
 spirv-sha256 = d35ede042a1341375f093f94566fb4773a0ae762eccc48a09348f4318fba5a73
+wgsl = wgsl/mesh.wgsl
+wgsl-sha256 = 7749dd7473397643249ec2760e1ab44f13476ef4011bae9674560bd068ceab01
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [tonemap]
@@ -18,6 +20,8 @@ source = shaders/tonemap.slang
 source-sha256 = e043ab6a3d10df8166631a05b671f8d632eee5c8f83f5cc8fc18a5359d613d4f
 spirv = spirv/tonemap.spv
 spirv-sha256 = 178957f0fee6362ab5c31a5312f289251af2c0d731ff0bf6a2353e06fab03598
+wgsl = wgsl/tonemap.wgsl
+wgsl-sha256 = 579856509aad67e6249eb4b0489bb393e9e6e3c77e9676221ac98a03dc121a41
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [triangle]
@@ -25,6 +29,8 @@ source = shaders/triangle.slang
 source-sha256 = e1a5e7acd7da40b0f27f685827467a36dd49eb8ba5978a3dfd03f36d8a33af66
 spirv = spirv/triangle.spv
 spirv-sha256 = d1a318ebaf3e333a2b7646473aae647d55011b3e91036540beb491896bea6d33
+wgsl = wgsl/triangle.wgsl
+wgsl-sha256 = e94308994c4b422b98293b5ca6c815a109dab182b6f96afc8d749bec38d35af9
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ui]
@@ -32,4 +38,6 @@ source = shaders/ui.slang
 source-sha256 = ff38f85ee947a5b6d61c2325a5fc1f49546855c433f30017219409309ae1f9ab
 spirv = spirv/ui.spv
 spirv-sha256 = 729fbc622184060623d9a7c6732505082fb52bc40417f1a356c4e5277e74ee66
+wgsl = wgsl/ui.wgsl
+wgsl-sha256 = f51882b9715c1f7094f5455d301446cf4faa0d60de3c98753dc212e72b9bf972
 entry-points = vertexMain:vertex, fragmentMain:fragment
