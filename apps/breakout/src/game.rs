@@ -34,7 +34,10 @@ const BALL_RADIUS: f64 = 0.3;
 const BALL_START_X: f64 = 0.0;
 const BALL_START_Y: f64 = -5.0;
 const BALL_SPEED_X: f64 = 4.0;
-const BALL_SPEED_Y: f64 = 8.0;
+/// Ball needs ~14 m/s upward to reach the brick grid at y=4..7 from
+/// start position y=-5 with Earth gravity (9.8 m/s²):
+/// v₀² = 2gΔy = 2*9.8*9 = 176 → v₀ ≈ 13.3. Use 14 for margin.
+const BALL_SPEED_Y: f64 = 14.0;
 
 const ACTION_LEFT: &str = "move_left";
 const ACTION_RIGHT: &str = "move_right";
@@ -135,6 +138,10 @@ fn reset_ball(phys: &mut PhysicsSystem, ball: Entity) {
         new_body.velocity = DVec3::ZERO;
         phys.set_body(ball, new_body);
     }
+}
+
+fn hold_ball(server: &mut Server<InMemoryTransport>, ball: Entity) {
+    with_physics(server, |phys| reset_ball(phys, ball));
 }
 
 impl Game {
@@ -251,6 +258,13 @@ impl Game {
         }
 
         world.register_system(Box::new(phys));
+
+        let brick_count = BRICK_ROWS * BRICK_COLS;
+        log::info!(
+            "physics: {} colliders, {} bodies (ball + paddle + 3 walls + {brick_count} bricks)",
+            5 + brick_count,
+            5 + brick_count,
+        );
 
         // --- Input ---
         let mut action_map = ActionMap::new();
@@ -369,6 +383,11 @@ impl Game {
 
         // Sync paddle position.
         set_paddle_position(&mut self.server, self.paddle_entity, self.paddle_x);
+
+        // Hold ball at start position with zero velocity while waiting.
+        if !self.launched {
+            hold_ball(&mut self.server, self.ball_entity);
+        }
 
         // Send input, advance simulation.
         let input_bytes = crcbl_net::encode_client_to_server(&ClientToServer::Input {
