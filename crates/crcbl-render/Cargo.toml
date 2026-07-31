@@ -21,6 +21,8 @@ log = { workspace = true }
 # nothing at all, so the forward pass can name the engine's own shaders without
 # this crate learning a backend.
 crcbl-shaders = { workspace = true }
+crcbl-ui = { workspace = true }
+bytemuck = { workspace = true }
 thiserror = { workspace = true }
 
 [lints]

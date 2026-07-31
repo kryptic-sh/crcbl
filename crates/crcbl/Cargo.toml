@@ -26,6 +26,7 @@ crcbl-hal = { workspace = true }
 crcbl-render = { workspace = true }
 crcbl-shaders = { workspace = true }
 crcbl-shell = { workspace = true }
+crcbl-ui = { workspace = true }
 crcbl-vk = { workspace = true }
 # Re-exported alongside `crcbl-render` so a game writes camera and light maths
 # in the same types the renderer takes, without a second workspace path.

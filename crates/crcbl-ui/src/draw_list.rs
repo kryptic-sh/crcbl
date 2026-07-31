@@ -14,7 +14,13 @@ use glam::Vec2;
 // ---------------------------------------------------------------------------
 
 /// A 2D vertex for UI rendering (screen-space, no Z).
+///
+/// # Safety
+///
+/// The fields are all f32 values with no padding, making the struct safe to
+/// transmute to/from byte slices.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
 pub struct Vertex2d {
     /// Position in screen-space pixels.
     pub pos: Vec2,
@@ -332,6 +338,11 @@ fn push_quad(
     });
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
+
+// SAFETY: Vertex2d is `#[repr(C)]` with only f32 fields (Vec2 is 2×f32,
+// [f32; 4] is 4×f32). No padding, all bit patterns valid.
+unsafe impl bytemuck::Pod for Vertex2d {}
+unsafe impl bytemuck::Zeroable for Vertex2d {}
 
 // ---------------------------------------------------------------------------
 // Tests

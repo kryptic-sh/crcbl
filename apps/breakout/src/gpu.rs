@@ -17,8 +17,11 @@ use crcbl::math::{Mat4, Vec3};
 use crcbl::prelude::*;
 use crcbl::render::{
     Camera, DirectionalLight, ForwardRenderer, PassTimers, Projection, RenderGraph, TransientPool,
+    UiRenderer,
 };
 use crcbl::shell::WindowId;
+use crcbl::ui::draw_list::DrawList;
+use crcbl::ui::text::FontAtlas;
 
 const FRAMES_IN_FLIGHT: usize = crcbl::render::forward::FRAMES_IN_FLIGHT;
 const MAX_TIMED_PASSES: u32 = 8;
@@ -125,6 +128,10 @@ pub struct Gpu {
     light: DirectionalLight,
     /// Interpolated paddle X position (updated each frame from game state).
     paddle_x: f64,
+    /// UI compositing.
+    ui: UiRenderer,
+    atlas: FontAtlas,
+    draw_list: DrawList,
     dumped: bool,
 }
 
@@ -251,6 +258,11 @@ impl Gpu {
         let renderer = ForwardRenderer::new(device.as_ref(), queue, format)?;
         let timers = PassTimers::new(device.as_ref(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
 
+        // UI renderer: creates the glyph atlas texture and UI pipeline.
+        let ui = UiRenderer::new(device.as_ref(), queue).map_err(GpuError::Hal)?;
+        let atlas = FontAtlas::built_in();
+        let draw_list = DrawList::new();
+
         // Breakout is a 2D game: orthographic projection with reversed-Z depth.
         let camera = Camera::default().with_projection(Projection::Orthographic {
             half_height: 9.0,
@@ -277,6 +289,9 @@ impl Gpu {
             camera,
             light: DirectionalLight::default(),
             paddle_x: 0.0,
+            ui,
+            atlas,
+            draw_list,
             dumped: false,
         })
     }
@@ -289,6 +304,11 @@ impl Gpu {
     /// Set the interpolated paddle X for the current frame.
     pub fn set_paddle_x(&mut self, x: f64) {
         self.paddle_x = x;
+    }
+
+    /// Replace the draw list for this frame.
+    pub fn set_draw_list(&mut self, dl: DrawList) {
+        self.draw_list = dl;
     }
 
     #[must_use]
@@ -351,6 +371,11 @@ impl Gpu {
             extent,
         )?;
 
+        // Upload UI geometry for this frame.
+        self.ui
+            .begin_frame(self.device.as_ref(), &self.draw_list, &self.atlas, 1.0)
+            .map_err(GpuError::Hal)?;
+
         let compiled = {
             let mut graph = RenderGraph::new(self.queue);
             let target = graph.import_image(
@@ -363,6 +388,8 @@ impl Gpu {
                 ),
             );
             let _hdr = self.renderer.add_passes(&mut graph, target, extent);
+            // Composite the UI on top of the tonemapped target.
+            self.ui.add_pass(&mut graph, target, extent);
             graph.compile(&self.pool)?
         };
 
@@ -462,6 +489,7 @@ impl Gpu {
     pub fn destroy(mut self) -> Result<(), GpuError> {
         self.device.wait_idle()?;
         self.retire_to(0)?;
+        self.ui.destroy(self.device.as_ref());
         self.pool.destroy(self.device.as_ref());
         if let Some(timers) = self.timers.as_mut() {
             timers.destroy(self.device.as_ref());

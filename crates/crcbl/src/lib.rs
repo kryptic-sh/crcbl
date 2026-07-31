@@ -79,6 +79,10 @@ pub use crcbl_shell as shell;
 /// message names neither crate helpfully.
 pub use glam as math;
 
+/// [`crcbl-ui`](crcbl_ui): immediate-mode UI toolkit — draw lists, glyph atlas,
+/// HUD skeleton, and widgets.
+pub use crcbl_ui as ui;
+
 pub mod backend;
 
 pub mod screenshot;

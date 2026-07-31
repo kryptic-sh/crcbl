@@ -95,6 +95,7 @@ pub mod forward;
 pub mod graph;
 pub mod timing;
 pub mod transient;
+pub mod ui_pass;
 
 pub use camera::{Camera, DirectionalLight, Projection};
 pub use forward::ForwardRenderer;
@@ -105,3 +106,4 @@ pub use graph::{
 };
 pub use timing::{FrameTimings, PassTimers, PassTiming};
 pub use transient::{TransientBufferDesc, TransientImageDesc, TransientPool, TransientUse};
+pub use ui_pass::UiRenderer;

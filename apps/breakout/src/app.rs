@@ -281,6 +281,12 @@ impl<S: Shell + ?Sized> Loop<S> {
         let paddle_x = self.game.step(now);
         self.gpu.set_paddle_x(paddle_x);
 
+        // Build HUD draw list from game state.
+        let mut dl = crcbl::ui::draw_list::DrawList::new();
+        build_hud(&mut dl, &self.game);
+
+        self.gpu.set_draw_list(dl);
+
         if self.gpu.frame()? == FrameOutcome::Presented {
             self.frames += 1;
         }
@@ -360,6 +366,57 @@ fn wait_for_configure<S: Shell + ?Sized>(
 /// One fixed simulation step — empty at Slice 1, gets physics/input in Slice 2+.
 fn tick(dt: f64) {
     let _ = dt;
+}
+
+/// Builds the HUD draw list from the current game state.
+fn build_hud(dl: &mut crcbl::ui::draw_list::DrawList, game: &crate::game::Game) {
+    use glam::Vec2;
+
+    let (score_text, lives_text, state_text) = {
+        use crate::game::GameState;
+        let state_str = match game.state {
+            GameState::WaitingForLaunch => "Press SPACE to launch",
+            GameState::Playing => "Playing",
+            GameState::Won => "YOU WIN! Press SPACE",
+            GameState::Lost => "GAME OVER - Press SPACE",
+        };
+        (
+            format!("Score: {}  High: {}", game.score, game.high_score.get()),
+            format!("Lives: {}", game.lives),
+            state_str.to_string(),
+        )
+    };
+
+    // Background panel in top-left
+    dl.rect(
+        Vec2::new(4.0, 4.0),
+        Vec2::new(380.0, 68.0),
+        [0.1, 0.1, 0.15, 0.85],
+    );
+
+    // Score text
+    dl.text(
+        Vec2::new(10.0, 10.0),
+        score_text,
+        [1.0, 1.0, 0.3, 1.0],
+        16.0,
+    );
+
+    // Lives text
+    dl.text(
+        Vec2::new(10.0, 30.0),
+        lives_text,
+        [0.3, 1.0, 0.3, 1.0],
+        16.0,
+    );
+
+    // State text
+    dl.text(
+        Vec2::new(10.0, 50.0),
+        state_text,
+        [0.7, 0.7, 1.0, 1.0],
+        14.0,
+    );
 }
 
 // ---- tests ------------------------------------------------------------------
