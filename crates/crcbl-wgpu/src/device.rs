@@ -11,7 +11,7 @@ use crcbl_hal::{
     ShaderModuleHandle, SubmitInfo, SurfaceError, SwapchainDesc, SwapchainHandle,
 };
 
-use std::sync::{Arc, Mutex};
+use crate::cell::{Lock, Shared};
 
 use crcbl_core::Pool;
 
@@ -23,7 +23,7 @@ pub struct WgpuDevice {
     pub(crate) queue: wgpu::Queue,
     caps: DeviceCaps,
     graphics_queue: QueueHandle,
-    pools: Arc<Pools>,
+    pools: Shared<Pools>,
 }
 
 impl std::fmt::Debug for WgpuDevice {
@@ -36,7 +36,7 @@ impl WgpuDevice {
     pub(crate) fn new(
         adapter: &wgpu::Adapter,
         _desc: &DeviceDesc<'_>,
-        surfaces: Arc<Mutex<Pool<SurfaceSlot>>>,
+        surfaces: Shared<Lock<Pool<SurfaceSlot>>>,
     ) -> Result<Self, HalError> {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: None,
@@ -57,7 +57,7 @@ impl WgpuDevice {
                 limits: hal::Limits::desktop(),
             },
             graphics_queue: QueueHandle::from_bits(1).expect("handle 1 is valid"),
-            pools: Arc::new(Pools::new(surfaces)),
+            pools: Shared::new(Pools::new(surfaces)),
         })
     }
 

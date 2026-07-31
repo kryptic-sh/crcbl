@@ -1,6 +1,6 @@
 //! The wgpu `CommandEncoder` implementation.
 
-use std::sync::Arc;
+use crate::cell::Shared;
 
 use crcbl_hal::{
     self as hal, CommandBufferHandle, CommandEncoder, GraphicsPipelineHandle, HalError,
@@ -12,7 +12,7 @@ use crate::resources::Pools;
 pub struct WgpuCommandEncoder {
     encoder: Option<wgpu::CommandEncoder>,
     handle: CommandBufferHandle,
-    pools: Arc<Pools>,
+    pools: Shared<Pools>,
     render_pass: Option<wgpu::RenderPass<'static>>,
     compute_pass: Option<wgpu::ComputePass<'static>>,
 }
@@ -27,7 +27,7 @@ impl WgpuCommandEncoder {
     pub fn new(
         encoder: wgpu::CommandEncoder,
         handle: CommandBufferHandle,
-        pools: Arc<Pools>,
+        pools: Shared<Pools>,
     ) -> Self {
         Self {
             encoder: Some(encoder),

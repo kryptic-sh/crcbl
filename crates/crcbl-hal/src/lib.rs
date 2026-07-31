@@ -201,6 +201,7 @@ pub mod resource;
 pub mod shader;
 pub mod swapchain;
 pub mod sync;
+pub mod threading;
 
 pub use caps::{
     AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits, RendererTier,

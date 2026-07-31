@@ -1,6 +1,6 @@
 //! The wgpu `Instance` implementation — adapter enumeration, surfaces.
 
-use std::sync::{Arc, Mutex};
+use crate::cell::{Lock, Shared};
 
 use crcbl_core::Pool;
 use crcbl_hal::{
@@ -15,7 +15,7 @@ use crate::resources::SurfaceSlot;
 pub struct WgpuInstance {
     instance: wgpu::Instance,
     adapters: Vec<(AdapterInfo, wgpu::Adapter)>,
-    surfaces: Arc<Mutex<Pool<SurfaceSlot>>>,
+    surfaces: Shared<Lock<Pool<SurfaceSlot>>>,
 }
 
 impl WgpuInstance {
@@ -56,12 +56,12 @@ impl WgpuInstance {
         Some(Self {
             instance,
             adapters,
-            surfaces: Arc::new(Mutex::new(Pool::new())),
+            surfaces: Shared::new(Lock::new(Pool::new())),
         })
     }
 
     /// The surface pool shared with devices created by this instance.
-    pub(crate) fn surface_pool(&self) -> Arc<Mutex<Pool<SurfaceSlot>>> {
+    pub(crate) fn surface_pool(&self) -> Shared<Lock<Pool<SurfaceSlot>>> {
         self.surfaces.clone()
     }
 }

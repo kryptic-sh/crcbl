@@ -543,7 +543,7 @@ pub struct DrawIndirectCount {
 /// recorded there (which the P8 job system will do), but two threads may not
 /// record into one encoder. That matches Vulkan's external-synchronisation rule
 /// for command buffers exactly.
-pub trait CommandEncoder: core::fmt::Debug + Send {
+pub trait CommandEncoder: core::fmt::Debug + crate::threading::HalThreadSafe {
     // --- debug ---
 
     /// Opens a named region in capture tools and profilers.

@@ -4,7 +4,7 @@
 //! wgpu objects. The pools are behind `Mutex` for interior mutability (the HAL
 //! trait methods take `&self`).
 
-use std::sync::{Arc, Mutex};
+use crate::cell::{Lock, Shared};
 
 use crcbl_core::Pool;
 
@@ -53,42 +53,42 @@ pub struct SemaphoreSlot {
 }
 
 pub struct Pools {
-    pub buffers: Mutex<Pool<wgpu::Buffer>>,
-    pub images: Mutex<Pool<wgpu::Texture>>,
-    pub image_views: Mutex<Pool<wgpu::TextureView>>,
-    pub samplers: Mutex<Pool<wgpu::Sampler>>,
-    pub shader_modules: Mutex<Pool<wgpu::ShaderModule>>,
-    pub bind_group_layouts: Mutex<Pool<wgpu::BindGroupLayout>>,
-    pub bind_groups: Mutex<Pool<wgpu::BindGroup>>,
-    pub pipeline_layouts: Mutex<Pool<wgpu::PipelineLayout>>,
-    pub graphics_pipelines: Mutex<Pool<wgpu::RenderPipeline>>,
-    pub compute_pipelines: Mutex<Pool<wgpu::ComputePipeline>>,
-    pub command_buffers: Arc<Mutex<Pool<CommandBufferSlot>>>,
-    pub swapchains: Mutex<Pool<SwapchainSlot>>,
-    pub semaphores: Mutex<Pool<SemaphoreSlot>>,
+    pub buffers: Lock<Pool<wgpu::Buffer>>,
+    pub images: Lock<Pool<wgpu::Texture>>,
+    pub image_views: Lock<Pool<wgpu::TextureView>>,
+    pub samplers: Lock<Pool<wgpu::Sampler>>,
+    pub shader_modules: Lock<Pool<wgpu::ShaderModule>>,
+    pub bind_group_layouts: Lock<Pool<wgpu::BindGroupLayout>>,
+    pub bind_groups: Lock<Pool<wgpu::BindGroup>>,
+    pub pipeline_layouts: Lock<Pool<wgpu::PipelineLayout>>,
+    pub graphics_pipelines: Lock<Pool<wgpu::RenderPipeline>>,
+    pub compute_pipelines: Lock<Pool<wgpu::ComputePipeline>>,
+    pub command_buffers: Shared<Lock<Pool<CommandBufferSlot>>>,
+    pub swapchains: Lock<Pool<SwapchainSlot>>,
+    pub semaphores: Lock<Pool<SemaphoreSlot>>,
     #[allow(dead_code)]
-    pub query_sets: Mutex<Pool<()>>,
+    pub query_sets: Lock<Pool<()>>,
     /// Shared surface pool, cloned from the instance.
-    pub surfaces: Arc<Mutex<Pool<SurfaceSlot>>>,
+    pub surfaces: Shared<Lock<Pool<SurfaceSlot>>>,
 }
 
 impl Pools {
-    pub fn new(surfaces: Arc<Mutex<Pool<SurfaceSlot>>>) -> Self {
+    pub fn new(surfaces: Shared<Lock<Pool<SurfaceSlot>>>) -> Self {
         Self {
-            buffers: Mutex::new(Pool::new()),
-            images: Mutex::new(Pool::new()),
-            image_views: Mutex::new(Pool::new()),
-            samplers: Mutex::new(Pool::new()),
-            shader_modules: Mutex::new(Pool::new()),
-            bind_group_layouts: Mutex::new(Pool::new()),
-            bind_groups: Mutex::new(Pool::new()),
-            pipeline_layouts: Mutex::new(Pool::new()),
-            graphics_pipelines: Mutex::new(Pool::new()),
-            compute_pipelines: Mutex::new(Pool::new()),
-            command_buffers: Arc::new(Mutex::new(Pool::new())),
-            swapchains: Mutex::new(Pool::new()),
-            semaphores: Mutex::new(Pool::new()),
-            query_sets: Mutex::new(Pool::new()),
+            buffers: Lock::new(Pool::new()),
+            images: Lock::new(Pool::new()),
+            image_views: Lock::new(Pool::new()),
+            samplers: Lock::new(Pool::new()),
+            shader_modules: Lock::new(Pool::new()),
+            bind_group_layouts: Lock::new(Pool::new()),
+            bind_groups: Lock::new(Pool::new()),
+            pipeline_layouts: Lock::new(Pool::new()),
+            graphics_pipelines: Lock::new(Pool::new()),
+            compute_pipelines: Lock::new(Pool::new()),
+            command_buffers: Shared::new(Lock::new(Pool::new())),
+            swapchains: Lock::new(Pool::new()),
+            semaphores: Lock::new(Pool::new()),
+            query_sets: Lock::new(Pool::new()),
             surfaces,
         }
     }

@@ -222,7 +222,7 @@ impl DeviceDesc<'_> {
 /// `crcbl-wgpu` may be instantiated in the same process — that is the whole
 /// point of the `dyn` decision in the crate docs, and it is how topic 10's
 /// "does it repro on wgpu?" triage works.
-pub trait Instance: core::fmt::Debug + Send + Sync {
+pub trait Instance: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// Which backend this is. For logs and bug reports — never for behaviour.
     fn backend(&self) -> BackendKind;
 
@@ -326,7 +326,7 @@ pub trait Instance: core::fmt::Debug + Send + Sync {
 ///
 /// See the module docs for why methods take `&self` and why destruction is
 /// explicit.
-pub trait Device: core::fmt::Debug + Send + Sync {
+pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// Which backend this device belongs to.
     fn backend(&self) -> BackendKind;
 
