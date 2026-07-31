@@ -79,6 +79,13 @@ pub struct Game {
     pub ball_x: f64,
     /// Whether a collision sound was queued this tick (for HUD logging).
     sound_played_this_tick: bool,
+    /// Queued key events from the shell pump, replayed in step() after
+    /// begin_tick to avoid ActionMap's double-resolve edge-detection bug.
+    pending_keys: Vec<(KeyCode, bool)>,
+    /// Frame counter for throttling HUD output.
+    frame_count: u64,
+    /// Previous state for transition-logging.
+    prev_log_state: GameState,
 }
 
 impl std::fmt::Debug for Game {
@@ -293,15 +300,31 @@ impl Game {
             high_score: crate::high_score::HighScore::load(headless),
             ball_x: 0.0,
             sound_played_this_tick: false,
+            pending_keys: Vec::new(),
+            frame_count: 0,
+            prev_log_state: GameState::WaitingForLaunch,
         })
     }
 
+    /// Queue a key event for replay at the start of the next step().
+    /// Actual action-map resolution is deferred to avoid the double-resolve
+    /// bug: ActionMap::key_event resolves immediately, so begin_tick's
+    /// subsequent resolve sees `was_active = true` and never sets just_pressed.
     pub fn key_event(&mut self, key: KeyCode, pressed: bool) {
-        self.action_map.key_event(key, pressed);
+        self.pending_keys.push((key, pressed));
     }
 
     pub fn step(&mut self, now: Duration) -> f64 {
         self.action_map.begin_tick(1.0 / TICK_HZ as f32);
+
+        // Flush queued key events AFTER begin_tick so resolve_one sees
+        // fresh `was_active = false` for newly-pressed keys.
+        let keys: Vec<_> = std::mem::take(&mut self.pending_keys);
+        for (key, pressed) in keys {
+            self.action_map.key_event(key, pressed);
+        }
+
+        self.frame_count += 1;
 
         let left = action_held(&self.action_map, ACTION_LEFT);
         let right = action_held(&self.action_map, ACTION_RIGHT);
@@ -397,15 +420,24 @@ impl Game {
             self.sound_played_this_tick = run_game_logic(server, ball, paddle, &mut ctx, audio);
         }
 
-        // HUD: log score/lives when they change or state transitions.
-        log_hud(
-            &self.state,
-            self.score,
-            self.lives,
-            self.ball_x,
-            self.high_score.get(),
-            self.sound_played_this_tick,
-        );
+        // HUD: log at most once per second (every 60 frames), plus always
+        // on state transitions or when a sound played.
+        let state_just_changed = self.state != self.prev_log_state;
+        self.prev_log_state = self.state;
+        let log_this_frame = self.frame_count.is_multiple_of(60)
+            || state_just_changed
+            || self.sound_played_this_tick;
+
+        if log_this_frame {
+            log_hud(
+                &self.state,
+                self.score,
+                self.lives,
+                self.ball_x,
+                self.high_score.get(),
+                self.sound_played_this_tick,
+            );
+        }
 
         // Update high score when game ends.
         if self.state == GameState::Won || self.state == GameState::Lost {
