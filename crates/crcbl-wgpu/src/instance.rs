@@ -209,6 +209,10 @@ pub(crate) fn hal_limits_for(limits: &wgpu::Limits, features: wgpu::Features) ->
             0
         },
         max_color_attachments: limits.max_color_attachments,
+        // WebGPU guarantees 1x and 4x and exposes nothing above: `sampleCount`
+        // on a `GPUTextureDescriptor` is specified to be one of exactly those
+        // two values, and wgpu has no limit to read it from.
+        max_sample_count: 4,
         max_draw_indirect_count: if hal_features.contains(Features::DRAW_INDIRECT_COUNT) {
             u32::MAX
         } else {

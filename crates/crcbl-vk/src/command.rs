@@ -65,19 +65,16 @@ pub(crate) struct VkCommandEncoder {
     /// Debug label nesting, so an unbalanced label does not corrupt the
     /// capture tool's tree.
     label_depth: u32,
-    /// The layout of the last graphics pipeline bound, for `bind_group` and
-    /// `push_constants`. See the module docs.
-    graphics: Option<BoundPipeline>,
-    /// The same, for compute.
-    compute: Option<BoundPipeline>,
-}
-
-/// What the encoder has to remember about a bound pipeline.
-#[derive(Clone, Copy, Debug)]
-struct BoundPipeline {
-    /// The Vulkan pipeline layout, stored so pipeline handles can stay live.
-    #[allow(dead_code)]
-    layout: vk::PipelineLayout,
+    /// Whether the open render pass pushed a label of its own.
+    ///
+    /// `begin_render_pass` pushes only when `desc.label.is_some()`, so popping
+    /// on any non-zero `label_depth` closed the *caller's* enclosing
+    /// `begin_debug_label` early and folded every later command into the wrong
+    /// region of the capture tree. The pass has to remember whether it owns a
+    /// label, not merely whether one is open.
+    render_pass_label: bool,
+    /// The same, for the open compute pass.
+    compute_pass_label: bool,
 }
 
 impl core::fmt::Debug for VkCommandEncoder {
@@ -99,8 +96,8 @@ impl VkCommandEncoder {
             in_render_pass: false,
             in_compute_pass: false,
             label_depth: 0,
-            graphics: None,
-            compute: None,
+            render_pass_label: false,
+            compute_pass_label: false,
         };
         if let Err(error) = encoder.begin(desc) {
             encoder.failed = Some(error);
@@ -244,12 +241,16 @@ impl CommandEncoder for VkCommandEncoder {
                 .buffer(raw)
                 .offset(0)
                 .size(vk::WHOLE_SIZE);
-            if let Some(transfer) = barrier.queue_transfer
-                && let (Ok(from_family), Ok(to_family)) = (
+            if let Some(transfer) = barrier.queue_transfer {
+                let families = (
                     self.device.queue_family(transfer.from),
                     self.device.queue_family(transfer.to),
-                )
-            {
+                );
+                let (Ok(from_family), Ok(to_family)) = families else {
+                    drop(state);
+                    self.fail(queue_transfer_failure("buffer", families));
+                    return;
+                };
                 vk_barrier = vk_barrier
                     .src_queue_family_index(from_family)
                     .dst_queue_family_index(to_family);
@@ -285,12 +286,16 @@ impl CommandEncoder for VkCommandEncoder {
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .image(raw)
                 .subresource_range(range);
-            if let Some(transfer) = barrier.queue_transfer
-                && let (Ok(from_family), Ok(to_family)) = (
+            if let Some(transfer) = barrier.queue_transfer {
+                let families = (
                     self.device.queue_family(transfer.from),
                     self.device.queue_family(transfer.to),
-                )
-            {
+                );
+                let (Ok(from_family), Ok(to_family)) = families else {
+                    drop(state);
+                    self.fail(queue_transfer_failure("image", families));
+                    return;
+                };
                 vk_barrier = vk_barrier
                     .src_queue_family_index(from_family)
                     .dst_queue_family_index(to_family);
@@ -463,6 +468,16 @@ impl CommandEncoder for VkCommandEncoder {
         if !self.ok() {
             return;
         }
+        // `vkCmdFillBuffer` requires both to be multiples of 4 — it writes
+        // `u32`s. Unchecked, a misaligned zeroing of an indirect count buffer
+        // is a VU violation rather than the descriptor error the seam promises.
+        // `VK_WHOLE_SIZE` is the one legal non-multiple.
+        if !offset.is_multiple_of(4) || (size != vk::WHOLE_SIZE && !size.is_multiple_of(4)) {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "fill_buffer offset {offset} and size {size} must both be multiples of 4"
+            )));
+            return;
+        }
         let state = self.device.state();
         let Ok(raw) = self.device.buffer_raw(&state, buffer) else {
             drop(state);
@@ -494,14 +509,14 @@ impl CommandEncoder for VkCommandEncoder {
         let state = self.device.state();
         let mut colors = Vec::with_capacity(desc.color_attachments.len());
         for attachment in desc.color_attachments {
-            let Ok(view) = self.device.view_raw(&state, attachment.view) else {
+            let Ok((view, _)) = self.device.view_raw(&state, attachment.view) else {
                 drop(state);
                 self.fail(HalError::invalid_handle("image view", attachment.view));
                 return;
             };
             let resolve = match attachment.resolve {
                 Some(handle) => match self.device.view_raw(&state, handle) {
-                    Ok(raw) => Some(raw),
+                    Ok((raw, _)) => Some(raw),
                     Err(_) => {
                         drop(state);
                         self.fail(HalError::invalid_handle("image view", handle));
@@ -531,7 +546,7 @@ impl CommandEncoder for VkCommandEncoder {
 
         let depth_stencil = match desc.depth_stencil_attachment {
             Some(attachment) => match self.device.view_raw(&state, attachment.view) {
-                Ok(view) => Some((view, attachment)),
+                Ok((view, format)) => Some((view, format, attachment)),
                 Err(_) => {
                     drop(state);
                     self.fail(HalError::invalid_handle("image view", attachment.view));
@@ -542,10 +557,26 @@ impl CommandEncoder for VkCommandEncoder {
         };
         drop(state);
 
-        let depth_info = depth_stencil.map(|(view, attachment)| {
+        // **The layout must match the one the image is actually in.** The graph
+        // transitions a read-only depth attachment to
+        // `DEPTH_STENCIL_READ_ONLY_OPTIMAL` (`conv::state_masks` for
+        // `ResourceState::DepthStencilRead`, which `PassBuilder::depth_read`
+        // emits), and hardcoding `DEPTH_STENCIL_ATTACHMENT_OPTIMAL` here began
+        // rendering with an attachment layout that did not match — a VU
+        // violation that breaks the "zero validation errors" gate and leaves
+        // the attachment contents undefined. `DepthStencilAttachment::read_only`
+        // is how the seam says which of the two states it declared.
+        let depth_layout = |read_only: bool| {
+            if read_only {
+                vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL
+            } else {
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+            }
+        };
+        let depth_info = depth_stencil.map(|(view, _, attachment)| {
             vk::RenderingAttachmentInfo::default()
                 .image_view(view)
-                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .image_layout(depth_layout(attachment.read_only))
                 .load_op(conv::load_op(attachment.depth_load))
                 .store_op(conv::store_op(attachment.depth_store))
                 .clear_value(vk::ClearValue {
@@ -559,17 +590,16 @@ impl CommandEncoder for VkCommandEncoder {
                 })
         });
         let stencil_info = depth_stencil
-            .filter(|(_, attachment)| {
-                // A separate stencil attachment info is only needed when the
-                // format has stencil; passing one for a depth-only format is a
-                // validation error.
-                attachment.stencil_load != crcbl_hal::LoadOp::DontCare
-                    || attachment.stencil_store != crcbl_hal::StoreOp::Discard
-            })
-            .map(|(view, attachment)| {
+            // Keyed off the **format**, not the ops. A `D32Float` attachment
+            // has no stencil plane to load or store however the caller set
+            // `stencil_load`/`stencil_store`, and handing `pStencilAttachment`
+            // a depth-only view is a VU violation — which is exactly what a
+            // caller filling the stencil fields unconditionally used to get.
+            .filter(|(_, format, _)| format.has_stencil())
+            .map(|(view, _, attachment)| {
                 vk::RenderingAttachmentInfo::default()
                     .image_view(view)
-                    .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .image_layout(depth_layout(attachment.read_only))
                     .load_op(conv::load_op(attachment.stencil_load))
                     .store_op(conv::store_op(attachment.stencil_store))
                     .clear_value(vk::ClearValue {
@@ -602,6 +632,7 @@ impl CommandEncoder for VkCommandEncoder {
 
         if let Some(label) = desc.label {
             self.begin_debug_label(label);
+            self.render_pass_label = true;
         }
         // SAFETY: `self.raw` is recording outside any pass, every view is live,
         // and the attachments are in the layouts the graph transitioned them to
@@ -619,7 +650,7 @@ impl CommandEncoder for VkCommandEncoder {
         // SAFETY: `self.raw` is recording inside a rendering scope.
         unsafe { self.device.raw.cmd_end_rendering(self.raw) };
         self.in_render_pass = false;
-        if self.label_depth > 0 {
+        if core::mem::take(&mut self.render_pass_label) {
             self.end_debug_label();
         }
     }
@@ -677,16 +708,15 @@ impl CommandEncoder for VkCommandEncoder {
     }
 
     fn bind_graphics_pipeline(&mut self, pipeline: GraphicsPipelineHandle) {
-        let Some(bound) = self.resolve_pipeline(pipeline.cast(), "graphics pipeline") else {
+        let Some(raw) = self.resolve_pipeline(pipeline.cast(), "graphics pipeline") else {
             return;
         };
-        self.graphics = Some(bound.1);
-        // SAFETY: `self.raw` is recording inside a rendering scope and `bound.0`
-        // is a live graphics pipeline of this device.
+        // SAFETY: `self.raw` is recording inside a rendering scope and `raw` is
+        // a live graphics pipeline of this device.
         unsafe {
             self.device
                 .raw
-                .cmd_bind_pipeline(self.raw, vk::PipelineBindPoint::GRAPHICS, bound.0);
+                .cmd_bind_pipeline(self.raw, vk::PipelineBindPoint::GRAPHICS, raw);
         }
     }
 
@@ -726,22 +756,65 @@ impl CommandEncoder for VkCommandEncoder {
         if !self.ok() {
             return;
         }
-        let (bind_point, _bound) = self.current_bind_point();
+        let bind_point = self.current_bind_point();
         let state = self.device.state();
-        let record =
-            match crate::device::lookup(&state.bind_groups, "bind group", group, self.device.id) {
-                Ok(record) => record.raw,
+        let (record, group_layout) =
+            match crate::device::lookup(&state.bind_groups, "bind group", group, &self.device) {
+                Ok(record) => (record.raw, record.layout),
                 Err(error) => {
                     drop(state);
                     self.fail(error);
                     return;
                 }
             };
+        // The alignments `adapter.rs` reports and nothing used to read. A
+        // dynamic offset is added to the descriptor's own offset before the
+        // shader sees it, so a misaligned one is
+        // `VUID-vkCmdBindDescriptorSets-pDynamicOffsets-01971` in the driver
+        // rather than the descriptor error the seam promises. The seam says
+        // `dynamic_offsets` is "in binding order", so the layout's own
+        // dynamic-offset bindings, in that order, say which alignment each
+        // offset must satisfy.
+        let dynamic_kinds = match crate::device::lookup(
+            &state.bind_group_layouts,
+            "bind group layout",
+            group_layout,
+            &self.device,
+        ) {
+            Ok(record) => {
+                let mut kinds: Vec<crcbl_hal::BindGroupLayoutEntry> = record
+                    .entries
+                    .iter()
+                    .copied()
+                    .filter(|entry| {
+                        matches!(
+                            entry.kind,
+                            crcbl_hal::BindingKind::UniformBuffer { dynamic: true }
+                                | crcbl_hal::BindingKind::StorageBuffer { dynamic: true, .. }
+                        )
+                    })
+                    .collect();
+                kinds.sort_by_key(|entry| entry.binding);
+                kinds
+            }
+            Err(error) => {
+                drop(state);
+                self.fail(error);
+                return;
+            }
+        };
+        if let Err(error) =
+            check_dynamic_offsets(&self.device.caps.limits, &dynamic_kinds, dynamic_offsets)
+        {
+            drop(state);
+            self.fail(error);
+            return;
+        }
         let layout_raw = match crate::device::lookup(
             &state.pipeline_layouts,
             "pipeline layout",
             layout,
-            self.device.id,
+            &self.device,
         ) {
             Ok(record) => record.raw,
             Err(error) => {
@@ -790,7 +863,7 @@ impl CommandEncoder for VkCommandEncoder {
             &state.pipeline_layouts,
             "pipeline layout",
             layout,
-            self.device.id,
+            &self.device,
         ) {
             Ok(entry) => entry,
             Err(error) => {
@@ -912,6 +985,7 @@ impl CommandEncoder for VkCommandEncoder {
         // give the pass a name and a timestamp boundary.
         if let Some(label) = desc.label {
             self.begin_debug_label(label);
+            self.compute_pass_label = true;
         }
         self.in_compute_pass = true;
     }
@@ -922,22 +996,21 @@ impl CommandEncoder for VkCommandEncoder {
         }
         // A compute pass has no Vulkan scope to close, only a label.
         self.in_compute_pass = false;
-        if self.label_depth > 0 {
+        if core::mem::take(&mut self.compute_pass_label) {
             self.end_debug_label();
         }
     }
 
     fn bind_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {
-        let Some(bound) = self.resolve_pipeline(pipeline.cast(), "compute pipeline") else {
+        let Some(raw) = self.resolve_pipeline(pipeline.cast(), "compute pipeline") else {
             return;
         };
-        self.compute = Some(bound.1);
-        // SAFETY: `self.raw` is recording and `bound.0` is a live compute
-        // pipeline of this device.
+        // SAFETY: `self.raw` is recording and `raw` is a live compute pipeline
+        // of this device.
         unsafe {
             self.device
                 .raw
-                .cmd_bind_pipeline(self.raw, vk::PipelineBindPoint::COMPUTE, bound.0);
+                .cmd_bind_pipeline(self.raw, vk::PipelineBindPoint::COMPUTE, raw);
         }
     }
 
@@ -1086,14 +1159,16 @@ impl CommandEncoder for VkCommandEncoder {
         let raw = self.raw;
         Ok(self
             .device
-            .state()
-            .command_buffers_mut()
-            .insert(CommandBufferEntry {
-                owner: self.device.id,
-                raw,
-                pool,
-            })
-            .cast())
+            .stamp(
+                self.device
+                    .state()
+                    .command_buffers_mut()
+                    .insert(CommandBufferEntry {
+                        owner: self.device.id,
+                        raw,
+                        pool,
+                    }),
+            ))
     }
 }
 
@@ -1113,26 +1188,23 @@ impl Drop for VkCommandEncoder {
 }
 
 impl VkCommandEncoder {
-    /// Resolves a pipeline handle to its `VkPipeline` and what must be
-    /// remembered about it.
+    /// Resolves a pipeline handle to its `VkPipeline`.
+    ///
+    /// Nothing is remembered about it any more: `bind_group` and
+    /// `push_constants` take an explicit [`PipelineLayoutHandle`], so the
+    /// bound-pipeline tracking that used to live here — and the
+    /// `PipelineEntry::layout` it copied — had no reader left.
     fn resolve_pipeline(
         &mut self,
         pipeline: Handle<crcbl_hal::GraphicsPipeline>,
         kind: &'static str,
-    ) -> Option<(vk::Pipeline, BoundPipeline)> {
+    ) -> Option<vk::Pipeline> {
         if !self.ok() {
             return None;
         }
         let state = self.device.state();
-        let resolved =
-            crate::device::lookup(&state.pipelines, kind, pipeline, self.device.id).map(|entry| {
-                (
-                    entry.raw,
-                    BoundPipeline {
-                        layout: entry.layout,
-                    },
-                )
-            });
+        let resolved = crate::device::lookup(&state.pipelines, kind, pipeline, &self.device)
+            .map(|entry| entry.raw);
         drop(state);
         match resolved {
             Ok(resolved) => Some(resolved),
@@ -1143,17 +1215,16 @@ impl VkCommandEncoder {
         }
     }
 
-    /// Which bind point `bind_group` and `push_constants` address, and what is
-    /// bound there.
+    /// Which bind point `bind_group` and `push_constants` address.
     ///
     /// The open scope is the only signal the seam carries — see the module
     /// docs. Outside a compute pass this is graphics, which is also the right
     /// answer for a bind issued before `begin_render_pass`.
-    fn current_bind_point(&self) -> (vk::PipelineBindPoint, Option<BoundPipeline>) {
+    fn current_bind_point(&self) -> vk::PipelineBindPoint {
         if self.in_compute_pass {
-            (vk::PipelineBindPoint::COMPUTE, self.compute)
+            vk::PipelineBindPoint::COMPUTE
         } else {
-            (vk::PipelineBindPoint::GRAPHICS, self.graphics)
+            vk::PipelineBindPoint::GRAPHICS
         }
     }
 
@@ -1245,6 +1316,64 @@ impl VkCommandEncoder {
     }
 }
 
+/// Checks the dynamic offsets a bind names against the layout that declared the
+/// slots they fill.
+///
+/// Pure, so the alignment policy — which is one of the two `Limits` fields the
+/// backend populated and never read — has a unit test rather than a GPU.
+fn check_dynamic_offsets(
+    limits: &crcbl_hal::Limits,
+    dynamic: &[crcbl_hal::BindGroupLayoutEntry],
+    offsets: &[u32],
+) -> Result<(), HalError> {
+    if offsets.len() != dynamic.len() {
+        return Err(HalError::InvalidDescriptor(format!(
+            "bind_group was given {} dynamic offset(s) but the layout declares {} \
+             dynamic-offset binding(s)",
+            offsets.len(),
+            dynamic.len()
+        )));
+    }
+    for (entry, offset) in dynamic.iter().zip(offsets) {
+        let alignment = match entry.kind {
+            crcbl_hal::BindingKind::UniformBuffer { .. } => {
+                limits.min_uniform_buffer_offset_alignment
+            }
+            _ => limits.min_storage_buffer_offset_alignment,
+        };
+        if alignment > 1 && !u64::from(*offset).is_multiple_of(alignment) {
+            return Err(HalError::InvalidDescriptor(format!(
+                "dynamic offset {offset} for binding {} is not a multiple of this device's \
+                 {alignment}-byte alignment",
+                entry.binding
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The error a barrier reports when a requested queue-ownership transfer names
+/// a queue this device does not have.
+///
+/// Dropping it silently is the one outcome that must not happen. The barrier
+/// would go out with `QUEUE_FAMILY_IGNORED` on both sides — no transfer at all
+/// — and the resource would then be used on the other family with **undefined
+/// contents**, which is a corruption bug that reproduces on exactly the
+/// machines that have a transfer queue. Every other resolution failure in this
+/// file calls `fail`; so does this one now.
+fn queue_transfer_failure(
+    what: &'static str,
+    families: (Result<u32, HalError>, Result<u32, HalError>),
+) -> HalError {
+    match families {
+        (Err(error), _) | (_, Err(error)) => HalError::InvalidDescriptor(format!(
+            "a {what} barrier asked for a queue-family transfer this device cannot perform: \
+             {error}"
+        )),
+        (Ok(_), Ok(_)) => unreachable!("only called when one of the two failed"),
+    }
+}
+
 /// The shared body of the two buffer↔image copies.
 fn buffer_image_region(copy: &BufferImageCopy) -> vk::BufferImageCopy {
     vk::BufferImageCopy {
@@ -1262,5 +1391,78 @@ fn buffer_image_region(copy: &BufferImageCopy) -> vk::BufferImageCopy {
             height: copy.image_extent.height,
             depth: copy.image_extent.depth_or_layers,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crcbl_hal::{BindGroupLayoutEntry, BindingKind, Limits, ShaderStages};
+
+    fn dynamic(binding: u32, uniform: bool) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: ShaderStages::ALL,
+            kind: if uniform {
+                BindingKind::UniformBuffer { dynamic: true }
+            } else {
+                BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: true,
+                }
+            },
+            count: 1,
+            flags: crcbl_hal::BindingFlags::empty(),
+        }
+    }
+
+    /// The two `Limits` fields `adapter.rs` populated and nothing read. A
+    /// misaligned dynamic offset used to reach the driver as a VU violation
+    /// instead of an `InvalidDescriptor` naming the binding.
+    #[test]
+    fn dynamic_offsets_are_checked_against_the_right_alignment() {
+        let limits = Limits::desktop();
+        assert_eq!(limits.min_uniform_buffer_offset_alignment, 64);
+        assert_eq!(limits.min_storage_buffer_offset_alignment, 16);
+        let slots = [dynamic(0, true), dynamic(1, false)];
+
+        check_dynamic_offsets(&limits, &slots, &[128, 32]).expect("both are aligned");
+
+        // 32 is a legal *storage* offset and an illegal uniform one, which is
+        // exactly why one shared alignment would be wrong.
+        let error = check_dynamic_offsets(&limits, &slots, &[32, 32])
+            .expect_err("32 is not a multiple of 64");
+        assert!(error.to_string().contains("binding 0"), "{error}");
+
+        let error = check_dynamic_offsets(&limits, &slots, &[128, 8])
+            .expect_err("8 is not a multiple of 16");
+        assert!(error.to_string().contains("binding 1"), "{error}");
+    }
+
+    /// A count mismatch is a caller bug too: `dynamic_offsets` is positional,
+    /// so one too few silently shifts every later offset onto the wrong slot.
+    #[test]
+    fn the_offset_count_must_match_the_layouts_dynamic_bindings() {
+        let limits = Limits::desktop();
+        let slots = [dynamic(0, true)];
+        assert!(check_dynamic_offsets(&limits, &slots, &[]).is_err());
+        assert!(check_dynamic_offsets(&limits, &slots, &[0, 0]).is_err());
+        check_dynamic_offsets(&limits, &[], &[]).expect("no dynamic bindings, no offsets");
+    }
+
+    /// A transfer that cannot be performed must be reported, never dropped:
+    /// the barrier would otherwise go out with `QUEUE_FAMILY_IGNORED` on both
+    /// sides and the resource be used on the other family with undefined
+    /// contents.
+    #[test]
+    fn a_queue_transfer_that_cannot_resolve_names_the_failure() {
+        let missing = HalError::invalid_handle::<crcbl_hal::Queue>(
+            "queue",
+            crcbl_core::Handle::from_bits(1 << 32).expect("non-zero generation"),
+        );
+        let error = queue_transfer_failure("image", (Ok(0), Err(missing)));
+        let text = error.to_string();
+        assert!(text.contains("image"), "{text}");
+        assert!(text.contains("transfer"), "{text}");
     }
 }

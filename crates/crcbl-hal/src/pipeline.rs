@@ -137,7 +137,19 @@ pub struct BindGroupLayoutEntry {
 pub struct BindGroupLayoutDesc<'a> {
     /// Debug name; see [`BufferDesc::label`](crate::BufferDesc::label).
     pub label: Option<&'a str>,
-    /// Binding slots, in any order.
+    /// Binding slots.
+    ///
+    /// Order is free **except** for a slot carrying
+    /// [`BindingFlags::VARIABLE_COUNT`], which must be both the last element of
+    /// this slice *and* the highest [`binding`](BindGroupLayoutEntry::binding)
+    /// number in it. Vulkan's rule is the second half — a runtime-sized array
+    /// is only legal on the highest-numbered binding of a set — and backends
+    /// check the first half too, because a `VARIABLE_COUNT` entry that is
+    /// highest-numbered but not last would make every "the variable binding is
+    /// `entries.last()`" reading in a backend silently wrong. Violating either
+    /// is [`HalError::InvalidDescriptor`](crate::HalError::InvalidDescriptor).
+    ///
+    /// Duplicate binding numbers are rejected.
     pub entries: &'a [BindGroupLayoutEntry],
 }
 

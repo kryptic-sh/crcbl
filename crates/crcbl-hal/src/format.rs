@@ -95,6 +95,18 @@ pub enum Format {
 
 impl Format {
     /// Bytes per block. For uncompressed formats a "block" is one texel.
+    ///
+    /// # Not the copy footprint of a depth/stencil format
+    ///
+    /// A combined depth+stencil format has **two planes**, and a copy names one
+    /// of them: `D32FloatS8Uint` reports `8` here (its in-memory element size)
+    /// while a depth-aspect copy moves 4 bytes per texel and a stencil-aspect
+    /// copy moves 1. `D24UnormS8Uint` reports `4` while its stencil aspect is
+    /// again 1 byte and its depth aspect is, on every API that permits the copy
+    /// at all, a 4-byte element. Use [`Format::texel_size`] when sizing a
+    /// [`BufferImageCopy`](crate::BufferImageCopy); `block_size` answers "how
+    /// wide is one element of this format", which is the right question for a
+    /// colour format and only that.
     #[must_use]
     pub const fn block_size(self) -> u32 {
         match self {
@@ -120,6 +132,50 @@ impl Format {
             | Self::Bc6hRgbUfloat
             | Self::Bc7RgbaUnorm
             | Self::Bc7RgbaUnormSrgb => 16,
+        }
+    }
+
+    /// Bytes one block of `aspect` occupies in a buffer during a copy.
+    ///
+    /// This is the number a [`BufferImageCopy`](crate::BufferImageCopy) is
+    /// sized against, and it is **not** [`Format::block_size`] for a combined
+    /// depth/stencil format — see that method for why. `None` means the format
+    /// does not have that aspect, or the aspect set names more than one plane,
+    /// neither of which a single copy region can describe.
+    ///
+    /// ```
+    /// use crcbl_hal::{Format, ImageAspect};
+    ///
+    /// assert_eq!(Format::D32FloatS8Uint.block_size(), 8);
+    /// assert_eq!(Format::D32FloatS8Uint.texel_size(ImageAspect::DEPTH), Some(4));
+    /// assert_eq!(Format::D32FloatS8Uint.texel_size(ImageAspect::STENCIL), Some(1));
+    /// assert_eq!(Format::D32FloatS8Uint.texel_size(ImageAspect::COLOR), None);
+    /// assert_eq!(Format::Rgba8Unorm.texel_size(ImageAspect::COLOR), Some(4));
+    /// ```
+    #[must_use]
+    pub const fn texel_size(self, aspect: crate::ImageAspect) -> Option<u32> {
+        use crate::ImageAspect as A;
+        // Exactly one plane, or the question has no single answer.
+        if aspect.bits().count_ones() != 1 {
+            return None;
+        }
+        if aspect.contains(A::COLOR) {
+            return if self.is_depth_stencil() {
+                None
+            } else {
+                Some(self.block_size())
+            };
+        }
+        if aspect.contains(A::STENCIL) {
+            return if self.has_stencil() { Some(1) } else { None };
+        }
+        // Depth.
+        match self {
+            Self::D16Unorm => Some(2),
+            // The 24-bit plane is addressed as a 32-bit element by every API
+            // that permits copying it at all.
+            Self::D32Float | Self::D32FloatS8Uint | Self::D24UnormS8Uint => Some(4),
+            _ => None,
         }
     }
 
@@ -322,6 +378,39 @@ mod tests {
             Format::Bc7RgbaUnorm.block_size(),
             Format::Bc7RgbaUnormSrgb.block_size()
         );
+    }
+
+    /// The gap `block_size` cannot express: a combined format's two planes have
+    /// different copy footprints, and neither is the element size.
+    #[test]
+    fn depth_stencil_aspects_have_their_own_copy_footprint() {
+        use crate::ImageAspect as A;
+
+        assert_eq!(Format::D32FloatS8Uint.block_size(), 8);
+        assert_eq!(Format::D32FloatS8Uint.texel_size(A::DEPTH), Some(4));
+        assert_eq!(Format::D32FloatS8Uint.texel_size(A::STENCIL), Some(1));
+        assert_eq!(Format::D24UnormS8Uint.texel_size(A::STENCIL), Some(1));
+        assert_eq!(Format::D16Unorm.texel_size(A::DEPTH), Some(2));
+
+        for format in ALL {
+            // A colour format has exactly one plane, and it is the block size.
+            if !format.is_depth_stencil() {
+                assert_eq!(format.texel_size(A::COLOR), Some(format.block_size()));
+                assert_eq!(format.texel_size(A::DEPTH), None, "{format:?}");
+                assert_eq!(format.texel_size(A::STENCIL), None, "{format:?}");
+            } else {
+                assert_eq!(format.texel_size(A::COLOR), None, "{format:?}");
+                assert!(format.texel_size(A::DEPTH).is_some(), "{format:?}");
+                assert_eq!(
+                    format.texel_size(A::STENCIL).is_some(),
+                    format.has_stencil(),
+                    "{format:?}"
+                );
+            }
+            // More than one plane, or none, is not a copy region.
+            assert_eq!(format.texel_size(A::DEPTH | A::STENCIL), None, "{format:?}");
+            assert_eq!(format.texel_size(A::empty()), None, "{format:?}");
+        }
     }
 
     #[test]

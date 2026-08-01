@@ -46,6 +46,15 @@ impl MemoryRequest {
     pub(crate) fn for_location(location: MemoryLocation) -> Self {
         use vk::MemoryPropertyFlags as P;
         match location {
+            // The one location whose two tiers are deliberately identical, so
+            // the search below degenerates to a single pass. `MemoryPropertyFlags`
+            // can only say "has these bits", never "lacks these bits", and the
+            // preference worth expressing here — *not* host-visible, so a
+            // device-local allocation does not eat a 256 MB ReBAR window an
+            // upload needs — is exactly a negation. Stating a `preferred` that
+            // adds nothing is the honest encoding of "no preference"; the
+            // ReBAR-avoidance heuristic belongs with the suballocator, which
+            // will have heap sizes to reason about.
             MemoryLocation::DeviceLocal => Self {
                 required: P::DEVICE_LOCAL,
                 preferred: P::DEVICE_LOCAL,

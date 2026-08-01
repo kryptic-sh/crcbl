@@ -109,10 +109,6 @@ pub(crate) struct PipelineLayoutEntry {
 pub(crate) struct PipelineEntry {
     pub(crate) owner: u64,
     pub(crate) raw: vk::Pipeline,
-    /// The layout it was built with. The encoder needs it for pipeline
-    /// handle lifetime tracking; bind_group and push_constants now receive
-    /// the layout explicitly.
-    pub(crate) layout: vk::PipelineLayout,
 }
 
 /// A sampler.
@@ -167,10 +163,21 @@ pub(crate) fn validate_bind_group_layout(
                 what: "descriptor-indexing flags on a device without DESCRIPTOR_INDEXING",
             });
         }
-        if entry.flags.contains(BindingFlags::VARIABLE_COUNT) && index + 1 != desc.entries.len() {
+        // Both halves of the rule the seam now states: last in the slice, so
+        // "the variable binding is `entries.last()`" is a true reading, *and*
+        // the highest binding number, which is what Vulkan actually requires.
+        // Checking only the first half accepted layouts the driver refuses.
+        if entry.flags.contains(BindingFlags::VARIABLE_COUNT)
+            && (index + 1 != desc.entries.len()
+                || desc
+                    .entries
+                    .iter()
+                    .any(|other| other.binding > entry.binding))
+        {
             return Err(HalError::InvalidDescriptor(format!(
-                "binding {} sets VARIABLE_COUNT but is not the last binding; Vulkan permits a \
-                 runtime-sized array only on the highest-numbered binding of a set",
+                "binding {} sets VARIABLE_COUNT but is not both the last entry and the \
+                 highest-numbered binding of the set; Vulkan permits a runtime-sized array only \
+                 on the highest-numbered binding",
                 entry.binding
             )));
         }
@@ -256,16 +263,16 @@ impl VkDevice {
             .map_err(|error| conv::hal_error("vkCreateShaderModule", error))?;
         self.inner().set_object_name(raw, desc.label);
 
-        Ok(self
-            .inner()
-            .state()
-            .shader_modules
-            .insert(ShaderModuleEntry {
-                owner: self.inner().id,
-                raw,
-                words: desc.spirv.to_vec(),
-            })
-            .cast())
+        Ok(self.inner().stamp(
+            self.inner()
+                .state()
+                .shader_modules
+                .insert(ShaderModuleEntry {
+                    owner: self.inner().id,
+                    raw,
+                    words: desc.spirv.to_vec(),
+                }),
+        ))
     }
 
     pub(crate) fn create_bind_group_layout_impl(
@@ -322,16 +329,18 @@ impl VkDevice {
 
         Ok(self
             .inner()
-            .state()
-            .bind_group_layouts
-            .insert(BindGroupLayoutEntryRecord {
-                owner: self.inner().id,
-                raw,
-                entries: desc.entries.to_vec(),
-                update_after_bind,
-                variable_binding,
-            })
-            .cast())
+            .stamp(
+                self.inner()
+                    .state()
+                    .bind_group_layouts
+                    .insert(BindGroupLayoutEntryRecord {
+                        owner: self.inner().id,
+                        raw,
+                        entries: desc.entries.to_vec(),
+                        update_after_bind,
+                        variable_binding,
+                    }),
+            ))
     }
 
     pub(crate) fn create_bind_group_impl(
@@ -346,7 +355,7 @@ impl VkDevice {
             &state.bind_group_layouts,
             "bind group layout",
             desc.layout,
-            inner.id,
+            &inner,
         )?;
         let layout_raw = layout.raw;
         let update_after_bind = layout.update_after_bind;
@@ -375,6 +384,34 @@ impl VkDevice {
                 )));
             }
             check_resource_kind(declared.kind, &entry.resource, entry.binding)?;
+        }
+
+        // `variable_count` sizes the pool *and* fills
+        // `VkDescriptorSetVariableDescriptorCountAllocateInfo`, so an over-large
+        // one used to fail `vkAllocateDescriptorSets` with
+        // `VUID-VkDescriptorSetVariableDescriptorCountAllocateInfo-pSetLayouts-03046`
+        // — a driver message naming neither the caller's binding nor the
+        // ceiling it broke. Checked here instead, in the vocabulary the rest of
+        // the module produces.
+        if let Some(count) = desc.variable_count {
+            let Some(binding) = variable_binding else {
+                return Err(HalError::InvalidDescriptor(
+                    "BindGroupDesc::variable_count on a layout that declares no VARIABLE_COUNT \
+                     binding"
+                        .to_string(),
+                ));
+            };
+            let declared = entries
+                .iter()
+                .find(|slot| slot.binding == binding)
+                .unwrap_or_else(|| unreachable!("the variable binding came from these entries"));
+            let ceiling = layout_binding_count(declared, &caps);
+            if count > ceiling {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "BindGroupDesc::variable_count is {count}, but binding {binding} holds at \
+                     most {ceiling} descriptors"
+                )));
+            }
         }
 
         let variable_count = desc.variable_count.or_else(|| {
@@ -449,16 +486,13 @@ impl VkDevice {
             return Err(error);
         }
 
-        Ok(state
-            .bind_groups
-            .insert(BindGroupEntryRecord {
-                owner: inner.id,
-                raw,
-                pool,
-                layout: desc.layout,
-                update_after_bind,
-            })
-            .cast())
+        Ok(inner.stamp(state.bind_groups.insert(BindGroupEntryRecord {
+            owner: inner.id,
+            raw,
+            pool,
+            layout: desc.layout,
+            update_after_bind,
+        })))
     }
 
     pub(crate) fn update_bind_group_impl(
@@ -468,7 +502,7 @@ impl VkDevice {
     ) -> Result<(), HalError> {
         let inner = Arc::clone(self.inner());
         let state = inner.state();
-        let record = lookup(&state.bind_groups, "bind group", group, inner.id)?;
+        let record = lookup(&state.bind_groups, "bind group", group, &inner)?;
         if !record.update_after_bind {
             // The seam names this exact error: without UPDATE_AFTER_BIND,
             // writing a set that a pending command buffer might reference is
@@ -483,7 +517,7 @@ impl VkDevice {
             &state.bind_group_layouts,
             "bind group layout",
             record.layout,
-            inner.id,
+            &inner,
         )?;
         let entries = layout.entries.clone();
         write_descriptors(&inner, &state, raw, &entries, updates)
@@ -510,7 +544,7 @@ impl VkDevice {
                 &state.bind_group_layouts,
                 "bind group layout",
                 *handle,
-                inner.id,
+                &inner,
             )?;
             set_layouts.push(entry.raw);
         }
@@ -566,15 +600,14 @@ impl VkDevice {
             .map_err(|error| conv::hal_error("vkCreatePipelineLayout", error))?;
         inner.set_object_name(raw, desc.label);
 
-        Ok(state
-            .pipeline_layouts
-            .insert(PipelineLayoutEntry {
+        Ok(
+            inner.stamp(state.pipeline_layouts.insert(PipelineLayoutEntry {
                 owner: inner.id,
                 raw,
                 push_constant_stages,
                 push_constant_size,
-            })
-            .cast())
+            })),
+        )
     }
 
     pub(crate) fn create_graphics_pipeline_impl(
@@ -625,33 +658,18 @@ impl VkDevice {
             &state.pipeline_layouts,
             "pipeline layout",
             desc.layout,
-            inner.id,
+            &inner,
         )?;
         let layout_raw = layout.raw;
 
         // The entry-point names have to outlive `vkCreateGraphicsPipelines`, so
         // they are owned locals rather than temporaries in the builder chain.
-        let vertex_name = entry_name(&state, &inner, desc.vertex, ShaderStages::VERTEX)?;
+        let (vertex_name, vertex_module) =
+            entry_name(&state, &inner, desc.vertex, ShaderStages::VERTEX)?;
         let fragment_name = match desc.fragment {
-            Some(entry) => Some((
-                entry_name(&state, &inner, entry, ShaderStages::FRAGMENT)?,
-                lookup(
-                    &state.shader_modules,
-                    "shader module",
-                    entry.module,
-                    inner.id,
-                )?
-                .raw,
-            )),
+            Some(entry) => Some(entry_name(&state, &inner, entry, ShaderStages::FRAGMENT)?),
             None => None,
         };
-        let vertex_module = lookup(
-            &state.shader_modules,
-            "shader module",
-            desc.vertex.module,
-            inner.id,
-        )?
-        .raw;
 
         let mut stages = vec![
             vk::PipelineShaderStageCreateInfo::default()
@@ -807,14 +825,10 @@ impl VkDevice {
         };
         inner.set_object_name(raw, desc.label);
 
-        Ok(state
-            .pipelines
-            .insert(PipelineEntry {
-                owner: inner.id,
-                raw,
-                layout: layout_raw,
-            })
-            .cast())
+        Ok(inner.stamp(state.pipelines.insert(PipelineEntry {
+            owner: inner.id,
+            raw,
+        })))
     }
 
     pub(crate) fn create_compute_pipeline_impl(
@@ -828,18 +842,11 @@ impl VkDevice {
             &state.pipeline_layouts,
             "pipeline layout",
             desc.layout,
-            inner.id,
+            &inner,
         )?;
         let layout_raw = layout.raw;
 
-        let name = entry_name(&state, &inner, desc.compute, ShaderStages::COMPUTE)?;
-        let module = lookup(
-            &state.shader_modules,
-            "shader module",
-            desc.compute.module,
-            inner.id,
-        )?
-        .raw;
+        let (name, module) = entry_name(&state, &inner, desc.compute, ShaderStages::COMPUTE)?;
 
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
@@ -871,14 +878,10 @@ impl VkDevice {
         };
         inner.set_object_name(raw, desc.label);
 
-        Ok(state
-            .pipelines
-            .insert(PipelineEntry {
-                owner: inner.id,
-                raw,
-                layout: layout_raw,
-            })
-            .cast())
+        Ok(inner.stamp(state.pipelines.insert(PipelineEntry {
+            owner: inner.id,
+            raw,
+        })))
     }
 
     pub(crate) fn create_sampler_impl(
@@ -938,39 +941,35 @@ impl VkDevice {
 
         Ok(self
             .inner()
-            .state()
-            .samplers
-            .insert(SamplerEntry {
+            .stamp(self.inner().state().samplers.insert(SamplerEntry {
                 owner: self.inner().id,
                 raw,
-            })
-            .cast())
+            })))
     }
 }
 
 // --- helpers ---------------------------------------------------------------
 
 /// Resolves a stage's entry point, checking it exists in the module first.
+///
+/// Returns the `VkShaderModule` alongside the name because every caller needs
+/// both, and looking the same handle up twice was the shape that produced it.
 fn entry_name(
     state: &DeviceState,
     inner: &DeviceInner,
     entry: ShaderEntry<'_>,
     stage: ShaderStages,
-) -> Result<std::ffi::CString, HalError> {
-    let module = lookup(
-        &state.shader_modules,
-        "shader module",
-        entry.module,
-        inner.id,
-    )?;
+) -> Result<(std::ffi::CString, vk::ShaderModule), HalError> {
+    let module = lookup(&state.shader_modules, "shader module", entry.module, inner)?;
     spirv::require_entry_point(&module.words, entry.entry_point, stage)
         .map_err(HalError::ShaderCompilation)?;
-    std::ffi::CString::new(entry.entry_point).map_err(|_| {
+    let name = std::ffi::CString::new(entry.entry_point).map_err(|_| {
         HalError::ShaderCompilation(format!(
             "entry point {:?} contains a NUL byte",
             entry.entry_point
         ))
-    })
+    })?;
+    Ok((name, module.raw))
 }
 
 /// Whether a resource can fill a binding of that kind.
@@ -1038,6 +1037,27 @@ fn write_descriptors(
                 offset,
                 size,
             } => {
+                // `Limits::min_*_buffer_offset_alignment` was populated by
+                // `adapter.rs` and read by nothing, so a misaligned binding
+                // offset became `VUID-VkWriteDescriptorSet-descriptorType-00327`
+                // in the driver instead of an `InvalidDescriptor` naming the
+                // binding.
+                let alignment = match slot.kind {
+                    BindingKind::UniformBuffer { .. } => {
+                        inner.caps.limits.min_uniform_buffer_offset_alignment
+                    }
+                    BindingKind::StorageBuffer { .. } => {
+                        inner.caps.limits.min_storage_buffer_offset_alignment
+                    }
+                    _ => 1,
+                };
+                if alignment > 1 && !offset.is_multiple_of(alignment) {
+                    return Err(HalError::InvalidDescriptor(format!(
+                        "binding {}'s buffer offset {offset} is not a multiple of this device's \
+                         {alignment}-byte alignment for {:?}",
+                        entry.binding, slot.kind
+                    )));
+                }
                 let raw = inner.buffer_raw(state, buffer)?;
                 plan.push((buffers.len(), true, entry.binding, entry.array_index, ty));
                 buffers.push(vk::DescriptorBufferInfo {
@@ -1051,7 +1071,7 @@ fn write_descriptors(
                 });
             }
             BindingResource::ImageView(view) => {
-                let raw = inner.view_raw(state, view)?;
+                let (raw, _) = inner.view_raw(state, view)?;
                 // The layout a sampled image is read in. The graph owns the
                 // transition — the seam says so explicitly — so this states the
                 // layout the descriptor will be *used* in, which for a sampled
@@ -1069,7 +1089,7 @@ fn write_descriptors(
                 });
             }
             BindingResource::Sampler(sampler) => {
-                let raw = lookup(&state.samplers, "sampler", sampler, inner.id)?.raw;
+                let raw = lookup(&state.samplers, "sampler", sampler, inner)?.raw;
                 plan.push((images.len(), false, entry.binding, entry.array_index, ty));
                 images.push(vk::DescriptorImageInfo {
                     sampler: raw,
@@ -1313,6 +1333,42 @@ mod tests {
         assert_eq!(variable_count_from_entries(1, &[at(0, 99), at(1, 0)]), 1);
         // Nothing written is still a legal, allocatable set.
         assert_eq!(variable_count_from_entries(1, &[]), 1);
+    }
+
+    /// Vulkan's rule is "the highest-numbered binding of the set", and checking
+    /// only "the last element of the slice" accepted layouts the driver
+    /// refuses. Both halves, now that the seam states both.
+    #[test]
+    fn variable_count_must_also_be_the_highest_binding_number() {
+        let tier_a = caps(Features::TIER_A);
+        // Last in the slice, but binding 2 sits below binding 7.
+        let entries = [
+            entry(7, BindingFlags::empty(), 1),
+            entry(2, BindingFlags::VARIABLE_COUNT, 8),
+        ];
+        let error = validate_bind_group_layout(
+            &BindGroupLayoutDesc {
+                label: None,
+                entries: &entries,
+            },
+            &tier_a,
+        )
+        .expect_err("a runtime-sized array must be the highest-numbered binding");
+        assert!(error.to_string().contains("highest-numbered"), "{error}");
+
+        // Both halves satisfied.
+        let entries = [
+            entry(2, BindingFlags::empty(), 1),
+            entry(7, BindingFlags::VARIABLE_COUNT, 8),
+        ];
+        validate_bind_group_layout(
+            &BindGroupLayoutDesc {
+                label: None,
+                entries: &entries,
+            },
+            &tier_a,
+        )
+        .expect("last and highest");
     }
 
     /// A resource of the wrong shape must be named at the seam's own binding

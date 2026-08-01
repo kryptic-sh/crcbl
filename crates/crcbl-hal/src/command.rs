@@ -185,8 +185,23 @@ pub struct ColorAttachment {
 pub struct DepthStencilAttachment {
     /// View rendered into. Must already be in
     /// [`ResourceState::DepthStencilWrite`] or
-    /// [`ResourceState::DepthStencilRead`].
+    /// [`ResourceState::DepthStencilRead`] — see
+    /// [`read_only`](Self::read_only), which is how the backend is told which.
     pub view: ImageViewHandle,
+    /// Whether the pass only *tests* depth/stencil — the depth-prepass-read
+    /// shape.
+    ///
+    /// **Which of the two states the view is already in**, and the backend has
+    /// no other way to know. Vulkan and DX12 both give a read-only depth
+    /// attachment a different image layout from a written one
+    /// (`DEPTH_STENCIL_READ_ONLY_OPTIMAL` vs `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`),
+    /// and `vkCmdBeginRendering` requires the layout named here to be the one
+    /// the image is actually in. Guessing from the store op is not equivalent:
+    /// a pass may read depth and store nothing, or write depth and discard it.
+    ///
+    /// `true` pairs with [`ResourceState::DepthStencilRead`], `false` with
+    /// [`ResourceState::DepthStencilWrite`].
+    pub read_only: bool,
     /// Depth start-of-pass behaviour.
     pub depth_load: LoadOp,
     /// Depth end-of-pass behaviour.
@@ -539,10 +554,19 @@ pub struct DrawIndirectCount {
 ///
 /// # Thread safety
 ///
-/// `Send` but not `Sync`: an encoder may be moved to a worker thread and
-/// recorded there (which the P8 job system will do), but two threads may not
-/// record into one encoder. That matches Vulkan's external-synchronisation rule
-/// for command buffers exactly.
+/// `Send + Sync` on native, through
+/// [`HalThreadSafe`](crate::threading::HalThreadSafe) — an encoder may be moved
+/// to a worker thread and recorded there, which the P8 job system will do.
+///
+/// Vulkan's external-synchronisation rule for command buffers ("two threads may
+/// not record into one") is discharged by `&mut self` on every recording
+/// method, not by dropping `Sync`: two threads cannot hold `&mut` to the same
+/// encoder, and `&self` alone can record nothing. An earlier version of this
+/// doc claimed `Send` but not `Sync`, which contradicted the trait's own bound
+/// — every implementor has always had to be `Sync`.
+///
+/// On `wasm32` the bound is vacuous, because wgpu's web types are `!Send` and
+/// the browser is single-threaded.
 pub trait CommandEncoder: core::fmt::Debug + crate::threading::HalThreadSafe {
     // --- debug ---
 

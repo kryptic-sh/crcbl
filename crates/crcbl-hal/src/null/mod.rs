@@ -78,12 +78,51 @@ use crate::{
     SwapchainHandle, Viewport,
 };
 
+/// Formats a null surface reports, and therefore the only ones a swapchain on
+/// one may be configured with. `SwapchainDesc::format` says it must be one of
+/// [`SurfaceCaps::formats`], so the two lists are one constant rather than two
+/// that drift.
+const SURFACE_FORMATS: &[Format] = &[Format::Bgra8UnormSrgb, Format::Bgra8Unorm];
+
+/// Fewest images a null swapchain ring holds — [`SurfaceCaps::min_image_count`].
+const RING_MIN_IMAGES: u32 = 2;
+/// Most images a null swapchain ring holds — [`SurfaceCaps::max_image_count`].
+const RING_MAX_IMAGES: u32 = 3;
+
+/// Low bits of a synthesised queue handle that name the queue kind. The rest
+/// carry the owning device's tag — see [`queue_handle`].
+const QUEUE_KIND_BITS: u32 = 8;
+
+/// The owning device's identity, squeezed into a queue handle's index field.
+///
+/// Queue handles are not pooled, so nothing else can record who issued one. 24
+/// bits is more device identity than a process will ever use and leaves the low
+/// byte for the kind.
+fn queue_tag(device_id: u64) -> u32 {
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        (device_id % (1 << 24)) as u32
+    }
+}
+
 /// Deterministic queue handles.
 ///
 /// Queues are not pooled objects — they exist for the device's lifetime and
-/// carry no state — so their handles are synthesised from a fixed generation.
-fn queue_handle(index: u32) -> QueueHandle {
-    Handle::from_bits((1u64 << 32) | u64::from(index)).expect("generation 1 is non-zero")
+/// carry no state — so their handles are synthesised rather than allocated.
+/// They still carry the **issuing device's tag**, because obligation 3 applies
+/// to every handle and a queue handle from another device would otherwise be
+/// indistinguishable from this device's own.
+fn queue_handle(device_id: u64, index: u32) -> QueueHandle {
+    let raw = (queue_tag(device_id) << QUEUE_KIND_BITS) | index;
+    Handle::from_bits((1u64 << 32) | u64::from(raw)).expect("generation 1 is non-zero")
+}
+
+/// The queue-kind index behind a handle *this* device issued, or `None` if the
+/// handle came from somewhere else.
+fn queue_index_of(device_id: u64, queue: QueueHandle) -> Option<u32> {
+    let raw = queue.index();
+    (queue.generation() == 1 && (raw >> QUEUE_KIND_BITS) == queue_tag(device_id))
+        .then_some(raw & ((1 << QUEUE_KIND_BITS) - 1))
 }
 
 /// Source of owner ids for instances and devices.
@@ -256,7 +295,7 @@ impl Instance for NullInstance {
         }
         self.check_surface(surface)?;
         Ok(SurfaceCaps {
-            formats: vec![Format::Bgra8UnormSrgb, Format::Bgra8Unorm],
+            formats: SURFACE_FORMATS.to_vec(),
             present_modes: if self.implicit_acquire() {
                 vec![PresentMode::Fifo]
             } else {
@@ -267,8 +306,8 @@ impl Instance for NullInstance {
                 ]
             },
             composite_alpha: vec![CompositeAlpha::Opaque],
-            min_image_count: 2,
-            max_image_count: 3,
+            min_image_count: RING_MIN_IMAGES,
+            max_image_count: RING_MAX_IMAGES,
             current_extent: None,
         })
     }
@@ -284,22 +323,28 @@ impl Instance for NullInstance {
         if let Some(surface) = desc.compatible_surface {
             self.check_surface(surface)?;
         }
+        // Optional features are granted only where the adapter has them, which
+        // is the behaviour a caller must handle on a real backend. The union
+        // with `required_features` that used to be here was dead: anything
+        // required and absent left through `missing` above.
+        let caps = DeviceCaps {
+            features: self
+                .caps
+                .features
+                .intersection(desc.required_features.union(desc.optional_features)),
+            limits: self.caps.limits,
+        };
         Ok(Box::new(NullDevice {
             recorder: self.recorder.clone(),
             instance_id: self.id,
             device_id: next_owner_id(),
-            caps: DeviceCaps {
-                // Optional features are granted only where the adapter has them,
-                // which is the behaviour a caller must handle on a real backend.
-                features: self
-                    .caps
-                    .features
-                    .intersection(desc.required_features.union(desc.optional_features))
-                    .union(desc.required_features),
-                limits: self.caps.limits,
-            },
+            // The *device's* granted features decide the acquire shape, not the
+            // adapter's. A caller that never asked for timeline semaphores gets
+            // the implicit-acquire shape even on a Tier A adapter, which is
+            // exactly what it would get from a real backend.
+            implicit_acquire: !caps.features.contains(Features::TIMELINE_SEMAPHORE),
+            caps,
             adapter_features: self.caps.features,
-            implicit_acquire: self.implicit_acquire(),
         }))
     }
 }
@@ -386,6 +431,71 @@ impl NullDevice {
             what,
         }
     }
+
+    /// Whether this device has a queue of `kind` at all.
+    fn has_queue(&self, kind: QueueKind) -> bool {
+        match kind {
+            QueueKind::Graphics => true,
+            QueueKind::Compute => self
+                .adapter_features
+                .contains(Features::ASYNC_COMPUTE_QUEUE),
+            QueueKind::Transfer => self.adapter_features.contains(Features::TRANSFER_QUEUE),
+        }
+    }
+
+    /// Resolves a queue handle against *this* device.
+    ///
+    /// Obligation 3 covers queues too. `submit`, `present` and
+    /// `create_command_encoder` used to ignore the argument entirely, so a
+    /// handle from another device — or a hand-made one — submitted happily.
+    fn check_queue(&self, queue: QueueHandle) -> Result<(), HalError> {
+        let bits = queue.to_bits();
+        let Some(index) = queue_index_of(self.device_id, queue) else {
+            // Another device's queue handle is well-formed but not ours; a
+            // hand-made one is neither, and there is no way to tell them apart
+            // from the bits, so the more specific error is the honest one only
+            // when the shape is right.
+            return Err(if queue.generation() == 1 {
+                HalError::ForeignObject {
+                    kind: "queue",
+                    bits,
+                }
+            } else {
+                HalError::InvalidHandle {
+                    kind: "queue",
+                    bits,
+                }
+            });
+        };
+        let kind = match index {
+            0 => QueueKind::Graphics,
+            1 => QueueKind::Compute,
+            2 => QueueKind::Transfer,
+            _ => {
+                return Err(HalError::InvalidHandle {
+                    kind: "queue",
+                    bits,
+                });
+            }
+        };
+        if self.has_queue(kind) {
+            Ok(())
+        } else {
+            Err(HalError::InvalidHandle {
+                kind: "queue",
+                bits,
+            })
+        }
+    }
+}
+
+/// The index a queue kind occupies in a synthesised handle.
+const fn queue_kind_index(kind: QueueKind) -> u32 {
+    match kind {
+        QueueKind::Graphics => 0,
+        QueueKind::Compute => 1,
+        QueueKind::Transfer => 2,
+    }
 }
 
 impl Device for NullDevice {
@@ -398,17 +508,8 @@ impl Device for NullDevice {
     }
 
     fn queue(&self, kind: QueueKind) -> Option<QueueHandle> {
-        match kind {
-            QueueKind::Graphics => Some(queue_handle(0)),
-            QueueKind::Compute => self
-                .adapter_features
-                .contains(Features::ASYNC_COMPUTE_QUEUE)
-                .then(|| queue_handle(1)),
-            QueueKind::Transfer => self
-                .adapter_features
-                .contains(Features::TRANSFER_QUEUE)
-                .then(|| queue_handle(2)),
-        }
+        self.has_queue(kind)
+            .then(|| queue_handle(self.device_id, queue_kind_index(kind)))
     }
 
     // --- resources ---
@@ -488,11 +589,14 @@ impl Device for NullDevice {
         if let Some(wait) = desc.after {
             self.check(ObjectKind::Semaphore, wait.semaphore.to_bits(), "semaphore")?;
         }
+        // Re-resolved under a fresh lock, so a concurrent `destroy_buffer` in
+        // the gap since `check` is an `InvalidHandle` rather than a panic:
+        // `Device` is `&self + Send + Sync`, so that gap is reachable.
         let (memory, buffer_size) = {
             let state = self.recorder.lock();
-            let object = state
-                .get(ObjectKind::Buffer, desc.buffer.to_bits())
-                .expect("checked above");
+            let Some(object) = state.get(ObjectKind::Buffer, desc.buffer.to_bits()) else {
+                return Err(HalError::invalid_handle("buffer", desc.buffer));
+            };
             let Detail::Buffer { size, memory, .. } = &object.detail else {
                 unreachable!("a buffer handle always carries buffer detail");
             };
@@ -540,11 +644,11 @@ impl Device for NullDevice {
         out: &mut [u8],
     ) -> Result<ReadbackState, HalError> {
         self.check(ObjectKind::Readback, readback.to_bits(), "readback")?;
-        let (buffer, offset, size, ready) = {
+        let (buffer, offset, ready) = {
             let mut state = self.recorder.lock();
-            let object = state
-                .get_mut(ObjectKind::Readback, readback.to_bits())
-                .expect("checked above");
+            let Some(object) = state.get_mut(ObjectKind::Readback, readback.to_bits()) else {
+                return Err(HalError::invalid_handle("readback", readback));
+            };
             let Detail::Readback {
                 buffer,
                 offset,
@@ -554,18 +658,23 @@ impl Device for NullDevice {
             else {
                 unreachable!("a readback handle always carries readback detail");
             };
+            // The descriptor check happens *before* the simulated latency
+            // advances. A rejected poll must not consume one: a caller whose
+            // slice is the wrong length would otherwise see the configured
+            // latency shortened by however many times it got the length wrong,
+            // which makes the latency it is being tested against a lie.
+            if out.len() as u64 != *size {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "poll_readback needs a {size}-byte slice, got {}",
+                    out.len()
+                )));
+            }
             let ready = *polls_remaining == 0;
             if !ready {
                 *polls_remaining -= 1;
             }
-            (*buffer, *offset, *size, ready)
+            (*buffer, *offset, ready)
         };
-        if out.len() as u64 != size {
-            return Err(HalError::InvalidDescriptor(format!(
-                "poll_readback needs a {size}-byte slice, got {}",
-                out.len()
-            )));
-        }
         if !ready {
             return Ok(ReadbackState::Pending);
         }
@@ -573,9 +682,9 @@ impl Device for NullDevice {
         // which is a caller bug and must be reported rather than read.
         self.check(ObjectKind::Buffer, buffer.to_bits(), "buffer")?;
         let mut state = self.recorder.lock();
-        let object = state
-            .get(ObjectKind::Buffer, buffer.to_bits())
-            .expect("checked above");
+        let Some(object) = state.get(ObjectKind::Buffer, buffer.to_bits()) else {
+            return Err(HalError::invalid_handle("buffer", buffer));
+        };
         let Detail::Buffer { bytes, .. } = &object.detail else {
             unreachable!("a buffer handle always carries buffer detail");
         };
@@ -603,24 +712,59 @@ impl Device for NullDevice {
             ));
         }
         let limits = self.caps.limits;
-        let longest = extent.width.max(extent.height);
-        if longest > limits.max_image_2d {
-            return Err(HalError::InvalidDescriptor(format!(
-                "image extent {longest} exceeds max_image_2d {}",
-                limits.max_image_2d
-            )));
-        }
-        if desc.image_type != ImageType::D3
-            && extent.depth_or_layers > limits.max_image_array_layers
-        {
-            return Err(HalError::InvalidDescriptor(format!(
-                "{} array layers exceeds max_image_array_layers {}",
-                extent.depth_or_layers, limits.max_image_array_layers
-            )));
+        // A 3D image is bounded by `max_image_3d` on **every** axis, including
+        // its depth; a 1D/2D one by `max_image_2d` on width and height and by
+        // `max_image_array_layers` on its layer count. Checking
+        // `max(width, height)` against `max_image_2d` for both left
+        // `max_image_3d` read by nothing and a volume's depth checked against
+        // nothing at all.
+        if desc.image_type == ImageType::D3 {
+            let longest = extent.width.max(extent.height).max(extent.depth_or_layers);
+            if longest > limits.max_image_3d {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "3D image extent {extent:?} exceeds max_image_3d {}",
+                    limits.max_image_3d
+                )));
+            }
+        } else {
+            let longest = extent.width.max(extent.height);
+            if longest > limits.max_image_2d {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "image extent {longest} exceeds max_image_2d {}",
+                    limits.max_image_2d
+                )));
+            }
+            if extent.depth_or_layers > limits.max_image_array_layers {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "{} array layers exceeds max_image_array_layers {}",
+                    extent.depth_or_layers, limits.max_image_array_layers
+                )));
+            }
         }
         if desc.mip_levels == 0 {
             return Err(HalError::InvalidDescriptor(
                 "image must have at least one mip level".to_string(),
+            ));
+        }
+        let full_chain = extent.full_mip_levels(desc.image_type);
+        if desc.mip_levels > full_chain {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{} mip levels exceeds the {full_chain} a {extent:?} {:?} image can have",
+                desc.mip_levels, desc.image_type
+            )));
+        }
+        // A sample count is a bit in a mask on every API underneath, so `3`
+        // is not "three samples" — it is two bits set, which reaches a driver
+        // as a nonsense request rather than an error.
+        if !desc.samples.is_power_of_two() || desc.samples > limits.max_sample_count {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{} samples is not a power of two in 1..={}",
+                desc.samples, limits.max_sample_count
+            )));
+        }
+        if desc.usage.is_empty() {
+            return Err(HalError::InvalidDescriptor(
+                "an image with no usage flags can never be used".to_string(),
             ));
         }
         Ok(self.insert(ObjectKind::Image, desc.label, Detail::None))
@@ -686,24 +830,70 @@ impl Device for NullDevice {
         desc: &BindGroupLayoutDesc<'_>,
     ) -> Result<BindGroupLayoutHandle, HalError> {
         let indexing = self.caps.features.contains(Features::DESCRIPTOR_INDEXING);
+        let mut seen: Vec<u32> = Vec::with_capacity(desc.entries.len());
+        let highest = desc
+            .entries
+            .iter()
+            .map(|entry| entry.binding)
+            .max()
+            .unwrap_or(0);
         for (index, entry) in desc.entries.iter().enumerate() {
             if !entry.flags.is_empty() && !indexing {
                 return Err(self.unsupported("descriptor indexing flags"));
             }
             if entry.flags.contains(crate::BindingFlags::VARIABLE_COUNT)
-                && index + 1 != desc.entries.len()
+                && (index + 1 != desc.entries.len() || entry.binding != highest)
             {
-                return Err(HalError::InvalidDescriptor(
-                    "VARIABLE_COUNT is only legal on the last binding".to_string(),
-                ));
+                return Err(HalError::InvalidDescriptor(format!(
+                    "binding {} sets VARIABLE_COUNT but is not both the last entry and the \
+                     highest-numbered binding of the set",
+                    entry.binding
+                )));
             }
             if entry.count == 0 {
                 return Err(HalError::InvalidDescriptor(
                     "binding count must be non-zero".to_string(),
                 ));
             }
+            if seen.contains(&entry.binding) {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "binding {} is declared twice",
+                    entry.binding
+                )));
+            }
+            seen.push(entry.binding);
+            // `u32::MAX` is the seam's "as many as you can", clamped by the
+            // backend rather than refused — see `crcbl-vk`'s
+            // `layout_binding_count`, which this mirrors deliberately.
+            if indexing
+                && entry.count != u32::MAX
+                && entry.count > 1
+                && entry.count > self.caps.limits.max_bindless_descriptors.max(1)
+            {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "binding {} asks for {} descriptors but max_bindless_descriptors is {}",
+                    entry.binding, entry.count, self.caps.limits.max_bindless_descriptors
+                )));
+            }
         }
-        Ok(self.insert(ObjectKind::BindGroupLayout, desc.label, Detail::None))
+        let update_after_bind = desc
+            .entries
+            .iter()
+            .any(|entry| entry.flags.contains(crate::BindingFlags::UPDATE_AFTER_BIND));
+        let variable_binding = desc
+            .entries
+            .iter()
+            .find(|entry| entry.flags.contains(crate::BindingFlags::VARIABLE_COUNT))
+            .map(|entry| entry.binding);
+        Ok(self.insert(
+            ObjectKind::BindGroupLayout,
+            desc.label,
+            Detail::BindGroupLayout {
+                entries: desc.entries.to_vec(),
+                update_after_bind,
+                variable_binding,
+            },
+        ))
     }
 
     fn destroy_bind_group_layout(&self, layout: BindGroupLayoutHandle) {
@@ -716,10 +906,34 @@ impl Device for NullDevice {
             desc.layout.to_bits(),
             "bind group layout",
         )?;
-        for entry in desc.entries {
-            self.check_binding(&entry.resource)?;
+        let layout = self.layout_of(desc.layout)?;
+        // `variable_count` is what the *pool* is sized with on a real backend,
+        // so an over-large one fails `vkAllocateDescriptorSets` with a VUID
+        // rather than the named error the rest of the seam produces.
+        if let Some(count) = desc.variable_count {
+            let Some(binding) = layout.variable_binding else {
+                return Err(HalError::InvalidDescriptor(
+                    "BindGroupDesc::variable_count on a layout with no VARIABLE_COUNT binding"
+                        .to_string(),
+                ));
+            };
+            let ceiling = layout.binding_ceiling(binding, &self.caps);
+            if count > ceiling {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "variable_count {count} exceeds the {ceiling} descriptors binding {binding} \
+                     declares"
+                )));
+            }
         }
-        Ok(self.insert(ObjectKind::BindGroup, desc.label, Detail::None))
+        self.check_entries_against(&layout, desc.entries)?;
+        Ok(self.insert(
+            ObjectKind::BindGroup,
+            desc.label,
+            Detail::BindGroup {
+                layout: desc.layout,
+                update_after_bind: layout.update_after_bind,
+            },
+        ))
     }
 
     fn update_bind_group(
@@ -728,10 +942,29 @@ impl Device for NullDevice {
         entries: &[BindGroupEntry],
     ) -> Result<(), HalError> {
         self.check(ObjectKind::BindGroup, group.to_bits(), "bind group")?;
-        for entry in entries {
-            self.check_binding(&entry.resource)?;
+        let (layout_handle, update_after_bind) = {
+            let state = self.recorder.lock();
+            let Some(object) = state.get(ObjectKind::BindGroup, group.to_bits()) else {
+                return Err(HalError::invalid_handle("bind group", group));
+            };
+            let Detail::BindGroup {
+                layout,
+                update_after_bind,
+            } = &object.detail
+            else {
+                unreachable!("a bind group handle always carries bind group detail");
+            };
+            (*layout, *update_after_bind)
+        };
+        if !update_after_bind {
+            // The error `Device::update_bind_group` promises. Without the flag,
+            // writing a set a pending command buffer might reference is
+            // undefined behaviour, so refusing is the only safe answer — and
+            // the null backend accepting it made the seam's own doc untestable.
+            return Err(self.unsupported("update_bind_group on a layout without UPDATE_AFTER_BIND"));
         }
-        Ok(())
+        let layout = self.layout_of(layout_handle)?;
+        self.check_entries_against(&layout, entries)
     }
 
     fn destroy_bind_group(&self, group: BindGroupHandle) {
@@ -763,10 +996,13 @@ impl Device for NullDevice {
                 // visible.
                 return Err(self.unsupported("push constants"));
             }
-            if range.offset + range.size > self.caps.limits.max_push_constant_size {
+            // Saturating, not wrapping: `PushConstantRange { offset: u32::MAX,
+            // size: 1 }` panicked in debug and wrapped to 0 in release, and 0
+            // then *passed* the check it was supposed to fail.
+            let end = range.offset.saturating_add(range.size);
+            if end > self.caps.limits.max_push_constant_size {
                 return Err(HalError::InvalidDescriptor(format!(
-                    "push constant range ends at {} but max_push_constant_size is {}",
-                    range.offset + range.size,
+                    "push constant range ends at {end} but max_push_constant_size is {}",
                     self.caps.limits.max_push_constant_size
                 )));
             }
@@ -869,7 +1105,11 @@ impl Device for NullDevice {
                 "query set must hold at least one query".to_string(),
             ));
         }
-        Ok(self.insert(ObjectKind::QuerySet, desc.label, Detail::None))
+        Ok(self.insert(
+            ObjectKind::QuerySet,
+            desc.label,
+            Detail::QuerySet { count: desc.count },
+        ))
     }
 
     fn destroy_query_set(&self, set: QuerySetHandle) {
@@ -879,10 +1119,29 @@ impl Device for NullDevice {
     fn query_results(
         &self,
         set: QuerySetHandle,
-        _first_query: u32,
+        first_query: u32,
         out: &mut [u64],
     ) -> Result<(), HalError> {
         self.check(ObjectKind::QuerySet, set.to_bits(), "query set")?;
+        let count = {
+            let state = self.recorder.lock();
+            let Some(object) = state.get(ObjectKind::QuerySet, set.to_bits()) else {
+                return Err(HalError::invalid_handle("query set", set));
+            };
+            let Detail::QuerySet { count } = &object.detail else {
+                unreachable!("a query set handle always carries query set detail");
+            };
+            *count
+        };
+        // The range check `Device::query_results` documents. It was impossible
+        // before: `first_query` was ignored and the set's size was not even
+        // stored, so the null backend accepted ranges `crcbl-vk` rejects.
+        let end = u64::from(first_query) + out.len() as u64;
+        if end > u64::from(count) {
+            return Err(HalError::InvalidDescriptor(format!(
+                "query range {first_query}..{end} exceeds the set's {count} queries"
+            )));
+        }
         // Zeros, as a device without timestamp support would report: the
         // profiler HUD degrades rather than breaking.
         out.fill(0);
@@ -934,6 +1193,11 @@ impl Device for NullDevice {
             label: desc.label.map(ToOwned::to_owned),
             commands: Vec::new(),
             scope: Scope::Outside,
+            // There is no error path out of `create_command_encoder`, so a
+            // queue that is not this device's is remembered and reported by
+            // `finish` — exactly what `crcbl-vk` does when its command pool
+            // cannot be created.
+            failed: self.check_queue(desc.queue).err(),
         })
     }
 
@@ -942,6 +1206,7 @@ impl Device for NullDevice {
     }
 
     fn submit(&self, queue: QueueHandle, submit: &SubmitInfo<'_>) -> Result<(), HalError> {
+        self.check_queue(queue)?;
         for buffer in submit.command_buffers {
             self.check(
                 ObjectKind::CommandBuffer,
@@ -1115,7 +1380,10 @@ impl Device for NullDevice {
         };
         let index = *next;
         let slot = index as usize;
-        *next = (index + 1) % u32::try_from(images.len()).unwrap_or(1);
+        // `.max(1)`, not `unwrap_or(1)`: `u32::try_from(0usize)` is `Ok(0)`, so
+        // the fallback never fired for the one input it looked like it guarded
+        // against, and an empty ring divided by zero.
+        *next = (index + 1) % u32::try_from(images.len()).unwrap_or(u32::MAX).max(1);
         let frame = AcquiredFrame {
             image: images[slot],
             view: views[slot],
@@ -1132,7 +1400,8 @@ impl Device for NullDevice {
         Ok(frame)
     }
 
-    fn present(&self, _queue: QueueHandle, present: &PresentInfo<'_>) -> Result<(), SurfaceError> {
+    fn present(&self, queue: QueueHandle, present: &PresentInfo<'_>) -> Result<(), SurfaceError> {
+        self.check_queue(queue).map_err(SurfaceError::Hal)?;
         self.check(
             ObjectKind::Swapchain,
             present.swapchain.to_bits(),
@@ -1162,7 +1431,18 @@ impl NullDevice {
     /// two-element semaphore vectors and the third acquire indexed past the end
     /// of them. The lengths are an invariant, so one constructor establishes it.
     fn build_ring(&self, desc: &SwapchainDesc<'_>) -> Result<Detail, SurfaceError> {
-        let image_count = desc.image_count.clamp(2, 3);
+        // `SwapchainDesc::format` must be one of `SurfaceCaps::formats`, and
+        // this backend used to accept anything at all — including `D32Float`,
+        // which no surface can present.
+        if !SURFACE_FORMATS.contains(&desc.format) {
+            return Err(SurfaceError::Hal(HalError::InvalidDescriptor(format!(
+                "{:?} is not one of this surface's formats {SURFACE_FORMATS:?}",
+                desc.format
+            ))));
+        }
+        // Clamped to what `surface_caps` reports, not to a pair of literals
+        // that happened to agree with it.
+        let image_count = desc.image_count.clamp(RING_MIN_IMAGES, RING_MAX_IMAGES);
         let mut images = Vec::with_capacity(image_count as usize);
         let mut views = Vec::with_capacity(image_count as usize);
         let mut acquire_semaphores = Vec::with_capacity(image_count as usize);
@@ -1223,6 +1503,63 @@ impl NullDevice {
         })
     }
 
+    /// Snapshots a bind-group layout, so validation can run without holding the
+    /// recorder lock across the resource lookups it also needs.
+    fn layout_of(&self, handle: BindGroupLayoutHandle) -> Result<LayoutRecord, HalError> {
+        let state = self.recorder.lock();
+        let Some(object) = state.get(ObjectKind::BindGroupLayout, handle.to_bits()) else {
+            return Err(HalError::invalid_handle("bind group layout", handle));
+        };
+        let Detail::BindGroupLayout {
+            entries,
+            update_after_bind,
+            variable_binding,
+        } = &object.detail
+        else {
+            unreachable!("a layout handle always carries layout detail");
+        };
+        Ok(LayoutRecord {
+            entries: entries.clone(),
+            update_after_bind: *update_after_bind,
+            variable_binding: *variable_binding,
+        })
+    }
+
+    /// Checks every assignment against the layout it claims to fill.
+    ///
+    /// The three things a real backend checks and this one used not to: that
+    /// the binding exists, that the array index is inside it, and that the
+    /// resource is the right *kind*. Without them the null backend green-lit
+    /// bind groups `crcbl-vk` rejects outright.
+    fn check_entries_against(
+        &self,
+        layout: &LayoutRecord,
+        entries: &[BindGroupEntry],
+    ) -> Result<(), HalError> {
+        for entry in entries {
+            let Some(declared) = layout
+                .entries
+                .iter()
+                .find(|slot| slot.binding == entry.binding)
+            else {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "bind group entry names binding {}, which the layout does not declare",
+                    entry.binding
+                )));
+            };
+            let ceiling = layout.binding_ceiling(entry.binding, &self.caps);
+            if entry.array_index >= ceiling {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "bind group entry writes index {} of binding {}, which holds {ceiling}",
+                    entry.array_index, entry.binding
+                )));
+            }
+            check_resource_kind(declared.kind, &entry.resource, entry.binding)?;
+            self.check_binding(&entry.resource)?;
+        }
+        Ok(())
+    }
+
     fn check_binding(&self, resource: &crate::BindingResource) -> Result<(), HalError> {
         match resource {
             crate::BindingResource::Buffer { buffer, .. } => {
@@ -1235,6 +1572,61 @@ impl NullDevice {
                 self.check(ObjectKind::Sampler, sampler.to_bits(), "sampler")
             }
         }
+    }
+}
+
+/// A bind-group layout's declarations, copied out from under the lock.
+#[derive(Debug)]
+struct LayoutRecord {
+    entries: Vec<crate::BindGroupLayoutEntry>,
+    update_after_bind: bool,
+    variable_binding: Option<u32>,
+}
+
+impl LayoutRecord {
+    /// How many descriptors a binding actually holds.
+    ///
+    /// [`BindingFlags::VARIABLE_COUNT`](crate::BindingFlags::VARIABLE_COUNT)
+    /// makes the declared `count` an upper bound, and the seam spells "as many
+    /// as you can" as `u32::MAX` — which is a request to clamp to the device's
+    /// ceiling, not a request for four billion descriptors.
+    fn binding_ceiling(&self, binding: u32, caps: &DeviceCaps) -> u32 {
+        let Some(entry) = self.entries.iter().find(|slot| slot.binding == binding) else {
+            return 0;
+        };
+        if entry.count == u32::MAX && self.variable_binding == Some(binding) {
+            caps.limits.max_bindless_descriptors.max(1)
+        } else {
+            entry.count
+        }
+    }
+}
+
+/// Whether a resource can fill a binding of that kind.
+///
+/// The same table `crcbl-vk`'s `check_resource_kind` uses, and for the same
+/// reason: a mismatch must name the caller's binding number, not a descriptor
+/// type in a driver message.
+fn check_resource_kind(
+    kind: crate::BindingKind,
+    resource: &crate::BindingResource,
+    binding: u32,
+) -> Result<(), HalError> {
+    use crate::{BindingKind as K, BindingResource as R};
+    let ok = matches!(
+        (kind, resource),
+        (
+            K::UniformBuffer { .. } | K::StorageBuffer { .. },
+            R::Buffer { .. }
+        ) | (K::SampledImage | K::StorageImage { .. }, R::ImageView(_))
+            | (K::Sampler, R::Sampler(_))
+    );
+    if ok {
+        Ok(())
+    } else {
+        Err(HalError::InvalidDescriptor(format!(
+            "binding {binding} is declared as {kind:?}, which cannot hold {resource:?}"
+        )))
     }
 }
 
@@ -1255,6 +1647,9 @@ struct NullEncoder {
     label: Option<String>,
     commands: Vec<Command>,
     scope: Scope,
+    /// The first hard failure, reported by [`CommandEncoder::finish`]. Distinct
+    /// from a [`ValidationError`], which is recorded and carried past.
+    failed: Option<HalError>,
 }
 
 impl NullEncoder {
@@ -1646,8 +2041,19 @@ impl CommandEncoder for NullEncoder {
     }
 
     fn finish(self: Box<Self>) -> Result<CommandBufferHandle, HalError> {
+        if let Some(error) = self.failed {
+            return Err(error);
+        }
         if self.scope != Scope::Outside {
+            // Recorded *and* returned. The seam's `finish` doc names an
+            // unclosed pass as an `Err` case and `crcbl-vk` returns one, so a
+            // null backend that answered `Ok` let CI green-light a command
+            // stream Vulkan refuses to end at all — `vkEndCommandBuffer` with
+            // a `vkCmdBeginRendering` outstanding is itself illegal.
             self.fail(ValidationError::UnclosedPass);
+            return Err(HalError::InvalidDescriptor(
+                "finish with a pass still open".to_string(),
+            ));
         }
         let mut state = self.recorder.lock();
         let command_buffer: CommandBufferHandle = state.insert_owned(

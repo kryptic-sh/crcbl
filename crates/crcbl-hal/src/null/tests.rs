@@ -300,19 +300,23 @@ fn push_constants_and_bindless_fail_loudly_on_tier_b() {
     assert!(matches!(error, HalError::Unsupported { .. }), "{error:?}");
 }
 
+/// Vulkan permits a runtime-sized array only on the **highest-numbered** binding
+/// of a set, and both backends additionally require it to be the last element of
+/// the slice so "the variable binding is `entries.last()`" is a true reading.
+/// The seam doc now states both halves; this pins them.
 #[test]
-fn variable_count_must_be_the_last_binding() {
+fn variable_count_must_be_the_last_and_highest_binding() {
     let instance = NullInstance::tier_a();
     let device = open(&instance);
-    let trailing = BindGroupLayoutEntry {
-        binding: 1,
+    let plain = BindGroupLayoutEntry {
+        binding: 0,
         visibility: ShaderStages::FRAGMENT,
         kind: BindingKind::Sampler,
         count: 4,
         flags: crate::BindingFlags::empty(),
     };
     let bindless = BindGroupLayoutEntry {
-        binding: 0,
+        binding: 1,
         visibility: ShaderStages::FRAGMENT,
         kind: BindingKind::SampledImage,
         count: 1 << 16,
@@ -321,18 +325,60 @@ fn variable_count_must_be_the_last_binding() {
     let error = device
         .create_bind_group_layout(&BindGroupLayoutDesc {
             label: None,
-            entries: &[bindless, trailing],
+            entries: &[bindless, plain],
         })
         .expect_err("VARIABLE_COUNT must come last");
     assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+
+    // Last in the slice but *not* the highest binding number: Vulkan refuses
+    // this, and the null backend used to accept it.
+    let error = device
+        .create_bind_group_layout(&BindGroupLayoutDesc {
+            label: None,
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 7,
+                    ..plain
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    ..bindless
+                },
+            ],
+        })
+        .expect_err("VARIABLE_COUNT must be the highest binding number");
+    assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+
     assert!(
         device
             .create_bind_group_layout(&BindGroupLayoutDesc {
                 label: None,
-                entries: &[trailing, bindless],
+                entries: &[plain, bindless],
             })
             .is_ok()
     );
+}
+
+/// A duplicated binding number is a caller bug `crcbl-vk` names and the null
+/// backend used to wave through.
+#[test]
+fn a_duplicated_binding_number_is_refused() {
+    let instance = NullInstance::tier_a();
+    let device = open(&instance);
+    let entry = BindGroupLayoutEntry {
+        binding: 3,
+        visibility: ShaderStages::FRAGMENT,
+        kind: BindingKind::Sampler,
+        count: 1,
+        flags: crate::BindingFlags::empty(),
+    };
+    let error = device
+        .create_bind_group_layout(&BindGroupLayoutDesc {
+            label: None,
+            entries: &[entry, entry],
+        })
+        .expect_err("binding 3 twice");
+    assert!(error.to_string().contains("twice"), "{error}");
 }
 
 /// Tier A gets binary acquire/present semaphores; Tier B, modelling WebGPU's
@@ -664,7 +710,17 @@ fn scope_violations_are_recorded() {
         4,
         0,
     );
-    let _ = encoder.finish().expect("the null backend always finishes");
+    // An unclosed pass is the one violation that is *also* an `Err`: the seam's
+    // `finish` doc names it and `crcbl-vk` returns one, because
+    // `vkEndCommandBuffer` inside a rendering scope is itself illegal. Every
+    // other violation above is recorded and carried past.
+    let error = encoder
+        .finish()
+        .expect_err("a pass left open must fail the finish, not just be recorded");
+    assert!(
+        error.to_string().contains("still open"),
+        "{error}: the error must name the unclosed pass"
+    );
 
     let errors = recorder.validation_errors();
     assert!(
@@ -973,6 +1029,7 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
         }],
         depth_stencil_attachment: Some(crate::DepthStencilAttachment {
             view: depth_view,
+            read_only: false,
             depth_load: LoadOp::Clear,
             depth_store: StoreOp::Store,
             stencil_load: LoadOp::DontCare,
@@ -1620,4 +1677,429 @@ fn a_readback_may_name_an_explicit_completion_point() {
 
     device.destroy_readback(request);
     device.destroy_buffer(buffer);
+}
+
+// --- validation the null backend used to skip --------------------------------
+//
+// The null backend is documented as the reference validator the graph suite
+// runs against, so anything it accepts that `crcbl-vk` rejects lets CI
+// green-light a command stream Vulkan refuses. These pin the gaps closed.
+
+/// A bind group must be checked against the layout it claims to conform to:
+/// the binding must exist, the array index must be inside it, and the resource
+/// must be the right *kind*. None of that used to happen here.
+#[test]
+fn a_bind_group_is_checked_against_its_layout() {
+    let instance = NullInstance::tier_a();
+    let device = open(&instance);
+
+    let layout = device
+        .create_bind_group_layout(&BindGroupLayoutDesc {
+            label: Some("frame"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::ALL,
+                kind: BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 2,
+                flags: crate::BindingFlags::empty(),
+            }],
+        })
+        .expect("set layout");
+    let buffer = device
+        .create_buffer(&BufferDesc {
+            label: None,
+            size: 64,
+            usage: crate::BufferUsage::STORAGE,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("buffer");
+    let sampler = device
+        .create_sampler(&crate::SamplerDesc::default())
+        .expect("sampler");
+
+    let entry = |binding, array_index, resource| BindGroupEntry {
+        binding,
+        array_index,
+        resource,
+    };
+    fn group<'a>(
+        layout: crate::BindGroupLayoutHandle,
+        entries: &'a [BindGroupEntry],
+    ) -> BindGroupDesc<'a> {
+        BindGroupDesc {
+            label: None,
+            layout,
+            entries,
+            variable_count: None,
+        }
+    }
+
+    device
+        .create_bind_group(&group(
+            layout,
+            &[entry(0, 1, crate::BindingResource::whole_buffer(buffer))],
+        ))
+        .expect("index 1 of a two-element binding is in range");
+
+    let error = device
+        .create_bind_group(&group(
+            layout,
+            &[entry(7, 0, crate::BindingResource::whole_buffer(buffer))],
+        ))
+        .expect_err("binding 7 is not declared");
+    assert!(error.to_string().contains("does not declare"), "{error}");
+
+    let error = device
+        .create_bind_group(&group(
+            layout,
+            &[entry(0, 2, crate::BindingResource::whole_buffer(buffer))],
+        ))
+        .expect_err("index 2 of a two-element binding is out of range");
+    assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+
+    let error = device
+        .create_bind_group(&group(
+            layout,
+            &[entry(0, 0, crate::BindingResource::Sampler(sampler))],
+        ))
+        .expect_err("a sampler cannot fill a storage-buffer binding");
+    assert!(error.to_string().contains('0'), "{error}");
+}
+
+/// `update_bind_group` on a layout without `UPDATE_AFTER_BIND` is the error
+/// `Device::update_bind_group` promises, and `crcbl-vk` produces. The null
+/// backend used to accept it, which made the doc untestable.
+#[test]
+fn updating_a_group_without_update_after_bind_is_refused() {
+    let instance = NullInstance::tier_a();
+    let device = open(&instance);
+    let slot = |flags| BindGroupLayoutEntry {
+        binding: 0,
+        visibility: ShaderStages::ALL,
+        kind: BindingKind::SampledImage,
+        count: 1,
+        flags,
+    };
+
+    let plain = device
+        .create_bind_group_layout(&BindGroupLayoutDesc {
+            label: None,
+            entries: &[slot(crate::BindingFlags::empty())],
+        })
+        .expect("layout");
+    let plain_group = device
+        .create_bind_group(&BindGroupDesc {
+            label: None,
+            layout: plain,
+            entries: &[],
+            variable_count: None,
+        })
+        .expect("group");
+    let error = device
+        .update_bind_group(plain_group, &[])
+        .expect_err("no UPDATE_AFTER_BIND");
+    assert!(matches!(error, HalError::Unsupported { .. }), "{error:?}");
+
+    let bindless = device
+        .create_bind_group_layout(&BindGroupLayoutDesc {
+            label: None,
+            entries: &[slot(crate::BindingFlags::UPDATE_AFTER_BIND)],
+        })
+        .expect("layout");
+    let bindless_group = device
+        .create_bind_group(&BindGroupDesc {
+            label: None,
+            layout: bindless,
+            entries: &[],
+            variable_count: None,
+        })
+        .expect("group");
+    device
+        .update_bind_group(bindless_group, &[])
+        .expect("UPDATE_AFTER_BIND is what the flag is for");
+}
+
+/// `PushConstantRange { offset: u32::MAX, size: 1 }` panicked in debug and
+/// wrapped to `0` in release — which then *passed* the limit check it was
+/// supposed to fail.
+#[test]
+fn a_push_constant_range_that_overflows_is_refused_not_wrapped() {
+    let instance = NullInstance::tier_a();
+    let device = open(&instance);
+    let error = device
+        .create_pipeline_layout(&PipelineLayoutDesc {
+            label: None,
+            bind_group_layouts: &[],
+            push_constants: Some(PushConstantRange {
+                stages: ShaderStages::ALL,
+                offset: u32::MAX,
+                size: 1,
+            }),
+        })
+        .expect_err("the range ends past every possible budget");
+    assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+}
+
+/// The range check `Device::query_results` documents, which was impossible
+/// before: `first_query` was ignored and the set's size was never stored.
+#[test]
+fn query_results_are_bounded_by_the_sets_size() {
+    let instance = NullInstance::tier_a();
+    let device = open(&instance);
+    let set = device
+        .create_query_set(&QuerySetDesc {
+            label: Some("timers"),
+            kind: QueryKind::Timestamp,
+            count: 4,
+        })
+        .expect("query set");
+
+    let mut out = [1u64; 2];
+    device
+        .query_results(set, 2, &mut out)
+        .expect("2..4 is inside a four-query set");
+    assert_eq!(out, [0, 0], "a device with no timestamps reports zeros");
+
+    let error = device
+        .query_results(set, 3, &mut out)
+        .expect_err("3..5 runs off the end");
+    assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+}
+
+/// Image validation used to compare `max(width, height)` against
+/// `max_image_2d` for every image type, leaving `max_image_3d` read by nothing,
+/// a volume's depth checked against nothing, and `samples` unvalidated.
+#[test]
+fn images_are_validated_per_type_and_sample_count() {
+    let instance = NullInstance::tier_a();
+    let device = open(&instance);
+    let limits = device.caps().limits;
+    let base = ImageDesc {
+        label: None,
+        image_type: ImageType::D3,
+        extent: crate::Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_layers: limits.max_image_3d + 1,
+        },
+        format: Format::Rgba8Unorm,
+        mip_levels: 1,
+        samples: 1,
+        usage: ImageUsage::SAMPLED,
+        memory: MemoryLocation::DeviceLocal,
+    };
+
+    let error = device
+        .create_image(&base)
+        .expect_err("a volume's depth is bounded by max_image_3d");
+    assert!(error.to_string().contains("max_image_3d"), "{error}");
+
+    let legal_extent = crate::Extent3d {
+        width: 4,
+        height: 4,
+        depth_or_layers: 4,
+    };
+    device
+        .create_image(&ImageDesc {
+            extent: legal_extent,
+            ..base
+        })
+        .expect("a 4x4x4 volume is fine");
+
+    // A sample count is a mask underneath, so `3` is `TYPE_1 | TYPE_2`.
+    let error = device
+        .create_image(&ImageDesc {
+            extent: legal_extent,
+            samples: 3,
+            ..base
+        })
+        .expect_err("3 is not a power of two");
+    assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+    let error = device
+        .create_image(&ImageDesc {
+            extent: legal_extent,
+            samples: limits.max_sample_count * 2,
+            ..base
+        })
+        .expect_err("past the device's ceiling");
+    assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+
+    // An image nothing may ever do anything with is a caller bug.
+    let error = device
+        .create_image(&ImageDesc {
+            extent: legal_extent,
+            usage: ImageUsage::empty(),
+            ..base
+        })
+        .expect_err("no usage flags");
+    assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+
+    // A volume's depth joins the mip chain; a 4x4x4 one has three levels.
+    let error = device
+        .create_image(&ImageDesc {
+            extent: legal_extent,
+            mip_levels: 4,
+            ..base
+        })
+        .expect_err("a 4x4x4 volume has three mip levels, not four");
+    assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+}
+
+/// Obligation 3 covers queues too. `submit`, `present` and
+/// `create_command_encoder` used to ignore the queue argument entirely, so
+/// another device's handle — synthesised from the kind index alone, and
+/// therefore *identical* — submitted happily.
+#[test]
+fn a_queue_from_another_device_is_foreign() {
+    let (recorder, instance) = boxed(NullInstance::tier_a());
+    let first = open(instance.as_ref());
+    let second = open(instance.as_ref());
+
+    let mine = first.queue(QueueKind::Graphics).expect("queue");
+    let theirs = second.queue(QueueKind::Graphics).expect("queue");
+    assert_ne!(
+        mine, theirs,
+        "two devices must not synthesise the same queue handle"
+    );
+
+    let error = first
+        .submit(theirs, &SubmitInfo::new(&[]))
+        .expect_err("that queue belongs to the other device");
+    assert!(
+        matches!(error, HalError::ForeignObject { kind: "queue", .. }),
+        "{error:?}"
+    );
+
+    // An encoder created against a foreign queue reports it at `finish`, where
+    // there is an error path — `create_command_encoder` has none.
+    let encoder = first.create_command_encoder(&CommandEncoderDesc {
+        label: None,
+        queue: theirs,
+    });
+    let error = encoder.finish().expect_err("foreign queue");
+    assert!(
+        matches!(error, HalError::ForeignObject { kind: "queue", .. }),
+        "{error:?}"
+    );
+
+    // The device's own queue still works.
+    first.submit(mine, &SubmitInfo::new(&[])).expect("submit");
+    let _ = recorder;
+}
+
+/// A rejected poll must not consume one of the simulated latency's polls: the
+/// caller would otherwise observe a shorter latency than it configured, which
+/// makes the latency it is being tested against a lie.
+#[test]
+fn a_rejected_poll_does_not_advance_the_simulated_readback() {
+    let (recorder, instance) = boxed(NullInstance::tier_a());
+    let device = open(instance.as_ref());
+    recorder.set_readback_latency(2);
+
+    let buffer = device
+        .create_buffer(&BufferDesc {
+            label: None,
+            size: 8,
+            usage: crate::BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("buffer");
+    let readback = device
+        .request_readback(&ReadbackDesc {
+            label: None,
+            buffer,
+            offset: 0,
+            size: 8,
+            after: None,
+        })
+        .expect("readback");
+
+    // Three polls with the wrong slice length. Each must be rejected and change
+    // nothing.
+    let mut wrong = [0u8; 4];
+    for _ in 0..3 {
+        let error = device
+            .poll_readback(readback, &mut wrong)
+            .expect_err("the slice is the wrong length");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+    }
+
+    let mut right = [0u8; 8];
+    for poll in 0..2 {
+        assert_eq!(
+            device.poll_readback(readback, &mut right).expect("poll"),
+            ReadbackState::Pending,
+            "poll {poll} must still be pending: the configured latency is 2"
+        );
+    }
+    assert_eq!(
+        device.poll_readback(readback, &mut right).expect("poll"),
+        ReadbackState::Ready
+    );
+}
+
+/// `SwapchainDesc::format` must be one of `SurfaceCaps::formats`, and the ring
+/// size must be clamped to the min/max the same backend reports.
+#[test]
+fn a_swapchain_format_must_be_one_the_surface_offers() {
+    let instance = NullInstance::tier_a();
+    let device = open(&instance);
+    // SAFETY: `Offscreen` names no platform object.
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
+    let caps = instance
+        .surface_caps(surface, AdapterId(0))
+        .expect("surface caps");
+
+    let desc = |format| SwapchainDesc {
+        label: None,
+        surface,
+        format,
+        extent: (64, 48),
+        image_count: 99,
+        present_mode: PresentMode::Fifo,
+        composite_alpha: CompositeAlpha::Opaque,
+    };
+
+    let error = device
+        .create_swapchain(&desc(Format::D32Float))
+        .expect_err("no surface presents a depth format");
+    assert!(
+        matches!(error, SurfaceError::Hal(HalError::InvalidDescriptor(_))),
+        "{error:?}"
+    );
+
+    let swapchain = device
+        .create_swapchain(&desc(caps.formats[0]))
+        .expect("a reported format is accepted");
+
+    // 99 images is clamped to the reported maximum, not to a literal that
+    // happens to agree with it.
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..(caps.max_image_count + 1) {
+        let frame = device
+            .acquire_next_frame(swapchain)
+            .expect("the ring hands out images");
+        seen.insert(frame.image);
+        device
+            .present(
+                device.queue(QueueKind::Graphics).expect("queue"),
+                &PresentInfo {
+                    swapchain,
+                    waits: &[],
+                },
+            )
+            .expect("present");
+    }
+    assert!(
+        seen.len() as u32 <= caps.max_image_count,
+        "the ring must hold at most {} images, saw {}",
+        caps.max_image_count,
+        seen.len()
+    );
+
+    device.destroy_swapchain(swapchain);
+    instance.destroy_surface(surface);
 }

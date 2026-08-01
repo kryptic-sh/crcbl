@@ -198,8 +198,14 @@ pub fn subresource_range(range: ImageSubresourceRange) -> vk::ImageSubresourceRa
 ///
 /// `TRANSFER_DST` is added unconditionally: every buffer in this engine is
 /// eventually written by a staging copy or a `fill_buffer`, and the flag costs
-/// nothing on any driver. `DEVICE_ADDRESS` additionally implies
-/// `SHADER_DEVICE_ADDRESS`, which the device must have enabled.
+/// nothing on any driver. That is also what covers
+/// [`BufferUsage::QUERY_RESOLVE`](crcbl_hal::BufferUsage::QUERY_RESOLVE), which
+/// has no arm of its own below — `vkCmdCopyQueryPoolResults` requires exactly
+/// `TRANSFER_DST` and nothing more, so the flag is already present. Stated
+/// rather than left as a silently-ignored variant.
+///
+/// `DEVICE_ADDRESS` additionally implies `SHADER_DEVICE_ADDRESS`, which the
+/// device must have enabled.
 #[must_use]
 pub fn buffer_usage(usage: crcbl_hal::BufferUsage) -> vk::BufferUsageFlags {
     use crcbl_hal::BufferUsage as U;
@@ -634,8 +640,13 @@ pub fn state_masks(state: ResourceState) -> StateMasks {
             A::DEPTH_STENCIL_ATTACHMENT_READ | A::DEPTH_STENCIL_ATTACHMENT_WRITE,
             L::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         ),
+        // `FRAGMENT_SHADER` used to be in this mask with no shader access bit
+        // beside it, which synchronises against a stage that cannot touch the
+        // resource: harmless over-sync, and wrong the day P7 samples the depth
+        // buffer, because the *right* answer then is `ShaderRead`, not a
+        // depth-attachment state with a shader stage bolted on.
         ResourceState::DepthStencilRead => (
-            S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS | S::FRAGMENT_SHADER,
+            S::EARLY_FRAGMENT_TESTS | S::LATE_FRAGMENT_TESTS,
             A::DEPTH_STENCIL_ATTACHMENT_READ,
             L::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
         ),

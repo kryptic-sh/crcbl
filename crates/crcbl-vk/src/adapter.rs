@@ -271,6 +271,7 @@ pub(crate) fn limits_of(
             0
         },
         max_color_attachments: limits.max_color_attachments,
+        max_sample_count: common_sample_count(limits),
         max_draw_indirect_count: if features.contains(Features::DRAW_INDIRECT_COUNT) {
             limits.max_draw_indirect_count
         } else {
@@ -299,6 +300,29 @@ pub(crate) fn limits_of(
     }
 }
 
+/// The highest sample count usable for **both** a colour and a depth
+/// attachment.
+///
+/// Vulkan reports a separate mask per attachment kind and they genuinely
+/// differ; the seam has one number, so the honest one is the intersection —
+/// a caller told "8" for colour and handed a 4x-only depth format has been
+/// lied to. Always a power of two, and never below 1: a driver reporting an
+/// empty mask is confused rather than authoritative, and every device supports
+/// one sample.
+#[must_use]
+fn common_sample_count(limits: &vk::PhysicalDeviceLimits) -> u32 {
+    let common = limits.framebuffer_color_sample_counts.as_raw()
+        & limits.framebuffer_depth_sample_counts.as_raw()
+        & limits.sampled_image_color_sample_counts.as_raw();
+    // `VkSampleCountFlagBits` is `1 << log2(samples)`, so the highest set bit
+    // *is* the count.
+    if common == 0 {
+        1
+    } else {
+        (1u32 << (31 - common.leading_zeros())).min(64)
+    }
+}
+
 /// Enumerates every physical device the instance can see.
 ///
 /// Discrete devices are listed first (`docs/plan/02-vulkan-backend.md` §2.1:
@@ -319,14 +343,24 @@ pub(crate) fn enumerate(instance: &ash::Instance, debug_utils: bool) -> Vec<Adap
         .map(|physical| describe(instance, physical, debug_utils))
         .collect();
 
-    records.sort_by_key(|record| match record.info.device_type {
-        DeviceType::Discrete => 0,
-        DeviceType::Integrated => 1,
-        DeviceType::Virtual => 2,
-        DeviceType::Other => 3,
-        // Last, always: a software rasteriser is correct and slow, and picking
-        // it by accident on a machine with a GPU looks like a performance bug.
-        DeviceType::Cpu => 4,
+    // **Openability first, speed second.** The crate docs say `apps/sandbox`
+    // takes `adapters()[0]` blind, so an adapter this backend cannot open must
+    // never be first — and sorting on device type alone put an unopenable
+    // discrete GPU ahead of a perfectly good integrated one, which surfaces as
+    // "crcbl refuses to start on this laptop".
+    records.sort_by_key(|record| {
+        let openable = u8::from(!record.core_1_3.is_complete());
+        let speed = match record.info.device_type {
+            DeviceType::Discrete => 0,
+            DeviceType::Integrated => 1,
+            DeviceType::Virtual => 2,
+            DeviceType::Other => 3,
+            // Last among openable ones: a software rasteriser is correct and
+            // slow, and picking it by accident on a machine with a GPU looks
+            // like a performance bug.
+            DeviceType::Cpu => 4,
+        };
+        (openable, speed)
     });
     for (index, record) in records.iter_mut().enumerate() {
         #[allow(clippy::cast_possible_truncation)]
@@ -352,10 +386,17 @@ fn describe(
     let mut vulkan_1_1 = vk::PhysicalDeviceVulkan11Features::default();
     let mut vulkan_1_2 = vk::PhysicalDeviceVulkan12Features::default();
     let mut vulkan_1_3 = vk::PhysicalDeviceVulkan13Features::default();
+    // Only chained on a device that has the version defining it. A
+    // `VkPhysicalDeviceVulkan13Features` in the chain of a 1.2 device is not
+    // merely useless — the spec forbids it, and a driver that honours the
+    // prohibition leaves the struct untouched, which reads as "no dynamic
+    // rendering" and happens to be the right answer for the wrong reason.
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut vulkan_1_1)
-        .push_next(&mut vulkan_1_2)
-        .push_next(&mut vulkan_1_3);
+        .push_next(&mut vulkan_1_2);
+    if properties.api_version >= vk::API_VERSION_1_3 {
+        features2 = features2.push_next(&mut vulkan_1_3);
+    }
     // SAFETY: as above.
     unsafe { instance.get_physical_device_features2(physical, &mut features2) };
 
@@ -427,6 +468,37 @@ fn describe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The seam has one sample-count ceiling and Vulkan reports three masks, so
+    /// the honest answer is their intersection: a caller told "8" for colour
+    /// and handed a 4x-only depth format has been lied to.
+    #[test]
+    fn the_sample_count_ceiling_is_the_intersection_of_the_masks() {
+        let mut limits = vk::PhysicalDeviceLimits {
+            framebuffer_color_sample_counts: vk::SampleCountFlags::TYPE_1
+                | vk::SampleCountFlags::TYPE_2
+                | vk::SampleCountFlags::TYPE_4
+                | vk::SampleCountFlags::TYPE_8,
+            framebuffer_depth_sample_counts: vk::SampleCountFlags::TYPE_1
+                | vk::SampleCountFlags::TYPE_2
+                | vk::SampleCountFlags::TYPE_4,
+            sampled_image_color_sample_counts: vk::SampleCountFlags::TYPE_1
+                | vk::SampleCountFlags::TYPE_2
+                | vk::SampleCountFlags::TYPE_4
+                | vk::SampleCountFlags::TYPE_8,
+            ..Default::default()
+        };
+        assert_eq!(common_sample_count(&limits), 4, "depth is the binding one");
+
+        limits.framebuffer_depth_sample_counts = limits.framebuffer_color_sample_counts;
+        assert_eq!(common_sample_count(&limits), 8);
+
+        // A driver reporting nothing at all is confused, not authoritative;
+        // every device supports one sample.
+        limits.framebuffer_color_sample_counts = vk::SampleCountFlags::empty();
+        assert_eq!(common_sample_count(&limits), 1);
+    }
+
     use crcbl_hal::RendererTier;
 
     fn family(flags: vk::QueueFlags, count: u32) -> vk::QueueFamilyProperties {

@@ -284,6 +284,7 @@ fn render(frame: &Frame) {
             clear: ClearValue::color([0.0, 0.0, 0.0, 1.0]),
         }],
         depth_stencil_attachment: Some(DepthStencilAttachment {
+            read_only: false,
             view: frame.depth_view,
             depth_load: LoadOp::Clear,
             depth_store: StoreOp::Store,
@@ -471,7 +472,7 @@ fn a_full_setup_and_teardown_leaks_nothing() {
                 image_type: ImageType::D2,
                 extent: Extent3d::d2(16, 16),
                 format: Format::Rgba8Unorm,
-                mip_levels: Extent3d::d2(16, 16).full_mip_levels(),
+                mip_levels: Extent3d::d2(16, 16).full_mip_levels(ImageType::D2),
                 samples: 1,
                 usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
                 memory: MemoryLocation::DeviceLocal,

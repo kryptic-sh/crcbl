@@ -286,12 +286,52 @@ unsafe extern "system" fn messenger_callback(
     callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
     user_data: *mut c_void,
 ) -> vk::Bool32 {
+    // **Nothing may unwind out of here.** This is an `extern "system"` frame
+    // the *driver* called; a panic crossing it is undefined behaviour, and the
+    // runtime's answer is to abort the process. That is not hypothetical: the
+    // body below allocates two `String`s and then dispatches into whatever
+    // `log` backend the application installed, which is arbitrary third-party
+    // code running on a driver thread. A logger that panics — a poisoned mutex,
+    // a full channel, a `write!` to a closed pipe — would take the process down
+    // from inside `vkQueueSubmit`, with a backtrace pointing at the driver.
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: discharged by this function's own contract, unchanged.
+        unsafe { messenger_body(severity, kinds, callback_data, user_data) };
+    }));
+    if caught.is_err() {
+        // Deliberately not `log`: the logger is the prime suspect. `eprintln!`
+        // can itself panic on a closed stderr, so even that is guarded.
+        let _ = std::panic::catch_unwind(|| {
+            eprintln!(
+                "crcbl-vk: a panic escaped the Vulkan debug messenger callback and was \
+                 contained; the validation message it was reporting is lost"
+            );
+        });
+    }
+    // The spec requires `VK_FALSE` from an application callback: `VK_TRUE`
+    // aborts the offending call, which turns every warning into a crash.
+    vk::FALSE
+}
+
+/// The messenger's actual work, called only from inside a [`catch_unwind`].
+///
+/// # Safety
+///
+/// As [`messenger_callback`].
+///
+/// [`catch_unwind`]: std::panic::catch_unwind
+unsafe fn messenger_body(
+    severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+    kinds: vk::DebugUtilsMessageTypeFlagsEXT,
+    callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
+    user_data: *mut c_void,
+) {
     // SAFETY: the loader guarantees `callback_data` is a live, fully populated
     // struct for the duration of the call. A null pointer would be a loader
     // bug, and is checked for rather than trusted because this callback runs
     // inside someone else's code and must not fault.
     let Some(data) = (unsafe { callback_data.as_ref() }) else {
-        return vk::FALSE;
+        return;
     };
     // SAFETY: the two `*const c_char` fields are either null or NUL-terminated
     // strings owned by the layer and valid for this call only, which is why
@@ -328,10 +368,6 @@ unsafe extern "system" fn messenger_callback(
         let sink = unsafe { &*user_data.cast::<SinkInner>() };
         sink.record(ValidationMessage { severity, id, text });
     }
-
-    // The spec requires `VK_FALSE` from an application callback: `VK_TRUE`
-    // aborts the offending call, which turns every warning into a crash.
-    vk::FALSE
 }
 
 /// Copies a possibly-null C string into an owned `String`.

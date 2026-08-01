@@ -839,10 +839,12 @@ pub(crate) fn build_surface_caps(
         .filter(|format| format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
         .filter_map(|format| conv::format_from_vk(format.format))
         .collect();
-    mapped.dedup();
     // "Best first", per the seam. sRGB first is what the tonemap pass wants,
     // and stable ordering means two drivers listing the same formats in
-    // different orders pick the same one.
+    // different orders pick the same one. Sorted *before* the dedup, which is
+    // the only order in which `Vec::dedup` — which only ever removes
+    // consecutive equals — deduplicates anything; the pass that used to run
+    // here first was a no-op on an unsorted list.
     mapped.sort_by_key(|format| (!format.is_srgb(), *format));
     mapped.dedup();
 

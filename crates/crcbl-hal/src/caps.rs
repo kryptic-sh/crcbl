@@ -223,6 +223,15 @@ pub struct Limits {
     pub max_push_constant_size: u32,
     /// Colour attachments in one render pass.
     pub max_color_attachments: u32,
+    /// Highest sample count usable for a multisampled image or pipeline.
+    ///
+    /// Always a power of two in `1..=64`: a sample count is a *mask* in every
+    /// API underneath, so `3` is not "three samples", it is `TYPE_1 | TYPE_2`.
+    /// Backends reject a request that is not a power of two, or that exceeds
+    /// this, with [`HalError::InvalidDescriptor`](crate::HalError::InvalidDescriptor)
+    /// — which is the error [`Device::create_image`](crate::Device::create_image)
+    /// documents and which had nowhere to be expressed before this field.
+    pub max_sample_count: u32,
     /// Draws one [`draw_indirect_count`](crate::CommandEncoder::draw_indirect_count)
     /// may emit.
     pub max_draw_indirect_count: u32,
@@ -265,6 +274,8 @@ impl Limits {
             max_bindless_descriptors: 0,
             max_push_constant_size: 0,
             max_color_attachments: 4,
+            // WebGPU's downlevel floor: 1x and 4x, and nothing above.
+            max_sample_count: 4,
             max_draw_indirect_count: 1,
             max_compute_workgroup_size: [256, 256, 64],
             max_compute_invocations_per_workgroup: 256,
@@ -293,6 +304,7 @@ impl Limits {
             max_bindless_descriptors: 500_000,
             max_push_constant_size: 128,
             max_color_attachments: 8,
+            max_sample_count: 8,
             max_draw_indirect_count: 1 << 20,
             max_compute_workgroup_size: [1024, 1024, 64],
             max_compute_invocations_per_workgroup: 1024,
@@ -401,12 +413,18 @@ mod tests {
     }
 
     #[test]
-    fn tier_a_requires_the_documented_four_capabilities() {
-        // Guards the doc table in `docs/plan/03-gpu-driven-rendering.md`.
-        assert!(Features::TIER_A.contains(Features::DESCRIPTOR_INDEXING));
-        assert!(Features::TIER_A.contains(Features::BUFFER_DEVICE_ADDRESS));
-        assert!(Features::TIER_A.contains(Features::DRAW_INDIRECT_COUNT));
-        assert!(Features::TIER_A.contains(Features::COMPUTE));
+    fn tier_a_requires_exactly_the_documented_capabilities() {
+        // Guards the doc table in `docs/plan/03-gpu-driven-rendering.md`. Named
+        // exhaustively, and checked for equality rather than containment: a
+        // feature added to `TIER_A` without a doc update is the thing this
+        // catches, and a `contains` list of a subset never would.
+        let documented = Features::DESCRIPTOR_INDEXING
+            | Features::BUFFER_DEVICE_ADDRESS
+            | Features::DRAW_INDIRECT_COUNT
+            | Features::MULTI_DRAW_INDIRECT
+            | Features::COMPUTE
+            | Features::TIMELINE_SEMAPHORE;
+        assert_eq!(Features::TIER_A, documented);
         // Push constants are NOT part of Tier A: WebGPU lacks them, but so do
         // some Tier A-capable configurations, and the renderer must have a
         // uniform-buffer path regardless.
@@ -435,6 +453,13 @@ mod tests {
         assert!(min.max_image_2d <= desktop.max_image_2d);
         assert!(min.max_bind_groups <= desktop.max_bind_groups);
         assert!(min.max_draw_indirect_count <= desktop.max_draw_indirect_count);
+        assert!(min.max_sample_count <= desktop.max_sample_count);
+        // A sample count is a bit in a mask underneath, so a preset reporting a
+        // non-power-of-two ceiling would make every backend's check nonsense.
+        for limits in [min, desktop] {
+            assert!(limits.max_sample_count.is_power_of_two());
+            assert!(limits.max_sample_count <= 64);
+        }
         // Alignment limits run the other way: the floor is the *coarser* one.
         assert!(
             min.min_uniform_buffer_offset_alignment >= desktop.min_uniform_buffer_offset_alignment

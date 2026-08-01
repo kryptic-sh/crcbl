@@ -108,6 +108,13 @@ pub(crate) struct ImageEntry {
 pub(crate) struct ViewEntry {
     pub(crate) owner: u64,
     pub(crate) raw: vk::ImageView,
+    /// The format the view reinterprets its image as.
+    ///
+    /// Kept because `begin_render_pass` needs it: whether a depth attachment
+    /// gets a `pStencilAttachment` is a property of the **format**, not of the
+    /// stencil ops the caller happened to set, and passing one for a depth-only
+    /// view is a VU violation.
+    pub(crate) format: Format,
     /// Whether a swapchain owns it. The seam hands these out through
     /// [`AcquiredFrame::view`] and nothing above ever destroys one — exactly
     /// the rule the acquire/present semaphores already follow.
@@ -196,9 +203,15 @@ pub(crate) enum Trash {
     /// release is what lets `Instance::destroy_surface` be honoured lazily —
     /// obligation 2.
     ///
-    /// Boxed: it is by far the largest thing that can be parked and by far the
-    /// rarest, so inlining it would pad every buffer and view in the queue up
-    /// to its size.
+    /// **Never parked in the [`RetireQueue`].** It is a `Trash` variant only so
+    /// that one `destroy_trash` covers every kind of object this device owns,
+    /// including the teardown sweeps. [`DeviceInner::retire_swapchain`] builds
+    /// one and destroys it immediately, after idling, because the queue is keyed
+    /// on the submission timeline and `vkQueuePresentKHR` is queue work no
+    /// timeline semaphore signals — see that method.
+    ///
+    /// Boxed anyway: it is by far the largest variant, so inlining it would pad
+    /// every buffer and view that *is* parked up to its size.
     Swapchain(Box<TrashSwapchain>),
 }
 
@@ -263,6 +276,9 @@ pub(crate) struct DeviceInner {
     pub(crate) debug_ext: Option<ext::debug_utils::Device>,
     pub(crate) caps: DeviceCaps,
     pub(crate) id: u64,
+    /// This device's stamp on every handle it issues. See the handle-tagging
+    /// section above; never zero.
+    tag: u32,
     memory_properties: vk::PhysicalDeviceMemoryProperties,
     queues: [Option<QueueSlot>; 3],
     pub(crate) state: Mutex<DeviceState>,
@@ -291,14 +307,61 @@ impl core::fmt::Debug for DeviceInner {
     }
 }
 
+// --- handle tagging --------------------------------------------------------
+//
+// **Every object table in this backend is per-device**, and every insert stamps
+// `owner: self.id`. That made `entry.owner() != owner` unreachable and
+// `HalError::ForeignObject` unproducible: obligation 3 was met only by accident,
+// because device B's handle *usually* failed to resolve in device A's pool.
+// Usually is not a guarantee — two devices allocating in step reach the same
+// slot index at the same generation almost immediately, and from that moment
+// device A silently accepts device B's handle and writes, or destroys, its own
+// unrelated object.
+//
+// So the handle carries the issuing device. The top byte of the index half is
+// the device's tag; the rest is the pool's own index, restored before any
+// lookup. The generation half is left alone, so `Pool`'s generation-exhaustion
+// rule is untouched.
+
+/// Bits of a handle's index half given over to the owning device's tag.
+const DEVICE_TAG_SHIFT: u32 = 24;
+/// The part of a handle's index half that is the pool's own index.
+const POOL_INDEX_MASK: u32 = (1 << DEVICE_TAG_SHIFT) - 1;
+/// How many distinct device tags exist. Tag `0` is reserved for "nobody", so a
+/// hand-made or un-stamped handle is foreign to every device.
+const DEVICE_TAG_COUNT: u64 = (u32::MAX >> DEVICE_TAG_SHIFT) as u64;
+
+/// The tag a device with this owner id stamps into its handles. Never zero.
+fn device_tag(id: u64) -> u32 {
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        1 + (id % DEVICE_TAG_COUNT) as u32
+    }
+}
+
+/// The device tag a handle carries, or `0` if it carries none.
+const fn handle_tag<M>(handle: Handle<M>) -> u32 {
+    handle.index() >> DEVICE_TAG_SHIFT
+}
+
+/// Strips the device tag, recovering the pool's own handle.
+fn untag<A, B>(handle: Handle<A>) -> Handle<B> {
+    Handle::from_bits(
+        (u64::from(handle.generation()) << 32) | u64::from(handle.index() & POOL_INDEX_MASK),
+    )
+    .unwrap_or_else(|| unreachable!("a handle's generation is never zero"))
+}
+
 /// Deterministic queue handles.
 ///
 /// Queues are not pooled: they live for the device's lifetime and carry no
-/// state a caller can hold. Synthesising the handle from the kind's index means
-/// [`Device::queue`] is a pure function, exactly as it is in `crcbl-hal`'s null
-/// backend.
-fn queue_handle(kind: QueueKind) -> QueueHandle {
-    Handle::from_bits((1u64 << 32) | queue_index(kind) as u64)
+/// state a caller can hold, so [`Device::queue`] stays a pure function. The
+/// device's tag rides in the same place it does on a pooled handle, because
+/// obligation 3 covers queues too — a `QueueHandle` synthesised from the kind
+/// index alone carried no device identity at all, so every device accepted
+/// every other device's.
+fn queue_handle(tag: u32, kind: QueueKind) -> QueueHandle {
+    Handle::from_bits((1u64 << 32) | u64::from((tag << DEVICE_TAG_SHIFT) | queue_index(kind)))
         .unwrap_or_else(|| unreachable!("generation 1 is non-zero"))
 }
 
@@ -324,19 +387,37 @@ impl VkDevice {
         &self.inner
     }
 
+    /// Removes a handle this device owns and parks its driver object.
+    ///
+    /// Eleven `destroy_*` bodies differed only in which pool they name and
+    /// which [`Trash`] variant they build, and all eleven had the same bug:
+    /// `pool.remove` first, `entry.owner != id` afterwards. By then the row was
+    /// gone and the entry dropped, so the driver object leaked — and a foreign
+    /// handle that happened to resolve destroyed this device's own unrelated
+    /// object. One place to get the order right is one place to keep it right.
+    fn retire_from<E: Owned, M>(
+        &self,
+        pool: impl FnOnce(&mut DeviceState) -> &mut Pool<E>,
+        handle: Handle<M>,
+        to_trash: impl FnOnce(E) -> Trash,
+    ) {
+        let mut state = self.inner.state();
+        let Some(entry) = take_owned(pool(&mut state), handle, &self.inner) else {
+            return;
+        };
+        self.inner.park(&mut state, to_trash(entry));
+    }
+
     /// Retires a graphics or compute pipeline.
     ///
     /// One body for both, because `GraphicsPipeline` and `ComputePipeline` are
     /// distinct marker types above the seam and the same `VkPipeline` below it.
     fn destroy_pipeline_handle(&self, pipeline: Handle<crcbl_hal::GraphicsPipeline>) {
-        let mut state = self.inner.state();
-        let Some(entry) = state.pipelines.remove(pipeline.cast()) else {
-            return;
-        };
-        if entry.owner != self.inner.id {
-            return;
-        }
-        self.inner.park(&mut state, Trash::Pipeline(entry.raw));
+        self.retire_from(
+            |state| &mut state.pipelines,
+            pipeline,
+            |entry| Trash::Pipeline(entry.raw),
+        );
     }
 
     pub(crate) fn open(
@@ -524,6 +605,7 @@ impl VkDevice {
                 .get_physical_device_memory_properties(record.physical)
         };
 
+        let id = next_owner_id();
         let inner = Arc::new(DeviceInner {
             instance,
             raw,
@@ -534,7 +616,8 @@ impl VkDevice {
                 features: granted,
                 limits: record.info.caps.limits,
             },
-            id: next_owner_id(),
+            id,
+            tag: device_tag(id),
             memory_properties,
             queues,
             state: Mutex::new(DeviceState::default()),
@@ -562,6 +645,33 @@ impl DeviceInner {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Stamps this device's tag into a handle its pools just issued.
+    ///
+    /// Every handle that crosses the seam goes through here; every handle that
+    /// comes back goes through [`local_handle`]. A pool index too large to
+    /// carry the tag gets tag `0` instead, which resolves nowhere — the object
+    /// leaks until teardown, which is far better than a handle that might
+    /// resolve to the wrong device's object. It takes 16 777 216 live objects
+    /// of one kind on one device to reach.
+    pub(crate) fn stamp<A, B>(&self, handle: Handle<A>) -> Handle<B> {
+        let index = handle.index();
+        let tag = if index > POOL_INDEX_MASK {
+            log::error!(
+                "crcbl-vk: pool index {index} is too large to carry a device tag; issuing a \
+                 handle that resolves nowhere rather than one that might resolve to another \
+                 device's object"
+            );
+            0
+        } else {
+            self.tag
+        };
+        Handle::from_bits(
+            (u64::from(handle.generation()) << 32)
+                | u64::from((index & POOL_INDEX_MASK) | (tag << DEVICE_TAG_SHIFT)),
+        )
+        .unwrap_or_else(|| unreachable!("a pool handle's generation is never zero"))
+    }
+
     /// Attaches a debug name, if the instance has `VK_EXT_debug_utils`.
     ///
     /// `docs/plan/02-vulkan-backend.md` §2.1: "names show up in RenderDoc from
@@ -586,8 +696,19 @@ impl DeviceInner {
     }
 
     fn queue_slot(&self, queue: QueueHandle) -> Result<QueueSlot, HalError> {
+        let tag = handle_tag(queue);
+        if tag != self.tag || queue.generation() != 1 {
+            return Err(if tag == 0 || queue.generation() != 1 {
+                HalError::invalid_handle("queue", queue)
+            } else {
+                HalError::ForeignObject {
+                    kind: "queue",
+                    bits: queue.to_bits(),
+                }
+            });
+        }
         self.queues
-            .get(queue.index() as usize)
+            .get((queue.index() & POOL_INDEX_MASK) as usize)
             .copied()
             .flatten()
             .ok_or_else(|| HalError::invalid_handle("queue", queue))
@@ -605,7 +726,7 @@ impl DeviceInner {
         state: &DeviceState,
         handle: BufferHandle,
     ) -> Result<vk::Buffer, HalError> {
-        lookup(&state.buffers, "buffer", handle, self.id).map(|entry| entry.raw)
+        lookup(&state.buffers, "buffer", handle, self).map(|entry| entry.raw)
     }
 
     /// Resolves an image handle, returning its format too — the encoder needs
@@ -615,16 +736,17 @@ impl DeviceInner {
         state: &DeviceState,
         handle: ImageHandle,
     ) -> Result<(vk::Image, Format), HalError> {
-        lookup(&state.images, "image", handle, self.id).map(|entry| (entry.raw, entry.format))
+        lookup(&state.images, "image", handle, self).map(|entry| (entry.raw, entry.format))
     }
 
-    /// Resolves an image-view handle.
+    /// Resolves an image-view handle, returning its format too — the encoder
+    /// needs it to decide whether a depth attachment has a stencil plane.
     pub(crate) fn view_raw(
         &self,
         state: &DeviceState,
         handle: ImageViewHandle,
-    ) -> Result<vk::ImageView, HalError> {
-        lookup(&state.views, "image view", handle, self.id).map(|entry| entry.raw)
+    ) -> Result<(vk::ImageView, Format), HalError> {
+        lookup(&state.views, "image view", handle, self).map(|entry| (entry.raw, entry.format))
     }
 
     /// Resolves a query-set handle.
@@ -633,7 +755,7 @@ impl DeviceInner {
         state: &DeviceState,
         handle: QuerySetHandle,
     ) -> Result<(vk::QueryPool, QueryKind), HalError> {
-        lookup(&state.query_sets, "query set", handle, self.id).map(|entry| (entry.raw, entry.kind))
+        lookup(&state.query_sets, "query set", handle, self).map(|entry| (entry.raw, entry.kind))
     }
 
     /// The submission counter's current value: the retirement key for anything
@@ -643,11 +765,29 @@ impl DeviceInner {
     }
 
     /// Reads the retire timeline and frees whatever the GPU has finished with.
+    ///
+    /// A failed read is **reported**, not swallowed. `ERROR_DEVICE_LOST` and
+    /// "nothing has retired yet" produce the same control flow here, so a
+    /// silent `return` made a lost device look like an idle one: the queue
+    /// stops draining and the symptom that eventually surfaces is a slow leak
+    /// rather than the device loss that caused it. Nothing above can act on it
+    /// mid-poll — the callers that can are `submit`, `poll_readback` and
+    /// `wait_semaphores`, which all report the same failure themselves — so
+    /// this logs and returns.
     pub(crate) fn poll_retire(&self, state: &mut DeviceState) {
         // SAFETY: `retire_timeline` is a live timeline semaphore of this device.
         let completed = unsafe { self.raw.get_semaphore_counter_value(self.retire_timeline) };
-        let Ok(completed) = completed else {
-            return;
+        let completed = match completed {
+            Ok(completed) => completed,
+            Err(error) => {
+                log::error!(
+                    "crcbl-vk: vkGetSemaphoreCounterValue on the retire timeline failed \
+                     ({error:?}); {} object(s) stay parked and nothing will be freed until it \
+                     succeeds",
+                    state.trash.pending()
+                );
+                return;
+            }
         };
         let raw = &self.raw;
         let swapchain_ext = &self.swapchain_ext;
@@ -688,7 +828,21 @@ impl DeviceInner {
     /// So this waits. A full device idle per resize is heavy and rare, and it
     /// is the boring correct answer; `VK_EXT_swapchain_maintenance1`'s present
     /// fences are the surgical one, and belong with the frame ring at P1.3.
+    ///
+    /// # `vkDeviceWaitIdle` is not enough, and this is the sequence that proves
+    /// it
+    ///
+    /// **A pending `vkAcquireNextImageKHR` is not queue work**, so idling the
+    /// device does not complete it. The ordinary shape of a resize is `acquire
+    /// → resize event arrives → reconfigure before ever presenting`, and that
+    /// leaves exactly one slot with a fence the presentation engine has not
+    /// signalled and a semaphore with a signal still outstanding. Destroying
+    /// either is `VUID-vkDestroyFence-fence-01120` /
+    /// `VUID-vkDestroySemaphore-semaphore-05149`, and on a real driver it is a
+    /// use-after-free in the WSI layer. [`FrameSync::acquire_armed`] already
+    /// records which slots are outstanding; this waits on those.
     fn retire_swapchain(&self, entry: SwapchainEntry) {
+        self.drain_pending_acquires(entry.sync.as_ref());
         // SAFETY: `raw` is a live device; waiting is always legal.
         let _ = unsafe { self.raw.device_wait_idle() };
         let trash = Trash::Swapchain(Box::new(TrashSwapchain {
@@ -707,24 +861,105 @@ impl DeviceInner {
         unsafe { destroy_trash(&self.raw, &self.swapchain_ext, &self.instance, trash) };
     }
 
+    /// Waits out every acquire this swapchain still has in flight.
+    ///
+    /// Called before the device idle in [`retire_swapchain`](Self::retire_swapchain),
+    /// because idling does not complete an acquire — see that method. A slot is
+    /// only waited on when its previous acquire actually *armed* it: a failed
+    /// `vkAcquireNextImageKHR` signals neither the fence nor the semaphore, so
+    /// an unconditional wait on every slot would block forever.
+    fn drain_pending_acquires(&self, sync: Option<&FrameSync>) {
+        let Some(sync) = sync else {
+            return;
+        };
+        let pending: Vec<vk::Fence> = sync
+            .acquire_fence
+            .iter()
+            .zip(&sync.acquire_armed)
+            .filter_map(|(fence, armed)| armed.then_some(*fence))
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        // Bounded rather than `u64::MAX`: a compositor that never returns the
+        // image would otherwise hang the process here with the device lock
+        // released but the caller stuck mid-resize. Five seconds is far beyond
+        // any real acquire, and timing out is loud rather than silent — the
+        // destroy that follows is then a genuine (and reported) risk rather
+        // than a certainty.
+        const ACQUIRE_TIMEOUT_NS: u64 = 5_000_000_000;
+        // SAFETY: every fence named is a live fence of this device, armed by a
+        // successful acquire on this swapchain.
+        let waited = unsafe { self.raw.wait_for_fences(&pending, true, ACQUIRE_TIMEOUT_NS) };
+        if let Err(error) = waited {
+            log::error!(
+                "crcbl-vk: {} acquire fence(s) still pending after 5s while retiring a \
+                 swapchain ({error:?}); destroying them anyway, which the driver may report",
+                pending.len()
+            );
+        }
+    }
+
     /// Allocates a dedicated block for `requirements`.
+    ///
+    /// # Both tiers of the preference, not just the first
+    ///
+    /// [`MemoryRequest`] states a `preferred` set and a `required` one, and
+    /// `find_memory_type` falls back from one to the other when no memory
+    /// *type* matches. That is only half the story: on a discrete GPU without
+    /// resizable BAR, `HostUpload`'s preferred `DEVICE_LOCAL | HOST_VISIBLE`
+    /// type exists and sits on a **256 MB** heap. Once that heap fills,
+    /// `vkAllocateMemory` fails while a plain host-visible type with gigabytes
+    /// free satisfies `required` perfectly well — and the old code reported
+    /// `OutOfDeviceMemory` with the machine barely warm.
+    ///
+    /// So the fallback happens on *allocation* failure too, not only on
+    /// selection failure.
     fn allocate(
         &self,
         requirements: vk::MemoryRequirements,
         location: MemoryLocation,
     ) -> Result<vk::DeviceMemory, HalError> {
-        let index = mem::find_memory_type(
+        let request = MemoryRequest::for_location(location);
+        let preferred = mem::find_memory_type(
             &self.memory_properties,
             requirements.memory_type_bits,
-            MemoryRequest::for_location(location),
-        )
-        .ok_or(HalError::OutOfDeviceMemory)?;
-        let info = vk::MemoryAllocateInfo::default()
-            .allocation_size(requirements.size)
-            .memory_type_index(index);
-        // SAFETY: `info` names a memory type this device reported.
-        unsafe { self.raw.allocate_memory(&info, None) }
-            .map_err(|error| conv::hal_error("vkAllocateMemory", error))
+            request,
+        );
+        let fallback = mem::find_memory_type(
+            &self.memory_properties,
+            requirements.memory_type_bits,
+            MemoryRequest {
+                required: request.required,
+                preferred: request.required,
+            },
+        );
+        let mut candidates: Vec<u32> = Vec::with_capacity(2);
+        candidates.extend(preferred);
+        candidates.extend(fallback.filter(|index| Some(*index) != preferred));
+        if candidates.is_empty() {
+            return Err(HalError::OutOfDeviceMemory);
+        }
+
+        let mut last = HalError::OutOfDeviceMemory;
+        for index in candidates {
+            let info = vk::MemoryAllocateInfo::default()
+                .allocation_size(requirements.size)
+                .memory_type_index(index);
+            // SAFETY: `info` names a memory type this device reported.
+            match unsafe { self.raw.allocate_memory(&info, None) } {
+                Ok(memory) => return Ok(memory),
+                Err(error) => {
+                    log::debug!(
+                        "crcbl-vk: memory type {index} could not satisfy a {} byte \
+                         {location:?} allocation ({error:?})",
+                        requirements.size
+                    );
+                    last = conv::hal_error("vkAllocateMemory", error);
+                }
+            }
+        }
+        Err(last)
     }
 
     /// Creates an image this backend owns, with a dedicated allocation.
@@ -851,12 +1086,12 @@ unsafe fn destroy_trash(
 /// tables — `destroy_image`, `destroy_image_view` and `destroy_semaphore` all
 /// deliberately refuse them. Every path that lets go of a `SwapchainEntry` must
 /// call this, or the rows outlive the objects they name.
-fn forget_swapchain_rows(state: &mut DeviceState, entry: &SwapchainEntry) {
+fn forget_swapchain_rows(inner: &DeviceInner, state: &mut DeviceState, entry: &SwapchainEntry) {
     for handle in &entry.image_handles {
-        state.images.remove(handle.cast());
+        take_owned(&mut state.images, *handle, inner);
     }
     for handle in &entry.view_handles {
-        state.views.remove(handle.cast());
+        take_owned(&mut state.views, *handle, inner);
     }
     for handle in entry
         .sync
@@ -864,19 +1099,45 @@ fn forget_swapchain_rows(state: &mut DeviceState, entry: &SwapchainEntry) {
         .into_iter()
         .flat_map(|sync| sync.acquire_handles.iter().chain(&sync.present_handles))
     {
-        state.semaphores.remove(handle.cast());
+        take_owned(&mut state.semaphores, *handle, inner);
     }
 }
 
-/// Resolves a handle against a pool and an owner.
+/// Decodes a handle for `inner`'s pools, or says why it is not one.
+fn local_handle<E, M>(
+    kind: &'static str,
+    handle: Handle<M>,
+    inner: &DeviceInner,
+) -> Result<Handle<E>, HalError> {
+    let tag = handle_tag(handle);
+    if tag == inner.tag {
+        return Ok(untag(handle));
+    }
+    // Tag zero was never issued by any device — a hand-made handle, or one
+    // whose pool index overflowed the tagged range. Anything else is a real
+    // handle belonging to a real, different device, which is the case
+    // obligation 3 exists for and which this backend could not previously
+    // report at all.
+    Err(if tag == 0 {
+        HalError::invalid_handle(kind, handle)
+    } else {
+        HalError::ForeignObject {
+            kind,
+            bits: handle.to_bits(),
+        }
+    })
+}
+
+/// Resolves a handle against a pool and its owning device.
 pub(crate) fn lookup<'p, E: Owned, M>(
     pool: &'p Pool<E>,
     kind: &'static str,
     handle: Handle<M>,
-    owner: u64,
+    inner: &DeviceInner,
 ) -> Result<&'p E, HalError> {
-    match pool.get(handle.cast()) {
-        Some(entry) if entry.owner() == owner => Ok(entry),
+    let local = local_handle(kind, handle, inner)?;
+    match pool.get(local) {
+        Some(entry) if entry.owner() == inner.id => Ok(entry),
         Some(_) => Err(HalError::ForeignObject {
             kind,
             bits: handle.to_bits(),
@@ -889,11 +1150,12 @@ fn lookup_mut<'p, E: Owned, M>(
     pool: &'p mut Pool<E>,
     kind: &'static str,
     handle: Handle<M>,
-    owner: u64,
+    inner: &DeviceInner,
 ) -> Result<&'p mut E, HalError> {
-    match pool.get(handle.cast()).map(Owned::owner) {
-        Some(entry_owner) if entry_owner == owner => Ok(pool
-            .get_mut(handle.cast())
+    let local = local_handle(kind, handle, inner)?;
+    match pool.get(local).map(Owned::owner) {
+        Some(entry_owner) if entry_owner == inner.id => Ok(pool
+            .get_mut(local)
             .unwrap_or_else(|| unreachable!("resolved immediately above"))),
         Some(_) => Err(HalError::ForeignObject {
             kind,
@@ -901,6 +1163,29 @@ fn lookup_mut<'p, E: Owned, M>(
         }),
         None => Err(HalError::invalid_handle(kind, handle)),
     }
+}
+
+/// Removes a handle from `pool`, but **only** if this device owns it.
+///
+/// The order is the whole point. Every `destroy_*` used to `remove` first and
+/// check `owner` afterwards, by which time the row was gone and the entry
+/// dropped: the driver object leaked, and a foreign handle that happened to
+/// resolve killed this device's own unrelated object outright.
+/// `Instance::destroy_surface` always had this right; this is that shape, once,
+/// for the eleven bodies that did not.
+fn take_owned<E: Owned, M>(
+    pool: &mut Pool<E>,
+    handle: Handle<M>,
+    inner: &DeviceInner,
+) -> Option<E> {
+    let local: Handle<E> = local_handle("object", handle, inner).ok()?;
+    if !pool
+        .get(local)
+        .is_some_and(|entry| entry.owner() == inner.id)
+    {
+        return None;
+    }
+    pool.remove(local)
 }
 
 /// The "this device cannot" answer, in one place so the message is uniform.
@@ -924,7 +1209,7 @@ impl Device for VkDevice {
     }
 
     fn queue(&self, kind: QueueKind) -> Option<QueueHandle> {
-        self.inner.queues[queue_index(kind) as usize].map(|_| queue_handle(kind))
+        self.inner.queues[queue_index(kind) as usize].map(|_| queue_handle(self.inner.tag, kind))
     }
 
     // --- resources ---
@@ -988,27 +1273,21 @@ impl Device for VkDevice {
         self.inner.set_object_name(raw, desc.label);
         Ok(self
             .inner
-            .state()
-            .buffers
-            .insert(BufferEntry {
+            .stamp(self.inner.state().buffers.insert(BufferEntry {
                 owner: self.inner.id,
                 raw,
                 memory,
                 size: desc.size,
                 location: desc.memory,
                 mapped,
-            })
-            .cast())
+            })))
     }
 
     fn destroy_buffer(&self, buffer: BufferHandle) {
         let mut state = self.inner.state();
-        let Some(entry) = state.buffers.remove(buffer.cast()) else {
+        let Some(entry) = take_owned(&mut state.buffers, buffer, &self.inner) else {
             return;
         };
-        if entry.owner != self.inner.id {
-            return;
-        }
         if !entry.mapped.is_null() {
             // SAFETY: `entry.memory` was mapped once in `create_buffer` and is
             // unmapped once here, before the allocation is parked for freeing.
@@ -1020,7 +1299,7 @@ impl Device for VkDevice {
 
     fn write_buffer(&self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<(), HalError> {
         let state = self.inner.state();
-        let entry = lookup(&state.buffers, "buffer", buffer, self.inner.id)?;
+        let entry = lookup(&state.buffers, "buffer", buffer, &self.inner)?;
         if !entry.location.is_mappable() {
             return Err(HalError::InvalidDescriptor(format!(
                 "write_buffer needs a mappable buffer; this one is {:?}",
@@ -1055,7 +1334,7 @@ impl Device for VkDevice {
 
     fn request_readback(&self, desc: &ReadbackDesc<'_>) -> Result<ReadbackHandle, HalError> {
         let mut state = self.inner.state();
-        let entry = lookup(&state.buffers, "buffer", desc.buffer, self.inner.id)?;
+        let entry = lookup(&state.buffers, "buffer", desc.buffer, &self.inner)?;
         if entry.location != MemoryLocation::HostReadback {
             return Err(HalError::InvalidDescriptor(format!(
                 "request_readback needs a HostReadback buffer; this one is {:?}",
@@ -1077,12 +1356,8 @@ impl Device for VkDevice {
         // counts — so a readback with no explicit wait needs no extra object.
         let wait = match desc.after {
             Some(wait) => {
-                let semaphore = lookup(
-                    &state.semaphores,
-                    "semaphore",
-                    wait.semaphore,
-                    self.inner.id,
-                )?;
+                let semaphore =
+                    lookup(&state.semaphores, "semaphore", wait.semaphore, &self.inner)?;
                 if !semaphore.timeline {
                     return Err(HalError::Unsupported {
                         backend: BackendKind::Vulkan,
@@ -1094,16 +1369,13 @@ impl Device for VkDevice {
             None => (self.inner.retire_timeline, self.inner.submissions()),
         };
 
-        Ok(state
-            .readbacks
-            .insert(ReadbackEntry {
-                owner: self.inner.id,
-                buffer: desc.buffer,
-                offset: desc.offset,
-                size: desc.size,
-                wait,
-            })
-            .cast())
+        Ok(self.inner.stamp(state.readbacks.insert(ReadbackEntry {
+            owner: self.inner.id,
+            buffer: desc.buffer,
+            offset: desc.offset,
+            size: desc.size,
+            wait,
+        })))
     }
 
     fn poll_readback(
@@ -1112,7 +1384,7 @@ impl Device for VkDevice {
         out: &mut [u8],
     ) -> Result<ReadbackState, HalError> {
         let state = self.inner.state();
-        let entry = lookup(&state.readbacks, "readback", readback, self.inner.id)?;
+        let entry = lookup(&state.readbacks, "readback", readback, &self.inner)?;
         if out.len() as u64 != entry.size {
             return Err(HalError::InvalidDescriptor(format!(
                 "poll_readback needs exactly {} bytes, got {}",
@@ -1133,7 +1405,7 @@ impl Device for VkDevice {
             // request time. If the buffer was destroyed between request and
             // poll, the generational handle fails lookup here — rather than
             // silently dereferencing unmapped memory.
-            let buffer_entry = lookup(&state.buffers, "buffer", entry.buffer, self.inner.id)?;
+            let buffer_entry = lookup(&state.buffers, "buffer", entry.buffer, &self.inner)?;
             if buffer_entry.mapped.is_null() {
                 return Err(HalError::InvalidDescriptor(
                     "buffer for readback is no longer mapped".to_string(),
@@ -1157,7 +1429,8 @@ impl Device for VkDevice {
     fn destroy_readback(&self, readback: ReadbackHandle) {
         // No driver object: the mapping belongs to the buffer, which the caller
         // still owns. Dropping the tracking entry is the whole of it.
-        self.inner.state().readbacks.remove(readback.cast());
+        let mut state = self.inner.state();
+        take_owned(&mut state.readbacks, readback, &self.inner);
     }
 
     fn create_image(&self, desc: &ImageDesc<'_>) -> Result<ImageHandle, HalError> {
@@ -1167,15 +1440,71 @@ impl Device for VkDevice {
                 desc.extent
             )));
         }
-        if desc.extent.width > self.inner.caps.limits.max_image_2d
-            || desc.extent.height > self.inner.caps.limits.max_image_2d
-        {
+        let limits = self.inner.caps.limits;
+        let is_3d = matches!(desc.image_type, crcbl_hal::ImageType::D3);
+        // A 3D image is bounded by `max_image_3d` on every axis; a 1D/2D one by
+        // `max_image_2d` on width and height and by `max_image_array_layers` on
+        // its layer count. Only the 2D extent used to be checked at all, so a
+        // volume's depth and an array's layer count reached the driver as VUID
+        // failures rather than as the descriptor error the seam promises.
+        if is_3d {
+            let longest = desc
+                .extent
+                .width
+                .max(desc.extent.height)
+                .max(desc.extent.depth_or_layers);
+            if longest > limits.max_image_3d {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "ImageDesc::extent {:?} exceeds max_image_3d {}",
+                    desc.extent, limits.max_image_3d
+                )));
+            }
+        } else {
+            if desc.extent.width > limits.max_image_2d || desc.extent.height > limits.max_image_2d {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "ImageDesc::extent {:?} exceeds max_image_2d {}",
+                    desc.extent, limits.max_image_2d
+                )));
+            }
+            if desc.extent.depth_or_layers > limits.max_image_array_layers {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "ImageDesc::extent {:?} asks for more array layers than \
+                     max_image_array_layers {}",
+                    desc.extent, limits.max_image_array_layers
+                )));
+            }
+        }
+        // `depth_or_layers` mips for a volume and does not for an array, which
+        // is why the image type is a parameter.
+        let full_chain = desc.extent.full_mip_levels(desc.image_type);
+        if desc.mip_levels > full_chain {
             return Err(HalError::InvalidDescriptor(format!(
-                "ImageDesc::extent {:?} exceeds max_image_2d {}",
-                desc.extent, self.inner.caps.limits.max_image_2d
+                "ImageDesc::mip_levels is {} but {:?} has only {full_chain} levels",
+                desc.mip_levels, desc.extent
             )));
         }
-        let is_3d = matches!(desc.image_type, crcbl_hal::ImageType::D3);
+        // Through `conv::sample_count`, which exists precisely to reject a
+        // non-power-of-two: `from_raw(3)` decodes as `TYPE_1 | TYPE_2`, so a
+        // caller asking for three samples reached the driver as a two-bit mask
+        // rather than as an error. `create_graphics_pipeline_impl` always used
+        // it; this did not.
+        let Some(samples) = conv::sample_count(desc.samples.max(1)) else {
+            return Err(HalError::InvalidDescriptor(format!(
+                "ImageDesc::samples is {}, which is not a power of two in 1..=64",
+                desc.samples
+            )));
+        };
+        if desc.samples > limits.max_sample_count.max(1) {
+            return Err(HalError::InvalidDescriptor(format!(
+                "ImageDesc::samples is {} but this device supports at most {}",
+                desc.samples, limits.max_sample_count
+            )));
+        }
+        if desc.usage.is_empty() {
+            return Err(HalError::InvalidDescriptor(
+                "ImageDesc::usage is empty, so the image could never be used".to_string(),
+            ));
+        }
         let extent = vk::Extent3D {
             width: desc.extent.width,
             height: desc.extent.height,
@@ -1195,7 +1524,7 @@ impl Device for VkDevice {
             } else {
                 desc.extent.depth_or_layers
             })
-            .samples(vk::SampleCountFlags::from_raw(desc.samples.max(1)))
+            .samples(samples)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(conv::image_usage(desc.usage))
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -1205,16 +1534,13 @@ impl Device for VkDevice {
             .create_owned_image(&info, desc.memory, desc.label)?;
         Ok(self
             .inner
-            .state()
-            .images
-            .insert(ImageEntry {
+            .stamp(self.inner.state().images.insert(ImageEntry {
                 owner: self.inner.id,
                 raw,
                 memory,
                 format: desc.format,
                 swapchain_owned: false,
-            })
-            .cast())
+            })))
     }
 
     fn destroy_image(&self, image: ImageHandle) {
@@ -1224,19 +1550,16 @@ impl Device for VkDevice {
         // lives, so removing the row would leave every later `AcquiredFrame`
         // handing out a handle that no longer resolves — the swapchain would
         // be permanently unusable, from one stray call.
-        if state
-            .images
-            .get(image.cast())
+        if local_handle("image", image, &self.inner)
+            .ok()
+            .and_then(|local| state.images.get(local))
             .is_some_and(|entry| entry.swapchain_owned)
         {
             return;
         }
-        let Some(entry) = state.images.remove(image.cast()) else {
+        let Some(entry) = take_owned(&mut state.images, image, &self.inner) else {
             return;
         };
-        if entry.owner != self.inner.id {
-            return;
-        }
         self.inner
             .park(&mut state, Trash::Image(entry.raw, entry.memory));
     }
@@ -1244,7 +1567,7 @@ impl Device for VkDevice {
     fn create_image_view(&self, desc: &ImageViewDesc<'_>) -> Result<ImageViewHandle, HalError> {
         let mut state = self.inner.state();
         // Copied out before the pool is borrowed mutably below.
-        let image_raw = lookup(&state.images, "image", desc.image, self.inner.id)?.raw;
+        let image_raw = lookup(&state.images, "image", desc.image, &self.inner)?.raw;
         let info = vk::ImageViewCreateInfo::default()
             .image(image_raw)
             .view_type(conv::image_view_type(desc.view_type))
@@ -1255,14 +1578,12 @@ impl Device for VkDevice {
         let raw = unsafe { self.inner.raw.create_image_view(&info, None) }
             .map_err(|error| conv::hal_error("vkCreateImageView", error))?;
         self.inner.set_object_name(raw, desc.label);
-        Ok(state
-            .views
-            .insert(ViewEntry {
-                owner: self.inner.id,
-                raw,
-                swapchain_owned: false,
-            })
-            .cast())
+        Ok(self.inner.stamp(state.views.insert(ViewEntry {
+            owner: self.inner.id,
+            raw,
+            format: desc.format,
+            swapchain_owned: false,
+        })))
     }
 
     fn destroy_image_view(&self, view: ImageViewHandle) {
@@ -1270,19 +1591,16 @@ impl Device for VkDevice {
         // A swapchain's views are handed out through `AcquiredFrame` and are
         // the swapchain's to destroy; a caller passing one here gets nothing,
         // rather than a swapchain whose attachments have been freed.
-        if state
-            .views
-            .get(view.cast())
+        if local_handle("image view", view, &self.inner)
+            .ok()
+            .and_then(|local| state.views.get(local))
             .is_some_and(|entry| entry.swapchain_owned)
         {
             return;
         }
-        let Some(entry) = state.views.remove(view.cast()) else {
+        let Some(entry) = take_owned(&mut state.views, view, &self.inner) else {
             return;
         };
-        if entry.owner != self.inner.id {
-            return;
-        }
         self.inner.park(&mut state, Trash::ImageView(entry.raw));
     }
 
@@ -1291,14 +1609,11 @@ impl Device for VkDevice {
     }
 
     fn destroy_sampler(&self, sampler: SamplerHandle) {
-        let mut state = self.inner.state();
-        let Some(entry) = state.samplers.remove(sampler.cast()) else {
-            return;
-        };
-        if entry.owner != self.inner.id {
-            return;
-        }
-        self.inner.park(&mut state, Trash::Sampler(entry.raw));
+        self.retire_from(
+            |state| &mut state.samplers,
+            sampler,
+            |entry| Trash::Sampler(entry.raw),
+        );
     }
 
     // --- shaders and pipelines ---
@@ -1314,19 +1629,11 @@ impl Device for VkDevice {
     }
 
     fn destroy_shader_module(&self, module: ShaderModuleHandle) {
-        let mut state = self.inner.state();
-        let Some(entry) = state.shader_modules.remove(module.cast()) else {
-            return;
-        };
-        if entry.owner != self.inner.id {
-            return;
-        }
-        // The seam promises "pipelines built from it stay valid", and Vulkan
-        // agrees: a `VkShaderModule` is consumed by pipeline creation and may be
-        // destroyed immediately after. It still goes through the deletion queue
-        // rather than being freed inline, because a *pipeline* creation could be
-        // in flight on another thread holding this same lock's other side.
-        self.inner.park(&mut state, Trash::ShaderModule(entry.raw));
+        self.retire_from(
+            |state| &mut state.shader_modules,
+            module,
+            |entry| Trash::ShaderModule(entry.raw),
+        );
     }
 
     fn create_bind_group_layout(
@@ -1337,15 +1644,11 @@ impl Device for VkDevice {
     }
 
     fn destroy_bind_group_layout(&self, layout: BindGroupLayoutHandle) {
-        let mut state = self.inner.state();
-        let Some(entry) = state.bind_group_layouts.remove(layout.cast()) else {
-            return;
-        };
-        if entry.owner != self.inner.id {
-            return;
-        }
-        self.inner
-            .park(&mut state, Trash::DescriptorSetLayout(entry.raw));
+        self.retire_from(
+            |state| &mut state.bind_group_layouts,
+            layout,
+            |entry| Trash::DescriptorSetLayout(entry.raw),
+        );
     }
 
     fn create_bind_group(&self, desc: &BindGroupDesc<'_>) -> Result<BindGroupHandle, HalError> {
@@ -1361,17 +1664,11 @@ impl Device for VkDevice {
     }
 
     fn destroy_bind_group(&self, group: BindGroupHandle) {
-        let mut state = self.inner.state();
-        let Some(entry) = state.bind_groups.remove(group.cast()) else {
-            return;
-        };
-        if entry.owner != self.inner.id {
-            return;
-        }
-        // The pool, not the set: freeing the pool frees the one set in it, which
-        // is why a bind group owns a whole pool. See `pipeline.rs`.
-        self.inner
-            .park(&mut state, Trash::DescriptorPool(entry.pool));
+        self.retire_from(
+            |state| &mut state.bind_groups,
+            group,
+            |entry| Trash::DescriptorPool(entry.pool),
+        );
     }
 
     fn create_pipeline_layout(
@@ -1382,15 +1679,11 @@ impl Device for VkDevice {
     }
 
     fn destroy_pipeline_layout(&self, layout: PipelineLayoutHandle) {
-        let mut state = self.inner.state();
-        let Some(entry) = state.pipeline_layouts.remove(layout.cast()) else {
-            return;
-        };
-        if entry.owner != self.inner.id {
-            return;
-        }
-        self.inner
-            .park(&mut state, Trash::PipelineLayout(entry.raw));
+        self.retire_from(
+            |state| &mut state.pipeline_layouts,
+            layout,
+            |entry| Trash::PipelineLayout(entry.raw),
+        );
     }
 
     fn create_graphics_pipeline(
@@ -1469,26 +1762,20 @@ impl Device for VkDevice {
         self.inner.set_object_name(raw, desc.label);
         Ok(self
             .inner
-            .state()
-            .query_sets
-            .insert(QuerySetEntry {
+            .stamp(self.inner.state().query_sets.insert(QuerySetEntry {
                 owner: self.inner.id,
                 raw,
                 count: desc.count,
                 kind: desc.kind,
-            })
-            .cast())
+            })))
     }
 
     fn destroy_query_set(&self, set: QuerySetHandle) {
-        let mut state = self.inner.state();
-        let Some(entry) = state.query_sets.remove(set.cast()) else {
-            return;
-        };
-        if entry.owner != self.inner.id {
-            return;
-        }
-        self.inner.park(&mut state, Trash::QueryPool(entry.raw));
+        self.retire_from(
+            |state| &mut state.query_sets,
+            set,
+            |entry| Trash::QueryPool(entry.raw),
+        );
     }
 
     fn query_results(
@@ -1498,7 +1785,7 @@ impl Device for VkDevice {
         out: &mut [u64],
     ) -> Result<(), HalError> {
         let state = self.inner.state();
-        let entry = lookup(&state.query_sets, "query set", set, self.inner.id)?;
+        let entry = lookup(&state.query_sets, "query set", set, &self.inner)?;
         let end = first_query as u64 + out.len() as u64;
         if end > u64::from(entry.count) {
             return Err(HalError::InvalidDescriptor(format!(
@@ -1554,15 +1841,12 @@ impl Device for VkDevice {
         self.inner.set_object_name(raw, desc.label);
         Ok(self
             .inner
-            .state()
-            .semaphores
-            .insert(SemaphoreEntry {
+            .stamp(self.inner.state().semaphores.insert(SemaphoreEntry {
                 owner: self.inner.id,
                 raw,
                 timeline,
                 swapchain_owned: false,
-            })
-            .cast())
+            })))
     }
 
     fn destroy_semaphore(&self, semaphore: SemaphoreHandle) {
@@ -1570,25 +1854,22 @@ impl Device for VkDevice {
         // A swapchain's semaphores are handed out through `AcquiredFrame` and
         // are the swapchain's to destroy; a caller passing one here gets the
         // handle removed and nothing else, rather than a dangling swapchain.
-        if state
-            .semaphores
-            .get(semaphore.cast())
+        if local_handle("semaphore", semaphore, &self.inner)
+            .ok()
+            .and_then(|local| state.semaphores.get(local))
             .is_some_and(|entry| entry.swapchain_owned)
         {
             return;
         }
-        let Some(entry) = state.semaphores.remove(semaphore.cast()) else {
+        let Some(entry) = take_owned(&mut state.semaphores, semaphore, &self.inner) else {
             return;
         };
-        if entry.owner != self.inner.id {
-            return;
-        }
         self.inner.park(&mut state, Trash::Semaphore(entry.raw));
     }
 
     fn semaphore_value(&self, semaphore: SemaphoreHandle) -> Result<u64, HalError> {
         let state = self.inner.state();
-        let entry = lookup(&state.semaphores, "semaphore", semaphore, self.inner.id)?;
+        let entry = lookup(&state.semaphores, "semaphore", semaphore, &self.inner)?;
         if !entry.timeline {
             return Err(HalError::Unsupported {
                 backend: BackendKind::Vulkan,
@@ -1608,12 +1889,7 @@ impl Device for VkDevice {
         let mut semaphores = Vec::with_capacity(waits.len());
         let mut values = Vec::with_capacity(waits.len());
         for wait in waits {
-            let entry = lookup(
-                &state.semaphores,
-                "semaphore",
-                wait.semaphore,
-                self.inner.id,
-            )?;
+            let entry = lookup(&state.semaphores, "semaphore", wait.semaphore, &self.inner)?;
             if !entry.timeline {
                 return Err(HalError::Unsupported {
                     backend: BackendKind::Vulkan,
@@ -1660,12 +1936,9 @@ impl Device for VkDevice {
 
     fn destroy_command_buffer(&self, buffer: CommandBufferHandle) {
         let mut state = self.inner.state();
-        let Some(entry) = state.command_buffers.remove(buffer.cast()) else {
+        let Some(entry) = take_owned(&mut state.command_buffers, buffer, &self.inner) else {
             return;
         };
-        if entry.owner != self.inner.id {
-            return;
-        }
         // The one object freed inline rather than parked: the seam says this
         // "must not be called until the submission that used it has completed",
         // so the caller has already done the waiting the deletion queue exists
@@ -1685,7 +1958,7 @@ impl Device for VkDevice {
                 &state.command_buffers,
                 "command buffer",
                 *handle,
-                self.inner.id,
+                &self.inner,
             )?;
             commands.push(
                 vk::CommandBufferSubmitInfo::default()
@@ -1696,12 +1969,7 @@ impl Device for VkDevice {
 
         let mut waits = Vec::with_capacity(submit.waits.len());
         for wait in submit.waits {
-            let entry = lookup(
-                &state.semaphores,
-                "semaphore",
-                wait.semaphore,
-                self.inner.id,
-            )?;
+            let entry = lookup(&state.semaphores, "semaphore", wait.semaphore, &self.inner)?;
             waits.push(
                 vk::SemaphoreSubmitInfo::default()
                     .semaphore(entry.raw)
@@ -1715,14 +1983,23 @@ impl Device for VkDevice {
             );
         }
 
-        let value = self.inner.submissions.fetch_add(1, Ordering::AcqRel) + 1;
+        // Read, not incremented. The counter must only move once the
+        // submission that signals this value is *actually in flight*: the
+        // lookups below `?`-return and `vkQueueSubmit2` can fail, and a counter
+        // bumped past a value nothing will ever signal leaves `poll_retire`
+        // stuck below every later-parked object forever — the deletion queue
+        // never drains again, and every `request_readback` without an explicit
+        // wait returns `Pending` for the rest of the process's life. The state
+        // lock serialises `submit` against itself, so reading here and
+        // committing after the driver call is safe.
+        let value = self.inner.submissions() + 1;
         let mut signals = Vec::with_capacity(submit.signals.len() + 1);
         for signal in submit.signals {
             let entry = lookup(
                 &state.semaphores,
                 "semaphore",
                 signal.semaphore,
-                self.inner.id,
+                &self.inner,
             )?;
             signals.push(
                 vk::SemaphoreSubmitInfo::default()
@@ -1755,6 +2032,9 @@ impl Device for VkDevice {
                 .queue_submit2(slot.raw, &[info], vk::Fence::null())
         }
         .map_err(|error| conv::hal_error("vkQueueSubmit2", error))?;
+        // Committed only now: the submission is in flight, so the retire
+        // timeline *will* reach `value`.
+        self.inner.submissions.store(value, Ordering::Release);
 
         self.inner.poll_retire(&mut state);
         Ok(())
@@ -1772,7 +2052,8 @@ impl Device for VkDevice {
                 return Err(error);
             }
         };
-        Ok(self.inner.state().swapchains.insert(built).cast())
+        let handle = self.inner.state().swapchains.insert(built);
+        Ok(self.inner.stamp(handle))
     }
 
     fn reconfigure_swapchain(
@@ -1784,7 +2065,7 @@ impl Device for VkDevice {
         // across a resize storm, which is what the seam promises callers.
         let (old_raw, old_surface) = {
             let state = self.inner.state();
-            let entry = lookup(&state.swapchains, "swapchain", swapchain, self.inner.id)?;
+            let entry = lookup(&state.swapchains, "swapchain", swapchain, &self.inner)?;
             (entry.raw, entry.surface_raw)
         };
         let surface_raw = self.inner.instance.surface_raw(desc.surface)?;
@@ -1814,7 +2095,7 @@ impl Device for VkDevice {
         };
 
         let mut state = self.inner.state();
-        let entry = match lookup_mut(&mut state.swapchains, "swapchain", swapchain, self.inner.id) {
+        let entry = match lookup_mut(&mut state.swapchains, "swapchain", swapchain, &self.inner) {
             Ok(entry) => entry,
             Err(error) => {
                 // The lock was released while `built` was under construction,
@@ -1823,7 +2104,7 @@ impl Device for VkDevice {
                 // `swapchain_owned` — which `Drop for DeviceInner` skips — so
                 // returning without undoing it would leak the swapchain, its
                 // views, its semaphores and its fences past `vkDestroyDevice`.
-                forget_swapchain_rows(&mut state, &built);
+                forget_swapchain_rows(&self.inner, &mut state, &built);
                 drop(state);
                 self.inner.retire_swapchain(built);
                 return Err(error.into());
@@ -1832,7 +2113,7 @@ impl Device for VkDevice {
         let previous = core::mem::replace(entry, built);
         // Invalidating the old handles is the point: a caller holding an image
         // or a view across a resize gets `InvalidHandle`, not a stale object.
-        forget_swapchain_rows(&mut state, &previous);
+        forget_swapchain_rows(&self.inner, &mut state, &previous);
         // Everything else about the old configuration retires on the timeline
         // as usual; the swapchain itself cannot. See `retire_swapchain`.
         drop(state);
@@ -1842,13 +2123,10 @@ impl Device for VkDevice {
 
     fn destroy_swapchain(&self, swapchain: SwapchainHandle) {
         let mut state = self.inner.state();
-        let Some(entry) = state.swapchains.remove(swapchain.cast()) else {
+        let Some(entry) = take_owned(&mut state.swapchains, swapchain, &self.inner) else {
             return;
         };
-        if entry.owner != self.inner.id {
-            return;
-        }
-        forget_swapchain_rows(&mut state, &entry);
+        forget_swapchain_rows(&self.inner, &mut state, &entry);
         drop(state);
         self.inner.retire_swapchain(entry);
     }
@@ -1859,8 +2137,8 @@ impl Device for VkDevice {
     ) -> Result<AcquiredFrame, SurfaceError> {
         let mut state = self.inner.state();
         self.inner.poll_retire(&mut state);
-        let id = self.inner.id;
-        let entry = lookup_mut(&mut state.swapchains, "swapchain", swapchain, id)?;
+        let inner = Arc::clone(&self.inner);
+        let entry = lookup_mut(&mut state.swapchains, "swapchain", swapchain, &inner)?;
 
         if entry.is_offscreen() {
             // The implicit-acquire shape, which is also `crcbl-wgpu`'s: no
@@ -1925,15 +2203,20 @@ impl Device for VkDevice {
     fn present(&self, queue: QueueHandle, present: &PresentInfo<'_>) -> Result<(), SurfaceError> {
         let slot = self.inner.queue_slot(queue)?;
         let mut state = self.inner.state();
-        let id = self.inner.id;
+        let inner = Arc::clone(&self.inner);
 
         let mut waits = Vec::with_capacity(present.waits.len());
         for handle in present.waits {
-            let entry = lookup(&state.semaphores, "semaphore", *handle, id)?;
+            let entry = lookup(&state.semaphores, "semaphore", *handle, &inner)?;
             waits.push(entry.raw);
         }
 
-        let entry = lookup_mut(&mut state.swapchains, "swapchain", present.swapchain, id)?;
+        let entry = lookup_mut(
+            &mut state.swapchains,
+            "swapchain",
+            present.swapchain,
+            &inner,
+        )?;
         let Some(index) = entry.acquired.take() else {
             return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
                 "present without a matching acquire_next_frame".to_string(),
@@ -2084,16 +2367,13 @@ impl VkDevice {
         let image_handles: Vec<ImageHandle> = images
             .iter()
             .map(|image| {
-                state
-                    .images
-                    .insert(ImageEntry {
-                        owner: self.inner.id,
-                        raw: *image,
-                        memory: vk::DeviceMemory::null(),
-                        format: desc.format,
-                        swapchain_owned: true,
-                    })
-                    .cast()
+                self.inner.stamp(state.images.insert(ImageEntry {
+                    owner: self.inner.id,
+                    raw: *image,
+                    memory: vk::DeviceMemory::null(),
+                    format: desc.format,
+                    swapchain_owned: true,
+                }))
             })
             .collect();
         // These rows are `swapchain_owned`, so `destroy_image` /
@@ -2106,10 +2386,10 @@ impl VkDevice {
                       views: &[vk::ImageView],
                       view_handles: &[ImageViewHandle]| {
             for handle in image_handles {
-                state.images.remove(handle.cast());
+                take_owned(&mut state.images, *handle, &self.inner);
             }
             for handle in view_handles {
-                state.views.remove(handle.cast());
+                take_owned(&mut state.views, *handle, &self.inner);
             }
             // SAFETY: every view was created moments ago by this device, has
             // never been used, and is destroyed exactly once.
@@ -2244,19 +2524,15 @@ impl VkDevice {
         let image_handles: Vec<ImageHandle> = images
             .iter()
             .map(|image| {
-                state
-                    .images
-                    .insert(ImageEntry {
-                        owner: self.inner.id,
-                        raw: *image,
-                        memory: vk::DeviceMemory::null(),
-                        format: desc.format,
-                        // The ring owns them, so `destroy_image` must not free
-                        // one — the same rule a WSI image follows, for the same
-                        // reason.
-                        swapchain_owned: true,
-                    })
-                    .cast()
+                // The ring owns them, so `destroy_image` must not free one —
+                // the same rule a WSI image follows, for the same reason.
+                self.inner.stamp(state.images.insert(ImageEntry {
+                    owner: self.inner.id,
+                    raw: *image,
+                    memory: vk::DeviceMemory::null(),
+                    format: desc.format,
+                    swapchain_owned: true,
+                }))
             })
             .collect();
         let (views, view_handles) =
@@ -2264,7 +2540,7 @@ impl VkDevice {
                 Ok(views) => views,
                 Err(error) => {
                     for handle in &image_handles {
-                        state.images.remove(handle.cast());
+                        take_owned(&mut state.images, *handle, &self.inner);
                     }
                     drop(state);
                     // SAFETY: every image and allocation was created moments
@@ -2360,14 +2636,12 @@ impl VkDevice {
         let handles = created
             .iter()
             .map(|view| {
-                state
-                    .views
-                    .insert(ViewEntry {
-                        owner: self.inner.id,
-                        raw: *view,
-                        swapchain_owned: true,
-                    })
-                    .cast()
+                self.inner.stamp(state.views.insert(ViewEntry {
+                    owner: self.inner.id,
+                    raw: *view,
+                    format,
+                    swapchain_owned: true,
+                }))
             })
             .collect();
         Ok((created, handles))
@@ -2445,15 +2719,12 @@ impl VkDevice {
         // Nothing below can fail, so every pool row inserted here is reachable
         // through the `SwapchainEntry` the caller is about to store.
         for (index, semaphore) in created.iter().copied().enumerate() {
-            let handle = state
-                .semaphores
-                .insert(SemaphoreEntry {
-                    owner: self.inner.id,
-                    raw: semaphore,
-                    timeline: false,
-                    swapchain_owned: true,
-                })
-                .cast();
+            let handle = self.inner.stamp(state.semaphores.insert(SemaphoreEntry {
+                owner: self.inner.id,
+                raw: semaphore,
+                timeline: false,
+                swapchain_owned: true,
+            }));
             if index < slots {
                 acquire.push(semaphore);
                 acquire_handles.push(handle);
@@ -2686,15 +2957,58 @@ mod tests {
     #[test]
     fn queue_handles_are_distinct_per_kind_and_round_trip() {
         let kinds = [QueueKind::Graphics, QueueKind::Compute, QueueKind::Transfer];
-        let handles: Vec<QueueHandle> = kinds.iter().copied().map(queue_handle).collect();
+        let tag = device_tag(1);
+        let handles: Vec<QueueHandle> = kinds
+            .iter()
+            .copied()
+            .map(|kind| queue_handle(tag, kind))
+            .collect();
         for (index, handle) in handles.iter().enumerate() {
-            assert_eq!(handle.index() as usize, index);
+            assert_eq!((handle.index() & POOL_INDEX_MASK) as usize, index);
+            assert_eq!(handle_tag(*handle), tag);
         }
         let mut bits: Vec<u64> = handles.iter().map(|handle| handle.to_bits()).collect();
         bits.sort_unstable();
         bits.dedup();
         assert_eq!(bits.len(), kinds.len(), "no two kinds may collide");
         assert_eq!(queue_index(QueueKind::Graphics), 0);
+    }
+
+    /// Two devices issue *different* handles for the same pool slot, which is
+    /// the whole point: without it `entry.owner() != owner` was unreachable,
+    /// `HalError::ForeignObject` was unproducible, and device A silently
+    /// accepted device B's handle the moment their pools stepped in time.
+    #[test]
+    fn a_handle_names_the_device_that_issued_it() {
+        let mut pool: Pool<u8> = Pool::new();
+        let slot: Handle<u8> = pool.insert(0);
+
+        let tags: Vec<u32> = (1..=4).map(device_tag).collect();
+        assert!(tags.iter().all(|tag| *tag != 0), "tag 0 means 'nobody'");
+        assert_eq!(
+            tags.iter().collect::<std::collections::HashSet<_>>().len(),
+            tags.len(),
+            "consecutive devices must not share a tag"
+        );
+
+        // Every stamped handle round-trips to the same pool slot, and reports
+        // the device that stamped it.
+        for tag in tags {
+            let stamped: Handle<u8> = Handle::from_bits(
+                (u64::from(slot.generation()) << 32)
+                    | u64::from(slot.index() | (tag << DEVICE_TAG_SHIFT)),
+            )
+            .expect("generation is non-zero");
+            assert_eq!(handle_tag(stamped), tag);
+            assert_eq!(untag::<u8, u8>(stamped), slot);
+        }
+    }
+
+    /// A handle nobody stamped resolves nowhere, rather than aliasing slot 0.
+    #[test]
+    fn an_unstamped_handle_belongs_to_no_device() {
+        let handle: Handle<u8> = Handle::from_bits((1u64 << 32) | 7).expect("non-zero generation");
+        assert_eq!(handle_tag(handle), 0);
     }
 
     /// The refusal must name the backend and the capability, because a caller

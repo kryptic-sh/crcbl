@@ -1357,10 +1357,19 @@ fn attachments(
                 },
             )),
             Some(Attachment::Depth {
-                load, store, clear, ..
+                load,
+                store,
+                clear,
+                write,
             }) => {
                 depth_stencil = Some(DepthStencilAttachment {
                     view,
+                    // `PassBuilder::depth_read` declares
+                    // `ResourceState::DepthStencilRead`, which puts the image in
+                    // a *different* layout from a written depth attachment. The
+                    // backend cannot infer that from the ops, so the pass's own
+                    // `write` flag is what tells it.
+                    read_only: !write,
                     depth_load: load,
                     depth_store: store,
                     // No stencil plane in anything the engine renders yet; a

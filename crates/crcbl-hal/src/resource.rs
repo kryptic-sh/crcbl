@@ -182,16 +182,25 @@ impl Extent3d {
 
     /// Number of mip levels in a full chain for this extent.
     ///
-    /// `floor(log2(max_dimension)) + 1`, clamped to at least 1. The mip count
-    /// every "generate the whole chain" call site would otherwise recompute
-    /// slightly differently.
+    /// `floor(log2(longest_dimension)) + 1`, clamped to at least 1. The mip
+    /// count every "generate the whole chain" call site would otherwise
+    /// recompute slightly differently.
+    ///
+    /// `image_type` is required because [`depth_or_layers`](Self::depth_or_layers)
+    /// means two different things: array layers, which do **not** mip, and a 3D
+    /// depth, which does. A `4x4x64` volume has a seven-level chain, not a
+    /// three-level one, and a caller that allocated three under-allocates by
+    /// four levels.
     #[must_use]
-    pub const fn full_mip_levels(self) -> u32 {
-        let longest = if self.width > self.height {
+    pub const fn full_mip_levels(self, image_type: ImageType) -> u32 {
+        let mut longest = if self.width > self.height {
             self.width
         } else {
             self.height
         };
+        if matches!(image_type, ImageType::D3) && self.depth_or_layers > longest {
+            longest = self.depth_or_layers;
+        }
         if longest == 0 {
             1
         } else {
@@ -464,13 +473,31 @@ mod tests {
             (4096, 4096, 13),
         ] {
             assert_eq!(
-                Extent3d::d2(width, height).full_mip_levels(),
+                Extent3d::d2(width, height).full_mip_levels(ImageType::D2),
                 expected,
                 "{width}x{height}"
             );
         }
         // Degenerate input must not produce a zero-length chain.
-        assert_eq!(Extent3d::d2(0, 0).full_mip_levels(), 1);
+        assert_eq!(Extent3d::d2(0, 0).full_mip_levels(ImageType::D2), 1);
+    }
+
+    /// `depth_or_layers` mips for a volume and does not for an array — the two
+    /// readings of one field, and the reason the image type is a parameter.
+    #[test]
+    fn a_volumes_depth_joins_the_mip_chain_but_array_layers_do_not() {
+        let extent = Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_layers: 64,
+        };
+        assert_eq!(extent.full_mip_levels(ImageType::D3), 7, "4x4x64 volume");
+        assert_eq!(
+            extent.full_mip_levels(ImageType::D2),
+            3,
+            "64 array layers do not mip"
+        );
+        assert_eq!(extent.full_mip_levels(ImageType::D1), 3);
     }
 
     #[test]

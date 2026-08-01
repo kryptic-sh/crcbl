@@ -22,11 +22,11 @@ use core::ops::Range;
 use crcbl_core::{Handle, Pool};
 
 use crate::{
-    BindGroupHandle, BufferBarrier, BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle,
-    ComputePipelineHandle, DepthStencilAttachment, DrawIndirect, DrawIndirectCount,
-    GraphicsPipelineHandle, ImageBarrier, ImageCopy, ImageHandle, IndexFormat, MemoryLocation,
-    QuerySetHandle, QueueHandle, Rect2d, SemaphoreSignal, SemaphoreWait, ShaderStages,
-    SwapchainHandle, Viewport,
+    BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle, BufferBarrier, BufferCopy,
+    BufferHandle, BufferImageCopy, CommandBufferHandle, ComputePipelineHandle,
+    DepthStencilAttachment, DrawIndirect, DrawIndirectCount, GraphicsPipelineHandle, ImageBarrier,
+    ImageCopy, ImageHandle, IndexFormat, MemoryLocation, QuerySetHandle, QueueHandle, Rect2d,
+    SemaphoreSignal, SemaphoreWait, ShaderStages, SwapchainHandle, Viewport,
 };
 
 /// Every kind of object the null backend tracks.
@@ -523,6 +523,25 @@ pub(super) enum Detail {
         size: u64,
         polls_remaining: u32,
     },
+    /// A bind-group layout: the declared slots a bind group is checked against.
+    BindGroupLayout {
+        entries: Vec<BindGroupLayoutEntry>,
+        /// Whether any slot carries
+        /// [`BindingFlags::UPDATE_AFTER_BIND`](crate::BindingFlags::UPDATE_AFTER_BIND),
+        /// which is what makes `update_bind_group` legal.
+        update_after_bind: bool,
+        /// The binding number carrying
+        /// [`BindingFlags::VARIABLE_COUNT`](crate::BindingFlags::VARIABLE_COUNT),
+        /// if any.
+        variable_binding: Option<u32>,
+    },
+    /// A bind group: the layout it conforms to, resolved at creation.
+    BindGroup {
+        layout: BindGroupLayoutHandle,
+        update_after_bind: bool,
+    },
+    /// A query set: how many queries it holds, so a range can be checked.
+    QuerySet { count: u32 },
     /// A swapchain: its image ring and rotation state.
     Swapchain {
         extent: (u32, u32),
