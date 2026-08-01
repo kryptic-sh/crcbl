@@ -134,9 +134,24 @@ pub(crate) fn hal_features_for(features: wgpu::Features) -> Features {
     if features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE) {
         out |= Features::INDIRECT_FIRST_INSTANCE;
     }
-    if features.contains(wgpu::Features::IMMEDIATES) {
-        out |= Features::PUSH_CONSTANTS;
-    }
+    // `Features::PUSH_CONSTANTS` is deliberately never reported, even when the
+    // adapter has `IMMEDIATES` — which it does on native wgpu over Vulkan.
+    //
+    // A capability on this seam is a promise about what this backend can be
+    // *asked to do*, and the answer is bounded by the shader language it
+    // ingests, not by the adapter alone. This backend prefers WGSL
+    // (`create_shader_module`), and WGSL has no push constants: Slang's WGSL
+    // target lowers `[[vk::push_constant]]` to a module-scope `var<uniform>`
+    // with no `@group`/`@binding`, which naga rejects outright. SPIR-V is not a
+    // way out either — every artifact this workspace ships declares
+    // `OpCapability DrawParameters`, which naga does not implement.
+    //
+    // Reporting the adapter's answer here made `crcbl_render::ConstantDelivery`
+    // choose the push-constant path on native wgpu and then fail to create the
+    // UI shader module, which is exactly the confusion the capability exists to
+    // prevent. Tier B's uniform-buffer path is the one this backend can serve,
+    // so it is the one it asks for.
+    let _ = wgpu::Features::IMMEDIATES;
     if features.contains(wgpu::Features::DEPTH_CLIP_CONTROL) {
         out |= Features::DEPTH_CLAMP;
     }
@@ -446,6 +461,30 @@ mod tests {
             "without a count buffer, one indirect call emits its own draws only"
         );
         assert!(!hal_features_for(wgpu::Features::empty()).contains(Features::PUSH_CONSTANTS));
+    }
+
+    /// Push constants are never advertised, however capable the adapter is.
+    ///
+    /// This backend ingests WGSL, and WGSL has no push constants — so an
+    /// adapter that has `IMMEDIATES` still cannot be handed a pipeline that
+    /// uses them, because the shader for it cannot be compiled. Reporting the
+    /// adapter's answer instead made `ConstantDelivery` pick the Tier A path on
+    /// native wgpu and fail at `create_shader_module`. The limit must agree with
+    /// the feature, which is what makes the pair checkable at all.
+    #[test]
+    fn push_constants_are_never_advertised_even_when_the_adapter_has_them() {
+        for features in [wgpu::Features::IMMEDIATES, wgpu::Features::all()] {
+            let hal = hal_features_for(features);
+            assert!(
+                !hal.contains(Features::PUSH_CONSTANTS),
+                "WGSL cannot express a push constant, so the seam must not offer one"
+            );
+            assert_eq!(
+                hal_limits_for(&wgpu::Limits::defaults(), features).max_push_constant_size,
+                0,
+                "a non-zero budget for a feature that is absent is a promise no call can keep"
+            );
+        }
     }
 
     /// Nothing wgpu cannot do may be advertised — most importantly buffer
