@@ -9,5 +9,18 @@ repository.workspace = true
 [lints]
 workspace = true
 
-[dependencies]
+# No unconditional dependencies: the DSP core (mixer, voices, spatial cue
+# grammar, WAV/QOA decoders) is pure `f32` block processing with nothing under
+# it, which is what `docs/plan/13-audio.md` means by "pure-DSP core, platform
+# seam at the device edge".
+
+# The native device backend. Target-gated rather than unconditional because the
+# browser's output is `src/web.rs` and cpal has no place in it: cpal 0.18 *does*
+# build for `wasm32-unknown-unknown`, but only by pulling `wasm-bindgen`,
+# `js-sys`, `web-sys` and `futures-util` into the wasm graph to drive an
+# AudioWorklet of its own — a second answer to the question this crate's `web`
+# module already answers, and the exact framework dependency
+# `docs/plan/15-windowing.md` rejects for the shell. Gating it keeps the wasm
+# build graph at *zero* third-party crates.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cpal = "0.18.1"
