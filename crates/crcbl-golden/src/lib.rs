@@ -95,6 +95,41 @@
 //!   and, as `compare`'s tests pin, still comfortably strict enough to reject a
 //!   triangle shifted by six pixels.
 //!
+//! ## P5.12 re-measured it across *backends*, and the same shape held
+//!
+//! The cross-backend gate (`crates/crcbl/tests/run-cross-backend-e2e.sh`) sends
+//! one frame through `crcbl-vk` and through `crcbl-wgpu` and compares the two.
+//! Both backends reaching the same ICD produce **byte-identical** frames — the
+//! `256x192` screenshot hashes to `14ba337e…` through either on radv and
+//! `559f4594…` through either on lavapipe — so the interesting measurement is
+//! the one with the drivers crossed: Vulkan on radv (Mesa 26.1.5) against wgpu
+//! on lavapipe.
+//!
+//! | | lit mesh, vk vs wgpu, drivers crossed |
+//! | --- | --- |
+//! | pixels differing at all (256×192) | 41 399 — **84.23%** |
+//! | pixels differing at all (97×61) | 5 129 — **86.68%** |
+//! | max per-channel delta | **1** |
+//! | pixels over a delta of 2 | **0** |
+//! | mean absolute error | 0.2127 |
+//! | RMSE | 0.4612 |
+//! | block SSIM | 0.999898 |
+//!
+//! That is the P1.3 row again, from a different direction: nearly everything
+//! differs, everything differs by exactly one level, and nothing at all exceeds
+//! a delta of 2. **Two backends on one driver are bit-exact; two drivers are one
+//! level apart whichever backend asked.** The variable is the driver, not the
+//! backend — which is the useful thing to know about a seam, and it is why
+//! [`Tolerance::RASTERISER`] is reused for the cross-backend gate rather than a
+//! second, looser constant being invented for it. A tolerance calibrated per
+//! comparison is a tolerance nobody can defend.
+//!
+//! A tolerance this permissive is only a gate if the frame it is applied to is a
+//! picture, which is what [`Image::distinct_colors`] is for: two blank frames
+//! match perfectly. The harness refuses a frame with fewer than 16 distinct
+//! colours; the lit cube has 41 at 256×192 and 36 at 97×61, and the null
+//! backend's frame has 1.
+//!
 //! # Blessing
 //!
 //! `CRCBL_BLESS=1` rewrites the reference instead of comparing against it. The
@@ -112,7 +147,10 @@ pub mod image;
 
 use std::path::{Path, PathBuf};
 
-pub use compare::{Comparison, Failure, Tolerance, compare, diff_image, ssim};
+pub use compare::{
+    Comparison, Failure, PixelDelta, Tolerance, compare, diff_image, differing_bounds, ssim,
+    worst_pixels,
+};
 pub use image::{ChannelOrder, Image, ImageError, MAX_PIXELS};
 
 /// The environment variable that turns a comparison into a regeneration.

@@ -327,6 +327,122 @@ fn luma(image: &Image) -> Vec<f64> {
         .collect()
 }
 
+/// One pixel that two images disagree about.
+///
+/// [`Comparison`] says *how much* two images differ; this says **where**. A
+/// cross-backend failure is read by a human who has to decide "the tolerance is
+/// too tight" from "the frame moved", and a summary line alone cannot tell them
+/// apart: a mean absolute error of 0.2 is the same number whether it is one
+/// level spread over the background or a black square in one corner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PixelDelta {
+    /// Column, from the left.
+    pub x: u32,
+    /// Row, from the top.
+    pub y: u32,
+    /// The reference's RGBA at `(x, y)`.
+    pub reference: [u8; 4],
+    /// The actual image's RGBA at `(x, y)`.
+    pub actual: [u8; 4],
+    /// The largest per-channel absolute difference at `(x, y)`.
+    pub max_delta: u8,
+}
+
+impl core::fmt::Display for PixelDelta {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "({:>5},{:>5}) reference {:?} actual {:?} delta {}",
+            self.x, self.y, self.reference, self.actual, self.max_delta
+        )
+    }
+}
+
+/// The `limit` pixels that differ most, worst first.
+///
+/// Ties break by position (top-to-bottom, left-to-right) so the output is
+/// **deterministic**: a failure message that names a different pixel on every
+/// run is not evidence anyone can compare across runs.
+///
+/// Differently sized images return nothing — no pixel of one corresponds to a
+/// pixel of the other, and inventing correspondences would be worse than saying
+/// nothing.
+#[must_use]
+pub fn worst_pixels(reference: &Image, actual: &Image, limit: usize) -> Vec<PixelDelta> {
+    if reference.width() != actual.width() || reference.height() != actual.height() {
+        return Vec::new();
+    }
+    let mut worst: Vec<PixelDelta> = Vec::new();
+    for y in 0..reference.height() {
+        for x in 0..reference.width() {
+            let (Some(left), Some(right)) = (reference.pixel(x, y), actual.pixel(x, y)) else {
+                continue;
+            };
+            let max_delta = (0..4)
+                .map(|channel| left[channel].abs_diff(right[channel]))
+                .max()
+                .unwrap_or(0);
+            if max_delta == 0 {
+                continue;
+            }
+            worst.push(PixelDelta {
+                x,
+                y,
+                reference: left,
+                actual: right,
+                max_delta,
+            });
+        }
+    }
+    // Sorted by delta descending; the scan above already visited positions in
+    // reading order and `sort_by` is stable, so equal deltas keep it.
+    worst.sort_by_key(|pixel| core::cmp::Reverse(pixel.max_delta));
+    worst.truncate(limit);
+    worst
+}
+
+/// The bounding box `(x, y, width, height)` of every pixel differing by more
+/// than `threshold`, or `None` if none does.
+///
+/// The other half of "where": a box covering the whole frame says the
+/// difference is global — a clear colour, a tonemap constant, a gamma step —
+/// and a box eight pixels across says something moved in one place. Those two
+/// call for completely different investigations and a scalar cannot separate
+/// them.
+#[must_use]
+pub fn differing_bounds(
+    reference: &Image,
+    actual: &Image,
+    threshold: u8,
+) -> Option<(u32, u32, u32, u32)> {
+    if reference.width() != actual.width() || reference.height() != actual.height() {
+        return None;
+    }
+    let (mut min_x, mut min_y) = (u32::MAX, u32::MAX);
+    let (mut max_x, mut max_y) = (0u32, 0u32);
+    let mut any = false;
+    for y in 0..reference.height() {
+        for x in 0..reference.width() {
+            let (Some(left), Some(right)) = (reference.pixel(x, y), actual.pixel(x, y)) else {
+                continue;
+            };
+            let delta = (0..4)
+                .map(|channel| left[channel].abs_diff(right[channel]))
+                .max()
+                .unwrap_or(0);
+            if delta <= threshold {
+                continue;
+            }
+            any = true;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+    any.then(|| (min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
+}
+
 /// Renders the difference between two images, for a human and for a CI artifact.
 ///
 /// The reference is kept as a dimmed greyscale background so the shape is still
@@ -659,6 +775,80 @@ mod tests {
         assert_eq!(same[0], same[1]);
         assert_eq!(same[1], same[2]);
         assert_eq!(diff.width(), reference.width());
+    }
+
+    /// "Where and by how much", on a picture whose answer is known: one pixel
+    /// moved a long way and a scatter of pixels moved a little. The big one has
+    /// to come first, and the order has to be the same on every run.
+    #[test]
+    fn the_worst_pixels_are_reported_worst_first_and_deterministically() {
+        let reference = triangle(32, 24, 0);
+        let mut actual = reference.clone();
+        actual.set_pixel(20, 5, [0, 0, 0, 0]);
+        actual.set_pixel(3, 1, [11, 20, 40, 255]);
+        actual.set_pixel(4, 1, [10, 21, 40, 255]);
+
+        let worst = worst_pixels(&reference, &actual, 8);
+        assert_eq!(worst.len(), 3, "{worst:?}");
+        assert_eq!((worst[0].x, worst[0].y), (20, 5));
+        assert_eq!(worst[0].max_delta, 255);
+        // The two one-level pixels tie, so reading order decides — and decides
+        // the same way every time.
+        assert_eq!((worst[1].x, worst[1].y), (3, 1));
+        assert_eq!((worst[2].x, worst[2].y), (4, 1));
+        assert_eq!(worst, worst_pixels(&reference, &actual, 8));
+
+        // The limit is a limit.
+        assert_eq!(worst_pixels(&reference, &actual, 1).len(), 1);
+        // And a display line a human reads has the coordinates and both colours
+        // in it, because that is the whole point of the type.
+        let line = worst[0].to_string();
+        for needle in ["20", "5", "255"] {
+            assert!(line.contains(needle), "{needle:?} missing from {line}");
+        }
+    }
+
+    /// The bounding box separates "everything drifted" from "one thing moved",
+    /// which is the first question anyone asks about a red cross-backend run.
+    #[test]
+    fn the_bounding_box_distinguishes_a_local_change_from_a_global_one() {
+        let reference = triangle(32, 24, 0);
+
+        let mut local = reference.clone();
+        for x in 10..14 {
+            local.set_pixel(x, 7, [0, 0, 0, 255]);
+        }
+        assert_eq!(
+            differing_bounds(&reference, &local, 2),
+            Some((10, 7, 4, 1)),
+            "a four-pixel run must report a four-pixel box"
+        );
+
+        // A global one-level shift: invisible at a threshold of 2, and the
+        // whole frame at a threshold of 0. Both answers are the truth about a
+        // different question, which is why the harness prints both.
+        let mut global = reference.clone();
+        for y in 0..reference.height() {
+            for x in 0..reference.width() {
+                let pixel = reference.pixel(x, y).expect("in range");
+                global.set_pixel(x, y, [pixel[0] + 1, pixel[1], pixel[2], pixel[3]]);
+            }
+        }
+        assert_eq!(differing_bounds(&reference, &global, 2), None);
+        assert_eq!(
+            differing_bounds(&reference, &global, 0),
+            Some((0, 0, 32, 24))
+        );
+    }
+
+    /// Differently sized images have no corresponding pixels, so the two
+    /// location helpers say nothing rather than something invented.
+    #[test]
+    fn locating_a_difference_between_differently_sized_images_reports_nothing() {
+        let reference = triangle(32, 24, 0);
+        let smaller = triangle(16, 12, 0);
+        assert!(worst_pixels(&reference, &smaller, 8).is_empty());
+        assert_eq!(differing_bounds(&reference, &smaller, 0), None);
     }
 
     /// The summary is what a failing test prints, so it must actually contain

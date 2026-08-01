@@ -250,6 +250,33 @@ impl Image {
         self.pixels[offset..offset + 4].copy_from_slice(&color);
     }
 
+    /// How many distinct RGBA colours the image contains, counting no further
+    /// than `ceiling`.
+    ///
+    /// This is the **anti-vacuity** measurement, and it is why a tolerance can
+    /// be widened without the gate quietly becoming decorative: two blank frames
+    /// agree perfectly, so "the images match" is only evidence when the images
+    /// are pictures of something. A cleared frame scores 1, a cleared frame with
+    /// a HUD scores a handful, and the engine's lit cube scores dozens.
+    ///
+    /// `ceiling` stops the count early — a caller asserting "at least 16
+    /// colours" does not need the exact answer for a 4K frame, and the early
+    /// exit keeps the set small.
+    #[must_use]
+    pub fn distinct_colors(&self, ceiling: usize) -> usize {
+        let mut seen: Vec<[u8; 4]> = Vec::new();
+        for pixel in self.pixels.chunks_exact(4) {
+            let color = [pixel[0], pixel[1], pixel[2], pixel[3]];
+            if !seen.contains(&color) {
+                seen.push(color);
+                if seen.len() >= ceiling {
+                    break;
+                }
+            }
+        }
+        seen.len()
+    }
+
     /// Loads a PNG.
     ///
     /// # Errors
@@ -346,6 +373,31 @@ impl Image {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The anti-vacuity measurement, on the three cases that matter: a cleared
+    /// frame, a frame with something in it, and the early exit.
+    #[test]
+    fn a_blank_frame_counts_one_colour_and_a_drawn_one_counts_more() {
+        let blank = Image::filled(16, 16, [29, 34, 49, 255]).expect("a valid test image");
+        assert_eq!(
+            blank.distinct_colors(64),
+            1,
+            "a cleared frame is one colour"
+        );
+
+        let mut drawn = blank.clone();
+        for i in 0..10u8 {
+            drawn.set_pixel(u32::from(i), 4, [i * 20, 60, 30, 255]);
+        }
+        assert_eq!(drawn.distinct_colors(64), 11, "ten colours plus the clear");
+
+        // The ceiling stops the count, so a caller asking "at least N" pays for
+        // N and not for the frame.
+        assert_eq!(drawn.distinct_colors(4), 4);
+        // And a ceiling of zero is treated as one rather than looping forever
+        // or returning something a comparison would read as "blank is fine".
+        assert_eq!(drawn.distinct_colors(1), 1);
+    }
 
     #[test]
     fn a_buffer_of_the_wrong_length_is_refused_rather_than_padded() {

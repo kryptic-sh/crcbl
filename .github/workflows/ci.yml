@@ -455,6 +455,119 @@ jobs:
           path: target/golden-diff/
           if-no-files-found: ignore
 
+  # The second backend's own e2e suite. `crates/crcbl-wgpu/tests/run-wgpu-e2e.sh`
+  # landed with P5.11 — executable, shellcheck-clean and wired into nothing, so
+  # the only backend the P5 gate is about was tested by no job at all. This is
+  # that job, in the shape of `vk-e2e` plus an X server, because the suite has a
+  # windowed half a headless one cannot stand in for: `wgpu::SurfaceTexture`'s
+  # `Drop` *discards* the acquired image instead of presenting it, which is a
+  # bug that only appears once the swapchain's images have all been handed out
+  # (P5.11's headline failure, and the reason the script's frame budget must stay
+  # above the image count).
+  #
+  # The script starts and stops Xvfb itself, polling for the socket with a
+  # deadline rather than sleeping — so this job installs the server and the X
+  # client libraries `crcbl-shell`'s X11 backend `dlopen`s, and nothing more.
+  # Runtime packages, not `-dev`: the backend links none of them, and a job that
+  # passes without the headers is itself the check that no `DT_NEEDED` crept in.
+  wgpu-e2e:
+    name: wgpu e2e (lavapipe, Xvfb)
+    runs-on: ubuntu-latest
+    # A software rasteriser, two windowed sample runs of 60 frames each, and a
+    # cold compile of wgpu.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+      - name: Install Xvfb, the X client libraries and lavapipe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb \
+            libxcb1 \
+            libxcb-randr0 \
+            libxcb-xinput0 \
+            libxkbcommon0 \
+            libxkbcommon-x11-0 \
+            libvulkan1 \
+            mesa-vulkan-drivers
+      # The ICD is pinned for the same reason `vk-e2e` pins it: a runner that
+      # grew a GPU tomorrow would otherwise stop testing the software path
+      # silently. The script fails if the manifest resolves to nothing, and
+      # fails if the suite reports zero tests run.
+      - name: Run the wgpu suite against lavapipe
+        env:
+          CRCBL_WGPU_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: crates/crcbl-wgpu/tests/run-wgpu-e2e.sh
+
+  # `docs/plan/12-testing.md`'s P5 row: "Cross-backend image compare (vk↔wgpu)",
+  # which its per-subsystem anchors call "the tier system's regression net" and
+  # the roadmap makes a condition of the HAL freeze at P5 exit — the seam is not
+  # frozen until a *second* backend implements it, and this is the job that says
+  # whether it implements it the same way.
+  #
+  # It renders one frame through `crcbl screenshot` twice, once per backend, and
+  # compares the two with `crcbl-golden`'s measured tolerance. Not byte
+  # equality: the two agree to the byte only while they reach the same driver,
+  # and on a machine where they do not they differ by one level on most of the
+  # frame (measured, in the script's header and in `crcbl-golden`'s docs). Not a
+  # tolerance loose enough to always pass either — the comparator refuses a
+  # frame with fewer than 16 distinct colours, so a backend that rendered
+  # nothing fails here even though "nothing" matches "nothing" perfectly.
+  #
+  # Its own job rather than a step inside `wgpu-e2e`: it needs no display and no
+  # X libraries, it is the P5 deliverable that ought to be visible by name in
+  # the job list, and a red cross-backend comparison means something completely
+  # different from a red wgpu suite.
+  cross-backend-e2e:
+    name: cross-backend image compare (vk vs wgpu)
+    runs-on: ubuntu-latest
+    # Two offscreen frames per size on a software rasteriser, plus the compile.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - name: Install the Vulkan loader and lavapipe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan1 \
+            mesa-vulkan-drivers
+      # Both backends are pinned to lavapipe because it is the only driver a
+      # runner has; the script says so out loud, since that configuration
+      # compares two backends rather than two drivers. Crossing the pins is what
+      # a developer with two ICDs does, and it is where the tolerance was
+      # measured.
+      - name: Compare the same frame across both backends
+        env:
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_WGPU_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: crates/crcbl/tests/run-cross-backend-e2e.sh
+      # `docs/plan/12-testing.md`: "diffs uploaded as CI artifacts on failure".
+      # Both frames and a red-marked diff of the two, which is what tells "the
+      # tolerance is too tight" from "one backend stopped drawing the cube"
+      # without reproducing the run.
+      - name: Upload the cross-backend diff
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cross-backend-diff
+          path: target/golden-diff/
+          if-no-files-found: ignore
+
   # The anti-rot gate for the committed SPIR-V. `crates/crcbl-shaders` ships
   # Slang sources *and* the compiled artifacts, because
   # `docs/plan/02-vulkan-backend.md`'s risk list sanctions exactly that ("Slang
