@@ -35,18 +35,18 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ui]
 source = shaders/ui.slang
-source-sha256 = ff38f85ee947a5b6d61c2325a5fc1f49546855c433f30017219409309ae1f9ab
+source-sha256 = 900163d912269ccdb8d89e6932b0ff05192ee19dbccac04e025be98f452e74ce
 spirv = spirv/ui.spv
-spirv-sha256 = 729fbc622184060623d9a7c6732505082fb52bc40417f1a356c4e5277e74ee66
+spirv-sha256 = cfc3412980ec233f6c85b780557c43ae851164b30190f506ace9bc4f4219ddf5
 wgsl = wgsl/ui.wgsl
-wgsl-sha256 = f51882b9715c1f7094f5455d301446cf4faa0d60de3c98753dc212e72b9bf972
+wgsl-sha256 = 4f184f7342f65b430c8521d18c1da19dd9ee206449ab473c167dcc9fe9d23414
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ui_tier_b]
 source = shaders/ui_tier_b.slang
-source-sha256 = a7509ca040a49e5905145fd32f631a3f4989aebd3b7c6f1a583a012139850529
+source-sha256 = 4f2f7e3ef718a53359fac107fca3932581f463d875b0c6f5561f43c9b25b2cb2
 spirv = spirv/ui_tier_b.spv
-spirv-sha256 = 802a424616b06c062e296ae9c3b33e23b1f38c93ea178032b7fbb255c938c5cd
+spirv-sha256 = c09368c5eedef42b61e25c187991278baec65a193eea4b3f5ff0db90fcceb31c
 wgsl = wgsl/ui_tier_b.wgsl
-wgsl-sha256 = abfa18764a43cfddc88b487211d156835f555f554c3831ec5100271599645a50
+wgsl-sha256 = 1113bc41a6805fae74a50a7227e2e6974c98d47a7391bd67a70dbd9cf0b50ee7
 entry-points = vertexMain:vertex, fragmentMain:fragment

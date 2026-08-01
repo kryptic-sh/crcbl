@@ -74,13 +74,20 @@ float4 fragmentMain(UiOutput input) : SV_Target
 {
     float4 color = input.color;
 
-    // When UV is non-zero, this is a textured glyph — sample the atlas.
+    // When UV is non-zero, this is a textured glyph — modulate by the atlas.
     // Glyph quads all have UV in (0,1); rect quads are at (0,0).
-    if (input.uv.x > 0.0 || input.uv.y > 0.0)
-    {
-        float glyph = glyphAtlas.Sample(glyphSampler, input.uv);
-        color.a *= glyph;
-    }
+    //
+    // The sample sits *above* the branch on purpose. WGSL requires
+    // `textureSample` to be called from uniform control flow, and `input.uv` is
+    // a varying — so sampling inside the `if` is a hard error in Dawn, which
+    // enforces the rule, even though naga accepts it and every Vulkan driver
+    // runs it. One invalid module invalidates its pipeline, its command buffer
+    // and therefore the whole frame, so this branch is why a browser drew
+    // nothing at all. Sampling unconditionally costs a fetch on rect quads,
+    // whose UV is (0,0), and the result is then discarded.
+    float glyph = glyphAtlas.Sample(glyphSampler, input.uv);
+    bool textured = input.uv.x > 0.0 || input.uv.y > 0.0;
+    color.a *= textured ? glyph : 1.0;
 
     return color;
 }

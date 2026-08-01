@@ -53,19 +53,26 @@ struct pixelInput_0
 fn fragmentMain( _S1 : pixelInput_0, @builtin(position) position_2 : vec4<f32>) -> pixelOutput_0
 {
     var color_3 : vec4<f32> = _S1.color_2;
-    var _S2 : bool;
+    var glyph_0 : f32 = (textureSample((glyphAtlas_0), (glyphSampler_0), (_S1.uv_2)).x);
+    var textured_0 : bool;
     if((_S1.uv_2.x) > 0.0f)
     {
-        _S2 = true;
+        textured_0 = true;
     }
     else
     {
-        _S2 = (_S1.uv_2.y) > 0.0f;
+        textured_0 = (_S1.uv_2.y) > 0.0f;
     }
-    if(_S2)
+    var _S2 : f32;
+    if(textured_0)
     {
-        color_3[i32(3)] = color_3[i32(3)] * (textureSample((glyphAtlas_0), (glyphSampler_0), (_S1.uv_2)).x);
+        _S2 = glyph_0;
     }
+    else
+    {
+        _S2 = 1.0f;
+    }
+    color_3[i32(3)] = color_3[i32(3)] * _S2;
     var _S3 : pixelOutput_0 = pixelOutput_0( color_3 );
     return _S3;
 }
