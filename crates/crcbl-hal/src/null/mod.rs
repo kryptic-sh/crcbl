@@ -563,6 +563,15 @@ impl Device for NullDevice {
         self.caps
     }
 
+    /// Whatever [`Recorder::report_device_error`] queued, oldest first.
+    ///
+    /// Nothing in this backend fails on its own — it is a recorder, not a
+    /// driver — so every error here was put there by a test that wants to see
+    /// what its caller does with one.
+    fn take_error(&self) -> Option<String> {
+        self.recorder.take_device_error()
+    }
+
     fn queue(&self, kind: QueueKind) -> Option<QueueHandle> {
         self.has_queue(kind)
             .then(|| queue_handle(self.device_id, queue_kind_index(kind)))

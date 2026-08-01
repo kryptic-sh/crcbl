@@ -12,6 +12,7 @@ use crcbl_hal::{
 };
 
 use crate::cell::{Lock, Shared};
+use crate::errors::ErrorSink;
 
 use crcbl_core::Pool;
 
@@ -33,6 +34,9 @@ pub struct WgpuDevice {
     enabled: wgpu::Features,
     graphics_queue: QueueHandle,
     pools: Shared<Pools>,
+    /// Where the device's out-of-band failures land. See [`crate::errors`] for
+    /// why a backend on this API needs one at all.
+    errors: std::sync::Arc<ErrorSink>,
 }
 
 impl std::fmt::Debug for WgpuDevice {
@@ -177,6 +181,16 @@ impl WgpuDevice {
             limits: crate::instance::hal_limits_for(&device.limits(), enabled),
         };
 
+        // Installed before anything is created on the device, because the first
+        // thing a caller does with a new device is build its pipelines and that
+        // is the failure this exists to catch. Without a handler wgpu logs the
+        // error and moves on, and the seam's caller learns nothing at all.
+        let errors = std::sync::Arc::new(ErrorSink::default());
+        let sink = errors.clone();
+        device.on_uncaptured_error(std::sync::Arc::new(move |error: wgpu::Error| {
+            sink.record(error.to_string());
+        }));
+
         Self {
             device,
             queue,
@@ -190,6 +204,25 @@ impl WgpuDevice {
             // `crcbl_hal::null` synthesises its own queue handles.
             graphics_queue: QueueHandle::from_bits(1 << 32).expect("generation 1 is non-zero"),
             pools: Shared::new(Pools::new(surfaces)),
+            errors,
+        }
+    }
+
+    /// Runs a creation call and reports anything the device blamed on it.
+    ///
+    /// `wgpu-core` — the native path — delivers a validation failure to the
+    /// error handler *during* the call, so this turns it into the `Err` the
+    /// seam's caller is already checking. The browser delivers it on a later
+    /// turn of the event loop instead, where nothing can attribute it to a
+    /// call; there the same error reaches the caller through
+    /// [`Device::take_error`] a frame later. Both halves are needed, and
+    /// neither replaces the other.
+    fn checked<T>(&self, what: &str, create: impl FnOnce() -> T) -> Result<T, HalError> {
+        let mark = self.errors.count();
+        let value = create();
+        match self.errors.since(mark) {
+            None => Ok(value),
+            Some(message) => Err(HalError::Backend(format!("wgpu {what}: {message}"))),
         }
     }
 
@@ -231,6 +264,9 @@ impl Device for WgpuDevice {
     }
     fn caps(&self) -> DeviceCaps {
         self.caps
+    }
+    fn take_error(&self) -> Option<String> {
+        self.errors.take()
     }
     fn queue(&self, kind: QueueKind) -> Option<QueueHandle> {
         // One queue: wgpu exposes exactly one, and the seam says a caller with
@@ -634,34 +670,43 @@ impl Device for WgpuDevice {
         &self,
         desc: &ShaderModuleDesc<'_>,
     ) -> Result<ShaderModuleHandle, HalError> {
-        let sm = if let Some(wgsl) = desc.wgsl {
-            // Not `create_shader_module_trusted`: WGSL arrives as source that
-            // naga will parse and bounds-check, and skipping those checks buys
-            // nothing here — the artifact is compiled once at start-up.
-            self.device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: desc.label,
-                    source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(wgsl)),
-                })
-        } else if desc.spirv.is_empty() {
+        if desc.wgsl.is_none() && desc.spirv.is_empty() {
             return Err(desc.unusable(ShaderSources::WGSL | ShaderSources::SPIRV));
-        } else {
-            // SAFETY: `ShaderRuntimeChecks::unchecked` removes the injected
-            // bounds checks, so the module must not index a binding out of
-            // range. `desc.spirv` is a build-time artifact of this workspace,
-            // compiled from a Slang source in `crcbl-shaders` and hash-pinned
-            // by its manifest — it is not attacker-supplied and not loaded from
-            // disk at run time.
-            unsafe {
-                self.device.create_shader_module_trusted(
-                    wgpu::ShaderModuleDescriptor {
+        }
+        // Guarded: a module that will not compile is the failure this backend
+        // used to accept silently, and it is the one that cost a phase. See
+        // `Self::checked`.
+        let sm = self.checked("create_shader_module", || {
+            if let Some(wgsl) = desc.wgsl {
+                // Not `create_shader_module_trusted`: WGSL arrives as source
+                // that naga will parse and bounds-check, and skipping those
+                // checks buys nothing here — the artifact is compiled once at
+                // start-up.
+                self.device
+                    .create_shader_module(wgpu::ShaderModuleDescriptor {
                         label: desc.label,
-                        source: wgpu::ShaderSource::SpirV(std::borrow::Cow::Borrowed(desc.spirv)),
-                    },
-                    wgpu::ShaderRuntimeChecks::unchecked(),
-                )
+                        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(wgsl)),
+                    })
+            } else {
+                // SAFETY: `ShaderRuntimeChecks::unchecked` removes the injected
+                // bounds checks, so the module must not index a binding out of
+                // range. `desc.spirv` is a build-time artifact of this
+                // workspace, compiled from a Slang source in `crcbl-shaders`
+                // and hash-pinned by its manifest — it is not attacker-supplied
+                // and not loaded from disk at run time.
+                unsafe {
+                    self.device.create_shader_module_trusted(
+                        wgpu::ShaderModuleDescriptor {
+                            label: desc.label,
+                            source: wgpu::ShaderSource::SpirV(std::borrow::Cow::Borrowed(
+                                desc.spirv,
+                            )),
+                        },
+                        wgpu::ShaderRuntimeChecks::unchecked(),
+                    )
+                }
             }
-        };
+        })?;
         Ok(self.pools.shader_modules.lock().unwrap().insert(sm).cast())
     }
     fn destroy_shader_module(&self, h: ShaderModuleHandle) {
@@ -952,41 +997,42 @@ impl Device for WgpuDevice {
             })
             .transpose()?;
 
-        let pipeline = self
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: desc.label,
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &vs,
-                    entry_point: Some(desc.vertex.entry_point),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: conv::map_topology(desc.primitive.topology),
-                    strip_index_format: None,
-                    front_face: conv::map_front_face(desc.primitive.front_face),
-                    cull_mode: conv::map_cull_mode(desc.primitive.cull_mode),
-                    polygon_mode: conv::map_polygon_mode(desc.primitive.polygon_mode),
-                    unclipped_depth: desc.primitive.depth_clamp,
-                    conservative: false,
-                },
-                depth_stencil: ds,
-                multisample: wgpu::MultisampleState {
-                    count: desc.multisample.samples,
-                    mask: u64::from(desc.multisample.mask),
-                    alpha_to_coverage_enabled: desc.multisample.alpha_to_coverage,
-                },
-                fragment: fs_entry.as_ref().map(|(m, e)| wgpu::FragmentState {
-                    module: m,
-                    entry_point: Some(e),
-                    compilation_options: Default::default(),
-                    targets: &targets,
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+        let pipeline = self.checked("create_graphics_pipeline", || {
+            self.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: desc.label,
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &vs,
+                        entry_point: Some(desc.vertex.entry_point),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology: conv::map_topology(desc.primitive.topology),
+                        strip_index_format: None,
+                        front_face: conv::map_front_face(desc.primitive.front_face),
+                        cull_mode: conv::map_cull_mode(desc.primitive.cull_mode),
+                        polygon_mode: conv::map_polygon_mode(desc.primitive.polygon_mode),
+                        unclipped_depth: desc.primitive.depth_clamp,
+                        conservative: false,
+                    },
+                    depth_stencil: ds,
+                    multisample: wgpu::MultisampleState {
+                        count: desc.multisample.samples,
+                        mask: u64::from(desc.multisample.mask),
+                        alpha_to_coverage_enabled: desc.multisample.alpha_to_coverage,
+                    },
+                    fragment: fs_entry.as_ref().map(|(m, e)| wgpu::FragmentState {
+                        module: m,
+                        entry_point: Some(e),
+                        compilation_options: Default::default(),
+                        targets: &targets,
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+        })?;
         Ok(self
             .pools
             .graphics_pipelines
@@ -1020,16 +1066,17 @@ impl Device for WgpuDevice {
                 .ok_or_else(|| HalError::invalid_handle("shader module", desc.compute.module))?
                 .clone()
         };
-        let pipeline = self
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: desc.label,
-                layout: Some(&layout),
-                module: &cs,
-                entry_point: Some(desc.compute.entry_point),
-                compilation_options: Default::default(),
-                cache: None,
-            });
+        let pipeline = self.checked("create_compute_pipeline", || {
+            self.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: desc.label,
+                    layout: Some(&layout),
+                    module: &cs,
+                    entry_point: Some(desc.compute.entry_point),
+                    compilation_options: Default::default(),
+                    cache: None,
+                })
+        })?;
         Ok(self
             .pools
             .compute_pipelines

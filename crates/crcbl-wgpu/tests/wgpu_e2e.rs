@@ -36,7 +36,8 @@ use crcbl_hal::{
     CommandEncoderDesc, CompositeAlpha, Device, DeviceDesc, Extent3d, Features, Format, HalError,
     ImageAspect, ImageSubresourceLayers, ImageSubresourceRange, Instance, LoadOp, MemoryLocation,
     Offset3d, PresentInfo, PresentMode, QueueKind, ReadbackDesc, ReadbackState, Rect2d,
-    RenderPassDesc, ResourceState, StoreOp, SubmitInfo, SurfaceError, SwapchainDesc,
+    RenderPassDesc, ResourceState, ShaderModuleDesc, StoreOp, SubmitInfo, SurfaceError,
+    SwapchainDesc,
 };
 use crcbl_wgpu::WgpuInstance;
 
@@ -609,4 +610,65 @@ fn reconfiguring_an_offscreen_ring_reissues_its_images() {
     device.wait_idle().expect("idle");
     device.destroy_command_buffer(commands);
     headless.finish();
+}
+
+/// **A shader that does not compile is an error, not a handle.**
+///
+/// WebGPU reports a creation failure on the device's error channel rather than
+/// to the call, so this backend used to return a module handle for source naga
+/// had rejected, build a pipeline on it, and submit command buffers the
+/// implementation discarded — the shape P5.13 found in a browser, where it
+/// presented as a black canvas over a game that reported itself as playing.
+///
+/// `wgpu-core` raises the error during the call, so the guard in
+/// `WgpuDevice::checked` catches it here and the seam's caller sees the `Err` it
+/// was already checking for. The asynchronous half of the same fix —
+/// `Device::take_error` — is what covers the browser, and the headless-browser
+/// gate is where that one is exercised.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_shader_module_that_will_not_compile_is_refused_instead_of_handed_back() {
+    let (instance, device, surface, _queue, _format) = Headless::open_device();
+
+    // Valid WGSL first, so the failure below is attributable to the source and
+    // not to a backend that refuses every module.
+    let good = device
+        .create_shader_module(&ShaderModuleDesc {
+            label: Some("valid"),
+            wgsl: Some(
+                "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
+            ),
+            ..ShaderModuleDesc::default()
+        })
+        .expect("well-formed WGSL compiles");
+    assert!(
+        device.take_error().is_none(),
+        "a module that compiled must leave nothing on the error channel"
+    );
+    device.destroy_shader_module(good);
+
+    let error = device
+        .create_shader_module(&ShaderModuleDesc {
+            label: Some("not WGSL at all"),
+            wgsl: Some("this is not a shader"),
+            ..ShaderModuleDesc::default()
+        })
+        .expect_err("source naga cannot parse is not a shader module");
+    let HalError::Backend(message) = &error else {
+        panic!("wrong variant: {error:?}");
+    };
+    assert!(
+        message.contains("create_shader_module"),
+        "the message must name the call that failed: {message}"
+    );
+
+    // Taken by the guard, so the frame loop's drain does not report it twice.
+    assert!(
+        device.take_error().is_none(),
+        "an error reported as an Err must not also be reported out of band"
+    );
+
+    instance.destroy_surface(surface);
+    drop(device);
+    drop(instance);
 }

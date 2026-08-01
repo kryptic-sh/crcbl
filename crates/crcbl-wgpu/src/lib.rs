@@ -107,6 +107,30 @@
 //! so `apps/breakout` now builds every module it needs and draws its HUD through
 //! this backend.
 //!
+//! # Errors the device reports out of band
+//!
+//! WebGPU does not answer "did this fail?" at the call. `create_shader_module`
+//! and `create_render_pipeline` return objects whatever happens and the reason
+//! for a failure arrives separately, so a backend that reads only return values
+//! believes it built everything it asked for — then submits command buffers the
+//! implementation discards. That is not hypothetical: the run that found the UI
+//! shader's uniformity error (above) submitted 384 invalid command buffers
+//! while reporting a healthy status.
+//!
+//! Two mechanisms close it, because the error arrives at two different times:
+//!
+//! * Every device gets an **uncaptured-error handler** the moment it opens.
+//!   Each error is logged at `error` and kept in an `errors::ErrorSink`.
+//! * Shader-module and pipeline creation run through `WgpuDevice::checked`,
+//!   which reports anything raised *during* the call as
+//!   [`HalError::Backend`](crcbl_hal::HalError::Backend) naming the call.
+//!   `wgpu-core` raises validation errors synchronously, so on native this is
+//!   the whole story and the failure reaches the caller as a plain `Err`.
+//! * A browser instead delivers it on a later turn of the event loop, where no
+//!   call can be blamed. That half surfaces through
+//!   [`Device::take_error`](crcbl_hal::Device::take_error), which
+//!   `crcbl::engine::GpuContext::acquire` drains before it records a frame.
+//!
 //! # wasm32
 //!
 //! The crate compiles for `wasm32` and opens devices there. Adapter enumeration
@@ -141,6 +165,7 @@ mod cell;
 mod command;
 mod conv;
 mod device;
+mod errors;
 mod instance;
 mod resources;
 

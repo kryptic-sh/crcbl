@@ -584,6 +584,8 @@ pub(super) struct State {
     /// One entry per `create_shader_module`, surviving the module's
     /// destruction. See [`Recorder::shader_modules_created`].
     pub(super) shader_modules_created: Vec<(Option<String>, ShaderSources)>,
+    /// Queued out-of-band device errors. See [`Recorder::report_device_error`].
+    pub(super) device_errors: std::collections::VecDeque<String>,
 }
 
 impl State {
@@ -595,6 +597,7 @@ impl State {
             readback_latency: 0,
             device_latency: 0,
             shader_modules_created: Vec::new(),
+            device_errors: std::collections::VecDeque::new(),
         }
     }
 
@@ -845,6 +848,27 @@ impl Recorder {
     /// completes on the first poll.
     pub fn set_device_latency(&self, polls: u32) {
         self.lock().device_latency = polls;
+    }
+
+    /// Queues an error for [`Device::take_error`](crate::Device::take_error) to
+    /// report, as if the driver had raised it outside any call.
+    ///
+    /// The sibling of [`set_device_latency`](Self::set_device_latency), and
+    /// there for the same reason: the null backend never fails, so a caller's
+    /// **handling** of an out-of-band failure would otherwise never run. This
+    /// simulates the one case that actually produces them — WebGPU delivering a
+    /// pipeline's compilation failure to the device's error channel a turn of
+    /// the event loop after the call that made it returned an object.
+    ///
+    /// Each queued error is reported once, oldest first.
+    pub fn report_device_error(&self, message: impl Into<String>) {
+        self.lock().device_errors.push_back(message.into());
+    }
+
+    /// Takes the oldest queued device error, if any. The backend's half of
+    /// [`report_device_error`](Self::report_device_error).
+    pub(super) fn take_device_error(&self) -> Option<String> {
+        self.lock().device_errors.pop_front()
     }
 
     /// Records a validation error. Used by the backend; exposed so a test can

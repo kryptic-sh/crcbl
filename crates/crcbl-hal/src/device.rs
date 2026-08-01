@@ -504,6 +504,25 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// or just fall back to [`QueueKind::Graphics`], which always exists.
     fn queue(&self, kind: QueueKind) -> Option<QueueHandle>;
 
+    /// Takes the error the driver reported **out of band**, if there is one.
+    ///
+    /// Some backends do not deliver every failure to the call that caused it.
+    /// WebGPU is the case this exists for: a pipeline whose shader will not
+    /// compile is still handed back as an object, and the reason arrives later
+    /// on the device's error channel. A caller that only checks return values
+    /// therefore sees a healthy device, submits command buffers the
+    /// implementation silently discards, and draws nothing — which is exactly
+    /// how the browser's first invalid shader presented, as a black canvas over
+    /// a game that reported itself as playing.
+    ///
+    /// Call it once a frame and log or fail on what comes out; it is the only
+    /// way to notice that class of failure at all. Each error is reported once
+    /// — taking it clears it — and backends that report every failure through
+    /// their return values keep the default and always answer `None`.
+    fn take_error(&self) -> Option<String> {
+        None
+    }
+
     // --- resources ---
 
     /// Creates a buffer.

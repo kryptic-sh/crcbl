@@ -16,11 +16,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl-hal**: `Device::take_error`, for the failures a backend learns about
+  outside the call that caused them. Defaults to `None`, so a backend that
+  reports everything through its return values is unaffected.
 - **breakout**: the ball's speed ramps 2% per brick broken, capped at 1.6x the
   launch speed. A lost life and a restart both put it back.
 
 ### Fixed
 
+- **crcbl-wgpu**: a shader module or pipeline that fails to build is reported.
+  WebGPU hands back an object either way and delivers the reason to the device's
+  error channel, so failures were invisible: the backend built a pipeline on a
+  module that had not compiled and every submission after it was silently
+  discarded, which presents as a black canvas over a game that reports itself as
+  playing. Creation calls now return `HalError::Backend`, and the asynchronous
+  half — the browser's, which no call can be blamed for — stops the frame loop
+  from `GpuContext::acquire` with the driver's own message.
 - **breakout**: the ball is no longer under gravity. It launches at a constant
   speed and collisions change only its direction, which is what makes a shot
   aimable.

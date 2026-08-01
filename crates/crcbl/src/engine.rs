@@ -699,6 +699,18 @@ impl GpuContext {
     /// [`GpuError`] for anything except a swapchain that has merely gone out of
     /// date, which is handled here.
     pub fn acquire(&mut self) -> Result<Option<AcquiredFrame>, GpuError> {
+        // Before anything else, because an error the device reported out of
+        // band is a reason not to record another frame. On a backend that
+        // reports every failure through its return values this is `None` every
+        // time; on WebGPU it is the *only* way a failed pipeline is ever heard
+        // from, and until this call existed the answer was a black canvas over
+        // a game that reported itself as playing. Start of the frame rather
+        // than end of the last one so that failures during start-up — where
+        // every pipeline is built — are caught by the first frame.
+        if let Some(message) = self.device.take_error() {
+            return Err(GpuError::Hal(HalError::Backend(message)));
+        }
+
         let acquired = match self.device.acquire_next_frame(self.swapchain) {
             Ok(frame) => frame,
             // Expected traffic after a resize, per the seam's docs: reconfigure
@@ -1263,6 +1275,86 @@ mod tests {
             gpu.acquire().expect("acquire").map(|f| f.extent),
             Some((640, 480))
         );
+        gpu.destroy().expect("teardown");
+        shell.destroy_window(window).expect("the window goes away");
+    }
+
+    /// An error the device reported **outside any call** stops the frame.
+    ///
+    /// This is the failure mode P5.13 found in a browser and could not see from
+    /// the code: WebGPU hands back a pipeline object whose shader did not
+    /// compile and delivers the reason to the device's error channel later, so
+    /// every subsequent submit is silently discarded and the page draws nothing
+    /// while reporting itself healthy. `acquire` asks the device before it
+    /// records anything, which is the only point in a frame where that answer
+    /// can still change what happens.
+    #[test]
+    fn a_device_error_raised_between_calls_fails_the_next_frame() {
+        use crcbl_hal::null::{NullInstance, Recorder};
+        use crcbl_shell::{HeadlessShell, WindowDesc};
+
+        let mut shell = HeadlessShell::new();
+        let window = shell
+            .create_window(&WindowDesc::default())
+            .expect("headless always creates a window");
+        let mut events = 0;
+        let extent = wait_for_configure(&mut shell, window, &mut events).expect("configured");
+
+        // Built by hand rather than through the registry, because the point of
+        // the test is to hold the recorder that decides when the device fails.
+        let recorder = Recorder::new();
+        let instance: Box<dyn Instance> =
+            Box::new(NullInstance::tier_a().with_recorder(recorder.clone()));
+        let target = shell
+            .surface_target(window)
+            .expect("the window is still alive");
+        let stage = GpuContext::start_device(
+            instance,
+            &target,
+            extent,
+            "device error test",
+            Features::empty(),
+            Features::empty(),
+        )
+        .expect("the null backend opens everywhere");
+        let mut pending = PendingGpuContext {
+            stage,
+            target,
+            extent,
+            label: "device error test".to_string(),
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+        };
+        let mut gpu = loop {
+            if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
+                break context;
+            }
+        };
+
+        // The control: a device with nothing to report does not fail a frame.
+        assert!(
+            gpu.acquire().expect("a healthy device acquires").is_some(),
+            "an unprovoked drain must not break every frame"
+        );
+
+        recorder.report_device_error("shader module 3 failed to compile");
+        let error = gpu
+            .acquire()
+            .expect_err("the device reported an error before this frame");
+        assert!(
+            error.to_string().contains("shader module 3"),
+            "the reason must survive to the caller, not just the fact: {error}"
+        );
+
+        // Reported once. A latched error would turn one bad pipeline into a
+        // frame loop that can never run again.
+        assert!(
+            gpu.acquire()
+                .expect("the error was already reported")
+                .is_some(),
+            "taking an error must clear it"
+        );
+
         gpu.destroy().expect("teardown");
         shell.destroy_window(window).expect("the window goes away");
     }

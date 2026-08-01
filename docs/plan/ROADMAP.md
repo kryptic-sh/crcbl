@@ -329,14 +329,20 @@ boot order.
   were invisible to a green native run, and neither would have been found by
   reading the code.
 
-- **`crcbl-wgpu` cannot see a pipeline it failed to create.** WebGPU delivers
-  creation failures to the device error callback, not to the call, and nothing
-  pushes an error scope or installs an uncaptured-error handler. The run that
-  found the shader bug submitted 384 invalid command buffers while reporting a
-  healthy status and a page that said "Playing". Every browser-only pipeline
-  failure will present as a black canvas with the game apparently running —
-  which is exactly how this one presented. Owed before the demo site carries a
-  second sample.
+- **~~`crcbl-wgpu` cannot see a pipeline it failed to create.~~ Closed at S1B.0,
+  in two halves.** WebGPU delivers creation failures to the device's error
+  channel rather than to the call, so this backend returned a handle for a
+  module that had not compiled; the run that found the shader bug submitted 384
+  invalid command buffers while reporting a healthy status and a page that said
+  "Playing". `crcbl-wgpu` now installs an uncaptured-error handler on every
+  device it opens, and `WgpuDevice::checked` wraps each shader-module and
+  pipeline creation so an error raised _during_ the call — which is what
+  `wgpu-core` produces natively — comes back as `HalError::Backend` naming the
+  call. The browser raises it a turn of the event loop later instead, where
+  nothing can attribute it to a call, so the seam grew `Device::take_error` and
+  `GpuContext::acquire` drains it before recording a frame: a failed pipeline
+  now stops the loop with its reason instead of drawing nothing. Both halves are
+  needed and neither replaces the other.
 
 - **`VUID-vkAcquireNextImageKHR-fence-10066` fires once per acquire on Linux
   under wgpu**, and is not reachable from this workspace: the fence is created
@@ -387,7 +393,7 @@ each has a script that sets the environment up and **fails if zero tests ran**:
 | `crates/crcbl-shell/tests/run-wayland-e2e.sh` | nested headless sway | 33    |
 | `crates/crcbl-shell/tests/run-x11-e2e.sh`     | Xvfb                 | 29    |
 | `crates/crcbl-vk/tests/run-vk-e2e.sh`         | any Vulkan ICD       | 26    |
-| `crates/crcbl-wgpu/tests/run-wgpu-e2e.sh`     | a wgpu adapter, Xvfb | 7     |
+| `crates/crcbl-wgpu/tests/run-wgpu-e2e.sh`     | a wgpu adapter, Xvfb | 8     |
 | `crates/crcbl/tests/run-cross-backend-e2e.sh` | both backends        | 2     |
 | `crates/crcbl-cli/tests/run-cli-e2e.sh`       | nothing              | 1     |
 | `web/run-browser-e2e.sh`                      | Chrome + Xvfb        | 18    |
