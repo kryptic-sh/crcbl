@@ -4,6 +4,24 @@ use std::hash::Hasher;
 use crate::entity::Entity;
 use crate::system::{DebugCtx, SystemTrait};
 
+/// A [`Hasher`] that keeps the bytes instead of mixing them.
+///
+/// [`Schedule::hash_state`] needs each system's contribution as a value it can
+/// sort, which a one-way hash cannot give it. `finish` is never meaningful and
+/// returns zero.
+#[derive(Default)]
+struct ByteSink(Vec<u8>);
+
+impl Hasher for ByteSink {
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes);
+    }
+
+    fn finish(&self) -> u64 {
+        0
+    }
+}
+
 /// An ordered sequence of systems run each tick.
 ///
 /// Systems are executed in insertion order. No automatic dependency inference
@@ -27,10 +45,11 @@ impl Schedule {
         self.systems.push(system);
     }
 
-    /// Runs every system's [`SystemTrait::tick`] in order.
-    pub fn run(&mut self) {
+    /// Runs every system's [`SystemTrait::tick`] in order, passing the
+    /// schedule's fixed timestep `dt` (seconds) through to each.
+    pub fn run(&mut self, dt: f64) {
         for system in &mut self.systems {
-            system.tick();
+            system.tick(dt);
         }
     }
 
@@ -70,17 +89,32 @@ impl Schedule {
     }
 
     /// Hash every system's state (name + component data) into `hasher`,
-    /// sorted by name so insertion order does not affect the hash.
+    /// independently of the order the systems were registered in.
+    ///
+    /// Each system's state is hashed into its own byte buffer first, then the
+    /// `(name, bytes)` pairs are sorted together and length-delimited into
+    /// `hasher`. Sorting on the name alone would not be enough: names are not
+    /// required to be unique, and ties would fall back on registration order.
+    /// The length prefixes stop concatenation ambiguity — without them a
+    /// system called `"ab"` with no data is indistinguishable from one called
+    /// `"a"` whose first data byte is `b'b'`.
     pub fn hash_state(&self, hasher: &mut dyn Hasher) {
-        let mut systems: Vec<(&str, &dyn SystemTrait)> = self
+        let mut entries: Vec<(&str, Vec<u8>)> = self
             .systems
             .iter()
-            .map(|s| (s.name(), s.as_ref()))
+            .map(|system| {
+                let mut bytes = ByteSink::default();
+                system.hash_state(&mut bytes);
+                (system.name(), bytes.0)
+            })
             .collect();
-        systems.sort_by_key(|(name, _)| *name);
-        for (name, system) in &systems {
+        entries.sort_unstable();
+
+        for (name, bytes) in &entries {
+            hasher.write(&(name.len() as u64).to_le_bytes());
             hasher.write(name.as_bytes());
-            system.hash_state(hasher);
+            hasher.write(&(bytes.len() as u64).to_le_bytes());
+            hasher.write(bytes);
         }
     }
 
@@ -150,7 +184,7 @@ mod tests {
             fn name(&self) -> &str {
                 "probe"
             }
-            fn tick(&mut self) {
+            fn tick(&mut self, _dt: f64) {
                 self.order.borrow_mut().push(self.id);
             }
             fn entity_count(&self) -> usize {
@@ -176,8 +210,86 @@ mod tests {
             order: order.clone(),
         }));
 
-        schedule.run();
+        schedule.run(1.0 / 60.0);
         assert_eq!(*order.borrow(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn run_passes_the_schedule_dt_to_every_system() {
+        struct Recorder(std::rc::Rc<std::cell::RefCell<Vec<f64>>>);
+        impl SystemTrait for Recorder {
+            fn name(&self) -> &str {
+                "recorder"
+            }
+            fn tick(&mut self, dt: f64) {
+                self.0.borrow_mut().push(dt);
+            }
+            fn entity_count(&self) -> usize {
+                0
+            }
+            fn sweep(&mut self, _dead: &[Entity]) {}
+            fn debug_draw(&mut self, _ctx: &DebugCtx) {}
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut schedule = Schedule::new();
+        schedule.add_system(Box::new(Recorder(seen.clone())));
+        schedule.add_system(Box::new(Recorder(seen.clone())));
+
+        schedule.run(1.0 / 30.0);
+        assert_eq!(*seen.borrow(), vec![1.0 / 30.0, 1.0 / 30.0]);
+    }
+
+    #[test]
+    fn hash_state_is_unambiguous_across_name_and_data_boundaries() {
+        use std::collections::hash_map::DefaultHasher;
+
+        fn hash(schedule: &Schedule) -> u64 {
+            let mut h = DefaultHasher::new();
+            schedule.hash_state(&mut h);
+            h.finish()
+        }
+
+        // System "ab" with no data must not collide with system "a" whose
+        // first data byte is b'b'.
+        let mut ab = Schedule::new();
+        ab.add_system(Box::new(System::<u8>::new("ab")));
+
+        let mut a_with_b = Schedule::new();
+        let mut sys = System::<u8>::new("a");
+        sys.attach(crate::test_entity(1, 1), b'b');
+        a_with_b.add_system(Box::new(sys));
+
+        assert_ne!(hash(&ab), hash(&a_with_b));
+    }
+
+    #[test]
+    fn hash_state_ignores_registration_order_of_same_named_systems() {
+        use std::collections::hash_map::DefaultHasher;
+
+        fn build(first: i32, second: i32) -> Schedule {
+            let mut schedule = Schedule::new();
+            for value in [first, second] {
+                let mut sys = System::<i32>::new("dup");
+                sys.attach(crate::test_entity(1, 1), value);
+                schedule.add_system(Box::new(sys));
+            }
+            schedule
+        }
+
+        fn hash(schedule: &Schedule) -> u64 {
+            let mut h = DefaultHasher::new();
+            schedule.hash_state(&mut h);
+            h.finish()
+        }
+
+        // Sorting on the name alone would leave these two at the mercy of
+        // registration order.
+        assert_eq!(hash(&build(1, 2)), hash(&build(2, 1)));
+        assert_ne!(hash(&build(1, 2)), hash(&build(1, 3)));
     }
 
     #[test]
@@ -204,7 +316,7 @@ mod tests {
     #[test]
     fn empty_schedule_runs_without_panic() {
         let mut schedule = Schedule::new();
-        schedule.run();
+        schedule.run(1.0 / 60.0);
         schedule.sweep(&[]);
         schedule.debug_draw(&DebugCtx);
     }

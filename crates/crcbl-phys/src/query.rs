@@ -35,20 +35,27 @@ pub fn sphere_overlaps_aabb(sphere: &Sphere, aabb: &Aabb) -> bool {
 #[inline]
 #[must_use]
 pub fn sphere_overlaps_capsule(sphere: &Sphere, capsule: &Capsule) -> bool {
-    // Clamp the sphere centre to the capsule segment.
-    let bot = capsule.bottom();
-    let top = capsule.top();
-    let seg_dir = top - bot;
-    let seg_len_sq = seg_dir.length_squared();
-
-    let t = if seg_len_sq < f64::EPSILON {
-        0.5
-    } else {
-        ((sphere.centre - bot).dot(seg_dir) / seg_len_sq).clamp(0.0, 1.0)
-    };
-    let closest = bot + seg_dir * t;
+    let closest = closest_point_on_capsule_axis(capsule, sphere.centre);
     let combined = sphere.radius + capsule.radius;
     (sphere.centre - closest).length_squared() <= combined * combined
+}
+
+/// The point on a capsule's axis segment (bottom cap centre → top cap centre)
+/// closest to `point`.
+///
+/// The capsule surface is exactly the set of points at distance `radius` from
+/// this segment, so this is the anchor for every capsule normal and distance
+/// in this module. A degenerate (zero-height) capsule returns its centre.
+#[inline]
+#[must_use]
+fn closest_point_on_capsule_axis(capsule: &Capsule, point: DVec3) -> DVec3 {
+    let bot = capsule.bottom();
+    let seg = capsule.top() - bot;
+    let len_sq = seg.length_squared();
+    if len_sq <= 0.0 {
+        return capsule.centre;
+    }
+    bot + seg * ((point - bot).dot(seg) / len_sq).clamp(0.0, 1.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -65,42 +72,117 @@ pub struct ShapeHit {
     /// Unit normal at the hit point, pointing **away** from the surface the ray
     /// struck.  For swept-sphere queries this is the contact normal.
     pub normal: DVec3,
-    /// Whether the ray origin started inside the shape.
+    /// Whether the query's accepted interval *begins* inside the shape — for
+    /// a ray that is `origin + dir * t_min`, for a sweep the sweep's start
+    /// position. A hit with this set is a resolution case (push out), not an
+    /// approach.
     pub started_inside: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Shared root selection
+// ---------------------------------------------------------------------------
+
+/// What a query reports when its accepted interval starts inside the shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InsideRule {
+    /// Report the far root: the surface the ray leaves through. Ray casts use
+    /// this — a ray fired from inside a volume strikes its far wall.
+    Exit,
+    /// Report the start of the interval: the shapes are already touching, so
+    /// the time of impact is now. Sweeps use this.
+    Contact,
+}
+
+/// Solve `a·t² + b·t + c = 0`, returning the roots in ascending order.
+///
+/// `None` means no real intersection: either the quadratic is degenerate
+/// (`a` at or below the noise floor — a ray with no length along the axis
+/// being solved) or the discriminant is negative (a miss).
+#[inline]
+fn solve_quadratic(a: f64, b: f64, c: f64) -> Option<(f64, f64)> {
+    if a <= f64::EPSILON {
+        return None;
+    }
+    let disc = b * b - 4.0 * a * c;
+    if disc < 0.0 {
+        return None;
+    }
+    let sqrt_disc = disc.sqrt();
+    let inv_2a = 0.5 / a;
+    Some(((-b - sqrt_disc) * inv_2a, (-b + sqrt_disc) * inv_2a))
+}
+
+/// The one root-selection rule in this module: every quadratic and every AABB
+/// slab test resolves its `(near, far)` interval through here.
+///
+/// `near..=far` is the interval over which the ray is inside the shape and
+/// `lo..=hi` the interval the caller accepts. The result is the reported `t`
+/// and whether the accepted interval began inside the shape.
+///
+/// * Disjoint intervals are a miss.
+/// * A `near` inside `lo..=hi` is the hit, from outside the shape.
+/// * Otherwise `lo` is already inside the shape and `rule` decides what to
+///   report. Note this covers a caller that merely *advanced* `lo` past the
+///   entry point (`Ray::with_bounds`) as well as one that genuinely starts
+///   within the shape — both must still produce a hit.
+#[inline]
+fn select_hit(near: f64, far: f64, lo: f64, hi: f64, rule: InsideRule) -> Option<(f64, bool)> {
+    if near > far || far < lo || near > hi {
+        return None;
+    }
+    if near >= lo {
+        return Some((near, false));
+    }
+    match rule {
+        InsideRule::Exit if far <= hi => Some((far, true)),
+        InsideRule::Exit => None,
+        InsideRule::Contact => Some((lo, true)),
+    }
+}
+
+/// The outward unit normal of the box face nearest to `point`.
+///
+/// Doubles as the surface normal for a hit lying on a face (distance zero) and
+/// as the minimum-penetration escape axis for a point inside the box, so
+/// callers never have to fabricate a normal when a query starts overlapping.
+#[must_use]
+fn aabb_face_normal(aabb: &Aabb, point: DVec3) -> DVec3 {
+    let faces = [
+        ((point.x - aabb.min.x).abs(), DVec3::NEG_X),
+        ((aabb.max.x - point.x).abs(), DVec3::X),
+        ((point.y - aabb.min.y).abs(), DVec3::NEG_Y),
+        ((aabb.max.y - point.y).abs(), DVec3::Y),
+        ((point.z - aabb.min.z).abs(), DVec3::NEG_Z),
+        ((aabb.max.z - point.z).abs(), DVec3::Z),
+    ];
+    let mut best = faces[0];
+    for &face in &faces[1..] {
+        if face.0 < best.0 {
+            best = face;
+        }
+    }
+    best.1
 }
 
 // ---------------------------------------------------------------------------
 // Ray vs sphere
 // ---------------------------------------------------------------------------
 
-/// Intersect a ray with a sphere. Returns the closest hit, or `None` if the
-/// ray misses entirely (including if the sphere is behind the ray origin).
+/// Intersect a ray with a sphere. Returns the nearest hit within the ray's
+/// bounds, or `None` if the ray misses entirely (including if the sphere is
+/// behind the ray origin).
+///
+/// A ray whose accepted interval starts inside the sphere hits the far surface
+/// and reports [`ShapeHit::started_inside`].
 #[must_use]
 pub fn ray_vs_sphere(ray: &Ray, sphere: &Sphere) -> Option<ShapeHit> {
     let oc = ray.origin - sphere.centre;
     let a = ray.dir.dot(ray.dir);
-    if a <= f64::EPSILON {
-        return None;
-    }
     let b = 2.0 * oc.dot(ray.dir);
     let c = oc.dot(oc) - sphere.radius * sphere.radius;
-    let disc = b * b - 4.0 * a * c;
-    if disc < 0.0 {
-        return None;
-    }
-    let sqrt_disc = disc.sqrt();
-    let t1 = (-b - sqrt_disc) / (2.0 * a);
-    let t2 = (-b + sqrt_disc) / (2.0 * a);
-    let (t, started_inside) = if t1 >= 0.0 {
-        (t1, false)
-    } else if t2 >= 0.0 {
-        (t2, true)
-    } else {
-        return None;
-    };
-    if t < ray.t_min || t > ray.t_max {
-        return None;
-    }
+    let (near, far) = solve_quadratic(a, b, c)?;
+    let (t, started_inside) = select_hit(near, far, ray.t_min, ray.t_max, InsideRule::Exit)?;
     let point = ray.origin + ray.dir * t;
     let to_centre = point - sphere.centre;
     let normal = if to_centre.length_squared() > 0.0 {
@@ -121,92 +203,21 @@ pub fn ray_vs_sphere(ray: &Ray, sphere: &Sphere) -> Option<ShapeHit> {
 // ---------------------------------------------------------------------------
 
 /// Intersect a ray with an axis-aligned bounding box (treated as a solid box).
-/// Returns the closest hit, or `None` if the ray misses entirely.
+/// Returns the nearest hit within the ray's bounds, or `None` if the ray
+/// misses entirely.
+///
+/// A ray whose accepted interval starts inside the box hits the far face and
+/// reports [`ShapeHit::started_inside`].
 #[must_use]
 pub fn ray_vs_aabb(ray: &Ray, aabb: &Aabb) -> Option<ShapeHit> {
     let inv_dir = ray.dir.recip();
     let dir_is_neg = [ray.dir.x < 0.0, ray.dir.y < 0.0, ray.dir.z < 0.0];
 
-    let (lox, hix) = if dir_is_neg[0] {
-        (aabb.max.x, aabb.min.x)
-    } else {
-        (aabb.min.x, aabb.max.x)
-    };
-    let (loy, hiy) = if dir_is_neg[1] {
-        (aabb.max.y, aabb.min.y)
-    } else {
-        (aabb.min.y, aabb.max.y)
-    };
-    let (loz, hiz) = if dir_is_neg[2] {
-        (aabb.max.z, aabb.min.z)
-    } else {
-        (aabb.min.z, aabb.max.z)
-    };
-
-    // Handle zero-direction axes to avoid NaN from 0.0 * INF.
-    let (tmin_x, tmax_x) = if inv_dir.x.is_finite() {
-        (
-            (lox - ray.origin.x) * inv_dir.x,
-            (hix - ray.origin.x) * inv_dir.x,
-        )
-    } else if ray.origin.x < aabb.min.x || ray.origin.x > aabb.max.x {
-        return None;
-    } else {
-        (f64::NEG_INFINITY, f64::INFINITY)
-    };
-    let (tmin_y, tmax_y) = if inv_dir.y.is_finite() {
-        (
-            (loy - ray.origin.y) * inv_dir.y,
-            (hiy - ray.origin.y) * inv_dir.y,
-        )
-    } else if ray.origin.y < aabb.min.y || ray.origin.y > aabb.max.y {
-        return None;
-    } else {
-        (f64::NEG_INFINITY, f64::INFINITY)
-    };
-    let (tmin_z, tmax_z) = if inv_dir.z.is_finite() {
-        (
-            (loz - ray.origin.z) * inv_dir.z,
-            (hiz - ray.origin.z) * inv_dir.z,
-        )
-    } else if ray.origin.z < aabb.min.z || ray.origin.z > aabb.max.z {
-        return None;
-    } else {
-        (f64::NEG_INFINITY, f64::INFINITY)
-    };
-
-    let tmin = tmin_x.max(tmin_y).max(tmin_z);
-    let tmax = tmax_x.min(tmax_y).min(tmax_z);
-
-    if tmin > tmax || tmax < 0.0 {
-        return None;
-    }
-    let (t, started_inside) = if tmin >= 0.0 {
-        (tmin, false)
-    } else {
-        (tmax, true)
-    };
-    if t < ray.t_min || t > ray.t_max {
-        return None;
-    }
+    let (near, far) = aabb.ray_slab(ray.origin, inv_dir, dir_is_neg)?;
+    let (t, started_inside) = select_hit(near, far, ray.t_min, ray.t_max, InsideRule::Exit)?;
 
     let point = ray.origin + ray.dir * t;
-
-    // Compute the face normal of the box at the hit point.
-    let eps = 1e-9;
-    let normal = if (point.x - aabb.min.x).abs() < eps {
-        DVec3::NEG_X
-    } else if (point.x - aabb.max.x).abs() < eps {
-        DVec3::X
-    } else if (point.y - aabb.min.y).abs() < eps {
-        DVec3::NEG_Y
-    } else if (point.y - aabb.max.y).abs() < eps {
-        DVec3::Y
-    } else if (point.z - aabb.min.z).abs() < eps {
-        DVec3::NEG_Z
-    } else {
-        DVec3::Z
-    };
+    let normal = aabb_face_normal(aabb, point);
 
     Some(ShapeHit {
         t,
@@ -220,136 +231,87 @@ pub fn ray_vs_aabb(ray: &Ray, aabb: &Aabb) -> Option<ShapeHit> {
 // Ray vs capsule
 // ---------------------------------------------------------------------------
 
-/// Intersect a ray with a Y-aligned capsule. Returns the closest hit, or `None`.
+/// Intersect a ray with a Y-aligned capsule. Returns the nearest hit within
+/// the ray's bounds, or `None`.
+///
+/// The capsule surface is the union of three pieces — the cylindrical band
+/// between the cap centres, the top hemisphere above the top cap centre, and
+/// the bottom hemisphere below the bottom one. Every root of all three is
+/// tested, each is kept only if it lands on the piece that owns it (the rest
+/// of each cap sphere lies *inside* the capsule), and the nearest survivor
+/// wins. Testing the pieces in sequence instead would return a far-side
+/// cylinder exit in preference to a nearer cap hit.
 #[must_use]
 pub fn ray_vs_capsule(ray: &Ray, capsule: &Capsule) -> Option<ShapeHit> {
-    // Treat the capsule as a segment (bottom→top) inflated by radius.
     let bot = capsule.bottom();
     let top = capsule.top();
-    let seg_dir = top - bot; // always (0, 2*half_height, 0)
+    let radius_sq = capsule.radius * capsule.radius;
 
-    // Find the closest point on the capsule segment to the ray.
-    // Solve for ray parameter t and segment parameter s.
-
-    // Ray: P(t) = ray.origin + ray.dir * t
-    // Segment: Q(s) = bot + seg_dir * s, s in [0, 1]
-    // Minimise distance squared: f(t, s) = |P(t) - Q(s)|^2
-
-    let d = ray.origin - bot;
-    let a = ray.dir.dot(ray.dir);
-    let b = ray.dir.dot(seg_dir);
-    let c = seg_dir.dot(seg_dir);
-    let d_dot_dir = d.dot(ray.dir);
-    let d_dot_seg = d.dot(seg_dir);
-
-    let denom = a * c - b * b;
-    let (t, s) = if denom.abs() <= f64::EPSILON {
-        // Ray and segment are parallel — choose midpoint on segment, solve for t.
-        let s = 0.5;
-        let t_val = if a > 0.0 {
-            (0.5 * b - d_dot_dir) / a
-        } else {
-            0.0
-        };
-        (t_val, s)
-    } else {
-        let s = (a * d_dot_seg - b * d_dot_dir) / denom;
-        let s = s.clamp(0.0, 1.0);
-        // Re-solve for t with clamped s: t = (s*b - d_dot_dir) / |D|²
-        let t = (s * b - d_dot_dir) / a;
-        (t, s)
+    let mut best = f64::INFINITY;
+    let mut consider = |t: f64| {
+        if t >= ray.t_min && t <= ray.t_max && t < best {
+            best = t;
+        }
     };
 
-    let closest_on_seg = bot + seg_dir * s;
-    let diff = ray.origin + ray.dir * t - closest_on_seg;
-    let dist_sq = diff.length_squared();
-
-    if dist_sq > capsule.radius * capsule.radius {
-        return None; // Missed the capsule entirely.
-    }
-
-    // Compute the exact ray-capsule intersection.
-    // We approach it as a cylinder + two hemispheres.
-    // For simplicity, treat it as ray-vs-infinite-cylinder capped by ray-vs-sphere.
-
-    // First try the cylindrical section.
-    if let Some(hit) = ray_vs_capsule_cylinder(ray, capsule)
-        && (ray.t_min..=ray.t_max).contains(&hit.t)
-    {
-        return Some(hit);
-    }
-
-    // Then try the hemispherical caps.
-    if let Some(hit) = ray_vs_sphere(ray, &Sphere::new(top, capsule.radius))
-        && (ray.t_min..=ray.t_max).contains(&hit.t)
-    {
-        return Some(hit);
-    }
-    if let Some(hit) = ray_vs_sphere(ray, &Sphere::new(bot, capsule.radius))
-        && (ray.t_min..=ray.t_max).contains(&hit.t)
-    {
-        return Some(hit);
-    }
-
-    None
-}
-
-/// Intersect a ray with the infinite cylinder of a Y-aligned capsule.
-fn ray_vs_capsule_cylinder(ray: &Ray, capsule: &Capsule) -> Option<ShapeHit> {
-    // Cylinder along Y: x² + z² = r², clamped to [bottom.y, top.y]
-    let bot = capsule.bottom();
-    let top = capsule.top();
-
-    // Project ray onto XZ plane.
-    let oxz = DVec3::new(ray.origin.x, 0.0, ray.origin.z);
-    let dxz = DVec3::new(ray.dir.x, 0.0, ray.dir.z);
-    let cxz = DVec3::new(capsule.centre.x, 0.0, capsule.centre.z);
-
-    let oc = oxz - cxz;
-    let a = dxz.dot(dxz);
-    if a <= f64::EPSILON {
-        return None; // Ray is parallel to the cylinder axis.
-    }
-    let b = 2.0 * oc.dot(dxz);
-    let c = oc.dot(oc) - capsule.radius * capsule.radius;
-    let disc = b * b - 4.0 * a * c;
-    if disc < 0.0 {
-        return None;
-    }
-
-    let sqrt_disc = disc.sqrt();
-    let t1 = (-b - sqrt_disc) / (2.0 * a);
-    let t2 = (-b + sqrt_disc) / (2.0 * a);
-    let mut t = t1.min(t2);
-    if t < 0.0 {
-        t = t1.max(t2);
-        if t < 0.0 {
-            return None;
+    // Cylindrical band: solve in the XZ plane, keep roots between the caps.
+    let oc_xz = DVec3::new(
+        ray.origin.x - capsule.centre.x,
+        0.0,
+        ray.origin.z - capsule.centre.z,
+    );
+    let dir_xz = DVec3::new(ray.dir.x, 0.0, ray.dir.z);
+    if let Some(roots) = solve_quadratic(
+        dir_xz.dot(dir_xz),
+        2.0 * oc_xz.dot(dir_xz),
+        oc_xz.dot(oc_xz) - radius_sq,
+    ) {
+        for t in [roots.0, roots.1] {
+            let y = ray.origin.y + ray.dir.y * t;
+            if y >= bot.y && y <= top.y {
+                consider(t);
+            }
         }
     }
-    if t < ray.t_min || t > ray.t_max {
+
+    // Hemispherical caps: keep only the roots beyond the cap centre's plane.
+    let a = ray.dir.dot(ray.dir);
+    for (cap, is_top) in [(top, true), (bot, false)] {
+        let oc = ray.origin - cap;
+        if let Some(roots) = solve_quadratic(a, 2.0 * oc.dot(ray.dir), oc.dot(oc) - radius_sq) {
+            for t in [roots.0, roots.1] {
+                let y = ray.origin.y + ray.dir.y * t;
+                if (is_top && y >= top.y) || (!is_top && y <= bot.y) {
+                    consider(t);
+                }
+            }
+        }
+    }
+
+    if !best.is_finite() {
         return None;
     }
 
-    // Check if the hit point is within the capsule's Y range.
-    let point = ray.origin + ray.dir * t;
-    if point.y < bot.y || point.y > top.y {
-        return None;
-    }
-
-    // Normal is radial from the capsule axis.
-    let radial = DVec3::new(point.x - capsule.centre.x, 0.0, point.z - capsule.centre.z);
+    let point = ray.origin + ray.dir * best;
+    let axis_point = closest_point_on_capsule_axis(capsule, point);
+    let radial = point - axis_point;
     let normal = if radial.length_squared() > 0.0 {
         radial.normalize()
     } else {
         DVec3::Y
     };
 
+    // The interval starts inside the capsule when the point at `t_min` is
+    // within `radius` of the axis segment.
+    let entry = ray.origin + ray.dir * ray.t_min;
+    let started_inside =
+        (entry - closest_point_on_capsule_axis(capsule, entry)).length_squared() <= radius_sq;
+
     Some(ShapeHit {
-        t,
+        t: best,
         point,
         normal,
-        started_inside: false,
+        started_inside,
     })
 }
 
@@ -363,6 +325,10 @@ fn ray_vs_capsule_cylinder(ray: &Ray, capsule: &Capsule) -> Option<ShapeHit> {
 ///
 /// The `swept` sphere moves from `segment.start` to `segment.end`; the `target`
 /// sphere is static at its position.
+///
+/// A sweep that is already overlapping at `segment.start` reports `t = 0` and
+/// [`ShapeHit::started_inside`] — including when it is overlapping for the
+/// whole sweep — so a body resting inside another still produces a contact.
 #[must_use]
 pub fn swept_sphere_vs_sphere(
     segment: &crate::broadphase::Segment,
@@ -370,18 +336,15 @@ pub fn swept_sphere_vs_sphere(
     target: &Sphere,
 ) -> Option<ShapeHit> {
     let dir = segment.end - segment.start;
-    let len = dir.length();
-    if len <= 0.0 {
+    let combined_r = swept_radius + target.radius;
+    let oc = segment.start - target.centre;
+
+    if dir.length_squared() <= 0.0 {
         // Stationary sweep: just test sphere-sphere overlap.
-        let dist = (segment.start - target.centre).length();
-        let combined = swept_radius + target.radius;
-        if dist <= combined {
-            let overlap = combined - dist;
-            let normal = if dist > 0.0 {
-                (segment.start - target.centre).normalize()
-            } else {
-                DVec3::Y
-            };
+        let dist = oc.length();
+        if dist <= combined_r {
+            let overlap = combined_r - dist;
+            let normal = if dist > 0.0 { oc / dist } else { DVec3::Y };
             return Some(ShapeHit {
                 t: 0.0,
                 point: segment.start - normal * (swept_radius - overlap * 0.5),
@@ -392,29 +355,14 @@ pub fn swept_sphere_vs_sphere(
         return None;
     }
 
-    let combined_r = swept_radius + target.radius;
-    let oc = segment.start - target.centre;
-
     // Solve: |oc + t * dir| = combined_r
     // a = dir·dir, b = 2 * oc·dir, c = oc·oc - combined_r²
-    let a = dir.dot(dir);
-    let b = 2.0 * oc.dot(dir);
-    let c = oc.dot(oc) - combined_r * combined_r;
-    let disc = b * b - 4.0 * a * c;
-    if disc < 0.0 {
-        return None;
-    }
-    let sqrt_disc = disc.sqrt();
-    let t1 = (-b - sqrt_disc) / (2.0 * a);
-    let t2 = (-b + sqrt_disc) / (2.0 * a);
-
-    let t = if (0.0..=1.0).contains(&t1) {
-        t1
-    } else if (0.0..=1.0).contains(&t2) {
-        t2
-    } else {
-        return None;
-    };
+    let (near, far) = solve_quadratic(
+        dir.dot(dir),
+        2.0 * oc.dot(dir),
+        oc.dot(oc) - combined_r * combined_r,
+    )?;
+    let (t, started_inside) = select_hit(near, far, 0.0, 1.0, InsideRule::Contact)?;
 
     let point_on_swept = segment.start + dir * t;
     let to_target = point_on_swept - target.centre;
@@ -429,7 +377,7 @@ pub fn swept_sphere_vs_sphere(
         t,
         point: contact_point,
         normal,
-        started_inside: false,
+        started_inside,
     })
 }
 
@@ -440,6 +388,9 @@ pub fn swept_sphere_vs_sphere(
 /// Compute the TOI for a sphere moving along a segment against a static AABB.
 /// Uses the Minkowski sum: inflate the AABB by the sphere radius and test the
 /// segment against the inflated box.
+///
+/// A sweep that starts already overlapping reports `t = 0`,
+/// [`ShapeHit::started_inside`], and the minimum-penetration face normal.
 #[must_use]
 pub fn swept_sphere_vs_aabb(
     segment: &crate::broadphase::Segment,
@@ -470,85 +421,21 @@ pub fn swept_sphere_vs_aabb(
         return None;
     }
 
-    // Inflate the AABB by swept_radius.
+    // Inflate the AABB by swept_radius: the sphere centre path against the
+    // inflated box is the same intersection problem as the sphere against the
+    // original box.
     let inflated = target.inflated(swept_radius);
     let inv_dir = dir.recip();
     let dir_is_neg = [dir.x < 0.0, dir.y < 0.0, dir.z < 0.0];
-    let origin = segment.start;
 
-    let (lox, hix) = if dir_is_neg[0] {
-        (inflated.max.x, inflated.min.x)
-    } else {
-        (inflated.min.x, inflated.max.x)
-    };
-    let (loy, hiy) = if dir_is_neg[1] {
-        (inflated.max.y, inflated.min.y)
-    } else {
-        (inflated.min.y, inflated.max.y)
-    };
-    let (loz, hiz) = if dir_is_neg[2] {
-        (inflated.max.z, inflated.min.z)
-    } else {
-        (inflated.min.z, inflated.max.z)
-    };
+    let (near, far) = inflated.ray_slab(segment.start, inv_dir, dir_is_neg)?;
+    let (t, started_inside) = select_hit(near, far, 0.0, 1.0, InsideRule::Contact)?;
 
-    // Handle zero-direction axes to avoid NaN from 0.0 * INF.
-    let (tmin_x, tmax_x) = if inv_dir.x.is_finite() {
-        ((lox - origin.x) * inv_dir.x, (hix - origin.x) * inv_dir.x)
-    } else if origin.x < inflated.min.x || origin.x > inflated.max.x {
-        return None;
-    } else {
-        (f64::NEG_INFINITY, f64::INFINITY)
-    };
-    let (tmin_y, tmax_y) = if inv_dir.y.is_finite() {
-        ((loy - origin.y) * inv_dir.y, (hiy - origin.y) * inv_dir.y)
-    } else if origin.y < inflated.min.y || origin.y > inflated.max.y {
-        return None;
-    } else {
-        (f64::NEG_INFINITY, f64::INFINITY)
-    };
-    let (tmin_z, tmax_z) = if inv_dir.z.is_finite() {
-        ((loz - origin.z) * inv_dir.z, (hiz - origin.z) * inv_dir.z)
-    } else if origin.z < inflated.min.z || origin.z > inflated.max.z {
-        return None;
-    } else {
-        (f64::NEG_INFINITY, f64::INFINITY)
-    };
-
-    let tmin = tmin_x.max(tmin_y).max(tmin_z);
-    let tmax = tmax_x.min(tmax_y).min(tmax_z);
-
-    // No intersection if the entry is past the exit or the exit is before the ray starts.
-    if tmin > tmax || tmax < 0.0 {
-        return None;
-    }
-
-    // tmin/tmax are the ray parameter such that P = O + t*D.
-    let t_dirlen = tmin.max(0.0);
-    let t_normalised = t_dirlen;
-
-    if !(0.0..=1.0).contains(&t_normalised) {
-        return None;
-    }
-
-    // Compute the hit point in world-space.
-    let point_on_inflated = segment.start + dir * t_dirlen;
-
-    // Compute the face normal of the *original* AABB that was struck.
-    let eps = 1e-9;
-    let normal = if (point_on_inflated.x - inflated.min.x).abs() < eps {
-        DVec3::NEG_X
-    } else if (point_on_inflated.x - inflated.max.x).abs() < eps {
-        DVec3::X
-    } else if (point_on_inflated.y - inflated.min.y).abs() < eps {
-        DVec3::NEG_Y
-    } else if (point_on_inflated.y - inflated.max.y).abs() < eps {
-        DVec3::Y
-    } else if (point_on_inflated.z - inflated.min.z).abs() < eps {
-        DVec3::NEG_Z
-    } else {
-        DVec3::Z
-    };
+    // Compute the hit point in world-space.  Inside the inflated box (a sweep
+    // that starts overlapping) the nearest face is the minimum-penetration
+    // escape axis, which is the normal a caller needs to push the sphere out.
+    let point_on_inflated = segment.start + dir * t;
+    let normal = aabb_face_normal(&inflated, point_on_inflated);
 
     // Contact point on the original AABB surface.
     let contact_point = DVec3::new(
@@ -558,10 +445,10 @@ pub fn swept_sphere_vs_aabb(
     );
 
     Some(ShapeHit {
-        t: t_normalised,
+        t,
         point: contact_point,
         normal,
-        started_inside: false,
+        started_inside,
     })
 }
 
@@ -574,41 +461,42 @@ pub fn swept_sphere_vs_aabb(
 ///
 /// The capsule is inflated by `swept_radius` and the segment (sphere centre
 /// path) is tested against the inflated shape via ray-vs-capsule.
+///
+/// As with the sphere and AABB sweeps, a sweep that starts already overlapping
+/// reports `t = 0`, [`ShapeHit::started_inside`], and the normal pointing out
+/// of the capsule along its nearest axis point — not out of its centre, which
+/// would push a character along a tall capsule instead of away from it.
 #[must_use]
 pub fn swept_sphere_vs_capsule(
     segment: &crate::broadphase::Segment,
     swept_radius: f64,
     capsule: &Capsule,
 ) -> Option<ShapeHit> {
+    let combined = swept_radius + capsule.radius;
+
+    // Already overlapping at the start of the sweep: contact is now.
+    let axis_point = closest_point_on_capsule_axis(capsule, segment.start);
+    let radial = segment.start - axis_point;
+    let dist_sq = radial.length_squared();
+    if dist_sq <= combined * combined {
+        let dist = dist_sq.sqrt();
+        let normal = if dist > 0.0 { radial / dist } else { DVec3::Y };
+        return Some(ShapeHit {
+            t: 0.0,
+            point: axis_point + normal * capsule.radius,
+            normal,
+            started_inside: true,
+        });
+    }
+
     let dir = segment.end - segment.start;
-    let len = dir.length();
-    if len <= 0.0 {
-        // Stationary: test sphere-vs-capsule overlap.
-        let sphere = Sphere::new(segment.start, swept_radius);
-        if sphere_overlaps_capsule(&sphere, capsule) {
-            let to_capsule = segment.start - capsule.centre;
-            let normal = if to_capsule.length_squared() > 0.0 {
-                to_capsule.normalize()
-            } else {
-                DVec3::Y
-            };
-            return Some(ShapeHit {
-                t: 0.0,
-                point: segment.start,
-                normal,
-                started_inside: true,
-            });
-        }
-        return None;
+    if dir.length_squared() <= 0.0 {
+        return None; // Stationary and not overlapping.
     }
 
     // Inflate the capsule by the swept sphere radius.  The segment (sphere
     // centre path) vs the inflated capsule is a ray-vs-capsule test.
-    let inflated = Capsule::new(
-        capsule.centre,
-        capsule.radius + swept_radius,
-        capsule.half_height,
-    );
+    let inflated = Capsule::new(capsule.centre, combined, capsule.half_height);
     let ray = Ray::new(segment.start, dir).with_bounds(0.0, 1.0);
 
     ray_vs_capsule(&ray, &inflated).map(|hit| {
@@ -687,6 +575,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ray_hits_sphere_it_already_entered_before_t_min() {
+        // Near root at t=4, far at t=6, but the caller advanced t_min past the
+        // near root.  The far root is still in bounds, so this is a hit.
+        let ray = Ray::new(DVec3::new(-5.0, 0.0, 0.0), DVec3::X).with_bounds(4.5, 100.0);
+        let sphere = Sphere::new(DVec3::ZERO, 1.0);
+        let hit = ray_vs_sphere(&ray, &sphere).expect("far root is within bounds");
+        assert!((hit.t - 6.0).abs() < 1e-9, "t = {}", hit.t);
+        assert!(hit.started_inside);
+    }
+
+    #[test]
+    fn ray_misses_sphere_when_both_roots_are_out_of_bounds() {
+        let ray = Ray::new(DVec3::new(-5.0, 0.0, 0.0), DVec3::X).with_bounds(6.5, 100.0);
+        let sphere = Sphere::new(DVec3::ZERO, 1.0);
+        assert!(ray_vs_sphere(&ray, &sphere).is_none());
+    }
+
     // ── Ray vs AABB ───────────────────────────────────────────────────
 
     #[test]
@@ -750,6 +656,16 @@ mod tests {
         assert!(ray_vs_aabb(&ray, &aabb).is_none());
     }
 
+    #[test]
+    fn ray_hits_aabb_it_already_entered_before_t_min() {
+        let ray = Ray::new(DVec3::new(-5.0, 0.0, 0.0), DVec3::X).with_bounds(4.5, 100.0);
+        let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
+        let hit = ray_vs_aabb(&ray, &aabb).expect("far face is within bounds");
+        assert!((hit.t - 6.0).abs() < 1e-9, "t = {}", hit.t);
+        assert!(hit.started_inside);
+        assert_eq!(hit.normal, DVec3::X);
+    }
+
     // ── Ray vs capsule ────────────────────────────────────────────────
 
     #[test]
@@ -774,6 +690,43 @@ mod tests {
         let capsule = Capsule::new(DVec3::ZERO, 0.5, 1.0);
         let ray = Ray::new(DVec3::new(-5.0, 3.0, 0.0), DVec3::X);
         assert!(ray_vs_capsule(&ray, &capsule).is_none());
+    }
+
+    #[test]
+    fn ray_inside_capsule_cylinder_radius_hits_the_cap_not_the_far_side() {
+        // Origin is radially inside the infinite cylinder (|x| = 0.9 < r = 1)
+        // but far above the capsule, aimed almost straight down.  The first
+        // real surface is the top hemisphere at t ≈ 4; the cylinder's exit at
+        // t ≈ 5 is a backface and must not win.
+        let capsule = Capsule::new(DVec3::ZERO, 1.0, 1.0);
+        let ray = Ray::new(DVec3::new(0.9, 5.0, 0.0), DVec3::new(0.0001, -1.0, 0.0));
+        let hit = ray_vs_capsule(&ray, &capsule).expect("ray must hit the capsule");
+        assert!(
+            hit.t < 4.5,
+            "expected the top cap at t ≈ 4, got t = {} at {:?}",
+            hit.t,
+            hit.point
+        );
+        assert!(
+            hit.point.y > 1.0,
+            "hit must be on the top cap: {:?}",
+            hit.point
+        );
+        assert!(
+            hit.normal.y > 0.0,
+            "top-cap normal must point up: {:?}",
+            hit.normal
+        );
+        assert!(!hit.started_inside);
+    }
+
+    #[test]
+    fn ray_started_inside_capsule_is_reported() {
+        let capsule = Capsule::new(DVec3::ZERO, 1.0, 2.0);
+        let ray = Ray::new(DVec3::ZERO, DVec3::X);
+        let hit = ray_vs_capsule(&ray, &capsule).expect("ray from the axis must exit the capsule");
+        assert!(hit.started_inside);
+        assert!((hit.t - 1.0).abs() < 1e-9, "t = {}", hit.t);
     }
 
     // ── Swept sphere vs sphere ────────────────────────────────────────
@@ -804,8 +757,22 @@ mod tests {
         let seg =
             crate::broadphase::Segment::new(DVec3::new(0.5, 0.0, 0.0), DVec3::new(5.0, 0.0, 0.0));
         let target = Sphere::new(DVec3::ZERO, 1.0);
-        let hit = swept_sphere_vs_sphere(&seg, 0.5, &target);
-        assert!(hit.is_some());
+        let hit = swept_sphere_vs_sphere(&seg, 0.5, &target).expect("overlap at t=0 is a contact");
+        // Contact is now, not when the sphere would leave the target.
+        assert_eq!(hit.t, 0.0);
+        assert!(hit.started_inside);
+        assert!((hit.normal - DVec3::X).length() < 1e-9, "{:?}", hit.normal);
+    }
+
+    #[test]
+    fn swept_sphere_overlapping_for_the_whole_sweep_still_contacts() {
+        // Deep overlap: both roots lie outside [0, 1] (t1 < 0 < 1 < t2), which
+        // is a resting contact, not a miss.
+        let seg = crate::broadphase::Segment::new(DVec3::ZERO, DVec3::new(0.1, 0.0, 0.0));
+        let target = Sphere::new(DVec3::ZERO, 5.0);
+        let hit = swept_sphere_vs_sphere(&seg, 0.5, &target).expect("resting contact");
+        assert_eq!(hit.t, 0.0);
+        assert!(hit.started_inside);
     }
 
     // ── Swept sphere vs AABB ──────────────────────────────────────────
@@ -836,8 +803,12 @@ mod tests {
         let seg =
             crate::broadphase::Segment::new(DVec3::new(0.5, 0.0, 0.0), DVec3::new(5.0, 0.0, 0.0));
         let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
-        let hit = swept_sphere_vs_aabb(&seg, 0.5, &aabb);
-        assert!(hit.is_some());
+        let hit = swept_sphere_vs_aabb(&seg, 0.5, &aabb).expect("overlap at t=0 is a contact");
+        assert_eq!(hit.t, 0.0);
+        assert!(hit.started_inside);
+        // Nearest inflated face from (0.5, 0, 0) is +X (0.5 vs 1.5 elsewhere),
+        // not the fabricated +Z the eps-chain used to fall through to.
+        assert_eq!(hit.normal, DVec3::X);
     }
 
     #[test]
@@ -934,6 +905,23 @@ mod tests {
             crate::broadphase::Segment::new(DVec3::new(-5.0, 5.0, 0.0), DVec3::new(5.0, 5.0, 0.0));
         let capsule = Capsule::new(DVec3::ZERO, 0.5, 2.0);
         assert!(swept_sphere_vs_capsule(&seg, 0.5, &capsule).is_none());
+    }
+
+    #[test]
+    fn swept_sphere_overlapping_tall_capsule_pushes_out_sideways() {
+        // A sphere overlapping the side of a tall capsule must be pushed along
+        // the shortest way out — laterally — not away from the capsule centre.
+        let capsule = Capsule::new(DVec3::ZERO, 1.0, 5.0);
+        let seg =
+            crate::broadphase::Segment::new(DVec3::new(1.2, 5.0, 0.0), DVec3::new(1.2, 5.0, 0.0));
+        let hit = swept_sphere_vs_capsule(&seg, 0.5, &capsule).expect("resting contact");
+        assert_eq!(hit.t, 0.0);
+        assert!(hit.started_inside);
+        assert!(
+            (hit.normal - DVec3::X).length() < 1e-9,
+            "expected a lateral normal, got {:?}",
+            hit.normal
+        );
     }
 
     #[test]

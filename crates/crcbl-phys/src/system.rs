@@ -13,7 +13,7 @@ use glam::DVec3;
 use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
 use crate::components::{ColliderComponent, RigidBody, Transform};
 use crate::forces::ForceProvider;
-use crate::integrator::{Integrator, SemiImplicitEuler};
+use crate::integrator::{Integrator as _, SemiImplicitEuler};
 use crate::query::ShapeHit;
 use crate::world::{ColliderId, PhysicsWorld};
 use crate::{Ray, Segment};
@@ -27,9 +27,10 @@ use crate::{Ray, Segment};
 ///
 /// # Integration loop
 ///
-/// Each `tick()` calls `step(dt)` once. The caller is responsible for
-/// fixed-timestep accumulation (substepping); call `step(substep_dt)` multiple
-/// times per tick to advance physics at a higher rate than the game tick.
+/// Each `tick(dt)` calls `step(dt)` once with the schedule's real tick period.
+/// The caller is responsible for fixed-timestep accumulation (substepping);
+/// call `step(substep_dt)` multiple times per tick to advance physics at a
+/// higher rate than the game tick.
 pub struct PhysicsSystem {
     world: PhysicsWorld,
 
@@ -47,13 +48,12 @@ pub struct PhysicsSystem {
 
     /// Force providers applied in order each substep before integration.
     force_providers: Vec<Box<dyn ForceProvider>>,
-    /// The integrator used for position/velocity advancement.
-    integrator: Box<dyn Integrator>,
 }
 
 impl PhysicsSystem {
-    /// Create an empty physics system with the default integrator
-    /// ([`SemiImplicitEuler`]).
+    /// Create an empty physics system.
+    ///
+    /// Integration is [`SemiImplicitEuler`]; see [`PhysicsSystem::step`].
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -64,7 +64,6 @@ impl PhysicsSystem {
             transforms: HashMap::new(),
             collider_comps: HashMap::new(),
             force_providers: Vec::new(),
-            integrator: Box::new(SemiImplicitEuler),
         }
     }
 
@@ -117,11 +116,6 @@ impl PhysicsSystem {
         self.force_providers.push(provider);
     }
 
-    /// Replace the integrator (default is [`SemiImplicitEuler`]).
-    pub fn set_integrator(&mut self, integrator: Box<dyn Integrator>) {
-        self.integrator = integrator;
-    }
-
     // ── Collider management ────────────────────────────────────────────
 
     /// Add or replace a collider for `entity`.
@@ -153,7 +147,7 @@ impl PhysicsSystem {
     pub fn remove_collider(&mut self, entity: Entity) {
         if let Some(id) = self.entity_to_collider.remove(&entity) {
             self.world.remove(id);
-            let slot = id.0 as usize;
+            let slot = id.index() as usize;
             if slot < self.collider_to_entity.len() {
                 self.collider_to_entity[slot] = None;
             }
@@ -164,11 +158,19 @@ impl PhysicsSystem {
 
     /// Advance dynamics by one substep of `dt` seconds.
     ///
-    /// Applies all force providers, then integrates every dynamic body.
-    /// Collider positions are synced to the new transforms.
+    /// Applies all force providers, then integrates every dynamic body with
+    /// [`SemiImplicitEuler`]. Collider positions are synced to the new
+    /// transforms.
+    ///
+    /// Bodies are visited in ascending entity order. `bodies` is a `HashMap`
+    /// with a randomly-seeded hasher, so its iteration order differs between
+    /// processes; floating-point work in a different order is a different
+    /// result, and this crate promises determinism.
     pub fn step(&mut self, dt: f64) {
-        // Collect entity list to avoid borrow conflicts.
-        let entities: Vec<Entity> = self.bodies.keys().copied().collect();
+        // Collect entity list to avoid borrow conflicts, in a canonical order
+        // so the arithmetic does not depend on the map's seed.
+        let mut entities: Vec<Entity> = self.bodies.keys().copied().collect();
+        entities.sort_unstable_by_key(|entity| entity.to_bits());
 
         // Apply forces.
         for &entity in &entities {
@@ -189,7 +191,7 @@ impl PhysicsSystem {
             let Some(transform) = self.transforms.get_mut(&entity) else {
                 continue;
             };
-            self.integrator.step(body, transform, dt);
+            SemiImplicitEuler.step(body, transform, dt);
         }
 
         // Sync colliders to new transforms.
@@ -204,7 +206,7 @@ impl PhysicsSystem {
     #[must_use]
     pub fn cast_ray(&mut self, ray: &Ray) -> Option<(Entity, ShapeHit)> {
         self.world.cast_ray(ray).and_then(|(id, hit)| {
-            let slot = id.0 as usize;
+            let slot = id.index() as usize;
             self.collider_to_entity
                 .get(slot)
                 .and_then(|e| e.map(|entity| (entity, hit)))
@@ -217,7 +219,7 @@ impl PhysicsSystem {
         self.world
             .sweep_sphere(segment, radius)
             .and_then(|(id, hit)| {
-                let slot = id.0 as usize;
+                let slot = id.index() as usize;
                 self.collider_to_entity
                     .get(slot)
                     .and_then(|e| e.map(|entity| (entity, hit)))
@@ -231,7 +233,7 @@ impl PhysicsSystem {
             .overlap_sphere(centre, radius)
             .into_iter()
             .filter_map(|id| {
-                let slot = id.0 as usize;
+                let slot = id.index() as usize;
                 let entity = self.collider_to_entity.get(slot).and_then(|e| *e)?;
                 Some((
                     entity,
@@ -253,7 +255,7 @@ impl PhysicsSystem {
             .overlap_aabb(aabb)
             .into_iter()
             .filter_map(|id| {
-                let slot = id.0 as usize;
+                let slot = id.index() as usize;
                 self.collider_to_entity.get(slot).and_then(|e| *e)
             })
             .collect()
@@ -319,7 +321,7 @@ impl PhysicsSystem {
         };
 
         self.entity_to_collider.insert(entity, id);
-        let slot = id.0 as usize;
+        let slot = id.index() as usize;
         if slot >= self.collider_to_entity.len() {
             self.collider_to_entity.resize(slot + 1, None);
         }
@@ -396,10 +398,12 @@ impl SystemTrait for PhysicsSystem {
         "physics"
     }
 
-    fn tick(&mut self) {
-        // Default: one substep at 1/120 s. The caller can override this by
-        // calling `step(dt)` directly before or instead of tick.
-        self.step(1.0 / 120.0);
+    fn tick(&mut self, dt: f64) {
+        // One substep at the schedule's real tick period.  Assuming a rate
+        // here instead would make simulated speed a function of the host's
+        // tick rate.  Callers wanting sub-stepping call `step(dt / n)` n times
+        // directly instead of relying on the schedule.
+        self.step(dt);
     }
 
     fn entity_count(&self) -> usize {
@@ -414,6 +418,68 @@ impl SystemTrait for PhysicsSystem {
 
     fn debug_draw(&mut self, _ctx: &DebugCtx) {
         // Future: draw collider AABBs, contacts, swept paths.
+    }
+
+    /// Feed transform and rigid-body state into the determinism hash.
+    ///
+    /// Entities are visited in ascending `to_bits()` order (the `HashMap`s
+    /// this reads are seeded per process) and every float goes in as
+    /// `to_bits()`, so the hash is a bit-exact function of the simulation
+    /// state and nothing else.
+    fn hash_state(&self, hasher: &mut dyn std::hash::Hasher) {
+        let mut entities: Vec<Entity> = self
+            .transforms
+            .keys()
+            .chain(self.bodies.keys())
+            .copied()
+            .collect();
+        entities.sort_unstable_by_key(|entity| entity.to_bits());
+        entities.dedup();
+
+        for entity in entities {
+            hasher.write(&entity.to_bits().to_le_bytes());
+
+            match self.transforms.get(&entity) {
+                Some(transform) => {
+                    hasher.write(&[1]);
+                    for value in [
+                        transform.position.x,
+                        transform.position.y,
+                        transform.position.z,
+                        transform.rotation.x,
+                        transform.rotation.y,
+                        transform.rotation.z,
+                        transform.rotation.w,
+                    ] {
+                        hasher.write(&value.to_bits().to_le_bytes());
+                    }
+                }
+                None => hasher.write(&[0]),
+            }
+
+            match self.bodies.get(&entity) {
+                Some(body) => {
+                    hasher.write(&[1]);
+                    for value in [
+                        body.mass,
+                        body.inverse_mass,
+                        body.velocity.x,
+                        body.velocity.y,
+                        body.velocity.z,
+                        body.force_accum.x,
+                        body.force_accum.y,
+                        body.force_accum.z,
+                    ] {
+                        hasher.write(&value.to_bits().to_le_bytes());
+                    }
+                }
+                None => hasher.write(&[0]),
+            }
+        }
+    }
+
+    fn contributes_to_hash(&self) -> bool {
+        true
     }
 
     fn replicate(&self, out: &mut Vec<u8>) -> bool {
@@ -795,5 +861,115 @@ mod tests {
         phys.add_force_provider(Box::new(GravityForce::EARTH));
         phys.step(1.0 / 60.0);
         // Just shouldn't panic.
+    }
+
+    // ── Schedule integration ────────────────────────────────────────────
+
+    #[test]
+    fn tick_uses_the_schedule_dt_rather_than_an_assumed_rate() {
+        // Same simulated second, two tick rates.  A hardcoded step would make
+        // the 30 Hz run cover half the ground of the 60 Hz one.
+        let simulate = |hz: u32| {
+            let mut phys = PhysicsSystem::new();
+            let e = test_entity(0);
+            let mut body = RigidBody::new_dynamic(1.0);
+            body.velocity = DVec3::new(10.0, 0.0, 0.0);
+            phys.set_body(e, body);
+            phys.set_transform(e, Transform::IDENTITY);
+
+            let dt = 1.0 / f64::from(hz);
+            for _ in 0..hz {
+                SystemTrait::tick(&mut phys, dt);
+            }
+            phys.transform(e).unwrap().position.x
+        };
+
+        let at_60 = simulate(60);
+        let at_30 = simulate(30);
+        assert!((at_60 - 10.0).abs() < 1e-9, "x = {at_60}");
+        assert!((at_30 - 10.0).abs() < 1e-9, "x = {at_30}");
+    }
+
+    #[test]
+    fn step_visits_bodies_in_canonical_order() {
+        // Insertion order must not reach the arithmetic: the `bodies` map is
+        // randomly seeded, so anything that depended on it would differ per
+        // process.  Two systems built in opposite orders must agree bit for
+        // bit.
+        let build = |reverse: bool| {
+            let mut phys = PhysicsSystem::new();
+            phys.add_force_provider(Box::new(GravityForce::EARTH));
+            let mut indices: Vec<u32> = (0..16).collect();
+            if reverse {
+                indices.reverse();
+            }
+            for i in indices {
+                let e = test_entity(i);
+                let mut body = RigidBody::new_dynamic(1.0 + f64::from(i) * 0.25);
+                body.velocity = DVec3::new(f64::from(i) * 0.1, 0.0, 0.0);
+                phys.set_body(e, body);
+                phys.set_transform(e, Transform::from_position(DVec3::splat(f64::from(i))));
+            }
+            for _ in 0..120 {
+                phys.step(1.0 / 120.0);
+            }
+            phys
+        };
+
+        let forward = build(false);
+        let backward = build(true);
+        for i in 0..16 {
+            let e = test_entity(i);
+            assert_eq!(
+                forward.transform(e).unwrap().position,
+                backward.transform(e).unwrap().position,
+                "entity {i} diverged"
+            );
+        }
+    }
+
+    #[test]
+    fn hash_state_covers_physics_state_in_canonical_order() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher as _;
+
+        fn hash(phys: &PhysicsSystem) -> u64 {
+            let mut h = DefaultHasher::new();
+            SystemTrait::hash_state(phys, &mut h);
+            h.finish()
+        }
+
+        let build = |reverse: bool, y: f64| {
+            let mut phys = PhysicsSystem::new();
+            let mut indices: Vec<u32> = (0..8).collect();
+            if reverse {
+                indices.reverse();
+            }
+            for i in indices {
+                let e = test_entity(i);
+                phys.set_body(e, RigidBody::new_dynamic(1.0 + f64::from(i)));
+                phys.set_transform(
+                    e,
+                    Transform::from_position(DVec3::new(f64::from(i), y, 0.0)),
+                );
+            }
+            phys
+        };
+
+        // The system must announce that it contributes, or the server's
+        // determinism harness silently skips all of physics.
+        assert!(SystemTrait::contributes_to_hash(&build(false, 0.0)));
+
+        // Insertion order is not state; position is.
+        assert_eq!(hash(&build(false, 0.0)), hash(&build(true, 0.0)));
+        assert_ne!(hash(&build(false, 0.0)), hash(&build(false, 1.0)));
+
+        // A velocity change alone must move the hash.
+        let mut moving = build(false, 0.0);
+        let e = test_entity(3);
+        let mut body = *moving.body(e).unwrap();
+        body.velocity = DVec3::new(0.0, -1.0, 0.0);
+        moving.set_body(e, body);
+        assert_ne!(hash(&build(false, 0.0)), hash(&moving));
     }
 }

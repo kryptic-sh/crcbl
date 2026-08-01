@@ -39,8 +39,29 @@ macro_rules! impl_component_hash_int {
     };
 }
 
-impl_component_hash_int!(u8, u16, u32, u64, u128, usize);
-impl_component_hash_int!(i8, i16, i32, i64, i128, isize);
+impl_component_hash_int!(u8, u16, u32, u64, u128);
+impl_component_hash_int!(i8, i16, i32, i64, i128);
+
+/// `usize` / `isize` are hashed at a **fixed** 8-byte width, not at the
+/// platform's pointer width.
+///
+/// `GameModule` compares a native binding against a wasm32 one; hashing
+/// `to_le_bytes()` directly would emit 8 bytes on x86-64 and 4 on wasm32, so
+/// identical state would disagree purely because of the target. Widening to
+/// `u64` / `i64` is lossless on every supported target.
+macro_rules! impl_component_hash_pointer_width {
+    ($($t:ty => $wide:ty),* $(,)?) => {
+        $(
+            impl ComponentHash for $t {
+                fn hash_component(&self, hasher: &mut dyn Hasher) {
+                    hasher.write(&(*self as $wide).to_le_bytes());
+                }
+            }
+        )*
+    };
+}
+
+impl_component_hash_pointer_width!(usize => u64, isize => i64);
 
 impl ComponentHash for f32 {
     fn hash_component(&self, hasher: &mut dyn Hasher) {
@@ -141,6 +162,15 @@ mod tests {
         assert_ne!(hash_one(&1u32), hash_one(&2u32));
         assert_ne!(hash_one(&1.0f32), hash_one(&2.0f32));
         assert_ne!(hash_one(&true), hash_one(&false));
+    }
+
+    #[test]
+    fn pointer_width_ints_hash_at_a_fixed_width() {
+        // The same value must hash the same whether it arrived as a `usize`
+        // (4 bytes wide on wasm32, 8 on x86-64) or as the fixed-width type
+        // the encoding promises.
+        assert_eq!(hash_one(&1234usize), hash_one(&1234u64));
+        assert_eq!(hash_one(&(-1234isize)), hash_one(&(-1234i64)));
     }
 
     #[test]

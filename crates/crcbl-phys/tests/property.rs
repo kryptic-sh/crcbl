@@ -6,6 +6,16 @@
 use crcbl_phys::{DragForce, ForceProvider, GravityForce, PhysicsSystem, RigidBody, Transform};
 use glam::DVec3;
 
+/// Build an [`Entity`] from a raw index for use in these tests.
+///
+/// Real entities only come from `crcbl_ecs::World::spawn`; these tests drive
+/// `PhysicsSystem` without a `World`, so they fabricate handles instead.
+/// Generation 1 is the first generation `Pool` ever issues, so every handle
+/// built here is well-formed.
+fn test_entity(index: u32) -> crcbl_ecs::Entity {
+    crcbl_ecs::Entity::from_bits((1u64 << 32) | index as u64).expect("generation 1 is never zero")
+}
+
 /// Build a system with Earth gravity and linear drag.
 fn make_falling_system() -> PhysicsSystem {
     let mut phys = PhysicsSystem::new();
@@ -23,7 +33,7 @@ fn terminal_velocity_emerges_under_gravity_and_drag() {
     // For gravity g=9.81 and linear drag k=0.5 on a 1 kg body:
     // v_term = m*g/k = 1*9.81/0.5 = 19.62 m/s (downward).
     let mut phys = make_falling_system();
-    let e = crcbl_phys::test_entity(0);
+    let e = test_entity(0);
     phys.set_body(e, RigidBody::new_dynamic(1.0));
     phys.set_transform(e, Transform::from_position(DVec3::new(0.0, 1000.0, 0.0)));
 
@@ -49,7 +59,7 @@ fn terminal_velocity_emerges_under_gravity_and_drag() {
 fn heavier_body_has_higher_terminal_velocity() {
     // For mass 4 kg: v_term = 4*9.81/0.5 = 78.48
     let mut phys = make_falling_system();
-    let e = crcbl_phys::test_entity(0);
+    let e = test_entity(0);
     phys.set_body(e, RigidBody::new_dynamic(4.0));
     phys.set_transform(e, Transform::from_position(DVec3::new(0.0, 1000.0, 0.0)));
 
@@ -80,7 +90,7 @@ fn heavier_body_has_higher_terminal_velocity() {
 fn same_initial_state_produces_same_final_state() {
     let run = || {
         let mut phys = make_falling_system();
-        let e = crcbl_phys::test_entity(0);
+        let e = test_entity(0);
         let mut body = RigidBody::new_dynamic(2.0);
         body.velocity = DVec3::new(10.0, 5.0, 0.0);
         phys.set_body(e, body);
@@ -128,7 +138,7 @@ fn energy_drift_is_bounded_for_oscillator() {
 
     let mut phys = PhysicsSystem::new();
     phys.add_force_provider(Box::new(SpringForce { stiffness: 10.0 }));
-    let e = crcbl_phys::test_entity(0);
+    let e = test_entity(0);
     phys.set_body(e, RigidBody::new_dynamic(1.0));
     phys.set_transform(e, Transform::from_position(DVec3::new(1.0, 0.0, 0.0)));
 
@@ -160,7 +170,7 @@ fn hash_physics_state(phys: &PhysicsSystem, count: usize) -> u64 {
 
     let mut hasher = DefaultHasher::new();
     for i in 0..count {
-        let e = crcbl_phys::test_entity(i as u32);
+        let e = test_entity(i as u32);
         if let Some(body) = phys.body(e) {
             body.velocity.to_array().iter().for_each(|v| {
                 v.to_bits().hash(&mut hasher);
@@ -188,7 +198,7 @@ fn thousand_body_determinism() {
 
         let count = 1000;
         for i in 0..count {
-            let e = crcbl_phys::test_entity(i as u32);
+            let e = test_entity(i as u32);
             let mass = 1.0 + ((i % 10) as f64) * 0.5; // 1.0..5.5 kg
             let mut body = RigidBody::new_dynamic(mass);
             // Deterministic initial velocity based on index.
@@ -232,7 +242,7 @@ fn thousand_body_substep_count_preserves_determinism() {
 
     let count = 500;
     for i in 0..count {
-        let e = crcbl_phys::test_entity(i as u32);
+        let e = test_entity(i as u32);
         phys.set_body(e, RigidBody::new_dynamic(1.0 + (i % 5) as f64));
         phys.set_transform(
             e,
@@ -251,7 +261,7 @@ fn thousand_body_substep_count_preserves_determinism() {
 
     // Verify all bodies exist and have finite state.
     for i in 0..count {
-        let e = crcbl_phys::test_entity(i as u32);
+        let e = test_entity(i as u32);
         let b = phys.body(e).expect("body should exist");
         let t = phys.transform(e).expect("transform should exist");
         assert!(b.velocity.is_finite());

@@ -15,8 +15,33 @@ use crate::query::{self, ShapeHit};
 ///
 /// Created by [`PhysicsWorld::add_sphere`], [`PhysicsWorld::add_box`], or
 /// [`PhysicsWorld::add_capsule`]. Use it to remove or update the collider.
+///
+/// This is a *generational* id — a storage slot plus the generation that slot
+/// was issued with — for the same reason [`crcbl_ecs::Entity`] is: removing a
+/// collider recycles its slot, and a bare index kept across the removal would
+/// silently start addressing whatever collider landed there next. A stale id
+/// resolves to nothing instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ColliderId(pub(crate) u32);
+pub struct ColliderId {
+    index: u32,
+    generation: u32,
+}
+
+impl ColliderId {
+    /// The storage slot this id names. Only meaningful together with the
+    /// generation, so this stays crate-internal.
+    #[inline]
+    pub(crate) const fn index(self) -> u32 {
+        self.index
+    }
+
+    /// Build an id from its parts. Crate-internal: only [`PhysicsWorld`] knows
+    /// which generation a slot is currently on.
+    #[inline]
+    const fn new(index: u32, generation: u32) -> Self {
+        Self { index, generation }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Collider shape storage
@@ -62,17 +87,19 @@ impl ColliderEntry {
 pub struct PhysicsWorld {
     /// Dense storage of collider entries.
     colliders: Vec<Option<ColliderSlot>>,
+    /// Generation counter per slot, parallel to `colliders`. Bumped when a
+    /// slot is freed, so ids issued before the removal stop resolving.
+    generations: Vec<u32>,
     /// Free slots for reuse (indices into `colliders`).
     free_slots: Vec<u32>,
-    /// Next id to assign.
-    next_id: u32,
+    /// Live collider count, so `len` does not scan the slot array.
+    live_count: usize,
     /// Lazily-rebuilt BVH. `None` when dirty.
     bvh: Option<Bvh>,
-    /// Maps collider slot index → BVH element position. Populated during
-    /// [`PhysicsWorld::rebuild`]. Used by update methods for O(log n) refit.
+    /// Maps collider slot index → BVH element position (`u32::MAX` for slots
+    /// with no element). Populated during [`PhysicsWorld::rebuild`]. Used by
+    /// update methods for O(log n) refit.
     bvh_slot_to_elem: Vec<u32>,
-    /// Incremented on every mutation; used to detect staleness.
-    generation: u64,
 }
 
 impl PhysicsWorld {
@@ -81,11 +108,11 @@ impl PhysicsWorld {
     pub fn new() -> Self {
         Self {
             colliders: Vec::new(),
+            generations: Vec::new(),
             free_slots: Vec::new(),
-            next_id: 0,
+            live_count: 0,
             bvh: None,
             bvh_slot_to_elem: Vec::new(),
-            generation: 0,
         }
     }
 
@@ -123,37 +150,44 @@ impl PhysicsWorld {
         self.set(id, ColliderEntry::Capsule(capsule))
     }
 
-    /// Mark a collider as a trigger (non-solid, generates overlap events).
+    /// Mark a collider as a trigger.
+    ///
+    /// A trigger is *non-solid*: [`PhysicsWorld::cast_ray`] and
+    /// [`PhysicsWorld::sweep_sphere`] pass straight through it, while
+    /// [`PhysicsWorld::overlap_sphere`] and [`PhysicsWorld::overlap_aabb`]
+    /// still report it — that is what makes it an overlap-only volume.
+    ///
     /// Returns `false` if the id is invalid.
     pub fn set_trigger(&mut self, id: ColliderId, is_trigger: bool) -> bool {
-        let slot = id.0 as usize;
-        let Some(slot_data) = self.colliders.get_mut(slot).and_then(|s| s.as_mut()) else {
+        let Some(slot) = self.slot_of(id) else {
             return false;
         };
-        slot_data.is_trigger = is_trigger;
+        if let Some(slot_data) = self.colliders[slot].as_mut() {
+            slot_data.is_trigger = is_trigger;
+        }
         true
     }
 
     /// Whether a collider is a trigger.
     pub fn is_trigger(&self, id: ColliderId) -> bool {
-        let slot = id.0 as usize;
-        self.colliders
-            .get(slot)
-            .and_then(|s| s.as_ref())
-            .is_some_and(|s| s.is_trigger)
+        self.slot_of(id)
+            .is_some_and(|slot| self.colliders[slot].as_ref().is_some_and(|s| s.is_trigger))
     }
 
     /// Remove a collider by its id. Returns `true` if the id was valid.
+    ///
+    /// The slot is recycled, but its generation is bumped first, so `id` (and
+    /// any copy of it) stops resolving even once a new collider lands there.
     pub fn remove(&mut self, id: ColliderId) -> bool {
-        let idx = id.0 as usize;
-        if idx >= self.colliders.len() || self.colliders[idx].is_none() {
+        let Some(slot) = self.slot_of(id) else {
             return false;
-        }
-        self.colliders[idx] = None;
-        self.free_slots.push(id.0);
+        };
+        self.colliders[slot] = None;
+        self.generations[slot] = self.generations[slot].wrapping_add(1);
+        self.free_slots.push(slot as u32);
+        self.live_count -= 1;
         self.bvh = None;
         self.bvh_slot_to_elem.clear();
-        self.generation = self.generation.wrapping_add(1);
         true
     }
 
@@ -169,7 +203,9 @@ impl PhysicsWorld {
             .enumerate()
             .filter_map(|(idx, slot)| slot.as_ref().map(|s| (s.entry.aabb(), idx as u32)))
             .collect();
-        // Build slot→elem reverse mapping.
+        // Build slot→elem reverse mapping.  `elem_idx` is the element's
+        // position in the array handed to `Bvh::build` — its *build order* —
+        // which is exactly what `Bvh::update_aabb` is indexed by.
         self.bvh_slot_to_elem = vec![u32::MAX; self.colliders.len()];
         for (elem_idx, (_, slot)) in elements.iter().enumerate() {
             self.bvh_slot_to_elem[*slot as usize] = elem_idx as u32;
@@ -180,13 +216,13 @@ impl PhysicsWorld {
     /// Number of colliders currently registered.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.colliders.iter().filter(|s| s.is_some()).count()
+        self.live_count
     }
 
     /// Whether the world has no colliders.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.live_count == 0
     }
 
     // ── Queries ────────────────────────────────────────────────────────
@@ -194,7 +230,8 @@ impl PhysicsWorld {
     /// Return all collider ids whose shape overlaps the query sphere.
     ///
     /// Uses the BVH for broadphase culling, then tests exact shape overlap
-    /// (sphere-vs-sphere, sphere-vs-AABB, sphere-vs-capsule).
+    /// (sphere-vs-sphere, sphere-vs-AABB, sphere-vs-capsule). Triggers are
+    /// included — overlap is the query they exist for.
     #[must_use]
     pub fn overlap_sphere(&mut self, centre: DVec3, radius: f64) -> Vec<ColliderId> {
         self.ensure_bvh();
@@ -220,7 +257,7 @@ impl PhysicsWorld {
                         }
                     })
             })
-            .map(ColliderId)
+            .map(|slot| self.id_for_slot(slot))
             .collect()
     }
 
@@ -228,14 +265,15 @@ impl PhysicsWorld {
     ///
     /// This is a broadphase-only query — it tests AABB-vs-AABB without
     /// exact shape overlap. Use [`PhysicsWorld::overlap_sphere`] for exact
-    /// shape-aware overlap.
+    /// shape-aware overlap. Triggers are included.
     #[must_use]
     pub fn overlap_aabb(&mut self, aabb: &Aabb) -> Vec<ColliderId> {
         self.ensure_bvh();
         let bvh = self.bvh.as_ref().unwrap();
-        bvh.traverse_aabb(aabb)
+        let slots = bvh.traverse_aabb(aabb);
+        slots
             .into_iter()
-            .map(ColliderId)
+            .map(|slot| self.id_for_slot(slot))
             .collect()
     }
 
@@ -243,6 +281,9 @@ impl PhysicsWorld {
     ///
     /// Results are tested against the exact shape geometry (not just the AABB).
     /// The returned `ColliderId` is the handle you got from `add_*`.
+    ///
+    /// Triggers are non-solid and are skipped — use
+    /// [`PhysicsWorld::overlap_sphere`] to detect them.
     #[must_use]
     pub fn cast_ray(&mut self, ray: &Ray) -> Option<(ColliderId, ShapeHit)> {
         self.ensure_bvh();
@@ -254,6 +295,7 @@ impl PhysicsWorld {
     /// Sweep a sphere along a segment, returning the closest hit (if any).
     ///
     /// Uses the shape-level swept-sphere TOI functions for exact results.
+    /// Triggers are non-solid and are skipped.
     #[must_use]
     pub fn sweep_sphere(
         &mut self,
@@ -269,60 +311,71 @@ impl PhysicsWorld {
     /// Get the AABB of a collider by id.
     #[must_use]
     pub fn aabb_of(&self, id: ColliderId) -> Option<Aabb> {
-        let idx = id.0 as usize;
-        self.colliders
-            .get(idx)
-            .and_then(|s| s.as_ref().map(|s| s.entry.aabb()))
-    }
-
-    /// The current generation counter (incremented on every mutation).
-    /// Useful for change detection in ECS systems.
-    #[must_use]
-    pub fn generation(&self) -> u64 {
-        self.generation
+        let slot = self.slot_of(id)?;
+        self.colliders[slot].as_ref().map(|s| s.entry.aabb())
     }
 
     // ── Internal helpers ───────────────────────────────────────────────
+
+    /// Resolve an id to a live storage slot, or `None` if the id is stale
+    /// (generation mismatch) or names an empty slot.
+    fn slot_of(&self, id: ColliderId) -> Option<usize> {
+        let slot = id.index as usize;
+        if self.generations.get(slot).copied() != Some(id.generation) {
+            return None;
+        }
+        self.colliders
+            .get(slot)
+            .and_then(|s| s.as_ref())
+            .map(|_| slot)
+    }
+
+    /// The id currently naming `slot`. Only call with a slot the BVH just
+    /// reported, i.e. one that is live.
+    fn id_for_slot(&self, slot: u32) -> ColliderId {
+        ColliderId::new(slot, self.generations[slot as usize])
+    }
 
     fn add(&mut self, entry: ColliderEntry) -> ColliderId {
         let slot_data = ColliderSlot {
             entry,
             is_trigger: false,
         };
-        let id = if let Some(slot) = self.free_slots.pop() {
+        let index = if let Some(slot) = self.free_slots.pop() {
             self.colliders[slot as usize] = Some(slot_data);
             slot
         } else {
-            let idx = self.next_id;
-            self.next_id = idx.wrapping_add(1);
+            let idx = self.colliders.len() as u32;
             self.colliders.push(Some(slot_data));
+            self.generations.push(0);
             idx
         };
+        self.live_count += 1;
         self.bvh = None;
         self.bvh_slot_to_elem.clear();
-        self.generation = self.generation.wrapping_add(1);
-        ColliderId(id)
+        self.id_for_slot(index)
     }
 
     /// Update an existing collider entry, refitting the BVH if built.
     fn set(&mut self, id: ColliderId, entry: ColliderEntry) -> bool {
-        let slot = id.0 as usize;
-        let Some(existing) = self.colliders.get(slot).and_then(|s| s.as_ref()) else {
+        let Some(slot) = self.slot_of(id) else {
             return false;
         };
-        let is_trigger = existing.is_trigger;
+        let is_trigger = self.colliders[slot].as_ref().is_some_and(|s| s.is_trigger);
         let new_aabb = entry.aabb();
         self.colliders[slot] = Some(ColliderSlot { entry, is_trigger });
-        self.generation = self.generation.wrapping_add(1);
 
-        // Try incremental refit.
-        if let Some(ref mut bvh) = self.bvh
-            && slot < self.bvh_slot_to_elem.len()
-        {
-            let elem_idx = self.bvh_slot_to_elem[slot] as usize;
-            bvh.update_aabb(elem_idx, new_aabb);
-        } else {
-            // BVH not built or mapping stale — mark dirty.
+        // Try incremental refit.  A refit that reports failure leaves the tree
+        // holding the old bounds, so the BVH must be dropped rather than
+        // queried against stale geometry.
+        let refit = match self.bvh {
+            Some(ref mut bvh) => match self.bvh_slot_to_elem.get(slot).copied() {
+                Some(elem) if elem != u32::MAX => bvh.update_aabb(elem as usize, new_aabb),
+                _ => false,
+            },
+            None => false,
+        };
+        if !refit {
             self.bvh = None;
             self.bvh_slot_to_elem.clear();
         }
@@ -336,7 +389,7 @@ impl PhysicsWorld {
     }
 
     /// Given BVH hits (AABB-level), find the closest exact hit using
-    /// shape-level intersection.
+    /// shape-level intersection. Triggers are non-solid and are skipped.
     fn closest_hit(&self, ray: &Ray, bvh_hits: &[BvhHit]) -> Option<(ColliderId, ShapeHit)> {
         let mut best: Option<(f64, ColliderId, ShapeHit)> = None;
         for bvh_hit in bvh_hits {
@@ -344,6 +397,9 @@ impl PhysicsWorld {
             let Some(Some(slot)) = self.colliders.get(idx) else {
                 continue;
             };
+            if slot.is_trigger {
+                continue;
+            }
             let hit = match &slot.entry {
                 ColliderEntry::Sphere(s) => query::ray_vs_sphere(ray, s),
                 ColliderEntry::Box(b) => query::ray_vs_aabb(ray, &b.aabb()),
@@ -352,13 +408,14 @@ impl PhysicsWorld {
             if let Some(hit) = hit
                 && hit.t < best.as_ref().map_or(f64::INFINITY, |&(t, _, _)| t)
             {
-                best = Some((hit.t, ColliderId(bvh_hit.element_id), hit));
+                best = Some((hit.t, self.id_for_slot(bvh_hit.element_id), hit));
             }
         }
         best.map(|(_, id, hit)| (id, hit))
     }
 
-    /// Given BVH hits, find the closest exact swept-sphere hit.
+    /// Given BVH hits, find the closest exact swept-sphere hit. Triggers are
+    /// non-solid and are skipped.
     fn closest_swept(
         &self,
         segment: &Segment,
@@ -371,6 +428,9 @@ impl PhysicsWorld {
             let Some(Some(slot)) = self.colliders.get(idx) else {
                 continue;
             };
+            if slot.is_trigger {
+                continue;
+            }
             let hit = match &slot.entry {
                 ColliderEntry::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
                 ColliderEntry::Box(b) => query::swept_sphere_vs_aabb(segment, radius, &b.aabb()),
@@ -379,7 +439,7 @@ impl PhysicsWorld {
             if let Some(hit) = hit
                 && hit.t < best.as_ref().map_or(f64::INFINITY, |&(t, _, _)| t)
             {
-                best = Some((hit.t, ColliderId(bvh_hit.element_id), hit));
+                best = Some((hit.t, self.id_for_slot(bvh_hit.element_id), hit));
             }
         }
         best.map(|(_, id, hit)| (id, hit))
@@ -396,7 +456,6 @@ impl std::fmt::Debug for PhysicsWorld {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PhysicsWorld")
             .field("collider_count", &self.len())
-            .field("generation", &self.generation)
             .field("bvh_cached", &self.bvh.is_some())
             .finish()
     }
@@ -430,7 +489,11 @@ mod tests {
     #[test]
     fn remove_invalid_id_returns_false() {
         let mut world = PhysicsWorld::new();
-        assert!(!world.remove(ColliderId(999)));
+        assert!(!world.remove(ColliderId::new(999, 0)));
+        // A double remove is the same stale-id case.
+        let id = world.add_sphere(Sphere::new(DVec3::ZERO, 1.0));
+        assert!(world.remove(id));
+        assert!(!world.remove(id));
     }
 
     #[test]
@@ -502,17 +565,32 @@ mod tests {
     #[test]
     fn aabb_of_unknown_id_returns_none() {
         let world = PhysicsWorld::new();
-        assert!(world.aabb_of(ColliderId(42)).is_none());
+        assert!(world.aabb_of(ColliderId::new(42, 0)).is_none());
     }
 
     #[test]
-    fn generation_increments_on_mutation() {
+    fn stale_id_does_not_address_the_slot_s_new_occupant() {
+        // ABA: remove a collider, add another that recycles the same slot, and
+        // check the retained id resolves to nothing rather than to the new
+        // occupant.
         let mut world = PhysicsWorld::new();
-        let gen0 = world.generation();
-        let id = world.add_sphere(Sphere::new(DVec3::ZERO, 1.0));
-        assert_ne!(world.generation(), gen0);
-        world.remove(id);
-        assert_ne!(world.generation(), gen0);
+        let old = world.add_sphere(Sphere::new(DVec3::ZERO, 1.0));
+        assert!(world.remove(old));
+
+        let new = world.add_sphere(Sphere::new(DVec3::new(9.0, 0.0, 0.0), 2.0));
+        assert_eq!(new.index(), old.index(), "the slot must be recycled");
+        assert_ne!(new, old, "but the id must not be");
+
+        assert!(world.aabb_of(old).is_none());
+        assert!(!world.remove(old));
+        assert!(!world.set_trigger(old, true));
+        assert!(!world.is_trigger(old));
+        assert!(!world.set_sphere(old, Sphere::new(DVec3::new(-50.0, 0.0, 0.0), 1.0)));
+
+        // The new occupant is untouched by any of the above.
+        let aabb = world.aabb_of(new).unwrap();
+        assert_eq!(aabb.centre(), DVec3::new(9.0, 0.0, 0.0));
+        assert_eq!(world.len(), 1);
     }
 
     #[test]
@@ -629,7 +707,33 @@ mod tests {
     #[test]
     fn set_sphere_on_invalid_id_returns_false() {
         let mut world = PhysicsWorld::new();
-        assert!(!world.set_sphere(ColliderId(999), Sphere::new(DVec3::ZERO, 1.0)));
+        assert!(!world.set_sphere(ColliderId::new(999, 0), Sphere::new(DVec3::ZERO, 1.0)));
+    }
+
+    #[test]
+    fn set_sphere_refits_the_right_leaf_when_colliders_are_not_centroid_ordered() {
+        // The BVH sorts each range by centroid while building, so the leaf
+        // order differs from the order colliders were added.  Moving slot 0
+        // must move the collider at x = 20, not the one at x = 5.
+        let mut world = PhysicsWorld::new();
+        let far = world.add_sphere(Sphere::new(DVec3::new(20.0, 0.0, 0.0), 1.0));
+        let near = world.add_sphere(Sphere::new(DVec3::new(5.0, 0.0, 0.0), 1.0));
+
+        let ray = Ray::new(DVec3::ZERO, DVec3::X);
+        let (id, hit) = world
+            .cast_ray(&ray)
+            .expect("the near sphere is ahead of the ray");
+        assert_eq!(id, near);
+        assert!((hit.t - 4.0).abs() < 1e-9, "t = {}", hit.t);
+
+        // Move the *far* sphere behind the ray origin.  The near one must
+        // still be found, at the same distance.
+        assert!(world.set_sphere(far, Sphere::new(DVec3::new(-50.0, 0.0, 0.0), 1.0)));
+        let (id, hit) = world
+            .cast_ray(&ray)
+            .expect("the untouched sphere must not vanish");
+        assert_eq!(id, near);
+        assert!((hit.t - 4.0).abs() < 1e-9, "t = {}", hit.t);
     }
 
     #[test]
@@ -695,6 +799,46 @@ mod tests {
     #[test]
     fn set_trigger_on_invalid_id_returns_false() {
         let mut world = PhysicsWorld::new();
-        assert!(!world.set_trigger(ColliderId(42), true));
+        assert!(!world.set_trigger(ColliderId::new(42, 0), true));
+    }
+
+    #[test]
+    fn trigger_is_transparent_to_rays_and_sweeps() {
+        let mut world = PhysicsWorld::new();
+        let trigger = world.add_sphere(Sphere::new(DVec3::new(5.0, 0.0, 0.0), 1.0));
+        assert!(world.set_trigger(trigger, true));
+
+        let ray = Ray::new(DVec3::ZERO, DVec3::X);
+        assert!(
+            world.cast_ray(&ray).is_none(),
+            "a trigger must not stop a bullet"
+        );
+
+        let seg = Segment::new(DVec3::ZERO, DVec3::new(10.0, 0.0, 0.0));
+        assert!(world.sweep_sphere(&seg, 0.5).is_none());
+    }
+
+    #[test]
+    fn trigger_still_shows_up_in_overlap_queries() {
+        let mut world = PhysicsWorld::new();
+        let trigger = world.add_sphere(Sphere::new(DVec3::new(2.0, 0.0, 0.0), 1.0));
+        assert!(world.set_trigger(trigger, true));
+
+        assert_eq!(world.overlap_sphere(DVec3::ZERO, 4.0), vec![trigger]);
+        let query = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(4.0));
+        assert_eq!(world.overlap_aabb(&query), vec![trigger]);
+    }
+
+    #[test]
+    fn solid_collider_behind_a_trigger_is_still_hit() {
+        let mut world = PhysicsWorld::new();
+        let trigger = world.add_sphere(Sphere::new(DVec3::new(5.0, 0.0, 0.0), 1.0));
+        world.set_trigger(trigger, true);
+        let solid = world.add_sphere(Sphere::new(DVec3::new(20.0, 0.0, 0.0), 1.0));
+
+        let ray = Ray::new(DVec3::ZERO, DVec3::X);
+        let (id, hit) = world.cast_ray(&ray).expect("the solid sphere is behind it");
+        assert_eq!(id, solid);
+        assert!((hit.t - 19.0).abs() < 1e-9, "t = {}", hit.t);
     }
 }

@@ -34,7 +34,12 @@ pub trait SystemTrait {
     fn name(&self) -> &str;
 
     /// Called once per tick by the schedule.
-    fn tick(&mut self);
+    ///
+    /// `dt` is the schedule's fixed timestep in seconds — the real tick
+    /// period, not an assumed one. A system that integrates over time must
+    /// use it, or its simulated speed becomes a function of the tick rate.
+    /// See [`World::set_tick_dt`](crate::World::set_tick_dt).
+    fn tick(&mut self, dt: f64);
 
     /// Number of entities currently registered with this system.
     fn entity_count(&self) -> usize;
@@ -149,6 +154,12 @@ impl<T> System<T> {
     ///
     /// If `entity` is already registered, its existing data is overwritten
     /// in-place. Otherwise a new entry is pushed.
+    ///
+    /// `entity` must be alive. A system owns no entity pool and so cannot
+    /// check: attaching a handle that [`World::sweep`](crate::World::sweep)
+    /// has already retired stores data that nothing will ever remove, and it
+    /// counts towards [`SystemTrait::entity_count`] and
+    /// [`SystemTrait::hash_state`] for the rest of the run.
     pub fn attach(&mut self, entity: Entity, data: T) {
         if let Some(&index) = self.entity_to_index.get(&entity) {
             self.data[index] = data;
@@ -210,14 +221,6 @@ impl<T> System<T> {
         self.index_to_entity.iter().copied().zip(self.data.iter())
     }
 
-    /// Iterates `(entity, &mut data)` pairs.
-    pub fn iter_entities_mut(&mut self) -> impl Iterator<Item = (Entity, &mut T)> {
-        self.index_to_entity
-            .iter()
-            .copied()
-            .zip(self.data.iter_mut())
-    }
-
     // -- debug draw ----------------------------------------------------------
 
     /// Sets a callback invoked each tick by [`SystemTrait::debug_draw`].
@@ -233,7 +236,7 @@ impl<T: ComponentHash + 'static> SystemTrait for System<T> {
         &self.name
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self, _dt: f64) {
         // Default: no-op. Users that need per-tick logic iterate the system
         // directly or implement `SystemTrait` on their own type.
     }
@@ -254,9 +257,18 @@ impl<T: ComponentHash + 'static> SystemTrait for System<T> {
         }
     }
 
+    /// Hashes `(entity, component)` pairs in ascending entity order.
+    ///
+    /// Storage order is not canonical — `detach` swap-removes, so two systems
+    /// holding the same logical state reach different `data` orders from
+    /// different attach/detach histories. Sorting by entity makes the hash a
+    /// function of the state alone.
     fn hash_state(&self, hasher: &mut dyn Hasher) {
-        for item in &self.data {
-            item.hash_component(hasher);
+        let mut order: Vec<usize> = (0..self.data.len()).collect();
+        order.sort_unstable_by_key(|&i| self.index_to_entity[i].to_bits());
+        for i in order {
+            hasher.write(&self.index_to_entity[i].to_bits().to_le_bytes());
+            self.data[i].hash_component(hasher);
         }
     }
 
@@ -432,6 +444,42 @@ mod tests {
     fn debug_draw_none_is_noop() {
         let mut sys = System::<i32>::new("test");
         sys.debug_draw(&DebugCtx); // must not panic
+    }
+
+    #[test]
+    fn hash_state_ignores_attach_and_detach_history() {
+        use std::collections::hash_map::DefaultHasher;
+
+        fn hash(sys: &System<i32>) -> u64 {
+            let mut h = DefaultHasher::new();
+            sys.hash_state(&mut h);
+            h.finish()
+        }
+
+        let (a, b, c) = (e(1), e(2), e(3));
+
+        // Same logical state, reached two ways.  The second system's `data`
+        // ends up in swap-remove order, which is not ascending entity order.
+        let mut direct = System::<i32>::new("s");
+        direct.attach(a, 10);
+        direct.attach(b, 20);
+        direct.attach(c, 30);
+
+        let mut churned = System::<i32>::new("s");
+        churned.attach(c, 30);
+        churned.attach(e(4), 40);
+        churned.attach(a, 10);
+        churned.detach(e(4));
+        churned.attach(b, 20);
+
+        assert_eq!(hash(&direct), hash(&churned));
+
+        // The hash still tracks the state itself.
+        let mut changed = System::<i32>::new("s");
+        changed.attach(a, 10);
+        changed.attach(b, 20);
+        changed.attach(c, 31);
+        assert_ne!(hash(&direct), hash(&changed));
     }
 
     #[test]

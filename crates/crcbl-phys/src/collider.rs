@@ -38,23 +38,12 @@ impl Aabb {
 
     /// Create an AABB from explicit min / max bounds.
     ///
-    /// The caller is responsible for ensuring `min ≤ max` per axis; use
-    /// [`Aabb::from_points`] when the relationship is unknown.
+    /// The caller is responsible for ensuring `min ≤ max` per axis; a box that
+    /// violates it reads as empty (see [`Aabb::is_empty`]).
     #[inline]
     #[must_use]
     pub fn new(min: DVec3, max: DVec3) -> Self {
         Self { min, max }
-    }
-
-    /// Build an AABB that contains every point in the iterator.
-    #[inline]
-    #[must_use]
-    pub fn from_points(points: impl IntoIterator<Item = DVec3>) -> Self {
-        let mut aabb = Self::EMPTY;
-        for p in points {
-            aabb = aabb.union_point(p);
-        }
-        aabb
     }
 
     /// Build an AABB from a centre and half-extents.
@@ -74,13 +63,6 @@ impl Aabb {
         (self.min + self.max) * 0.5
     }
 
-    /// Half-extents on each axis.
-    #[inline]
-    #[must_use]
-    pub fn half_extents(&self) -> DVec3 {
-        (self.max - self.min) * 0.5
-    }
-
     /// Extents on each axis (full width / height / depth).
     #[inline]
     #[must_use]
@@ -88,19 +70,9 @@ impl Aabb {
         self.max - self.min
     }
 
-    /// Surface area. Returns `0.0` for an empty AABB.
-    #[inline]
-    #[must_use]
-    pub fn surface_area(&self) -> f64 {
-        let d = self.extents();
-        if d.x <= 0.0 || d.y <= 0.0 || d.z <= 0.0 {
-            return 0.0;
-        }
-        2.0 * (d.x * d.y + d.x * d.z + d.y * d.z)
-    }
-
-    /// Whether this AABB contains no volume (any axis has zero or negative
-    /// extent).
+    /// Whether this AABB is degenerate: `min` is past `max` on at least one
+    /// axis. A zero-extent (flat or point) box is *not* empty — it still
+    /// intersects and bounds correctly.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -135,16 +107,6 @@ impl Aabb {
         }
     }
 
-    /// Expand to contain a single point.
-    #[inline]
-    #[must_use]
-    pub fn union_point(self, point: DVec3) -> Self {
-        Self {
-            min: self.min.min(point),
-            max: self.max.max(point),
-        }
-    }
-
     /// Whether `other` overlaps this AABB (touching counts as overlapping).
     #[inline]
     #[must_use]
@@ -157,19 +119,56 @@ impl Aabb {
             && self.max.z >= other.min.z
     }
 
-    /// Whether `point` is inside (or on the boundary of) this AABB.
-    #[inline]
-    #[must_use]
-    pub fn contains(&self, point: DVec3) -> bool {
-        point.x >= self.min.x
-            && point.x <= self.max.x
-            && point.y >= self.min.y
-            && point.y <= self.max.y
-            && point.z >= self.min.z
-            && point.z <= self.max.z
-    }
-
     // -- ray intersection (slab method) ---------------------------------------
+
+    /// The parametric interval `(t_near, t_far)` over which a ray is inside
+    /// this AABB, or `None` if the ray misses it entirely.
+    ///
+    /// This is the one slab test in the crate — the boolean overlap check, the
+    /// BVH's entry-distance probe and the shape-level box queries all go
+    /// through it. `inv_dir` is the component-wise reciprocal of the ray
+    /// direction and `dir_is_neg` its per-axis sign; both are precomputed by
+    /// the caller because a traversal reuses them across many boxes. Axes with
+    /// a zero direction component (infinite reciprocal) are handled without
+    /// producing `NaN` from `0.0 * INF`.
+    ///
+    /// The interval is unclamped: `t_near` is negative when the ray origin is
+    /// inside the box. Choosing which end to report is the caller's job — see
+    /// `crate::query`'s shared root-selection rule.
+    #[must_use]
+    pub(crate) fn ray_slab(
+        &self,
+        origin: DVec3,
+        inv_dir: DVec3,
+        dir_is_neg: [bool; 3],
+    ) -> Option<(f64, f64)> {
+        let origin = origin.to_array();
+        let inv_dir = inv_dir.to_array();
+        let min = self.min.to_array();
+        let max = self.max.to_array();
+
+        let mut t_near = f64::NEG_INFINITY;
+        let mut t_far = f64::INFINITY;
+        for axis in 0..3 {
+            let (lo, hi) = if dir_is_neg[axis] {
+                (max[axis], min[axis])
+            } else {
+                (min[axis], max[axis])
+            };
+            if inv_dir[axis].is_finite() {
+                t_near = t_near.max((lo - origin[axis]) * inv_dir[axis]);
+                t_far = t_far.min((hi - origin[axis]) * inv_dir[axis]);
+            } else if origin[axis] < min[axis] || origin[axis] > max[axis] {
+                // Parallel to this slab and outside it: no intersection.
+                return None;
+            }
+        }
+
+        if t_near > t_far {
+            return None;
+        }
+        Some((t_near, t_far))
+    }
 
     /// Test whether a ray intersects this AABB, using the pre-computed
     /// inverse direction and sign flags for efficiency.
@@ -186,59 +185,8 @@ impl Aabb {
         t_min: f64,
         t_max: f64,
     ) -> bool {
-        let (lox, hix) = if dir_is_neg[0] {
-            (self.max.x, self.min.x)
-        } else {
-            (self.min.x, self.max.x)
-        };
-        let (loy, hiy) = if dir_is_neg[1] {
-            (self.max.y, self.min.y)
-        } else {
-            (self.min.y, self.max.y)
-        };
-        let (loz, hiz) = if dir_is_neg[2] {
-            (self.max.z, self.min.z)
-        } else {
-            (self.min.z, self.max.z)
-        };
-
-        // Handle zero-direction axes to avoid NaN from 0.0 * INF.
-        let (tmin, tmax) = if inv_dir.x.is_finite() {
-            ((lox - origin.x) * inv_dir.x, (hix - origin.x) * inv_dir.x)
-        } else if origin.x < self.min.x || origin.x > self.max.x {
-            return false;
-        } else {
-            (f64::NEG_INFINITY, f64::INFINITY)
-        };
-        let (tymin, tymax) = if inv_dir.y.is_finite() {
-            ((loy - origin.y) * inv_dir.y, (hiy - origin.y) * inv_dir.y)
-        } else if origin.y < self.min.y || origin.y > self.max.y {
-            return false;
-        } else {
-            (f64::NEG_INFINITY, f64::INFINITY)
-        };
-
-        if tmin > tymax || tymin > tmax {
-            return false;
-        }
-        let tmin = tmin.max(tymin);
-        let tmax = tmax.min(tymax);
-
-        let (tzmin, tzmax) = if inv_dir.z.is_finite() {
-            ((loz - origin.z) * inv_dir.z, (hiz - origin.z) * inv_dir.z)
-        } else if origin.z < self.min.z || origin.z > self.max.z {
-            return false;
-        } else {
-            (f64::NEG_INFINITY, f64::INFINITY)
-        };
-
-        if tmin > tzmax || tzmin > tmax {
-            return false;
-        }
-        let tmin = tmin.max(tzmin);
-        let tmax = tmax.min(tzmax);
-
-        tmin <= t_max && tmax >= t_min
+        self.ray_slab(origin, inv_dir, dir_is_neg)
+            .is_some_and(|(t_near, t_far)| t_near <= t_max && t_far >= t_min)
     }
 }
 
@@ -413,7 +361,7 @@ mod tests {
 
     #[test]
     fn point_aabb_is_not_empty() {
-        let aabb = Aabb::from_points([DVec3::splat(1.0)]);
+        let aabb = Aabb::new(DVec3::splat(1.0), DVec3::splat(1.0));
         assert!(!aabb.is_empty());
         assert_eq!(aabb.min, DVec3::splat(1.0));
         assert_eq!(aabb.max, DVec3::splat(1.0));
@@ -447,15 +395,6 @@ mod tests {
         let a = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
         let b = Aabb::from_centre_half(DVec3::new(5.0, 0.0, 0.0), DVec3::splat(1.0));
         assert!(!a.intersects(&b));
-    }
-
-    #[test]
-    fn aabb_contains_point() {
-        let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(2.0));
-        assert!(aabb.contains(DVec3::new(1.0, 1.0, 1.0)));
-        assert!(aabb.contains(DVec3::ZERO));
-        assert!(aabb.contains(DVec3::new(2.0, 2.0, 2.0))); // boundary
-        assert!(!aabb.contains(DVec3::new(2.1, 0.0, 0.0)));
     }
 
     #[test]
@@ -512,14 +451,14 @@ mod tests {
     }
 
     #[test]
-    fn surface_area_of_unit_box() {
-        let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(0.5));
-        assert!((aabb.surface_area() - 6.0).abs() < 1e-12);
-    }
-
-    #[test]
-    fn surface_area_of_empty_is_zero() {
-        assert_eq!(Aabb::EMPTY.surface_area(), 0.0);
+    fn ray_slab_reports_entry_and_exit() {
+        let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
+        let dir = DVec3::X;
+        let neg = [dir.x < 0.0, dir.y < 0.0, dir.z < 0.0];
+        // Origin inside: entry is behind the origin, exit ahead of it.
+        let (near, far) = aabb.ray_slab(DVec3::ZERO, dir.recip(), neg).unwrap();
+        assert!((near + 1.0).abs() < 1e-12);
+        assert!((far - 1.0).abs() < 1e-12);
     }
 
     #[test]
@@ -534,7 +473,7 @@ mod tests {
     fn from_centre_half_roundtrips() {
         let aabb = Aabb::from_centre_half(DVec3::new(1.0, 2.0, 3.0), DVec3::new(0.5, 1.0, 1.5));
         assert_eq!(aabb.centre(), DVec3::new(1.0, 2.0, 3.0));
-        assert_eq!(aabb.half_extents(), DVec3::new(0.5, 1.0, 1.5));
+        assert_eq!(aabb.extents(), DVec3::new(1.0, 2.0, 3.0));
     }
 
     // -- Sphere --------------------------------------------------------------

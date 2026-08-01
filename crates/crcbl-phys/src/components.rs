@@ -159,10 +159,24 @@ impl Transform {
     ///
     /// The encoding is position (3 × f64 LE) followed by rotation
     /// quaternion (4 × f64 LE, x/y/z/w) — 56 bytes.
+    pub const ENCODED_LEN: usize = 7 * 8;
+
+    /// How far a decoded quaternion's length² may sit from 1 before
+    /// [`Self::decode`] rejects it.
+    ///
+    /// Wide enough to absorb the round-trip error of an `f64` quaternion built
+    /// from Euler angles; far too tight to admit a degenerate or zero one.
+    const ROTATION_TOLERANCE: f64 = 1e-6;
+
+    /// Byte length of the replication encoding written by [`Self::encode`].
+    ///
+    /// Always [`Self::ENCODED_LEN`] — the encoding is fixed-width, so this
+    /// does not depend on `self`. It takes a receiver only so call sites can
+    /// write `transform.encoded_len()` next to `transform.encode(..)`.
     #[inline]
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
-        7 * 8
+        Self::ENCODED_LEN
     }
 
     /// Append the replication encoding to `out` (little-endian, platform-
@@ -183,20 +197,37 @@ impl Transform {
 
     /// Decode a transform from the encoding written by [`Self::encode`].
     ///
-    /// Returns `None` if `data` is not exactly [`Self::encoded_len`] bytes.
+    /// Returns `None` if `data` is not exactly [`Self::ENCODED_LEN`] bytes, if
+    /// any component is not finite, or if the rotation is not (near enough) a
+    /// unit quaternion.
+    ///
+    /// This runs on bytes a peer sent us. A NaN or infinite position poisons
+    /// every AABB it reaches and, through them, the whole BVH; a degenerate
+    /// quaternion turns [`Self::forward`] / [`Self::right`] / [`Self::up`]
+    /// into garbage. Neither is representable by [`Self::encode`], so
+    /// rejecting them here costs a well-behaved peer nothing.
     #[must_use]
     pub fn decode(data: &[u8]) -> Option<Self> {
-        if data.len() != Transform::IDENTITY.encoded_len() {
+        if data.len() != Self::ENCODED_LEN {
             return None;
         }
         let mut values = [0.0f64; 7];
         for (i, value) in values.iter_mut().enumerate() {
             let bytes: [u8; 8] = data[i * 8..(i + 1) * 8].try_into().ok()?;
             *value = f64::from_le_bytes(bytes);
+            if !value.is_finite() {
+                return None;
+            }
         }
+
+        let rotation = DQuat::from_xyzw(values[3], values[4], values[5], values[6]);
+        if (rotation.length_squared() - 1.0).abs() > Self::ROTATION_TOLERANCE {
+            return None;
+        }
+
         Some(Self {
             position: DVec3::new(values[0], values[1], values[2]),
-            rotation: DQuat::from_xyzw(values[3], values[4], values[5], values[6]),
+            rotation,
         })
     }
 
@@ -314,6 +345,39 @@ mod tests {
         assert_eq!(t.forward(), DVec3::NEG_Z);
         assert_eq!(t.right(), DVec3::X);
         assert_eq!(t.up(), DVec3::Y);
+    }
+
+    #[test]
+    fn decode_rejects_non_finite_and_degenerate_payloads() {
+        let good = Transform::new(DVec3::new(1.0, 2.0, 3.0), DQuat::from_rotation_y(0.75));
+        let mut buf = Vec::new();
+        good.encode(&mut buf);
+        assert!(Transform::decode(&buf).is_some());
+
+        // Field 0 is position.x, field 3 the first quaternion component.
+        let poison = |field: usize, value: f64| {
+            let mut data = buf.clone();
+            data[field * 8..(field + 1) * 8].copy_from_slice(&value.to_le_bytes());
+            Transform::decode(&data)
+        };
+
+        assert!(poison(0, f64::NAN).is_none(), "NaN position");
+        assert!(poison(1, f64::INFINITY).is_none(), "infinite position");
+        assert!(poison(2, f64::NEG_INFINITY).is_none(), "-inf position");
+        assert!(poison(6, f64::NAN).is_none(), "NaN quaternion component");
+
+        // A zero quaternion has length 0: `forward()` on it is meaningless.
+        let mut zero_rot = buf.clone();
+        for field in 3..7 {
+            zero_rot[field * 8..(field + 1) * 8].copy_from_slice(&0.0f64.to_le_bytes());
+        }
+        assert!(Transform::decode(&zero_rot).is_none(), "zero quaternion");
+
+        // So is a scaled one.
+        let scaled = Transform::new(good.position, DQuat::from_xyzw(0.0, 0.0, 0.0, 4.0));
+        let mut data = Vec::new();
+        scaled.encode(&mut data);
+        assert!(Transform::decode(&data).is_none(), "non-unit quaternion");
     }
 
     #[test]

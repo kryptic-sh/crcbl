@@ -171,7 +171,7 @@ impl SystemTrait for CounterSystem {
         &self.name
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self, _dt: f64) {
         for (_, val) in &mut self.data {
             *val += 1.0;
         }

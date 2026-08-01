@@ -97,10 +97,9 @@ impl Segment {
 pub struct BvhHit {
     /// The element_id supplied at build time.
     pub element_id: u32,
-    /// Parametric distance along the ray at the hit point.
+    /// Parametric distance along the ray at the leaf AABB's entry point.
+    /// This is a broadphase distance — refine it with an exact shape test.
     pub t: f64,
-    /// The world-space hit position.
-    pub point: DVec3,
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +108,9 @@ pub struct BvhHit {
 
 /// A flat node in the BVH tree.
 ///
-/// Nodes are stored in a flat array (post-order layout).  An internal node has
+/// Nodes are stored in a flat array in pre-order: [`Bvh::build_rec`] reserves
+/// a node's slot before recursing, so a parent always precedes its subtree and
+/// the root is at index 0.  An internal node has
 /// `leaf_count == 0` and stores left/right child indices.  A leaf node has
 /// `leaf_count > 0` and stores the start index into the element-indices array
 /// at `child_left` (child_right is unused).
@@ -140,8 +141,10 @@ struct Node {
 pub struct Bvh {
     nodes: Vec<Node>,
     element_indices: Vec<u32>,
-    /// For each element index (position in element_indices), the leaf node
-    /// that owns it.
+    /// For each element in *build order* — its position in the array passed to
+    /// [`Bvh::build`] — the leaf node that owns it. Construction reorders
+    /// elements by centroid, so leaf order and build order differ; this is
+    /// indexed by build order because that is what callers hold on to.
     element_node: Vec<u32>,
     root: u32,
 }
@@ -155,7 +158,14 @@ impl Bvh {
     /// An empty iterator produces an empty BVH (no root node).
     #[must_use]
     pub fn build(elements: impl IntoIterator<Item = (Aabb, u32)>) -> Self {
-        let mut items: Vec<_> = elements.into_iter().collect();
+        // Each item carries its position in the input array as a third field so
+        // the centroid sort below cannot detach `element_node` from the build
+        // order that `update_aabb` is indexed by.
+        let mut items: Vec<(Aabb, u32, u32)> = elements
+            .into_iter()
+            .enumerate()
+            .map(|(build_index, (aabb, element_id))| (aabb, element_id, build_index as u32))
+            .collect();
         if items.is_empty() {
             return Self {
                 nodes: Vec::new(),
@@ -189,8 +199,11 @@ impl Bvh {
     }
 
     /// Recursive build using spatial median split on the longest axis.
+    ///
+    /// `items` are `(aabb, element_id, build_index)`; leaves record their
+    /// node against `build_index`, never against the leaf's own position.
     fn build_rec(
-        items: &mut [(Aabb, u32)],
+        items: &mut [(Aabb, u32, u32)],
         nodes: &mut Vec<Node>,
         element_indices: &mut Vec<u32>,
         element_node: &mut [u32],
@@ -211,7 +224,7 @@ impl Bvh {
             let elem_idx = element_indices.len();
             element_indices.push(items[range_start].1);
             let node_idx = nodes.len() as u32;
-            element_node[elem_idx] = node_idx;
+            element_node[items[range_start].2 as usize] = node_idx;
             nodes.push(Node {
                 aabb,
                 child_left: elem_idx as u32,
@@ -337,18 +350,17 @@ impl Bvh {
                 // Leaf: report each element at the AABB entry point.
                 let t_entry = node
                     .aabb
-                    .intersect_ray_entry(ray.origin, inv_dir, dir_is_neg);
+                    .ray_slab(ray.origin, inv_dir, dir_is_neg)
+                    .map_or(f64::INFINITY, |(t_near, _)| t_near);
                 if t_entry > t_max {
                     continue;
                 }
                 let t = t_entry.max(t_min);
-                let point = ray.origin + ray.dir * t;
                 let end = (node.child_left + node.leaf_count) as usize;
                 for i in node.child_left as usize..end {
                     hits.push(BvhHit {
                         element_id: self.element_indices[i],
                         t,
-                        point,
                     });
                 }
             } else {
@@ -412,57 +424,6 @@ impl Bvh {
             current = self.nodes[current as usize].parent;
         }
         true
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers on Aabb for ray entry point
-// ---------------------------------------------------------------------------
-
-impl Aabb {
-    /// Returns the near intersection `t` along the ray, or `f64::INFINITY` if
-    /// the ray misses. Requires the slab-method precomputed values.
-    fn intersect_ray_entry(&self, origin: DVec3, inv_dir: DVec3, dir_is_neg: [bool; 3]) -> f64 {
-        let (lox, _hix) = if dir_is_neg[0] {
-            (self.max.x, self.min.x)
-        } else {
-            (self.min.x, self.max.x)
-        };
-        let (loy, _hiy) = if dir_is_neg[1] {
-            (self.max.y, self.min.y)
-        } else {
-            (self.min.y, self.max.y)
-        };
-        let (loz, _hiz) = if dir_is_neg[2] {
-            (self.max.z, self.min.z)
-        } else {
-            (self.min.z, self.max.z)
-        };
-
-        // Handle zero-direction axes to avoid NaN from 0.0 * INF.
-        let tmin = if inv_dir.x.is_finite() {
-            (lox - origin.x) * inv_dir.x
-        } else if origin.x < self.min.x || origin.x > self.max.x {
-            return f64::INFINITY;
-        } else {
-            f64::NEG_INFINITY
-        };
-        let tymin = if inv_dir.y.is_finite() {
-            (loy - origin.y) * inv_dir.y
-        } else if origin.y < self.min.y || origin.y > self.max.y {
-            return f64::INFINITY;
-        } else {
-            f64::NEG_INFINITY
-        };
-        let tzmin = if inv_dir.z.is_finite() {
-            (loz - origin.z) * inv_dir.z
-        } else if origin.z < self.min.z || origin.z > self.max.z {
-            return f64::INFINITY;
-        } else {
-            f64::NEG_INFINITY
-        };
-
-        tmin.max(tymin).max(tzmin)
     }
 }
 
@@ -712,6 +673,33 @@ mod tests {
         // The BVH should still find it.
         let hits = bvh.traverse_ray(&Ray::new(DVec3::ZERO, DVec3::X));
         assert_eq!(hits.len(), 20);
+    }
+
+    #[test]
+    fn update_aabb_indexes_build_order_not_leaf_order() {
+        // Elements are supplied in *descending* centroid order, so the
+        // centroid sort in `build_rec` reverses them.  `update_aabb(0)` must
+        // still move the element that was passed first.
+        let elements = vec![
+            (
+                Aabb::from_centre_half(DVec3::new(20.0, 0.0, 0.0), DVec3::splat(1.0)),
+                100,
+            ),
+            (
+                Aabb::from_centre_half(DVec3::new(5.0, 0.0, 0.0), DVec3::splat(1.0)),
+                200,
+            ),
+        ];
+        let mut bvh = Bvh::build(elements);
+        assert_eq!(bvh.traverse_ray(&Ray::new(DVec3::ZERO, DVec3::X)).len(), 2);
+
+        // Move build-order element 0 (the one at x=20) behind the ray origin.
+        let new_aabb = Aabb::from_centre_half(DVec3::new(-50.0, 0.0, 0.0), DVec3::splat(1.0));
+        assert!(bvh.update_aabb(0, new_aabb));
+
+        let hits = bvh.traverse_ray(&Ray::new(DVec3::ZERO, DVec3::X));
+        assert_eq!(hits.len(), 1, "only the untouched element remains ahead");
+        assert_eq!(hits[0].element_id, 200);
     }
 
     #[test]

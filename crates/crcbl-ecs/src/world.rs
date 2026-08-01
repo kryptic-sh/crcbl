@@ -18,17 +18,42 @@ pub struct World {
     pool: Pool<EntityMarker>,
     schedule: Schedule,
     dead: Vec<Entity>,
+    tick_dt: f64,
 }
 
 impl World {
-    /// Creates an empty world.
+    /// The tick period assumed by [`World::tick`] until
+    /// [`World::set_tick_dt`] says otherwise: 60 Hz.
+    pub const DEFAULT_TICK_DT: f64 = 1.0 / 60.0;
+
+    /// Creates an empty world ticking at [`World::DEFAULT_TICK_DT`].
+    ///
+    /// A host that runs at any other rate **must** call
+    /// [`World::set_tick_dt`], or every system that integrates over time will
+    /// simulate at the wrong speed.
     #[must_use]
     pub fn new() -> Self {
         Self {
             pool: Pool::new(),
             schedule: Schedule::new(),
             dead: Vec::new(),
+            tick_dt: Self::DEFAULT_TICK_DT,
         }
+    }
+
+    /// Set the fixed timestep, in seconds, handed to every system's
+    /// [`SystemTrait::tick`].
+    ///
+    /// This is the host's real tick period — `1.0 / tick_hz` for a
+    /// fixed-rate server loop.
+    pub fn set_tick_dt(&mut self, dt: f64) {
+        self.tick_dt = dt;
+    }
+
+    /// The fixed timestep handed to systems each tick, in seconds.
+    #[must_use]
+    pub fn tick_dt(&self) -> f64 {
+        self.tick_dt
     }
 
     /// Allocates a fresh entity and returns its handle.
@@ -70,9 +95,19 @@ impl World {
         self.schedule.add_system(system);
     }
 
-    /// Runs one tick: calls every system's `tick`, then sweeps dead entities.
+    /// Runs one tick at [`World::tick_dt`]: calls every system's `tick`, then
+    /// sweeps dead entities.
     pub fn tick(&mut self) {
-        self.schedule.run();
+        self.tick_with_dt(self.tick_dt);
+    }
+
+    /// Runs one tick of `dt` seconds without changing the stored
+    /// [`World::tick_dt`].
+    ///
+    /// Use this when the host already has the tick period to hand and would
+    /// otherwise have to keep it in sync with the world.
+    pub fn tick_with_dt(&mut self, dt: f64) {
+        self.schedule.run(dt);
         self.sweep();
     }
 
@@ -194,7 +229,7 @@ mod tests {
             fn name(&self) -> &str {
                 "rec"
             }
-            fn tick(&mut self) {
+            fn tick(&mut self, _dt: f64) {
                 self.ticked = true;
             }
             fn entity_count(&self) -> usize {
