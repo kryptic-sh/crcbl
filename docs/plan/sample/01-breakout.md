@@ -28,6 +28,16 @@ Deliberately the smallest thing that is a _game_ and not a demo.
   vs box colliders (never tunnels at high speed — first CCD consumer),
   reflection from contact normal. Paddle = kinematic body. No game-code
   collision math. Speed ramps per hit.
+- **The paddle is the exception to "reflection from contact normal", and has to
+  be.** A mirror reflection returns every ball at the angle it arrived, so the
+  player has no way to aim and the paddle is a wall that happens to move.
+  `game::paddle_bounce` picks the outgoing angle from where across the paddle
+  the ball was caught, plus a smaller trim for which way the paddle was moving.
+  That is response policy, not intersection math: the contact still comes from
+  `PhysicsSystem::sweep_sphere`, and every other collider still mirrors.
+- **No gravity.** The ball is a dynamic body with no force providers at all — a
+  ball that arcs cannot be aimed either, and breakout has never had one. The
+  speed ramp is the only thing that changes its speed after a launch.
 - 3 lives, score, restart. Keyboard + mouse paddle input.
 - Sound: bounce/brick-break cues through the spatial grammar (P4A lands audio
   before this sample — the earlier "no sound" line predated that decision).
