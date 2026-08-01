@@ -24,10 +24,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **breakout**: the ball is no longer under gravity. It launches at a constant
   speed and collisions change only its direction, which is what makes a shot
   aimable.
-- **breakout**: the paddle steers. The outgoing angle comes from where across
-  the paddle the ball was caught, plus a smaller trim for which way the paddle
-  was moving; it used to mirror off the contact normal and return every ball at
-  the angle it arrived.
+- **breakout**: the paddle steers, by being moved. A paddle standing still
+  mirrors the ball like a wall; a paddle being driven left or right decides
+  which way the ball goes next, and turns a ball back the way it came rather
+  than rebounding it onward.
 - **breakout**: the whole play field is on screen at every aspect ratio. The
   orthographic camera derived its width from a fixed half height, so a 4:3
   surface — the size the window opens at, and the aspect the web demo's canvas

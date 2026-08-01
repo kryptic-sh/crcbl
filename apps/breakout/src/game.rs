@@ -10,11 +10,12 @@
 //! gravity arcs, so the same launch reaches a different brick depending on how
 //! far across the screen it has travelled, and the player cannot aim.
 //!
-//! The paddle is the one collider that does not answer with a mirror
-//! reflection: where the ball lands across its width, plus which way it was
-//! being moved, chooses the outgoing angle. See [`paddle_bounce`]. A paddle that
-//! reflected off its contact normal like a wall would return every ball at the
-//! angle it arrived, which leaves the player nothing to steer with.
+//! Every collider answers with a mirror reflection, the paddle included — a
+//! paddle standing still returns the ball at the angle it arrived, exactly as a
+//! wall does. What the paddle adds is **drag**: a paddle being driven left or
+//! right decides which way the ball goes next, and it can turn a ball back the
+//! way it came rather than merely rebounding it. See [`bounce`]. All of the
+//! player's control over the ball is in moving the paddle.
 //!
 //! # Where the simulation runs
 //!
@@ -110,13 +111,13 @@ const MAX_BALL_SPEED: f64 = BALL_SPEED * 1.6;
 /// straight up comes straight back down onto the middle of the paddle, and the
 /// opening of every run would be identical.
 const LAUNCH_ANGLE: f64 = 0.35;
-/// The steepest a paddle bounce sends the ball away from vertical, reached at
-/// the paddle's outer edge. 60°: shallow enough to still climb the screen.
-const MAX_BOUNCE_ANGLE: f64 = std::f64::consts::FRAC_PI_3;
-/// What a paddle moving under the ball adds to that angle, in radians (~11°).
-/// Small next to [`MAX_BOUNCE_ANGLE`], so where the ball lands stays the
-/// player's main control and a moving paddle is the trim on top of it.
-const PADDLE_SPIN_ANGLE: f64 = 0.2;
+/// The least sideways a moving paddle sends the ball, as a fraction of its
+/// speed.
+///
+/// A ball caught dead vertical has no horizontal component to turn, so without
+/// a floor a moving paddle would do nothing to it. 0.4 of the speed puts it out
+/// at about 24° from vertical — a definite push, and still climbing.
+const PADDLE_DRAG_FRACTION: f64 = 0.4;
 /// The shallowest the ball's direction may get, as a fraction of its speed.
 ///
 /// A ball travelling almost horizontally rallies between the two side walls
@@ -341,12 +342,12 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
 /// thing it hit.
 ///
 /// `paddle_dir` is the direction the player is driving the paddle this tick,
-/// -1, 0 or 1; it only matters for a paddle hit, where it trims the outgoing
-/// angle.
+/// -1, 0 or 1. It only matters for a hit on the paddle's face, where it is the
+/// whole of the player's control over where the ball goes next — see
+/// [`bounce`].
 fn resolve_collisions(logic: &mut GameLogic, world: &mut World, dt: f64, paddle_dir: f64) {
     let ball = logic.ball;
     let paddle = logic.paddle;
-    let paddle_x = logic.paddle_x;
     let mut broken: Option<Entity> = None;
     let mut cue: Option<(u32, f32)> = None;
 
@@ -393,16 +394,18 @@ fn resolve_collisions(logic: &mut GameLogic, world: &mut World, dt: f64, paddle_
 
             if approaching {
                 let mut new_body = body;
-                // The paddle steers; everything else mirrors. `normal.y` tells
-                // the paddle's top face from its ends — a ball that clips the
-                // side of the paddle is coming from beside it, and answering
-                // that with an upward bounce would be a free save.
+                // Only the paddle's *face* takes english, and only from a
+                // paddle that is moving. `normal.y` tells the top face from the
+                // ends: a ball that clips the side of the paddle is coming from
+                // beside it, and dragging that one sideways would be a save the
+                // player did not make.
                 let speed = logic.ball_speed;
-                new_body.velocity = if hit_entity == paddle && hit.normal.y > 0.5 {
-                    paddle_bounce(hit.point.x, paddle_x, paddle_dir, speed)
+                let english = if hit_entity == paddle && hit.normal.y > 0.5 {
+                    paddle_dir
                 } else {
-                    keep_speed(vel - 2.0 * vel.dot(hit.normal) * hit.normal, speed)
+                    0.0
                 };
+                new_body.velocity = bounce(vel, hit.normal, english, speed);
                 phys.set_body(ball, new_body);
                 resolved.position = hit.point + hit.normal * BALL_RADIUS * 1.01;
                 phys.set_transform(ball, resolved);
@@ -526,22 +529,31 @@ fn ramped_speed(speed: f64) -> f64 {
     (speed * SPEED_RAMP).min(MAX_BALL_SPEED)
 }
 
-/// The velocity a paddle bounce gives the ball.
+/// The velocity a bounce off `normal` gives the ball.
 ///
-/// **Where** the ball lands on the paddle decides the outgoing direction, not
-/// the contact normal: dead centre goes straight up, the outer edge goes off at
-/// [`MAX_BOUNCE_ANGLE`], and the paddle's own motion trims that by up to
-/// [`PADDLE_SPIN_ANGLE`]. This is the player's only control over the ball, and
-/// mirror reflection — which sends every ball back at the angle it arrived —
-/// gives them none of it.
+/// `english` is the direction the paddle is being driven — -1, 0 or 1 — and is
+/// zero for everything that is not the paddle's face.
 ///
-/// The result always points upward: `|angle| ≤ MAX_BOUNCE_ANGLE < π/2`, so
-/// `cos` is positive and a bounce cannot drive the ball down through the paddle.
-fn paddle_bounce(contact_x: f64, paddle_x: f64, paddle_dir: f64, speed: f64) -> DVec3 {
-    let offset = ((contact_x - paddle_x) / PADDLE_HALF_WIDTH).clamp(-1.0, 1.0);
-    let angle = (offset * MAX_BOUNCE_ANGLE + paddle_dir * PADDLE_SPIN_ANGLE)
-        .clamp(-MAX_BOUNCE_ANGLE, MAX_BOUNCE_ANGLE);
-    DVec3::new(angle.sin(), angle.cos(), 0.0) * speed
+/// # A still paddle is a mirror; a moving one steers
+///
+/// With `english` at zero this is the same reflection a wall gives: the ball
+/// leaves at the angle it arrived and the contact changes nothing else. That is
+/// the whole behaviour of a paddle the player is not moving.
+///
+/// A paddle that *is* moving decides which way the ball goes next — including
+/// against the way it was already travelling. A ball coming down to the right,
+/// caught by a paddle sweeping left, leaves to the **left**: the paddle drags
+/// it, rather than the ball merely rebounding off a surface that happens to be
+/// in motion. The incoming angle still sets how steep the return is, and
+/// [`PADDLE_DRAG_FRACTION`] floors it so a ball caught falling straight down is
+/// turned rather than sent straight back up.
+fn bounce(vel: DVec3, normal: DVec3, english: f64, speed: f64) -> DVec3 {
+    let mirrored = vel - 2.0 * vel.dot(normal) * normal;
+    if english == 0.0 {
+        return keep_speed(mirrored, speed);
+    }
+    let sideways = mirrored.x.abs().max(speed * PADDLE_DRAG_FRACTION) * english;
+    keep_speed(DVec3::new(sideways, mirrored.y, 0.0), speed)
 }
 
 /// Puts `vel` back at `speed`, no shallower than
@@ -1232,59 +1244,122 @@ mod tests {
         }
     }
 
-    /// Where the ball lands across the paddle is what decides where it goes.
-    ///
-    /// The ball is dropped **straight down** onto three known points, so a
-    /// mirror reflection off the paddle's contact normal — which is what the
-    /// game used to do — returns it straight back up in all three cases and
-    /// `vel.x` is zero every time. The player had no way to aim.
+    /// A paddle standing still is a mirror: the ball leaves at the angle it
+    /// arrived and the catch changes nothing else.
     #[test]
-    fn the_paddle_steers_the_ball_by_where_it_is_caught() {
-        let left = drop_onto_paddle(-4.0);
-        let centre = drop_onto_paddle(0.0);
-        let right = drop_onto_paddle(4.0);
-
-        assert!(left.x < -1.0, "a catch on the left must go left: {left:?}");
-        assert!(
-            right.x > 1.0,
-            "a catch on the right must go right: {right:?}"
-        );
-        assert!(centre.x.abs() < 1e-9, "a centred catch goes up: {centre:?}");
-        for v in [left, centre, right] {
-            assert!(v.y > 0.0, "a paddle bounce always returns the ball: {v:?}");
+    fn a_still_paddle_returns_the_ball_at_the_angle_it_arrived() {
+        for incoming in [
+            DVec3::new(0.0, -BALL_SPEED, 0.0),
+            DVec3::new(4.0, -10.2, 0.0),
+            DVec3::new(-4.0, -10.2, 0.0),
+        ] {
+            // Direction, not components: `keep_speed` puts the magnitude at
+            // the ball's own speed, and these arrive at whatever speed the
+            // case is written with.
+            let mirrored = DVec3::new(incoming.x, -incoming.y, 0.0).normalize();
+            let out = catch_on_the_paddle(incoming, None);
             assert!(
-                (v.length() - BALL_SPEED).abs() < 1e-9,
-                "a bounce changed the speed: {v:?}",
+                (out.normalize() - mirrored).length() < 1e-9,
+                "{incoming:?} came off a still paddle as {out:?}",
+            );
+            assert!(
+                (out.length() - BALL_SPEED).abs() < 1e-9,
+                "{incoming:?} came off a still paddle as {out:?}",
             );
         }
     }
 
-    /// Drops the ball straight down onto the paddle, `offset` world units from
-    /// its centre, and returns the velocity the bounce gave it.
+    /// A paddle that is moving decides which way the ball goes — including
+    /// against the way it was already travelling.
     ///
-    /// Placed rather than played into position: the assertion is about the
-    /// outgoing angle for an *exactly* known contact, and a ball that arrived
-    /// under its own steam would arrive somewhere slightly different.
-    fn drop_onto_paddle(offset: f64) -> DVec3 {
+    /// The case, exactly: a ball coming down to the right, caught by a paddle
+    /// sweeping **left**, has to leave to the left. A mirror sends it up and to
+    /// the right, and that is the answer this rules out.
+    #[test]
+    fn a_paddle_sweeping_left_turns_a_rightward_ball_left() {
+        let down_and_right = DVec3::new(4.0, -10.2, 0.0);
+
+        let dragged = catch_on_the_paddle(down_and_right, Some(KeyCode::ArrowLeft));
+        assert!(
+            dragged.x < 0.0,
+            "a paddle sweeping left must turn the ball left, got {dragged:?}",
+        );
+        assert!(dragged.y > 0.0, "and still return it: {dragged:?}");
+
+        // The mirror image of the case, so neither direction is special.
+        let down_and_left = DVec3::new(-4.0, -10.2, 0.0);
+        let dragged = catch_on_the_paddle(down_and_left, Some(KeyCode::ArrowRight));
+        assert!(
+            dragged.x > 0.0,
+            "a paddle sweeping right must turn the ball right, got {dragged:?}",
+        );
+        assert!(dragged.y > 0.0, "and still return it: {dragged:?}");
+    }
+
+    /// A ball caught falling dead straight has no sideways motion to turn, and
+    /// a moving paddle still has to turn it.
+    #[test]
+    fn a_moving_paddle_turns_a_ball_that_arrives_straight_down() {
+        let straight_down = DVec3::new(0.0, -BALL_SPEED, 0.0);
+        let still = catch_on_the_paddle(straight_down, None);
+        assert!(still.x.abs() < 1e-9, "a still paddle mirrors it: {still:?}");
+
+        for (key, sign) in [(KeyCode::ArrowLeft, -1.0), (KeyCode::ArrowRight, 1.0)] {
+            let out = catch_on_the_paddle(straight_down, Some(key));
+            // The floor is on the sideways-to-upward *ratio*, which is what
+            // survives `keep_speed` renormalising the pair — about 22° off
+            // vertical.
+            assert!(
+                out.x * sign / out.y >= PADDLE_DRAG_FRACTION - 1e-9,
+                "{key:?} pushed the ball only to {out:?}",
+            );
+            assert!(out.y > 0.0, "and still returned it: {out:?}");
+            assert!(
+                (out.length() - BALL_SPEED).abs() < 1e-9,
+                "drag is not free speed: {out:?}",
+            );
+        }
+    }
+
+    /// Drops the ball onto the paddle at `incoming` velocity, with the paddle
+    /// held in `steer`, and returns the velocity the bounce gave it.
+    ///
+    /// `incoming` must point downward. `steer` is the key the player is holding
+    /// through the catch, or `None` for a paddle standing still.
+    ///
+    /// The ball is placed rather than played into position: these assertions
+    /// are about the outgoing direction for an *exactly* known incoming one,
+    /// and a ball that arrived under its own steam would arrive at some angle
+    /// nobody chose.
+    fn catch_on_the_paddle(incoming: DVec3, steer: Option<KeyCode>) -> DVec3 {
+        assert!(incoming.y < 0.0, "the ball has to be falling: {incoming:?}");
         let mut h = Harness::new(60, 60);
         h.run(0.1, LAUNCH);
         let (ball, paddle_x) = {
             let logic = lock(&h.game.shared);
             (logic.ball, logic.paddle_x)
         };
-        // A world unit above the paddle, falling: several ticks of ordinary
-        // free flight and then the ordinary collision path, rather than a
-        // contact staged inside the tick it is resolved in.
+        // A world unit above the paddle: several ticks of ordinary free flight
+        // and then the ordinary collision path, rather than a contact staged
+        // inside the tick it is resolved in.
         with_physics(h.game.server.world_mut(), |phys| {
             phys.set_transform(
                 ball,
-                Transform::from_position(DVec3::new(paddle_x + offset, PADDLE_Y + 1.0, 0.0)),
+                Transform::from_position(DVec3::new(paddle_x, PADDLE_Y + 1.0, 0.0)),
             );
-            set_velocity(phys, ball, DVec3::new(0.0, -BALL_SPEED, 0.0));
+            set_velocity(phys, ball, incoming);
         });
+        if let Some(key) = steer {
+            // Pressed and never released, so the paddle is still moving on
+            // whichever tick the contact lands on.
+            h.game.key_event(key, true);
+        }
 
         for _ in 0..12 {
             h.frame();
+            if let Some(key) = steer {
+                h.game.key_event(key, true);
+            }
             let velocity = with_physics(h.game.server.world_mut(), |phys| {
                 phys.body(ball).expect("the ball has a body").velocity
             })
@@ -1293,7 +1368,7 @@ mod tests {
                 return velocity;
             }
         }
-        panic!("the paddle never returned a ball dropped {offset} from its centre");
+        panic!("the paddle never returned a ball arriving at {incoming:?}");
     }
 
     /// The ball this harness is playing with, and how fast it is going.
@@ -1406,21 +1481,29 @@ mod tests {
         );
     }
 
-    /// A paddle being driven under the ball trims the angle it leaves at, and
-    /// never enough to point it back down.
+    /// The bounce keeps the ball's speed and never drives it back down through
+    /// the surface it just bounced off, whatever the paddle was doing.
     #[test]
-    fn a_moving_paddle_trims_the_bounce() {
-        let still = paddle_bounce(1.0, 0.0, 0.0, BALL_SPEED);
-        let with_the_ball = paddle_bounce(1.0, 0.0, 1.0, BALL_SPEED);
-        let against_it = paddle_bounce(1.0, 0.0, -1.0, BALL_SPEED);
-        assert!(with_the_ball.x > still.x, "{with_the_ball:?} vs {still:?}");
-        assert!(against_it.x < still.x, "{against_it:?} vs {still:?}");
+    fn a_bounce_returns_the_ball_at_its_own_speed() {
+        let up = DVec3::Y;
+        for incoming in [
+            DVec3::new(0.0, -BALL_SPEED, 0.0),
+            DVec3::new(10.6, -2.9, 0.0),
+            DVec3::new(-10.6, -2.9, 0.0),
+        ] {
+            for english in [-1.0, 0.0, 1.0] {
+                let out = bounce(incoming, up, english, BALL_SPEED);
+                assert!(out.y > 0.0, "{incoming:?} + {english} → {out:?}");
+                assert!(
+                    (out.length() - BALL_SPEED).abs() < 1e-9,
+                    "{incoming:?} + {english} → {out:?}",
+                );
+            }
+        }
 
-        // The clamp holds at the edge: even the outer edge plus a full spin
-        // stays inside the bounce cone, so the ball still climbs.
-        let edge = paddle_bounce(PADDLE_HALF_WIDTH, 0.0, 1.0, BALL_SPEED);
-        assert!(edge.y > 0.0, "a bounce drove the ball down: {edge:?}");
-        assert!((edge.length() - BALL_SPEED).abs() < 1e-9);
+        // And the ramped speed is the one it comes off at.
+        let fast = bounce(DVec3::new(2.0, -9.0, 0.0), up, 1.0, MAX_BALL_SPEED);
+        assert!((fast.length() - MAX_BALL_SPEED).abs() < 1e-9, "{fast:?}");
     }
 
     /// No bounce leaves the ball in a rally the paddle cannot reach.
