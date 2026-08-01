@@ -88,7 +88,9 @@ for (let i = 2; i < process.argv.length; i += 1) {
 const SITE = resolve(REPO, args.site ?? process.env.SITE_DIR ?? 'target/site');
 const DEMO = args.demo ?? 'demos/breakout/';
 const OUT = resolve(REPO, args.out ?? 'target/web-e2e');
-const TIMEOUT_MS = Number(args.timeout ?? process.env.CRCBL_WEB_E2E_TIMEOUT_MS ?? 90_000);
+const TIMEOUT_MS = Number(
+  args.timeout ?? process.env.CRCBL_WEB_E2E_TIMEOUT_MS ?? 90_000
+);
 
 /**
  * Which WebGPU adapter Chromium is told to use.
@@ -143,7 +145,9 @@ function fail(message) {
 
 if (!existsSync(SITE)) fail(`no site at ${SITE} — run web/build.sh first`);
 if (!Number.isFinite(TIMEOUT_MS) || TIMEOUT_MS <= 0) {
-  fail(`--timeout must be a positive number of milliseconds, got ${TIMEOUT_MS}`);
+  fail(
+    `--timeout must be a positive number of milliseconds, got ${TIMEOUT_MS}`
+  );
 }
 if (!['auto', 'hardware', 'swiftshader'].includes(ADAPTER)) {
   fail(`--adapter must be auto, hardware or swiftshader, got "${ADAPTER}"`);
@@ -228,7 +232,9 @@ function serve(root) {
   const misses = [];
   const server = createServer((request, response) => {
     // Only the path; a query string is not part of a file name.
-    const path = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
+    const path = decodeURIComponent(
+      new URL(request.url, 'http://localhost').pathname
+    );
     if (path === CONTROL_PATH || path === `${CONTROL_PATH}/`) {
       response.writeHead(200, {
         'content-type': MIME['.html'],
@@ -239,7 +245,9 @@ function serve(root) {
     }
     // `normalize` collapses `..` before the prefix test, so a request for
     // `/../../etc/passwd` cannot escape the site directory.
-    const target = normalize(join(root, path.endsWith('/') ? `${path}index.html` : path));
+    const target = normalize(
+      join(root, path.endsWith('/') ? `${path}index.html` : path)
+    );
     if (!target.startsWith(root)) {
       response.writeHead(403).end('outside the site');
       return;
@@ -271,7 +279,9 @@ function serve(root) {
     // Port 0: the OS picks a free one. A hard-coded port turns two harnesses on
     // one machine into a flake, and this repository treats a flake as a bug.
     server.listen(0, '127.0.0.1', () => {
-      const { port } = /** @type {import('node:net').AddressInfo} */ (server.address());
+      const { port } = /** @type {import('node:net').AddressInfo} */ (
+        server.address()
+      );
       ok({
         origin: `http://localhost:${port}`,
         misses,
@@ -297,10 +307,16 @@ function serve(root) {
 function findBrowser() {
   const explicit = process.env.CRCBL_CHROMIUM;
   if (explicit) {
-    if (!existsSync(explicit)) fail(`CRCBL_CHROMIUM=${explicit} does not exist`);
+    if (!existsSync(explicit))
+      fail(`CRCBL_CHROMIUM=${explicit} does not exist`);
     return explicit;
   }
-  const candidates = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'];
+  const candidates = [
+    'google-chrome',
+    'google-chrome-stable',
+    'chromium',
+    'chromium-browser',
+  ];
   for (const name of candidates) {
     for (const dir of (process.env.PATH ?? '').split(':')) {
       if (dir && existsSync(join(dir, name))) return join(dir, name);
@@ -308,7 +324,7 @@ function findBrowser() {
   }
   return fail(
     `no browser found. Tried ${candidates.join(', ')} on PATH.\n` +
-      '  Set CRCBL_CHROMIUM to a Chromium or Chrome binary with WebGPU support.',
+      '  Set CRCBL_CHROMIUM to a Chromium or Chrome binary with WebGPU support.'
   );
 }
 
@@ -362,7 +378,10 @@ function browserFlags(profile, mode) {
   // Chrome's sandbox needs user namespaces, which a root-in-container CI job
   // usually cannot have. Opt in on the condition rather than always: a
   // sandboxed browser is the configuration a visitor runs.
-  if (process.env.CRCBL_CHROMIUM_NO_SANDBOX === '1' || process.getuid?.() === 0) {
+  if (
+    process.env.CRCBL_CHROMIUM_NO_SANDBOX === '1' ||
+    process.getuid?.() === 0
+  ) {
     flags.push('--no-sandbox');
   }
 
@@ -371,7 +390,9 @@ function browserFlags(profile, mode) {
   // runner nobody here has, and the alternative to an escape hatch is a patched
   // copy of this file. Printed with the rest of the command line, so a run that
   // used one says so.
-  const extra = (process.env.CRCBL_CHROMIUM_FLAGS ?? '').split(' ').filter(Boolean);
+  const extra = (process.env.CRCBL_CHROMIUM_FLAGS ?? '')
+    .split(' ')
+    .filter(Boolean);
   return [...flags, ...extra];
 }
 
@@ -410,7 +431,8 @@ async function launch(binary, mode) {
   const stderr = [];
   child.stderr.setEncoding('utf8');
   child.stderr.on('data', (chunk) => {
-    for (const line of chunk.split('\n')) if (line.trim()) stderr.push(line.trimEnd());
+    for (const line of chunk.split('\n'))
+      if (line.trim()) stderr.push(line.trimEnd());
   });
 
   let exited = null;
@@ -482,7 +504,8 @@ class Cdp {
       client.#socket.onopen = ok;
       client.#socket.onerror = () => no(new Error(`cannot reach ${url}`));
     });
-    client.#socket.onmessage = (event) => client.#dispatch(JSON.parse(event.data));
+    client.#socket.onmessage = (event) =>
+      client.#dispatch(JSON.parse(event.data));
     return client;
   }
 
@@ -491,11 +514,15 @@ class Cdp {
       const slot = this.#pending.get(message.id);
       if (!slot) return;
       this.#pending.delete(message.id);
-      if (message.error) slot.reject(new Error(`${message.error.message} (${message.error.code})`));
+      if (message.error)
+        slot.reject(
+          new Error(`${message.error.message} (${message.error.code})`)
+        );
       else slot.resolve(message.result);
       return;
     }
-    for (const handler of this.#listeners.get(message.method) ?? []) handler(message.params);
+    for (const handler of this.#listeners.get(message.method) ?? [])
+      handler(message.params);
   }
 
   on(method, handler) {
@@ -527,10 +554,15 @@ class Cdp {
  */
 async function openPage(browser) {
   const control = await Cdp.connect(browser.endpoint);
-  const created = await control.send('Target.createTarget', { url: 'about:blank' });
+  const created = await control.send('Target.createTarget', {
+    url: 'about:blank',
+  });
   control.close();
   return Cdp.connect(
-    browser.endpoint.replace(/\/devtools\/browser\/.*$/, `/devtools/page/${created.targetId}`),
+    browser.endpoint.replace(
+      /\/devtools\/browser\/.*$/,
+      `/devtools/page/${created.targetId}`
+    )
   );
 }
 
@@ -550,7 +582,9 @@ async function evaluate(page, expression) {
   });
   if (result.exceptionDetails) {
     const details = result.exceptionDetails;
-    throw new Error(details.exception?.description ?? details.text ?? 'evaluation threw');
+    throw new Error(
+      details.exception?.description ?? details.text ?? 'evaluation threw'
+    );
   }
   return result.result.value;
 }
@@ -632,7 +666,11 @@ const SAMPLE_CANVAS = (selector) => `(async () => {
 })()`;
 
 const describe = (sample) =>
-  sample.top.map(({ rgb, share }) => `rgb(${rgb.join(',')}) ${(share * 100).toFixed(1)}%`).join(', ');
+  sample.top
+    .map(
+      ({ rgb, share }) => `rgb(${rgb.join(',')}) ${(share * 100).toFixed(1)}%`
+    )
+    .join(', ');
 
 // ---------------------------------------------------------------------------
 // The pre-flight: can this browser render *and* report pixels?
@@ -665,18 +703,31 @@ async function preflight(binary, mode, origin) {
            out.adapter = [info.vendor, info.architecture, info.device, info.description]
              .filter(Boolean).join(' ') || 'unnamed';
            return out;
-         })()`,
-      ),
+         })()`
+      )
     );
     if (!platform?.gpu || !platform?.adapter) {
-      return { mode, ...platform, readback: null, error: platform?.gpu ? 'no adapter' : 'no navigator.gpu' };
+      return {
+        mode,
+        ...platform,
+        readback: null,
+        error: platform?.gpu ? 'no adapter' : 'no navigator.gpu',
+      };
     }
 
     // The control has to have drawn before its pixels mean anything.
-    const drew = await until(async () => (await evaluate(page, `globalThis.controlFrames ?? 0`)) > 2);
+    const drew = await until(
+      async () => (await evaluate(page, `globalThis.controlFrames ?? 0`)) > 2
+    );
     const error = await evaluate(page, `globalThis.controlError`);
     if (error) return { mode, ...platform, readback: null, error };
-    if (!drew) return { mode, ...platform, readback: null, error: 'the control never drew a frame' };
+    if (!drew)
+      return {
+        mode,
+        ...platform,
+        readback: null,
+        error: 'the control never drew a frame',
+      };
 
     const sample = await evaluate(page, SAMPLE_CANVAS('#canvas'));
     // One clear, so one colour, and it must be the one the control asked for.
@@ -688,7 +739,12 @@ async function preflight(binary, mode, origin) {
       sample &&
       sample.top[0].share > 0.99 &&
       seen.every((value, i) => Math.abs(value - CONTROL_RGB[i]) <= 8);
-    return { mode, ...platform, readback: { matches, seen, sample }, error: null };
+    return {
+      mode,
+      ...platform,
+      readback: { matches, seen, sample },
+      error: null,
+    };
   } finally {
     browser.stop();
   }
@@ -703,7 +759,9 @@ const checks = [];
 
 function check(group, name, ok, detail = '') {
   checks.push({ group, name, ok: Boolean(ok), detail });
-  console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
+  console.log(
+    `  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`
+  );
   return Boolean(ok);
 }
 
@@ -750,7 +808,7 @@ try {
     console.log(
       `  ..   control page under "${mode}": ` +
         `adapter ${result.adapter ?? 'none'}, ` +
-        `readback ${result.readback ? (result.readback.matches ? 'ok' : `rgb(${result.readback.seen.join(',')})`) : (result.error ?? 'n/a')}`,
+        `readback ${result.readback ? (result.readback.matches ? 'ok' : `rgb(${result.readback.seen.join(',')})`) : (result.error ?? 'n/a')}`
     );
     if (result.readback?.matches) {
       chosen = result;
@@ -759,37 +817,53 @@ try {
   }
 
   const best = chosen ?? attempts.at(-1);
-  check('A', 'the browser exposes navigator.gpu', best?.gpu, best?.gpu ? '' : 'the demo would show its no-WebGPU banner');
-  check('A', 'a WebGPU adapter is granted', best?.adapter, best?.adapter ?? best?.error ?? 'requestAdapter() resolved null');
+  check(
+    'A',
+    'the browser exposes navigator.gpu',
+    best?.gpu,
+    best?.gpu ? '' : 'the demo would show its no-WebGPU banner'
+  );
+  check(
+    'A',
+    'a WebGPU adapter is granted',
+    best?.adapter,
+    best?.adapter ?? best?.error ?? 'requestAdapter() resolved null'
+  );
   const readable = check(
     'A',
     'a known-colour clear reads back as that colour',
     chosen,
     chosen
       ? `${chosen.mode} adapter, rgb(${chosen.readback.seen.join(',')})`
-      : `tried ${modes.join(', ')}; none returned pixels — group D could not tell a rendered frame from a blank one`,
+      : `tried ${modes.join(', ')}; none returned pixels — group D could not tell a rendered frame from a blank one`
   );
 
   if (!readable) {
     throw new Error(
       'this browser cannot report canvas pixels with any adapter mode; refusing to run the render checks, ' +
-        'because passing them would mean nothing and failing them would blame the engine',
+        'because passing them would mean nothing and failing them would blame the engine'
     );
   }
 
-  console.log(`\nweb e2e: running against the "${chosen.mode}" adapter — ${chosen.adapter}`);
+  console.log(
+    `\nweb e2e: running against the "${chosen.mode}" adapter — ${chosen.adapter}`
+  );
 
   browser = await launch(binary, chosen.mode);
   console.log(
-    `web e2e: flags ${browser.flags.filter((f) => !f.startsWith('--user-data-dir')).join(' ')}`,
+    `web e2e: flags ${browser.flags.filter((f) => !f.startsWith('--user-data-dir')).join(' ')}`
   );
 
   const page = await openPage(browser);
   page.on('Runtime.consoleAPICalled', ({ type, args: values }) => {
-    consoleLines.push(`[${type}] ${values.map((v) => v.value ?? v.description ?? '').join(' ')}`);
+    consoleLines.push(
+      `[${type}] ${values.map((v) => v.value ?? v.description ?? '').join(' ')}`
+    );
   });
   page.on('Runtime.exceptionThrown', ({ exceptionDetails }) => {
-    pageErrors.push(exceptionDetails.exception?.description ?? exceptionDetails.text);
+    pageErrors.push(
+      exceptionDetails.exception?.description ?? exceptionDetails.text
+    );
   });
   page.on('Log.entryAdded', ({ entry }) => {
     consoleLines.push(`[${entry.source}.${entry.level}] ${entry.text}`);
@@ -797,7 +871,8 @@ try {
     // through the device's error callback, and Chrome surfaces those here.
     // `wgpu` does not turn any of them into a `Result`, so this is the only
     // place a harness can see them at all.
-    if (entry.source === 'rendering' && entry.level !== 'info') deviceErrors.push(entry.text);
+    if (entry.source === 'rendering' && entry.level !== 'info')
+      deviceErrors.push(entry.text);
   });
   await page.send('Runtime.enable');
   await page.send('Log.enable');
@@ -807,11 +882,26 @@ try {
   await page.send('Page.navigate', { url });
   await until(async () => evaluate(page, `document.readyState === 'complete'`));
 
-  const ready = await until(async () => evaluate(page, `Boolean(globalThis.crcbl)`));
-  check('A', 'the shim loads and publishes its debug handle', ready, ready ? url : 'globalThis.crcbl never appeared');
+  const ready = await until(async () =>
+    evaluate(page, `Boolean(globalThis.crcbl)`)
+  );
+  check(
+    'A',
+    'the shim loads and publishes its debug handle',
+    ready,
+    ready ? url : 'globalThis.crcbl never appeared'
+  );
 
-  const banner = await evaluate(page, `document.getElementById('status')?.textContent ?? ''`);
-  check('A', 'the page raised no uncaught exception', pageErrors.length === 0, pageErrors[0] ?? `page says "${banner}"`);
+  const banner = await evaluate(
+    page,
+    `document.getElementById('status')?.textContent ?? ''`
+  );
+  check(
+    'A',
+    'the page raised no uncaught exception',
+    pageErrors.length === 0,
+    pageErrors[0] ?? `page says "${banner}"`
+  );
 
   group('B — the engine boots');
 
@@ -823,19 +913,44 @@ try {
     return status === 3 || status === 4 || status === 5 ? { status } : null;
   });
 
-  check('B', 'the shell reported the canvas size', said('shell: first configure'), said('shell: first configure')?.trim() ?? 'no configure line');
-  check('B', 'the wgpu backend opened a device', said('hal: wgpu adapter'), said('hal: wgpu adapter')?.trim() ?? 'no adapter line');
-  check('B', 'a swapchain was created', said('hal: swapchain'), said('hal: swapchain')?.trim() ?? 'no swapchain line');
-  const isRunning = check('B', 'the demo reached STATUS_RUNNING', settled?.status === 3, `status ${settled?.status ?? 'never settled'}`);
+  check(
+    'B',
+    'the shell reported the canvas size',
+    said('shell: first configure'),
+    said('shell: first configure')?.trim() ?? 'no configure line'
+  );
+  check(
+    'B',
+    'the wgpu backend opened a device',
+    said('hal: wgpu adapter'),
+    said('hal: wgpu adapter')?.trim() ?? 'no adapter line'
+  );
+  check(
+    'B',
+    'a swapchain was created',
+    said('hal: swapchain'),
+    said('hal: swapchain')?.trim() ?? 'no swapchain line'
+  );
+  const isRunning = check(
+    'B',
+    'the demo reached STATUS_RUNNING',
+    settled?.status === 3,
+    `status ${settled?.status ?? 'never settled'}`
+  );
   // `/favicon.ico` is requested by the browser, not by the shim, and the site
   // deliberately has none. Every other 404 is an asset the page wanted.
   const missing = site.misses.filter((m) => !m.endsWith('favicon.ico'));
-  check('B', 'every asset the page asked for exists', missing.length === 0, missing.join(', '));
+  check(
+    'B',
+    'every asset the page asked for exists',
+    missing.length === 0,
+    missing.join(', ')
+  );
 
   if (!isRunning) {
     const detail = await evaluate(
       page,
-      `document.getElementById('status')?.textContent + ' | ' + document.getElementById('detail')?.textContent`,
+      `document.getElementById('status')?.textContent + ' | ' + document.getElementById('detail')?.textContent`
     );
     throw new Error(`the demo never started running: ${detail}`);
   }
@@ -845,16 +960,42 @@ try {
   const hud = () => consoleLines.filter((line) => line.includes('[HUD]'));
   await until(async () => hud().length > 0);
   const beforeLaunch = hud().length;
-  check('C', 'the game reports its state before any input', beforeLaunch > 0 && hud()[0].includes('WAITING'), hud()[0]?.trim() ?? 'no HUD line');
+  check(
+    'C',
+    'the game reports its state before any input',
+    beforeLaunch > 0 && hud()[0].includes('WAITING'),
+    hud()[0]?.trim() ?? 'no HUD line'
+  );
 
   // A real click, dispatched through the browser's own input pipeline rather
   // than by calling `canvas.focus()` from script. That is the point: it
   // exercises the shim's `pointerdown` listener, which is what a player's click
   // does and what hands the canvas the keyboard.
+  //
+  // Scroll it into view first, and read the rect *after*. `Input.dispatch-
+  // MouseEvent` takes viewport coordinates and `getBoundingClientRect` returns
+  // them, so a canvas sitting below the fold yields a y outside the viewport
+  // and the click lands on nothing — which presents identically to the shim
+  // having no pointer listener at all. A page redesign that moves the canvas
+  // down the document is not a regression in the thing this checks.
   const rect = await evaluate(
     page,
+    `(() => { const c = document.getElementById('canvas');
+              c.scrollIntoView({ block: 'center', behavior: 'instant' });
+              const r = c.getBoundingClientRect();
+              return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()`
+  );
+  const inViewport = await evaluate(
+    page,
     `(() => { const r = document.getElementById('canvas').getBoundingClientRect();
-              return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()`,
+              const cy = r.y + r.height / 2, cx = r.x + r.width / 2;
+              return cy >= 0 && cy <= innerHeight && cx >= 0 && cx <= innerWidth; })()`
+  );
+  check(
+    'C',
+    'the canvas centre is inside the viewport to be clicked',
+    inViewport === true,
+    `centre (${rect.x}, ${rect.y}) is outside the window`
   );
   for (const type of ['mousePressed', 'mouseReleased']) {
     await page.send('Input.dispatchMouseEvent', {
@@ -867,7 +1008,12 @@ try {
     });
   }
   const focused = await evaluate(page, `document.activeElement?.id ?? ''`);
-  check('C', 'a click gives the canvas keyboard focus', focused === 'canvas', `activeElement is "${focused}"`);
+  check(
+    'C',
+    'a click gives the canvas keyboard focus',
+    focused === 'canvas',
+    `activeElement is "${focused}"`
+  );
 
   // The key the demo's own instructions name. `code` is what the engine binds
   // to; `key` and the virtual key codes are what a real keyboard sends.
@@ -883,9 +1029,16 @@ try {
   }
 
   const launched = await until(async () =>
-    hud().slice(beforeLaunch).find((line) => line.includes('PLAYING')),
+    hud()
+      .slice(beforeLaunch)
+      .find((line) => line.includes('PLAYING'))
   );
-  check('C', 'Space launches the ball', Boolean(launched), (launched ?? 'the state never left WAITING').trim());
+  check(
+    'C',
+    'Space launches the ball',
+    Boolean(launched),
+    (launched ?? 'the state never left WAITING').trim()
+  );
 
   // The ball's x is in every HUD line, and two different values is the
   // simulation advancing under its own steam — which nothing on the JS side
@@ -895,11 +1048,18 @@ try {
       hud()
         .slice(beforeLaunch)
         .map((line) => line.match(/Ball x: (-?[\d.]+)/)?.[1])
-        .filter(Boolean),
+        .filter(Boolean)
     );
     return seen.size > 1 ? seen : null;
   });
-  check('C', 'the ball moves after the launch', Boolean(positions), positions ? `x took ${positions.size} values: ${[...positions].join(', ')}` : 'x never changed');
+  check(
+    'C',
+    'the ball moves after the launch',
+    Boolean(positions),
+    positions
+      ? `x took ${positions.size} values: ${[...positions].join(', ')}`
+      : 'x never changed'
+  );
 
   group('D — it renders');
 
@@ -914,20 +1074,29 @@ try {
   }
 
   const last = samples.at(-1);
-  check('D', 'the canvas has a backing store', last && last.width > 0 && last.height > 0, last ? `${last.width}x${last.height}` : 'no canvas');
+  check(
+    'D',
+    'the canvas has a backing store',
+    last && last.width > 0 && last.height > 0,
+    last ? `${last.width}x${last.height}` : 'no canvas'
+  );
 
   check(
     'D',
     'the browser reported no WebGPU device errors',
     deviceErrors.length === 0,
-    deviceErrors.length ? `${deviceErrors.length} error(s); first: ${deviceErrors[0].split('\n')[0]}` : '',
+    deviceErrors.length
+      ? `${deviceErrors.length} error(s); first: ${deviceErrors[0].split('\n')[0]}`
+      : ''
   );
 
   check(
     'D',
     'the canvas is not one flat colour',
     last && last.distinct > 1,
-    last ? `${last.distinct} distinct colour(s): ${describe(last)}` : 'nothing sampled',
+    last
+      ? `${last.distinct} distinct colour(s): ${describe(last)}`
+      : 'nothing sampled'
   );
 
   const frames = new Set(samples.map((s) => s.hash));
@@ -935,16 +1104,22 @@ try {
     'D',
     'the canvas changes between frames while the ball is in flight',
     frames.size > 1,
-    `${frames.size} distinct frame(s) across ${samples.length} samples`,
+    `${frames.size} distinct frame(s) across ${samples.length} samples`
   );
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and
   // the first thing a human will ask for. The canvas itself rather than a
   // viewport screenshot — the page's chrome is not what is under test.
-  const png = await evaluate(page, `document.getElementById('canvas').toDataURL().slice(22)`);
+  const png = await evaluate(
+    page,
+    `document.getElementById('canvas').toDataURL().slice(22)`
+  );
   const shotPath = join(OUT, `breakout-${chosen.mode}.png`);
   writeFileSync(shotPath, Buffer.from(png, 'base64'));
-  writeFileSync(join(OUT, `breakout-${chosen.mode}.log`), consoleLines.join('\n'));
+  writeFileSync(
+    join(OUT, `breakout-${chosen.mode}.log`),
+    consoleLines.join('\n')
+  );
   console.log(`\nweb e2e: canvas  ${shotPath}`);
   console.log(`web e2e: page log ${join(OUT, `breakout-${chosen.mode}.log`)}`);
 
@@ -969,21 +1144,31 @@ if (checks.length === 0) {
   // The trap `docs/plan/12-testing.md` names: a harness that checked nothing and
   // said so quietly is worse than no harness.
   console.error('web e2e: ZERO CHECKS RAN — the gate is not gating.');
-  if (browser?.stderr.length) console.error(browser.stderr.slice(-40).join('\n'));
+  if (browser?.stderr.length)
+    console.error(browser.stderr.slice(-40).join('\n'));
   process.exit(1);
 }
 
-console.log(`web e2e: ${checks.length - failed.length}/${checks.length} checks passed`);
+console.log(
+  `web e2e: ${checks.length - failed.length}/${checks.length} checks passed`
+);
 
 if (failed.length) {
   console.error('\nweb e2e: FAILED');
-  for (const c of failed) console.error(`  ${c.group}: ${c.name}${c.detail ? ` — ${c.detail}` : ''}`);
+  for (const c of failed)
+    console.error(`  ${c.group}: ${c.name}${c.detail ? ` — ${c.detail}` : ''}`);
   if (deviceErrors.length) {
     console.error('\nweb e2e: WebGPU device errors, in full:');
     for (const message of deviceErrors.slice(0, 4)) {
-      console.error(message.split('\n').map((line) => `    ${line}`).join('\n'));
+      console.error(
+        message
+          .split('\n')
+          .map((line) => `    ${line}`)
+          .join('\n')
+      );
     }
-    if (deviceErrors.length > 4) console.error(`    … and ${deviceErrors.length - 4} more`);
+    if (deviceErrors.length > 4)
+      console.error(`    … and ${deviceErrors.length - 4} more`);
   }
   process.exit(1);
 }

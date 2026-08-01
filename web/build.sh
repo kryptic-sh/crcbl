@@ -57,7 +57,13 @@ fi
 echo "==> assembling $SITE"
 rm -rf "$SITE"
 mkdir -p "$SITE"
-# The static half: everything in `web/` except the build tooling.
+# The rendered half: every page is `templates/layout.html` filled from a file
+# in `pages/`, so the header, the demo bar and the footer live in one place.
+echo "==> rendering pages"
+python3 "$REPO/web/build-pages.py" "$SITE"
+
+# The static half: everything in `web/` except the build tooling and the
+# template sources, which are inputs rather than output.
 #
 # `-name '*.sh'` rather than naming each script: this list silently gained
 # `run-browser-e2e.sh` when the browser gate landed, and shipped it to the
@@ -65,7 +71,10 @@ mkdir -p "$SITE"
 # added is one that will be wrong again.
 (cd "$REPO/web" && find . \
   -path ./tools -prune -o \
+  -path ./pages -prune -o \
+  -path ./templates -prune -o \
   -name '*.sh' -prune -o \
+  -name '*.py' -prune -o \
   -name README.md -prune -o \
   -type f -print) | while read -r file; do
   mkdir -p "$SITE/$(dirname "$file")"

@@ -1,0 +1,116 @@
+<!--meta
+{
+  "out": "index.html",
+  "slug": "",
+  "title": "Crucible — browser demos",
+  "description": "Crucible is a from-scratch Rust game engine. Every sample it ships also runs in the browser on WebGPU.",
+  "nav": [
+    { "href": "#demos", "label": "demos" },
+    { "href": "#requirements", "label": "requirements" },
+    { "href": "https://github.com/kryptic-sh/crcbl", "label": "github" }
+  ]
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● WebGPU</span>
+    <span class="badge">MIT</span>
+    <span class="badge">Rust → wasm32</span>
+    <span class="badge warn">in development</span>
+  </div>
+  <h1>
+    The engine,<br />
+    <span class="grad">in your browser.</span>
+  </h1>
+  <p class="tagline">
+    Crucible is a game engine written from scratch in Rust — its own Vulkan
+    backend, its own Wayland and X11 windowing over hand-written FFI, its own
+    ECS, renderer, physics, netcode and audio.
+  </p>
+  <p class="tagline small">
+    A second graphics backend on <code>wgpu</code> is what makes this page
+    possible: the same engine and the same sample code, compiled to
+    <code>wasm32-unknown-unknown</code> and drawing through WebGPU. Not a port —
+    the same source.
+  </p>
+  <div class="cta">
+    <a class="btn primary" href="demos/breakout/">play breakout →</a>
+    <a class="btn" href="https://www.kryptic.sh/projects/crcbl/"
+      >about the engine</a
+    >
+    <a class="btn" href="https://github.com/kryptic-sh/crcbl">source</a>
+  </div>
+</header>
+
+<section id="demos">
+  <h2>demos</h2>
+  <h3>Every sample that can run in a browser is published here.</h3>
+  <p>
+    From the moment it exists, so the browser target cannot quietly rot: a
+    broken wasm build is a broken CI, and a broken CI blocks the merge. Each
+    build is loaded in a real headless browser that opens a WebGPU device,
+    presses a key and reads the canvas back before it ships.
+  </p>
+  <ul class="grid">
+    <li>
+      <a class="feat" href="demos/breakout/">
+        <div class="icon">S1 · playable</div>
+        <h4>Breakout</h4>
+        <p>
+          The first playable sample. Client and server over an in-memory
+          transport, swept-sphere collision, an orthographic camera, an
+          engine-rendered HUD, spatial audio on every bounce, and a high score
+          kept in the Origin Private File System.
+        </p>
+      </a>
+    </li>
+    <li>
+      <div class="feat soon">
+        <div class="icon">S2 · next</div>
+        <h4>Asteroids</h4>
+        <p>
+          Lands with the second physics slice — dynamic BVH churn, overlap
+          queries, and the start of the L1 integrator.
+        </p>
+      </div>
+    </li>
+  </ul>
+</section>
+
+<section id="requirements">
+  <h2>requirements</h2>
+  <h3>A browser with WebGPU.</h3>
+  <p>
+    Chrome or Edge 113 and later, Safari 18 and later, or Firefox with WebGPU
+    enabled. On Linux you may need to launch Chrome with
+    <code>--enable-unsafe-webgpu</code>, depending on the driver.
+  </p>
+  <div class="note">
+    <strong>Single-threaded, deliberately.</strong> GitHub Pages cannot send the
+    COOP/COEP headers that <code>SharedArrayBuffer</code>
+    requires, so this deployment is built without it rather than pretending
+    otherwise. The audio feed is designed around that constraint instead of
+    working around it.
+  </div>
+</section>
+
+<section id="source">
+  <h2>source</h2>
+  <h3>All of it is readable.</h3>
+  <p>
+    The engine, the samples, the shim that boots them here, and the roadmap —
+    which records what is missing and what is broken alongside what works.
+  </p>
+  <div class="cta">
+    <a class="btn primary" href="https://github.com/kryptic-sh/crcbl"
+      >github.com/kryptic-sh/crcbl</a
+    >
+    <a
+      class="btn"
+      href="https://github.com/kryptic-sh/crcbl/blob/main/docs/plan/ROADMAP.md"
+      >roadmap</a
+    >
+  </div>
+</section>
+<!--/body-->

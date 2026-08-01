@@ -24,7 +24,13 @@ import init from './crcbl_breakout.js';
 import { attachShell } from '../../engine/shell.js';
 import { startAudio } from '../../engine/audio.js';
 import { drainLog, LOG_INFO } from '../../engine/log.js';
-import { drainFetch, flushOpfs, opfsSettled, preloadAssets, restoreOpfs } from '../../engine/storage.js';
+import {
+  drainFetch,
+  flushOpfs,
+  opfsSettled,
+  preloadAssets,
+  restoreOpfs,
+} from '../../engine/storage.js';
 import { readUtf8 } from '../../engine/wasm.js';
 
 /** Mirrors the `STATUS_*` constants in `apps/breakout/src/web.rs`. */
@@ -43,9 +49,21 @@ const ASSET_BASE = 'assets/';
 /** Any non-zero id; it only has to match the canvas's `data-raw-handle`. */
 const CANVAS_ID = 1;
 
-const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('canvas'));
-const statusLine = /** @type {HTMLElement} */ (document.getElementById('status'));
-const detailLine = /** @type {HTMLElement} */ (document.getElementById('detail'));
+const canvas = /** @type {HTMLCanvasElement} */ (
+  document.getElementById('canvas')
+);
+const statusLine = /** @type {HTMLElement} */ (
+  document.getElementById('status')
+);
+const detailLine = /** @type {HTMLElement} */ (
+  document.getElementById('detail')
+);
+const statusBar = /** @type {HTMLElement} */ (
+  document.getElementById('statusbar')
+);
+const stopButton = /** @type {HTMLButtonElement} */ (
+  document.getElementById('stop')
+);
 
 /**
  * @param {string} text
@@ -56,6 +74,17 @@ function say(text, detail = '', fatal = false) {
   statusLine.textContent = text;
   detailLine.textContent = detail;
   statusLine.classList.toggle('fatal', fatal);
+  // The indicator beside the text is driven from the same call, so it cannot
+  // drift into decoration: a dot that says "running" while the demo has
+  // stopped is worse than no dot.
+  statusBar.classList.toggle('failed', fatal);
+  if (fatal) statusBar.classList.remove('running');
+}
+
+/** Reflect a terminal state: nothing left to stop, nothing left running. */
+function settle() {
+  statusBar.classList.remove('running');
+  stopButton.disabled = true;
 }
 
 /**
@@ -86,7 +115,11 @@ async function assetKeys() {
  * @returns {string}
  */
 function lastError(exports, memory) {
-  return readUtf8(memory, exports.__crcbl_breakout_error_ptr(), exports.__crcbl_breakout_error_len());
+  return readUtf8(
+    memory,
+    exports.__crcbl_breakout_error_ptr(),
+    exports.__crcbl_breakout_error_len()
+  );
 }
 
 async function main() {
@@ -94,7 +127,7 @@ async function main() {
     say(
       'This browser has no WebGPU.',
       'Crucible renders through WebGPU in the browser. Chrome or Edge 113+, or Firefox with WebGPU enabled, will run it.',
-      true,
+      true
     );
     return;
   }
@@ -121,7 +154,9 @@ async function main() {
   // Pre-load and restore run together: they touch different ABIs and different
   // storage, and the game needs both before it boots.
   const [, root] = await Promise.all([
-    assetKeys().then((keys) => preloadAssets({ exports, memory, keys, base: ASSET_BASE })),
+    assetKeys().then((keys) =>
+      preloadAssets({ exports, memory, keys, base: ASSET_BASE })
+    ),
     restoreOpfs({ exports, memory }),
   ]);
   log();
@@ -129,7 +164,11 @@ async function main() {
   say('Opening a GPU device…');
   const shell = attachShell({ exports, memory, canvas, canvasId: CANVAS_ID });
   if (exports.__crcbl_breakout_boot() !== 1) {
-    say('The engine could not open a window.', lastError(exports, memory), true);
+    say(
+      'The engine could not open a window.',
+      lastError(exports, memory),
+      true
+    );
     log();
     return;
   }
@@ -163,7 +202,9 @@ async function main() {
   // engine answers it by accepting, tearing the frame down in order, and
   // reporting `STOPPED` — which is the same path a compositor's close button
   // takes on the desktop.
-  document.getElementById('stop')?.addEventListener('click', () => shell.requestClose());
+  document
+    .getElementById('stop')
+    ?.addEventListener('click', () => shell.requestClose());
 
   let announced = -1;
 
@@ -180,11 +221,17 @@ async function main() {
     if (status !== announced) {
       announced = status;
       if (status === STATUS.RUNNING) {
-        say('Playing.', '← → move · SPACE launches · click the canvas for keyboard and sound');
+        say(
+          'Playing.',
+          '← → move · SPACE launches · click the canvas for keyboard and sound'
+        );
+        statusBar.classList.add('running');
       } else if (status === STATUS.STOPPED) {
         say('Stopped.', opfsSettled(exports) ? 'High score saved.' : 'Saving…');
+        settle();
       } else if (status === STATUS.FAILED) {
         say('The demo stopped.', lastError(exports, memory), true);
+        settle();
       }
     }
 
@@ -214,7 +261,8 @@ async function main() {
         pending: exports.__crcbl_web_fetch_pending(),
         inFlight: exports.__crcbl_web_fetch_inflight(),
       }),
-      logLevel: (/** @type {number} */ level) => exports.__crcbl_breakout_log_level(level),
+      logLevel: (/** @type {number} */ level) =>
+        exports.__crcbl_breakout_log_level(level),
     },
   });
 }
@@ -222,4 +270,5 @@ async function main() {
 main().catch((error) => {
   console.error(error);
   say('The demo failed to load.', String(error), true);
+  settle();
 });

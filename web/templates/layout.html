@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#bb9af7" />
+    <title>{{title}}</title>
+    <meta name="description" content="{{description}}" />
+    <link rel="canonical" href="{{canonical}}" />
+    <meta property="og:title" content="{{title}}" />
+    <meta property="og:description" content="{{description}}" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="{{canonical}}" />
+    <meta property="og:site_name" content="kryptic.sh" />
+    <link rel="stylesheet" href="/style.css" />
+    {{head_extra}}
+  </head>
+  <body>
+    <nav class="siblings">
+      <div class="siblings-inner">{{siblings}}</div>
+    </nav>
+
+    <nav class="top">
+      <div class="brand">{{brand}}</div>
+      <div class="links">{{nav_links}}</div>
+    </nav>
+
+    <main class="wrap">{{content}}</main>
+
+    <footer>
+      <div class="wrap footer-inner">
+        <div>kryptic.sh · MIT · built in Rust</div>
+        <div>{{footer_links}}</div>
+      </div>
+    </footer>
+    {{body_end}}
+  </body>
+</html>
