@@ -15,12 +15,12 @@
 //! 1. Parses `spirv/manifest.txt`.
 //! 2. Fails if any source's SHA-256 differs from the recorded one — "someone
 //!    edited the `.slang` and did not regenerate".
-//! 3. Fails if any artifact's SHA-256 differs — "the `.spv` is truncated,
-//!    corrupt, or was replaced by hand".
+//! 3. Fails if any artifact's SHA-256 differs — "the `.spv` or `.wgsl` is
+//!    truncated, corrupt, or was replaced by hand".
 //! 4. If a `slangc` matching the pinned version happens to be present,
-//!    recompiles and demands the bytes match, which catches the one case
-//!    hashing cannot: a manifest regenerated against a *different* source than
-//!    the one committed.
+//!    recompiles **both** targets and demands the bytes match, which catches
+//!    the one case hashing cannot: a manifest regenerated against a *different*
+//!    source than the one committed.
 //! 5. Writes `$OUT_DIR/shaders.rs`, the static table `src/lib.rs` includes.
 
 use std::path::{Path, PathBuf};
@@ -83,7 +83,26 @@ fn main() {
         check_hash(&spirv_path, &record.spirv_sha256, record, "SPIR-V artifact");
 
         if let Some(slangc) = slangc.as_deref() {
-            recompile_spirv(slangc, &manifest, record, &root, &spirv_path);
+            recompile(
+                slangc,
+                &manifest,
+                record,
+                &root,
+                Target::SpirV,
+                &record.spirv,
+                &spirv_path,
+            );
+            if !record.wgsl.is_empty() {
+                recompile(
+                    slangc,
+                    &manifest,
+                    record,
+                    &root,
+                    Target::Wgsl,
+                    &record.wgsl,
+                    &root.join(&record.wgsl),
+                );
+            }
         }
 
         let ident = record.name.to_uppercase().replace('-', "_");
@@ -267,24 +286,50 @@ fn names_version(line: &str, pinned: &str) -> bool {
     line == pinned || line.split_whitespace().any(|word| word == pinned)
 }
 
-/// Recompiles one shader's SPIR-V and demands byte-for-byte equality.
-fn recompile_spirv(
+/// One of Slang's output targets, and the artifact column it fills.
+///
+/// Both columns get the same treatment for the same reason: a manifest hash
+/// agrees with a file that nobody checked came from the committed source. The
+/// WGSL is what the wgpu backend actually compiles, so leaving it hash-only
+/// would have made the *rendering* backend the least-checked artifact.
+#[derive(Clone, Copy)]
+enum Target {
+    SpirV,
+    Wgsl,
+}
+
+impl Target {
+    /// What `-target` calls it, which is also the extension the check file
+    /// gets.
+    const fn flag(self) -> &'static str {
+        match self {
+            Self::SpirV => "spirv",
+            Self::Wgsl => "wgsl",
+        }
+    }
+}
+
+/// Recompiles one shader to one target and demands byte-for-byte equality.
+fn recompile(
     slangc: &str,
     manifest: &Manifest,
     record: &ShaderRecord,
     root: &Path,
+    target: Target,
+    artifact: &str,
     committed: &Path,
 ) {
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("cargo always sets OUT_DIR"))
-        .join(format!("{}.check.spv", record.name));
-    let status = Command::new(slangc)
+        .join(format!("{}.check.{}", record.name, target.flag()));
+    let mut command = Command::new(slangc);
+    command
         .arg(root.join(&record.source))
-        .args(["-target", "spirv"])
-        .args(["-profile", &manifest.target])
-        .arg("-emit-spirv-directly")
-        .arg("-o")
-        .arg(&out)
-        .status();
+        .args(["-target", target.flag()])
+        .args(["-profile", &manifest.target]);
+    if matches!(target, Target::SpirV) {
+        command.arg("-emit-spirv-directly");
+    }
+    let status = command.arg("-o").arg(&out).status();
     match status {
         Ok(status) if status.success() => {}
         // A compiler that is present but cannot compile the source is a real
@@ -292,9 +337,10 @@ fn recompile_spirv(
         // is already hash-verified and is what will be used.
         _ => {
             println!(
-                "cargo::warning=slangc could not recompile {}; the committed artifact is \
+                "cargo::warning=slangc could not recompile {} to {}; the committed artifact is \
                  hash-checked but not byte-checked",
-                record.source
+                record.source,
+                target.flag()
             );
             return;
         }
@@ -305,12 +351,11 @@ fn recompile_spirv(
     if fresh != old {
         fail(&format!(
             "shader `{name}`: recompiling {source} with the pinned slangc produces different \
-             bytes than the committed {spirv}.\n\nThis is the case a hash cannot catch — the \
+             bytes than the committed {artifact}.\n\nThis is the case a hash cannot catch — the \
              manifest agrees with both files, but they do not agree with each other. Run \
              crates/crcbl-shaders/tools/compile-shaders.sh and commit the result.",
             name = record.name,
             source = record.source,
-            spirv = record.spirv,
         ));
     }
 }

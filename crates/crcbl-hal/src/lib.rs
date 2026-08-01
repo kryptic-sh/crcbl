@@ -249,7 +249,9 @@ pub use resource::{
     ImageView, ImageViewDesc, ImageViewHandle, ImageViewType, MemoryLocation, Offset3d, Rect2d,
     Sampler, SamplerAddressMode, SamplerDesc, SamplerHandle,
 };
-pub use shader::{ShaderEntry, ShaderModule, ShaderModuleDesc, ShaderModuleHandle, ShaderStages};
+pub use shader::{
+    ShaderEntry, ShaderModule, ShaderModuleDesc, ShaderModuleHandle, ShaderSources, ShaderStages,
+};
 pub use swapchain::{
     AcquiredFrame, CompositeAlpha, PresentInfo, PresentMode, Surface, SurfaceCaps, SurfaceHandle,
     Swapchain, SwapchainDesc, SwapchainHandle,

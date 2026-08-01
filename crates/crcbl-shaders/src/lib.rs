@@ -1,14 +1,21 @@
-//! The engine's shaders: Slang sources, and the SPIR-V compiled from them.
+//! The engine's shaders: Slang sources, and the SPIR-V and WGSL compiled from
+//! them.
 //!
 //! ```text
-//! shaders/*.slang ──tools/compile-shaders.sh──▶ spirv/*.spv  (committed)
+//! shaders/*.slang ──tools/compile-shaders.sh──┬─▶ spirv/*.spv   (committed)
+//!                                             └─▶ wgsl/*.wgsl   (committed)
 //!                                                    │
 //!                          build.rs verifies ────────┤
 //!                                                    ▼
-//!                                        crcbl_shaders::TRIANGLE.spirv()
+//!                          crcbl_shaders::TRIANGLE.spirv() / .wgsl()
 //!                                                    │
-//!                                          ShaderModuleDesc { spirv }
+//!                                     ShaderModuleDesc { spirv, wgsl }
 //! ```
+//!
+//! Both artifacts are handed over on every call and the backend picks:
+//! `crcbl-vk` reads the SPIR-V, `crcbl-wgpu` reads the WGSL. See
+//! `crcbl_hal::shader` for why the seam is shaped that way and what a caller
+//! owes it.
 //!
 //! # Decision: Slang source, committed SPIR-V, no compiler in the build
 //!
@@ -53,20 +60,47 @@
 //! hot reload, "keyed by shader hash", at P9. Nothing here forecloses it: the
 //! hash is already in the manifest and [`sha256`] is already public, and a
 //! runtime path adds a `slangc`-shaped compiler behind a dev-only feature
-//! without changing this crate's shape. The same is true of P5's WGSL and P14's
-//! MSL/DXIL — each is another artifact column in the manifest and another
-//! `include_bytes!` in the generated table.
+//! without changing this crate's shape. P5's WGSL took exactly that shape —
+//! another artifact column in the manifest, another `include_bytes!` in the
+//! generated table — and P14's MSL/DXIL will take it again.
 //!
 //! What is *not* here is `03-gpu-driven-rendering.md`'s tier permutation axis.
 //! The triangle does not vary by tier, and a permutation system with one
 //! permutation would be a guess at the shape `37-materials.md` owns.
 //!
+//! # Known gap: push constants have no WGSL spelling (`ui.wgsl`)
+//!
+//! WGSL has no push constants — they are a native-`wgpu` extension, absent from
+//! WebGPU — and Slang's WGSL target does not say so. It lowers a
+//! `[[vk::push_constant]]` block to a module-scope `var<uniform>` with **no**
+//! `@group`/`@binding`, which is not valid WGSL. `wgsl/ui.wgsl` carries one:
+//!
+//! ```text
+//! var<uniform> constants_0 : UiConstants_std430_0;
+//! ```
+//!
+//! and `naga` rejects it — "Binding decoration is missing or not applicable" —
+//! so `crcbl-wgpu` cannot create the `ui.slang` module. `mesh`, `tonemap` and
+//! `triangle` use no push constants and compile.
+//!
+//! This is not fixable here: the artifact is a faithful translation of a source
+//! that asks for something the target does not have. The fix is in
+//! `crcbl-render`'s UI pass and `ui.slang` — a uniform buffer binding in place
+//! of the push-constant block, which is the Tier B data-layout rule
+//! `docs/plan/10-wasm-webgpu.md` states for this backend anyway. Regenerating
+//! the artifacts is part of that change, not of the seam change that made the
+//! WGSL reachable.
+//!
+//! No shader added here may use push constants until that lands, or it acquires
+//! the same gap silently.
+//!
 //! # Nothing here knows a backend
 //!
 //! This crate has no dependencies at all, not even `crcbl-hal`. It hands out
-//! `&[u32]` and entry-point names, which is exactly what
-//! `crcbl_hal::ShaderModuleDesc` takes, and
-//! it stays usable by a backend that has not been written yet.
+//! `&[u32]`, `Option<&str>` and entry-point names, which is exactly what
+//! `crcbl_hal::ShaderModuleDesc` takes field for field, and it stays usable by
+//! a backend that has not been written yet. Each new artifact format is a new
+//! accessor here and a new field there; neither names the other's types.
 
 pub mod sha256;
 
@@ -234,21 +268,28 @@ impl Shader {
         })
     }
 
-    /// The compiled WGSL source, valid UTF-8.
+    /// The compiled WGSL source, valid UTF-8, or `None` for a shader with no
+    /// WGSL artifact.
     ///
-    /// Returns `""` for shaders that were not compiled to WGSL (pre-P5
-    /// artifacts). The wgpu backend uses this rather than SPIR-V.
+    /// This is what `crcbl_hal::ShaderModuleDesc::wgsl` takes, in the shape it
+    /// takes it: the seam spells "no artifact" as `None` there, so this spells
+    /// it as `None` here and a call site is `wgsl: MESH.wgsl()` with nothing in
+    /// between. The wgpu backend prefers it over the SPIR-V; the Vulkan backend
+    /// ignores it.
     ///
     /// # Panics
     ///
-    /// If the embedded artifact is not valid UTF-8. Mapping that to `""`, as
-    /// this used to, turns a corrupt artifact into an empty shader source — and
-    /// an empty source is indistinguishable from "this shader has no WGSL",
-    /// which is a legitimate state.
+    /// If the embedded artifact is not valid UTF-8. Mapping that to absence
+    /// would turn a corrupt artifact into "this shader has no WGSL", which is a
+    /// legitimate state, and the wgpu backend would then report the shader as
+    /// missing rather than as broken.
     #[must_use]
-    pub fn wgsl(&self) -> &str {
+    pub fn wgsl(&self) -> Option<&str> {
+        if self.wgsl_bytes.is_empty() {
+            return None;
+        }
         match std::str::from_utf8(self.wgsl_bytes) {
-            Ok(text) => text,
+            Ok(text) => Some(text),
             Err(error) => panic!(
                 "shader `{}`: the committed WGSL artifact is not valid UTF-8 ({error})",
                 self.name
@@ -376,6 +417,59 @@ mod tests {
         );
         assert_eq!(ambiguous.entry_point(Stage::Vertex), None);
         assert_eq!(ambiguous.entry_point(Stage::Fragment), Some("mainFs"));
+    }
+
+    /// Every shipped shader has a WGSL artifact, and it names the entry points
+    /// the manifest recorded from the SPIR-V.
+    ///
+    /// The wgpu backend addresses a WGSL module by the *same* entry-point name
+    /// it would use for the SPIR-V one, because `ShaderEntry` is per-stage and
+    /// format-blind. Slang happens to keep the names across targets; if a
+    /// future release mangled them, every wgpu pipeline would fail at creation
+    /// on a machine with a GPU and nowhere else. This is that check, with no
+    /// GPU.
+    #[test]
+    fn every_shipped_shader_has_wgsl_naming_the_same_entry_points() {
+        for shader in ALL {
+            let wgsl = shader
+                .wgsl()
+                .unwrap_or_else(|| panic!("{}: no WGSL artifact", shader.name()));
+            for entry in shader.entry_points() {
+                let attribute = match entry.stage() {
+                    Stage::Vertex => "@vertex",
+                    Stage::Fragment => "@fragment",
+                    Stage::Compute => "@compute",
+                };
+                assert!(
+                    wgsl.contains(attribute),
+                    "{}: WGSL declares no {attribute} stage",
+                    shader.name()
+                );
+                assert!(
+                    wgsl.contains(&format!("fn {}(", entry.name())),
+                    "{}: WGSL has no `fn {}(`, so the entry point the manifest records from \
+                     the SPIR-V is not addressable in the WGSL",
+                    shader.name(),
+                    entry.name()
+                );
+            }
+        }
+    }
+
+    /// A shader with no WGSL column reports absence, not an empty source — the
+    /// distinction `crcbl_hal::ShaderModuleDesc::wgsl` is an `Option` for.
+    #[test]
+    fn a_shader_without_wgsl_reports_none() {
+        static ENTRIES: [EntryPoint; 1] = [EntryPoint::new("mainVs", Stage::Vertex)];
+        let spirv_only = Shader::new(
+            "spirv-only",
+            "shaders/spirv-only.slang",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            b"",
+            b"",
+            &ENTRIES,
+        );
+        assert_eq!(spirv_only.wgsl(), None);
     }
 
     /// The recorded hash is the drift check's whole basis, so it must actually

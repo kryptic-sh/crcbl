@@ -8,7 +8,7 @@ use crcbl_hal::{
     ImageViewHandle, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, QuerySetDesc,
     QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState,
     SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, ShaderModuleDesc,
-    ShaderModuleHandle, SubmitInfo, SurfaceError, SwapchainDesc, SwapchainHandle,
+    ShaderModuleHandle, ShaderSources, SubmitInfo, SurfaceError, SwapchainDesc, SwapchainHandle,
 };
 
 use crate::cell::{Lock, Shared};
@@ -422,19 +422,53 @@ impl Device for WgpuDevice {
     }
 
     // ---------- shader modules ----------
+    /// WGSL first, SPIR-V only if that is all there is.
+    ///
+    /// wgpu reaches both formats through `naga`, but not equally. Its WGSL
+    /// frontend is the one WebGPU itself is specified in and the one wgpu's own
+    /// tests exercise; its SPIR-V frontend implements a subset, and the subset
+    /// excludes `DrawParameters` — which every artifact `crcbl-shaders` emits
+    /// declares, because Slang lowers `SV_VertexID` to
+    /// `gl_VertexIndex - gl_BaseVertex`. Before this preference existed, this
+    /// function had never successfully created a module on any target.
+    ///
+    /// So the SPIR-V path is kept, and kept honest: a caller who supplies only
+    /// SPIR-V gets it handed to naga, and gets naga's error — an
+    /// `UnsupportedCapability` panic through wgpu's error handler for anything
+    /// the frontend does not implement. It is a fallback for shaders that
+    /// happen to stay inside naga's subset, not a supported path for the
+    /// engine's own.
     fn create_shader_module(
         &self,
         desc: &ShaderModuleDesc<'_>,
     ) -> Result<ShaderModuleHandle, HalError> {
-        // SAFETY: we pass trusted SPIR-V from the engine's own shader crate
-        let sm = unsafe {
-            self.device.create_shader_module_trusted(
-                wgpu::ShaderModuleDescriptor {
+        let sm = if let Some(wgsl) = desc.wgsl {
+            // Not `create_shader_module_trusted`: WGSL arrives as source that
+            // naga will parse and bounds-check, and skipping those checks buys
+            // nothing here — the artifact is compiled once at start-up.
+            self.device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: desc.label,
-                    source: wgpu::ShaderSource::SpirV(std::borrow::Cow::Borrowed(desc.spirv)),
-                },
-                wgpu::ShaderRuntimeChecks::unchecked(),
-            )
+                    source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(wgsl)),
+                })
+        } else if desc.spirv.is_empty() {
+            return Err(desc.unusable(ShaderSources::WGSL | ShaderSources::SPIRV));
+        } else {
+            // SAFETY: `ShaderRuntimeChecks::unchecked` removes the injected
+            // bounds checks, so the module must not index a binding out of
+            // range. `desc.spirv` is a build-time artifact of this workspace,
+            // compiled from a Slang source in `crcbl-shaders` and hash-pinned
+            // by its manifest — it is not attacker-supplied and not loaded from
+            // disk at run time.
+            unsafe {
+                self.device.create_shader_module_trusted(
+                    wgpu::ShaderModuleDescriptor {
+                        label: desc.label,
+                        source: wgpu::ShaderSource::SpirV(std::borrow::Cow::Borrowed(desc.spirv)),
+                    },
+                    wgpu::ShaderRuntimeChecks::unchecked(),
+                )
+            }
         };
         Ok(self.pools.shader_modules.lock().unwrap().insert(sm).cast())
     }

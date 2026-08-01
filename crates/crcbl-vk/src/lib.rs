@@ -130,12 +130,18 @@
 //!   model (allocate N, write a subset, stream the rest through
 //!   `update_bind_group` later) needs. See `pipeline::variable_count_from_entries`
 //!   for the fallback inference path.
-//! * **Vertex pulling needs `shaderDrawParameters`.** `SV_VertexID` lowers to
-//!   `gl_VertexIndex - gl_BaseVertex`, which declares SPIR-V's
-//!   `DrawParameters` capability. It is Vulkan 1.1 core-optional and present on
-//!   radv and lavapipe, so it joins this backend's floor rather than becoming a
-//!   `Features` bit the renderer would branch on — but it *is* a requirement
-//!   the seam's vocabulary cannot express.
+//! * **Vertex pulling needs `shaderDrawParameters`** — closed at P5.9, from the
+//!   other end. `SV_VertexID` lowers to `gl_VertexIndex - gl_BaseVertex`, which
+//!   declares SPIR-V's `DrawParameters` capability. It is Vulkan 1.1
+//!   core-optional and present on radv and lavapipe, so it joins this backend's
+//!   floor rather than becoming a `Features` bit the renderer would branch on.
+//!   Scored here as a seam-vocabulary gap, it turned out to be a hard stop for
+//!   the *second* backend: `naga` does not implement `DrawParameters`, so
+//!   `crcbl-wgpu` could not create a shader module on any target. The fix was
+//!   not to constrain this backend — `crcbl-shaders` already emitted WGSL, and
+//!   `crcbl_hal::ShaderModuleDesc` now carries both artifacts so each backend
+//!   takes the one it can read. This backend reads the SPIR-V and ignores
+//!   `desc.wgsl`; see `crcbl_hal::shader` for the contract.
 //! * **Synchronisation validation had never run.**
 //!   `VK_EXT_validation_features` is a *layer* extension, and the probe only
 //!   enumerated the loader's implicit list, so `CRCBL_VK_SYNC_VALIDATION=1`

@@ -213,6 +213,7 @@ fn shader_modules_reject_non_spirv() {
         .create_shader_module(&ShaderModuleDesc {
             label: None,
             spirv: &[0xDEAD_BEEF],
+            wgsl: None,
         })
         .expect_err("not SPIR-V");
     assert!(matches!(error, HalError::ShaderCompilation(_)), "{error:?}");
@@ -221,6 +222,7 @@ fn shader_modules_reject_non_spirv() {
             .create_shader_module(&ShaderModuleDesc {
                 label: None,
                 spirv: &[],
+                wgsl: None,
             })
             .is_err()
     );
@@ -229,9 +231,82 @@ fn shader_modules_reject_non_spirv() {
             .create_shader_module(&ShaderModuleDesc {
                 label: Some("cull"),
                 spirv: &SPIRV,
+                wgsl: None,
             })
             .is_ok()
     );
+}
+
+/// The null backend compiles nothing, so it accepts either artifact format on
+/// its own — including WGSL with no SPIR-V beside it, which is a legal
+/// descriptor the SPIR-V magic-number check must not reject.
+#[test]
+fn shader_modules_accept_wgsl_with_or_without_spirv() {
+    let instance = NullInstance::tier_a();
+    let device = open(&instance);
+    assert!(
+        device
+            .create_shader_module(&ShaderModuleDesc {
+                label: Some("wgsl only"),
+                spirv: &[],
+                wgsl: Some("@fragment fn main() {}"),
+            })
+            .is_ok()
+    );
+    assert!(
+        device
+            .create_shader_module(&ShaderModuleDesc {
+                label: Some("both"),
+                spirv: &SPIRV,
+                wgsl: Some("@fragment fn main() {}"),
+            })
+            .is_ok()
+    );
+}
+
+/// A descriptor carrying no artifact at all names the gap rather than producing
+/// a module handle no pipeline could use.
+#[test]
+fn a_shader_module_with_no_artifact_names_the_gap() {
+    let instance = NullInstance::tier_a();
+    let device = open(&instance);
+    let error = device
+        .create_shader_module(&ShaderModuleDesc {
+            label: Some("empty.slang"),
+            spirv: &[],
+            wgsl: None,
+        })
+        .expect_err("a descriptor with no artifact is not a shader");
+    let text = error.to_string();
+    assert!(text.contains("empty.slang"), "{text}");
+    assert!(text.contains("was given nothing"), "{text}");
+}
+
+/// What each call site supplied survives the module's destruction, which is
+/// what makes "did this caller offer every format it has" assertable at all —
+/// every real caller destroys its modules the moment its pipelines exist.
+#[test]
+fn created_shader_modules_are_logged_with_the_formats_they_carried() {
+    let instance = NullInstance::tier_a();
+    let recorder = instance.recorder();
+    let device = open(&instance);
+    let module = device
+        .create_shader_module(&ShaderModuleDesc {
+            label: Some("mesh.slang"),
+            spirv: &SPIRV,
+            wgsl: Some("@vertex fn vertexMain() {}"),
+        })
+        .expect("both formats");
+    device.destroy_shader_module(module);
+    assert_eq!(
+        recorder.shader_modules_created(),
+        vec![(
+            Some("mesh.slang".to_string()),
+            ShaderSources::SPIRV | ShaderSources::WGSL
+        )]
+    );
+    recorder.clear();
+    assert!(recorder.shader_modules_created().is_empty());
 }
 
 /// The Tier B trap the seam exists to make visible: a layout that asks for
@@ -894,6 +969,7 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
         .create_shader_module(&ShaderModuleDesc {
             label: Some("frame"),
             spirv: &SPIRV,
+            wgsl: None,
         })
         .expect("module");
     let set_layout = device

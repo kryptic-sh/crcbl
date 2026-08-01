@@ -1263,6 +1263,7 @@ impl TriangleResources {
             .create_shader_module(&crcbl_hal::ShaderModuleDesc {
                 label: Some("triangle.slang"),
                 spirv: crcbl_shaders::TRIANGLE.spirv(),
+                wgsl: crcbl_shaders::TRIANGLE.wgsl(),
             })
             .expect("the committed SPIR-V is accepted");
 
@@ -1672,6 +1673,7 @@ fn a_missing_entry_point_is_named_before_the_driver_sees_it() {
         .create_shader_module(&crcbl_hal::ShaderModuleDesc {
             label: Some("triangle.slang"),
             spirv: crcbl_shaders::TRIANGLE.spirv(),
+            wgsl: crcbl_shaders::TRIANGLE.wgsl(),
         })
         .expect("the committed SPIR-V is accepted");
     let pipeline_layout = device
@@ -1729,6 +1731,7 @@ fn a_missing_entry_point_is_named_before_the_driver_sees_it() {
         .create_shader_module(&crcbl_hal::ShaderModuleDesc {
             label: None,
             spirv: &[0x0302_2307, 0, 0, 0, 0],
+            wgsl: None,
         })
         .expect_err("a byte-swapped module is not SPIR-V");
     assert!(error.to_string().contains("byte-swapped"), "{error}");
@@ -2900,6 +2903,7 @@ impl DepthProbe {
             .create_shader_module(&crcbl_hal::ShaderModuleDesc {
                 label: Some("mesh.slang"),
                 spirv: crcbl_shaders::MESH.spirv(),
+                wgsl: crcbl_shaders::MESH.wgsl(),
             })
             .expect("the committed SPIR-V is accepted");
         let color_targets = [crcbl_hal::ColorTargetState::opaque(headless.format)];

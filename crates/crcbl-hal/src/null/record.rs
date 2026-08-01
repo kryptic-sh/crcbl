@@ -26,7 +26,7 @@ use crate::{
     BufferHandle, BufferImageCopy, CommandBufferHandle, ComputePipelineHandle,
     DepthStencilAttachment, DrawIndirect, DrawIndirectCount, GraphicsPipelineHandle, ImageBarrier,
     ImageCopy, ImageHandle, IndexFormat, MemoryLocation, QuerySetHandle, QueueHandle, Rect2d,
-    SemaphoreSignal, SemaphoreWait, ShaderStages, SwapchainHandle, Viewport,
+    SemaphoreSignal, SemaphoreWait, ShaderSources, ShaderStages, SwapchainHandle, Viewport,
 };
 
 /// Every kind of object the null backend tracks.
@@ -581,6 +581,9 @@ pub(super) struct State {
     /// How many `PendingDevice::poll` calls report `Pending` before a device
     /// request completes. See [`Recorder::set_device_latency`].
     pub(super) device_latency: u32,
+    /// One entry per `create_shader_module`, surviving the module's
+    /// destruction. See [`Recorder::shader_modules_created`].
+    pub(super) shader_modules_created: Vec<(Option<String>, ShaderSources)>,
 }
 
 impl State {
@@ -591,6 +594,7 @@ impl State {
             validation: Vec::new(),
             readback_latency: 0,
             device_latency: 0,
+            shader_modules_created: Vec::new(),
         }
     }
 
@@ -773,6 +777,24 @@ impl Recorder {
         self.lock().pools[kind as usize].len()
     }
 
+    /// Every shader module created so far, as `(label, formats the descriptor
+    /// carried)`, in creation order.
+    ///
+    /// The no-GPU assertion for the seam's "offer every artifact you have"
+    /// rule. A call site that stopped passing its WGSL keeps working on Vulkan
+    /// and keeps working here, so nothing but running `crcbl-wgpu` on a machine
+    /// with a GPU would notice — which is how the WGSL artifacts sat unused
+    /// from P5.3 to P5.9. This notices, in the plain test suite.
+    ///
+    /// A log rather than a lookup on the handle, because a caller that builds
+    /// pipelines destroys its modules immediately afterwards — by the time a
+    /// test can assert anything, every handle it would ask about is dead.
+    /// [`clear`](Self::clear) drops it with the rest of the stream.
+    #[must_use]
+    pub fn shader_modules_created(&self) -> Vec<(Option<String>, ShaderSources)> {
+        self.lock().shader_modules_created.clone()
+    }
+
     /// Total live objects across every kind.
     #[must_use]
     pub fn total_live_objects(&self) -> usize {
@@ -788,6 +810,7 @@ impl Recorder {
         let mut state = self.lock();
         state.events.clear();
         state.validation.clear();
+        state.shader_modules_created.clear();
     }
 
     /// Makes the next `poll_readback` calls report

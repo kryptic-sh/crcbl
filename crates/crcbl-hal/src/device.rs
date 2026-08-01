@@ -623,13 +623,19 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
 
     // --- shaders and pipelines ---
 
-    /// Creates a shader module from SPIR-V.
+    /// Creates a shader module from whichever artifact this backend consumes.
+    ///
+    /// The caller fills in every format it holds and does not choose between
+    /// them; this implementation takes the one it can compile. See
+    /// [`crate::shader`] for the contract in full.
     ///
     /// # Errors
     ///
-    /// [`HalError::ShaderCompilation`] if the SPIR-V is malformed or uses a
-    /// capability the device lacks. Backends that cross-compile (Metal, DX12,
-    /// WebGPU) report translation failures here too.
+    /// [`HalError::ShaderCompilation`] if the artifact is malformed, uses a
+    /// capability the device lacks, or fails to translate. Also — via
+    /// [`ShaderModuleDesc::unusable`] — when the descriptor carries no format
+    /// this backend can compile, including a descriptor that carries none at
+    /// all.
     fn create_shader_module(
         &self,
         desc: &ShaderModuleDesc<'_>,

@@ -85,8 +85,8 @@ use crate::{
     PresentMode, QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
     ReadbackHandle, ReadbackState, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle,
     SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreWait, ShaderModuleDesc,
-    ShaderModuleHandle, ShaderStages, SubmitInfo, SurfaceCaps, SurfaceError, SurfaceHandle,
-    SwapchainDesc, SwapchainHandle, Viewport,
+    ShaderModuleHandle, ShaderSources, ShaderStages, SubmitInfo, SurfaceCaps, SurfaceError,
+    SurfaceHandle, SwapchainDesc, SwapchainHandle, Viewport,
 };
 
 /// Formats a null surface reports, and therefore the only ones a swapchain on
@@ -855,25 +855,39 @@ impl Device for NullDevice {
 
     // --- shaders and pipelines ---
 
+    /// Accepts every format the seam defines and records which ones it was
+    /// handed.
+    ///
+    /// The null backend compiles nothing, so it is the one backend with no
+    /// reason to prefer a format — and that is what makes it the place a test
+    /// asserts what a *caller* supplied. See
+    /// [`Recorder::shader_module_sources`](crate::null::Recorder::shader_module_sources).
     fn create_shader_module(
         &self,
         desc: &ShaderModuleDesc<'_>,
     ) -> Result<ShaderModuleHandle, HalError> {
+        let sources = desc.provided();
+        if sources.is_empty() {
+            // Every real backend rejects this too; saying so here means the
+            // no-GPU suite catches a call site that stopped passing artifacts.
+            return Err(desc.unusable(ShaderSources::all()));
+        }
         // The SPIR-V magic number. Checking it costs nothing and catches the
         // classic "passed bytes where words were wanted" mistake, which
-        // otherwise surfaces as a driver error at P1.
+        // otherwise surfaces as a driver error at P1. Only when SPIR-V was
+        // offered at all: a WGSL-only module is legal and has no magic number.
         const SPIRV_MAGIC: u32 = 0x0723_0203;
-        match desc.spirv.first() {
-            Some(&SPIRV_MAGIC) => {}
-            Some(word) => {
-                return Err(HalError::ShaderCompilation(format!(
-                    "not SPIR-V: first word is {word:#010x}, expected {SPIRV_MAGIC:#010x}"
-                )));
-            }
-            None => {
-                return Err(HalError::ShaderCompilation("empty module".to_string()));
-            }
+        if let Some(&word) = desc.spirv.first()
+            && word != SPIRV_MAGIC
+        {
+            return Err(HalError::ShaderCompilation(format!(
+                "not SPIR-V: first word is {word:#010x}, expected {SPIRV_MAGIC:#010x}"
+            )));
         }
+        self.recorder
+            .lock()
+            .shader_modules_created
+            .push((desc.label.map(ToOwned::to_owned), sources));
         Ok(self.insert(ObjectKind::ShaderModule, desc.label, Detail::None))
     }
 

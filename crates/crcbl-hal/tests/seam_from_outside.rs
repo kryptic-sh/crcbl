@@ -188,6 +188,7 @@ fn setup(instance: &dyn Instance) -> Frame {
         .create_shader_module(&ShaderModuleDesc {
             label: Some("opaque"),
             spirv: &SPIRV,
+            wgsl: None,
         })
         .expect("shader module");
     let layout = device

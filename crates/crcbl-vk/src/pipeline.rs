@@ -49,7 +49,7 @@ use crcbl_hal::{
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, ComputePipelineDesc,
     ComputePipelineHandle, DeviceCaps, Features, GraphicsPipelineDesc, GraphicsPipelineHandle,
     HalError, PipelineLayoutDesc, PipelineLayoutHandle, SamplerDesc, SamplerHandle, ShaderEntry,
-    ShaderModuleDesc, ShaderModuleHandle, ShaderStages,
+    ShaderModuleDesc, ShaderModuleHandle, ShaderSources, ShaderStages,
 };
 
 use crate::conv;
@@ -244,6 +244,16 @@ impl VkDevice {
         &self,
         desc: &ShaderModuleDesc<'_>,
     ) -> Result<ShaderModuleHandle, HalError> {
+        // Vulkan consumes SPIR-V and nothing else. `desc.wgsl` is ignored
+        // rather than translated: a WGSL→SPIR-V frontend inside the Vulkan
+        // backend would be a second shader compiler in the hot path to fix a
+        // problem no Vulkan driver has, and the engine's SPIR-V is the artifact
+        // this backend was designed around — including the `DrawParameters`
+        // capability that vertex pulling needs and that naga cannot read.
+        if desc.spirv.is_empty() {
+            return Err(desc.unusable(ShaderSources::SPIRV));
+        }
+
         // Parsed before the driver sees it, so "these are bytes, not words" and
         // "this module has no entry points" are reported by name rather than as
         // a driver error at pipeline creation.

@@ -1,20 +1,61 @@
 //! Shader modules.
 //!
-//! # SPIR-V is the interchange format
+//! # The caller offers every artifact it has; the backend picks
 //!
-//! The seam takes **SPIR-V words** and nothing else. Shaders are authored in
-//! Slang and compiled at build time (`docs/plan/02-vulkan-backend.md` §2.3);
-//! backends that cannot consume SPIR-V directly cross-compile it — Metal and
-//! DX12 via Slang's MSL/DXIL outputs (stage 9), WebGPU via SPIR-V → WGSL
-//! (stage 10). That is a *backend* concern; nothing above the seam knows a
-//! second shader language exists.
+//! [`ShaderModuleDesc`] carries **one field per artifact format** — SPIR-V
+//! words today, WGSL source alongside them — and the caller fills in every one
+//! it has. It does not choose between them and it is not told which backend it
+//! is talking to; the backend takes the format it can consume and ignores the
+//! rest.
 //!
-//! The alternative — a `ShaderSource` enum with a variant per language — was
-//! rejected because it would put artifact-format selection above the seam,
-//! where the renderer would have to know which backend it was talking to in
-//! order to hand it the right bytes.
+//! This replaces "the seam takes SPIR-V words and nothing else", which held
+//! from P0 to P5 on the premise that a backend which cannot consume SPIR-V
+//! cross-compiles it. `crcbl-wgpu` disproved the premise: `naga`, the only
+//! SPIR-V frontend a browser build can carry, does not implement
+//! `DrawParameters`, and every artifact this engine ships declares it because
+//! Slang lowers `SV_VertexID` to `gl_VertexIndex - gl_BaseVertex`. So
+//! `crcbl-wgpu` could not create a shader module on **any** target — the
+//! failure was not browser-specific — while `crcbl-shaders` had been emitting
+//! complete WGSL since P5.3 that the seam had no field to carry.
+//!
+//! Recompiling the SPIR-V without `DrawParameters` would also have unblocked
+//! naga. It was rejected: it constrains the Vulkan backend, which wants vertex
+//! pulling, in order to widen the wgpu one, and the WGSL artifacts already
+//! exist.
+//!
+//! ## Why fields and not a `ShaderSource` enum
+//!
+//! An enum with a variant per language was rejected at P0 and is still
+//! rejected, for the reason first written down then: it puts artifact-format
+//! *selection* above the seam, where the renderer would have to know which
+//! backend it was talking to in order to hand it the right bytes. Parallel
+//! fields keep the selection below the seam, which is the whole point — a
+//! caller says "here is the SPIR-V and here is the WGSL", every backend sees
+//! the same descriptor, and adding MSL or DXIL at P14 adds a field rather than
+//! a variant every existing `match` has to grow an arm for.
+//!
+//! ## The contract
+//!
+//! **Callers must supply every format they hold.** Omitting one is not a
+//! preference — it is a statement that the artifact does not exist, and it is
+//! how a shader silently becomes unusable on a backend that has not been
+//! written yet. `crcbl-shaders`' generated table hands out both halves
+//! (`Shader::spirv`, `Shader::wgsl`), so the correct call site names both.
+//!
+//! **A descriptor must carry at least one format.** One with neither is
+//! [`HalError::ShaderCompilation`].
+//!
+//! **A backend that is handed only formats it cannot consume must fail, by
+//! name.** [`HalError::ShaderCompilation`]
+//! whose message says which formats were offered and which the backend needed —
+//! never a silent fallback, never a module handle that no pipeline can use.
+//! [`ShaderSources`] exists so that message is spelled the same way everywhere.
+
+use core::fmt;
 
 use crcbl_core::Handle;
+
+use crate::HalError;
 
 /// Marker type for shader-module handles. Uninhabited.
 #[derive(Debug)]
@@ -41,18 +82,112 @@ bitflags::bitflags! {
     }
 }
 
+bitflags::bitflags! {
+    /// Which shader artifact formats are in play — offered by a caller, or
+    /// consumable by a backend.
+    ///
+    /// One bit per field of [`ShaderModuleDesc`]. It exists so that "you gave
+    /// me WGSL and I need SPIR-V" is one sentence written once rather than a
+    /// phrase each backend invents, and so a test can assert what a call site
+    /// supplied without reaching for the descriptor's fields one at a time.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct ShaderSources: u32 {
+        /// [`ShaderModuleDesc::spirv`] is non-empty.
+        const SPIRV = 1 << 0;
+        /// [`ShaderModuleDesc::wgsl`] is `Some`.
+        const WGSL = 1 << 1;
+    }
+}
+
+impl fmt::Display for ShaderSources {
+    /// Names the formats in a form that reads inside a sentence:
+    /// `"SPIR-V and WGSL"`, `"WGSL"`, or `"nothing"` for the empty set.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut first = true;
+        for (bit, name) in [(Self::SPIRV, "SPIR-V"), (Self::WGSL, "WGSL")] {
+            if self.contains(bit) {
+                if !first {
+                    f.write_str(" and ")?;
+                }
+                f.write_str(name)?;
+                first = false;
+            }
+        }
+        if first {
+            f.write_str("nothing")
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// Creation parameters for a shader module.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// One field per artifact format. Fill in every one you have — see the
+/// [module docs](self) for why the caller offers and the backend picks, and for
+/// what a backend owes you when it cannot use what you offered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ShaderModuleDesc<'a> {
     /// Debug name; see [`BufferDesc::label`](crate::BufferDesc::label).
     pub label: Option<&'a str>,
-    /// SPIR-V, as 32-bit words.
+    /// SPIR-V, as 32-bit words. Empty when there is no SPIR-V artifact.
     ///
     /// Words rather than bytes because SPIR-V is defined as a word stream and
     /// every consumer needs 4-byte alignment; taking `&[u8]` would push a
     /// realignment copy into every backend. Build scripts emit `&[u32]` via
     /// `include_bytes!` + a const transmute helper, or read words at load time.
+    ///
+    /// Empty rather than `Option<&[u32]>` for absence: a zero-word SPIR-V
+    /// module is not a thing that exists — the format's own header is five
+    /// words — so the two states cannot be confused, and every existing call
+    /// site keeps passing a slice.
     pub spirv: &'a [u32],
+    /// WGSL source, as text. `None` when there is no WGSL artifact.
+    ///
+    /// `Option<&str>` rather than `""` for absence, unlike `spirv` above,
+    /// because the empty string *is* a syntactically valid WGSL module — one
+    /// with no entry points. Conflating it with "no artifact" would turn a
+    /// truncated file into "this backend does not get WGSL" and send the caller
+    /// looking in the wrong place.
+    ///
+    /// Text and not a parsed module: WGSL's interchange form is source, every
+    /// consumer of it is a compiler, and the seam has no business owning a
+    /// syntax tree.
+    pub wgsl: Option<&'a str>,
+}
+
+impl ShaderModuleDesc<'_> {
+    /// Which formats this descriptor actually carries.
+    ///
+    /// The one place the "empty means absent" rule for
+    /// [`spirv`](Self::spirv) is spelled out, so no backend re-derives it.
+    #[must_use]
+    pub fn provided(&self) -> ShaderSources {
+        let mut sources = ShaderSources::empty();
+        if !self.spirv.is_empty() {
+            sources |= ShaderSources::SPIRV;
+        }
+        if self.wgsl.is_some() {
+            sources |= ShaderSources::WGSL;
+        }
+        sources
+    }
+
+    /// The error a backend owes a caller when this descriptor carries nothing
+    /// it can consume — including the case where it carries nothing at all.
+    ///
+    /// `accepted` is what the backend can compile. The message names both
+    /// sides, because "shader compilation failed" without them sends the reader
+    /// to the shader source when the bug is at the call site.
+    #[must_use]
+    pub fn unusable(&self, accepted: ShaderSources) -> HalError {
+        HalError::ShaderCompilation(format!(
+            "shader module `{label}` was given {given}, but this backend can only compile \
+             {accepted}",
+            label = self.label.unwrap_or("<unlabelled>"),
+            given = self.provided(),
+        ))
+    }
 }
 
 /// One stage of a pipeline: a module plus the entry point to use from it.
@@ -81,15 +216,103 @@ mod tests {
         assert!(ShaderStages::ALL.contains(ShaderStages::COMPUTE));
     }
 
+    /// SPIR-V magic number, as the first word of any valid module.
+    const MAGIC: u32 = 0x0723_0203;
+
     #[test]
     fn shader_desc_takes_words_not_bytes() {
-        // SPIR-V magic number, as the first word of any valid module.
-        let spirv = [0x0723_0203u32, 0x0001_0600, 0, 0, 0];
+        let spirv = [MAGIC, 0x0001_0600, 0, 0, 0];
         let desc = ShaderModuleDesc {
             label: Some("probe"),
             spirv: &spirv,
+            wgsl: None,
         };
-        assert_eq!(desc.spirv[0], 0x0723_0203);
+        assert_eq!(desc.spirv[0], MAGIC);
         assert_eq!(desc.spirv.len(), 5);
+    }
+
+    /// The contract's "empty means absent" rule, in both fields, read back
+    /// through the one function every backend uses to read it.
+    #[test]
+    fn provided_reports_exactly_the_formats_that_are_present() {
+        let spirv = [MAGIC, 0x0001_0600, 0, 0, 0];
+        assert_eq!(
+            ShaderModuleDesc::default().provided(),
+            ShaderSources::empty()
+        );
+        assert_eq!(
+            ShaderModuleDesc {
+                spirv: &spirv,
+                ..ShaderModuleDesc::default()
+            }
+            .provided(),
+            ShaderSources::SPIRV
+        );
+        assert_eq!(
+            ShaderModuleDesc {
+                wgsl: Some("@fragment fn main() {}"),
+                ..ShaderModuleDesc::default()
+            }
+            .provided(),
+            ShaderSources::WGSL
+        );
+        assert_eq!(
+            ShaderModuleDesc {
+                spirv: &spirv,
+                wgsl: Some("@fragment fn main() {}"),
+                ..ShaderModuleDesc::default()
+            }
+            .provided(),
+            ShaderSources::SPIRV | ShaderSources::WGSL
+        );
+    }
+
+    /// An empty WGSL string is a *present* artifact, not an absent one — the
+    /// distinction `Option` exists to keep.
+    #[test]
+    fn empty_wgsl_is_present_not_absent() {
+        let desc = ShaderModuleDesc {
+            wgsl: Some(""),
+            ..ShaderModuleDesc::default()
+        };
+        assert_eq!(desc.provided(), ShaderSources::WGSL);
+    }
+
+    #[test]
+    fn source_sets_name_themselves_in_a_sentence() {
+        assert_eq!(ShaderSources::empty().to_string(), "nothing");
+        assert_eq!(ShaderSources::SPIRV.to_string(), "SPIR-V");
+        assert_eq!(ShaderSources::WGSL.to_string(), "WGSL");
+        assert_eq!(
+            (ShaderSources::SPIRV | ShaderSources::WGSL).to_string(),
+            "SPIR-V and WGSL"
+        );
+    }
+
+    /// The error a backend owes names both sides of the gap, and the module, so
+    /// the reader looks at the call site rather than at the shader source.
+    #[test]
+    fn the_unusable_error_names_the_gap() {
+        let desc = ShaderModuleDesc {
+            label: Some("mesh.slang"),
+            wgsl: Some("@fragment fn main() {}"),
+            ..ShaderModuleDesc::default()
+        };
+        let HalError::ShaderCompilation(message) = desc.unusable(ShaderSources::SPIRV) else {
+            panic!("an unusable descriptor is a shader-compilation failure");
+        };
+        assert!(message.contains("mesh.slang"), "{message}");
+        assert!(message.contains("was given WGSL"), "{message}");
+        assert!(message.contains("only compile SPIR-V"), "{message}");
+    }
+
+    #[test]
+    fn a_descriptor_with_no_artifact_at_all_says_so() {
+        let HalError::ShaderCompilation(message) =
+            ShaderModuleDesc::default().unusable(ShaderSources::all())
+        else {
+            panic!("an unusable descriptor is a shader-compilation failure");
+        };
+        assert!(message.contains("was given nothing"), "{message}");
     }
 }

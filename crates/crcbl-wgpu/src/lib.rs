@@ -25,6 +25,31 @@
 //!   inserts its own hazard barriers, so `pipeline_barrier` is a real no-op and
 //!   a timeline "signal" is the completion of the submission that carries it.
 //!
+//! # Shaders: WGSL first
+//!
+//! [`create_shader_module`](crcbl_hal::Device::create_shader_module) takes
+//! [`ShaderModuleDesc::wgsl`](crcbl_hal::ShaderModuleDesc::wgsl) when it is
+//! there and falls back to the SPIR-V only when it is not. Both reach `naga`,
+//! but its SPIR-V frontend implements a subset that excludes `DrawParameters` —
+//! which every artifact `crcbl-shaders` emits declares, because Slang lowers
+//! `SV_VertexID` to `gl_VertexIndex - gl_BaseVertex`. Until the seam grew a
+//! WGSL field at P5.9 this backend had **never created a shader module on any
+//! target**, native or browser; the failure was never browser-specific. A
+//! descriptor carrying neither format is an error naming the gap, not a module
+//! handle no pipeline could use.
+//!
+//! ## Known gap: `ui.slang` still does not compile here
+//!
+//! WGSL has no push constants, and Slang's WGSL target emits the block as a
+//! module-scope `var<uniform>` with no `@group`/`@binding` — invalid WGSL,
+//! which `naga` refuses. `mesh`, `tonemap` and `triangle` compile; `ui` does
+//! not, so `apps/breakout` under `--backend wgpu` stops at that module while
+//! `apps/sandbox`, which has no UI pass, gets past every shader it needs. The
+//! fix is a uniform buffer in place of the push-constant block in
+//! `crcbl-render`'s UI pass and in `ui.slang` — the Tier B data-layout rule
+//! `docs/plan/10-wasm-webgpu.md` states for this backend anyway. Recorded in
+//! full in `crcbl-shaders`' crate docs.
+//!
 //! # wasm32
 //!
 //! The crate compiles for `wasm32` and opens devices there. Adapter enumeration
