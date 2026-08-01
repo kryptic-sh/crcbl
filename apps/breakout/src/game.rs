@@ -1,5 +1,19 @@
 //! Breakout game logic: physics integration, ball/wall/paddle colliders,
-//! gravity, collision detection, server/client replication.
+//! collision detection, server/client replication.
+//!
+//! # The ball is not a projectile
+//!
+//! There is no gravity and no drag: the ball keeps [`BALL_SPEED`] from launch to
+//! death and a collision only ever changes its *direction*. That is the whole
+//! model, and it is what breakout has always been — a ball under Earth gravity
+//! arcs, so the same launch reaches a different brick depending on how far
+//! across the screen it has travelled, and the player cannot aim.
+//!
+//! The paddle is the one collider that does not answer with a mirror
+//! reflection: where the ball lands across its width, plus which way it was
+//! being moved, chooses the outgoing angle. See [`paddle_bounce`]. A paddle that
+//! reflected off its contact normal like a wall would return every ball at the
+//! angle it arrived, which leaves the player nothing to steer with.
 //!
 //! # Where the simulation runs
 //!
@@ -46,7 +60,7 @@ use crcbl_core::input::KeyCode;
 use crcbl_ecs::{Entity, GameModule, World};
 use crcbl_input::{ActionDecl, ActionKind, ActionMap, Binding};
 use crcbl_net::{InMemoryTransport, ProtocolCompatibility};
-use crcbl_phys::{ColliderComponent, GravityForce, PhysicsSystem, RigidBody, Transform};
+use crcbl_phys::{ColliderComponent, PhysicsSystem, RigidBody, Transform};
 use crcbl_server::Server;
 use glam::DVec3;
 
@@ -71,11 +85,32 @@ pub const WORLD_TOP: f64 = 9.0;
 pub const BALL_RADIUS: f64 = 0.3;
 const BALL_START_X: f64 = 0.0;
 const BALL_START_Y: f64 = -5.0;
-const BALL_SPEED_X: f64 = 4.0;
-/// Ball needs ~14 m/s upward to reach the brick grid at y=4..7 from
-/// start position y=-5 with Earth gravity (9.8 m/s²):
-/// v₀² = 2gΔy = 2*9.8*9 = 176 → v₀ ≈ 13.3. Use 14 for margin.
-const BALL_SPEED_Y: f64 = 14.0;
+/// The ball's speed, in world units per second — constant for the whole life of
+/// a ball, because nothing accelerates it. Every collision rotates the velocity
+/// and [`keep_speed`] puts the magnitude back.
+///
+/// 11 covers the 8.6 units from the start position at y = -5 to the underside
+/// of the lowest brick row at y = 3.6 in about 0.8 s, which is the pace the
+/// game reads at.
+const BALL_SPEED: f64 = 11.0;
+/// How far off vertical a launch goes, in radians. Not zero: a ball launched
+/// straight up comes straight back down onto the middle of the paddle, and the
+/// opening of every run would be identical.
+const LAUNCH_ANGLE: f64 = 0.35;
+/// The steepest a paddle bounce sends the ball away from vertical, reached at
+/// the paddle's outer edge. 60°: shallow enough to still climb the screen.
+const MAX_BOUNCE_ANGLE: f64 = std::f64::consts::FRAC_PI_3;
+/// What a paddle moving under the ball adds to that angle, in radians (~11°).
+/// Small next to [`MAX_BOUNCE_ANGLE`], so where the ball lands stays the
+/// player's main control and a moving paddle is the trim on top of it.
+const PADDLE_SPIN_ANGLE: f64 = 0.2;
+/// The shallowest the ball's direction may get, as a fraction of its speed.
+///
+/// A ball travelling almost horizontally rallies between the two side walls
+/// above the paddle forever, and the player has no way to reach it. Every
+/// bounce tilts the direction back to at least this, which costs nothing in the
+/// normal case and makes the degenerate one impossible.
+const MIN_VERTICAL_FRACTION: f64 = 0.25;
 /// How far below the paddle the ball has to fall before the life is lost.
 const BALL_DEAD_Y: f64 = PADDLE_Y - 2.0;
 
@@ -246,7 +281,7 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
         logic.launched = true;
         let ball = logic.ball;
         with_physics(world, |phys| {
-            set_velocity(phys, ball, DVec3::new(BALL_SPEED_X, BALL_SPEED_Y, 0.0));
+            set_velocity(phys, ball, launch_velocity());
         });
     }
 
@@ -268,8 +303,9 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
             moved.position.y = PADDLE_Y;
             phys.set_transform(paddle, moved);
         }
-        // A ball that has not been launched is pinned at the start position,
-        // so gravity does not drag it out of the world while the player waits.
+        // A ball that has not been launched is pinned at the start position, so
+        // a run that has ended — or a life that has just been lost — parks it
+        // there rather than wherever the last collision left it.
         if !launched {
             reset_ball(phys, ball);
         }
@@ -277,7 +313,7 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
 
     // --- collisions, scoring, lives -------------------------------------
     if logic.state == GameState::Playing {
-        resolve_collisions(logic, world, dt);
+        resolve_collisions(logic, world, dt, dir);
         check_life_and_win(logic, world);
     }
 
@@ -286,8 +322,14 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
 
 /// Sweeps the ball's path over the tick that just ran and resolves the first
 /// thing it hit.
-fn resolve_collisions(logic: &mut GameLogic, world: &mut World, dt: f64) {
+///
+/// `paddle_dir` is the direction the player is driving the paddle this tick,
+/// -1, 0 or 1; it only matters for a paddle hit, where it trims the outgoing
+/// angle.
+fn resolve_collisions(logic: &mut GameLogic, world: &mut World, dt: f64, paddle_dir: f64) {
     let ball = logic.ball;
+    let paddle = logic.paddle;
+    let paddle_x = logic.paddle_x;
     let mut broken: Option<Entity> = None;
     let mut cue: Option<(u32, f32)> = None;
 
@@ -331,7 +373,15 @@ fn resolve_collisions(logic: &mut GameLogic, world: &mut World, dt: f64) {
 
             if approaching {
                 let mut new_body = body;
-                new_body.velocity = vel - 2.0 * vel.dot(hit.normal) * hit.normal;
+                // The paddle steers; everything else mirrors. `normal.y` tells
+                // the paddle's top face from its ends — a ball that clips the
+                // side of the paddle is coming from beside it, and answering
+                // that with an upward bounce would be a free save.
+                new_body.velocity = if hit_entity == paddle && hit.normal.y > 0.5 {
+                    paddle_bounce(hit.point.x, paddle_x, paddle_dir)
+                } else {
+                    keep_speed(vel - 2.0 * vel.dot(hit.normal) * hit.normal)
+                };
                 phys.set_body(ball, new_body);
                 resolved.position = hit.point + hit.normal * BALL_RADIUS * 1.01;
                 phys.set_transform(ball, resolved);
@@ -436,6 +486,54 @@ fn with_physics<R>(world: &mut World, f: impl FnOnce(&mut PhysicsSystem) -> R) -
         }
     }
     None
+}
+
+/// The velocity a launch gives the ball: up and slightly to the right, at the
+/// one speed the ball ever has.
+fn launch_velocity() -> DVec3 {
+    DVec3::new(LAUNCH_ANGLE.sin(), LAUNCH_ANGLE.cos(), 0.0) * BALL_SPEED
+}
+
+/// The velocity a paddle bounce gives the ball.
+///
+/// **Where** the ball lands on the paddle decides the outgoing direction, not
+/// the contact normal: dead centre goes straight up, the outer edge goes off at
+/// [`MAX_BOUNCE_ANGLE`], and the paddle's own motion trims that by up to
+/// [`PADDLE_SPIN_ANGLE`]. This is the player's only control over the ball, and
+/// mirror reflection — which sends every ball back at the angle it arrived —
+/// gives them none of it.
+///
+/// The result always points upward: `|angle| ≤ MAX_BOUNCE_ANGLE < π/2`, so
+/// `cos` is positive and a bounce cannot drive the ball down through the paddle.
+fn paddle_bounce(contact_x: f64, paddle_x: f64, paddle_dir: f64) -> DVec3 {
+    let offset = ((contact_x - paddle_x) / PADDLE_HALF_WIDTH).clamp(-1.0, 1.0);
+    let angle = (offset * MAX_BOUNCE_ANGLE + paddle_dir * PADDLE_SPIN_ANGLE)
+        .clamp(-MAX_BOUNCE_ANGLE, MAX_BOUNCE_ANGLE);
+    DVec3::new(angle.sin(), angle.cos(), 0.0) * BALL_SPEED
+}
+
+/// Puts `vel` back at [`BALL_SPEED`], no shallower than
+/// [`MIN_VERTICAL_FRACTION`].
+///
+/// Mirror reflection off an axis-aligned box preserves speed exactly, so the
+/// rescale is a no-op in exact arithmetic and a drift-killer in floating point.
+/// The vertical floor is the part that changes behaviour: it is what stops a
+/// ball from ending up in a horizontal rally the paddle can never reach.
+fn keep_speed(vel: DVec3) -> DVec3 {
+    let planar = DVec3::new(vel.x, vel.y, 0.0);
+    if planar.length_squared() < 1e-12 {
+        return DVec3::new(0.0, BALL_SPEED, 0.0);
+    }
+    let dir = planar.normalize();
+    // Rebuilt from the clamped y rather than scaled, so the result is exactly
+    // on the circle of radius `BALL_SPEED` and exactly at the floor angle.
+    let y = if dir.y.abs() < MIN_VERTICAL_FRACTION {
+        MIN_VERTICAL_FRACTION.copysign(dir.y)
+    } else {
+        dir.y
+    };
+    let x = (1.0 - y * y).max(0.0).sqrt().copysign(dir.x);
+    DVec3::new(x, y, 0.0) * BALL_SPEED
 }
 
 fn reset_ball(phys: &mut PhysicsSystem, ball: Entity) {
@@ -592,8 +690,10 @@ impl Game {
         assert!(tick_hz > 0, "tick rate must be positive");
         let mut world = World::new();
 
-        let mut phys = PhysicsSystem::new();
-        phys.add_force_provider(Box::new(GravityForce::EARTH));
+        // No force providers at all: see the module docs. Breakout's ball is
+        // steered by its collisions and by nothing else, so the integrator only
+        // ever moves it along the velocity a bounce left it with.
+        let phys = PhysicsSystem::new();
         world.register_system(Box::new(phys));
 
         // Ball: dynamic, sphere collider.
@@ -1059,6 +1159,149 @@ mod tests {
         h.frame();
         h.frame();
         assert_eq!(h.game.state, GameState::Playing);
+    }
+
+    /// Nothing accelerates the ball: between two bounces it travels in a
+    /// straight line, at one speed, forever.
+    ///
+    /// The ball used to be a dynamic body under `GravityForce::EARTH`, so every
+    /// tick added `9.81 * dt` to its downward velocity — 0.16 m/s at 60 Hz —
+    /// and the "bounce" was an arc. Each per-tick step below is compared with
+    /// the first one, which is the smallest thing gravity cannot survive.
+    #[test]
+    fn a_launched_ball_flies_straight_at_a_constant_speed() {
+        let mut h = Harness::new(60, 60);
+        h.run(0.1, LAUNCH);
+        assert_eq!(h.game.state, GameState::Playing, "the launch has to happen");
+
+        let mut render = RenderState::default();
+        h.game.render_state(&mut render);
+        let mut previous = render.ball;
+        let step = BALL_SPEED * h.game.tick_dt_secs();
+
+        // 30 ticks of free flight: from y ≈ -4 the ball covers 5.2 units and
+        // the lowest brick's underside is at y = 3.6, so nothing is hit and
+        // every step below is unresolved motion.
+        for tick in 0..30 {
+            h.frame();
+            h.game.render_state(&mut render);
+            let delta = render.ball - previous;
+            previous = render.ball;
+            assert!(
+                (delta.length() - step).abs() < 1e-9,
+                "tick {tick} moved {} where {step} was owed",
+                delta.length(),
+            );
+            assert!(
+                delta.y > 0.0,
+                "tick {tick} moved the ball downward: {delta:?}",
+            );
+        }
+    }
+
+    /// Where the ball lands across the paddle is what decides where it goes.
+    ///
+    /// The ball is dropped **straight down** onto three known points, so a
+    /// mirror reflection off the paddle's contact normal — which is what the
+    /// game used to do — returns it straight back up in all three cases and
+    /// `vel.x` is zero every time. The player had no way to aim.
+    #[test]
+    fn the_paddle_steers_the_ball_by_where_it_is_caught() {
+        let left = drop_onto_paddle(-4.0);
+        let centre = drop_onto_paddle(0.0);
+        let right = drop_onto_paddle(4.0);
+
+        assert!(left.x < -1.0, "a catch on the left must go left: {left:?}");
+        assert!(
+            right.x > 1.0,
+            "a catch on the right must go right: {right:?}"
+        );
+        assert!(centre.x.abs() < 1e-9, "a centred catch goes up: {centre:?}");
+        for v in [left, centre, right] {
+            assert!(v.y > 0.0, "a paddle bounce always returns the ball: {v:?}");
+            assert!(
+                (v.length() - BALL_SPEED).abs() < 1e-9,
+                "a bounce changed the speed: {v:?}",
+            );
+        }
+    }
+
+    /// Drops the ball straight down onto the paddle, `offset` world units from
+    /// its centre, and returns the velocity the bounce gave it.
+    ///
+    /// Placed rather than played into position: the assertion is about the
+    /// outgoing angle for an *exactly* known contact, and a ball that arrived
+    /// under its own steam would arrive somewhere slightly different.
+    fn drop_onto_paddle(offset: f64) -> DVec3 {
+        let mut h = Harness::new(60, 60);
+        h.run(0.1, LAUNCH);
+        let (ball, paddle_x) = {
+            let logic = lock(&h.game.shared);
+            (logic.ball, logic.paddle_x)
+        };
+        // A world unit above the paddle, falling: several ticks of ordinary
+        // free flight and then the ordinary collision path, rather than a
+        // contact staged inside the tick it is resolved in.
+        with_physics(h.game.server.world_mut(), |phys| {
+            phys.set_transform(
+                ball,
+                Transform::from_position(DVec3::new(paddle_x + offset, PADDLE_Y + 1.0, 0.0)),
+            );
+            set_velocity(phys, ball, DVec3::new(0.0, -BALL_SPEED, 0.0));
+        });
+
+        for _ in 0..12 {
+            h.frame();
+            let velocity = with_physics(h.game.server.world_mut(), |phys| {
+                phys.body(ball).expect("the ball has a body").velocity
+            })
+            .expect("the world has physics");
+            if velocity.y > 0.0 {
+                return velocity;
+            }
+        }
+        panic!("the paddle never returned a ball dropped {offset} from its centre");
+    }
+
+    /// A paddle being driven under the ball trims the angle it leaves at, and
+    /// never enough to point it back down.
+    #[test]
+    fn a_moving_paddle_trims_the_bounce() {
+        let still = paddle_bounce(1.0, 0.0, 0.0);
+        let with_the_ball = paddle_bounce(1.0, 0.0, 1.0);
+        let against_it = paddle_bounce(1.0, 0.0, -1.0);
+        assert!(with_the_ball.x > still.x, "{with_the_ball:?} vs {still:?}");
+        assert!(against_it.x < still.x, "{against_it:?} vs {still:?}");
+
+        // The clamp holds at the edge: even the outer edge plus a full spin
+        // stays inside the bounce cone, so the ball still climbs.
+        let edge = paddle_bounce(PADDLE_HALF_WIDTH, 0.0, 1.0);
+        assert!(edge.y > 0.0, "a bounce drove the ball down: {edge:?}");
+        assert!((edge.length() - BALL_SPEED).abs() < 1e-9);
+    }
+
+    /// No bounce leaves the ball in a rally the paddle cannot reach.
+    #[test]
+    fn a_bounce_is_never_flatter_than_the_floor_angle() {
+        let floor = BALL_SPEED * MIN_VERTICAL_FRACTION;
+        for vel in [
+            DVec3::new(BALL_SPEED, 0.0, 0.0),
+            DVec3::new(-BALL_SPEED, 0.0, 0.0),
+            DVec3::new(10.9, -0.5, 0.0),
+            DVec3::new(-10.9, 0.5, 0.0),
+        ] {
+            let kept = keep_speed(vel);
+            assert!(
+                kept.y.abs() >= floor - 1e-9,
+                "{vel:?} stayed flat at {kept:?}",
+            );
+            assert!((kept.length() - BALL_SPEED).abs() < 1e-9, "{kept:?}");
+            assert_eq!(
+                kept.x < 0.0,
+                vel.x < 0.0,
+                "the flattening reversed the ball: {vel:?} → {kept:?}",
+            );
+        }
     }
 
     /// **Finding 2.** The paddle's speed is a property of simulated time, not
