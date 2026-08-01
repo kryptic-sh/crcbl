@@ -104,7 +104,11 @@ def nav_html(links: list[dict]) -> str:
     for link in links:
         href, label = link["href"], link["label"]
         if href.startswith("http"):
-            parts.append(f'<a href="{href}" rel="noopener">{label} ↗</a>')
+            # No `target="_blank"`, and therefore no `rel="noopener"` — that
+            # attribute exists to blunt the risk of a new tab, so without one it
+            # is noise. Whether a link opens in a new tab is the reader's call;
+            # the arrow only marks it as leaving the site.
+            parts.append(f'<a href="{href}">{label} ↗</a>')
         else:
             parts.append(f'<a href="{href}">{label}</a>')
     return "\n        ".join(parts)
