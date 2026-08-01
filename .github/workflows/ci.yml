@@ -689,9 +689,18 @@ jobs:
           --locked --test corpus
       # A fixed seed and nonzero run count make this a bounded, reproducible
       # execution of every decoder over both the committed corpus and mutations.
+      #
+      # `--target` is spelled out because `cargo fuzz` defaults it to the triple
+      # **cargo-fuzz itself was built for**, and the binary that lands here is
+      # the prebuilt `x86_64-unknown-linux-musl` one (install-action has no
+      # recipe for cargo-fuzz@0.13.1 and falls back to cargo-binstall, which
+      # picks the static build). Without this the job asked the toolchain for a
+      # musl std it does not have and reported it as "sanitizer is incompatible
+      # with statically linked libc" — a message about a target nobody chose.
       - name: Fuzz hostile decoder packets
         run: >-
-          cargo fuzz run --fuzz-dir crates/crcbl-net/fuzz decoder
+          cargo fuzz run --fuzz-dir crates/crcbl-net/fuzz
+          --target x86_64-unknown-linux-gnu decoder
           crates/crcbl-net/fuzz/corpus/decoder --
           -runs=10000 -seed=20260730 -max_len=65537 -timeout=10
       - name: Verify fuzz lockfile stayed current
