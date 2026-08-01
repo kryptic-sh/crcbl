@@ -11,6 +11,7 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
   `app::WorldToScreen`. Neither is a pixel check that would catch the framing
   drifting again: `web/run-browser-e2e.sh` has not been run and there is no
   golden image for a breakout frame.
-- **No changelog exists in this repo**, so the bounce-physics, speed-ramp and
-  camera changes are recorded only in `git log`. Worth starting one at the first
-  tagged release; there are no tags yet.
+- **The changelog starts mid-project.** `CHANGELOG.md` covers this session's
+  changes onward; everything before it is in `git log` only, and nobody has gone
+  back to reconstruct it. Worth doing at the first tagged release, or not at all
+  — there are no releases yet for a reader to be missing entries from.
