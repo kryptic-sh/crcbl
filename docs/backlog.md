@@ -3,34 +3,6 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## crcbl-phys: `sweep_sphere` misses contacts by up to one radius
-
-`PhysicsWorld::sweep_sphere` builds its candidate list with
-`Bvh::traverse_segment`, which walks the BVH with the sphere's **centre line**
-as a ray (`broadphase.rs`, `traverse_segment` → `traverse_ray`). The narrow
-phase (`query::swept_sphere_vs_aabb`) does inflate the target by the radius and
-handles a sweep that starts overlapping — but it is only ever called for
-colliders the centre line already reached, so a sphere that grazes a box, or
-stops short of it by less than its radius, is never offered to it at all.
-
-Verified while writing breakout's paddle-steering test: a ball placed 0.05 units
-clear of the paddle's top face and moving down at 11 u/s reported **no hit** on
-the tick its surface passed through the face, and kept its velocity exactly. It
-only registered once its centre crossed into the paddle's AABB, a tick and a
-half later.
-
-Consequences today: a contact resolves up to `radius` late, so breakout's ball
-is drawn slightly inside a wall or a brick on the tick before it bounces, and a
-genuinely grazing sweep is missed outright.
-
-The fix is small and local — traverse with `Bvh::traverse_aabb` over the
-segment's bounds inflated by the radius, then keep the existing narrow phase,
-which already rejects the extra candidates. Not done here because `sweep_sphere`
-is a shared engine query with consumers beyond this game, and changing what it
-reports deserves its own change with its own tests. `apps/breakout` works around
-it with `gpu::VIEW_MARGIN`, which keeps the sliver of ball that overshoots a
-wall on screen.
-
 ## breakout: the ball's speed never ramps
 
 `docs/plan/sample/01-breakout.md` lists "Speed ramps per hit" under scope. The

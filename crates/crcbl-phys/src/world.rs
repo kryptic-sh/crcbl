@@ -296,6 +296,21 @@ impl PhysicsWorld {
     ///
     /// Uses the shape-level swept-sphere TOI functions for exact results.
     /// Triggers are non-solid and are skipped.
+    ///
+    /// # The broadphase query is the swept *volume*, not the centre line
+    ///
+    /// A sphere is `radius` wide, so the colliders it can touch are the ones
+    /// within `radius` of the path its centre takes. Traversing the BVH with the
+    /// centre line as a ray — which this did — offers the narrow phase only the
+    /// colliders that line runs through, and every shape the sphere merely
+    /// grazes is dropped before the exact test that would have caught it. The
+    /// visible form of that: a ball rolling along a wall never touches it, and a
+    /// ball approaching one is reported as hitting only once its centre is level
+    /// with the surface, half a diameter inside.
+    ///
+    /// Traversing the segment's bounds inflated by `radius` offers a superset
+    /// instead. The extra candidates cost one exact test each and are rejected
+    /// by [`Self::closest_swept`], which is the same narrow phase as before.
     #[must_use]
     pub fn sweep_sphere(
         &mut self,
@@ -304,8 +319,13 @@ impl PhysicsWorld {
     ) -> Option<(ColliderId, ShapeHit)> {
         self.ensure_bvh();
         let bvh = self.bvh.as_ref().unwrap();
-        let hits = bvh.traverse_segment(segment);
-        self.closest_swept(segment, radius, &hits)
+        let bounds = Aabb::new(
+            segment.start.min(segment.end),
+            segment.start.max(segment.end),
+        )
+        .inflated(radius);
+        let candidates = bvh.traverse_aabb(&bounds);
+        self.closest_swept(segment, radius, &candidates)
     }
 
     /// Get the AABB of a collider by id.
@@ -414,17 +434,17 @@ impl PhysicsWorld {
         best.map(|(_, id, hit)| (id, hit))
     }
 
-    /// Given BVH hits, find the closest exact swept-sphere hit. Triggers are
-    /// non-solid and are skipped.
+    /// Given broadphase candidates, find the closest exact swept-sphere hit.
+    /// Triggers are non-solid and are skipped.
     fn closest_swept(
         &self,
         segment: &Segment,
         radius: f64,
-        bvh_hits: &[BvhHit],
+        candidates: &[u32],
     ) -> Option<(ColliderId, ShapeHit)> {
         let mut best: Option<(f64, ColliderId, ShapeHit)> = None;
-        for bvh_hit in bvh_hits {
-            let idx = bvh_hit.element_id as usize;
+        for &element in candidates {
+            let idx = element as usize;
             let Some(Some(slot)) = self.colliders.get(idx) else {
                 continue;
             };
@@ -439,7 +459,7 @@ impl PhysicsWorld {
             if let Some(hit) = hit
                 && hit.t < best.as_ref().map_or(f64::INFINITY, |&(t, _, _)| t)
             {
-                best = Some((hit.t, self.id_for_slot(bvh_hit.element_id), hit));
+                best = Some((hit.t, self.id_for_slot(element), hit));
             }
         }
         best.map(|(_, id, hit)| (id, hit))
@@ -541,6 +561,45 @@ mod tests {
             hit.t
         );
         assert_eq!(hit.normal, DVec3::NEG_X);
+    }
+
+    /// A sphere whose *centre* never enters the box still touches it, and the
+    /// sweep has to say so.
+    ///
+    /// The broadphase used to traverse the centre line as a ray, so a box the
+    /// sphere overlaps by anything less than its radius was dropped before the
+    /// exact test ran. Every case below is a real contact: the centre line
+    /// passes 0.3 above a box whose top is at y = 0, with a sphere of radius
+    /// 0.5, so the sphere is 0.2 deep at its closest.
+    #[test]
+    fn sweep_sphere_hits_a_box_its_centre_line_misses() {
+        let mut world = PhysicsWorld::new();
+        world.add_box(BoxCollider::new(
+            DVec3::new(0.0, -1.0, 0.0),
+            DVec3::splat(1.0),
+        ));
+
+        // Along the top face, never crossing it.
+        let along = Segment::new(DVec3::new(-5.0, 0.3, 0.0), DVec3::new(5.0, 0.3, 0.0));
+        let (_, hit) = world
+            .sweep_sphere(&along, 0.5)
+            .expect("a sphere grazing the top face touches it");
+        assert!(hit.point.y <= 0.0 + 1e-9, "contact on the box: {hit:?}");
+
+        // Coming down onto it and stopping short: the surfaces meet, the
+        // centres do not.
+        let onto = Segment::new(DVec3::new(0.0, 1.0, 0.0), DVec3::new(0.0, 0.3, 0.0));
+        let (_, hit) = world
+            .sweep_sphere(&onto, 0.5)
+            .expect("a sphere landing on the face touches it");
+        assert!(hit.normal.y > 0.5, "the top face's normal: {hit:?}");
+
+        // And a genuine miss is still a miss: 0.6 clear of a 0.5 sphere.
+        let clear = Segment::new(DVec3::new(-5.0, 0.6, 0.0), DVec3::new(5.0, 0.6, 0.0));
+        assert!(
+            world.sweep_sphere(&clear, 0.5).is_none(),
+            "a sphere that does not reach the box must not report a hit",
+        );
     }
 
     #[test]

@@ -54,13 +54,18 @@ pub fn camera_half_height(extent: (u32, u32)) -> f32 {
 /// Slack kept between the play field and the edge of the surface, in world
 /// units.
 ///
-/// Not decoration. `crcbl-phys`'s swept-sphere query traverses the broadphase
-/// with the sphere's **centre line** (`PhysicsWorld::sweep_sphere` →
-/// `Bvh::traverse_segment`), so a wall is not even offered to the narrow phase
-/// until the ball's centre reaches its AABB — and on the tick before that the
-/// ball is drawn up to [`BALL_RADIUS`](crate::game::BALL_RADIUS) past the wall's
-/// inner face. A field flush with the surface would clip exactly that sliver,
-/// which is the same "the ball leaves the screen" symptom in miniature.
+/// Framing, and now only framing. It was added to cover a real overshoot:
+/// `crcbl-phys`'s swept-sphere query traversed the broadphase with the sphere's
+/// **centre line**, so a wall was not offered to the narrow phase until the
+/// ball's centre reached its AABB, and the ball was drawn up to
+/// [`BALL_RADIUS`](crate::game::BALL_RADIUS) inside the wall on the tick before
+/// the bounce registered. `PhysicsWorld::sweep_sphere` now traverses the swept
+/// volume, so contact lands when the surfaces meet and the ball never crosses
+/// the face at all.
+///
+/// Kept because a field flush with the surface edge reads as a rendering bug —
+/// the ball touching the last row of pixels looks like the clipping this
+/// module's other comment is about — and half a unit is cheap.
 const VIEW_MARGIN: f32 = 0.5;
 
 /// The camera projection for an `extent`-sized viewport.

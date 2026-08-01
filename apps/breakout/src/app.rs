@@ -841,15 +841,12 @@ mod tests {
     /// bounced off a wall that was never drawn on screen.
     #[test]
     fn the_whole_play_field_is_on_screen_at_every_aspect_ratio() {
-        use crate::game::{BALL_RADIUS, WORLD_LEFT, WORLD_RIGHT, WORLD_TOP};
+        use crate::game::{WORLD_LEFT, WORLD_RIGHT, WORLD_TOP};
 
-        // A ball against a wall is drawn up to its own radius past the wall's
-        // inner face — see `gpu::VIEW_MARGIN` — so that is the extent the
-        // surface actually has to cover.
-        let (reach_x, reach_y) = (
-            WORLD_RIGHT as f32 + BALL_RADIUS as f32,
-            WORLD_TOP as f32 + BALL_RADIUS as f32,
-        );
+        // The walls' inner faces are as far as anything ever gets: a ball
+        // resolving against one is put back at `face - radius * 1.01`, and the
+        // sweep catches the contact when the surfaces meet.
+        let (reach_x, reach_y) = (WORLD_RIGHT as f32, WORLD_TOP as f32);
 
         for extent in [
             (960, 720),   // what the window opens at, and the canvas's ratio
@@ -870,11 +867,11 @@ mod tests {
                 map.half_height,
             );
 
-            // And in pixels: a ball against any wall is inside the surface,
-            // including the sliver of it that is drawn past the wall's face.
+            // And in pixels: both wall faces and the ceiling are inside the
+            // surface, with `gpu::VIEW_MARGIN` still to spare.
             let (width, height) = (extent.0 as f32, extent.1 as f32);
-            for x in [WORLD_LEFT - BALL_RADIUS, WORLD_RIGHT + BALL_RADIUS] {
-                for y in [-9.0, WORLD_TOP + BALL_RADIUS] {
+            for x in [WORLD_LEFT, WORLD_RIGHT] {
+                for y in [-9.0, WORLD_TOP] {
                     let p = map.point(x, y);
                     assert!(
                         p.x >= -1e-3 && p.x <= width + 1e-3,
