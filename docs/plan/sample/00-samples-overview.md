@@ -20,24 +20,28 @@ its charter gets its scope cut, not the engine bent around it.
 
 ## The ladder
 
-Sample numbering **is build order** (see [../ROADMAP.md](../ROADMAP.md) —
-S-phases). Every sample starts only when all its engine dependencies exist,
+Sample numbering **is build order** for 01–11 (see
+[../ROADMAP.md](../ROADMAP.md) — S-phases); the table is ordered by gate, and a
+sample allocated after the ladder was written keeps the next free number rather
+than renumbering the rest. `12-flappy` is the first of those — allocated last,
+built second. Every sample starts only when all its engine dependencies exist,
 ships with spatial audio, and (except viewer) publishes as a wasm demo on the
 GitHub Pages site.
 
-| #   | Sample                       | Roadmap gate           | Proves                                                                                                          |
-| --- | ---------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------- |
-| 01  | [breakout](01-breakout.md)   | S1 (P0–P4A)            | 2D path, minimal ECS, in-memory server loop, game UI, swept-sphere CCD, panning audio                           |
-| 02  | [asteroids](02-asteroids.md) | S2 (P5–P6)             | Entity churn, generational ids, broadphase churn, segment CCD, first forces                                     |
-| 03  | [horde](03-horde.md)         | S3 (P7–P8)             | GPU-driven renderer at scale, flat CPU cost claim, 10k-body queries                                             |
-| 04  | [hud](04-hud.md)             | P4 skeleton → P10 done | Pure UI demo: CSS HUD + widget gallery + themes; the UI system's living fixture                                 |
-| 05  | [viewer](05-viewer.md)       | S4 (P9–P10)            | Asset pipeline as a _usable tool_, camera, inspector panels                                                     |
-| 06  | [orbit](06-orbit.md)         | S5 (P11)               | Physics acceptance test: sector space, orbits, drag, CCD, on-rails handoff                                      |
-| 07  | [towers](07-towers.md)       | S6 (P12–P13)           | **Flagship**: everything — editor content, co-op multiplayer, browser client, esports audio cues                |
-| 08  | [arena](08-arena.md)         | post-MVP               | Client prediction driver — pulls netcode forward; audio grammar under fire                                      |
-| 09  | [puppet](09-puppet.md)       | post-MVP wave 1        | Skeletal animation acceptance test; shadows + device-swap input showcase                                        |
-| 10  | [sparks](10-sparks.md)       | post-MVP wave 1        | VFX gallery + live workbench; GPU particle pipeline fixture                                                     |
-| 11  | [breach](11-breach.md)       | FPS-era                | **FPS flagship**: 5v5 comp shooter — prediction/lagcomp, ballistics, FP rendering, integrity gate, ranked chain |
+| #   | Sample                       | Roadmap gate                 | Proves                                                                                                          |
+| --- | ---------------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| 01  | [breakout](01-breakout.md)   | S1 (P0–P4A)                  | 2D path, minimal ECS, in-memory server loop, game UI, swept-sphere CCD, panning audio                           |
+| 12  | [flappy](12-flappy.md)       | S1B (needs nothing past P4A) | That the engine has no breakout-shaped assumptions; procedural churn, one-input latency, seeded determinism     |
+| 02  | [asteroids](02-asteroids.md) | S2 (P5–P6)                   | Entity churn, generational ids, broadphase churn, segment CCD, first forces                                     |
+| 03  | [horde](03-horde.md)         | S3 (P7–P8)                   | GPU-driven renderer at scale, flat CPU cost claim, 10k-body queries                                             |
+| 04  | [hud](04-hud.md)             | P4 skeleton → P10 done       | Pure UI demo: CSS HUD + widget gallery + themes; the UI system's living fixture                                 |
+| 05  | [viewer](05-viewer.md)       | S4 (P9–P10)                  | Asset pipeline as a _usable tool_, camera, inspector panels                                                     |
+| 06  | [orbit](06-orbit.md)         | S5 (P11)                     | Physics acceptance test: sector space, orbits, drag, CCD, on-rails handoff                                      |
+| 07  | [towers](07-towers.md)       | S6 (P12–P13)                 | **Flagship**: everything — editor content, co-op multiplayer, browser client, esports audio cues                |
+| 08  | [arena](08-arena.md)         | post-MVP                     | Client prediction driver — pulls netcode forward; audio grammar under fire                                      |
+| 09  | [puppet](09-puppet.md)       | post-MVP wave 1              | Skeletal animation acceptance test; shadows + device-swap input showcase                                        |
+| 10  | [sparks](10-sparks.md)       | post-MVP wave 1              | VFX gallery + live workbench; GPU particle pipeline fixture                                                     |
+| 11  | [breach](11-breach.md)       | FPS-era                      | **FPS flagship**: 5v5 comp shooter — prediction/lagcomp, ballistics, FP rendering, integrity gate, ranked chain |
 
 01–06 stay tiny (days, not weeks, each; hud is continuous — a P4 skeleton that
 grows until P10). 07 is the MVP-era flagship and long-lived dogfood. 08 exists
