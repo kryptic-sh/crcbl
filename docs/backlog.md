@@ -52,6 +52,24 @@ been updated to say so, and someone reading the two together will notice.
 Nothing else does its own intersection math; the sweep is still
 `PhysicsSystem::sweep_sphere` and every other collider still mirrors.
 
+## CI on main is red, and was before these changes
+
+Runs 30716427236 (commit 3ab92a9, a docs-only change) and 30720929583 (this
+work) fail the **same nine jobs**: test/clippy/coverage/rustdoc/vk e2e/wgpu
+e2e/decoder fuzz on linux, plus macOS and Windows. Two distinct causes in the
+logs:
+
+- **Linux and macOS**: `alsa-sys 0.4.0`'s build script panics — the runner has
+  no `libasound2-dev`, so `pkg-config` finds no `alsa`. Every linux job that
+  compiles the workspace dies there, which is why the failure looks total.
+- **Windows**: `crates/crcbl-shaders/build.rs:369` panics during
+  `cargo build --workspace --locked`.
+
+Neither is caused by the breakout fixes: the same jobs failed identically on the
+previous commit. The Pages workflow is green and did deploy the demo. Not
+diagnosed further; the fix is presumably an apt step in the linux jobs and a
+look at what the shader build expects to find on Windows.
+
 ## Coverage gaps
 
 - **The camera fix was never seen on a screen.** The "whole play field is on
