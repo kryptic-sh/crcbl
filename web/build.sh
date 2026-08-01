@@ -58,9 +58,14 @@ echo "==> assembling $SITE"
 rm -rf "$SITE"
 mkdir -p "$SITE"
 # The static half: everything in `web/` except the build tooling.
+#
+# `-name '*.sh'` rather than naming each script: this list silently gained
+# `run-browser-e2e.sh` when the browser gate landed, and shipped it to the
+# demo site. A prune that has to be extended by hand every time a script is
+# added is one that will be wrong again.
 (cd "$REPO/web" && find . \
   -path ./tools -prune -o \
-  -name build.sh -prune -o \
+  -name '*.sh' -prune -o \
   -name README.md -prune -o \
   -type f -print) | while read -r file; do
   mkdir -p "$SITE/$(dirname "$file")"

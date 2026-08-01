@@ -477,11 +477,21 @@ gets recorded in the relevant crate's docs rather than worked around silently.
 
 - `gh-pages` deploy workflow: on main push, build all wasm-ready samples
   (`wasm32-unknown-unknown` + bindgen), assemble static site (index page listing
-  demos + engine README blurb), deploy to `https://kryptic-sh.github.io/crcbl/`.
+  demos + engine README blurb), deploy to `https://crcbl.kryptic.sh/`.
 - Every wasm sample = a Pages demo from the moment it exists; the site grows one
   demo per S-phase. Broken wasm build = broken CI = blocked merge — the browser
   target can't rot.
-- (Later, optional) front the same builds from the unified `kryptic.sh` site.
+- The demos are a **subdomain, not a subpath under the org site**, and that is
+  deliberate. `www.kryptic.sh` is prose built from one template by a stdlib
+  Python script; this site is build output — `cargo build --target wasm32`,
+  `wasm-bindgen`, committed shader artifacts, and a headless-Chromium gate.
+  Folding it into the org site would put that whole toolchain into the website's
+  CI and make every demo change wait on a second repo's deploy. The subdomain
+  keeps the pipeline where the code is. `www.kryptic.sh/crcbl/` remains the
+  project's landing page and links here.
+- `web/CNAME` carries the domain into the published artifact and the deploy
+  workflow fails without it: a missing `CNAME` file silently reverts the custom
+  domain on the next deploy, so it is checked rather than assumed.
 
 ## Cross-cutting tracks
 

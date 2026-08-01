@@ -1,6 +1,6 @@
 name: Pages
 
-# The demo site: https://kryptic-sh.github.io/crcbl/
+# The demo site: https://crcbl.kryptic.sh/
 #
 # `docs/plan/ROADMAP.md`'s "Demo site (GitHub Pages)" section asks for two
 # things, and they are split into two jobs here rather than one:
@@ -94,6 +94,26 @@ jobs:
       #     frame that would need a GPU.
       - name: Build the site
         run: ./web/build.sh
+
+      # The custom domain lives in `web/CNAME`, which `web/build.sh` copies into
+      # the artifact along with the rest of `web/`. GitHub reads that file on
+      # every deploy and *clears* the custom domain when it is missing — so
+      # losing it does not fail anything, it silently moves the site back to
+      # `kryptic-sh.github.io/crcbl/` and breaks every link to the demos. The
+      # site repo guards the same file for the same reason.
+      - name: Check the custom domain survived the build
+        run: |
+          set -euo pipefail
+          test -f target/site/CNAME || {
+            echo "::error::target/site/CNAME is missing — the deploy would drop crcbl.kryptic.sh"
+            exit 1
+          }
+          domain="$(tr -d '[:space:]' < target/site/CNAME)"
+          test "$domain" = "crcbl.kryptic.sh" || {
+            echo "::error::target/site/CNAME says '$domain', expected crcbl.kryptic.sh"
+            exit 1
+          }
+          echo "custom domain: $domain"
 
       # THE ASSUMPTIONS THE BROWSER GATE MAKES, CHECKED RATHER THAN HOPED FOR.
       # `ubuntu-latest` ships `/usr/bin/google-chrome` and `Xvfb`, and both of
