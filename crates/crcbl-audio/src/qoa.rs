@@ -19,6 +19,9 @@ use crate::AudioSample;
 #[derive(Clone, Debug, PartialEq)]
 pub struct QoaFile {
     /// Interleaved sample data, converted to f32.
+    ///
+    /// The QOA header counts samples *per channel*, so this is
+    /// `header_samples × channels` long.
     pub samples: Vec<AudioSample>,
     /// Sample rate in Hz.
     pub sample_rate: u32,
@@ -37,7 +40,8 @@ pub enum QoaError {
     StreamingUnsupported,
     /// Channel count is zero.
     ZeroChannels,
-    /// Sample count overflows a usize.
+    /// The declared sample count cannot be held by the bytes that follow it,
+    /// or the interleaved total overflows a `usize`.
     SampleCountOverflow,
     /// Frame data truncated mid-stream.
     FrameTruncated,
@@ -52,7 +56,7 @@ impl core::fmt::Display for QoaError {
             Self::MissingMagic => f.write_str("not a QOA file (expected 'qoaf' magic)"),
             Self::StreamingUnsupported => f.write_str("streaming QOA is not supported"),
             Self::ZeroChannels => f.write_str("QOA file declares zero channels"),
-            Self::SampleCountOverflow => f.write_str("QOA sample count overflows"),
+            Self::SampleCountOverflow => f.write_str("QOA sample count is not backed by the file"),
             Self::FrameTruncated => f.write_str("QOA frame data truncated"),
             Self::FrameSizeMismatch => f.write_str("QOA frame size mismatch"),
         }
@@ -64,6 +68,8 @@ impl std::error::Error for QoaError {}
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const SLICE_LEN: usize = 20;
+/// Every slice is exactly eight bytes on the wire, whatever it decodes to.
+const SLICE_BYTES: usize = 8;
 const LMS_LEN: usize = 4;
 const MAGIC: u32 = 0x716f_6166; // 'qoaf'
 
@@ -150,21 +156,39 @@ pub fn decode(bytes: &[u8]) -> Result<QoaFile, QoaError> {
     if magic != MAGIC {
         return Err(QoaError::MissingMagic);
     }
+    // The header counts samples *per channel*, not interleaved samples.
     let total_samples = read_u32_be(bytes, &mut pos)?;
     if total_samples == 0 {
         return Err(QoaError::StreamingUnsupported);
     }
-    let total = usize::try_from(total_samples).map_err(|_| QoaError::SampleCountOverflow)?;
+    let total = total_samples as usize;
+
+    // Reject a count the remaining bytes cannot possibly hold *before*
+    // reserving for it. `total_samples` comes from the file, so an 8-byte file
+    // declaring `u32::MAX` would otherwise ask for a 17 GB allocation and abort
+    // the process in `handle_alloc_error`.
+    //
+    // An eight-byte slice decodes to `SLICE_LEN` samples of one channel, so
+    // this bounds the *interleaved* length whatever the channel count is, and
+    // each frame spends further bytes on its header and LMS state on top. With
+    // at least one channel it also bounds the per-channel count.
+    let max_interleaved = (bytes.len() - pos) / SLICE_BYTES * SLICE_LEN;
+    if total > max_interleaved {
+        return Err(QoaError::SampleCountOverflow);
+    }
 
     // Group state across frames — channel count and sample rate must be
     // identical in every frame for static files.
     let mut channels: u8 = 0;
     let mut sample_rate: u32 = 0;
     let mut lms: Vec<LmsState> = Vec::new();
-    let mut samples: Vec<AudioSample> = Vec::with_capacity(total);
+    let mut samples: Vec<AudioSample> = Vec::new();
+    // Per-channel samples decoded so far. Comparing `samples.len()` against
+    // `total` instead would stop a stereo file at half its length.
+    let mut decoded_samples = 0usize;
 
     loop {
-        if samples.len() >= total {
+        if decoded_samples >= total {
             break;
         }
         // ── Frame header ─────────────────────────────────────────────────
@@ -181,6 +205,15 @@ pub fn decode(bytes: &[u8]) -> Result<QoaFile, QoaError> {
             channels = num_channels;
             sample_rate = sr;
             lms.resize(channels as usize, LmsState::new());
+            // Only now is the interleaved length known: the header count is
+            // per channel. Check the product against the same byte budget, so
+            // a file declaring many channels cannot multiply its way to an
+            // allocation it has no data for.
+            let interleaved = total
+                .checked_mul(channels as usize)
+                .filter(|n| *n <= max_interleaved)
+                .ok_or(QoaError::SampleCountOverflow)?;
+            samples.reserve_exact(interleaved);
         } else if num_channels != channels || sr != sample_rate {
             // Static files: every frame must have the same channels and rate.
             return Err(QoaError::FrameSizeMismatch);
@@ -206,7 +239,7 @@ pub fn decode(bytes: &[u8]) -> Result<QoaFile, QoaError> {
         }
 
         // ── Decode slices ────────────────────────────────────────────────
-        let channel_samples = fsamples.min(total - samples.len());
+        let channel_samples = fsamples.min(total - decoded_samples);
         let mut decoded = vec![0i16; channel_samples * channels as usize];
         let full_slices = channel_samples / SLICE_LEN;
         let remainder = channel_samples % SLICE_LEN;
@@ -230,6 +263,7 @@ pub fn decode(bytes: &[u8]) -> Result<QoaFile, QoaError> {
         for &raw in &decoded {
             samples.push(f32::from(raw) / 32768.0);
         }
+        decoded_samples += channel_samples;
     }
 
     Ok(QoaFile {
@@ -298,28 +332,36 @@ fn decode_slice(
     }
 
     // Decode `count` samples.
+    //
+    // The arithmetic is `wrapping_*` throughout to match the reference
+    // decoder's C `int`, which wraps in practice. A crafted file can drive the
+    // weights far outside the range real audio produces, and a debug build
+    // would otherwise panic on the overflow rather than decoding garbage.
     let st = &mut lms[ch];
     for n in 0..count {
         let residual = dequant_row[qr[n] as usize];
         // LMS prediction: dot product, shifted.
-        let prediction = (st.history[0] * st.weights[0]
-            + st.history[1] * st.weights[1]
-            + st.history[2] * st.weights[2]
-            + st.history[3] * st.weights[3])
-            >> 13;
-        let sample = (prediction + residual).clamp(-32768, 32767) as i16;
+        let mut prediction = 0i32;
+        for i in 0..LMS_LEN {
+            prediction = prediction.wrapping_add(st.history[i].wrapping_mul(st.weights[i]));
+        }
+        let prediction = prediction >> 13;
+        let sample = prediction.saturating_add(residual).clamp(-32768, 32767) as i16;
         decoded[(slice_idx * SLICE_LEN + n) * channels as usize + ch] = sample;
 
-        // Update LMS weights.
+        // Update LMS weights, per `qoa.h`:
+        //
+        //     weights[i] += history[i] < 0 ? -delta : delta;
+        //
+        // The *sign* comes from the history, the *magnitude* from the delta.
+        // Taking them the other way round makes the predictor diverge from the
+        // encoder's, so anything but silence decodes to noise — and it needed a
+        // non-spec weight clamp to stop it exploding, which is why there is no
+        // clamp here: the reference has none.
         let delta = residual >> 4;
         for i in 0..LMS_LEN {
-            let w = &mut st.weights[i];
-            *w += match delta.cmp(&0) {
-                core::cmp::Ordering::Less => -st.history[i],
-                core::cmp::Ordering::Greater => st.history[i],
-                core::cmp::Ordering::Equal => 0,
-            };
-            *w = (*w).clamp(-(1 << 13), 1 << 13);
+            let signed = if st.history[i] < 0 { -delta } else { delta };
+            st.weights[i] = st.weights[i].wrapping_add(signed);
         }
         // Shift history.
         st.history[0] = st.history[1];
@@ -431,12 +473,106 @@ mod tests {
         }
     }
 
+    /// Builds a one-frame, one-slice mono QOA file with an explicit LMS state.
+    ///
+    /// [`silent_qoa`] can only produce all-zero LMS state and all-zero
+    /// residuals, where the weight update is a no-op — which is exactly why an
+    /// inverted update was invisible to every test.
+    fn qoa_with_lms(
+        sample_count: u16,
+        history: [i16; LMS_LEN],
+        weights: [i16; LMS_LEN],
+        sf_quant: u8,
+        qr: [u8; SLICE_LEN],
+    ) -> Vec<u8> {
+        assert!(sample_count as usize <= SLICE_LEN, "one slice only");
+        let mut out = b"qoaf".to_vec();
+        out.extend_from_slice(&u32::from(sample_count).to_be_bytes());
+
+        let fsize = 8 + LMS_LEN * 4 + SLICE_BYTES;
+        out.push(1); // channels
+        out.extend_from_slice(&[0x00, 0xAC, 0x44]); // 44100 Hz as a u24
+        out.extend_from_slice(&sample_count.to_be_bytes());
+        out.extend_from_slice(&(fsize as u16).to_be_bytes());
+        for h in history {
+            out.extend_from_slice(&h.to_be_bytes());
+        }
+        for w in weights {
+            out.extend_from_slice(&w.to_be_bytes());
+        }
+
+        // sf_quant in bits 63..60, then 20 × 3-bit residual indices.
+        let mut raw = u64::from(sf_quant) << 60;
+        for (i, q) in qr.iter().enumerate() {
+            raw |= u64::from(*q) << (57 - i * 3);
+        }
+        out.extend_from_slice(&raw.to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn lms_weight_update_takes_its_sign_from_the_history() {
+        // Hand-computed against `qoa.h`, which does
+        // `weights[i] += history[i] < 0 ? -delta : delta`:
+        //
+        //   start: history = [0, 0, 0, -1000], weights = [0, 0, 0, 8192]
+        //   n=0  prediction = (-1000 * 8192) >> 13           = -1000
+        //        residual   = DEQUANT_TAB[15][4]             =  9216
+        //        sample     = -1000 + 9216                   =  8216
+        //        delta      = 9216 >> 4                      =   576
+        //        weights    = [576, 576, 576, 8192 - 576]    → last one negated
+        //        history    = [0, 0, -1000, 8216]
+        //   n=1  prediction = (-1000*576 + 8216*7616) >> 13  =  7568
+        //        residual   = DEQUANT_TAB[15][0]             =  1536
+        //        sample     = 7568 + 1536                    =  9104
+        //
+        // Taking the sign from `delta` and the magnitude from the history —
+        // the inverted form — gives 8749 for the second sample.
+        let mut qr = [0u8; SLICE_LEN];
+        qr[0] = 4;
+        let data = qoa_with_lms(2, [0, 0, 0, -1000], [0, 0, 0, 8192], 15, qr);
+
+        let qoa = decode(&data).unwrap();
+        assert_eq!(qoa.samples.len(), 2);
+        assert_eq!(qoa.samples[0], 8216.0 / 32768.0);
+        assert_eq!(qoa.samples[1], 9104.0 / 32768.0);
+    }
+
     #[test]
     fn decode_multi_frame() {
         // 520 samples = 2 frames (256 + 264)
         let data = silent_qoa(1, 44100, 520);
         let qoa = decode(&data).unwrap();
         assert_eq!(qoa.samples.len(), 520);
+    }
+
+    #[test]
+    fn decode_multi_frame_stereo_keeps_both_channels() {
+        // The header count is per channel, so 6000 declared samples over two
+        // frames of a stereo file is 12000 interleaved. Comparing the header
+        // count against the interleaved length stopped at half the file.
+        let data = silent_qoa(2, 48_000, 6000);
+        let qoa = decode(&data).unwrap();
+        assert_eq!(qoa.channels, 2);
+        assert_eq!(qoa.samples.len(), 12_000);
+    }
+
+    #[test]
+    fn absurd_sample_count_rejected_without_allocating() {
+        // Eight bytes declaring u32::MAX samples: fed straight into
+        // `Vec::with_capacity` that is a 17 GB reservation and an abort.
+        let mut header = b"qoaf".to_vec();
+        header.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(decode(&header), Err(QoaError::SampleCountOverflow));
+    }
+
+    #[test]
+    fn sample_count_beyond_the_remaining_bytes_rejected() {
+        // A well-formed single-frame file whose header claims far more samples
+        // than the frames that follow could hold.
+        let mut data = silent_qoa(1, 44100, 40);
+        data[4..8].copy_from_slice(&100_000u32.to_be_bytes());
+        assert_eq!(decode(&data), Err(QoaError::SampleCountOverflow));
     }
 
     #[test]

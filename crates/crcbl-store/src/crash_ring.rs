@@ -1,6 +1,6 @@
-//! Crash ring — a lock-free, fixed-size ring buffer that records the last N
-//! ticks of server output.  On panic, the contents are written as a `.crpl`
-//! replay file so a crash can be replayed and debugged.
+//! Crash ring — a fixed-size ring buffer that records the last N ticks of
+//! server output.  On panic, the contents are written as a `.crpl` replay file
+//! so a crash can be replayed and debugged.
 //!
 //! # Usage
 //!
@@ -10,20 +10,23 @@
 //! let ring = CrashRing::new(120); // keep last 120 ticks
 //! // ... per tick: ring.push(tick_id, &msg_bytes);
 //!
-//! // Register for crash dump:
-//! // ring.install_panic_hook("crash.crpl", &storage);
+//! // From a panic hook, or wherever the crash is caught:
+//! // ring.dump(&storage, Path::new("crash.crpl"), tick_rate)?;
 //! ```
 //!
-//! The ring uses interior mutability (atomic indexing into a pre-allocated Vec)
-//! so it is safe to push from any thread and read from a panic handler without
-//! locking.
+//! The ring is behind a [`Mutex`], so it is `Sync`: pushes from any thread and
+//! reads from a panic handler are both safe, and a snapshot is a consistent
+//! view rather than a torn one.  The lock is held only for a memcpy of one
+//! entry, which is nothing next to the tick it belongs to.  A poisoned lock is
+//! recovered rather than propagated: [`dump`](CrashRing::dump) exists precisely
+//! for the case where another thread panicked.
 
-use std::cell::UnsafeCell;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use crcbl_core::TickId;
 
+use crate::replay::{REPLAY_FORMAT_VERSION, REPLAY_MAGIC, REPLAY_MIN_SIZE};
 use crate::{StorageError, StorageSource};
 
 /// One recorded tick entry in the ring.
@@ -33,19 +36,24 @@ struct TickEntry {
     data: Vec<u8>,
 }
 
+/// The mutable half of the ring.
+#[derive(Debug)]
+struct RingState {
+    /// Ring buffer slots, pre-allocated.
+    slots: Box<[Option<TickEntry>]>,
+    /// Next write position, wrapped by capacity.
+    head: usize,
+    /// Number of entries written (saturates rather than wrapping).
+    count: usize,
+}
+
 /// A fixed-size ring buffer of tick entries.
 ///
-/// Thread-safe for single-producer writes and panic-handler reads.
-/// Not safe for concurrent producers — the server tick loop is the only writer.
+/// Safe for any number of producers and for reads from a panic handler.
+#[derive(Debug)]
 pub struct CrashRing {
     capacity: usize,
-    /// Ring buffer slots, pre-allocated, wrapped in UnsafeCell for interior
-    /// mutability (single-producer contract).
-    slots: UnsafeCell<Box<[Option<TickEntry>]>>,
-    /// Next write position, wrapped by capacity.
-    head: AtomicUsize,
-    /// Number of entries written (monotonically increases, wraps at usize::MAX).
-    count: AtomicUsize,
+    state: Mutex<RingState>,
 }
 
 impl CrashRing {
@@ -60,9 +68,11 @@ impl CrashRing {
         slots.resize_with(capacity, || None);
         Self {
             capacity,
-            slots: UnsafeCell::new(slots.into_boxed_slice()),
-            head: AtomicUsize::new(0),
-            count: AtomicUsize::new(0),
+            state: Mutex::new(RingState {
+                slots: slots.into_boxed_slice(),
+                head: 0,
+                count: 0,
+            }),
         }
     }
 
@@ -70,51 +80,38 @@ impl CrashRing {
     ///
     /// Overwrites the oldest entry when the ring is full.
     pub fn push(&self, tick: TickId, data: &[u8]) {
-        let idx = self.head.fetch_add(1, Ordering::Relaxed) % self.capacity;
-        self.count.fetch_add(1, Ordering::Relaxed);
-        // SAFETY: idx < capacity, and the single-producer contract ensures no
-        // other writer touches this slot concurrently.
-        let slots = unsafe { &mut *self.slots.get() };
-        slots[idx] = Some(TickEntry {
+        let mut state = self.lock();
+        let idx = state.head % self.capacity;
+        state.head = state.head.wrapping_add(1);
+        state.count = state.count.saturating_add(1);
+        state.slots[idx] = Some(TickEntry {
             tick,
             data: data.to_vec(),
         });
     }
 
-    /// Number of entries written so far (may overflow `usize` for very long
-    /// sessions).
+    /// Number of entries written so far (saturating for very long sessions).
     pub fn count(&self) -> usize {
-        self.count.load(Ordering::Relaxed)
+        self.lock().count
     }
-}
 
-impl std::fmt::Debug for CrashRing {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CrashRing")
-            .field("capacity", &self.capacity)
-            .field("count", &self.count.load(Ordering::Relaxed))
-            .finish_non_exhaustive()
+    /// Lock the ring, recovering from poisoning.
+    ///
+    /// A producer that panicked mid-push left a well-formed `RingState` — the
+    /// slot it was writing is simply still the old entry — and refusing to dump
+    /// after a panic would defeat the purpose of the ring.
+    fn lock(&self) -> std::sync::MutexGuard<'_, RingState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
-}
 
-/// Snapshots the ring into a `Vec<TickEntry>`, ordered from oldest to newest.
-///
-/// Reads without locking; the producer may be writing concurrently, so a
-/// small number of entries near the write head may be missing or partially
-/// written.  This is acceptable for crash dumps: a best-effort snapshot.
-impl CrashRing {
+    /// Snapshots the ring, ordered from oldest to newest.
     fn snapshot(&self) -> Vec<TickEntry> {
-        let written = self.count.load(Ordering::Relaxed);
-        let count = written.min(self.capacity);
-        let head = self.head.load(Ordering::Relaxed);
-
-        // SAFETY: read-only access; the writer may update slots concurrently
-        // but we're taking a best-effort snapshot.
-        let slots = unsafe { &*self.slots.get() };
+        let state = self.lock();
+        let count = state.count.min(self.capacity);
         let mut out = Vec::with_capacity(count);
         for i in 0..count {
-            let idx = (head.wrapping_sub(count).wrapping_add(i)) % self.capacity;
-            if let Some(entry) = &slots[idx] {
+            let idx = (state.head.wrapping_sub(count).wrapping_add(i)) % self.capacity;
+            if let Some(entry) = &state.slots[idx] {
                 out.push(entry.clone());
             }
         }
@@ -133,12 +130,14 @@ impl CrashRing {
         tick_rate: u32,
     ) -> Result<(), StorageError> {
         let entries = self.snapshot();
-        let mut buf =
-            Vec::with_capacity(30 + entries.iter().map(|e| 12 + e.data.len()).sum::<usize>());
+        let mut buf = Vec::with_capacity(
+            REPLAY_MIN_SIZE + entries.iter().map(|e| 12 + e.data.len()).sum::<usize>(),
+        );
 
-        // Replay file header.
-        buf.extend_from_slice(b"CRBLREPL");
-        buf.extend_from_slice(&1u16.to_le_bytes()); // format version
+        // Replay file header — constants from `replay` so a format bump cannot
+        // leave crash dumps silently emitting the previous version.
+        buf.extend_from_slice(REPLAY_MAGIC);
+        buf.extend_from_slice(&REPLAY_FORMAT_VERSION.to_le_bytes());
         buf.extend_from_slice(&(entries.len() as u64).to_le_bytes());
         buf.extend_from_slice(&tick_rate.to_le_bytes());
         let start_tick = entries.first().map(|e| e.tick.get()).unwrap_or(0);
@@ -201,6 +200,37 @@ mod tests {
 
         let transport = crate::replay::FileTransport::open(&storage, path).unwrap();
         assert_eq!(transport.len(), 3);
+        // Oldest first: ticks 2, 3, 4.
+        for (i, expected) in [2u64, 3, 4].into_iter().enumerate() {
+            assert_eq!(transport.tick_at(i), TickId::from_raw(expected));
+        }
+    }
+
+    #[test]
+    fn ring_is_shareable_across_threads() {
+        use std::sync::Arc;
+
+        let ring = Arc::new(CrashRing::new(64));
+        let threads: Vec<_> = (0..4u64)
+            .map(|t| {
+                let ring = Arc::clone(&ring);
+                std::thread::spawn(move || {
+                    for i in 0..25u64 {
+                        ring.push(TickId::from_raw(t * 100 + i), &[t as u8; 8]);
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        assert_eq!(ring.count(), 100);
+        let storage = MemoryStorage::new();
+        ring.dump(&storage, Path::new("threads.crpl"), 60).unwrap();
+        let transport = crate::replay::FileTransport::open(&storage, Path::new("threads.crpl"))
+            .expect("dump must be a readable replay");
+        assert_eq!(transport.len(), 64);
     }
 
     #[test]

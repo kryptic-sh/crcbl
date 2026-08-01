@@ -90,11 +90,16 @@ pub struct SpatialCue {
 }
 
 impl SpatialCue {
-    /// Reference: centred, full volume, no processing.
+    /// The centre of the pan law: no direction encoded, full volume, no pitch
+    /// shift.
+    ///
+    /// The gains are the constant-power centre (`1/√2`), not unity — under a
+    /// constant-power pan law that *is* dead centre, and using unity here would
+    /// put a 3 dB step at the boundary between this and any other direction.
     pub const REFERENCE: Self = Self {
         itd_samples: 0.0,
-        gain_left: 1.0,
-        gain_right: 1.0,
+        gain_left: core::f32::consts::FRAC_1_SQRT_2,
+        gain_right: core::f32::consts::FRAC_1_SQRT_2,
         pitch_ratio: 1.0,
         volume: 1.0,
     };
@@ -171,29 +176,32 @@ pub fn compute_cue(listener: [f32; 3], emitter: [f32; 3], grammar: &CueGrammar) 
 
 /// Computes left/right gains and ITD from a pan value in [-1, +1].
 ///
-/// Uses constant-power panning for the gain split and cosine ITD mapping.
+/// Uses constant-power panning for the gain split and a linear ITD mapping.
+/// Every output is continuous in `pan`, including across zero — the module
+/// promises continuity, and an emitter that crosses the centre line by a
+/// fraction of a millimetre must not jump.
 fn pan_cue(pan: f32, grammar: &CueGrammar) -> (f32, f32, f32) {
-    // Constant-power: angle = (pan + 1) / 2 * 90° → pan_weight in [0, π/2].
+    // Constant-power: angle = (pan + 1) / 2 * 90° → angle in [0, π/2].
     // Right channel weight = sin(angle), left channel weight = cos(angle).
-    // Centre (pan=0) is handled as a fast path: no panning, no ILD, no ITD.
-    if pan.abs() < f32::EPSILON {
-        return (1.0, 1.0, 0.0);
-    }
-    let pan_weight = (pan.clamp(-1.0, 1.0) + 1.0) * 0.5; // [0, 1]
+    // At pan = 0 both are 1/√2, which is the centre of this law.
+    let pan = pan.clamp(-1.0, 1.0);
+    let pan_weight = (pan + 1.0) * 0.5; // [0, 1]
     let angle = pan_weight * core::f32::consts::FRAC_PI_2;
     let (sin_a, cos_a) = angle.sin_cos();
     let mut gain_right = sin_a;
     let mut gain_left = cos_a;
 
-    // Apply ILD: attenuate the far ear.
-    let ild_linear = db_to_linear(-grammar.ild_db);
+    // Apply ILD: attenuate the far ear, scaled by how far off-centre the
+    // source is. Applying the full `ild_db` the instant `pan` leaves zero
+    // would be a 6 dB step in each ear — a 12 dB swing across the centre.
+    let ild_linear = db_to_linear(-grammar.ild_db * pan.abs());
     if pan > 0.0 {
         gain_left *= ild_linear; // far ear = left when source is right
-    } else {
+    } else if pan < 0.0 {
         gain_right *= ild_linear; // far ear = right when source is left
     }
 
-    // ITD: cosine relationship with pan angle.
+    // ITD: linear in the pan angle.
     // pan=0 → ITD=0, pan=±1 → ITD=∓max.
     // Positive ITD = delay right channel (source left).
     // Source right (pan > 0) → delay left → ITD negative.
@@ -236,13 +244,68 @@ mod tests {
 
     #[test]
     fn ahead_is_reference() {
-        // Within rolloff_start: full volume, no panning.
+        // Within rolloff_start: full volume, no ITD, no pitch shift, and the
+        // constant-power centre in both ears (not unity — see `REFERENCE`).
+        let centre = core::f32::consts::FRAC_1_SQRT_2;
         let cue = compute_cue([0.0, 0.0, 0.0], [0.0, 0.0, 0.5], &grammar());
         assert_eq!(cue.itd_samples, 0.0);
-        assert!((cue.gain_left - 1.0).abs() < 0.01);
-        assert!((cue.gain_right - 1.0).abs() < 0.01);
+        assert!((cue.gain_left - centre).abs() < 0.01, "{}", cue.gain_left);
+        assert!((cue.gain_right - centre).abs() < 0.01, "{}", cue.gain_right);
         assert!((cue.pitch_ratio - 1.0).abs() < 0.01);
         assert!((cue.volume - 1.0).abs() < 0.01);
+        assert!((cue.gain_left - cue.gain_right).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pan_is_continuous_across_centre() {
+        // A 0.1 mm lateral move used to swing each ear by 6 dB: the centre
+        // fast path returned unity and the ILD switched ears in one step.
+        let grammar = grammar();
+        let sample = |x: f32| compute_cue([0.0, 0.0, 0.0], [x, 0.0, 5.0], &grammar);
+
+        let left = sample(-1e-4);
+        let centre = sample(0.0);
+        let right = sample(1e-4);
+
+        for (a, b) in [(left, centre), (centre, right), (left, right)] {
+            assert!(
+                (a.gain_left - b.gain_left).abs() < 1e-3,
+                "left gain jumped: {} → {}",
+                a.gain_left,
+                b.gain_left
+            );
+            assert!(
+                (a.gain_right - b.gain_right).abs() < 1e-3,
+                "right gain jumped: {} → {}",
+                a.gain_right,
+                b.gain_right
+            );
+            // ITD is in samples, so it is scaled by `max_itd_samples` (30);
+            // the gains are order 1. A tenth of a sample is inaudible.
+            assert!(
+                (a.itd_samples - b.itd_samples).abs() < 0.1,
+                "ITD jumped: {} → {}",
+                a.itd_samples,
+                b.itd_samples
+            );
+        }
+    }
+
+    #[test]
+    fn ild_grows_monotonically_with_pan() {
+        // The far ear must fade in gradually, not switch on at |pan| > 0.
+        let grammar = grammar();
+        let mut previous = 0.0f32;
+        for step in 0..=20 {
+            let x = step as f32 / 20.0 * 5.0;
+            let cue = compute_cue([0.0, 0.0, 0.0], [x, 0.0, 5.0], &grammar);
+            let ratio_db = 20.0 * (cue.gain_right / cue.gain_left).log10();
+            assert!(
+                ratio_db >= previous - 1e-3,
+                "L/R ratio went backwards at x={x}: {previous} → {ratio_db}"
+            );
+            previous = ratio_db;
+        }
     }
 
     #[test]

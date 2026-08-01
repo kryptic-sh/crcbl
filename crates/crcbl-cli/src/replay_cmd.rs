@@ -15,10 +15,20 @@ use crate::report::{Failure, Outcome};
 
 /// Runs `crcbl replay`.
 pub fn run(args: &ReplayArgs) -> Result<Outcome, Failure> {
-    let storage = NativeStorage::at(PathBuf::from("."));
+    // `NativeStorage` is a sandbox: a key may not escape its root, so an
+    // absolute path is not a valid key. A CLI argument names a file anywhere on
+    // disk, so the root is the file's own directory and the key is its name.
     let path = Path::new(&args.file);
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| Failure::new(format!("not a replay file: {}", path.display())))?;
+    let root = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let storage = NativeStorage::at(root);
 
-    let transport = FileTransport::open(&storage, path)
+    let transport = FileTransport::open(&storage, Path::new(file_name))
         .map_err(|e| Failure::new(format!("cannot open replay: {e}")))?;
 
     let tick_ids: Vec<i64> = (0..transport.len())

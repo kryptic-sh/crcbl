@@ -44,12 +44,23 @@ fn orbit_events(radius: f32, steps: usize, sound_id: u32) -> Vec<AudioEvent> {
 /// Hash a stereo output buffer for determinism checks.
 fn hash_buffer(buf: &[AudioSample]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hasher;
     let mut h = DefaultHasher::new();
-    for &s in buf {
-        s.to_bits().hash(&mut h);
-    }
+    hash_buffer_into(&mut h, buf);
     h.finish()
+}
+
+/// Fold a stereo output buffer into a running hash.
+///
+/// Feeding every block into one hasher keeps the result sensitive to the
+/// *order* of the blocks; combining per-block hashes with XOR would not, and a
+/// spatialiser that played an orbit backwards would still match.
+fn hash_buffer_into<H: std::hash::Hasher>(hasher: &mut H, buf: &[AudioSample]) {
+    use std::hash::Hash;
+    buf.len().hash(hasher);
+    for &s in buf {
+        s.to_bits().hash(hasher);
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -169,14 +180,18 @@ fn orbit_integration_deterministic() {
     let mut bank = SoundBank::new();
     bank.insert(1, tone_220hz(48_000, 256 * 20));
 
-    fn run_orbit(bank: &SoundBank, grammar: &CueGrammar) -> u64 {
-        let events = orbit_events(5.0, 8, 1);
+    fn run_orbit(bank: &SoundBank, grammar: &CueGrammar, events: &[AudioEvent]) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+
         let listener = [0.0f32, 0.0, 0.0];
         let block = 256;
         let sample_rate = 48_000;
 
-        let mut final_hash = 0u64;
-        for event in &events {
+        // One hasher fed in block order, so the digest depends on the sequence
+        // and not merely on the set of blocks.
+        let mut hasher = DefaultHasher::new();
+        for event in events {
             let mut mixer = Mixer::new();
             let cue = compute_cue(listener, event.position, grammar);
             let voice = bank
@@ -188,14 +203,25 @@ fn orbit_integration_deterministic() {
             mixer.play(voice);
             let mut buf = vec![0.0f32; block * CHANNELS];
             mixer.fill(&mut buf, sample_rate);
-            final_hash ^= hash_buffer(&buf);
+            hash_buffer_into(&mut hasher, &buf);
         }
-        final_hash
+        hasher.finish()
     }
 
-    let hash_a = run_orbit(&bank, &grammar);
-    let hash_b = run_orbit(&bank, &grammar);
+    let events = orbit_events(5.0, 8, 1);
+    let hash_a = run_orbit(&bank, &grammar, &events);
+    let hash_b = run_orbit(&bank, &grammar, &events);
     assert_eq!(hash_a, hash_b, "orbit should be deterministic");
+
+    // Order sensitivity: the same blocks in the reverse order are a different
+    // orbit and must hash differently. An XOR fold reported them as identical.
+    let mut reversed = events.clone();
+    reversed.reverse();
+    assert_ne!(
+        hash_a,
+        run_orbit(&bank, &grammar, &reversed),
+        "orbit hash must depend on block order"
+    );
 }
 
 #[test]

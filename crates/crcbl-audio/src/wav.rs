@@ -42,8 +42,6 @@ pub enum WavError {
     UnsupportedBitsPerSample(u16),
     /// No `data` chunk, or it is empty.
     MissingData,
-    /// The data chunk claims more bytes than the file holds.
-    DataTruncated,
 }
 
 impl core::fmt::Display for WavError {
@@ -59,7 +57,6 @@ impl core::fmt::Display for WavError {
                 write!(f, "unsupported bits per sample: {bits}")
             }
             Self::MissingData => f.write_str("WAV file has no data chunk"),
-            Self::DataTruncated => f.write_str("WAV data chunk truncated"),
         }
     }
 }
@@ -92,11 +89,18 @@ pub fn decode(bytes: &[u8]) -> Result<WavFile, WavError> {
     while pos + 8 <= bytes.len() {
         let id = read_fourcc(bytes, &mut pos)?;
         let size = read_u32_le(bytes, &mut pos)? as usize;
-        if pos + size > bytes.len() {
-            return Err(WavError::Truncated);
-        }
-        let payload = &bytes[pos..pos + size];
-        pos += size;
+        // `checked_add`: `size` comes from the file, and on a 32-bit target
+        // `pos + size` can wrap past the bounds check and then panic on the
+        // slice below.
+        let end = pos
+            .checked_add(size)
+            .filter(|end| *end <= bytes.len())
+            .ok_or(WavError::Truncated)?;
+        let payload = &bytes[pos..end];
+        // RIFF pads every odd-sized chunk with a byte that the size does not
+        // count. Without skipping it the next chunk header reads one byte
+        // early and the file looks like garbage.
+        pos = end + (size & 1);
 
         match &id {
             b"fmt " => {
@@ -135,20 +139,17 @@ pub fn decode(bytes: &[u8]) -> Result<WavFile, WavError> {
     if bytes_per_sample == 0 || bytes_per_sample > 4 {
         return Err(WavError::UnsupportedBitsPerSample(bits_per_sample));
     }
-    let total_samples = data.len() / bytes_per_sample;
-    if total_samples * bytes_per_sample > data.len() {
-        return Err(WavError::DataTruncated);
-    }
-
+    // A trailing partial sample is simply not decoded: `chunks_exact` stops at
+    // the last whole one.
     let samples = match (format_tag, bits_per_sample) {
         (1, 8) => {
             // 8-bit PCM is unsigned: 0x80 = zero.
             data.iter().map(|&b| (b as f32 - 128.0) / 128.0).collect()
         }
-        (1, 16) => decode_s16(data, total_samples),
-        (1, 24) => decode_s24(data, total_samples),
-        (1, 32) => decode_s32(data, total_samples),
-        (3, 32) => decode_f32(data, total_samples),
+        (1, 16) => decode_s16(data),
+        (1, 24) => decode_s24(data),
+        (1, 32) => decode_s32(data),
+        (3, 32) => decode_f32(data),
         _ => return Err(WavError::UnsupportedBitsPerSample(bits_per_sample)),
     };
 
@@ -189,8 +190,8 @@ fn read_u32_le(bytes: &[u8], pos: &mut usize) -> Result<u32, WavError> {
     Ok(value)
 }
 
-fn decode_s16(data: &[u8], total: usize) -> Vec<f32> {
-    let mut out = Vec::with_capacity(total);
+fn decode_s16(data: &[u8]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(data.len() / 2);
     for chunk in data.chunks_exact(2) {
         let raw = i16::from_le_bytes([chunk[0], chunk[1]]);
         out.push(f32::from(raw) / 32768.0);
@@ -198,8 +199,8 @@ fn decode_s16(data: &[u8], total: usize) -> Vec<f32> {
     out
 }
 
-fn decode_s24(data: &[u8], total: usize) -> Vec<f32> {
-    let mut out = Vec::with_capacity(total);
+fn decode_s24(data: &[u8]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(data.len() / 3);
     for chunk in data.chunks_exact(3) {
         // Sign-extend the 24-bit value into an i32.
         let raw = i32::from_le_bytes([
@@ -213,9 +214,9 @@ fn decode_s24(data: &[u8], total: usize) -> Vec<f32> {
     out
 }
 
-fn decode_s32(data: &[u8], total: usize) -> Vec<f32> {
+fn decode_s32(data: &[u8]) -> Vec<f32> {
     let scale = 2_147_483_648.0_f32; // 2^31
-    let mut out = Vec::with_capacity(total);
+    let mut out = Vec::with_capacity(data.len() / 4);
     for chunk in data.chunks_exact(4) {
         let raw = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         out.push(raw as f32 / scale);
@@ -223,11 +224,16 @@ fn decode_s32(data: &[u8], total: usize) -> Vec<f32> {
     out
 }
 
-fn decode_f32(data: &[u8], total: usize) -> Vec<f32> {
-    let mut out = Vec::with_capacity(total);
+/// Float WAV is the one format that can carry NaN and infinities.
+///
+/// They are replaced with silence here, at the decoder boundary: `f32::clamp`
+/// returns NaN for NaN so the mixer's clip would not catch them, and a NaN that
+/// reaches a playhead calculation makes the voice immortal.
+fn decode_f32(data: &[u8]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(data.len() / 4);
     for chunk in data.chunks_exact(4) {
         let raw = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        out.push(raw);
+        out.push(if raw.is_finite() { raw } else { 0.0 });
     }
     out
 }
@@ -328,6 +334,43 @@ mod tests {
         bytes[21] = 0;
         let wav = decode(&bytes).unwrap();
         assert!((wav.samples[0] + 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn float32_non_finite_becomes_silence() {
+        // NaN survives `f32::clamp`, and a NaN sample fed to a playhead makes
+        // the voice immortal — so it is stopped at the decoder.
+        let raw: Vec<u8> = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.75]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let mut bytes = minimal_wav(&raw, 48000, 1, 32);
+        bytes[20] = 3; // IEEE float
+        bytes[21] = 0;
+        let wav = decode(&bytes).unwrap();
+        assert_eq!(wav.samples, vec![0.0, 0.0, 0.0, -0.75]);
+    }
+
+    #[test]
+    fn decodes_with_odd_sized_chunk_before_data() {
+        // RIFF pads an odd-sized chunk with a byte the size field does not
+        // count. Advancing by the size alone reads the next chunk header one
+        // byte early, and the whole file fails to parse.
+        let raw = [0xFFu8, 0x7F]; // one 16-bit mono sample
+        let mut wav = minimal_wav(&raw, 44100, 1, 16);
+        let data_chunk = wav.split_off(36);
+        wav.extend_from_slice(b"LIST");
+        wav.extend_from_slice(&5u32.to_le_bytes()); // odd payload
+        wav.extend_from_slice(b"INFOx");
+        wav.push(0); // the pad byte
+        wav.extend_from_slice(&data_chunk);
+        let new_size = (wav.len() - 8) as u32;
+        wav[4..8].copy_from_slice(&new_size.to_le_bytes());
+
+        let wav = decode(&wav).unwrap();
+        assert_eq!(wav.channels, 1);
+        assert_eq!(wav.samples.len(), 1);
+        assert!((wav.samples[0] - 32767.0 / 32768.0).abs() < 1e-6);
     }
 
     #[test]

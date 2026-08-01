@@ -191,7 +191,9 @@ impl SettingsStack {
     /// Key path examples: `"engine.video.vsync"`, `"game.difficulty"`.
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
         for layer in self.layers.iter().rev() {
-            let table = layer.table()?;
+            // A layer without a table is skipped, not treated as the end of
+            // the search.
+            let Some(table) = layer.table() else { continue };
             if let Some(value) = get_dotted(table, key)
                 && let Ok(v) = value.clone().try_into::<T>()
             {
@@ -205,16 +207,11 @@ impl SettingsStack {
     ///
     /// For example, `stack.get_section::<VideoSettings>("engine.video")` would
     /// deserialize the `[engine.video]` section.
+    ///
+    /// A section is just a dotted key whose value happens to be a table, so
+    /// this is [`get`](Self::get) under another name.
     pub fn get_section<T: DeserializeOwned>(&self, namespace: &str) -> Option<T> {
-        for layer in self.layers.iter().rev() {
-            let table = layer.table()?;
-            if let Some(value) = get_dotted(table, namespace)
-                && let Ok(v) = value.clone().try_into::<T>()
-            {
-                return Some(v);
-            }
-        }
-        None
+        self.get(namespace)
     }
 
     // ── Writing ─────────────────────────────────────────────────────────
@@ -222,15 +219,17 @@ impl SettingsStack {
     /// Set a value in the user settings layer (the first
     /// [`SettingsLayer::UserFile`] in the stack).
     ///
-    /// Returns an error if no user settings layer exists.
+    /// Returns an error if no user settings layer exists, or if an ancestor of
+    /// `key` already holds a scalar in the user's `settings.toml` (e.g.
+    /// `engine = "x"` with a `"engine.video.vsync"` write) — a hand-edited file
+    /// can put anything there, so this is reported rather than clobbered.
     pub fn set<T: Serialize>(&mut self, key: &str, value: &T) -> Result<(), StorageError> {
         let toml_value = toml::Value::try_from(value)
             .map_err(|e| StorageError::Other(format!("settings value serialization: {e}")))?;
 
         for layer in self.layers.iter_mut() {
             if let Some(table) = layer.table_mut() {
-                set_dotted(table, key, toml_value.clone());
-                return Ok(());
+                return set_dotted(table, key, toml_value.clone());
             }
         }
 
@@ -254,6 +253,7 @@ impl SettingsStack {
 
     /// Dump the merged view of all layers as a TOML string.
     ///
+    /// Every key reads back the same value [`get`](Self::get) would return.
     /// Useful for debugging and for the `crcbl settings list` CLI command.
     pub fn dump(&self) -> String {
         let merge = self.merge_all();
@@ -262,11 +262,15 @@ impl SettingsStack {
 
     // ── Internal ────────────────────────────────────────────────────────
 
-    /// Merge all layers into one table, first-write-wins (lowest priority
-    /// first, so engine defaults are overwritten by user settings, etc.).
+    /// Merge all layers into one table.
+    ///
+    /// [`deep_merge`] is first-write-wins, so layers are visited **highest
+    /// priority first** — the same order [`get`](Self::get) searches in.
+    /// Visiting them lowest-first would make the dump report engine defaults
+    /// where `get` returns the user's override.
     fn merge_all(&self) -> toml::Table {
         let mut merged = toml::Table::new();
-        for layer in &self.layers {
+        for layer in self.layers.iter().rev() {
             if let Some(table) = layer.table() {
                 deep_merge(&mut merged, table);
             }
@@ -281,10 +285,9 @@ impl SettingsStack {
 ///
 /// `"engine.video.vsync"` → `table["engine"]["video"]["vsync"]`.
 fn get_dotted<'a>(table: &'a toml::Table, key: &str) -> Option<&'a toml::Value> {
+    // `str::split` always yields at least one element, so `parts` is never
+    // empty — not even for `""`.
     let parts: Vec<&str> = key.split('.').collect();
-    if parts.is_empty() {
-        return None;
-    }
 
     // Navigate through intermediate tables.
     let mut current: &toml::Table = table;
@@ -302,24 +305,29 @@ fn get_dotted<'a>(table: &'a toml::Table, key: &str) -> Option<&'a toml::Value> 
 /// Set a value at a dotted key path, creating intermediate tables as needed.
 ///
 /// `"engine.video.vsync" = false` → sets `table["engine"]["video"]["vsync"]`.
-fn set_dotted(table: &mut toml::Table, key: &str, value: toml::Value) {
+///
+/// Returns an error if an ancestor key already exists as a non-table value —
+/// a user-edited `settings.toml` can contain `engine = "not a table"`, and
+/// overwriting it would silently discard whatever else they wrote.
+fn set_dotted(table: &mut toml::Table, key: &str, value: toml::Value) -> Result<(), StorageError> {
+    // `str::split` always yields at least one element.
     let parts: Vec<&str> = key.split('.').collect();
-    if parts.is_empty() {
-        return;
-    }
-    if parts.len() == 1 {
-        table.insert(parts[0].to_string(), value);
-        return;
-    }
+    let (last, ancestors) = parts.split_last().expect("split yields one element");
+
     let mut current = table;
-    for &part in &parts[..parts.len() - 1] {
+    for &part in ancestors {
         current = current
             .entry(part)
             .or_insert_with(|| toml::Value::Table(toml::Table::new()))
             .as_table_mut()
-            .expect("entry must be a table after insert");
+            .ok_or_else(|| {
+                StorageError::Other(format!(
+                    "settings key {key:?} needs a table at {part:?}, but that key holds a value"
+                ))
+            })?;
     }
-    current.insert(parts[parts.len() - 1].to_string(), value);
+    current.insert((*last).to_string(), value);
+    Ok(())
 }
 
 /// Deep-merge `source` into `target`. Keys in `source` that already exist in
@@ -347,7 +355,7 @@ mod tests {
     fn make_table(kv: &[(&str, &str)]) -> toml::Table {
         let mut table = toml::Table::new();
         for (k, v) in kv {
-            set_dotted(&mut table, k, toml::Value::String(v.to_string()));
+            set_dotted(&mut table, k, toml::Value::String(v.to_string())).unwrap();
         }
         table
     }
@@ -388,7 +396,7 @@ mod tests {
     #[test]
     fn set_dotted_creates_intermediates() {
         let mut t = toml::Table::new();
-        set_dotted(&mut t, "engine.video.vsync", true.into());
+        set_dotted(&mut t, "engine.video.vsync", true.into()).unwrap();
 
         assert_eq!(get_dotted(&t, "engine.video.vsync"), Some(&true.into()));
     }
@@ -396,10 +404,31 @@ mod tests {
     #[test]
     fn set_dotted_overwrites_existing() {
         let mut t = toml::Table::new();
-        set_dotted(&mut t, "key", "old".into());
-        set_dotted(&mut t, "key", "new".into());
+        set_dotted(&mut t, "key", "old".into()).unwrap();
+        set_dotted(&mut t, "key", "new".into()).unwrap();
 
         assert_eq!(get_dotted(&t, "key"), Some(&"new".into()));
+    }
+
+    #[test]
+    fn set_over_scalar_ancestor_errors_instead_of_panicking() {
+        // A hand-edited settings.toml containing `engine = "not a table"`.
+        let mut user = toml::Table::new();
+        user.insert("engine".into(), "not a table".into());
+
+        let mut stack = SettingsStack::new();
+        stack.add(SettingsLayer::UserFile(StorageSettingsFile {
+            data: user,
+            dirty: false,
+        }));
+
+        let err = stack.set("engine.video.vsync", &true).unwrap_err();
+        assert!(err.to_string().contains("holds a value"), "{err}");
+        // The user's value is left alone.
+        assert_eq!(
+            stack.get::<String>("engine").as_deref(),
+            Some("not a table")
+        );
     }
 
     // ── Deep merge ────────────────────────────────────────────────────
@@ -518,6 +547,37 @@ mod tests {
 
         let dump = stack.dump();
         assert!(dump.contains("name"));
+    }
+
+    #[test]
+    fn stack_dump_agrees_with_get() {
+        let mut stack = SettingsStack::new();
+
+        let mut defaults = toml::Table::new();
+        let mut video = toml::Table::new();
+        video.insert("vsync".into(), true.into());
+        video.insert("fov".into(), toml::Value::Integer(90));
+        defaults.insert("video".into(), toml::Value::Table(video));
+        defaults.insert("volume".into(), toml::Value::Integer(100));
+        stack.add(SettingsLayer::EngineDefaults(defaults));
+
+        let mut overrides = toml::Table::new();
+        let mut video = toml::Table::new();
+        video.insert("vsync".into(), false.into());
+        overrides.insert("video".into(), toml::Value::Table(video));
+        overrides.insert("volume".into(), toml::Value::Integer(50));
+        stack.add(SettingsLayer::CliOverrides(overrides));
+
+        let dumped: toml::Table = toml::from_str(&stack.dump()).unwrap();
+        for key in ["volume", "video.vsync", "video.fov"] {
+            assert_eq!(
+                get_dotted(&dumped, key),
+                stack.get::<toml::Value>(key).as_ref(),
+                "dump disagrees with get for {key}"
+            );
+        }
+        // Specifically: the higher-priority layer wins in both.
+        assert_eq!(stack.get::<i64>("volume"), Some(50));
     }
 
     // ── StorageSettingsFile ───────────────────────────────────────────

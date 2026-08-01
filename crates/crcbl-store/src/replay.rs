@@ -36,13 +36,16 @@ use crate::{StorageError, StorageSource};
 // ── Constants ──────────────────────────────────────────────────────────────
 
 /// Magic bytes identifying a `.crpl` replay file.
-const REPLAY_MAGIC: &[u8; 8] = b"CRBLREPL";
+pub const REPLAY_MAGIC: &[u8; 8] = b"CRBLREPL";
 
 /// Current replay format version.
-const REPLAY_FORMAT_VERSION: u16 = 1;
+pub const REPLAY_FORMAT_VERSION: u16 = 1;
 
 /// Minimum size of a valid replay file: header only (empty replay is valid).
-const REPLAY_MIN_SIZE: usize = 30;
+pub const REPLAY_MIN_SIZE: usize = 30;
+
+/// Smallest possible `TickEntry`: `tick_id` + `msg_len`, with no payload.
+const MIN_ENTRY_SIZE: usize = 12;
 
 // ── ReplayWriter ───────────────────────────────────────────────────────────
 
@@ -177,15 +180,28 @@ impl FileTransport {
             )));
         }
 
-        let tick_count = u64::from_le_bytes(bytes[10..18].try_into().unwrap()) as usize;
+        let declared_ticks = u64::from_le_bytes(bytes[10..18].try_into().unwrap());
         let tick_rate = u32::from_le_bytes(bytes[18..22].try_into().unwrap());
         let _start_tick = u64::from_le_bytes(bytes[22..30].try_into().unwrap());
 
-        let mut cursor = 30usize;
+        let mut cursor = REPLAY_MIN_SIZE;
+
+        // Reject a count the remaining bytes cannot possibly hold *before*
+        // reserving for it: `tick_count` comes from the file, and a 30-byte
+        // file declaring u64::MAX entries would otherwise abort the process in
+        // `Vec::with_capacity`.
+        let remaining = bytes.len() - cursor;
+        let tick_count = usize::try_from(declared_ticks).unwrap_or(usize::MAX);
+        if declared_ticks > (remaining / MIN_ENTRY_SIZE) as u64 {
+            return Err(StorageError::Other(format!(
+                "replay declares {declared_ticks} ticks but only {remaining} bytes follow the header"
+            )));
+        }
+
         let mut entries = Vec::with_capacity(tick_count);
 
         for _ in 0..tick_count {
-            if cursor + 12 > bytes.len() {
+            if cursor + MIN_ENTRY_SIZE > bytes.len() {
                 return Err(StorageError::Other(
                     "replay file truncated in entry header".into(),
                 ));
@@ -200,14 +216,15 @@ impl FileTransport {
                 u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
             cursor += 4;
 
-            if cursor + msg_len > bytes.len() {
-                return Err(StorageError::Other(
-                    "replay file truncated in entry data".into(),
-                ));
-            }
+            // `checked_add`: on a 32-bit target `cursor + msg_len` can wrap,
+            // which would pass the bounds check and then panic on the slice.
+            let end = cursor
+                .checked_add(msg_len)
+                .filter(|end| *end <= bytes.len())
+                .ok_or_else(|| StorageError::Other("replay file truncated in entry data".into()))?;
 
-            let msg_data = bytes[cursor..cursor + msg_len].to_vec();
-            cursor += msg_len;
+            let msg_data = bytes[cursor..end].to_vec();
+            cursor = end;
 
             entries.push((tick_id, msg_data));
         }
@@ -403,6 +420,49 @@ mod tests {
                 .to_string()
                 .contains("invalid replay magic")
         );
+    }
+
+    #[test]
+    fn replay_absurd_tick_count_rejected_without_allocating() {
+        let storage = MemoryStorage::new();
+        // A 30-byte header claiming u64::MAX entries: the old code fed that
+        // straight into `Vec::with_capacity` and aborted the process.
+        let mut data = vec![0u8; REPLAY_MIN_SIZE];
+        data[0..8].copy_from_slice(REPLAY_MAGIC);
+        data[8..10].copy_from_slice(&REPLAY_FORMAT_VERSION.to_le_bytes());
+        data[10..18].copy_from_slice(&u64::MAX.to_le_bytes());
+        storage.write(Path::new("huge.crpl"), &data).unwrap();
+
+        let err = FileTransport::open(&storage, Path::new("huge.crpl")).unwrap_err();
+        assert!(err.to_string().contains("bytes follow the header"));
+    }
+
+    #[test]
+    fn replay_tick_count_beyond_remaining_bytes_rejected() {
+        let storage = MemoryStorage::new();
+        // Room for exactly one minimum-size entry, but two are declared.
+        let mut data = vec![0u8; REPLAY_MIN_SIZE + 12];
+        data[0..8].copy_from_slice(REPLAY_MAGIC);
+        data[8..10].copy_from_slice(&REPLAY_FORMAT_VERSION.to_le_bytes());
+        data[10..18].copy_from_slice(&2u64.to_le_bytes());
+        storage.write(Path::new("over.crpl"), &data).unwrap();
+
+        assert!(FileTransport::open(&storage, Path::new("over.crpl")).is_err());
+    }
+
+    #[test]
+    fn replay_entry_length_beyond_file_rejected() {
+        let storage = MemoryStorage::new();
+        let mut data = vec![0u8; REPLAY_MIN_SIZE + 12];
+        data[0..8].copy_from_slice(REPLAY_MAGIC);
+        data[8..10].copy_from_slice(&REPLAY_FORMAT_VERSION.to_le_bytes());
+        data[10..18].copy_from_slice(&1u64.to_le_bytes());
+        // msg_len = u32::MAX for the single entry.
+        data[REPLAY_MIN_SIZE + 8..REPLAY_MIN_SIZE + 12].copy_from_slice(&u32::MAX.to_le_bytes());
+        storage.write(Path::new("len.crpl"), &data).unwrap();
+
+        let err = FileTransport::open(&storage, Path::new("len.crpl")).unwrap_err();
+        assert!(err.to_string().contains("truncated in entry data"));
     }
 
     #[test]

@@ -69,7 +69,12 @@ pub trait AudioSource: Send + Sync + 'static {
 /// `open_null` produces silence at 48 kHz on a polling thread — the
 /// headless CI and test path, exactly like `NullBackend` for GPU tests.
 pub struct AudioStream {
+    // Declared first so it drops first: the callback sees a dead weak handle
+    // and writes silence for however long it takes the device to stop.
     _alive: Arc<()>,
+    /// The cpal stream, owned so that dropping `AudioStream` stops playback.
+    /// `None` for the null backend, which uses a polling thread instead.
+    _stream: Option<cpal::Stream>,
 }
 
 impl std::fmt::Debug for AudioStream {
@@ -81,7 +86,8 @@ impl std::fmt::Debug for AudioStream {
 impl AudioStream {
     /// Open the system default output device.
     ///
-    /// Returns `None` if no device is available (headless CI).
+    /// Returns `None` if no device is available (headless CI). The stream is
+    /// owned by the returned value and stops when it is dropped.
     #[must_use]
     pub fn open(source: impl AudioSource) -> Option<Self> {
         let alive = Arc::new(());
@@ -108,6 +114,10 @@ impl AudioStream {
                     move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
                         if alive_weak.upgrade().is_some() {
                             fill_audio(data, channels, src.as_ref(), sample_rate);
+                        } else {
+                            // Not writing at all would let the device play back
+                            // whatever the buffer happened to hold.
+                            data.fill(0.0);
                         }
                     }
                 },
@@ -119,13 +129,11 @@ impl AudioStream {
             .ok()?;
 
         stream.play().ok()?;
-        // Keep the stream alive; cpal stops playback on drop.
-        // We hold it via a leaked Box to prevent the compiler from
-        // moving it (Stream is not Send on all platforms).
-        let stream: std::pin::Pin<Box<_>> = Box::pin(stream);
-        std::mem::forget(stream);
 
-        Some(Self { _alive: alive })
+        Some(Self {
+            _alive: alive,
+            _stream: Some(stream),
+        })
     }
 
     /// Open a null stream for headless tests and CI.
@@ -146,6 +154,9 @@ impl AudioStream {
                 if alive_weak.upgrade().is_none() {
                     break;
                 }
+                // `AudioSource` accumulates, so the buffer must be zeroed each
+                // block — the same contract the cpal path keeps.
+                buffer.fill(0.0);
                 source.fill(&mut buffer, sample_rate);
                 std::thread::sleep(std::time::Duration::from_micros(
                     (block_size as u64 * 1_000_000) / sample_rate as u64,
@@ -153,11 +164,18 @@ impl AudioStream {
             }
         });
 
-        Self { _alive: alive }
+        Self {
+            _alive: alive,
+            _stream: None,
+        }
     }
 }
 
 fn fill_audio(data: &mut [f32], channels: usize, source: &dyn AudioSource, sample_rate: u32) {
+    // `AudioSource::fill` is additive and documented to receive a zeroed
+    // buffer; cpal hands back whatever the device buffer last held.
+    data.fill(0.0);
+
     if channels == CHANNELS {
         source.fill(data, sample_rate);
     } else if channels == 1 {
@@ -168,7 +186,6 @@ fn fill_audio(data: &mut [f32], channels: usize, source: &dyn AudioSource, sampl
             *sample = (stereo[i * 2] + stereo[i * 2 + 1]) * 0.5;
         }
     } else {
-        data.fill(0.0);
         let block = data.len() / channels;
         let mut stereo = vec![0.0f32; block * CHANNELS];
         source.fill(&mut stereo, sample_rate);
@@ -235,6 +252,25 @@ mod tests {
         source.fill(&mut buf, 48_000);
         for &s in &buf {
             assert!((s - 0.5).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn fill_audio_zeroes_the_device_buffer_on_every_layout() {
+        struct Silent;
+        impl AudioSource for Silent {
+            fn fill(&self, _buffer: &mut [AudioSample], _rate: u32) {}
+        }
+
+        // cpal hands back the previous block's contents; a source that adds
+        // nothing must leave silence, not the stale buffer.
+        for channels in [1usize, CHANNELS, 6] {
+            let mut data = vec![0.7f32; 8 * channels];
+            fill_audio(&mut data, channels, &Silent, 48_000);
+            assert!(
+                data.iter().all(|s| *s == 0.0),
+                "stale samples left for {channels} channels: {data:?}"
+            );
         }
     }
 

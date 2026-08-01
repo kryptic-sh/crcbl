@@ -22,7 +22,10 @@
 //! ```
 //!
 //! The checksum covers everything before it (magic through the last sector's
-//! data). A corrupted or truncated file is detected on open.
+//! data) and is a real SHA-256 ([`crcbl_shaders::sha256`]). A corrupted or
+//! truncated file is detected on open: [`SaveReader::open`] fails on a checksum
+//! mismatch, and [`SaveReader::open_ignoring_checksum`] is the explicit
+//! salvage path for a damaged file.
 
 use std::path::Path;
 
@@ -37,7 +40,11 @@ use crate::{StorageError, StorageSource};
 const SAVE_MAGIC: &[u8; 8] = b"CRCBLSVE";
 
 /// Current save format version. Bump on breaking changes.
-const SAVE_FORMAT_VERSION: u16 = 1;
+///
+/// Version 2 replaced the "SHA-256" field — which was actually a
+/// `DefaultHasher` digest, and so not stable across Rust releases — with a real
+/// SHA-256. The layout is otherwise identical to version 1.
+const SAVE_FORMAT_VERSION: u16 = 2;
 
 /// Size of the binary header (excluding sectors and checksum).
 const HEADER_SIZE: usize = 30;
@@ -47,6 +54,9 @@ const CHECKSUM_SIZE: usize = 32;
 
 /// Size of a SectorId in binary (3 × i64 = 24 bytes).
 const SECTOR_ID_SIZE: usize = 24;
+
+/// Smallest possible `SectorEntry`: id + `data_len`, with no data.
+const MIN_SECTOR_ENTRY_SIZE: usize = SECTOR_ID_SIZE + 4;
 
 /// Minimum size of a valid save file: header + checksum.
 const MIN_SAVE_SIZE: usize = HEADER_SIZE + CHECKSUM_SIZE;
@@ -119,59 +129,67 @@ impl SaveWriter {
     }
 
     /// Encode the save into bytes (header + sectors, no checksum yet).
-    fn encode_body(&self) -> Vec<u8> {
+    ///
+    /// Fails rather than truncating when a count or a sector's data length does
+    /// not fit the `u32` the format reserves for it.
+    fn encode_body(&self) -> Result<Vec<u8>, StorageError> {
         let capacity = HEADER_SIZE
-            + self.sectors.len() * (SECTOR_ID_SIZE + 4) // 4 = data_len u32
-            + self.sectors.iter().map(|s| s.snapshot_data.len()).sum::<usize>();
+            + self.sectors.len() * MIN_SECTOR_ENTRY_SIZE
+            + self
+                .sectors
+                .iter()
+                .map(|s| s.snapshot_data.len())
+                .sum::<usize>();
         let mut buf = Vec::with_capacity(capacity);
+
+        let sector_count = u32::try_from(self.sectors.len()).map_err(|_| {
+            StorageError::Other(format!(
+                "save has {} sectors, more than the format's u32 count",
+                self.sectors.len()
+            ))
+        })?;
 
         buf.extend_from_slice(SAVE_MAGIC);
         buf.extend_from_slice(&SAVE_FORMAT_VERSION.to_le_bytes());
         buf.extend_from_slice(&self.header.tick.get().to_le_bytes());
         buf.extend_from_slice(&self.header.playtime_secs.to_le_bytes());
-        buf.extend_from_slice(&(self.sectors.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&sector_count.to_le_bytes());
 
         for sector in &self.sectors {
+            let data_len = u32::try_from(sector.snapshot_data.len()).map_err(|_| {
+                StorageError::Other(format!(
+                    "sector {:?} snapshot is {} bytes, more than the format's u32 length",
+                    sector.sector_id,
+                    sector.snapshot_data.len()
+                ))
+            })?;
             // SectorId as [i64; 3]
             buf.extend_from_slice(&sector.sector_id.x.to_le_bytes());
             buf.extend_from_slice(&sector.sector_id.y.to_le_bytes());
             buf.extend_from_slice(&sector.sector_id.z.to_le_bytes());
             // Data length + data
-            buf.extend_from_slice(&(sector.snapshot_data.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&data_len.to_le_bytes());
             buf.extend_from_slice(&sector.snapshot_data);
         }
 
-        buf
+        Ok(buf)
     }
 
     /// Compute the SHA-256 checksum of `data`.
+    ///
+    /// This is the workspace's own SHA-256, verified against the NIST vectors
+    /// in `crcbl-shaders`. It must stay a real, specified digest: the previous
+    /// `DefaultHasher` expansion changed with the Rust release, so every save
+    /// written by one toolchain failed its checksum under the next.
     fn checksum(data: &[u8]) -> [u8; CHECKSUM_SIZE] {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::Hasher;
-
-        // Use the engine's existing hash rather than pulling in sha2.
-        // For CRC verification a collision-resistant hash is not required —
-        // any uniform digest catches accidental corruption.
-        let mut hasher = DefaultHasher::new();
-        hasher.write(data);
-        let h = hasher.finish();
-
-        // Expand u64 into [u8; 32] deterministically (not cryptographic,
-        // but repeatable and cheap).
-        let mut out = [0u8; CHECKSUM_SIZE];
-        for chunk in out.chunks_mut(8) {
-            let v = hasher.finish().to_le_bytes();
-            chunk.copy_from_slice(&v[..chunk.len()]);
-            hasher.write_u64(h.wrapping_add(1));
-        }
-        out
+        crcbl_shaders::sha256::sha256(data)
     }
 
     /// Write the save file atomically through `storage` at `path`.
     ///
     /// Uses the project's atomic write pattern (temp + fsync + rename).
     pub fn write(&self, storage: &dyn StorageSource, path: &Path) -> Result<(), StorageError> {
-        let body = self.encode_body();
+        let body = self.encode_body()?;
 
         // Checksum covers everything before it.
         let checksum = Self::checksum(&body);
@@ -196,8 +214,30 @@ impl SaveReader {
     ///
     /// Validates the magic, checks the format version, and verifies the
     /// checksum. Returns an error if the file is too short, has an invalid
-    /// magic, or contains an unsupported format version.
+    /// magic, contains an unsupported format version, or fails its checksum.
+    ///
+    /// Use [`open_ignoring_checksum`](Self::open_ignoring_checksum) to salvage
+    /// what is readable from a file whose checksum does not match.
     pub fn open(storage: &dyn StorageSource, path: &Path) -> Result<Self, StorageError> {
+        let reader = Self::open_ignoring_checksum(storage, path)?;
+        if !reader.data.checksum_valid {
+            return Err(StorageError::Other(format!(
+                "save checksum mismatch: {} is corrupt",
+                path.display()
+            )));
+        }
+        Ok(reader)
+    }
+
+    /// Open and parse a save file without failing on a checksum mismatch.
+    ///
+    /// Every other validation still applies; the result's
+    /// [`SaveData::checksum_valid`] reports whether the contents can be
+    /// trusted.
+    pub fn open_ignoring_checksum(
+        storage: &dyn StorageSource,
+        path: &Path,
+    ) -> Result<Self, StorageError> {
         let bytes = storage.read(path)?;
 
         if bytes.len() < MIN_SAVE_SIZE {
@@ -234,10 +274,22 @@ impl SaveReader {
         let sector_count = u32::from_le_bytes(body[26..30].try_into().unwrap()) as usize;
 
         let mut cursor = HEADER_SIZE;
+
+        // Reject a count the remaining bytes cannot possibly hold *before*
+        // reserving for it: `sector_count` comes from the file, and a 62-byte
+        // file declaring u32::MAX sectors would otherwise abort the process in
+        // `Vec::with_capacity`.
+        let remaining = body.len() - cursor;
+        if sector_count > remaining / MIN_SECTOR_ENTRY_SIZE {
+            return Err(StorageError::Other(format!(
+                "save declares {sector_count} sectors but only {remaining} bytes follow the header"
+            )));
+        }
+
         let mut sectors = Vec::with_capacity(sector_count);
 
         for _ in 0..sector_count {
-            if cursor + SECTOR_ID_SIZE + 4 > body.len() {
+            if cursor + MIN_SECTOR_ENTRY_SIZE > body.len() {
                 return Err(StorageError::Other(
                     "save file truncated in sector entry".into(),
                 ));
@@ -252,14 +304,15 @@ impl SaveReader {
                 u32::from_le_bytes(body[cursor..cursor + 4].try_into().unwrap()) as usize;
             cursor += 4;
 
-            if cursor + data_len > body.len() {
-                return Err(StorageError::Other(
-                    "save file truncated in sector data".into(),
-                ));
-            }
+            // `checked_add`: on a 32-bit target `cursor + data_len` can wrap,
+            // which would pass the bounds check and then panic on the slice.
+            let end = cursor
+                .checked_add(data_len)
+                .filter(|end| *end <= body.len())
+                .ok_or_else(|| StorageError::Other("save file truncated in sector data".into()))?;
 
-            let snapshot_data = body[cursor..cursor + data_len].to_vec();
-            cursor += data_len;
+            let snapshot_data = body[cursor..end].to_vec();
+            cursor = end;
 
             sectors.push(SectorSave {
                 sector_id: SectorId { x, y, z },
@@ -300,7 +353,7 @@ impl SaveReader {
 /// # Example
 ///
 /// ```ignore
-/// let ring = AutosaveRing::new(5, "autosave_{}.crb");
+/// let ring = AutosaveRing::new(5, "autosave_{}.crb")?;
 /// ring.write(&storage, writer)?;  // writes to autosave_0.crb, then _1, …, wrapping
 /// ```
 #[derive(Debug)]
@@ -317,15 +370,24 @@ impl AutosaveRing {
     /// Create a new autosave ring.
     ///
     /// `capacity` is the number of rotating save files (minimum 1).
-    /// `template` must contain exactly one `{}` where the slot index goes,
-    /// e.g. `"autosave_{}.crb"`.
-    pub fn new(capacity: usize, template: impl Into<String>) -> Self {
+    /// `template` must contain a `{}` where the slot index goes, e.g.
+    /// `"autosave_{}.crb"`.
+    ///
+    /// Returns an error if `template` has no `{}` — without it every slot
+    /// resolves to the same path and the ring silently keeps one save.
+    pub fn new(capacity: usize, template: impl Into<String>) -> Result<Self, StorageError> {
         let capacity = capacity.max(1);
-        Self {
-            capacity,
-            template: template.into(),
-            slot: 0,
+        let template = template.into();
+        if !template.contains("{}") {
+            return Err(StorageError::Other(format!(
+                "autosave template {template:?} has no `{{}}` slot placeholder"
+            )));
         }
+        Ok(Self {
+            capacity,
+            template,
+            slot: 0,
+        })
     }
 
     /// The path for the current slot.
@@ -346,10 +408,15 @@ impl AutosaveRing {
     }
 
     /// List all existing autosave file names in order from oldest to newest.
+    ///
+    /// The next write goes to `slot`, so once the ring has wrapped that slot
+    /// holds the *oldest* save — iterating `0..capacity` would report the
+    /// reverse of the documented order.
     pub fn list(&self, storage: &dyn StorageSource) -> Vec<String> {
         let mut files = Vec::new();
         for i in 0..self.capacity {
-            let path = self.template.replace("{}", &i.to_string());
+            let idx = (self.slot + i) % self.capacity;
+            let path = self.template.replace("{}", &idx.to_string());
             if storage.exists(Path::new(&path)) {
                 files.push(path);
             }
@@ -451,8 +518,63 @@ mod tests {
         data[10] ^= 0xFF; // flip a bit in the header
         storage.write(path, &data).unwrap();
 
-        let reader = SaveReader::open(&storage, path).unwrap();
+        // `open` refuses a corrupt file — the module doc promises detection.
+        let err = SaveReader::open(&storage, path).unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"), "{err}");
+
+        // The salvage path still parses it, and reports the mismatch.
+        let reader = SaveReader::open_ignoring_checksum(&storage, path).unwrap();
         assert!(!reader.data().checksum_valid);
+    }
+
+    #[test]
+    fn checksum_is_real_sha256_of_the_body() {
+        let storage = MemoryStorage::new();
+        let writer = make_sample_save();
+        let path = Path::new("sha.crb");
+        writer.write(&storage, path).unwrap();
+
+        let bytes = storage.read(path).unwrap();
+        let (body, checksum) = bytes.split_at(bytes.len() - CHECKSUM_SIZE);
+        assert_eq!(checksum, crcbl_shaders::sha256::sha256(body));
+    }
+
+    #[test]
+    fn absurd_sector_count_rejected_without_allocating() {
+        let storage = MemoryStorage::new();
+        // A minimum-size file claiming u32::MAX sectors: the old code fed that
+        // straight into `Vec::with_capacity` and aborted the process.
+        let mut body = vec![0u8; HEADER_SIZE];
+        body[0..8].copy_from_slice(SAVE_MAGIC);
+        body[8..10].copy_from_slice(&SAVE_FORMAT_VERSION.to_le_bytes());
+        body[26..30].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut data = body.clone();
+        data.extend_from_slice(&SaveWriter::checksum(&body));
+        storage.write(Path::new("huge.crb"), &data).unwrap();
+
+        let err = SaveReader::open(&storage, Path::new("huge.crb")).unwrap_err();
+        assert!(err.to_string().contains("bytes follow the header"), "{err}");
+    }
+
+    #[test]
+    fn sector_data_length_beyond_file_rejected() {
+        let storage = MemoryStorage::new();
+        let mut body = vec![0u8; HEADER_SIZE + MIN_SECTOR_ENTRY_SIZE];
+        body[0..8].copy_from_slice(SAVE_MAGIC);
+        body[8..10].copy_from_slice(&SAVE_FORMAT_VERSION.to_le_bytes());
+        body[26..30].copy_from_slice(&1u32.to_le_bytes());
+        // data_len = u32::MAX for the single sector.
+        let len_at = HEADER_SIZE + SECTOR_ID_SIZE;
+        body[len_at..len_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut data = body.clone();
+        data.extend_from_slice(&SaveWriter::checksum(&body));
+        storage.write(Path::new("len.crb"), &data).unwrap();
+
+        let err = SaveReader::open(&storage, Path::new("len.crb")).unwrap_err();
+        assert!(
+            err.to_string().contains("truncated in sector data"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -492,26 +614,54 @@ mod tests {
         };
         let writer = SaveWriter::new(header);
 
-        let mut ring = AutosaveRing::new(3, "autosave_{}.crb");
+        let mut ring = AutosaveRing::new(3, "autosave_{}.crb").unwrap();
 
         // Write 5 times → should wrap around.
         for _ in 0..5 {
             ring.write(&storage, &writer).unwrap();
         }
 
-        // After 5 writes on a ring of 3, slots 0 and 1 were overwritten,
-        // slot 2 was the third write (oldest survivor is slot 3 % 3 = 0).
+        // After 5 writes on a ring of 3 the next slot is 2, so slot 2 holds
+        // the oldest surviving save and slot 1 the newest.
         let files = ring.list(&storage);
-        assert_eq!(files.len(), 3);
-        // All three autosave files exist.
-        for i in 0..3 {
-            assert!(storage.exists(Path::new(&format!("autosave_{i}.crb"))));
+        assert_eq!(
+            files,
+            vec![
+                "autosave_2.crb".to_string(),
+                "autosave_0.crb".to_string(),
+                "autosave_1.crb".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn autosave_ring_lists_oldest_first_before_wrapping() {
+        let storage = MemoryStorage::new();
+        let writer = SaveWriter::new(SaveHeader {
+            tick: TickId::from_raw(1),
+            playtime_secs: 0.0,
+        });
+
+        let mut ring = AutosaveRing::new(4, "part_{}.crb").unwrap();
+        for _ in 0..2 {
+            ring.write(&storage, &writer).unwrap();
         }
+
+        assert_eq!(
+            ring.list(&storage),
+            vec!["part_0.crb".to_string(), "part_1.crb".to_string()]
+        );
+    }
+
+    #[test]
+    fn autosave_ring_rejects_template_without_placeholder() {
+        let err = AutosaveRing::new(3, "autosave.crb").unwrap_err();
+        assert!(err.to_string().contains("slot placeholder"), "{err}");
     }
 
     #[test]
     fn autosave_ring_capacity_at_least_one() {
-        let ring = AutosaveRing::new(0, "save_{}.crb");
+        let ring = AutosaveRing::new(0, "save_{}.crb").unwrap();
         assert_eq!(ring.capacity(), 1);
     }
 
@@ -524,7 +674,7 @@ mod tests {
         };
         let writer = SaveWriter::new(header);
 
-        let mut ring = AutosaveRing::new(2, "ring_{}.crb");
+        let mut ring = AutosaveRing::new(2, "ring_{}.crb").unwrap();
         assert_eq!(ring.slot(), 0);
 
         ring.write(&storage, &writer).unwrap();

@@ -23,7 +23,7 @@ pub mod settings;
 
 use std::io;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 // ── Error type ─────────────────────────────────────────────────────────────
 
@@ -46,24 +46,36 @@ pub enum StorageError {
     #[error("unexpected type at path: {0}")]
     WrongType(PathBuf),
 
+    /// The path escapes the storage root, or is absolute when it must be
+    /// relative to it.
+    #[error("path escapes the storage root: {0}")]
+    InvalidPath(PathBuf),
+
     /// A generic application-level error.
     #[error("{0}")]
     Other(String),
 }
 
-impl From<io::Error> for StorageError {
-    fn from(e: io::Error) -> Self {
+impl StorageError {
+    /// Classify an [`io::Error`] that happened while touching `path`.
+    ///
+    /// The path must be supplied by the caller: `io::Error` does not carry it,
+    /// and the `Display` text is an errno message, not a path.
+    fn from_io(path: &Path, e: io::Error) -> Self {
         match e.kind() {
-            io::ErrorKind::NotFound => {
-                // Extract the path from the error message when possible;
-                // the io::Error itself stores the path on some platforms.
-                StorageError::NotFound(PathBuf::from(e.to_string()))
-            }
-            io::ErrorKind::PermissionDenied => {
-                StorageError::PermissionDenied(PathBuf::from(e.to_string()))
-            }
+            io::ErrorKind::NotFound => StorageError::NotFound(path.to_path_buf()),
+            io::ErrorKind::PermissionDenied => StorageError::PermissionDenied(path.to_path_buf()),
             _ => StorageError::Io(e),
         }
+    }
+}
+
+impl From<io::Error> for StorageError {
+    /// Path-less conversion. Prefer [`StorageError::from_io`] wherever the path
+    /// is known — this variant cannot classify not-found or permission errors
+    /// without inventing a path for them.
+    fn from(e: io::Error) -> Self {
+        StorageError::Io(e)
     }
 }
 
@@ -122,7 +134,7 @@ impl NativeStorage {
         let base = dirs::config_dir()
             .ok_or_else(|| StorageError::Other("no config directory found".into()))?;
         let root = base.join(app_name);
-        std::fs::create_dir_all(&root)?;
+        std::fs::create_dir_all(&root).map_err(|e| StorageError::from_io(&root, e))?;
         Ok(Self { root })
     }
 
@@ -132,7 +144,7 @@ impl NativeStorage {
         let base = dirs::data_dir()
             .ok_or_else(|| StorageError::Other("no data directory found".into()))?;
         let root = base.join(app_name);
-        std::fs::create_dir_all(&root)?;
+        std::fs::create_dir_all(&root).map_err(|e| StorageError::from_io(&root, e))?;
         Ok(Self { root })
     }
 
@@ -147,49 +159,76 @@ impl NativeStorage {
         &self.root
     }
 
-    /// Resolve a relative path to an absolute one.
-    fn resolve(&self, path: &Path) -> PathBuf {
-        self.root.join(path)
+    /// Resolve a storage-relative path to an absolute one.
+    ///
+    /// The argument must stay inside the root: absolute paths, Windows path
+    /// prefixes, and `..` components are rejected with
+    /// [`StorageError::InvalidPath`]. Without this a caller-supplied `../..`
+    /// (or `/etc`, which `Path::join` would silently substitute for the whole
+    /// root) would let [`delete`](StorageSource::delete) `remove_dir_all` an
+    /// arbitrary directory.
+    fn resolve(&self, path: &Path) -> Result<PathBuf, StorageError> {
+        if !is_contained(path) {
+            return Err(StorageError::InvalidPath(path.to_path_buf()));
+        }
+        Ok(self.root.join(path))
     }
+}
+
+/// Whether `path` is relative and stays within its root — no prefix, no root
+/// directory, no `..`. Bare `.` components are allowed and ignored.
+fn is_contained(path: &Path) -> bool {
+    path.components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
+/// Strip `.` components so `list(".")` and `list("")` produce the same
+/// key prefix that [`MemoryStorage`] stores its keys under.
+fn normalise_dir(dir: &Path) -> PathBuf {
+    dir.components()
+        .filter(|c| !matches!(c, Component::CurDir))
+        .collect()
 }
 
 impl StorageSource for NativeStorage {
     fn read(&self, path: &Path) -> Result<Vec<u8>, StorageError> {
-        let abs = self.resolve(path);
-        Ok(std::fs::read(&abs)?)
+        let abs = self.resolve(path)?;
+        std::fs::read(&abs).map_err(|e| StorageError::from_io(&abs, e))
     }
 
     fn write(&self, path: &Path, data: &[u8]) -> Result<(), StorageError> {
-        let abs = self.resolve(path);
+        let abs = self.resolve(path)?;
         if let Some(parent) = abs.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent).map_err(|e| StorageError::from_io(parent, e))?;
         }
         write_atomic(&abs, data)
     }
 
     fn delete(&self, path: &Path) -> Result<(), StorageError> {
-        let abs = self.resolve(path);
+        let abs = self.resolve(path)?;
         if abs.is_dir() {
-            std::fs::remove_dir_all(&abs)?;
+            std::fs::remove_dir_all(&abs).map_err(|e| StorageError::from_io(&abs, e))?;
         } else {
-            std::fs::remove_file(&abs)?;
+            std::fs::remove_file(&abs).map_err(|e| StorageError::from_io(&abs, e))?;
         }
         Ok(())
     }
 
     fn exists(&self, path: &Path) -> bool {
-        self.resolve(path).exists()
+        self.resolve(path).is_ok_and(|abs| abs.exists())
     }
 
     fn list(&self, dir: &Path) -> Result<Vec<PathBuf>, StorageError> {
-        let abs = self.resolve(dir);
+        let abs = self.resolve(dir)?;
+        // The trait promises full storage-relative paths, not bare file names.
+        let prefix = normalise_dir(dir);
         let mut entries = Vec::new();
-        for entry in std::fs::read_dir(&abs)? {
-            let entry = entry?;
-            entries.push(entry.file_name());
+        for entry in std::fs::read_dir(&abs).map_err(|e| StorageError::from_io(&abs, e))? {
+            let entry = entry.map_err(|e| StorageError::from_io(&abs, e))?;
+            entries.push(prefix.join(entry.file_name()));
         }
         entries.sort();
-        Ok(entries.into_iter().map(PathBuf::from).collect())
+        Ok(entries)
     }
 }
 
@@ -204,9 +243,14 @@ impl StorageSource for NativeStorage {
 /// target (the rename is atomic on the same filesystem).
 ///
 /// Parent directories are created if they do not exist.
+///
+/// The temporary file is created with `create_new` (`O_EXCL`), so a pre-planted
+/// symlink or file at the guessable temporary path makes the write fail instead
+/// of being followed. It is removed again on every failure path, so a failed
+/// write leaves nothing behind.
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), StorageError> {
     let parent = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent)?;
+    std::fs::create_dir_all(parent).map_err(|e| StorageError::from_io(parent, e))?;
 
     let tmp_name = {
         let stem = path.file_stem().unwrap_or_default().to_string_lossy();
@@ -221,10 +265,16 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), StorageError> {
         parent.join(format!(".{stem}.{suffix:x}{ext}.tmp"))
     };
 
-    {
-        let mut f = std::fs::File::create(&tmp_name)?;
-        f.write_all(data)?;
-        f.sync_all()?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_name)
+        .map_err(|e| StorageError::from_io(&tmp_name, e))?;
+    let written = f.write_all(data).and_then(|()| f.sync_all());
+    drop(f);
+    if let Err(e) = written {
+        std::fs::remove_file(&tmp_name).ok();
+        return Err(StorageError::from_io(&tmp_name, e));
     }
 
     // fsync the parent directory so the link is durable.
@@ -232,7 +282,10 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), StorageError> {
         parent_fd.sync_all().ok();
     }
 
-    std::fs::rename(&tmp_name, path)?;
+    if let Err(e) = std::fs::rename(&tmp_name, path) {
+        std::fs::remove_file(&tmp_name).ok();
+        return Err(StorageError::from_io(path, e));
+    }
 
     // fsync again after rename so the directory entry is durable on systems
     // that require it.
@@ -300,11 +353,12 @@ impl StorageSource for MemoryStorage {
     }
 
     fn list(&self, dir: &Path) -> Result<Vec<PathBuf>, StorageError> {
+        let dir = normalise_dir(dir);
         let mut entries: Vec<PathBuf> = self
             .data
             .borrow()
             .keys()
-            .filter(|p| p.parent() == Some(dir))
+            .filter(|p| p.parent() == Some(dir.as_path()))
             .cloned()
             .collect();
         entries.sort();
@@ -425,6 +479,84 @@ mod tests {
         assert_eq!(names, vec!["a.txt", "b.txt"]);
     }
 
+    #[test]
+    fn native_list_returns_relative_paths_like_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let native = NativeStorage::at(dir.path().to_path_buf());
+        let memory = MemoryStorage::new();
+
+        for store in [&native as &dyn StorageSource, &memory] {
+            store.write(Path::new("saves/a.crb"), b"a").unwrap();
+            store.write(Path::new("saves/b.crb"), b"b").unwrap();
+        }
+
+        let expected = vec![PathBuf::from("saves/a.crb"), PathBuf::from("saves/b.crb")];
+        assert_eq!(native.list(Path::new("saves")).unwrap(), expected);
+        assert_eq!(memory.list(Path::new("saves")).unwrap(), expected);
+    }
+
+    // ── Path containment ─────────────────────────────────────────────────
+
+    #[test]
+    fn native_rejects_parent_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NativeStorage::at(dir.path().join("root"));
+
+        let escape = Path::new("../escape");
+        assert!(matches!(
+            store.write(escape, b"x").unwrap_err(),
+            StorageError::InvalidPath(_)
+        ));
+        assert!(matches!(
+            store.read(escape).unwrap_err(),
+            StorageError::InvalidPath(_)
+        ));
+        assert!(matches!(
+            store.delete(escape).unwrap_err(),
+            StorageError::InvalidPath(_)
+        ));
+        assert!(!store.exists(escape));
+        assert!(!dir.path().join("escape").exists());
+    }
+
+    #[test]
+    fn native_rejects_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::create_dir_all(victim.join("nested")).unwrap();
+
+        let store = NativeStorage::at(dir.path().join("root"));
+        // `Path::join` would discard the root entirely for an absolute
+        // argument, so `delete` would `remove_dir_all` the victim directory.
+        assert!(matches!(
+            store.delete(&victim).unwrap_err(),
+            StorageError::InvalidPath(_)
+        ));
+        assert!(victim.join("nested").exists());
+    }
+
+    #[test]
+    fn native_accepts_nested_relative_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NativeStorage::at(dir.path().to_path_buf());
+        let path = Path::new("./saves/campaign/slot1.crb");
+
+        store.write(path, b"inside").unwrap();
+        assert!(store.exists(path));
+        assert_eq!(store.read(path).unwrap(), b"inside");
+        assert!(dir.path().join("saves/campaign/slot1.crb").exists());
+    }
+
+    #[test]
+    fn native_missing_file_error_carries_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = NativeStorage::at(dir.path().to_path_buf());
+        match store.read(Path::new("nope.txt")).unwrap_err() {
+            StorageError::NotFound(p) => assert_eq!(p, dir.path().join("nope.txt")),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
     // ── Atomic write tests ───────────────────────────────────────────────
 
     #[test]
@@ -462,6 +594,25 @@ mod tests {
         write_atomic(&path, b"new").unwrap();
 
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    }
+
+    #[test]
+    fn atomic_write_removes_temp_file_when_rename_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        // A non-empty directory cannot be replaced by a rename, so the write
+        // fails after the temp file has been created and synced.
+        let path = dir.path().join("target.txt");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("occupant"), b"x").unwrap();
+
+        assert!(write_atomic(&path, b"data").is_err());
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leaked temp files: {leftovers:?}");
     }
 
     #[test]
