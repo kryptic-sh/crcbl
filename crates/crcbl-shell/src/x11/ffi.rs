@@ -1128,6 +1128,8 @@ pub mod value {
     pub const ATOM_ATOM: u32 = 4;
     /// `XCB_ATOM_CARDINAL`.
     pub const ATOM_CARDINAL: u32 = 6;
+    /// `XCB_ATOM_INTEGER`, the type ICCCM's `TIMESTAMP` target answers in.
+    pub const ATOM_INTEGER: u32 = 19;
     /// `XCB_ATOM_STRING` — Latin-1, which is why `UTF8_STRING` exists.
     pub const ATOM_STRING: u32 = 31;
     /// `XCB_ATOM_WM_NAME`.

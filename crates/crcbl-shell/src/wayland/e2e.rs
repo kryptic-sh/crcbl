@@ -99,8 +99,11 @@ unsafe extern "C" fn bind_shm(
     args: *mut WlArgument,
 ) -> c_int {
     // SAFETY: `user_data` is the `*mut ShmBinding` passed to
-    // `wl_proxy_add_dispatcher` below, which lives on the stack of `map_window`
-    // for strictly longer than the roundtrip that can call this.
+    // `wl_proxy_add_dispatcher` in `map_window`. It points into a `Box` that
+    // outlives the registry proxy — which `map_window` destroys before it
+    // returns, so no later `global`/`global_remove` can reach a freed
+    // allocation. It used to point at `map_window`'s own stack frame, and an
+    // output hotplug after that frame was gone re-entered here through it.
     let state = unsafe { &mut *user_data.cast::<ShmBinding>().cast_mut() };
     // SAFETY: this dispatcher is attached only to a `wl_registry`, so `args`
     // matches that interface's events for `opcode`.
@@ -166,13 +169,19 @@ pub fn map_window(shell: &dyn Shell, window: WindowId) -> Result<(), ShellError>
     let display: *mut WlDisplay = display.as_ptr().cast();
     let surface: *mut WlProxy = surface.as_ptr().cast();
 
-    let mut binding = ShmBinding {
+    // Boxed, not a local: the pointer goes to `wl_proxy_add_dispatcher` and
+    // libwayland keeps it for as long as the registry proxy lives. A local left
+    // `bind_shm` holding a pointer into a dead stack frame, which any later
+    // `wl_registry.global`/`global_remove` — an output hotplug, which this
+    // suite provokes deliberately — would have followed. `VirtualInput::attach`
+    // and `DragSource::attach` box theirs for the same reason.
+    let mut binding = Box::new(ShmBinding {
         registry: ptr::null_mut(),
         shm: ptr::null_mut(),
-    };
+    });
     // SAFETY: the display belongs to the shell and is live for as long as the
     // shell is borrowed. The registry, the roundtrip and the dispatcher all run
-    // on this thread, and `binding` outlives every call that can reach it.
+    // on this thread, and the boxed `binding` outlives the registry proxy.
     unsafe {
         binding.registry =
             super::protocol::wayland::wl_display::get_registry(ffi::display_as_proxy(display));
@@ -182,23 +191,51 @@ pub fn map_window(shell: &dyn Shell, window: WindowId) -> Result<(), ShellError>
         (lib.proxy_add_dispatcher)(
             binding.registry,
             bind_shm,
-            ptr::from_mut(&mut binding).cast(),
+            ptr::from_mut(binding.as_mut()).cast(),
             ptr::null_mut(),
         );
         // Two round trips: the first delivers the globals, the second the
         // `wl_shm.format` events that follow the bind.
         if (lib.display_roundtrip)(display) < 0 || (lib.display_roundtrip)(display) < 0 {
+            (lib.proxy_destroy)(binding.registry);
             return Err(ShellError::Backend("roundtrip failed".to_string()));
         }
     }
-    if binding.shm.is_null() {
+    let shm = binding.shm;
+    // The private registry has done its one job. Destroying it here — rather
+    // than leaking one per call, as this used to — is also what makes
+    // `bind_shm` unreachable from now on.
+    // SAFETY: the registry was created on this connection above and nothing
+    // else refers to it. `wl_registry` has no protocol destructor, so a
+    // client-side destroy is the whole of it.
+    unsafe { (lib.proxy_destroy)(binding.registry) };
+    if shm.is_null() {
         return Err(ShellError::Backend(
             "the compositor does not advertise wl_shm".to_string(),
         ));
     }
-    // SAFETY: `binding.shm` was just created on this connection.
-    unsafe { (lib.proxy_add_dispatcher)(binding.shm, ignore, ptr::null(), ptr::null_mut()) };
+    // SAFETY: `shm` was just bound on this connection.
+    unsafe { (lib.proxy_add_dispatcher)(shm, ignore, ptr::null(), ptr::null_mut()) };
+    let result = attach_shm_buffer(lib, display, surface, size, shm);
+    // SAFETY: `shm` is live and unused from here; the pool created from it is a
+    // separate object that deliberately outlives it. `wl_shm.release` only
+    // exists at version 2 and this binds version 1, so a client-side destroy is
+    // the only way to say it.
+    unsafe { (lib.proxy_destroy)(shm) };
+    result
+}
 
+/// Wraps an anonymous file in a `wl_buffer` and attaches it to `surface`.
+///
+/// Split out of [`map_window`] so the private registry and `wl_shm` have
+/// exactly one place to be destroyed, whichever step fails.
+fn attach_shm_buffer(
+    lib: &'static ffi::Lib,
+    display: *mut WlDisplay,
+    surface: *mut WlProxy,
+    size: crate::PhysicalSize,
+    shm: *mut WlProxy,
+) -> Result<(), ShellError> {
     let stride = i64::from(size.width) * 4;
     let length = stride * i64::from(size.height);
     // SAFETY: the name is a NUL-terminated literal; `memfd_create` returns a
@@ -224,7 +261,7 @@ pub fn map_window(shell: &dyn Shell, window: WindowId) -> Result<(), ShellError>
         reason = "the sizes come from a compositor configure and are far below i32::MAX"
     )]
     unsafe {
-        let pool = wl_shm::create_pool(binding.shm, fd, length as i32);
+        let pool = wl_shm::create_pool(shm, fd, length as i32);
         (lib.proxy_add_dispatcher)(pool, ignore, ptr::null(), ptr::null_mut());
         let buffer = wl_shm_pool::create_buffer(
             pool,

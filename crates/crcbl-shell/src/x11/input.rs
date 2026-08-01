@@ -53,7 +53,7 @@ use crcbl_core::input::{ButtonState, Keysym, Modifiers, Scancode};
 use super::{
     Conn, DisplayMode, KEYBOARD_DEVICE, KeyCode, LOCK_RECENTRE_FRACTION, POINTER_DEVICE,
     PhysicalPoint, PhysicalSize, PointerMode, ShellEvent, WindowConfiguration, WindowId, X11Shell,
-    ffi, keys, xkb,
+    ffi, keys, read_wire, xkb,
 };
 
 /// `NotifyGrab` and `NotifyUngrab`, the two `FocusIn`/`FocusOut` modes that are
@@ -193,7 +193,9 @@ impl X11Shell {
     /// docs](self). With detectable auto-repeat on it is always `false` and the
     /// repeat is recognized here instead, from the key already being held.
     fn handle_key(&mut self, raw: &Raw, paired: bool) {
-        let event: ffi::InputEvent = read_event(raw);
+        let Some(event) = read_wire::<ffi::InputEvent>(raw) else {
+            return;
+        };
         let Some(window) = self.window_by_xid(event.event) else {
             return;
         };
@@ -262,7 +264,9 @@ impl X11Shell {
 
     /// A pointer button went down or came up — or the wheel turned.
     fn handle_button(&mut self, raw: &Raw, pressed: bool) {
-        let event: ffi::InputEvent = read_event(raw);
+        let Some(event) = read_wire::<ffi::InputEvent>(raw) else {
+            return;
+        };
         let Some(window) = self.window_by_xid(event.event) else {
             return;
         };
@@ -310,7 +314,9 @@ impl X11Shell {
     /// window but it still *moves*, so it eventually rests against an edge and
     /// stops generating motion in that direction.
     fn handle_motion(&mut self, raw: &Raw) {
-        let event: ffi::InputEvent = read_event(raw);
+        let Some(event) = read_wire::<ffi::InputEvent>(raw) else {
+            return;
+        };
         let Some(window) = self.window_by_xid(event.event) else {
             return;
         };
@@ -341,7 +347,9 @@ impl X11Shell {
 
     /// The pointer entered or left a window.
     fn handle_crossing(&mut self, raw: &Raw, entered: bool) {
-        let event: ffi::InputEvent = read_event(raw);
+        let Some(event) = read_wire::<ffi::InputEvent>(raw) else {
+            return;
+        };
         let Some(window) = self.window_by_xid(event.event) else {
             return;
         };
@@ -366,7 +374,9 @@ impl X11Shell {
 
     /// Keyboard focus arrived or left.
     fn handle_focus(&mut self, raw: &Raw, focused: bool) {
-        let event: ffi::FocusEvent = read_event(raw);
+        let Some(event) = read_wire::<ffi::FocusEvent>(raw) else {
+            return;
+        };
         if event.mode == NOTIFY_GRAB || event.mode == NOTIFY_UNGRAB {
             return;
         }
@@ -400,7 +410,9 @@ impl X11Shell {
     /// why the previous size is kept — a window dragged across the desktop
     /// otherwise recreates the swapchain on every motion event.
     fn handle_configure(&mut self, raw: &Raw) {
-        let event: ffi::ConfigureNotifyEvent = read_event(raw);
+        let Some(event) = read_wire::<ffi::ConfigureNotifyEvent>(raw) else {
+            return;
+        };
         let Some(window) = self.window_by_xid(event.window) else {
             return;
         };
@@ -429,7 +441,9 @@ impl X11Shell {
 
     /// A window was mapped or unmapped.
     fn handle_map(&mut self, raw: &Raw, mapped: bool) {
-        let event: ffi::WindowNotifyEvent = read_event(raw);
+        let Some(event) = read_wire::<ffi::WindowNotifyEvent>(raw) else {
+            return;
+        };
         let Some(window) = self.window_by_xid(event.window) else {
             return;
         };
@@ -450,17 +464,25 @@ impl X11Shell {
     /// seam's answer is the same as an explicit destroy: the handle goes stale
     /// and a [`WindowDestroyed`](ShellEvent::WindowDestroyed) says so.
     fn handle_destroy(&mut self, raw: &Raw) {
-        let event: ffi::WindowNotifyEvent = read_event(raw);
+        let Some(event) = read_wire::<ffi::WindowNotifyEvent>(raw) else {
+            return;
+        };
         let Some(window) = self.window_by_xid(event.window) else {
             return;
         };
         self.windows.remove(window.cast());
+        // The same cleanup the explicit path does, through the same function:
+        // an outstanding read left alive here answered two seconds later,
+        // naming a window this very event has just reported as destroyed.
+        self.forget_selection_state(window, event.window);
         self.queue.push_back(ShellEvent::WindowDestroyed { window });
     }
 
     /// A message from another client — in practice, the window manager.
     fn handle_client_message(&mut self, raw: &Raw) {
-        let event: ffi::ClientMessageEvent = read_event(raw);
+        let Some(event) = read_wire::<ffi::ClientMessageEvent>(raw) else {
+            return;
+        };
         let Some(window) = self.window_by_xid(event.window) else {
             return;
         };
@@ -487,7 +509,9 @@ impl X11Shell {
     /// has no incremental update. Recompiling costs a round trip and happens
     /// when a user switches layout, which is not a frame-loop concern.
     fn handle_mapping_notify(&mut self, raw: &Raw) {
-        let event: ffi::MappingNotifyEvent = read_event(raw);
+        let Some(event) = read_wire::<ffi::MappingNotifyEvent>(raw) else {
+            return;
+        };
         // `request == 2` is a *pointer* mapping change — which button is which
         // — and has nothing to do with the keymap.
         if event.request == 2 {
@@ -506,7 +530,9 @@ impl X11Shell {
         let Some(opcode) = self.conn.xi_opcode else {
             return;
         };
-        let header: ffi::XiRawEvent = read_event(raw);
+        let Some(header) = read_wire::<ffi::XiRawEvent>(raw) else {
+            return;
+        };
         if header.extension != opcode || header.event_type != ffi::value::XI_RAW_MOTION {
             return;
         }
@@ -652,29 +678,6 @@ impl X11Shell {
 /// anyway.
 const MAX_EVENTS_PER_PUMP: usize = 4096;
 
-/// Reinterprets an event's bytes as a wire struct.
-///
-/// Every X11 event body is at least 32 bytes and every type read through this
-/// is no larger, which the size assertions in [`ffi`] pin down. A copy rather
-/// than a cast, because the batch's `Vec<u8>` has no alignment guarantee and
-/// reading a `u32` through a misaligned reference is undefined even on x86.
-fn read_event<T: Copy>(raw: &[u8]) -> T {
-    debug_assert!(raw.len() >= size_of::<T>(), "event shorter than its type");
-    let mut value = core::mem::MaybeUninit::<T>::uninit();
-    // SAFETY: `T` is a `#[repr(C)]` wire struct of plain integers, so every bit
-    // pattern is valid, and `size_of::<T>()` bytes are copied from a slice the
-    // caller has checked is at least that long. The destination is a fresh
-    // uninitialised `T`, so the copy cannot overlap.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            raw.as_ptr(),
-            value.as_mut_ptr().cast::<u8>(),
-            size_of::<T>().min(raw.len()),
-        );
-        value.assume_init()
-    }
-}
-
 /// Whether these two events are an auto-repeat pair.
 ///
 /// See the [module docs](self): a `KeyRelease` immediately followed by a
@@ -687,8 +690,12 @@ fn is_repeat_pair(first: &Raw, second: Option<&Raw>) -> bool {
     if first[0] & 0x7f != ffi::event::KEY_RELEASE || second[0] & 0x7f != ffi::event::KEY_PRESS {
         return false;
     }
-    let release: ffi::InputEvent = read_event(first);
-    let press: ffi::InputEvent = read_event(second);
+    let (Some(release), Some(press)) = (
+        read_wire::<ffi::InputEvent>(first),
+        read_wire::<ffi::InputEvent>(second),
+    ) else {
+        return false;
+    };
     release.detail == press.detail && release.time == press.time
 }
 

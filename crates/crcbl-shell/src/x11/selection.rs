@@ -54,6 +54,15 @@
 //! the backend would satisfy obligation 4 for well-behaved peers and violate it
 //! for exactly the peers a timeout exists for.
 //!
+//! There is exactly **one** case where an accepted read is not answered: its
+//! window was destroyed. An answer names the window it was asked for, and
+//! emitting one for a handle the consumer has already been told is stale would
+//! break [obligation 1](crate::Shell), which is the stronger of the two — a
+//! consumer can see a stale handle and cannot see a request that will never be
+//! answered on a window it no longer has. Both routes to a destroyed window go
+//! through `X11Shell::forget_selection_state`, and `HeadlessShell` makes the
+//! same call in `resolve_reads`.
+//!
 //! # Decision: the same shape as `service_transfers`, for the same deadlock
 //!
 //! An X11 client can own the selection *and* read it, and P0.5c predicted the

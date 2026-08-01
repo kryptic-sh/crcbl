@@ -186,9 +186,7 @@ use crate::{
 use data::{Delivery, HeldRead, Resolution, Transfer};
 use ffi::{Lib, WlArgument, WlDisplay, WlMessage, WlProxy};
 use protocol::fractional_scale::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1};
-use protocol::pointer_constraints::{
-    zwp_confined_pointer_v1, zwp_locked_pointer_v1, zwp_pointer_constraints_v1,
-};
+use protocol::pointer_constraints::{zwp_locked_pointer_v1, zwp_pointer_constraints_v1};
 use protocol::relative_pointer::{zwp_relative_pointer_manager_v1, zwp_relative_pointer_v1};
 use protocol::viewporter::{wp_viewport, wp_viewporter};
 use protocol::wayland::{
@@ -292,18 +290,32 @@ impl TimeBase {
     ///
     /// Pure so it can be tested without a compositor, which matters because the
     /// wrap is unobservable in any session shorter than seven weeks.
+    ///
+    /// `wayland_millis` is a raw `u32` off the wire, carried by every pointer
+    /// and keyboard event and validated by nobody, so the widening is written as
+    /// "pick the nearest candidate that exists" rather than as an adjustment.
+    /// The candidate one wrap *below* the current one only exists on a machine
+    /// that has been up for 49.7 days; before that `now_millis` has no high bits
+    /// and subtracting a wrap underflows — which is what the earlier
+    /// `full -= WRAP` did, panicking in debug and producing a timestamp around
+    /// 1.8 × 10¹⁹ ms in release for any event whose stamp merely ran ahead of
+    /// our sample.
     fn rebase(epoch_nanos: u64, now_nanos: u64, wayland_millis: u32) -> EventTime {
         const WRAP: u64 = 1 << 32;
         let now_millis = now_nanos / 1_000_000;
-        // Reconstruct the full-width timestamp closest to now: an event is
-        // always within a few milliseconds of the present, so of the three
-        // candidate epochs the nearest one is the right one.
-        let mut full = (now_millis & !(WRAP - 1)) | u64::from(wayland_millis);
-        if full > now_millis + WRAP / 2 {
-            full -= WRAP;
-        } else if full + WRAP / 2 < now_millis {
-            full += WRAP;
-        }
+        // An event is always within a few milliseconds of the present, so of
+        // the reconstructions that are representable at all, the one nearest
+        // `now` is the right one.
+        let current = (now_millis & !(WRAP - 1)) | u64::from(wayland_millis);
+        let full = [
+            current.checked_sub(WRAP),
+            Some(current),
+            current.checked_add(WRAP),
+        ]
+        .into_iter()
+        .flatten()
+        .min_by_key(|candidate| candidate.abs_diff(now_millis))
+        .expect("the current wrap is always a candidate");
         let epoch_millis = epoch_nanos / 1_000_000;
         EventTime::from_millis(full.saturating_sub(epoch_millis))
     }
@@ -621,6 +633,19 @@ struct Sink {
     /// libwayland, so that [`watch`](Self::watch) can be called from inside the
     /// dispatcher — see that method for the event that forces it.
     lib: &'static Lib,
+    /// This allocation's own address, as it came out of `Box::into_raw`.
+    ///
+    /// The pointer every `wl_proxy_add_dispatcher` is given, and the reason it
+    /// is a stored field rather than a `ptr::from_mut(self)` at the call site:
+    /// `self` there is a transient reborrow — of `Conn::sink()`'s `&mut *self.sink`,
+    /// or of the dispatcher's own `&mut *user_data` — and every *later*
+    /// `Conn::sink()` re-derives from the raw root, which invalidates that
+    /// reborrow and everything descended from it. libwayland would then be
+    /// holding pointers whose provenance is dead, and the dispatcher's
+    /// `&mut *user_data` would be undefined behaviour from the second `watch`
+    /// onward. Handing over the root itself is what makes each dispatcher entry
+    /// a fresh, valid derivation.
+    root: *mut Sink,
     /// Proxies we have attached the dispatcher to, and what they are.
     objects: Vec<(usize, ObjectKind)>,
     /// Decoded events awaiting the pump.
@@ -628,12 +653,23 @@ struct Sink {
 }
 
 impl Sink {
-    fn new(lib: &'static Lib) -> Self {
-        Self {
+    /// Allocates a sink and records its own address.
+    ///
+    /// Returns the raw pointer rather than the value because [`root`](Self::root)
+    /// can only be filled in once the allocation has an address — which is the
+    /// whole point of the field.
+    fn boxed(lib: &'static Lib) -> *mut Sink {
+        let raw = Box::into_raw(Box::new(Self {
             lib,
+            root: ptr::null_mut(),
             objects: Vec::new(),
             events: Vec::new(),
-        }
+        }));
+        // SAFETY: `raw` was just returned by `Box::into_raw`, so it is live,
+        // aligned and uniquely owned; nothing else refers to the allocation
+        // yet.
+        unsafe { (*raw).root = raw };
+        raw
     }
 
     fn kind_of(&self, proxy: usize) -> Option<ObjectKind> {
@@ -672,16 +708,13 @@ impl Sink {
         self.objects.push((proxy as usize, kind));
         // SAFETY: `proxy` is live on this connection and has no dispatcher yet;
         // `dispatch` matches libwayland's `wl_dispatcher_func_t`; and the
-        // `*mut Sink` handed over is this allocation, which outlives every
-        // proxy because `WaylandShell::drop` destroys them all before freeing
-        // it.
+        // `*mut Sink` handed over is `self.root` — the pointer `Box::into_raw`
+        // produced, *not* a reborrow of the `&mut self` this method holds, so it
+        // stays valid across every later `Conn::sink()`. The allocation outlives
+        // every proxy, because `WaylandShell::drop` destroys them all before
+        // freeing it.
         unsafe {
-            (self.lib.proxy_add_dispatcher)(
-                proxy,
-                dispatch,
-                ptr::from_mut(self).cast(),
-                ptr::null_mut(),
-            );
+            (self.lib.proxy_add_dispatcher)(proxy, dispatch, self.root.cast(), ptr::null_mut());
         }
     }
 }
@@ -701,12 +734,14 @@ unsafe extern "C" fn dispatch(
     _message: *const WlMessage,
     args: *mut WlArgument,
 ) -> c_int {
-    // SAFETY: `user_data` is the `*mut Sink` handed to every
-    // `wl_proxy_add_dispatcher` call by `Conn::watch`, which comes from
-    // `Box::into_raw` and stays live until `WaylandShell::drop`. No Rust
-    // reference to that allocation is alive here: the shell only takes one
-    // outside the `dispatch_pending`/`roundtrip`/`read_events` calls that can
-    // reach this function.
+    // SAFETY: `user_data` is `Sink::root` — the pointer `Box::into_raw`
+    // produced in `Sink::boxed`, which every `watch` hands over verbatim and
+    // which stays live until `WaylandShell::drop`. Deriving a `&mut` from the
+    // allocation's root here is what keeps it valid across the shell's own
+    // `Conn::sink()` reborrows. No Rust reference to the allocation is alive at
+    // this point: the shell only takes one outside the
+    // `dispatch_pending`/`roundtrip`/`read_events` calls that can reach this
+    // function.
     let sink = unsafe { &mut *user_data.cast::<Sink>().cast_mut() };
     let proxy = target as usize;
     let Some(kind) = sink.kind_of(proxy) else {
@@ -1690,6 +1725,14 @@ struct WlWindow {
     requested_size: LogicalSize,
     requested_mode: DisplayMode,
     requested_constraints: SizeConstraints,
+    /// [`WindowDesc::resizable`], kept because xdg-shell has no way to *ask*
+    /// what it is: the flag is expressed as `min == max`, so every later
+    /// `set_min_size`/`set_max_size` has to restate it. Without the field,
+    /// `set_constraints` had to guess `true`, and a window created
+    /// `resizable: false` became user-resizable the first time a caller touched
+    /// its constraints — with no way back. The X11 backend keeps the same flag
+    /// for the same reason.
+    resizable: bool,
     configuration: Option<WindowConfiguration>,
     pending: PendingConfigure,
     /// Outputs the surface is on, in `wl_surface.enter` order. Empty until the
@@ -1846,7 +1889,7 @@ impl WaylandShell {
             relative_pointer_manager: ptr::null_mut(),
             pointer_constraints: ptr::null_mut(),
             data_device_manager: ptr::null_mut(),
-            sink: Box::into_raw(Box::new(Sink::new(lib))),
+            sink: Sink::boxed(lib),
         };
 
         let mut shell = Self {
@@ -2016,9 +2059,16 @@ impl WaylandShell {
         match interface {
             "wl_compositor" => bind!(compositor, wl_compositor, COMPOSITOR_VERSION),
             "xdg_wm_base" => {
+                // Only watch the proxy the *first* time. A compositor may
+                // advertise two globals of the same interface, and re-watching
+                // an already-bound one pushed a duplicate into `Sink::objects`
+                // and made libwayland log "proxy already has a dispatcher".
+                let fresh = self.conn.wm_base.is_null();
                 bind!(wm_base, xdg_wm_base, WM_BASE_VERSION);
-                let proxy = self.conn.wm_base;
-                self.conn.watch(proxy, ObjectKind::WmBase);
+                if fresh {
+                    let proxy = self.conn.wm_base;
+                    self.conn.watch(proxy, ObjectKind::WmBase);
+                }
             }
             "wp_viewporter" => bind!(viewporter, wp_viewporter, 1),
             "wp_fractional_scale_manager_v1" => {
@@ -2237,8 +2287,20 @@ impl WaylandShell {
                         self.outputs.iter().position(|output| output.global == name)
                     {
                         let output = self.outputs.remove(index);
-                        self.conn.destroy(output.xdg);
-                        self.conn.destroy(output.proxy as *mut WlProxy);
+                        let proxy = output.proxy as *mut WlProxy;
+                        // Both interfaces have a protocol destructor, which
+                        // `Conn::destroy`'s own documentation forbids using it
+                        // for: a client-side destroy frees the proxy without
+                        // telling the compositor, so on every hotplug the
+                        // compositor kept the object until we disconnected.
+                        // `zxdg_output_v1.destroy` has existed since version 1;
+                        // `wl_output.release` since 3, and this binds 4.
+                        // SAFETY: both proxies are live, and each destructor is
+                        // its own interface's.
+                        unsafe {
+                            self.conn.release(output.xdg, zxdg_output_v1::destroy);
+                            self.conn.release_since(proxy, 3, wl_output::release);
+                        }
                         monitors_dirty = true;
                     }
                     if let Some(index) = self.seats.iter().position(|seat| seat.global == name) {
@@ -2522,7 +2584,10 @@ impl WaylandShell {
         }
         self.remove_data_device(index);
         let proxy = self.seats[index].proxy;
-        self.conn.destroy(proxy);
+        // `wl_seat.release` since version 5, and this binds 8. See the output
+        // case in `process_raw` for why a client-side destroy is wrong here.
+        // SAFETY: the proxy is live and `release` is `wl_seat`'s destructor.
+        unsafe { self.conn.release_since(proxy, 5, wl_seat::release) };
         self.seats.remove(index);
     }
 
@@ -3290,9 +3355,9 @@ impl WaylandShell {
             Err(_) => return,
         };
         for (_, proxy) in existing {
-            // SAFETY: each proxy is a live constraint object created below. The
-            // two interfaces have byte-identical destructors at opcode 0, but
-            // the correct one is still named per kind by `constraint_destructor`.
+            // SAFETY: each proxy is a live constraint object created below, and
+            // the two interfaces share one destructor — see
+            // `constraint_destructor`.
             unsafe { self.conn.release(proxy, constraint_destructor()) };
         }
         if mode == PointerMode::Free || self.conn.pointer_constraints.is_null() {
@@ -3704,6 +3769,23 @@ impl WaylandShell {
         }
     }
 
+    /// Tells a drag source that nothing here suits us.
+    ///
+    /// `wl_data_offer.accept` with a **null** mime type is the protocol's "no",
+    /// and it has to be sent even for an offer this backend is not tracking: a
+    /// drag that gets no answer at all leaves the source's cursor promising a
+    /// drop that will never happen.
+    fn refuse_drag(&mut self, proxy: *mut WlProxy, serial: u32) {
+        if proxy.is_null() {
+            return;
+        }
+        // SAFETY: `proxy` is the `wl_data_offer` the compositor created and
+        // named in the `enter` event being handled, so it is live; `accept`
+        // takes a nullable string.
+        unsafe { wl_data_offer::accept(proxy, serial, None) };
+        self.conn.flush();
+    }
+
     /// A drag arrived over one of our surfaces.
     fn drag_entered(
         &mut self,
@@ -3714,7 +3796,9 @@ impl WaylandShell {
         y: i32,
         offer: usize,
     ) {
+        let proxy = offer as *mut WlProxy;
         let Some(index) = self.data_seat(device) else {
+            self.refuse_drag(proxy, serial);
             return;
         };
         let Some(offer) = self.seats[index]
@@ -3722,6 +3806,7 @@ impl WaylandShell {
             .as_mut()
             .and_then(|device| device.claim(offer))
         else {
+            self.refuse_drag(proxy, serial);
             return;
         };
         // A window that did not ask for drops is not a drop target: the source
@@ -3741,15 +3826,19 @@ impl WaylandShell {
             .and(offer.pick(MimeType::UriList))
             .map(str::to_string);
 
-        let version = if offer.proxy.is_null() {
-            0
-        } else {
-            // SAFETY: the offer proxy is live on this connection.
-            unsafe { ffi::proxy_version(offer.proxy) }
-        };
+        if offer.proxy.is_null() {
+            // Nothing to answer on. The null check used to guard only the
+            // version query, and then `accept` and `set_actions` dereferenced
+            // the same pointer two lines later — the generated wrappers read
+            // the proxy before marshalling anything.
+            return;
+        }
+        // SAFETY: the offer proxy is live on this connection.
+        let version = unsafe { ffi::proxy_version(offer.proxy) };
         let encoded = mime.as_deref().and_then(|mime| CString::new(mime).ok());
-        // SAFETY: the offer is live; `accept` takes a nullable string, and a
-        // null one is the protocol's own way of saying "nothing here suits me".
+        // SAFETY: the offer is live (checked just above); `accept` takes a
+        // nullable string, and a null one is the protocol's own way of saying
+        // "nothing here suits me".
         unsafe {
             wl_data_offer::accept(offer.proxy, serial, encoded.as_deref());
             if version >= 3 {
@@ -4114,13 +4203,15 @@ impl WaylandShell {
 /// The destructor request shared by both constraint interfaces.
 ///
 /// `zwp_locked_pointer_v1.destroy` and `zwp_confined_pointer_v1.destroy` are
-/// the same opcode on interfaces whose only other requests we never send, so
-/// one function serves both — and the choice is made here rather than at four
-/// call sites.
+/// opcode 0 on both interfaces, take no arguments, and are the only requests
+/// this backend ever sends on either — so one function genuinely serves both,
+/// and which of the two names it is spelled with is a documentation choice, not
+/// a dispatch. Nothing here can dispatch on the kind anyway:
+/// [`WlWindow::constraints`] records the pointer and the proxy, not which
+/// interface the proxy is. This used to carry a
+/// `let _ = zwp_confined_pointer_v1::REQ_DESTROY;` that did nothing but make
+/// the call sites' "named per kind" comments look substantiated.
 const fn constraint_destructor() -> unsafe fn(*mut WlProxy) {
-    // Named through `zwp_locked_pointer_v1` because a constraint is far more
-    // often a lock; `zwp_confined_pointer_v1::destroy` is byte-identical.
-    let _ = zwp_confined_pointer_v1::REQ_DESTROY;
     zwp_locked_pointer_v1::destroy
 }
 
@@ -4184,8 +4275,13 @@ impl Drop for WaylandShell {
             .map(|output| (output.xdg, output.proxy as *mut WlProxy))
             .collect();
         for (xdg, output) in outputs {
-            self.conn.destroy(xdg);
-            self.conn.destroy(output);
+            // SAFETY: both proxies are live and each destructor is its own
+            // interface's; see the hotplug path for why these are protocol
+            // destructors rather than `Conn::destroy`.
+            unsafe {
+                self.conn.release(xdg, zxdg_output_v1::destroy);
+                self.conn.release_since(output, 3, wl_output::release);
+            }
         }
         let globals = [
             self.conn.data_device_manager,
@@ -4360,6 +4456,7 @@ impl Shell for WaylandShell {
                 requested_size: desc.size,
                 requested_mode: desc.mode,
                 requested_constraints: desc.constraints,
+                resizable: desc.resizable,
                 // Unconfigured, and it stays that way until the compositor
                 // answers — a round trip away. This is the contract P0.4 was
                 // shaped around and the reason it was shaped that way.
@@ -4478,9 +4575,10 @@ impl Shell for WaylandShell {
         let toplevel = state.toplevel;
         let surface = state.surface;
         let requested = state.requested_size;
+        let resizable = state.resizable;
         // SAFETY: both proxies are live; the sizes are plain integers.
         unsafe {
-            apply_constraints(toplevel, constraints, true, requested);
+            apply_constraints(toplevel, constraints, resizable, requested);
             wl_surface::commit(surface);
         }
         self.conn.flush();
@@ -4608,10 +4706,7 @@ impl Shell for WaylandShell {
     fn set_pointer_mode(&mut self, window: WindowId, mode: PointerMode) -> Result<(), ShellError> {
         self.window(window)?;
         if !self.caps.contains(mode.required_cap()) {
-            return Err(Self::unsupported(match mode {
-                PointerMode::Locked => "pointer lock",
-                _ => "pointer confinement",
-            }));
+            return Err(Self::unsupported(mode.as_str()));
         }
         self.rebuild_constraint(window, mode);
         Ok(())
@@ -4775,6 +4870,15 @@ impl Shell for WaylandShell {
             // no arguments beyond the object it creates.
             let source = unsafe { wl_data_device_manager::create_data_source(manager) };
             if source.is_null() {
+                // The previous source was `take`n out of the device above.
+                // Returning without putting it back left the compositor still
+                // believing we owned the selection while nothing on this side
+                // did — so the next `wl_data_source.send` found no seat, and the
+                // selection could never be released either. Nothing changed, so
+                // nothing should have moved: put it back.
+                if let Some(device) = self.seats[index].data.as_mut() {
+                    device.source = previous;
+                }
                 return Err(ShellError::Backend(
                     "wl_data_device_manager.create_data_source failed".to_string(),
                 ));
@@ -5101,6 +5205,27 @@ mod tests {
         assert_eq!(
             TimeBase::rebase(epoch, now_millis * 1_000_000, u32::MAX),
             EventTime::from_millis(WRAP - 1),
+        );
+    }
+
+    #[test]
+    fn a_timestamp_ahead_of_now_before_the_first_wrap_does_not_underflow() {
+        // The whole `time` argument is an unvalidated `u32` off the wire, and on
+        // a machine with an uptime under 49.7 days there is no earlier wrap to
+        // move a too-large stamp into. Subtracting one anyway panicked in debug
+        // and produced ~1.8e19 ms in release — for a hostile compositor, and for
+        // an honest one whose event merely ran a few milliseconds ahead of the
+        // `CLOCK_MONOTONIC` sample taken here.
+        let now = 60_000_000_000; // one minute of uptime, in nanoseconds
+        assert_eq!(
+            TimeBase::rebase(0, now, u32::MAX),
+            EventTime::from_millis(u64::from(u32::MAX)),
+            "the only reconstruction that exists is the raw value"
+        );
+        // The nearby, ordinary case is unaffected.
+        assert_eq!(
+            TimeBase::rebase(0, now, 60_001),
+            EventTime::from_millis(60_001)
         );
     }
 
@@ -5510,6 +5635,7 @@ mod tests {
             requested_size: LogicalSize::new(640.0, 480.0),
             requested_mode: DisplayMode::Windowed,
             requested_constraints: SizeConstraints::default(),
+            resizable: true,
             configuration: None,
             pending: PendingConfigure::default(),
             outputs: Vec::new(),

@@ -242,7 +242,14 @@ impl HeadlessWindow {
             .unwrap_or(1.0)
     }
 
-    /// The mode that is or will be in effect.
+    /// The mode that is in effect, or — before the first configure — the one
+    /// that is on its way.
+    ///
+    /// Deliberately *not* the pending configure's when the window is already
+    /// configured: a compositor answering a `set_mode` with something else is a
+    /// case the seam exists to express, so an injected
+    /// [`resize`](HeadlessShell::resize) must report the mode currently in
+    /// effect rather than adopting the one that was merely asked for.
     fn settled_mode(&self) -> DisplayMode {
         self.configuration
             .map(|config| config.mode)
@@ -361,9 +368,27 @@ impl HeadlessShell {
     /// borderless window goes, and every backend that could report zero
     /// monitors (a headless X server, a disconnected session) is a case the
     /// engine treats as "no display".
+    ///
+    /// If two monitors share a [`MonitorId`], or if one uses `u32::MAX`. Ids
+    /// are the key [`Shell::monitor`] looks up and the ones
+    /// [`plug_monitor`](Self::plug_monitor) hands out afterwards, so a
+    /// duplicate makes the lookup ambiguous and `u32::MAX` leaves no id for the
+    /// next hotplug.
     #[must_use]
     pub fn with_monitors(mut self, monitors: Vec<MonitorInfo>) -> Self {
         assert!(!monitors.is_empty(), "a shell needs at least one monitor");
+        for (index, monitor) in monitors.iter().enumerate() {
+            assert!(
+                monitor.id.0 != u32::MAX,
+                "monitor id {} leaves no id for the next hotplug",
+                monitor.id.0
+            );
+            assert!(
+                !monitors[..index].iter().any(|seen| seen.id == monitor.id),
+                "monitor id {} appears twice",
+                monitor.id.0
+            );
+        }
         self.next_monitor_id = monitors
             .iter()
             .map(|monitor| monitor.id.0 + 1)
@@ -519,7 +544,11 @@ impl HeadlessShell {
     /// against an unchanged window geometry) and Win32 (`WM_DPICHANGED`'s
     /// suggested rectangle) do. Queues a
     /// [`ScaleFactorChanged`](ShellEvent::ScaleFactorChanged) carrying both
-    /// facts, so a consumer cannot hold a mismatched size/scale pair.
+    /// facts, so a consumer cannot hold a mismatched size/scale pair, followed
+    /// by the [`Resized`](ShellEvent::Resized) it implies — which is the pair
+    /// both Linux backends emit for a scale change, and the pair
+    /// [`deliver_due_configures`](Self::deliver_due_configures) emits for a
+    /// scale change that arrives with a configure.
     ///
     /// # Errors
     ///
@@ -550,6 +579,11 @@ impl HeadlessShell {
             window,
             scale_factor,
             size,
+        });
+        self.queue.push_back(ShellEvent::Resized {
+            window,
+            size,
+            scale_factor,
         });
         Ok(())
     }
@@ -1200,16 +1234,31 @@ impl Shell for HeadlessShell {
             return Err(ShellError::NoSuchMonitor(monitor.0));
         }
 
-        let scale_factor = self.monitors[0].scale_factor;
-        let size = match desc.mode {
-            DisplayMode::Windowed => desc
-                .constraints
-                .apply(desc.size.to_physical(scale_factor), scale_factor),
+        // `desc.accept_drops` without `ShellCaps::DRAG_DROP` is deliberately not
+        // an error: it is a hint, and on a backend with no drag-and-drop it is
+        // simply a hint nobody reads — which is what X11 does with it too. The
+        // request is inert rather than ignored, because
+        // [`drop_file`](Self::drop_file) refuses without the capability.
+        //
+        // The scale factor comes from the monitor the window lands on, not from
+        // the primary one: a borderless window on a HiDPI secondary monitor is
+        // exactly the case `docs/plan/15-windowing.md`'s DPI matrix is looking
+        // for, and reporting the primary's scale there produces a swapchain at
+        // the wrong size. `set_mode` takes the same pair from the same place.
+        let (size, scale_factor) = match desc.mode {
+            DisplayMode::Windowed => {
+                let scale_factor = self.monitors[0].scale_factor;
+                (
+                    desc.constraints
+                        .apply(desc.size.to_physical(scale_factor), scale_factor),
+                    scale_factor,
+                )
+            }
             DisplayMode::Borderless { monitor } => {
                 let monitor = monitor
                     .and_then(|id| self.monitor(id))
                     .unwrap_or(&self.monitors[0]);
-                monitor.size()
+                (monitor.size(), monitor.scale_factor)
             }
         };
 
@@ -1318,27 +1367,30 @@ impl Shell for HeadlessShell {
         let countdown = self.configure_delay;
         let state = self.window_mut(window)?;
         state.requested_constraints = constraints;
-        match state.configuration {
-            // The window system already told us a size; if the new hints
-            // disagree with it, a compositor that honours them answers with a
-            // fresh configure — later, not now.
-            Some(config) => {
-                let constrained = constraints.apply(config.size, config.scale_factor);
-                if constrained != config.size {
-                    state.pending = Some(PendingConfigure {
-                        size: constrained,
-                        scale_factor: config.scale_factor,
-                        mode: config.mode,
-                        countdown,
-                    });
-                }
-            }
-            // Still unconfigured: fold the hints into the configure that is
-            // already on its way rather than scheduling a second one.
-            None => {
-                if let Some(pending) = state.pending.as_mut() {
-                    pending.size = constraints.apply(pending.size, pending.scale_factor);
-                }
+
+        // A configure already on its way is the authoritative statement of what
+        // is coming, whether or not the window has been configured before, so
+        // the hints fold into it rather than scheduling a second one. Rebuilding
+        // it from the *effective* configuration instead would silently discard
+        // whatever `set_mode` had put there — leaving `requested_mode` set,
+        // `effective_mode` unchanged and `mode_request_honoured` false forever.
+        if let Some(pending) = state.pending.as_mut() {
+            pending.size = constraints.apply(pending.size, pending.scale_factor);
+            return Ok(());
+        }
+
+        // Nothing in flight: the window system already told us a size, and if
+        // the new hints disagree with it, a compositor that honours them answers
+        // with a fresh configure — later, not now.
+        if let Some(config) = state.configuration {
+            let constrained = constraints.apply(config.size, config.scale_factor);
+            if constrained != config.size {
+                state.pending = Some(PendingConfigure {
+                    size: constrained,
+                    scale_factor: config.scale_factor,
+                    mode: config.mode,
+                    countdown,
+                });
             }
         }
         Ok(())
@@ -1363,8 +1415,27 @@ impl Shell for HeadlessShell {
         }
     }
 
-    fn wait_events(&mut self, _timeout: Option<Duration>) {
+    /// Sleeps as far as a shell with no window system behind it can.
+    ///
+    /// This shell reports [`ShellCaps::EVENT_WAIT`] by default, and that bit
+    /// says `wait_events` *genuinely blocks* — so it does: with the capability
+    /// set and nothing already queued, this really sleeps for `timeout`, and an
+    /// editor-style idle loop tested here idles rather than spinning. Without
+    /// the capability it returns immediately, like every backend that cannot
+    /// block.
+    ///
+    /// `None` — "until something happens" — returns immediately whatever the
+    /// capability says, because the only thing that can make something happen
+    /// in a headless shell is the caller, on this thread. Blocking forever
+    /// there would be a deadlock by construction rather than a wait.
+    fn wait_events(&mut self, timeout: Option<Duration>) {
         self.waits += 1;
+        if !self.caps.contains(ShellCaps::EVENT_WAIT) || !self.queue.is_empty() {
+            return;
+        }
+        if let Some(timeout) = timeout {
+            std::thread::sleep(timeout);
+        }
     }
 
     /// The seam-level spelling of [`set_time`](Self::set_time).
@@ -1389,11 +1460,7 @@ impl Shell for HeadlessShell {
 
     fn set_pointer_mode(&mut self, window: WindowId, mode: PointerMode) -> Result<(), ShellError> {
         if !self.caps.contains(mode.required_cap()) {
-            return Err(self.unsupported(match mode {
-                PointerMode::Confined => "pointer confinement",
-                PointerMode::Locked => "pointer lock",
-                PointerMode::Free => unreachable!("Free requires no capability"),
-            }));
+            return Err(self.unsupported(mode.as_str()));
         }
         self.window_mut(window)?.pointer_mode = mode;
         Ok(())
@@ -1754,6 +1821,83 @@ mod tests {
     }
 
     #[test]
+    fn constraints_do_not_cancel_a_mode_request_that_has_not_landed() {
+        // Both are requests, and they are independent. Rebuilding the pending
+        // configure from the *effective* configuration threw the mode away:
+        // `requested_mode` stayed `Borderless`, `effective_mode` stayed
+        // `Windowed`, and `mode_request_honoured` was false forever.
+        let (mut shell, window) = shell_with_configured_window();
+        shell
+            .set_mode(window, DisplayMode::Borderless { monitor: None })
+            .expect("mode request");
+        shell
+            .set_constraints(window, SizeConstraints::min(LogicalSize::new(320.0, 180.0)))
+            .expect("constraint request");
+        settle(&mut shell);
+
+        let state = shell.window_state(window).expect("state");
+        assert_eq!(
+            state.effective_mode(),
+            Some(DisplayMode::Borderless { monitor: None })
+        );
+        assert!(state.mode_request_honoured());
+    }
+
+    #[test]
+    fn a_borderless_window_reports_its_own_monitors_scale() {
+        // The scale used to be hoisted from `monitors[0]` above the match, so a
+        // borderless window on a HiDPI secondary monitor took that monitor's
+        // *size* and the primary's *scale* — a swapchain sized for one and a UI
+        // laid out for the other.
+        let mut shell = HeadlessShell::new();
+        let hidpi = shell.plug_monitor(MonitorInfo {
+            id: MonitorId(0),
+            name: "HEADLESS-2".to_string(),
+            bounds: PhysicalRect::new(1920, 0, 2560, 1440),
+            work_area: PhysicalRect::new(1920, 0, 2560, 1440),
+            scale_factor: 2.0,
+            refresh_millihertz: 143_998,
+            is_primary: false,
+        });
+        let window = shell
+            .create_window(&WindowDesc {
+                mode: DisplayMode::Borderless {
+                    monitor: Some(hidpi),
+                },
+                ..WindowDesc::default()
+            })
+            .expect("window");
+        settle(&mut shell);
+
+        let state = shell.window_state(window).expect("state");
+        assert_eq!(state.size(), Some(PhysicalSize::new(2560, 1440)));
+        assert_eq!(
+            state.scale_factor(),
+            Some(2.0),
+            "the scale is the borderless monitor's, not the primary's"
+        );
+        // And `set_mode` onto the same monitor agrees, which is the pair that
+        // used to disagree.
+        let other = shell
+            .create_window(&WindowDesc::default())
+            .expect("second window");
+        settle(&mut shell);
+        shell
+            .set_mode(
+                other,
+                DisplayMode::Borderless {
+                    monitor: Some(hidpi),
+                },
+            )
+            .expect("request");
+        settle(&mut shell);
+        assert_eq!(
+            shell.window_state(other).expect("state").scale_factor(),
+            shell.window_state(window).expect("state").scale_factor()
+        );
+    }
+
+    #[test]
     fn constraints_set_before_the_first_configure_fold_into_it() {
         let mut shell = HeadlessShell::new();
         let window = shell.create_window(&WindowDesc::default()).expect("window");
@@ -1811,11 +1955,20 @@ mod tests {
         let events = drain(&mut shell);
         assert_eq!(
             events,
-            vec![ShellEvent::ScaleFactorChanged {
-                window,
-                scale_factor: 1.5,
-                size: PhysicalSize::new(1920, 1080),
-            }]
+            vec![
+                ShellEvent::ScaleFactorChanged {
+                    window,
+                    scale_factor: 1.5,
+                    size: PhysicalSize::new(1920, 1080),
+                },
+                // The resize the scale change implies, in the same order both
+                // Linux backends report it.
+                ShellEvent::Resized {
+                    window,
+                    size: PhysicalSize::new(1920, 1080),
+                    scale_factor: 1.5,
+                },
+            ]
         );
         // 1280x720 logical at 1.5 is 1920x1080 physical — the swapchain must be
         // recreated at the new size, which is the leak the DPI matrix test in

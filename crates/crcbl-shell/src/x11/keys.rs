@@ -116,11 +116,37 @@ pub const fn button(detail: u8, pressed: bool) -> Button {
         // numbers them after the wheel rather than by their evdev codes.
         8 => Button::Press(PointerButton::Back),
         9 => Button::Press(PointerButton::Forward),
-        // Anything higher keeps its raw X11 number. It is *not* translated to
-        // an evdev code: `PointerButton::Other` documents that the raw code is
-        // what a profile round-trips, and the raw code here is X11's.
-        other => Button::Press(PointerButton::Other(other as u16)),
+        // Anything higher is translated back to the evdev code the X input
+        // driver derived it from, so `PointerButton::Other(n)` names the same
+        // physical button on both Linux backends.
+        //
+        // It used to keep the raw X11 number, on the reasoning that a raw code
+        // is what a profile round-trips. That is true and was the wrong
+        // conclusion: `linux::keymap::pointer_button` stores the *evdev* code,
+        // and its own documentation says two backends must not disagree about
+        // what `Other(2)` means — so a profile saved under Wayland bound a
+        // different physical button when replayed under X11, on the same mouse.
+        // The X11 number is the derived one, so it is the one that converts.
+        other => Button::Press(PointerButton::Other(evdev_of(other))),
     }
+}
+
+/// The evdev code an X11 button number above 9 was derived from.
+///
+/// `xf86-input-libinput` — and `evdev` before it — assigns X11 button numbers
+/// in a fixed order: 1–3 for the primary trio, 4–7 for the two scroll axes,
+/// then 8 upward for the rest of the evdev button block starting at `BTN_SIDE`.
+/// So 8 is `BTN_SIDE` (`0x113`), 9 is `BTN_EXTRA`, 10 is `BTN_FORWARD`, and the
+/// arithmetic below continues that run.
+///
+/// The first two of those are named buttons and never reach here; the run
+/// starts at 10 → `BTN_FORWARD`.
+const fn evdev_of(x11_button: u8) -> u16 {
+    /// `BTN_SIDE`, the evdev code X11 button 8 is derived from.
+    const BTN_SIDE: u16 = 0x113;
+    /// The first X11 button number in the derived run.
+    const FIRST_DERIVED: u16 = 8;
+    BTN_SIDE + (x11_button as u16 - FIRST_DERIVED)
 }
 
 /// `WM_SIZE_HINTS`, as `WM_NORMAL_HINTS` carries it.
@@ -389,9 +415,28 @@ mod tests {
         assert_eq!(button(3, true), Button::Press(PointerButton::Right));
         assert_eq!(button(8, true), Button::Press(PointerButton::Back));
         assert_eq!(button(9, true), Button::Press(PointerButton::Forward));
-        // A gaming mouse's tenth button keeps its raw X11 number.
-        assert_eq!(button(10, true), Button::Press(PointerButton::Other(10)));
-        assert_eq!(button(10, false), Button::Press(PointerButton::Other(10)));
+        // A gaming mouse's tenth button reports the *evdev* code, which is
+        // what the Wayland backend reports for the same physical button — so an
+        // input profile binds the same thing under either.
+        assert_eq!(
+            button(10, true),
+            Button::Press(crate::linux::keymap::pointer_button(0x115))
+        );
+        assert_eq!(button(10, true), Button::Press(PointerButton::Other(0x115)));
+        assert_eq!(
+            button(10, false),
+            Button::Press(PointerButton::Other(0x115))
+        );
+        assert_eq!(button(11, true), Button::Press(PointerButton::Other(0x116)));
+        // And the two named thumb buttons agree with the Wayland table too.
+        assert_eq!(
+            button(8, true),
+            Button::Press(crate::linux::keymap::pointer_button(0x113))
+        );
+        assert_eq!(
+            button(9, true),
+            Button::Press(crate::linux::keymap::pointer_button(0x114))
+        );
     }
 
     #[test]

@@ -468,7 +468,27 @@ impl Keymap {
         // decoded event and never reads it again, so this adopts it exactly
         // once and no other owner can close it.
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
-        Self::compile(file.as_raw_fd(), size as usize)
+
+        // `size` is the compositor's word for how long the keymap is, and
+        // `mmap` happily maps a length past the end of the file it is given —
+        // touching those pages then raises **SIGBUS**, which is a crash and not
+        // a failure this function could return `None` for. So the file is asked
+        // how big it actually is, and a compositor whose two answers disagree
+        // gets the no-keysym degradation the module documents rather than
+        // taking the process down.
+        let declared = size as usize;
+        let actual = file
+            .metadata()
+            .ok()
+            .and_then(|metadata| usize::try_from(metadata.len()).ok())?;
+        if actual < declared {
+            log::warn!(
+                "the compositor declared a {declared}-byte keymap but sent a \
+                 {actual}-byte file; ignoring it"
+            );
+            return None;
+        }
+        Self::compile(file.as_raw_fd(), declared)
     }
 
     /// Reads the keymap the X server holds for the core keyboard.
@@ -579,9 +599,12 @@ impl Keymap {
         if size == 0 {
             return None;
         }
-        // SAFETY: `fd` is the readable descriptor the compositor sent and
-        // `size` is the length it declared. `MAP_PRIVATE | PROT_READ` is what
-        // `wl_keyboard.keymap` documents as the only permitted mapping.
+        // SAFETY: `fd` is the readable descriptor the compositor sent, and
+        // `size` has been checked against the file's own length by
+        // [`from_fd`], so every page this maps is backed — which is what keeps
+        // the read of the last byte below from raising SIGBUS.
+        // `MAP_PRIVATE | PROT_READ` is what `wl_keyboard.keymap` documents as
+        // the only permitted mapping.
         let mapped = unsafe { mmap(ptr::null_mut(), size, PROT_READ, MAP_PRIVATE, fd, 0) };
         if mapped == MAP_FAILED || mapped.is_null() {
             log::warn!("cannot mmap the compositor's keymap ({size} bytes)");

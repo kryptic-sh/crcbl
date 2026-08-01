@@ -221,14 +221,33 @@ pub fn open_backend(backend: ShellBackend) -> Result<Box<dyn Shell>, ShellError>
     }
 }
 
-/// Opens the web backend. The canvas id is read from the `CRCBL_CANVAS_ID`
-/// environment variable (set by the JS shim during init).
+/// Opens the web backend, which exists only inside a browser.
+///
+/// Registered on every target — unlike the two Linux entries, which are
+/// `#[cfg]`ed out where they cannot work — because the failure it has to produce
+/// off wasm is a *diagnostic*. `CRCBL_SHELL=web` on a desktop used to hand back
+/// a shell that could never receive an event, so the application hung in its
+/// configure loop with nothing in the log; `UnknownBackend` would have been
+/// almost as bad, since "web is not in this build" is not what is wrong. The
+/// error names the actual problem instead. This is the same argument the module
+/// docs make for why headless is `auto: false`.
+///
+/// The canvas id comes from the shim's `__crcbl_web_canvas`, not from an
+/// environment variable: `std::env::var` on `wasm32-unknown-unknown` always
+/// answers `NotPresent`, so a `CRCBL_CANVAS_ID` lookup silently always produced
+/// the fallback.
 fn web_open() -> Result<Box<dyn Shell>, ShellError> {
-    let canvas_id: u32 = std::env::var("CRCBL_CANVAS_ID")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    Ok(Box::new(crate::web::open(canvas_id)?))
+    #[cfg(target_arch = "wasm32")]
+    {
+        Ok(Box::new(crate::web::open(crate::web::canvas_id())?))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Err(ShellError::Unsupported {
+            backend: ShellBackend::Web,
+            what: "the web backend outside a browser — build for wasm32-unknown-unknown",
+        })
+    }
 }
 
 /// Tries every auto-selectable backend in preference order.
@@ -319,6 +338,18 @@ mod tests {
         // Win32 lands at P14, so it is the stable example of a backend this
         // build does not have. (X11 was that example until P0.6 registered it,
         // which is the point.)
+        // Registered everywhere, but it only *works* in a browser — and off
+        // wasm it says so rather than handing back a shell that can never
+        // produce an event.
+        if !cfg!(target_arch = "wasm32") {
+            let error = open_backend(ShellBackend::Web).expect_err("no browser here");
+            let ShellError::Unsupported { backend, what } = error else {
+                panic!("wrong variant");
+            };
+            assert_eq!(backend, ShellBackend::Web);
+            assert!(what.contains("wasm32"), "{what}");
+        }
+
         let error = open_backend(ShellBackend::Win32).expect_err("not registered yet");
         let ShellError::UnknownBackend {
             requested,

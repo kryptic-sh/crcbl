@@ -247,12 +247,24 @@ impl PhysicalRect {
     }
 
     /// Whether a desktop-space point lies inside.
+    ///
+    /// **Half-open**: the left and top edges belong to this rectangle, the
+    /// right and bottom ones do not. Monitors tile edge to edge — the standard
+    /// side-by-side layout is `(0,0,1920,1080)` next to `(1920,0,1920,1080)` —
+    /// so an inclusive far edge would put the first column of the second
+    /// monitor inside *both*, and the monitor lookup in the X11 backend returns
+    /// the first match. Half-open makes the tiling a partition.
+    ///
+    /// The subtraction is widened to `i64` *before* it happens, not after: a
+    /// rectangle at a negative origin and a point near [`i32::MAX`] overflow an
+    /// `i32` difference, which panics in debug and wraps to "inside" in
+    /// release.
     #[must_use]
     pub const fn contains(self, x: i32, y: i32) -> bool {
         x >= self.x
             && y >= self.y
-            && (x - self.x) as i64 <= self.width as i64
-            && (y - self.y) as i64 <= self.height as i64
+            && (x as i64 - self.x as i64) < self.width as i64
+            && (y as i64 - self.y as i64) < self.height as i64
     }
 }
 
@@ -495,5 +507,38 @@ mod tests {
         assert!(!left.contains(10, 500));
         assert_eq!(left.size(), PhysicalSize::new(1920, 1080));
         assert_eq!(left.to_string(), "1920x1080+-1920+0");
+    }
+
+    #[test]
+    fn tiled_monitors_partition_the_desktop() {
+        // The standard side-by-side layout. Every point belongs to exactly one
+        // of the two, which is what a monitor lookup that returns the first
+        // match needs to be correct.
+        let first = PhysicalRect::new(0, 0, 1920, 1080);
+        let second = PhysicalRect::new(1920, 0, 1920, 1080);
+        for (x, y) in [(0, 0), (1919, 0), (0, 1079), (1919, 1079)] {
+            assert!(first.contains(x, y), "({x},{y}) is on the first monitor");
+            assert!(!second.contains(x, y));
+        }
+        for (x, y) in [(1920, 0), (3839, 1079)] {
+            assert!(second.contains(x, y), "({x},{y}) is on the second monitor");
+            assert!(!first.contains(x, y), "the shared edge belongs to one");
+        }
+        // Past the far edge in either axis is outside.
+        assert!(!first.contains(0, 1080));
+        assert!(!second.contains(3840, 0));
+    }
+
+    #[test]
+    fn hit_testing_a_far_away_point_does_not_overflow() {
+        // `x - self.x` overflows an i32 here; the widening must happen first.
+        let negative_origin = PhysicalRect::new(-1, 0, 1920, 1080);
+        assert!(!negative_origin.contains(i32::MAX, 0));
+        assert!(!PhysicalRect::new(i32::MIN, 0, 1920, 1080).contains(i32::MAX, 0));
+        // The widest legal rectangle really does reach that far — and stops one
+        // pixel short of `i32::MIN + u32::MAX`, because the far edge is open.
+        let widest = PhysicalRect::new(i32::MIN, 0, u32::MAX, 1080);
+        assert!(widest.contains(i32::MAX - 1, 0));
+        assert!(!widest.contains(i32::MAX, 0));
     }
 }

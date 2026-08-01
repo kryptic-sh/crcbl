@@ -436,6 +436,20 @@ impl Conn {
     /// Returns `(type, format, bytes)`, or `None` when the property does not
     /// exist. A property that exists and is empty answers `Some` with an empty
     /// vector — the distinction [`ClipboardContent`] is built on.
+    ///
+    /// # The size cap is here, not in the caller
+    ///
+    /// Whoever wrote the property chose how big it is, and following
+    /// `bytes_after` to exhaustion means this process allocates whatever a
+    /// clipboard owner answered a `ConvertSelection` with — and then copies it
+    /// again. [`selection::MAX_BYTES`] used to be consulted only in
+    /// `Read::on_chunk`, which is *after* the bytes are resident, and the
+    /// non-`INCR` path had no check at all: one multi-gigabyte property was
+    /// enough. A property past the cap reads as **absent**, because a truncated
+    /// property is not the property and a caller must not be handed half a
+    /// value; the clipboard path turns that into
+    /// [`Unavailable`](ClipboardContent::Unavailable), which is the same answer
+    /// `on_chunk` gives past the same cap.
     fn get_property(&self, window: u32, property: u32) -> Option<(u32, u8, Vec<u8>)> {
         /// Words per `GetProperty`. 4 MiB, which is larger than any chunk a
         /// peer may write (see [`selection::max_property_bytes`]) and so
@@ -486,6 +500,14 @@ impl Conn {
             type_ = reply_type;
             format = reply_format;
             let read = value.len();
+            if bytes.len().saturating_add(read) > selection::MAX_BYTES {
+                log::warn!(
+                    "property {property} on window {window:#x} is larger than \
+                     {} bytes; treating it as absent",
+                    selection::MAX_BYTES
+                );
+                return None;
+            }
             bytes.extend_from_slice(&value);
             if bytes_after == 0 || read == 0 {
                 break;
@@ -517,10 +539,22 @@ impl Conn {
     }
 
     /// Sends a 32-byte event to `window`.
+    ///
+    /// `xcb_send_event` reads exactly 32 bytes from the pointer whatever it is
+    /// given, and this module also defines 28- and 12-byte wire structs, so the
+    /// requirement is enforced *structurally* rather than by a comment: the
+    /// `const` block below is evaluated at monomorphisation and fails the build
+    /// for any other `T`. A remark in a SAFETY comment could not have.
     fn send_event<T>(&self, window: u32, mask: u32, event: &T) {
-        // SAFETY: the connection and window are live. `SendEvent` reads exactly
-        // 32 bytes from the pointer, and every caller passes a wire event type
-        // whose size is asserted to be 32 in `ffi`'s tests.
+        const {
+            assert!(
+                size_of::<T>() == 32,
+                "xcb_send_event always reads 32 bytes, so the event must be exactly that large"
+            );
+        }
+        // SAFETY: the connection and window are live, and `T` is 32 bytes by
+        // the assertion above, so the 32 bytes libxcb reads are all inside
+        // `event`.
         unsafe {
             (self.lib.send_event)(
                 self.raw(),
@@ -530,6 +564,44 @@ impl Conn {
                 ptr::from_ref(event).cast::<core::ffi::c_char>(),
             );
         }
+    }
+}
+
+/// Reinterprets an event's bytes as a wire struct.
+///
+/// `None` when `raw` is shorter than `T`. That is meant never to happen —
+/// libxcb delivers events of at least 32 bytes and every `T` read through this
+/// is no larger, which [`ffi`]'s size assertions pin down — but "cannot happen"
+/// is not a safety argument. The three byte-identical copies this replaces
+/// copied `size_of::<T>().min(raw.len())` bytes and then called
+/// `assume_init()`, so a short slice left the tail of `T` uninitialised, and
+/// reading uninitialised memory is undefined *regardless* of every bit pattern
+/// of `T` being valid. A short slice is now an outcome the caller handles.
+///
+/// A copy rather than a cast, because an event buffer is a `Vec<u8>` with no
+/// alignment guarantee and reading a `u32` through a misaligned reference is
+/// undefined even on x86.
+pub(super) fn read_wire<T: Copy>(raw: &[u8]) -> Option<T> {
+    if raw.len() < size_of::<T>() {
+        log::debug!(
+            "an X11 event of {} bytes is too short for a {}-byte wire struct",
+            raw.len(),
+            size_of::<T>()
+        );
+        return None;
+    }
+    let mut value = core::mem::MaybeUninit::<T>::uninit();
+    // SAFETY: `T` is a `#[repr(C)]` wire struct of plain integers, so every bit
+    // pattern is valid; `raw` is at least `size_of::<T>()` bytes by the check
+    // above, so the whole of `value` is written before it is read; and the
+    // destination is a fresh local, so the copy cannot overlap.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            raw.as_ptr(),
+            value.as_mut_ptr().cast::<u8>(),
+            size_of::<T>(),
+        );
+        Some(value.assume_init())
     }
 }
 
@@ -618,6 +690,12 @@ pub struct X11Shell {
     /// window owns it.
     offers: Vec<(MimeType, Vec<u8>)>,
     owner_window: u32,
+    /// The server timestamp the selection was acquired with.
+    ///
+    /// ICCCM's `TIMESTAMP` target answers with exactly this, and it must be the
+    /// acquisition time rather than "now": a peer uses it to tell one ownership
+    /// from the next.
+    owner_time: u32,
     /// A hidden cursor, created once and shared. `0` until something asks.
     blank_cursor: u32,
     queue: VecDeque<ShellEvent>,
@@ -773,6 +851,7 @@ impl X11Shell {
             writes: Vec::new(),
             offers: Vec::new(),
             owner_window: 0,
+            owner_time: ffi::value::CURRENT_TIME,
             blank_cursor: 0,
             queue: VecDeque::new(),
             time: TimeBase::now(),
@@ -855,6 +934,56 @@ impl X11Shell {
         self.windows
             .get_mut(window.cast())
             .ok_or_else(|| ShellError::invalid_window(window))
+    }
+
+    /// Drops everything a window that has gone away was carrying.
+    ///
+    /// Called from **both** ways a window dies — [`Shell::destroy_window`] and
+    /// a server-driven `DestroyNotify` — because the two used to disagree, and
+    /// each of them was wrong in its own direction: the explicit path dropped
+    /// outstanding reads and left `writes` alone, and the `DestroyNotify` path
+    /// left the reads *alive*, so two seconds later `service_transfers` emitted
+    /// a [`ClipboardData`](ShellEvent::ClipboardData) naming a window it had
+    /// already reported as [`WindowDestroyed`](ShellEvent::WindowDestroyed).
+    ///
+    /// # Why an outstanding read is dropped rather than answered
+    ///
+    /// [Obligation 4](Shell) is about *accepted* requests, and an answer has to
+    /// name the window it was asked for. Emitting one for a handle the consumer
+    /// has just been told is stale would break
+    /// [obligation 1](Shell) — the stronger of the two, because a consumer can
+    /// see a stale handle and cannot see a request that will never be answered
+    /// on a window it no longer has. `HeadlessShell::resolve_reads` makes the
+    /// same call for the same reason, and this is the two backends agreeing.
+    fn forget_selection_state(&mut self, window: WindowId, xid: u32) {
+        self.reads.retain(|read| read.window != window);
+        if self.owner_window == xid {
+            // A selection owned by a window that has stopped existing is a
+            // clipboard nobody can ever read: the server would keep naming a
+            // dead window as the owner until some other client claimed it. The
+            // outstanding writes are answers on that selection, so they go with
+            // it — exactly as they do when `clipboard_offer` releases it.
+            self.conn
+                .set_selection_owner(ffi::value::NONE, self.last_server_time);
+            self.offers.clear();
+            self.writes.clear();
+            self.owner_window = 0;
+            self.owner_time = ffi::value::CURRENT_TIME;
+        }
+    }
+
+    /// The window this shell currently holds the pointer grab for, if any.
+    ///
+    /// Derived rather than stored, because an X11 grab is *per client*: there
+    /// is at most one, and [`XWindow::pointer_mode`] already records which
+    /// window asked for it — set only after the `GrabPointer` succeeded. A
+    /// separate field would be a second source of truth that a destroyed window
+    /// could leave stale.
+    fn grab_holder(&self) -> Option<WindowId> {
+        self.windows
+            .iter()
+            .find(|(_, state)| state.pointer_mode.is_captured())
+            .map(|(handle, _)| handle.cast())
     }
 
     /// The [`WindowId`] owning an XID, for routing an incoming event.

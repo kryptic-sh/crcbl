@@ -58,7 +58,7 @@
 
 use super::{
     ClipboardContent, ClipboardRequestId, MimeType, Read, ReceivedMime, ShellEvent, Step, Write,
-    X11Shell, ffi, selection, window,
+    X11Shell, ffi, read_wire, selection, window,
 };
 
 impl X11Shell {
@@ -68,7 +68,9 @@ impl X11Shell {
     /// them will never come again, and answering one we somehow still received
     /// would be answering for data the user has replaced.
     pub(super) fn handle_selection_clear(&mut self, raw: &[u8]) {
-        let event: ffi::SelectionClearEvent = read_wire(raw);
+        let Some(event) = read_wire::<ffi::SelectionClearEvent>(raw) else {
+            return;
+        };
         if event.selection != self.conn.atoms.clipboard {
             return;
         }
@@ -87,7 +89,9 @@ impl X11Shell {
     /// therefore never allowed to block; the only round trip below is a
     /// `ChangeProperty`, which does not have a reply.
     pub(super) fn handle_selection_request(&mut self, raw: &[u8]) {
-        let event: ffi::SelectionRequestEvent = read_wire(raw);
+        let Some(event) = read_wire::<ffi::SelectionRequestEvent>(raw) else {
+            return;
+        };
         let property = self.answer_selection_request(&event);
         // The reply is a `SelectionNotify` we construct and send ourselves —
         // there is no request for it. `property == 0` is the refusal, and the
@@ -122,6 +126,21 @@ impl X11Shell {
         } else {
             event.property
         };
+
+        if event.target == self.conn.atoms.timestamp {
+            // ICCCM: the answer is the timestamp we *acquired* the selection
+            // with, as a 32-bit `INTEGER`. Not the current server time — a peer
+            // uses this to tell one ownership from the next.
+            let acquired = [self.owner_time];
+            self.conn.set_property(
+                event.requestor,
+                property,
+                ffi::value::ATOM_INTEGER,
+                32,
+                &window::words_to_bytes(&acquired),
+            );
+            return property;
+        }
 
         if event.target == self.conn.atoms.targets {
             let targets = self.advertised_targets();
@@ -180,7 +199,10 @@ impl X11Shell {
     /// looks for it, and a list that omits it reads as a client that does not
     /// support the query at all.
     fn advertised_targets(&self) -> Vec<u32> {
-        let mut targets = vec![self.conn.atoms.targets];
+        // `TIMESTAMP` too: ICCCM requires *every* selection owner to answer it,
+        // and a peer that uses it to detect an ownership change (which is what
+        // it is for) reads an owner that omits it as broken.
+        let mut targets = vec![self.conn.atoms.targets, self.conn.atoms.timestamp];
         for (mime, _) in &self.offers {
             if *mime == MimeType::TextUtf8 {
                 // All four spellings, because an X11 peer may ask for any of
@@ -193,14 +215,24 @@ impl X11Shell {
                 }
             }
         }
-        targets.retain(|atom| *atom != 0);
-        targets.dedup();
-        targets
+        // `dedup` alone only removes *consecutive* duplicates, so two
+        // `TextUtf8` offers put four non-adjacent repeats into `TARGETS`. The
+        // order is the preference order a peer reads, so the first occurrence
+        // is the one that stays.
+        let mut unique = Vec::with_capacity(targets.len());
+        for atom in targets {
+            if atom != 0 && !unique.contains(&atom) {
+                unique.push(atom);
+            }
+        }
+        unique
     }
 
     /// The owner answered one of our `ConvertSelection`s.
     pub(super) fn handle_selection_notify(&mut self, raw: &[u8]) {
-        let event: ffi::SelectionNotifyEvent = read_wire(raw);
+        let Some(event) = read_wire::<ffi::SelectionNotifyEvent>(raw) else {
+            return;
+        };
         // Which of the two conversions this answers. A read has exactly one
         // outstanding at a time, so the phase is enough to route it — and it
         // has to be the *phase* rather than the property, because both use the
@@ -269,7 +301,9 @@ impl X11Shell {
         const NEW_VALUE: u8 = 0;
         /// `XCB_PROPERTY_DELETE`.
         const DELETED: u8 = 1;
-        let event: ffi::PropertyNotifyEvent = read_wire(raw);
+        let Some(event) = read_wire::<ffi::PropertyNotifyEvent>(raw) else {
+            return;
+        };
         self.last_server_time = event.time;
 
         // Not a selection at all: the window manager rewriting `_NET_WM_STATE`
@@ -618,22 +652,5 @@ impl super::Conn {
                 values.as_ptr().cast::<core::ffi::c_void>(),
             );
         }
-    }
-}
-
-/// Reinterprets an event's bytes as a wire struct; see
-/// [`input`](super::input)'s equivalent.
-fn read_wire<T: Copy>(raw: &[u8]) -> T {
-    let mut value = core::mem::MaybeUninit::<T>::uninit();
-    // SAFETY: `T` is a `#[repr(C)]` wire struct of plain integers, so every bit
-    // pattern is valid, and no more than `raw.len()` bytes are read. The
-    // destination is a fresh uninitialised `T`, so the copy cannot overlap.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            raw.as_ptr(),
-            value.as_mut_ptr().cast::<u8>(),
-            size_of::<T>().min(raw.len()),
-        );
-        value.assume_init()
     }
 }

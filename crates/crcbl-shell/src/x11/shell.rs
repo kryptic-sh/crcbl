@@ -310,16 +310,7 @@ impl Shell for X11Shell {
             .windows
             .remove(window.cast())
             .ok_or_else(|| ShellError::invalid_window(window))?;
-        if self.owner_window == removed.id {
-            // A selection owned by a window that is about to stop existing is a
-            // clipboard nobody can ever read: the server would keep naming a
-            // dead window as the owner until some other client claimed it.
-            self.conn
-                .set_selection_owner(ffi::value::NONE, self.last_server_time);
-            self.offers.clear();
-            self.owner_window = 0;
-        }
-        self.reads.retain(|read| read.window != window);
+        self.forget_selection_state(window, removed.id);
         self.conn.destroy_x_window(removed.id);
         self.conn.flush();
         self.queue.push_back(ShellEvent::WindowDestroyed { window });
@@ -531,6 +522,16 @@ impl Shell for X11Shell {
     /// than silently ignored, because a first-person camera that quietly did
     /// not capture the pointer is a bug report about "the mouse escaping".
     ///
+    /// # Nothing is released until the replacement is held
+    ///
+    /// There is no pre-emptive `UngrabPointer`. Two things went wrong with one:
+    /// a failed `GrabPointer` returned `Err` after the previous grab was already
+    /// gone — so no grab was held while [`WindowState::pointer_mode`] still said
+    /// `Locked` — and it broke a grab this same shell held for a *different*
+    /// window. X11 lets the client that holds the grab re-grab with new
+    /// parameters, so a successful `GrabPointer` replaces ours by itself, and a
+    /// failed one leaves everything exactly as it was.
+    ///
     /// # Errors
     ///
     /// [`ShellError::InvalidWindow`] for a stale handle, or
@@ -540,16 +541,20 @@ impl Shell for X11Shell {
         let xid = state.id;
         let hidden = mode == PointerMode::Locked || state.cursor == Some(None);
         if !self.caps.contains(mode.required_cap()) {
-            return Err(Self::unsupported(match mode {
-                PointerMode::Locked => "pointer lock",
-                _ => "pointer confinement",
-            }));
+            return Err(Self::unsupported(mode.as_str()));
         }
 
-        // SAFETY: the connection is live; ungrabbing when nothing is grabbed is
-        // a no-op on the server.
-        unsafe { (self.conn.lib.ungrab_pointer)(self.conn.raw(), ffi::value::CURRENT_TIME) };
         if mode == PointerMode::Free {
+            // Only if *this* window is the one holding the grab. A shell with
+            // two windows must not have one of them free the other's capture,
+            // and the grab is per-client, so an unconditional ungrab did.
+            if self.grab_holder() == Some(window) {
+                // SAFETY: the connection is live; ungrabbing when nothing is
+                // grabbed is a no-op on the server.
+                unsafe {
+                    (self.conn.lib.ungrab_pointer)(self.conn.raw(), ffi::value::CURRENT_TIME);
+                };
+            }
             self.window_mut(window)?.pointer_mode = mode;
             let restore = self.window(window)?.cursor == Some(None);
             self.apply_cursor(xid, restore);
@@ -590,11 +595,28 @@ impl Shell for X11Shell {
         // SAFETY: freed exactly once.
         unsafe { ffi::free_reply(reply) };
         if status != ffi::value::GRAB_SUCCESS {
+            // Nothing was released to get here, so nothing has to be put back:
+            // whatever capture this shell held is still held, and the recorded
+            // `pointer_mode` still describes it.
             return Err(ShellError::Backend(format!(
                 "another client holds the pointer (GrabPointer status {status})"
             )));
         }
 
+        // The grab replaced any previous one, so no other window of this shell
+        // still holds a capture.
+        let previous: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|(_, state)| state.pointer_mode.is_captured())
+            .map(|(handle, _)| handle.cast())
+            .filter(|held| *held != window)
+            .collect();
+        for held in previous {
+            if let Ok(state) = self.window_mut(held) {
+                state.pointer_mode = PointerMode::Free;
+            }
+        }
         self.window_mut(window)?.pointer_mode = mode;
         if mode == PointerMode::Locked
             && let Some(size) = self.window(window)?.configuration.map(|config| config.size)
@@ -712,24 +734,41 @@ impl Shell for X11Shell {
             self.offers.clear();
             self.writes.clear();
             self.owner_window = 0;
+            self.owner_time = ffi::value::CURRENT_TIME;
             return Ok(());
+        }
+        // A format this backend has no atom for cannot be advertised in
+        // `TARGETS` and cannot be asked for, so it would be an offer no peer
+        // could ever take. Filtering happens **before** the claim, not after
+        // it: an offer list of nothing but `MimeType::Other` used to pass the
+        // `offers.is_empty()` check on the caller's slice, get emptied by this
+        // filter, and still take ownership of `CLIPBOARD` — leaving this
+        // process owning the desktop clipboard and answering nothing, `TARGETS`
+        // included, until it released it.
+        let publishable: Vec<(MimeType, Vec<u8>)> = offers
+            .iter()
+            .filter(|offer| self.conn.atoms.for_mime(offer.mime) != 0)
+            .map(|offer| (offer.mime, offer.bytes.to_vec()))
+            .collect();
+        if publishable.is_empty() {
+            return Err(Self::unsupported(
+                "a clipboard offer in which no format has an X11 atom",
+            ));
         }
         // A fresh timestamp first: the server silently ignores a claim older
         // than the current owner's, and a process that has been idle has no
         // recent one. See `xselection`'s module docs.
         self.refresh_server_time(xid);
+        // That probe is this backend's one synchronous wait, and it drains the
+        // connection to get its answer — which can process a `DestroyNotify`
+        // for the very window whose XID was captured above. Re-resolve the
+        // handle rather than claiming the selection for a window that no longer
+        // exists.
+        let xid = self.window(window)?.id;
         // The bytes are held here until a peer asks for them, which is what
         // makes the write synchronous on every platform: "claim the selection"
         // completes now, the transfer happens later.
-        self.offers = offers
-            .iter()
-            .map(|offer| (offer.mime, offer.bytes.to_vec()))
-            .collect();
-        // A format this backend has no atom for cannot be advertised in
-        // `TARGETS` and cannot be asked for, so it would be an offer no peer
-        // could ever take. Dropping it here keeps `advertised_targets` honest.
-        self.offers
-            .retain(|(mime, _)| self.conn.atoms.for_mime(*mime) != 0);
+        self.offers = publishable;
         if !self.conn.set_selection_owner(xid, self.last_server_time) {
             self.offers.clear();
             return Err(ShellError::Backend(
@@ -737,6 +776,7 @@ impl Shell for X11Shell {
             ));
         }
         self.owner_window = xid;
+        self.owner_time = self.last_server_time;
         Ok(())
     }
 

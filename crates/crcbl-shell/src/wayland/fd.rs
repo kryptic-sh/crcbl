@@ -82,6 +82,13 @@ use super::ffi;
 /// outside Wayland entirely, over a pipe the compositor only brokered — so a
 /// timeout is the only way it can ever end.
 ///
+/// It is an **idle** deadline, exactly as that sentence says: every byte that
+/// moves buys another `TIMEOUT`. Applied to the transfer as a whole instead, it
+/// would abandon a paste that is streaming perfectly well and merely happens to
+/// be larger than two seconds' worth of pipe — reporting
+/// [`Unavailable`](crate::ClipboardContent::Unavailable) for a clipboard that
+/// was being delivered.
+///
 /// Two seconds: long enough that a large paste from a busy application is not
 /// cut off, short enough that a paste which is never going to arrive answers
 /// while the user is still looking at the menu they picked it from. The answer
@@ -154,8 +161,10 @@ pub enum State {
 pub struct Reading {
     file: File,
     buffer: Vec<u8>,
-    /// `CLOCK_MONOTONIC` nanoseconds after which this is abandoned.
-    deadline_nanos: u64,
+    /// `CLOCK_MONOTONIC` nanoseconds after which this is abandoned **if
+    /// nothing has moved since**. Pushed forward by every byte that arrives;
+    /// see [`TIMEOUT`].
+    idle_deadline_nanos: u64,
 }
 
 impl Reading {
@@ -165,7 +174,7 @@ impl Reading {
         Self {
             file,
             buffer: Vec::new(),
-            deadline_nanos: now_nanos.saturating_add(deadline_nanos()),
+            idle_deadline_nanos: now_nanos.saturating_add(deadline_nanos()),
         }
     }
 
@@ -212,11 +221,14 @@ impl Reading {
                 }
             }
         }
+        if moved {
+            self.idle_deadline_nanos = now_nanos.saturating_add(deadline_nanos());
+        }
         (self.state_at(now_nanos), moved)
     }
 
     fn state_at(&self, now_nanos: u64) -> State {
-        if now_nanos >= self.deadline_nanos {
+        if now_nanos >= self.idle_deadline_nanos {
             log::debug!("a clipboard transfer timed out with no data from the peer");
             State::Failed
         } else {
@@ -236,7 +248,8 @@ pub struct Writing {
     file: File,
     bytes: Vec<u8>,
     offset: usize,
-    deadline_nanos: u64,
+    /// As [`Reading::idle_deadline_nanos`]: reset by every byte the peer takes.
+    idle_deadline_nanos: u64,
 }
 
 impl Writing {
@@ -248,7 +261,7 @@ impl Writing {
             file,
             bytes,
             offset: 0,
-            deadline_nanos: now_nanos.saturating_add(deadline_nanos()),
+            idle_deadline_nanos: now_nanos.saturating_add(deadline_nanos()),
         }
     }
 
@@ -286,7 +299,10 @@ impl Writing {
             // all of it".
             return (State::Done, moved);
         }
-        if now_nanos >= self.deadline_nanos {
+        if moved {
+            self.idle_deadline_nanos = now_nanos.saturating_add(deadline_nanos());
+        }
+        if now_nanos >= self.idle_deadline_nanos {
             log::debug!("a clipboard transfer timed out with the peer not reading");
             return (State::Failed, moved);
         }
@@ -354,6 +370,36 @@ mod tests {
         let (state, moved) = reading.service(now() + 2 * deadline_nanos());
         assert_eq!(state, State::Failed);
         assert!(!moved);
+        drop(writer);
+    }
+
+    #[test]
+    fn a_transfer_that_keeps_moving_is_never_abandoned_for_being_slow() {
+        // The deadline bounds *idleness*, which is what its own documentation
+        // says. A whole-transfer deadline gave up on a paste that was streaming
+        // steadily and merely took longer than `TIMEOUT` in total, and answered
+        // `Unavailable` for a clipboard that was arriving.
+        let (reader, mut writer) = std::io::pipe().expect("pipe");
+        let mut reading = Reading::new(File::from(std::os::fd::OwnedFd::from(reader)), now());
+
+        let mut clock = now();
+        for _ in 0..5 {
+            // Each chunk arrives a whole timeout's worth of time after the
+            // last, which is as slow as a transfer can be without stalling.
+            clock += deadline_nanos() - 1;
+            writer.write_all(b"chunk").expect("write");
+            let (state, moved) = reading.service(clock);
+            assert_eq!(state, State::Pending, "it is still arriving");
+            assert!(moved);
+        }
+        // Total elapsed is far past `TIMEOUT`, and nothing has been abandoned.
+        assert_eq!(reading.buffer.len(), 25);
+        // Stop feeding it, and the same deadline ends it.
+        assert_eq!(
+            reading.service(clock + deadline_nanos()).0,
+            State::Failed,
+            "silence still runs out"
+        );
         drop(writer);
     }
 

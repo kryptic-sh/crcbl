@@ -1,6 +1,6 @@
 [package]
 name = "crcbl-shell"
-description = "Crucible windowing shell: own Wayland and X11 backends"
+description = "Crucible windowing shell: own Wayland, X11, Web/canvas and headless backends"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

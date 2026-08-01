@@ -73,6 +73,25 @@ impl PointerMode {
             Self::Locked => crate::ShellCaps::POINTER_LOCK,
         }
     }
+
+    /// What this mode is called in a
+    /// [`ShellError::Unsupported`](crate::ShellError::Unsupported).
+    ///
+    /// Every backend needs this string in
+    /// [`set_pointer_mode`](crate::Shell::set_pointer_mode) and each one used
+    /// to spell the table again, with an `unreachable!()` for
+    /// [`Free`](Self::Free) on the grounds that it needs no capability. That
+    /// reasoning is correct today and is a panic the day a mode is added, so
+    /// the function is total instead.
+    #[inline]
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Free => "a free pointer",
+            Self::Confined => "pointer confinement",
+            Self::Locked => "pointer lock",
+        }
+    }
 }
 
 /// A standard cursor shape.

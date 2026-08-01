@@ -567,7 +567,10 @@ fn the_event_order_is_the_order_it_was_scripted_in() {
             "Button",
             "Wheel",
             "Resized",
-            "ScaleFactorChanged"
+            // A scale change is a resize too, and says so with both events —
+            // the pair both Linux backends emit.
+            "ScaleFactorChanged",
+            "Resized",
         ]
     );
 }

@@ -255,13 +255,14 @@ pub(crate) mod x11;
 
 /// The Web/canvas backend (P5).
 ///
-/// Compiled on all targets so it can be tested. The `extern "C"` entry points
-/// are harmless dead code on non-wasm targets; the backend itself is only
-/// useful on wasm32, but the type must be reachable for unit tests and for the
-/// backend registry table.
-#[cfg(not(target_arch = "wasm32"))]
-mod web;
-#[cfg(target_arch = "wasm32")]
+/// Compiled on `wasm32`, where it is the real backend, and under `cfg(test)`,
+/// where its own tests drive the JS→wasm entry points exactly as a browser
+/// would. **Not** in a native build: there is no shim to call it, and compiling
+/// it everywhere exported the shim's `__crcbl_web_*` symbols from every binary
+/// that links the engine. The registry entry stays on every target regardless,
+/// so `CRCBL_SHELL=web` off wasm names the problem instead of hanging — see
+/// [`backend`].
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) mod web;
 
 /// Scaffolding for the nested-compositor end-to-end suite, behind the

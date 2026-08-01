@@ -36,6 +36,7 @@ use core::ptr;
 use std::collections::HashMap;
 
 use super::ffi::{self, Connection, Lib};
+use super::read_wire;
 
 /// `xcb_test_fake_input`'s event types.
 mod fake {
@@ -567,7 +568,9 @@ impl Peer {
     }
 
     fn answer_request(&mut self, raw: &[u8]) {
-        let event: ffi::SelectionRequestEvent = wire(raw);
+        let Some(event) = read_wire::<ffi::SelectionRequestEvent>(raw) else {
+            return;
+        };
         let targets_atom = self.atom("TARGETS");
         let incr_atom = self.atom("INCR");
         let property = if event.property == 0 {
@@ -651,7 +654,9 @@ impl Peer {
     }
 
     fn collect_notify(&mut self, raw: &[u8]) {
-        let event: ffi::SelectionNotifyEvent = wire(raw);
+        let Some(event) = read_wire::<ffi::SelectionNotifyEvent>(raw) else {
+            return;
+        };
         if !self.incoming.active {
             return;
         }
@@ -681,7 +686,9 @@ impl Peer {
         const NEW_VALUE: u8 = 0;
         /// `XCB_PROPERTY_DELETE`.
         const DELETED: u8 = 1;
-        let event: ffi::PropertyNotifyEvent = wire(raw);
+        let Some(event) = read_wire::<ffi::PropertyNotifyEvent>(raw) else {
+            return;
+        };
 
         if event.state == NEW_VALUE && self.incoming.active && self.incoming.incremental {
             let bytes = self
@@ -828,23 +835,6 @@ impl Drop for Peer {
             (self.lib.flush)(self.connection);
             (self.lib.disconnect)(self.connection);
         }
-    }
-}
-
-/// Reinterprets an event's bytes as a wire struct; see
-/// [`input`](super::input)'s equivalent for the alignment argument.
-fn wire<T: Copy>(raw: &[u8]) -> T {
-    let mut value = core::mem::MaybeUninit::<T>::uninit();
-    // SAFETY: `T` is a `#[repr(C)]` wire struct of plain integers, so every bit
-    // pattern is valid, and no more than `raw.len()` bytes are read into a
-    // fresh, non-overlapping destination.
-    unsafe {
-        ptr::copy_nonoverlapping(
-            raw.as_ptr(),
-            value.as_mut_ptr().cast::<u8>(),
-            size_of::<T>().min(raw.len()),
-        );
-        value.assume_init()
     }
 }
 

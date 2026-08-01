@@ -307,10 +307,15 @@ impl Conn {
         else {
             return DEFAULT_SCALE;
         };
-        let Ok(text) = core::str::from_utf8(&bytes) else {
-            return DEFAULT_SCALE;
-        };
-        parse_xft_dpi(text).map_or(DEFAULT_SCALE, |dpi| (dpi / BASE_DPI).clamp(0.5, 8.0))
+        // `RESOURCE_MANAGER` has type `STRING`, which in X11 is **Latin-1**,
+        // not UTF-8 — so it is decoded byte-by-byte rather than validated.
+        // Requiring the whole property to be valid UTF-8 meant one accented
+        // character anywhere in a user's `.Xresources` — in a font name, a
+        // colour comment, an unrelated application's resource — silently reset
+        // the desktop scale to 1.0 and ignored a perfectly ASCII `Xft.dpi` two
+        // lines further down.
+        let text: String = bytes.iter().map(|byte| char::from(*byte)).collect();
+        parse_xft_dpi(&text).map_or(DEFAULT_SCALE, |dpi| (dpi / BASE_DPI).clamp(0.5, 8.0))
     }
 }
 
@@ -365,6 +370,15 @@ mod tests {
     fn a_resource_that_merely_starts_with_the_name_is_not_the_one() {
         // `Xft.dpiScale` is not `Xft.dpi`, and a prefix match would read a
         // different setting's value as the scale.
+        // A resource database is Latin-1, and a byte-by-byte decode of one is
+        // what `read_xft_scale` hands this parser. A non-ASCII byte in an
+        // unrelated resource must not hide the line below it.
+        let latin1: String = b"Xft.dpiScale:\t2\n*faceName:\tCourier \xe9\nXft.dpi:\t144\n"
+            .iter()
+            .map(|byte| char::from(*byte))
+            .collect();
+        assert_eq!(parse_xft_dpi(&latin1), Some(144.0));
+
         assert_eq!(parse_xft_dpi("Xft.dpiScale:\t2\n"), None);
         assert_eq!(parse_xft_dpi("Xft.hinting:\t1\n"), None);
         assert_eq!(parse_xft_dpi(""), None);
