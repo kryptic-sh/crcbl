@@ -98,6 +98,56 @@ the GPU — the GPU-bound principle holds, only the draw-emission tail differs.
 - **Tier B perf disappointment.** Set the budget expectation in this doc's perf
   task — Tier B is the reach-everyone tier, not the showcase tier.
 
+## Status after P5.8 (the shim, the entry point, the deploy)
+
+The page, the shim and the deploy exist; **the demo does not render yet.**
+Recorded here rather than discovered by whoever opens the URL.
+
+**What is built and checkable without a browser.** `apps/breakout` is a `cdylib`
+with an `extern "C"` entry point (`src/web.rs`); `web/` is the shim, in plain ES
+modules with no bundler and no npm; `.github/workflows/pages.yml` builds on PRs
+and deploys on main. The artifact builds and exports all 60 `__crcbl_*` symbols;
+the shim calls 56 of them and every one exists; the module imports nothing
+outside the `wasm-bindgen` glue. `web/tools/check-exports.mjs` asserts all three
+of those on every PR, and both of its failure directions were verified by
+deliberately breaking them.
+
+**What blocks it.** `naga` refuses every one of the engine's SPIR-V modules
+(`UnsupportedCapability(DrawParameters)`), so `crcbl-wgpu` cannot create a
+shader module on **any** target — the native `--backend wgpu` run fails the same
+way. The WGSL artifacts this document's task 3 asks for already exist and are
+complete; the HAL seam has no field to carry them. See ROADMAP's "Known gaps"
+for the full diagnosis and the next slice.
+
+**Task 1 of this stage is therefore not done.** The Tier B renderer path has not
+been validated on native wgpu against any scene, and the exit criterion "sandbox
+scene runs in Chrome/Firefox-with-WebGPU" cannot be attempted until it has been.
+The order the tasks are written in — native wgpu first, "faster iteration, same
+code" — was right, and the browser work reached the end of the platform half
+before the graphics half had a working shader.
+
+**Deliberate deviations from this document, both forced:**
+
+- **`wasm-bindgen` is a build tool, not a binding strategy.** The plan's build
+  bullet names it, and `docs/plan/15-windowing.md` rejects it for the shell.
+  Both hold: no crate depends on `wasm-bindgen`, `#[wasm_bindgen]` appears
+  nowhere, and every `__crcbl_*` symbol is hand-written `extern "C"`. The CLI is
+  mandatory anyway, because `wgpu` reaches WebGPU through `web-sys` and leaves
+  ~320 `__wbindgen_placeholder__` imports that nothing else can resolve —
+  `WebAssembly.instantiateStreaming` on a raw artifact is a `LinkError`. Its
+  version is read from `Cargo.lock` in one place (`web/build.sh`) so a
+  mismatched CLI fails the build rather than a visitor's browser.
+- **The audio feed is shape B** (render on the main thread, `postMessage`
+  transferred blocks) rather than the shape A `crcbl-audio` prefers. Two
+  independent reasons, either sufficient: `AudioWorkletGlobalScope` cannot
+  satisfy the `wasm-bindgen` imports, and a second wasm instance in the worklet
+  would have its own linear memory and none of the voices the game queued. The
+  cost is ~21–43 ms of buffered lead, stated in `web/engine/audio-worklet.js`.
+- **There is no `crcbl-web` crate.** The build bullet allowed for one "if
+  crcbl-shell's canvas/rAF handling is solid". It is, and the glue that was left
+  fitted in `apps/breakout/src/web.rs` and `web/engine/*.js`. A second sample is
+  what will show which parts of that are engine and which are sample.
+
 ## Correction (design review, 2026-07-27)
 
 **GitHub Pages cannot set COOP/COEP headers**, so `SharedArrayBuffer` is

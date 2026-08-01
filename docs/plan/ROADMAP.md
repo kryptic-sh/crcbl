@@ -18,7 +18,25 @@ Two hard rules govern the ordering:
 breakout onward ships as a browser demo on GitHub Pages. The demo site is the
 engine's public face and its continuous cross-backend regression test.
 
-## Status (as of 2026-07-31)
+## Status (as of 2026-08-01)
+
+**P5 is in progress**, five slices merged: polled device creation across the HAL
+seam (P5.4), AudioWorklet output (P5.5), the wasm32 dependency graph (P5.6),
+browser storage over fetch and OPFS (P5.7), and the JS shim, wasm entry point
+and Pages deploy (P5.8). **The phase gate is not closed** — `naga` rejects every
+SPIR-V artifact the engine ships, so `crcbl-wgpu` has never created a shader
+module on any target and the demo page does not render. The diagnosis and the
+next slice are under "Known gaps" below; it is a HAL change, and the seam does
+not freeze until P5 exit.
+
+**A full-workspace code review** (`docs/code-review.md`, 2026-08-01) read every
+line of the tree and its findings were fixed across eight commits before this
+phase resumed — among them a BVH refit that hid untouched colliders from every
+query, an unsound `Send`/`Sync` on the audio mixer, three allocation bombs
+reachable from ordinary files, path traversal out of the storage root, an
+unauthenticated ack that could permanently desync a client, and a `crcbl-wgpu`
+that could not complete a frame. Breakout's determinism tests never launched the
+ball, which is why three gameplay bugs had survived; they do now.
 
 **P0 and P1 are complete and merged to `main`.** The `crcbl screenshot` CLI
 subcommand (offscreen render → PNG), explicit `PipelineLayoutHandle` on
@@ -44,15 +62,16 @@ The phase table below is the plan; this section is the record. Where the two
 disagree about what was built, this section is right and the phase row says what
 was intended.
 
-| Phase             | Status   | Landed as                                                                                                                                                                                                                                                                                                                                          |
-| ----------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **P0** — base     | **done** | `f922ca3`, `3198f7a`, `6dd4b46`, `84af231`, `c058f45`, `bad7186`, `a991e42`, `063fd99`, `421ce69`, `f06e6cd`, `36dd636`, `e094d39`                                                                                                                                                                                                                 |
-| **P1** — Vulkan   | **done** | `91fd871`, `236f19b`, `c6dc4a4`, `a54990d`, `dc36d32`, `8a4e303`, `cbd6153`                                                                                                                                                                                                                                                                        |
-| **P2** — sim core | **done** | `7b8efb5` scaffold, `f8e8117` net, `9e55569` ecs, `9d31e2d` input, `2b2e5bd` server/client, `d4d0330` sim harness; `7f2d920` interpolation; P2b through `f1e625c`, `e036705`, `ec0597e`, `fb7e7bf`, `9dcc30d`, `b6c9d7d`, `27390fd`, `cb3b110`, `b37e4d5`, `53405f6`, `4156345`; P2c through `4ff402e`, `fa16710`, `c4688f1`, `83362f3`, `1270c72` |
-| **P3** — phys L0  | **done** | `5665da2` overlaps, `cbfd6b1` dynamic BVH refit, `b1924dd` swept-capsule TOI + triggers, `c4db85d` ECS components, `b765640` PhysicsSystem, `a2be1f6` integrator, `6b30532` force providers, `60dd95e` integration loop, `05dd23a` property tests                                                                                                  |
-| **P4** — UI L0    | **done** | `49ec170` draw-list, `b40ca95` label/button/HUD, `ab17700` `0352112` `510ce31` triangulation, `9f65472` snapshot tests; `1270c72` replay; `264a7fd` crash ring                                                                                                                                                                                     |
-| **P4A** — audio   | **done** | `6bd33b2` device seam, `a7e94c2` mixer/voices/golden, `912234f` WAV, `2abbd2d` QOA, `916d51f` cue grammar rules 1–4, `bf9a245` clippy                                                                                                                                                                                                              |
-| **S1** — breakout | **done** | `d747a84` scaffold, `71d931c` paddle+input, `5989f1b` ball+physics, `495a7fb` bricks+scoring, `ee3bea5` audio+HUD, `fa4e20b` spatial panning, `3bcf327` client interpolation, `a6c2e6b` high score, `ecfd85a` determinism tests, `ab71b1e` input fix, `968b65a` launch fix, `e3fd64d` persistence test, `5f47a12` UI compositing pass |
+| Phase             | Status          | Landed as                                                                                                                                                                                                                                                                                                                                          |
+| ----------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **P0** — base     | **done**        | `f922ca3`, `3198f7a`, `6dd4b46`, `84af231`, `c058f45`, `bad7186`, `a991e42`, `063fd99`, `421ce69`, `f06e6cd`, `36dd636`, `e094d39`                                                                                                                                                                                                                 |
+| **P1** — Vulkan   | **done**        | `91fd871`, `236f19b`, `c6dc4a4`, `a54990d`, `dc36d32`, `8a4e303`, `cbd6153`                                                                                                                                                                                                                                                                        |
+| **P2** — sim core | **done**        | `7b8efb5` scaffold, `f8e8117` net, `9e55569` ecs, `9d31e2d` input, `2b2e5bd` server/client, `d4d0330` sim harness; `7f2d920` interpolation; P2b through `f1e625c`, `e036705`, `ec0597e`, `fb7e7bf`, `9dcc30d`, `b6c9d7d`, `27390fd`, `cb3b110`, `b37e4d5`, `53405f6`, `4156345`; P2c through `4ff402e`, `fa16710`, `c4688f1`, `83362f3`, `1270c72` |
+| **P3** — phys L0  | **done**        | `5665da2` overlaps, `cbfd6b1` dynamic BVH refit, `b1924dd` swept-capsule TOI + triggers, `c4db85d` ECS components, `b765640` PhysicsSystem, `a2be1f6` integrator, `6b30532` force providers, `60dd95e` integration loop, `05dd23a` property tests                                                                                                  |
+| **P4** — UI L0    | **done**        | `49ec170` draw-list, `b40ca95` label/button/HUD, `ab17700` `0352112` `510ce31` triangulation, `9f65472` snapshot tests; `1270c72` replay; `264a7fd` crash ring                                                                                                                                                                                     |
+| **P4A** — audio   | **done**        | `6bd33b2` device seam, `a7e94c2` mixer/voices/golden, `912234f` WAV, `2abbd2d` QOA, `916d51f` cue grammar rules 1–4, `bf9a245` clippy                                                                                                                                                                                                              |
+| **S1** — breakout | **done**        | `d747a84` scaffold, `71d931c` paddle+input, `5989f1b` ball+physics, `495a7fb` bricks+scoring, `ee3bea5` audio+HUD, `fa4e20b` spatial panning, `3bcf327` client interpolation, `a6c2e6b` high score, `ecfd85a` determinism tests, `ab71b1e` input fix, `968b65a` launch fix, `e3fd64d` persistence test, `5f47a12` UI compositing pass              |
+| **P5** — wasm     | **in progress** | `a61bd26` polled device creation, `b932e28` AudioWorklet output, `325b8ba` wasm32 dependency graph, `9c1b48e` fetch + OPFS storage, `c5c2a13` JS shim + entry point + Pages deploy. Earlier: `84e531b` WebShell, `afd63bf` wasm32 target support, `f7d28ad` WGSL artifacts. **Gate open** — see "Shaders block the wgpu backend"                   |
 
 ### What exists now
 
@@ -98,29 +117,102 @@ was intended.
   unit/e2e tests including scripted-input determinism and persistence RT.
 - **`crcbl-wgpu`** (P5): wgpu 30 backend — `WgpuInstance` (adapter enumeration,
   registered in backend table), `WgpuDevice` with full resource/pipeline/
-  bind-group creation and pool-based handle tracking, command encoder
-  finish flow with pre-allocated handle slots, `conv` mappings
-  (formats, blend states, rasteriser, binding kinds). Available via
-  `CRCBL_GPU=wgpu` on native. Surface/swapchain (Wayland, Xcb via
-  raw-window-handle) and full command recording (render/compute passes,
-  draw/bind/state calls via forget_lifetime) implemented.
-  Push constants remain a no-op (wgpu 30 lacks the API), indirect draws
-  and copies remain stubbed (P6+).
+  bind-group creation and pool-based handle tracking, command encoder finish
+  flow with pre-allocated handle slots, `conv` mappings (formats, blend states,
+  rasteriser, binding kinds). Available via `CRCBL_GPU=wgpu` on native.
+  Surface/swapchain (Wayland, Xcb via raw-window-handle) and full command
+  recording (render/compute passes, draw/bind/state calls via forget_lifetime)
+  implemented. Push constants remain a no-op (wgpu 30 lacks the API), indirect
+  draws and copies remain stubbed (P6+).
 - **`crcbl-wgpu` cross-platform**: Compiles on both native (Vulkan/Metal/DX12)
   and `wasm32-unknown-unknown` (WebGPU) via `cell` module (polymorphic
-  `Arc`/`Mutex` ↔ `Rc`/`RefCell`). `HalThreadSafe` marker trait in
-  `crcbl-hal` relaxes `Send + Sync` bounds on wasm32.
-  `create_native()` gated to non-wasm targets.
-- **`crcbl-shell`** (P5): `WebShell` backend — single-canvas window, `extern "C"`
-  entry points for JS→wasm input (resize/key/pointer/frame), event queue over
-  `RefCell<VecDeque>`, `SurfaceTarget::Web { canvas_id }`. Registered in
-  backend table as non-auto (`CRCBL_SHELL=web`). Caps exclude
-  `MULTI_WINDOW`, `POINTER_WARP`, `CLIPBOARD`, `DRAG_DROP`, `EVENT_WAIT`.
-  8 unit tests. JS shim counterpart (P5.3) follows.
+  `Arc`/`Mutex` ↔ `Rc`/`RefCell`). `HalThreadSafe` marker trait in `crcbl-hal`
+  relaxes `Send + Sync` bounds on wasm32. `create_native()` gated to non-wasm
+  targets.
+- **`crcbl-shell`** (P5): `WebShell` backend — single-canvas window,
+  `extern "C"` entry points for JS→wasm input (resize/key/pointer/frame), event
+  queue over `RefCell<VecDeque>`, `SurfaceTarget::Web { canvas_id }`. Registered
+  in backend table as non-auto (`CRCBL_SHELL=web`). Caps exclude `MULTI_WINDOW`,
+  `POINTER_WARP`, `CLIPBOARD`, `DRAG_DROP`, `EVENT_WAIT`. 8 unit tests. JS shim
+  counterpart (P5.3) follows.
+- **Polled device creation** (P5.4): `Instance::request_device` returns a
+  `Box<dyn PendingDevice>` whose `poll` yields `Pending` or `Ready(device)`,
+  following the `request_readback`/`poll_readback` idiom the seam already had.
+  `wgpu`'s `requestDevice` is a promise and the browser main thread cannot block
+  on it, so before this `crcbl-wgpu` returned `Unsupported` on wasm32 and
+  nothing could render in a browser. Everything decidable synchronously (unknown
+  adapter, missing features, foreign surface) is still an error from the
+  request. `create_device` remains as a provided blocking wrapper and is
+  `#[cfg]`-ed out on wasm32, so a browser build that reaches for it fails to
+  compile rather than at run time; the ~35 native call sites are untouched.
+  Vulkan's first poll is ready (no faked latency); the null backend models both
+  outcomes and gained `set_device_latency` beside `set_readback_latency`, so the
+  polled path is testable with no GPU. `crcbl::backend::request_open` and
+  `GpuContext::request_open` are the browser-shaped entry points.
+- **AudioWorklet output** (P5.5): `crcbl-audio` gained a web output and gated
+  `cpal` to non-wasm targets — its wasm dependency graph is now zero third-party
+  crates. The seam is a pure pull (`render(frames)` into wasm-owned planar
+  buffers), which needs no `SharedArrayBuffer` and so survives Pages' inability
+  to set COOP/COEP, as the 2026-07-27 correction in
+  [10-wasm-webgpu.md](10-wasm-webgpu.md) required. The source is always driven
+  at the fixed 48 kHz internal rate and resampled to the device rate with phase
+  and carry frames across blocks — passing a 44.1 kHz device rate down would
+  detune every asset by 147 cents and corrupt the pitch cues rules 3 and 4
+  depend on. An underrun returns a short block and is counted, never a repeat.
+- **Browser storage** (P5.7): `crcbl-store::web` — `FetchSource` (pre-load as
+  the intended mode, request/poll underneath for anything discovered at run
+  time; a miss returns `StorageError::Pending`) and `OpfsStorage`. OPFS has no
+  `rename`, so `write_atomic`'s guarantee is split honestly rather than quietly
+  weakened: generation ping-pong with SHA-256-framed records keeps "no torn
+  value", "no older value after a newer one" and "nothing left behind by a
+  failure", and drops durability-on-return — `write` returns when queued, and
+  the answerable form is `queued + in_flight == 0`. Nothing needs an OPFS sync
+  access handle, so the engine may run on the main thread or in a Worker; the
+  shim declares which and a shim that never drains fills the queue and is
+  refused rather than silently dropping writes. One `canonical_key` guards every
+  key from the engine and from the shim's manifest, with a charset that excludes
+  every URL metacharacter, so no key can escape the asset root.
+- **wasm32 dependency graph** (P5.6): `apps/breakout` and the `crcbl` umbrella
+  build for `wasm32-unknown-unknown`. `crcbl-vk` moved to a
+  `cfg(not(target_arch = "wasm32"))` dependency of the umbrella (`ash` reaches
+  `libloading`, which has no wasm build), and its registry entry is `#[cfg]`-ed
+  out to match; `wgpu` becomes the auto-selectable backend on wasm only, so
+  native selection order is unchanged. `crcbl::screenshot` is native-only —
+  every step of it blocks. `getrandom`'s `wasm_js` backend is enabled from
+  `crcbl-server`'s wasm target section, so `wasm-bindgen`/`js-sys` stay out of
+  native binaries. CI's wasm32 job now checks and clippies the whole workspace
+  minus `crcbl-vk`, with `apps/breakout` first and by name.
+- **JS shim, wasm entry point, Pages deploy** (P5.8): `apps/breakout` is a
+  library with two front ends — `main.rs` (argv, exit codes) and `src/web.rs`
+  (`cdylib`, `extern "C"`, driven by `requestAnimationFrame`). Start-up is
+  polled: `PendingLoop` turns `wait_for_configure` and `Gpu::open`'s two blocks
+  inside out, so the device promise is polled across rAF frames instead of being
+  waited on inside the loop that resolves it. The clock is the browser's
+  (`Loop::set_frame_step`, clamped) because `Instant::now` panics on
+  `wasm32-unknown-unknown`, and so does `crcbl_core::log::init_logging` — the
+  browser build queues log lines in wasm and the page drains them. The high
+  score moved to `OpfsStorage` on wasm32. `web/` holds the shim: canvas/DPI/
+  input, the AudioWorklet feed (shape B, `postMessage`, no `SharedArrayBuffer`),
+  fetch pre-load, OPFS restore/drain, plus the site's index and the breakout
+  page. `.github/workflows/pages.yml` builds on PRs and deploys on main, with
+  `pages: write`/`id-token: write` scoped to the deploy job only.
+  `web/tools/check-exports.mjs` is the gate that can run without a browser: it
+  compares what Rust declares, what the shim calls, and what the artifact
+  exports, and fails on any of the three disagreeing. **`wasm-bindgen` is
+  adopted as a build tool only** — no `#[wasm_bindgen]`, no crate depends on it,
+  the version comes out of `Cargo.lock` — because `wgpu`→`web-sys` leaves ~320
+  unresolvable `__wbindgen_placeholder__` imports that only its CLI can link.
+  **The gate is not closed**: see "Shaders block the wgpu backend" below.
+- **Web key ABI correction** (P5.8): `crcbl-shell`'s `__crcbl_web_key` takes two
+  `(ptr, len)` pairs and the module had no way for a browser to obtain an
+  address inside wasm memory, so the entry point was specified but not callable.
+  `__crcbl_web_key_scratch_ptr`/`_capacity` publish a wasm-owned scratch, the
+  same shape `crcbl-store`'s fetch and OPFS ABIs already used. Found by writing
+  the shim; a test now drives a key event through the real path.
 - **`crcbl-shaders`** (P5.3): WGSL artifacts committed alongside SPIR-V —
   `compile-shaders.sh` produces `wgsl/*.wgsl` per shader; `Shader::wgsl()`
-  returns the source for wgpu backends. Manifest tracks both formats.
-  Swapchain, surface, and command-encoder recording remain stubbed (P6+).
+  returns the source for wgpu backends. Manifest tracks both formats. Swapchain,
+  surface, and command-encoder recording remain stubbed (P6+).
 - **`crcbl-ecs`** (P2a): system-owned-array ECS — `World`, `System<T>` (dense
   SoA + sparse entity→index), `Schedule` (ordered tick sequence), `Inspector`
   (per-system stats). Entity lifecycle: spawn, deferred despawn, generational
@@ -161,8 +253,8 @@ was intended.
   **S1 completion** added `UiRenderer` in `crcbl-render` (GPU pipeline, glyph
   atlas texture upload, per-frame vertex/index buffer write, alpha-blended
   compositing pass on top of the tonemap target) and the `ui.slang` shader in
-  `crcbl-shaders` (screen-space vertex pulling, push-constant viewport transform,
-  glyph atlas sampling).
+  `crcbl-shaders` (screen-space vertex pulling, push-constant viewport
+  transform, glyph atlas sampling).
 - **`crcbl-audio`** (P4A): `AudioStream` device seam (cpal native, null for CI),
   audio thread polling at hardware sample rate, `Mixer` with pooled `Voice`s
   (loop, stop, volume), stereo f32 internal format, WAV decoder (mono/stereo
@@ -171,10 +263,14 @@ was intended.
   pitch for behind, elevation pitch for above/below, distance rolloff), and
   golden-buffer test.
 
-**1199 unit/integration tests** (18 new from S1), plus 26 Vulkan e2e (run on
-both radv and lavapipe), 33 Wayland e2e, 29 X11 e2e and 1 CLI e2e. The whole
-workspace suite passes with no Vulkan driver present at all, and the shell
-suites pass under 32-way CPU contention.
+**1550 unit/integration tests**, plus 29 Vulkan e2e (run on both radv and
+lavapipe), 33 Wayland e2e, 29 X11 e2e and 1 CLI e2e. The whole workspace suite
+passes with no Vulkan driver present at all, and the shell suites pass under
+32-way CPU contention. The browser half adds two checks that need no browser:
+`web/tools/check-exports.mjs` (Rust's declared symbols == the artifact's exports
+== what the shim calls) and `web/tools/smoke.mjs`, which instantiates the
+deployed artifact under node with every import stubbed and drives the documented
+boot order.
 
 ### Known gaps, carried forward deliberately
 
@@ -183,6 +279,37 @@ suites pass under 32-way CPU contention.
 - **One HAL seam finding remains open**, recorded in `crcbl-vk`'s crate docs:
   vertex pulling depends on `shaderDrawParameters`, for which the seam has no
   vocabulary.
+- **Shaders block the wgpu backend, and therefore the P5 gate.** Found while
+  wiring P5.8 and reproducible in one command on any machine:
+
+  ```
+  $ breakout --backend wgpu --frames 30       # or `sandbox`, same failure
+  wgpu error: In Device::create_shader_module, label = 'mesh.slang'
+    Shader 'mesh.slang' parsing error: UnsupportedCapability(DrawParameters)
+  ```
+
+  All four SPIR-V artifacts declare `OpCapability DrawParameters` (4427) — Slang
+  emits it because `SV_VertexID` maps to `gl_VertexIndex - gl_BaseVertex` — and
+  **naga does not implement that capability**, so no shader module has ever been
+  created on `crcbl-wgpu`, on any target. This is the same finding already
+  recorded above ("vertex pulling depends on `shaderDrawParameters`, for which
+  the seam has no vocabulary") seen from the other end; it was scored as a
+  seam-vocabulary gap and is in fact a hard stop for the second backend.
+
+  It is not browser-specific — the native wgpu path fails identically — but it
+  is what stands between P5.8 and a playable page. `crcbl-shaders` already emits
+  the WGSL, and it is complete (`wgsl/{mesh,ui,tonemap,triangle}.wgsl`,
+  `Shader::wgsl()`); **nothing consumes it**, because `ShaderModuleDesc` carries
+  only `spirv: &[u32]` and `crcbl-wgpu` passes it as
+  `wgpu::ShaderSource::SpirV`.
+
+  The next slice is that seam: give `ShaderModuleDesc` a WGSL half, have
+  `crcbl-wgpu` prefer it and `crcbl-vk` ignore it. That is a HAL change, which
+  is why it is not folded into P5.8 — the seam does not freeze until P5 exit and
+  this is exactly the kind of change that exit is waiting for. (Recompiling the
+  SPIR-V without `DrawParameters` would also unblock naga, but it fixes one
+  backend by constraining the other, and the WGSL artifacts already exist.)
+
 - **RenderDoc capture** has not been verified by hand; every object and pass
   carries a debug label and `DEBUG_MARKERS` is requested.
 - **A green local Vulkan run is weaker than CI's.** Synchronisation validation
@@ -273,7 +400,7 @@ gets recorded in the relevant crate's docs rather than worked around silently.
 | **P3** ✅  | `crcbl-phys` slice 1 (L0): box/sphere colliders, BVH, ray/segment, swept-sphere TOI + contact normals                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | 5                 | Physics unit+property suite + debug draw                                           |
 | **P4** ✅  | `crcbl-ui` slice 1: draw-list pass, glyph atlas text, label/button, HUD basics; draw-list snapshot tests; black-box replay ring + crash dump + `crcbl replay` CLI (topic 22)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 7, 12             | Text + score HUD renders through engine                                            |
 | **P4A** ✅ | `crcbl-audio`: device seam (cpal), audio thread, mixer/buses, WAV/QOA, voices, **full spatial cue grammar** (topic 13), server-event wiring, golden-buffer e2e                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | 13                | Grammar-trainer orbit test audible + green e2e                                     |
-| **S1** ✅  | **Sample: breakout** — first playable; all deps (P0–P4A) exist. **12 slices merged**: scaffold, paddle+input, ball+physics (swept-sphere CCD), bricks+scoring+game states, audio (sine-wave bounce/brick-break), spatial panning via `compute_cue`, client-interpolated ball state with drift detection, high score persistence via `crcbl_store::write_atomic`, determinism tests, input-queue fix, launch-speed fix, persistence RTT, render-graph UI compositing pass (glyph atlas, per-frame vertex/index upload, alpha-blended on-screen HUD with score/lives/state).                                                                                                                                                                                                                                                                                                                                                                                          | —                 | Winnable/losable native game with on-screen HUD                                   |
+| **S1** ✅  | **Sample: breakout** — first playable; all deps (P0–P4A) exist. **12 slices merged**: scaffold, paddle+input, ball+physics (swept-sphere CCD), bricks+scoring+game states, audio (sine-wave bounce/brick-break), spatial panning via `compute_cue`, client-interpolated ball state with drift detection, high score persistence via `crcbl_store::write_atomic`, determinism tests, input-queue fix, launch-speed fix, persistence RTT, render-graph UI compositing pass (glyph atlas, per-frame vertex/index upload, alpha-blended on-screen HUD with score/lives/state).                                                                                                                                                                                                                                                                                                                                                                                                   | —                 | Winnable/losable native game with on-screen HUD                                    |
 | **P5**     | **Wasm early**: `crcbl-wgpu` Tier B backend, canvas/rAF platform, Slang→WGSL, `FetchSource`-lite, AudioWorklet output; cross-backend image compare (vk↔wgpu); **GitHub Pages demo site + CI deploy**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | 10 (part), 12, 13 | **breakout playable in browser at the Pages URL**                                  |
 | **P6**     | Phys slice 2: dynamic BVH churn, overlap queries, L1 integrator start (thrust, damping)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | 5                 |                                                                                    |
 | **S2**     | **Sample: asteroids**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | —                 | Native + published web demo                                                        |
