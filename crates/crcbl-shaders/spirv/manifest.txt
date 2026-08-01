@@ -41,3 +41,12 @@ spirv-sha256 = 729fbc622184060623d9a7c6732505082fb52bc40417f1a356c4e5277e74ee66
 wgsl = wgsl/ui.wgsl
 wgsl-sha256 = f51882b9715c1f7094f5455d301446cf4faa0d60de3c98753dc212e72b9bf972
 entry-points = vertexMain:vertex, fragmentMain:fragment
+
+[ui_tier_b]
+source = shaders/ui_tier_b.slang
+source-sha256 = a7509ca040a49e5905145fd32f631a3f4989aebd3b7c6f1a583a012139850529
+spirv = spirv/ui_tier_b.spv
+spirv-sha256 = 802a424616b06c062e296ae9c3b33e23b1f38c93ea178032b7fbb255c938c5cd
+wgsl = wgsl/ui_tier_b.wgsl
+wgsl-sha256 = abfa18764a43cfddc88b487211d156835f555f554c3831ec5100271599645a50
+entry-points = vertexMain:vertex, fragmentMain:fragment

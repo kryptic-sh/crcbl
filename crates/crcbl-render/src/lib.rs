@@ -38,6 +38,22 @@
 //! graph-compile suite `docs/plan/12-testing.md` calls a non-negotiable anchor
 //! run on every machine, with no ICD in the room.
 //!
+//! # Two tiers, one renderer
+//!
+//! `docs/plan/03-gpu-driven-rendering.md`'s rule is that **Tier B is a
+//! constraint on data layout, not a separate renderer**, and [`ui_pass`] is
+//! where the first one bites: WebGPU has no push constants at all, so the pass
+//! that draws every sample's HUD picks its constant delivery from
+//! [`Features::PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS) — see
+//! [`ConstantDelivery`]. [`forward`] needs no such branch; its camera has been
+//! in a uniform buffer since P1 for exactly this reason.
+//!
+//! One thing that split needs is **not** closed, and is recorded in
+//! [`ui_pass`]'s own docs rather than worked around here: the Tier B *shader*
+//! artifact does not exist, because `slangc` was unavailable when the Rust half
+//! landed and the committed artifacts are hash-verified. The follow-up is one
+//! new `.slang` file and one run of `compile-shaders.sh`.
+//!
 //! # What this crate is *not*, at P1
 //!
 //! No backend registry (see below), no materials, no scene, no culling, no
@@ -108,4 +124,4 @@ pub use graph::{
 };
 pub use timing::{FrameTimings, PassTimers, PassTiming};
 pub use transient::{TransientBufferDesc, TransientImageDesc, TransientPool, TransientUse};
-pub use ui_pass::UiRenderer;
+pub use ui_pass::{ConstantDelivery, UiRenderer};

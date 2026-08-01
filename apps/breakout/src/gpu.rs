@@ -59,9 +59,11 @@ fn desc(backend: Option<GpuBackend>) -> GpuContextDesc<'static> {
     GpuContextDesc {
         label: "breakout",
         backend,
-        // The UI pass hands `ui.slang` its viewport size through a push
-        // constant and has no other binding to do it through, so
-        // `UiRenderer::new` refuses a device that did not enable them.
+        // `optional_features`, not required: the UI pass hands `ui.slang` its
+        // viewport size through a push constant where there are any, and
+        // through a uniform buffer where there are none — see
+        // `crcbl::render::ConstantDelivery`. A browser is the second case and
+        // always will be, since WebGPU has no push constants at all.
         optional_features: Features::TIER_A
             | Features::TIMESTAMP_QUERY
             | Features::DEBUG_MARKERS

@@ -266,7 +266,9 @@ impl ForwardRenderer {
             bind_group_layouts: &mesh_set_layouts,
             // The camera goes in the uniform buffer above rather than here:
             // `Features::PUSH_CONSTANTS` is absent on Tier B and the seam is
-            // explicit that the substitute is a data-layout decision.
+            // explicit that the substitute is a data-layout decision. So this
+            // file needs no tier branch at all — it has been on Tier B's shape
+            // since P1, and `crate::ui_pass` is where the split actually bites.
             push_constants: None,
         })?;
         rollback.pipeline_layouts.push(mesh_pipeline_layout);
@@ -279,6 +281,7 @@ impl ForwardRenderer {
         let mesh_module = device.create_shader_module(&ShaderModuleDesc {
             label: Some("mesh.slang"),
             spirv: MESH.spirv(),
+            wgsl: MESH.wgsl(),
         })?;
         let mesh_targets = [ColorTargetState::opaque(Format::Rgba16Float)];
         let mesh_pipeline = device.create_graphics_pipeline(&GraphicsPipelineDesc {
@@ -348,6 +351,7 @@ impl ForwardRenderer {
         let tonemap_module = device.create_shader_module(&ShaderModuleDesc {
             label: Some("tonemap.slang"),
             spirv: TONEMAP.spirv(),
+            wgsl: TONEMAP.wgsl(),
         })?;
         let tonemap_targets = [ColorTargetState::opaque(target_format)];
         let tonemap_pipeline = device.create_graphics_pipeline(&GraphicsPipelineDesc {

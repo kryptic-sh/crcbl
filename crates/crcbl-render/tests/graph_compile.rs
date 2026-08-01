@@ -1626,3 +1626,40 @@ fn declaring_one_image_twice_in_a_pass_is_an_error() {
     assert!(text.contains("twice"), "{text}");
     assert!(text.contains("scene"), "{text}");
 }
+
+/// Every shader module the engine's own passes create is offered **both**
+/// artifact formats.
+///
+/// `crcbl_hal::shader`'s contract is that a caller supplies every format it
+/// holds and the backend picks. Nothing about a Vulkan run can check that: a
+/// call site that quietly stopped passing its WGSL renders exactly the same on
+/// `crcbl-vk`, and only `crcbl-wgpu` — which needs a GPU, or a browser — would
+/// notice. That is precisely how the WGSL artifacts sat unused between P5.3 and
+/// P5.9. This runs with no ICD, no driver and no GPU.
+#[test]
+fn the_engine_passes_offer_every_shader_artifact_they_have() {
+    use crcbl_hal::ShaderSources;
+
+    let harness = Harness::open();
+    let renderer = crcbl_render::ForwardRenderer::new(
+        harness.device.as_ref(),
+        harness.queue,
+        Format::Rgba8UnormSrgb,
+    )
+    .expect("the null backend accepts every descriptor");
+    renderer.destroy(harness.device.as_ref());
+
+    let created = harness.recorder.shader_modules_created();
+    assert!(
+        !created.is_empty(),
+        "the forward renderer created no shader modules at all"
+    );
+    for (label, sources) in created {
+        assert_eq!(
+            sources,
+            ShaderSources::SPIRV | ShaderSources::WGSL,
+            "{}: offered only {sources}",
+            label.as_deref().unwrap_or("<unlabelled>")
+        );
+    }
+}
