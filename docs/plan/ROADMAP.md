@@ -20,14 +20,32 @@ engine's public face and its continuous cross-backend regression test.
 
 ## Status (as of 2026-08-01)
 
-**P5 is in progress**, five slices merged: polled device creation across the HAL
+**P5 is complete.** Nine slices merged: polled device creation across the HAL
 seam (P5.4), AudioWorklet output (P5.5), the wasm32 dependency graph (P5.6),
-browser storage over fetch and OPFS (P5.7), and the JS shim, wasm entry point
-and Pages deploy (P5.8). **The phase gate is not closed** — `naga` rejects every
-SPIR-V artifact the engine ships, so `crcbl-wgpu` has never created a shader
-module on any target and the demo page does not render. The diagnosis and the
-next slice are under "Known gaps" below; it is a HAL change, and the seam does
-not freeze until P5 exit.
+browser storage over fetch and OPFS (P5.7), the JS shim, wasm entry point and
+Pages deploy (P5.8), WGSL across the seam (P5.9), a Tier B constants path
+(P5.10), wgpu present + offscreen (P5.11), the cross-backend image gate (P5.12),
+and the headless-browser gate (P5.13).
+
+**The gate is closed: breakout renders and plays in a browser.**
+`web/run-browser-e2e.sh` drives a real Chromium over the built site and reports
+18/18 — the page boots, opens a WebGPU device, configures a swapchain, takes a
+real click and a real `Space` key, launches the ball, breaks a brick, and draws
+16 distinct frames across 16 samples with no device errors. The captured canvas
+shows the brick grid, the paddle and the engine-drawn HUD.
+
+Two blockers stood in the way and both are recorded below rather than forgotten:
+naga rejected every SPIR-V artifact the engine shipped (closed by P5.9 carrying
+WGSL across the seam), and Dawn — stricter than naga about WGSL's uniformity
+rule — rejected the UI shader for sampling a texture under a branch on a
+varying, which invalidated the whole frame's command buffer and left the canvas
+black while the game ran normally. Both were found by building the check before
+believing the code.
+
+**The HAL seam is now frozen**, on the roadmap's own criterion: two backends
+implement it, and `crcbl screenshot` renders the same scene through `crcbl-vk`
+and `crcbl-wgpu` to byte-identical PNGs on one driver, one channel level apart
+across two.
 
 **A full-workspace code review** (`docs/code-review.md`, 2026-08-01) read every
 line of the tree and its findings were fixed across eight commits before this
@@ -62,25 +80,26 @@ The phase table below is the plan; this section is the record. Where the two
 disagree about what was built, this section is right and the phase row says what
 was intended.
 
-| Phase             | Status          | Landed as                                                                                                                                                                                                                                                                                                                                          |
-| ----------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **P0** — base     | **done**        | `f922ca3`, `3198f7a`, `6dd4b46`, `84af231`, `c058f45`, `bad7186`, `a991e42`, `063fd99`, `421ce69`, `f06e6cd`, `36dd636`, `e094d39`                                                                                                                                                                                                                 |
-| **P1** — Vulkan   | **done**        | `91fd871`, `236f19b`, `c6dc4a4`, `a54990d`, `dc36d32`, `8a4e303`, `cbd6153`                                                                                                                                                                                                                                                                        |
-| **P2** — sim core | **done**        | `7b8efb5` scaffold, `f8e8117` net, `9e55569` ecs, `9d31e2d` input, `2b2e5bd` server/client, `d4d0330` sim harness; `7f2d920` interpolation; P2b through `f1e625c`, `e036705`, `ec0597e`, `fb7e7bf`, `9dcc30d`, `b6c9d7d`, `27390fd`, `cb3b110`, `b37e4d5`, `53405f6`, `4156345`; P2c through `4ff402e`, `fa16710`, `c4688f1`, `83362f3`, `1270c72` |
-| **P3** — phys L0  | **done**        | `5665da2` overlaps, `cbfd6b1` dynamic BVH refit, `b1924dd` swept-capsule TOI + triggers, `c4db85d` ECS components, `b765640` PhysicsSystem, `a2be1f6` integrator, `6b30532` force providers, `60dd95e` integration loop, `05dd23a` property tests                                                                                                  |
-| **P4** — UI L0    | **done**        | `49ec170` draw-list, `b40ca95` label/button/HUD, `ab17700` `0352112` `510ce31` triangulation, `9f65472` snapshot tests; `1270c72` replay; `264a7fd` crash ring                                                                                                                                                                                     |
-| **P4A** — audio   | **done**        | `6bd33b2` device seam, `a7e94c2` mixer/voices/golden, `912234f` WAV, `2abbd2d` QOA, `916d51f` cue grammar rules 1–4, `bf9a245` clippy                                                                                                                                                                                                              |
-| **S1** — breakout | **done**        | `d747a84` scaffold, `71d931c` paddle+input, `5989f1b` ball+physics, `495a7fb` bricks+scoring, `ee3bea5` audio+HUD, `fa4e20b` spatial panning, `3bcf327` client interpolation, `a6c2e6b` high score, `ecfd85a` determinism tests, `ab71b1e` input fix, `968b65a` launch fix, `e3fd64d` persistence test, `5f47a12` UI compositing pass              |
-| **P5** — wasm     | **in progress** | `a61bd26` polled device creation, `b932e28` AudioWorklet output, `325b8ba` wasm32 dependency graph, `9c1b48e` fetch + OPFS storage, `c5c2a13` JS shim + entry point + Pages deploy. Earlier: `84e531b` WebShell, `afd63bf` wasm32 target support, `f7d28ad` WGSL artifacts. **Gate open** — see "Shaders block the wgpu backend"                   |
+| Phase             | Status   | Landed as                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ----------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **P0** — base     | **done** | `f922ca3`, `3198f7a`, `6dd4b46`, `84af231`, `c058f45`, `bad7186`, `a991e42`, `063fd99`, `421ce69`, `f06e6cd`, `36dd636`, `e094d39`                                                                                                                                                                                                                                                                                                                                                                                    |
+| **P1** — Vulkan   | **done** | `91fd871`, `236f19b`, `c6dc4a4`, `a54990d`, `dc36d32`, `8a4e303`, `cbd6153`                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| **P2** — sim core | **done** | `7b8efb5` scaffold, `f8e8117` net, `9e55569` ecs, `9d31e2d` input, `2b2e5bd` server/client, `d4d0330` sim harness; `7f2d920` interpolation; P2b through `f1e625c`, `e036705`, `ec0597e`, `fb7e7bf`, `9dcc30d`, `b6c9d7d`, `27390fd`, `cb3b110`, `b37e4d5`, `53405f6`, `4156345`; P2c through `4ff402e`, `fa16710`, `c4688f1`, `83362f3`, `1270c72`                                                                                                                                                                    |
+| **P3** — phys L0  | **done** | `5665da2` overlaps, `cbfd6b1` dynamic BVH refit, `b1924dd` swept-capsule TOI + triggers, `c4db85d` ECS components, `b765640` PhysicsSystem, `a2be1f6` integrator, `6b30532` force providers, `60dd95e` integration loop, `05dd23a` property tests                                                                                                                                                                                                                                                                     |
+| **P4** — UI L0    | **done** | `49ec170` draw-list, `b40ca95` label/button/HUD, `ab17700` `0352112` `510ce31` triangulation, `9f65472` snapshot tests; `1270c72` replay; `264a7fd` crash ring                                                                                                                                                                                                                                                                                                                                                        |
+| **P4A** — audio   | **done** | `6bd33b2` device seam, `a7e94c2` mixer/voices/golden, `912234f` WAV, `2abbd2d` QOA, `916d51f` cue grammar rules 1–4, `bf9a245` clippy                                                                                                                                                                                                                                                                                                                                                                                 |
+| **S1** — breakout | **done** | `d747a84` scaffold, `71d931c` paddle+input, `5989f1b` ball+physics, `495a7fb` bricks+scoring, `ee3bea5` audio+HUD, `fa4e20b` spatial panning, `3bcf327` client interpolation, `a6c2e6b` high score, `ecfd85a` determinism tests, `ab71b1e` input fix, `968b65a` launch fix, `e3fd64d` persistence test, `5f47a12` UI compositing pass                                                                                                                                                                                 |
+| **P5** — wasm     | **done** | `a61bd26` polled device creation, `b932e28` AudioWorklet output, `325b8ba` wasm32 dependency graph, `9c1b48e` fetch + OPFS storage, `c5c2a13` JS shim + entry point + Pages deploy, `fd0bc23` WGSL across the seam, `df45682` Tier B constants, `33d4dc0` wgpu push-constant capability, `afb4579` wgpu present + offscreen, `e52e28c` cross-backend gate, `4d7c7c8` uniform-control-flow shader fix, `ed3e726` headless-browser gate. Earlier: `84e531b` WebShell, `afd63bf` wasm32 target, `f7d28ad` WGSL artifacts |
 
 ### What exists now
 
-- **Workspace + CI**: 20 crates, 5 apps/support crates. CI is 14 required jobs —
+- **Workspace + CI**: 20 crates, 5 apps/support crates. CI is 16 required jobs —
   fmt, clippy `-D warnings`, rustdoc `-D warnings`, `cargo-machete`,
   `cargo-deny`, nextest on Linux and cross-platform (macOS + Windows), coverage,
-  a weekly advisory cron, five e2e suites (Wayland under nested sway, X11 under
-  Xvfb, Vulkan on lavapipe, the CLI scaffold, and the shader-manifest check),
-  and a decoder fuzz job.
+  a weekly advisory cron, seven e2e suites (Wayland under nested sway, X11 under
+  Xvfb, Vulkan on lavapipe, wgpu on lavapipe under Xvfb, the cross-backend
+  vk↔wgpu image compare, the CLI scaffold, and the shader-manifest check), and a
+  decoder fuzz job.
 - **`crcbl-core`**: `Handle`/`Pool`, sector-tiled `WorldPos` (`I64Vec3` sectors,
   2^20 m cells), `FrameArena`, `FrameClock` with an injected `TimeSource`, the
   input vocabulary, `SurfaceTarget`, logging.
@@ -202,7 +221,8 @@ was intended.
   adopted as a build tool only** — no `#[wasm_bindgen]`, no crate depends on it,
   the version comes out of `Cargo.lock` — because `wgpu`→`web-sys` leaves ~320
   unresolvable `__wbindgen_placeholder__` imports that only its CLI can link.
-  **The gate is not closed**: see "Shaders block the wgpu backend" below.
+  The gate this slice could not close — no browser had ever loaded the page — is
+  closed by P5.13.
 - **Web key ABI correction** (P5.8): `crcbl-shell`'s `__crcbl_web_key` takes two
   `(ptr, len)` pairs and the module had no way for a browser to obtain an
   address inside wasm memory, so the entry point was specified but not callable.
@@ -279,36 +299,51 @@ boot order.
 - **One HAL seam finding remains open**, recorded in `crcbl-vk`'s crate docs:
   vertex pulling depends on `shaderDrawParameters`, for which the seam has no
   vocabulary.
-- **Shaders block the wgpu backend, and therefore the P5 gate.** Found while
-  wiring P5.8 and reproducible in one command on any machine:
+- **Two shader stops, both closed, both worth remembering (P5.9, P5.13).** Every
+  SPIR-V artifact the engine ships declares `OpCapability DrawParameters` —
+  Slang emits it because `SV_VertexID` lowers to
+  `gl_VertexIndex - gl_BaseVertex` — and naga does not implement it, so
+  `crcbl-wgpu` had never created a shader module on any target. The WGSL to
+  sidestep it had been committed since P5.3 and was consumed by nothing, because
+  `ShaderModuleDesc` carried only SPIR-V. P5.9 gave the seam a WGSL half.
+
+  Then a browser found the second one. Dawn enforces WGSL's uniformity rule
+  where naga does not, and both UI shaders sampled the glyph atlas inside
+  `if (input.uv.x > 0.0 || input.uv.y > 0.0)` — a branch on a varying:
 
   ```
-  $ breakout --backend wgpu --frames 30       # or `sandbox`, same failure
-  wgpu error: In Device::create_shader_module, label = 'mesh.slang'
-    Shader 'mesh.slang' parsing error: UnsupportedCapability(DrawParameters)
+  error: 'textureSample' must only be called from uniform control flow
+  note: control flow depends on possibly non-uniform value
   ```
 
-  All four SPIR-V artifacts declare `OpCapability DrawParameters` (4427) — Slang
-  emits it because `SV_VertexID` maps to `gl_VertexIndex - gl_BaseVertex` — and
-  **naga does not implement that capability**, so no shader module has ever been
-  created on `crcbl-wgpu`, on any target. This is the same finding already
-  recorded above ("vertex pulling depends on `shaderDrawParameters`, for which
-  the seam has no vocabulary") seen from the other end; it was scored as a
-  seam-vocabulary gap and is in fact a hard stop for the second backend.
+  The consequence was total rather than cosmetic: the invalid module invalidated
+  the `ui compositing` pipeline, that invalidated the whole `breakout frame`
+  command buffer, and `Queue.submit` dropped it — discarding the forward and
+  tonemap passes too, so **the canvas stayed black while the game ran
+  normally**. Hoisting the sample above the branch and selecting afterwards is
+  the same image with no non-uniform sample; Vulkan's output is unchanged,
+  verified by the cross-backend PNGs staying byte-identical.
 
-  It is not browser-specific — the native wgpu path fails identically — but it
-  is what stands between P5.8 and a playable page. `crcbl-shaders` already emits
-  the WGSL, and it is complete (`wgsl/{mesh,ui,tonemap,triangle}.wgsl`,
-  `Shader::wgsl()`); **nothing consumes it**, because `ShaderModuleDesc` carries
-  only `spirv: &[u32]` and `crcbl-wgpu` passes it as
-  `wgpu::ShaderSource::SpirV`.
+  The lesson is the one this project keeps re-learning: **a second
+  implementation is the only thing that finds this class of bug.** Both stops
+  were invisible to a green native run, and neither would have been found by
+  reading the code.
 
-  The next slice is that seam: give `ShaderModuleDesc` a WGSL half, have
-  `crcbl-wgpu` prefer it and `crcbl-vk` ignore it. That is a HAL change, which
-  is why it is not folded into P5.8 — the seam does not freeze until P5 exit and
-  this is exactly the kind of change that exit is waiting for. (Recompiling the
-  SPIR-V without `DrawParameters` would also unblock naga, but it fixes one
-  backend by constraining the other, and the WGSL artifacts already exist.)
+- **`crcbl-wgpu` cannot see a pipeline it failed to create.** WebGPU delivers
+  creation failures to the device error callback, not to the call, and nothing
+  pushes an error scope or installs an uncaptured-error handler. The run that
+  found the shader bug submitted 384 invalid command buffers while reporting a
+  healthy status and a page that said "Playing". Every browser-only pipeline
+  failure will present as a black canvas with the game apparently running —
+  which is exactly how this one presented. Owed before the demo site carries a
+  second sample.
+
+- **`VUID-vkAcquireNextImageKHR-fence-10066` fires once per acquire on Linux
+  under wgpu**, and is not reachable from this workspace: the fence is created
+  and reused inside `wgpu-hal`'s `NativeSwapchain`, which waits on and resets it
+  only under `cfg(windows)`. 30.0.0 is the newest published version. Frames are
+  correct and the runs pass; recorded rather than silenced by turning wgpu's
+  validation off.
 
 - **RenderDoc capture** has not been verified by hand; every object and pass
   carries a debug label and `DEBUG_MARKERS` is requested.
@@ -352,7 +387,25 @@ each has a script that sets the environment up and **fails if zero tests ran**:
 | `crates/crcbl-shell/tests/run-wayland-e2e.sh` | nested headless sway | 33    |
 | `crates/crcbl-shell/tests/run-x11-e2e.sh`     | Xvfb                 | 29    |
 | `crates/crcbl-vk/tests/run-vk-e2e.sh`         | any Vulkan ICD       | 26    |
+| `crates/crcbl-wgpu/tests/run-wgpu-e2e.sh`     | a wgpu adapter, Xvfb | 7     |
+| `crates/crcbl/tests/run-cross-backend-e2e.sh` | both backends        | 2     |
 | `crates/crcbl-cli/tests/run-cli-e2e.sh`       | nothing              | 1     |
+| `web/run-browser-e2e.sh`                      | Chrome + Xvfb        | 18    |
+
+`web/run-browser-e2e.sh` is the P5 gate itself and needs no GPU: it serves the
+built site, drives it in a real browser over the DevTools protocol, sends a real
+click and a real Space key, and **reads the canvas back** to prove the frame is
+neither blank nor still. Its header carries the measured table of which
+display/adapter combinations can report canvas pixels at all — three of the four
+obvious ones cannot, silently — and it runs a known-colour clear as a control
+before it believes any render result.
+
+The cross-backend row counts **comparisons**, not `#[test]`s: it renders one
+frame through each backend per size and compares the pair with `crcbl-golden`'s
+measured tolerance, and it fails when zero comparisons ran for the same reason
+the others fail when zero tests ran. Cross the ICDs (`CRCBL_VK_ICD` and
+`CRCBL_WGPU_ICD` pointing at different drivers) to run it in the configuration
+the tolerance was measured in; CI has only lavapipe and says so.
 
 **Two runs that are not optional**, because both have caught bugs a normal run
 could not:

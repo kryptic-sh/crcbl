@@ -100,6 +100,11 @@ the GPU — the GPU-bound principle holds, only the draw-emission tail differs.
 
 ## Status after P5.8 (the shim, the entry point, the deploy)
 
+> **Superseded by "Status after P5.13" above.** The blocker named here — `naga`
+> and `DrawParameters` — was closed by P5.9, and task 1 is done. The section is
+> kept because the rest of it still holds and because the sequencing lesson at
+> its end is the one worth keeping.
+
 The page, the shim and the deploy exist; **the demo does not render yet.**
 Recorded here rather than discovered by whoever opens the URL.
 
@@ -147,6 +152,46 @@ before the graphics half had a working shader.
   crcbl-shell's canvas/rAF handling is solid". It is, and the glue that was left
   fitted in `apps/breakout/src/web.rs` and `web/engine/*.js`. A second sample is
   what will show which parts of that are engine and which are sample.
+
+## Status after P5.13 — exit criteria met
+
+`web/run-browser-e2e.sh` serves the built site, drives it in a real Chromium
+over the DevTools protocol, and reads the canvas back. It is the gate this
+document's exit criteria are measured by, and it needs no GPU — the default
+configuration is Xvfb plus Chromium's bundled SwiftShader.
+
+**It reports 18/18.** breakout boots, `crcbl-wgpu` opens a WebGPU device, a
+960x511 `Rgba8Unorm` Fifo swapchain is configured on the canvas, the rAF loop
+runs, a real click focuses the canvas, a real `Space` keydown reaches
+`__crcbl_web_key` and launches the ball, a brick breaks (score 10, 39 bricks
+left, the audio cue fires), and the canvas holds 13 distinct colours across 16
+distinct frames with no WebGPU device errors behind them. Task 2 of this
+document — "wasm build of sandbox: canvas, rAF, FetchSource, single-thread loop"
+— holds for breakout.
+
+**Task 1 is discharged too.** "Tier B renderer path validated on native wgpu"
+was skipped when the browser work ran ahead of it, and P5.11 went back for it:
+`crcbl-wgpu` now presents windowed frames and renders offscreen with readback,
+and the offscreen frame is byte-identical to Vulkan's on the same driver.
+
+**The two things the browser found that nothing else could.** Dawn enforces
+WGSL's uniformity rule where naga does not, and rejected the UI shader for
+sampling the glyph atlas under a branch on a varying — which invalidated the
+frame's whole command buffer and left the canvas black while the simulation ran
+normally. And `crcbl-wgpu` cannot observe a pipeline it failed to create,
+because WebGPU reports creation failures to the device error callback; the run
+submitted 384 invalid command buffers while reporting a healthy status. The
+first is fixed; the second is recorded in ROADMAP's known gaps.
+
+**A readback trap worth keeping.** Three of the four obvious ways to read a
+WebGPU canvas back return transparent black regardless of what was drawn,
+varying by display and adapter — a first harness used `drawImage` and would have
+blamed the engine for a working renderer. The gate therefore runs a known-colour
+clear as a control in the same browser with the same flags, and refuses to
+interpret the render checks unless the control reads back.
+
+**Not yet measured:** frame rate against a Tier B budget (task 5), and any
+browser other than Chromium.
 
 ## Correction (design review, 2026-07-27)
 
