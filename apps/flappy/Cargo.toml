@@ -1,0 +1,38 @@
+[package]
+name = "flappy"
+description = "Flappy — the engine's second game, and the test that it has no breakout-shaped assumptions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# **A library, and for now only a library.** The renderer, the native binary and
+# the browser entry point arrive in later S1B slices; the simulation lands first
+# because it is the half that answers the question this sample exists to ask —
+# whether a game with a different shape can be built on the same engine without
+# the engine changing. Nothing about that needs a window.
+#
+# The lib is not called `flappy`, for the reason `apps/breakout/Cargo.toml`
+# spells out: once this package grows a bin, a lib of the same name writes the
+# same `flappy.wasm` and the Pages deploy picks up whichever target finished
+# last.
+[lib]
+name = "crcbl_flappy"
+
+# Deliberately a subset of breakout's list. Every dependency here is one this
+# slice actually calls; the audio, storage and graphics crates arrive with the
+# slices that use them, so `cargo machete` stays meaningful.
+[dependencies]
+crcbl-ecs = { workspace = true }
+crcbl-net = { workspace = true }
+crcbl-phys = { workspace = true }
+crcbl-input = { workspace = true }
+crcbl-server = { workspace = true }
+crcbl-client = { workspace = true }
+crcbl-core = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+
+[lints]
+workspace = true
