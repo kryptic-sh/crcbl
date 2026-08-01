@@ -32,18 +32,45 @@ pub struct Hello {
 /// Why the server rejected a handshake.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectReason {
-    /// Machine-readable rejection code:
-    ///
-    /// | Code | Meaning                |
-    /// |------|------------------------|
-    /// | 0x01 | protocol_version_mismatch |
-    /// | 0x02 | schema_mismatch           |
-    /// | 0x03 | server_full               |
-    /// | 0x04 | invalid_session_token     |
-    /// | 0x05 | engine_build_id_mismatch  |
+    /// Machine-readable rejection code; see the `RejectReason` constants.
     pub code: u8,
     /// Human-readable message for logs and diagnostics.
     pub msg: String,
+}
+
+impl RejectReason {
+    /// The client's protocol version does not match the server's.
+    pub const PROTOCOL_VERSION_MISMATCH: u8 = 0x01;
+    /// The client's replicated schema hash does not match the server's.
+    pub const SCHEMA_MISMATCH: u8 = 0x02;
+    /// The server has no room for another session right now.
+    pub const SERVER_FULL: u8 = 0x03;
+    /// The presented resume token is wrong, absent, or no longer valid.
+    pub const INVALID_SESSION_TOKEN: u8 = 0x04;
+    /// The client's engine build id does not match the server's.
+    pub const ENGINE_BUILD_ID_MISMATCH: u8 = 0x05;
+    /// The server could not draw a resume credential from the OS CSPRNG.
+    pub const ENTROPY_FAILURE: u8 = 0x06;
+
+    /// Whether this code means "do not bother trying again with this build".
+    ///
+    /// A version, schema or build mismatch is a property of the two binaries
+    /// and will not change while they are running. Everything else — a full
+    /// server, an expired token, an entropy failure, or a code this build does
+    /// not recognise — is transient, and a client that latched on it would
+    /// wedge itself for a condition that resolves on its own. A forged reject
+    /// is exactly the shape of a transient failure, which is the other reason
+    /// the distinction matters: the handshake carries no MAC, so an attacker
+    /// can always inject one.
+    #[must_use]
+    pub const fn is_permanent(&self) -> bool {
+        matches!(
+            self.code,
+            Self::PROTOCOL_VERSION_MISMATCH
+                | Self::SCHEMA_MISMATCH
+                | Self::ENGINE_BUILD_ID_MISMATCH
+        )
+    }
 }
 
 // ── HandshakeResult ───────────────────────────────────────────────────────────
@@ -100,7 +127,7 @@ impl HandshakeGate {
             return HandshakeResult::Reject {
                 generation: hello.generation,
                 reason: RejectReason {
-                    code: 0x01,
+                    code: RejectReason::PROTOCOL_VERSION_MISMATCH,
                     msg: format!(
                         "protocol version mismatch: client {}, server {}",
                         hello.protocol_version, self.compatibility.protocol_version,
@@ -113,7 +140,7 @@ impl HandshakeGate {
             return HandshakeResult::Reject {
                 generation: hello.generation,
                 reason: RejectReason {
-                    code: 0x05,
+                    code: RejectReason::ENGINE_BUILD_ID_MISMATCH,
                     msg: format!(
                         "engine build id mismatch: client 0x{:016x}, server 0x{:016x}",
                         hello.engine_build_id, self.compatibility.engine_build_id,
@@ -126,7 +153,7 @@ impl HandshakeGate {
             return HandshakeResult::Reject {
                 generation: hello.generation,
                 reason: RejectReason {
-                    code: 0x02,
+                    code: RejectReason::SCHEMA_MISMATCH,
                     msg: format!(
                         "schema hash mismatch: client 0x{:016x}, server 0x{:016x}",
                         hello.schema_hash, self.compatibility.schema_hash,
@@ -295,6 +322,64 @@ mod tests {
         // responsibility. The test verifies the token is preserved in the
         // Hello and doesn't affect accept/reject by the gate.
         assert!(matches!(result, HandshakeResult::Accept { .. }));
+    }
+
+    // ── Permanence classification ─────────────────────────────────────────
+
+    #[test]
+    fn only_build_mismatches_are_permanent() {
+        let reason = |code| RejectReason {
+            code,
+            msg: String::new(),
+        };
+        for code in [
+            RejectReason::PROTOCOL_VERSION_MISMATCH,
+            RejectReason::SCHEMA_MISMATCH,
+            RejectReason::ENGINE_BUILD_ID_MISMATCH,
+        ] {
+            assert!(reason(code).is_permanent(), "code {code:#04x}");
+        }
+        for code in [
+            RejectReason::SERVER_FULL,
+            RejectReason::INVALID_SESSION_TOKEN,
+            RejectReason::ENTROPY_FAILURE,
+            // An unrecognised code is transient by default: a build that does
+            // not know what it means must not give up over it.
+            0xFE,
+        ] {
+            assert!(!reason(code).is_permanent(), "code {code:#04x}");
+        }
+    }
+
+    #[test]
+    fn gate_rejections_use_the_named_codes() {
+        let g = gate();
+        let for_hello = |hello: Hello| match g.validate(&hello, SessionId(1), token(), TickId::ZERO)
+        {
+            HandshakeResult::Reject { reason, .. } => reason.code,
+            HandshakeResult::Accept { .. } => panic!("expected a rejection"),
+        };
+        assert_eq!(
+            for_hello(Hello {
+                protocol_version: 999,
+                ..matching_hello()
+            }),
+            RejectReason::PROTOCOL_VERSION_MISMATCH
+        );
+        assert_eq!(
+            for_hello(Hello {
+                engine_build_id: 0xBAD,
+                ..matching_hello()
+            }),
+            RejectReason::ENGINE_BUILD_ID_MISMATCH
+        );
+        assert_eq!(
+            for_hello(Hello {
+                schema_hash: 0xBAD,
+                ..matching_hello()
+            }),
+            RejectReason::SCHEMA_MISMATCH
+        );
     }
 
     // ── Debug coverage ────────────────────────────────────────────────────

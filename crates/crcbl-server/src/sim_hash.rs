@@ -13,17 +13,6 @@ use std::hash::{Hash, Hasher};
 use crcbl_core::TickId;
 use crcbl_ecs::World;
 
-/// The result of a determinism check: world state hash + tick count.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SimHash {
-    /// Number of ticks that ran.
-    pub ticks: u64,
-    /// The final tick id.
-    pub final_tick: TickId,
-    /// Hash of world state after all ticks.
-    pub hash: u64,
-}
-
 /// Hash the current state of `world` at `tick`.
 ///
 /// The hash covers the tick id and every system's name + component data.

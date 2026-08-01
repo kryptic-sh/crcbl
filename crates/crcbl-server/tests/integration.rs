@@ -11,8 +11,11 @@ use crcbl_ecs::{System, World};
 use crcbl_net::InMemoryTransport;
 use crcbl_server::Server;
 
+/// Explicit engine and schema identifiers, and the *shipped* protocol
+/// version — pinning a literal here meant the default the crates actually
+/// ship was never exercised end to end.
 const COMPATIBILITY: crcbl_net::ProtocolCompatibility = crcbl_net::ProtocolCompatibility {
-    protocol_version: 3,
+    protocol_version: crcbl_net::ProtocolCompatibility::DEFAULT.protocol_version,
     engine_build_id: 0x0043_5243_424C,
     schema_hash: 0x0050_3242,
 };
@@ -230,7 +233,9 @@ fn server_rejects_invalid_reconnect_tokens_and_resumes_matching_token() {
         send_hello(&mut peer, token);
         server.update(tick_dt * (3 + index as u32));
         match recv_handshake(&mut peer) {
-            crcbl_net::HandshakeResult::Reject { reason, .. } => assert_eq!(reason.code, 0x04),
+            crcbl_net::HandshakeResult::Reject { reason, .. } => {
+                assert_eq!(reason.code, crcbl_net::RejectReason::INVALID_SESSION_TOKEN)
+            }
             crcbl_net::HandshakeResult::Accept { .. } => panic!("invalid reconnect token accepted"),
         }
         assert_eq!(
@@ -283,7 +288,9 @@ fn server_rejects_fresh_hello_with_session_token_and_retries_are_idempotent() {
     server.update(std::time::Duration::ZERO);
     server.update(tick_dt);
     match recv_handshake(&mut peer) {
-        crcbl_net::HandshakeResult::Reject { reason, .. } => assert_eq!(reason.code, 0x04),
+        crcbl_net::HandshakeResult::Reject { reason, .. } => {
+            assert_eq!(reason.code, crcbl_net::RejectReason::INVALID_SESSION_TOKEN)
+        }
         crcbl_net::HandshakeResult::Accept { .. } => panic!("fresh stale token accepted"),
     }
     assert_eq!(
@@ -376,7 +383,9 @@ fn independently_created_servers_reject_each_others_resume_tokens() {
     send_hello(&mut replacement_peer, Some(token_a));
     server_b.update(std::time::Duration::from_secs(2));
     match recv_handshake(&mut replacement_peer) {
-        crcbl_net::HandshakeResult::Reject { reason, .. } => assert_eq!(reason.code, 0x04),
+        crcbl_net::HandshakeResult::Reject { reason, .. } => {
+            assert_eq!(reason.code, crcbl_net::RejectReason::INVALID_SESSION_TOKEN)
+        }
         crcbl_net::HandshakeResult::Accept { .. } => {
             panic!("server B accepted server A credential")
         }
@@ -386,7 +395,7 @@ fn independently_created_servers_reject_each_others_resume_tokens() {
 #[test]
 fn client_and_server_reject_compatibility_mismatches() {
     let server_compatibility = crcbl_net::ProtocolCompatibility {
-        protocol_version: 3,
+        protocol_version: crcbl_net::ProtocolCompatibility::DEFAULT.protocol_version,
         engine_build_id: 0xA1,
         schema_hash: 0xB1,
     };
@@ -480,7 +489,9 @@ fn injected_time_expires_reconnect_without_sleep() {
     send_hello(&mut replacement_peer, Some(token));
     server.update(std::time::Duration::from_secs(6));
     match recv_handshake(&mut replacement_peer) {
-        crcbl_net::HandshakeResult::Reject { reason, .. } => assert_eq!(reason.code, 0x04),
+        crcbl_net::HandshakeResult::Reject { reason, .. } => {
+            assert_eq!(reason.code, crcbl_net::RejectReason::INVALID_SESSION_TOKEN)
+        }
         crcbl_net::HandshakeResult::Accept { .. } => panic!("expired reconnect accepted"),
     }
 }

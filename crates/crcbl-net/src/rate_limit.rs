@@ -1,11 +1,18 @@
-//! Deterministic per-client inbound traffic limiting.
+//! Deterministic inbound traffic limiting.
+//!
+//! Both peers need this: the server bounds what one client may send it, and
+//! the client bounds what the server (or anything spoofing it) may make it
+//! decode, because every accepted delta costs a baseline mutation and a
+//! reconstruction pass.
 
 use std::time::Duration;
 
-/// Configures the maximum inbound traffic a single server client may send.
+/// Configures the maximum inbound traffic accepted from one peer.
 ///
 /// Each limit is a token bucket with capacity equal to one second of traffic.
-/// This admits normal short bursts while bounding an idle client's later burst.
+/// This admits normal short bursts while bounding an idle peer's later burst.
+/// A holder that limits several delivery channels applies the budget to each
+/// channel independently, so a flood on one cannot starve another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InboundRateLimitConfig {
     /// Maximum accepted inbound messages per second.
@@ -23,8 +30,12 @@ impl Default for InboundRateLimitConfig {
     }
 }
 
+/// Token-bucket limiter for one inbound channel.
+///
+/// Time is injected by the caller, so behaviour is deterministic in tests and
+/// does not depend on a wall clock.
 #[derive(Debug)]
-pub(crate) struct InboundRateLimiter {
+pub struct InboundRateLimiter {
     config: InboundRateLimitConfig,
     message_tokens: u64,
     byte_tokens: u64,
@@ -36,7 +47,9 @@ pub(crate) struct InboundRateLimiter {
 impl InboundRateLimiter {
     const NANOS_PER_SECOND: u128 = 1_000_000_000;
 
-    pub(crate) fn new(config: InboundRateLimitConfig, now: Duration) -> Self {
+    /// A limiter starting with one full second of budget at `now`.
+    #[must_use]
+    pub fn new(config: InboundRateLimitConfig, now: Duration) -> Self {
         Self {
             message_tokens: config.messages_per_second,
             byte_tokens: config.bytes_per_second,
@@ -47,7 +60,8 @@ impl InboundRateLimiter {
         }
     }
 
-    pub(crate) fn reconfigure(&mut self, config: InboundRateLimitConfig, now: Duration) {
+    /// Replace the budget, resetting the bucket to one second of the new one.
+    pub fn reconfigure(&mut self, config: InboundRateLimitConfig, now: Duration) {
         *self = Self::new(config, now);
     }
 
@@ -89,7 +103,12 @@ impl InboundRateLimiter {
         }
     }
 
-    pub(crate) fn allow(&mut self, now: Duration, bytes: u64) -> Result<(), (bool, bool)> {
+    /// Charge one message of `bytes` against both budgets.
+    ///
+    /// Returns `Err((messages_limited, bytes_limited))` naming which budget
+    /// refused it. Both dimensions are charged either way, so a stream of
+    /// oversized packets cannot bypass the message budget.
+    pub fn allow(&mut self, now: Duration, bytes: u64) -> Result<(), (bool, bool)> {
         self.refill(now);
         let messages_limited = self.message_tokens == 0;
         let bytes_limited = bytes > self.byte_tokens;

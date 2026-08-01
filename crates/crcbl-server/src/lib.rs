@@ -3,31 +3,37 @@
 //! The server is the single source of truth. Each tick it drains client inputs,
 //! advances the ECS world, and broadcasts a per-system snapshot over an
 //! unreliable transport channel. Snapshots are delta-encoded against the
-//! client's last-acked baseline (P2b protocol).
+//! client's last-acked baseline (P2b protocol) and carry a per-session MAC
+//! (see [`crcbl_net::auth`]) — an unauthenticated packet reaches nothing but
+//! the error counter.
 
-pub mod rate_limit;
 pub mod sim_hash;
 
-pub use rate_limit::InboundRateLimitConfig;
+pub use crcbl_net::rate_limit;
+pub use crcbl_net::rate_limit::InboundRateLimitConfig;
 
 use std::fmt;
 use std::time::Duration;
 
 use crcbl_core::{FrameClock, TickId};
 use crcbl_ecs::{GameModule, Inspector, World};
+use crcbl_net::auth::SessionCrypto;
+use crcbl_net::rate_limit::InboundRateLimiter;
 use crcbl_net::{
-    Baseline, DeltaCodec, HandshakeGate, HandshakeResult, Message, MessageKind,
-    ProtocolCompatibility, RejectReason, ResumeToken, SectorId, SessionConfig, SessionId,
-    SessionManager, SessionState, SnapshotWriter, Transport,
+    Baseline, DeltaCodec, HandshakeGate, HandshakeResult, Message, ProtocolCompatibility,
+    RejectReason, ResumeToken, SectorId, SessionConfig, SessionId, SessionManager, SessionState,
+    SnapshotWriter, Transport, Trust,
 };
-use rate_limit::InboundRateLimiter;
 
-#[cfg(test)]
-const PROTOCOL_VERSION: u32 = ProtocolCompatibility::DEFAULT.protocol_version;
-#[cfg(test)]
-const ENGINE_BUILD_ID: u64 = ProtocolCompatibility::DEFAULT.engine_build_id;
-#[cfg(test)]
-const SCHEMA_HASH: u64 = ProtocolCompatibility::DEFAULT.schema_hash;
+/// Ticks the server will keep delta-encoding against the same acked baseline
+/// before it gives up and sends a keyframe.
+///
+/// A client whose acks stop making progress — because the delta it needs was
+/// lost, or because its baseline was evicted from the ring — cannot recover on
+/// its own: it will reject every delta that targets a baseline it does not
+/// have, forever. This bounds that stall, and is the server half of the same
+/// guarantee the client makes by re-announcing its baseline.
+const KEYFRAME_RECOVERY_TICKS: u32 = 32;
 
 // ---------------------------------------------------------------------------
 // Server
@@ -43,12 +49,24 @@ pub struct Server<T: Transport> {
     session: SessionManager,
     session_config: SessionConfig,
     resume_token: ResumeToken,
+    /// Authenticated channel for this session; `None` until a handshake is
+    /// accepted, and replaced whenever the resume token rotates.
+    session_crypto: Option<SessionCrypto>,
     next_session_id: u64,
     session_terminated: bool,
     handshake_gate: HandshakeGate,
-    inbound_rate_limiter: InboundRateLimiter,
+    rate_limit_config: InboundRateLimitConfig,
+    /// One limiter per delivery channel: a flood of unreliable state must not
+    /// consume the budget that reliable control traffic needs to be read at
+    /// all, which is the whole point of having two channels.
+    reliable_rate_limiter: InboundRateLimiter,
+    unreliable_rate_limiter: InboundRateLimiter,
     now: Duration,
+    /// Ticks since `last_acked_tick` last advanced; drives keyframe recovery.
+    ticks_since_ack_progress: u32,
+    last_ack_progress: Option<TickId>,
     processing_error_count: u64,
+    auth_failure_count: u64,
     rate_limited_message_count: u64,
     rate_limited_byte_count: u64,
     /// Optional game logic module (ticked after the ECS schedule).
@@ -56,69 +74,56 @@ pub struct Server<T: Transport> {
 }
 
 impl<T: Transport> Server<T> {
-    /// Create a server with the default protocol compatibility identifiers.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `tick_hz` is zero or the operating system CSPRNG is unavailable.
-    #[must_use]
-    pub fn new(world: World, transport: T, tick_hz: u32) -> Self {
-        let compatibility = ProtocolCompatibility::DEFAULT;
-        if !cfg!(test) {
-            compatibility.assert_explicit();
-        }
-        Self::try_new_with_compatibility(world, transport, tick_hz, compatibility)
-            .expect("operating system CSPRNG must be available to create a server")
-    }
-
-    /// Create a server with the default protocol compatibility identifiers.
-    ///
-    /// Returns the operating-system entropy error rather than issuing a predictable
-    /// resume credential.
-    pub fn try_new(world: World, transport: T, tick_hz: u32) -> Result<Self, getrandom::Error> {
-        let compatibility = ProtocolCompatibility::DEFAULT;
-        if !cfg!(test) {
-            compatibility.assert_explicit();
-        }
-        Self::try_new_with_compatibility(world, transport, tick_hz, compatibility)
-    }
-
     /// Create a server with explicit protocol compatibility identifiers.
     ///
+    /// There is deliberately no constructor that defaults them:
+    /// [`ProtocolCompatibility::DEFAULT`] carries zero engine and schema ids,
+    /// which protect nothing, and a networked embedding must supply its own.
+    ///
+    /// The world's fixed timestep is set from `tick_hz`, so every system
+    /// integrates at the rate the server actually runs.
+    ///
     /// # Panics
     ///
-    /// Panics if `tick_hz` is zero.
+    /// Panics if `tick_hz` is zero, or if either compatibility identifier is
+    /// zero.
     ///
-    /// Returns the operating-system entropy error rather than issuing a predictable
-    /// resume credential.
+    /// # Errors
+    ///
+    /// Returns the operating-system entropy error rather than issuing a
+    /// predictable resume credential.
     pub fn try_new_with_compatibility(
-        world: World,
+        mut world: World,
         transport: T,
         tick_hz: u32,
         compatibility: ProtocolCompatibility,
     ) -> Result<Self, getrandom::Error> {
-        if !cfg!(test) {
-            compatibility.assert_explicit();
-        }
+        compatibility.assert_explicit();
+        let clock = FrameClock::new(tick_hz);
+        world.set_tick_dt(clock.tick_dt_secs());
         let config = SessionConfig::default();
         let session_id = SessionId(1);
         let resume_token = Self::generate_resume_token()?;
+        let rate_limit_config = InboundRateLimitConfig::default();
         Ok(Self {
             world,
             transport,
-            clock: FrameClock::new(tick_hz),
+            clock,
             session: SessionManager::new(session_id, &config),
             session_config: config,
             resume_token,
+            session_crypto: None,
             next_session_id: session_id.0 + 1,
             session_terminated: false,
             handshake_gate: HandshakeGate::new(compatibility),
-            inbound_rate_limiter: InboundRateLimiter::new(
-                InboundRateLimitConfig::default(),
-                Duration::ZERO,
-            ),
+            rate_limit_config,
+            reliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
+            unreliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
             now: Duration::ZERO,
+            ticks_since_ack_progress: 0,
+            last_ack_progress: None,
             processing_error_count: 0,
+            auth_failure_count: 0,
             rate_limited_message_count: 0,
             rate_limited_byte_count: 0,
             module: None,
@@ -167,60 +172,108 @@ impl<T: Transport> Server<T> {
     }
 
     /// Consume queued client messages: handshake, inputs (discarded — P3), and acks.
+    ///
+    /// Each channel is drained under its own budget, so exhausting one leaves
+    /// the other readable.
     fn drain_inputs(&mut self) {
-        loop {
-            match self.transport.recv_reliable() {
-                Ok(Some(msg)) => {
-                    if !self.process_inbound_message(msg) {
+        for reliable in [true, false] {
+            loop {
+                let received = if reliable {
+                    self.transport.recv_reliable()
+                } else {
+                    self.transport.recv()
+                };
+                match received {
+                    Ok(Some(msg)) => {
+                        if !self.charge_inbound_budget(reliable, msg.payload.len()) {
+                            break;
+                        }
+                        self.process_inbound_message(&msg.payload);
+                    }
+                    Ok(None) => break,
+                    Err(crcbl_net::TransportError::Disconnected) => break,
+                    Err(_) => {
+                        self.processing_error_count += 1;
                         break;
                     }
-                }
-                Ok(None) => break,
-                Err(crcbl_net::TransportError::Disconnected) => break,
-                Err(_) => {
-                    self.processing_error_count += 1;
-                    break;
-                }
-            }
-        }
-        loop {
-            match self.transport.recv() {
-                Ok(Some(msg)) => {
-                    if !self.process_inbound_message(msg) {
-                        break;
-                    }
-                }
-                Ok(None) => break,
-                Err(crcbl_net::TransportError::Disconnected) => break,
-                Err(_) => {
-                    self.processing_error_count += 1;
-                    break;
                 }
             }
         }
     }
 
-    fn process_inbound_message(&mut self, msg: Message) -> bool {
-        let bytes = u64::try_from(msg.payload.len()).unwrap_or(u64::MAX);
-        if let Err((messages_limited, bytes_limited)) =
-            self.inbound_rate_limiter.allow(self.now, bytes)
-        {
-            self.rate_limited_message_count = self
-                .rate_limited_message_count
-                .saturating_add(u64::from(messages_limited));
-            self.rate_limited_byte_count = self
-                .rate_limited_byte_count
-                .saturating_add(u64::from(bytes_limited));
-            return false;
+    /// Charge one inbound message against its channel's budget, returning
+    /// whether the caller may keep reading that channel.
+    fn charge_inbound_budget(&mut self, reliable: bool, bytes: usize) -> bool {
+        let now = self.now;
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        let limiter = if reliable {
+            &mut self.reliable_rate_limiter
+        } else {
+            &mut self.unreliable_rate_limiter
+        };
+        match limiter.allow(now, bytes) {
+            Ok(()) => true,
+            Err((messages_limited, bytes_limited)) => {
+                self.rate_limited_message_count = self
+                    .rate_limited_message_count
+                    .saturating_add(u64::from(messages_limited));
+                self.rate_limited_byte_count = self
+                    .rate_limited_byte_count
+                    .saturating_add(u64::from(bytes_limited));
+                false
+            }
         }
-        if let Ok(hello) = crcbl_net::decode_hello(&msg.payload) {
-            self.handle_hello(hello);
-        } else if let Ok(ack) = crcbl_net::decode_ack(&msg.payload) {
-            self.session.handle_ack(ack.sector, ack.tick);
-        } else if crcbl_net::decode_client_to_server(&msg.payload).is_err() {
-            self.processing_error_count += 1;
+    }
+
+    /// Dispatch one inbound payload on its tag byte.
+    ///
+    /// Only the handshake travels unauthenticated — it is what establishes the
+    /// key. Everything else must carry a valid session MAC, so a spoofer who
+    /// can read tick ids off the wire still cannot move this session's state.
+    fn process_inbound_message(&mut self, payload: &[u8]) {
+        match payload.first().copied() {
+            Some(crcbl_net::codec::HELLO_TAG) => match crcbl_net::decode_hello(payload) {
+                Ok(hello) => self.handle_hello(hello),
+                Err(_) => self.processing_error_count += 1,
+            },
+            Some(crcbl_net::auth::AUTH_TAG) => self.process_authenticated_message(payload),
+            _ => self.processing_error_count += 1,
         }
-        true
+    }
+
+    fn process_authenticated_message(&mut self, envelope: &[u8]) {
+        // Authenticated traffic only means anything for an established
+        // session; before and after that there is no key to check it against.
+        if self.session.state() != SessionState::Connected {
+            self.auth_failure_count += 1;
+            return;
+        }
+        let Some(crypto) = self.session_crypto.as_mut() else {
+            self.auth_failure_count += 1;
+            return;
+        };
+        let payload = match crypto.open(envelope) {
+            Ok(payload) => payload.to_vec(),
+            Err(_) => {
+                self.auth_failure_count += 1;
+                return;
+            }
+        };
+
+        match payload.first().copied() {
+            Some(crcbl_net::codec::ACK_TAG) => match crcbl_net::decode_ack(&payload) {
+                Ok(ack) => self.session.handle_ack(ack.sector, ack.tick),
+                Err(_) => self.processing_error_count += 1,
+            },
+            // Inputs are decoded to validate them and discarded — P3 wires
+            // them into the simulation.
+            Some(crcbl_net::codec::INPUT_TAG | crcbl_net::codec::COMMAND_TAG) => {
+                if crcbl_net::decode_client_to_server(&payload).is_err() {
+                    self.processing_error_count += 1;
+                }
+            }
+            _ => self.processing_error_count += 1,
+        }
     }
 
     fn handle_hello(&mut self, hello: crcbl_net::Hello) {
@@ -252,6 +305,7 @@ impl<T: Transport> Server<T> {
                         self.session.begin_handshake();
                         self.session
                             .on_connected(hello.engine_build_id, hello.schema_hash);
+                        self.adopt_session_key();
                     }
                 }
                 SessionState::Reconnecting => {
@@ -266,12 +320,11 @@ impl<T: Transport> Server<T> {
                     } else {
                         match Self::generate_resume_token() {
                             Ok(resume_token) => {
-                                let reconnects = self.session.can_reconnect(
+                                if self.session.can_reconnect(
                                     self.now,
                                     hello.engine_build_id,
                                     hello.schema_hash,
-                                );
-                                if reconnects {
+                                ) {
                                     if let HandshakeResult::Accept {
                                         resume_token: accepted_token,
                                         ..
@@ -279,14 +332,18 @@ impl<T: Transport> Server<T> {
                                     {
                                         *accepted_token = resume_token;
                                     }
-                                    if self.send_handshake_result(result) {
-                                        assert!(self.session.try_reconnect(
+                                    if self.send_handshake_result(result)
+                                        && self.session.try_reconnect(
                                             self.now,
                                             hello.engine_build_id,
                                             hello.schema_hash,
-                                            &self.session_config,
-                                        ));
+                                        )
+                                    {
+                                        // Rotating the token rotates the MAC
+                                        // key, which restarts the replay
+                                        // counter space for the new session.
                                         self.resume_token = resume_token;
+                                        self.adopt_session_key();
                                     }
                                     return;
                                 }
@@ -325,6 +382,11 @@ impl<T: Transport> Server<T> {
         self.send_handshake_result(result);
     }
 
+    /// Key this session's authenticated channel from the current resume token.
+    fn adopt_session_key(&mut self) {
+        self.session_crypto = Some(SessionCrypto::from_token(&self.resume_token));
+    }
+
     fn generate_resume_token() -> Result<ResumeToken, getrandom::Error> {
         let mut bytes = [0; 32];
         getrandom::fill(&mut bytes[..])?;
@@ -337,17 +399,19 @@ impl<T: Transport> Server<T> {
         self.next_session_id = self.next_session_id.wrapping_add(1);
         self.session = SessionManager::new(session_id, &self.session_config);
         self.resume_token = resume_token;
+        self.session_crypto = None;
         self.session_terminated = false;
+        self.ticks_since_ack_progress = 0;
+        self.last_ack_progress = None;
         Ok(())
     }
 
     fn send_handshake_result(&mut self, result: HandshakeResult) -> bool {
         if self
             .transport
-            .send_reliable(Message {
-                kind: MessageKind::Reliable,
-                payload: crcbl_net::encode_handshake_result(&result),
-            })
+            .send_reliable(Message::reliable(crcbl_net::encode_handshake_result(
+                &result,
+            )))
             .is_err()
         {
             self.processing_error_count += 1;
@@ -361,7 +425,7 @@ impl<T: Transport> Server<T> {
         HandshakeResult::Reject {
             generation,
             reason: RejectReason {
-                code: 0x06,
+                code: RejectReason::ENTROPY_FAILURE,
                 msg: format!("unable to generate resume credential: {error}"),
             },
         }
@@ -371,7 +435,7 @@ impl<T: Transport> Server<T> {
         HandshakeResult::Reject {
             generation,
             reason: RejectReason {
-                code: 0x04,
+                code: RejectReason::INVALID_SESSION_TOKEN,
                 msg: message.into(),
             },
         }
@@ -382,50 +446,30 @@ impl<T: Transport> Server<T> {
     fn emit_snapshot(&mut self) {
         let tick = self.clock.tick();
         let sector = SectorId::ZERO;
-        let mut writer = SnapshotWriter::new_with_sector(sector, tick);
-
-        let stats = Inspector::collect(&self.world);
-        for (idx, (system, stat)) in self.world.schedule().iter().zip(stats.iter()).enumerate() {
-            // Systems with a replication impl emit their real per-entity
-            // component data; the rest fall back to one synthetic entity
-            // carrying only the entity count (4 bytes LE).
-            let mut data = Vec::new();
-            if !system.replicate(&mut data) {
-                data.extend_from_slice(&0u64.to_le_bytes());
-                data.extend_from_slice(&4u32.to_le_bytes());
-                data.extend_from_slice(&(stat.entity_count as u32).to_le_bytes());
-            }
-            writer.write_system(idx as u32, data);
-        }
-
-        let snapshot = writer.finish();
-        let systems: Vec<_> = match &snapshot {
-            crcbl_net::ServerToClient::Snapshot { systems, .. } => systems.to_vec(),
-            _ => return,
+        let Some(systems) = self.collect_systems(sector, tick) else {
+            return;
         };
 
-        // Delta-encode against the client's baseline.
-        let baseline = match Baseline::from_trusted_snapshot(tick, &systems) {
+        // Parse the freshly written blobs exactly once: the same decoded
+        // baseline is both what gets diffed and what gets retained.
+        let current = match Baseline::from_snapshot(tick, &systems, Trust::Authenticated) {
             Ok(baseline) => baseline,
             Err(_) => {
                 self.processing_error_count += 1;
                 return;
             }
         };
-        let last_acked = self.session.last_acked_tick(sector);
-        let previous = last_acked.and_then(|tick| {
-            self.session
-                .baseline_store(sector)
-                .and_then(|store| store.get(tick))
-                .cloned()
-        });
-        let delta = match DeltaCodec::encode_with_sector(sector, tick, &systems, previous.as_ref())
-        {
-            Ok(delta) => delta,
-            Err(_) => {
-                self.processing_error_count += 1;
-                return;
-            }
+
+        // Borrow the retained baseline rather than cloning it: the delta is
+        // finished with it before anything needs the store mutably again.
+        let previous_tick = self.delta_baseline_tick(sector);
+        let delta = {
+            let previous = previous_tick.and_then(|tick| {
+                self.session
+                    .baseline_store(sector)
+                    .and_then(|store| store.get(tick))
+            });
+            DeltaCodec::encode_from_baseline(sector, &current, previous)
         };
 
         let payload = match crcbl_net::encode_delta(&delta) {
@@ -435,20 +479,97 @@ impl<T: Transport> Server<T> {
                 return;
             }
         };
+        let Some(crypto) = self.session_crypto.as_mut() else {
+            self.processing_error_count += 1;
+            return;
+        };
+        let payload = match crypto.seal(&payload) {
+            Ok(payload) => payload,
+            Err(_) => {
+                self.processing_error_count += 1;
+                return;
+            }
+        };
 
         // Store this full snapshot as a new baseline for future deltas.
-        self.session.baseline_store_mut(sector).insert(baseline);
+        self.session.baseline_store_mut(sector).insert(current);
 
         if self
             .transport
-            .send_unreliable(Message {
-                kind: MessageKind::Unreliable,
-                payload,
-            })
+            .send_unreliable(Message::unreliable(payload))
             .is_err()
         {
             self.processing_error_count += 1;
         }
+    }
+
+    /// Serialise every replicated system into snapshot blobs.
+    ///
+    /// Returns `None` when two systems collide on a replicated id, which would
+    /// otherwise let one system's data land in another's baseline.
+    fn collect_systems(
+        &mut self,
+        sector: SectorId,
+        tick: TickId,
+    ) -> Option<Vec<crcbl_net::SystemSnapshot>> {
+        let mut writer = SnapshotWriter::new_with_sector(sector, tick);
+        let stats = Inspector::collect(&self.world);
+        let mut seen = std::collections::HashSet::new();
+
+        for (system, stat) in self.world.schedule().iter().zip(stats.iter()) {
+            let system_id = replicated_system_id(system.name());
+            if !seen.insert(system_id) {
+                // Two systems sharing a replicated id would silently overwrite
+                // each other in the client's baseline. Drop the whole snapshot
+                // rather than replicate a lie.
+                self.processing_error_count += 1;
+                return None;
+            }
+            // Systems with a replication impl emit their real per-entity
+            // component data; the rest fall back to one synthetic entity
+            // carrying only the entity count (4 bytes LE).
+            let mut data = Vec::new();
+            if !system.replicate(&mut data) {
+                crcbl_net::encode_entity_entry(
+                    &mut data,
+                    0,
+                    &(stat.entity_count as u32).to_le_bytes(),
+                );
+            }
+            writer.write_system(system_id, data);
+        }
+
+        match writer.finish() {
+            crcbl_net::ServerToClient::Snapshot { systems, .. } => Some(systems),
+            crcbl_net::ServerToClient::Event { .. } => None,
+        }
+    }
+
+    /// The tick this delta should be encoded against, or `None` for a keyframe.
+    ///
+    /// Returns `None` — forcing a keyframe — once the client's acks have
+    /// stopped advancing for [`KEYFRAME_RECOVERY_TICKS`], because at that
+    /// point the client is provably not applying what it is being sent.
+    fn delta_baseline_tick(&mut self, sector: SectorId) -> Option<TickId> {
+        let last_acked = self.session.last_acked_tick(sector);
+        if last_acked == self.last_ack_progress {
+            self.ticks_since_ack_progress = self.ticks_since_ack_progress.saturating_add(1);
+        } else {
+            self.last_ack_progress = last_acked;
+            self.ticks_since_ack_progress = 0;
+        }
+        if self.ticks_since_ack_progress >= KEYFRAME_RECOVERY_TICKS {
+            self.ticks_since_ack_progress = 0;
+            return None;
+        }
+
+        // Only a tick still in the ring can be delta-encoded against; an
+        // evicted one falls back to a keyframe.
+        last_acked.filter(|&tick| {
+            self.session
+                .baseline_store(sector)
+                .is_some_and(|store| store.get(tick).is_some())
+        })
     }
 
     /// Replace the transport after a disconnect. The next valid resume handshake
@@ -464,9 +585,12 @@ impl<T: Transport> Server<T> {
 
     /// Configure deterministic per-client inbound traffic limits.
     ///
-    /// Reconfiguration resets the bucket to one second of the new budget.
+    /// The budget applies to each delivery channel independently, and
+    /// reconfiguration resets both buckets to one second of the new budget.
     pub fn set_inbound_rate_limit_config(&mut self, config: InboundRateLimitConfig) {
-        self.inbound_rate_limiter.reconfigure(config, self.now);
+        self.rate_limit_config = config;
+        self.reliable_rate_limiter.reconfigure(config, self.now);
+        self.unreliable_rate_limiter.reconfigure(config, self.now);
     }
 
     /// Attach a [`GameModule`] to drive game-specific per-tick logic.
@@ -488,6 +612,16 @@ impl<T: Transport> Server<T> {
     #[must_use]
     pub fn rate_limited_byte_count(&self) -> u64 {
         self.rate_limited_byte_count
+    }
+
+    /// Number of messages rejected because they were unauthenticated, carried
+    /// a bad MAC, or replayed a counter.
+    ///
+    /// A non-zero and growing value on a healthy link means someone is
+    /// injecting packets.
+    #[must_use]
+    pub fn auth_failure_count(&self) -> u64 {
+        self.auth_failure_count
     }
 
     /// Current session lifecycle state.
@@ -527,6 +661,25 @@ impl<T: Transport> Server<T> {
     }
 }
 
+/// The replicated id for a system, derived from its name.
+///
+/// Derived from the name rather than the schedule position, because the
+/// position changes whenever a system is registered or removed and the client
+/// would then apply one system's blobs into another's baseline without any
+/// error. FNV-1a: short, stable across builds and platforms, and adequate for
+/// an identifier space the server also checks for collisions.
+#[must_use]
+pub fn replicated_system_id(name: &str) -> u32 {
+    const OFFSET_BASIS: u32 = 0x811c_9dc5;
+    const PRIME: u32 = 0x0100_0193;
+    let mut hash = OFFSET_BASIS;
+    for byte in name.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
 impl<T: Transport> fmt::Debug for Server<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Server")
@@ -546,9 +699,26 @@ impl<T: Transport> fmt::Debug for Server<T> {
 mod tests {
     use super::*;
     use crcbl_ecs::System;
-    use crcbl_net::InMemoryTransport;
+    use crcbl_net::auth::AUTH_TAG;
+    use crcbl_net::{InMemoryTransport, MessageKind};
 
     // ── Helpers ────────────────────────────────────────────────────────────
+
+    /// Explicit identifiers, as a networked embedding must supply. The default
+    /// protocol version is used deliberately, so the shipped constant is what
+    /// these tests exercise.
+    const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
+        protocol_version: ProtocolCompatibility::DEFAULT.protocol_version,
+        engine_build_id: 0x0043_5243_424C,
+        schema_hash: 0x0053_5256,
+    };
+
+    const TICK: Duration = Duration::from_nanos(16_666_667);
+
+    fn server(world: World, transport: InMemoryTransport) -> Server<InMemoryTransport> {
+        Server::try_new_with_compatibility(world, transport, 60, COMPATIBILITY)
+            .expect("OS CSPRNG available")
+    }
 
     /// Build a world with one system ("position") containing one entity.
     fn world_with_one_entity() -> World {
@@ -560,6 +730,16 @@ mod tests {
         world
     }
 
+    fn hello(generation: u64, session_token: Option<ResumeToken>) -> Vec<u8> {
+        crcbl_net::encode_hello(&crcbl_net::Hello {
+            protocol_version: COMPATIBILITY.protocol_version,
+            engine_build_id: COMPATIBILITY.engine_build_id,
+            schema_hash: COMPATIBILITY.schema_hash,
+            generation,
+            session_token,
+        })
+    }
+
     /// Drain all messages from a transport, returning the payloads.
     fn drain_payloads(transport: &mut InMemoryTransport) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
@@ -569,30 +749,36 @@ mod tests {
         out
     }
 
-    fn connect_server(server: &mut Server<InMemoryTransport>, peer: &mut InMemoryTransport) {
-        peer.send_reliable(Message {
-            kind: MessageKind::Reliable,
-            payload: crcbl_net::encode_hello(&crcbl_net::Hello {
-                protocol_version: PROTOCOL_VERSION,
-                engine_build_id: ENGINE_BUILD_ID,
-                schema_hash: SCHEMA_HASH,
-                generation: 1,
-                session_token: None,
-            }),
-        })
-        .unwrap();
-        server.update(std::time::Duration::ZERO);
-        server.update(std::time::Duration::from_nanos(16_666_667));
-        let mut accepted = false;
-        while let Some(result) = peer.recv().unwrap() {
-            if matches!(
-                crcbl_net::decode_handshake_result(&result.payload),
-                Ok(HandshakeResult::Accept { .. })
-            ) {
-                accepted = true;
+    /// Complete a handshake and return the peer's end of the authenticated
+    /// channel, which is what lets a test send an ack the server will accept.
+    fn connect(
+        server: &mut Server<InMemoryTransport>,
+        peer: &mut InMemoryTransport,
+    ) -> SessionCrypto {
+        peer.send_reliable(Message::reliable(hello(1, None)))
+            .unwrap();
+        server.update(Duration::ZERO);
+        server.update(TICK);
+
+        let mut crypto = None;
+        while let Some(msg) = peer.recv().unwrap() {
+            if let Ok(HandshakeResult::Accept { resume_token, .. }) =
+                crcbl_net::decode_handshake_result(&msg.payload)
+            {
+                crypto = Some(SessionCrypto::from_token(&resume_token));
             }
         }
-        assert!(accepted, "server must accept a matching hello");
+        assert_eq!(server.session_state(), SessionState::Connected);
+        crypto.expect("server must accept a matching hello")
+    }
+
+    fn send_sealed(peer: &mut InMemoryTransport, crypto: &mut SessionCrypto, payload: &[u8]) {
+        let sealed = crypto.seal(payload).expect("counter space available");
+        peer.send_unreliable(Message::unreliable(sealed)).unwrap();
+    }
+
+    fn ack(tick: u64) -> Vec<u8> {
+        crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(tick))
     }
 
     fn retain_ack_baselines(
@@ -602,19 +788,65 @@ mod tests {
         for tick in ticks {
             let tick = TickId::from_raw(tick);
             server.session.baseline_store_mut(SectorId::ZERO).insert(
-                Baseline::from_trusted_snapshot(tick, &[]).expect("empty snapshot is valid"),
+                Baseline::from_snapshot(tick, &[], Trust::Authenticated)
+                    .expect("empty snapshot is valid"),
             );
         }
     }
 
-    // ── Creation ───────────────────────────────────────────────────────────
+    // ── Construction ───────────────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "engine_build_id and schema_hash must be non-zero")]
+    fn placeholder_compatibility_is_refused() {
+        let (transport, _peer) = InMemoryTransport::pair();
+        let _ = Server::try_new_with_compatibility(
+            World::new(),
+            transport,
+            60,
+            ProtocolCompatibility::DEFAULT,
+        );
+    }
+
+    #[test]
+    fn world_timestep_matches_the_configured_tick_rate() {
+        for tick_hz in [30u32, 60, 128] {
+            let (transport, _peer) = InMemoryTransport::pair();
+            let server =
+                Server::try_new_with_compatibility(World::new(), transport, tick_hz, COMPATIBILITY)
+                    .expect("OS CSPRNG available");
+            let expected = FrameClock::new(tick_hz).tick_dt_secs();
+            assert!(
+                (server.world().tick_dt() - expected).abs() < 1e-12,
+                "at {tick_hz} Hz the world ticks at {}, not {expected}",
+                server.world().tick_dt(),
+            );
+            assert_ne!(
+                server.world().tick_dt(),
+                World::DEFAULT_TICK_DT,
+                "{tick_hz} Hz must not silently run at the 60 Hz default"
+            );
+        }
+    }
+
+    #[test]
+    fn server_starts_at_tick_zero_and_connected() {
+        let (transport, _peer) = InMemoryTransport::pair();
+        let server = server(World::new(), transport);
+        assert_eq!(server.tick_id(), TickId::ZERO);
+        assert!(server.is_connected());
+    }
+
+    // ── Session lifecycle ──────────────────────────────────────────────────
 
     #[test]
     fn failed_reconnect_accept_keeps_previous_credential() {
         let (transport, peer) = InMemoryTransport::pair();
-        let mut server = Server::new(World::new(), transport, 60);
+        let mut server = server(World::new(), transport);
         server.session.begin_handshake();
-        server.session.on_connected(ENGINE_BUILD_ID, SCHEMA_HASH);
+        server
+            .session
+            .on_connected(COMPATIBILITY.engine_build_id, COMPATIBILITY.schema_hash);
         server
             .session
             .on_disconnect(Duration::ZERO, &server.session_config);
@@ -622,9 +854,9 @@ mod tests {
         drop(peer);
 
         server.handle_hello(crcbl_net::Hello {
-            protocol_version: PROTOCOL_VERSION,
-            engine_build_id: ENGINE_BUILD_ID,
-            schema_hash: SCHEMA_HASH,
+            protocol_version: COMPATIBILITY.protocol_version,
+            engine_build_id: COMPATIBILITY.engine_build_id,
+            schema_hash: COMPATIBILITY.schema_hash,
             generation: 1,
             session_token: Some(token),
         });
@@ -635,17 +867,15 @@ mod tests {
     }
 
     #[test]
-    fn rotating_session_clears_baselines_and_acks() {
+    fn rotating_session_clears_baselines_acks_and_the_session_key() {
         let (transport, _peer) = InMemoryTransport::pair();
-        let mut server = Server::new(World::new(), transport, 60);
+        let mut server = server(World::new(), transport);
         let old_session_id = server.session.session_id();
         let old_token = server.resume_token;
         let tick = TickId::from_raw(1);
-        server
-            .session
-            .baseline_store_mut(SectorId::ZERO)
-            .insert(Baseline::from_trusted_snapshot(tick, &[]).expect("empty snapshot is valid"));
+        retain_ack_baselines(&mut server, [1]);
         server.session.handle_ack(SectorId::ZERO, tick);
+        server.adopt_session_key();
 
         server.rotate_session().expect("OS CSPRNG available");
 
@@ -653,20 +883,7 @@ mod tests {
         assert_ne!(server.resume_token, old_token);
         assert_eq!(server.session.last_acked_tick(SectorId::ZERO), None);
         assert!(server.session.baseline_store(SectorId::ZERO).is_none());
-    }
-
-    #[test]
-    fn server_starts_at_tick_zero() {
-        let (transport, _peer) = InMemoryTransport::pair();
-        let server = Server::new(World::new(), transport, 60);
-        assert_eq!(server.tick_id(), TickId::ZERO);
-    }
-
-    #[test]
-    fn server_is_connected_initially() {
-        let (transport, _peer) = InMemoryTransport::pair();
-        let server = Server::new(World::new(), transport, 60);
-        assert!(server.is_connected());
+        assert!(server.session_crypto.is_none());
     }
 
     // ── Tick loop ──────────────────────────────────────────────────────────
@@ -674,32 +891,19 @@ mod tests {
     #[test]
     fn update_with_no_elapsed_time_does_nothing() {
         let (transport, _peer) = InMemoryTransport::pair();
-        let mut server = Server::new(World::new(), transport, 60);
-        let ticks = server.update(std::time::Duration::ZERO);
-        assert_eq!(ticks, 0);
+        let mut server = server(World::new(), transport);
+        assert_eq!(server.update(Duration::ZERO), 0);
         assert_eq!(server.tick_id(), TickId::ZERO);
     }
 
     #[test]
     fn update_runs_ticks_for_elapsed_time() {
         let (transport, _peer) = InMemoryTransport::pair();
-        let mut server = Server::new(world_with_one_entity(), transport, 60);
+        let mut server = server(world_with_one_entity(), transport);
 
-        server.update(std::time::Duration::ZERO);
-        let tick_dt = std::time::Duration::from_nanos(16_666_667);
-        let ticks = server.update(tick_dt);
-        assert_eq!(ticks, 1);
+        server.update(Duration::ZERO);
+        assert_eq!(server.update(TICK), 1);
         assert_eq!(server.tick_id(), TickId::from_raw(1));
-    }
-
-    #[test]
-    fn tick_advances_world() {
-        let (transport, _peer) = InMemoryTransport::pair();
-        let mut server = Server::new(world_with_one_entity(), transport, 60);
-
-        server.update(std::time::Duration::ZERO);
-        let tick_dt = std::time::Duration::from_nanos(16_666_667);
-        server.update(tick_dt);
 
         let stats = Inspector::collect(server.world());
         assert_eq!(stats.len(), 1);
@@ -709,120 +913,233 @@ mod tests {
     #[test]
     fn tick_loop_with_no_inputs_does_not_panic() {
         let (transport, _peer) = InMemoryTransport::pair();
-        let mut server = Server::new(world_with_one_entity(), transport, 60);
+        let mut server = server(world_with_one_entity(), transport);
 
-        server.update(std::time::Duration::ZERO);
-        let ticks = server.update(std::time::Duration::from_nanos(5 * 16_666_667));
-        assert_eq!(ticks, 5);
+        server.update(Duration::ZERO);
+        assert_eq!(server.update(5 * TICK), 5);
         assert_eq!(server.tick_id(), TickId::from_raw(5));
     }
 
     // ── Snapshot emission ──────────────────────────────────────────────────
 
     #[test]
-    fn snapshot_is_sent_after_tick() {
-        let (server_transport, mut client_transport) = InMemoryTransport::pair();
-        let mut server = Server::new(world_with_one_entity(), server_transport, 60);
-        connect_server(&mut server, &mut client_transport);
+    fn snapshots_are_sealed_and_delta_encodable() {
+        let (server_transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world_with_one_entity(), server_transport);
+        let mut crypto = connect(&mut server, &mut peer);
 
-        server.update(std::time::Duration::ZERO);
-        let tick_dt = std::time::Duration::from_nanos(16_666_667);
-        server.update(tick_dt);
+        server.update(2 * TICK);
 
-        let msg = client_transport.recv().unwrap().unwrap();
+        let msg = peer.recv().unwrap().unwrap();
         assert_eq!(msg.kind, MessageKind::Unreliable);
-        assert!(!msg.payload.is_empty());
-    }
-
-    #[test]
-    fn snapshot_is_delta_encodable() {
-        // Verify the emitted payload decodes as a valid Delta (new codec).
-        let (server_transport, mut client_transport) = InMemoryTransport::pair();
-        let mut server = Server::new(world_with_one_entity(), server_transport, 60);
-        connect_server(&mut server, &mut client_transport);
-
-        server.update(std::time::Duration::ZERO);
-        server.update(std::time::Duration::from_nanos(16_666_667));
-
-        let msg = client_transport.recv().unwrap().unwrap();
-        let delta = crcbl_net::decode_delta(&msg.payload);
-        assert!(delta.is_ok(), "snapshot payload must decode as Delta");
+        assert_eq!(msg.payload.first(), Some(&AUTH_TAG));
+        let payload = crypto
+            .open(&msg.payload)
+            .expect("server seals its snapshots");
+        assert!(
+            crcbl_net::decode_delta(payload, Trust::Authenticated).is_ok(),
+            "snapshot payload must decode as Delta"
+        );
     }
 
     #[test]
     fn multiple_ticks_produce_multiple_snapshots() {
-        let (server_transport, mut client_transport) = InMemoryTransport::pair();
-        let mut server = Server::new(world_with_one_entity(), server_transport, 60);
-        connect_server(&mut server, &mut client_transport);
+        let (server_transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world_with_one_entity(), server_transport);
+        connect(&mut server, &mut peer);
 
-        server.update(std::time::Duration::ZERO);
-        server.update(std::time::Duration::from_nanos(3 * 16_666_667));
+        server.update(4 * TICK);
 
-        let payloads = drain_payloads(&mut client_transport);
-        assert_eq!(payloads.len(), 3);
+        assert_eq!(drain_payloads(&mut peer).len(), 3);
     }
 
-    // ── Input + ack consumption ────────────────────────────────────────────
+    #[test]
+    fn replicated_system_ids_follow_the_name_not_the_schedule_position() {
+        let build = |names: &[&str]| {
+            let mut world = World::new();
+            for name in names {
+                world.register_system(Box::new(System::<f32>::new(*name)));
+            }
+            let (transport, mut peer) = InMemoryTransport::pair();
+            let mut server = server(world, transport);
+            let mut crypto = connect(&mut server, &mut peer);
+            server.update(2 * TICK);
+            let msg = peer.recv().unwrap().unwrap();
+            let payload = crypto.open(&msg.payload).expect("sealed snapshot");
+            let mut ids: Vec<u32> = crcbl_net::decode_delta(payload, Trust::Authenticated)
+                .expect("valid delta")
+                .systems
+                .iter()
+                .map(|system| system.system_id)
+                .collect();
+            ids.sort_unstable();
+            ids
+        };
+
+        // Registering a new system first used to shift every later system's
+        // replicated id by one, so the client applied one system's blobs into
+        // another's baseline.
+        let before = build(&["physics", "render"]);
+        let after = build(&["audio", "physics", "render"]);
+        assert_eq!(before.len(), 2);
+        assert_eq!(after.len(), 3);
+        for id in &before {
+            assert!(
+                after.contains(id),
+                "system id {id} changed when an unrelated system was registered"
+            );
+        }
+    }
 
     #[test]
-    fn server_handles_ack() {
-        let (server_transport, mut client_transport) = InMemoryTransport::pair();
-        let mut server = Server::new(world_with_one_entity(), server_transport, 60);
+    fn colliding_system_names_refuse_to_replicate() {
+        let mut world = World::new();
+        world.register_system(Box::new(System::<f32>::new("duplicate")));
+        world.register_system(Box::new(System::<f32>::new("duplicate")));
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world, transport);
+        connect(&mut server, &mut peer);
 
-        // Send an ack from the "client" side.
-        let ack_payload = crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(1));
-        client_transport
-            .send_unreliable(Message {
-                kind: MessageKind::Unreliable,
-                payload: ack_payload,
-            })
+        server.update(2 * TICK);
+
+        assert!(
+            drain_payloads(&mut peer).is_empty(),
+            "a snapshot whose system ids collide must not be sent at all"
+        );
+        assert_eq!(server.processing_error_count(), 1);
+    }
+
+    // ── Authentication ─────────────────────────────────────────────────────
+
+    #[test]
+    fn a_forged_ack_cannot_move_the_session() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(World::new(), transport);
+        connect(&mut server, &mut peer);
+        retain_ack_baselines(&mut server, [1, 2, 3]);
+
+        // The attacker knows the tick — it is in every snapshot in cleartext —
+        // but not the session key.
+        let mut forged = SessionCrypto::from_token(&ResumeToken::from_bytes([0xFF; 32]));
+        send_sealed(&mut peer, &mut forged, &ack(3));
+        // ...and a bare, unauthenticated ack, which is what the old protocol
+        // accepted.
+        peer.send_unreliable(Message::unreliable(ack(3))).unwrap();
+        server.update(2 * TICK);
+
+        assert_eq!(server.session.last_acked_tick(SectorId::ZERO), None);
+        assert_eq!(server.auth_failure_count(), 1);
+        assert_eq!(server.processing_error_count(), 1);
+    }
+
+    #[test]
+    fn a_genuine_ack_is_accepted_and_its_replay_is_not() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(World::new(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
+        retain_ack_baselines(&mut server, [1, 2]);
+
+        let sealed = crypto.seal(&ack(1)).expect("counter space available");
+        peer.send_unreliable(Message::unreliable(sealed.clone()))
             .unwrap();
+        server.update(2 * TICK);
+        assert_eq!(
+            server.session.last_acked_tick(SectorId::ZERO),
+            Some(TickId::from_raw(1))
+        );
+        assert_eq!(server.auth_failure_count(), 0);
 
-        server.update(std::time::Duration::ZERO);
-        server.update(std::time::Duration::from_nanos(16_666_667));
-        // Ack was consumed — just verifying no panic.
+        // A captured packet replayed verbatim carries a valid MAC; only the
+        // replay counter rejects it.
+        peer.send_unreliable(Message::unreliable(sealed)).unwrap();
+        send_sealed(&mut peer, &mut crypto, &ack(2));
+        server.update(3 * TICK);
+        assert_eq!(
+            server.session.last_acked_tick(SectorId::ZERO),
+            Some(TickId::from_raw(2))
+        );
+        assert_eq!(server.auth_failure_count(), 1);
     }
 
     #[test]
-    fn server_consumes_client_inputs_without_error() {
-        let (server_transport, client_transport) = InMemoryTransport::pair();
-        let mut server = Server::new(World::new(), server_transport, 60);
+    fn a_forged_ack_cannot_stall_keyframe_recovery() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world_with_one_entity(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
 
-        let input = crcbl_net::ClientToServer::Input {
+        // One honest ack, so the server has a baseline to delta against.
+        server.update(2 * TICK);
+        let msg = peer.recv().unwrap().unwrap();
+        let payload = crypto.open(&msg.payload).expect("sealed snapshot");
+        let tick = crcbl_net::decode_delta(payload, Trust::Authenticated)
+            .expect("valid delta")
+            .tick;
+        send_sealed(
+            &mut peer,
+            &mut crypto,
+            &crcbl_net::encode_ack(SectorId::ZERO, tick),
+        );
+        server.update(3 * TICK);
+
+        // The client then goes quiet — which is what a desynced client looks
+        // like from here. The server must stop delta-encoding against a
+        // baseline the client is provably not applying.
+        let mut now = 3 * TICK;
+        let mut sent_keyframe = false;
+        for _ in 0..(KEYFRAME_RECOVERY_TICKS + 4) {
+            now += TICK;
+            server.update(now);
+            for msg in drain_payloads(&mut peer) {
+                let payload = crypto.open(&msg).expect("sealed snapshot");
+                if crcbl_net::decode_delta(payload, Trust::Authenticated)
+                    .expect("valid delta")
+                    .is_keyframe
+                {
+                    sent_keyframe = true;
+                }
+            }
+        }
+        assert!(
+            sent_keyframe,
+            "a client whose acks stop advancing must eventually be sent a keyframe"
+        );
+    }
+
+    #[test]
+    fn authenticated_inputs_are_accepted_and_junk_is_counted() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(World::new(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
+
+        let input = crcbl_net::encode_client_to_server(&crcbl_net::ClientToServer::Input {
             tick: TickId::from_raw(1),
             data: vec![1, 2, 3],
-        };
-        let payload = crcbl_net::encode_client_to_server(&input);
-        let mut peer = client_transport;
-        peer.send_unreliable(Message {
-            kind: MessageKind::Unreliable,
-            payload,
-        })
-        .unwrap();
+        });
+        send_sealed(&mut peer, &mut crypto, &input);
+        send_sealed(&mut peer, &mut crypto, &[0xEE]);
+        server.update(2 * TICK);
 
-        server.update(std::time::Duration::ZERO);
-        server.update(std::time::Duration::from_nanos(16_666_667));
+        assert_eq!(server.processing_error_count(), 1);
+        assert_eq!(server.auth_failure_count(), 0);
     }
+
+    // ── Inbound rate limiting ──────────────────────────────────────────────
 
     #[test]
     fn inbound_message_limit_accepts_boundary_then_drops_next() {
         let (transport, mut peer) = InMemoryTransport::pair();
-        let mut server = Server::new(World::new(), transport, 60);
+        let mut server = server(World::new(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
         server.set_inbound_rate_limit_config(InboundRateLimitConfig {
             messages_per_second: 2,
             bytes_per_second: 1_024,
         });
-        retain_ack_baselines(&mut server, 1..=2);
+        retain_ack_baselines(&mut server, 1..=3);
         for tick in 1..=3 {
-            peer.send_unreliable(Message {
-                kind: MessageKind::Unreliable,
-                payload: crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(tick)),
-            })
-            .unwrap();
+            send_sealed(&mut peer, &mut crypto, &ack(tick));
         }
 
-        server.update(Duration::ZERO);
-        server.update(Duration::from_nanos(16_666_667));
+        server.update(2 * TICK);
 
         assert_eq!(
             server.session.last_acked_tick(SectorId::ZERO),
@@ -837,26 +1154,18 @@ mod tests {
     #[test]
     fn inbound_byte_limit_is_independent_of_message_limit() {
         let (transport, mut peer) = InMemoryTransport::pair();
-        let mut server = Server::new(World::new(), transport, 60);
-        let ack = crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(1));
+        let mut server = server(World::new(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
+        let sealed_len = (crcbl_net::auth::AUTH_OVERHEAD + ack(1).len()) as u64;
         server.set_inbound_rate_limit_config(InboundRateLimitConfig {
             messages_per_second: 2,
-            bytes_per_second: ack.len() as u64,
+            bytes_per_second: sealed_len,
         });
-        retain_ack_baselines(&mut server, [1]);
-        peer.send_unreliable(Message {
-            kind: MessageKind::Unreliable,
-            payload: ack.clone(),
-        })
-        .unwrap();
-        peer.send_unreliable(Message {
-            kind: MessageKind::Unreliable,
-            payload: ack,
-        })
-        .unwrap();
+        retain_ack_baselines(&mut server, [1, 2]);
+        send_sealed(&mut peer, &mut crypto, &ack(1));
+        send_sealed(&mut peer, &mut crypto, &ack(2));
 
-        server.update(Duration::ZERO);
-        server.update(Duration::from_nanos(16_666_667));
+        server.update(2 * TICK);
 
         assert_eq!(
             server.session.last_acked_tick(SectorId::ZERO),
@@ -870,39 +1179,30 @@ mod tests {
     #[test]
     fn inbound_limits_refill_only_when_injected_time_advances() {
         let (transport, mut peer) = InMemoryTransport::pair();
-        let mut server = Server::new(World::new(), transport, 60);
+        let mut server = server(World::new(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
         server.set_inbound_rate_limit_config(InboundRateLimitConfig {
             messages_per_second: 1,
             bytes_per_second: 1_024,
         });
         retain_ack_baselines(&mut server, 1..=4);
-        for tick in 1..=2 {
-            peer.send_unreliable(Message {
-                kind: MessageKind::Unreliable,
-                payload: crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(tick)),
-            })
-            .unwrap();
-        }
-        server.update(Duration::ZERO);
-        server.update(Duration::from_nanos(16_666_667));
-        server.update(Duration::from_nanos(16_666_667));
-        peer.send_unreliable(Message {
-            kind: MessageKind::Unreliable,
-            payload: crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(3)),
-        })
-        .unwrap();
-        server.update(Duration::ZERO);
-        server.update(Duration::from_secs(1) + Duration::from_nanos(16_666_667));
-        peer.send_unreliable(Message {
-            kind: MessageKind::Unreliable,
-            payload: crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(4)),
-        })
-        .unwrap();
-        server.update(Duration::from_secs(2) + Duration::from_nanos(16_666_667));
 
+        for tick in 1..=2 {
+            send_sealed(&mut peer, &mut crypto, &ack(tick));
+        }
+        server.update(2 * TICK);
         assert_eq!(
             server.session.last_acked_tick(SectorId::ZERO),
-            Some(TickId::from_raw(4))
+            Some(TickId::from_raw(1))
+        );
+        assert_eq!(server.rate_limited_message_count(), 1);
+
+        // A second of injected time restores exactly one message of budget.
+        send_sealed(&mut peer, &mut crypto, &ack(3));
+        server.update(Duration::from_secs(1) + 2 * TICK);
+        assert_eq!(
+            server.session.last_acked_tick(SectorId::ZERO),
+            Some(TickId::from_raw(3))
         );
         assert_eq!(server.rate_limited_message_count(), 1);
         assert_eq!(server.rate_limited_byte_count(), 0);
@@ -911,83 +1211,53 @@ mod tests {
     #[test]
     fn oversized_and_malformed_packets_are_limited_before_decode() {
         let (transport, mut peer) = InMemoryTransport::pair();
-        let mut server = Server::new(World::new(), transport, 60);
+        let mut server = server(World::new(), transport);
+        connect(&mut server, &mut peer);
         server.set_inbound_rate_limit_config(InboundRateLimitConfig {
             messages_per_second: 2,
             bytes_per_second: 3,
         });
-        peer.send_unreliable(Message {
-            kind: MessageKind::Unreliable,
-            payload: vec![0; 4],
-        })
-        .unwrap();
-        server.update(Duration::ZERO);
-        server.update(Duration::from_nanos(16_666_667));
+        peer.send_unreliable(Message::unreliable(vec![0; 4]))
+            .unwrap();
+        server.update(2 * TICK);
         assert_eq!(server.rate_limited_byte_count(), 1);
         assert_eq!(server.processing_error_count(), 0);
-
-        server.set_inbound_rate_limit_config(InboundRateLimitConfig {
-            messages_per_second: 1,
-            bytes_per_second: 1_024,
-        });
-        retain_ack_baselines(&mut server, [1]);
-        peer.send_unreliable(Message {
-            kind: MessageKind::Unreliable,
-            payload: vec![0xff],
-        })
-        .unwrap();
-        peer.send_unreliable(Message {
-            kind: MessageKind::Unreliable,
-            payload: crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(1)),
-        })
-        .unwrap();
-        server.update(Duration::from_nanos(33_333_334));
-
-        assert_eq!(server.processing_error_count(), 1);
-        assert_eq!(server.rate_limited_message_count(), 1);
-        assert_eq!(server.session.last_acked_tick(SectorId::ZERO), None);
+        assert_eq!(server.auth_failure_count(), 0);
     }
 
     #[test]
-    fn reliable_handshake_bypasses_unreliable_backlog() {
+    fn an_unreliable_flood_cannot_head_of_line_block_the_handshake() {
         let (transport, mut peer) = InMemoryTransport::pair();
-        let mut server = Server::new(World::new(), transport, 60);
-        for _ in 0..InboundRateLimitConfig::default().messages_per_second {
-            peer.send_unreliable(Message {
-                kind: MessageKind::Unreliable,
-                payload: vec![0xff],
-            })
-            .unwrap();
+        let mut server = server(World::new(), transport);
+        let budget = InboundRateLimitConfig::default().messages_per_second;
+        // Twice the whole per-second budget of junk: under a single shared
+        // limiter this exhausted it and the reliable queue stopped being read.
+        for _ in 0..(2 * budget) {
+            peer.send_unreliable(Message::unreliable(vec![0xff]))
+                .unwrap();
         }
-        peer.send_reliable(Message {
-            kind: MessageKind::Reliable,
-            payload: crcbl_net::encode_hello(&crcbl_net::Hello {
-                protocol_version: PROTOCOL_VERSION,
-                engine_build_id: ENGINE_BUILD_ID,
-                schema_hash: SCHEMA_HASH,
-                generation: 1,
-                session_token: None,
-            }),
-        })
-        .unwrap();
+        peer.send_reliable(Message::reliable(hello(1, None)))
+            .unwrap();
 
         server.update(Duration::ZERO);
-        server.update(Duration::from_nanos(16_666_667));
+        server.update(TICK);
 
         assert_eq!(server.session_state(), SessionState::Connected);
         assert!(matches!(
             crcbl_net::decode_handshake_result(&peer.recv().unwrap().unwrap().payload),
             Ok(HandshakeResult::Accept { .. })
         ));
-        assert_eq!(server.rate_limited_message_count(), 1);
+        assert!(server.rate_limited_message_count() > 0);
     }
 
     #[test]
     fn inbound_limits_are_isolated_per_server() {
         let (a_transport, mut a_peer) = InMemoryTransport::pair();
         let (b_transport, mut b_peer) = InMemoryTransport::pair();
-        let mut server_a = Server::new(World::new(), a_transport, 60);
-        let mut server_b = Server::new(World::new(), b_transport, 60);
+        let mut server_a = server(World::new(), a_transport);
+        let mut server_b = server(World::new(), b_transport);
+        let mut crypto_a = connect(&mut server_a, &mut a_peer);
+        let mut crypto_b = connect(&mut server_b, &mut b_peer);
         let limits = InboundRateLimitConfig {
             messages_per_second: 1,
             bytes_per_second: 1_024,
@@ -996,18 +1266,11 @@ mod tests {
         server_b.set_inbound_rate_limit_config(limits);
         retain_ack_baselines(&mut server_a, [1]);
         retain_ack_baselines(&mut server_b, [1]);
-        for peer in [&mut a_peer, &mut b_peer] {
-            peer.send_unreliable(Message {
-                kind: MessageKind::Unreliable,
-                payload: crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(1)),
-            })
-            .unwrap();
-        }
+        send_sealed(&mut a_peer, &mut crypto_a, &ack(1));
+        send_sealed(&mut b_peer, &mut crypto_b, &ack(1));
 
-        server_a.update(Duration::ZERO);
-        server_b.update(Duration::ZERO);
-        server_a.update(Duration::from_nanos(16_666_667));
-        server_b.update(Duration::from_nanos(16_666_667));
+        server_a.update(2 * TICK);
+        server_b.update(2 * TICK);
 
         assert_eq!(
             server_a.session.last_acked_tick(SectorId::ZERO),
@@ -1021,12 +1284,28 @@ mod tests {
         assert_eq!(server_b.rate_limited_message_count(), 0);
     }
 
+    // ── System ids ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn replicated_system_id_is_stable_and_name_specific() {
+        assert_eq!(
+            replicated_system_id("physics"),
+            replicated_system_id("physics")
+        );
+        assert_ne!(
+            replicated_system_id("physics"),
+            replicated_system_id("render")
+        );
+        // FNV-1a of the empty string is the offset basis.
+        assert_eq!(replicated_system_id(""), 0x811c_9dc5);
+    }
+
     // ── Debug ──────────────────────────────────────────────────────────────
 
     #[test]
     fn debug_format() {
         let (transport, _peer) = InMemoryTransport::pair();
-        let server = Server::new(World::new(), transport, 60);
+        let server = server(World::new(), transport);
         let s = format!("{server:?}");
         assert!(s.contains("Server"));
         assert!(s.contains("connected"));

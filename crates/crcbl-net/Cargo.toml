@@ -8,6 +8,14 @@ repository.workspace = true
 
 [dependencies]
 crcbl-core = { workspace = true }
+# `crcbl-shaders` is here for exactly one item: `crcbl_shaders::sha256`, the
+# workspace's own tested SHA-256, which `src/auth.rs` builds HMAC-SHA256 on so
+# per-session message authentication needs no third-party crypto crate. The
+# crate itself has no dependencies of its own, so this adds one leaf to the
+# build graph and ~24 KiB of committed SPIR-V to a linked binary. The hash
+# belongs in a neutral crate (`crcbl-core`) rather than the shader crate; that
+# move is left for whoever owns both.
+crcbl-shaders = { workspace = true }
 thiserror = { workspace = true }
 
 [lints]

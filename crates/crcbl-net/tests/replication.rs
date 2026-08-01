@@ -9,6 +9,7 @@ use crcbl_core::TickId;
 use crcbl_net::{
     Baseline, ConditionSimulator, Delta, DeltaCodec, InMemoryTransport, Message, MessageKind,
     SectorId, SessionConfig, SessionId, SessionManager, SimConditions, SystemSnapshot, Transport,
+    Trust,
 };
 
 // ── Minimal server (writes SystemSnapshots, delta-encodes them) ────────────
@@ -38,7 +39,8 @@ impl Server {
 
         // Store full snapshot as new baseline.
         self.session.baseline_store_mut(SectorId::ZERO).insert(
-            Baseline::from_trusted_snapshot(tick, systems).expect("test snapshots are valid"),
+            Baseline::from_snapshot(tick, systems, Trust::Authenticated)
+                .expect("test snapshots are valid"),
         );
 
         crcbl_net::encode_delta(&delta).expect("valid delta")
@@ -59,15 +61,15 @@ impl Client {
     fn new() -> Self {
         let empty: &[SystemSnapshot] = &[];
         Self {
-            baseline: Baseline::from_trusted_snapshot(TickId::ZERO, empty)
+            baseline: Baseline::from_snapshot(TickId::ZERO, empty, Trust::Authenticated)
                 .expect("empty snapshot is valid"),
         }
     }
 
     fn apply(&mut self, payload: &[u8]) -> Option<TickId> {
-        let delta = crcbl_net::decode_delta(payload).ok()?;
+        let delta = crcbl_net::decode_delta(payload, Trust::Authenticated).ok()?;
         let tick = delta.tick;
-        let _ = DeltaCodec::apply(&delta, &mut self.baseline).ok()?;
+        DeltaCodec::apply(&delta, &mut self.baseline, Trust::Authenticated).ok()?;
         Some(tick)
     }
 }
@@ -157,7 +159,7 @@ fn first_tick_is_keyframe() {
     let snap = snapshot(tick, 1, 3);
     let payload = server.encode(tick, &[snap]);
 
-    let delta: Delta = crcbl_net::decode_delta(&payload).unwrap();
+    let delta: Delta = crcbl_net::decode_delta(&payload, Trust::Authenticated).unwrap();
     assert!(
         delta.is_keyframe,
         "first tick with no acked baseline must be keyframe"
@@ -172,7 +174,7 @@ fn unchanged_state_produces_empty_delta() {
     let systems = vec![snap1];
 
     // Build baseline from the snapshot.
-    let baseline = Baseline::from_trusted_snapshot(TickId::from_raw(1), &systems)
+    let baseline = Baseline::from_snapshot(TickId::from_raw(1), &systems, Trust::Authenticated)
         .expect("test snapshots are valid");
 
     // Re-encode the same snapshot against this baseline.
@@ -201,7 +203,7 @@ fn modified_state_produces_modified_entries() {
     // Tick 2: modified values.
     let snap2 = snapshot_modified(TickId::from_raw(2), 1, 3);
     let payload2 = server.encode(TickId::from_raw(2), &[snap2]);
-    let delta2 = crcbl_net::decode_delta(&payload2).unwrap();
+    let delta2 = crcbl_net::decode_delta(&payload2, Trust::Authenticated).unwrap();
 
     assert!(!delta2.is_keyframe);
     // Entity bytes differ → modified.
@@ -225,7 +227,7 @@ fn removed_entity_detected() {
     // Tick 2: only 1 entity (2 removed).
     let snap2 = snapshot(TickId::from_raw(2), 1, 1);
     let payload2 = server.encode(TickId::from_raw(2), &[snap2]);
-    let delta2 = crcbl_net::decode_delta(&payload2).unwrap();
+    let delta2 = crcbl_net::decode_delta(&payload2, Trust::Authenticated).unwrap();
 
     assert_eq!(delta2.systems[0].removed.len(), 2);
 }

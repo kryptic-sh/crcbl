@@ -6,12 +6,39 @@
 // ── Message primitives ────────────────────────────────────────────────────────
 
 /// A wire-level message with a reliability hint and a binary payload.
+///
+/// `kind` is **not** an instruction: which channel a message travels on is
+/// decided entirely by whether the sender called [`Transport::send_reliable`]
+/// or [`Transport::send_unreliable`], and every implementation overwrites
+/// `kind` to match on the way in. It is therefore a truthful label on a
+/// received message and an ignored field on a sent one — a mismatch cannot
+/// silently reroute anything.
 #[derive(Debug, Clone)]
 pub struct Message {
-    /// Delivery semantics.
+    /// Delivery semantics. Set by the sending call; see the type docs.
     pub kind: MessageKind,
     /// Opaque payload bytes.
     pub payload: Vec<u8>,
+}
+
+impl Message {
+    /// A message for the reliable channel.
+    #[must_use]
+    pub fn reliable(payload: Vec<u8>) -> Self {
+        Self {
+            kind: MessageKind::Reliable,
+            payload,
+        }
+    }
+
+    /// A message for the unreliable channel.
+    #[must_use]
+    pub fn unreliable(payload: Vec<u8>) -> Self {
+        Self {
+            kind: MessageKind::Unreliable,
+            payload,
+        }
+    }
 }
 
 /// Delivery guarantee requested for a message.
@@ -55,19 +82,36 @@ pub enum TransportError {
 /// driving the loop.
 pub trait Transport: Send {
     /// Queue a message for reliable, ordered delivery.
+    ///
+    /// Implementations must set [`Message::kind`] to
+    /// [`MessageKind::Reliable`] so the field cannot disagree with the channel.
     fn send_reliable(&mut self, msg: Message) -> Result<(), TransportError>;
 
     /// Queue a message for best-effort delivery. May be dropped or reordered.
+    ///
+    /// Implementations must set [`Message::kind`] to
+    /// [`MessageKind::Unreliable`].
     fn send_unreliable(&mut self, msg: Message) -> Result<(), TransportError>;
 
     /// Receive the next available reliable control message without polling
-    /// unreliable traffic. Transports with separate channels should override
-    /// this so control traffic cannot be starved by lossy state.
+    /// unreliable traffic.
+    ///
+    /// The default defers to [`Transport::recv`], which is correct for a
+    /// backend with a single delivery queue and merely unprioritised for one
+    /// that forgot to override it. It deliberately does not return `Ok(None)`:
+    /// that made a missing override look like an idle link, and a backend
+    /// author who forgot would lose every handshake with no error anywhere.
+    /// Backends with separate channels must override this so control traffic
+    /// cannot be starved by lossy state.
     fn recv_reliable(&mut self) -> Result<Option<Message>, TransportError> {
-        Ok(None)
+        self.recv()
     }
 
     /// Receive the next available message, or `Ok(None)` if nothing is queued.
+    ///
+    /// Reliable traffic is drained first, so a caller that only ever calls
+    /// `recv` still cannot have its control messages starved by a flood of
+    /// unreliable state.
     fn recv(&mut self) -> Result<Option<Message>, TransportError>;
 
     /// Whether the transport is still connected.
@@ -148,19 +192,21 @@ fn map_try_send_error(error: std::sync::mpsc::TrySendError<Message>) -> Transpor
 }
 
 impl Transport for InMemoryTransport {
-    fn send_reliable(&mut self, msg: Message) -> Result<(), TransportError> {
+    fn send_reliable(&mut self, mut msg: Message) -> Result<(), TransportError> {
         if !self.connected {
             return Err(TransportError::Disconnected);
         }
         validate_message_size(&msg)?;
+        msg.kind = MessageKind::Reliable;
         self.reliable_tx.try_send(msg).map_err(map_try_send_error)
     }
 
-    fn send_unreliable(&mut self, msg: Message) -> Result<(), TransportError> {
+    fn send_unreliable(&mut self, mut msg: Message) -> Result<(), TransportError> {
         if !self.connected {
             return Err(TransportError::Disconnected);
         }
         validate_message_size(&msg)?;
+        msg.kind = MessageKind::Unreliable;
         self.unreliable_tx.try_send(msg).map_err(map_try_send_error)
     }
 
@@ -183,13 +229,25 @@ impl Transport for InMemoryTransport {
             return Err(TransportError::Disconnected);
         }
 
-        match self.unreliable_rx.try_recv() {
+        // Reliable first: control traffic must not queue behind a backlog of
+        // lossy state, and a peer that floods the unreliable channel must not
+        // be able to delay a handshake or a session-key rotation.
+        let reliable_gone = match self.reliable_rx.try_recv() {
             Ok(msg) => return Ok(Some(msg)),
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
-        }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => true,
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+        };
 
-        self.recv_reliable()
+        // Messages already queued outlive the peer that sent them; the
+        // transport only reports the disconnect once both channels are drained.
+        match self.unreliable_rx.try_recv() {
+            Ok(msg) => Ok(Some(msg)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) if reliable_gone => {
+                self.connected = false;
+                Err(TransportError::Disconnected)
+            }
+            Err(_) => Ok(None),
+        }
     }
 
     fn is_connected(&self) -> bool {
@@ -270,6 +328,49 @@ mod tests {
         let second = b.recv().unwrap().unwrap();
         assert_eq!(second.kind, MessageKind::Unreliable);
         assert_eq!(second.payload, b"snap");
+    }
+
+    #[test]
+    fn recv_drains_reliable_before_unreliable() {
+        let (mut a, mut b) = InMemoryTransport::pair();
+
+        a.send_unreliable(Message::unreliable(b"snap".to_vec()))
+            .unwrap();
+        a.send_reliable(Message::reliable(b"cmd".to_vec())).unwrap();
+
+        // Sent second, received first — control traffic is never starved.
+        let first = b.recv().unwrap().unwrap();
+        assert_eq!(first.kind, MessageKind::Reliable);
+        assert_eq!(first.payload, b"cmd");
+        assert_eq!(b.recv().unwrap().unwrap().payload, b"snap");
+    }
+
+    #[test]
+    fn the_sending_call_decides_the_channel_not_the_kind_field() {
+        let (mut a, mut b) = InMemoryTransport::pair();
+
+        // A message mislabelled `Reliable` sent on the unreliable channel
+        // stays unreliable, and arrives labelled as such.
+        a.send_unreliable(Message {
+            kind: MessageKind::Reliable,
+            payload: b"lie".to_vec(),
+        })
+        .unwrap();
+        assert!(b.recv_reliable().unwrap().is_none());
+        let received = b.recv().unwrap().unwrap();
+        assert_eq!(received.kind, MessageKind::Unreliable);
+        assert_eq!(received.payload, b"lie");
+    }
+
+    #[test]
+    fn buffered_unreliable_messages_survive_the_peer_dropping() {
+        let (mut a, mut b) = InMemoryTransport::pair();
+        a.send_unreliable(Message::unreliable(b"last".to_vec()))
+            .unwrap();
+        drop(a);
+
+        assert_eq!(b.recv().unwrap().unwrap().payload, b"last");
+        assert!(matches!(b.recv(), Err(TransportError::Disconnected)));
     }
 
     #[test]

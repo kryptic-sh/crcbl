@@ -25,8 +25,12 @@ pub struct SimConditions {
     pub jitter: Duration,
     /// Probability of duplicating each message.
     pub duplicate_rate: f64,
-    /// If non-zero, shuffle up to this many consecutive ready messages
-    /// before they are forwarded to the inner transport.
+    /// If greater than one, shuffle within runs of this many consecutive ready
+    /// messages before they are forwarded to the inner transport.
+    ///
+    /// A message can therefore move at most `reorder_window - 1` places, which
+    /// is what makes a scripted reorder test reproduce a bounded depth rather
+    /// than an arbitrary permutation of everything that happened to be ready.
     pub reorder_window: usize,
     /// Seed for the deterministic LCG RNG.
     pub seed: u64,
@@ -46,6 +50,10 @@ impl Default for SimConditions {
 }
 
 // ── ConditionSimulator ───────────────────────────────────────────────────────
+
+/// Largest delay the simulator will schedule. See
+/// [`ConditionSimulator::compute_delay`].
+const MAX_SIMULATED_DELAY: Duration = Duration::from_secs(3600);
 
 struct PendingMessage {
     msg: Message,
@@ -137,21 +145,34 @@ impl<T: Transport> ConditionSimulator<T> {
         (self.next_u64() as f64) / (u64::MAX as f64)
     }
 
-    /// Compute the per-message delay: latency ± jitter, clamped to zero.
+    /// Compute the per-message delay: latency ± jitter, clamped to
+    /// `[0, MAX_SIMULATED_DELAY]`.
+    ///
+    /// The upper clamp is load-bearing, not cosmetic: `Duration::from_secs_f64`
+    /// panics on a non-finite or out-of-range value and `Instant + Duration`
+    /// panics on overflow, both reachable from a `latency + jitter` a caller
+    /// is free to configure. A simulated delay past the clamp is a
+    /// configuration error, and a clamp is a better answer than a crash.
     fn compute_delay(&mut self) -> Duration {
-        let base = self.conditions.latency.as_secs_f64();
+        let latency = self.conditions.latency.min(MAX_SIMULATED_DELAY);
         if self.conditions.jitter.is_zero() {
-            return self.conditions.latency;
+            return latency;
         }
-        let j = self.conditions.jitter.as_secs_f64();
+        let base = latency.as_secs_f64();
+        let jitter = self
+            .conditions
+            .jitter
+            .min(MAX_SIMULATED_DELAY)
+            .as_secs_f64();
         let r = self.next_f64(); // [0, 1)
-        let offset = (r - 0.5) * 2.0 * j; // [-jitter, +jitter]
+        let offset = (r - 0.5) * 2.0 * jitter; // [-jitter, +jitter]
         let total = base + offset;
         if total <= 0.0 {
-            Duration::ZERO
-        } else {
-            Duration::from_secs_f64(total)
+            return Duration::ZERO;
         }
+        Duration::try_from_secs_f64(total)
+            .unwrap_or(latency)
+            .min(MAX_SIMULATED_DELAY)
     }
 
     /// Push a message into the internal buffer with a future release time.
@@ -183,10 +204,13 @@ impl<T: Transport> ConditionSimulator<T> {
             }
         }
 
-        // Apply reordering if configured.
+        // Apply reordering if configured, one window at a time so the
+        // configured depth is the depth a message can actually move.
         let window = self.conditions.reorder_window;
         if window > 1 && self.ready.len() > 1 {
-            deterministic_shuffle(&mut self.ready, &mut self.conditions.seed);
+            for run in self.ready.chunks_mut(window) {
+                deterministic_shuffle(run, &mut self.conditions.seed);
+            }
         }
 
         // Forward to inner transport.
@@ -206,10 +230,14 @@ impl<T: Transport> ConditionSimulator<T> {
 // ── Transport impl ───────────────────────────────────────────────────────────
 
 impl<T: Transport> Transport for ConditionSimulator<T> {
-    fn send_reliable(&mut self, msg: Message) -> Result<(), TransportError> {
+    fn send_reliable(&mut self, mut msg: Message) -> Result<(), TransportError> {
         if !self.inner.is_connected() {
             return Err(TransportError::Disconnected);
         }
+        // The channel the caller chose is the channel the message keeps: the
+        // simulator re-routes buffered messages by `kind`, so `kind` has to be
+        // set here rather than trusted from the caller.
+        msg.kind = MessageKind::Reliable;
 
         // Loss check (before consuming the message).
         if self.next_f64() < self.conditions.loss_rate {
@@ -230,10 +258,11 @@ impl<T: Transport> Transport for ConditionSimulator<T> {
         Ok(())
     }
 
-    fn send_unreliable(&mut self, msg: Message) -> Result<(), TransportError> {
+    fn send_unreliable(&mut self, mut msg: Message) -> Result<(), TransportError> {
         if !self.inner.is_connected() {
             return Err(TransportError::Disconnected);
         }
+        msg.kind = MessageKind::Unreliable;
 
         if self.next_f64() < self.conditions.loss_rate {
             self.drain_pending();
@@ -281,10 +310,14 @@ impl<T: Transport> std::fmt::Debug for ConditionSimulator<T> {
 // ── Deterministic shuffle ────────────────────────────────────────────────────
 
 /// Fisher-Yates shuffle driven by an LCG — reproducible for a given seed.
+///
+/// The index comes from the LCG's **high** bits. A truncating LCG's low bit
+/// `k` has period `2^(k+1)`, so `seed % (i + 1)` for small `i` is close to a
+/// fixed alternating pattern — the shuffle would not shuffle.
 fn deterministic_shuffle<T>(items: &mut [T], seed: &mut u64) {
     for i in (1..items.len()).rev() {
         *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-        let j = (*seed as usize) % (i + 1);
+        let j = ((*seed >> 32) % (i as u64 + 1)) as usize;
         items.swap(i, j);
     }
 }
@@ -537,6 +570,77 @@ mod tests {
             payloads, sorted,
             "with seed 123, latency, and window 10, order should differ; got {payloads:?}"
         );
+    }
+
+    #[test]
+    fn reorder_stays_inside_the_configured_window() {
+        let (a, mut b) = InMemoryTransport::pair();
+        let mut sim = ConditionSimulator::new(
+            a,
+            SimConditions {
+                reorder_window: 3,
+                seed: 7,
+                ..Default::default()
+            },
+        );
+
+        // Stage the ready queue directly: the windowing is what is under test,
+        // not the latency scheduling that would normally fill it.
+        sim.ready.extend((0..12u8).map(msg));
+        sim.drain_pending();
+
+        let payloads: Vec<u8> = drain_all(&mut b).iter().map(|m| m.payload[0]).collect();
+        assert_eq!(payloads.len(), 12);
+        assert_ne!(
+            payloads,
+            (0..12u8).collect::<Vec<u8>>(),
+            "a window of 3 over 12 messages must actually reorder some of them"
+        );
+        for (position, &payload) in payloads.iter().enumerate() {
+            let moved = position as i64 - i64::from(payload);
+            assert!(
+                moved.abs() < 3,
+                "message {payload} moved {moved} places, past the window of 3: {payloads:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shuffle_uses_high_bits_so_short_runs_are_not_a_fixed_pattern() {
+        // Taking the index from the LCG's low bits makes `items.swap` for
+        // small `i` nearly periodic; over many independent 2-element runs the
+        // shuffle would then produce one arrangement almost every time.
+        let mut seed = 1u64;
+        let mut swapped = 0usize;
+        for _ in 0..64 {
+            let mut pair = [0u8, 1];
+            deterministic_shuffle(&mut pair, &mut seed);
+            if pair == [1, 0] {
+                swapped += 1;
+            }
+        }
+        assert!(
+            (16..48).contains(&swapped),
+            "64 two-element shuffles swapped {swapped} times; expected roughly half"
+        );
+    }
+
+    #[test]
+    fn absurd_latency_and_jitter_do_not_panic() {
+        let (a, _b) = InMemoryTransport::pair();
+        let mut sim = ConditionSimulator::new(
+            a,
+            SimConditions {
+                latency: Duration::MAX,
+                jitter: Duration::MAX,
+                seed: 5,
+                ..Default::default()
+            },
+        );
+        for i in 0..8u8 {
+            sim.send_reliable(msg(i)).unwrap();
+        }
+        assert_eq!(sim.pending.len(), 8);
     }
 
     // ── Wrap InMemoryTransport ───────────────────────────────────────────

@@ -13,16 +13,21 @@
 //!   single-threaded local play.
 //! * [`SnapshotWriter`] / [`SnapshotReader`] — encode and decode per-system state
 //!   for the server → client snapshot path.
+//! * [`auth`] — the per-session MAC every post-handshake message carries.
+//!   Nothing else in the protocol proves who sent a packet.
 
+pub mod auth;
 pub mod codec;
 pub mod condition;
 pub mod delta;
 pub mod handshake;
 pub mod messages;
+pub mod rate_limit;
 pub mod session;
 pub mod transport;
 pub mod types;
 
+pub use auth::{AuthError, ReplayWindow, SessionCrypto, SessionKey};
 pub use codec::{
     Ack, DecodeError, decode_ack, decode_client_to_server, decode_handshake_result, decode_hello,
     decode_server_to_client, encode_ack, encode_client_to_server, encode_handshake_result,
@@ -31,13 +36,15 @@ pub use codec::{
 pub use condition::{ConditionSimulator, SimConditions};
 pub use delta::{
     Baseline, BaselineDecodeError, BaselineStore, Delta, DeltaCodec, DeltaDecodeError,
-    MAX_BASELINE_ENCODED_BYTES, MAX_BASELINE_ENTITIES, MAX_BASELINE_SYSTEMS, SystemDelta,
-    decode_delta, decode_trusted_delta, encode_delta, hash_encoded,
+    MAX_AUTHENTICATED_SYSTEMS, MAX_BASELINE_ENCODED_BYTES, MAX_BASELINE_ENTITIES,
+    MAX_BASELINE_SYSTEMS, SystemDelta, Trust, decode_delta, encode_delta, encode_entity_entry,
+    hash_encoded,
 };
 pub use handshake::{HandshakeGate, HandshakeResult, Hello, RejectReason};
 pub use messages::{
     ClientToServer, ServerToClient, SnapshotReader, SnapshotWriter, SystemSnapshot,
 };
+pub use rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 pub use session::{SessionConfig, SessionManager, SessionState};
 pub use transport::{
     IN_MEMORY_CHANNEL_CAPACITY, InMemoryTransport, MAX_IN_MEMORY_MESSAGE_BYTES, Message,

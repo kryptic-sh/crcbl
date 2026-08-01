@@ -31,6 +31,30 @@ pub enum DecodeError {
     DuplicateSystem(u32),
 }
 
+// ── Message tags ──────────────────────────────────────────────────────────────
+//
+// Every message this codec produces starts with one of these. A receiver
+// dispatches on the tag rather than trial-decoding each type in turn: a trial
+// decode makes "unknown message" indistinguishable from "malformed known
+// message", and silently depends on no two decoders accepting the same bytes.
+
+/// `ClientToServer::Input`.
+pub const INPUT_TAG: u8 = 0x00;
+/// `ClientToServer::Command`.
+pub const COMMAND_TAG: u8 = 0x01;
+/// `ServerToClient::Snapshot`.
+pub const SNAPSHOT_TAG: u8 = 0x10;
+/// `ServerToClient::Event`.
+pub const EVENT_TAG: u8 = 0x11;
+/// [`Hello`].
+pub const HELLO_TAG: u8 = 0x20;
+/// [`HandshakeResult::Accept`].
+pub const ACCEPT_TAG: u8 = 0x21;
+/// [`HandshakeResult::Reject`].
+pub const REJECT_TAG: u8 = 0x22;
+/// [`Ack`].
+pub const ACK_TAG: u8 = 0x30;
+
 /// Maximum accepted wire payload. Snapshots target a single UDP datagram.
 pub const MAX_WIRE_PAYLOAD_BYTES: usize = 64 * 1024;
 /// Largest individual opaque field accepted from the wire.
@@ -43,7 +67,7 @@ fn validate_payload_size(payload: &[u8]) -> Result<(), DecodeError> {
     Ok(())
 }
 
-fn validate_field_len(len: usize, _remaining: usize) -> Result<(), DecodeError> {
+fn validate_field_len(len: usize) -> Result<(), DecodeError> {
     if len > MAX_FIELD_BYTES {
         return Err(DecodeError::InvalidLength(len as u32));
     }
@@ -52,21 +76,26 @@ fn validate_field_len(len: usize, _remaining: usize) -> Result<(), DecodeError> 
 
 // ── ByteReader helper ─────────────────────────────────────────────────────────
 
-struct ByteReader<'a> {
+/// Cursor over a wire payload that bounds-checks every read.
+///
+/// Every decoder in the crate reads through this: a hand-rolled
+/// `if cursor + N > payload.len()` at each field is one more chance to get a
+/// bound wrong, and there are dozens of fields.
+pub(crate) struct ByteReader<'a> {
     buf: &'a [u8],
     offset: usize,
 }
 
 impl<'a> ByteReader<'a> {
-    fn new(buf: &'a [u8]) -> Self {
+    pub(crate) fn new(buf: &'a [u8]) -> Self {
         Self { buf, offset: 0 }
     }
 
-    fn remaining(&self) -> usize {
+    pub(crate) fn remaining(&self) -> usize {
         self.buf.len().saturating_sub(self.offset)
     }
 
-    fn read_u8(&mut self) -> Result<u8, DecodeError> {
+    pub(crate) fn read_u8(&mut self) -> Result<u8, DecodeError> {
         if self.remaining() < 1 {
             return Err(DecodeError::TooShort {
                 needed: 1,
@@ -79,7 +108,7 @@ impl<'a> ByteReader<'a> {
         Ok(val)
     }
 
-    fn read_u16(&mut self) -> Result<u16, DecodeError> {
+    pub(crate) fn read_u16(&mut self) -> Result<u16, DecodeError> {
         if self.remaining() < 2 {
             return Err(DecodeError::TooShort {
                 needed: 2,
@@ -92,7 +121,7 @@ impl<'a> ByteReader<'a> {
         Ok(u16::from_le_bytes(bytes))
     }
 
-    fn read_u32(&mut self) -> Result<u32, DecodeError> {
+    pub(crate) fn read_u32(&mut self) -> Result<u32, DecodeError> {
         if self.remaining() < 4 {
             return Err(DecodeError::TooShort {
                 needed: 4,
@@ -105,7 +134,7 @@ impl<'a> ByteReader<'a> {
         Ok(u32::from_le_bytes(bytes))
     }
 
-    fn read_u64(&mut self) -> Result<u64, DecodeError> {
+    pub(crate) fn read_u64(&mut self) -> Result<u64, DecodeError> {
         if self.remaining() < 8 {
             return Err(DecodeError::TooShort {
                 needed: 8,
@@ -118,7 +147,7 @@ impl<'a> ByteReader<'a> {
         Ok(u64::from_le_bytes(bytes))
     }
 
-    fn read_i64(&mut self) -> Result<i64, DecodeError> {
+    pub(crate) fn read_i64(&mut self) -> Result<i64, DecodeError> {
         if self.remaining() < 8 {
             return Err(DecodeError::TooShort {
                 needed: 8,
@@ -131,7 +160,7 @@ impl<'a> ByteReader<'a> {
         Ok(i64::from_le_bytes(bytes))
     }
 
-    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
+    pub(crate) fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
         if self.remaining() < len {
             return Err(DecodeError::TooShort {
                 needed: len,
@@ -144,7 +173,7 @@ impl<'a> ByteReader<'a> {
         Ok(slice)
     }
 
-    fn assert_empty(&self) -> Result<(), DecodeError> {
+    pub(crate) fn assert_empty(&self) -> Result<(), DecodeError> {
         let rem = self.remaining();
         if rem > 0 {
             Err(DecodeError::TrailingBytes(rem))
@@ -162,7 +191,7 @@ pub fn encode_client_to_server(msg: &ClientToServer) -> Vec<u8> {
     match msg {
         ClientToServer::Input { tick, data } => {
             let mut buf = Vec::with_capacity(1 + 8 + 4 + data.len());
-            buf.push(0x00); // tag: Input
+            buf.push(INPUT_TAG);
             buf.extend_from_slice(&tick.get().to_le_bytes());
             buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
             buf.extend_from_slice(data);
@@ -170,7 +199,7 @@ pub fn encode_client_to_server(msg: &ClientToServer) -> Vec<u8> {
         }
         ClientToServer::Command { data } => {
             let mut buf = Vec::with_capacity(1 + 4 + data.len());
-            buf.push(0x01); // tag: Command
+            buf.push(COMMAND_TAG);
             buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
             buf.extend_from_slice(data);
             buf
@@ -183,10 +212,10 @@ pub fn decode_client_to_server(payload: &[u8]) -> Result<ClientToServer, DecodeE
     let mut r = ByteReader::new(payload);
     let tag = r.read_u8()?;
     match tag {
-        0x00 => {
+        INPUT_TAG => {
             let tick_raw = r.read_u64()?;
             let data_len = r.read_u32()? as usize;
-            validate_field_len(data_len, r.remaining())?;
+            validate_field_len(data_len)?;
             let data = r.read_bytes(data_len)?.to_vec();
             r.assert_empty()?;
             Ok(ClientToServer::Input {
@@ -194,9 +223,9 @@ pub fn decode_client_to_server(payload: &[u8]) -> Result<ClientToServer, DecodeE
                 data,
             })
         }
-        0x01 => {
+        COMMAND_TAG => {
             let data_len = r.read_u32()? as usize;
-            validate_field_len(data_len, r.remaining())?;
+            validate_field_len(data_len)?;
             let data = r.read_bytes(data_len)?.to_vec();
             r.assert_empty()?;
             Ok(ClientToServer::Command { data })
@@ -223,7 +252,7 @@ pub fn encode_server_to_client(msg: &ServerToClient) -> Vec<u8> {
                 cap += 4 + 4 + sys.data.len(); // system_id + data_len + data
             }
             let mut buf = Vec::with_capacity(cap);
-            buf.push(0x10); // tag: Snapshot
+            buf.push(SNAPSHOT_TAG);
             buf.extend_from_slice(&sector.x.to_le_bytes());
             buf.extend_from_slice(&sector.y.to_le_bytes());
             buf.extend_from_slice(&sector.z.to_le_bytes());
@@ -238,7 +267,7 @@ pub fn encode_server_to_client(msg: &ServerToClient) -> Vec<u8> {
         }
         ServerToClient::Event { data } => {
             let mut buf = Vec::with_capacity(1 + 4 + data.len());
-            buf.push(0x11); // tag: Event
+            buf.push(EVENT_TAG);
             buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
             buf.extend_from_slice(data);
             buf
@@ -251,7 +280,7 @@ pub fn decode_server_to_client(payload: &[u8]) -> Result<ServerToClient, DecodeE
     let mut r = ByteReader::new(payload);
     let tag = r.read_u8()?;
     match tag {
-        0x10 => {
+        SNAPSHOT_TAG => {
             let sx = r.read_i64()?;
             let sy = r.read_i64()?;
             let sz = r.read_i64()?;
@@ -268,7 +297,7 @@ pub fn decode_server_to_client(payload: &[u8]) -> Result<ServerToClient, DecodeE
                     return Err(DecodeError::DuplicateSystem(system_id));
                 }
                 let data_len = r.read_u32()? as usize;
-                validate_field_len(data_len, r.remaining())?;
+                validate_field_len(data_len)?;
                 let data = r.read_bytes(data_len)?.to_vec();
                 systems.push(SystemSnapshot { system_id, data });
             }
@@ -283,9 +312,9 @@ pub fn decode_server_to_client(payload: &[u8]) -> Result<ServerToClient, DecodeE
                 systems,
             })
         }
-        0x11 => {
+        EVENT_TAG => {
             let data_len = r.read_u32()? as usize;
-            validate_field_len(data_len, r.remaining())?;
+            validate_field_len(data_len)?;
             let data = r.read_bytes(data_len)?.to_vec();
             r.assert_empty()?;
             Ok(ServerToClient::Event { data })
@@ -302,7 +331,7 @@ pub fn decode_server_to_client(payload: &[u8]) -> Result<ServerToClient, DecodeE
 pub fn encode_hello(hello: &Hello) -> Vec<u8> {
     let has_session = hello.session_token.is_some();
     let mut buf = Vec::with_capacity(1 + 4 + 8 + 8 + 8 + 1 + usize::from(has_session) * 32);
-    buf.push(0x20);
+    buf.push(HELLO_TAG);
     buf.extend_from_slice(&hello.protocol_version.to_le_bytes());
     buf.extend_from_slice(&hello.engine_build_id.to_le_bytes());
     buf.extend_from_slice(&hello.schema_hash.to_le_bytes());
@@ -318,7 +347,7 @@ pub fn decode_hello(payload: &[u8]) -> Result<Hello, DecodeError> {
     validate_payload_size(payload)?;
     let mut r = ByteReader::new(payload);
     let tag = r.read_u8()?;
-    if tag != 0x20 {
+    if tag != HELLO_TAG {
         return Err(DecodeError::UnknownTag { tag });
     }
     let protocol_version = r.read_u32()?;
@@ -354,7 +383,7 @@ pub fn encode_handshake_result(result: &HandshakeResult) -> Vec<u8> {
             server_tick,
         } => {
             let mut buf = Vec::with_capacity(1 + 8 + 8 + 32 + 8);
-            buf.push(0x21);
+            buf.push(ACCEPT_TAG);
             buf.extend_from_slice(&generation.to_le_bytes());
             buf.extend_from_slice(&session_id.0.to_le_bytes());
             buf.extend_from_slice(resume_token.as_bytes());
@@ -364,7 +393,7 @@ pub fn encode_handshake_result(result: &HandshakeResult) -> Vec<u8> {
         HandshakeResult::Reject { generation, reason } => {
             let msg_bytes = reason.msg.as_bytes();
             let mut buf = Vec::with_capacity(1 + 8 + 1 + 2 + msg_bytes.len());
-            buf.push(0x22);
+            buf.push(REJECT_TAG);
             buf.extend_from_slice(&generation.to_le_bytes());
             buf.push(reason.code);
             buf.extend_from_slice(&(msg_bytes.len() as u16).to_le_bytes());
@@ -379,7 +408,7 @@ pub fn decode_handshake_result(payload: &[u8]) -> Result<HandshakeResult, Decode
     let mut r = ByteReader::new(payload);
     let tag = r.read_u8()?;
     match tag {
-        0x21 => {
+        ACCEPT_TAG => {
             let generation = r.read_u64()?;
             let raw_session = r.read_u64()?;
             let resume_token = ResumeToken::from_bytes(r.read_bytes(32)?.try_into().unwrap());
@@ -392,11 +421,11 @@ pub fn decode_handshake_result(payload: &[u8]) -> Result<HandshakeResult, Decode
                 server_tick: TickId::from_raw(raw_tick),
             })
         }
-        0x22 => {
+        REJECT_TAG => {
             let generation = r.read_u64()?;
             let code = r.read_u8()?;
             let msg_len = r.read_u16()? as usize;
-            validate_field_len(msg_len, r.remaining())?;
+            validate_field_len(msg_len)?;
             let msg_bytes = r.read_bytes(msg_len)?;
             let msg = String::from_utf8(msg_bytes.to_vec())
                 .map_err(|_| DecodeError::InvalidLength(msg_len as u32))?;
@@ -421,7 +450,7 @@ pub struct Ack {
 
 pub fn encode_ack(sector: SectorId, tick: TickId) -> Vec<u8> {
     let mut buf = Vec::with_capacity(1 + 24 + 8);
-    buf.push(0x30);
+    buf.push(ACK_TAG);
     buf.extend_from_slice(&sector.x.to_le_bytes());
     buf.extend_from_slice(&sector.y.to_le_bytes());
     buf.extend_from_slice(&sector.z.to_le_bytes());
@@ -433,7 +462,7 @@ pub fn decode_ack(payload: &[u8]) -> Result<Ack, DecodeError> {
     validate_payload_size(payload)?;
     let mut r = ByteReader::new(payload);
     let tag = r.read_u8()?;
-    if tag != 0x30 {
+    if tag != ACK_TAG {
         return Err(DecodeError::UnknownTag { tag });
     }
     let sector = SectorId {
@@ -928,7 +957,8 @@ mod tests {
             let _ = decode_hello(payload);
             let _ = decode_handshake_result(payload);
             let _ = decode_ack(payload);
-            let _ = crate::delta::decode_delta(payload);
+            let _ = crate::delta::decode_delta(payload, crate::delta::Trust::Untrusted);
+            let _ = crate::delta::decode_delta(payload, crate::delta::Trust::Authenticated);
         }
     }
 

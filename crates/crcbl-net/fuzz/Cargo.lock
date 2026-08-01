@@ -46,6 +46,7 @@ name = "crcbl-net"
 version = "0.1.0"
 dependencies = [
  "crcbl-core",
+ "crcbl-shaders",
  "thiserror",
 ]
 
@@ -56,6 +57,10 @@ dependencies = [
  "crcbl-net",
  "libfuzzer-sys",
 ]
+
+[[package]]
+name = "crcbl-shaders"
+version = "0.1.0"
 
 [[package]]
 name = "find-msvc-tools"

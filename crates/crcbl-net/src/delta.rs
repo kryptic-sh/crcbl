@@ -9,12 +9,20 @@
 //! * [`DeltaCodec`] — computes deltas from snapshots and applies deltas back to
 //!   baselines.
 //! * [`encode_delta`] / [`decode_delta`] — binary wire format for delta messages.
+//!
+//! # Entity blobs
+//!
+//! One framing carries per-entity component data everywhere in this protocol:
+//! repeated `(entity_bits: u64 LE, data_len: u32 LE, data: [u8; data_len])`.
+//! [`encode_entity_entry`] writes it and [`read_entity_entry`] reads it; no
+//! other code in the workspace should open-code the offsets.
 
 use std::collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 
 use crcbl_core::TickId;
 
+use crate::codec::{ByteReader, DecodeError};
 use crate::messages::SystemSnapshot;
 use crate::types::{EntityBits, EntityData, SectorId};
 
@@ -22,13 +30,51 @@ use crate::types::{EntityBits, EntityData, SectorId};
 pub const MAX_DELTA_BYTES: usize = 64 * 1024;
 /// Largest individual component payload accepted from a delta packet.
 pub const MAX_COMPONENT_BYTES: usize = 60 * 1024;
-/// Maximum systems accepted from an untrusted delta packet.
+/// Maximum systems accepted from an unauthenticated delta packet.
 pub const MAX_BASELINE_SYSTEMS: usize = 256;
-const MAX_TRUSTED_DELTA_SYSTEMS: usize = MAX_DELTA_BYTES / 16;
+/// Maximum systems accepted once a packet's session MAC has verified.
+///
+/// This is the physical ceiling — a system costs 16 bytes of header, so a
+/// 64 KiB packet cannot describe more. The payload-derived check in
+/// [`decode_delta`] reaches the same conclusion first for a real packet; the
+/// constant is what bounds a [`Baseline`] assembled by other means.
+pub const MAX_AUTHENTICATED_SYSTEMS: usize = MAX_DELTA_BYTES / 16;
 /// Maximum entities retained across all baseline systems.
 pub const MAX_BASELINE_ENTITIES: usize = 4_096;
 /// Maximum encoded entity bytes retained in one baseline.
 pub const MAX_BASELINE_ENCODED_BYTES: usize = 256 * 1024;
+/// Bytes of framing each entity entry costs on the wire and in a baseline.
+const ENTITY_ENTRY_HEADER_BYTES: usize = 12;
+
+// ── Trust ─────────────────────────────────────────────────────────────────────
+
+/// How far the caller trusts the bytes being decoded.
+///
+/// The difference is one number — how many systems a packet may declare — but
+/// it is the number that decides whether a hostile packet can make the
+/// receiver allocate thousands of maps, so it is spelled out rather than
+/// implied by which function was called.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trust {
+    /// Bytes from a peer that has not proved it holds the session key. Every
+    /// limit is at its hostile-input setting.
+    Untrusted,
+    /// Bytes whose per-session MAC verified — see [`crate::auth`]. Packet,
+    /// component and duplicate-id validation is unchanged; only the system
+    /// count is raised to the packet's physical maximum.
+    Authenticated,
+}
+
+impl Trust {
+    /// Maximum systems a packet or baseline may contain at this trust level.
+    #[must_use]
+    pub const fn max_systems(self) -> usize {
+        match self {
+            Self::Untrusted => MAX_BASELINE_SYSTEMS,
+            Self::Authenticated => MAX_AUTHENTICATED_SYSTEMS,
+        }
+    }
+}
 
 /// Errors returned while constructing a [`Baseline`] from snapshots.
 #[derive(Debug, thiserror::Error)]
@@ -66,6 +112,66 @@ pub enum BaselineDecodeError {
     InvalidKeyframeOperations,
 }
 
+// ── Entity blob framing ───────────────────────────────────────────────────────
+
+/// Append one `(entity_bits, data_len, data)` entry to an entity blob.
+///
+/// This is the only writer of the framing; see the [module docs](self).
+pub fn encode_entity_entry(out: &mut Vec<u8>, entity_bits: EntityBits, data: &[u8]) {
+    out.extend_from_slice(&entity_bits.to_le_bytes());
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(data);
+}
+
+/// Why one entity entry could not be read.
+#[derive(Debug, Clone, Copy)]
+enum EntityEntryError {
+    /// The 12-byte header is not fully present.
+    Header,
+    /// The declared payload length exceeds the component cap or the bytes left.
+    Length(u32),
+}
+
+impl From<EntityEntryError> for DeltaDecodeError {
+    fn from(error: EntityEntryError) -> Self {
+        match error {
+            EntityEntryError::Header => Self::TooShort,
+            EntityEntryError::Length(len) => Self::InvalidLength(len),
+        }
+    }
+}
+
+impl From<EntityEntryError> for BaselineDecodeError {
+    fn from(error: EntityEntryError) -> Self {
+        match error {
+            EntityEntryError::Length(len) if len as usize > MAX_COMPONENT_BYTES => {
+                Self::ComponentTooLarge(len)
+            }
+            EntityEntryError::Header | EntityEntryError::Length(_) => Self::Truncated,
+        }
+    }
+}
+
+/// Read one `(entity_bits, data)` entry, enforcing the component-size cap.
+///
+/// This is the only reader of the framing; see the [module docs](self).
+fn read_entity_entry<'a>(
+    reader: &mut ByteReader<'a>,
+) -> Result<(EntityBits, &'a [u8]), EntityEntryError> {
+    if reader.remaining() < ENTITY_ENTRY_HEADER_BYTES {
+        return Err(EntityEntryError::Header);
+    }
+    let entity_bits = reader.read_u64().map_err(|_| EntityEntryError::Header)?;
+    let data_len = reader.read_u32().map_err(|_| EntityEntryError::Header)? as usize;
+    if data_len > MAX_COMPONENT_BYTES || data_len > reader.remaining() {
+        return Err(EntityEntryError::Length(data_len as u32));
+    }
+    let data = reader
+        .read_bytes(data_len)
+        .map_err(|_| EntityEntryError::Length(data_len as u32))?;
+    Ok((entity_bits, data))
+}
+
 // ── Baseline ──────────────────────────────────────────────────────────────────
 
 /// A complete baseline snapshot for one tick, storing every system's
@@ -78,27 +184,12 @@ pub struct Baseline {
 }
 
 impl Baseline {
-    /// Build a [`Baseline`] from snapshots, enforcing all retained-state limits.
+    /// Build a [`Baseline`] from snapshots, enforcing the retained-state limits
+    /// for `trust`.
     pub fn from_snapshot(
         tick: TickId,
         systems: &[SystemSnapshot],
-    ) -> Result<Self, BaselineDecodeError> {
-        Self::from_snapshot_inner(tick, systems, true)
-    }
-
-    /// Build a [`Baseline`] from trusted local snapshots with the larger
-    /// packet-derived system cap used by the negotiated server-to-client path.
-    pub fn from_trusted_snapshot(
-        tick: TickId,
-        systems: &[SystemSnapshot],
-    ) -> Result<Self, BaselineDecodeError> {
-        Self::from_snapshot_inner(tick, systems, false)
-    }
-
-    fn from_snapshot_inner(
-        tick: TickId,
-        systems: &[SystemSnapshot],
-        enforce_limits: bool,
+        trust: Trust,
     ) -> Result<Self, BaselineDecodeError> {
         let mut map: HashMap<u32, HashMap<u64, Vec<u8>>> = HashMap::new();
 
@@ -108,28 +199,55 @@ impl Baseline {
             }
             map.insert(sys.system_id, decode_entity_blobs(&sys.data)?);
         }
-        if enforce_limits {
-            validate_baseline_limits(&map, MAX_BASELINE_SYSTEMS)?;
-        }
+        validate_baseline_limits(&map, trust)?;
 
         Ok(Self { tick, systems: map })
     }
 
     /// Number of systems present in this baseline.
-    #[allow(dead_code)]
     pub fn system_count(&self) -> usize {
         self.systems.len()
     }
 
     /// Total entity count across all systems in this baseline.
-    #[allow(dead_code)]
     pub fn entity_count(&self) -> usize {
-        self.systems.values().map(|m| m.len()).sum()
+        self.systems.values().map(HashMap::len).sum()
     }
 
     /// Number of entities in a specific system.
     pub fn entity_count_for(&self, system_id: u32) -> usize {
-        self.systems.get(&system_id).map(|m| m.len()).unwrap_or(0)
+        self.systems.get(&system_id).map_or(0, HashMap::len)
+    }
+
+    /// Iterate every `(system_id, entity_bits, component data)` triple.
+    ///
+    /// Consumers that only want the state — a renderer reading transforms, for
+    /// instance — should read it here rather than round-tripping the baseline
+    /// through [`Baseline::to_snapshots`] and parsing the bytes back out.
+    pub fn iter_entities(&self) -> impl Iterator<Item = (u32, EntityBits, &[u8])> {
+        self.systems.iter().flat_map(|(&system_id, entities)| {
+            entities
+                .iter()
+                .map(move |(&entity_bits, data)| (system_id, entity_bits, data.as_slice()))
+        })
+    }
+
+    /// Re-serialise this baseline into one [`SystemSnapshot`] per system.
+    ///
+    /// This walks and copies the whole retained state; prefer
+    /// [`Baseline::iter_entities`] unless the snapshot framing is what you
+    /// actually need.
+    pub fn to_snapshots(&self) -> Vec<SystemSnapshot> {
+        self.systems
+            .iter()
+            .map(|(&system_id, entities)| {
+                let mut data = Vec::new();
+                for (&entity_bits, entity_data) in entities {
+                    encode_entity_entry(&mut data, entity_bits, entity_data);
+                }
+                SystemSnapshot { system_id, data }
+            })
+            .collect()
     }
 
     /// Process-local hash of the full baseline state.
@@ -142,12 +260,12 @@ impl Baseline {
     pub fn state_hash(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
         let mut sys_ids: Vec<u32> = self.systems.keys().copied().collect();
-        sys_ids.sort();
+        sys_ids.sort_unstable();
         for &sys_id in &sys_ids {
             sys_id.hash(&mut hasher);
             let entities = &self.systems[&sys_id];
             let mut entity_ids: Vec<u64> = entities.keys().copied().collect();
-            entity_ids.sort();
+            entity_ids.sort_unstable();
             for &eb in &entity_ids {
                 eb.hash(&mut hasher);
                 entities[&eb].hash(&mut hasher);
@@ -157,41 +275,23 @@ impl Baseline {
     }
 }
 
-/// Decode a flat binary blob into `entity_bits → Vec<u8>`.
-///
-/// Format: repeated `(entity_bits: u64 LE, data_len: u32 LE, data: [u8; data_len])`.
+/// Decode a flat entity blob into `entity_bits → Vec<u8>`.
 fn decode_entity_blobs(blob: &[u8]) -> Result<HashMap<u64, Vec<u8>>, BaselineDecodeError> {
     if blob.len() > MAX_DELTA_BYTES {
         return Err(BaselineDecodeError::BlobTooLarge(blob.len()));
     }
     let mut out = HashMap::new();
-    let mut cursor = 0usize;
+    let mut reader = ByteReader::new(blob);
 
-    while cursor < blob.len() {
-        if blob.len() - cursor < 12 {
-            return Err(BaselineDecodeError::TrailingBytes(blob.len() - cursor));
+    while reader.remaining() > 0 {
+        if reader.remaining() < ENTITY_ENTRY_HEADER_BYTES {
+            return Err(BaselineDecodeError::TrailingBytes(reader.remaining()));
         }
-        let bits_bytes: [u8; 8] = blob[cursor..cursor + 8].try_into().unwrap();
-        let entity_bits = u64::from_le_bytes(bits_bytes);
-        cursor += 8;
-        let len_bytes: [u8; 4] = blob[cursor..cursor + 4].try_into().unwrap();
-        let data_len = u32::from_le_bytes(len_bytes);
-        cursor += 4;
-        let data_len = data_len as usize;
-
-        if data_len > MAX_COMPONENT_BYTES {
-            return Err(BaselineDecodeError::ComponentTooLarge(data_len as u32));
-        }
-        if data_len > blob.len() - cursor {
-            return Err(BaselineDecodeError::Truncated);
-        }
+        let (entity_bits, data) = read_entity_entry(&mut reader)?;
         if out.contains_key(&entity_bits) {
             return Err(BaselineDecodeError::DuplicateEntity(entity_bits));
         }
-
-        let data = blob[cursor..cursor + data_len].to_vec();
-        cursor += data_len;
-        out.insert(entity_bits, data);
+        out.insert(entity_bits, data.to_vec());
     }
 
     Ok(out)
@@ -199,9 +299,9 @@ fn decode_entity_blobs(blob: &[u8]) -> Result<HashMap<u64, Vec<u8>>, BaselineDec
 
 fn validate_baseline_limits(
     systems: &HashMap<u32, HashMap<u64, Vec<u8>>>,
-    max_systems: usize,
+    trust: Trust,
 ) -> Result<(), BaselineDecodeError> {
-    if systems.len() > max_systems {
+    if systems.len() > trust.max_systems() {
         return Err(BaselineDecodeError::BaselineTooLarge);
     }
 
@@ -213,7 +313,7 @@ fn validate_baseline_limits(
             .ok_or(BaselineDecodeError::BaselineTooLarge)?;
         for data in system.values() {
             encoded_bytes = encoded_bytes
-                .checked_add(12)
+                .checked_add(ENTITY_ENTRY_HEADER_BYTES)
                 .and_then(|bytes| bytes.checked_add(data.len()))
                 .ok_or(BaselineDecodeError::BaselineTooLarge)?;
         }
@@ -224,19 +324,15 @@ fn validate_baseline_limits(
     Ok(())
 }
 
-fn validate_trusted_baseline_limits(
-    systems: &HashMap<u32, HashMap<u64, Vec<u8>>>,
-) -> Result<(), BaselineDecodeError> {
-    validate_baseline_limits(systems, MAX_TRUSTED_DELTA_SYSTEMS)
-}
-
 // ── BaselineStore ─────────────────────────────────────────────────────────────
 
 /// Bounded ring buffer of [`Baseline`]s keyed by [`TickId`].
 ///
-/// Older baselines are evicted once capacity is reached. A capacity of zero
-/// disables storage. The store answers "is this tick too old to delta against?"
-/// efficiently by checking whether the tick falls behind the oldest retained tick.
+/// The ring is kept sorted by tick: [`BaselineStore::insert`] ignores a
+/// baseline older than the newest retained one and replaces an equal one, so
+/// [`BaselineStore::is_too_old`] can read the oldest tick off the front and
+/// [`BaselineStore::get`] can binary-search. Older baselines are evicted once
+/// capacity is reached; a capacity of zero disables storage.
 #[derive(Debug)]
 pub struct BaselineStore {
     capacity: usize,
@@ -245,6 +341,7 @@ pub struct BaselineStore {
 
 impl BaselineStore {
     /// Create a new store with the given ring capacity.
+    #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
@@ -252,10 +349,23 @@ impl BaselineStore {
         }
     }
 
-    /// Insert a baseline. Evicts the oldest if at capacity.
+    /// Insert a baseline, evicting the oldest if at capacity.
+    ///
+    /// Ticks only ever move forwards, so a baseline older than the newest
+    /// retained one is a caller error and is dropped rather than corrupting
+    /// the ordering the lookups rely on. An equal tick replaces in place.
     pub fn insert(&mut self, baseline: Baseline) {
         if self.capacity == 0 {
             return;
+        }
+        if let Some(newest) = self.ring.back_mut() {
+            if baseline.tick < newest.tick {
+                return;
+            }
+            if baseline.tick == newest.tick {
+                *newest = baseline;
+                return;
+            }
         }
         if self.ring.len() >= self.capacity {
             self.ring.pop_front();
@@ -264,12 +374,18 @@ impl BaselineStore {
     }
 
     /// Look up a baseline by tick id.
+    #[must_use]
     pub fn get(&self, tick: TickId) -> Option<&Baseline> {
-        self.ring.iter().find(|b| b.tick == tick)
+        let index = self
+            .ring
+            .binary_search_by(|baseline| baseline.tick.cmp(&tick))
+            .ok()?;
+        self.ring.get(index)
     }
 
     /// Whether the given tick is older than the oldest retained baseline
     /// (i.e. a delta-encode from it is impossible).
+    #[must_use]
     pub fn is_too_old(&self, tick: TickId) -> bool {
         match self.ring.front() {
             Some(oldest) => tick < oldest.tick,
@@ -278,6 +394,7 @@ impl BaselineStore {
     }
 
     /// The newest retained baseline, if any.
+    #[must_use]
     pub fn newest(&self) -> Option<&Baseline> {
         self.ring.back()
     }
@@ -285,10 +402,12 @@ impl BaselineStore {
 
 // ── hash_encoded ──────────────────────────────────────────────────────────────
 
-/// Hash serialised component bytes for change detection.
+/// Hash serialised component bytes.
 ///
-/// Uses [`DefaultHasher`] — adequate for identity checks; not
-/// cryptographically strong.
+/// Uses [`DefaultHasher`] — adequate for a process-local identity check, not
+/// cryptographically strong, and deliberately *not* used for change detection:
+/// the encoder has both buffers in hand, so it compares them (see
+/// [`DeltaCodec::encode_from_baseline`]).
 pub fn hash_encoded(data: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
     data.hash(&mut hasher);
@@ -347,63 +466,88 @@ impl DeltaCodec {
     }
 
     /// Compute a sector-scoped delta from `current` snapshots vs an optional baseline.
+    ///
+    /// The snapshots are parsed into a [`Baseline`] first, so a caller that
+    /// already holds one — the server, which must retain it anyway — should
+    /// call [`DeltaCodec::encode_from_baseline`] and skip the parse.
     pub fn encode_with_sector(
         sector: SectorId,
         tick: TickId,
         current: &[SystemSnapshot],
         baseline: Option<&Baseline>,
     ) -> Result<Delta, BaselineDecodeError> {
+        let current = Baseline::from_snapshot(tick, current, Trust::Authenticated)?;
+        Ok(Self::encode_from_baseline(sector, &current, baseline))
+    }
+
+    /// Diff two decoded baselines directly.
+    ///
+    /// Systems are emitted in ascending id order so the same pair of baselines
+    /// always produces the same packet.
+    #[must_use]
+    pub fn encode_from_baseline(
+        sector: SectorId,
+        current: &Baseline,
+        baseline: Option<&Baseline>,
+    ) -> Delta {
         let Some(baseline) = baseline else {
-            return Self::encode_keyframe(sector, tick, current);
+            return Self::encode_keyframe(sector, current);
         };
 
-        let mut systems = Vec::new();
-        let mut seen_system_ids = HashSet::new();
+        let mut system_ids: Vec<u32> = current
+            .systems
+            .keys()
+            .chain(baseline.systems.keys())
+            .copied()
+            .collect();
+        system_ids.sort_unstable();
+        system_ids.dedup();
 
-        for snap in current {
-            if !seen_system_ids.insert(snap.system_id) {
-                return Err(BaselineDecodeError::DuplicateSystem(snap.system_id));
-            }
-            let current_entities = decode_entity_blobs(&snap.data)?;
-            let baseline_entities = baseline.systems.get(&snap.system_id);
+        let mut systems = Vec::with_capacity(system_ids.len());
+        for system_id in system_ids {
+            let current_entities = current.systems.get(&system_id);
+            let baseline_entities = baseline.systems.get(&system_id);
 
             let mut added = Vec::new();
             let mut removed = Vec::new();
             let mut modified = Vec::new();
             let mut unchanged = 0u32;
 
-            for (&eb, data) in &current_entities {
-                match baseline_entities.and_then(|m| m.get(&eb)) {
-                    None => {
-                        added.push(EntityData {
-                            entity_bits: eb,
-                            data: data.clone(),
-                        });
-                    }
-                    Some(baseline_data) => {
-                        if hash_encoded(data) != hash_encoded(baseline_data) {
-                            modified.push(EntityData {
-                                entity_bits: eb,
-                                data: data.clone(),
-                            });
-                        } else {
-                            unchanged += 1;
-                        }
-                    }
+            for (&entity_bits, data) in current_entities.into_iter().flatten() {
+                match baseline_entities.and_then(|entities| entities.get(&entity_bits)) {
+                    None => added.push(EntityData {
+                        entity_bits,
+                        data: data.clone(),
+                    }),
+                    // Both buffers are in hand: compare them. A 64-bit hash
+                    // comparison here would be slower for a small blob and
+                    // would silently drop a real update on a collision.
+                    Some(baseline_data) if data != baseline_data => modified.push(EntityData {
+                        entity_bits,
+                        data: data.clone(),
+                    }),
+                    Some(_) => unchanged += 1,
                 }
             }
 
-            // Entities in baseline not in current → removed.
-            if let Some(be) = baseline_entities {
-                for &eb in be.keys() {
-                    if !current_entities.contains_key(&eb) {
-                        removed.push(eb);
-                    }
+            for &entity_bits in baseline_entities
+                .into_iter()
+                .flatten()
+                .map(|(bits, _)| bits)
+            {
+                if !current_entities.is_some_and(|entities| entities.contains_key(&entity_bits)) {
+                    removed.push(entity_bits);
                 }
+            }
+
+            // A system present in the baseline and absent from current with no
+            // entities to tombstone contributes nothing.
+            if current_entities.is_none() && removed.is_empty() {
+                continue;
             }
 
             systems.push(SystemDelta {
-                system_id: snap.system_id,
+                system_id,
                 added,
                 removed,
                 modified,
@@ -411,157 +555,77 @@ impl DeltaCodec {
             });
         }
 
-        // Systems present in baseline but absent from current → all removed.
-        for (&sys_id, baseline_entities) in &baseline.systems {
-            if seen_system_ids.contains(&sys_id) {
-                continue;
-            }
-            let removed: Vec<EntityBits> = baseline_entities.keys().copied().collect();
-            if !removed.is_empty() {
-                systems.push(SystemDelta {
-                    system_id: sys_id,
-                    added: Vec::new(),
-                    removed,
-                    modified: Vec::new(),
-                    unchanged_count: 0,
-                });
-            }
-        }
-
-        Ok(Delta {
+        Delta {
             sector,
-            tick,
+            tick: current.tick,
             baseline_tick: Some(baseline.tick),
             is_keyframe: false,
             systems,
-        })
+        }
     }
 
     /// Keyframe path: every entity in every system goes into `added`.
-    fn encode_keyframe(
-        sector: SectorId,
-        tick: TickId,
-        current: &[SystemSnapshot],
-    ) -> Result<Delta, BaselineDecodeError> {
-        let mut seen_system_ids = HashSet::new();
-        let mut systems = Vec::with_capacity(current.len());
-        for snap in current {
-            if !seen_system_ids.insert(snap.system_id) {
-                return Err(BaselineDecodeError::DuplicateSystem(snap.system_id));
-            }
-            let entities = decode_entity_blobs(&snap.data)?;
-            let added = entities
-                .into_iter()
-                .map(|(entity_bits, data)| EntityData { entity_bits, data })
-                .collect();
-            systems.push(SystemDelta {
-                system_id: snap.system_id,
-                added,
+    fn encode_keyframe(sector: SectorId, current: &Baseline) -> Delta {
+        let mut system_ids: Vec<u32> = current.systems.keys().copied().collect();
+        system_ids.sort_unstable();
+        let systems = system_ids
+            .into_iter()
+            .map(|system_id| SystemDelta {
+                system_id,
+                added: current.systems[&system_id]
+                    .iter()
+                    .map(|(&entity_bits, data)| EntityData {
+                        entity_bits,
+                        data: data.clone(),
+                    })
+                    .collect(),
                 removed: Vec::new(),
                 modified: Vec::new(),
                 unchanged_count: 0,
-            });
-        }
+            })
+            .collect();
 
-        Ok(Delta {
+        Delta {
             sector,
-            tick,
+            tick: current.tick,
             baseline_tick: None,
             is_keyframe: true,
             systems,
-        })
+        }
     }
 
-    /// Apply a delta transactionally, returning the reconstructed full snapshot.
+    /// Apply a delta transactionally, advancing `baseline` to the delta's tick.
     ///
-    /// On keyframe, replaces the entire baseline. Rejected deltas leave `baseline`
-    /// unchanged.
+    /// Every operation and the resulting size are checked before anything is
+    /// written, so a rejected delta leaves `baseline` untouched — which is why
+    /// this needs no defensive copy of the whole state. Read the result with
+    /// [`Baseline::iter_entities`] or [`Baseline::to_snapshots`].
     pub fn apply(
         delta: &Delta,
         baseline: &mut Baseline,
-    ) -> Result<Vec<SystemSnapshot>, BaselineDecodeError> {
-        Self::apply_inner(delta, baseline, true)
-    }
-
-    /// Apply a delta received from an authenticated peer negotiated by the
-    /// session handshake. The packet-size and component-size checks still apply.
-    pub fn apply_trusted(
-        delta: &Delta,
-        baseline: &mut Baseline,
-    ) -> Result<Vec<SystemSnapshot>, BaselineDecodeError> {
-        Self::apply_inner(delta, baseline, false)
-    }
-
-    fn apply_inner(
-        delta: &Delta,
-        baseline: &mut Baseline,
-        enforce_limits: bool,
-    ) -> Result<Vec<SystemSnapshot>, BaselineDecodeError> {
+        trust: Trust,
+    ) -> Result<(), BaselineDecodeError> {
         validate_delta_metadata(delta, baseline)?;
         validate_delta_operations(delta)?;
-        let mut systems = if delta.is_keyframe {
-            HashMap::new()
-        } else {
-            baseline.systems.clone()
-        };
+        validate_delta_against_baseline(delta, baseline, trust)?;
 
+        if delta.is_keyframe {
+            baseline.systems.clear();
+        }
         for sys_delta in &delta.systems {
-            let existing = systems.get(&sys_delta.system_id);
-            if !delta.is_keyframe {
-                for entity in &sys_delta.added {
-                    if existing.is_some_and(|entities| entities.contains_key(&entity.entity_bits)) {
-                        return Err(BaselineDecodeError::InvalidEntityOperation {
-                            system_id: sys_delta.system_id,
-                            entity_bits: entity.entity_bits,
-                            operation: "add",
-                        });
-                    }
-                }
-                for &entity_bits in &sys_delta.removed {
-                    if !existing.is_some_and(|entities| entities.contains_key(&entity_bits)) {
-                        return Err(BaselineDecodeError::InvalidEntityOperation {
-                            system_id: sys_delta.system_id,
-                            entity_bits,
-                            operation: "remove",
-                        });
-                    }
-                }
-                for entity in &sys_delta.modified {
-                    if !existing.is_some_and(|entities| entities.contains_key(&entity.entity_bits))
-                    {
-                        return Err(BaselineDecodeError::InvalidEntityOperation {
-                            system_id: sys_delta.system_id,
-                            entity_bits: entity.entity_bits,
-                            operation: "modify",
-                        });
-                    }
-                }
-            }
-
-            let system_entities = systems.entry(sys_delta.system_id).or_default();
-            for ed in &sys_delta.added {
-                system_entities.insert(ed.entity_bits, ed.data.clone());
+            let entities = baseline.systems.entry(sys_delta.system_id).or_default();
+            for entity in &sys_delta.added {
+                entities.insert(entity.entity_bits, entity.data.clone());
             }
             for &entity_bits in &sys_delta.removed {
-                system_entities.remove(&entity_bits);
+                entities.remove(&entity_bits);
             }
-            for ed in &sys_delta.modified {
-                system_entities.insert(ed.entity_bits, ed.data.clone());
+            for entity in &sys_delta.modified {
+                entities.insert(entity.entity_bits, entity.data.clone());
             }
         }
-        if enforce_limits {
-            validate_baseline_limits(&systems, MAX_BASELINE_SYSTEMS)?;
-        } else {
-            validate_trusted_baseline_limits(&systems)?;
-        }
-
-        let next = Baseline {
-            tick: delta.tick,
-            systems,
-        };
-        let snapshots = baseline_to_snapshots(&next);
-        *baseline = next;
-        Ok(snapshots)
+        baseline.tick = delta.tick;
+        Ok(())
     }
 }
 
@@ -599,7 +663,7 @@ fn validate_delta_operations(delta: &Delta) -> Result<(), BaselineDecodeError> {
             return Err(BaselineDecodeError::DuplicateSystem(system.system_id));
         }
         let mut entity_ids = HashSet::new();
-        for entity in &system.added {
+        for entity in system.added.iter().chain(&system.modified) {
             if entity.data.len() > MAX_COMPONENT_BYTES {
                 return Err(BaselineDecodeError::ComponentTooLarge(
                     entity.data.len() as u32
@@ -614,38 +678,93 @@ fn validate_delta_operations(delta: &Delta) -> Result<(), BaselineDecodeError> {
                 return Err(BaselineDecodeError::DuplicateEntity(entity_bits));
             }
         }
-        for entity in &system.modified {
-            if entity.data.len() > MAX_COMPONENT_BYTES {
-                return Err(BaselineDecodeError::ComponentTooLarge(
-                    entity.data.len() as u32
-                ));
-            }
-            if !entity_ids.insert(entity.entity_bits) {
-                return Err(BaselineDecodeError::DuplicateEntity(entity.entity_bits));
-            }
-        }
     }
     Ok(())
 }
 
-/// Reconstruct [`SystemSnapshot`]s from a [`Baseline`]'s internal maps.
-fn baseline_to_snapshots(baseline: &Baseline) -> Vec<SystemSnapshot> {
-    baseline
-        .systems
-        .iter()
-        .map(|(&sys_id, entities)| {
-            let mut blob = Vec::new();
-            for (&eb, data) in entities {
-                blob.extend_from_slice(&eb.to_le_bytes());
-                blob.extend_from_slice(&(data.len() as u32).to_le_bytes());
-                blob.extend_from_slice(data);
+/// Check every operation against the current baseline and project the size of
+/// the result, so [`DeltaCodec::apply`] can mutate in place knowing it cannot
+/// fail half-way.
+fn validate_delta_against_baseline(
+    delta: &Delta,
+    baseline: &Baseline,
+    trust: Trust,
+) -> Result<(), BaselineDecodeError> {
+    let mut system_count = if delta.is_keyframe {
+        0usize
+    } else {
+        baseline.systems.len()
+    };
+    let mut entities = if delta.is_keyframe {
+        0usize
+    } else {
+        baseline.entity_count()
+    };
+    let mut encoded_bytes = if delta.is_keyframe {
+        0usize
+    } else {
+        baseline
+            .systems
+            .values()
+            .flat_map(HashMap::values)
+            .map(|data| ENTITY_ENTRY_HEADER_BYTES + data.len())
+            .sum()
+    };
+
+    for sys_delta in &delta.systems {
+        // A keyframe replaces the whole state, so nothing survives from the
+        // baseline to collide with or to be removed.
+        let existing = if delta.is_keyframe {
+            None
+        } else {
+            baseline.systems.get(&sys_delta.system_id)
+        };
+        if existing.is_none() {
+            system_count += 1;
+        }
+
+        for entity in &sys_delta.added {
+            if existing.is_some_and(|entities| entities.contains_key(&entity.entity_bits)) {
+                return Err(BaselineDecodeError::InvalidEntityOperation {
+                    system_id: sys_delta.system_id,
+                    entity_bits: entity.entity_bits,
+                    operation: "add",
+                });
             }
-            SystemSnapshot {
-                system_id: sys_id,
-                data: blob,
-            }
-        })
-        .collect()
+            entities += 1;
+            encoded_bytes += ENTITY_ENTRY_HEADER_BYTES + entity.data.len();
+        }
+        for &entity_bits in &sys_delta.removed {
+            let Some(previous) = existing.and_then(|entities| entities.get(&entity_bits)) else {
+                return Err(BaselineDecodeError::InvalidEntityOperation {
+                    system_id: sys_delta.system_id,
+                    entity_bits,
+                    operation: "remove",
+                });
+            };
+            entities -= 1;
+            encoded_bytes -= ENTITY_ENTRY_HEADER_BYTES + previous.len();
+        }
+        for entity in &sys_delta.modified {
+            let Some(previous) = existing.and_then(|entities| entities.get(&entity.entity_bits))
+            else {
+                return Err(BaselineDecodeError::InvalidEntityOperation {
+                    system_id: sys_delta.system_id,
+                    entity_bits: entity.entity_bits,
+                    operation: "modify",
+                });
+            };
+            encoded_bytes = encoded_bytes + entity.data.len() - previous.len();
+        }
+    }
+
+    if system_count > trust.max_systems()
+        || entities > MAX_BASELINE_ENTITIES
+        || encoded_bytes > MAX_BASELINE_ENCODED_BYTES
+    {
+        return Err(BaselineDecodeError::BaselineTooLarge);
+    }
+    Ok(())
 }
 
 // ── Wire encoding ─────────────────────────────────────────────────────────────
@@ -678,7 +797,7 @@ pub fn encode_delta(delta: &Delta) -> Result<Vec<u8>, BaselineDecodeError> {
             .ok_or(BaselineDecodeError::BaselineTooLarge)?;
         for entity in system.added.iter().chain(&system.modified) {
             capacity = capacity
-                .checked_add(12)
+                .checked_add(ENTITY_ENTRY_HEADER_BYTES)
                 .and_then(|bytes| bytes.checked_add(entity.data.len()))
                 .ok_or(BaselineDecodeError::BaselineTooLarge)?;
         }
@@ -697,132 +816,74 @@ pub fn encode_delta(delta: &Delta) -> Result<Vec<u8>, BaselineDecodeError> {
     }
     let mut buf = Vec::with_capacity(capacity);
 
-    // sector
     buf.extend_from_slice(&delta.sector.x.to_le_bytes());
     buf.extend_from_slice(&delta.sector.y.to_le_bytes());
     buf.extend_from_slice(&delta.sector.z.to_le_bytes());
-
-    // tick
     buf.extend_from_slice(&delta.tick.get().to_le_bytes());
-
     // baseline_tick (None = 0)
-    let baseline_tick = delta.baseline_tick.map(|t| t.get()).unwrap_or(0);
+    let baseline_tick = delta.baseline_tick.map_or(0, TickId::get);
     buf.extend_from_slice(&baseline_tick.to_le_bytes());
-
-    // is_keyframe
-    buf.push(delta.is_keyframe as u8);
-
-    // system_count
+    buf.push(u8::from(delta.is_keyframe));
     buf.extend_from_slice(&(delta.systems.len() as u32).to_le_bytes());
 
     for sys in &delta.systems {
-        // system_id
         buf.extend_from_slice(&sys.system_id.to_le_bytes());
-        // added_count
         buf.extend_from_slice(&(sys.added.len() as u32).to_le_bytes());
-        // removed_count
         buf.extend_from_slice(&(sys.removed.len() as u32).to_le_bytes());
-        // modified_count
         buf.extend_from_slice(&(sys.modified.len() as u32).to_le_bytes());
 
-        // Added entities
-        for ed in &sys.added {
-            buf.extend_from_slice(&ed.entity_bits.to_le_bytes());
-            buf.extend_from_slice(&(ed.data.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&ed.data);
+        for entity in &sys.added {
+            encode_entity_entry(&mut buf, entity.entity_bits, &entity.data);
         }
-
-        // Removed entities (entity_bits only)
-        for &eb in &sys.removed {
-            buf.extend_from_slice(&eb.to_le_bytes());
+        // Removed entities carry no payload, so they are bare ids rather than
+        // entity entries.
+        for &entity_bits in &sys.removed {
+            buf.extend_from_slice(&entity_bits.to_le_bytes());
         }
-
-        // Modified entities
-        for ed in &sys.modified {
-            buf.extend_from_slice(&ed.entity_bits.to_le_bytes());
-            buf.extend_from_slice(&(ed.data.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&ed.data);
+        for entity in &sys.modified {
+            encode_entity_entry(&mut buf, entity.entity_bits, &entity.data);
         }
     }
 
     Ok(buf)
 }
 
-/// Decode a [`Delta`] from an untrusted wire packet (see [`encode_delta`]).
-pub fn decode_delta(payload: &[u8]) -> Result<Delta, DeltaDecodeError> {
-    decode_delta_inner(payload, MAX_BASELINE_SYSTEMS)
-}
-
-/// Decode a delta from an authenticated peer negotiated by the session handshake.
-///
-/// Packet, component, and duplicate-id validation still applies; only the
-/// 256-system hostile-input cap is raised to the packet's physical maximum.
-pub fn decode_trusted_delta(payload: &[u8]) -> Result<Delta, DeltaDecodeError> {
-    decode_delta_inner(payload, MAX_TRUSTED_DELTA_SYSTEMS)
-}
-
-fn decode_delta_inner(payload: &[u8], max_systems: usize) -> Result<Delta, DeltaDecodeError> {
+/// Decode a [`Delta`] from a wire packet (see [`encode_delta`]) at `trust`.
+pub fn decode_delta(payload: &[u8], trust: Trust) -> Result<Delta, DeltaDecodeError> {
     if payload.len() > MAX_DELTA_BYTES {
         return Err(DeltaDecodeError::InvalidLength(payload.len() as u32));
     }
-    let mut cursor = 0usize;
+    let mut reader = ByteReader::new(payload);
 
-    // sector: 3 × i64 LE
-    if cursor + 24 > payload.len() {
-        return Err(DeltaDecodeError::TooShort);
-    }
     let sector = SectorId {
-        x: i64::from_le_bytes(payload[cursor..cursor + 8].try_into().unwrap()),
-        y: i64::from_le_bytes(payload[cursor + 8..cursor + 16].try_into().unwrap()),
-        z: i64::from_le_bytes(payload[cursor + 16..cursor + 24].try_into().unwrap()),
+        x: reader.read_i64()?,
+        y: reader.read_i64()?,
+        z: reader.read_i64()?,
     };
-    cursor += 24;
+    let tick = TickId::from_raw(reader.read_u64()?);
 
-    // tick: u64 LE
-    if cursor + 8 > payload.len() {
-        return Err(DeltaDecodeError::TooShort);
-    }
-    let tick_raw = u64::from_le_bytes(payload[cursor..cursor + 8].try_into().unwrap());
-    let tick = TickId::from_raw(tick_raw);
-    cursor += 8;
-
-    // baseline_tick: u64 LE (None = 0)
-    if cursor + 8 > payload.len() {
-        return Err(DeltaDecodeError::TooShort);
-    }
-    let baseline_tick_raw = u64::from_le_bytes(payload[cursor..cursor + 8].try_into().unwrap());
-    cursor += 8;
-    let baseline_tick = if baseline_tick_raw == 0 {
-        None
-    } else {
-        Some(TickId::from_raw(baseline_tick_raw))
+    // baseline_tick: 0 means "none".
+    let baseline_tick = match reader.read_u64()? {
+        0 => None,
+        raw => Some(TickId::from_raw(raw)),
     };
 
-    // is_keyframe: u8
-    if cursor + 1 > payload.len() {
-        return Err(DeltaDecodeError::TooShort);
-    }
-    let is_keyframe = match payload[cursor] {
+    let is_keyframe = match reader.read_u8()? {
         0 => false,
         1 => true,
         flag => return Err(DeltaDecodeError::InvalidFlag(flag)),
     };
-    cursor += 1;
-
     if is_keyframe != baseline_tick.is_none() {
         return Err(DeltaDecodeError::InvalidMetadata);
     }
 
-    // system_count: u32 LE
-    if cursor + 4 > payload.len() {
-        return Err(DeltaDecodeError::TooShort);
-    }
-    let system_count = u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap()) as usize;
-    cursor += 4;
-    if system_count > max_systems {
+    let system_count = reader.read_u32()? as usize;
+    if system_count > trust.max_systems() {
         return Err(DeltaDecodeError::InvalidLength(system_count as u32));
     }
-    if system_count > (payload.len() - cursor) / 16 {
+    // Every system costs 16 bytes of header, so a count the packet cannot
+    // physically contain is rejected before anything is allocated for it.
+    if system_count > reader.remaining() / 16 {
         return Err(DeltaDecodeError::InvalidLength(system_count as u32));
     }
 
@@ -830,111 +891,67 @@ fn decode_delta_inner(payload: &[u8], max_systems: usize) -> Result<Delta, Delta
     let mut system_ids = HashSet::with_capacity(system_count);
 
     for _ in 0..system_count {
-        // system_id: u32 LE
-        if cursor + 4 > payload.len() {
-            return Err(DeltaDecodeError::TooShort);
-        }
-        let system_id = u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap());
-        cursor += 4;
+        let system_id = reader.read_u32()?;
         if !system_ids.insert(system_id) {
             return Err(DeltaDecodeError::DuplicateSystem(system_id));
         }
 
-        // added_count: u32 LE
-        if cursor + 4 > payload.len() {
-            return Err(DeltaDecodeError::TooShort);
-        }
-        let added_count =
-            u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap()) as usize;
-        cursor += 4;
+        let added_count = reader.read_u32()? as usize;
+        let removed_count = reader.read_u32()? as usize;
+        let modified_count = reader.read_u32()? as usize;
 
-        // removed_count: u32 LE
-        if cursor + 4 > payload.len() {
-            return Err(DeltaDecodeError::TooShort);
-        }
-        let removed_count =
-            u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap()) as usize;
-        cursor += 4;
-
-        // modified_count: u32 LE
-        if cursor + 4 > payload.len() {
-            return Err(DeltaDecodeError::TooShort);
-        }
-        let modified_count =
-            u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap()) as usize;
-        cursor += 4;
-
+        // Same argument as the system count, one level down: each entity costs
+        // at least its header, so the declared counts are checked against the
+        // bytes remaining before any of them is allocated for.
         let minimum_entity_bytes = added_count
-            .checked_mul(12)
+            .checked_mul(ENTITY_ENTRY_HEADER_BYTES)
             .and_then(|bytes| bytes.checked_add(removed_count.checked_mul(8)?))
-            .and_then(|bytes| bytes.checked_add(modified_count.checked_mul(12)?))
+            .and_then(|bytes| {
+                bytes.checked_add(modified_count.checked_mul(ENTITY_ENTRY_HEADER_BYTES)?)
+            })
             .ok_or(DeltaDecodeError::InvalidLength(u32::MAX))?;
-        if minimum_entity_bytes > payload.len() - cursor {
+        if minimum_entity_bytes > reader.remaining() {
             return Err(DeltaDecodeError::InvalidLength(minimum_entity_bytes as u32));
         }
 
-        // Read added entities
-        let mut added = Vec::with_capacity(added_count);
         let mut entity_ids = HashSet::with_capacity(
             added_count
                 .checked_add(removed_count)
                 .and_then(|count| count.checked_add(modified_count))
                 .ok_or(DeltaDecodeError::InvalidLength(u32::MAX))?,
         );
+
+        let mut added = Vec::with_capacity(added_count);
         for _ in 0..added_count {
-            if cursor + 12 > payload.len() {
-                return Err(DeltaDecodeError::TooShort);
-            }
-            let entity_bits = u64::from_le_bytes(payload[cursor..cursor + 8].try_into().unwrap());
-            cursor += 8;
+            let (entity_bits, data) = read_entity_entry(&mut reader)?;
             if !entity_ids.insert(entity_bits) {
                 return Err(DeltaDecodeError::DuplicateEntity(entity_bits));
             }
-            let data_len =
-                u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
-            if data_len > MAX_COMPONENT_BYTES || data_len > payload.len() - cursor {
-                return Err(DeltaDecodeError::InvalidLength(data_len as u32));
-            }
-            let data = payload[cursor..cursor + data_len].to_vec();
-            cursor += data_len;
-            added.push(EntityData { entity_bits, data });
+            added.push(EntityData {
+                entity_bits,
+                data: data.to_vec(),
+            });
         }
 
-        // Read removed entities (entity_bits only)
         let mut removed = Vec::with_capacity(removed_count);
         for _ in 0..removed_count {
-            if cursor + 8 > payload.len() {
-                return Err(DeltaDecodeError::TooShort);
-            }
-            let entity_bits = u64::from_le_bytes(payload[cursor..cursor + 8].try_into().unwrap());
-            cursor += 8;
+            let entity_bits = reader.read_u64()?;
             if !entity_ids.insert(entity_bits) {
                 return Err(DeltaDecodeError::DuplicateEntity(entity_bits));
             }
             removed.push(entity_bits);
         }
 
-        // Read modified entities
         let mut modified = Vec::with_capacity(modified_count);
         for _ in 0..modified_count {
-            if cursor + 12 > payload.len() {
-                return Err(DeltaDecodeError::TooShort);
-            }
-            let entity_bits = u64::from_le_bytes(payload[cursor..cursor + 8].try_into().unwrap());
-            cursor += 8;
+            let (entity_bits, data) = read_entity_entry(&mut reader)?;
             if !entity_ids.insert(entity_bits) {
                 return Err(DeltaDecodeError::DuplicateEntity(entity_bits));
             }
-            let data_len =
-                u32::from_le_bytes(payload[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
-            if data_len > MAX_COMPONENT_BYTES || data_len > payload.len() - cursor {
-                return Err(DeltaDecodeError::InvalidLength(data_len as u32));
-            }
-            let data = payload[cursor..cursor + data_len].to_vec();
-            cursor += data_len;
-            modified.push(EntityData { entity_bits, data });
+            modified.push(EntityData {
+                entity_bits,
+                data: data.to_vec(),
+            });
         }
 
         systems.push(SystemDelta {
@@ -946,9 +963,8 @@ fn decode_delta_inner(payload: &[u8], max_systems: usize) -> Result<Delta, Delta
         });
     }
 
-    // Trailing bytes check.
-    if cursor < payload.len() {
-        return Err(DeltaDecodeError::TrailingBytes(payload.len() - cursor));
+    if reader.remaining() > 0 {
+        return Err(DeltaDecodeError::TrailingBytes(reader.remaining()));
     }
 
     Ok(Delta {
@@ -981,6 +997,18 @@ pub enum DeltaDecodeError {
     DuplicateEntity(u64),
 }
 
+impl From<DecodeError> for DeltaDecodeError {
+    fn from(error: DecodeError) -> Self {
+        match error {
+            DecodeError::TooShort { .. } => Self::TooShort,
+            DecodeError::InvalidLength(len) => Self::InvalidLength(len),
+            DecodeError::TrailingBytes(count) => Self::TrailingBytes(count),
+            DecodeError::DuplicateSystem(id) => Self::DuplicateSystem(id),
+            DecodeError::UnknownTag { tag } => Self::InvalidFlag(tag),
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1002,7 +1030,7 @@ mod tests {
             system_id,
             data: blob,
         };
-        Baseline::from_trusted_snapshot(tick, &[snap]).expect("valid test snapshot")
+        Baseline::from_snapshot(tick, &[snap], Trust::Authenticated).expect("valid test snapshot")
     }
 
     /// Build a `Vec<SystemSnapshot>` from a list of (system_id, entities).
@@ -1083,6 +1111,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn baseline_store_keeps_its_ring_sorted() {
+        let mut store = BaselineStore::new(4);
+        for tick in [10u64, 20, 30] {
+            store.insert(make_snapshot(TickId::from_raw(tick), 1, &[(tick, b"x")]));
+        }
+
+        // An out-of-order insert would break both the binary search in `get`
+        // and the "oldest is at the front" assumption in `is_too_old`.
+        store.insert(make_snapshot(TickId::from_raw(15), 1, &[(15, b"late")]));
+        assert!(store.get(TickId::from_raw(15)).is_none());
+        assert_eq!(store.newest().map(|b| b.tick), Some(TickId::from_raw(30)));
+        assert!(store.is_too_old(TickId::from_raw(9)));
+        assert!(!store.is_too_old(TickId::from_raw(10)));
+        for tick in [10u64, 20, 30] {
+            assert_eq!(
+                store.get(TickId::from_raw(tick)).map(|b| b.tick),
+                Some(TickId::from_raw(tick))
+            );
+        }
+
+        // Re-inserting the newest tick replaces it rather than duplicating it.
+        store.insert(make_snapshot(TickId::from_raw(30), 1, &[(99, b"redo")]));
+        assert_eq!(store.newest().map(|b| b.tick), Some(TickId::from_raw(30)));
+        assert_eq!(store.get(TickId::from_raw(30)).unwrap().entity_count(), 1);
+        assert!(
+            store
+                .get(TickId::from_raw(30))
+                .unwrap()
+                .iter_entities()
+                .any(|(_, bits, _)| bits == 99)
+        );
+    }
+
     // ── is_too_old (empty store) ──────────────────────────────────────────
 
     #[test]
@@ -1145,8 +1207,9 @@ mod tests {
             },
         };
 
-        let baseline = Baseline::from_trusted_snapshot(TickId::from_raw(7), &[sys1, sys2])
-            .expect("valid test snapshots");
+        let baseline =
+            Baseline::from_snapshot(TickId::from_raw(7), &[sys1, sys2], Trust::Authenticated)
+                .expect("valid test snapshots");
         assert_eq!(baseline.system_count(), 2);
         assert_eq!(baseline.entity_count(), 3);
     }
@@ -1160,10 +1223,10 @@ mod tests {
             })
             .collect();
         assert!(matches!(
-            Baseline::from_snapshot(TickId::from_raw(1), &systems),
+            Baseline::from_snapshot(TickId::from_raw(1), &systems, Trust::Untrusted),
             Err(BaselineDecodeError::BaselineTooLarge)
         ));
-        let baseline = Baseline::from_trusted_snapshot(TickId::from_raw(1), &systems)
+        let baseline = Baseline::from_snapshot(TickId::from_raw(1), &systems, Trust::Authenticated)
             .expect("trusted snapshots are not packet-limited");
         assert_eq!(baseline.system_count(), 300);
     }
@@ -1187,11 +1250,11 @@ mod tests {
         };
         let payload = encode_delta(&delta).expect("packet remains below byte limit");
         assert!(matches!(
-            decode_delta(&payload),
+            decode_delta(&payload, Trust::Untrusted),
             Err(DeltaDecodeError::InvalidLength(_))
         ));
         assert_eq!(
-            decode_trusted_delta(&payload)
+            decode_delta(&payload, Trust::Authenticated)
                 .expect("authenticated peer may exceed hostile system cap")
                 .systems
                 .len(),
@@ -1253,8 +1316,9 @@ mod tests {
             },
         };
 
-        let baseline = Baseline::from_trusted_snapshot(TickId::from_raw(7), &[sys1, sys2])
-            .expect("valid test snapshots");
+        let baseline =
+            Baseline::from_snapshot(TickId::from_raw(7), &[sys1, sys2], Trust::Authenticated)
+                .expect("valid test snapshots");
         assert_eq!(baseline.entity_count_for(10), 1);
         assert_eq!(baseline.entity_count_for(20), 1);
         assert_eq!(baseline.entity_count_for(99), 0);
@@ -1315,8 +1379,8 @@ mod tests {
         let tick_b = TickId::from_raw(2);
         let snaps = make_snapshots(&[(1, &[(10, b"pos"), (20, b"vel")])]);
 
-        let baseline =
-            Baseline::from_trusted_snapshot(tick_a, &snaps).expect("valid test snapshots");
+        let baseline = Baseline::from_snapshot(tick_a, &snaps, Trust::Authenticated)
+            .expect("valid test snapshots");
         let delta = DeltaCodec::encode(tick_b, &snaps, Some(&baseline)).expect("valid snapshot");
 
         assert!(!delta.is_keyframe);
@@ -1337,8 +1401,8 @@ mod tests {
         let snaps_a = make_snapshots(&[(1, &[(10, b"pos")])]);
         let snaps_b = make_snapshots(&[(1, &[(10, b"pos"), (20, b"vel")])]);
 
-        let baseline =
-            Baseline::from_trusted_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
+        let baseline = Baseline::from_snapshot(tick_a, &snaps_a, Trust::Authenticated)
+            .expect("valid test snapshots");
         let delta = DeltaCodec::encode(tick_b, &snaps_b, Some(&baseline)).expect("valid snapshot");
 
         assert!(!delta.is_keyframe);
@@ -1359,8 +1423,8 @@ mod tests {
         let snaps_a = make_snapshots(&[(1, &[(10, b"pos"), (20, b"vel")])]);
         let snaps_b = make_snapshots(&[(1, &[(10, b"pos")])]);
 
-        let baseline =
-            Baseline::from_trusted_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
+        let baseline = Baseline::from_snapshot(tick_a, &snaps_a, Trust::Authenticated)
+            .expect("valid test snapshots");
         let delta = DeltaCodec::encode(tick_b, &snaps_b, Some(&baseline)).expect("valid snapshot");
 
         assert!(!delta.is_keyframe);
@@ -1381,8 +1445,8 @@ mod tests {
         let snaps_a = make_snapshots(&[(1, &[(10, b"old_data")])]);
         let snaps_b = make_snapshots(&[(1, &[(10, b"new_data")])]);
 
-        let baseline =
-            Baseline::from_trusted_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
+        let baseline = Baseline::from_snapshot(tick_a, &snaps_a, Trust::Authenticated)
+            .expect("valid test snapshots");
         let delta = DeltaCodec::encode(tick_b, &snaps_b, Some(&baseline)).expect("valid snapshot");
 
         assert!(!delta.is_keyframe);
@@ -1404,8 +1468,8 @@ mod tests {
         // Same bytes, different tick — should be unchanged.
         let snaps_b = make_snapshots(&[(1, &[(10, b"same")])]);
 
-        let baseline =
-            Baseline::from_trusted_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
+        let baseline = Baseline::from_snapshot(tick_a, &snaps_a, Trust::Authenticated)
+            .expect("valid test snapshots");
         let delta = DeltaCodec::encode(tick_b, &snaps_b, Some(&baseline)).expect("valid snapshot");
 
         assert_eq!(delta.systems[0].modified.len(), 0);
@@ -1420,29 +1484,30 @@ mod tests {
     fn delta_apply_roundtrip() {
         // Tick 1: entity 10 with "a"
         let snaps_t1 = make_snapshots(&[(1, &[(10, b"a")])]);
-        let mut baseline = Baseline::from_trusted_snapshot(TickId::from_raw(1), &snaps_t1)
-            .expect("valid test snapshots");
+        let mut baseline =
+            Baseline::from_snapshot(TickId::from_raw(1), &snaps_t1, Trust::Authenticated)
+                .expect("valid test snapshots");
 
         // Tick 2: add entity 20 with "b"
         let snaps_t2 = make_snapshots(&[(1, &[(10, b"a"), (20, b"b")])]);
         let delta_t2 = DeltaCodec::encode(TickId::from_raw(2), &snaps_t2, Some(&baseline))
             .expect("valid snapshot");
-        let _reconstructed = DeltaCodec::apply(&delta_t2, &mut baseline).expect("valid delta");
+        DeltaCodec::apply(&delta_t2, &mut baseline, Trust::Authenticated).expect("valid delta");
 
         // Tick 3: modify entity 10 from "a" to "a2", entity 20 unchanged
         let snaps_t3 = make_snapshots(&[(1, &[(10, b"a2"), (20, b"b")])]);
         let delta_t3 = DeltaCodec::encode(TickId::from_raw(3), &snaps_t3, Some(&baseline))
             .expect("valid snapshot");
-        let _reconstructed = DeltaCodec::apply(&delta_t3, &mut baseline).expect("valid delta");
+        DeltaCodec::apply(&delta_t3, &mut baseline, Trust::Authenticated).expect("valid delta");
 
         // Tick 4: remove entity 20
         let snaps_t4 = make_snapshots(&[(1, &[(10, b"a2")])]);
         let delta_t4 = DeltaCodec::encode(TickId::from_raw(4), &snaps_t4, Some(&baseline))
             .expect("valid snapshot");
-        let reconstructed_t4 = DeltaCodec::apply(&delta_t4, &mut baseline).expect("valid delta");
+        DeltaCodec::apply(&delta_t4, &mut baseline, Trust::Authenticated).expect("valid delta");
 
         // After applying all deltas, baseline should match snaps_t4.
-        let t4_entities = snapshot_entities(&reconstructed_t4);
+        let t4_entities = snapshot_entities(&baseline.to_snapshots());
         let expected = snapshot_entities(&snaps_t4);
 
         assert_eq!(baseline.tick, TickId::from_raw(4));
@@ -1460,12 +1525,12 @@ mod tests {
         let snaps_a = make_snapshots(&[(1, &[(10, b"pos"), (20, b"vel")])]);
         let snaps_b = make_snapshots(&[(1, &[(10, b"pos")])]);
 
-        let mut baseline =
-            Baseline::from_trusted_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
+        let mut baseline = Baseline::from_snapshot(tick_a, &snaps_a, Trust::Authenticated)
+            .expect("valid test snapshots");
         let delta = DeltaCodec::encode(tick_b, &snaps_b, Some(&baseline)).expect("valid snapshot");
-        let reconstructed = DeltaCodec::apply(&delta, &mut baseline).expect("valid delta");
+        DeltaCodec::apply(&delta, &mut baseline, Trust::Authenticated).expect("valid delta");
 
-        let entities = snapshot_entities(&reconstructed);
+        let entities = snapshot_entities(&baseline.to_snapshots());
         let sys = entities.get(&1).unwrap();
         assert!(sys.contains_key(&10));
         assert!(!sys.contains_key(&20));
@@ -1476,7 +1541,7 @@ mod tests {
     fn encode_decode_delta_roundtrip() {
         let tick = TickId::from_raw(5);
         let snaps = make_snapshots(&[(1, &[(10, b"a"), (20, b"bb")]), (2, &[(30, b"ccc")])]);
-        let baseline = Baseline::from_trusted_snapshot(TickId::from_raw(4), &snaps)
+        let baseline = Baseline::from_snapshot(TickId::from_raw(4), &snaps, Trust::Authenticated)
             .expect("valid test snapshots");
 
         // Add entity 40 to system 1, modify entity 20, remove entity 30 from system 2.
@@ -1489,7 +1554,7 @@ mod tests {
             .expect("valid snapshot");
 
         let encoded = encode_delta(&delta).expect("valid delta");
-        let decoded = decode_delta(&encoded).expect("decode should succeed");
+        let decoded = decode_delta(&encoded, Trust::Untrusted).expect("decode should succeed");
         let re_encoded = encode_delta(&decoded).expect("valid delta");
 
         assert_eq!(decoded.sector, sector);
@@ -1499,7 +1564,7 @@ mod tests {
     /// 10. Empty byte slice → error.
     #[test]
     fn decode_empty() {
-        let result = decode_delta(b"");
+        let result = decode_delta(b"", Trust::Untrusted);
         assert!(matches!(result, Err(DeltaDecodeError::TooShort)));
     }
 
@@ -1515,7 +1580,7 @@ mod tests {
         // Test truncation at every byte position from 1..full.len().
         for len in 1..full.len() {
             let truncated = &full[..len];
-            let result = decode_delta(truncated);
+            let result = decode_delta(truncated, Trust::Untrusted);
             // Must never panic, must return an error.
             assert!(result.is_err(), "truncated at {len} bytes should error");
         }
@@ -1534,14 +1599,17 @@ mod tests {
 
         for len in 0..24 {
             assert!(
-                matches!(decode_delta(&full[..len]), Err(DeltaDecodeError::TooShort)),
+                matches!(
+                    decode_delta(&full[..len], Trust::Untrusted),
+                    Err(DeltaDecodeError::TooShort)
+                ),
                 "sector header truncated at {len} bytes"
             );
         }
         let mut trailing = full;
         trailing.push(0);
         assert!(matches!(
-            decode_delta(&trailing),
+            decode_delta(&trailing, Trust::Untrusted),
             Err(DeltaDecodeError::TrailingBytes(1))
         ));
     }
@@ -1576,8 +1644,8 @@ mod tests {
         // System 2 is gone in the next tick.
         let snaps_b = make_snapshots(&[(1, &[(10, b"pos")])]);
 
-        let baseline =
-            Baseline::from_trusted_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
+        let baseline = Baseline::from_snapshot(tick_a, &snaps_a, Trust::Authenticated)
+            .expect("valid test snapshots");
         let delta = DeltaCodec::encode(tick_b, &snaps_b, Some(&baseline)).expect("valid snapshot");
 
         // Should have a removed entry for system 2.
@@ -1596,8 +1664,8 @@ mod tests {
         // System 2 is new in this tick.
         let snaps_b = make_snapshots(&[(1, &[(10, b"pos")]), (2, &[(20, b"new")])]);
 
-        let baseline =
-            Baseline::from_trusted_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
+        let baseline = Baseline::from_snapshot(tick_a, &snaps_a, Trust::Authenticated)
+            .expect("valid test snapshots");
         let delta = DeltaCodec::encode(tick_b, &snaps_b, Some(&baseline)).expect("valid snapshot");
 
         let sys2_delta: Vec<_> = delta.systems.iter().filter(|s| s.system_id == 2).collect();
@@ -1612,15 +1680,15 @@ mod tests {
         let tick_b = TickId::from_raw(2);
 
         let snaps_a = make_snapshots(&[(1, &[(10, b"old")])]);
-        let mut baseline =
-            Baseline::from_trusted_snapshot(tick_a, &snaps_a).expect("valid test snapshots");
+        let mut baseline = Baseline::from_snapshot(tick_a, &snaps_a, Trust::Authenticated)
+            .expect("valid test snapshots");
 
         // Keyframe with completely different entities.
         let snaps_b = make_snapshots(&[(1, &[(99, b"new")])]);
         let keyframe = DeltaCodec::encode(tick_b, &snaps_b, None).expect("valid snapshot");
-        let reconstructed = DeltaCodec::apply(&keyframe, &mut baseline).expect("valid delta");
+        DeltaCodec::apply(&keyframe, &mut baseline, Trust::Authenticated).expect("valid delta");
 
-        let entities = snapshot_entities(&reconstructed);
+        let entities = snapshot_entities(&baseline.to_snapshots());
         let sys = entities.get(&1).unwrap();
         assert!(sys.contains_key(&99));
         assert!(!sys.contains_key(&10)); // Old entity gone.
@@ -1630,8 +1698,9 @@ mod tests {
     #[test]
     fn apply_rejects_wrong_baseline_tick_without_mutating() {
         let snapshots = make_snapshots(&[(1, &[(10, b"old")])]);
-        let mut baseline = Baseline::from_trusted_snapshot(TickId::from_raw(2), &snapshots)
-            .expect("valid test snapshots");
+        let mut baseline =
+            Baseline::from_snapshot(TickId::from_raw(2), &snapshots, Trust::Authenticated)
+                .expect("valid test snapshots");
         let original_hash = baseline.state_hash();
         let delta = Delta {
             sector: SectorId::ZERO,
@@ -1642,7 +1711,7 @@ mod tests {
         };
 
         assert!(matches!(
-            DeltaCodec::apply(&delta, &mut baseline),
+            DeltaCodec::apply(&delta, &mut baseline, Trust::Authenticated),
             Err(BaselineDecodeError::WrongBaselineTick {
                 expected,
                 actual: Some(actual),
@@ -1655,8 +1724,9 @@ mod tests {
     #[test]
     fn apply_rejects_stale_tick_without_mutating() {
         let snapshots = make_snapshots(&[(1, &[(10, b"old")])]);
-        let mut baseline = Baseline::from_trusted_snapshot(TickId::from_raw(2), &snapshots)
-            .expect("valid test snapshots");
+        let mut baseline =
+            Baseline::from_snapshot(TickId::from_raw(2), &snapshots, Trust::Authenticated)
+                .expect("valid test snapshots");
         let original_hash = baseline.state_hash();
         let delta = Delta {
             sector: SectorId::ZERO,
@@ -1667,7 +1737,7 @@ mod tests {
         };
 
         assert!(matches!(
-            DeltaCodec::apply(&delta, &mut baseline),
+            DeltaCodec::apply(&delta, &mut baseline, Trust::Authenticated),
             Err(BaselineDecodeError::StaleDeltaTick { .. })
         ));
         assert_eq!(baseline.tick, TickId::from_raw(2));
@@ -1677,8 +1747,9 @@ mod tests {
     #[test]
     fn apply_rejects_malformed_keyframe_without_mutating() {
         let snapshots = make_snapshots(&[(1, &[(10, b"old")])]);
-        let mut baseline = Baseline::from_trusted_snapshot(TickId::from_raw(2), &snapshots)
-            .expect("valid test snapshots");
+        let mut baseline =
+            Baseline::from_snapshot(TickId::from_raw(2), &snapshots, Trust::Authenticated)
+                .expect("valid test snapshots");
         let original_hash = baseline.state_hash();
         let delta = Delta {
             sector: SectorId::ZERO,
@@ -1695,7 +1766,7 @@ mod tests {
         };
 
         assert!(matches!(
-            DeltaCodec::apply(&delta, &mut baseline),
+            DeltaCodec::apply(&delta, &mut baseline, Trust::Authenticated),
             Err(BaselineDecodeError::InvalidKeyframeOperations)
         ));
         assert_eq!(baseline.tick, TickId::from_raw(2));
@@ -1705,8 +1776,9 @@ mod tests {
     #[test]
     fn apply_rejects_invalid_entity_lifecycle_without_mutating() {
         let snapshots = make_snapshots(&[(1, &[(10, b"old")])]);
-        let baseline = Baseline::from_trusted_snapshot(TickId::from_raw(2), &snapshots)
-            .expect("valid test snapshots");
+        let baseline =
+            Baseline::from_snapshot(TickId::from_raw(2), &snapshots, Trust::Authenticated)
+                .expect("valid test snapshots");
 
         let cases = [
             SystemDelta {
@@ -1749,7 +1821,7 @@ mod tests {
                 systems: vec![system],
             };
             assert!(matches!(
-                DeltaCodec::apply(&delta, &mut candidate),
+                DeltaCodec::apply(&delta, &mut candidate, Trust::Authenticated),
                 Err(BaselineDecodeError::InvalidEntityOperation { .. })
             ));
             assert_eq!(candidate.tick, TickId::from_raw(2));
@@ -1787,14 +1859,14 @@ mod tests {
         let tick = TickId::from_raw(42);
         let baseline_tick = TickId::from_raw(41);
         let snaps = make_snapshots(&[(1, &[(10, b"a"), (20, b"bb")])]);
-        let baseline =
-            Baseline::from_trusted_snapshot(baseline_tick, &snaps).expect("valid test snapshots");
+        let baseline = Baseline::from_snapshot(baseline_tick, &snaps, Trust::Authenticated)
+            .expect("valid test snapshots");
 
         let snaps_next = make_snapshots(&[(1, &[(10, b"a_modified"), (30, b"cc")])]);
         let delta = DeltaCodec::encode(tick, &snaps_next, Some(&baseline)).expect("valid snapshot");
 
         let encoded = encode_delta(&delta).expect("valid delta");
-        let decoded = decode_delta(&encoded).expect("decode should succeed");
+        let decoded = decode_delta(&encoded, Trust::Untrusted).expect("decode should succeed");
 
         assert_eq!(decoded.tick, tick);
         assert_eq!(decoded.baseline_tick, Some(baseline_tick));
@@ -1823,7 +1895,7 @@ mod tests {
             .concat(),
         };
         assert!(matches!(
-            Baseline::from_trusted_snapshot(tick, &[truncated]),
+            Baseline::from_snapshot(tick, &[truncated], Trust::Authenticated),
             Err(BaselineDecodeError::Truncated)
         ));
 
@@ -1832,7 +1904,7 @@ mod tests {
             data: vec![0],
         };
         assert!(matches!(
-            Baseline::from_trusted_snapshot(tick, &[trailing]),
+            Baseline::from_snapshot(tick, &[trailing], Trust::Authenticated),
             Err(BaselineDecodeError::TrailingBytes(1))
         ));
 
@@ -1847,7 +1919,7 @@ mod tests {
             data: duplicate_data,
         };
         assert!(matches!(
-            Baseline::from_trusted_snapshot(tick, &[duplicate]),
+            Baseline::from_snapshot(tick, &[duplicate], Trust::Authenticated),
             Err(BaselineDecodeError::DuplicateEntity(7))
         ));
     }
@@ -1864,7 +1936,7 @@ mod tests {
         .expect("valid delta");
         invalid_metadata[40] = 1;
         assert!(matches!(
-            decode_delta(&invalid_metadata),
+            decode_delta(&invalid_metadata, Trust::Untrusted),
             Err(DeltaDecodeError::InvalidMetadata)
         ));
 
@@ -1872,7 +1944,7 @@ mod tests {
         huge_system_count[40] = 1;
         huge_system_count[41..45].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(matches!(
-            decode_delta(&huge_system_count),
+            decode_delta(&huge_system_count, Trust::Untrusted),
             Err(DeltaDecodeError::InvalidLength(_))
         ));
 
@@ -1895,7 +1967,7 @@ mod tests {
         .expect("valid delta");
         huge_component[69..73].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(matches!(
-            decode_delta(&huge_component),
+            decode_delta(&huge_component, Trust::Untrusted),
             Err(DeltaDecodeError::InvalidLength(_))
         ));
     }
@@ -1915,7 +1987,7 @@ mod tests {
                 state ^= state << 17;
                 payload.push(state as u8);
             }
-            let _ = decode_delta(&payload);
+            let _ = decode_delta(&payload, Trust::Untrusted);
         }
     }
 
@@ -1930,7 +2002,7 @@ mod tests {
         })
         .expect("valid delta");
         payload[40] = 2;
-        assert!(decode_delta(&payload).is_err());
+        assert!(decode_delta(&payload, Trust::Untrusted).is_err());
     }
 
     #[test]
@@ -1961,7 +2033,7 @@ mod tests {
             },
         ];
         assert!(matches!(
-            Baseline::from_trusted_snapshot(TickId::from_raw(1), &systems),
+            Baseline::from_snapshot(TickId::from_raw(1), &systems, Trust::Authenticated),
             Err(BaselineDecodeError::DuplicateSystem(1))
         ));
     }
@@ -1989,7 +2061,7 @@ mod tests {
             same_list.extend_from_slice(&0u32.to_le_bytes());
         }
         assert!(matches!(
-            decode_delta(&same_list),
+            decode_delta(&same_list, Trust::Untrusted),
             Err(DeltaDecodeError::DuplicateEntity(7))
         ));
 
@@ -2002,7 +2074,7 @@ mod tests {
         cross_list.extend_from_slice(&0u32.to_le_bytes());
         cross_list.extend_from_slice(&7u64.to_le_bytes());
         assert!(matches!(
-            decode_delta(&cross_list),
+            decode_delta(&cross_list, Trust::Untrusted),
             Err(DeltaDecodeError::DuplicateEntity(7))
         ));
 
@@ -2014,15 +2086,15 @@ mod tests {
             duplicate_system.extend_from_slice(&0u32.to_le_bytes());
         }
         assert!(matches!(
-            decode_delta(&duplicate_system),
+            decode_delta(&duplicate_system, Trust::Untrusted),
             Err(DeltaDecodeError::DuplicateSystem(1))
         ));
     }
 
     #[test]
     fn apply_rejects_growth_without_mutating_baseline() {
-        let mut baseline =
-            Baseline::from_trusted_snapshot(TickId::ZERO, &[]).expect("empty baseline");
+        let mut baseline = Baseline::from_snapshot(TickId::ZERO, &[], Trust::Authenticated)
+            .expect("empty baseline");
         for entity_bits in 0..MAX_BASELINE_ENTITIES as u64 {
             let delta = Delta {
                 sector: SectorId::ZERO,
@@ -2040,7 +2112,8 @@ mod tests {
                     unchanged_count: 0,
                 }],
             };
-            DeltaCodec::apply(&delta, &mut baseline).expect("within baseline limit");
+            DeltaCodec::apply(&delta, &mut baseline, Trust::Authenticated)
+                .expect("within baseline limit");
         }
         let hash = baseline.state_hash();
         let tick = baseline.tick;
@@ -2061,7 +2134,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            DeltaCodec::apply(&overflow, &mut baseline),
+            DeltaCodec::apply(&overflow, &mut baseline, Trust::Authenticated),
             Err(BaselineDecodeError::BaselineTooLarge)
         ));
         assert_eq!(baseline.tick, tick);

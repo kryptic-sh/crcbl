@@ -75,7 +75,7 @@ impl ProtocolCompatibility {
     /// embeddings must pass explicit, non-zero engine and schema identifiers to
     /// client and server constructors.
     pub const DEFAULT: Self = Self {
-        protocol_version: 4,
+        protocol_version: 5,
         engine_build_id: 0,
         schema_hash: 0,
     };
@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn protocol_compatibility_default_is_explicit() {
-        assert_eq!(ProtocolCompatibility::DEFAULT.protocol_version, 4);
+        assert_eq!(ProtocolCompatibility::DEFAULT.protocol_version, 5);
     }
 
     #[test]

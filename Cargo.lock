@@ -337,6 +337,7 @@ name = "crcbl-net"
 version = "0.1.0"
 dependencies = [
  "crcbl-core",
+ "crcbl-shaders",
  "thiserror 2.0.19",
 ]
 

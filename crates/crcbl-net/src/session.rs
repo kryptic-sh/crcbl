@@ -174,11 +174,21 @@ impl SessionManager {
             "on_disconnect only valid in Connected state"
         );
         self.state = SessionState::Reconnecting;
-        self.reconnect_deadline = Some(now + config.reconnect_grace_period);
+        // A grace period near `Duration::MAX` would overflow the addition and
+        // panic. Saturating instead means "effectively never expires", which
+        // is what such a configuration asked for.
+        self.reconnect_deadline = Some(
+            now.checked_add(config.reconnect_grace_period)
+                .unwrap_or(Duration::MAX),
+        );
     }
 
     /// Check whether reconnect credentials and deadline still match without
     /// changing session state.
+    ///
+    /// This is the single definition of "may this client resume?" —
+    /// [`SessionManager::try_reconnect`] performs the transition and defers
+    /// the decision here, so the two cannot drift apart.
     #[must_use]
     pub fn can_reconnect(&self, now: Duration, engine_build_id: u64, schema_hash: u64) -> bool {
         self.state == SessionState::Reconnecting
@@ -189,39 +199,17 @@ impl SessionManager {
             && self.schema_hash == Some(schema_hash)
     }
 
-    /// Attempt to reconnect.
+    /// Attempt to reconnect, transitioning to [`SessionState::Connected`] when
+    /// [`SessionManager::can_reconnect`] holds.
     ///
-    /// Returns `true` if all of the following hold:
-    /// - The session is in [`SessionState::Reconnecting`].
-    /// - The current time is within the reconnect grace period.
-    /// - The client's `engine_build_id` and `schema_hash` match the original.
-    ///
-    /// On success, transitions back to [`SessionState::Connected`].
-    pub fn try_reconnect(
-        &mut self,
-        now: Duration,
-        engine_build_id: u64,
-        schema_hash: u64,
-        _config: &SessionConfig,
-    ) -> bool {
-        if self.state != SessionState::Reconnecting {
+    /// A refusal because the grace period has elapsed also expires the
+    /// session, exactly as [`SessionManager::expire_if_timed_out`] would.
+    pub fn try_reconnect(&mut self, now: Duration, engine_build_id: u64, schema_hash: u64) -> bool {
+        if !self.can_reconnect(now, engine_build_id, schema_hash) {
+            self.expire_if_timed_out(now);
             return false;
         }
 
-        // Check grace period.
-        if let Some(deadline) = self.reconnect_deadline
-            && now > deadline
-        {
-            self.state = SessionState::Disconnected;
-            return false;
-        }
-
-        // Check build / schema match.
-        if self.engine_build_id != Some(engine_build_id) || self.schema_hash != Some(schema_hash) {
-            return false;
-        }
-
-        // Valid reconnect — go back to connected.
         self.state = SessionState::Connected;
         self.reconnect_deadline = None;
         // Keep the baseline store intact so delta-encoding can resume.
@@ -251,6 +239,7 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::delta::Trust;
 
     fn config() -> SessionConfig {
         SessionConfig {
@@ -296,7 +285,7 @@ mod tests {
         mgr.on_disconnect(t, &config());
         assert_eq!(mgr.state(), SessionState::Reconnecting);
 
-        let ok = mgr.try_reconnect(t, 0xABCD, 0x1234, &config());
+        let ok = mgr.try_reconnect(t, 0xABCD, 0x1234);
         assert!(ok);
         assert_eq!(mgr.state(), SessionState::Connected);
     }
@@ -310,7 +299,7 @@ mod tests {
         mgr.on_connected(0xAAAA, 0xBBBB);
 
         mgr.on_disconnect(now(), &config());
-        let ok = mgr.try_reconnect(now(), 0xCCCC, 0xBBBB, &config());
+        let ok = mgr.try_reconnect(now(), 0xCCCC, 0xBBBB);
         assert!(!ok);
         // State should still be Reconnecting — schema check failed before
         // state transition.
@@ -324,7 +313,7 @@ mod tests {
         mgr.on_connected(0xAAAA, 0xBBBB);
 
         mgr.on_disconnect(now(), &config());
-        let ok = mgr.try_reconnect(now(), 0xAAAA, 0xCCCC, &config());
+        let ok = mgr.try_reconnect(now(), 0xAAAA, 0xCCCC);
         assert!(!ok);
         assert_eq!(mgr.state(), SessionState::Reconnecting);
     }
@@ -346,9 +335,50 @@ mod tests {
 
         // Advance time past the grace period.
         let late = t + Duration::from_millis(20);
-        let ok = mgr.try_reconnect(late, 0xA, 0xB, &cfg);
+        let ok = mgr.try_reconnect(late, 0xA, 0xB);
         assert!(!ok);
         assert_eq!(mgr.state(), SessionState::Disconnected);
+    }
+
+    #[test]
+    fn an_unbounded_grace_period_saturates_instead_of_overflowing() {
+        let cfg = SessionConfig {
+            reconnect_grace_period: Duration::MAX,
+            baseline_ring_capacity: 8,
+        };
+        let mut mgr = SessionManager::new(SessionId(15), &cfg);
+        mgr.begin_handshake();
+        mgr.on_connected(0xA, 0xB);
+
+        mgr.on_disconnect(Duration::from_secs(60), &cfg);
+        assert_eq!(mgr.reconnect_deadline, Some(Duration::MAX));
+        assert!(mgr.try_reconnect(Duration::MAX, 0xA, 0xB));
+    }
+
+    #[test]
+    fn try_reconnect_agrees_with_can_reconnect() {
+        let cfg = SessionConfig {
+            reconnect_grace_period: Duration::from_secs(10),
+            baseline_ring_capacity: 8,
+        };
+        let cases = [
+            (Duration::from_secs(5), 0xAu64, 0xBu64),
+            (Duration::from_secs(5), 0xBAD, 0xB),
+            (Duration::from_secs(5), 0xA, 0xBAD),
+            (Duration::from_secs(50), 0xA, 0xB),
+        ];
+        for (now, engine, schema) in cases {
+            let mut mgr = SessionManager::new(SessionId(16), &cfg);
+            mgr.begin_handshake();
+            mgr.on_connected(0xA, 0xB);
+            mgr.on_disconnect(Duration::ZERO, &cfg);
+            let predicted = mgr.can_reconnect(now, engine, schema);
+            assert_eq!(
+                predicted,
+                mgr.try_reconnect(now, engine, schema),
+                "can_reconnect and try_reconnect disagreed at {now:?} for {engine:#x}/{schema:#x}"
+            );
+        }
     }
 
     // ── expire_if_timed_out ───────────────────────────────────────────────
@@ -389,8 +419,12 @@ mod tests {
 
     fn insert_baseline(mgr: &mut SessionManager, tick: u64) {
         mgr.baseline_store_mut(SectorId::ZERO).insert(
-            crate::delta::Baseline::from_trusted_snapshot(TickId::from_raw(tick), &[])
-                .expect("empty snapshot is valid"),
+            crate::delta::Baseline::from_snapshot(
+                TickId::from_raw(tick),
+                &[],
+                Trust::Authenticated,
+            )
+            .expect("empty snapshot is valid"),
         );
     }
 
@@ -436,8 +470,12 @@ mod tests {
         let right = SectorId { x: 2, y: 0, z: 0 };
         for sector in [left, right] {
             mgr.baseline_store_mut(sector).insert(
-                crate::delta::Baseline::from_trusted_snapshot(TickId::from_raw(7), &[])
-                    .expect("empty snapshot is valid"),
+                crate::delta::Baseline::from_snapshot(
+                    TickId::from_raw(7),
+                    &[],
+                    Trust::Authenticated,
+                )
+                .expect("empty snapshot is valid"),
             );
         }
 
@@ -458,7 +496,7 @@ mod tests {
         let left = SectorId { x: 1, y: 0, z: 0 };
         let right = SectorId { x: 2, y: 0, z: 0 };
         let baseline = |tick| {
-            crate::delta::Baseline::from_trusted_snapshot(TickId::from_raw(tick), &[])
+            crate::delta::Baseline::from_snapshot(TickId::from_raw(tick), &[], Trust::Authenticated)
                 .expect("empty snapshot is valid")
         };
 
@@ -493,7 +531,7 @@ mod tests {
         // Mutable access.
         use crate::delta::Baseline;
         mgr.baseline_store_mut(SectorId::ZERO).insert(
-            Baseline::from_trusted_snapshot(TickId::from_raw(1), &[])
+            Baseline::from_snapshot(TickId::from_raw(1), &[], Trust::Authenticated)
                 .expect("empty snapshot is valid"),
         );
         assert!(
