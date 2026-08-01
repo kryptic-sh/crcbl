@@ -130,9 +130,13 @@ impl InterfaceIndex {
         let mut entries = Vec::new();
         for source in sources {
             for interface in &source.protocol.interfaces {
+                // The path component is the *module* name, so it has to be
+                // escaped exactly the way `emit_interface` declares it — an
+                // interface named after a Rust keyword would otherwise resolve
+                // to a path that does not exist.
                 entries.push((
                     interface.name.clone(),
-                    format!("{}::{}", source.module, interface.name),
+                    format!("{}::{}", source.module, escape_ident(&interface.name)),
                 ));
             }
         }
@@ -271,7 +275,8 @@ fn emit_interface(
     let name = &interface.name;
     let _ = writeln!(
         out,
-        "\n    /// The `{name}` interface.\n    pub mod {name} {{"
+        "\n    /// The `{name}` interface.\n    pub mod {} {{",
+        escape_ident(name)
     );
     let _ = writeln!(
         out,
@@ -497,6 +502,28 @@ fn event_field_type(arg: &Arg, ffi: &str, borrows: bool) -> String {
     }
 }
 
+/// Each argument paired with the wire slot its *value* occupies.
+///
+/// Not `args.iter().enumerate()`: an untyped `new_id` — the `wl_registry.bind`
+/// shape — is one XML argument but three wire slots (interface name, version,
+/// id), and the proxy is the third of them. [`Message::type_slots`] expands the
+/// same way, so an event carrying one would otherwise read its own proxy and
+/// every later argument out of the wrong slot.
+fn wire_slots(message: &Message) -> Vec<(usize, &Arg)> {
+    let mut slots = Vec::with_capacity(message.args.len());
+    let mut next = 0;
+    for arg in &message.args {
+        if arg.ty == ArgType::NewId && arg.interface.is_none() {
+            slots.push((next + 2, arg));
+            next += 3;
+        } else {
+            slots.push((next, arg));
+            next += 1;
+        }
+    }
+    slots
+}
+
 fn event_field_expression(arg: &Arg, slot: usize, ffi: &str) -> String {
     let read = format!("(*args.add({slot}))");
     match arg.ty {
@@ -542,10 +569,19 @@ fn emit_events(out: &mut String, interface: &Interface, ffi: &str) {
     }
     out.push_str("        }\n");
 
-    let (generics, ret) = if borrows {
-        ("<'a>", "Option<Event<'a>>")
+    // `args` is a *reference* to the first slot of libwayland's argument array,
+    // not a raw pointer, purely so that `'a` is tied to something. With
+    // `*const WlArgument` the caller chooses `'a` freely — `'static` included —
+    // while the `&CStr` and `&[u8]` fields point into the closure storage
+    // libwayland frees when the dispatcher returns.
+    let (generics, args_ty, ret) = if borrows {
+        (
+            "<'a>",
+            format!("&'a {ffi}::WlArgument"),
+            "Option<Event<'a>>",
+        )
     } else {
-        ("", "Option<Event>")
+        ("", format!("&{ffi}::WlArgument"), "Option<Event>")
     };
     let _ = writeln!(
         out,
@@ -556,18 +592,25 @@ fn emit_events(out: &mut String, interface: &Interface, ffi: &str) {
          \x20       ///\n\
          \x20       /// # Safety\n\
          \x20       ///\n\
-         \x20       /// `args` must be the argument array libwayland passed for `opcode` on a\n\
-         \x20       /// `{}` proxy. Borrowed strings and arrays point into libwayland's closure\n\
-         \x20       /// storage and are valid only until the dispatcher returns.\n\
+         \x20       /// `args` must borrow the first slot of the argument array libwayland passed\n\
+         \x20       /// for `opcode` on a `{}` proxy, and that array must have as many slots as\n\
+         \x20       /// this opcode's signature declares. Borrowed strings and arrays point into\n\
+         \x20       /// libwayland's closure storage, so the borrow must not outlive the\n\
+         \x20       /// dispatcher call — which is what the returned lifetime records.\n\
          \x20       #[must_use]\n\
-         \x20       pub unsafe fn decode_event{generics}(opcode: u32, args: *const {ffi}::WlArgument) -> {ret} {{",
+         \x20       pub unsafe fn decode_event{generics}(opcode: u32, args: {args_ty}) -> {ret} {{",
         interface.name
     );
     if interface.events.is_empty() {
         out.push_str("            let _ = (opcode, args);\n            None\n        }\n");
         return;
     }
-    out.push_str("            let _ = args;\n            match opcode {\n");
+    let _ = writeln!(
+        out,
+        "            let args: *const {ffi}::WlArgument = core::ptr::from_ref(args);\n\
+         \x20           let _ = args;\n\
+         \x20           match opcode {{"
+    );
     for (opcode, message) in interface.events.iter().enumerate() {
         if message.args.is_empty() {
             let _ = writeln!(
@@ -582,7 +625,7 @@ fn emit_events(out: &mut String, interface: &Interface, ffi: &str) {
             "                {opcode} => Some(Event::{} {{",
             camel_case(&message.name)
         );
-        for (slot, arg) in message.args.iter().enumerate() {
+        for (slot, arg) in wire_slots(message) {
             let _ = writeln!(
                 out,
                 "                    {}: {},",
@@ -723,5 +766,77 @@ mod tests {
         .expect("emits");
         assert!(generated.contains("WlInterfacePtr; 1]"), "{generated}");
         assert!(generated.contains("&super::TYPES[0]"));
+    }
+
+    #[test]
+    fn an_interface_named_after_a_keyword_declares_and_resolves_the_same_module() {
+        // The module declaration used to skip `escape_ident` while the path in
+        // the type table did not exist at all, so this failed to compile rather
+        // than mis-generating — but only because no vendored protocol has one.
+        let protocol = parse_protocol(
+            r#"<protocol name="p">
+                 <interface name="r#loop" version="1"/>
+               </protocol>"#,
+        );
+        assert!(protocol.is_err(), "`#` is not an identifier character");
+
+        let protocol = parse_protocol(
+            r#"<protocol name="p">
+                 <interface name="loop" version="1"/>
+                 <interface name="user" version="1">
+                   <request name="get"><arg name="it" type="new_id" interface="loop"/></request>
+                 </interface>
+               </protocol>"#,
+        )
+        .expect("well-formed");
+        let generated = emit(
+            &[Source {
+                module: "p",
+                protocol,
+            }],
+            &Options::default(),
+        )
+        .expect("every interface reference resolves");
+        assert!(generated.contains("pub mod r#loop {"), "{generated}");
+        assert!(
+            generated.contains("WlInterfacePtr::new(&super::p::r#loop::INTERFACE)"),
+            "the type table must name the module as it was declared"
+        );
+        // The wire name is the XML name, not the escaped one.
+        assert!(generated.contains(r#"pub const NAME: &core::ffi::CStr = c"loop";"#));
+    }
+
+    #[test]
+    fn an_untyped_new_id_in_an_event_reads_the_third_wire_slot() {
+        // No vendored protocol has one, which is why this was wrong: the
+        // decoder indexed XML arguments while `type_slots` expands an untyped
+        // `new_id` to three wire slots. `id` is the third, and `after` is the
+        // fourth — not the second and third.
+        let protocol = parse_protocol(
+            r#"<protocol name="p"><interface name="i" version="1">
+                 <event name="made">
+                   <arg name="id" type="new_id"/>
+                   <arg name="after" type="uint"/>
+                 </event>
+               </interface></protocol>"#,
+        )
+        .expect("well-formed");
+        assert_eq!(protocol.interfaces[0].events[0].signature(), "sunu");
+        let generated = emit(
+            &[Source {
+                module: "p",
+                protocol,
+            }],
+            &Options::default(),
+        )
+        .expect("emits");
+        assert!(
+            generated.contains("id: unsafe { (*args.add(2)).o },"),
+            "{generated}"
+        );
+        assert!(
+            generated.contains("after: unsafe { (*args.add(3)).u },"),
+            "{generated}"
+        );
     }
 }

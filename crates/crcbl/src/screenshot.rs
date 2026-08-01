@@ -1,8 +1,15 @@
 //! Offscreen render → readback → golden image — the `crcbl screenshot` path.
 //!
 //! Opens a GPU backend, creates an offscreen surface and swapchain, renders
-//! one frame through [`ForwardRenderer`], reads the pixels back, and returns
-//! a [`crcbl_golden::Image`] ready to save as PNG.
+//! one frame through [`ForwardRenderer`], and reads the pixels back.
+//!
+//! What comes back is the swapchain image's bytes *as they are in memory*, in
+//! [`OffscreenSetup::format`]'s channel order — which on an ordinary desktop
+//! surface is BGRA, not RGBA. Turning them into a `crcbl_golden::Image` is
+//! the caller's job and needs `Image::from_readback` with the matching
+//! `ChannelOrder`, not `Image::from_rgba8`; this module deliberately does not
+//! guess, because the format is the thing it knows and the image type is not
+//! its dependency to reach for.
 //!
 //! This module is the render half of the CLI subcommand; the CLI module
 //! owns the argument parsing and I/O.
@@ -24,6 +31,27 @@ use crate::render::{
 // OffscreenSetup
 // ---------------------------------------------------------------------------
 
+/// The largest edge, in pixels, an offscreen frame may have.
+///
+/// 16384 is `maxImageDimension2D` on every implementation the engine targets,
+/// so anything past it would be refused by swapchain creation anyway — but
+/// only *after* this module had already tried to allocate a host-visible
+/// staging buffer for it. `16384x16384` RGBA8 is one gibibyte, which is the
+/// most this path will ever ask an allocator for.
+///
+/// The CLI checks `--size` against this at parse time so an absurd request is
+/// a bad *invocation* (exit 2) rather than a failed command; [`OffscreenSetup::open`]
+/// checks it again because a library may not have gone through the CLI.
+pub const MAX_DIMENSION: u32 = 16_384;
+
+/// How long [`OffscreenSetup::draw_and_readback`] waits for the copy to land.
+///
+/// Generous because an offscreen ring on a software rasteriser can take
+/// hundreds of milliseconds for a single frame. Public because the two error
+/// paths that mention it are public, and a deadline a caller can be hit by is
+/// one it should be able to read.
+pub const READBACK_DEADLINE: Duration = Duration::from_secs(10);
+
 /// Holds everything needed to render one frame offscreen: a GPU instance,
 /// device, offscreen swapchain ring, and the forward renderer.
 ///
@@ -42,8 +70,6 @@ pub struct OffscreenSetup {
     light: DirectionalLight,
     renderer: ForwardRenderer,
     pool: TransientPool,
-    /// Seconds of animation, advanced by callers who want a particular pose.
-    elapsed: f32,
 }
 
 /// Reasons an offscreen render might fail before a pixel is written.
@@ -72,6 +98,24 @@ pub enum OffscreenError {
     /// The swapchain went out of date before the first frame completed.
     #[error("offscreen swapchain is out of date")]
     OutOfDate,
+
+    /// The requested frame is larger than [`MAX_DIMENSION`] on an edge, or its
+    /// byte count does not fit this machine's address space.
+    #[error("{width}x{height} is larger than the {MAX_DIMENSION}x{MAX_DIMENSION} offscreen limit")]
+    TooLarge {
+        /// Requested width, in pixels.
+        width: u32,
+        /// Requested height, in pixels.
+        height: u32,
+    },
+
+    /// The readback did not land within [`READBACK_DEADLINE`].
+    ///
+    /// A `Result` rather than a panic because the CLI's contract is exit 1 with
+    /// a `--json`-shaped message, and a `panic!` here aborted with exit 101
+    /// past `report::emit` entirely.
+    #[error("readback did not complete within {0:?}")]
+    ReadbackTimeout(Duration),
 }
 
 impl OffscreenSetup {
@@ -79,9 +123,20 @@ impl OffscreenSetup {
     /// adapter, device, swapchain, and forward renderer for a frame of
     /// `(width, height)` pixels.
     ///
-    /// Returns `Err` if no GPU is available (lavapipe, swiftshader, or a real
-    /// card), if the device is unusable, or if any HAL call fails.
+    /// Returns `Err` if the frame is not between `1x1` and
+    /// [`MAX_DIMENSION`]`x`[`MAX_DIMENSION`], if no GPU is available (lavapipe,
+    /// swiftshader, or a real card), if the device is unusable, or if any HAL
+    /// call fails.
     pub fn open(width: u32, height: u32) -> Result<Self, OffscreenError> {
+        // Checked before the backend is opened, so an absurd `--size` costs a
+        // comparison rather than a device.
+        if width == 0 || height == 0 {
+            return Err(OffscreenError::Unusable("a frame must be at least 1x1"));
+        }
+        if width > MAX_DIMENSION || height > MAX_DIMENSION {
+            return Err(OffscreenError::TooLarge { width, height });
+        }
+
         let extent = (width, height);
         let instance = crate::backend::open()?;
 
@@ -151,23 +206,41 @@ impl OffscreenSetup {
             light: DirectionalLight::default(),
             renderer,
             pool: TransientPool::new(),
-            elapsed: 0.0,
         })
     }
 
-    /// Advances the animation clock by `dt` seconds.
-    pub fn advance(&mut self, dt: f32) {
-        self.elapsed += dt;
+    /// The surface format the readback bytes are in.
+    ///
+    /// The swapchain's preferred format is `Bgra8UnormSrgb` on most surfaces,
+    /// and [`Self::draw_and_readback`] copies the swapchain image *raw*. A
+    /// caller turning those bytes into an image therefore has to know whether
+    /// to swizzle red and blue, and this is how it knows. Feeding them to an
+    /// RGBA constructor unconditionally produces a channel-swapped PNG on
+    /// every ordinary desktop surface.
+    #[must_use]
+    pub const fn format(&self) -> Format {
+        self.format
     }
 
     /// Records, submits, and reads back one frame.
     ///
-    /// Returns RGBA8 sRGB pixels as `(width, height, Vec<u8>)`.
+    /// Returns the swapchain image's bytes as `((width, height), Vec<u8>)`,
+    /// four bytes per pixel, row-major, top row first, in [`Self::format`]'s
+    /// channel order — **not** necessarily RGBA.
+    ///
+    /// The pose is fixed at `t = 0`: a screenshot is a golden-image input, and
+    /// a deterministic frame is the only kind worth comparing against a
+    /// reference. (There was an `advance`/`elapsed` pair here to move the
+    /// clock; nothing ever called it, so every screenshot rendered `t = 0`
+    /// anyway and the state only made the frame look configurable.)
     ///
     /// # Errors
     ///
-    /// [`OffscreenError::Hal`] if recording, submission, or readback fail.
-    /// [`OffscreenError::OutOfDate`] if the swapchain is stale.
+    /// [`OffscreenError::Hal`] if recording, submission, or readback fail,
+    /// [`OffscreenError::OutOfDate`] if the swapchain is stale,
+    /// [`OffscreenError::TooLarge`] if the acquired extent's byte count does
+    /// not fit in a `usize`, or [`OffscreenError::ReadbackTimeout`] if the copy
+    /// has not landed after [`READBACK_DEADLINE`].
     pub fn draw_and_readback(&mut self) -> Result<((u32, u32), Vec<u8>), OffscreenError> {
         let device = self.device.as_ref();
         let acquired = device
@@ -178,7 +251,19 @@ impl OffscreenSetup {
             })?;
 
         let extent = acquired.extent;
-        let byte_count = u64::from(extent.0) * u64::from(extent.1) * 4;
+        // The extent comes back from the swapchain rather than from `open`, so
+        // it is checked here too: `u32 * u32 * 4` overflows a `u32` and the
+        // product has to survive narrowing to a `usize` before it can size a
+        // staging buffer or a `Vec`.
+        let too_large = || OffscreenError::TooLarge {
+            width: extent.0,
+            height: extent.1,
+        };
+        let byte_count = u64::from(extent.0)
+            .checked_mul(u64::from(extent.1))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(too_large)?;
+        let host_capacity = usize::try_from(byte_count).map_err(|_| too_large())?;
 
         // ---- render the frame through the graph ----
 
@@ -186,7 +271,7 @@ impl OffscreenSetup {
             device,
             &self.camera,
             &self.light,
-            ForwardRenderer::spin(self.elapsed),
+            ForwardRenderer::spin(0.0),
             extent,
         )?;
 
@@ -260,18 +345,20 @@ impl OffscreenSetup {
             after: None,
         })?;
 
-        let mut pixels = vec![0u8; byte_count as usize];
+        let mut pixels = vec![0u8; host_capacity];
 
-        // Poll with a generous deadline; an offscreen ring on a software
-        // rasteriser can take hundreds of ms for a single frame.
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + READBACK_DEADLINE;
         loop {
             let state = device.poll_readback(readback, &mut pixels)?;
             if let ReadbackState::Ready = state {
                 break;
             }
             if std::time::Instant::now() > deadline {
-                panic!("screenshot readback did not complete within 10 s; timed out");
+                // The command buffer, staging buffer and readback are left
+                // alone deliberately: the GPU may still be reading them, and
+                // destroying them now would be worse than leaking them until
+                // `finish` waits the device idle and drops it.
+                return Err(OffscreenError::ReadbackTimeout(READBACK_DEADLINE));
             }
             std::thread::sleep(Duration::from_micros(100));
         }
@@ -284,19 +371,66 @@ impl OffscreenSetup {
     }
 
     /// Tears down in correct order: wait idle, destroy swapchain → surface →
-    /// device, then check validation.
-    pub fn finish(self) {
-        self.device.wait_idle().expect("idle");
+    /// device.
+    ///
+    /// # Errors
+    ///
+    /// [`OffscreenError::Hal`] if the device could not be brought to idle — a
+    /// device lost during the frame surfaces here and nowhere else, and a
+    /// caller about to save the pixels as a golden image needs to be told
+    /// before it trusts them. The teardown still runs either way; the failure
+    /// is reported after it.
+    pub fn finish(self) -> Result<(), OffscreenError> {
+        let idle = self.device.wait_idle();
         self.device.destroy_swapchain(self.swapchain);
         self.instance.destroy_surface(self.surface);
         drop(self.device);
         drop(self.instance);
+        idle.map_err(OffscreenError::Hal)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--size 4000000000x4000000000` used to reach an unchecked
+    /// `width * height * 4`, and `--size 100000x100000` a 40 GB allocation.
+    /// Both are now refused, and refused *before* a GPU is opened, which is
+    /// what makes this testable without one.
+    #[test]
+    fn an_absurd_frame_is_refused_before_a_backend_is_opened() {
+        for (width, height) in [
+            (u32::MAX, u32::MAX),
+            (4_000_000_000, 4_000_000_000),
+            (100_000, 100_000),
+            (MAX_DIMENSION + 1, 1),
+            (1, MAX_DIMENSION + 1),
+        ] {
+            let error = OffscreenSetup::open(width, height)
+                .err()
+                .unwrap_or_else(|| panic!("{width}x{height} is not a frame"));
+            assert!(
+                matches!(error, OffscreenError::TooLarge { .. }),
+                "{width}x{height}: {error}"
+            );
+        }
+    }
+
+    /// A zero edge would make a swapchain nothing can present, and the error
+    /// says so rather than being a validation-layer message later.
+    #[test]
+    fn a_zero_sized_frame_is_refused() {
+        for (width, height) in [(0, 16), (16, 0), (0, 0)] {
+            assert!(
+                matches!(
+                    OffscreenSetup::open(width, height),
+                    Err(OffscreenError::Unusable(_))
+                ),
+                "{width}x{height} should be unusable"
+            );
+        }
+    }
 
     /// The null backend exercises the same code paths but renders nothing.
     /// The test exists to prove the module compiles and the HAL seam is

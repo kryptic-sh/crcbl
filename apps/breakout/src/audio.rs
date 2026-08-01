@@ -18,9 +18,13 @@ struct Sound {
 }
 
 /// A playing voice with its own playhead.
+///
+/// `playhead` counts **frames**, not samples. `Sound::data` is interleaved
+/// stereo, so a frame is two `f32`s — a playhead that advanced one *index* per
+/// output frame played every sound at half speed and twice the length.
 struct Voice {
     sound: Arc<Sound>,
-    playhead: usize,
+    playhead: f64,
     volume: f32,
     pitch: f32,
     gain_l: f32,
@@ -60,26 +64,32 @@ impl crcbl_audio::AudioSource for MixerSource {
 }
 
 impl Voice {
+    /// Mixes this voice into `buffer` and reports whether it still has audio
+    /// left. `buffer` is interleaved stereo, same as the source.
     fn render_block(&mut self, buffer: &mut [AudioSample]) -> bool {
         let data = &self.sound.data;
-        let data_len = data.len();
-        let mut pos = self.playhead as f64;
-        let step = self.pitch as f64;
+        let source_frames = data.len() / 2;
+        // A ratio of 1.0 means one source frame per output frame: unity pitch.
+        // Non-finite or non-positive ratios would either stall the voice
+        // forever or index backwards, so they play at unity instead.
+        let step = if self.pitch.is_finite() && self.pitch > 0.0 {
+            f64::from(self.pitch)
+        } else {
+            1.0
+        };
 
-        for frame in buffer.chunks_exact_mut(2) {
-            if pos as usize >= data_len {
-                return false; // finished
+        for out in buffer.chunks_exact_mut(2) {
+            let frame = self.playhead as usize;
+            if frame >= source_frames {
+                return false;
             }
-            let idx = pos as usize & !1; // even index for stereo pair
-            let s_l = data[idx];
-            let s_r = data.get(idx + 1).copied().unwrap_or(0.0);
-            frame[0] += s_l * self.volume * self.gain_l;
-            frame[1] += s_r * self.volume * self.gain_r;
-            pos += step;
+            let idx = frame * 2;
+            out[0] += data[idx] * self.volume * self.gain_l;
+            out[1] += data[idx + 1] * self.volume * self.gain_r;
+            self.playhead += step;
         }
 
-        self.playhead = pos as usize;
-        self.playhead < data_len
+        (self.playhead as usize) < source_frames
     }
 }
 
@@ -127,7 +137,12 @@ impl Audio {
     /// Play a sound with spatial panning based on `emitter_x` (world X).
     /// Listener is assumed at the screen centre (X=0, Z=1 in front).
     pub fn play_panned(&mut self, id: u32, emitter_x: f32) {
-        let idx = id as usize - 1;
+        // Sound ids are 1-based; `id - 1` on a `u32` underflows to `u32::MAX`
+        // for id 0 rather than missing the table.
+        let Some(idx) = id.checked_sub(1).map(|i| i as usize) else {
+            log::debug!("audio: sound id 0 is not a sound");
+            return;
+        };
         if let Some(sound) = self.sounds.get(idx) {
             let cue = crcbl_audio::spatial::compute_cue(
                 [0.0, 0.0, 0.0],       // listener at origin
@@ -136,7 +151,7 @@ impl Audio {
             );
             self.queue.push(Voice {
                 sound: Arc::clone(sound),
-                playhead: 0,
+                playhead: 0.0,
                 volume: cue.volume * 0.5,
                 pitch: cue.pitch_ratio,
                 gain_l: cue.gain_left,
@@ -162,13 +177,109 @@ fn gen_sine(freq_hz: f32, duration_secs: f32, sample_rate: u32) -> Vec<f32> {
     out
 }
 
+/// A linear fade in and out over `FADE_FRAMES`, or over half the sound —
+/// whichever is shorter.
+///
+/// The previous version compared `i > total.saturating_sub(fade)` and then
+/// computed `total - i`, which is fine only while `total >= fade`. For a sound
+/// shorter than 1.25 ms at 48 kHz the saturating subtraction clamped to zero,
+/// every index took the second branch, and `total - i` underflowed on the last
+/// sample.
+const FADE_FRAMES: usize = 60;
+
 fn fade_env(i: usize, total: usize) -> f32 {
-    let fade = 60usize;
-    if i < fade {
-        i as f32 / fade as f32
-    } else if i > total.saturating_sub(fade) {
-        (total - i) as f32 / fade as f32
+    debug_assert!(i < total, "fade_env is only defined inside the sound");
+    let fade = FADE_FRAMES.min(total / 2).max(1);
+    let from_start = i;
+    let from_end = total - i;
+    if from_start < fade {
+        from_start as f32 / fade as f32
+    } else if from_end <= fade {
+        from_end as f32 / fade as f32
     } else {
         1.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sound is interleaved stereo, so one output frame must advance the
+    /// playhead by one *source frame*. It used to advance by one sample index
+    /// and mask the pair, so a 440 Hz beep came out at 220 Hz over twice the
+    /// length.
+    #[test]
+    fn a_voice_plays_at_the_rate_it_was_recorded() {
+        let frames = 100;
+        let sound = Arc::new(Sound {
+            data: gen_sine(440.0, frames as f32 / 48_000.0, 48_000),
+        });
+        assert_eq!(sound.data.len(), frames * 2);
+
+        let mut voice = Voice {
+            sound: Arc::clone(&sound),
+            playhead: 0.0,
+            volume: 1.0,
+            pitch: 1.0,
+            gain_l: 1.0,
+            gain_r: 1.0,
+        };
+        // Exactly the whole sound in one block: the voice must be spent.
+        let mut buffer = vec![0.0f32; frames * 2];
+        assert!(!voice.render_block(&mut buffer) || voice.playhead >= frames as f64);
+        assert!(
+            (voice.playhead - frames as f64).abs() < 1.0,
+            "playhead at {} after {frames} frames",
+            voice.playhead,
+        );
+        // And the samples came out in source order, not each one twice.
+        assert_eq!(buffer[0], sound.data[0]);
+        assert_eq!(buffer[2], sound.data[2]);
+    }
+
+    /// A pitch ratio of 2 consumes two source frames per output frame.
+    #[test]
+    fn the_pitch_ratio_scales_the_playhead() {
+        let sound = Arc::new(Sound {
+            data: gen_sine(440.0, 200.0 / 48_000.0, 48_000),
+        });
+        let mut voice = Voice {
+            sound,
+            playhead: 0.0,
+            volume: 1.0,
+            pitch: 2.0,
+            gain_l: 1.0,
+            gain_r: 1.0,
+        };
+        let mut buffer = vec![0.0f32; 50 * 2];
+        voice.render_block(&mut buffer);
+        assert!((voice.playhead - 100.0).abs() < 1e-6, "{}", voice.playhead);
+    }
+
+    /// Sound ids are 1-based and `id - 1` underflows a `u32` at zero.
+    #[test]
+    fn sound_id_zero_is_ignored_rather_than_underflowing() {
+        let mut audio = Audio::new(true);
+        audio.play_panned(0, 0.0);
+        audio.play_panned(9999, 0.0);
+        assert_eq!(audio.queue.inner.lock().unwrap().len(), 0);
+        audio.play_panned(SOUND_BOUNCE, 0.0);
+        assert_eq!(audio.queue.inner.lock().unwrap().len(), 1);
+    }
+
+    /// A sound shorter than the fade window still has a defined envelope.
+    #[test]
+    fn a_very_short_sound_does_not_underflow_the_fade() {
+        for total in 1..=8usize {
+            for i in 0..total {
+                let env = fade_env(i, total);
+                assert!((0.0..=1.0).contains(&env), "fade_env({i}, {total}) = {env}",);
+            }
+        }
+        // And a 10-frame sound really is under the 60-frame fade window.
+        let short = gen_sine(440.0, 10.0 / 48_000.0, 48_000);
+        assert_eq!(short.len(), 20);
+        assert!(short.iter().all(|s| s.is_finite()));
     }
 }

@@ -113,7 +113,7 @@ pub mod image;
 use std::path::{Path, PathBuf};
 
 pub use compare::{Comparison, Failure, Tolerance, compare, diff_image, ssim};
-pub use image::{ChannelOrder, Image, ImageError};
+pub use image::{ChannelOrder, Image, ImageError, MAX_PIXELS};
 
 /// The environment variable that turns a comparison into a regeneration.
 pub const BLESS_ENV: &str = "CRCBL_BLESS";
@@ -321,7 +321,7 @@ mod tests {
     }
 
     fn picture(shift: u32) -> Image {
-        let mut image = Image::filled(32, 32, [5, 10, 20, 255]);
+        let mut image = Image::filled(32, 32, [5, 10, 20, 255]).expect("a valid test image");
         for y in 8..24 {
             for x in (8 + shift)..(24 + shift) {
                 image.set_pixel(x, y, [200, 100, 50, 255]);

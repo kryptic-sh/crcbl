@@ -83,7 +83,7 @@ impl ReplayWriter {
 
     /// Record one tick's server output message.
     ///
-    /// `msg` should be an encoded [`ServerToClient`] message as produced by
+    /// `msg` should be an encoded `ServerToClient` message as produced by
     /// the server's snapshot emission.
     pub fn push_tick(&mut self, tick: TickId, msg: &[u8]) {
         self.entries.push((tick, msg.to_vec()));

@@ -137,14 +137,17 @@ impl Comparison {
     /// message and for a CI log.
     #[must_use]
     pub fn summary(&self) -> String {
+        // In `u64`, like `compare`'s own `pixel_count`: `width * height` in
+        // `u32` overflows at 4K by 16K, and a percentage computed from a
+        // wrapped denominator is worse than no percentage.
+        let pixel_count = u64::from(self.width.max(1)) * u64::from(self.height.max(1));
         let mut text = format!(
             "{}x{}: {} pixel(s) differ at all ({:.4}%), max channel delta {}, {} over \
              tolerance ({:.4}%), mean abs error {:.4}, rmse {:.4}, ssim {:.6}",
             self.width,
             self.height,
             self.differing_pixels,
-            self.differing_pixels as f64 / f64::from(self.width.max(1) * self.height.max(1))
-                * 100.0,
+            self.differing_pixels as f64 / pixel_count as f64 * 100.0,
             self.max_channel_delta,
             self.failing_pixels,
             self.failing_ratio * 100.0,
@@ -336,7 +339,9 @@ fn luma(image: &Image) -> Vec<f64> {
 /// picture of what happened.
 #[must_use]
 pub fn diff_image(reference: &Image, actual: &Image) -> Image {
-    let mut diff = Image::filled(reference.width(), reference.height(), [0, 0, 0, 255]);
+    // `filled_like` rather than `filled`: `reference` is already a valid image,
+    // so no size check can fail here and this function needs no `Result`.
+    let mut diff = Image::filled_like(reference, [0, 0, 0, 255]);
     for y in 0..reference.height() {
         for x in 0..reference.width() {
             let Some(left) = reference.pixel(x, y) else {
@@ -385,7 +390,8 @@ mod tests {
     /// A picture with structure: a filled triangle, so "moved" and "missing"
     /// are distinguishable from "slightly different at the edges".
     fn triangle(width: u32, height: u32, offset: i32) -> Image {
-        let mut image = Image::filled(width, height, [10, 20, 40, 255]);
+        let mut image =
+            Image::filled(width, height, [10, 20, 40, 255]).expect("a valid test image");
         for y in 0..height {
             let half = (y * width) / (2 * height.max(1));
             let centre = i64::from(width) / 2 + i64::from(offset);
@@ -459,8 +465,8 @@ mod tests {
     /// as different as two pixels can be.
     #[test]
     fn a_luma_preserving_recolour_is_invisible_to_ssim_and_caught_per_pixel() {
-        let reference = Image::filled(64, 48, [255, 0, 0, 255]);
-        let recoloured = Image::filled(64, 48, [0, 130, 0, 255]);
+        let reference = Image::filled(64, 48, [255, 0, 0, 255]).expect("a valid test image");
+        let recoloured = Image::filled(64, 48, [0, 130, 0, 255]).expect("a valid test image");
 
         let structural_only = Tolerance {
             max_channel_delta: 255,
@@ -493,8 +499,8 @@ mod tests {
     /// reason to distrust the metric rather than to pair it.
     #[test]
     fn a_recolour_that_changes_luma_moves_ssim_as_well() {
-        let dark = Image::filled(64, 48, [10, 20, 30, 255]);
-        let bright = Image::filled(64, 48, [200, 210, 220, 255]);
+        let dark = Image::filled(64, 48, [10, 20, 30, 255]).expect("a valid test image");
+        let bright = Image::filled(64, 48, [200, 210, 220, 255]).expect("a valid test image");
         let result = compare(&dark, &bright, &Tolerance::RASTERISER);
         assert!(!result.is_match());
         assert!(
@@ -576,7 +582,7 @@ mod tests {
     #[test]
     fn a_blank_frame_never_matches_a_drawn_one() {
         let reference = triangle(64, 48, 0);
-        let blank = Image::filled(64, 48, [0, 0, 0, 255]);
+        let blank = Image::filled(64, 48, [0, 0, 0, 255]).expect("a valid test image");
         let result = compare(&reference, &blank, &Tolerance::RASTERISER);
         assert!(!result.is_match(), "{}", result.summary());
         assert!(result.ssim < 0.5, "ssim {}", result.ssim);
@@ -600,8 +606,8 @@ mod tests {
     /// silently scored 1.0.
     #[test]
     fn images_smaller_than_a_block_are_still_measured() {
-        let reference = Image::filled(3, 3, [0, 0, 0, 255]);
-        let other = Image::filled(3, 3, [255, 255, 255, 255]);
+        let reference = Image::filled(3, 3, [0, 0, 0, 255]).expect("a valid test image");
+        let other = Image::filled(3, 3, [255, 255, 255, 255]).expect("a valid test image");
         assert!(
             ssim(&reference, &other) < 0.5,
             "a 3x3 black/white pair must not score as identical: {}",
@@ -625,7 +631,10 @@ mod tests {
         for value in [
             forward,
             ssim(&a, &a),
-            ssim(&a, &Image::filled(64, 48, [0; 4])),
+            ssim(
+                &a,
+                &Image::filled(64, 48, [0; 4]).expect("a valid test image"),
+            ),
         ] {
             assert!((0.0..=1.0).contains(&value), "{value}");
         }

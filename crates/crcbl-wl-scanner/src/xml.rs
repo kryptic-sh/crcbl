@@ -104,11 +104,18 @@ impl<'a> Reader<'a> {
                 self.pos += end + 2;
             } else if rest.starts_with("<!") {
                 // `<!DOCTYPE …>` — no internal subset appears in any Wayland
-                // protocol file, so a flat scan to `>` is correct here and a
-                // parse error if that ever stops being true.
+                // protocol file, so a flat scan to `>` is correct here. An
+                // internal subset (`<!DOCTYPE p [ … ]>`) is refused rather than
+                // scanned past: a flat scan stops at the first `>` inside the
+                // subset and leaves the rest of it — `]>` included — to be
+                // re-parsed as document content, which is a silent mis-parse of
+                // exactly the kind this reader promises not to perform.
                 let Some(end) = rest.find('>') else {
                     return self.error("unterminated declaration");
                 };
+                if rest[..end].contains('[') {
+                    return self.error("DOCTYPE with an internal subset is not supported");
+                }
                 self.pos += end + 1;
             } else {
                 return Ok(true);
@@ -122,20 +129,28 @@ impl<'a> Reader<'a> {
     ///
     /// [`XmlError`] if the document is malformed anywhere the reader looks.
     pub fn next_node(&mut self) -> Result<Option<Node<'a>>, XmlError> {
-        if !self.skip_noise()? {
-            return Ok(None);
-        }
-        if !self.rest().starts_with('<') {
-            // Character data up to the next tag.
+        // A loop rather than a tail call for the whitespace case. Recursing
+        // costs one stack frame per run of insignificant text, and a document
+        // that alternates whitespace and comments — `" <!--x-->"` repeated —
+        // then overflows the *build script's* stack rather than reporting an
+        // error, at a repetition count a protocol file could plausibly reach.
+        loop {
+            if !self.skip_noise()? {
+                return Ok(None);
+            }
+            if self.rest().starts_with('<') {
+                break;
+            }
+            // Character data up to the next tag. `rest` is non-empty and does
+            // not start with `<`, so this always advances `pos`.
             let rest = self.rest();
             let end = rest.find('<').unwrap_or(rest.len());
             let raw = &rest[..end];
             self.pos += end;
             let text = decode_entities(raw);
-            if text.trim().is_empty() {
-                return self.next_node();
+            if !text.trim().is_empty() {
+                return Ok(Some(Node::Text { text }));
             }
-            return Ok(Some(Node::Text { text }));
         }
 
         if let Some(after) = self.rest().strip_prefix("</") {
@@ -380,5 +395,38 @@ mod tests {
                 .to_string()
                 .contains("unterminated start tag")
         );
+    }
+
+    #[test]
+    fn a_long_run_of_insignificant_text_does_not_grow_the_stack() {
+        // This used to be a tail call per whitespace run, so the reader spent
+        // one stack frame per repetition and overflowed inside `build.rs`
+        // rather than returning. 100_000 repetitions is far past where the
+        // recursive version died and finishes instantly as a loop.
+        let mut source = String::with_capacity(11 * 100_000 + 32);
+        source.push_str("<protocol>");
+        for _ in 0..100_000 {
+            source.push_str(" <!--x-->");
+        }
+        source.push_str("</protocol>");
+        assert_eq!(
+            nodes(&source).len(),
+            2,
+            "start and end, with every comment and blank run skipped"
+        );
+    }
+
+    #[test]
+    fn a_doctype_with_an_internal_subset_is_refused_rather_than_half_skipped() {
+        // A flat scan to `>` stops inside the subset and leaves `]>` to be read
+        // back as document content — a silent mis-parse. Refusing is the
+        // contract this reader states.
+        let mut reader = Reader::new("<!DOCTYPE protocol [ <!ELEMENT protocol ANY> ]><protocol/>");
+        let error = reader.next_node().expect_err("internal subset");
+        assert!(error.to_string().contains("internal subset"), "{error}");
+
+        // A plain DOCTYPE is still skipped.
+        let nodes = nodes("<!DOCTYPE protocol SYSTEM \"wayland.dtd\"><protocol name=\"p\"/>");
+        assert_eq!(nodes.len(), 1);
     }
 }

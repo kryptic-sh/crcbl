@@ -8,6 +8,15 @@
 //! Vulkan; P1.2 drew a triangle through it. **P1.3 hands the frame to
 //! `crcbl-render`.**
 //!
+//! # The join itself lives in `crcbl::engine`
+//!
+//! Everything that is not specific to the sandbox — opening a backend, choosing
+//! an adapter that can present, the swapchain, the frames-in-flight ring,
+//! resize and teardown — moved to [`crcbl::engine::GpuContext`], which
+//! `apps/breakout/src/gpu.rs` uses too. It was the same code twice, and only
+//! this copy carried the rationale below, so the pair could only drift. Finding
+//! 3 in the list at the end of these docs asked for exactly that move.
+//!
 //! # There are no barriers in this file
 //!
 //! There used to be two, hand-written, around the render pass:
@@ -90,32 +99,22 @@
 //!    the device may outlive its instance. [`Gpu::destroy`] does it by hand;
 //!    at P1.1 a real driver with validation on agreed.
 //! 5. **The swapchain's configured extent was unobservable** — *fixed in the
-//!    seam*, [`AcquiredFrame::extent`].
+//!    seam*, `AcquiredFrame::extent`.
 //! 6. **A render pass needed a view the seam would not give it** — *fixed in
-//!    the seam*, [`AcquiredFrame::view`].
-
-use std::collections::VecDeque;
+//!    the seam*, `AcquiredFrame::view`.
 
 use crcbl::backend::GpuBackend;
-use crcbl::hal::{
-    AcquiredFrame, CommandBufferHandle, CommandEncoderDesc, DeviceDesc, Features, Format, HalError,
-    PresentInfo, PresentMode, QueueHandle, QueueKind, SemaphoreDesc, SemaphoreHandle,
-    SemaphoreKind, SemaphoreSignal, SemaphoreWait, SubmitInfo, SurfaceError, SurfaceHandle,
-    SwapchainDesc, SwapchainHandle,
-};
+pub use crcbl::engine::{FrameOutcome, GpuError};
+
+use crcbl::engine::{GpuContext, GpuContextDesc};
+use crcbl::hal::CommandEncoderDesc;
 use crcbl::prelude::*;
 use crcbl::render::{
     Camera, DirectionalLight, ForwardRenderer, PassTimers, RenderGraph, TransientPool,
 };
 use crcbl::shell::WindowId;
 
-/// How many frames may be in flight before the loop waits for the oldest.
-///
-/// Two is the classic double-buffered default: one frame being recorded while
-/// one is executing. It is `crcbl-render`'s constant because the uniform ring
-/// has to be the same depth — one buffer per frame in flight, or a spinning
-/// camera is a read-after-write hazard across submissions.
-const FRAMES_IN_FLIGHT: usize = crcbl::render::forward::FRAMES_IN_FLIGHT;
+const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
 
 /// How many passes the per-pass GPU timers can bracket.
 ///
@@ -123,47 +122,10 @@ const FRAMES_IN_FLIGHT: usize = crcbl::render::forward::FRAMES_IN_FLIGHT;
 /// resize of the query sets, and costs sixteen timestamps.
 const MAX_TIMED_PASSES: u32 = 8;
 
-/// What one [`Gpu::frame`] did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FrameOutcome {
-    /// The frame was recorded, submitted and presented.
-    Presented,
-    /// The swapchain no longer matched the surface, so it was reconfigured and
-    /// this frame was skipped. Expected traffic during a resize, not an error.
-    Reconfigured,
-}
-
-/// The engine's GPU side, driven entirely through the `crcbl-hal` seam.
-///
-/// Nothing in this struct names a backend. [`Gpu::open`] asks
-/// [`crcbl::backend::open_backend`] for one **by value** and everything after
-/// it is `dyn Instance` / `dyn Device` — which is what made P1.1's swap from
-/// the null backend to `crcbl-vk` a change to one argument rather than to this
-/// file.
+/// The sandbox's GPU side: the shared join plus the milestone 3–5 renderer.
 #[derive(Debug)]
 pub struct Gpu {
-    instance: Box<dyn Instance>,
-    device: Box<dyn Device>,
-    queue: QueueHandle,
-    surface: SurfaceHandle,
-    swapchain: SwapchainHandle,
-    /// Everything `create_swapchain` was last called with, so a resize
-    /// reconfigures with one field changed rather than a fresh guess.
-    config: SwapchainConfig,
-    /// `None` on a device without timeline semaphores; see the module docs.
-    timeline: Option<SemaphoreHandle>,
-    /// Submissions issued so far, and therefore the value the next one signals.
-    submitted: u64,
-    in_flight: VecDeque<(u64, CommandBufferHandle)>,
-    /// The extent the swapchain was last *configured* at, from
-    /// [`AcquiredFrame::extent`]. Distinct from `config.extent`, which is what
-    /// the shell asked for.
-    configured_extent: (u32, u32),
-    /// Scratch, reused every frame so a steady-state frame allocates nothing.
-    waits: Vec<SemaphoreWait>,
-    signals: Vec<SemaphoreSignal>,
-
-    // --- P1.3: the frame is a graph ---
+    ctx: GpuContext,
     renderer: ForwardRenderer,
     pool: TransientPool,
     /// `None` on a device without timestamp queries — the report degrades, the
@@ -181,80 +143,11 @@ pub struct Gpu {
     dumped: bool,
 }
 
-/// The swapchain parameters, kept so a reconfigure changes exactly one of them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SwapchainConfig {
-    format: Format,
-    extent: (u32, u32),
-    image_count: u32,
-    present_mode: PresentMode,
-}
-
-/// What can go wrong between the window and the device.
-#[derive(Debug)]
-pub enum GpuError {
-    /// No GPU backend could be opened at all.
-    NoBackend(crcbl::backend::GpuError),
-    /// The backend has no adapter, no graphics queue, or no usable format.
-    Unusable(&'static str),
-    /// A HAL call failed.
-    Hal(HalError),
-    /// A surface or swapchain call failed.
-    Surface(SurfaceError),
-    /// The render graph refused the frame.
-    Graph(crcbl::render::GraphError),
-}
-
-impl std::fmt::Display for GpuError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoBackend(error) => write!(
-                f,
-                "{error}\n\
-                 hint: `--backend null` runs the same loop against the recording \
-                 no-op backend, which needs no driver."
-            ),
-            Self::Unusable(what) => write!(f, "the backend is unusable: {what}"),
-            Self::Hal(error) => write!(f, "{error}"),
-            Self::Surface(error) => write!(f, "{error}"),
-            Self::Graph(error) => write!(f, "render graph: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for GpuError {}
-
-impl From<crcbl::backend::GpuError> for GpuError {
-    fn from(error: crcbl::backend::GpuError) -> Self {
-        Self::NoBackend(error)
-    }
-}
-
-impl From<HalError> for GpuError {
-    fn from(error: HalError) -> Self {
-        Self::Hal(error)
-    }
-}
-
-impl From<SurfaceError> for GpuError {
-    fn from(error: SurfaceError) -> Self {
-        Self::Surface(error)
-    }
-}
-
-impl From<crcbl::render::GraphError> for GpuError {
-    fn from(error: crcbl::render::GraphError) -> Self {
-        Self::Graph(error)
-    }
-}
-
 impl Gpu {
-    /// Creates an instance, a surface for `window`, a device, a swapchain and
-    /// the forward renderer.
+    /// Opens the join and builds the forward renderer on top of it.
     ///
     /// `extent` must come from the window system — call this only after the
-    /// first configure, because a swapchain needs a size and an unconfigured
-    /// window does not have one.
+    /// first configure.
     ///
     /// # Errors
     ///
@@ -267,162 +160,27 @@ impl Gpu {
         backend: Option<GpuBackend>,
         projection: crcbl::render::Projection,
     ) -> Result<Self, GpuError> {
-        // The line that used to name `NullInstance`. It now names a *value*
-        // from a registry, which is the whole difference between "the sandbox
-        // knows about Vulkan" and "the sandbox knows there are backends".
-        let instance: Box<dyn Instance> = match backend {
-            Some(backend) => crcbl::backend::open_backend(backend)?,
-            None => crcbl::backend::open()?,
-        };
-
-        let adapters = instance.adapters();
-        if adapters.is_empty() {
-            return Err(GpuError::Unusable("no adapter"));
-        }
-
-        // The join. `shell` produced this; only a HAL backend looks inside it.
-        let target = shell
-            .surface_target(window)
-            .map_err(|_| GpuError::Unusable("the window went away before its surface was made"))?;
-        log::debug!(
-            "hal: creating a surface for a {} target",
-            target.platform_name()
-        );
-
-        // SAFETY: `target` was produced by `shell` for a window that is live
-        // right now, so every handle in it names an object of the stated kind.
-        // The caller keeps the shell — and therefore the window — alive until
-        // after `destroy`, which tears the swapchain and surface down first.
-        // This is the whole `Instance::create_surface` contract, and this
-        // module is the only place in the app that can discharge it.
-        let surface = unsafe { instance.create_surface(&target) }?;
-
-        // **Adapter selection is surface-aware, and has to be.** P1.1 found a
-        // discrete radv GPU that enumerates first, is Tier A, and *cannot
-        // present to an Xvfb window* — while the software rasteriser behind it
-        // can. An `Err` here means "not this one", not "give up".
-        let mut chosen = None;
-        let mut last_error = None;
-        for adapter in &adapters {
-            match instance.surface_caps(surface, adapter.id) {
-                Ok(caps) if caps.preferred_format().is_some() => {
-                    chosen = Some((adapter.clone(), caps));
-                    break;
-                }
-                Ok(_) => log::debug!(
-                    "hal: adapter {:?} offers no usable surface format; trying the next",
-                    adapter.name
-                ),
-                Err(error) => {
-                    log::debug!(
-                        "hal: adapter {:?} cannot serve this surface ({error}); trying the next",
-                        adapter.name
-                    );
-                    last_error = Some(error);
-                }
-            }
-        }
-        let Some((adapter, caps)) = chosen else {
-            instance.destroy_surface(surface);
-            return Err(match last_error {
-                Some(error) => error.into(),
-                None => GpuError::Unusable("no adapter can present to this window"),
-            });
-        };
-        log::info!(
-            "hal: {} adapter {:?} ({:?}), tier {:?}",
-            instance.backend(),
-            adapter.name,
-            adapter.device_type,
-            adapter.caps.tier()
-        );
-
-        if let Some(reported) = caps.current_extent
-            && reported != extent
-        {
-            log::info!(
-                "hal: surface reports {reported:?} but the shell configured {extent:?}; \
-                 using the shell's size"
-            );
-        }
-        let format = caps
-            .preferred_format()
-            .ok_or(GpuError::Unusable("the surface offers no format"))?;
-        let present_mode = caps.choose_present_mode(&[PresentMode::Mailbox, PresentMode::Fifo]);
-        let image_count = caps
-            .min_image_count
-            .saturating_add(1)
-            .min(caps.max_image_count);
-
-        let device = instance.create_device(&DeviceDesc {
-            label: Some("sandbox"),
-            adapter: adapter.id,
-            // Nothing here needs a feature, and demanding `TIER_A` would refuse
-            // to run on the Tier B devices `docs/plan/02-vulkan-backend.md`
-            // requires the engine to support. Ask for everything optionally and
-            // branch on what came back.
-            required_features: Features::empty(),
-            // `TIMESTAMP_QUERY` is deliberately not part of `TIER_A` — topic
-            // 10's browsers may lack it — so the per-pass timers have to be
-            // asked for by name. Absent, `PassTimers::new` declines and the
-            // frame runs untimed.
-            optional_features: Features::TIER_A
-                | Features::TIMESTAMP_QUERY
-                | Features::DEBUG_MARKERS,
-            compatible_surface: Some(surface),
-        })?;
-        let queue = device
-            .queue(QueueKind::Graphics)
-            .ok_or(GpuError::Unusable("no graphics queue"))?;
-
-        let config = SwapchainConfig {
-            format,
+        let ctx = GpuContext::open(
+            shell,
+            window,
             extent,
-            image_count,
-            present_mode,
-        };
-        let swapchain = device.create_swapchain(&config.desc(surface))?;
-        log::info!(
-            "hal: swapchain {}x{} {format:?} {present_mode:?} ({image_count} images)",
-            extent.0,
-            extent.1
-        );
-
-        let timeline = if device
-            .caps()
-            .features
-            .contains(Features::TIMELINE_SEMAPHORE)
-        {
-            Some(device.create_semaphore(&SemaphoreDesc {
-                label: Some("sandbox frames in flight"),
-                kind: SemaphoreKind::Timeline { initial_value: 0 },
-            })?)
-        } else {
-            log::debug!("hal: no timeline semaphores; retiring command buffers with wait_idle");
-            None
-        };
+            &GpuContextDesc {
+                label: "sandbox",
+                backend,
+                ..GpuContextDesc::default()
+            },
+        )?;
 
         // Milestones 3–5. Built after the swapchain because the tonemap
         // pipeline has to name the colour format the pass will render to.
-        let renderer = ForwardRenderer::new(device.as_ref(), queue, format)?;
-        let timers = PassTimers::new(device.as_ref(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
+        let renderer = ForwardRenderer::new(ctx.device(), ctx.queue(), ctx.format())?;
+        let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
         if timers.is_none() {
             log::info!("hal: no timestamp queries on this device; per-pass timing is off");
         }
 
         Ok(Self {
-            instance,
-            device,
-            queue,
-            surface,
-            swapchain,
-            config,
-            timeline,
-            submitted: 0,
-            in_flight: VecDeque::with_capacity(FRAMES_IN_FLIGHT + 1),
-            configured_extent: extent,
-            waits: Vec::with_capacity(1),
-            signals: Vec::with_capacity(2),
+            ctx,
             renderer,
             pool: TransientPool::new(),
             timers,
@@ -435,14 +193,14 @@ impl Gpu {
 
     /// The swapchain's current size — the one it was **configured** at.
     #[must_use]
-    pub fn extent(&self) -> (u32, u32) {
-        self.configured_extent
+    pub const fn extent(&self) -> (u32, u32) {
+        self.ctx.extent()
     }
 
     /// The format the swapchain was created with. Test-only.
     #[cfg(test)]
-    pub fn format(&self) -> Format {
-        self.config.format
+    pub const fn format(&self) -> crcbl::hal::Format {
+        self.ctx.format()
     }
 
     /// The most recent frame whose per-pass GPU timings have landed.
@@ -460,88 +218,41 @@ impl Gpu {
     /// Driven by the loop's clock rather than read from one here, so a headless
     /// run renders the same cube on every machine — which is what makes a
     /// golden image of it worth anything.
-    pub fn advance(&mut self, dt: f32) {
+    pub const fn advance(&mut self, dt: f32) {
         self.elapsed += dt;
     }
 
-    /// Records, submits and presents one frame.
+    /// Builds this frame's graph, compiles it, executes it, submits and
+    /// presents.
+    ///
+    /// **The whole frame, and not one barrier in it.**
     ///
     /// # Errors
     ///
     /// [`GpuError`] for anything except a swapchain that has merely gone out of
-    /// date, which is handled here and reported as
-    /// [`FrameOutcome::Reconfigured`].
+    /// date, which is reported as [`FrameOutcome::Reconfigured`].
     pub fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
-        let acquired = match self.device.acquire_next_frame(self.swapchain) {
-            Ok(frame) => frame,
-            // Expected traffic after a resize, per the seam's docs: reconfigure
-            // and let the next frame have the image.
-            Err(SurfaceError::OutOfDate) => {
-                self.reconfigure()?;
-                return Ok(FrameOutcome::Reconfigured);
-            }
-            Err(error) => return Err(error.into()),
-        };
-
-        // Obligation 3: the answer, not the request.
-        if acquired.extent != self.configured_extent {
-            log::debug!(
-                "hal: swapchain configured at {:?} (the shell asked for {:?})",
-                acquired.extent,
-                self.config.extent
-            );
-            self.configured_extent = acquired.extent;
+        let Some(acquired) = self.ctx.acquire()? else {
             // The graph's shape changed, so the dump is worth printing again.
             self.dumped = false;
-        }
-
-        self.record_and_submit(&acquired)?;
-        match self.device.present(
-            self.queue,
-            &PresentInfo {
-                swapchain: self.swapchain,
-                waits: acquired.present_semaphore.as_slice(),
-            },
-        ) {
-            Ok(()) => {}
-            // **Present is the usual place a resize is noticed**, not acquire.
-            Err(SurfaceError::OutOfDate) => {
-                self.reconfigure()?;
-                return Ok(FrameOutcome::Reconfigured);
-            }
-            Err(error) => return Err(error.into()),
-        }
-
-        if acquired.suboptimal {
-            log::debug!("hal: swapchain suboptimal; reconfiguring after present");
-            self.reconfigure()?;
-        }
-        Ok(FrameOutcome::Presented)
-    }
-
-    /// Builds this frame's graph, compiles it, executes it and submits.
-    ///
-    /// **The whole frame, and not one barrier in it.**
-    fn record_and_submit(&mut self, acquired: &AcquiredFrame) -> Result<(), GpuError> {
+            return Ok(FrameOutcome::Reconfigured);
+        };
         let extent = acquired.extent;
+
         self.renderer.begin_frame(
-            self.device.as_ref(),
+            self.ctx.device(),
             &self.camera,
             &self.light,
             ForwardRenderer::spin(self.elapsed),
             extent,
         )?;
 
+        let format = self.ctx.format();
         let compiled = {
-            let mut graph = RenderGraph::new(self.queue);
+            let mut graph = RenderGraph::new(self.ctx.queue());
             let target = graph.import_image(
                 "swapchain",
-                ForwardRenderer::present_target(
-                    acquired.image,
-                    acquired.view,
-                    self.config.format,
-                    extent,
-                ),
+                ForwardRenderer::present_target(acquired.image, acquired.view, format, extent),
             );
             let _hdr = self.renderer.add_passes(&mut graph, target, extent);
             // The pool is what remembers the previous frame, so the barriers
@@ -558,78 +269,29 @@ impl Gpu {
             self.dumped = true;
         }
 
-        let mut encoder = self.device.create_command_encoder(&CommandEncoderDesc {
-            label: Some("sandbox frame"),
-            queue: self.queue,
-        });
+        let mut encoder = self
+            .ctx
+            .device()
+            .create_command_encoder(&CommandEncoderDesc {
+                label: Some("sandbox frame"),
+                queue: self.ctx.queue(),
+            });
         compiled.execute(
-            self.device.as_ref(),
+            self.ctx.device(),
             &mut self.pool,
             encoder.as_mut(),
             self.timers.as_mut(),
         )?;
         let command_buffer = encoder.finish()?;
 
-        self.submitted += 1;
-        let value = self.submitted;
-
-        self.waits.clear();
-        self.waits
-            .extend(acquired.acquire_semaphore.map(|semaphore| SemaphoreWait {
-                semaphore,
-                value: 0,
-            }));
-        self.signals.clear();
-        self.signals
-            .extend(acquired.present_semaphore.map(|semaphore| SemaphoreSignal {
-                semaphore,
-                value: 0,
-            }));
-        self.signals.extend(self.timeline.map(|semaphore| {
-            SemaphoreSignal {
-                semaphore,
-                // A timeline value is monotonic, so the frame number *is* the
-                // value and no rotation is needed.
-                value,
-            }
-        }));
-
-        self.device.submit(
-            self.queue,
-            &SubmitInfo {
-                command_buffers: &[command_buffer],
-                waits: &self.waits,
-                signals: &self.signals,
-            },
-        )?;
-        self.in_flight.push_back((value, command_buffer));
-        self.retire_to(FRAMES_IN_FLIGHT)?;
-        // Only after the retire above, so nothing the pool destroys can still be
-        // referenced by a submission that has not completed.
-        self.pool.retire_unused(self.device.as_ref());
-        Ok(())
-    }
-
-    /// Waits for and destroys command buffers until at most `keep` are in
-    /// flight.
-    fn retire_to(&mut self, keep: usize) -> Result<(), GpuError> {
-        while self.in_flight.len() > keep {
-            let (value, command_buffer) = self
-                .in_flight
-                .pop_front()
-                .unwrap_or_else(|| unreachable!("the queue is non-empty above"));
-            match self.timeline {
-                Some(semaphore) => {
-                    self.device
-                        .wait_semaphores(&[SemaphoreWait { semaphore, value }], u64::MAX)?;
-                }
-                // The Tier B fallback. Correct, and coarse enough that the log
-                // line above exists to explain the frame rate.
-                None => self.device.wait_idle()?,
-            }
-            self.device.destroy_command_buffer(command_buffer);
+        let outcome = self.ctx.submit_and_present(&acquired, command_buffer)?;
+        // Only after the submit's retire, so nothing the pool destroys can
+        // still be referenced by a submission that has not completed.
+        self.pool.retire_unused(self.ctx.device());
+        if outcome == FrameOutcome::Reconfigured {
+            self.dumped = false;
         }
-        Ok(())
+        Ok(outcome)
     }
 
     /// Resizes the swapchain to `extent`.
@@ -640,27 +302,7 @@ impl Gpu {
     /// — a minimized window reports one, and the swapchain is simply left
     /// alone.
     pub fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError> {
-        if extent == self.config.extent {
-            return Ok(());
-        }
-        if extent.0 == 0 || extent.1 == 0 {
-            log::debug!("hal: window has an empty extent {extent:?}; keeping the swapchain");
-            return Ok(());
-        }
-        self.config.extent = extent;
-        self.reconfigure()
-    }
-
-    fn reconfigure(&mut self) -> Result<(), GpuError> {
-        log::debug!(
-            "hal: reconfiguring the swapchain to {}x{}",
-            self.config.extent.0,
-            self.config.extent.1
-        );
-        // Reconfigure, never destroy-and-recreate: the handle stays valid
-        // across a resize storm, which is what the seam promises callers.
-        self.device
-            .reconfigure_swapchain(self.swapchain, &self.config.desc(self.surface))?;
+        self.ctx.resize(extent)?;
         self.dumped = false;
         Ok(())
     }
@@ -672,35 +314,12 @@ impl Gpu {
     /// [`GpuError`] if waiting for outstanding work failed.
     pub fn destroy(mut self) -> Result<(), GpuError> {
         // Nothing may be destroyed while the device might still be using it.
-        self.device.wait_idle()?;
-        self.retire_to(0)?;
-        self.pool.destroy(self.device.as_ref());
+        self.ctx.drain()?;
+        self.pool.destroy(self.ctx.device());
         if let Some(timers) = self.timers.as_mut() {
-            timers.destroy(self.device.as_ref());
+            timers.destroy(self.ctx.device());
         }
-        self.renderer.destroy(self.device.as_ref());
-        if let Some(semaphore) = self.timeline.take() {
-            self.device.destroy_semaphore(semaphore);
-        }
-        // Swapchain before surface, surface before the window the caller owns;
-        // the device is allowed to outlive its instance, so their drop order is
-        // the one the struct declares.
-        self.device.destroy_swapchain(self.swapchain);
-        self.instance.destroy_surface(self.surface);
-        Ok(())
-    }
-}
-
-impl SwapchainConfig {
-    fn desc(self, surface: SurfaceHandle) -> SwapchainDesc<'static> {
-        SwapchainDesc {
-            label: Some("sandbox swapchain"),
-            surface,
-            format: self.format,
-            extent: self.extent,
-            image_count: self.image_count,
-            present_mode: self.present_mode,
-            composite_alpha: crcbl::hal::CompositeAlpha::Opaque,
-        }
+        self.renderer.destroy(self.ctx.device());
+        self.ctx.destroy()
     }
 }

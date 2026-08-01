@@ -1,18 +1,16 @@
-//! GPU setup for breakout: shell surface → device → swapchain → render graph.
+//! GPU setup for breakout: the shared [`crcbl::engine`] join plus this game's
+//! own renderers.
 //!
-//! Mirrors `apps/sandbox/src/gpu.rs` but locks the camera to orthographic
-//! projection. The ForwardRenderer still draws the lit cube — Slice 2+ will add
-//! 2D sprite/quad rendering on top.
-
-use std::collections::VecDeque;
+//! Everything that is not specific to breakout — opening a backend, choosing an
+//! adapter that can present, the swapchain, the frames-in-flight ring, resize
+//! and teardown — lives in [`crcbl::engine::GpuContext`], which
+//! `apps/sandbox/src/gpu.rs` uses too. This file is what is left: an
+//! orthographic camera, the forward renderer, the UI compositor, and the graph
+//! that joins them.
 
 use crcbl::backend::GpuBackend;
-use crcbl::hal::{
-    AcquiredFrame, CommandBufferHandle, CommandEncoderDesc, DeviceDesc, Features, Format, HalError,
-    PresentInfo, PresentMode, QueueHandle, QueueKind, SemaphoreDesc, SemaphoreHandle,
-    SemaphoreKind, SemaphoreSignal, SemaphoreWait, SubmitInfo, SurfaceError, SurfaceHandle,
-    SwapchainDesc, SwapchainHandle,
-};
+use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError};
+use crcbl::hal::{CommandEncoderDesc, Features};
 use crcbl::math::{Mat4, Vec3};
 use crcbl::prelude::*;
 use crcbl::render::{
@@ -23,110 +21,27 @@ use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::text::FontAtlas;
 
-const FRAMES_IN_FLIGHT: usize = crcbl::render::forward::FRAMES_IN_FLIGHT;
+const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
 const MAX_TIMED_PASSES: u32 = 8;
 
-// ---- outcome ----------------------------------------------------------------
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FrameOutcome {
-    Presented,
-    Reconfigured,
-}
-
-// ---- error ------------------------------------------------------------------
-
-#[derive(Debug)]
-pub enum GpuError {
-    NoBackend(crcbl::backend::GpuError),
-    Unusable(&'static str),
-    Hal(HalError),
-    Surface(SurfaceError),
-    Graph(crcbl::render::GraphError),
-}
-
-impl std::fmt::Display for GpuError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoBackend(error) => write!(f, "{error}"),
-            Self::Unusable(what) => write!(f, "backend unusable: {what}"),
-            Self::Hal(error) => write!(f, "{error}"),
-            Self::Surface(error) => write!(f, "{error}"),
-            Self::Graph(error) => write!(f, "render graph: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for GpuError {}
-
-impl From<crcbl::backend::GpuError> for GpuError {
-    fn from(e: crcbl::backend::GpuError) -> Self {
-        Self::NoBackend(e)
-    }
-}
-impl From<HalError> for GpuError {
-    fn from(e: HalError) -> Self {
-        Self::Hal(e)
-    }
-}
-impl From<SurfaceError> for GpuError {
-    fn from(e: SurfaceError) -> Self {
-        Self::Surface(e)
-    }
-}
-impl From<crcbl::render::GraphError> for GpuError {
-    fn from(e: crcbl::render::GraphError) -> Self {
-        Self::Graph(e)
-    }
-}
-
-// ---- config -----------------------------------------------------------------
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SwapchainConfig {
-    format: Format,
-    extent: (u32, u32),
-    image_count: u32,
-    present_mode: PresentMode,
-}
-
-impl SwapchainConfig {
-    fn desc(self, surface: SurfaceHandle) -> SwapchainDesc<'static> {
-        SwapchainDesc {
-            label: Some("breakout swapchain"),
-            surface,
-            format: self.format,
-            extent: self.extent,
-            image_count: self.image_count,
-            present_mode: self.present_mode,
-            composite_alpha: crcbl::hal::CompositeAlpha::Opaque,
-        }
-    }
-}
+/// Half the vertical extent of the orthographic camera, in world units.
+///
+/// Public because `app.rs` derives its world→screen mapping from it: the UI
+/// quads that draw the ball and the bricks have to land where this projection
+/// puts them, and two copies of the number would drift.
+pub const CAMERA_HALF_HEIGHT: f32 = 9.0;
 
 // ---- Gpu --------------------------------------------------------------------
 
 #[derive(Debug)]
 pub struct Gpu {
-    instance: Box<dyn Instance>,
-    device: Box<dyn Device>,
-    queue: QueueHandle,
-    surface: SurfaceHandle,
-    swapchain: SwapchainHandle,
-    config: SwapchainConfig,
-    timeline: Option<SemaphoreHandle>,
-    submitted: u64,
-    in_flight: VecDeque<(u64, CommandBufferHandle)>,
-    configured_extent: (u32, u32),
-    waits: Vec<SemaphoreWait>,
-    signals: Vec<SemaphoreSignal>,
-
+    ctx: GpuContext,
     renderer: ForwardRenderer,
     pool: TransientPool,
     timers: Option<PassTimers>,
     camera: Camera,
     light: DirectionalLight,
-    /// Interpolated paddle X position (updated each frame from game state).
+    /// Paddle X for this frame, from the game state.
     paddle_x: f64,
     /// UI compositing.
     ui: UiRenderer,
@@ -136,8 +51,8 @@ pub struct Gpu {
 }
 
 impl Gpu {
-    /// Opens a GPU backend, creates a surface, device, swapchain, and forward
-    /// renderer. Camera is locked to orthographic projection.
+    /// Opens a GPU backend, a surface, a device and a swapchain, and builds the
+    /// forward and UI renderers. The camera is locked to orthographic.
     ///
     /// # Errors
     ///
@@ -148,145 +63,38 @@ impl Gpu {
         extent: (u32, u32),
         backend: Option<GpuBackend>,
     ) -> Result<Self, GpuError> {
-        let instance: Box<dyn Instance> = match backend {
-            Some(backend) => crcbl::backend::open_backend(backend)?,
-            None => crcbl::backend::open()?,
-        };
-
-        let adapters = instance.adapters();
-        if adapters.is_empty() {
-            return Err(GpuError::Unusable("no adapter"));
-        }
-
-        let target = shell
-            .surface_target(window)
-            .map_err(|_| GpuError::Unusable("the window went away before its surface was made"))?;
-        log::debug!(
-            "hal: creating a surface for a {} target",
-            target.platform_name()
-        );
-
-        // SAFETY: `target` was produced by a live window; the shell outlives
-        // the surface because `destroy` tears it down first.
-        let surface = unsafe { instance.create_surface(&target) }?;
-
-        let mut chosen = None;
-        let mut last_error = None;
-        for adapter in &adapters {
-            match instance.surface_caps(surface, adapter.id) {
-                Ok(caps) if caps.preferred_format().is_some() => {
-                    chosen = Some((adapter.clone(), caps));
-                    break;
-                }
-                Ok(_) => log::debug!(
-                    "hal: adapter {:?} offers no usable surface format; trying next",
-                    adapter.name
-                ),
-                Err(error) => {
-                    log::debug!(
-                        "hal: adapter {:?} cannot serve this surface ({error}); trying next",
-                        adapter.name
-                    );
-                    last_error = Some(error);
-                }
-            }
-        }
-        let Some((adapter, caps)) = chosen else {
-            instance.destroy_surface(surface);
-            return Err(match last_error {
-                Some(error) => error.into(),
-                None => GpuError::Unusable("no adapter can present to this window"),
-            });
-        };
-        log::info!(
-            "hal: {} adapter {:?} ({:?}), tier {:?}",
-            instance.backend(),
-            adapter.name,
-            adapter.device_type,
-            adapter.caps.tier()
-        );
-
-        let format = caps
-            .preferred_format()
-            .ok_or(GpuError::Unusable("the surface offers no format"))?;
-        let present_mode = caps.choose_present_mode(&[PresentMode::Mailbox, PresentMode::Fifo]);
-        let image_count = caps
-            .min_image_count
-            .saturating_add(1)
-            .min(caps.max_image_count);
-
-        let device = instance.create_device(&DeviceDesc {
-            label: Some("breakout"),
-            adapter: adapter.id,
-            required_features: Features::empty(),
-            optional_features: Features::TIER_A
-                | Features::TIMESTAMP_QUERY
-                | Features::DEBUG_MARKERS
-                // The UI pass hands `ui.slang` its viewport size this way and
-                // has no other binding to do it through, so `UiRenderer::new`
-                // refuses a device that did not enable them.
-                | Features::PUSH_CONSTANTS,
-            compatible_surface: Some(surface),
-        })?;
-        let queue = device
-            .queue(QueueKind::Graphics)
-            .ok_or(GpuError::Unusable("no graphics queue"))?;
-
-        let config = SwapchainConfig {
-            format,
+        let ctx = GpuContext::open(
+            shell,
+            window,
             extent,
-            image_count,
-            present_mode,
-        };
-        let swapchain = device.create_swapchain(&config.desc(surface))?;
-        log::info!(
-            "hal: swapchain {}x{} {format:?} {present_mode:?} ({image_count} images)",
-            extent.0,
-            extent.1
-        );
+            &GpuContextDesc {
+                label: "breakout",
+                backend,
+                // The UI pass hands `ui.slang` its viewport size through a push
+                // constant and has no other binding to do it through, so
+                // `UiRenderer::new` refuses a device that did not enable them.
+                optional_features: Features::TIER_A
+                    | Features::TIMESTAMP_QUERY
+                    | Features::DEBUG_MARKERS
+                    | Features::PUSH_CONSTANTS,
+                ..GpuContextDesc::default()
+            },
+        )?;
 
-        let timeline = if device
-            .caps()
-            .features
-            .contains(Features::TIMELINE_SEMAPHORE)
-        {
-            Some(device.create_semaphore(&SemaphoreDesc {
-                label: Some("breakout frames in flight"),
-                kind: SemaphoreKind::Timeline { initial_value: 0 },
-            })?)
-        } else {
-            log::debug!("hal: no timeline semaphores; retiring command buffers with wait_idle");
-            None
-        };
-
-        let renderer = ForwardRenderer::new(device.as_ref(), queue, format)?;
-        let timers = PassTimers::new(device.as_ref(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
-
-        // UI renderer: creates the glyph atlas texture and UI pipeline.
-        let ui = UiRenderer::new(device.as_ref(), queue, format).map_err(GpuError::Hal)?;
-        let atlas = FontAtlas::built_in();
-        let draw_list = DrawList::new();
+        let format = ctx.format();
+        let renderer = ForwardRenderer::new(ctx.device(), ctx.queue(), format)?;
+        let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
+        let ui = UiRenderer::new(ctx.device(), ctx.queue(), format).map_err(GpuError::Hal)?;
 
         // Breakout is a 2D game: orthographic projection with reversed-Z depth.
         let camera = Camera::default().with_projection(Projection::Orthographic {
-            half_height: 9.0,
+            half_height: CAMERA_HALF_HEIGHT,
             near: 0.1,
             far: 100.0,
         });
 
         Ok(Self {
-            instance,
-            device,
-            queue,
-            surface,
-            swapchain,
-            config,
-            timeline,
-            submitted: 0,
-            in_flight: VecDeque::with_capacity(FRAMES_IN_FLIGHT + 1),
-            configured_extent: extent,
-            waits: Vec::with_capacity(1),
-            signals: Vec::with_capacity(2),
+            ctx,
             renderer,
             pool: TransientPool::new(),
             timers,
@@ -294,25 +102,26 @@ impl Gpu {
             light: DirectionalLight::default(),
             paddle_x: 0.0,
             ui,
-            atlas,
-            draw_list,
+            atlas: FontAtlas::built_in(),
+            draw_list: DrawList::new(),
             dumped: false,
         })
     }
 
     #[must_use]
-    pub fn extent(&self) -> (u32, u32) {
-        self.configured_extent
+    pub const fn extent(&self) -> (u32, u32) {
+        self.ctx.extent()
     }
 
-    /// Set the interpolated paddle X for the current frame.
-    pub fn set_paddle_x(&mut self, x: f64) {
+    /// Set the paddle X for the current frame.
+    pub const fn set_paddle_x(&mut self, x: f64) {
         self.paddle_x = x;
     }
 
-    /// Replace the draw list for this frame.
-    pub fn set_draw_list(&mut self, dl: DrawList) {
-        self.draw_list = dl;
+    /// Takes this frame's draw list, handing the previous frame's allocation
+    /// back so the caller can refill it instead of building a new one.
+    pub fn take_draw_list(&mut self, dl: &mut DrawList) {
+        std::mem::swap(&mut self.draw_list, dl);
     }
 
     #[must_use]
@@ -321,75 +130,37 @@ impl Gpu {
     }
 
     /// Records, submits and presents one frame.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] for anything except a swapchain that has merely gone out of
+    /// date, which is reported as [`FrameOutcome::Reconfigured`].
     pub fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
-        let acquired = match self.device.acquire_next_frame(self.swapchain) {
-            Ok(frame) => frame,
-            Err(SurfaceError::OutOfDate) => {
-                self.reconfigure()?;
-                return Ok(FrameOutcome::Reconfigured);
-            }
-            Err(error) => return Err(error.into()),
-        };
-
-        if acquired.extent != self.configured_extent {
-            log::debug!(
-                "hal: swapchain configured at {:?} (asked {:?})",
-                acquired.extent,
-                self.config.extent
-            );
-            self.configured_extent = acquired.extent;
+        let Some(acquired) = self.ctx.acquire()? else {
             self.dumped = false;
-        }
-
-        self.record_and_submit(&acquired)?;
-
-        match self.device.present(
-            self.queue,
-            &PresentInfo {
-                swapchain: self.swapchain,
-                waits: acquired.present_semaphore.as_slice(),
-            },
-        ) {
-            Ok(()) => {}
-            Err(SurfaceError::OutOfDate) => {
-                self.reconfigure()?;
-                return Ok(FrameOutcome::Reconfigured);
-            }
-            Err(error) => return Err(error.into()),
-        }
-
-        if acquired.suboptimal {
-            log::debug!("hal: swapchain suboptimal; reconfiguring after present");
-            self.reconfigure()?;
-        }
-        Ok(FrameOutcome::Presented)
-    }
-
-    fn record_and_submit(&mut self, acquired: &AcquiredFrame) -> Result<(), GpuError> {
+            return Ok(FrameOutcome::Reconfigured);
+        };
         let extent = acquired.extent;
+
         self.renderer.begin_frame(
-            self.device.as_ref(),
+            self.ctx.device(),
             &self.camera,
             &self.light,
             paddle_model(self.paddle_x),
             extent,
         )?;
-
-        // Upload UI geometry for this frame.
+        // Upload UI geometry for this frame: the ball, every live brick, the
+        // paddle outline and the HUD.
         self.ui
-            .begin_frame(self.device.as_ref(), &self.draw_list, &self.atlas, 1.0)
+            .begin_frame(self.ctx.device(), &self.draw_list, &self.atlas, 1.0)
             .map_err(GpuError::Hal)?;
 
+        let format = self.ctx.format();
         let compiled = {
-            let mut graph = RenderGraph::new(self.queue);
+            let mut graph = RenderGraph::new(self.ctx.queue());
             let target = graph.import_image(
                 "swapchain",
-                ForwardRenderer::present_target(
-                    acquired.image,
-                    acquired.view,
-                    self.config.format,
-                    extent,
-                ),
+                ForwardRenderer::present_target(acquired.image, acquired.view, format, extent),
             );
             let _hdr = self.renderer.add_passes(&mut graph, target, extent);
             // Composite the UI on top of the tonemapped target.
@@ -402,127 +173,74 @@ impl Gpu {
             self.dumped = true;
         }
 
-        let mut encoder = self.device.create_command_encoder(&CommandEncoderDesc {
-            label: Some("breakout frame"),
-            queue: self.queue,
-        });
+        let mut encoder = self
+            .ctx
+            .device()
+            .create_command_encoder(&CommandEncoderDesc {
+                label: Some("breakout frame"),
+                queue: self.ctx.queue(),
+            });
         compiled.execute(
-            self.device.as_ref(),
+            self.ctx.device(),
             &mut self.pool,
             encoder.as_mut(),
             self.timers.as_mut(),
         )?;
         let command_buffer = encoder.finish()?;
 
-        self.submitted += 1;
-        let value = self.submitted;
-
-        self.waits.clear();
-        self.waits
-            .extend(acquired.acquire_semaphore.map(|semaphore| SemaphoreWait {
-                semaphore,
-                value: 0,
-            }));
-        self.signals.clear();
-        self.signals
-            .extend(acquired.present_semaphore.map(|semaphore| SemaphoreSignal {
-                semaphore,
-                value: 0,
-            }));
-        self.signals.extend(
-            self.timeline
-                .map(|semaphore| SemaphoreSignal { semaphore, value }),
-        );
-
-        self.device.submit(
-            self.queue,
-            &SubmitInfo {
-                command_buffers: &[command_buffer],
-                waits: &self.waits,
-                signals: &self.signals,
-            },
-        )?;
-        self.in_flight.push_back((value, command_buffer));
-        self.retire_to(FRAMES_IN_FLIGHT)?;
-        self.pool.retire_unused(self.device.as_ref());
-        Ok(())
-    }
-
-    fn retire_to(&mut self, keep: usize) -> Result<(), GpuError> {
-        while self.in_flight.len() > keep {
-            let (value, command_buffer) = self
-                .in_flight
-                .pop_front()
-                .unwrap_or_else(|| unreachable!("the queue is non-empty above"));
-            match self.timeline {
-                Some(semaphore) => {
-                    self.device
-                        .wait_semaphores(&[SemaphoreWait { semaphore, value }], u64::MAX)?;
-                }
-                None => self.device.wait_idle()?,
-            }
-            self.device.destroy_command_buffer(command_buffer);
+        let outcome = self.ctx.submit_and_present(&acquired, command_buffer)?;
+        // Only after the submit's retire, so nothing the pool destroys can
+        // still be referenced by a submission that has not completed.
+        self.pool.retire_unused(self.ctx.device());
+        if outcome == FrameOutcome::Reconfigured {
+            self.dumped = false;
         }
-        Ok(())
+        Ok(outcome)
     }
 
+    /// Resizes the swapchain.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the reconfigure failed.
     pub fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError> {
-        if extent == self.config.extent {
-            return Ok(());
-        }
-        if extent.0 == 0 || extent.1 == 0 {
-            log::debug!("hal: window has empty extent {extent:?}; keeping swapchain");
-            return Ok(());
-        }
-        self.config.extent = extent;
-        self.reconfigure()
-    }
-
-    fn reconfigure(&mut self) -> Result<(), GpuError> {
-        log::debug!(
-            "hal: reconfiguring swapchain to {}x{}",
-            self.config.extent.0,
-            self.config.extent.1
-        );
-        self.device
-            .reconfigure_swapchain(self.swapchain, &self.config.desc(self.surface))?;
+        self.ctx.resize(extent)?;
         self.dumped = false;
         Ok(())
     }
 
+    /// Releases everything, in dependency order.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if waiting for outstanding work failed.
     pub fn destroy(mut self) -> Result<(), GpuError> {
-        self.device.wait_idle()?;
-        self.retire_to(0)?;
-        self.ui.destroy(self.device.as_ref());
-        self.pool.destroy(self.device.as_ref());
+        // Nothing may be destroyed while the device might still be using it.
+        self.ctx.drain()?;
+        self.ui.destroy(self.ctx.device());
+        self.pool.destroy(self.ctx.device());
         if let Some(timers) = self.timers.as_mut() {
-            timers.destroy(self.device.as_ref());
+            timers.destroy(self.ctx.device());
         }
-        self.renderer.destroy(self.device.as_ref());
-        if let Some(semaphore) = self.timeline.take() {
-            self.device.destroy_semaphore(semaphore);
-        }
-        self.device.destroy_swapchain(self.swapchain);
-        self.instance.destroy_surface(self.surface);
-        Ok(())
+        self.renderer.destroy(self.ctx.device());
+        self.ctx.destroy()
     }
 }
 
-/// Model matrix for the paddle: a wide, flat rectangle at `(x, PADDLE_Y, 0)`.
+/// Model matrix for the paddle: a wide, flat box at `(x, PADDLE_Y, 0)`.
 ///
-/// The cube is 1×1×1 centred at origin. We scale X to the paddle width,
-/// flatten Y and Z, and translate to the paddle position.
+/// The cube is 1×1×1 centred at origin, so this scales it to the paddle's
+/// collider extents and translates it to the paddle position.
 ///
-/// # Constants
-const PADDLE_HALF_WIDTH: f64 = 5.0;
-const PADDLE_Y: f64 = -8.0;
-const PADDLE_THICKNESS: f64 = 0.3;
-
+/// Every number comes from `game.rs`. They used to be re-declared privately in
+/// this file with the same values, so changing the collider moved the paddle
+/// the ball bounces off without moving the one on screen.
 fn paddle_model(x: f64) -> Mat4 {
+    use crate::game::{PADDLE_HALF_HEIGHT, PADDLE_HALF_WIDTH, PADDLE_Y};
     let scale = Vec3::new(
-        PADDLE_HALF_WIDTH as f32 * 2.0,
-        PADDLE_THICKNESS as f32,
-        PADDLE_THICKNESS as f32,
+        (PADDLE_HALF_WIDTH * 2.0) as f32,
+        (PADDLE_HALF_HEIGHT * 2.0) as f32,
+        (PADDLE_HALF_HEIGHT * 2.0) as f32,
     );
     let translation = Vec3::new(x as f32, PADDLE_Y as f32, 0.0);
     Mat4::from_scale_rotation_translation(scale, glam::Quat::IDENTITY, translation)

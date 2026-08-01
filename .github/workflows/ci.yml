@@ -56,6 +56,11 @@ jobs:
           # cross-platform legs are keyed by runner OS automatically.
           shared-key: lint
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      # Every other job passes `--all-features`, so without this line nothing
+      # ever compiles the crates as a consumer gets them. A feature that only
+      # builds when its siblings are on is a broken feature, and it is invisible
+      # to a workspace that always turns them all on.
+      - run: cargo build --workspace --locked --no-default-features
 
   docs:
     name: rustdoc
@@ -82,9 +87,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      # Pinned, like `cargo-fuzz@0.13.1` and `SLANG_VERSION` below: a tool
+      # installed as "latest" changes what CI enforces without a commit, and a
+      # new `cargo-machete` heuristic turning a green repo red is indistinguish-
+      # able from a regression.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-machete
+          tool: cargo-machete@0.9.2
       - run: cargo machete
 
   deny:
@@ -93,10 +102,48 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      # Pinned: `deny.toml`'s `skip` list is written against this version's
+      # `crate = "name@version"` spelling, and its `multiple-versions = "deny"`
+      # gate is calibrated against what this version reports.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.19.7
       - run: cargo deny --all-features check
+
+  # The only job that compiles the `cfg(target_arch = "wasm32")` code at all.
+  #
+  # `crcbl-shell` (the Web/canvas backend, P5), `crcbl-wgpu` (the WebGPU target,
+  # P5.3b) and `crcbl-hal` all carry wasm-gated code that was added deliberately
+  # and then compiled by nothing: every other job in this file runs on a host
+  # target, so a `#[cfg(target_arch = "wasm32")]` block could stop compiling and
+  # no gate would notice. That is the same argument this file makes for the
+  # macOS/Windows jobs — "platform code is validated *exclusively* here, so
+  # these jobs are load-bearing from day one".
+  #
+  # It is `check`/`clippy` rather than `test`: `wasm32-unknown-unknown` has no
+  # test harness without a browser runner, and the thing at risk is the code
+  # compiling, not the browser behaving. Only the crates that actually have
+  # wasm-gated code are listed — the rest of the workspace pulls `ash`, `cpal`
+  # and `png`, none of which target wasm today.
+  wasm32:
+    name: build + clippy (wasm32)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm32
+      - run: >-
+          cargo check --locked --target wasm32-unknown-unknown
+          -p crcbl-shell -p crcbl-wgpu -p crcbl-hal -p crcbl-core
+      - run: >-
+          cargo clippy --locked --all-features --target wasm32-unknown-unknown
+          -p crcbl-shell -p crcbl-wgpu -p crcbl-hal -p crcbl-core -- -D warnings
 
   # Linux is the developer's daily driver, so it carries the full gate.
   test-linux:
@@ -114,7 +161,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
       - run: cargo nextest run --workspace --all-features --locked --profile ci
       # nextest does not run doctests — without this step every `//!`/`///`
       # example in the engine is unexecuted documentation.
@@ -147,7 +196,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
       - run: cargo build --workspace --locked
       # Clippy runs here too, not just on Linux: `cfg`-gated platform code is
       # invisible to the Linux lint pass, so a macOS/Windows-only backend would
@@ -174,7 +225,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
       # `libwayland-client0` and `libxkbcommon0`, not their `-dev` packages:
       # the backend resolves both with `dlopen` at runtime rather than linking
       # them, so the runtime packages are all it needs — and the fact that this
@@ -226,7 +279,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
       # Runtime packages, not their `-dev` counterparts: the backend resolves
       # every one of these with `dlopen` rather than linking them, so the
       # runtime packages are all it needs — and the fact that this job passes
@@ -288,7 +343,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
       # Scaffolds into a temporary directory, builds it with its own
       # `CARGO_TARGET_DIR`, checks `rustfmt` and `clippy` on the generated
       # source, and runs `crcbl run --headless`.
@@ -322,7 +379,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
       # `libvulkan1` is the loader — which `crcbl-vk` `dlopen`s rather than
       # links, so its absence is a clean `OpenError::NoLoader` and not a dead
       # process. `mesa-vulkan-drivers` brings lavapipe. `vulkan-tools` is only
@@ -344,6 +403,20 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           CRCBL_VK_SYNC_VALIDATION: "1"
         run: crates/crcbl-vk/tests/run-vk-e2e.sh
+      # The first playable sample, against a real driver. `run-vk-e2e.sh` drives
+      # `--package sandbox` and every other harness script does too, so until
+      # this step existed nothing outside breakout's own unit tests ever ran the
+      # binary — and nothing at all ran it on Vulkan. It renders the whole board
+      # (forward cube plus the UI pass's quads for the ball and forty bricks),
+      # so a validation error in the UI compositing path fails here.
+      - name: Run breakout headless against lavapipe
+        env:
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: "1"
+          CRCBL_VK_SYNC_VALIDATION: "1"
+        run: >-
+          cargo run --locked --quiet --package breakout --
+          --headless --frames 60 --backend vk
       # `docs/plan/12-testing.md`: "diffs uploaded as CI artifacts on failure".
       # The reference, what lavapipe actually rendered, and a red-marked diff of
       # the two — enough to tell "the tolerance is too tight" from "the triangle
@@ -455,6 +528,11 @@ jobs:
     runs-on: ubuntu-latest
     # Instrumented build plus a full suite re-run.
     timeout-minutes: 45
+    env:
+      # Measured on this commit: 76.73% of lines. The floor sits just below it
+      # so a genuine regression fails and normal churn does not. Verified
+      # locally: `--fail-under-lines 75` exits 0 and `77` exits 1.
+      COVERAGE_FLOOR: "75"
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -467,18 +545,26 @@ jobs:
           shared-key: coverage
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov,cargo-nextest
+          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.140
       - name: Run tests under instrumentation
         run: cargo llvm-cov --no-report nextest --workspace --all-features --locked
       - name: Generate lcov report
         run: cargo llvm-cov report --lcov --output-path lcov.info
       - name: Coverage summary
         run: cargo llvm-cov report --summary-only
-      # TODO(P1): turn the gate on. `docs/plan/12-testing.md` calls for per-crate
-      # floors (core/phys/net high, backend crates measured but looser). Every
-      # crate is empty in P0, so any threshold here would pass on nothing and
-      # measure nothing — the tooling is wired, the gate is deliberately off.
-      # Enable with `--fail-under-lines <n>` once P1 lands real code.
+      # The gate. It was deferred with a TODO whose reason ("every crate is
+      # empty in P0") stopped being true several phases ago, and a coverage job
+      # that only prints a number enforces nothing.
+      #
+      # COVERAGE_FLOOR is set just below the measured line coverage, so it fails
+      # on a real regression and not on rounding. `docs/plan/12-testing.md` asks
+      # for per-crate floors (core/phys/net high, backend crates looser);
+      # `cargo llvm-cov` gates the workspace as a whole, so this is the
+      # workspace floor and the per-crate split waits for tooling that can
+      # express it. Raise the number when coverage rises — never lower it to
+      # make a red build green.
+      - name: Enforce the coverage floor
+        run: cargo llvm-cov report --fail-under-lines "${COVERAGE_FLOOR}"
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v7

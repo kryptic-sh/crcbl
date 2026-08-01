@@ -71,7 +71,7 @@ impl StorageError {
 }
 
 impl From<io::Error> for StorageError {
-    /// Path-less conversion. Prefer [`StorageError::from_io`] wherever the path
+    /// Path-less conversion. Prefer `StorageError::from_io` wherever the path
     /// is known — this variant cannot classify not-found or permission errors
     /// without inventing a path for them.
     fn from(e: io::Error) -> Self {

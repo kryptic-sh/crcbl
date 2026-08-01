@@ -135,11 +135,43 @@ pub fn run(args: &NewArgs) -> Result<Outcome, Failure> {
 /// A three-key replacement rather than a templating engine, deliberately: the
 /// generated files are Rust and TOML, and anything smarter would need escaping
 /// rules of its own.
+///
+/// `{{engine}}` is the one substitution whose value the *user* supplies, via
+/// `--engine` or the current directory, and it is only ever interpolated into
+/// `path = "{{engine}}"` — a TOML basic string. A directory containing a quote
+/// or a backslash is legal on every platform this runs on and would otherwise
+/// end the string early and produce a manifest Cargo cannot parse, so it is
+/// escaped for that context. `{{name}}` needs no escaping: `check_name` has
+/// already restricted it to ASCII letters, digits, `-` and `_`.
 fn render(template: &str, name: &str, engine: &str) -> String {
     template
         .replace("{{name}}", name)
-        .replace("{{engine}}", engine)
+        .replace("{{engine}}", &toml_basic_string(engine))
         .replace("{{version}}", env!("CARGO_PKG_VERSION"))
+}
+
+/// `value`, escaped for the inside of a TOML basic string (the `"…"` kind).
+///
+/// The escape set is TOML 1.0's: quote, backslash, the five named control
+/// escapes, and `\uXXXX` for everything else below `0x20` plus `DEL`.
+fn toml_basic_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{8}' => escaped.push_str("\\b"),
+            '\u{c}' => escaped.push_str("\\f"),
+            control if control < ' ' || control == '\u{7f}' => {
+                escaped.push_str(&format!("\\u{:04X}", control as u32));
+            }
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 /// Finds the engine checkout, or explains what to do about it.
@@ -349,6 +381,38 @@ mod tests {
         assert!(
             manifest.contains("[workspace]"),
             "the project must be its own workspace root:\n{manifest}"
+        );
+    }
+
+    /// `path = "{{engine}}"` is a TOML basic string, and a checkout directory
+    /// is allowed to contain a quote. Unescaped, it closed the string and left
+    /// a manifest Cargo refuses to parse.
+    #[test]
+    fn an_engine_path_with_toml_metacharacters_is_escaped() {
+        let rendered = render(
+            "crcbl = { path = \"{{engine}}\" }",
+            "mygame",
+            "/home/dev/say \"hi\"\\crcbl",
+        );
+        assert_eq!(
+            rendered,
+            r#"crcbl = { path = "/home/dev/say \"hi\"\\crcbl" }"#
+        );
+        // One opening and one closing quote, and nothing in between that ends
+        // the string early.
+        assert_eq!(
+            rendered.matches(r#"""#).count() - rendered.matches(r#"\""#).count(),
+            2,
+            "{rendered}"
+        );
+    }
+
+    /// The ordinary path is untouched, so escaping did not become a rewrite.
+    #[test]
+    fn an_ordinary_engine_path_is_substituted_verbatim() {
+        assert_eq!(
+            render("path = \"{{engine}}\"", "mygame", "../crcbl/crates/crcbl"),
+            "path = \"../crcbl/crates/crcbl\""
         );
     }
 

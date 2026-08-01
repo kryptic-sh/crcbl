@@ -107,7 +107,7 @@ unsafe extern "C" fn bind_shm(
     let state = unsafe { &mut *user_data.cast::<ShmBinding>().cast_mut() };
     // SAFETY: this dispatcher is attached only to a `wl_registry`, so `args`
     // matches that interface's events for `opcode`.
-    let event = unsafe { wl_registry::decode_event(opcode, args.cast_const()) };
+    let event = unsafe { wl_registry::decode_event(opcode, &*args.cast_const()) };
     if let Some(wl_registry::Event::Global {
         name,
         interface,
@@ -334,7 +334,7 @@ unsafe extern "C" fn bind_input(
     let state = unsafe { &mut *user_data.cast::<InputGlobals>().cast_mut() };
     // SAFETY: this dispatcher is attached only to a `wl_registry`, so `args`
     // matches that interface's events for `opcode`.
-    let event = unsafe { wl_registry::decode_event(opcode, args.cast_const()) };
+    let event = unsafe { wl_registry::decode_event(opcode, &*args.cast_const()) };
     let Some(wl_registry::Event::Global {
         name,
         interface,
@@ -802,7 +802,7 @@ unsafe extern "C" fn bind_drag(
     // dispatch that can reach it.
     let state = unsafe { &mut *user_data.cast::<DragState>().cast_mut() };
     // SAFETY: attached only to a `wl_registry`.
-    let event = unsafe { wl_registry::decode_event(opcode, args.cast_const()) };
+    let event = unsafe { wl_registry::decode_event(opcode, &*args.cast_const()) };
     let Some(wl_registry::Event::Global {
         name,
         interface,
@@ -839,7 +839,9 @@ unsafe extern "C" fn drag_dispatch(
 ) -> c_int {
     // SAFETY: as `bind_drag`.
     let state = unsafe { &mut *user_data.cast::<DragState>().cast_mut() };
-    let args = args.cast_const();
+    // SAFETY: libwayland hands the dispatcher its closure argument array, which
+    // outlives this call; the borrow pins the decoders' lifetime to it.
+    let args = unsafe { &*args.cast_const() };
     if target == state.pointer.cast() {
         // SAFETY: this branch is only reached for the `wl_pointer` proxy.
         if let Some(wl_pointer::Event::Button {

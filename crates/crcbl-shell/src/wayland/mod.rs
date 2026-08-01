@@ -750,7 +750,13 @@ unsafe extern "C" fn dispatch(
         // the documented behaviour.
         return 0;
     };
-    let args: *const WlArgument = args.cast_const();
+    // SAFETY: libwayland always hands the dispatcher its closure's argument
+    // array, which has one slot per signature character and lives for the
+    // duration of this call. Borrowing it here rather than passing the raw
+    // pointer is what pins the decoders' `'a` to this stack frame: with a raw
+    // pointer the lifetime is inferred, and a `&CStr` field could outlive the
+    // closure storage it points into.
+    let args: &WlArgument = unsafe { &*args.cast_const() };
 
     // SAFETY (all decoders): `kind` records which interface this proxy was
     // created as, so `args` is that interface's argument array for `opcode` —

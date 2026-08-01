@@ -28,12 +28,15 @@ fn main() -> ExitCode {
         Invocation::Run(options) => match app::run(&options) {
             Ok(summary) => {
                 println!(
-                    "breakout: {} frames, {} ticks on the {} shell at {}x{} ({:?})",
+                    "breakout: {} frames, {} ticks on the {} shell at {}x{} \
+                     (score {}, {:?}, {:?})",
                     summary.frames,
                     summary.ticks,
                     summary.backend,
                     summary.extent.0,
                     summary.extent.1,
+                    summary.score,
+                    summary.state,
                     summary.exit,
                 );
                 ExitCode::SUCCESS

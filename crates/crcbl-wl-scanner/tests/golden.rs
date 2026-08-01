@@ -396,7 +396,13 @@ fn request_wrappers_and_event_decoders_are_generated_for_the_slice_we_need() {
         "pub unsafe fn set_title(proxy: *mut crate::wayland::ffi::WlProxy, title: &core::ffi::CStr)",
         // A nullable object argument stays a raw pointer the caller may null.
         "pub unsafe fn set_fullscreen(proxy: *mut crate::wayland::ffi::WlProxy, output: *mut crate::wayland::ffi::WlProxy)",
-        "pub unsafe fn decode_event<'a>(opcode: u32, args: *const crate::wayland::ffi::WlArgument) -> Option<Event<'a>>",
+        // `args` is a borrow rather than a raw pointer so that `'a` is tied to
+        // something: with `*const WlArgument` the caller picks `'a` freely, and
+        // the `&CStr`/`&[u8]` fields dangle the moment the dispatcher returns.
+        "pub unsafe fn decode_event<'a>(opcode: u32, args: &'a crate::wayland::ffi::WlArgument) -> Option<Event<'a>>",
+        // An interface whose events borrow nothing still takes the borrow, so
+        // every call site passes the same thing.
+        "pub unsafe fn decode_event(opcode: u32, args: &crate::wayland::ffi::WlArgument) -> Option<Event>",
     ] {
         assert!(generated.contains(needle), "missing: {needle}");
     }

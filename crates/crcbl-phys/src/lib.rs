@@ -14,11 +14,9 @@
 //! | **L2** | Contact solver: sequential impulses, warm starting, islands | Stretch |
 //!
 //! All spatial types use `f64` for determinism. Downcasting to `f32` happens
-//! only at the render boundary via [`WorldPos::relative_to`].
+//! only at the render boundary via `crcbl_core::WorldPos::relative_to`.
 //!
 //! See `docs/plan/05-physics.md` for the full design.
-//!
-//! [`WorldPos::relative_to`]: crcbl_core::world::WorldPos::relative_to
 
 pub mod broadphase;
 pub mod collider;

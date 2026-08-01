@@ -3,6 +3,17 @@
 # it, and demanding it from every local `cargo` invocation forces a rustup
 # component install on contributors who never run coverage. The CI coverage
 # job requests it explicitly instead.
+#
+# The channel is an **exact version**, not `"stable"`. `"stable"` is not a pin:
+# it resolves to whatever the newest stable release is on the day the job runs,
+# which contradicts this file's own promise that "local and CI never drift" —
+# and since every clippy job runs with `-D warnings`, a new stable release with
+# a new lint turns CI red on a repository nobody touched. The `decoder-fuzz` job
+# already pins its nightly by date for the same reason.
+#
+# Bumping it is a deliberate act: change the version here, run
+# `cargo clippy --all-targets -- -D warnings` and fix whatever the new release
+# found, in the same commit.
 [toolchain]
-channel = "stable"
+channel = "1.97.0"
 components = ["rustfmt", "clippy"]

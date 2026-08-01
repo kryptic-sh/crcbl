@@ -16,7 +16,6 @@ crcbl-shaders = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
-log = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

@@ -202,13 +202,29 @@ pub fn open() -> Result<Box<dyn Instance>, GpuError> {
 /// [`GpuError::UnknownBackend`] if this build has no such backend, or
 /// [`GpuError::Backend`] if it failed to open.
 pub fn open_backend(backend: GpuBackend) -> Result<Box<dyn Instance>, GpuError> {
-    match REGISTRY.iter().find(|entry| entry.backend == backend) {
-        Some(entry) => (entry.open)().map_err(|source| GpuError::Backend { backend, source }),
-        None => Err(GpuError::UnknownBackend {
+    let entry = lookup(REGISTRY, backend)?;
+    (entry.open)().map_err(|source| GpuError::Backend { backend, source })
+}
+
+/// Finds `backend` in `registry`, or names what the registry does have.
+///
+/// Split out and taking the registry as an argument so the "this build has no
+/// such backend" arm is reachable from a test. Against [`REGISTRY`] it is
+/// unreachable today — every [`GpuBackend`] variant is registered — but the
+/// table is the thing that will grow `#[cfg]`s (there is no `crcbl-vk` on
+/// wasm), and an error path that has never once been executed is not an error
+/// path anyone should trust.
+fn lookup(
+    registry: &'static [Registration],
+    backend: GpuBackend,
+) -> Result<&'static Registration, GpuError> {
+    registry
+        .iter()
+        .find(|entry| entry.backend == backend)
+        .ok_or_else(|| GpuError::UnknownBackend {
             requested: backend.as_str().to_string(),
-            available: registry_names(REGISTRY.iter().map(|entry| entry.backend)),
-        }),
-    }
+            available: registry_names(registry.iter().map(|entry| entry.backend)),
+        })
 }
 
 /// Tries every auto-selectable backend in order.
@@ -240,6 +256,46 @@ fn open_auto() -> Result<Box<dyn Instance>, GpuError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `GpuBackend` variant resolves in this build. The moment one is
+    /// `#[cfg]`-ed out — there is no `crcbl-vk` on wasm — this fails and points
+    /// at the arm that has to start being reachable.
+    #[test]
+    fn the_registry_covers_every_backend_this_build_claims() {
+        for backend in [GpuBackend::Vulkan, GpuBackend::Wgpu, GpuBackend::Null] {
+            assert!(
+                lookup(REGISTRY, backend).is_ok(),
+                "{backend} is a variant with no registration",
+            );
+        }
+    }
+
+    /// And the "no such backend" arm reports what *is* available rather than
+    /// an empty message. Exercised against a registry that really is missing
+    /// one, because the shipped table is not.
+    #[test]
+    fn an_absent_backend_names_the_ones_that_are_there() {
+        static ONLY_NULL: &[Registration] = &[Registration {
+            backend: GpuBackend::Null,
+            auto: false,
+            open: || Ok(Box::new(crcbl_hal::null::NullInstance::tier_a())),
+        }];
+
+        let Err(error) = lookup(ONLY_NULL, GpuBackend::Vulkan) else {
+            panic!("vulkan is not in a null-only registry");
+        };
+        match error {
+            GpuError::UnknownBackend {
+                requested,
+                available,
+            } => {
+                assert_eq!(requested, GpuBackend::Vulkan.as_str());
+                assert_eq!(available, "null");
+            }
+            other => panic!("wrong error: {other}"),
+        }
+        assert!(lookup(ONLY_NULL, GpuBackend::Null).is_ok());
+    }
 
     #[test]
     fn backend_names_round_trip_and_accept_what_people_type() {

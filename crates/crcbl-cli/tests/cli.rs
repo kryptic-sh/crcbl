@@ -90,7 +90,7 @@ fn help_and_version_exit_zero() {
     }
     // Per-command help too, since a CLI whose subcommands cannot explain
     // themselves is not scriptable by anyone who has not read the source.
-    for command in ["new", "run", "build"] {
+    for command in ["new", "run", "build", "screenshot", "replay"] {
         let output = crcbl(temporary.path(), &[command, "--help"]);
         assert_eq!(code(&output), 0, "{command} --help");
         assert!(stdout(&output).contains(command), "{command} --help");
@@ -108,6 +108,12 @@ fn a_malformed_invocation_exits_two() {
         vec!["new", "1bad"],
         vec!["build", "--target", "ps5"],
         vec!["run", "stray"],
+        // An absurd `--size` is a bad invocation, not a 40 GB allocation and
+        // not an overflowed byte count.
+        vec!["screenshot", "--size", "4000000000x4000000000"],
+        vec!["screenshot", "--size", "100000x100000"],
+        vec!["screenshot", "--size", "0x1080"],
+        vec!["screenshot", "--size", "wat"],
     ] {
         let output = crcbl(temporary.path(), &args);
         assert_eq!(code(&output), 2, "{args:?} should be exit 2");
@@ -256,6 +262,105 @@ fn new_rejects_a_directory_that_is_not_an_engine_checkout() {
         !temporary.path().join("mygame").exists(),
         "nothing may be written before the engine is resolved"
     );
+}
+
+/// `screenshot` is the one subcommand whose *output* a CI job wants to read a
+/// path out of, and `--json` used to emit `{"ok":true,"command":"screenshot"}`
+/// and nothing else while the human line carried the path and the size.
+///
+/// Whether a GPU is present decides which branch runs; both are asserted,
+/// because "there is no GPU here" must still be one JSON object with `ok:false`
+/// rather than a panic or a bare exit code.
+#[test]
+fn screenshot_json_carries_the_path_and_the_dimensions() {
+    let temporary = TempDir::new("screenshot");
+    let target = temporary.path().join("shot.png");
+    let output = crcbl(
+        temporary.path(),
+        &[
+            "screenshot",
+            "--size",
+            "32x24",
+            "-o",
+            target.to_str().expect("a UTF-8 path"),
+            "--json",
+        ],
+    );
+    let json = stdout(&output);
+    assert_eq!(json.lines().count(), 1, "exactly one line: {json}");
+
+    if code(&output) != 0 {
+        assert_eq!(code(&output), 1, "no GPU is a failure, not a bad usage");
+        assert!(
+            json.starts_with(r#"{"ok":false,"command":"screenshot""#),
+            "{json}"
+        );
+        assert!(json.contains(r#""error":"#), "{json}");
+        return;
+    }
+
+    assert!(
+        json.starts_with(r#"{"ok":true,"command":"screenshot""#),
+        "{json}"
+    );
+    assert!(has_field(&json, "width", "32"), "{json}");
+    assert!(has_field(&json, "height", "24"), "{json}");
+    assert!(
+        has_field(
+            &json,
+            "path",
+            &format!("{:?}", target.to_str().expect("a UTF-8 path"))
+        ),
+        "the path a CI job has to pick up is in the object: {json}"
+    );
+    assert!(target.is_file(), "the PNG named in the JSON exists");
+
+    // And the PNG is a PNG: the magic bytes, not just a file that was created.
+    let bytes = std::fs::read(&target).expect("the screenshot");
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "not a PNG");
+}
+
+/// `std::env::args()` panics on a non-UTF-8 argument, so every path-taking flag
+/// used to abort with exit 101 rather than doing its job or failing cleanly.
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_path_argument_is_not_a_panic() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temporary = TempDir::new("nonutf8");
+    let weird = temporary.path().join(OsStr::from_bytes(b"n\xfft-utf8"));
+    std::fs::create_dir_all(&weird).expect("a directory a filesystem accepts");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_crcbl"))
+        .arg("new")
+        .arg("mygame")
+        .arg("--engine")
+        .arg(&weird)
+        .arg("--json")
+        .current_dir(temporary.path())
+        .output()
+        .expect("the crcbl binary runs");
+
+    // Exit 1: the invocation parsed fine and the directory is simply not a
+    // checkout. What matters is that it is not 101.
+    assert_eq!(
+        code(&output),
+        1,
+        "a non-UTF-8 --engine must reach the command, not abort the process"
+    );
+    assert!(stdout(&output).starts_with(r#"{"ok":false"#));
+
+    // The same for `-o`, where the path is the whole point of the flag.
+    let output = Command::new(env!("CARGO_BIN_EXE_crcbl"))
+        .arg("replay")
+        .arg(weird.join("missing.crpl"))
+        .arg("--json")
+        .current_dir(temporary.path())
+        .output()
+        .expect("the crcbl binary runs");
+    assert_eq!(code(&output), 1, "a missing file, not a panic");
+    assert!(stdout(&output).starts_with(r#"{"ok":false"#));
 }
 
 /// `run` outside a project is a failure with a next step, not a panic and not a

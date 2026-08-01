@@ -12,8 +12,10 @@
 //! crcbl::hal     → crcbl-hal     the GPU seam, plus the recording null backend
 //! crcbl::render  → crcbl-render  the render graph, cameras, the forward frame
 //! crcbl::shaders → crcbl-shaders the engine's shaders, as SPIR-V
+//! crcbl::ui      → crcbl-ui      draw lists, the glyph atlas, HUD widgets
 //! crcbl::math    → glam          the maths the renderer's types are spelled in
 //! crcbl::backend → (this crate)  runtime GPU backend selection
+//! crcbl::engine  → (this crate)  the shell↔HAL join every sample repeats
 //! ```
 //!
 //! # What is deliberately not here
@@ -84,6 +86,8 @@ pub use glam as math;
 pub use crcbl_ui as ui;
 
 pub mod backend;
+
+pub mod engine;
 
 pub mod screenshot;
 

@@ -40,7 +40,10 @@ use crate::args::{Command, Invocation};
 use crate::report::EXIT_USAGE;
 
 fn main() -> ExitCode {
-    match args::parse(std::env::args().skip(1)) {
+    // `args_os`, not `args`: the latter panics on an argument that is not valid
+    // Unicode, and `--path`, `--engine`, `-o` and `replay`'s file all take
+    // paths, which on Linux are bytes. See `args`'s module docs.
+    match args::parse(std::env::args_os().skip(1)) {
         Invocation::Command(command) => {
             let json = command.json();
             let name = command.name();

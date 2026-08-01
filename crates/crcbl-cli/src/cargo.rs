@@ -53,14 +53,17 @@ pub fn run(args: &RunArgs) -> Result<Outcome, Failure> {
     command.args(&args.passthrough);
 
     let described = describe(&command);
-    let status = execute(&mut command, &described)?;
+    execute(&mut command, &described)?;
     Ok(Outcome {
         human: format!("ran {}", manifest.display()),
         json: vec![
             ("manifest", Json::string(manifest.display().to_string())),
             ("headless", Json::Bool(args.headless)),
             ("invocation", Json::string(&described)),
-            ("cargo_exit_code", Json::Number(i64::from(status))),
+            // Zero by construction: `execute` turns every other code into a
+            // `Failure` that carries the real one. The field stays so the
+            // success and failure objects have the same shape.
+            ("cargo_exit_code", Json::Number(0)),
         ],
     })
 }
@@ -90,7 +93,7 @@ pub fn build(args: &BuildArgs) -> Result<Outcome, Failure> {
     }
 
     let described = describe(&command);
-    let status = execute(&mut command, &described)?;
+    execute(&mut command, &described)?;
     Ok(Outcome {
         human: format!("built {}", manifest.display()),
         json: vec![
@@ -101,7 +104,8 @@ pub fn build(args: &BuildArgs) -> Result<Outcome, Failure> {
                 Json::string(if args.release { "release" } else { "debug" }),
             ),
             ("invocation", Json::string(&described)),
-            ("cargo_exit_code", Json::Number(i64::from(status))),
+            // See `run`: zero by construction.
+            ("cargo_exit_code", Json::Number(0)),
         ],
     })
 }
@@ -127,13 +131,17 @@ fn cargo(subcommand: &str, manifest: &Path) -> Command {
 /// `--json`-less use for the sake of one. With `--json` the object is printed
 /// *after* Cargo's own output, on stdout — the convention `cargo --message-
 /// format=json` set.
-fn execute(command: &mut Command, described: &str) -> Result<i32, Failure> {
+///
+/// Returns `()` rather than the exit code: success *is* code zero, every other
+/// code is a [`Failure`] carrying it, and a `Result<i32, _>` whose `Ok` arm can
+/// only ever hold `0` invited callers to report a number they had not checked.
+fn execute(command: &mut Command, described: &str) -> Result<(), Failure> {
     let status = command.status().map_err(|error| {
         Failure::new(format!("could not start `{described}`: {error}"))
             .with("invocation", Json::string(described))
     })?;
     match status.code() {
-        Some(0) => Ok(0),
+        Some(0) => Ok(()),
         Some(code) => Err(
             Failure::new(format!("`{described}` failed with exit code {code}"))
                 .with("invocation", Json::string(described))
@@ -202,7 +210,7 @@ mod tests {
     fn headless_is_passed_through_to_the_game_not_to_cargo() {
         let args = RunArgs {
             headless: true,
-            passthrough: vec!["--frames".to_string(), "3".to_string()],
+            passthrough: vec!["--frames".into(), "3".into()],
             ..run_args()
         };
         let mut command = cargo("run", Path::new("/p/Cargo.toml"));

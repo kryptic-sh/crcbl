@@ -14,7 +14,7 @@
 //!
 //! One framing carries per-entity component data everywhere in this protocol:
 //! repeated `(entity_bits: u64 LE, data_len: u32 LE, data: [u8; data_len])`.
-//! [`encode_entity_entry`] writes it and [`read_entity_entry`] reads it; no
+//! [`encode_entity_entry`] writes it and `read_entity_entry` reads it; no
 //! other code in the workspace should open-code the offsets.
 
 use std::collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher};

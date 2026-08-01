@@ -21,7 +21,6 @@ repository.workspace = true
 # them.
 [dependencies]
 crcbl-core = { workspace = true }
-crcbl-golden = { workspace = true }
 crcbl-hal = { workspace = true }
 crcbl-render = { workspace = true }
 crcbl-shaders = { workspace = true }
@@ -34,6 +33,14 @@ crcbl-wgpu = { workspace = true }
 glam = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
+
+# `crcbl-golden` is a **dev**-dependency: the only reference to it from this
+# crate is an intra-doc link in `screenshot.rs`, and rustdoc resolves those from
+# dev-dependencies. As a normal dependency it linked `png` into every binary
+# that names `crcbl` — and falsified `crcbl-golden`'s own manifest, which says
+# "it reaches no shipped binary".
+[dev-dependencies]
+crcbl-golden = { workspace = true }
 
 [lints]
 workspace = true

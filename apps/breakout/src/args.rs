@@ -13,8 +13,9 @@ USAGE:
 OPTIONS:
     --headless           Run without a window (for CI / determinism tests)
     --frames <N>         Stop after N presented frames
-    --tick-hz <N>        Simulation rate in Hz (default 60)
-    --backend <B>        GPU backend: vulkan or null
+    --tick-hz <N>        Simulation rate in Hz (default 60). Sets the server's
+                         clock, the ECS timestep and every integrator.
+    --backend <B>        GPU backend: vk, vulkan, null, none or wgpu
     -h, --help           Print this help";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,7 +31,7 @@ impl Default for Options {
         Self {
             headless: false,
             frames: None,
-            tick_hz: 60,
+            tick_hz: crate::game::DEFAULT_TICK_HZ,
             backend: None,
         }
     }
@@ -80,16 +81,18 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
                     _ => return Invocation::BadUsage(format!("not a positive tick rate: {val}")),
                 }
             }
+            // `GpuBackend::from_name`, not a hand-written match: the sandbox
+            // and every CI harness script pass `--backend vk`, which a
+            // `"vulkan" | "null"` match rejects.
             "--backend" => {
                 let Some(val) = args.next() else {
-                    return Invocation::BadUsage("--backend needs `vulkan` or `null`".into());
+                    return Invocation::BadUsage("--backend needs a value".into());
                 };
-                match val.as_str() {
-                    "vulkan" => options.backend = Some(crcbl::backend::GpuBackend::Vulkan),
-                    "null" => options.backend = Some(crcbl::backend::GpuBackend::Null),
-                    other => {
+                match crcbl::backend::GpuBackend::from_name(&val) {
+                    Some(backend) => options.backend = Some(backend),
+                    None => {
                         return Invocation::BadUsage(format!(
-                            "unknown backend '{other}' — use `vulkan` or `null`"
+                            "unknown backend '{val}' — try `vk`, `null` or `wgpu`"
                         ));
                     }
                 }
@@ -99,4 +102,89 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
     }
 
     Invocation::Run(options)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crcbl::backend::GpuBackend;
+
+    fn parsed(argv: &[&str]) -> Options {
+        match parse(argv.iter().map(|s| (*s).to_string())) {
+            Invocation::Run(options) => options,
+            Invocation::Help => panic!("expected a run, got help"),
+            Invocation::BadUsage(message) => panic!("expected a run, got: {message}"),
+        }
+    }
+
+    fn rejected(argv: &[&str]) -> String {
+        match parse(argv.iter().map(|s| (*s).to_string())) {
+            Invocation::BadUsage(message) => message,
+            _ => panic!("expected a rejection"),
+        }
+    }
+
+    #[test]
+    fn the_defaults_are_a_windowed_sixty_hertz_run() {
+        let options = parsed(&[]);
+        assert!(!options.headless);
+        assert_eq!(options.tick_hz, crate::game::DEFAULT_TICK_HZ);
+        assert_eq!(options.frames, None);
+        assert_eq!(options.backend, None);
+        assert_eq!(options.frame_budget(), None);
+    }
+
+    /// Every spelling the sandbox and the CI harness scripts use. `vk` in
+    /// particular was rejected by a hand-written `"vulkan" | "null"` match
+    /// while every `run-*-e2e.sh` passes exactly that.
+    #[test]
+    fn the_backend_flag_accepts_every_name_the_registry_knows() {
+        for name in ["vk", "vulkan"] {
+            assert_eq!(
+                parsed(&["--backend", name]).backend,
+                Some(GpuBackend::Vulkan),
+                "--backend {name}",
+            );
+        }
+        for name in ["null", "none"] {
+            assert_eq!(parsed(&["--backend", name]).backend, Some(GpuBackend::Null));
+        }
+        assert_eq!(
+            parsed(&["--backend", "wgpu"]).backend,
+            Some(GpuBackend::Wgpu)
+        );
+        assert!(rejected(&["--backend", "metal"]).contains("metal"));
+        assert!(rejected(&["--backend"]).contains("--backend"));
+    }
+
+    #[test]
+    fn a_zero_tick_rate_and_a_zero_frame_count_are_rejected() {
+        assert!(rejected(&["--tick-hz", "0"]).contains("tick rate"));
+        assert!(rejected(&["--tick-hz", "-1"]).contains("tick rate"));
+        assert!(rejected(&["--frames", "0"]).contains("frame count"));
+        assert!(rejected(&["--nonsense"]).contains("nonsense"));
+    }
+
+    #[test]
+    fn a_headless_run_gets_a_default_budget_and_a_windowed_one_does_not() {
+        assert_eq!(parsed(&["--headless"]).frame_budget(), Some(120));
+        assert_eq!(
+            parsed(&["--headless", "--frames", "7"]).frame_budget(),
+            Some(7)
+        );
+        assert_eq!(parsed(&["--frames", "7"]).frame_budget(), Some(7));
+    }
+
+    #[test]
+    fn help_is_help() {
+        assert!(matches!(
+            parse(["-h".to_string()].into_iter()),
+            Invocation::Help
+        ));
+        assert!(matches!(
+            parse(["--help".to_string()].into_iter()),
+            Invocation::Help
+        ));
+        assert!(USAGE.contains("--tick-hz"));
+    }
 }

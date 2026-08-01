@@ -41,38 +41,26 @@
 //! [`SandboxError::NoWindowSystem`]. `--headless` itself works on every
 //! platform, which is what keeps the cross-platform CI leg meaningful.
 
-use std::time::Duration;
-
 use crcbl::backend::GpuBackend;
-use crcbl::core::time::{ManualTime, MonotonicTime};
+// The loop's scaffolding — the clock, the event sink, the configure wait, the
+// exit vocabulary and the four timing constants — lives in `crcbl::engine`,
+// shared with `apps/breakout`. It was two copies of the same code, and only one
+// of them carried the rationale.
+//
+// `WINDOWED_IDLE` is advisory: `Shell::wait_events` may return immediately, but
+// on the backends that honour it this is the difference between an idle sandbox
+// using 4% of a core and using all of one.
+//
+// `MAX_CONSECUTIVE_RECONFIGURES` is what makes `--frames N` terminate when the
+// swapchain never becomes presentable — a budget of *presented* frames cannot.
+use crcbl::engine::{
+    Clock, ConfigureError, ExitReason, Flow, MAX_CONSECUTIVE_RECONFIGURES, Pending, WINDOWED_IDLE,
+    accept_close, wait_for_configure,
+};
 use crcbl::prelude::*;
 use crcbl::shell::{LogicalSize, ShellBackend as Backend, WindowId, open, open_backend};
 
 use crate::gpu::{FrameOutcome, Gpu, GpuError};
-
-/// How long to wait for the window system to configure the window before
-/// giving up.
-///
-/// A deadline rather than a fixed number of pumps, because
-/// `docs/plan/12-testing.md` requires polling with a deadline and never a
-/// sleep. It is generous: a cold CI runner starting a compositor is slow, and
-/// the only thing this bound protects against is a job that hangs forever with
-/// no output.
-const CONFIGURE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How long a windowed frame is willing to idle waiting for input.
-///
-/// Advisory — [`Shell::wait_events`] is allowed to return immediately — but on
-/// the backends that honour it this is the difference between an idle sandbox
-/// using 4% of a core and using all of one. There is no vsync to pace against
-/// until `crcbl-vk` presents for real at P1.
-const WINDOWED_IDLE: Duration = Duration::from_millis(4);
-
-/// The simulated step a headless frame advances by.
-///
-/// 60 frames per second of *wall clock*, so `--frames 120 --tick-hz 60` runs
-/// exactly 120 ticks on every machine.
-const HEADLESS_FRAME_STEP: Duration = Duration::from_nanos(1_000_000_000 / 60);
 
 /// Which projection the camera uses.
 ///
@@ -172,17 +160,6 @@ impl Options {
     }
 }
 
-/// Why the loop stopped.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExitReason {
-    /// The frame budget ran out. The only way a headless run ends.
-    FrameBudget,
-    /// The window system asked the window to close and it was allowed to.
-    CloseRequested,
-    /// The window went away without asking.
-    WindowDestroyed,
-}
-
 /// What a completed run did. Printed by `main`, asserted by the tests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Summary {
@@ -210,7 +187,9 @@ pub enum SandboxError {
     Shell(ShellError),
     /// The window was never configured, so there was never a size to create a
     /// swapchain at.
-    NeverConfigured,
+    Configure(ConfigureError),
+    /// The swapchain reconfigured over and over and never presented a frame.
+    NeverPresented,
     /// The GPU seam failed.
     Gpu(GpuError),
 }
@@ -227,10 +206,10 @@ impl std::fmt::Display for SandboxError {
                  no window and works everywhere."
             ),
             Self::Shell(error) => write!(f, "shell error: {error}"),
-            Self::NeverConfigured => write!(
+            Self::Configure(error) => write!(f, "{error}"),
+            Self::NeverPresented => write!(
                 f,
-                "the window system never configured the window within {}s, so it never had a size",
-                CONFIGURE_TIMEOUT.as_secs()
+                "the swapchain reconfigured {MAX_CONSECUTIVE_RECONFIGURES} times in a row                  without presenting a frame"
             ),
             Self::Gpu(error) => write!(f, "gpu error: {error}"),
         }
@@ -245,52 +224,15 @@ impl From<ShellError> for SandboxError {
     }
 }
 
+impl From<ConfigureError> for SandboxError {
+    fn from(error: ConfigureError) -> Self {
+        Self::Configure(error)
+    }
+}
+
 impl From<GpuError> for SandboxError {
     fn from(error: GpuError) -> Self {
         Self::Gpu(error)
-    }
-}
-
-/// A time source the loop can drive, whichever kind it is.
-///
-/// The variants exist so the *loop* stays free of `if headless`: it calls
-/// [`Clock::advance`] once per frame and gets a timestamp, and the difference
-/// between "read the real clock" and "step the fake one" lives here.
-#[derive(Debug)]
-enum Clock {
-    Real(MonotonicTime),
-    Manual { time: ManualTime, step: Duration },
-}
-
-impl Clock {
-    fn new(headless: bool) -> Self {
-        if headless {
-            Self::Manual {
-                time: ManualTime::new(),
-                step: HEADLESS_FRAME_STEP,
-            }
-        } else {
-            Self::Real(MonotonicTime::new())
-        }
-    }
-
-    /// The current reading, without advancing anything.
-    fn elapsed(&self) -> Duration {
-        match self {
-            Self::Real(time) => time.elapsed(),
-            Self::Manual { time, .. } => time.elapsed(),
-        }
-    }
-
-    /// Moves to the next frame's timestamp and returns it.
-    fn advance(&mut self) -> Duration {
-        match self {
-            Self::Real(time) => time.elapsed(),
-            Self::Manual { time, step } => {
-                time.advance(*step);
-                time.elapsed()
-            }
-        }
     }
 }
 
@@ -320,15 +262,7 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
     events: u64,
     budget: Option<u64>,
     windowed: bool,
-}
-
-/// What one [`Loop::frame`] decided about the next one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Flow {
-    /// Keep going.
-    Continue,
-    /// Stop, for this reason.
-    Stop(ExitReason),
+    reconfigures_in_a_row: u32,
 }
 
 /// Opens a window (or does not), runs the loop, and tears everything down.
@@ -337,15 +271,32 @@ pub enum Flow {
 ///
 /// [`SandboxError`] if no shell backend opened, if the window was never
 /// configured, or if the HAL seam failed.
+/// Teardown runs on **every** path, including a failing frame. `run` used to
+/// propagate `engine.frame()?`, which skipped `finish` — and therefore
+/// `gpu.destroy()` and `shell.destroy_window()` — because neither `Loop` nor
+/// `Gpu` has a `Drop` impl to fall back on. The `crcbl-vk` `Drop` impls do
+/// reclaim the objects, but they log "N object(s) still alive at device
+/// teardown" while doing it, which is the diagnostic for a real leak.
 pub fn run(options: &Options) -> Result<Summary, SandboxError> {
     let mut engine = Loop::start(options)?;
-    let exit = loop {
-        match engine.frame()? {
-            Flow::Continue => {}
-            Flow::Stop(reason) => break reason,
+    let outcome = loop {
+        match engine.frame() {
+            Ok(Flow::Continue) => {}
+            Ok(Flow::Stop(reason)) => break Ok(reason),
+            Err(error) => break Err(error),
         }
     };
-    engine.finish(exit)
+    match outcome {
+        Ok(reason) => engine.finish(reason),
+        Err(error) => {
+            // The frame error is the one worth reporting; a teardown failure on
+            // top of it is logged rather than allowed to replace it.
+            if let Err(teardown) = engine.finish(ExitReason::Failed) {
+                log::error!("teardown after a failed frame also failed: {teardown}");
+            }
+            Err(error)
+        }
+    }
 }
 
 impl Loop<dyn Shell> {
@@ -418,6 +369,7 @@ impl<S: Shell + ?Sized> Loop<S> {
             ticks: 0,
             events,
             budget: options.frame_budget(),
+            reconfigures_in_a_row: 0,
         })
     }
 
@@ -454,8 +406,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         if pending.close_requested {
             // A close request is a question. A game would ask the player about
             // unsaved progress here; the sandbox has none, so it says yes.
-            self.shell
-                .reply_close_request(self.window, CloseReply::Close)?;
+            accept_close(self.shell.as_mut(), self.window)?;
             return Ok(Flow::Stop(ExitReason::CloseRequested));
         }
         if let Some(size) = pending.resized {
@@ -478,8 +429,23 @@ impl<S: Shell + ?Sized> Loop<S> {
         // `alpha` is read after the tick loop, never before: before, the
         // accumulator may still hold whole ticks.
         render(self.frame_clock.alpha());
-        if self.gpu.frame()? == FrameOutcome::Presented {
-            self.frames += 1;
+        match self.gpu.frame()? {
+            FrameOutcome::Presented => {
+                self.frames += 1;
+                self.reconfigures_in_a_row = 0;
+            }
+            // The budget counts *presented* frames, so a swapchain that is
+            // permanently suboptimal (or permanently out of date) would
+            // reconfigure forever and never reach it — and `--frames N` would
+            // never terminate. Four seconds of 60 Hz reconfiguring is far past
+            // "a resize storm" and squarely in "this surface will never
+            // present".
+            FrameOutcome::Reconfigured => {
+                self.reconfigures_in_a_row += 1;
+                if self.reconfigures_in_a_row >= MAX_CONSECUTIVE_RECONFIGURES {
+                    return Err(SandboxError::NeverPresented);
+                }
+            }
         }
         Ok(Flow::Continue)
     }
@@ -508,12 +474,18 @@ impl<S: Shell + ?Sized> Loop<S> {
             exit,
         };
         // Surface and swapchain first: the seam is explicit that the HAL
-        // surface must die before the window whose handles it holds.
-        self.gpu.destroy()?;
+        // surface must die before the window whose handles it holds. Both are
+        // attempted even when the first failed — a mapped window left behind
+        // because the GPU teardown errored is strictly worse than the error.
+        let gpu_result = self.gpu.destroy();
         // A window destroyed in answer to a close request is already gone.
-        if exit != ExitReason::CloseRequested && exit != ExitReason::WindowDestroyed {
-            self.shell.destroy_window(self.window)?;
-        }
+        let shell_result = if exit.window_survives() {
+            self.shell.destroy_window(self.window)
+        } else {
+            Ok(())
+        };
+        gpu_result?;
+        shell_result?;
         Ok(summary)
     }
 
@@ -539,66 +511,6 @@ impl<S: Shell + ?Sized> Loop<S> {
     #[cfg(test)]
     fn window(&self) -> WindowId {
         self.window
-    }
-}
-
-/// What a `pump` turned up, in the form the code after it can act on.
-#[derive(Clone, Copy, Debug, Default)]
-struct Pending {
-    count: u64,
-    resized: Option<PhysicalSize>,
-    close_requested: bool,
-    destroyed: bool,
-}
-
-impl Pending {
-    fn observe(&mut self, event: &ShellEvent) {
-        self.count += 1;
-        match event {
-            // Only the last size of a resize storm matters; reconfiguring the
-            // swapchain once per intermediate size is pure waste.
-            ShellEvent::Resized { size, .. } | ShellEvent::ScaleFactorChanged { size, .. } => {
-                self.resized = Some(*size);
-            }
-            ShellEvent::CloseRequested { .. } => self.close_requested = true,
-            ShellEvent::WindowDestroyed { .. } => self.destroyed = true,
-            _ => {}
-        }
-        // Input lands at debug level per `docs/plan/01-foundations.md` §1.4:
-        // the sandbox is where you find out whether a key arrived at all.
-        log::debug!("shell event: {event:?}");
-    }
-}
-
-/// Polls until the window system has configured the window, or the deadline
-/// passes.
-///
-/// The loop is mandatory rather than defensive: a window has no size until the
-/// window system says so, and a swapchain needs an extent. `HeadlessShell`
-/// defers its first configure by at least one pump specifically so this path is
-/// exercised in CI.
-fn wait_for_configure<S: Shell + ?Sized>(
-    shell: &mut S,
-    window: WindowId,
-    events: &mut u64,
-) -> Result<(u32, u32), SandboxError> {
-    // The deadline is wall-clock even in a headless run: it bounds a hang, and
-    // a hang is measured in real seconds.
-    let started = MonotonicTime::new();
-    loop {
-        shell.pump(&mut |event| {
-            *events += 1;
-            log::debug!("shell event: {event:?}");
-        });
-        if let Some(size) = shell.window_state(window)?.size() {
-            return Ok((size.width, size.height));
-        }
-        if started.elapsed() >= CONFIGURE_TIMEOUT {
-            return Err(SandboxError::NeverConfigured);
-        }
-        // Advisory: on a real backend this parks on the connection's file
-        // descriptor, and headless returns immediately.
-        shell.wait_events(Some(Duration::from_millis(8)));
     }
 }
 

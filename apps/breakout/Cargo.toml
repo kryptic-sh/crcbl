@@ -7,10 +7,18 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-# One engine dependency, same pattern as apps/sandbox: the game names `crcbl`
-# and nothing else. `log` is for per-event debug logging.
-# Direct ECS/net/input/server/client deps because the umbrella does not
-# re-export them (per `docs/plan/ROADMAP.md`, samples are the consumers).
+# **Eleven engine dependencies, not one.** `apps/sandbox` names `crcbl` and
+# nothing else; breakout cannot, because the umbrella re-exports only the
+# graphics stack (`core`, `shell`, `hal`, `render`, `shaders`, `ui`) and the
+# simulation half — ECS, physics, input, net, server, client, audio, store — has
+# no re-export. `docs/plan/ROADMAP.md` puts samples on the consumer side of that
+# line deliberately, so the paths are named here rather than hidden; the comment
+# that used to claim "one engine dependency" was counting the first line only.
+#
+# The umbrella growing `crcbl::ecs`/`::phys`/`::net`/… is what would collapse
+# this list, and is the change to make when the simulation crates stabilise.
+# `glam` is here for the `DVec3` the physics seam speaks; `log` for per-event
+# debug logging.
 [dependencies]
 crcbl = { workspace = true }
 crcbl-ecs = { workspace = true }

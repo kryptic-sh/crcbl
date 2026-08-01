@@ -547,7 +547,7 @@ impl HeadlessShell {
     /// facts, so a consumer cannot hold a mismatched size/scale pair, followed
     /// by the [`Resized`](ShellEvent::Resized) it implies — which is the pair
     /// both Linux backends emit for a scale change, and the pair
-    /// [`deliver_due_configures`](Self::deliver_due_configures) emits for a
+    /// `deliver_due_configures` emits for a
     /// scale change that arrives with a configure.
     ///
     /// # Errors

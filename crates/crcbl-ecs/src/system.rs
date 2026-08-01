@@ -89,7 +89,8 @@ pub trait SystemTrait {
     }
 
     /// Downcast support for callers that hold `&mut dyn SystemTrait` (e.g.
-    /// through [`Schedule::iter_mut`]) and need the concrete system type.
+    /// through [`Schedule::iter_mut`](crate::Schedule::iter_mut)) and need the
+    /// concrete system type.
     /// Implementations are the one-liner `self`.
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }

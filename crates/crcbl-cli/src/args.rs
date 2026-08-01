@@ -36,6 +36,18 @@
 //! dependencies passes both trivially — which is a nice property, not the
 //! argument.
 
+//! # Arguments are `OsString`s, not `String`s
+//!
+//! `std::env::args()` panics on an argument that is not valid Unicode, which on
+//! Linux is any path a filesystem will happily hand you. Every flag this CLI
+//! takes a *path* for — `--path`, `--engine`, `-o`, and `replay`'s file — would
+//! therefore abort with exit 101 rather than the contracted exit 2 or a working
+//! command. So the parser reads `OsString`s and only ever asks for UTF-8 where
+//! the value genuinely has to be text: a subcommand name, a flag, a Cargo
+//! package name, a `WxH` size. Those cases fail as a bad invocation, with the
+//! offending argument rendered lossily so the message is still readable.
+
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// Top-level `--help`.
@@ -126,7 +138,8 @@ Renders one frame using the auto-selected GPU backend through an offscreen
 swapchain, reads the pixels back, and writes a PNG.
 
 OPTIONS:
-        --size WxH       Output dimensions. Default: 1920x1080.
+        --size WxH       Output dimensions. Default: 1920x1080. Each edge must
+                         be between 1 and 16384.
     -o, --output <FILE>  Write the PNG here. Default: screenshot.png.
         --json           Emit one JSON object instead of human output.
     -h, --help           Print this text.";
@@ -211,7 +224,10 @@ pub struct RunArgs {
     /// Machine-readable output.
     pub json: bool,
     /// Everything after `--`.
-    pub passthrough: Vec<String>,
+    ///
+    /// `OsString` because these are the *game's* arguments and the game's
+    /// arguments include paths.
+    pub passthrough: Vec<OsString>,
 }
 
 /// `crcbl build`.
@@ -275,28 +291,42 @@ OPTIONS:
     -h, --help    Print this text.";
 
 /// Parses arguments, which must **not** include the program name.
-pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
+pub fn parse(args: impl IntoIterator<Item = OsString>) -> Invocation {
     let mut args = args.into_iter().peekable();
     let Some(first) = args.next() else {
         return Invocation::BadUsage("no command given".to_string());
     };
 
-    match first.as_str() {
-        "-h" | "--help" | "help" => Invocation::Help(USAGE),
-        "-V" | "--version" => Invocation::Version,
-        "new" => parse_new(args),
-        "run" => parse_run(args),
-        "build" => parse_build(args),
-        "screenshot" => parse_screenshot(args),
-        "replay" => parse_replay(args),
-        other if other.starts_with('-') => {
+    match first.to_str() {
+        Some("-h" | "--help" | "help") => Invocation::Help(USAGE),
+        Some("-V" | "--version") => Invocation::Version,
+        Some("new") => parse_new(args),
+        Some("run") => parse_run(args),
+        Some("build") => parse_build(args),
+        Some("screenshot") => parse_screenshot(args),
+        Some("replay") => parse_replay(args),
+        Some(other) if other.starts_with('-') => {
             Invocation::BadUsage(format!("unrecognized option `{other}`"))
         }
-        other => Invocation::BadUsage(format!("unrecognized command `{other}`")),
+        // A command name is never a path, so a non-UTF-8 one is a typo rather
+        // than something to support. It is still exit 2, not a panic.
+        Some(other) => Invocation::BadUsage(format!("unrecognized command `{other}`")),
+        None => Invocation::BadUsage(format!(
+            "unrecognized command `{}`",
+            first.to_string_lossy()
+        )),
     }
 }
 
-fn parse_new(mut args: impl Iterator<Item = String>) -> Invocation {
+/// A non-UTF-8 argument where only text will do.
+fn not_text(command: &str, what: &str, arg: &OsString) -> Invocation {
+    Invocation::BadUsage(format!(
+        "`{command}` needs a {what} that is valid UTF-8; `{}` is not",
+        arg.to_string_lossy()
+    ))
+}
+
+fn parse_new(mut args: impl Iterator<Item = OsString>) -> Invocation {
     let mut parsed = NewArgs {
         name: String::new(),
         path: None,
@@ -307,27 +337,31 @@ fn parse_new(mut args: impl Iterator<Item = String>) -> Invocation {
     let mut name = None;
 
     while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-h" | "--help" => return Invocation::Help(NEW_USAGE),
-            "--json" => parsed.json = true,
-            "--force" => parsed.force = true,
-            "--path" => match args.next() {
+        match arg.to_str() {
+            Some("-h" | "--help") => return Invocation::Help(NEW_USAGE),
+            Some("--json") => parsed.json = true,
+            Some("--force") => parsed.force = true,
+            // A directory, so it stays an `OsString` all the way to `PathBuf`.
+            Some("--path") => match args.next() {
                 Some(value) => parsed.path = Some(PathBuf::from(value)),
                 None => return bad("--path needs a directory"),
             },
-            "--engine" => match args.next() {
+            Some("--engine") => match args.next() {
                 Some(value) => parsed.engine = Some(PathBuf::from(value)),
                 None => return bad("--engine needs a directory"),
             },
-            other if other.starts_with('-') => {
+            Some(other) if other.starts_with('-') => {
                 return Invocation::BadUsage(format!("`new` has no option `{other}`"));
             }
-            other if name.is_none() => name = Some(other.to_string()),
-            other => {
+            Some(other) if name.is_none() => name = Some(other.to_string()),
+            Some(other) => {
                 return Invocation::BadUsage(format!(
                     "`new` takes one name; `{other}` is a second one"
                 ));
             }
+            // A project name becomes a crate name, which `check_name` already
+            // restricts to ASCII; a non-UTF-8 one could never have passed.
+            None => return not_text("new", "project name", &arg),
         }
     }
 
@@ -341,7 +375,7 @@ fn parse_new(mut args: impl Iterator<Item = String>) -> Invocation {
     Invocation::Command(Command::New(parsed))
 }
 
-fn parse_run(mut args: impl Iterator<Item = String>) -> Invocation {
+fn parse_run(mut args: impl Iterator<Item = OsString>) -> Invocation {
     let mut parsed = RunArgs {
         headless: false,
         package: None,
@@ -351,24 +385,35 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Invocation {
     };
 
     while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-h" | "--help" => return Invocation::Help(RUN_USAGE),
-            "--json" => parsed.json = true,
-            "--headless" => parsed.headless = true,
-            "--release" => parsed.release = true,
-            "-p" | "--package" => match args.next() {
-                Some(value) => parsed.package = Some(value),
+        match arg.to_str() {
+            Some("-h" | "--help") => return Invocation::Help(RUN_USAGE),
+            Some("--json") => parsed.json = true,
+            Some("--headless") => parsed.headless = true,
+            Some("--release") => parsed.release = true,
+            // A Cargo package name, which Cargo itself requires to be UTF-8.
+            Some("-p" | "--package") => match args.next() {
+                Some(value) => match value.into_string() {
+                    Ok(name) => parsed.package = Some(name),
+                    Err(value) => return not_text("run", "package name", &value),
+                },
                 None => return bad("--package needs a name"),
             },
             // Everything after `--` belongs to the game, including things that
-            // look like our own flags.
-            "--" => {
+            // look like our own flags — and including paths, so it is not
+            // required to be UTF-8.
+            Some("--") => {
                 parsed.passthrough.extend(args);
                 break;
             }
-            other => {
+            Some(other) => {
                 return Invocation::BadUsage(format!(
                     "`run` has no argument `{other}` (pass game arguments after `--`)"
+                ));
+            }
+            None => {
+                return Invocation::BadUsage(format!(
+                    "`run` has no argument `{}` (pass game arguments after `--`)",
+                    arg.to_string_lossy()
                 ));
             }
         }
@@ -376,7 +421,7 @@ fn parse_run(mut args: impl Iterator<Item = String>) -> Invocation {
     Invocation::Command(Command::Run(parsed))
 }
 
-fn parse_build(mut args: impl Iterator<Item = String>) -> Invocation {
+fn parse_build(mut args: impl Iterator<Item = OsString>) -> Invocation {
     let mut parsed = BuildArgs {
         target: Target::Native,
         package: None,
@@ -385,33 +430,52 @@ fn parse_build(mut args: impl Iterator<Item = String>) -> Invocation {
     };
 
     while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-h" | "--help" => return Invocation::Help(BUILD_USAGE),
-            "--json" => parsed.json = true,
-            "--release" => parsed.release = true,
-            "-p" | "--package" => match args.next() {
-                Some(value) => parsed.package = Some(value),
+        match arg.to_str() {
+            Some("-h" | "--help") => return Invocation::Help(BUILD_USAGE),
+            Some("--json") => parsed.json = true,
+            Some("--release") => parsed.release = true,
+            Some("-p" | "--package") => match args.next() {
+                Some(value) => match value.into_string() {
+                    Ok(name) => parsed.package = Some(name),
+                    Err(value) => return not_text("build", "package name", &value),
+                },
                 None => return bad("--package needs a name"),
             },
-            "--target" => match args.next().as_deref() {
-                Some("native") => parsed.target = Target::Native,
-                Some("wasm" | "wasm32" | "web") => parsed.target = Target::Wasm,
-                Some(other) => {
-                    return Invocation::BadUsage(format!(
-                        "unknown target `{other}` (known: native, wasm)"
-                    ));
+            Some("--target") => {
+                let Some(value) = args.next() else {
+                    return bad("--target needs a value");
+                };
+                match value.to_str() {
+                    Some("native") => parsed.target = Target::Native,
+                    Some("wasm" | "wasm32" | "web") => parsed.target = Target::Wasm,
+                    Some(other) => {
+                        return Invocation::BadUsage(format!(
+                            "unknown target `{other}` (known: native, wasm)"
+                        ));
+                    }
+                    None => {
+                        return Invocation::BadUsage(format!(
+                            "unknown target `{}` (known: native, wasm)",
+                            value.to_string_lossy()
+                        ));
+                    }
                 }
-                None => return bad("--target needs a value"),
-            },
-            other => {
+            }
+            Some(other) => {
                 return Invocation::BadUsage(format!("`build` has no argument `{other}`"));
+            }
+            None => {
+                return Invocation::BadUsage(format!(
+                    "`build` has no argument `{}`",
+                    arg.to_string_lossy()
+                ));
             }
         }
     }
     Invocation::Command(Command::Build(parsed))
 }
 
-fn parse_screenshot(mut args: impl Iterator<Item = String>) -> Invocation {
+fn parse_screenshot(mut args: impl Iterator<Item = OsString>) -> Invocation {
     let mut parsed = ScreenshotArgs {
         width: 1920,
         height: 1080,
@@ -420,36 +484,43 @@ fn parse_screenshot(mut args: impl Iterator<Item = String>) -> Invocation {
     };
 
     while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-h" | "--help" => return Invocation::Help(SCREENSHOT_USAGE),
-            "--json" => parsed.json = true,
-            "--size" => match args.next() {
-                Some(value) => match parse_size(&value) {
-                    Some((w, h)) => {
-                        parsed.width = w;
-                        parsed.height = h;
+        match arg.to_str() {
+            Some("-h" | "--help") => return Invocation::Help(SCREENSHOT_USAGE),
+            Some("--json") => parsed.json = true,
+            Some("--size") => {
+                let Some(value) = args.next() else {
+                    return bad("--size needs a value");
+                };
+                let raw = value.to_string_lossy().into_owned();
+                match value.to_str().map(parse_size) {
+                    Some(Ok((width, height))) => {
+                        parsed.width = width;
+                        parsed.height = height;
                     }
-                    None => {
-                        return Invocation::BadUsage(format!(
-                            "`--size` expects WxH, e.g. 1920x1080; got `{value}`"
-                        ));
-                    }
-                },
-                None => return bad("--size needs a value"),
-            },
-            "-o" | "--output" => match args.next() {
+                    Some(Err(reason)) => return Invocation::BadUsage(reason),
+                    None => return Invocation::BadUsage(size_syntax(&raw)),
+                }
+            }
+            // A path, so it stays an `OsString` all the way to `PathBuf`.
+            Some("-o" | "--output") => match args.next() {
                 Some(value) => parsed.output = std::path::PathBuf::from(value),
                 None => return bad("--output needs a path"),
             },
-            other => {
+            Some(other) => {
                 return Invocation::BadUsage(format!("`screenshot` has no argument `{other}`"));
+            }
+            None => {
+                return Invocation::BadUsage(format!(
+                    "`screenshot` has no argument `{}`",
+                    arg.to_string_lossy()
+                ));
             }
         }
     }
     Invocation::Command(Command::Screenshot(parsed))
 }
 
-fn parse_replay(args: impl Iterator<Item = String>) -> Invocation {
+fn parse_replay(args: impl Iterator<Item = OsString>) -> Invocation {
     let mut parsed = ReplayArgs {
         file: PathBuf::new(),
         json: false,
@@ -457,16 +528,17 @@ fn parse_replay(args: impl Iterator<Item = String>) -> Invocation {
     let mut file = None;
 
     for arg in args {
-        match arg.as_str() {
-            "-h" | "--help" => return Invocation::Help(REPLAY_USAGE),
-            "--json" => parsed.json = true,
-            other if other.starts_with('-') => {
+        match arg.to_str() {
+            Some("-h" | "--help") => return Invocation::Help(REPLAY_USAGE),
+            Some("--json") => parsed.json = true,
+            Some(other) if other.starts_with('-') => {
                 return Invocation::BadUsage(format!("`replay` has no option `{other}`"));
             }
-            other if file.is_none() => file = Some(PathBuf::from(other)),
-            other => {
+            Some(_) | None if file.is_none() => file = Some(PathBuf::from(arg)),
+            _ => {
                 return Invocation::BadUsage(format!(
-                    "`replay` takes one file; `{other}` is a second one"
+                    "`replay` takes one file; `{}` is a second one",
+                    arg.to_string_lossy()
                 ));
             }
         }
@@ -479,14 +551,38 @@ fn parse_replay(args: impl Iterator<Item = String>) -> Invocation {
     Invocation::Command(Command::Replay(parsed))
 }
 
-fn parse_size(raw: &str) -> Option<(u32, u32)> {
-    let (w, rest) = raw.split_once('x')?;
-    let w: u32 = w.parse().ok()?;
-    let h: u32 = rest.parse().ok()?;
-    if w == 0 || h == 0 {
-        return None;
+/// `WxH`, bounded on both ends.
+///
+/// The upper bound is [`crcbl::screenshot::MAX_DIMENSION`] and it is enforced
+/// *here*, at parse time, so `--size 4000000000x4000000000` and `--size
+/// 100000x100000` are bad invocations (exit 2) rather than a 40 GB allocation
+/// or an overflowed byte count several layers down. The engine checks the same
+/// bound again for callers that never went through this parser.
+fn parse_size(raw: &str) -> Result<(u32, u32), String> {
+    const MAX: u32 = crcbl::screenshot::MAX_DIMENSION;
+
+    let Some((width, height)) = raw.split_once('x') else {
+        return Err(size_syntax(raw));
+    };
+    let (Ok(width), Ok(height)) = (width.parse::<u32>(), height.parse::<u32>()) else {
+        return Err(size_syntax(raw));
+    };
+    if width == 0 || height == 0 {
+        return Err(format!(
+            "`--size` needs a non-zero width and height; got `{raw}`"
+        ));
     }
-    Some((w, h))
+    if width > MAX || height > MAX {
+        return Err(format!(
+            "`--size` is capped at {MAX}x{MAX} (a {MAX}x{MAX} frame is already a gibibyte of \
+             pixels); got `{raw}`"
+        ));
+    }
+    Ok((width, height))
+}
+
+fn size_syntax(raw: &str) -> String {
+    format!("`--size` expects WxH, e.g. 1920x1080; got `{raw}`")
 }
 
 fn bad(message: &str) -> Invocation {
@@ -538,7 +634,7 @@ mod tests {
     use super::*;
 
     fn parse_args(args: &[&str]) -> Invocation {
-        parse(args.iter().map(|arg| (*arg).to_string()))
+        parse(args.iter().map(OsString::from))
     }
 
     fn command(args: &[&str]) -> Command {
@@ -607,7 +703,10 @@ mod tests {
         };
         assert!(args.headless);
         assert!(!args.json, "`--json` after `--` belongs to the game");
-        assert_eq!(args.passthrough, ["--headless", "--frames", "3", "--json"]);
+        assert_eq!(
+            args.passthrough,
+            ["--headless", "--frames", "3", "--json"].map(OsString::from)
+        );
     }
 
     /// wasm is P5, and the difference between "unknown" and "not yet" is the
@@ -656,9 +755,115 @@ mod tests {
             vec!["build", "--target", "ps5"],
             vec!["build", "stray"],
             vec!["replay"],
+            vec!["screenshot", "--size"],
+            vec!["screenshot", "--size", "1920"],
+            vec!["screenshot", "--size", "nonsensexthing"],
+            vec!["screenshot", "--size", "0x1080"],
+            vec!["screenshot", "--size", "1920x0"],
+            // The two the review names: an overflowing product and a 40 GB
+            // allocation. Both are exit 2, not a panic and not an OOM.
+            vec!["screenshot", "--size", "4000000000x4000000000"],
+            vec!["screenshot", "--size", "100000x100000"],
+            vec!["screenshot", "--size", "16385x16"],
+            vec!["screenshot", "--size", "16x16385"],
+            vec!["screenshot", "-o"],
         ] {
             assert!(
                 matches!(parse_args(&args), Invocation::BadUsage(_)),
+                "{args:?} should be a bad invocation"
+            );
+        }
+    }
+
+    /// The help text quotes the cap as a literal, so it is pinned to the
+    /// constant it describes.
+    #[test]
+    fn the_screenshot_help_names_the_real_size_cap() {
+        let max = crcbl::screenshot::MAX_DIMENSION;
+        assert!(
+            SCREENSHOT_USAGE.contains(&max.to_string()),
+            "`screenshot --help` must name the {max} cap:\n{SCREENSHOT_USAGE}"
+        );
+    }
+
+    /// The largest frame the engine will render is still a *good* invocation;
+    /// the bound is a cap, not an off-by-one.
+    #[test]
+    fn the_largest_accepted_size_is_the_engines_own_limit() {
+        let max = crcbl::screenshot::MAX_DIMENSION;
+        let Command::Screenshot(args) = command(&["screenshot", "--size", &format!("{max}x{max}")])
+        else {
+            panic!("expected screenshot");
+        };
+        assert_eq!((args.width, args.height), (max, max));
+    }
+
+    /// `std::env::args()` panics on a non-UTF-8 argument, and every one of
+    /// these flags takes a path. A path a filesystem accepts must reach the
+    /// command intact, and a non-UTF-8 value where only text will do must be
+    /// exit 2 rather than exit 101.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_path_survives_and_a_non_utf8_name_is_exit_two() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let weird = || OsString::from_vec(b"/tmp/n\xfft-utf8".to_vec());
+        let parse_os = |args: Vec<OsString>| parse(args);
+
+        let Invocation::Command(Command::New(args)) = parse_os(vec![
+            OsString::from("new"),
+            OsString::from("mygame"),
+            OsString::from("--path"),
+            weird(),
+            OsString::from("--engine"),
+            weird(),
+        ]) else {
+            panic!("a non-UTF-8 --path/--engine is a usable invocation");
+        };
+        assert_eq!(args.path.as_deref(), Some(std::path::Path::new(&weird())));
+        assert_eq!(args.engine.as_deref(), Some(std::path::Path::new(&weird())));
+
+        let Invocation::Command(Command::Screenshot(args)) = parse_os(vec![
+            OsString::from("screenshot"),
+            OsString::from("-o"),
+            weird(),
+        ]) else {
+            panic!("a non-UTF-8 -o is a usable invocation");
+        };
+        assert_eq!(args.output, std::path::PathBuf::from(weird()));
+
+        let Invocation::Command(Command::Replay(args)) =
+            parse_os(vec![OsString::from("replay"), weird()])
+        else {
+            panic!("a non-UTF-8 replay file is a usable invocation");
+        };
+        assert_eq!(args.file, std::path::PathBuf::from(weird()));
+
+        // Game arguments are the game's business, paths included.
+        let Invocation::Command(Command::Run(args)) = parse_os(vec![
+            OsString::from("run"),
+            OsString::from("--"),
+            OsString::from("--scene"),
+            weird(),
+        ]) else {
+            panic!("expected run");
+        };
+        assert_eq!(args.passthrough, vec![OsString::from("--scene"), weird()]);
+
+        // And where the value has to be text, it is a named bad invocation.
+        for args in [
+            vec![weird()],
+            vec![OsString::from("new"), weird()],
+            vec![OsString::from("build"), OsString::from("-p"), weird()],
+            vec![OsString::from("build"), OsString::from("--target"), weird()],
+            vec![
+                OsString::from("screenshot"),
+                OsString::from("--size"),
+                weird(),
+            ],
+        ] {
+            assert!(
+                matches!(parse_os(args.clone()), Invocation::BadUsage(_)),
                 "{args:?} should be a bad invocation"
             );
         }
