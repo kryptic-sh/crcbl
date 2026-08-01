@@ -3,14 +3,6 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## breakout: the ball's speed never ramps
-
-`docs/plan/sample/01-breakout.md` lists "Speed ramps per hit" under scope. The
-ball runs at a constant `game::BALL_SPEED` from launch to death — `keep_speed`
-puts the magnitude back after every bounce, so a ramp is a single multiplier in
-that function plus somewhere to keep the current speed. Deliberately left out of
-the bounce-physics fix, which was about removing gravity, not about pacing.
-
 ## breakout: the paddle deviates from "reflection from contact normal"
 
 The same plan doc says collision response is "reflection from contact normal"

@@ -3,11 +3,12 @@
 //!
 //! # The ball is not a projectile
 //!
-//! There is no gravity and no drag: the ball keeps [`BALL_SPEED`] from launch to
-//! death and a collision only ever changes its *direction*. That is the whole
-//! model, and it is what breakout has always been — a ball under Earth gravity
-//! arcs, so the same launch reaches a different brick depending on how far
-//! across the screen it has travelled, and the player cannot aim.
+//! There is no gravity and no drag. A collision changes the ball's
+//! *direction*, and the only thing that changes its *speed* is breaking a
+//! brick — [`ramped_speed`], applied once per brick and capped. That is the
+//! whole model, and it is what breakout has always been: a ball under Earth
+//! gravity arcs, so the same launch reaches a different brick depending on how
+//! far across the screen it has travelled, and the player cannot aim.
 //!
 //! The paddle is the one collider that does not answer with a mirror
 //! reflection: where the ball lands across its width, plus which way it was
@@ -85,14 +86,26 @@ pub const WORLD_TOP: f64 = 9.0;
 pub const BALL_RADIUS: f64 = 0.3;
 const BALL_START_X: f64 = 0.0;
 const BALL_START_Y: f64 = -5.0;
-/// The ball's speed, in world units per second — constant for the whole life of
-/// a ball, because nothing accelerates it. Every collision rotates the velocity
-/// and [`keep_speed`] puts the magnitude back.
+/// The speed a ball launches at, in world units per second.
 ///
 /// 11 covers the 8.6 units from the start position at y = -5 to the underside
 /// of the lowest brick row at y = 3.6 in about 0.8 s, which is the pace the
-/// game reads at.
+/// game opens at. It is the *only* thing that changes the ball's speed after a
+/// launch, and it changes it in one place — see [`ramped_speed`].
 const BALL_SPEED: f64 = 11.0;
+/// What one broken brick multiplies the ball's speed by.
+///
+/// `docs/plan/sample/01-breakout.md` puts "speed ramps per hit" in scope, and a
+/// game whose ball moves at exactly one speed from the first brick to the
+/// fortieth has no arc to it. 2% a brick is small enough not to be felt as a
+/// jolt and compounds to the cap over most of a grid.
+const SPEED_RAMP: f64 = 1.02;
+/// The fastest the ramp takes the ball, in world units per second.
+///
+/// 1.6x the launch speed: 0.3 units per tick at 60 Hz, still under the ball's
+/// own diameter, so the sweep resolves a wall or a brick on the tick it reaches
+/// it rather than a tick late.
+const MAX_BALL_SPEED: f64 = BALL_SPEED * 1.6;
 /// How far off vertical a launch goes, in radians. Not zero: a ball launched
 /// straight up comes straight back down onto the middle of the paddle, and the
 /// opening of every run would be identical.
@@ -210,6 +223,9 @@ struct GameLogic {
     lives: u32,
     state: GameState,
     launched: bool,
+    /// The speed this ball is on. Starts at [`BALL_SPEED`] and ramps with every
+    /// brick it breaks; a fresh ball starts over.
+    ball_speed: f64,
     /// Sound cues raised this tick: `(sound id, world x)`. Drained by the
     /// facade, which owns the output stream — audio does not belong on the
     /// simulation's side of the seam.
@@ -227,6 +243,7 @@ impl GameLogic {
         self.state = GameState::WaitingForLaunch;
         self.launched = false;
         self.paddle_x = 0.0;
+        self.ball_speed = BALL_SPEED;
     }
 }
 
@@ -366,6 +383,9 @@ fn resolve_collisions(logic: &mut GameLogic, world: &mut World, dt: f64, paddle_
             if is_brick {
                 broken = Some(hit_entity);
                 logic.score += 10;
+                // Ramped *before* the bounce below reads it, so the brick that
+                // raised the speed is the one the ball leaves faster.
+                logic.ball_speed = ramped_speed(logic.ball_speed);
                 cue = Some((crate::audio::SOUND_BRICK, pos.x as f32));
             } else if approaching {
                 cue = Some((crate::audio::SOUND_BOUNCE, pos.x as f32));
@@ -377,10 +397,11 @@ fn resolve_collisions(logic: &mut GameLogic, world: &mut World, dt: f64, paddle_
                 // the paddle's top face from its ends — a ball that clips the
                 // side of the paddle is coming from beside it, and answering
                 // that with an upward bounce would be a free save.
+                let speed = logic.ball_speed;
                 new_body.velocity = if hit_entity == paddle && hit.normal.y > 0.5 {
-                    paddle_bounce(hit.point.x, paddle_x, paddle_dir)
+                    paddle_bounce(hit.point.x, paddle_x, paddle_dir, speed)
                 } else {
-                    keep_speed(vel - 2.0 * vel.dot(hit.normal) * hit.normal)
+                    keep_speed(vel - 2.0 * vel.dot(hit.normal) * hit.normal, speed)
                 };
                 phys.set_body(ball, new_body);
                 resolved.position = hit.point + hit.normal * BALL_RADIUS * 1.01;
@@ -421,6 +442,9 @@ fn check_life_and_win(logic: &mut GameLogic, world: &mut World) {
             logic.state = GameState::Lost;
         } else {
             logic.state = GameState::WaitingForLaunch;
+            // A fresh ball is a fresh ramp: inheriting the speed of the ball
+            // that was just lost is how a run gets unrecoverable.
+            logic.ball_speed = BALL_SPEED;
             with_physics(world, |phys| reset_ball(phys, ball));
         }
         return;
@@ -489,9 +513,17 @@ fn with_physics<R>(world: &mut World, f: impl FnOnce(&mut PhysicsSystem) -> R) -
 }
 
 /// The velocity a launch gives the ball: up and slightly to the right, at the
-/// one speed the ball ever has.
+/// speed every ball starts at.
 fn launch_velocity() -> DVec3 {
     DVec3::new(LAUNCH_ANGLE.sin(), LAUNCH_ANGLE.cos(), 0.0) * BALL_SPEED
+}
+
+/// The speed a ball is on after breaking one more brick.
+///
+/// The whole ramp, in one place, so the cap cannot be applied on one path and
+/// forgotten on another.
+fn ramped_speed(speed: f64) -> f64 {
+    (speed * SPEED_RAMP).min(MAX_BALL_SPEED)
 }
 
 /// The velocity a paddle bounce gives the ball.
@@ -505,24 +537,24 @@ fn launch_velocity() -> DVec3 {
 ///
 /// The result always points upward: `|angle| ≤ MAX_BOUNCE_ANGLE < π/2`, so
 /// `cos` is positive and a bounce cannot drive the ball down through the paddle.
-fn paddle_bounce(contact_x: f64, paddle_x: f64, paddle_dir: f64) -> DVec3 {
+fn paddle_bounce(contact_x: f64, paddle_x: f64, paddle_dir: f64, speed: f64) -> DVec3 {
     let offset = ((contact_x - paddle_x) / PADDLE_HALF_WIDTH).clamp(-1.0, 1.0);
     let angle = (offset * MAX_BOUNCE_ANGLE + paddle_dir * PADDLE_SPIN_ANGLE)
         .clamp(-MAX_BOUNCE_ANGLE, MAX_BOUNCE_ANGLE);
-    DVec3::new(angle.sin(), angle.cos(), 0.0) * BALL_SPEED
+    DVec3::new(angle.sin(), angle.cos(), 0.0) * speed
 }
 
-/// Puts `vel` back at [`BALL_SPEED`], no shallower than
+/// Puts `vel` back at `speed`, no shallower than
 /// [`MIN_VERTICAL_FRACTION`].
 ///
 /// Mirror reflection off an axis-aligned box preserves speed exactly, so the
 /// rescale is a no-op in exact arithmetic and a drift-killer in floating point.
 /// The vertical floor is the part that changes behaviour: it is what stops a
 /// ball from ending up in a horizontal rally the paddle can never reach.
-fn keep_speed(vel: DVec3) -> DVec3 {
+fn keep_speed(vel: DVec3, speed: f64) -> DVec3 {
     let planar = DVec3::new(vel.x, vel.y, 0.0);
     if planar.length_squared() < 1e-12 {
-        return DVec3::new(0.0, BALL_SPEED, 0.0);
+        return DVec3::new(0.0, speed, 0.0);
     }
     let dir = planar.normalize();
     // Rebuilt from the clamped y rather than scaled, so the result is exactly
@@ -533,7 +565,7 @@ fn keep_speed(vel: DVec3) -> DVec3 {
         dir.y
     };
     let x = (1.0 - y * y).max(0.0).sqrt().copysign(dir.x);
-    DVec3::new(x, y, 0.0) * BALL_SPEED
+    DVec3::new(x, y, 0.0) * speed
 }
 
 fn reset_ball(phys: &mut PhysicsSystem, ball: Entity) {
@@ -772,6 +804,7 @@ impl Game {
             lives: STARTING_LIVES,
             state: GameState::WaitingForLaunch,
             launched: false,
+            ball_speed: BALL_SPEED,
             sounds: Vec::new(),
             ticks: 0,
         }));
@@ -1263,19 +1296,129 @@ mod tests {
         panic!("the paddle never returned a ball dropped {offset} from its centre");
     }
 
+    /// The ball this harness is playing with, and how fast it is going.
+    fn ball_speed(h: &mut Harness) -> f64 {
+        let ball = lock(&h.game.shared).ball;
+        with_physics(h.game.server.world_mut(), |phys| {
+            phys.body(ball)
+                .expect("the ball has a body")
+                .velocity
+                .length()
+        })
+        .expect("the world has physics")
+    }
+
+    /// Runs frames until the ball has broken at least one brick, and answers
+    /// how many.
+    ///
+    /// Not a fixed number of seconds: the ball is lost a second or so after it
+    /// comes back down past a paddle nobody is steering, and a ball waiting to
+    /// be relaunched has no speed to read.
+    fn play_until_a_brick_breaks(h: &mut Harness) -> u32 {
+        for _ in 0..600 {
+            h.frame();
+            if h.game.score > 0 {
+                assert_eq!(h.game.state, GameState::Playing, "the ball is still live");
+                return (BRICK_COUNT - h.game.bricks_remaining()) as u32;
+            }
+        }
+        panic!("ten seconds and not one brick");
+    }
+
+    /// Breaking bricks speeds the ball up, and the speed is real motion rather
+    /// than a number in a field.
+    #[test]
+    fn the_ball_speeds_up_as_bricks_break() {
+        let mut h = Harness::new(60, 60);
+        h.run(0.1, LAUNCH);
+        let launched = ball_speed(&mut h);
+        assert!((launched - BALL_SPEED).abs() < 1e-9, "{launched}");
+
+        let broken = play_until_a_brick_breaks(&mut h);
+        let now = ball_speed(&mut h);
+        assert!(
+            (now - BALL_SPEED * SPEED_RAMP.powi(broken as i32)).abs() < 1e-9,
+            "{broken} bricks should put the ball at {} and it is at {now}",
+            BALL_SPEED * SPEED_RAMP.powi(broken as i32),
+        );
+
+        // And the ball actually covers that ground: one tick's motion is the
+        // speed, or the field is decorative.
+        let mut render = RenderState::default();
+        h.game.render_state(&mut render);
+        let before = render.ball;
+        h.frame();
+        h.game.render_state(&mut render);
+        assert!(
+            ((render.ball - before).length() - now * h.game.tick_dt_secs()).abs() < 1e-6,
+            "the ball moved {} where {} was owed",
+            (render.ball - before).length(),
+            now * h.game.tick_dt_secs(),
+        );
+    }
+
+    /// The ramp is bounded, and the bound is low enough that the ball still
+    /// cannot cross its own diameter inside one tick.
+    #[test]
+    fn the_ramp_is_capped_below_a_tunnelling_speed() {
+        let mut speed = BALL_SPEED;
+        for _ in 0..BRICK_COUNT * 4 {
+            speed = ramped_speed(speed);
+            assert!(speed <= MAX_BALL_SPEED, "{speed} is past the cap");
+        }
+        assert!(
+            (speed - MAX_BALL_SPEED).abs() < 1e-9,
+            "the ramp must actually reach its cap, got {speed}",
+        );
+        assert!(
+            MAX_BALL_SPEED / f64::from(DEFAULT_TICK_HZ) < BALL_RADIUS * 2.0,
+            "a tick at the cap moves {} against a ball {} across",
+            MAX_BALL_SPEED / f64::from(DEFAULT_TICK_HZ),
+            BALL_RADIUS * 2.0,
+        );
+    }
+
+    /// A restart puts the ramp back where it started, along with everything
+    /// else. A run that inherited the previous one's speed would open at a pace
+    /// the player never earned.
+    #[test]
+    fn a_restart_starts_the_ramp_over() {
+        let mut h = Harness::new(60, 60);
+        h.run(0.1, LAUNCH);
+        play_until_a_brick_breaks(&mut h);
+        assert!(
+            ball_speed(&mut h) > BALL_SPEED,
+            "the run has to have ramped"
+        );
+
+        h.game.key_event(KeyCode::KeyR, true);
+        h.game.key_event(KeyCode::KeyR, false);
+        h.frame();
+        h.game.key_event(KeyCode::Space, true);
+        h.game.key_event(KeyCode::Space, false);
+        h.frame();
+
+        assert_eq!(h.game.state, GameState::Playing);
+        let relaunched = ball_speed(&mut h);
+        assert!(
+            (relaunched - BALL_SPEED).abs() < 1e-9,
+            "a restarted run launched at {relaunched}",
+        );
+    }
+
     /// A paddle being driven under the ball trims the angle it leaves at, and
     /// never enough to point it back down.
     #[test]
     fn a_moving_paddle_trims_the_bounce() {
-        let still = paddle_bounce(1.0, 0.0, 0.0);
-        let with_the_ball = paddle_bounce(1.0, 0.0, 1.0);
-        let against_it = paddle_bounce(1.0, 0.0, -1.0);
+        let still = paddle_bounce(1.0, 0.0, 0.0, BALL_SPEED);
+        let with_the_ball = paddle_bounce(1.0, 0.0, 1.0, BALL_SPEED);
+        let against_it = paddle_bounce(1.0, 0.0, -1.0, BALL_SPEED);
         assert!(with_the_ball.x > still.x, "{with_the_ball:?} vs {still:?}");
         assert!(against_it.x < still.x, "{against_it:?} vs {still:?}");
 
         // The clamp holds at the edge: even the outer edge plus a full spin
         // stays inside the bounce cone, so the ball still climbs.
-        let edge = paddle_bounce(PADDLE_HALF_WIDTH, 0.0, 1.0);
+        let edge = paddle_bounce(PADDLE_HALF_WIDTH, 0.0, 1.0, BALL_SPEED);
         assert!(edge.y > 0.0, "a bounce drove the ball down: {edge:?}");
         assert!((edge.length() - BALL_SPEED).abs() < 1e-9);
     }
@@ -1290,7 +1433,7 @@ mod tests {
             DVec3::new(10.9, -0.5, 0.0),
             DVec3::new(-10.9, 0.5, 0.0),
         ] {
-            let kept = keep_speed(vel);
+            let kept = keep_speed(vel, BALL_SPEED);
             assert!(
                 kept.y.abs() >= floor - 1e-9,
                 "{vel:?} stayed flat at {kept:?}",
