@@ -170,7 +170,7 @@ pub mod fetch;
 pub mod opfs;
 
 use std::collections::BTreeMap;
-use std::path::{Component, Path};
+use std::path::Path;
 
 use crate::StorageError;
 
@@ -219,17 +219,29 @@ pub const MAX_KEY_LEN: usize = 255;
 pub fn canonical_key(path: &Path) -> Result<String, StorageError> {
     let invalid = || StorageError::InvalidPath(path.to_path_buf());
 
-    let mut key = String::new();
-    for component in path.components() {
-        let part = match component {
-            Component::CurDir => continue,
-            Component::Normal(part) => part,
-            // Prefix, RootDir and ParentDir are exactly what `is_contained`
-            // rejects for `NativeStorage`.
-            _ => return Err(invalid()),
-        };
-        let part = part.to_str().ok_or_else(invalid)?;
-        if part.is_empty() || !part.bytes().all(is_key_byte) {
+    // Split the string on `/` rather than walking `Path::components()`.
+    //
+    // A key here is a **URL path** — what `FetchSource` appends to its base and
+    // what an OPFS name is looked up by — and `Path`'s idea of a separator is
+    // the *host's*. On Windows `a\b` parses as two components, so this function
+    // refused that key on Linux and quietly rewrote it to `a/b` on Windows: the
+    // one function whose job is to say what a key may contain gave two answers
+    // depending on which machine asked. The Windows CI leg is where that
+    // surfaced, and a manifest built on Windows is where it would have bitten.
+    //
+    // With the split done here, `\` is simply not a key byte on any platform,
+    // and `..` is rejected by name rather than by `Component::ParentDir`.
+    let raw = path.to_str().ok_or_else(invalid)?;
+    // One trailing slash is allowed and dropped, which is what `Path` did with
+    // `saves/` and what a caller naming a directory writes.
+    let raw = raw.strip_suffix('/').unwrap_or(raw);
+
+    let mut key = String::with_capacity(raw.len());
+    for part in raw.split('/') {
+        if part == "." {
+            continue;
+        }
+        if part.is_empty() || part == ".." || !part.bytes().all(is_key_byte) {
             return Err(invalid());
         }
         if !key.is_empty() {
@@ -254,7 +266,10 @@ pub fn canonical_key(path: &Path) -> Result<String, StorageError> {
 ///
 /// [`StorageError::InvalidPath`], as [`canonical_key`].
 fn canonical_dir(path: &Path) -> Result<String, StorageError> {
-    if path.components().all(|c| matches!(c, Component::CurDir)) {
+    // String-first, for the reason `canonical_key` gives at length.
+    let raw = path.to_str().unwrap_or("\0");
+    let trimmed = raw.strip_suffix('/').unwrap_or(raw);
+    if trimmed.is_empty() || trimmed.split('/').all(|part| part == ".") {
         return Ok(String::new());
     }
     canonical_key(path)
@@ -558,6 +573,32 @@ mod tests {
                     Err(StorageError::InvalidPath(_))
                 ),
                 "{input:?} should be refused"
+            );
+        }
+    }
+
+    /// `/` is the only separator, on every host.
+    ///
+    /// This used to walk `Path::components()`, whose separators are the
+    /// *host's*: `a\b` was one component on Linux (refused, `\` is not a key
+    /// byte) and two on Windows (accepted, and silently rewritten to `a/b`).
+    /// The Windows CI leg is what failed, and a key that means one thing on the
+    /// machine that built the manifest and another on the machine that reads it
+    /// is the bug behind the failure.
+    ///
+    /// The refusals below hold everywhere now because nothing in
+    /// [`canonical_key`] consults platform path semantics any more.
+    #[test]
+    fn a_key_is_split_on_slashes_and_nothing_else() {
+        assert_eq!(canonical_key(Path::new("a/b/c.png")).unwrap(), "a/b/c.png");
+        // A trailing slash names the same thing, as it did through `Path`.
+        assert_eq!(canonical_key(Path::new("saves/")).unwrap(), "saves");
+        assert_eq!(canonical_key(Path::new("./a/./b")).unwrap(), "a/b");
+
+        for host_separator in ["a\\b", "a\\\\b", "C:\\x", "\\\\host\\share"] {
+            assert!(
+                canonical_key(Path::new(host_separator)).is_err(),
+                "{host_separator:?} must be refused on every platform",
             );
         }
     }
