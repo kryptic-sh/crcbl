@@ -9,7 +9,8 @@ fn decode_delta_untrusted(payload: &[u8]) -> Result<crcbl_net::Delta, DeltaDecod
 #[test]
 fn named_delta_seeds_reach_their_intended_paths() {
     let minimal = include_bytes!("../corpus/decoder/delta-keyframe-minimal");
-    let decoded = decode_delta(minimal, Trust::Untrusted).expect("minimal keyframe seed must decode");
+    let decoded =
+        decode_delta(minimal, Trust::Untrusted).expect("minimal keyframe seed must decode");
     assert!(decoded.is_keyframe);
     assert!(decoded.systems.is_empty());
 
