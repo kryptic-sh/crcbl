@@ -8,18 +8,26 @@
 //! - [`write_atomic`] — write-then-rename for crash-safe file writes
 //! - Settings (TOML layers, typed access) — module `settings`
 //! - Saves (binary save/load container) — module `save`
+//! - Browser storage ([`FetchSource`](web::FetchSource) for assets,
+//!   [`OpfsStorage`](web::OpfsStorage) for saves) — module [`web`]
 //!
 //! # Wasm / async design note
 //!
-//! The trait is defined as a **sync** `fn` interface because no async runtime
-//! exists in the engine yet. The wasm backend (P5) will add an async path —
-//! either by wrapping this trait with an adapter or by introducing a second
-//! trait. The `Result<Vec<u8>>` return is forward-compatible with both.
+//! The trait is a **sync** `fn` interface, and the browser has neither blocking
+//! file IO nor blocking network IO. Module [`web`] resolves that without an
+//! async runtime and without a blocking-executor hack: both browser backends are
+//! **resident caches with an out-of-band fill**, so every `StorageSource` call
+//! is an ordinary map lookup and the asynchrony lives in a request/deliver queue
+//! the JS shim drains. A read of something not yet resident is
+//! [`StorageError::Pending`] — a state the caller polls, not a stall. See the
+//! [`web`] module docs for the whole contract, including what
+//! [`write_atomic`]'s guarantee becomes when there is no `rename`.
 
 pub mod crash_ring;
 pub mod replay;
 pub mod save;
 pub mod settings;
+pub mod web;
 
 use std::io;
 use std::io::Write;
@@ -28,7 +36,12 @@ use std::path::{Component, Path, PathBuf};
 // ── Error type ─────────────────────────────────────────────────────────────
 
 /// Errors produced by storage operations.
+///
+/// `#[non_exhaustive]`: the browser backends in [`web`] added three variants
+/// after the native ones shipped, and an IndexedDB fallback is still to come
+/// (`docs/plan/14-persistence.md`). Match with a `_` arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum StorageError {
     /// An underlying I/O error.
     #[error("I/O error: {0}")]
@@ -50,6 +63,32 @@ pub enum StorageError {
     /// relative to it.
     #[error("path escapes the storage root: {0}")]
     InvalidPath(PathBuf),
+
+    /// The backend has been asked for the data but does not have it yet.
+    ///
+    /// Only the browser backends produce this: a `fetch()` is in flight, or the
+    /// shim has not finished restoring the Origin Private File System into the
+    /// resident map. It is a *state*, not a failure — poll again next frame. See
+    /// [`web`].
+    #[error("not resident yet, still pending: {0}")]
+    Pending(PathBuf),
+
+    /// The operation does not exist on this backend at all.
+    ///
+    /// [`FetchSource`](web::FetchSource) is read-only: HTTP `GET` has no write
+    /// or delete, and pretending otherwise by succeeding silently would lose a
+    /// save.
+    #[error("unsupported operation: {0}")]
+    Unsupported(&'static str),
+
+    /// A size or backlog limit refused the write.
+    ///
+    /// The browser's storage quota, a single value larger than the backend
+    /// accepts, or — the case worth naming — the bounded queue of writes waiting
+    /// for a JS shim that is not draining it. See
+    /// [`OpfsStorage`](web::OpfsStorage).
+    #[error("storage limit reached: {0}")]
+    LimitExceeded(PathBuf),
 
     /// A generic application-level error.
     #[error("{0}")]
@@ -248,6 +287,17 @@ impl StorageSource for NativeStorage {
 /// symlink or file at the guessable temporary path makes the write fail instead
 /// of being followed. It is removed again on every failure path, so a failed
 /// write leaves nothing behind.
+///
+/// # Not in a browser
+///
+/// This function is `std::fs` all the way down. It compiles for
+/// `wasm32-unknown-unknown` and fails at runtime on the first call, because that
+/// target's `std::fs` is a stub with no filesystem behind it — and the Origin
+/// Private File System has no `rename` to build this shape on even when reached
+/// through JS. The browser's persistence path is
+/// [`OpfsStorage`](web::OpfsStorage), whose docs state exactly which half of the
+/// guarantee above survives (torn reads: prevented; durability at return:
+/// **not** provided) rather than leaving a caller to assume this one's.
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), StorageError> {
     let parent = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent).map_err(|e| StorageError::from_io(parent, e))?;
