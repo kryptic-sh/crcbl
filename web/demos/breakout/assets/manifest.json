@@ -1,0 +1,4 @@
+{
+  "comment": "Asset keys the shim pre-loads through __crcbl_web_fetch_* before the game boots. Breakout has none yet: its meshes, its font atlas and its shaders are all compiled into the wasm module. The list is the seam, not the content.",
+  "keys": []
+}

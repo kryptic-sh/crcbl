@@ -315,13 +315,20 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), StorageError> {
         parent.join(format!(".{stem}.{suffix:x}{ext}.tmp"))
     };
 
-    let mut f = std::fs::OpenOptions::new()
+    // The handle's whole life is this `match`: the file must be closed before
+    // the rename below, because Windows refuses to rename an open file. An
+    // explicit `drop(f)` used to say so, until `wasm32-unknown-unknown` — whose
+    // `std::fs::File` is an unsupported stub with no `Drop` impl at all — turned
+    // that line into a `clippy::drop_non_drop` error in the wasm32 CI job. A
+    // scope closes it on every target and cannot be read as a no-op.
+    let written = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&tmp_name)
-        .map_err(|e| StorageError::from_io(&tmp_name, e))?;
-    let written = f.write_all(data).and_then(|()| f.sync_all());
-    drop(f);
+    {
+        Ok(mut f) => f.write_all(data).and_then(|()| f.sync_all()),
+        Err(e) => return Err(StorageError::from_io(&tmp_name, e)),
+    };
     if let Err(e) = written {
         std::fs::remove_file(&tmp_name).ok();
         return Err(StorageError::from_io(&tmp_name, e));

@@ -1,0 +1,130 @@
+name: Pages
+
+# The demo site: https://kryptic-sh.github.io/crcbl/
+#
+# `docs/plan/ROADMAP.md`'s "Demo site (GitHub Pages)" section asks for two
+# things, and they are split into two jobs here rather than one:
+#
+#   * "Broken wasm build = broken CI = blocked merge — the browser target can't
+#     rot." That is `build`, and it runs on **pull requests too**. A PR that
+#     breaks the shim, the export contract or the wasm build fails here before
+#     anything reaches main.
+#   * "on main push, build all wasm-ready samples, assemble static site, deploy".
+#     That is `deploy`, which runs only on a push to main.
+#
+# PERMISSIONS. The workflow default is `contents: read`, the same as `ci.yml`.
+# `pages: write` and `id-token: write` are granted to the **deploy job only** —
+# the job that builds the artifact, runs `cargo`, and executes repository code
+# never holds a token that can publish. `id-token: write` is what
+# `actions/deploy-pages` exchanges for a short-lived Pages deployment token, so
+# there is no long-lived secret anywhere in this file.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+# A superseded deploy is worth cancelling; two of them racing to publish is not.
+concurrency:
+  group: pages-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build the demo site
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pages
+
+      # Node 24 for two reasons: `node --check` understands ES module syntax in
+      # a `.js` file without a `package.json` to declare the dialect, and the
+      # export checker uses `WebAssembly.Module.exports`. There is no npm step
+      # and no `node_modules` — this repository hand-writes its bindings.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      # The version comes out of `Cargo.lock`, so it cannot drift from the
+      # `wasm-bindgen` crate the build resolves. A mismatched CLI emits glue
+      # whose imports the module does not have, and that failure would surface
+      # as a `LinkError` in a visitor's browser rather than here.
+      - name: Resolve the pinned wasm-bindgen version
+        id: bindgen
+        run: |
+          version=$(awk '/^name = "wasm-bindgen"$/ { found = 1; next }
+                         found && /^version = / { gsub(/[",]/, "", $3); print $3; exit }' Cargo.lock)
+          test -n "$version" || { echo "no wasm-bindgen in Cargo.lock"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@${{ steps.bindgen.outputs.version }}
+
+      # Every JS file parses. Cheap, and it catches the class of mistake that
+      # otherwise only appears as a blank page.
+      - name: Syntax-check the shim
+        run: node --check web/engine/*.js web/demos/*/*.js web/tools/*.mjs
+
+      # Builds each wasm-ready sample, runs `wasm-bindgen`, assembles
+      # `target/site`, and runs two checks against every artifact it produced.
+      # They are the real gate, and they are what makes this job worth running
+      # on a PR rather than only on a deploy:
+      #
+      #   check-exports.mjs — every `__crcbl_*` the Rust sources declare is
+      #     exported, every symbol the shim calls exists, `memory` is exported,
+      #     and the module imports nothing outside the bindgen glue.
+      #   smoke.mjs — instantiates the artifact under node with every import
+      #     stubbed to throw and drives the documented boot sequence up to the
+      #     frame that would need a GPU.
+      - name: Build the site
+        run: ./web/build.sh
+
+      - name: Upload the site
+        uses: actions/upload-artifact@v7
+        with:
+          name: site
+          path: target/site
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    name: deploy to GitHub Pages
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Scoped to this job alone. Nothing here compiles or runs repository code:
+    # it downloads the artifact the `build` job produced and hands it to Pages.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: site
+          path: site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -19,6 +19,8 @@
 //! per frame instead has a speed proportional to the frame rate, which is a bug
 //! a headless run — where a frame is pinned to exactly 1/60 s — cannot see.
 
+use core::time::Duration;
+
 use crcbl::engine::{
     Clock, ConfigureError, ExitReason, Flow, FrameOutcome, GpuError, MAX_CONSECUTIVE_RECONFIGURES,
     Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
@@ -27,7 +29,7 @@ use crcbl::prelude::*;
 use crcbl::shell::{LogicalSize, ShellBackend as Backend, WindowId, open, open_backend};
 
 use crate::game::{self, Game, GameState, RenderState};
-use crate::gpu::Gpu;
+use crate::gpu::{Gpu, PendingGpu};
 
 pub use crate::args::Options;
 
@@ -182,19 +184,7 @@ impl<S: Shell + ?Sized> Loop<S> {
     /// open, or the game could not be built.
     pub fn with_shell(mut shell: Box<S>, options: &Options) -> Result<Self, BreakoutError> {
         let clock_source = Clock::new(options.headless);
-        log::info!(
-            "shell: {} backend, caps {:?}",
-            shell.backend(),
-            shell.caps()
-        );
-        shell.align_event_clock(clock_source.elapsed());
-
-        let window = shell.create_window(&WindowDesc {
-            title: "Breakout",
-            app_id: "sh.kryptic.crcbl.breakout",
-            size: LogicalSize::new(960.0, 720.0),
-            ..WindowDesc::default()
-        })?;
+        let window = open_the_window(shell.as_mut(), &clock_source)?;
 
         let mut events = 0;
         let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
@@ -202,8 +192,24 @@ impl<S: Shell + ?Sized> Loop<S> {
 
         // Locked to orthographic: breakout is a pure 2D game.
         let gpu = Gpu::open(shell.as_ref(), window, extent, options.backend)?;
-        let game = Game::new(options.headless, options.tick_hz)?;
+        Self::assemble(shell, window, gpu, options, clock_source, events)
+    }
 
+    /// The half of start-up that is the same however the GPU arrived.
+    ///
+    /// Shared with [`PendingLoop::poll`], which reaches this point several rAF
+    /// frames later than [`with_shell`](Self::with_shell) does. A second copy
+    /// of this struct literal is how the browser build would come to run a
+    /// subtly different game from the native one.
+    fn assemble(
+        shell: Box<S>,
+        window: WindowId,
+        gpu: Gpu,
+        options: &Options,
+        clock_source: Clock,
+        events: u64,
+    ) -> Result<Self, BreakoutError> {
+        let game = Game::new(options.headless, options.tick_hz)?;
         Ok(Self {
             windowed: !options.headless,
             shell,
@@ -223,10 +229,36 @@ impl<S: Shell + ?Sized> Loop<S> {
         })
     }
 
+    /// Sets how far one [`frame`](Self::frame) advances a manual clock.
+    ///
+    /// **The browser's clock is the browser's.** `Clock::Real` reads
+    /// [`std::time::Instant`], which on `wasm32-unknown-unknown` has no
+    /// implementation at all and panics on the first `now()`. The web entry
+    /// point therefore builds the loop on `Clock::manual` and calls this once
+    /// per `requestAnimationFrame` with the delta the browser reported, so the
+    /// simulation is paced by real time without the engine ever reading a clock
+    /// the platform does not have. A real clock ignores this — a loop that
+    /// *can* read the time must not be steered by its caller.
+    ///
+    /// `dt` is clamped to [`MAX_FRAME_STEP`]: a backgrounded tab resumes with a
+    /// multi-second gap, and feeding that to the fixed-timestep accumulator
+    /// spends the next frame running thousands of ticks.
+    pub fn set_frame_step(&mut self, dt: Duration) {
+        if let Clock::Manual { step, .. } = &mut self.clock_source {
+            *step = dt.min(MAX_FRAME_STEP);
+        }
+    }
+
     /// The game, for scripted tests and for an embedder that wants to drive it.
     #[cfg(test)]
     pub fn game_mut(&mut self) -> &mut Game {
         &mut self.game
+    }
+
+    /// The swapchain's current extent, in pixels.
+    #[must_use]
+    pub const fn extent(&self) -> (u32, u32) {
+        self.gpu.extent()
     }
 
     /// One frame: pump, tick the simulation to catch up with the clock, draw.
@@ -339,6 +371,178 @@ impl<S: Shell + ?Sized> Loop<S> {
         gpu_result?;
         shell_result?;
         Ok(summary)
+    }
+}
+
+// ---- polled start-up --------------------------------------------------------
+
+/// The largest step [`Loop::set_frame_step`] will accept.
+///
+/// A tab that was backgrounded for a minute reports a one-minute
+/// `requestAnimationFrame` delta on the frame it comes back. Handing that to a
+/// fixed-timestep accumulator asks for 3600 ticks in one frame, which is a
+/// freeze the user reads as a crash. Four frames' worth of catch-up is the
+/// budget; anything beyond it is time the simulation simply did not experience.
+pub const MAX_FRAME_STEP: Duration = Duration::from_millis(64);
+
+/// Creates the one window, and puts the shell's event clock on the engine's.
+///
+/// The two lines both paths share before they diverge over how they wait.
+fn open_the_window<S: Shell + ?Sized>(
+    shell: &mut S,
+    clock_source: &Clock,
+) -> Result<WindowId, BreakoutError> {
+    log::info!(
+        "shell: {} backend, caps {:?}",
+        shell.backend(),
+        shell.caps()
+    );
+    shell.align_event_clock(clock_source.elapsed());
+    Ok(shell.create_window(&WindowDesc {
+        title: "Breakout",
+        app_id: "sh.kryptic.crcbl.breakout",
+        size: LogicalSize::new(960.0, 720.0),
+        ..WindowDesc::default()
+    })?)
+}
+
+/// How far [`PendingLoop`] has got.
+#[derive(Debug)]
+enum BootStage {
+    /// The window has no size yet. On every platform this is the compositor's
+    /// answer to `create_window`; in a browser it is the shim's first
+    /// `__crcbl_web_resize`, from initial layout.
+    Configure,
+    /// A device has been requested and has not arrived.
+    Device { pending: PendingGpu },
+    /// The loop has been handed over, or a step failed.
+    Done,
+}
+
+/// A [`Loop`] being started one poll at a time.
+///
+/// [`Loop::with_shell`] blocks twice — once in
+/// [`wait_for_configure`](crcbl::engine::wait_for_configure) and once inside
+/// `Gpu::open` — and a browser main thread may do neither: both of the things
+/// being waited for are resolved by the very event loop the wait would be
+/// sitting inside. This is the same start-up with the waits turned inside out,
+/// so the outer loop can be `requestAnimationFrame`.
+///
+/// It is deliberately **not** the native path's implementation. `with_shell`
+/// keeps its blocking waits because on a native platform they are the honest
+/// shape and their timeouts are real diagnostics; what the two share is
+/// `Loop::assemble`, which is everything after the waiting.
+#[derive(Debug)]
+pub struct PendingLoop<S: Shell + ?Sized = dyn Shell> {
+    shell: Option<Box<S>>,
+    window: WindowId,
+    options: Options,
+    clock_source: Option<Clock>,
+    stage: BootStage,
+    /// The most recent size the shell reported, which is not necessarily the
+    /// one the swapchain was requested at: the canvas can be resized while the
+    /// device request is still in flight.
+    extent: Option<(u32, u32)>,
+    events: u64,
+}
+
+impl<S: Shell + ?Sized> PendingLoop<S> {
+    /// Creates the window and starts the wait, without blocking on either half.
+    ///
+    /// `clock_source` is the caller's because the browser's cannot be
+    /// [`Clock::new`]'s — see [`Loop::set_frame_step`].
+    ///
+    /// # Errors
+    ///
+    /// [`BreakoutError`] if the shell refused the window.
+    pub fn request(
+        mut shell: Box<S>,
+        options: &Options,
+        clock_source: Clock,
+    ) -> Result<Self, BreakoutError> {
+        let window = open_the_window(shell.as_mut(), &clock_source)?;
+        Ok(Self {
+            shell: Some(shell),
+            window,
+            options: options.clone(),
+            clock_source: Some(clock_source),
+            stage: BootStage::Configure,
+            extent: None,
+            events: 0,
+        })
+    }
+
+    /// Advances start-up. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// Events are pumped on every poll, including while the device request is
+    /// outstanding — a queue nobody drains is how a resize during start-up
+    /// becomes a swapchain at the wrong size, and how the shim's own diagnostic
+    /// ("the canvas never gets input") goes unexplained.
+    ///
+    /// # Errors
+    ///
+    /// [`BreakoutError`] if the window went away before it had a size, if the
+    /// device request failed, or if the game could not be built. Polling after
+    /// the loop was handed over is a caller bug and reports the same
+    /// [`GpuError::Unusable`] the engine does.
+    pub fn poll(&mut self) -> Result<Option<Loop<S>>, BreakoutError> {
+        let Some(shell) = self.shell.as_mut() else {
+            return Err(BreakoutError::Gpu(GpuError::Unusable(
+                "this breakout loop was already started",
+            )));
+        };
+
+        let mut pending = Pending::default();
+        shell.pump(&mut |event| pending.observe(&event));
+        self.events += pending.count;
+        if pending.destroyed {
+            return Err(BreakoutError::Shell(ShellError::invalid_window(
+                self.window,
+            )));
+        }
+        if let Some(size) = pending.resized {
+            self.extent = Some((size.width, size.height));
+        }
+
+        match core::mem::replace(&mut self.stage, BootStage::Done) {
+            BootStage::Configure => {
+                let Some(extent) = self.extent else {
+                    self.stage = BootStage::Configure;
+                    return Ok(None);
+                };
+                log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+                // Left `Done` if this fails, so a failed start-up stays failed
+                // rather than requesting a second device next frame.
+                self.stage = BootStage::Device {
+                    pending: Gpu::request_open(
+                        shell.as_ref(),
+                        self.window,
+                        extent,
+                        self.options.backend,
+                    )?,
+                };
+                Ok(None)
+            }
+            BootStage::Device { mut pending } => {
+                let Some(mut gpu) = pending.poll()? else {
+                    self.stage = BootStage::Device { pending };
+                    return Ok(None);
+                };
+                // The canvas may have been resized while the promise was in
+                // flight; the swapchain was requested at the older size.
+                if let Some(extent) = self.extent
+                    && extent != gpu.extent()
+                {
+                    gpu.resize(extent)?;
+                }
+                let shell = self.shell.take().expect("checked at the top");
+                let clock = self.clock_source.take().expect("taken with the shell");
+                Loop::assemble(shell, self.window, gpu, &self.options, clock, self.events).map(Some)
+            }
+            BootStage::Done => Err(BreakoutError::Gpu(GpuError::Unusable(
+                "this breakout loop was already started",
+            ))),
+        }
     }
 }
 
@@ -627,5 +831,151 @@ mod tests {
     /// Helper: build a Loop<HeadlessShell> for scripting.
     fn scripted(options: &Options) -> Loop<HeadlessShell> {
         Loop::with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
+    }
+
+    /// Drives [`PendingLoop`] to completion on the headless shell.
+    ///
+    /// The browser has no test harness, so the polled start-up would otherwise
+    /// be code that only CI's `cargo check --target wasm32-unknown-unknown`
+    /// ever looks at — compiled, never run. The headless shell configures its
+    /// window and the null backend answers its device request, which is exactly
+    /// the two waits the browser turns into promises, so the state machine runs
+    /// here end to end.
+    fn poll_to_completion(options: &Options, clock: Clock) -> (Loop<HeadlessShell>, u32) {
+        let mut pending = PendingLoop::request(Box::new(HeadlessShell::new()), options, clock)
+            .expect("headless always creates a window");
+        let mut polls = 0;
+        loop {
+            polls += 1;
+            assert!(polls < 64, "headless + null must not poll forever");
+            if let Some(engine) = pending.poll().expect("nothing here can fail") {
+                return (engine, polls);
+            }
+        }
+    }
+
+    /// The polled start-up reaches the same loop the blocking one does.
+    ///
+    /// Same frame and tick counts from the same options: if the two ever
+    /// diverge, the browser build is running a different game from the one CI
+    /// tests, and nothing else in this file would notice.
+    #[test]
+    fn the_polled_start_up_reaches_the_same_loop_as_the_blocking_one() {
+        let options = headless(30);
+        let (mut polled, polls) = poll_to_completion(&options, Clock::new(true));
+        assert!(
+            polls >= 2,
+            "the first poll cannot both learn the size and have a device, got {polls}",
+        );
+        while let Ok(Flow::Continue) = polled.frame() {}
+        let polled = polled.finish(ExitReason::FrameBudget).expect("teardown");
+
+        let mut blocking = scripted(&options);
+        while let Ok(Flow::Continue) = blocking.frame() {}
+        let blocking = blocking.finish(ExitReason::FrameBudget).expect("teardown");
+
+        assert_eq!(polled.frames, blocking.frames);
+        assert_eq!(polled.ticks, blocking.ticks);
+        assert_eq!(polled.extent, blocking.extent);
+    }
+
+    /// A polled loop asks for the device only once it knows the canvas size.
+    ///
+    /// The browser's configure handshake: a `<canvas>` has no size until the
+    /// document lays it out, and a swapchain cannot be created without one. A
+    /// shell that never reports a size must leave start-up parked rather than
+    /// request a swapchain at a guessed extent.
+    #[test]
+    fn start_up_parks_until_the_window_reports_a_size() {
+        let options = headless(1);
+        let mut pending =
+            PendingLoop::request(Box::new(HeadlessShell::new()), &options, Clock::new(true))
+                .expect("headless always creates a window");
+        assert!(pending.extent.is_none(), "no size before the first pump");
+        assert!(matches!(pending.stage, BootStage::Configure));
+
+        // `HeadlessShell` delays the first configure by a pump or two, exactly
+        // as a compositor does. Every poll before it arrives must stay parked
+        // in `Configure` rather than guess an extent.
+        let mut polls = 0;
+        while matches!(pending.stage, BootStage::Configure) {
+            polls += 1;
+            assert!(polls < 64, "the configure never arrived");
+            assert!(
+                pending.poll().expect("no failure").is_none(),
+                "a loop cannot exist before the window has a size",
+            );
+            assert_eq!(
+                pending.extent.is_some(),
+                matches!(pending.stage, BootStage::Device { .. }),
+                "the device is requested on exactly the poll that learns the size",
+            );
+        }
+    }
+
+    /// The browser's clock drives the simulation, and a stalled tab does not
+    /// stampede it.
+    ///
+    /// [`Loop::set_frame_step`] is the whole of the wasm timing story:
+    /// `Instant::now` panics on that target, so the rAF delta is the only clock
+    /// there is. Half the step must produce half the ticks, and a delta from a
+    /// tab that was backgrounded for a minute must be clamped rather than
+    /// spending the next frame catching up.
+    #[test]
+    fn the_frame_step_paces_the_simulation_and_is_clamped() {
+        let options = Options {
+            headless: true,
+            backend: Some(GpuBackend::Null),
+            frames: Some(60),
+            tick_hz: 60,
+        };
+
+        let mut fast = poll_to_completion(&options, Clock::manual(Duration::ZERO)).0;
+        for _ in 0..60 {
+            fast.set_frame_step(Duration::from_micros(16_667));
+            let _ = fast.frame();
+        }
+        let fast = fast.finish(ExitReason::FrameBudget).expect("teardown");
+
+        let mut slow = poll_to_completion(&options, Clock::manual(Duration::ZERO)).0;
+        for _ in 0..60 {
+            slow.set_frame_step(Duration::from_micros(8_333));
+            let _ = slow.frame();
+        }
+        let slow = slow.finish(ExitReason::FrameBudget).expect("teardown");
+
+        assert_eq!(
+            fast.frames, slow.frames,
+            "the frame count is the frame count"
+        );
+        assert!(
+            fast.ticks >= slow.ticks * 2 - 2 && fast.ticks <= slow.ticks * 2 + 2,
+            "half the step must be about half the ticks: {} vs {}",
+            fast.ticks,
+            slow.ticks,
+        );
+
+        // A minute-long delta from a backgrounded tab is one clamped frame, not
+        // 3600 ticks in one go.
+        let mut resumed = poll_to_completion(&options, Clock::manual(Duration::ZERO)).0;
+        resumed.set_frame_step(Duration::from_secs(60));
+        let before = resumed.ticks;
+        let _ = resumed.frame();
+        assert!(
+            resumed.ticks - before <= 4,
+            "a resumed tab ran {} ticks in one frame",
+            resumed.ticks - before,
+        );
+        resumed.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// A real clock ignores the caller: a loop that can read the time must not
+    /// be steered by whoever calls it.
+    #[test]
+    fn a_real_clock_is_not_steerable() {
+        let (mut engine, _) = poll_to_completion(&headless(1), Clock::new(false));
+        engine.set_frame_step(Duration::from_secs(1));
+        assert!(matches!(engine.clock_source, Clock::Real(_)));
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 }

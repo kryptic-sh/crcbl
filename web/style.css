@@ -1,0 +1,155 @@
+/* One stylesheet for the whole demo site. No framework, no build step — the
+   same policy the JS follows, for the same reason. */
+
+:root {
+  color-scheme: dark;
+  --bg: #0e1015;
+  --panel: #161a22;
+  --edge: #262d3a;
+  --ink: #d8dee9;
+  --dim: #8b95a7;
+  --accent: #67b0ff;
+  --bad: #ff8080;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 2rem 1.25rem 4rem;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+main {
+  max-width: 60rem;
+  margin: 0 auto;
+}
+
+a {
+  color: var(--accent);
+}
+
+h1 {
+  margin: 0 0 0.25rem;
+  font-size: 2rem;
+  letter-spacing: -0.02em;
+}
+
+h2 {
+  margin: 2.5rem 0 0.75rem;
+  font-size: 1.15rem;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.tagline {
+  margin: 0 0 1.5rem;
+  color: var(--dim);
+}
+
+.demos {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  padding: 0;
+  list-style: none;
+}
+
+.demo {
+  display: block;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--edge);
+  border-radius: 0.6rem;
+  background: var(--panel);
+  color: inherit;
+  text-decoration: none;
+}
+
+.demo:hover {
+  border-color: var(--accent);
+}
+
+.demo h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+}
+
+.demo p {
+  margin: 0;
+  color: var(--dim);
+  font-size: 0.9rem;
+}
+
+.note {
+  padding: 0.85rem 1rem;
+  border-left: 3px solid var(--edge);
+  color: var(--dim);
+  font-size: 0.9rem;
+}
+
+/* --- demo page ---------------------------------------------------------- */
+
+.stage {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+canvas {
+  display: block;
+  width: 100%;
+  /* 4:3, the aspect the sample's orthographic camera is framed for. The canvas
+     backing store is sized in device pixels by the shim; this is the CSS box. */
+  aspect-ratio: 4 / 3;
+  max-height: 75vh;
+  border: 1px solid var(--edge);
+  border-radius: 0.4rem;
+  background: #000;
+  /* A focused canvas is the one receiving keys, so say so. */
+  outline-offset: 2px;
+  touch-action: none;
+}
+
+canvas:focus-visible {
+  outline: 2px solid var(--accent);
+}
+
+.bar {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+#status {
+  font-weight: 600;
+}
+
+#status.fatal {
+  color: var(--bad);
+}
+
+#detail {
+  color: var(--dim);
+  font-size: 0.9rem;
+}
+
+button {
+  padding: 0.35rem 0.8rem;
+  border: 1px solid var(--edge);
+  border-radius: 0.35rem;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--accent);
+}

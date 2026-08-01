@@ -1,31 +1,24 @@
-//! Breakout — the first playable Crucible sample.
+//! Breakout — the native front end.
 //!
 //! ```text
 //! breakout [--headless] [--frames N]
 //! ```
 //!
-//! A 2D breakout game: paddle, ball, brick grid, score, lives. Runs
-//! client+server over in-memory transport, orthographic camera, spatial audio
-//! for bounces.
+//! Argv in, exit code out, and nothing else: the game itself is the `breakout`
+//! library this binary links, which is also what the browser's wasm entry point
+//! drives. See that crate's docs for why the split exists.
 //!
 //! Exit codes: 0 ran, 1 it failed, 2 bad arguments.
 
-mod app;
-mod args;
-mod audio;
-mod game;
-mod gpu;
-mod high_score;
-
 use std::process::ExitCode;
 
-use crate::args::{Invocation, parse};
+use crcbl_breakout::{Invocation, USAGE, parse, run};
 
 fn main() -> ExitCode {
     crcbl::core::log::init_logging();
 
     match parse(std::env::args().skip(1)) {
-        Invocation::Run(options) => match app::run(&options) {
+        Invocation::Run(options) => match run(&options) {
             Ok(summary) => {
                 println!(
                     "breakout: {} frames, {} ticks on the {} shell at {}x{} \
@@ -47,12 +40,12 @@ fn main() -> ExitCode {
             }
         },
         Invocation::Help => {
-            println!("{}", args::USAGE);
+            println!("{USAGE}");
             ExitCode::SUCCESS
         }
         Invocation::BadUsage(message) => {
             eprintln!("breakout: {message}");
-            eprintln!("{}", args::USAGE);
+            eprintln!("{USAGE}");
             ExitCode::from(2)
         }
     }

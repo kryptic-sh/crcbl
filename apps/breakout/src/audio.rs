@@ -22,6 +22,7 @@ struct Sound {
 /// `playhead` counts **frames**, not samples. `Sound::data` is interleaved
 /// stereo, so a frame is two `f32`s — a playhead that advanced one *index* per
 /// output frame played every sound at half speed and twice the length.
+#[derive(Debug)]
 struct Voice {
     sound: Arc<Sound>,
     playhead: f64,
@@ -32,6 +33,7 @@ struct Voice {
 }
 
 /// Thread-safe voice queue. Game thread pushes, audio thread drains.
+#[derive(Debug)]
 struct VoiceQueue {
     inner: Mutex<Vec<Voice>>,
 }
@@ -95,6 +97,7 @@ impl Voice {
 
 /// Manages sound loading and playback. Creates voices on the game thread
 /// by cloning pre-built `Voice` templates.
+#[derive(Debug)]
 pub struct Audio {
     sounds: Vec<Arc<Sound>>,
     queue: Arc<VoiceQueue>,

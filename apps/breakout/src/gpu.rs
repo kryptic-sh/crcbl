@@ -9,7 +9,7 @@
 //! that joins them.
 
 use crcbl::backend::GpuBackend;
-use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError};
+use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError, PendingGpuContext};
 use crcbl::hal::{CommandEncoderDesc, Features};
 use crcbl::math::{Mat4, Vec3};
 use crcbl::prelude::*;
@@ -50,9 +50,59 @@ pub struct Gpu {
     dumped: bool,
 }
 
+/// What both [`Gpu::open`] and [`Gpu::request_open`] ask the engine for.
+///
+/// One value rather than two copies of the same descriptor: the browser path
+/// and the native path must open the *same* device, or a feature that only the
+/// blocking path requested is a bug nobody sees until someone loads the page.
+fn desc(backend: Option<GpuBackend>) -> GpuContextDesc<'static> {
+    GpuContextDesc {
+        label: "breakout",
+        backend,
+        // The UI pass hands `ui.slang` its viewport size through a push
+        // constant and has no other binding to do it through, so
+        // `UiRenderer::new` refuses a device that did not enable them.
+        optional_features: Features::TIER_A
+            | Features::TIMESTAMP_QUERY
+            | Features::DEBUG_MARKERS
+            | Features::PUSH_CONSTANTS,
+        ..GpuContextDesc::default()
+    }
+}
+
+/// A [`Gpu`] being opened one poll at a time.
+///
+/// The browser's half of [`Gpu::open`]. `requestDevice` is a promise and the
+/// page's own event loop is what resolves it, so a browser that blocked waiting
+/// for a device would deadlock against itself — see
+/// [`GpuContext::request_open`]. Poll this once per `requestAnimationFrame`
+/// until it yields.
+#[derive(Debug)]
+pub struct PendingGpu {
+    pending: PendingGpuContext,
+}
+
+impl PendingGpu {
+    /// Advances the open. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the device request failed or a renderer refused the
+    /// device it produced.
+    pub fn poll(&mut self) -> Result<Option<Gpu>, GpuError> {
+        match self.pending.poll()? {
+            Some(ctx) => Gpu::from_context(ctx).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
 impl Gpu {
     /// Opens a GPU backend, a surface, a device and a swapchain, and builds the
     /// forward and UI renderers. The camera is locked to orthographic.
+    ///
+    /// **Blocks**, so this is the native path only; a browser calls
+    /// [`request_open`](Self::request_open).
     ///
     /// # Errors
     ///
@@ -63,24 +113,37 @@ impl Gpu {
         extent: (u32, u32),
         backend: Option<GpuBackend>,
     ) -> Result<Self, GpuError> {
-        let ctx = GpuContext::open(
-            shell,
-            window,
-            extent,
-            &GpuContextDesc {
-                label: "breakout",
-                backend,
-                // The UI pass hands `ui.slang` its viewport size through a push
-                // constant and has no other binding to do it through, so
-                // `UiRenderer::new` refuses a device that did not enable them.
-                optional_features: Features::TIER_A
-                    | Features::TIMESTAMP_QUERY
-                    | Features::DEBUG_MARKERS
-                    | Features::PUSH_CONSTANTS,
-                ..GpuContextDesc::default()
-            },
-        )?;
+        Self::from_context(GpuContext::open(shell, window, extent, &desc(backend))?)
+    }
 
+    /// Starts opening the same thing without blocking.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the registry has no such backend or the window went away
+    /// before its surface could be described. Everything else is reported from
+    /// [`PendingGpu::poll`].
+    pub fn request_open<S: Shell + ?Sized>(
+        shell: &S,
+        window: WindowId,
+        extent: (u32, u32),
+        backend: Option<GpuBackend>,
+    ) -> Result<PendingGpu, GpuError> {
+        Ok(PendingGpu {
+            pending: GpuContext::request_open(shell, window, extent, &desc(backend))?,
+        })
+    }
+
+    /// Builds this game's renderers on an already-open context.
+    ///
+    /// The half of start-up that is the same however the context arrived, which
+    /// is why it is a function rather than a copy in each of the two paths.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the forward renderer or the UI compositor refused the
+    /// device.
+    fn from_context(ctx: GpuContext) -> Result<Self, GpuError> {
         let format = ctx.format();
         let renderer = ForwardRenderer::new(ctx.device(), ctx.queue(), format)?;
         let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);

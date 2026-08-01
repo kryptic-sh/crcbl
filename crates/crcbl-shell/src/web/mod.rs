@@ -48,6 +48,20 @@
 //! shape Wayland forces and the reason [`Shell::create_window`] returns nothing
 //! but a handle.
 //!
+//! # Strings cross in a buffer wasm owns
+//!
+//! [`__crcbl_web_key`](shim::__crcbl_web_key) is the only entry point that
+//! takes pointers, and a browser cannot invent an address inside wasm memory —
+//! it can only be given one. [`__crcbl_web_key_scratch_ptr`] and
+//! [`__crcbl_web_key_scratch_capacity`] are that address and its bound; the
+//! shim writes `KeyboardEvent.code` at the start of the buffer and
+//! `KeyboardEvent.key` immediately after it, then passes the two `(ptr, len)`
+//! pairs. This is the same shape `crcbl-store`'s fetch and OPFS entry points
+//! use, and for the same reason.
+//!
+//! [`__crcbl_web_key_scratch_ptr`]: shim::__crcbl_web_key_scratch_ptr
+//! [`__crcbl_web_key_scratch_capacity`]: shim::__crcbl_web_key_scratch_capacity
+//!
 //! # Timestamps
 //!
 //! Every input entry point takes the DOM event's own `timeStamp`, in
@@ -115,7 +129,31 @@ thread_local! {
     /// The canvas id the shim announced through
     /// [`__crcbl_web_canvas`](shim::__crcbl_web_canvas), read by [`canvas_id`].
     static CANVAS: Cell<u32> = const { Cell::new(0) };
+
+    /// Where the shim writes `KeyboardEvent.code` and `KeyboardEvent.key`.
+    ///
+    /// A fixed array in thread-local storage, so its address is stable for the
+    /// life of the thread: a `Vec` could reallocate and a pointer the shim
+    /// cached would then name freed memory. `Cell::as_ptr` hands the address
+    /// out without a borrow and without `unsafe` — nothing on the Rust side
+    /// ever reads *through* the cell, because
+    /// [`__crcbl_web_key`](shim::__crcbl_web_key) reads the raw pointer the
+    /// shim passed back in.
+    static KEY_SCRATCH: Cell<[u8; KEY_SCRATCH_CAPACITY]> =
+        const { Cell::new([0; KEY_SCRATCH_CAPACITY]) };
 }
+
+/// How many bytes the key scratch buffer holds.
+///
+/// The two strings a `keydown` carries share it: the shim writes
+/// `KeyboardEvent.code` at the start and `KeyboardEvent.key` immediately after,
+/// then passes both pointers. `code` is a W3C identifier — the longest is
+/// `MediaTrackPrevious`, 18 bytes — and `key` is one composed character or a
+/// name of similar length, so 256 is roughly an order of magnitude of headroom
+/// over anything a browser can produce. A shim whose two strings do not fit
+/// must drop the event rather than truncate it: half a `code` is a *different*
+/// key, and would bind to one.
+pub const KEY_SCRATCH_CAPACITY: usize = 256;
 
 /// Runs `f` against the live shell's bridge.
 ///
@@ -240,8 +278,8 @@ fn keysym_of(key: &str) -> Keysym {
 /// a shim that cannot be there.
 pub(crate) mod shim {
     use super::{
-        CANVAS, PhysicalPoint, PhysicalSize, ShellEvent, event_time, key_code_of, keysym_of,
-        queue_for, scancode_of, with_bridge,
+        CANVAS, KEY_SCRATCH, KEY_SCRATCH_CAPACITY, PhysicalPoint, PhysicalSize, ShellEvent,
+        event_time, key_code_of, keysym_of, queue_for, scancode_of, with_bridge,
     };
     use crcbl_core::input::{ButtonState, DeviceId, Modifiers, PointerButton, ScrollDelta};
 
@@ -290,6 +328,36 @@ pub(crate) mod shim {
     #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
     pub unsafe extern "C" fn __crcbl_web_canvas(canvas: u32) {
         CANVAS.with(|slot| slot.set(canvas));
+    }
+
+    /// The address the shim writes a key event's two strings to.
+    ///
+    /// Stable for the life of the thread, so a shim may read it once. It is
+    /// **wasm's** buffer: JS writes into it and calls
+    /// [`__crcbl_web_key`] immediately, and nothing else may be interleaved
+    /// between the write and the call.
+    ///
+    /// This exists because `__crcbl_web_key` takes pointers *in*, and a browser
+    /// has no way to obtain an address inside wasm memory except from an export
+    /// that hands one out — the same reason
+    /// [`crcbl-store`](https://docs.rs/crcbl-store)'s fetch and OPFS entry
+    /// points each publish a scratch buffer. Without it the key ABI was
+    /// specified but not callable: the module docs said the shim "copies the
+    /// string into the wasm heap immediately before the call" and gave it
+    /// nowhere to copy to. Found while writing that shim (P5.8).
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_key_scratch_ptr() -> *mut u8 {
+        KEY_SCRATCH.with(|slot| slot.as_ptr().cast::<u8>())
+    }
+
+    /// How many bytes may be written there: [`KEY_SCRATCH_CAPACITY`].
+    ///
+    /// Read it rather than assuming the constant — the two are the same number
+    /// today and a shim that hard-codes it is a shim that keeps working after
+    /// the number changes and then starts corrupting the frame after the buffer.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_key_scratch_capacity() -> u32 {
+        u32::try_from(KEY_SCRATCH_CAPACITY).unwrap_or(u32::MAX)
     }
 
     /// Called once per `requestAnimationFrame` with `performance.now()`.
@@ -953,6 +1021,76 @@ mod tests {
         unsafe { shim::__crcbl_web_resize(9, 800, 600, 1.0) };
         assert_eq!(drain(&mut shell), Vec::new());
         assert_eq!(shell.window_state(window).expect("state").size(), None);
+    }
+
+    /// A key event delivered exactly the way the JS shim delivers one.
+    ///
+    /// The other key tests build `&str`s in Rust and hand out their pointers,
+    /// which no browser can do: JS has no address inside wasm memory except one
+    /// an export gave it. This drives the real path — read the scratch address
+    /// and its capacity, copy both strings in, pass the two `(ptr, len)` pairs
+    /// — and it is the test whose absence let `__crcbl_web_key` be specified
+    /// without being callable (P5.8).
+    #[test]
+    fn the_key_scratch_is_how_a_browser_gets_a_string_into_wasm() {
+        let (mut shell, window) = shell_with_window(2);
+
+        let code = "KeyA";
+        let key = "a";
+        let capacity = shim::__crcbl_web_key_scratch_capacity() as usize;
+        assert!(capacity >= code.len() + key.len());
+        let base = shim::__crcbl_web_key_scratch_ptr();
+        assert!(!base.is_null());
+        // The address must not move between calls, or a shim that reads it once
+        // — as the sample shim does — writes into freed memory forever after.
+        assert_eq!(base, shim::__crcbl_web_key_scratch_ptr());
+
+        // What `new Uint8Array(memory.buffer, base, n).set(bytes)` does.
+        // SAFETY: `base` is the start of a `KEY_SCRATCH_CAPACITY`-byte buffer
+        // in thread-local storage that lives for the whole thread, and the two
+        // strings were just checked to fit in it. Nothing else aliases it: the
+        // buffer is only ever reached through this pointer.
+        unsafe {
+            core::ptr::copy_nonoverlapping(code.as_ptr(), base, code.len());
+            core::ptr::copy_nonoverlapping(key.as_ptr(), base.add(code.len()), key.len());
+        }
+
+        // SAFETY: both pointers name initialised bytes inside that buffer, and
+        // nothing writes to it for the duration of the call — the shim's half
+        // of the contract on `borrow_str`.
+        unsafe {
+            shim::__crcbl_web_key(
+                2,
+                base,
+                code.len() as u32,
+                base.add(code.len()),
+                key.len() as u32,
+                1234.5,
+                STATE_EDGE | STATE_SHIFT,
+            );
+        }
+
+        let events = drain(&mut shell);
+        let [
+            ShellEvent::Key {
+                window: got_window,
+                key_code,
+                keysym,
+                state,
+                repeat,
+                modifiers,
+                ..
+            },
+        ] = events.as_slice()
+        else {
+            panic!("expected exactly one key event, got {events:?}");
+        };
+        assert_eq!(*got_window, window);
+        assert_eq!(*key_code, KeyCode::from_name("KeyA"));
+        assert_eq!(*keysym, Keysym::from_char('a'));
+        assert_eq!(*state, ButtonState::Pressed);
+        assert!(!*repeat);
+        assert_eq!(*modifiers, Modifiers::SHIFT);
     }
 
     #[test]

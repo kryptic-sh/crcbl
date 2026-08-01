@@ -7,6 +7,26 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# **A library with two front ends, not a binary.** P5.8 needs the same loop
+# reachable from `main.rs` (argv, exit codes) and from a browser's JS shim
+# (`src/web.rs`, an `extern "C"` entry point the shim drives once per
+# `requestAnimationFrame`). A bin crate has no linkable artifact for the second,
+# so the game moved into `src/lib.rs` and both callers are thin.
+#
+# `cdylib` is what `wasm32-unknown-unknown` links into a `.wasm`; `rlib` is what
+# `main.rs` links against. Both are needed — a `cdylib`-only lib cannot be a
+# dependency of the binary in the same package.
+#
+# The lib is **not** called `breakout`. A lib and a bin with the same name in
+# one package write the same `breakout.wasm`, which cargo reports as an "output
+# filename collision" and says may become a hard error — and which, until then,
+# means the file the Pages deploy picks up is whichever target finished last.
+# One of the two is the game as a `cdylib` and the other is a `main` that calls
+# `std::env::args`; they must not be able to trade places.
+[lib]
+name = "crcbl_breakout"
+crate-type = ["cdylib", "rlib"]
+
 # **Eleven engine dependencies, not one.** `apps/sandbox` names `crcbl` and
 # nothing else; breakout cannot, because the umbrella re-exports only the
 # graphics stack (`core`, `shell`, `hal`, `render`, `shaders`, `ui`) and the

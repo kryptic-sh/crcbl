@@ -48,6 +48,7 @@ impl Options {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Invocation {
     Run(Options),
     Help,

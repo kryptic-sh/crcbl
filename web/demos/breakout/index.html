@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Breakout — Crucible</title>
+    <meta
+      name="description"
+      content="Breakout, the first Crucible sample, compiled to wasm32 and drawing through WebGPU."
+    />
+    <link rel="stylesheet" href="../../style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Breakout</h1>
+      <p class="tagline">
+        <a href="../../">← all demos</a>
+      </p>
+
+      <div class="stage">
+        <!-- `data-raw-handle` is stamped by the shim rather than written here,
+             so the id lives in exactly one place (`main.js`). -->
+        <canvas id="canvas" tabindex="0" aria-label="Breakout game"></canvas>
+        <div class="bar">
+          <span id="status">Starting…</span>
+          <span id="detail"></span>
+          <button id="stop" type="button">Stop</button>
+        </div>
+      </div>
+
+      <h2>Controls</h2>
+      <p>
+        <strong>←</strong> and <strong>→</strong> move the paddle,
+        <strong>Space</strong> launches the ball and restarts after a win or a
+        loss. Click the canvas first: a canvas has to have keyboard focus to
+        receive keys, and browsers will not start audio until you interact with
+        the page.
+      </p>
+
+      <h2>What is actually running</h2>
+      <p>
+        The same <code>apps/breakout</code> that builds a native binary, with
+        four differences the browser forces and nothing else: start-up is polled
+        across several frames because <code>requestDevice</code> is a promise;
+        the frame loop is driven by <code>requestAnimationFrame</code> out here
+        rather than by a <code>loop</code> inside the engine; the clock is the
+        browser's, because <code>wasm32-unknown-unknown</code> has no
+        <code>Instant</code>; and the high score lives in the Origin Private
+        File System instead of <code>~/.config</code>.
+      </p>
+      <p class="note">
+        Open the console for the engine's log — the wasm module imports nothing,
+        not even <code>console.log</code>, so log lines are queued inside wasm
+        and drained by the page each frame. <code>crcbl.audio()</code>,
+        <code>crcbl.saves()</code> and <code>crcbl.logLevel(4)</code> are there
+        too.
+      </p>
+    </main>
+    <script type="module" src="main.js"></script>
+  </body>
+</html>
