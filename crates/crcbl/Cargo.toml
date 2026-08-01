@@ -26,13 +26,23 @@ crcbl-render = { workspace = true }
 crcbl-shaders = { workspace = true }
 crcbl-shell = { workspace = true }
 crcbl-ui = { workspace = true }
-crcbl-vk = { workspace = true }
 crcbl-wgpu = { workspace = true }
 # Re-exported alongside `crcbl-render` so a game writes camera and light maths
 # in the same types the renderer takes, without a second workspace path.
 glam = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
+
+# There is no Vulkan in a browser. `crcbl-vk` reaches `libvulkan.so.1` through
+# `ash`, which reaches it through `libloading` — a crate that does not compile
+# for `wasm32-unknown-unknown` at all, so an unconditional dependency here broke
+# the wasm build of everything that names the umbrella (P5.6). Per-target
+# dependency rather than a feature: the target is already known at build time,
+# and a feature that must be remembered is a feature that will be forgotten.
+# `src/backend.rs` gates the matching registry entry with the same `cfg`, so the
+# browser's table contains only backends that exist.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+crcbl-vk = { workspace = true }
 
 # `crcbl-golden` is a **dev**-dependency: the only reference to it from this
 # crate is an intra-doc link in `screenshot.rs`, and rustdoc resolves those from

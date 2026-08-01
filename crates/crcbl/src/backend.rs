@@ -48,14 +48,26 @@
 //! reports `Pending`, so "try Vulkan, then wgpu" reads the same whether it is
 //! being driven by a `while` loop at start-up or by a rAF callback.
 //!
-//! # Recorded gap: this crate does not build for `wasm32` yet
+//! # The table is not the same on every target
 //!
-//! [`REGISTRY`](self) still names `crcbl-vk` unconditionally, and the umbrella's
-//! manifest pulls in `crcbl-vk`, `cpal` and the native shells regardless of
-//! target. The polled shape here is what a browser build *needs*, and the
-//! per-target dependency split is a separate slice (P5.x); until it lands,
-//! `cargo check --target wasm32-unknown-unknown` on this crate fails for
-//! dependency reasons rather than for anything in this module.
+//! There is no Vulkan in a browser, so on `wasm32` the [`GpuBackend::Vulkan`]
+//! entry is `#[cfg]`-ed out and `crcbl-vk` is not even a dependency — see this
+//! crate's manifest. The `#[cfg]` is on the *element*, exactly as
+//! `crcbl_shell::backend`'s table gates Wayland and X11 to Linux, so nothing
+//! else in this file mentions a target and the walk in
+//! [`PendingInstance::poll`] needs no conditional compilation of its own.
+//!
+//! One consequence is deliberate: **`wgpu` is auto-selectable on `wasm32` and
+//! not on native**. It is the browser's only backend, so an `open()` there that
+//! refused to select it would always fail; on native Vulkan is the performance
+//! tier and wgpu stays the portability tier a developer asks for by name.
+//! Native selection order is therefore unchanged — Vulkan, and nothing else
+//! automatically.
+//!
+//! The blocking wrappers [`open`] and [`open_backend`] do not exist on `wasm32`
+//! either, for the reason [`Instance::create_device`] does not: the browser's
+//! main thread may not block, so reaching for one there is a *compile* error
+//! pointing at [`request_open`] rather than a hang on the first frame.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -175,8 +187,14 @@ struct Registration {
     open: fn() -> InstanceFuture,
 }
 
-/// Every backend compiled into this build, in the order [`open`] tries them.
+/// Every backend compiled into this build, in the order [`request_open`] tries
+/// them.
 static REGISTRY: &[Registration] = &[
+    // `#[cfg]` on the element, not on the whole table — the shape
+    // `crcbl_shell::backend`'s registry uses for Wayland and X11. There is no
+    // Vulkan in a browser and `crcbl-vk` is not a dependency there at all, so
+    // on wasm32 this entry simply is not present.
+    #[cfg(not(target_arch = "wasm32"))]
     Registration {
         backend: GpuBackend::Vulkan,
         auto: true,
@@ -190,7 +208,11 @@ static REGISTRY: &[Registration] = &[
     },
     Registration {
         backend: GpuBackend::Wgpu,
-        auto: false,
+        // The browser's *only* backend, so it must be auto-selectable there or
+        // `request_open` could never succeed; on native Vulkan is the
+        // performance tier and wgpu stays opt-in, which is what keeps native
+        // selection order exactly what it was.
+        auto: cfg!(target_arch = "wasm32"),
         // `new_async`, not `create_native`: adapter enumeration is a future on
         // the WebGPU backend and `create_native` is the `pollster::block_on`
         // wrapper that cannot exist there. Awaiting it costs one extra poll on
@@ -321,6 +343,10 @@ impl PendingInstance {
     }
 
     /// Polls until the instance arrives. The blocking half of [`open`].
+    ///
+    /// Absent on `wasm32`: the browser's main thread may not block, and the
+    /// only executor there is the rAF loop that would be spinning in here.
+    #[cfg(not(target_arch = "wasm32"))]
     fn block(mut self) -> Result<Box<dyn Instance>, GpuError> {
         loop {
             if let Some(instance) = self.poll()? {
@@ -394,23 +420,31 @@ fn request_open_auto(registry: &'static [Registration]) -> PendingInstance {
 /// and a failure is *not* fallen back from — someone who set the variable meant
 /// it. Otherwise the auto-selectable backends are tried in order.
 ///
-/// Blocks until a backend answers. Browser code polls [`request_open`] instead.
+/// Blocks until a backend answers. **Absent on `wasm32`**, where the main
+/// thread may not block: browser code polls [`request_open`] instead and gets a
+/// compile error rather than a hung first frame if it forgets. Same rule, same
+/// reason as [`Instance::create_device`].
 ///
 /// # Errors
 ///
 /// [`GpuError::UnknownBackend`] for a name this build does not have,
 /// [`GpuError::Backend`] when a named backend refused, or
 /// [`GpuError::NoBackend`] when nothing auto-selectable worked.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn open() -> Result<Box<dyn Instance>, GpuError> {
     request_open()?.block()
 }
 
 /// Opens a specific backend, ignoring [`BACKEND_ENV_VAR`].
 ///
+/// Blocks, so like [`open`] it is **absent on `wasm32`**; the polled form is
+/// [`request_open_backend`].
+///
 /// # Errors
 ///
 /// [`GpuError::UnknownBackend`] if this build has no such backend, or
 /// [`GpuError::Backend`] if it failed to open.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn open_backend(backend: GpuBackend) -> Result<Box<dyn Instance>, GpuError> {
     request_open_backend(backend)?.block()
 }
@@ -440,16 +474,44 @@ fn lookup(
 mod tests {
     use super::*;
 
-    /// Every `GpuBackend` variant resolves in this build. The moment one is
-    /// `#[cfg]`-ed out — there is no `crcbl-vk` on wasm — this fails and points
-    /// at the arm that has to start being reachable.
+    /// The backends this target really has, in registry order. One list, used
+    /// by every test that asserts about the table, so a new registration is a
+    /// single deliberate edit here.
+    const REGISTERED: &[GpuBackend] = &[
+        #[cfg(not(target_arch = "wasm32"))]
+        GpuBackend::Vulkan,
+        GpuBackend::Wgpu,
+        GpuBackend::Null,
+    ];
+
+    /// Every backend this build claims resolves. `GpuBackend::Vulkan` is a
+    /// variant on every target — it is what `CRCBL_GPU=vk` parses to — but it
+    /// is *registered* only where `crcbl-vk` is a dependency, so on wasm32 the
+    /// honest answer is [`GpuError::UnknownBackend`] and that is asserted below
+    /// rather than left untested.
     #[test]
     fn the_registry_covers_every_backend_this_build_claims() {
-        for backend in [GpuBackend::Vulkan, GpuBackend::Wgpu, GpuBackend::Null] {
+        for backend in REGISTERED {
             assert!(
-                lookup(REGISTRY, backend).is_ok(),
+                lookup(REGISTRY, *backend).is_ok(),
                 "{backend} is a variant with no registration",
             );
+        }
+    }
+
+    /// The other half: a variant that this target does *not* register is
+    /// rejected by name, with a message naming what it does have. On native
+    /// every variant is registered, so this asserts the arm it can.
+    #[test]
+    fn a_variant_this_target_lacks_is_rejected_by_name() {
+        for backend in [GpuBackend::Vulkan, GpuBackend::Wgpu, GpuBackend::Null] {
+            if REGISTERED.contains(&backend) {
+                continue;
+            }
+            let Err(GpuError::UnknownBackend { available, .. }) = lookup(REGISTRY, backend) else {
+                panic!("{backend} is not in this build's registry but resolved anyway");
+            };
+            assert!(!available.is_empty(), "the message names what is there");
         }
     }
 
@@ -498,10 +560,7 @@ mod tests {
     #[test]
     fn the_table_is_what_it_says_and_null_is_never_automatic() {
         let backends: Vec<GpuBackend> = REGISTRY.iter().map(|entry| entry.backend).collect();
-        assert_eq!(
-            backends,
-            [GpuBackend::Vulkan, GpuBackend::Wgpu, GpuBackend::Null]
-        );
+        assert_eq!(backends, REGISTERED);
         let null = REGISTRY
             .iter()
             .find(|entry| entry.backend == GpuBackend::Null)
@@ -509,6 +568,27 @@ mod tests {
         assert!(!null.auto, "a game must never silently render nothing");
     }
 
+    /// Auto-selection differs by target *on purpose*: Vulkan is the only
+    /// automatic entry on native, and wgpu is the only one in a browser because
+    /// it is the only backend there at all. Asserting it here is what stops a
+    /// later edit from quietly making wgpu automatic on native — which would
+    /// change which GPU path every existing game takes.
+    #[test]
+    fn exactly_one_backend_is_auto_selectable_and_it_depends_on_the_target() {
+        let auto: Vec<GpuBackend> = REGISTRY
+            .iter()
+            .filter(|entry| entry.auto)
+            .map(|entry| entry.backend)
+            .collect();
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!(auto, [GpuBackend::Vulkan]);
+        #[cfg(target_arch = "wasm32")]
+        assert_eq!(auto, [GpuBackend::Wgpu]);
+    }
+
+    /// Blocking, so native-only: `open_backend` and `PendingInstance::block`
+    /// do not exist on wasm32.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn opening_null_by_name_works_and_reports_itself() {
         let instance = open_backend(GpuBackend::Null).expect("null is registered");
@@ -519,6 +599,9 @@ mod tests {
     /// Wgpu is registered but not auto-selectable; asking for it by name
     /// either opens it (when a GPU is present) or produces a descriptive
     /// error (when no adapter was found).
+    /// Blocking, so native-only: `open_backend` and `PendingInstance::block`
+    /// do not exist on wasm32.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn wgpu_is_registered_and_reachable_by_name() {
         match open_backend(GpuBackend::Wgpu) {
@@ -536,6 +619,9 @@ mod tests {
     /// On a machine with a driver this genuinely opens Vulkan, which is correct
     /// and not something to assert against; the point is the failure path's
     /// message, which is what a developer with no driver actually sees.
+    /// Blocking, so native-only: `open_backend` and `PendingInstance::block`
+    /// do not exist on wasm32.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn automatic_selection_reports_what_it_tried() {
         match request_open_auto(REGISTRY).block() {
@@ -576,6 +662,9 @@ mod tests {
     /// Auto-selection over a registry whose only auto entry always fails: the
     /// fallback walk lives in `PendingInstance::poll`, so this is the arm that
     /// proves it reports every attempt rather than the first.
+    /// Blocking, so native-only: `open_backend` and `PendingInstance::block`
+    /// do not exist on wasm32.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_polled_auto_open_walks_the_table_and_then_gives_up() {
         static ALWAYS_FAILS: &[Registration] = &[

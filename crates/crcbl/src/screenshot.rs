@@ -13,6 +13,22 @@
 //!
 //! This module is the render half of the CLI subcommand; the CLI module
 //! owns the argument parsing and I/O.
+//!
+//! # Native only
+//!
+//! The whole path blocks: [`crate::backend::open`], a blocking device creation,
+//! and a `std::thread::sleep` poll loop waiting for the readback copy to land.
+//! The browser's main thread may not block, so this module is
+//! `#[cfg(not(target_arch = "wasm32"))]` in `lib.rs` and a wasm build that
+//! reaches for it fails to *compile* rather than hanging on the first
+//! screenshot — the rule [`crate::backend`] states and
+//! [`Instance::create_device`] established.
+//!
+//! Nothing here is wanted in a browser at P5: it is a command-line tool's back
+//! end, not something a game calls per frame. If it ever is, the polled shapes
+//! it would have to be rewritten onto already exist —
+//! [`Instance::request_device`] and
+//! [`Device::poll_readback`].
 
 use std::time::Duration;
 

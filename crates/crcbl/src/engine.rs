@@ -419,6 +419,23 @@ impl GpuContext {
     /// first configure, because a swapchain needs a size and an unconfigured
     /// window does not have one.
     ///
+    /// # This one blocks, and on `wasm32` that is a hang
+    ///
+    /// It spins on [`request_open`](Self::request_open) until the device
+    /// arrives. In a browser the promise behind that device is resolved by the
+    /// event loop this call is *inside*, so it would never complete — which is
+    /// why [`crate::backend::open`] and
+    /// [`Instance::create_device`] do not
+    /// exist on `wasm32` at all.
+    ///
+    /// This one still does, deliberately and temporarily: `apps/breakout`'s
+    /// start-up is written on it, and the slice that gives the sample a polled
+    /// loop (P5.7, the rAF entry point) is the one that can take it away
+    /// without deleting the sample's wasm build in the same edit. **Browser
+    /// code must call [`request_open`](Self::request_open).** See this crate's
+    /// `backend` module docs for the compile-error-over-run-time-error rule
+    /// this is the single exception to.
+    ///
     /// # Errors
     ///
     /// [`GpuError`] if no backend opened, if the backend exposes no adapter, no

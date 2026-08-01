@@ -122,9 +122,29 @@ jobs:
   #
   # It is `check`/`clippy` rather than `test`: `wasm32-unknown-unknown` has no
   # test harness without a browser runner, and the thing at risk is the code
-  # compiling, not the browser behaving. Only the crates that actually have
-  # wasm-gated code are listed — the rest of the workspace pulls `ash`, `cpal`
-  # and `png`, none of which target wasm today.
+  # compiling, not the browser behaving.
+  #
+  # **The whole workspace, minus two crates.** This used to name four crates,
+  # because the rest of the workspace pulled `ash` and `cpal` unconditionally.
+  # P5.5 target-gated cpal and P5.6 target-gated `crcbl-vk` out of the umbrella,
+  # so a deny-list is now shorter than an allow-list — and an allow-list is what
+  # let the umbrella and the sample stop building for wasm without any job
+  # noticing. Everything not excluded here, `apps/breakout` and the `crcbl`
+  # umbrella included, is expected to build. Adding a member to this list is a
+  # deliberate edit that has to say why:
+  #
+  # * `crcbl-vk` `dlopen`s `libvulkan.so.1` through `ash`, and `libloading` has
+  #   no wasm build at all. There is no Vulkan in a browser and there is no
+  #   version of this crate that could exist there.
+  # * `crcbl-cli` is a command-line tool — argv, exit codes, a filesystem, PNG
+  #   files on disk, and `crcbl::screenshot`, which is native-only for the same
+  #   blocking reason `Instance::create_device` is. `wasm32-unknown-unknown` has
+  #   none of those. The browser's entry point is the sample's wasm module, not
+  #   a CLI.
+  #
+  # `apps/breakout` is the reason this matters at P5: the phase gate is the
+  # sample playable in a browser, and the dependency graph underneath it is the
+  # thing that broke first.
   wasm32:
     name: build + clippy (wasm32)
     runs-on: ubuntu-latest
@@ -138,12 +158,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: wasm32
+      # The P5 deliverable, named on its own so a failure says which half broke
+      # before the workspace sweep buries it in a hundred other crates.
+      - run: cargo check --locked --target wasm32-unknown-unknown -p breakout
       - run: >-
-          cargo check --locked --target wasm32-unknown-unknown
-          -p crcbl-shell -p crcbl-wgpu -p crcbl-hal -p crcbl-core
+          cargo check --locked --workspace
+          --exclude crcbl-vk --exclude crcbl-cli
+          --target wasm32-unknown-unknown
       - run: >-
-          cargo clippy --locked --all-features --target wasm32-unknown-unknown
-          -p crcbl-shell -p crcbl-wgpu -p crcbl-hal -p crcbl-core -- -D warnings
+          cargo clippy --locked --all-features --workspace
+          --exclude crcbl-vk --exclude crcbl-cli
+          --target wasm32-unknown-unknown -- -D warnings
 
   # Linux is the developer's daily driver, so it carries the full gate.
   test-linux:

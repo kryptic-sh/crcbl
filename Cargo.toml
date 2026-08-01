@@ -23,6 +23,11 @@ repository = "https://github.com/kryptic-sh/crcbl"
 ash = "0.38"
 bitflags = "2.9"
 glam = "0.33"
+# Entropy for `crcbl-server`'s resume tokens. Deliberately featureless here:
+# the browser backend (`wasm_js`, i.e. `crypto.getRandomValues` via `js-sys`)
+# is enabled from `crates/crcbl-server/Cargo.toml`'s `cfg(target_arch =
+# "wasm32")` section instead, because enabling it in this table would enable it
+# for native too and put `wasm-bindgen` in every binary that links a server.
 getrandom = "0.4.3"
 log = "0.4"
 # Golden-image I/O for `crcbl-golden`; see that crate's manifest for why it is

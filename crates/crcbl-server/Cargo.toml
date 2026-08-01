@@ -10,7 +10,31 @@ repository.workspace = true
 crcbl-core = { workspace = true }
 crcbl-ecs = { workspace = true }
 crcbl-net = { workspace = true }
+# The resume-token entropy source, and the only one in the workspace. Its
+# default backends cover every native target; `wasm32-unknown-unknown` has no
+# system entropy at all, so getrandom refuses to compile there until a backend
+# is named — see the target section below.
 getrandom = { workspace = true }
+
+# `crypto.getRandomValues` through `js-sys`, which is what `wasm_js` is.
+#
+# Per-target rather than a feature of this crate, for two reasons. It has to be
+# *on* for the browser build — a resume token that is not unpredictable is not a
+# resume token, and getrandom's other answer for this target is
+# `getrandom_backend="unsupported"`, which would make every handshake fail at
+# run time. And it must be *off* everywhere else: `wasm_js` pulls
+# `wasm-bindgen` and `js-sys` in, and cargo's feature unification is per-graph,
+# so a feature declared unconditionally in `[workspace.dependencies]` would put
+# both of them in every native binary that links a server. Nothing about the
+# native build changes: this section is not compiled for it.
+#
+# getrandom 0.4 needs the feature and nothing else — unlike 0.3, which also
+# demanded `RUSTFLAGS=--cfg getrandom_backend="wasm_js"`. That is why this
+# workspace has no `.cargo/config.toml`; if the pin ever moves back, the `--cfg`
+# comes with it and native builds must be re-checked, because a `[build]
+# rustflags` entry there applies to every target.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }
 
 [dev-dependencies]
 crcbl-client = { workspace = true }

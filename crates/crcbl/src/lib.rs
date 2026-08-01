@@ -89,6 +89,10 @@ pub mod backend;
 
 pub mod engine;
 
+// Native only, and the module's own docs say why: every step of the screenshot
+// path blocks, and the browser's main thread may not. P5.6 gated it rather than
+// letting a wasm build compile a hang.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod screenshot;
 
 /// The names a game touches on every frame.
