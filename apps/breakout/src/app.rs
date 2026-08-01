@@ -590,10 +590,12 @@ impl HudStrings {
 
 /// Maps the orthographic world onto the surface, in pixels.
 ///
-/// The camera is `Projection::Orthographic { half_height: 9.0 }`, so the
-/// visible world is `±9 * aspect` across and `±9` tall. Deriving the mapping
-/// from the same numbers the camera uses is what makes the quads land where the
-/// forward pass puts the paddle cube.
+/// The camera's half height comes from [`crate::gpu::camera_half_height`] and
+/// the projection derives the width from the aspect ratio, so the visible world
+/// is `±half_height * aspect` across and `±half_height` tall. Deriving the
+/// mapping from the same function the camera uses is what makes the quads land
+/// where the forward pass puts the paddle cube — including on a viewport narrow
+/// enough that the camera had to widen to fit the field.
 #[derive(Clone, Copy, Debug)]
 struct WorldToScreen {
     half_width: f32,
@@ -606,7 +608,7 @@ impl WorldToScreen {
     fn new(extent: (u32, u32)) -> Self {
         let width = extent.0.max(1) as f32;
         let height = extent.1.max(1) as f32;
-        let half_height = crate::gpu::CAMERA_HALF_HEIGHT;
+        let half_height = crate::gpu::camera_half_height(extent);
         Self {
             half_width: half_height * (width / height),
             half_height,
@@ -826,6 +828,65 @@ mod tests {
             3,
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// The whole play field is on screen, at every aspect ratio a window or a
+    /// canvas can hand us.
+    ///
+    /// The camera used to be a fixed `half_height: 9.0` and the projection
+    /// derives its width from the aspect ratio, so a 4:3 surface — the size the
+    /// window opens at, and the `aspect-ratio: 4 / 3` the web demo's canvas is
+    /// styled with — showed 12 world units either side of a field that runs to
+    /// 14. The ball vanished off the edge at x ≈ ±12 and came back once it had
+    /// bounced off a wall that was never drawn on screen.
+    #[test]
+    fn the_whole_play_field_is_on_screen_at_every_aspect_ratio() {
+        use crate::game::{BALL_RADIUS, WORLD_LEFT, WORLD_RIGHT, WORLD_TOP};
+
+        // A ball against a wall is drawn up to its own radius past the wall's
+        // inner face — see `gpu::VIEW_MARGIN` — so that is the extent the
+        // surface actually has to cover.
+        let (reach_x, reach_y) = (
+            WORLD_RIGHT as f32 + BALL_RADIUS as f32,
+            WORLD_TOP as f32 + BALL_RADIUS as f32,
+        );
+
+        for extent in [
+            (960, 720),   // what the window opens at, and the canvas's ratio
+            (800, 600),   // 4:3 again, smaller
+            (1920, 1080), // 16:9
+            (1440, 400),  // a canvas clamped by `max-height: 68vh`
+            (600, 900),   // taller than it is wide
+        ] {
+            let map = WorldToScreen::new(extent);
+            assert!(
+                map.half_width >= reach_x,
+                "{extent:?} shows {} world units of a field that reaches {reach_x}",
+                map.half_width,
+            );
+            assert!(
+                map.half_height >= reach_y,
+                "{extent:?} shows {} world units of a field that reaches {reach_y}",
+                map.half_height,
+            );
+
+            // And in pixels: a ball against any wall is inside the surface,
+            // including the sliver of it that is drawn past the wall's face.
+            let (width, height) = (extent.0 as f32, extent.1 as f32);
+            for x in [WORLD_LEFT - BALL_RADIUS, WORLD_RIGHT + BALL_RADIUS] {
+                for y in [-9.0, WORLD_TOP + BALL_RADIUS] {
+                    let p = map.point(x, y);
+                    assert!(
+                        p.x >= -1e-3 && p.x <= width + 1e-3,
+                        "world ({x}, {y}) lands at {p:?} on a {extent:?} surface",
+                    );
+                    assert!(
+                        p.y >= -1e-3 && p.y <= height + 1e-3,
+                        "world ({x}, {y}) lands at {p:?} on a {extent:?} surface",
+                    );
+                }
+            }
+        }
     }
 
     /// Helper: build a Loop<HeadlessShell> for scripting.

@@ -24,12 +24,53 @@ use crcbl::ui::text::FontAtlas;
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
 const MAX_TIMED_PASSES: u32 = 8;
 
-/// Half the vertical extent of the orthographic camera, in world units.
+/// Half the vertical extent of the orthographic camera for a `extent`-sized
+/// viewport, in world units.
+///
+/// [`Projection::Orthographic`] takes a half *height* and derives the width from
+/// the aspect ratio, so a fixed 9.0 shows `9 * aspect` of world horizontally —
+/// which at 4:3 is 12 units against a play field that runs to
+/// [`WORLD_RIGHT`](crate::game::WORLD_RIGHT) = 14. The ball left the screen at
+/// x ≈ ±12 and reappeared once it had bounced off a wall the player could not
+/// see; the window opens at 960×720 and the web demo's canvas is
+/// `aspect-ratio: 4 / 3`, so both were cropped.
+///
+/// Widening the camera until the whole field fits is the fix, and it holds at
+/// every aspect ratio: a viewport too narrow to show the field at 9.0 gets
+/// letterboxed vertically instead of cropped horizontally, and a wide one keeps
+/// 9.0 and shows some empty margin either side.
 ///
 /// Public because `app.rs` derives its world→screen mapping from it: the UI
 /// quads that draw the ball and the bricks have to land where this projection
 /// puts them, and two copies of the number would drift.
-pub const CAMERA_HALF_HEIGHT: f32 = 9.0;
+#[must_use]
+pub fn camera_half_height(extent: (u32, u32)) -> f32 {
+    let aspect = extent.0.max(1) as f32 / extent.1.max(1) as f32;
+    let half_height = crate::game::WORLD_TOP as f32 + VIEW_MARGIN;
+    let half_width = crate::game::WORLD_RIGHT as f32 + VIEW_MARGIN;
+    half_height.max(half_width / aspect)
+}
+
+/// Slack kept between the play field and the edge of the surface, in world
+/// units.
+///
+/// Not decoration. `crcbl-phys`'s swept-sphere query traverses the broadphase
+/// with the sphere's **centre line** (`PhysicsWorld::sweep_sphere` →
+/// `Bvh::traverse_segment`), so a wall is not even offered to the narrow phase
+/// until the ball's centre reaches its AABB — and on the tick before that the
+/// ball is drawn up to [`BALL_RADIUS`](crate::game::BALL_RADIUS) past the wall's
+/// inner face. A field flush with the surface would clip exactly that sliver,
+/// which is the same "the ball leaves the screen" symptom in miniature.
+const VIEW_MARGIN: f32 = 0.5;
+
+/// The camera projection for an `extent`-sized viewport.
+fn projection(extent: (u32, u32)) -> Projection {
+    Projection::Orthographic {
+        half_height: camera_half_height(extent),
+        near: 0.1,
+        far: 100.0,
+    }
+}
 
 // ---- Gpu --------------------------------------------------------------------
 
@@ -152,11 +193,10 @@ impl Gpu {
         let ui = UiRenderer::new(ctx.device(), ctx.queue(), format).map_err(GpuError::Hal)?;
 
         // Breakout is a 2D game: orthographic projection with reversed-Z depth.
-        let camera = Camera::default().with_projection(Projection::Orthographic {
-            half_height: CAMERA_HALF_HEIGHT,
-            near: 0.1,
-            far: 100.0,
-        });
+        // The extent is the one the context opened at; `frame` re-derives it
+        // every frame, because a resize changes the aspect ratio and with it
+        // how wide the camera has to be to keep the whole field on screen.
+        let camera = Camera::default().with_projection(projection(ctx.extent()));
 
         Ok(Self {
             ctx,
@@ -206,6 +246,10 @@ impl Gpu {
             return Ok(FrameOutcome::Reconfigured);
         };
         let extent = acquired.extent;
+        // The swapchain's extent, not the one the resize event reported: on the
+        // frame a reconfigure lands they can differ, and the camera must agree
+        // with the surface actually being drawn into.
+        self.camera.projection = projection(extent);
 
         self.renderer.begin_frame(
             self.ctx.device(),
