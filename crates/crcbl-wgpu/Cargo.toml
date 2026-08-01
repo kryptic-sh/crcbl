@@ -11,10 +11,13 @@ repository.workspace = true
 crcbl-core = { workspace = true }
 crcbl-hal = { workspace = true }
 log = { workspace = true }
-thiserror = { workspace = true }
-bytemuck = { workspace = true }
 wgpu = { version = "30", features = ["spirv"] }
 raw-window-handle = "0.6"
+
+# Only the native path blocks: `Instance::create_device` is synchronous and a
+# native thread may block on `request_device`. The browser main thread may not,
+# which is why wasm32 refuses instead — see the crate docs.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.4"
 
 [lints]

@@ -991,7 +991,30 @@ fn a_resource_crossing_queues_gets_an_ownership_transfer() {
         .expect("crossing queue families is an ownership transfer, not a plain transition");
     assert_eq!(ownership.from, harness.queue);
     assert_eq!(ownership.to, transfer);
+
+    // A transfer is **two** barriers with identical fields — a release on the
+    // source queue and an acquire on the destination, per `QueueTransfer`'s own
+    // docs. Emitting only the acquire leaves the source queue never releasing,
+    // which is the half that makes the destination's read legal at all. The
+    // release belongs after the last pass on the source queue.
+    let release = compiled.passes()[0].release_barriers();
+    assert_eq!(
+        release.images.len(),
+        1,
+        "the source queue must release what the destination acquires: {release:?}"
+    );
+    assert_eq!(
+        release.images[0], barrier,
+        "both halves carry the same fields"
+    );
+    assert!(compiled.passes()[1].release_barriers().is_empty());
+
     assert!(compiled.dump().contains("queue "), "{}", compiled.dump());
+    assert!(
+        compiled.dump().contains("release"),
+        "the dump must show both halves: {}",
+        compiled.dump()
+    );
 }
 
 /// Executing a graph must leave the backend holding exactly what it held before,
@@ -1397,6 +1420,10 @@ fn subresource_range_reaches_the_barrier() {
             usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
             extent: EXTENT,
             samples: 1,
+            // Two levels, because the passes below address both. The pool used
+            // to create every transient with one level regardless, so this
+            // graph barriered a level the image did not have.
+            mip_levels: 2,
         },
     );
 
@@ -1451,21 +1478,24 @@ fn subresource_range_reaches_the_barrier() {
     assert_eq!(r0.base_mip, 0);
     assert_eq!(r0.mip_count, 1);
 
-    // Pass 2: transition from mip-0-write to mip-1-write.
+    // Pass 2: mip 1 has never been touched, so its barrier leaves `Undefined`.
+    // State is tracked per subresource: naming mip 0's `ShaderReadWrite` here —
+    // which is what a whole-image tracker did — would be a barrier whose source
+    // scope this subresource was never in, and a driver may treat one of those
+    // as covering nothing.
     let b1 = compiled.passes()[1].barriers();
     assert_eq!(b1.images.len(), 1);
-    assert_eq!(b1.images[0].from, ResourceState::ShaderReadWrite);
+    assert_eq!(b1.images[0].from, ResourceState::Undefined);
     assert_eq!(b1.images[0].to, ResourceState::ShaderReadWrite);
-    // State is whole-image tracked, so the transition still fires (from==to) — but
-    // the *range* is scoped to mip 1.
     let r1 = b1.images[0]
         .range
         .expect("pass 2 declares a subresource range");
     assert_eq!(r1.base_mip, 1);
     assert_eq!(r1.mip_count, 1);
 
-    // Pass 3: `read_image` leaves range as `None` — resolved to whole-image at
-    // execute time.
+    // Pass 3: both levels are now in the same state, so the whole-image read
+    // collapses to one barrier and `read_image` leaves range as `None` —
+    // resolved to whole-image at execute time.
     let b2 = compiled.passes()[2].barriers();
     assert_eq!(b2.images.len(), 1);
     assert_eq!(b2.images[0].from, ResourceState::ShaderReadWrite);
@@ -1476,4 +1506,123 @@ fn subresource_range_reaches_the_barrier() {
     );
 
     pool.destroy(harness.device.as_ref());
+}
+
+/// The other half of per-subresource tracking: when the levels of one image are
+/// in *different* states, a whole-image access cannot be one barrier, because a
+/// barrier carries one `from`. It has to be one per state.
+#[test]
+fn a_whole_image_access_over_mixed_states_emits_a_barrier_per_state() {
+    let harness = Harness::open();
+    let mut pool = TransientPool::new();
+
+    let mut graph = harness.graph();
+    let image = graph.create_image(
+        "mip-chain",
+        TransientImageDesc {
+            format: Format::Rgba16Float,
+            usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+            extent: EXTENT,
+            samples: 1,
+            mip_levels: 3,
+        },
+    );
+
+    // Only mip 0 is written; mips 1 and 2 stay `Undefined`.
+    graph
+        .add_compute_pass("write-mip0")
+        .use_subresource(
+            image,
+            ResourceState::ShaderReadWrite,
+            ImageSubresourceRange {
+                aspect: ImageAspect::COLOR,
+                base_mip: 0,
+                mip_count: 1,
+                base_layer: 0,
+                layer_count: u32::MAX,
+            },
+        )
+        .execute(|_| {});
+    graph
+        .add_compute_pass("read-all")
+        .read_image(image)
+        .execute(|_| {});
+
+    let compiled = graph.compile(&pool).expect("a legal frame");
+    let barriers = compiled.passes()[1].barriers();
+    assert_eq!(
+        barriers.images.len(),
+        2,
+        "one barrier per source state: {barriers:?}"
+    );
+    let written = barriers
+        .images
+        .iter()
+        .find(|barrier| barrier.from == ResourceState::ShaderReadWrite)
+        .expect("mip 0 was written");
+    assert_eq!(written.range.expect("scoped").base_mip, 0);
+    assert_eq!(written.range.expect("scoped").mip_count, 1);
+    let untouched = barriers
+        .images
+        .iter()
+        .find(|barrier| barrier.from == ResourceState::Undefined)
+        .expect("mips 1 and 2 were never written");
+    assert_eq!(untouched.range.expect("scoped").base_mip, 1);
+    assert_eq!(untouched.range.expect("scoped").mip_count, 2);
+
+    pool.destroy(harness.device.as_ref());
+}
+
+/// A range naming a level the image does not have is a declaration mistake, and
+/// the graph says so rather than emitting a barrier that covers nothing.
+#[test]
+fn a_subresource_the_image_does_not_have_is_rejected() {
+    let harness = Harness::open();
+    let pool = TransientPool::new();
+
+    let mut graph = harness.graph();
+    let image = graph.create_image("single-level", scene_color());
+    graph
+        .add_compute_pass("write-mip3")
+        .use_subresource(
+            image,
+            ResourceState::ShaderReadWrite,
+            ImageSubresourceRange {
+                aspect: ImageAspect::COLOR,
+                base_mip: 3,
+                mip_count: 1,
+                base_layer: 0,
+                layer_count: 1,
+            },
+        )
+        .execute(|_| {});
+
+    let error = graph
+        .compile(&pool)
+        .expect_err("mip 3 of a one-level image does not exist");
+    let text = error.to_string();
+    assert!(text.contains("single-level"), "{text}");
+    assert!(text.contains("mip 3"), "{text}");
+}
+
+/// Declaring one resource twice in a pass is a mistake with a name: two colour
+/// attachments over one view are two shader outputs writing the same pixels in
+/// an order nothing defines.
+#[test]
+fn declaring_one_image_twice_in_a_pass_is_an_error() {
+    let harness = Harness::open();
+    let pool = TransientPool::new();
+
+    let mut graph = harness.graph();
+    let color = graph.create_image("scene", scene_color());
+    graph
+        .add_render_pass("double")
+        .clear_color(color, [0.0; 4])
+        .clear_color(color, [1.0; 4])
+        .execute(|_| {});
+
+    let error = graph.compile(&pool).expect_err("one view, two attachments");
+    let text = error.to_string();
+    assert!(text.contains("twice"), "{text}");
+    assert!(text.contains("scene"), "{text}");
 }

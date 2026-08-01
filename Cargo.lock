@@ -445,13 +445,11 @@ dependencies = [
 name = "crcbl-wgpu"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
  "crcbl-core",
  "crcbl-hal",
  "log",
  "pollster",
  "raw-window-handle",
- "thiserror 2.0.19",
  "wgpu",
 ]
 

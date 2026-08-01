@@ -98,6 +98,47 @@ pub struct ForwardRenderer {
     target_format: Format,
 }
 
+/// What a partly-built [`ForwardRenderer`] has to give back.
+///
+/// `new` creates a dozen objects with `?` between them, and the seam's
+/// `destroy_*` is explicit — so a failure half way through used to leak
+/// everything created before it. The recorder's leak assertions cover the happy
+/// path; this covers the other one.
+#[derive(Default)]
+struct Rollback {
+    buffers: Vec<BufferHandle>,
+    bind_groups: Vec<BindGroupHandle>,
+    bind_group_layouts: Vec<BindGroupLayoutHandle>,
+    pipeline_layouts: Vec<PipelineLayoutHandle>,
+    pipelines: Vec<GraphicsPipelineHandle>,
+    samplers: Vec<SamplerHandle>,
+}
+
+impl Rollback {
+    /// Releases everything, in the same dependency order as
+    /// [`ForwardRenderer::destroy`].
+    fn run(self, device: &dyn Device) {
+        for handle in self.samplers {
+            device.destroy_sampler(handle);
+        }
+        for handle in self.pipelines {
+            device.destroy_graphics_pipeline(handle);
+        }
+        for handle in self.pipeline_layouts {
+            device.destroy_pipeline_layout(handle);
+        }
+        for handle in self.bind_groups {
+            device.destroy_bind_group(handle);
+        }
+        for handle in self.bind_group_layouts {
+            device.destroy_bind_group_layout(handle);
+        }
+        for handle in self.buffers {
+            device.destroy_buffer(handle);
+        }
+    }
+}
+
 impl ForwardRenderer {
     /// Builds both pipelines and uploads the cube.
     ///
@@ -108,11 +149,31 @@ impl ForwardRenderer {
     /// # Errors
     ///
     /// [`HalError`] from any seam call. A backend that cannot build a pipeline
-    /// says so here rather than drawing nothing later.
+    /// says so here rather than drawing nothing later — and a failure part-way
+    /// through releases everything already created, so a caller that retries or
+    /// exits leaves nothing behind.
     pub fn new(
         device: &dyn Device,
         queue: QueueHandle,
         target_format: Format,
+    ) -> Result<Self, HalError> {
+        let mut rollback = Rollback::default();
+        match Self::build(device, queue, target_format, &mut rollback) {
+            Ok(renderer) => Ok(renderer),
+            Err(error) => {
+                rollback.run(device);
+                Err(error)
+            }
+        }
+    }
+
+    /// The body of [`ForwardRenderer::new`], recording what it has created into
+    /// `rollback` as it goes.
+    fn build(
+        device: &dyn Device,
+        queue: QueueHandle,
+        target_format: Format,
+        rollback: &mut Rollback,
     ) -> Result<Self, HalError> {
         let vertices = upload(
             device,
@@ -121,6 +182,7 @@ impl ForwardRenderer {
             BufferUsage::STORAGE,
             &mesh::cube_vertex_bytes(),
         )?;
+        rollback.buffers.push(vertices);
         let indices = upload(
             device,
             queue,
@@ -128,6 +190,7 @@ impl ForwardRenderer {
             BufferUsage::INDEX,
             &mesh::cube_index_bytes(),
         )?;
+        rollback.buffers.push(indices);
 
         // --- the mesh pass ---
         //
@@ -161,6 +224,7 @@ impl ForwardRenderer {
             label: Some("mesh frame"),
             entries: &mesh_entries,
         })?;
+        rollback.bind_group_layouts.push(mesh_layout);
 
         let mut uniforms = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut mesh_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
@@ -171,6 +235,7 @@ impl ForwardRenderer {
                 usage: BufferUsage::UNIFORM,
                 memory: MemoryLocation::HostUpload,
             })?;
+            rollback.buffers.push(buffer);
             let entries = [
                 BindGroupEntry {
                     binding: 0,
@@ -189,6 +254,7 @@ impl ForwardRenderer {
                 entries: &entries,
                 variable_count: None,
             })?;
+            rollback.bind_groups.push(group);
             uniforms.push(buffer);
             mesh_groups.push(group);
             let _ = index;
@@ -203,7 +269,13 @@ impl ForwardRenderer {
             // explicit that the substitute is a data-layout decision.
             push_constants: None,
         })?;
+        rollback.pipeline_layouts.push(mesh_pipeline_layout);
 
+        // Entry points resolved before the module exists: a manifest that
+        // disagreed with the SPIR-V would otherwise fail inside the descriptor
+        // literal, with the module already created and nothing holding it.
+        let mesh_vertex = entry(&MESH, Stage::Vertex)?;
+        let mesh_fragment = entry(&MESH, Stage::Fragment)?;
         let mesh_module = device.create_shader_module(&ShaderModuleDesc {
             label: Some("mesh.slang"),
             spirv: MESH.spirv(),
@@ -214,11 +286,11 @@ impl ForwardRenderer {
             layout: mesh_pipeline_layout,
             vertex: ShaderEntry {
                 module: mesh_module,
-                entry_point: entry(&MESH, Stage::Vertex)?,
+                entry_point: mesh_vertex,
             },
             fragment: Some(ShaderEntry {
                 module: mesh_module,
-                entry_point: entry(&MESH, Stage::Fragment)?,
+                entry_point: mesh_fragment,
             }),
             primitive: PrimitiveState {
                 // Back-face culling is on from the first mesh. The cube's
@@ -240,6 +312,7 @@ impl ForwardRenderer {
         });
         device.destroy_shader_module(mesh_module);
         let mesh_pipeline = mesh_pipeline?;
+        rollback.pipelines.push(mesh_pipeline);
 
         // --- the tonemap pass ---
         let tonemap_entries = [
@@ -262,12 +335,16 @@ impl ForwardRenderer {
             label: Some("tonemap scene"),
             entries: &tonemap_entries,
         })?;
+        rollback.bind_group_layouts.push(tonemap_layout);
         let tonemap_set_layouts = [tonemap_layout];
         let tonemap_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("tonemap"),
             bind_group_layouts: &tonemap_set_layouts,
             push_constants: None,
         })?;
+        rollback.pipeline_layouts.push(tonemap_pipeline_layout);
+        let tonemap_vertex = entry(&TONEMAP, Stage::Vertex)?;
+        let tonemap_fragment = entry(&TONEMAP, Stage::Fragment)?;
         let tonemap_module = device.create_shader_module(&ShaderModuleDesc {
             label: Some("tonemap.slang"),
             spirv: TONEMAP.spirv(),
@@ -278,11 +355,11 @@ impl ForwardRenderer {
             layout: tonemap_pipeline_layout,
             vertex: ShaderEntry {
                 module: tonemap_module,
-                entry_point: entry(&TONEMAP, Stage::Vertex)?,
+                entry_point: tonemap_vertex,
             },
             fragment: Some(ShaderEntry {
                 module: tonemap_module,
-                entry_point: entry(&TONEMAP, Stage::Fragment)?,
+                entry_point: tonemap_fragment,
             }),
             // The full-screen triangle is deliberately oversized, so two of its
             // vertices are outside the viewport and its winding is not worth
@@ -294,6 +371,7 @@ impl ForwardRenderer {
         });
         device.destroy_shader_module(tonemap_module);
         let tonemap_pipeline = tonemap_pipeline?;
+        rollback.pipelines.push(tonemap_pipeline);
 
         // Nearest, not linear: see `tonemap.slang` on why a 1:1 blit must not
         // leave a golden image depending on two rasterisers agreeing about
@@ -306,6 +384,7 @@ impl ForwardRenderer {
             address_mode: [SamplerAddressMode::ClampToEdge; 3],
             ..SamplerDesc::default()
         })?;
+        rollback.samplers.push(sampler);
 
         Ok(Self {
             vertices,
@@ -347,7 +426,11 @@ impl ForwardRenderer {
     ) -> Result<(), HalError> {
         self.frame = (self.frame + 1) % self.uniforms.len();
 
-        let aspect = if extent.1 == 0 {
+        // A minimised window reports a zero extent in *either* dimension, and
+        // `Projection::matrix` asserts a finite positive aspect. Guarding only
+        // the height left `extent.0 == 0` producing `0.0`, which trips that
+        // assert and takes the frame loop down with it.
+        let aspect = if extent.0 == 0 || extent.1 == 0 {
             1.0
         } else {
             extent.0 as f32 / extent.1 as f32
@@ -569,6 +652,10 @@ fn entry(shader: &crcbl_shaders::Shader, stage: Stage) -> Result<&'static str, H
 /// graph", and it is not really one: this is a **startup** submission with no
 /// graph in the room, before any frame. Every barrier in a *frame* is the
 /// graph's.
+///
+/// Every object created here is released on every path out, failing ones
+/// included: a `?` that walked away from the staging buffer would leak one per
+/// failed startup and leave the recorder's leak assertions passing.
 fn upload(
     device: &dyn Device,
     queue: QueueHandle,
@@ -583,6 +670,21 @@ fn upload(
         usage: BufferUsage::TRANSFER_SRC,
         memory: MemoryLocation::HostUpload,
     })?;
+    let target = upload_into_target(device, queue, label, usage, bytes, staging);
+    device.destroy_buffer(staging);
+    target
+}
+
+/// The half of [`upload`] that owns the destination buffer.
+fn upload_into_target(
+    device: &dyn Device,
+    queue: QueueHandle,
+    label: &str,
+    usage: BufferUsage,
+    bytes: &[u8],
+    staging: BufferHandle,
+) -> Result<BufferHandle, HalError> {
+    let size = bytes.len() as u64;
     device.write_buffer(staging, 0, bytes)?;
 
     let target = device.create_buffer(&BufferDesc {
@@ -591,7 +693,24 @@ fn upload(
         usage: usage | BufferUsage::TRANSFER_DST,
         memory: MemoryLocation::DeviceLocal,
     })?;
+    match record_upload(device, queue, usage, size, staging, target) {
+        Ok(()) => Ok(target),
+        Err(error) => {
+            device.destroy_buffer(target);
+            Err(error)
+        }
+    }
+}
 
+/// Records, submits and drains the staging copy.
+fn record_upload(
+    device: &dyn Device,
+    queue: QueueHandle,
+    usage: BufferUsage,
+    size: u64,
+    staging: BufferHandle,
+    target: BufferHandle,
+) -> Result<(), HalError> {
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
         label: Some("startup upload"),
         queue,
@@ -617,14 +736,14 @@ fn upload(
     });
     let commands = encoder.finish()?;
 
-    device.submit(queue, &SubmitInfo::new(&[commands]))?;
     // The seam sanctions `wait_idle` as "a shutdown and test primitive".
     // Startup is neither, but it is also not a frame, and the staging buffer
     // cannot be freed until the copy has run.
-    device.wait_idle()?;
+    let submitted = device
+        .submit(queue, &SubmitInfo::new(&[commands]))
+        .and_then(|()| device.wait_idle());
     device.destroy_command_buffer(commands);
-    device.destroy_buffer(staging);
-    Ok(target)
+    submitted
 }
 
 #[cfg(test)]

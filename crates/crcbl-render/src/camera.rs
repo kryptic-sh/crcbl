@@ -193,8 +193,39 @@ impl Default for Camera {
 
 impl Camera {
     /// The view matrix: world → right-handed Y-up view space.
+    ///
+    /// # Panics
+    ///
+    /// If the camera is degenerate: `eye` and `target` coincide, `up` is zero,
+    /// or `up` is parallel to the view direction. Each of those makes
+    /// `look_at` divide by a zero-length vector and hand back a matrix of
+    /// `NaN`s — which propagates through the uniform block into the vertex
+    /// shader and shows up as an empty screen with no error anywhere, the same
+    /// failure [`Projection::matrix`] asserts against.
     #[must_use]
     pub fn view(&self) -> Mat4 {
+        let direction = self.target - self.eye;
+        assert!(
+            direction.length_squared() > 0.0 && direction.is_finite(),
+            "the camera must look somewhere: eye {:?} and target {:?}",
+            self.eye,
+            self.target
+        );
+        assert!(
+            self.up.length_squared() > 0.0 && self.up.is_finite(),
+            "the camera's up vector must be non-zero and finite, got {:?}",
+            self.up
+        );
+        assert!(
+            direction
+                .normalize()
+                .cross(self.up.normalize())
+                .length_squared()
+                > f32::EPSILON,
+            "the camera's up vector {:?} is parallel to its view direction {direction:?}; there \
+             is no basis to build",
+            self.up
+        );
         glam::camera::rh::view::look_at_mat4(self.eye, self.target, self.up.normalize())
     }
 
@@ -225,13 +256,21 @@ impl Camera {
     /// Returns `None` for a point on or behind the eye plane, where the divide
     /// is undefined.
     ///
+    /// `w > 0`, not `w.abs() > 0`: under a right-handed perspective projection
+    /// `w` is the distance in front of the eye, so a point *behind* it has a
+    /// negative `w` and dividing by it yields a positive-looking depth for
+    /// geometry that is not in the frustum at all. Under
+    /// [`Projection::Orthographic`] `w` is always `1`, so every point has a
+    /// depth and this returns one — which is correct, an orthographic camera
+    /// has no eye plane to be behind.
+    ///
     /// # Panics
     ///
-    /// As [`Projection::matrix`].
+    /// As [`Projection::matrix`] and [`Camera::view`].
     #[must_use]
     pub fn depth_of(&self, point: Vec3, aspect: f32) -> Option<f32> {
         let clip = self.view_projection(aspect) * point.extend(1.0);
-        (clip.w.abs() > f32::MIN_POSITIVE).then(|| clip.z / clip.w)
+        (clip.w > f32::MIN_POSITIVE).then(|| clip.z / clip.w)
     }
 }
 
@@ -607,5 +646,68 @@ mod tests {
              unlit cube: light {:?} against camera {to_camera:?}",
             light.direction
         );
+    }
+
+    /// A point behind the eye is not in front of the camera, and `depth_of`
+    /// says so. The guard used to be `w.abs()`, which handed back a plausible
+    /// negative depth for geometry the frustum does not contain — and the doc
+    /// comment above it said the opposite.
+    #[test]
+    fn a_point_behind_the_eye_has_no_depth() {
+        let camera = reversed();
+        // The camera sits at the origin looking down -Z, so anything at
+        // positive Z is behind it and the eye itself is on the eye plane.
+        assert_eq!(camera.depth_of(Vec3::new(0.0, 0.0, 10.0), ASPECT), None);
+        assert_eq!(camera.depth_of(camera.eye, ASPECT), None);
+        assert!(camera.depth_of(Vec3::new(0.0, 0.0, -1.0), ASPECT).is_some());
+    }
+
+    /// An orthographic camera has no eye plane, so every point projects.
+    #[test]
+    fn an_orthographic_camera_projects_everything() {
+        let camera = reversed().with_projection(Projection::Orthographic {
+            half_height: 2.0,
+            near: 0.1,
+            far: 100.0,
+        });
+        assert!(
+            camera.depth_of(Vec3::new(0.0, 0.0, 10.0), ASPECT).is_some(),
+            "an orthographic camera has no eye plane to be behind"
+        );
+    }
+
+    /// A degenerate basis makes `look_at` divide by a zero-length vector and
+    /// return `NaN`s, which reach the shader as a blank screen and no error.
+    /// Every other degenerate input to this module is asserted; so is this one.
+    #[test]
+    #[should_panic(expected = "parallel to its view direction")]
+    fn an_up_vector_along_the_view_direction_panics() {
+        let camera = Camera {
+            eye: Vec3::new(0.0, 0.0, 2.0),
+            target: Vec3::ZERO,
+            up: Vec3::Z,
+            projection: Projection::default(),
+        };
+        let _ = camera.view();
+    }
+
+    #[test]
+    #[should_panic(expected = "up vector must be non-zero")]
+    fn a_zero_up_vector_panics() {
+        let camera = Camera {
+            up: Vec3::ZERO,
+            ..Camera::default()
+        };
+        let _ = camera.view();
+    }
+
+    #[test]
+    #[should_panic(expected = "must look somewhere")]
+    fn a_camera_looking_at_its_own_eye_panics() {
+        let camera = Camera {
+            target: Vec3::new(0.0, 0.0, 2.0),
+            ..Camera::default()
+        };
+        let _ = camera.view();
     }
 }

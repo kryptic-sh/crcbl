@@ -60,9 +60,9 @@ pub const RETIRE_AFTER_FRAMES: u32 = 3;
 /// What a graph-owned image should be.
 ///
 /// Deliberately smaller than [`ImageDesc`]: a transient is always
-/// [`MemoryLocation::DeviceLocal`], always a single-mip 2D image, and never has
-/// a caller-chosen label — the graph names it. Fewer fields is fewer ways for
-/// two "identical" transients to fail to alias.
+/// [`MemoryLocation::DeviceLocal`], always a single-layer 2D image, and never
+/// has a caller-chosen label — the graph names it. Fewer fields is fewer ways
+/// for two "identical" transients to fail to alias.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TransientImageDesc {
     /// Size in pixels.
@@ -73,6 +73,37 @@ pub struct TransientImageDesc {
     pub usage: ImageUsage,
     /// Samples per pixel; `1` for everything the MVP renders.
     pub samples: u32,
+    /// Mip levels. `1` for a plain render target; more for anything a pass
+    /// addresses one level of.
+    ///
+    /// The pool used to hard-code `1` while
+    /// [`PassBuilder::use_subresource`](crate::graph::PassBuilder::use_subresource)
+    /// happily barriered level 3, so the graph and the image disagreed about
+    /// how many levels existed. It is a field for that reason: the graph now
+    /// rejects a subresource the image does not have, and it can only do that
+    /// if the description says.
+    pub mip_levels: u32,
+}
+
+impl TransientImageDesc {
+    /// A single-mip, single-sample 2D image.
+    #[must_use]
+    pub const fn new(extent: (u32, u32), format: Format, usage: ImageUsage) -> Self {
+        Self {
+            extent,
+            format,
+            usage,
+            samples: 1,
+            mip_levels: 1,
+        }
+    }
+
+    /// The same description with `mip_levels` levels.
+    #[must_use]
+    pub const fn with_mip_levels(mut self, mip_levels: u32) -> Self {
+        self.mip_levels = mip_levels;
+        self
+    }
 }
 
 /// What a graph-owned buffer should be.
@@ -128,6 +159,8 @@ struct PooledBuffer {
 pub struct TransientPool {
     images: HashMap<TransientImageDesc, Vec<PooledImage>>,
     buffers: HashMap<TransientBufferDesc, Vec<PooledBuffer>>,
+    /// Frames begun. Reported by [`TransientPool::frame_count`]; retirement
+    /// counts idle frames per entry rather than reading this.
     frames: u64,
 }
 
@@ -143,7 +176,7 @@ impl TransientPool {
     /// Called by [`CompiledGraph::execute`](crate::graph::CompiledGraph::execute)
     /// before it realises anything, so a caller never has to remember to.
     pub fn begin_frame(&mut self) {
-        self.frames += 1;
+        self.frames = self.frames.wrapping_add(1);
         for pooled in self.images.values_mut().flatten() {
             pooled.taken = false;
         }
@@ -175,7 +208,7 @@ impl TransientPool {
             image_type: ImageType::D2,
             extent: crcbl_hal::Extent3d::d2(desc.extent.0, desc.extent.1),
             format: desc.format,
-            mip_levels: 1,
+            mip_levels: desc.mip_levels,
             samples: desc.samples,
             usage: desc.usage,
             memory: MemoryLocation::DeviceLocal,
@@ -362,6 +395,12 @@ impl TransientPool {
         retired
     }
 
+    /// How many frames have begun against this pool.
+    #[must_use]
+    pub const fn frame_count(&self) -> u64 {
+        self.frames
+    }
+
     /// How many physical images the pool is holding.
     #[must_use]
     pub fn image_count(&self) -> usize {
@@ -408,6 +447,7 @@ mod tests {
             format: Format::Rgba16Float,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
             samples: 1,
+            mip_levels: 1,
         }
     }
 
@@ -481,6 +521,7 @@ mod tests {
                     format: Format::D32Float,
                     usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
                     samples: 1,
+                    mip_levels: 1,
                 },
             )
             .expect("created");

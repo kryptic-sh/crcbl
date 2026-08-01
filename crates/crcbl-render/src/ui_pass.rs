@@ -15,12 +15,12 @@ use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BlendState, BufferDesc,
     BufferHandle, BufferImageCopy, BufferUsage, ColorTargetState, ColorWrites, CommandEncoderDesc,
-    Device, Extent3d, FilterMode, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError,
-    ImageDesc, ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage,
-    ImageViewDesc, ImageViewHandle, ImageViewType, IndexFormat, LoadOp, MemoryLocation, Offset3d,
-    PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState, PushConstantRange, QueueHandle,
-    ResourceState, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
-    ShaderStages, StoreOp, SubmitInfo,
+    Device, Extent3d, Features, FilterMode, Format, GraphicsPipelineDesc, GraphicsPipelineHandle,
+    HalError, ImageDesc, ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageType,
+    ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType, IndexFormat, LoadOp, MemoryLocation,
+    Offset3d, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState, PushConstantRange,
+    QueueHandle, ResourceState, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry,
+    ShaderModuleDesc, ShaderStages, StoreOp, SubmitInfo,
 };
 
 use crcbl_shaders::{Stage, UI};
@@ -41,6 +41,20 @@ struct UiPushConstants {
 
 /// How many frames of vertex/index buffers to keep in flight.
 const FRAMES_IN_FLIGHT: usize = 2;
+
+/// Starting size of each ring buffer, in bytes.
+const INITIAL_RING_BYTES: u64 = 1024;
+
+/// The size a ring buffer grows to when `needed` bytes no longer fit.
+///
+/// Doubling rather than fitting exactly, so a UI that grows a few vertices per
+/// frame reallocates a handful of times rather than every frame.
+fn grown(needed: u64) -> u64 {
+    needed
+        .max(INITIAL_RING_BYTES)
+        .next_power_of_two()
+        .next_multiple_of(256)
+}
 
 /// The UI compositing renderer.
 ///
@@ -64,9 +78,21 @@ pub struct UiRenderer {
     index_buffers: Vec<BufferHandle>,
     frame: usize,
 
-    // Cached sizes for re-upload detection
+    /// How many **bytes** each ring buffer holds. Compared against the bytes a
+    /// frame needs; the counts below are *elements* and comparing the two is
+    /// what used to make a steady-state frame destroy and recreate both
+    /// buffers and the bind group every time.
+    vertex_capacity: Vec<u64>,
+    index_capacity: Vec<u64>,
+
+    // Element counts, for the draw call and for "is there anything to draw".
     last_vertex_count: Vec<usize>,
     last_index_count: Vec<usize>,
+
+    /// The format the pipeline was built for. Dynamic rendering checks the
+    /// pipeline's colour-target format against the attachment at pass-begin, so
+    /// a swapchain in a different format needs a different pipeline.
+    target_format: Format,
 
     destroyed: bool,
 }
@@ -74,12 +100,36 @@ pub struct UiRenderer {
 impl UiRenderer {
     /// Creates the UI pipeline, glyph atlas, and per-frame geometry buffers.
     ///
+    /// `target_format` must be the format of the image the pass composites
+    /// onto — normally the swapchain's, which is `Bgra8UnormSrgb` on most
+    /// desktop platforms. Under dynamic rendering the pipeline's colour-target
+    /// format is checked against the attachment at pass-begin time rather than
+    /// at creation, so a pipeline built for the wrong one fails the frame, not
+    /// the constructor. [`ForwardRenderer::new`](crate::ForwardRenderer::new)
+    /// takes it for the same reason.
+    ///
     /// The atlas is uploaded immediately via a staging copy.
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call.
-    pub fn new(device: &dyn Device, queue: QueueHandle) -> Result<Self, HalError> {
+    /// [`HalError::Unsupported`] on a device without
+    /// [`Features::PUSH_CONSTANTS`] — `ui.slang` receives the viewport size as
+    /// a push constant and has no other binding to receive it through, so a
+    /// device that cannot deliver one has to be told rather than shown a UI
+    /// scaled by whatever was left in the block. Otherwise [`HalError`] from
+    /// any seam call.
+    pub fn new(
+        device: &dyn Device,
+        queue: QueueHandle,
+        target_format: Format,
+    ) -> Result<Self, HalError> {
+        if !device.caps().features.contains(Features::PUSH_CONSTANTS) {
+            return Err(HalError::Unsupported {
+                backend: device.backend(),
+                what: "the UI pass: ui.slang takes its viewport size as a push constant and this \
+                       device has no push constants",
+            });
+        }
         let atlas = FontAtlas::built_in();
         let (atlas_w, atlas_h, atlas_pixels) = atlas.glyph_bitmap();
 
@@ -133,16 +183,18 @@ impl UiRenderer {
         let mut index_buffers = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut last_vertex_count = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut last_index_count = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut vertex_capacity = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut index_capacity = Vec::with_capacity(FRAMES_IN_FLIGHT);
         for _ in 0..FRAMES_IN_FLIGHT {
             let vb = device.create_buffer(&BufferDesc {
                 label: Some("ui vertices"),
-                size: 1024,
+                size: INITIAL_RING_BYTES,
                 usage: BufferUsage::STORAGE,
                 memory: MemoryLocation::HostUpload,
             })?;
             let ib = device.create_buffer(&BufferDesc {
                 label: Some("ui indices"),
-                size: 1024,
+                size: INITIAL_RING_BYTES,
                 usage: BufferUsage::INDEX,
                 memory: MemoryLocation::HostUpload,
             })?;
@@ -173,25 +225,21 @@ impl UiRenderer {
             frame_groups.push(bg);
             last_vertex_count.push(0);
             last_index_count.push(0);
+            vertex_capacity.push(INITIAL_RING_BYTES);
+            index_capacity.push(INITIAL_RING_BYTES);
         }
 
         let set_layouts = [bind_group_layout];
-        let supports_push = device
-            .caps()
-            .features
-            .contains(crcbl_hal::Features::PUSH_CONSTANTS);
+        // Unconditional: `new` refused a device without push constants above,
+        // so the layout the pass records against always has the block.
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("ui"),
             bind_group_layouts: &set_layouts,
-            push_constants: if supports_push {
-                Some(PushConstantRange {
-                    stages: ShaderStages::VERTEX,
-                    offset: 0,
-                    size: std::mem::size_of::<UiPushConstants>() as u32,
-                })
-            } else {
-                None
-            },
+            push_constants: Some(PushConstantRange {
+                stages: ShaderStages::VERTEX,
+                offset: 0,
+                size: std::mem::size_of::<UiPushConstants>() as u32,
+            }),
         })?;
 
         let ui_module = device.create_shader_module(&ShaderModuleDesc {
@@ -199,7 +247,7 @@ impl UiRenderer {
             spirv: UI.spirv(),
         })?;
         let ui_targets = [ColorTargetState {
-            format: Format::Rgba8UnormSrgb, // placeholder; reconfigured at draw time
+            format: target_format,
             blend: Some(BlendState::alpha()),
             write_mask: ColorWrites::ALL,
         }];
@@ -233,10 +281,19 @@ impl UiRenderer {
             vertex_buffers,
             index_buffers,
             frame: 0,
+            vertex_capacity,
+            index_capacity,
             last_vertex_count,
             last_index_count,
+            target_format,
             destroyed: false,
         })
+    }
+
+    /// The format the compositing pass renders into.
+    #[must_use]
+    pub const fn target_format(&self) -> Format {
+        self.target_format
     }
 
     /// Uploads the draw list's triangulated geometry and advances the ring.
@@ -259,33 +316,41 @@ impl UiRenderer {
 
         let (vertices, indices) = draw_list.to_triangles(Some(atlas), scale);
 
-        // Recreate vertex buffer if too small
+        // Grow the ring buffers only when this frame genuinely needs more room.
+        // Both sides of every comparison here are **bytes**.
         let vb_needed = (vertices.len() * std::mem::size_of::<Vertex2d>()) as u64;
-        if vb_needed > self.last_vertex_count[idx] as u64 || vb_needed == 0 {
-            // round up to at least 1 KiB
-            let size = vb_needed.max(1024).next_multiple_of(256);
-            device.destroy_buffer(self.vertex_buffers[idx]);
-            self.vertex_buffers[idx] = device.create_buffer(&BufferDesc {
+        let ib_needed = (indices.len() * std::mem::size_of::<u32>()) as u64;
+
+        // The vertex buffer is named by the frame's bind group, so replacing it
+        // is the only thing that makes the group stale.
+        let mut vertex_buffer_replaced = false;
+        if vb_needed > self.vertex_capacity[idx] {
+            let size = grown(vb_needed);
+            // Create before destroying: a creation that fails must not leave a
+            // destroyed handle in the struct for `destroy` to hand back to the
+            // device a second time. `TransientPool::image` has the same shape.
+            let fresh = device.create_buffer(&BufferDesc {
                 label: Some("ui vertices"),
                 size,
                 usage: BufferUsage::STORAGE,
                 memory: MemoryLocation::HostUpload,
             })?;
+            device.destroy_buffer(std::mem::replace(&mut self.vertex_buffers[idx], fresh));
+            self.vertex_capacity[idx] = size;
+            vertex_buffer_replaced = true;
         }
-        self.last_vertex_count[idx] = vertices.len();
-
-        // Recreate index buffer if too small
-        let ib_needed = (indices.len() * std::mem::size_of::<u32>()) as u64;
-        if ib_needed > self.last_index_count[idx] as u64 || ib_needed == 0 {
-            let size = ib_needed.max(1024).next_multiple_of(256);
-            device.destroy_buffer(self.index_buffers[idx]);
-            self.index_buffers[idx] = device.create_buffer(&BufferDesc {
+        if ib_needed > self.index_capacity[idx] {
+            let size = grown(ib_needed);
+            let fresh = device.create_buffer(&BufferDesc {
                 label: Some("ui indices"),
                 size,
                 usage: BufferUsage::INDEX,
                 memory: MemoryLocation::HostUpload,
             })?;
+            device.destroy_buffer(std::mem::replace(&mut self.index_buffers[idx], fresh));
+            self.index_capacity[idx] = size;
         }
+        self.last_vertex_count[idx] = vertices.len();
         self.last_index_count[idx] = indices.len();
 
         // Upload vertex data
@@ -300,30 +365,33 @@ impl UiRenderer {
             device.write_buffer(self.index_buffers[idx], 0, bytes)?;
         }
 
-        // Recreate frame bind group pointing at new vertex buffer (all 3 bindings)
-        device.destroy_bind_group(self.frame_groups[idx]);
-        self.frame_groups[idx] = device.create_bind_group(&BindGroupDesc {
-            label: Some("ui frame"),
-            layout: self.bind_group_layout,
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    array_index: 0,
-                    resource: BindingResource::ImageView(self.atlas_view),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    array_index: 0,
-                    resource: BindingResource::Sampler(self.atlas_sampler),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    array_index: 0,
-                    resource: BindingResource::whole_buffer(self.vertex_buffers[idx]),
-                },
-            ],
-            variable_count: None,
-        })?;
+        // Only a new vertex buffer needs a new bind group; the atlas and the
+        // sampler never change, so a steady-state frame writes no descriptors.
+        if vertex_buffer_replaced {
+            let fresh = device.create_bind_group(&BindGroupDesc {
+                label: Some("ui frame"),
+                layout: self.bind_group_layout,
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        array_index: 0,
+                        resource: BindingResource::ImageView(self.atlas_view),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        array_index: 0,
+                        resource: BindingResource::Sampler(self.atlas_sampler),
+                    },
+                    BindGroupEntry {
+                        binding: 2,
+                        array_index: 0,
+                        resource: BindingResource::whole_buffer(self.vertex_buffers[idx]),
+                    },
+                ],
+                variable_count: None,
+            })?;
+            device.destroy_bind_group(std::mem::replace(&mut self.frame_groups[idx], fresh));
+        }
 
         Ok(())
     }
@@ -333,7 +401,11 @@ impl UiRenderer {
     /// The pass reads nothing except its own vertex buffer; it blends onto the
     /// target using alpha blending. Call after the tonemap pass.
     ///
-    /// Returns the pass builder so the caller can further configure it.
+    /// `extent` is the target's size in pixels, which the shader divides by to
+    /// reach NDC. It is *not* used to set the viewport or the scissor: the
+    /// graph already sets both from the pass's own render area
+    /// ([`CompiledGraph::execute`](crate::graph::CompiledGraph::execute)), and a
+    /// body that set them again could only disagree with it.
     pub fn add_pass<'a>(
         &'a self,
         graph: &mut RenderGraph<'a>,
@@ -360,14 +432,6 @@ impl UiRenderer {
                 };
                 let push_bytes: &[u8] = bytemuck::bytes_of(&push);
                 let encoder = ctx.encoder();
-                // Set viewport to cover the full target
-                encoder.set_viewport(&crcbl_hal::Viewport::from_size(extent.0, extent.1));
-                encoder.set_scissor(&crcbl_hal::Rect2d {
-                    x: 0,
-                    y: 0,
-                    width: extent.0,
-                    height: extent.1,
-                });
                 encoder.bind_graphics_pipeline(pipeline);
                 encoder.bind_group(0, bg, &[], pipeline_layout);
                 // Write push constants for the viewport
@@ -416,6 +480,11 @@ impl Drop for UiRenderer {
 // ---------------------------------------------------------------------------
 
 /// Uploads an R8_UNORM texture via a staging buffer copy.
+///
+/// Every object this creates is released on every path out, including the
+/// failing ones: a `?` that dropped the staging buffer on the floor would leak
+/// one per failed startup, and the recorder's leak assertions would only notice
+/// once something actually failed.
 fn upload_texture_r8(
     device: &dyn Device,
     queue: QueueHandle,
@@ -423,13 +492,48 @@ fn upload_texture_r8(
     height: u32,
     pixels: &[u8],
 ) -> Result<(ImageHandle, ImageViewHandle), HalError> {
-    let size = pixels.len() as u64;
+    // Rows are padded to the device's copy alignment rather than packed
+    // tightly. Vulkan takes either; WebGPU requires a 256-byte row pitch and
+    // says so through this limit, so padding here is what makes one upload path
+    // work on both instead of one that only ever ran on the backend it was
+    // written against. `R8Unorm` is one byte per texel, so bytes and texels are
+    // the same number throughout.
+    let alignment = device
+        .caps()
+        .limits
+        .optimal_buffer_copy_offset_alignment
+        .max(1);
+    let row_pitch = u64::from(width).next_multiple_of(alignment);
+    let size = row_pitch * u64::from(height);
+    let mut padded = vec![0u8; usize::try_from(size).unwrap_or(usize::MAX)];
+    for row in 0..height as usize {
+        let src = row * width as usize;
+        let dst = row * row_pitch as usize;
+        padded[dst..dst + width as usize].copy_from_slice(&pixels[src..src + width as usize]);
+    }
+
     let staging = device.create_buffer(&BufferDesc {
         label: Some("ui atlas staging"),
         size,
         usage: BufferUsage::TRANSFER_SRC,
         memory: MemoryLocation::HostUpload,
     })?;
+    let row_texels = u32::try_from(row_pitch).unwrap_or(u32::MAX);
+    let outcome = upload_atlas_image(device, queue, width, height, row_texels, staging, &padded);
+    device.destroy_buffer(staging);
+    outcome
+}
+
+/// The half of [`upload_texture_r8`] that owns the image and the view.
+fn upload_atlas_image(
+    device: &dyn Device,
+    queue: QueueHandle,
+    width: u32,
+    height: u32,
+    row_texels: u32,
+    staging: BufferHandle,
+    pixels: &[u8],
+) -> Result<(ImageHandle, ImageViewHandle), HalError> {
     device.write_buffer(staging, 0, pixels)?;
 
     let image = device.create_image(&ImageDesc {
@@ -443,7 +547,7 @@ fn upload_texture_r8(
         memory: MemoryLocation::DeviceLocal,
     })?;
 
-    let view = device.create_image_view(&ImageViewDesc {
+    let view = match device.create_image_view(&ImageViewDesc {
         label: Some("ui glyph atlas"),
         image,
         view_type: ImageViewType::D2,
@@ -455,8 +559,34 @@ fn upload_texture_r8(
             base_layer: 0,
             layer_count: 1,
         },
-    })?;
+    }) {
+        Ok(view) => view,
+        Err(error) => {
+            device.destroy_image(image);
+            return Err(error);
+        }
+    };
 
+    match record_atlas_upload(device, queue, image, staging, width, height, row_texels) {
+        Ok(()) => Ok((image, view)),
+        Err(error) => {
+            device.destroy_image_view(view);
+            device.destroy_image(image);
+            Err(error)
+        }
+    }
+}
+
+/// Records, submits and drains the staging copy.
+fn record_atlas_upload(
+    device: &dyn Device,
+    queue: QueueHandle,
+    image: ImageHandle,
+    staging: BufferHandle,
+    width: u32,
+    height: u32,
+    row_texels: u32,
+) -> Result<(), HalError> {
     let range = ImageSubresourceRange {
         aspect: crcbl_hal::ImageAspect::COLOR,
         base_mip: 0,
@@ -485,8 +615,8 @@ fn upload_texture_r8(
     encoder.copy_buffer_to_image(&BufferImageCopy {
         buffer: staging,
         buffer_offset: 0,
-        buffer_row_length: 0,
-        buffer_image_height: 0,
+        buffer_row_length: row_texels,
+        buffer_image_height: height,
         image,
         image_subresource: ImageSubresourceLayers {
             aspect: crcbl_hal::ImageAspect::COLOR,
@@ -510,12 +640,11 @@ fn upload_texture_r8(
     });
 
     let commands = encoder.finish()?;
-    device.submit(queue, &SubmitInfo::new(&[commands]))?;
-    device.wait_idle()?;
+    let submitted = device
+        .submit(queue, &SubmitInfo::new(&[commands]))
+        .and_then(|()| device.wait_idle());
     device.destroy_command_buffer(commands);
-    device.destroy_buffer(staging);
-
-    Ok((image, view))
+    submitted
 }
 
 fn entry(shader: &crcbl_shaders::Shader, stage: Stage) -> Result<&'static str, HalError> {
@@ -552,15 +681,16 @@ mod tests {
     #[test]
     fn ui_renderer_builds_and_leaks_nothing() {
         let (device, queue) = open();
-        let renderer =
-            UiRenderer::new(device.as_ref(), queue).expect("the null backend accepts everything");
+        let renderer = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb)
+            .expect("the null backend accepts everything");
         renderer.destroy(device.as_ref());
     }
 
     #[test]
     fn begin_frame_with_empty_draw_list_is_harmless() {
         let (device, queue) = open();
-        let mut renderer = UiRenderer::new(device.as_ref(), queue).expect("built");
+        let mut renderer =
+            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
         let atlas = FontAtlas::built_in();
         let dl = DrawList::new();
         renderer
@@ -572,7 +702,8 @@ mod tests {
     #[test]
     fn begin_frame_with_rect_uploads_geometry() {
         let (device, queue) = open();
-        let mut renderer = UiRenderer::new(device.as_ref(), queue).expect("built");
+        let mut renderer =
+            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
         let atlas = FontAtlas::built_in();
         let mut dl = DrawList::new();
         dl.rect(
@@ -589,7 +720,8 @@ mod tests {
     #[test]
     fn begin_frame_with_text_uploads_geometry() {
         let (device, queue) = open();
-        let mut renderer = UiRenderer::new(device.as_ref(), queue).expect("built");
+        let mut renderer =
+            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
         let atlas = FontAtlas::built_in();
         let mut dl = DrawList::new();
         dl.text(
@@ -602,5 +734,133 @@ mod tests {
             .begin_frame(device.as_ref(), &dl, &atlas, 1.0)
             .expect("text upload should succeed");
         renderer.destroy(device.as_ref());
+    }
+
+    /// A UI that has not changed must not churn the GPU: the byte counts and
+    /// the element counts used to be compared against each other, so both ring
+    /// buffers *and* the frame bind group were destroyed and recreated every
+    /// single frame in steady state.
+    #[test]
+    fn a_steady_state_frame_recreates_nothing() {
+        let recorder = crcbl_hal::null::Recorder::new();
+        let instance = NullInstance::tier_a().with_recorder(recorder.clone());
+        let adapter = instance.adapters().remove(0);
+        let device = instance
+            .create_device(&DeviceDesc {
+                label: None,
+                adapter: adapter.id,
+                required_features: Features::TIER_A,
+                optional_features: Features::PUSH_CONSTANTS,
+                compatible_surface: None,
+            })
+            .expect("the null backend always opens");
+        let queue = device.queue(QueueKind::Graphics).expect("always present");
+        let mut renderer =
+            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+
+        let atlas = FontAtlas::built_in();
+        let mut dl = DrawList::new();
+        dl.text(
+            glam::Vec2::new(10.0, 10.0),
+            "steady",
+            [1.0, 1.0, 1.0, 1.0],
+            14.0,
+        );
+
+        // Two frames to fill both slots of the ring, then measure.
+        for _ in 0..FRAMES_IN_FLIGHT {
+            renderer
+                .begin_frame(device.as_ref(), &dl, &atlas, 1.0)
+                .expect("upload");
+        }
+        let buffers = renderer.vertex_buffers.clone();
+        let groups = renderer.frame_groups.clone();
+        let settled = recorder.total_live_objects();
+
+        for _ in 0..8 {
+            renderer
+                .begin_frame(device.as_ref(), &dl, &atlas, 1.0)
+                .expect("upload");
+        }
+        assert_eq!(
+            recorder.total_live_objects(),
+            settled,
+            "an unchanged draw list must not allocate"
+        );
+        assert_eq!(
+            renderer.vertex_buffers, buffers,
+            "the vertex ring must be reused, not reallocated"
+        );
+        assert_eq!(
+            renderer.frame_groups, groups,
+            "the frame bind group only changes when its vertex buffer does"
+        );
+
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// The ring still grows when a frame genuinely needs more room, and the old
+    /// buffer is released rather than leaked.
+    #[test]
+    fn a_bigger_draw_list_grows_the_ring_once() {
+        let (device, queue) = open();
+        let mut renderer =
+            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+        let atlas = FontAtlas::built_in();
+
+        let mut small = DrawList::new();
+        small.rect(
+            glam::Vec2::ZERO,
+            glam::Vec2::new(10.0, 10.0),
+            [1.0, 1.0, 1.0, 1.0],
+        );
+        renderer
+            .begin_frame(device.as_ref(), &small, &atlas, 1.0)
+            .expect("upload");
+        let before = renderer.vertex_capacity[renderer.frame];
+
+        let mut big = DrawList::new();
+        for index in 0..512 {
+            let x = index as f32;
+            big.rect(
+                glam::Vec2::new(x, 0.0),
+                glam::Vec2::new(x + 1.0, 1.0),
+                [1.0, 1.0, 1.0, 1.0],
+            );
+        }
+        // Two frames so the same ring slot comes round again.
+        for _ in 0..FRAMES_IN_FLIGHT {
+            renderer
+                .begin_frame(device.as_ref(), &big, &atlas, 1.0)
+                .expect("upload");
+        }
+        assert!(
+            renderer.vertex_capacity[renderer.frame] > before,
+            "the ring must grow when the frame no longer fits"
+        );
+        renderer.destroy(device.as_ref());
+    }
+
+    /// The UI shader has nowhere but a push constant to learn the viewport
+    /// from, so a device without them is refused rather than shown a UI scaled
+    /// by whatever was left in the block.
+    #[test]
+    fn a_device_without_push_constants_is_refused() {
+        let instance = NullInstance::tier_b();
+        let adapter = instance.adapters().remove(0);
+        let device = instance
+            .create_device(&DeviceDesc {
+                label: None,
+                adapter: adapter.id,
+                required_features: Features::COMPUTE,
+                optional_features: Features::empty(),
+                compatible_surface: None,
+            })
+            .expect("the tier B null adapter opens");
+        let queue = device.queue(QueueKind::Graphics).expect("always present");
+        let error = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb)
+            .expect_err("no push constants, no UI pass");
+        assert!(matches!(error, HalError::Unsupported { .. }), "{error:?}");
     }
 }

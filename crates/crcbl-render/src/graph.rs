@@ -111,7 +111,7 @@ use core::fmt;
 
 use crcbl_hal::{
     Barriers, BufferBarrier, BufferHandle, BufferUsage, ClearValue, ColorAttachment,
-    CommandEncoder, ComputePassDesc, DepthStencilAttachment, Device, Format, HalError,
+    CommandEncoder, ComputePassDesc, DepthStencilAttachment, Device, Format, HalError, ImageAspect,
     ImageBarrier, ImageHandle, ImageSubresourceRange, ImageUsage, ImageViewHandle, LoadOp,
     QueueHandle, QueueTransfer, Rect2d, RenderPassDesc, ResourceState, StoreOp, Viewport, depth,
 };
@@ -738,6 +738,10 @@ pub struct CompiledPass<'a> {
     queue: QueueHandle,
     /// Barriers emitted **before** this pass opens.
     barriers: GraphBarriers,
+    /// Barriers emitted **after** this pass closes: the release half of a
+    /// queue-ownership transfer whose acquire a later pass records. Empty in
+    /// every single-queue frame, which is every frame the MVP runs.
+    release_barriers: GraphBarriers,
     images: Vec<ImageAccess>,
     buffers: Vec<BufferAccess>,
     render_area: Rect2d,
@@ -771,6 +775,14 @@ impl CompiledPass<'_> {
     #[must_use]
     pub const fn barriers(&self) -> &GraphBarriers {
         &self.barriers
+    }
+
+    /// The barriers emitted immediately after it — the release half of any
+    /// queue-ownership transfer a later pass acquires. See
+    /// [`crcbl_hal::QueueTransfer`] on why a transfer is two barriers.
+    #[must_use]
+    pub const fn release_barriers(&self) -> &GraphBarriers {
+        &self.release_barriers
     }
 
     /// The queue it was declared on.
@@ -878,7 +890,7 @@ impl<'a> CompiledGraph<'a> {
     pub fn barrier_batches(&self) -> Vec<&GraphBarriers> {
         self.passes
             .iter()
-            .map(|pass| &pass.barriers)
+            .flat_map(|pass| [&pass.barriers, &pass.release_barriers])
             .chain(core::iter::once(&self.final_barriers))
             .filter(|batch| !batch.is_empty())
             .collect()
@@ -916,7 +928,7 @@ impl<'a> CompiledGraph<'a> {
             self.transient_buffers.len(),
             self.passes
                 .iter()
-                .map(|pass| pass.barriers.len())
+                .map(|pass| pass.barriers.len() + pass.release_barriers.len())
                 .sum::<usize>()
                 + self.final_barriers.len(),
         )?;
@@ -968,6 +980,7 @@ impl<'a> CompiledGraph<'a> {
                     self.slot_note(self.buffer_slots[access.buffer.index()]),
                 )?;
             }
+            self.write_barriers(out, &pass.release_barriers, &format!("[{index}] release "))?;
         }
 
         self.write_barriers(out, &self.final_barriers, "[final] ")?;
@@ -1117,6 +1130,10 @@ impl<'a> CompiledGraph<'a> {
                 PassKind::Render => encoder.end_render_pass(),
                 PassKind::Compute => encoder.end_compute_pass(),
             }
+            // The release half of any queue-ownership transfer a later pass
+            // acquires. Outside the pass scope, because the seam only allows
+            // barriers there.
+            emit(encoder, &images, &realised, &pass.release_barriers);
             if let Some(timers) = timers.as_deref_mut() {
                 timers.pass_end(encoder, index);
             }
@@ -1420,6 +1437,46 @@ pub enum GraphError {
         /// Pass label.
         pass: String,
     },
+    /// One pass declared the same resource twice over the same subrange.
+    ///
+    /// `.color(image, ..).color(image, ..)` used to be accepted and produced
+    /// two colour attachments over one view — two shader outputs writing the
+    /// same pixels, in an order nothing defines. A pass that genuinely touches
+    /// two parts of one image declares two *different* subresource ranges.
+    #[error(
+        "pass `{pass}` declares `{resource}` twice over the same subrange; a resource is declared \
+         once per pass, and two attachments over one view is not a second attachment"
+    )]
+    DuplicateDeclaration {
+        /// Pass label.
+        pass: String,
+        /// Resource label.
+        resource: String,
+    },
+    /// A pass named a mip level or array layer the image does not have.
+    #[error(
+        "pass `{pass}` uses `{resource}` at mip {base_mip}+{mip_count} / layer \
+         {base_layer}+{layer_count}, but the image has {mip_levels} mip level(s) and \
+         {layers} layer(s); a barrier on a subresource that does not exist covers nothing"
+    )]
+    SubresourceOutOfRange {
+        /// Pass label.
+        pass: String,
+        /// Resource label.
+        resource: String,
+        /// First mip named.
+        base_mip: u32,
+        /// Mip levels named.
+        mip_count: u32,
+        /// First layer named.
+        base_layer: u32,
+        /// Layers named.
+        layer_count: u32,
+        /// Mip levels the image has.
+        mip_levels: u32,
+        /// Array layers the image has.
+        layers: u32,
+    },
     /// A compute pass attached something.
     #[error("compute pass `{pass}` attaches `{resource}`; compute passes have no attachments")]
     AttachmentInComputePass {
@@ -1443,6 +1500,10 @@ pub enum GraphError {
     Hal(#[from] HalError),
 }
 
+/// Array layers a [`TransientImageDesc`] image has. The pool creates them
+/// single-layer, and the description has no field to say otherwise.
+const TRANSIENT_LAYERS: u32 = 1;
+
 /// Per-physical-resource tracking during compilation.
 ///
 /// Keyed on the *physical* resource, and seeded from what that resource was
@@ -1451,10 +1512,13 @@ pub enum GraphError {
 /// fresh" case: a slot handed from one virtual resource to another is the same
 /// object, in the state the previous one left it, and the module docs explain
 /// why pretending otherwise loses the barrier.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Tracked {
     state: ResourceState,
     queue: Option<QueueHandle>,
+    /// Index of the pass in *this* graph that last used it, which is where the
+    /// release half of a queue-ownership transfer has to be recorded.
+    last_pass: Option<usize>,
 }
 
 impl Tracked {
@@ -1462,6 +1526,15 @@ impl Tracked {
         Self {
             state: last.state,
             queue: last.queue,
+            last_pass: None,
+        }
+    }
+
+    const fn declared(state: ResourceState) -> Self {
+        Self {
+            state,
+            queue: None,
+            last_pass: None,
         }
     }
 
@@ -1470,6 +1543,258 @@ impl Tracked {
             state: self.state,
             queue: self.queue,
         }
+    }
+}
+
+/// A half-open mip × layer rectangle of one image.
+///
+/// The unit of image state tracking. Whole-image is just the rectangle covering
+/// everything — the graph does not need a second representation for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Subrect {
+    mips: (u32, u32),
+    layers: (u32, u32),
+}
+
+impl Subrect {
+    /// The rectangle a resource with unknown extents starts at. Imported
+    /// images do not say how many levels or layers they have, and every access
+    /// to one in this engine covers the whole thing.
+    const UNBOUNDED: Self = Self {
+        mips: (0, u32::MAX),
+        layers: (0, u32::MAX),
+    };
+
+    const fn bounded(mip_levels: u32, layers: u32) -> Self {
+        Self {
+            mips: (0, mip_levels),
+            layers: (0, layers),
+        }
+    }
+
+    const fn is_empty(self) -> bool {
+        self.mips.0 >= self.mips.1 || self.layers.0 >= self.layers.1
+    }
+
+    fn intersect(self, other: Self) -> Self {
+        Self {
+            mips: (self.mips.0.max(other.mips.0), self.mips.1.min(other.mips.1)),
+            layers: (
+                self.layers.0.max(other.layers.0),
+                self.layers.1.min(other.layers.1),
+            ),
+        }
+    }
+
+    /// `self` minus `cut`, as up to four disjoint rectangles.
+    ///
+    /// `cut` must already be an intersection with `self`, so the pieces tile
+    /// the difference exactly.
+    fn subtract(self, cut: Self) -> Vec<Self> {
+        let mut out = Vec::new();
+        if cut.mips.0 > self.mips.0 {
+            out.push(Self {
+                mips: (self.mips.0, cut.mips.0),
+                layers: self.layers,
+            });
+        }
+        if self.mips.1 > cut.mips.1 {
+            out.push(Self {
+                mips: (cut.mips.1, self.mips.1),
+                layers: self.layers,
+            });
+        }
+        if cut.layers.0 > self.layers.0 {
+            out.push(Self {
+                mips: cut.mips,
+                layers: (self.layers.0, cut.layers.0),
+            });
+        }
+        if self.layers.1 > cut.layers.1 {
+            out.push(Self {
+                mips: cut.mips,
+                layers: (cut.layers.1, self.layers.1),
+            });
+        }
+        out
+    }
+
+    fn to_range(self, aspect: crcbl_hal::ImageAspect) -> ImageSubresourceRange {
+        ImageSubresourceRange {
+            aspect,
+            base_mip: self.mips.0,
+            mip_count: if self.mips.1 == u32::MAX {
+                ImageSubresourceRange::ALL
+            } else {
+                self.mips.1 - self.mips.0
+            },
+            base_layer: self.layers.0,
+            layer_count: if self.layers.1 == u32::MAX {
+                ImageSubresourceRange::ALL
+            } else {
+                self.layers.1 - self.layers.0
+            },
+        }
+    }
+}
+
+/// `ALL` means "every remaining", so it resolves against the image's own size.
+fn subrect_of(range: ImageSubresourceRange, bounds: Subrect) -> Subrect {
+    let mip_end = if range.mip_count == ImageSubresourceRange::ALL {
+        bounds.mips.1
+    } else {
+        range.base_mip.saturating_add(range.mip_count)
+    };
+    let layer_end = if range.layer_count == ImageSubresourceRange::ALL {
+        bounds.layers.1
+    } else {
+        range.base_layer.saturating_add(range.layer_count)
+    };
+    Subrect {
+        mips: (range.base_mip, mip_end),
+        layers: (range.base_layer, layer_end),
+    }
+}
+
+/// One transition the tracker decided is needed.
+#[derive(Clone, Copy, Debug)]
+struct SubBarrier {
+    from: ResourceState,
+    queue_transfer: Option<QueueTransfer>,
+    /// The part of the image it covers, or `None` when the whole access range
+    /// is in one state and the access's own range already describes it.
+    rect: Option<Subrect>,
+    /// Pass that last used this part, for the release half of a transfer.
+    last_pass: Option<usize>,
+}
+
+/// Per-**subresource** image state.
+///
+/// A whole-image tracker was wrong in a way that only a per-mip pass could
+/// notice, and did: writing mip 0 and then mip 1 produced a barrier on mip 1
+/// whose `from` was the state mip 0 had been left in, which mip 1 had never
+/// been in. A barrier that names a source state its subresource never occupied
+/// is a barrier the driver is free to interpret as covering nothing.
+#[derive(Clone, Debug)]
+struct ImageTracker {
+    bounds: Subrect,
+    /// Disjoint rectangles tiling `bounds`, each with the state of that part.
+    segments: Vec<(Subrect, Tracked)>,
+}
+
+impl ImageTracker {
+    fn new(bounds: Subrect, tracked: Tracked) -> Self {
+        Self {
+            bounds,
+            segments: vec![(bounds, tracked)],
+        }
+    }
+
+    /// Applies an access covering `rect`, returning the barriers it needs.
+    fn transition(
+        &mut self,
+        rect: Subrect,
+        want: ResourceState,
+        queue: QueueHandle,
+        pass: usize,
+    ) -> Vec<SubBarrier> {
+        let mut outside: Vec<(Subrect, Tracked)> = Vec::new();
+        let mut inside: Vec<(Subrect, Tracked)> = Vec::new();
+        for (segment, tracked) in self.segments.drain(..) {
+            let overlap = segment.intersect(rect);
+            if overlap.is_empty() {
+                outside.push((segment, tracked));
+                continue;
+            }
+            outside.extend(
+                segment
+                    .subtract(overlap)
+                    .into_iter()
+                    .map(|piece| (piece, tracked)),
+            );
+            inside.push((overlap, tracked));
+        }
+
+        let mut barriers = Vec::new();
+        for (piece, tracked) in &inside {
+            let queue_transfer = match tracked.queue {
+                Some(previous) if previous != queue => Some(QueueTransfer {
+                    from: previous,
+                    to: queue,
+                }),
+                _ => None,
+            };
+            // A queue-family transfer is a barrier even between two identical
+            // states: ownership has to move, or the second queue reads memory
+            // the first has not released.
+            if ResourceState::needs_barrier(tracked.state, want) || queue_transfer.is_some() {
+                barriers.push(SubBarrier {
+                    from: tracked.state,
+                    queue_transfer,
+                    rect: Some(*piece),
+                    last_pass: tracked.last_pass,
+                });
+            }
+        }
+
+        // The common case: every part of the access was in one state, so the
+        // access's own declared range describes the barrier exactly and there
+        // is no reason to spell out the pieces.
+        if barriers.len() == inside.len()
+            && barriers.windows(2).all(|pair| {
+                pair[0].from == pair[1].from && pair[0].queue_transfer == pair[1].queue_transfer
+            })
+        {
+            barriers.truncate(1.min(barriers.len()));
+            if let Some(first) = barriers.first_mut() {
+                first.rect = None;
+            }
+        }
+
+        let entered = Tracked {
+            state: want,
+            queue: Some(queue),
+            last_pass: Some(pass),
+        };
+        self.segments = outside;
+        for (piece, tracked) in inside {
+            // A read that needed no barrier stays in the state it was in — two
+            // reads of the same kind are the same state by definition.
+            let state = if ResourceState::needs_barrier(tracked.state, want) {
+                want
+            } else {
+                tracked.state
+            };
+            self.segments.push((piece, Tracked { state, ..entered }));
+        }
+        self.coalesce();
+        barriers
+    }
+
+    /// Collapses back to one segment once the whole image agrees again, so a
+    /// frame of whole-image passes never grows the list.
+    fn coalesce(&mut self) {
+        let Some((_, first)) = self.segments.first().copied() else {
+            return;
+        };
+        if self.segments.iter().all(|(_, tracked)| *tracked == first) {
+            self.segments = vec![(self.bounds, first)];
+        }
+    }
+
+    /// The state of the base subresource.
+    ///
+    /// [`TransientUse`] holds one state per resource, so a frame that leaves an
+    /// image in mixed states can only hand the pool the one the next frame's
+    /// whole-image barrier will name — which is the base level's.
+    fn end(&self) -> TransientUse {
+        self.segments
+            .iter()
+            .find(|(rect, _)| {
+                rect.mips.0 == self.bounds.mips.0 && rect.layers.0 == self.bounds.layers.0
+            })
+            .or_else(|| self.segments.first())
+            .map_or_else(TransientUse::default, |(_, tracked)| tracked.end())
     }
 }
 
@@ -1539,21 +1864,28 @@ fn compile<'a>(
     // is what the owner declared; for a transient it is what the pool remembers
     // of the last frame that used the very same handle, which is the whole of
     // the cross-frame fix.
-    let mut image_state: Vec<Tracked> = images
+    let mut image_state: Vec<ImageTracker> = images
         .iter()
         .zip(&image_slots)
-        .map(|(node, slot)| Tracked {
-            state: match (slot, node.source) {
-                (Slot::Imported, ImageSource::Imported(imported)) => imported.initial,
-                _ => ResourceState::Undefined,
-            },
-            queue: None,
+        .map(|(node, slot)| match (slot, node.source) {
+            (Slot::Imported, ImageSource::Imported(imported)) => {
+                ImageTracker::new(Subrect::UNBOUNDED, Tracked::declared(imported.initial))
+            }
+            _ => ImageTracker::new(
+                Subrect::UNBOUNDED,
+                Tracked::declared(ResourceState::Undefined),
+            ),
         })
         .collect();
-    let mut transient_image_state: Vec<Tracked> = (0..transient_images.len())
+    let mut transient_image_state: Vec<ImageTracker> = (0..transient_images.len())
         .map(|slot| {
-            Tracked::carried(
-                pool.image_use(transient_images[slot], ordinal(&transient_images, slot)),
+            let desc = transient_images[slot];
+            ImageTracker::new(
+                // A transient is a single-layer 2D image whose level count the
+                // description now states, so a range naming a level it does not
+                // have is a compile error rather than a barrier on nothing.
+                Subrect::bounded(desc.mip_levels.max(1), 1),
+                Tracked::carried(pool.image_use(desc, ordinal(&transient_images, slot))),
             )
         })
         .collect();
@@ -1566,6 +1898,7 @@ fn compile<'a>(
                 _ => ResourceState::Undefined,
             },
             queue: None,
+            last_pass: None,
         })
         .collect();
     let mut transient_buffer_state: Vec<Tracked> = (0..transient_buffers.len())
@@ -1576,25 +1909,47 @@ fn compile<'a>(
         })
         .collect();
 
-    let mut compiled = Vec::with_capacity(passes.len());
-    for pass in passes {
+    let mut compiled: Vec<CompiledPass<'a>> = Vec::with_capacity(passes.len());
+    for (index, pass) in passes.into_iter().enumerate() {
         let mut barriers = GraphBarriers::default();
 
         for access in &pass.images {
+            let node = &images[access.image.index()];
+            let aspect = access
+                .range
+                .map_or_else(|| ImageAspect::of(node.format()), |range| range.aspect);
             let tracked = tracker(
                 image_slots[access.image.index()],
                 access.image.0,
                 &mut image_state,
                 &mut transient_image_state,
             );
-            if let Some(barrier) = transition(tracked, access.state, pass.queue) {
-                barriers.images.push(GraphImageBarrier {
+            let rect = access
+                .range
+                .map_or(tracked.bounds, |range| subrect_of(range, tracked.bounds));
+            for sub in tracked.transition(rect, access.state, pass.queue, index) {
+                let range = match sub.rect {
+                    None => access.range,
+                    Some(piece) => Some(piece.to_range(aspect)),
+                };
+                let barrier = GraphImageBarrier {
                     image: access.image,
-                    from: barrier.0,
+                    from: sub.from,
                     to: access.state,
-                    queue_transfer: barrier.1,
-                    range: access.range,
-                });
+                    queue_transfer: sub.queue_transfer,
+                    range,
+                };
+                // A transfer is *two* barriers with identical fields: a release
+                // on the source queue and an acquire on the destination
+                // (`crcbl_hal::QueueTransfer`). The release goes after the last
+                // pass that used the resource, which is the only point at which
+                // the source queue is finished with it.
+                if sub.queue_transfer.is_some()
+                    && let Some(source) = sub.last_pass
+                {
+                    compiled[source].release_barriers.images.push(barrier);
+                }
+                barriers.images.push(barrier);
             }
         }
         for access in &pass.buffers {
@@ -1604,13 +1959,22 @@ fn compile<'a>(
                 &mut buffer_state,
                 &mut transient_buffer_state,
             );
-            if let Some(barrier) = transition(tracked, access.state, pass.queue) {
-                barriers.buffers.push(GraphBufferBarrier {
+            if let Some(barrier) = transition(tracked, access.state, pass.queue, index) {
+                let compiled_barrier = GraphBufferBarrier {
                     buffer: access.buffer,
                     from: barrier.0,
                     to: access.state,
                     queue_transfer: barrier.1,
-                });
+                };
+                if barrier.1.is_some()
+                    && let Some(source) = barrier.2
+                {
+                    compiled[source]
+                        .release_barriers
+                        .buffers
+                        .push(compiled_barrier);
+                }
+                barriers.buffers.push(compiled_barrier);
             }
         }
 
@@ -1620,6 +1984,7 @@ fn compile<'a>(
             kind: pass.kind,
             queue: pass.queue,
             barriers,
+            release_barriers: GraphBarriers::default(),
             images: pass.images,
             buffers: pass.buffers,
             render_area,
@@ -1635,19 +2000,27 @@ fn compile<'a>(
         let ImageSource::Imported(imported) = node.source else {
             continue;
         };
-        let tracked = image_state[index];
+        let tracker = &image_state[index];
+        let aspect = ImageAspect::of(imported.format);
+        let whole = tracker.segments.len() == 1;
         // `!=` rather than `needs_barrier`: this transition guards nothing —
         // the graph is finished with the resource — so its only job is to leave
         // the layout its owner asked for. A write-after-write between two passes
         // is a hazard and gets a barrier; a write followed by *nothing* is not.
-        if tracked.state != imported.final_state {
-            final_barriers.images.push(GraphImageBarrier {
-                image: ImageId(u32::try_from(index).expect("a frame has few resources")),
-                from: tracked.state,
-                to: imported.final_state,
-                queue_transfer: None,
-                range: None,
-            });
+        for (rect, tracked) in &tracker.segments {
+            if tracked.state != imported.final_state {
+                final_barriers.images.push(GraphImageBarrier {
+                    image: ImageId(u32::try_from(index).expect("a frame has few resources")),
+                    from: tracked.state,
+                    to: imported.final_state,
+                    queue_transfer: None,
+                    range: if whole {
+                        None
+                    } else {
+                        Some(rect.to_range(aspect))
+                    },
+                });
+            }
         }
     }
     for (index, node) in buffers.iter().enumerate() {
@@ -1668,7 +2041,10 @@ fn compile<'a>(
     // What the pool is told once these commands are actually recorded. Read off
     // the trackers rather than re-derived, so the state the next frame barriers
     // against is by construction the state this frame's last barrier reached.
-    let transient_image_end = transient_image_state.iter().map(|t| t.end()).collect();
+    let transient_image_end = transient_image_state
+        .iter()
+        .map(ImageTracker::end)
+        .collect();
     let transient_buffer_end = transient_buffer_state.iter().map(|t| t.end()).collect();
 
     Ok(CompiledGraph {
@@ -1685,12 +2061,12 @@ fn compile<'a>(
     })
 }
 
-fn tracker<'s>(
+fn tracker<'s, T>(
     slot: Slot,
     id: u32,
-    per_resource: &'s mut [Tracked],
-    per_slot: &'s mut [Tracked],
-) -> &'s mut Tracked {
+    per_resource: &'s mut [T],
+    per_slot: &'s mut [T],
+) -> &'s mut T {
     match slot {
         Slot::Imported => &mut per_resource[id as usize],
         Slot::Transient(index) => &mut per_slot[index],
@@ -1714,7 +2090,8 @@ fn transition(
     tracked: &mut Tracked,
     want: ResourceState,
     queue: QueueHandle,
-) -> Option<(ResourceState, Option<QueueTransfer>)> {
+    pass: usize,
+) -> Option<(ResourceState, Option<QueueTransfer>, Option<usize>)> {
     let queue_transfer = match tracked.queue {
         Some(previous) if previous != queue => Some(QueueTransfer {
             from: previous,
@@ -1723,7 +2100,9 @@ fn transition(
         _ => None,
     };
     let from = tracked.state;
+    let source_pass = tracked.last_pass;
     tracked.queue = Some(queue);
+    tracked.last_pass = Some(pass);
 
     // A queue-family transfer is a barrier even between two identical states:
     // ownership has to move, or the second queue reads memory the first has not
@@ -1732,7 +2111,7 @@ fn transition(
         return None;
     }
     tracked.state = want;
-    Some((from, queue_transfer))
+    Some((from, queue_transfer, source_pass))
 }
 
 /// First and last pass index that touches each resource.
@@ -1832,8 +2211,36 @@ fn validate(
                 }
                 seen_depth = true;
             }
+            // A transient states how many levels and layers it has, so a range
+            // naming one it does not is a mistake the graph can name here
+            // rather than a barrier on nothing three passes later. An import
+            // does not say, so there is nothing to check.
+            if let (Some(range), ImageSource::Transient(desc)) =
+                (access.range, images[access.image.index()].source)
+            {
+                let mip_levels = desc.mip_levels.max(1);
+                let mips_ok = range.mip_count == ImageSubresourceRange::ALL
+                    || range.base_mip.saturating_add(range.mip_count) <= mip_levels;
+                let layers_ok = range.layer_count == ImageSubresourceRange::ALL
+                    || range.base_layer.saturating_add(range.layer_count) <= TRANSIENT_LAYERS;
+                if !mips_ok || !layers_ok || range.base_mip >= mip_levels {
+                    return Err(GraphError::SubresourceOutOfRange {
+                        pass: pass.label.clone(),
+                        resource: images[access.image.index()].label.clone(),
+                        base_mip: range.base_mip,
+                        mip_count: range.mip_count,
+                        base_layer: range.base_layer,
+                        layer_count: range.layer_count,
+                        mip_levels,
+                        layers: TRANSIENT_LAYERS,
+                    });
+                }
+            }
             for other in &pass.images[position + 1..] {
-                if other.image == access.image && other.state != access.state {
+                if other.image != access.image {
+                    continue;
+                }
+                if other.state != access.state {
                     return Err(GraphError::ConflictingAccess {
                         pass: pass.label.clone(),
                         resource: images[access.image.index()].label.clone(),
@@ -1841,11 +2248,20 @@ fn validate(
                         second: other.state,
                     });
                 }
+                if other.range == access.range {
+                    return Err(GraphError::DuplicateDeclaration {
+                        pass: pass.label.clone(),
+                        resource: images[access.image.index()].label.clone(),
+                    });
+                }
             }
         }
         for (position, access) in pass.buffers.iter().enumerate() {
             for other in &pass.buffers[position + 1..] {
-                if other.buffer == access.buffer && other.state != access.state {
+                if other.buffer != access.buffer {
+                    continue;
+                }
+                if other.state != access.state {
                     return Err(GraphError::ConflictingAccess {
                         pass: pass.label.clone(),
                         resource: buffers[access.buffer.index()].label.clone(),
@@ -1853,6 +2269,10 @@ fn validate(
                         second: other.state,
                     });
                 }
+                return Err(GraphError::DuplicateDeclaration {
+                    pass: pass.label.clone(),
+                    resource: buffers[access.buffer.index()].label.clone(),
+                });
             }
         }
     }
@@ -1912,6 +2332,7 @@ impl TransientImageDesc {
                 // is real" checkable.
                 .union(ImageUsage::TRANSFER_SRC),
             samples: 1,
+            mip_levels: 1,
         }
     }
 
@@ -1923,6 +2344,7 @@ impl TransientImageDesc {
             format: Format::D32Float,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
             samples: 1,
+            mip_levels: 1,
         }
     }
 }

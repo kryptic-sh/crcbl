@@ -221,7 +221,11 @@ impl Gpu {
             required_features: Features::empty(),
             optional_features: Features::TIER_A
                 | Features::TIMESTAMP_QUERY
-                | Features::DEBUG_MARKERS,
+                | Features::DEBUG_MARKERS
+                // The UI pass hands `ui.slang` its viewport size this way and
+                // has no other binding to do it through, so `UiRenderer::new`
+                // refuses a device that did not enable them.
+                | Features::PUSH_CONSTANTS,
             compatible_surface: Some(surface),
         })?;
         let queue = device
@@ -259,7 +263,7 @@ impl Gpu {
         let timers = PassTimers::new(device.as_ref(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
 
         // UI renderer: creates the glyph atlas texture and UI pipeline.
-        let ui = UiRenderer::new(device.as_ref(), queue).map_err(GpuError::Hal)?;
+        let ui = UiRenderer::new(device.as_ref(), queue, format).map_err(GpuError::Hal)?;
         let atlas = FontAtlas::built_in();
         let draw_list = DrawList::new();
 

@@ -19,34 +19,45 @@ pub struct WgpuInstance {
 }
 
 impl WgpuInstance {
+    /// Enumerates adapters, blocking on the enumeration future.
+    ///
+    /// Not available on wasm32: the browser main thread cannot block. See the
+    /// crate docs for what that means for this backend on the web.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new_native() -> Option<Self> {
+        pollster::block_on(Self::new_async())
+    }
+
+    /// Enumerates adapters without blocking.
+    ///
+    /// Available on every target, including wasm32, because
+    /// `Instance::enumerate_adapters` is a future on the WebGPU backend.
+    pub async fn new_async() -> Option<Self> {
         let instance = wgpu::Instance::default();
 
-        let adapters: Vec<_> =
-            pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
-                .into_iter()
-                .enumerate()
-                .map(|(index, adapter)| {
-                    let info = adapter.get_info();
-                    let caps = DeviceCaps {
-                        features: Features::empty(),
-                        limits: Limits::desktop(),
-                    };
-                    (
-                        AdapterInfo {
-                            id: AdapterId(index as u32),
-                            name: info.name,
-                            vendor_id: info.vendor,
-                            device_id: info.device,
-                            device_type: DeviceType::Other,
-                            driver: format!("wgpu {}", info.driver),
-                            backend: BackendKind::Wgpu,
-                            caps,
-                        },
-                        adapter,
-                    )
-                })
-                .collect();
+        let adapters: Vec<_> = instance
+            .enumerate_adapters(wgpu::Backends::all())
+            .await
+            .into_iter()
+            .enumerate()
+            .map(|(index, adapter)| {
+                let info = adapter.get_info();
+                let caps = adapter_caps(&adapter);
+                (
+                    AdapterInfo {
+                        id: AdapterId(index as u32),
+                        name: info.name,
+                        vendor_id: info.vendor,
+                        device_id: info.device,
+                        device_type: map_device_type(info.device_type),
+                        driver: format!("{} ({})", info.driver, info.driver_info),
+                        backend: BackendKind::Wgpu,
+                        caps,
+                    },
+                    adapter,
+                )
+            })
+            .collect();
 
         if adapters.is_empty() {
             log::warn!("crcbl-wgpu: no adapters found");
@@ -63,6 +74,162 @@ impl WgpuInstance {
     /// The surface pool shared with devices created by this instance.
     pub(crate) fn surface_pool(&self) -> Shared<Lock<Pool<SurfaceSlot>>> {
         self.surfaces.clone()
+    }
+}
+
+fn map_device_type(kind: wgpu::DeviceType) -> DeviceType {
+    match kind {
+        wgpu::DeviceType::Cpu => DeviceType::Cpu,
+        wgpu::DeviceType::IntegratedGpu => DeviceType::Integrated,
+        wgpu::DeviceType::DiscreteGpu => DeviceType::Discrete,
+        wgpu::DeviceType::VirtualGpu => DeviceType::Virtual,
+        wgpu::DeviceType::Other => DeviceType::Other,
+    }
+}
+
+/// Everything an adapter says about itself, in the seam's vocabulary.
+pub(crate) fn adapter_caps(adapter: &wgpu::Adapter) -> DeviceCaps {
+    let features = adapter.features();
+    DeviceCaps {
+        features: hal_features_for(features),
+        limits: hal_limits_for(&adapter.limits(), features),
+    }
+}
+
+/// wgpu capabilities → seam features.
+///
+/// Only what this backend actually implements is reported. Query sets are
+/// [`HalError::Unsupported`] here, so `TIMESTAMP_QUERY` and the statistics
+/// flags stay absent even on an adapter that has them — a renderer that turned
+/// its profiler HUD on from a flag the backend then refuses would be worse off
+/// than one that never saw the flag.
+pub(crate) fn hal_features_for(features: wgpu::Features) -> Features {
+    let mut out = Features::empty();
+
+    // Compute, multi-draw-indirect and debug markers are unconditional in wgpu.
+    out |= Features::COMPUTE;
+    out |= Features::MULTI_DRAW_INDIRECT;
+    out |= Features::DEBUG_MARKERS;
+    // `SamplerDescriptor::anisotropy_clamp` and `DepthBiasState::clamp` are
+    // core wgpu, not optional features.
+    out |= Features::SAMPLER_ANISOTROPY;
+    out |= Features::DEPTH_BIAS_CLAMP;
+    // `Device::submit` records signals against the submission that performs
+    // them and `semaphore_value` resolves them, so the seam's timeline is real
+    // even though wgpu has no semaphore object.
+    out |= Features::TIMELINE_SEMAPHORE;
+
+    // Bindless needs all three halves: unbounded arrays, non-uniform indexing,
+    // and partial binding. Two of the three is not a bindless device.
+    if features.contains(wgpu::Features::TEXTURE_BINDING_ARRAY)
+        && features
+            .contains(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING)
+        && features.contains(wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY)
+    {
+        out |= Features::DESCRIPTOR_INDEXING;
+    }
+    if features.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT) {
+        out |= Features::DRAW_INDIRECT_COUNT;
+    }
+    if features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE) {
+        out |= Features::INDIRECT_FIRST_INSTANCE;
+    }
+    if features.contains(wgpu::Features::IMMEDIATES) {
+        out |= Features::PUSH_CONSTANTS;
+    }
+    if features.contains(wgpu::Features::DEPTH_CLIP_CONTROL) {
+        out |= Features::DEPTH_CLAMP;
+    }
+    if features.contains(wgpu::Features::POLYGON_MODE_LINE) {
+        out |= Features::POLYGON_MODE_LINE;
+    }
+    if features.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
+        out |= Features::TEXTURE_COMPRESSION_BC;
+    }
+
+    // Deliberately never reported: `BUFFER_DEVICE_ADDRESS` (wgpu has no raw GPU
+    // pointers), the query features (see above), `ASYNC_COMPUTE_QUEUE` and
+    // `TRANSFER_QUEUE` (wgpu exposes one queue), and `SHADER_DEBUG_PRINTF`.
+    out
+}
+
+/// The seam features a caller asked for, as the wgpu features that provide
+/// them — intersected with what the adapter actually has, so an optional
+/// feature the adapter lacks is simply not enabled.
+pub(crate) fn wgpu_features_for(wanted: Features, available: wgpu::Features) -> wgpu::Features {
+    let mut out = wgpu::Features::empty();
+    if wanted.contains(Features::DESCRIPTOR_INDEXING) {
+        out |= wgpu::Features::TEXTURE_BINDING_ARRAY
+            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+            | wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY;
+    }
+    if wanted.contains(Features::DRAW_INDIRECT_COUNT) {
+        out |= wgpu::Features::MULTI_DRAW_INDIRECT_COUNT;
+    }
+    if wanted.contains(Features::INDIRECT_FIRST_INSTANCE) {
+        out |= wgpu::Features::INDIRECT_FIRST_INSTANCE;
+    }
+    if wanted.contains(Features::PUSH_CONSTANTS) {
+        out |= wgpu::Features::IMMEDIATES;
+    }
+    if wanted.contains(Features::DEPTH_CLAMP) {
+        out |= wgpu::Features::DEPTH_CLIP_CONTROL;
+    }
+    if wanted.contains(Features::POLYGON_MODE_LINE) {
+        out |= wgpu::Features::POLYGON_MODE_LINE;
+    }
+    if wanted.contains(Features::TEXTURE_COMPRESSION_BC) {
+        out |= wgpu::Features::TEXTURE_COMPRESSION_BC;
+    }
+    out.intersection(available)
+}
+
+/// wgpu limits → seam limits, kept consistent with the reported features.
+///
+/// The two that used to disagree are the ones keyed off a feature here:
+/// reporting a 128-byte push-constant budget while `PUSH_CONSTANTS` is absent
+/// is a promise no call can keep.
+pub(crate) fn hal_limits_for(limits: &wgpu::Limits, features: wgpu::Features) -> Limits {
+    let hal_features = hal_features_for(features);
+    Limits {
+        max_image_2d: limits.max_texture_dimension_2d,
+        max_image_3d: limits.max_texture_dimension_3d,
+        max_image_array_layers: limits.max_texture_array_layers,
+        max_storage_buffer_range: limits.max_storage_buffer_binding_size,
+        max_uniform_buffer_range: limits.max_uniform_buffer_binding_size,
+        max_bind_groups: limits.max_bind_groups,
+        max_bindless_descriptors: if hal_features.contains(Features::DESCRIPTOR_INDEXING) {
+            limits.max_binding_array_elements_per_shader_stage
+        } else {
+            0
+        },
+        max_push_constant_size: if hal_features.contains(Features::PUSH_CONSTANTS) {
+            limits.max_immediate_size
+        } else {
+            0
+        },
+        max_color_attachments: limits.max_color_attachments,
+        max_draw_indirect_count: if hal_features.contains(Features::DRAW_INDIRECT_COUNT) {
+            u32::MAX
+        } else {
+            1
+        },
+        max_compute_workgroup_size: [
+            limits.max_compute_workgroup_size_x,
+            limits.max_compute_workgroup_size_y,
+            limits.max_compute_workgroup_size_z,
+        ],
+        max_compute_invocations_per_workgroup: limits.max_compute_invocations_per_workgroup,
+        max_compute_workgroups_per_dimension: limits.max_compute_workgroups_per_dimension,
+        min_uniform_buffer_offset_alignment: u64::from(limits.min_uniform_buffer_offset_alignment),
+        min_storage_buffer_offset_alignment: u64::from(limits.min_storage_buffer_offset_alignment),
+        // wgpu wants a buffer↔image copy's rows padded to this, which is the
+        // coarsest alignment such a copy has to satisfy.
+        optimal_buffer_copy_offset_alignment: u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
+        // `SamplerDescriptor::anisotropy_clamp` is a `u16` wgpu clamps to 16.
+        max_sampler_anisotropy: 16.0,
+        // No timestamp queries, so no tick period to report.
+        timestamp_period_ns: 0.0,
     }
 }
 
@@ -83,10 +250,7 @@ impl Instance for WgpuInstance {
         let surfaces = self.surfaces.lock().unwrap();
         let slot = surfaces
             .get(surface.cast())
-            .ok_or(HalError::InvalidHandle {
-                kind: "surface",
-                bits: surface.to_bits(),
-            })?;
+            .ok_or_else(|| HalError::invalid_handle("surface", surface))?;
 
         let (_, wgpu_adapter) = self
             .adapters
@@ -96,10 +260,20 @@ impl Instance for WgpuInstance {
 
         let caps = slot.surface.get_capabilities(wgpu_adapter);
 
+        // An adapter that cannot present to this surface must be an error, not
+        // an empty format list — `Instance::surface_caps` says so, and callers
+        // doing adapter selection read `Err` as "try the next one".
+        if caps.formats.is_empty() || caps.present_modes.is_empty() {
+            return Err(HalError::Unsupported {
+                backend: BackendKind::Wgpu,
+                what: "this adapter cannot present to this surface",
+            });
+        }
+
         let formats: Vec<_> = caps
             .formats
             .iter()
-            .map(|f| crate::conv::unmap_format(*f))
+            .filter_map(|f| crate::conv::unmap_format(*f))
             .collect();
 
         let present_modes: Vec<_> = caps
@@ -115,6 +289,13 @@ impl Instance for WgpuInstance {
                 wgpu::PresentMode::AutoVsync | wgpu::PresentMode::AutoNoVsync => None,
             })
             .collect();
+
+        if formats.is_empty() || present_modes.is_empty() {
+            return Err(HalError::Unsupported {
+                backend: BackendKind::Wgpu,
+                what: "this surface supports no format or present mode the seam can name",
+            });
+        }
 
         let composite_alpha: Vec<_> = caps
             .alpha_modes
@@ -148,17 +329,16 @@ impl Instance for WgpuInstance {
                     raw_window_handle: raw_window,
                 })
         }
-        .map_err(|_e| HalError::Unsupported {
-            backend: BackendKind::Wgpu,
-            what: "create_surface",
-        })?;
+        .map_err(|e| HalError::Backend(format!("wgpu create_surface on {platform}: {e}")))?;
 
         let mut surfaces = self.surfaces.lock().unwrap();
         Ok(surfaces.insert(SurfaceSlot { surface, platform }).cast())
     }
 
     fn destroy_surface(&self, surface: SurfaceHandle) {
-        self.surfaces.lock().unwrap().remove(surface.cast());
+        if let Some(slot) = self.surfaces.lock().unwrap().remove(surface.cast()) {
+            log::debug!("crcbl-wgpu: destroyed the {} surface", slot.platform);
+        }
     }
 
     fn create_device(&self, desc: &DeviceDesc<'_>) -> Result<Box<dyn crcbl_hal::Device>, HalError> {
@@ -219,7 +399,17 @@ unsafe fn map_surface_target(
             let display = RawDisplayHandle::Xcb(XcbDisplayHandle::new(Some(connection), 0));
             Ok((window, Some(display), "xcb"))
         }
-        SurfaceTarget::Web { .. } => unsupported("Web (P5.3)"),
+        #[cfg(target_arch = "wasm32")]
+        SurfaceTarget::Web { canvas_id } => {
+            use raw_window_handle::{WebDisplayHandle, WebWindowHandle};
+            // The shell's JS shim stamps `data-raw-handle="<canvas_id>"` on the
+            // canvas; that attribute is what `WebWindowHandle` names.
+            let window = RawWindowHandle::Web(WebWindowHandle::new(canvas_id));
+            let display = RawDisplayHandle::Web(WebDisplayHandle::new());
+            Ok((window, Some(display), "web"))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        SurfaceTarget::Web { .. } => unsupported("a Web canvas surface outside a wasm32 build"),
         SurfaceTarget::Win32 { .. } => unsupported("Win32 (P14)"),
         SurfaceTarget::AppKit { .. } => unsupported("AppKit (P14)"),
         SurfaceTarget::Offscreen => {
@@ -228,5 +418,53 @@ unsafe fn map_surface_target(
             // The renderer can use a plain texture ring instead.
             unsupported("Offscreen (not yet wired)")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reported limits must agree with the reported features: a
+    /// push-constant budget on a device without push constants is a promise no
+    /// call can keep, and it is what the fabricated `Limits::desktop()` used to
+    /// report on every adapter.
+    #[test]
+    fn limits_agree_with_features() {
+        let bare = hal_limits_for(&wgpu::Limits::defaults(), wgpu::Features::empty());
+        assert_eq!(bare.max_push_constant_size, 0);
+        assert_eq!(bare.max_bindless_descriptors, 0);
+        assert_eq!(
+            bare.max_draw_indirect_count, 1,
+            "without a count buffer, one indirect call emits its own draws only"
+        );
+        assert!(!hal_features_for(wgpu::Features::empty()).contains(Features::PUSH_CONSTANTS));
+    }
+
+    /// Nothing wgpu cannot do may be advertised — most importantly buffer
+    /// device address, whose absence is what puts this backend in Tier B.
+    #[test]
+    fn wgpu_never_claims_tier_a() {
+        let everything = hal_features_for(wgpu::Features::all());
+        assert!(!everything.contains(Features::BUFFER_DEVICE_ADDRESS));
+        assert!(!everything.contains(Features::TIMESTAMP_QUERY));
+        assert_eq!(
+            DeviceCaps {
+                features: everything,
+                limits: hal_limits_for(&wgpu::Limits::defaults(), wgpu::Features::all()),
+            }
+            .tier(),
+            crcbl_hal::RendererTier::B
+        );
+    }
+
+    /// A caller asking for an optional feature the adapter lacks gets a device,
+    /// not an error — and the feature simply is not enabled.
+    #[test]
+    fn optional_features_are_filtered_by_the_adapter() {
+        let requested = Features::PUSH_CONSTANTS | Features::TEXTURE_COMPRESSION_BC;
+        let available = wgpu::Features::IMMEDIATES;
+        let enabled = wgpu_features_for(requested, available);
+        assert_eq!(enabled, wgpu::Features::IMMEDIATES);
     }
 }

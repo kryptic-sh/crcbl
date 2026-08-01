@@ -22,9 +22,11 @@
 //! [`pipeline_barrier`](crcbl_hal::CommandEncoder::pipeline_barrier) during a
 //! frame.
 //!
-//! The one barrier outside it is [`forward`]'s startup upload, which runs before
-//! any frame exists and has no graph to belong to; it is called out at the call
-//! site.
+//! The barriers outside it are the **startup uploads**: [`forward`]'s staging
+//! copy for the cube, and [`ui_pass`]'s for the glyph atlas. Both run before any
+//! frame exists and have no graph to belong to; both are called out at the call
+//! site. There are no others, and a barrier recorded during a frame from
+//! anywhere but [`graph::CompiledGraph::execute`] is a bug.
 //!
 //! # Nothing here knows a backend
 //!

@@ -148,6 +148,17 @@ impl PassTimers {
             log::debug!("graph: no TIMESTAMP_QUERY on this device; per-pass timing is off");
             return None;
         }
+        // Two queries per pass, and the query index is a `u32` — so a capacity
+        // above half the range would overflow every `capacity * 2` below and
+        // reset a range shorter than the one it wrote.
+        let Some(query_count) = max_passes.checked_mul(2) else {
+            log::debug!(
+                "graph: {max_passes} passes needs {} timestamp queries, more than a u32 index \
+                 holds; per-pass timing is off",
+                u64::from(max_passes) * 2
+            );
+            return None;
+        };
         let period_ns = device.caps().limits.timestamp_period_ns;
         // One more than the frames in flight, so the slot about to be reused is
         // always one whose submission has completed.
@@ -158,7 +169,7 @@ impl PassTimers {
                 label: Some("graph pass timers"),
                 kind: QueryKind::Timestamp,
                 // Two per pass: one before its barriers, one after it closes.
-                count: max_passes * 2,
+                count: query_count,
             }) {
                 Ok(set) => slots.push(Slot {
                     set,
@@ -234,7 +245,7 @@ impl PassTimers {
         slot.frame = self.frames;
         // Vulkan requires a reset before every write; the seam makes callers
         // always do it so the Vulkan path is never the special case.
-        encoder.reset_query_set(slot.set, 0..self.capacity * 2);
+        encoder.reset_query_set(slot.set, 0..self.capacity.saturating_mul(2));
     }
 
     /// Writes the timestamp that opens pass `index`.

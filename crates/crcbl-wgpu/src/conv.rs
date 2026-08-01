@@ -1,38 +1,111 @@
 //! Conversions between `crcbl-hal` enums and `wgpu` types.
+//!
+//! Every mapping here is either total or fallible. Nothing falls back to a
+//! "close enough" substitute: a format the backend silently swapped is a golden
+//! image that differs from the Vulkan one for no reason a log line explains.
 
 use crcbl_hal::{
-    BlendFactor, BlendOp, BufferUsage, CompareOp, CullMode, FilterMode, Format, FrontFace,
-    ImageUsage, IndexFormat, LoadOp, PolygonMode, PrimitiveTopology, SamplerAddressMode,
-    ShaderStages, StencilOp, StoreOp,
+    BackendKind, BlendFactor, BlendOp, BufferUsage, CompareOp, CullMode, FilterMode, Format,
+    FrontFace, HalError, ImageAspect, ImageUsage, IndexFormat, MemoryLocation, PolygonMode,
+    PrimitiveTopology, SamplerAddressMode, ShaderStages, StencilOp,
 };
 
+/// The HAL format set is a subset of wgpu's, so this is total — see
+/// `crcbl_hal::format`'s note on why `Format` is deliberately not
+/// `#[non_exhaustive]`.
+///
+/// [`Format::D24UnormS8Uint`] is the one inexact pair: wgpu exposes
+/// `Depth24PlusStencil8`, which is *at least* 24 bits of depth. The HAL's own
+/// docs already prefer [`Format::D32Float`] for that reason.
 pub fn map_format(f: Format) -> wgpu::TextureFormat {
+    use wgpu::TextureFormat as W;
     match f {
-        Format::R8Unorm => wgpu::TextureFormat::R8Unorm,
-        Format::Rg8Unorm => wgpu::TextureFormat::Rg8Unorm,
-        Format::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
-        Format::Rgba8UnormSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
-        Format::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
-        Format::Bgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
-        Format::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
-        Format::Rg32Float => wgpu::TextureFormat::Rg32Float,
-        Format::Rg32Uint => wgpu::TextureFormat::Rg32Uint,
-        Format::R11g11b10Float => wgpu::TextureFormat::Rgba16Float, // closest wgpu match
-        Format::D32Float => wgpu::TextureFormat::Depth32Float,
-        Format::D32FloatS8Uint => wgpu::TextureFormat::Depth32FloatStencil8,
-        Format::D24UnormS8Uint => wgpu::TextureFormat::Depth24PlusStencil8,
-        Format::D16Unorm => wgpu::TextureFormat::Depth16Unorm,
-        _ => {
-            log::warn!("crcbl-wgpu: unmapped format {f:?}, falling back to Rgba8Unorm");
-            wgpu::TextureFormat::Rgba8Unorm
-        }
+        Format::R8Unorm => W::R8Unorm,
+        Format::Rg8Unorm => W::Rg8Unorm,
+        Format::Rgba8Unorm => W::Rgba8Unorm,
+        Format::Rgba8UnormSrgb => W::Rgba8UnormSrgb,
+        Format::Bgra8Unorm => W::Bgra8Unorm,
+        Format::Bgra8UnormSrgb => W::Bgra8UnormSrgb,
+        Format::Rgb10a2Unorm => W::Rgb10a2Unorm,
+        Format::R11g11b10Float => W::Rg11b10Ufloat,
+        Format::R16Float => W::R16Float,
+        Format::Rg16Float => W::Rg16Float,
+        Format::Rgba16Float => W::Rgba16Float,
+        Format::R32Float => W::R32Float,
+        Format::Rg32Float => W::Rg32Float,
+        Format::Rgba32Float => W::Rgba32Float,
+        Format::R32Uint => W::R32Uint,
+        Format::Rg32Uint => W::Rg32Uint,
+        Format::D32Float => W::Depth32Float,
+        Format::D32FloatS8Uint => W::Depth32FloatStencil8,
+        Format::D24UnormS8Uint => W::Depth24PlusStencil8,
+        Format::D16Unorm => W::Depth16Unorm,
+        Format::Bc1RgbaUnorm => W::Bc1RgbaUnorm,
+        Format::Bc1RgbaUnormSrgb => W::Bc1RgbaUnormSrgb,
+        Format::Bc3RgbaUnorm => W::Bc3RgbaUnorm,
+        Format::Bc3RgbaUnormSrgb => W::Bc3RgbaUnormSrgb,
+        Format::Bc4RUnorm => W::Bc4RUnorm,
+        Format::Bc5RgUnorm => W::Bc5RgUnorm,
+        Format::Bc6hRgbUfloat => W::Bc6hRgbUfloat,
+        Format::Bc7RgbaUnorm => W::Bc7RgbaUnorm,
+        Format::Bc7RgbaUnormSrgb => W::Bc7RgbaUnormSrgb,
     }
+}
+
+/// Reverse of [`map_format`]: wgpu format → HAL format.
+///
+/// `None` for a wgpu format the seam has no name for. Callers enumerating what
+/// a surface or adapter supports drop those entries; there is nothing to be
+/// gained by reporting a format nothing above the seam can ask for, and
+/// substituting a different one is how a swapchain ends up configured in a
+/// format the caller never chose.
+pub fn unmap_format(f: wgpu::TextureFormat) -> Option<Format> {
+    use wgpu::TextureFormat as W;
+    Some(match f {
+        W::R8Unorm => Format::R8Unorm,
+        W::Rg8Unorm => Format::Rg8Unorm,
+        W::Rgba8Unorm => Format::Rgba8Unorm,
+        W::Rgba8UnormSrgb => Format::Rgba8UnormSrgb,
+        W::Bgra8Unorm => Format::Bgra8Unorm,
+        W::Bgra8UnormSrgb => Format::Bgra8UnormSrgb,
+        W::Rgb10a2Unorm => Format::Rgb10a2Unorm,
+        W::Rg11b10Ufloat => Format::R11g11b10Float,
+        W::R16Float => Format::R16Float,
+        W::Rg16Float => Format::Rg16Float,
+        W::Rgba16Float => Format::Rgba16Float,
+        W::R32Float => Format::R32Float,
+        W::Rg32Float => Format::Rg32Float,
+        W::Rgba32Float => Format::Rgba32Float,
+        W::R32Uint => Format::R32Uint,
+        W::Rg32Uint => Format::Rg32Uint,
+        W::Depth32Float => Format::D32Float,
+        W::Depth32FloatStencil8 => Format::D32FloatS8Uint,
+        W::Depth24PlusStencil8 => Format::D24UnormS8Uint,
+        W::Depth16Unorm => Format::D16Unorm,
+        W::Bc1RgbaUnorm => Format::Bc1RgbaUnorm,
+        W::Bc1RgbaUnormSrgb => Format::Bc1RgbaUnormSrgb,
+        W::Bc3RgbaUnorm => Format::Bc3RgbaUnorm,
+        W::Bc3RgbaUnormSrgb => Format::Bc3RgbaUnormSrgb,
+        W::Bc4RUnorm => Format::Bc4RUnorm,
+        W::Bc5RgUnorm => Format::Bc5RgUnorm,
+        W::Bc6hRgbUfloat => Format::Bc6hRgbUfloat,
+        W::Bc7RgbaUnorm => Format::Bc7RgbaUnorm,
+        W::Bc7RgbaUnormSrgb => Format::Bc7RgbaUnormSrgb,
+        _ => return None,
+    })
 }
 
 pub fn map_filter(m: FilterMode) -> wgpu::FilterMode {
     match m {
         FilterMode::Nearest => wgpu::FilterMode::Nearest,
         FilterMode::Linear => wgpu::FilterMode::Linear,
+    }
+}
+
+pub fn map_mip_filter(m: FilterMode) -> wgpu::MipmapFilterMode {
+    match m {
+        FilterMode::Nearest => wgpu::MipmapFilterMode::Nearest,
+        FilterMode::Linear => wgpu::MipmapFilterMode::Linear,
     }
 }
 
@@ -58,7 +131,19 @@ pub fn map_compare(op: CompareOp) -> wgpu::CompareFunction {
     }
 }
 
-pub fn map_buffer_usage(u: BufferUsage) -> wgpu::BufferUsages {
+/// Buffer usages, plus whatever the *memory location* implies.
+///
+/// wgpu has no mapped-memory location: [`crcbl_hal::Device::write_buffer`] on
+/// this backend is `Queue::write_buffer`, which stages through wgpu's own
+/// upload heap and therefore needs `COPY_DST` on the destination. `crcbl-vk`
+/// writes straight into a persistent mapping and needs no usage bit for it, so
+/// the seam does not make callers declare one — which means the backend that
+/// does need it has to derive it, and the honest derivation is "every buffer
+/// the seam says is host-writable".
+///
+/// [`MemoryLocation::HostReadback`] gets `COPY_DST` for the same reason and
+/// `MAP_READ` so the readback path can map it.
+pub fn map_buffer_usage(u: BufferUsage, memory: MemoryLocation) -> wgpu::BufferUsages {
     let mut out = wgpu::BufferUsages::empty();
     if u.contains(BufferUsage::TRANSFER_SRC) {
         out |= wgpu::BufferUsages::COPY_SRC;
@@ -81,6 +166,13 @@ pub fn map_buffer_usage(u: BufferUsage) -> wgpu::BufferUsages {
     if u.contains(BufferUsage::QUERY_RESOLVE) {
         out |= wgpu::BufferUsages::QUERY_RESOLVE;
     }
+    match memory {
+        MemoryLocation::DeviceLocal => {}
+        MemoryLocation::HostUpload => out |= wgpu::BufferUsages::COPY_DST,
+        MemoryLocation::HostReadback => {
+            out |= wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ;
+        }
+    }
     out
 }
 
@@ -98,27 +190,34 @@ pub fn map_image_usage(u: ImageUsage) -> wgpu::TextureUsages {
     if u.contains(ImageUsage::STORAGE) {
         out |= wgpu::TextureUsages::STORAGE_BINDING;
     }
-    if u.contains(ImageUsage::COLOR_ATTACHMENT) {
+    // wgpu has one attachment usage for both planes; the format decides which
+    // it means. Leaving depth out is how `TransientImageDesc::scene_depth` —
+    // which sets `DEPTH_STENCIL_ATTACHMENT` and nothing else — used to ask for
+    // a texture with no usages at all.
+    if u.contains(ImageUsage::COLOR_ATTACHMENT) || u.contains(ImageUsage::DEPTH_STENCIL_ATTACHMENT)
+    {
         out |= wgpu::TextureUsages::RENDER_ATTACHMENT;
     }
-    // DEPTH_STENCIL_ATTACHMENT and PRESENT don't map directly to wgpu usages;
-    // PRESENT is handled by the swapchain surface.
+    // `PRESENT` is the surface configuration's business, not a texture usage.
     out
 }
 
-#[allow(dead_code)]
-pub fn map_load_op(_op: LoadOp) -> wgpu::LoadOp<wgpu::Color> {
-    // wgpu uses LoadOp::Clear(color) or LoadOp::Load
-    // We always use Load for now — clear values are passed via begin_render_pass
-    wgpu::LoadOp::Load
+/// A copy's aspect. A copy names exactly one plane, per
+/// [`crcbl_hal::ImageSubresourceLayers`].
+pub fn map_aspect(aspect: ImageAspect) -> Result<wgpu::TextureAspect, HalError> {
+    if aspect == ImageAspect::DEPTH {
+        Ok(wgpu::TextureAspect::DepthOnly)
+    } else if aspect == ImageAspect::STENCIL {
+        Ok(wgpu::TextureAspect::StencilOnly)
+    } else if aspect == ImageAspect::COLOR {
+        Ok(wgpu::TextureAspect::All)
+    } else {
+        Err(HalError::InvalidDescriptor(format!(
+            "a copy must name exactly one image plane, got {aspect:?}"
+        )))
+    }
 }
 
-#[allow(dead_code)]
-pub fn map_store_op(_op: StoreOp) -> wgpu::StoreOp {
-    wgpu::StoreOp::Store
-}
-
-#[allow(dead_code)]
 pub fn map_index_format(f: IndexFormat) -> wgpu::IndexFormat {
     match f {
         IndexFormat::Uint16 => wgpu::IndexFormat::Uint16,
@@ -183,7 +282,6 @@ pub fn map_blend_op(bo: BlendOp) -> wgpu::BlendOperation {
     }
 }
 
-#[allow(dead_code)]
 pub fn map_stencil_op(so: StencilOp) -> wgpu::StencilOperation {
     match so {
         StencilOp::Keep => wgpu::StencilOperation::Keep,
@@ -195,6 +293,32 @@ pub fn map_stencil_op(so: StencilOp) -> wgpu::StencilOperation {
         StencilOp::IncrementWrap => wgpu::StencilOperation::IncrementWrap,
         StencilOp::DecrementWrap => wgpu::StencilOperation::DecrementWrap,
     }
+}
+
+pub fn map_stencil_face(face: crcbl_hal::StencilFaceState) -> wgpu::StencilFaceState {
+    wgpu::StencilFaceState {
+        compare: map_compare(face.compare),
+        fail_op: map_stencil_op(face.fail_op),
+        depth_fail_op: map_stencil_op(face.depth_fail_op),
+        pass_op: map_stencil_op(face.pass_op),
+    }
+}
+
+pub fn map_color_writes(w: crcbl_hal::ColorWrites) -> wgpu::ColorWrites {
+    let mut out = wgpu::ColorWrites::empty();
+    if w.contains(crcbl_hal::ColorWrites::R) {
+        out |= wgpu::ColorWrites::RED;
+    }
+    if w.contains(crcbl_hal::ColorWrites::G) {
+        out |= wgpu::ColorWrites::GREEN;
+    }
+    if w.contains(crcbl_hal::ColorWrites::B) {
+        out |= wgpu::ColorWrites::BLUE;
+    }
+    if w.contains(crcbl_hal::ColorWrites::A) {
+        out |= wgpu::ColorWrites::ALPHA;
+    }
+    out
 }
 
 pub fn map_shader_stages(s: ShaderStages) -> wgpu::ShaderStages {
@@ -212,8 +336,19 @@ pub fn map_shader_stages(s: ShaderStages) -> wgpu::ShaderStages {
 }
 
 use crcbl_hal::BindingKind;
-pub fn map_binding_kind(k: BindingKind) -> wgpu::BindingType {
-    match k {
+
+/// Binding kinds.
+///
+/// Fallible because of storage images: wgpu's `BindingType::StorageTexture`
+/// needs the texel format and the view dimension at *layout* creation, and
+/// [`BindingKind::StorageImage`] carries neither. Inventing `Rgba8Unorm` there
+/// produced a layout that silently disagreed with every shader whose storage
+/// image was anything else, so this refuses instead. Sampled images are
+/// assumed 2D, single-sampled and float-filterable, which is what every sampled
+/// binding in the engine is; a shadow-comparison or integer sampled image would
+/// need the same information the seam does not yet carry.
+pub fn map_binding_kind(k: BindingKind) -> Result<wgpu::BindingType, HalError> {
+    Ok(match k {
         BindingKind::UniformBuffer { dynamic } => wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
             has_dynamic_offset: dynamic,
@@ -229,35 +364,106 @@ pub fn map_binding_kind(k: BindingKind) -> wgpu::BindingType {
             view_dimension: wgpu::TextureViewDimension::D2,
             multisampled: false,
         },
-        BindingKind::StorageImage { read_only: _ } => wgpu::BindingType::StorageTexture {
-            access: wgpu::StorageTextureAccess::ReadWrite,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            view_dimension: wgpu::TextureViewDimension::D2,
-        },
+        BindingKind::StorageImage { .. } => {
+            return Err(HalError::Unsupported {
+                backend: BackendKind::Wgpu,
+                what: "storage-image bindings: wgpu needs the texel format and view dimension at \
+                       bind-group-layout creation and BindingKind::StorageImage carries neither",
+            });
+        }
         BindingKind::Sampler => wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-    }
+    })
 }
 
-/// Reverse of [`map_format`]: wgpu format → HAL format.
-pub fn unmap_format(f: wgpu::TextureFormat) -> crcbl_hal::Format {
-    match f {
-        wgpu::TextureFormat::R8Unorm => crcbl_hal::Format::R8Unorm,
-        wgpu::TextureFormat::Rg8Unorm => crcbl_hal::Format::Rg8Unorm,
-        wgpu::TextureFormat::Rgba8Unorm => crcbl_hal::Format::Rgba8Unorm,
-        wgpu::TextureFormat::Rgba8UnormSrgb => crcbl_hal::Format::Rgba8UnormSrgb,
-        wgpu::TextureFormat::Bgra8Unorm => crcbl_hal::Format::Bgra8Unorm,
-        wgpu::TextureFormat::Bgra8UnormSrgb => crcbl_hal::Format::Bgra8UnormSrgb,
-        wgpu::TextureFormat::Rgba16Float => crcbl_hal::Format::Rgba16Float,
-        wgpu::TextureFormat::Rg32Float => crcbl_hal::Format::Rg32Float,
-        wgpu::TextureFormat::Rg32Uint => crcbl_hal::Format::Rg32Uint,
-        wgpu::TextureFormat::Rg11b10Ufloat => crcbl_hal::Format::R11g11b10Float,
-        wgpu::TextureFormat::Depth32Float => crcbl_hal::Format::D32Float,
-        wgpu::TextureFormat::Depth32FloatStencil8 => crcbl_hal::Format::D32FloatS8Uint,
-        wgpu::TextureFormat::Depth24PlusStencil8 => crcbl_hal::Format::D24UnormS8Uint,
-        wgpu::TextureFormat::Depth16Unorm => crcbl_hal::Format::D16Unorm,
-        other => {
-            log::warn!("crcbl-wgpu: unmapped wgpu format {other:?}, falling back to Rgba8Unorm");
-            crcbl_hal::Format::Rgba8Unorm
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A depth-only transient must still be usable as an attachment, or every
+    /// forward pass fails at texture creation.
+    #[test]
+    fn depth_only_usage_reaches_render_attachment() {
+        let usage = map_image_usage(ImageUsage::DEPTH_STENCIL_ATTACHMENT);
+        assert_eq!(usage, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        assert!(!usage.is_empty());
+    }
+
+    /// `write_buffer` is `Queue::write_buffer` here, which needs `COPY_DST`
+    /// even on a buffer whose declared usage is only `UNIFORM`.
+    #[test]
+    fn host_visible_buffers_can_be_written() {
+        let usage = map_buffer_usage(BufferUsage::UNIFORM, MemoryLocation::HostUpload);
+        assert!(usage.contains(wgpu::BufferUsages::COPY_DST));
+        assert!(usage.contains(wgpu::BufferUsages::UNIFORM));
+        // A device-local buffer gets nothing it did not ask for.
+        let device_local = map_buffer_usage(BufferUsage::STORAGE, MemoryLocation::DeviceLocal);
+        assert!(!device_local.contains(wgpu::BufferUsages::COPY_DST));
+    }
+
+    /// The pair must be an inverse for everything wgpu and the seam share, or a
+    /// swapchain configured from `surface_caps` is configured in a format the
+    /// caller never picked.
+    #[test]
+    fn format_mapping_round_trips() {
+        for format in [
+            Format::R8Unorm,
+            Format::Rg8Unorm,
+            Format::Rgba8Unorm,
+            Format::Rgba8UnormSrgb,
+            Format::Bgra8Unorm,
+            Format::Bgra8UnormSrgb,
+            Format::Rgb10a2Unorm,
+            Format::R11g11b10Float,
+            Format::R16Float,
+            Format::Rg16Float,
+            Format::Rgba16Float,
+            Format::R32Float,
+            Format::Rg32Float,
+            Format::Rgba32Float,
+            Format::R32Uint,
+            Format::Rg32Uint,
+            Format::D32Float,
+            Format::D32FloatS8Uint,
+            Format::D24UnormS8Uint,
+            Format::D16Unorm,
+            Format::Bc1RgbaUnorm,
+            Format::Bc1RgbaUnormSrgb,
+            Format::Bc3RgbaUnorm,
+            Format::Bc3RgbaUnormSrgb,
+            Format::Bc4RUnorm,
+            Format::Bc5RgUnorm,
+            Format::Bc6hRgbUfloat,
+            Format::Bc7RgbaUnorm,
+            Format::Bc7RgbaUnormSrgb,
+        ] {
+            assert_eq!(
+                unmap_format(map_format(format)),
+                Some(format),
+                "{format:?} does not survive the round trip"
+            );
         }
+    }
+
+    /// A format wgpu has and the seam does not is dropped, not substituted.
+    #[test]
+    fn an_unnameable_wgpu_format_is_none() {
+        assert_eq!(unmap_format(wgpu::TextureFormat::Rgba8Snorm), None);
+    }
+
+    #[test]
+    fn a_storage_image_binding_is_refused_rather_than_guessed() {
+        let error = map_binding_kind(BindingKind::StorageImage { read_only: false })
+            .expect_err("wgpu cannot express this without a format");
+        assert!(matches!(error, HalError::Unsupported { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn a_copy_names_exactly_one_plane() {
+        assert_eq!(
+            map_aspect(ImageAspect::DEPTH).expect("depth"),
+            wgpu::TextureAspect::DepthOnly
+        );
+        assert!(map_aspect(ImageAspect::DEPTH | ImageAspect::STENCIL).is_err());
+        assert!(map_aspect(ImageAspect::empty()).is_err());
     }
 }
