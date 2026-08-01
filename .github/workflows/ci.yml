@@ -723,11 +723,30 @@ jobs:
         with:
           tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.140
       # ALSA headers for `cpal`; see the `clippy` job for why.
-      - name: Install the ALSA headers cpal links against
+      #
+      # The Vulkan loader and lavapipe are here for a different reason: without
+      # a driver, every `crcbl-vk` and `crcbl-wgpu` test still *runs* and still
+      # passes, because each one opens the backend and returns early when there
+      # is none. Same test count, a fifth of the code executed — measured, once
+      # this job could compile again: `device.rs` 3.97% against 63.39% on a
+      # machine with a driver, `command.rs` 7.01% against 57.39%, `pipeline.rs`
+      # 28.69% against 78.12%, and the workspace total 72.06% against 77.57%.
+      # A coverage number that says how much of the *backend* code a runner
+      # happens to be able to reach is not measuring the test suite.
+      - name: Install the ALSA headers, the Vulkan loader and lavapipe
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev \
+            libvulkan1 \
+            mesa-vulkan-drivers
+      # Pinned to the software ICD for the reason `vk-e2e` pins it: a runner
+      # that grew a GPU tomorrow would otherwise change what this job measures
+      # without a commit.
       - name: Run tests under instrumentation
+        env:
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_WGPU_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: cargo llvm-cov --no-report nextest --workspace --all-features --locked
       - name: Generate lcov report
         run: cargo llvm-cov report --lcov --output-path lcov.info
