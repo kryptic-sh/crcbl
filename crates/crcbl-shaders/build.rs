@@ -105,13 +105,18 @@ fn main() {
             })
             .collect();
 
-        // WGSL include_bytes or empty
+        // WGSL include_bytes or empty.
+        //
+        // `{:?}` rather than `{}` for the path, as for `name`/`source` below: a
+        // manifest path containing a quote or a backslash would otherwise close
+        // the generated string literal and inject arbitrary code into
+        // `$OUT_DIR/shaders.rs`.
         let wgsl_include = if record.wgsl.is_empty() {
             "b\"\"".to_string()
         } else {
             format!(
-                "include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/{}\"))",
-                record.wgsl
+                "include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/\", {wgsl:?}))",
+                wgsl = record.wgsl
             )
         };
 
@@ -121,7 +126,7 @@ fn main() {
                  {name:?},\n    \
                  {source:?},\n    \
                  {hash:?},\n    \
-                 include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/{spirv}\")),\n    \
+                 include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/\", {spirv:?})),\n    \
                  {wgsl_include},\n    \
                  &[{entries}],\n\
              );\n\n",
@@ -232,16 +237,34 @@ fn pinned_slangc(pinned: &str) -> Option<String> {
     // Slang prints its version on stderr.
     let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stdout));
-    let version = text.lines().map(str::trim).rfind(|line| !line.is_empty())?;
-    if version == pinned {
-        Some(slangc)
-    } else {
-        println!(
-            "cargo::warning=slangc {version} is not the pinned {pinned}; the committed SPIR-V \
-             is hash-checked but not byte-checked in this build"
-        );
-        None
+
+    // Every non-empty line, not just the last one. Taking `rfind` meant any
+    // trailing output — a deprecation notice, a shell wrapper's own banner —
+    // silently downgraded the byte-for-byte check to hash-only with nothing but
+    // a `cargo::warning` to say so.
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.iter().any(|line| names_version(line, pinned)) {
+        return Some(slangc);
     }
+    let reported = lines.last().copied().unwrap_or("<no output>");
+    println!(
+        "cargo::warning=slangc reported {reported:?}, which does not name the pinned {pinned}; \
+         the committed SPIR-V is hash-checked but not byte-checked in this build"
+    );
+    None
+}
+
+/// Whether one line of `slangc -v` output names `pinned`.
+///
+/// Slang prints a bare version on some builds and `slangc <version>` on others,
+/// so both shapes count — but a line that merely *contains* the digits does
+/// not, or a path like `/opt/slang-2026.14/bin` would pass.
+fn names_version(line: &str, pinned: &str) -> bool {
+    line == pinned || line.split_whitespace().any(|word| word == pinned)
 }
 
 /// Recompiles one shader's SPIR-V and demands byte-for-byte equality.

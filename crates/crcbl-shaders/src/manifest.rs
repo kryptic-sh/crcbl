@@ -59,11 +59,11 @@ pub struct Manifest {
 /// A `String` naming the 1-based line number and what was wrong with it.
 pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
     let mut manifest = Manifest::default();
-    let mut current: Option<ShaderRecord> = None;
+    let mut current: Option<(ShaderRecord, usize)> = None;
 
     for (index, raw) in text.lines().enumerate() {
         let line_number = index + 1;
-        let line = raw.split('#').next().unwrap_or("").trim();
+        let line = strip_comment(raw).trim();
         if line.is_empty() {
             continue;
         }
@@ -72,23 +72,30 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
             .strip_prefix('[')
             .and_then(|rest| rest.strip_suffix(']'))
         {
-            if let Some(record) = current.take() {
-                manifest.shaders.push(finish(record, line_number)?);
+            if let Some((record, start)) = current.take() {
+                manifest.shaders.push(finish(record, start)?);
             }
             let name = name.trim();
-            if name.is_empty() {
-                return Err(format!("line {line_number}: empty section name"));
+            check_section_name(name, line_number)?;
+            if manifest.shaders.iter().any(|s| s.name == name) {
+                return Err(format!(
+                    "line {line_number}: section [{name}] is declared twice; the generated table \
+                     would have two `pub static`s of the same name"
+                ));
             }
-            current = Some(ShaderRecord {
-                name: name.to_string(),
-                source: String::new(),
-                source_sha256: String::new(),
-                spirv: String::new(),
-                spirv_sha256: String::new(),
-                wgsl: String::new(),
-                wgsl_sha256: String::new(),
-                entry_points: Vec::new(),
-            });
+            current = Some((
+                ShaderRecord {
+                    name: name.to_string(),
+                    source: String::new(),
+                    source_sha256: String::new(),
+                    spirv: String::new(),
+                    spirv_sha256: String::new(),
+                    wgsl: String::new(),
+                    wgsl_sha256: String::new(),
+                    entry_points: Vec::new(),
+                },
+                line_number,
+            ));
             continue;
         }
 
@@ -99,7 +106,7 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
         };
         let (key, value) = (key.trim(), value.trim());
 
-        match (&mut current, key) {
+        match (current.as_mut().map(|(record, _)| record), key) {
             (None, "slangc-version") => manifest.slangc_version = value.to_string(),
             (None, "target") => manifest.target = value.to_string(),
             (None, other) => {
@@ -108,12 +115,27 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
                      header key"
                 ));
             }
-            (Some(record), "source") => record.source = value.to_string(),
-            (Some(record), "source-sha256") => record.source_sha256 = hex(value, line_number)?,
-            (Some(record), "spirv") => record.spirv = value.to_string(),
-            (Some(record), "spirv-sha256") => record.spirv_sha256 = hex(value, line_number)?,
-            (Some(record), "wgsl") => record.wgsl = value.to_string(),
-            (Some(record), "wgsl-sha256") => record.wgsl_sha256 = hex(value, line_number)?,
+            (Some(record), "source") => {
+                set_once(&mut record.source, value.to_string(), key, line_number)?
+            }
+            (Some(record), "source-sha256") => {
+                let hash = hex(value, line_number)?;
+                set_once(&mut record.source_sha256, hash, key, line_number)?;
+            }
+            (Some(record), "spirv") => {
+                set_once(&mut record.spirv, value.to_string(), key, line_number)?
+            }
+            (Some(record), "spirv-sha256") => {
+                let hash = hex(value, line_number)?;
+                set_once(&mut record.spirv_sha256, hash, key, line_number)?;
+            }
+            (Some(record), "wgsl") => {
+                set_once(&mut record.wgsl, value.to_string(), key, line_number)?
+            }
+            (Some(record), "wgsl-sha256") => {
+                let hash = hex(value, line_number)?;
+                set_once(&mut record.wgsl_sha256, hash, key, line_number)?;
+            }
             (Some(record), "entry-points") => {
                 for pair in value.split(',') {
                     let pair = pair.trim();
@@ -139,9 +161,8 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
         }
     }
 
-    if let Some(record) = current.take() {
-        let last = text.lines().count();
-        manifest.shaders.push(finish(record, last)?);
+    if let Some((record, start)) = current.take() {
+        manifest.shaders.push(finish(record, start)?);
     }
     if manifest.slangc_version.is_empty() {
         return Err("the manifest names no `slangc-version`".to_string());
@@ -152,8 +173,71 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
     Ok(manifest)
 }
 
+/// Everything after an unquoted `#` that starts a comment.
+///
+/// A `#` only opens a comment at the start of a line or after whitespace, so a
+/// value that legitimately contains one — a path, a fragment — survives.
+/// `split('#').next()` truncated those silently.
+fn strip_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    for (index, &byte) in bytes.iter().enumerate() {
+        if byte == b'#' && (index == 0 || bytes[index - 1].is_ascii_whitespace()) {
+            return &line[..index];
+        }
+    }
+    line
+}
+
+/// Rejects a section name the generated table could not turn into one valid,
+/// unique Rust identifier.
+///
+/// `build.rs` builds the identifier as `name.to_uppercase().replace('-', "_")`.
+/// With no check, `2d blur` produced an invalid ident and the error surfaced
+/// inside generated code rather than naming the manifest line that caused it.
+fn check_section_name(name: &str, line_number: usize) -> Result<(), String> {
+    if name.is_empty() {
+        return Err(format!("line {line_number}: empty section name"));
+    }
+    if name.starts_with(|c: char| c.is_ascii_digit()) {
+        return Err(format!(
+            "line {line_number}: section name {name:?} starts with a digit, so it cannot become a \
+             Rust identifier"
+        ));
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|&c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    {
+        return Err(format!(
+            "line {line_number}: section name {name:?} contains {bad:?}; only ASCII letters, \
+             digits, `-` and `_` become a Rust identifier"
+        ));
+    }
+    Ok(())
+}
+
+/// Assigns a field once, rather than letting a repeated key silently win.
+fn set_once(
+    field: &mut String,
+    value: String,
+    key: &str,
+    line_number: usize,
+) -> Result<(), String> {
+    if !field.is_empty() {
+        return Err(format!(
+            "line {line_number}: `{key}` is set twice in the same section"
+        ));
+    }
+    *field = value;
+    Ok(())
+}
+
 /// Rejects a section that is missing a field, rather than letting an empty
 /// hash compare equal to nothing later.
+///
+/// `line_number` is the section's own `[header]` line — reporting the *next*
+/// header's line, as this used to, points past the block that is actually
+/// wrong.
 fn finish(record: ShaderRecord, line_number: usize) -> Result<ShaderRecord, String> {
     for (field, value) in [
         ("source", &record.source),
@@ -167,6 +251,20 @@ fn finish(record: ShaderRecord, line_number: usize) -> Result<ShaderRecord, Stri
                 record.name
             ));
         }
+    }
+    // `wgsl` and `wgsl-sha256` are optional, but only together: a `wgsl` with
+    // no hash used to reach build.rs and fail its comparison against `""`,
+    // with a message naming drift rather than the missing key.
+    if record.wgsl.is_empty() != record.wgsl_sha256.is_empty() {
+        let (present, missing) = if record.wgsl.is_empty() {
+            ("wgsl-sha256", "wgsl")
+        } else {
+            ("wgsl", "wgsl-sha256")
+        };
+        return Err(format!(
+            "line {line_number}: section [{}] has `{present}` but no `{missing}`; both or neither",
+            record.name
+        ));
     }
     if record.entry_points.is_empty() {
         return Err(format!(
@@ -277,6 +375,82 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
         let manifest = parse_manifest(&text).expect("parses");
         assert_eq!(manifest.shaders.len(), 1);
         assert_eq!(manifest.shaders[0].name, "triangle");
+    }
+
+    /// `build.rs` turns the section name into a `pub static` identifier, so a
+    /// name that is not one must fail here — naming the manifest line —
+    /// rather than as a syntax error inside generated code.
+    #[test]
+    fn a_section_name_that_is_not_an_identifier_is_refused() {
+        for bad in ["2d blur", "2dblur", "blur.pass", "post fx"] {
+            let text = format!("slangc-version = 1\n[{bad}]\n");
+            let error = parse_manifest(&text).expect_err("{bad} is not an identifier");
+            assert!(error.contains("line 2"), "{bad}: {error}");
+        }
+    }
+
+    /// Two sections with the same name produced two records, and therefore two
+    /// identically-named `pub static`s.
+    #[test]
+    fn a_duplicate_section_name_is_refused() {
+        let text = format!("{SAMPLE}\n[triangle]\nsource = other.slang\n");
+        let error = parse_manifest(&text).expect_err("two [triangle]s collide");
+        assert!(error.contains("twice"), "{error}");
+    }
+
+    /// A repeated key used to last-wins silently, so a manifest with two
+    /// `spirv-sha256` lines checked only one of them.
+    #[test]
+    fn a_repeated_key_is_refused() {
+        let text = format!("{SAMPLE}source = shaders/other.slang\n");
+        let error = parse_manifest(&text).expect_err("`source` twice is ambiguous");
+        assert!(error.contains("twice"), "{error}");
+    }
+
+    /// `wgsl` and `wgsl-sha256` are optional together. One without the other
+    /// used to reach `build.rs` and fail there against `""`, with a message
+    /// naming drift rather than the missing key.
+    #[test]
+    fn a_wgsl_path_without_its_hash_is_refused() {
+        let text = format!("{SAMPLE}wgsl = wgsl/triangle.wgsl\n");
+        let error = parse_manifest(&text).expect_err("a wgsl with no hash is unusable");
+        assert!(error.contains("wgsl-sha256"), "{error}");
+
+        let text = format!(
+            "{SAMPLE}wgsl-sha256 = \
+             0000000000000000000000000000000000000000000000000000000000000000\n"
+        );
+        let error = parse_manifest(&text).expect_err("a hash with no wgsl is unusable");
+        assert!(error.contains("`wgsl`"), "{error}");
+    }
+
+    /// The error must point at the offending section's own header, not at the
+    /// next one.
+    #[test]
+    fn an_incomplete_section_names_its_own_header_line() {
+        let text = "slangc-version = 1\n\
+                    [first]\n\
+                    source = a.slang\n\
+                    \n\
+                    [second]\n\
+                    source = b.slang\n";
+        let error = parse_manifest(text).expect_err("[first] has no hashes");
+        assert!(
+            error.contains("line 2") && error.contains("[first]"),
+            "the error should name [first]'s header on line 2: {error}"
+        );
+    }
+
+    /// A `#` inside a value is not a comment — only one at the start of a line
+    /// or after whitespace is.
+    #[test]
+    fn a_hash_inside_a_value_is_not_a_comment() {
+        assert_eq!(strip_comment("source = a#b.slang"), "source = a#b.slang");
+        assert_eq!(
+            strip_comment("source = a.slang # note"),
+            "source = a.slang "
+        );
+        assert_eq!(strip_comment("# whole line"), "");
     }
 
     /// The real manifest must parse, or the build script's error would be the

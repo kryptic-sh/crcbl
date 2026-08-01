@@ -28,13 +28,30 @@ pub struct GlyphMetrics {
 
 impl GlyphMetrics {
     /// The bounding rectangle for this glyph, relative to the cursor position.
+    ///
+    /// `cursor` is a **baseline** position: `bearing_y` is measured up from the
+    /// baseline, so the returned `min.y` sits above `cursor.y`.
     #[must_use]
     pub fn rect(&self, cursor: Vec2) -> (Vec2, Vec2) {
+        self.rect_scaled(cursor, 1.0)
+    }
+
+    /// The bounding rectangle for this glyph at `scale`, relative to the
+    /// baseline position `cursor`.
+    ///
+    /// Only the glyph's own extents are scaled — `cursor` is already in final
+    /// screen space, so scaling it again would move the anchor with the font
+    /// size.
+    #[must_use]
+    pub fn rect_scaled(&self, cursor: Vec2, scale: f32) -> (Vec2, Vec2) {
         let min = Vec2::new(
-            cursor.x + self.bearing_x as f32,
-            cursor.y - self.bearing_y as f32,
+            cursor.x + self.bearing_x as f32 * scale,
+            cursor.y - self.bearing_y as f32 * scale,
         );
-        let max = Vec2::new(min.x + self.width as f32, min.y + self.height as f32);
+        let max = Vec2::new(
+            min.x + self.width as f32 * scale,
+            min.y + self.height as f32 * scale,
+        );
         (min, max)
     }
 }
@@ -46,22 +63,30 @@ impl GlyphMetrics {
 /// A simple monospace bitmap font atlas.
 ///
 /// The built-in engine font is a fixed-pitch 8×13 px bitmap covering ASCII
-/// 32–126. Glyphs are arranged in a single row in the atlas texture.
+/// 32–126, plus a trailing `.notdef` box. Glyphs are arranged in a single row
+/// in the atlas texture.
 ///
 /// # Atlas layout
 ///
 /// Each glyph is `GLYPH_WIDTH × GLYPH_HEIGHT` pixels. They are packed
-/// left-to-right, one row, in ASCII order. The total atlas width is
-/// `GLYPH_WIDTH * COUNT` pixels.
+/// left-to-right, one row, in ASCII order, with `.notdef` last. The total atlas
+/// width is `GLYPH_WIDTH * GLYPH_COUNT` pixels.
 pub struct FontAtlas {
-    /// Glyph metrics for each character, indexed by (codepoint - FIRST_CHAR).
+    /// Glyph metrics for each atlas column, indexed by [`glyph_index`].
     metrics: Vec<GlyphMetrics>,
     /// Atlas texture dimensions in pixels (width, height).
     pub texture_size: (u32, u32),
 }
 
-/// Number of glyphs in the built-in atlas (ASCII 32–126 inclusive).
-pub const GLYPH_COUNT: usize = 95;
+/// Number of printable-ASCII glyphs in the built-in atlas (32–126 inclusive).
+pub const ASCII_GLYPH_COUNT: usize = 95;
+
+/// Atlas column of the `.notdef` glyph — the fallback drawn for every codepoint
+/// outside ASCII 32–126.
+pub const NOTDEF_INDEX: usize = ASCII_GLYPH_COUNT;
+
+/// Number of glyphs in the built-in atlas: printable ASCII plus `.notdef`.
+pub const GLYPH_COUNT: usize = ASCII_GLYPH_COUNT + 1;
 
 /// First ASCII codepoint in the atlas.
 pub const FIRST_CHAR: u8 = 32;
@@ -85,11 +110,37 @@ pub const LINE_HEIGHT: f32 = 16.0;
 /// Ascender height in pixels (baseline to top of capital letter).
 pub const ASCENDER: i32 = 10;
 
+/// The atlas column a codepoint renders from.
+///
+/// Codepoints outside the printable-ASCII range map to [`NOTDEF_INDEX`]. The
+/// test is on the **codepoint**, not on a truncated byte: `'Ł'` (U+0141) and
+/// `'A'` (U+0041) share a low byte but are not the same glyph.
+#[must_use]
+pub fn glyph_index(c: char) -> usize {
+    let cp = c as u32;
+    if cp >= FIRST_CHAR as u32 && cp <= LAST_CHAR as u32 {
+        (cp - FIRST_CHAR as u32) as usize
+    } else {
+        NOTDEF_INDEX
+    }
+}
+
+/// Metrics returned when the atlas holds no glyph at all — an empty glyph that
+/// advances nothing, so a degenerate atlas lays text out as nothing rather than
+/// panicking.
+static EMPTY_GLYPH: GlyphMetrics = GlyphMetrics {
+    width: 0,
+    height: 0,
+    bearing_x: 0,
+    bearing_y: 0,
+    advance: 0.0,
+};
+
 impl FontAtlas {
     /// Create the built-in monospace font atlas.
     #[must_use]
     pub fn built_in() -> Self {
-        let metrics: Vec<GlyphMetrics> = (FIRST_CHAR..=LAST_CHAR)
+        let mut metrics: Vec<GlyphMetrics> = (FIRST_CHAR..=LAST_CHAR)
             .map(|c| {
                 let w = if c <= b' ' { 0 } else { GLYPH_WIDTH };
                 GlyphMetrics {
@@ -101,6 +152,14 @@ impl FontAtlas {
                 }
             })
             .collect();
+        // `.notdef`, drawn for anything outside printable ASCII.
+        metrics.push(GlyphMetrics {
+            width: GLYPH_WIDTH,
+            height: GLYPH_HEIGHT,
+            bearing_x: 1,
+            bearing_y: ASCENDER,
+            advance: GLYPH_ADVANCE,
+        });
 
         let texture_size = (GLYPH_WIDTH * GLYPH_COUNT as u32, GLYPH_HEIGHT);
         Self {
@@ -111,38 +170,59 @@ impl FontAtlas {
 
     /// Look up the metrics for a character.
     ///
-    /// Returns the metrics for `'\0'` (empty glyph) for out-of-range or
-    /// non-printable characters.
+    /// Any codepoint outside ASCII 32–126 — including control characters and
+    /// everything non-Latin — resolves to the `.notdef` box.
     #[must_use]
     pub fn glyph(&self, c: char) -> &GlyphMetrics {
-        let idx = (c as u8).wrapping_sub(FIRST_CHAR) as usize;
-        self.metrics.get(idx).unwrap_or(&self.metrics[0])
+        let idx = glyph_index(c);
+        self.metrics
+            .get(idx)
+            .or_else(|| self.metrics.get(NOTDEF_INDEX))
+            .or_else(|| self.metrics.first())
+            .unwrap_or(&EMPTY_GLYPH)
     }
 
     /// Measure the width of a string in pixels at the given scale.
     ///
     /// `scale` is a multiplier relative to the baked-in glyph size (1.0 =
-    /// natural pixel size).
+    /// natural pixel size). Multi-line text measures as its **widest** line, not
+    /// as the sum of every line.
     #[must_use]
     pub fn text_width(&self, text: &str, scale: f32) -> f32 {
-        let mut w = 0.0;
+        let mut widest = 0.0f32;
+        let mut line = 0.0f32;
         for c in text.chars() {
             if c == '\n' {
+                widest = widest.max(line);
+                line = 0.0;
                 continue;
             }
-            let g = self.glyph(c);
-            w += g.advance * scale;
+            line += self.glyph(c).advance * scale;
         }
-        w
+        widest.max(line)
     }
 
-    /// Layout a single line of text into screen-space glyph positions.
+    /// Number of lines a string lays out to (always at least one).
+    #[must_use]
+    pub fn line_count(&self, text: &str) -> usize {
+        1 + text.chars().filter(|&c| c == '\n').count()
+    }
+
+    /// Layout text into screen-space glyph positions.
+    ///
+    /// `pos` is the **top-left anchor** of the first line's em box — the same
+    /// anchor [`DrawCommand::Text::pos`] documents — not a baseline. The
+    /// baseline is derived from it as `pos.y + ASCENDER * scale`.
     ///
     /// Returns a list of `(char, min, max)` quads where `min`/`max` are the
-    /// screen-space corners of each glyph.
+    /// screen-space corners of each glyph, with `min` the top-left corner in
+    /// the Y-down screen convention.
+    ///
+    /// [`DrawCommand::Text::pos`]: crate::draw_list::DrawCommand::Text
     pub fn layout_line(&self, text: &str, pos: Vec2, scale: f32) -> Vec<(char, Vec2, Vec2)> {
         let mut out = Vec::with_capacity(text.len());
-        let mut cursor = pos;
+        // `cursor` is a baseline position; `pos` is the top of the em box.
+        let mut cursor = Vec2::new(pos.x, pos.y + ASCENDER as f32 * scale);
         for c in text.chars() {
             if c == '\n' {
                 cursor.x = pos.x;
@@ -151,9 +231,7 @@ impl FontAtlas {
             }
             let g = self.glyph(c);
             if g.width > 0 {
-                let (min, max) = g.rect(cursor);
-                let min = Vec2::new(min.x * scale, min.y * scale);
-                let max = Vec2::new(max.x * scale, max.y * scale);
+                let (min, max) = g.rect_scaled(cursor, scale);
                 out.push((c, min, max));
             }
             cursor.x += g.advance * scale;
@@ -175,25 +253,31 @@ impl FontAtlas {
 
     /// UV u-coordinate of the left edge of the given glyph in the atlas
     /// texture (range [0, 1]).
+    ///
+    /// Codepoints with no glyph resolve to `.notdef`, so the result is always
+    /// inside `[0, 1]`.
     #[must_use]
     pub fn glyph_u_min(&self, c: char) -> f32 {
         let atlas_w = self.texture_size.0 as f32;
         if atlas_w == 0.0 {
             return 0.0;
         }
-        let col = (c as u8).wrapping_sub(FIRST_CHAR) as u32;
+        let col = glyph_index(c) as u32;
         (col * GLYPH_WIDTH) as f32 / atlas_w
     }
 
     /// UV u-coordinate of the right edge of the given glyph in the atlas
     /// texture (range [0, 1]).
+    ///
+    /// Codepoints with no glyph resolve to `.notdef`, so the result is always
+    /// inside `[0, 1]`.
     #[must_use]
     pub fn glyph_u_max(&self, c: char) -> f32 {
         let atlas_w = self.texture_size.0 as f32;
         if atlas_w == 0.0 {
             return 0.0;
         }
-        let col = (c as u8).wrapping_sub(FIRST_CHAR) as u32;
+        let col = glyph_index(c) as u32;
         ((col + 1) * GLYPH_WIDTH) as f32 / atlas_w
     }
 
@@ -206,8 +290,8 @@ impl FontAtlas {
         let (w, h) = self.texture_size;
         let mut data = vec![0u8; (w * h) as usize];
 
-        for (glyph_idx, c) in (FIRST_CHAR..=LAST_CHAR).enumerate() {
-            let rows = glyph_rows(c as char);
+        for glyph_idx in 0..GLYPH_COUNT {
+            let rows = glyph_rows_at(glyph_idx);
             let x_offset = glyph_idx as u32 * GLYPH_WIDTH;
             for (row, &row_bits) in rows.iter().enumerate() {
                 for col in 0..GLYPH_WIDTH as usize {
@@ -226,10 +310,28 @@ impl FontAtlas {
 // Embedded 8×13 bitmap font (row-major bit patterns, MSB = leftmost pixel)
 // ---------------------------------------------------------------------------
 
+/// The `.notdef` glyph: a hollow box, drawn for every codepoint the atlas has
+/// no bitmap for.
+const NOTDEF_ROWS: [u8; 13] = [
+    0xFE, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0xFE, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// Returns the 13 row bytes for the atlas column `index`.
+///
+/// Columns `0..ASCII_GLYPH_COUNT` are printable ASCII in order; the last is
+/// `.notdef`.
+fn glyph_rows_at(index: usize) -> [u8; 13] {
+    if index < ASCII_GLYPH_COUNT {
+        glyph_rows(char::from(FIRST_CHAR + index as u8))
+    } else {
+        NOTDEF_ROWS
+    }
+}
+
 /// Returns the 13 row bytes for the given ASCII character.
 ///
 /// Each byte encodes one row of the 8-pixel-wide glyph; the MSB (bit 7) is the
-/// leftmost pixel. Only characters 32–126 are valid; others return space.
+/// leftmost pixel. Only characters 32–126 are valid; others return `.notdef`.
 fn glyph_rows(c: char) -> [u8; 13] {
     // Compact 8×13 embedded bitmap font.
     // clang-format off
@@ -517,7 +619,7 @@ fn glyph_rows(c: char) -> [u8; 13] {
         '~' => [
             0x76, 0xDC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ],
-        _ => [0x00; 13],
+        _ => NOTDEF_ROWS,
     }
     // clang-format on
 }
@@ -546,9 +648,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn built_in_atlas_has_95_glyphs() {
+    fn built_in_atlas_has_ascii_plus_notdef() {
         let atlas = FontAtlas::built_in();
         assert_eq!(atlas.len(), GLYPH_COUNT);
+        assert_eq!(GLYPH_COUNT, ASCII_GLYPH_COUNT + 1);
     }
 
     #[test]
@@ -568,10 +671,37 @@ mod tests {
     }
 
     #[test]
-    fn out_of_range_char_returns_space_glyph() {
+    fn out_of_range_char_returns_notdef() {
         let atlas = FontAtlas::built_in();
-        let g = atlas.glyph('\0');
-        assert_eq!(g.width, 0);
+        // Control characters, and anything past ASCII 126, get the box.
+        for c in ['\0', '\u{7f}', 'é', '€', 'Ł', 'ġ'] {
+            assert_eq!(glyph_index(c), NOTDEF_INDEX, "{c:?} should be .notdef");
+            let g = atlas.glyph(c);
+            assert_eq!(g.width, GLYPH_WIDTH, "{c:?} should draw the box");
+        }
+    }
+
+    /// The bug: `(c as u8)` kept only the low byte, so U+0141 rendered `'A'`
+    /// (U+0041) and U+0121 rendered `'!'` (U+0021).
+    #[test]
+    fn non_ascii_does_not_alias_onto_an_ascii_glyph() {
+        let atlas = FontAtlas::built_in();
+        assert_ne!(atlas.glyph_u_min('Ł'), atlas.glyph_u_min('A'));
+        assert_ne!(atlas.glyph_u_min('ġ'), atlas.glyph_u_min('!'));
+    }
+
+    /// Out-of-range codepoints used to produce `u_min > 1.0`, which samples
+    /// outside the atlas.
+    #[test]
+    fn glyph_uvs_stay_inside_the_atlas_for_any_codepoint() {
+        let atlas = FontAtlas::built_in();
+        for c in ['\0', 'é', '€', 'Ł', '\u{10ffff}', 'A', ' ', '~'] {
+            let (u_min, u_max) = (atlas.glyph_u_min(c), atlas.glyph_u_max(c));
+            assert!(
+                (0.0..=1.0).contains(&u_min) && (0.0..=1.0).contains(&u_max) && u_min < u_max,
+                "{c:?}: u range {u_min}..{u_max} escapes the atlas"
+            );
+        }
     }
 
     #[test]
@@ -612,6 +742,49 @@ mod tests {
         );
     }
 
+    /// The bug: `min`/`max` were multiplied by `scale` on top of a `cursor`
+    /// that already carried `pos` plus a scaled advance, so the position came
+    /// out as `pos.x * scale + i * advance * scale²` — the anchor moved with
+    /// the font size and the advance scaled twice.
+    #[test]
+    fn layout_line_scales_extents_but_not_the_anchor() {
+        let atlas = FontAtlas::built_in();
+        let glyphs = atlas.layout_line("AB", Vec2::new(100.0, 200.0), 2.0);
+        assert_eq!(glyphs.len(), 2);
+
+        // First glyph: x = 100 + bearing_x(1) * 2, y = 200 (top of the em box,
+        // since bearing_y == ASCENDER for every glyph in this font).
+        assert!((glyphs[0].1.x - 102.0).abs() < 0.001, "{:?}", glyphs[0].1);
+        assert!((glyphs[0].1.y - 200.0).abs() < 0.001, "{:?}", glyphs[0].1);
+        // Extents scale exactly once: 8×13 at 2.0 → 16×26.
+        assert!((glyphs[0].2.x - glyphs[0].1.x - 16.0).abs() < 0.001);
+        assert!((glyphs[0].2.y - glyphs[0].1.y - 26.0).abs() < 0.001);
+        // Advance scales exactly once: 10 → 20, not 40.
+        assert!(
+            (glyphs[1].1.x - glyphs[0].1.x - GLYPH_ADVANCE * 2.0).abs() < 0.001,
+            "advance scaled twice: {}",
+            glyphs[1].1.x - glyphs[0].1.x
+        );
+    }
+
+    /// `pos` is the top-left anchor of the em box, not a baseline: a glyph must
+    /// never be laid out above the position it was asked for.
+    #[test]
+    fn layout_line_anchor_is_the_top_left_not_the_baseline() {
+        let atlas = FontAtlas::built_in();
+        let pos = Vec2::new(10.0, 100.0);
+        for scale in [0.5, 1.0, 2.0] {
+            let glyphs = atlas.layout_line("Hi", pos, scale);
+            for (c, min, max) in glyphs {
+                assert!(min.y >= pos.y - 0.001, "{c:?} at scale {scale}: {min:?}");
+                assert!(
+                    max.y <= pos.y + LINE_HEIGHT * scale + 0.001,
+                    "{c:?} at scale {scale}: {max:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn layout_line_handles_newline() {
         let atlas = FontAtlas::built_in();
@@ -634,10 +807,24 @@ mod tests {
     }
 
     #[test]
+    fn text_width_of_multiline_is_the_widest_line() {
+        let atlas = FontAtlas::built_in();
+        // Not 5 * advance: the two lines are measured separately.
+        let w = atlas.text_width("AB\nCDE", 1.0);
+        assert!(
+            (w - GLYPH_ADVANCE * 3.0).abs() < 0.001,
+            "expected the widest line ({}), got {w}",
+            GLYPH_ADVANCE * 3.0
+        );
+        assert_eq!(atlas.line_count("AB\nCDE"), 2);
+        assert_eq!(atlas.line_count("one line"), 1);
+    }
+
+    #[test]
     fn debug_format() {
         let atlas = FontAtlas::built_in();
         let s = format!("{atlas:?}");
-        assert!(s.contains("glyph_count: 95"));
+        assert!(s.contains(&format!("glyph_count: {GLYPH_COUNT}")));
     }
 
     #[test]
@@ -649,11 +836,17 @@ mod tests {
     }
 
     #[test]
-    fn glyph_u_max_for_last_char_is_one() {
+    fn glyph_u_max_for_the_notdef_column_is_one() {
         let atlas = FontAtlas::built_in();
-        // '~' is the last glyph (codepoint 126 = FIRST_CHAR + 94).
+        // `.notdef` is the last column, so any unmapped codepoint ends the atlas.
+        let u = atlas.glyph_u_max('€');
+        assert!((u - 1.0).abs() < 0.001, "got {u}");
+        // '~' is the last *ASCII* glyph, one column before it.
         let u = atlas.glyph_u_max('~');
-        assert!((u - 1.0).abs() < 0.001);
+        assert!(
+            (u - ASCII_GLYPH_COUNT as f32 / GLYPH_COUNT as f32).abs() < 0.001,
+            "got {u}"
+        );
     }
 
     #[test]

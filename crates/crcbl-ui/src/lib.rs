@@ -29,6 +29,9 @@ pub mod widget;
 pub use draw_list::{DrawCommand, DrawList, Vertex2d};
 pub use hud::{Anchor, Hud, HudPanel};
 pub use text::{
-    FontAtlas, GLYPH_ADVANCE, GLYPH_COUNT, GLYPH_HEIGHT, GLYPH_WIDTH, GlyphMetrics, LINE_HEIGHT,
+    ASCENDER, ASCII_GLYPH_COUNT, FIRST_CHAR, FontAtlas, GLYPH_ADVANCE, GLYPH_COUNT, GLYPH_HEIGHT,
+    GLYPH_WIDTH, GlyphMetrics, LAST_CHAR, LINE_HEIGHT, NOTDEF_INDEX, glyph_index,
 };
-pub use widget::{Button, ButtonState, Label, Style};
+pub use widget::{
+    Button, ButtonState, Label, NATURAL_FONT_SIZE, PointerInput, Style, UiState, WidgetId,
+};

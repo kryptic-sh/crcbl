@@ -40,24 +40,30 @@ pub struct Vertex2d {
 pub enum DrawCommand {
     /// A filled rectangle.
     Rect {
-        /// Top-left corner in screen-space.
+        /// Top-left corner in screen-space (Y grows downwards).
         min: Vec2,
-        /// Bottom-right corner in screen-space.
+        /// Bottom-right corner in screen-space (Y grows downwards).
         max: Vec2,
         /// RGBA fill colour.
         color: [f32; 4],
     },
-    /// A rectangle outline (border).
+    /// A rectangle outline (border), drawn inside the declared bounds.
     RectOutline {
+        /// Top-left corner in screen-space.
         min: Vec2,
+        /// Bottom-right corner in screen-space.
         max: Vec2,
-        /// Line thickness in pixels.
+        /// Line thickness in pixels. Clamped to half the smaller extent, so an
+        /// over-thick border becomes a filled rect rather than self-intersecting
+        /// geometry.
         thickness: f32,
+        /// RGBA border colour.
         color: [f32; 4],
     },
     /// A single line of text rendered from the glyph atlas.
     Text {
-        /// Top-left anchor of the text.
+        /// Top-left anchor of the text's em box — *not* a baseline. The first
+        /// line's glyphs occupy `pos.y ..= pos.y + LINE_HEIGHT * scale`.
         pos: Vec2,
         /// The text content.
         text: String,
@@ -154,12 +160,20 @@ impl DrawList {
     /// one textured quad with UV coordinates into the atlas. When `atlas` is
     /// `None`, text commands are skipped (the `to_triangles` return from S6).
     ///
-    /// `scale` is a multiplier on the font size (1.0 = baked-in 8×13 px); also
-    /// multiplied into position for text commands.
+    /// `scale` is a multiplier on the font size (1.0 = baked-in 8×13 px).
     ///
-    /// The index buffer uses `u32` indices; callers that need `u16` must
-    /// adapt. Vertex positions are in screen-space pixels with Y-up (the UI
-    /// convention); the renderer applies an orthographic projection.
+    /// The index buffer uses `u32` indices; callers that need `u16` must adapt.
+    ///
+    /// # Coordinate convention
+    ///
+    /// Vertex positions are in screen-space pixels, **Y-down**: `(0, 0)` is the
+    /// top-left of the framebuffer and Y grows towards the bottom. This is the
+    /// convention `shaders/ui.slang` implements
+    /// (`ndc.y = 1.0 - (y / viewport.y) * 2.0`) and the one every widget in this
+    /// crate lays out in, so `min` really is the visually-upper corner.
+    ///
+    /// Glyph UVs follow the same convention: `v = 0` is the atlas's top row and
+    /// is emitted at the quad's `min.y` vertex, so glyphs render upright.
     #[must_use]
     pub fn to_triangles(&self, atlas: Option<&FontAtlas>, scale: f32) -> (Vec<Vertex2d>, Vec<u32>) {
         let mut vertices = Vec::new();
@@ -168,36 +182,15 @@ impl DrawList {
         for cmd in &self.commands {
             match cmd {
                 DrawCommand::Rect { min, max, color } => {
-                    let base = vertices.len() as u32;
-                    // clockwise winding: top-left, top-right, bottom-right, bottom-left
-                    vertices.push(Vertex2d {
-                        pos: Vec2::new(min.x, max.y),
-                        uv: Vec2::ZERO,
-                        color: *color,
-                    });
-                    vertices.push(Vertex2d {
-                        pos: Vec2::new(max.x, max.y),
-                        uv: Vec2::ZERO,
-                        color: *color,
-                    });
-                    vertices.push(Vertex2d {
-                        pos: Vec2::new(max.x, min.y),
-                        uv: Vec2::ZERO,
-                        color: *color,
-                    });
-                    vertices.push(Vertex2d {
-                        pos: Vec2::new(min.x, min.y),
-                        uv: Vec2::ZERO,
-                        color: *color,
-                    });
-                    indices.extend_from_slice(&[
-                        base,
-                        base + 1,
-                        base + 2,
-                        base,
-                        base + 2,
-                        base + 3,
-                    ]);
+                    push_quad(
+                        *min,
+                        *max,
+                        Vec2::ZERO,
+                        Vec2::ZERO,
+                        *color,
+                        &mut vertices,
+                        &mut indices,
+                    );
                 }
                 DrawCommand::RectOutline {
                     min,
@@ -205,52 +198,45 @@ impl DrawList {
                     thickness,
                     color,
                 } => {
-                    // Four narrow quads: top, bottom, left, right. Each quad is
-                    // inset so the border sits *inside* the declared bounds.
-                    let t = *thickness;
-                    let inner_min = Vec2::new(min.x + t, min.y + t);
-                    let inner_max = Vec2::new(max.x - t, max.y - t);
+                    // Four quads: top and bottom span the full width, left and
+                    // right fill the gap between them. Every corner is covered
+                    // exactly once, and both ends of each edge are built the
+                    // same way.
+                    //
+                    // The thickness is clamped to half the smaller extent: an
+                    // unclamped border would invert the inner rect and emit
+                    // self-intersecting bowties that paint over the whole box.
+                    let half = (*max - *min) * 0.5;
+                    let t = thickness.max(0.0).min(half.x.max(0.0)).min(half.y.max(0.0));
                     let c = *color;
 
-                    // top edge
-                    push_quad(
-                        Vec2::new(min.x, max.y),
-                        Vec2::new(max.x, max.y),
-                        Vec2::new(inner_max.x, inner_max.y),
-                        Vec2::new(inner_min.x, inner_max.y),
-                        c,
-                        &mut vertices,
-                        &mut indices,
-                    );
-                    // bottom edge
-                    push_quad(
+                    let inner_min = Vec2::new(min.x + t, min.y + t);
+                    let inner_max = Vec2::new(max.x - t, max.y - t);
+
+                    let mut edge = |q_min: Vec2, q_max: Vec2| {
+                        push_quad(
+                            q_min,
+                            q_max,
+                            Vec2::ZERO,
+                            Vec2::ZERO,
+                            c,
+                            &mut vertices,
+                            &mut indices,
+                        );
+                    };
+                    // top (full width, including both corners)
+                    edge(*min, Vec2::new(max.x, inner_min.y));
+                    // bottom (full width, including both corners)
+                    edge(Vec2::new(min.x, inner_max.y), *max);
+                    // left (between the two horizontal edges)
+                    edge(
                         Vec2::new(min.x, inner_min.y),
-                        Vec2::new(max.x, inner_min.y),
-                        Vec2::new(max.x, min.y),
-                        Vec2::new(min.x, min.y),
-                        c,
-                        &mut vertices,
-                        &mut indices,
-                    );
-                    // left edge
-                    push_quad(
-                        Vec2::new(min.x, inner_max.y),
                         Vec2::new(inner_min.x, inner_max.y),
-                        Vec2::new(inner_min.x, inner_min.y),
-                        Vec2::new(min.x, inner_min.y),
-                        c,
-                        &mut vertices,
-                        &mut indices,
                     );
-                    // right edge
-                    push_quad(
-                        Vec2::new(inner_max.x, inner_max.y),
-                        Vec2::new(max.x, inner_max.y),
-                        Vec2::new(max.x, inner_min.y),
+                    // right (between the two horizontal edges)
+                    edge(
                         Vec2::new(inner_max.x, inner_min.y),
-                        c,
-                        &mut vertices,
-                        &mut indices,
+                        Vec2::new(max.x, inner_max.y),
                     );
                 }
                 DrawCommand::Text {
@@ -263,39 +249,19 @@ impl DrawList {
                         let layout_scale = (*size / GLYPH_HEIGHT as f32) * scale;
                         let glyphs = atlas.layout_line(text, *pos, layout_scale);
                         for (c, min, max) in glyphs {
-                            let u_min = atlas.glyph_u_min(c);
-                            let u_max = atlas.glyph_u_max(c);
-                            let v_min = 0.0;
-                            let v_max = 1.0;
-                            let base = vertices.len() as u32;
-                            vertices.push(Vertex2d {
-                                pos: Vec2::new(min.x, max.y),
-                                uv: Vec2::new(u_min, v_min),
-                                color: *color,
-                            });
-                            vertices.push(Vertex2d {
-                                pos: Vec2::new(max.x, max.y),
-                                uv: Vec2::new(u_max, v_min),
-                                color: *color,
-                            });
-                            vertices.push(Vertex2d {
-                                pos: Vec2::new(max.x, min.y),
-                                uv: Vec2::new(u_max, v_max),
-                                color: *color,
-                            });
-                            vertices.push(Vertex2d {
-                                pos: Vec2::new(min.x, min.y),
-                                uv: Vec2::new(u_min, v_max),
-                                color: *color,
-                            });
-                            indices.extend_from_slice(&[
-                                base,
-                                base + 1,
-                                base + 2,
-                                base,
-                                base + 2,
-                                base + 3,
-                            ]);
+                            // v = 0 is the atlas's top row, and `min.y` is the
+                            // quad's top edge in the Y-down screen convention.
+                            let uv_min = Vec2::new(atlas.glyph_u_min(c), 0.0);
+                            let uv_max = Vec2::new(atlas.glyph_u_max(c), 1.0);
+                            push_quad(
+                                min,
+                                max,
+                                uv_min,
+                                uv_max,
+                                *color,
+                                &mut vertices,
+                                &mut indices,
+                            );
                         }
                     }
                 }
@@ -305,37 +271,37 @@ impl DrawList {
     }
 }
 
-/// Push a quad (4 vertices, 6 indices) for use by [`DrawList::to_triangles`].
+/// Push one axis-aligned quad — 4 vertices, 6 indices — for use by
+/// [`DrawList::to_triangles`].
+///
+/// `min`/`max` are the top-left and bottom-right corners in the Y-down screen
+/// convention, and `uv_min`/`uv_max` the matching atlas corners (both
+/// [`Vec2::ZERO`] for untextured primitives, which the fragment shader reads as
+/// "do not sample").
+///
+/// Vertices are emitted bottom-left, bottom-right, top-right, top-left, which
+/// after the shader's Y flip is counter-clockwise in NDC. Nothing depends on
+/// that today — `crcbl-render`'s UI pass uses `PrimitiveState::default()` with
+/// no face culling — but the order is fixed here rather than per-call-site so
+/// there is only one thing to change if it ever does.
 fn push_quad(
-    a: Vec2,
-    b: Vec2,
-    c: Vec2,
-    d: Vec2,
+    min: Vec2,
+    max: Vec2,
+    uv_min: Vec2,
+    uv_max: Vec2,
     color: [f32; 4],
     vertices: &mut Vec<Vertex2d>,
     indices: &mut Vec<u32>,
 ) {
     let base = vertices.len() as u32;
-    vertices.push(Vertex2d {
-        pos: a,
-        uv: Vec2::ZERO,
-        color,
-    });
-    vertices.push(Vertex2d {
-        pos: b,
-        uv: Vec2::ZERO,
-        color,
-    });
-    vertices.push(Vertex2d {
-        pos: c,
-        uv: Vec2::ZERO,
-        color,
-    });
-    vertices.push(Vertex2d {
-        pos: d,
-        uv: Vec2::ZERO,
-        color,
-    });
+    for (pos, uv) in [
+        (Vec2::new(min.x, max.y), Vec2::new(uv_min.x, uv_max.y)),
+        (Vec2::new(max.x, max.y), Vec2::new(uv_max.x, uv_max.y)),
+        (Vec2::new(max.x, min.y), Vec2::new(uv_max.x, uv_min.y)),
+        (Vec2::new(min.x, min.y), Vec2::new(uv_min.x, uv_min.y)),
+    ] {
+        vertices.push(Vertex2d { pos, uv, color });
+    }
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
@@ -450,11 +416,12 @@ mod tests {
         assert_eq!(verts.len(), 4);
         assert_eq!(indices.len(), 6);
 
-        // Vertices are CCW from top-left.
-        assert_eq!(verts[0].pos, Vec2::new(10.0, 120.0)); // top-left
-        assert_eq!(verts[1].pos, Vec2::new(110.0, 120.0)); // top-right
-        assert_eq!(verts[2].pos, Vec2::new(110.0, 20.0)); // bottom-right
-        assert_eq!(verts[3].pos, Vec2::new(10.0, 20.0)); // bottom-left
+        // Emission order, in the Y-down screen convention: bottom-left,
+        // bottom-right, top-right, top-left.
+        assert_eq!(verts[0].pos, Vec2::new(10.0, 120.0)); // bottom-left
+        assert_eq!(verts[1].pos, Vec2::new(110.0, 120.0)); // bottom-right
+        assert_eq!(verts[2].pos, Vec2::new(110.0, 20.0)); // top-right
+        assert_eq!(verts[3].pos, Vec2::new(10.0, 20.0)); // top-left
 
         // All vertices share the command's color.
         for v in &verts {
@@ -549,13 +516,118 @@ mod tests {
             (verts[1].uv.x - expected_u_max).abs() < 0.001,
             "u_max mismatch"
         );
-        // v goes from 0 (top of atlas) to 1 (bottom).
-        assert!((verts[0].uv.y - 0.0).abs() < 0.001);
-        assert!((verts[2].uv.y - 1.0).abs() < 0.001);
 
         // All verts share the text colour.
         for v in &verts {
             assert_eq!(v.color, [1.0, 0.0, 0.0, 1.0]);
+        }
+    }
+
+    /// Pins the UV/position relationship the shader depends on. `ui.slang`
+    /// computes `ndc.y = 1.0 - (y / viewport.y) * 2.0`, so screen y = 0 is the
+    /// **top** of the framebuffer; the atlas's top row (`v = 0`) must therefore
+    /// be emitted at the quad's smallest y. Emitting it at the largest y — as
+    /// `to_triangles` used to — renders every glyph vertically mirrored.
+    ///
+    /// There is no golden image for the UI pass, so this is the check that
+    /// keeps the two ends of the convention from drifting apart again.
+    #[test]
+    fn glyph_atlas_top_row_maps_to_the_quads_top_edge() {
+        use crate::text::GLYPH_WIDTH;
+
+        let atlas = FontAtlas::built_in();
+        let mut dl = DrawList::new();
+        dl.text(Vec2::new(100.0, 200.0), "A", [1.0; 4], 13.0);
+        let (verts, _) = dl.to_triangles(Some(&atlas), 1.0);
+        assert_eq!(verts.len(), 4);
+
+        for v in &verts {
+            let top = v.pos.y < 200.0 + GLYPH_HEIGHT as f32 * 0.5;
+            let expected_v = if top { 0.0 } else { 1.0 };
+            assert!(
+                (v.uv.y - expected_v).abs() < 0.001,
+                "vertex at y={} has v={}, expected {expected_v} — the glyph is mirrored",
+                v.pos.y,
+                v.uv.y
+            );
+        }
+
+        // And the same for u: the atlas's left column is at the quad's left.
+        let u_left = atlas.glyph_u_min('A');
+        for v in &verts {
+            let left = v.pos.x < 100.0 + GLYPH_WIDTH as f32 * 0.5 + 1.0;
+            let expected_u = if left { u_left } else { atlas.glyph_u_max('A') };
+            assert!(
+                (v.uv.x - expected_u).abs() < 0.001,
+                "u mismatch at {:?}",
+                v.pos
+            );
+        }
+    }
+
+    /// The bug: the top edge tapered to the *inner* width while the bottom was
+    /// emitted full-width and the verticals stopped short, leaving each top
+    /// corner half covered. Every pixel of the border ring must be painted.
+    #[test]
+    fn rect_outline_covers_every_corner() {
+        let mut dl = DrawList::new();
+        dl.rect_outline(Vec2::ZERO, Vec2::new(100.0, 80.0), 3.0, [1.0; 4]);
+        let (verts, _) = dl.to_triangles(None, 1.0);
+
+        // Every point in the border ring must lie inside one of the four quads.
+        let quads: Vec<(Vec2, Vec2)> = verts
+            .chunks_exact(4)
+            .map(|q| {
+                let xs = q.iter().map(|v| v.pos.x);
+                let ys = q.iter().map(|v| v.pos.y);
+                (
+                    Vec2::new(
+                        xs.clone().fold(f32::MAX, f32::min),
+                        ys.clone().fold(f32::MAX, f32::min),
+                    ),
+                    Vec2::new(xs.fold(f32::MIN, f32::max), ys.fold(f32::MIN, f32::max)),
+                )
+            })
+            .collect();
+        assert_eq!(quads.len(), 4);
+
+        let covered = |p: Vec2| {
+            quads
+                .iter()
+                .any(|(lo, hi)| p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y)
+        };
+        // Sample the four corner squares, which is where the miter left holes.
+        for p in [
+            Vec2::new(1.5, 1.5),
+            Vec2::new(98.5, 1.5),
+            Vec2::new(1.5, 78.5),
+            Vec2::new(98.5, 78.5),
+        ] {
+            assert!(covered(p), "corner pixel {p:?} is not covered by any quad");
+        }
+        // And the interior must stay hollow.
+        assert!(!covered(Vec2::new(50.0, 40.0)), "the border filled the box");
+    }
+
+    /// `rect_outline((0,0), (10,10), 8.0)` used to invert the inner rect and
+    /// emit self-intersecting bowties. Clamping turns it into a filled box.
+    #[test]
+    fn rect_outline_thickness_is_clamped_to_half_the_extent() {
+        let mut dl = DrawList::new();
+        dl.rect_outline(Vec2::ZERO, Vec2::splat(10.0), 8.0, [1.0; 4]);
+        let (verts, _) = dl.to_triangles(None, 1.0);
+
+        for q in verts.chunks_exact(4) {
+            let (x0, x1) = (q[3].pos.x, q[1].pos.x);
+            let (y0, y1) = (q[3].pos.y, q[1].pos.y);
+            assert!(
+                x1 >= x0 && y1 >= y0,
+                "quad is inverted: ({x0},{y0})..({x1},{y1})"
+            );
+            assert!(
+                (0.0..=10.0).contains(&x0) && (0.0..=10.0).contains(&x1),
+                "quad escapes the declared bounds"
+            );
         }
     }
 
@@ -667,9 +739,12 @@ mod tests {
         let hash = hash_triangles(&verts, &indices);
 
         // Golden hash. Update only when triangulation output intentionally
-        // changes.
+        // changes. Last re-blessed when text layout stopped double-applying
+        // `scale`, the `Text` anchor became a true top-left, glyph V flipped to
+        // match `ui.slang`'s Y-down screen space, and `RectOutline` stopped
+        // mitering its top edge.
         assert_eq!(
-            hash, 1_583_942_257_705_471_847,
+            hash, 16_849_584_058_741_182_623,
             "draw-list snapshot hash mismatch — triangulation output changed"
         );
 

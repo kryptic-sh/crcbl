@@ -62,7 +62,10 @@ pub struct Axis1Action {
     pub value: f32,
 }
 
-/// 2-D analog axis: normalized vector (WASD composite, stick, mouse motion).
+/// 2-D analog axis (WASD composite, stick, mouse motion).
+///
+/// Key-driven composites are normalized to at most unit length; mouse motion is
+/// a raw pixel delta and is not.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Axis2Action {
     /// Horizontal component.
@@ -100,7 +103,21 @@ pub enum Binding {
     MouseMotion,
     /// Mouse scroll wheel.
     MouseScroll,
-    /// WASD composite: four keys mapped to a 2-D axis (unit vector).
+    /// Two keys driving one 1-D axis: `negative` contributes −1.0, `positive`
+    /// +1.0, and both at once cancel.
+    ///
+    /// A single [`Binding::Key`] on an `Axis1` can only ever push the axis
+    /// positive, so a keyboard-driven throttle or zoom needs this.
+    KeyAxis {
+        /// Key for the −1.0 direction.
+        negative: KeyCode,
+        /// Key for the +1.0 direction.
+        positive: KeyCode,
+    },
+    /// WASD composite: four keys mapped to a 2-D axis.
+    ///
+    /// The composite is normalized, so a diagonal is a unit vector rather than
+    /// `(1, 1)` — otherwise diagonal movement is 41% faster than cardinal.
     Wasd {
         /// Key for the +Y direction (forward / up).
         up: KeyCode,
@@ -154,7 +171,13 @@ struct ActionSlot {
     active: bool,
     /// Accumulated time at which the action became active (None when inactive).
     /// Used to compute `Held { duration }`.
-    hold_start: Option<f32>,
+    hold_start: Option<f64>,
+    /// Whether this action reacts to input at all.
+    ///
+    /// A flag on the slot rather than a `HashSet<String>` on the map: the set
+    /// was hashed once per slot per raw event, and `set_enabled` on a name that
+    /// was never declared grew it forever.
+    enabled: bool,
 }
 
 impl ActionSlot {
@@ -169,6 +192,7 @@ impl ActionSlot {
             value,
             active: false,
             hold_start: None,
+            enabled: true,
         }
     }
 
@@ -176,7 +200,49 @@ impl ActionSlot {
     fn kind(&self) -> ActionKind {
         self.decl.kind
     }
+
+    /// Force the action back to its idle value and drop any hold state.
+    fn reset(&mut self) {
+        self.active = false;
+        self.hold_start = None;
+        match &mut self.value {
+            ActionValue::Button(a) => {
+                a.state = ButtonState::Released;
+                a.just_pressed = false;
+                a.just_released = false;
+            }
+            ActionValue::Axis1(a) => a.value = 0.0,
+            ActionValue::Axis2(a) => {
+                a.x = 0.0;
+                a.y = 0.0;
+            }
+        }
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// What can go wrong when mutating an [`ActionMap`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionMapError {
+    /// An action with this name is already declared.
+    DuplicateName(String),
+    /// No action with this name has been declared.
+    UnknownAction(String),
+}
+
+impl std::fmt::Display for ActionMapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateName(name) => write!(f, "duplicate action name: {name}"),
+            Self::UnknownAction(name) => write!(f, "no such action: {name}"),
+        }
+    }
+}
+
+impl std::error::Error for ActionMapError {}
 
 // ---------------------------------------------------------------------------
 // ActionMap
@@ -192,9 +258,6 @@ pub struct ActionMap {
     slots: Vec<ActionSlot>,
     /// name → index into `slots`.
     name_to_idx: HashMap<String, usize>,
-    /// Set of action names that are currently enabled (default: every declared
-    /// action is enabled until explicitly disabled).
-    enabled: HashSet<String>,
 
     // Raw input state -------------------------------------------------------
     held_keys: HashSet<KeyCode>,
@@ -203,7 +266,12 @@ pub struct ActionMap {
     scroll_delta: (f32, f32),
 
     /// Seconds elapsed since creation (advanced by `begin_tick`).
-    elapsed: f32,
+    ///
+    /// `f64` rather than `f32`: an `f32` accumulator quantizes `Held`
+    /// durations after a few hours of uptime and stops advancing entirely
+    /// after about nineteen days, which is well inside a dedicated server's
+    /// lifetime.
+    elapsed: f64,
 }
 
 impl ActionMap {
@@ -213,7 +281,6 @@ impl ActionMap {
         Self {
             slots: Vec::new(),
             name_to_idx: HashMap::new(),
-            enabled: HashSet::new(),
             held_keys: HashSet::new(),
             held_buttons: HashSet::new(),
             mouse_delta: (0.0, 0.0),
@@ -225,46 +292,81 @@ impl ActionMap {
     /// Register an action.  Actions are enabled by default.
     ///
     /// # Panics
-    /// Panics if an action with the same name has already been declared.
+    /// Panics if an action with the same name has already been declared. Use
+    /// [`ActionMap::try_declare`] when the declaration comes from a user config
+    /// file, where a duplicate is a message rather than a crash.
     pub fn declare(&mut self, decl: ActionDecl) {
-        assert!(
-            !self.name_to_idx.contains_key(&decl.name),
-            "duplicate action name: {}",
-            decl.name
-        );
+        if let Err(error) = self.try_declare(decl) {
+            panic!("{error}");
+        }
+    }
+
+    /// Register an action, reporting a duplicate name rather than panicking.
+    ///
+    /// # Errors
+    /// [`ActionMapError::DuplicateName`] if the name is already declared.
+    pub fn try_declare(&mut self, decl: ActionDecl) -> Result<(), ActionMapError> {
+        if self.name_to_idx.contains_key(&decl.name) {
+            return Err(ActionMapError::DuplicateName(decl.name));
+        }
         let idx = self.slots.len();
         self.name_to_idx.insert(decl.name.clone(), idx);
-        self.enabled.insert(decl.name.clone());
         self.slots.push(ActionSlot::new(decl));
+        Ok(())
+    }
+
+    /// Replace an action's bindings in place — the rebind path.
+    ///
+    /// Keeps the action's registration order and enabled flag, and resets its
+    /// value and hold state (the old bindings' "is it down" answer says nothing
+    /// about the new ones). Rebuilding the whole map instead, which was the
+    /// only option before, lost both.
+    ///
+    /// # Errors
+    /// [`ActionMapError::UnknownAction`] if nothing with that name is declared.
+    pub fn rebind(&mut self, name: &str, bindings: Vec<Binding>) -> Result<(), ActionMapError> {
+        let Some(&idx) = self.name_to_idx.get(name) else {
+            return Err(ActionMapError::UnknownAction(name.to_owned()));
+        };
+        let slot = &mut self.slots[idx];
+        slot.decl.bindings = bindings;
+        slot.reset();
+        if slot.enabled {
+            self.resolve_one(idx);
+        }
+        Ok(())
+    }
+
+    /// The bindings currently driving an action, or `None` if it is not
+    /// declared.
+    #[must_use]
+    pub fn bindings(&self, name: &str) -> Option<&[Binding]> {
+        let &idx = self.name_to_idx.get(name)?;
+        Some(&self.slots[idx].decl.bindings)
+    }
+
+    /// Whether an action is enabled. `None` if it is not declared.
+    #[must_use]
+    pub fn is_enabled(&self, name: &str) -> Option<bool> {
+        let &idx = self.name_to_idx.get(name)?;
+        Some(self.slots[idx].enabled)
     }
 
     /// Enable or disable an action by name.  Disabled actions always return
-    /// their default (idle) value and do not react to input.
+    /// their default (idle) value and do not react to input — including across
+    /// [`ActionMap::begin_tick`], which used to re-read the held-key set and
+    /// re-press a disabled action on the very next tick.
     ///
     /// Has no effect if the named action does not exist.
     pub fn set_enabled(&mut self, name: &str, enabled: bool) {
-        if enabled {
-            self.enabled.insert(name.to_owned());
-        } else {
-            self.enabled.remove(name);
+        let Some(&idx) = self.name_to_idx.get(name) else {
+            return;
+        };
+        let slot = &mut self.slots[idx];
+        slot.enabled = enabled;
+        if !enabled {
             // Reset the action to idle so it doesn't stick.
-            if let Some(&idx) = self.name_to_idx.get(name) {
-                let slot = &mut self.slots[idx];
-                slot.active = false;
-                slot.hold_start = None;
-                match &mut slot.value {
-                    ActionValue::Button(a) => {
-                        a.state = ButtonState::Released;
-                        a.just_pressed = false;
-                        a.just_released = false;
-                    }
-                    ActionValue::Axis1(a) => a.value = 0.0,
-                    ActionValue::Axis2(a) => {
-                        a.x = 0.0;
-                        a.y = 0.0;
-                    }
-                }
-            }
+            slot.reset();
         }
     }
 
@@ -277,7 +379,17 @@ impl ActionMap {
         } else {
             self.held_keys.remove(&key);
         }
-        self.resolve_affected_by_key(key);
+        self.resolve_matching(|b| match b {
+            Binding::Key(k) => *k == key,
+            Binding::KeyAxis { negative, positive } => *negative == key || *positive == key,
+            Binding::Wasd {
+                up,
+                down,
+                left,
+                right,
+            } => *up == key || *down == key || *left == key || *right == key,
+            Binding::MouseButton(_) | Binding::MouseMotion | Binding::MouseScroll => false,
+        });
     }
 
     /// Feed a mouse-button event.
@@ -287,21 +399,35 @@ impl ActionMap {
         } else {
             self.held_buttons.remove(&button);
         }
-        self.resolve_affected_by_button(button);
+        self.resolve_matching(|b| matches!(b, Binding::MouseButton(b2) if *b2 == button));
     }
 
     /// Feed mouse motion (delta in pixels since the last event).
+    ///
+    /// Non-finite deltas are dropped: a `NaN` from a driver or a divide-by-zero
+    /// sensitivity would otherwise propagate straight into an action value and
+    /// poison every comparison downstream.
     pub fn mouse_motion(&mut self, dx: f32, dy: f32) {
+        if !dx.is_finite() || !dy.is_finite() {
+            return;
+        }
         self.mouse_delta.0 += dx;
         self.mouse_delta.1 += dy;
-        self.resolve_mouse_motion_actions();
+        self.resolve_matching(|b| matches!(b, Binding::MouseMotion));
     }
 
     /// Feed scroll input (delta in detents or pixels — caller normalises).
+    ///
+    /// Non-finite deltas are dropped, as for [`ActionMap::mouse_motion`];
+    /// `f32::clamp` returns `NaN` for a `NaN` input, so the clamp downstream is
+    /// no defence.
     pub fn mouse_scroll(&mut self, dx: f32, dy: f32) {
+        if !dx.is_finite() || !dy.is_finite() {
+            return;
+        }
         self.scroll_delta.0 += dx;
         self.scroll_delta.1 += dy;
-        self.resolve_mouse_scroll_actions();
+        self.resolve_matching(|b| matches!(b, Binding::MouseScroll));
     }
 
     /// Called at the start of each server tick.
@@ -312,13 +438,22 @@ impl ActionMap {
     /// - Advances the internal clock by `dt` seconds so that [`ButtonState::Held`]
     ///   durations are up-to-date next time a button action is resolved.
     pub fn begin_tick(&mut self, dt: f32) {
-        self.elapsed += dt;
+        if dt.is_finite() {
+            self.elapsed += f64::from(dt);
+        }
         self.mouse_delta = (0.0, 0.0);
         self.scroll_delta = (0.0, 0.0);
 
         // Reset edge flags and re-resolve every action so that Held durations
         // and axis values reflect the new elapsed time and cleared deltas.
+        //
+        // Disabled actions are skipped entirely. Resolving them here re-read
+        // `held_keys` and re-pressed them — so disabling "jump" while Space was
+        // held cleared it, and the next tick emitted `just_pressed` again.
         for i in 0..self.slots.len() {
+            if !self.slots[i].enabled {
+                continue;
+            }
             if let ActionValue::Button(a) = &mut self.slots[i].value {
                 a.reset_edges();
             }
@@ -355,92 +490,17 @@ impl ActionMap {
 
     // -- internal resolution -------------------------------------------------
 
-    /// Re-resolve every action whose bindings include `key`.
-    fn resolve_affected_by_key(&mut self, key: KeyCode) {
-        let indices: Vec<usize> = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter(|(_, slot)| {
-                self.enabled.contains(&slot.decl.name)
-                    && slot.decl.bindings.iter().any(|b| match b {
-                        Binding::Key(k) => *k == key,
-                        Binding::Wasd {
-                            up,
-                            down,
-                            left,
-                            right,
-                        } => *up == key || *down == key || *left == key || *right == key,
-                        _ => false,
-                    })
-            })
-            .map(|(i, _)| i)
-            .collect();
-        for idx in indices {
-            self.resolve_one(idx);
-        }
-    }
-
-    /// Re-resolve every action whose bindings include `button`.
-    fn resolve_affected_by_button(&mut self, button: PointerButton) {
-        let indices: Vec<usize> = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter(|(_, slot)| {
-                self.enabled.contains(&slot.decl.name)
-                    && slot
-                        .decl
-                        .bindings
-                        .iter()
-                        .any(|b| matches!(b, Binding::MouseButton(b2) if *b2 == button))
-            })
-            .map(|(i, _)| i)
-            .collect();
-        for idx in indices {
-            self.resolve_one(idx);
-        }
-    }
-
-    /// Re-resolve actions that depend on mouse motion.
-    fn resolve_mouse_motion_actions(&mut self) {
-        let indices: Vec<usize> = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter(|(_, slot)| {
-                self.enabled.contains(&slot.decl.name)
-                    && slot
-                        .decl
-                        .bindings
-                        .iter()
-                        .any(|b| matches!(b, Binding::MouseMotion))
-            })
-            .map(|(i, _)| i)
-            .collect();
-        for idx in indices {
-            self.resolve_one(idx);
-        }
-    }
-
-    /// Re-resolve actions that depend on mouse scroll.
-    fn resolve_mouse_scroll_actions(&mut self) {
-        let indices: Vec<usize> = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter(|(_, slot)| {
-                self.enabled.contains(&slot.decl.name)
-                    && slot
-                        .decl
-                        .bindings
-                        .iter()
-                        .any(|b| matches!(b, Binding::MouseScroll))
-            })
-            .map(|(i, _)| i)
-            .collect();
-        for idx in indices {
-            self.resolve_one(idx);
+    /// Re-resolve every enabled action with a binding `matches` accepts.
+    ///
+    /// One helper rather than four near-identical bodies, and no `Vec<usize>`
+    /// per event: the enabled flag lives on the slot, so nothing here allocates
+    /// or hashes a `String`.
+    fn resolve_matching(&mut self, matches: impl Fn(&Binding) -> bool) {
+        for i in 0..self.slots.len() {
+            let slot = &self.slots[i];
+            if slot.enabled && slot.decl.bindings.iter().any(&matches) {
+                self.resolve_one(i);
+            }
         }
     }
 
@@ -462,6 +522,9 @@ impl ActionMap {
                     Binding::Key(k) => held_keys.contains(k),
                     Binding::MouseButton(b) => held_buttons.contains(b),
                     Binding::MouseMotion | Binding::MouseScroll => false,
+                    Binding::KeyAxis { negative, positive } => {
+                        held_keys.contains(negative) || held_keys.contains(positive)
+                    }
                     Binding::Wasd {
                         up,
                         down: w_down,
@@ -490,7 +553,7 @@ impl ActionMap {
                         slot.hold_start = Some(elapsed);
                     }
                     (true, true) => {
-                        let duration = elapsed - slot.hold_start.unwrap_or(elapsed);
+                        let duration = (elapsed - slot.hold_start.unwrap_or(elapsed)) as f32;
                         action.state = ButtonState::Held { duration };
                     }
                     (true, false) => {
@@ -514,6 +577,14 @@ impl ActionMap {
                         Binding::Key(k) if held_keys.contains(k) => {
                             value += 1.0;
                         }
+                        Binding::KeyAxis { negative, positive } => {
+                            if held_keys.contains(negative) {
+                                value -= 1.0;
+                            }
+                            if held_keys.contains(positive) {
+                                value += 1.0;
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -527,6 +598,12 @@ impl ActionMap {
                 action.value = value;
             }
             ActionKind::Axis2 => {
+                // The key composite and the pointer delta are accumulated
+                // separately: the composite is normalized so a diagonal is a
+                // unit vector rather than 1.414 long, while a pointer delta is
+                // a pixel count and normalizing it would throw away the speed.
+                let mut key_x: f32 = 0.0;
+                let mut key_y: f32 = 0.0;
                 let mut x: f32 = 0.0;
                 let mut y: f32 = 0.0;
 
@@ -539,16 +616,16 @@ impl ActionMap {
                             right,
                         } => {
                             if held_keys.contains(up) {
-                                y += 1.0;
+                                key_y += 1.0;
                             }
                             if held_keys.contains(w_down) {
-                                y -= 1.0;
+                                key_y -= 1.0;
                             }
                             if held_keys.contains(left) {
-                                x -= 1.0;
+                                key_x -= 1.0;
                             }
                             if held_keys.contains(right) {
-                                x += 1.0;
+                                key_x += 1.0;
                             }
                         }
                         Binding::MouseMotion => {
@@ -558,6 +635,14 @@ impl ActionMap {
                         _ => {}
                     }
                 }
+
+                let len = (key_x * key_x + key_y * key_y).sqrt();
+                if len > 1.0 {
+                    key_x /= len;
+                    key_y /= len;
+                }
+                x += key_x;
+                y += key_y;
 
                 let action = match &mut slot.value {
                     ActionValue::Axis2(a) => a,
@@ -845,18 +930,19 @@ mod tests {
         let v = map.action("move").unwrap();
         assert_eq_axis2(v, 0.0, 1.0);
 
-        // Press D as well → (1, 1).
+        // Press D as well → a *unit* diagonal, not (1, 1).
         map.key_event(KeyCode::KeyD, true);
         let v = map.action("move").unwrap();
-        assert_eq_axis2(v, 1.0, 1.0);
+        let diag = std::f32::consts::FRAC_1_SQRT_2;
+        assert_eq_axis2(v, diag, diag);
 
-        // Release W and D, then press S and A → (−1, −1).
+        // Release W and D, then press S and A → the opposite unit diagonal.
         map.key_event(KeyCode::KeyW, false);
         map.key_event(KeyCode::KeyD, false);
         map.key_event(KeyCode::KeyA, true);
         map.key_event(KeyCode::KeyS, true);
         let v = map.action("move").unwrap();
-        assert_eq_axis2(v, -1.0, -1.0);
+        assert_eq_axis2(v, -diag, -diag);
 
         // Release all.
         map.key_event(KeyCode::KeyD, false);
@@ -1047,6 +1133,264 @@ mod tests {
 
         map.set_enabled("move", false);
         assert_eq_axis2(map.action("move").unwrap(), 0.0, 0.0);
+
+        // …and it must stay zero across ticks. `begin_tick` used to re-resolve
+        // every slot with no enabled check, so the still-held W came straight
+        // back on the next tick.
+        for tick in 0..3 {
+            map.begin_tick(1.0 / 60.0);
+            assert_eq_axis2(map.action("move").unwrap(), 0.0, 0.0);
+            assert!(tick < 3);
+        }
+    }
+
+    /// The same bug for a Button action: disabling "jump" while Space is held
+    /// cleared it, and the very next `begin_tick` re-emitted
+    /// `state: Pressed, just_pressed: true` — a menu opened with gameplay
+    /// disabled still jumped.
+    #[test]
+    fn a_disabled_button_does_not_re_press_itself_on_the_next_tick() {
+        let mut map = ActionMap::new();
+        map.declare(decl_button("jump", Binding::Key(KeyCode::Space)));
+
+        map.key_event(KeyCode::Space, true);
+        map.set_enabled("jump", false);
+
+        for _ in 0..3 {
+            map.begin_tick(1.0 / 60.0);
+            let v = map.action("jump").unwrap();
+            assert!(
+                matches!(
+                    v,
+                    ActionValue::Button(ButtonAction {
+                        state: ButtonState::Released,
+                        just_pressed: false,
+                        just_released: false,
+                    })
+                ),
+                "a disabled action fired anyway: {v:?}"
+            );
+        }
+
+        // Re-enabling with the key still held presses it again, which is the
+        // intended behaviour.
+        map.set_enabled("jump", true);
+        map.begin_tick(1.0 / 60.0);
+        assert!(matches!(
+            map.action("jump").unwrap(),
+            ActionValue::Button(ButtonAction {
+                state: ButtonState::Pressed,
+                just_pressed: true,
+                ..
+            })
+        ));
+    }
+
+    /// `set_enabled` on a name that was never declared used to insert into a
+    /// `HashSet<String>` that nothing ever pruned.
+    #[test]
+    fn set_enabled_on_an_unknown_action_is_a_no_op() {
+        let mut map = ActionMap::new();
+        map.declare(decl_button("jump", Binding::Key(KeyCode::Space)));
+        map.set_enabled("typo-in-the-profile", true);
+        map.set_enabled("typo-in-the-profile", false);
+        assert_eq!(map.is_enabled("typo-in-the-profile"), None);
+        assert_eq!(map.is_enabled("jump"), Some(true));
+        assert_eq!(map.action_names().count(), 1);
+    }
+
+    // -- declare / rebind ---------------------------------------------------
+
+    #[test]
+    fn try_declare_reports_a_duplicate_rather_than_aborting() {
+        let mut map = ActionMap::new();
+        assert!(
+            map.try_declare(decl_button("jump", Binding::Key(KeyCode::Space)))
+                .is_ok()
+        );
+        assert_eq!(
+            map.try_declare(decl_button("jump", Binding::Key(KeyCode::KeyJ))),
+            Err(ActionMapError::DuplicateName("jump".to_owned()))
+        );
+        // The first declaration is untouched.
+        assert_eq!(
+            map.bindings("jump"),
+            Some(&[Binding::Key(KeyCode::Space)][..])
+        );
+    }
+
+    #[test]
+    fn rebind_replaces_bindings_and_keeps_the_enabled_flag() {
+        let mut map = ActionMap::new();
+        map.declare(decl_button("jump", Binding::Key(KeyCode::Space)));
+        map.set_enabled("jump", false);
+
+        map.rebind("jump", vec![Binding::Key(KeyCode::KeyJ)])
+            .expect("declared");
+        assert_eq!(
+            map.bindings("jump"),
+            Some(&[Binding::Key(KeyCode::KeyJ)][..])
+        );
+        assert_eq!(
+            map.is_enabled("jump"),
+            Some(false),
+            "the rebind must not silently re-enable the action"
+        );
+
+        map.set_enabled("jump", true);
+        map.key_event(KeyCode::KeyJ, true);
+        assert!(matches!(
+            map.action("jump").unwrap(),
+            ActionValue::Button(ButtonAction {
+                state: ButtonState::Pressed,
+                ..
+            })
+        ));
+        // The old key no longer does anything.
+        map.begin_tick(0.016);
+        map.key_event(KeyCode::KeyJ, false);
+        map.begin_tick(0.016);
+        map.key_event(KeyCode::Space, true);
+        assert!(matches!(
+            map.action("jump").unwrap(),
+            ActionValue::Button(ButtonAction {
+                state: ButtonState::Released,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rebind_an_unknown_action_errors() {
+        let mut map = ActionMap::new();
+        assert_eq!(
+            map.rebind("nope", vec![]),
+            Err(ActionMapError::UnknownAction("nope".to_owned()))
+        );
+    }
+
+    /// A rebind while the new key is already held resolves immediately.
+    #[test]
+    fn rebind_resolves_against_the_current_held_keys() {
+        let mut map = ActionMap::new();
+        map.declare(decl_button("jump", Binding::Key(KeyCode::Space)));
+        map.key_event(KeyCode::KeyJ, true);
+        map.rebind("jump", vec![Binding::Key(KeyCode::KeyJ)])
+            .expect("declared");
+        assert!(matches!(
+            map.action("jump").unwrap(),
+            ActionValue::Button(ButtonAction {
+                state: ButtonState::Pressed,
+                just_pressed: true,
+                ..
+            })
+        ));
+    }
+
+    // -- Axis1 key pairs ----------------------------------------------------
+
+    /// A single `Key` binding can only ever add +1.0, so a keyboard axis could
+    /// not go negative at all.
+    #[test]
+    fn key_axis_reaches_both_ends_of_the_range() {
+        let mut map = ActionMap::new();
+        map.declare(ActionDecl {
+            name: "throttle".into(),
+            kind: ActionKind::Axis1,
+            bindings: vec![Binding::KeyAxis {
+                negative: KeyCode::KeyS,
+                positive: KeyCode::KeyW,
+            }],
+        });
+
+        assert_eq_axis1(map.action("throttle").unwrap(), 0.0);
+
+        map.key_event(KeyCode::KeyW, true);
+        assert_eq_axis1(map.action("throttle").unwrap(), 1.0);
+
+        // Both held → cancel.
+        map.key_event(KeyCode::KeyS, true);
+        assert_eq_axis1(map.action("throttle").unwrap(), 0.0);
+
+        map.key_event(KeyCode::KeyW, false);
+        assert_eq_axis1(map.action("throttle").unwrap(), -1.0);
+    }
+
+    /// A `KeyAxis` on a `Button` action is "either key is down".
+    #[test]
+    fn key_axis_drives_a_button_from_either_key() {
+        let mut map = ActionMap::new();
+        map.declare(decl_button(
+            "any",
+            Binding::KeyAxis {
+                negative: KeyCode::KeyS,
+                positive: KeyCode::KeyW,
+            },
+        ));
+        map.key_event(KeyCode::KeyS, true);
+        assert!(matches!(
+            map.action("any").unwrap(),
+            ActionValue::Button(ButtonAction {
+                state: ButtonState::Pressed,
+                ..
+            })
+        ));
+    }
+
+    // -- non-finite input ---------------------------------------------------
+
+    /// `mouse_motion(NAN, 1.0)` used to write `Axis2 { x: NaN, y: 1.0 }`
+    /// straight through, and `f32::clamp` returns `NaN` for a `NaN` scroll, so
+    /// the clamp downstream was no defence either.
+    #[test]
+    fn non_finite_deltas_are_dropped_at_the_ingest_boundary() {
+        let mut map = ActionMap::new();
+        map.declare(decl_axis2_mouse("look"));
+        map.declare(decl_axis1_scroll("zoom"));
+
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            map.mouse_motion(bad, 1.0);
+            map.mouse_motion(1.0, bad);
+            map.mouse_scroll(0.0, bad);
+        }
+
+        match map.action("look").unwrap() {
+            ActionValue::Axis2(a) => assert!(
+                a.x.is_finite() && a.y.is_finite(),
+                "look went non-finite: {a:?}"
+            ),
+            other => panic!("expected Axis2, got {other:?}"),
+        }
+        match map.action("zoom").unwrap() {
+            ActionValue::Axis1(a) => {
+                assert!(a.value.is_finite(), "zoom went non-finite: {a:?}");
+            }
+            other => panic!("expected Axis1, got {other:?}"),
+        }
+
+        // Good deltas still land.
+        map.begin_tick(0.016);
+        map.mouse_motion(3.0, -4.0);
+        assert_eq_axis2(map.action("look").unwrap(), 3.0, -4.0);
+    }
+
+    /// A non-finite `dt` must not poison the clock every `Held` duration is
+    /// measured against.
+    #[test]
+    fn a_non_finite_dt_does_not_poison_hold_durations() {
+        let mut map = ActionMap::new();
+        map.declare(decl_button("fire", Binding::Key(KeyCode::KeyF)));
+        map.key_event(KeyCode::KeyF, true);
+        map.begin_tick(f32::NAN);
+        map.begin_tick(2.0);
+
+        let ActionValue::Button(a) = map.action("fire").unwrap() else {
+            panic!("expected Button");
+        };
+        let ButtonState::Held { duration } = a.state else {
+            panic!("expected Held, got {:?}", a.state);
+        };
+        assert!((duration - 2.0).abs() < 0.001, "got {duration}");
     }
 
     // -- action_mut ---------------------------------------------------------
@@ -1332,7 +1676,43 @@ mod tests {
 
         map.key_event(KeyCode::ArrowRight, true);
         map.key_event(KeyCode::ArrowUp, true);
-        assert_eq_axis2(map.action("move").unwrap(), 1.0, 1.0);
+        let diag = std::f32::consts::FRAC_1_SQRT_2;
+        assert_eq_axis2(map.action("move").unwrap(), diag, diag);
+    }
+
+    /// The docs promised a unit vector and the code never normalized, so a
+    /// diagonal was 1.414 long — 41% faster than a cardinal direction.
+    #[test]
+    fn wasd_diagonal_is_not_faster_than_a_cardinal_direction() {
+        let mut map = ActionMap::new();
+        map.declare(decl_axis2_wasd(
+            "move",
+            KeyCode::KeyW,
+            KeyCode::KeyS,
+            KeyCode::KeyA,
+            KeyCode::KeyD,
+        ));
+
+        map.key_event(KeyCode::KeyW, true);
+        let cardinal = axis2_len(map.action("move").unwrap());
+        assert!((cardinal - 1.0).abs() < 0.001, "got {cardinal}");
+
+        map.key_event(KeyCode::KeyD, true);
+        let diagonal = axis2_len(map.action("move").unwrap());
+        assert!(
+            (diagonal - 1.0).abs() < 0.001,
+            "diagonal magnitude {diagonal} should be 1.0"
+        );
+    }
+
+    /// Mouse motion is a pixel delta, not a direction: normalizing it would
+    /// throw away how far the pointer actually moved.
+    #[test]
+    fn mouse_motion_is_not_normalized() {
+        let mut map = ActionMap::new();
+        map.declare(decl_axis2_mouse("look"));
+        map.mouse_motion(30.0, 40.0);
+        assert_eq_axis2(map.action("look").unwrap(), 30.0, 40.0);
     }
 
     // -- assert helpers -----------------------------------------------------
@@ -1347,6 +1727,13 @@ mod tests {
                     a.y
                 );
             }
+            other => panic!("expected Axis2, got {other:?}"),
+        }
+    }
+
+    fn axis2_len(v: &ActionValue) -> f32 {
+        match v {
+            ActionValue::Axis2(a) => (a.x * a.x + a.y * a.y).sqrt(),
             other => panic!("expected Axis2, got {other:?}"),
         }
     }

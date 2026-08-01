@@ -214,18 +214,16 @@ pub fn cube_indices() -> Vec<u32> {
 #[must_use]
 pub fn cube_vertex_bytes() -> Vec<u8> {
     let vertices = cube_vertices();
-    let mut bytes = Vec::with_capacity(vertices.len() * VERTEX_STRIDE);
-    for vertex in &vertices {
-        for value in vertex
-            .position
-            .iter()
-            .chain(&vertex.normal)
-            .chain(&vertex.color)
-        {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    bytes
+    crate::pack_f32_le(
+        vertices.iter().flat_map(|vertex| {
+            vertex
+                .position
+                .iter()
+                .chain(&vertex.normal)
+                .chain(&vertex.color)
+        }),
+        vertices.len() * VERTEX_STRIDE,
+    )
 }
 
 /// [`cube_indices`] as the bytes an index buffer holds.

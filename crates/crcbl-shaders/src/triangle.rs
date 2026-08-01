@@ -74,13 +74,12 @@ pub const VERTICES: [Vertex; 3] = [
 /// a struct of `float4`s and what every target this engine has is.
 #[must_use]
 pub fn vertex_bytes() -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(VERTICES.len() * VERTEX_STRIDE);
-    for vertex in &VERTICES {
-        for value in vertex.position.iter().chain(&vertex.color) {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    bytes
+    crate::pack_f32_le(
+        VERTICES
+            .iter()
+            .flat_map(|vertex| vertex.position.iter().chain(&vertex.color)),
+        VERTICES.len() * VERTEX_STRIDE,
+    )
 }
 
 #[cfg(test)]

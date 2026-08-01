@@ -86,6 +86,22 @@ pub mod triangle;
 
 use std::sync::OnceLock;
 
+/// Little-endian `f32`s in iteration order — what `std430` means for a struct
+/// of `float4`s, and what every target this engine has is.
+///
+/// `mesh` and `triangle` write different vertex structs but the same loop, so
+/// it lives here once rather than once per module.
+pub(crate) fn pack_f32_le<'a>(
+    values: impl IntoIterator<Item = &'a f32>,
+    capacity: usize,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(capacity);
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
 /// Which pipeline stage an entry point is for.
 ///
 /// Deliberately *not* `crcbl_hal::ShaderStages`: this crate has no dependency
@@ -193,11 +209,26 @@ impl Shader {
     ///
     /// This is what `crcbl_hal::ShaderModuleDesc::spirv`
     /// takes.
+    ///
+    /// # Panics
+    ///
+    /// If the embedded artifact's length is not a multiple of four. `build.rs`
+    /// hash-checks every artifact, so this cannot happen for a manifest that
+    /// agrees with the tree — but `chunks_exact` would otherwise *drop* the
+    /// trailing partial word of a truncated `.spv` and hand the driver a
+    /// silently shortened module.
     #[must_use]
     pub fn spirv(&self) -> &[u32] {
         self.words.get_or_init(|| {
-            self.spirv_bytes
-                .chunks_exact(4)
+            let chunks = self.spirv_bytes.chunks_exact(4);
+            assert!(
+                chunks.remainder().is_empty(),
+                "shader `{}`: the committed SPIR-V is {} bytes, which is not a whole number of \
+                 32-bit words — the artifact is truncated",
+                self.name,
+                self.spirv_bytes.len(),
+            );
+            chunks
                 .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
                 .collect()
         })
@@ -207,9 +238,22 @@ impl Shader {
     ///
     /// Returns `""` for shaders that were not compiled to WGSL (pre-P5
     /// artifacts). The wgpu backend uses this rather than SPIR-V.
+    ///
+    /// # Panics
+    ///
+    /// If the embedded artifact is not valid UTF-8. Mapping that to `""`, as
+    /// this used to, turns a corrupt artifact into an empty shader source — and
+    /// an empty source is indistinguishable from "this shader has no WGSL",
+    /// which is a legitimate state.
     #[must_use]
     pub fn wgsl(&self) -> &str {
-        std::str::from_utf8(self.wgsl_bytes).unwrap_or("")
+        match std::str::from_utf8(self.wgsl_bytes) {
+            Ok(text) => text,
+            Err(error) => panic!(
+                "shader `{}`: the committed WGSL artifact is not valid UTF-8 ({error})",
+                self.name
+            ),
+        }
     }
 
     /// Every entry point the module exposes.
