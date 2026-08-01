@@ -113,6 +113,20 @@
 //! per-backend mapping, and note that poll-shaped is also what makes topic 03's
 //! "N frames latent" debug readback expressible at all.
 //!
+//! # Decision: device creation is polled too
+//!
+//! [`Instance::request_device`] returns a [`PendingDevice`] whose
+//! [`poll`](PendingDevice::poll) yields
+//! [`Pending`](DeviceRequestState::Pending) or the finished
+//! [`Box<dyn Device>`](Device) — deliberately the same request/poll pair as
+//! readback, because it is the same problem: WebGPU's `requestDevice` is a
+//! promise and the browser main thread cannot block on it. `crcbl-vk` completes
+//! on its first poll, `crcbl-wgpu` drives the real future, and [`null`] can be
+//! told to take N polls so a caller's loop is testable with no GPU.
+//! [`Instance::create_device`] remains as the blocking wrapper **on native
+//! only** — it is `#[cfg]`-ed out of `wasm32` builds so a browser caller gets a
+//! compile error instead of a run-time refusal. See [`device`] for the argument.
+//!
 //! # Object lifetimes are a stated contract, not an inference
 //!
 //! [`Instance::create_device`] returns `Box<dyn Device>`, which is `'static`,
@@ -212,7 +226,9 @@ pub use command::{
     DepthStencilAttachment, DrawIndirect, DrawIndirectCount, ImageBarrier, ImageCopy, LoadOp,
     QueueTransfer, RenderPassDesc, ResourceState, StoreOp, depth,
 };
-pub use device::{Device, DeviceDesc, Instance, Queue, QueueHandle, QueueKind};
+pub use device::{
+    Device, DeviceDesc, DeviceRequestState, Instance, PendingDevice, Queue, QueueHandle, QueueKind,
+};
 pub use error::{HalError, SurfaceError};
 pub use format::{Format, IndexFormat};
 pub use pipeline::{

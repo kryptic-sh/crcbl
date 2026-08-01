@@ -40,12 +40,90 @@ impl std::fmt::Debug for WgpuDevice {
     }
 }
 
+/// The `requestDevice` future, boxed so a [`WgpuPendingDevice`] can outlive the
+/// call that started it.
+///
+/// `Send` on native (`HalThreadSafe` demands it, and wgpu's future is
+/// `WasmNotSend`), unbounded on wasm32 where the web types are `!Send`.
+#[cfg(not(target_arch = "wasm32"))]
+type DeviceFuture = std::pin::Pin<
+    Box<dyn Future<Output = Result<(wgpu::Device, wgpu::Queue), wgpu::RequestDeviceError>> + Send>,
+>;
+
+/// See the native [`DeviceFuture`].
+#[cfg(target_arch = "wasm32")]
+type DeviceFuture = std::pin::Pin<
+    Box<dyn Future<Output = Result<(wgpu::Device, wgpu::Queue), wgpu::RequestDeviceError>>>,
+>;
+
+/// A wgpu device request in flight: the `requestDevice` future plus everything
+/// needed to build the [`WgpuDevice`] once it resolves.
+///
+/// The whole reason the seam is poll-shaped. On the web `requestDevice` returns
+/// a `Promise` that resolves on a later turn of the event loop, and the main
+/// thread — where the rAF loop lives — must not block on it. Each
+/// [`poll`](crcbl_hal::PendingDevice::poll) polls the future once with a no-op
+/// waker: the promise is driven by the browser's own event loop, so the waker
+/// has nothing to do and the next poll simply observes the result. On native the
+/// future is `core::future::ready`, so the first poll completes.
+pub(crate) struct WgpuPendingDevice {
+    /// `None` once the device has been handed over, so a second poll is the
+    /// caller bug it is rather than a second device.
+    future: Lock<Option<DeviceFuture>>,
+    surfaces: Shared<Lock<Pool<SurfaceSlot>>>,
+}
+
+impl std::fmt::Debug for WgpuPendingDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WgpuPendingDevice").finish_non_exhaustive()
+    }
+}
+
+impl crcbl_hal::PendingDevice for WgpuPendingDevice {
+    fn backend(&self) -> BackendKind {
+        BackendKind::Wgpu
+    }
+
+    fn poll(&mut self) -> Result<crcbl_hal::DeviceRequestState, HalError> {
+        let mut slot = self.future.lock().unwrap();
+        let Some(future) = slot.as_mut() else {
+            return Err(HalError::InvalidDescriptor(
+                "this device request already produced its device".to_string(),
+            ));
+        };
+        // A no-op waker is correct here and not a shortcut: nothing in this
+        // engine parks a thread on this future. Native completes on the first
+        // poll; on the web the `Promise`'s `then` callback runs on the browser's
+        // microtask queue whether or not a waker was registered, so the poll
+        // after it lands sees the result. The caller's rAF loop is the executor.
+        let waker = core::task::Waker::noop();
+        let mut cx = core::task::Context::from_waker(waker);
+        match future.as_mut().poll(&mut cx) {
+            core::task::Poll::Pending => Ok(crcbl_hal::DeviceRequestState::Pending),
+            core::task::Poll::Ready(result) => {
+                *slot = None;
+                let (device, queue) = result.map_err(|error| {
+                    HalError::DeviceLost(format!("wgpu device creation failed: {error}"))
+                })?;
+                drop(slot);
+                let device = WgpuDevice::from_open(device, queue, self.surfaces.clone());
+                Ok(crcbl_hal::DeviceRequestState::Ready(Box::new(device)))
+            }
+        }
+    }
+}
+
 impl WgpuDevice {
-    pub(crate) fn new(
+    /// Starts opening a device, returning as soon as the request is in flight.
+    ///
+    /// Everything decidable without the driver — a missing required feature —
+    /// is decided here, per the seam's contract; only the open itself is
+    /// deferred.
+    pub(crate) fn request(
         adapter: &wgpu::Adapter,
         desc: &DeviceDesc<'_>,
         surfaces: Shared<Lock<Pool<SurfaceSlot>>>,
-    ) -> Result<Self, HalError> {
+    ) -> Result<WgpuPendingDevice, HalError> {
         let advertised = crate::instance::adapter_caps(adapter);
         let missing = advertised.missing(desc.required_features);
         if !missing.is_empty() {
@@ -65,16 +143,28 @@ impl WgpuDevice {
             required_limits.max_immediate_size = 0;
         }
 
-        let (device, queue) = open_device(
-            adapter,
-            &wgpu::DeviceDescriptor {
-                label: desc.label,
-                required_features,
-                required_limits,
-                ..Default::default()
-            },
-        )?;
+        // The borrow of `adapter` and of `desc.label` ends with this call:
+        // wgpu's future owns everything it needs, which is what lets the
+        // returned `PendingDevice` be `'static`.
+        let future = adapter.request_device(&wgpu::DeviceDescriptor {
+            label: desc.label,
+            required_features,
+            required_limits,
+            ..Default::default()
+        });
 
+        Ok(WgpuPendingDevice {
+            future: Lock::new(Some(Box::pin(future))),
+            surfaces,
+        })
+    }
+
+    /// Wraps an opened wgpu device and its queue.
+    fn from_open(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        surfaces: Shared<Lock<Pool<SurfaceSlot>>>,
+    ) -> Self {
         // What the device *has*, not what was asked for: an optional feature
         // the caller did not request is simply not in `enabled`, and one that
         // needs no enabling at all (compute, debug markers) is always there.
@@ -86,14 +176,20 @@ impl WgpuDevice {
             limits: crate::instance::hal_limits_for(&device.limits(), enabled),
         };
 
-        Ok(Self {
+        Self {
             device,
             queue,
             caps,
             enabled,
-            graphics_queue: QueueHandle::from_bits(1).expect("handle 1 is valid"),
+            // A handle's high 32 bits are its generation and zero is the "never
+            // issued" sentinel, so the synthesised queue handle needs a
+            // non-zero one — `from_bits(1)` is index 1, generation 0, which is
+            // no handle at all and panicked on the first real device this
+            // backend ever opened. Index 0, generation 1, exactly as
+            // `crcbl_hal::null` synthesises its own queue handles.
+            graphics_queue: QueueHandle::from_bits(1 << 32).expect("generation 1 is non-zero"),
             pools: Shared::new(Pools::new(surfaces)),
-        })
+        }
     }
 
     fn unsupported(what: &'static str) -> HalError {
@@ -1106,33 +1202,6 @@ impl WgpuDevice {
     }
 }
 
-/// Opens the wgpu device.
-///
-/// `Instance::create_device` is synchronous and `request_device` is a future.
-/// Blocking on it is correct on a native thread and forbidden on the browser
-/// main thread, so wasm32 gets an honest refusal rather than a deadlock — see
-/// the crate docs for the rest of that gap.
-#[cfg(not(target_arch = "wasm32"))]
-fn open_device(
-    adapter: &wgpu::Adapter,
-    descriptor: &wgpu::DeviceDescriptor<'_>,
-) -> Result<(wgpu::Device, wgpu::Queue), HalError> {
-    pollster::block_on(adapter.request_device(descriptor))
-        .map_err(|e| HalError::DeviceLost(format!("wgpu device creation failed: {e}")))
-}
-
-/// See the native [`open_device`].
-#[cfg(target_arch = "wasm32")]
-fn open_device(
-    _adapter: &wgpu::Adapter,
-    _descriptor: &wgpu::DeviceDescriptor<'_>,
-) -> Result<(wgpu::Device, wgpu::Queue), HalError> {
-    Err(WgpuDevice::unsupported(
-        "opening a device on wasm32: the seam's create_device is synchronous and the browser main \
-         thread cannot block on requestDevice",
-    ))
-}
-
 /// `ImageSubresourceRange::ALL` → wgpu's "all remaining", which is `None`.
 fn remaining(count: u32) -> Option<u32> {
     (count != hal::ImageSubresourceRange::ALL).then_some(count)
@@ -1173,5 +1242,107 @@ mod tests {
         assert_eq!(remaining(hal::ImageSubresourceRange::ALL), None);
         assert_eq!(remaining(1), Some(1));
         assert_eq!(remaining(0), Some(0));
+    }
+
+    /// The seam's thread-safety marker is `Send + Sync` on native, and a
+    /// `PendingDevice` has to satisfy it like every other trait object. The
+    /// boxed `requestDevice` future is `Send` but not `Sync`, which is exactly
+    /// why it lives behind [`Lock`] — if that wrapper is ever removed, this
+    /// stops compiling instead of failing at the `Box<dyn PendingDevice>` coercion
+    /// in `WgpuInstance::request_device`.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_pending_device_is_thread_safe_on_native() {
+        fn assert_thread_safe<T: Send + Sync>() {}
+        assert_thread_safe::<WgpuPendingDevice>();
+    }
+
+    /// And it is a `PendingDevice` — the coercion the instance performs, made
+    /// explicit so a signature drift is a compile error here rather than an
+    /// error inside `instance.rs`.
+    #[test]
+    fn a_pending_device_is_a_seam_pending_device() {
+        fn boxes(_: fn(WgpuPendingDevice) -> Box<dyn crcbl_hal::PendingDevice>) {}
+        boxes(|pending| Box::new(pending));
+    }
+
+    /// Adapterless machines run this too: with no wgpu adapter there is nothing
+    /// to request, and the test says so rather than silently passing. With one,
+    /// the **polled** path — never `create_device` — must produce a working
+    /// device, because that is the path the browser will take.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn the_polled_path_opens_a_real_device_when_an_adapter_exists() {
+        use crcbl_hal::Instance as _;
+
+        let Some(instance) = crate::create_native() else {
+            // No adapter in this environment; `crcbl-wgpu`'s own suite must not
+            // fail for that, and CI covers the adapter case on lavapipe. Say so
+            // out loud: a check that silently did not run is not a check.
+            eprintln!("SKIPPED: no wgpu adapter here, so the polled open was not exercised");
+            return;
+        };
+        let adapters = instance.adapters();
+        assert!(!adapters.is_empty(), "create_native returned Some");
+
+        let mut pending = instance
+            .request_device(&hal::DeviceDesc {
+                label: Some("polled"),
+                adapter: adapters[0].id,
+                required_features: hal::Features::empty(),
+                optional_features: hal::Features::empty(),
+                compatible_surface: None,
+            })
+            .expect("an adapter that enumerated can be asked for a device");
+
+        let mut polls = 0;
+        let device = loop {
+            polls += 1;
+            assert!(polls < 1024, "the native future must complete promptly");
+            match pending.poll().expect("polling a healthy request") {
+                hal::DeviceRequestState::Pending => {}
+                hal::DeviceRequestState::Ready(device) => break device,
+            }
+        };
+        assert_eq!(device.backend(), BackendKind::Wgpu);
+        assert_eq!(
+            device.caps().tier(),
+            hal::RendererTier::B,
+            "wgpu has no buffer device address"
+        );
+
+        // The device it produced is real, not a token.
+        let buffer = device
+            .create_buffer(&hal::BufferDesc {
+                label: Some("from a polled wgpu device"),
+                size: 256,
+                usage: hal::BufferUsage::STORAGE,
+                memory: hal::MemoryLocation::DeviceLocal,
+            })
+            .expect("a polled device creates resources");
+        device.destroy_buffer(buffer);
+
+        // And the request is spent.
+        assert!(pending.poll().is_err(), "the device was already taken");
+    }
+
+    /// An adapter index the instance never issued is refused by
+    /// `request_device` itself, not deferred to a poll — the seam's rule that
+    /// only what depends on the driver answering may be late.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn an_unknown_adapter_is_refused_before_any_poll() {
+        use crcbl_hal::Instance as _;
+
+        let Some(instance) = crate::create_native() else {
+            eprintln!("SKIPPED: no wgpu adapter here, so request_device was not exercised");
+            return;
+        };
+        let bogus = hal::AdapterId(u32::from(u16::MAX));
+        match instance.request_device(&hal::DeviceDesc::for_adapter(bogus)) {
+            Err(HalError::NoSuchAdapter(index)) => assert_eq!(index, bogus.0),
+            Err(other) => panic!("wrong error: {other}"),
+            Ok(_) => panic!("an adapter that does not exist must not be requestable"),
+        }
     }
 }

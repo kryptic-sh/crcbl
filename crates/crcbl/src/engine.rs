@@ -315,6 +315,103 @@ pub struct GpuContext {
     signals: Vec<SemaphoreSignal>,
 }
 
+/// How far [`PendingGpuContext`] has got.
+///
+/// Exactly the two steps that can take longer than an instant, in order: the
+/// backend instance (adapter enumeration is a promise on the web) and then the
+/// device (`requestDevice` is a promise everywhere). Everything between them —
+/// surface creation, surface-aware adapter selection, format and present-mode
+/// choice — is synchronous on every backend and happens in one step when the
+/// instance lands.
+#[derive(Debug)]
+enum OpenStage {
+    Instance(crate::backend::PendingInstance),
+    Device {
+        instance: Box<dyn Instance>,
+        surface: SurfaceHandle,
+        config: SwapchainConfig,
+        pending: Box<dyn crcbl_hal::PendingDevice>,
+    },
+    /// The context has been handed over, or a step failed.
+    Done,
+}
+
+/// A [`GpuContext`] being opened, one poll at a time.
+///
+/// From [`GpuContext::request_open`]. Poll it until it yields; see
+/// [`crcbl_hal::device`] for why start-up is shaped this way rather than
+/// blocking, and [`crate::backend`] for the instance half of it.
+///
+/// Dropping one mid-flight abandons the open. The surface, if one was already
+/// created, is destroyed with the instance — the same teardown obligation
+/// [`GpuContext::destroy`] discharges, except that no swapchain exists yet.
+#[derive(Debug)]
+pub struct PendingGpuContext {
+    stage: OpenStage,
+    target: crcbl_hal::SurfaceTarget,
+    extent: (u32, u32),
+    label: String,
+    required_features: Features,
+    optional_features: Features,
+}
+
+impl PendingGpuContext {
+    /// Advances the open. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if no backend opened, if the backend exposes no adapter, no
+    /// graphics queue or no surface format, or if any HAL call failed. Polling
+    /// after the context was handed over is a caller bug and reports
+    /// [`GpuError::Unusable`].
+    pub fn poll(&mut self) -> Result<Option<GpuContext>, GpuError> {
+        loop {
+            match core::mem::replace(&mut self.stage, OpenStage::Done) {
+                OpenStage::Instance(mut pending) => {
+                    let Some(instance) = pending.poll()? else {
+                        self.stage = OpenStage::Instance(pending);
+                        return Ok(None);
+                    };
+                    // The stage is left `Done` if this fails, which is what
+                    // makes a failed open stay failed rather than retrying a
+                    // half-built context on the next frame.
+                    self.stage = GpuContext::start_device(
+                        instance,
+                        &self.target,
+                        self.extent,
+                        &self.label,
+                        self.required_features,
+                        self.optional_features,
+                    )?;
+                }
+                OpenStage::Device {
+                    instance,
+                    surface,
+                    config,
+                    mut pending,
+                } => match pending.poll()? {
+                    crcbl_hal::DeviceRequestState::Pending => {
+                        self.stage = OpenStage::Device {
+                            instance,
+                            surface,
+                            config,
+                            pending,
+                        };
+                        return Ok(None);
+                    }
+                    crcbl_hal::DeviceRequestState::Ready(device) => {
+                        return GpuContext::finish(instance, surface, config, device, self.extent)
+                            .map(Some);
+                    }
+                },
+                OpenStage::Done => {
+                    return Err(GpuError::Unusable("this GPU context was already opened"));
+                }
+            }
+        }
+    }
+}
+
 impl GpuContext {
     /// Creates an instance, a surface for `window`, a device and a swapchain.
     ///
@@ -332,20 +429,49 @@ impl GpuContext {
         extent: (u32, u32),
         desc: &GpuContextDesc<'_>,
     ) -> Result<Self, GpuError> {
+        let mut pending = Self::request_open(shell, window, extent, desc)?;
+        loop {
+            if let Some(context) = pending.poll()? {
+                return Ok(context);
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    /// Starts opening the instance, surface, device and swapchain, without
+    /// blocking.
+    ///
+    /// The non-blocking form of [`open`](Self::open), and the only one a browser
+    /// can use: both halves of start-up that a browser defers — adapter
+    /// enumeration and `requestDevice` — are promises there. Poll the returned
+    /// [`PendingGpuContext`] once per rAF frame until it yields.
+    ///
+    /// The window must stay alive from this call until the context is destroyed,
+    /// which is the same obligation [`open`](Self::open) already carries; the
+    /// surface is created part-way through, once an instance exists.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the registry has no such backend or the window went away
+    /// before its surface could be described. Everything else is reported from
+    /// [`PendingGpuContext::poll`].
+    pub fn request_open<S: Shell + ?Sized>(
+        shell: &S,
+        window: WindowId,
+        extent: (u32, u32),
+        desc: &GpuContextDesc<'_>,
+    ) -> Result<PendingGpuContext, GpuError> {
         // The line that used to name `NullInstance`. It now names a *value*
         // from a registry, which is the whole difference between "the sample
         // knows about Vulkan" and "the sample knows there are backends".
-        let instance: Box<dyn Instance> = match desc.backend {
-            Some(backend) => crate::backend::open_backend(backend)?,
-            None => crate::backend::open()?,
+        let instance = match desc.backend {
+            Some(backend) => crate::backend::request_open_backend(backend)?,
+            None => crate::backend::request_open()?,
         };
 
-        let adapters = instance.adapters();
-        if adapters.is_empty() {
-            return Err(GpuError::Unusable("no adapter"));
-        }
-
         // The join. `shell` produced this; only a HAL backend looks inside it.
+        // Taken now rather than at poll time so the shell is not borrowed for
+        // the whole of start-up.
         let target = shell
             .surface_target(window)
             .map_err(|_| GpuError::Unusable("the window went away before its surface was made"))?;
@@ -354,12 +480,38 @@ impl GpuContext {
             target.platform_name()
         );
 
-        // SAFETY: `target` was produced by `shell` for a window that is live
-        // right now, so every handle in it names an object of the stated kind.
-        // The caller keeps the shell — and therefore the window — alive until
-        // after `destroy`, which tears the swapchain and surface down first.
-        // This is the whole `Instance::create_surface` contract.
-        let surface = unsafe { instance.create_surface(&target) }?;
+        Ok(PendingGpuContext {
+            stage: OpenStage::Instance(instance),
+            target,
+            extent,
+            label: desc.label.to_string(),
+            required_features: desc.required_features,
+            optional_features: desc.optional_features,
+        })
+    }
+
+    /// Creates the surface, picks an adapter and starts the device request.
+    fn start_device(
+        instance: Box<dyn Instance>,
+        target: &crcbl_hal::SurfaceTarget,
+        extent: (u32, u32),
+        label: &str,
+        required_features: Features,
+        optional_features: Features,
+    ) -> Result<OpenStage, GpuError> {
+        let adapters = instance.adapters();
+        if adapters.is_empty() {
+            return Err(GpuError::Unusable("no adapter"));
+        }
+
+        // SAFETY: `target` was produced by the caller's shell for a window that
+        // must still be live — `request_open` documents that obligation and it
+        // is the same one `open` has always carried — so every handle in it
+        // names an object of the stated kind. The caller keeps the shell, and
+        // therefore the window, alive until after `destroy`, which tears the
+        // swapchain and surface down first. This is the whole
+        // `Instance::create_surface` contract.
+        let surface = unsafe { instance.create_surface(target) }?;
 
         // **Adapter selection is surface-aware, and has to be.** P1.1 found a
         // discrete radv GPU that enumerates first, is Tier A, and *cannot
@@ -418,17 +570,6 @@ impl GpuContext {
             .saturating_add(1)
             .min(caps.max_image_count);
 
-        let device = instance.create_device(&DeviceDesc {
-            label: Some(desc.label),
-            adapter: adapter.id,
-            required_features: desc.required_features,
-            optional_features: desc.optional_features,
-            compatible_surface: Some(surface),
-        })?;
-        let queue = device
-            .queue(QueueKind::Graphics)
-            .ok_or(GpuError::Unusable("no graphics queue"))?;
-
         let config = SwapchainConfig {
             label: "crcbl swapchain",
             format,
@@ -436,7 +577,40 @@ impl GpuContext {
             image_count,
             present_mode,
         };
+
+        // The one call that may take more than an instant. On the web it is a
+        // promise; here it is a `PendingDevice` the caller polls.
+        let pending = instance.request_device(&DeviceDesc {
+            label: Some(label),
+            adapter: adapter.id,
+            required_features,
+            optional_features,
+            compatible_surface: Some(surface),
+        })?;
+
+        Ok(OpenStage::Device {
+            instance,
+            surface,
+            config,
+            pending,
+        })
+    }
+
+    /// Builds the context once the device has arrived.
+    fn finish(
+        instance: Box<dyn Instance>,
+        surface: SurfaceHandle,
+        config: SwapchainConfig,
+        device: Box<dyn Device>,
+        extent: (u32, u32),
+    ) -> Result<Self, GpuError> {
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .ok_or(GpuError::Unusable("no graphics queue"))?;
+
         let swapchain = device.create_swapchain(&config.desc(surface))?;
+        let (format, present_mode, image_count) =
+            (config.format, config.present_mode, config.image_count);
         log::info!(
             "hal: swapchain {}x{} {format:?} {present_mode:?} ({image_count} images)",
             extent.0,
@@ -935,6 +1109,57 @@ mod tests {
         let first = clock.advance();
         let second = clock.advance();
         assert!(second >= first);
+    }
+
+    /// The browser's start-up shape, driven on a headless shell with the null
+    /// backend: `request_open` never blocks, and polling it produces exactly
+    /// the context `open` would have produced.
+    ///
+    /// `open` itself is this loop with a `yield_now` in it, so a break in the
+    /// state machine breaks both — which is the point of having only one.
+    #[test]
+    fn a_gpu_context_can_be_opened_by_polling_instead_of_blocking() {
+        use crcbl_shell::{HeadlessShell, WindowDesc};
+
+        let mut shell = HeadlessShell::new();
+        let window = shell
+            .create_window(&WindowDesc::default())
+            .expect("headless always creates a window");
+
+        let mut pending = GpuContext::request_open(
+            &shell,
+            window,
+            (320, 240),
+            &GpuContextDesc {
+                label: "polled open",
+                backend: Some(GpuBackend::Null),
+                ..GpuContextDesc::default()
+            },
+        )
+        .expect("the null backend is always registered");
+
+        let mut polls = 0;
+        let mut gpu = loop {
+            polls += 1;
+            assert!(polls < 64, "the null backend must not poll forever");
+            if let Some(context) = pending.poll().expect("nothing here can fail") {
+                break context;
+            }
+        };
+        assert_eq!(gpu.extent(), (320, 240));
+        assert_eq!(
+            gpu.device().backend(),
+            crcbl_hal::BackendKind::Null,
+            "the backend asked for by value is the one that opened"
+        );
+
+        // Polling a spent request is a caller bug, not a second context.
+        let error = pending.poll().expect_err("the context was already taken");
+        assert!(matches!(error, GpuError::Unusable(_)), "{error}");
+
+        gpu.drain().expect("nothing was submitted");
+        gpu.destroy()
+            .expect("teardown is in the seam's stated order");
     }
 
     #[test]

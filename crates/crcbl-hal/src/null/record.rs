@@ -578,6 +578,9 @@ pub(super) struct State {
     /// How many `poll_readback` calls report `Pending` before a request
     /// completes. See [`Recorder::set_readback_latency`].
     pub(super) readback_latency: u32,
+    /// How many `PendingDevice::poll` calls report `Pending` before a device
+    /// request completes. See [`Recorder::set_device_latency`].
+    pub(super) device_latency: u32,
 }
 
 impl State {
@@ -587,6 +590,7 @@ impl State {
             events: Vec::new(),
             validation: Vec::new(),
             readback_latency: 0,
+            device_latency: 0,
         }
     }
 
@@ -799,6 +803,25 @@ impl Recorder {
     /// Applies to readbacks requested after this call. Default `0`.
     pub fn set_readback_latency(&self, polls: u32) {
         self.lock().readback_latency = polls;
+    }
+
+    /// Makes the next device requests report
+    /// [`Pending`](crate::DeviceRequestState::Pending) `polls` times before
+    /// handing over the device.
+    ///
+    /// The sibling of [`set_readback_latency`](Self::set_readback_latency), and
+    /// there for the same reason: the null backend opens a device instantly, so
+    /// a request would otherwise be ready on its first poll and a caller's
+    /// **poll loop** — the rAF-driven start-up path that
+    /// `docs/plan/10-wasm-webgpu.md` needs — would never be exercised. Setting a
+    /// latency simulates WebGPU's deferred `requestDevice` promise on a machine
+    /// with no browser and no GPU.
+    ///
+    /// Applies to devices requested after this call. Default `0`, which is what
+    /// [`Instance::create_device`](crate::Instance::create_device) sees: it
+    /// completes on the first poll.
+    pub fn set_device_latency(&self, polls: u32) {
+        self.lock().device_latency = polls;
     }
 
     /// Records a validation error. Used by the backend; exposed so a test can

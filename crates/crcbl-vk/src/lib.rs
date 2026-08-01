@@ -1,10 +1,16 @@
 //! Vulkan implementation of the [`crcbl-hal`](crcbl_hal) seam.
 //!
 //! ```text
-//! VkInstance::open() ──▶ adapters() ──▶ create_device() ──▶ Box<dyn Device>
-//!        │                                                       │
+//! VkInstance::open() ──▶ adapters() ──▶ request_device() ──▶ poll() ──▶ Box<dyn Device>
+//!        │                                                                  │
 //!        └── create_surface(SurfaceTarget) ──▶ SurfaceHandle ──▶ swapchain
 //! ```
+//!
+//! `vkCreateDevice` is synchronous, so `request_device` does the work and the
+//! first `poll` hands the device over; the seam is poll-shaped for WebGPU's
+//! sake (`crcbl_hal::device`) and this backend does not fake latency for it.
+//! `Instance::create_device` — the blocking wrapper the seam still provides on
+//! native — therefore behaves exactly as it always did here.
 //!
 //! Nothing above the seam names a type from this crate: the sandbox and the
 //! renderer hold `Box<dyn Instance>` and `Box<dyn Device>`, and the only place

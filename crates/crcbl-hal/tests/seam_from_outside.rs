@@ -28,14 +28,14 @@ use crcbl_hal::null::{Command, NullInstance, ObjectKind, Recorder};
 use crcbl_hal::{
     AdapterInfo, Barriers, BufferBarrier, BufferDesc, BufferHandle, BufferUsage, ClearValue,
     ColorAttachment, ColorTargetState, CommandBufferHandle, CommandEncoder, CommandEncoderDesc,
-    DepthStencilAttachment, DepthStencilState, Device, DeviceCaps, DeviceDesc, DrawIndirect,
-    DrawIndirectCount, Extent3d, Features, Format, GraphicsPipelineDesc, GraphicsPipelineHandle,
-    HalError, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
-    ImageViewHandle, ImageViewType, Instance, LoadOp, MemoryLocation, MultisampleState,
-    PresentInfo, PresentMode, PrimitiveState, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle,
-    ReadbackState, Rect2d, RenderPassDesc, RendererTier, ShaderEntry, ShaderModuleDesc,
-    ShaderModuleHandle, StoreOp, SubmitInfo, SurfaceCaps, SurfaceHandle, SurfaceTarget,
-    SwapchainDesc, SwapchainHandle, Viewport, depth,
+    DepthStencilAttachment, DepthStencilState, Device, DeviceCaps, DeviceDesc, DeviceRequestState,
+    DrawIndirect, DrawIndirectCount, Extent3d, Features, Format, GraphicsPipelineDesc,
+    GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType,
+    ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType, Instance, LoadOp, MemoryLocation,
+    MultisampleState, PendingDevice, PresentInfo, PresentMode, PrimitiveState, QueueHandle,
+    QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState, Rect2d, RenderPassDesc, RendererTier,
+    ShaderEntry, ShaderModuleDesc, ShaderModuleHandle, StoreOp, SubmitInfo, SurfaceCaps,
+    SurfaceHandle, SurfaceTarget, SwapchainDesc, SwapchainHandle, Viewport, depth,
 };
 
 /// A minimal valid SPIR-V header — magic word plus version.
@@ -645,4 +645,135 @@ fn a_device_outlives_the_instance_that_made_it() {
         })
         .expect("the device is still usable");
     device.destroy_buffer(buffer);
+}
+
+// ---------------------------------------------------------------------------
+// Polled device creation (P5.4)
+// ---------------------------------------------------------------------------
+
+/// The browser's start-up path, with no browser: request a device, get
+/// `Pending` for a few frames, then get the device — and it works.
+///
+/// This is the device-creation twin of the readback poll loop above, and it
+/// exists for the same reason: `create_device` blocks, and a `create_device`
+/// that a caller could not avoid would be unimplementable on wasm32. A test
+/// that only ever called the blocking wrapper would never once execute the
+/// `Pending` arm.
+#[test]
+fn a_device_request_can_take_several_polls_and_still_produce_a_working_device() {
+    let recorder = Recorder::new();
+    let instance: Box<dyn Instance> =
+        Box::new(NullInstance::tier_a().with_recorder(recorder.clone()));
+    let adapters: Vec<AdapterInfo> = instance.adapters();
+
+    // Make the backend behave like a browser: `requestDevice` does not resolve
+    // on the frame it was asked on.
+    recorder.set_device_latency(3);
+
+    let mut pending: Box<dyn PendingDevice> = instance
+        .request_device(&DeviceDesc::for_adapter(adapters[0].id))
+        .expect("the request itself is accepted immediately");
+    assert_eq!(pending.backend(), crcbl_hal::BackendKind::Null);
+
+    let mut polls = 0;
+    let device: Box<dyn Device> = loop {
+        polls += 1;
+        assert!(polls < 16, "the request never completed");
+        match pending.poll().expect("polling a healthy request") {
+            DeviceRequestState::Pending => {}
+            DeviceRequestState::Ready(device) => break device,
+        }
+    };
+    assert_eq!(polls, 4, "three Pending polls, then the device");
+
+    // And it is a real device, not a token.
+    let buffer: BufferHandle = device
+        .create_buffer(&BufferDesc {
+            label: Some("from a polled device"),
+            size: 256,
+            usage: BufferUsage::STORAGE,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("the polled device creates resources");
+    device.destroy_buffer(buffer);
+    assert_eq!(recorder.live_objects(ObjectKind::Buffer), 0);
+}
+
+/// A backend whose creation is instant completes on the **first** poll, which
+/// is what `crcbl-vk` does and what the blocking wrapper depends on.
+#[test]
+fn a_request_with_no_latency_is_ready_at_once() {
+    let instance: Box<dyn Instance> = Box::new(NullInstance::tier_b());
+    let adapters: Vec<AdapterInfo> = instance.adapters();
+    let mut pending: Box<dyn PendingDevice> = instance
+        .request_device(&DeviceDesc {
+            label: Some("tier b"),
+            adapter: adapters[0].id,
+            required_features: Features::empty(),
+            optional_features: Features::COMPUTE,
+            compatible_surface: None,
+        })
+        .expect("request");
+    let state = pending.poll().expect("poll");
+    assert!(state.is_ready(), "nothing to wait for, so nothing waits");
+    let device: Box<dyn Device> = state.into_device().expect("ready carries the device");
+    assert_eq!(device.caps().tier(), RendererTier::B);
+}
+
+/// The device leaves the request exactly once. A second poll is a caller bug
+/// and says so rather than handing out a second device.
+#[test]
+fn polling_a_completed_request_is_an_error_not_a_second_device() {
+    let instance: Box<dyn Instance> = Box::new(NullInstance::tier_a());
+    let adapters: Vec<AdapterInfo> = instance.adapters();
+    let mut pending: Box<dyn PendingDevice> = instance
+        .request_device(&DeviceDesc::for_adapter(adapters[0].id))
+        .expect("request");
+    assert!(pending.poll().expect("first poll").is_ready());
+    let error: HalError = pending.poll().expect_err("the device was already taken");
+    assert!(
+        matches!(error, HalError::InvalidDescriptor(_)),
+        "wrong error: {error}"
+    );
+}
+
+/// Everything decidable without a driver is decided by `request_device`
+/// itself — the seam's contract, and what keeps a caller from discovering a
+/// typo'd adapter index N frames later.
+#[test]
+fn what_can_fail_immediately_does_fail_immediately() {
+    let instance: Box<dyn Instance> = Box::new(NullInstance::tier_b());
+    let recorder = Recorder::new();
+    let slow: Box<dyn Instance> = Box::new(NullInstance::tier_b().with_recorder(recorder.clone()));
+    recorder.set_device_latency(5);
+
+    let unknown = instance.request_device(&DeviceDesc::for_adapter(crcbl_hal::AdapterId(7)));
+    assert!(
+        matches!(unknown, Err(HalError::NoSuchAdapter(7))),
+        "an unknown adapter is not a deferred failure"
+    );
+
+    // Tier B has no buffer device address, and the latency must not delay
+    // *that* answer either.
+    let too_much = slow.request_device(&DeviceDesc::for_adapter(slow.adapters()[0].id));
+    match too_much {
+        Err(HalError::UnsupportedFeatures { missing }) => {
+            assert!(missing.contains(Features::BUFFER_DEVICE_ADDRESS));
+        }
+        other => panic!("Tier A on a Tier B adapter must be refused up front: {other:?}"),
+    }
+}
+
+/// The blocking wrapper is still the blocking wrapper: it drains the simulated
+/// latency for the caller, so every native call site is unchanged by P5.4.
+#[test]
+fn create_device_still_blocks_through_the_latency() {
+    let recorder = Recorder::new();
+    let instance: Box<dyn Instance> =
+        Box::new(NullInstance::tier_a().with_recorder(recorder.clone()));
+    recorder.set_device_latency(4);
+    let device: Box<dyn Device> = instance
+        .create_device(&DeviceDesc::for_adapter(instance.adapters()[0].id))
+        .expect("the wrapper polls until it is ready");
+    assert!(device.caps().tier().is_a());
 }

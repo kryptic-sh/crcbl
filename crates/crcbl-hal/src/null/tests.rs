@@ -7,7 +7,7 @@
 use super::*;
 
 use crate::{
-    BindGroupLayoutEntry, BindingKind, ClearValue, ColorAttachment, ColorTargetState,
+    BindGroupLayoutEntry, BindingKind, BufferUsage, ClearValue, ColorAttachment, ColorTargetState,
     DepthStencilState, ImageSubresourceRange, ImageViewType, LoadOp, MultisampleState,
     PrimitiveState, PushConstantRange, RendererTier, ResourceState, ShaderEntry, StoreOp, depth,
 };
@@ -2102,4 +2102,73 @@ fn a_swapchain_format_must_be_one_the_surface_offers() {
 
     device.destroy_swapchain(swapchain);
     instance.destroy_surface(surface);
+}
+
+/// The simulated device latency applies to requests made *after* it is set, and
+/// each request counts down on its own — the same contract
+/// `set_readback_latency` carries, and the one a test that opens two devices in
+/// one process depends on.
+#[test]
+fn device_latency_applies_per_request_and_only_after_it_is_set() {
+    let (recorder, instance) = boxed(NullInstance::tier_a());
+    let adapter = instance.adapters()[0].id;
+
+    // Requested before the latency is set: unaffected.
+    let mut instant = instance
+        .request_device(&DeviceDesc::for_adapter(adapter))
+        .expect("request");
+    recorder.set_device_latency(2);
+    assert!(
+        instant.poll().expect("poll").is_ready(),
+        "a request already in flight must not pick up a latency set later"
+    );
+
+    // Two requests after it: both count down independently.
+    let mut first = instance
+        .request_device(&DeviceDesc::for_adapter(adapter))
+        .expect("request");
+    let mut second = instance
+        .request_device(&DeviceDesc::for_adapter(adapter))
+        .expect("request");
+    for _ in 0..2 {
+        assert!(!first.poll().expect("poll").is_ready());
+        assert!(!second.poll().expect("poll").is_ready());
+    }
+    assert!(first.poll().expect("poll").is_ready());
+    assert!(second.poll().expect("poll").is_ready());
+}
+
+/// A device that arrived through the polled path is the same device the
+/// blocking wrapper would have produced, ownership stamping included: a buffer
+/// from one is foreign to the other.
+#[test]
+fn a_polled_device_stamps_its_own_ownership_like_any_other() {
+    let (_recorder, instance) = boxed(NullInstance::tier_a());
+    let adapter = instance.adapters()[0].id;
+
+    let mut request = instance
+        .request_device(&DeviceDesc::for_adapter(adapter))
+        .expect("request");
+    let polled = request
+        .poll()
+        .expect("poll")
+        .into_device()
+        .expect("ready on the first poll");
+    let blocking = instance
+        .create_device(&DeviceDesc::for_adapter(adapter))
+        .expect("the blocking wrapper");
+
+    let buffer = polled
+        .create_buffer(&BufferDesc {
+            label: Some("polled device's buffer"),
+            size: 64,
+            usage: BufferUsage::STORAGE,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("create");
+    let error = blocking
+        .write_buffer(buffer, 0, &[0u8; 4])
+        .expect_err("another device's buffer is foreign");
+    assert!(matches!(error, HalError::ForeignObject { .. }), "{error:?}");
+    polled.destroy_buffer(buffer);
 }

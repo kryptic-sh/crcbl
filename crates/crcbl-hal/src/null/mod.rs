@@ -15,6 +15,17 @@
 //!    assert which passes ran in which order, which barriers separated them,
 //!    and that nothing leaked. See [`Recorder`].
 //!
+//! # It can also be slow on purpose
+//!
+//! Two things the seam defers — readback and device creation — are instant
+//! here, which would leave every caller's *poll loop* untested. [`Recorder`]
+//! therefore takes a latency for each:
+//! [`set_readback_latency`](Recorder::set_readback_latency) and
+//! [`set_device_latency`](Recorder::set_device_latency) make N polls report
+//! `Pending` before completing, which is what a browser's `mapAsync` and
+//! `requestDevice` promises do and what no amount of native hardware will
+//! reproduce.
+//!
 //! # Always compiled
 //!
 //! Not behind a feature. See the crate docs for the argument — briefly: other
@@ -67,15 +78,15 @@ use crate::{
     BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutHandle, BufferCopy, BufferDesc,
     BufferHandle, BufferImageCopy, CommandBufferHandle, CommandEncoder, CommandEncoderDesc,
     CompositeAlpha, ComputePassDesc, ComputePipelineDesc, ComputePipelineHandle, Device,
-    DeviceCaps, DeviceDesc, DeviceType, DrawIndirect, DrawIndirectCount, Features, Format,
-    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageCopy, ImageDesc, ImageHandle,
-    ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, IndexFormat, Instance, Limits,
-    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, PresentMode, QueryKind,
-    QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle,
-    ReadbackState, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle, SemaphoreDesc,
-    SemaphoreHandle, SemaphoreKind, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle,
-    ShaderStages, SubmitInfo, SurfaceCaps, SurfaceError, SurfaceHandle, SwapchainDesc,
-    SwapchainHandle, Viewport,
+    DeviceCaps, DeviceDesc, DeviceRequestState, DeviceType, DrawIndirect, DrawIndirectCount,
+    Features, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageCopy, ImageDesc,
+    ImageHandle, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, IndexFormat, Instance,
+    Limits, MemoryLocation, PendingDevice, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo,
+    PresentMode, QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
+    ReadbackHandle, ReadbackState, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle,
+    SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreWait, ShaderModuleDesc,
+    ShaderModuleHandle, ShaderStages, SubmitInfo, SurfaceCaps, SurfaceError, SurfaceHandle,
+    SwapchainDesc, SwapchainHandle, Viewport,
 };
 
 /// Formats a null surface reports, and therefore the only ones a swapchain on
@@ -312,7 +323,7 @@ impl Instance for NullInstance {
         })
     }
 
-    fn create_device(&self, desc: &DeviceDesc<'_>) -> Result<Box<dyn Device>, HalError> {
+    fn request_device(&self, desc: &DeviceDesc<'_>) -> Result<Box<dyn PendingDevice>, HalError> {
         if desc.adapter != AdapterId(0) {
             return Err(HalError::NoSuchAdapter(desc.adapter.0));
         }
@@ -334,7 +345,11 @@ impl Instance for NullInstance {
                 .intersection(desc.required_features.union(desc.optional_features)),
             limits: self.caps.limits,
         };
-        Ok(Box::new(NullDevice {
+        // Everything checkable is checked above, synchronously, which is the
+        // seam's rule: only what depends on a driver answering may be deferred.
+        // The null backend has no driver, so all that is left to defer is the
+        // simulated latency.
+        let device = NullDevice {
             recorder: self.recorder.clone(),
             instance_id: self.id,
             device_id: next_owner_id(),
@@ -345,7 +360,48 @@ impl Instance for NullInstance {
             implicit_acquire: !caps.features.contains(Features::TIMELINE_SEMAPHORE),
             caps,
             adapter_features: self.caps.features,
+        };
+        let polls_remaining = self.recorder.lock().device_latency;
+        Ok(Box::new(NullPendingDevice {
+            polls_remaining,
+            device: Some(Box::new(device)),
         }))
+    }
+}
+
+/// A null device request in flight.
+///
+/// Reached through `dyn PendingDevice` from
+/// [`Instance::request_device`](crate::Instance::request_device). The device is
+/// built up front — nothing about it can fail late — and handed over once the
+/// simulated latency from
+/// [`Recorder::set_device_latency`] has elapsed, which is how a caller's poll
+/// loop gets exercised with no GPU and no browser.
+#[derive(Debug)]
+struct NullPendingDevice {
+    polls_remaining: u32,
+    /// `None` once the device has been handed over, so a second poll is the
+    /// caller bug it is rather than a second device.
+    device: Option<Box<dyn Device>>,
+}
+
+impl PendingDevice for NullPendingDevice {
+    fn backend(&self) -> BackendKind {
+        BackendKind::Null
+    }
+
+    fn poll(&mut self) -> Result<DeviceRequestState, HalError> {
+        let Some(device) = self.device.take() else {
+            return Err(HalError::InvalidDescriptor(
+                "this device request already produced its device".to_string(),
+            ));
+        };
+        if self.polls_remaining > 0 {
+            self.polls_remaining -= 1;
+            self.device = Some(device);
+            return Ok(DeviceRequestState::Pending);
+        }
+        Ok(DeviceRequestState::Ready(device))
     }
 }
 

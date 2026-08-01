@@ -345,15 +345,18 @@ impl Instance for WgpuInstance {
         }
     }
 
-    fn create_device(&self, desc: &DeviceDesc<'_>) -> Result<Box<dyn crcbl_hal::Device>, HalError> {
+    fn request_device(
+        &self,
+        desc: &DeviceDesc<'_>,
+    ) -> Result<Box<dyn crcbl_hal::PendingDevice>, HalError> {
         let (_info, adapter) = self
             .adapters
             .iter()
             .find(|(info, _)| info.id == desc.adapter)
             .ok_or(HalError::NoSuchAdapter(desc.adapter.0))?;
 
-        WgpuDevice::new(adapter, desc, self.surface_pool())
-            .map(|d| Box::new(d) as Box<dyn crcbl_hal::Device>)
+        WgpuDevice::request(adapter, desc, self.surface_pool())
+            .map(|pending| Box::new(pending) as Box<dyn crcbl_hal::PendingDevice>)
     }
 }
 

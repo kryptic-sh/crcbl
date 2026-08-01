@@ -7,8 +7,8 @@ use ash::{ext, khr, vk};
 
 use crcbl_core::{Pool, SurfaceTarget};
 use crcbl_hal::{
-    AdapterId, AdapterInfo, BackendKind, CompositeAlpha, Device, DeviceDesc, Format, HalError,
-    Instance, PresentMode, SurfaceCaps, SurfaceHandle,
+    AdapterId, AdapterInfo, BackendKind, CompositeAlpha, Device, DeviceDesc, DeviceRequestState,
+    Format, HalError, Instance, PresentMode, SurfaceCaps, SurfaceHandle,
 };
 
 use crate::adapter::{self, AdapterRecord};
@@ -795,7 +795,17 @@ impl Instance for VkInstance {
         Ok(build_surface_caps(&capabilities, &formats, &present_modes))
     }
 
-    fn create_device(&self, desc: &DeviceDesc<'_>) -> Result<Box<dyn Device>, HalError> {
+    /// Opens the device *now* and hands it over on the first poll.
+    ///
+    /// `vkCreateDevice` is synchronous, so there is nothing to wait for and this
+    /// backend does not pretend otherwise: no simulated latency, no deferred
+    /// work. The seam is poll-shaped because WebGPU's `requestDevice` is a
+    /// promise (see `crcbl_hal::device`); a backend whose creation completes
+    /// immediately says so by completing immediately.
+    fn request_device(
+        &self,
+        desc: &DeviceDesc<'_>,
+    ) -> Result<Box<dyn crcbl_hal::PendingDevice>, HalError> {
         let record = self.record(desc.adapter)?;
         let present_surface = match desc.compatible_surface {
             Some(surface) => Some((surface, self.inner.surface_raw(surface)?)),
@@ -807,7 +817,37 @@ impl Instance for VkInstance {
             desc,
             present_surface.map(|(_, raw)| raw),
         )?;
-        Ok(Box::new(device))
+        Ok(Box::new(VkPendingDevice {
+            device: Some(Box::new(device)),
+        }))
+    }
+}
+
+/// A Vulkan device request — already finished before it is returned.
+///
+/// See [`Instance::request_device`] above for why this exists at all on a
+/// backend with a synchronous device-creation call.
+#[derive(Debug)]
+struct VkPendingDevice {
+    /// `None` once handed over, so a second poll is the caller bug it is rather
+    /// than a second device.
+    device: Option<Box<dyn Device>>,
+}
+
+impl crcbl_hal::PendingDevice for VkPendingDevice {
+    fn backend(&self) -> BackendKind {
+        BackendKind::Vulkan
+    }
+
+    fn poll(&mut self) -> Result<DeviceRequestState, HalError> {
+        self.device
+            .take()
+            .map(DeviceRequestState::Ready)
+            .ok_or_else(|| {
+                HalError::InvalidDescriptor(
+                    "this device request already produced its device".to_string(),
+                )
+            })
     }
 }
 

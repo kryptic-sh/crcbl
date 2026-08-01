@@ -27,16 +27,33 @@
 //!
 //! # wasm32
 //!
-//! The crate compiles for `wasm32` and can enumerate adapters there through
-//! [`WgpuInstance::new_async`], but **it cannot open a device**:
-//! [`Instance::create_device`](crcbl_hal::Instance::create_device) is
-//! synchronous and `wgpu`'s `request_device` is a future the browser main
-//! thread must not block on. `create_device` therefore returns a
-//! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported) naming that gap
-//! rather than deadlocking. Closing it needs an async device-creation path
-//! above the seam; until then, surfaces from
-//! [`SurfaceTarget::Web`](crcbl_core::SurfaceTarget::Web) are created (so the
-//! shell half is testable) and nothing else on wasm32 is.
+//! The crate compiles for `wasm32` and opens devices there. Adapter enumeration
+//! is [`WgpuInstance::new_async`] and device creation is the seam's polled pair,
+//! [`Instance::request_device`](crcbl_hal::Instance::request_device) →
+//! [`PendingDevice::poll`](crcbl_hal::PendingDevice::poll):
+//!
+//! ```text
+//! let mut pending = instance.request_device(&desc)?;   // starts requestDevice
+//! // …once per rAF frame, never blocking:
+//! if let DeviceRequestState::Ready(device) = pending.poll()? { … }
+//! ```
+//!
+//! `request_device` starts `GPUAdapter.requestDevice` and keeps the future;
+//! each `poll` polls it once with a no-op waker. The browser's own event loop
+//! resolves the promise, so the poll after it lands observes the device — the
+//! rAF loop is the executor and no thread is ever parked. On native the same
+//! future is `core::future::ready`, so the first poll completes and
+//! [`Instance::create_device`](crcbl_hal::Instance::create_device) — the seam's
+//! blocking wrapper, which does not exist on `wasm32` — behaves as it always
+//! did.
+//!
+//! What remains wasm32-specific: surfaces come from
+//! [`SurfaceTarget::Web`](crcbl_core::SurfaceTarget::Web), and
+//! [`create_native`] is absent because *adapter enumeration* still blocks in it.
+//! Instance creation itself has no polled seam — it is not a `crcbl-hal` trait
+//! method — so a browser caller must `await` [`WgpuInstance::new_async`]; the
+//! `crcbl` umbrella's backend registry is where that shows up, and it is
+//! recorded there.
 
 mod cell;
 mod command;

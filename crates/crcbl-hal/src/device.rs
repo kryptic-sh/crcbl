@@ -4,14 +4,68 @@
 //! Instance ──adapters()──▶ [AdapterInfo]      (caps known before a device exists)
 //!    │
 //!    ├──create_surface(SurfaceTarget)──▶ SurfaceHandle
-//!    └──create_device(DeviceDesc)──────▶ Box<dyn Device>
+//!    └──request_device(DeviceDesc)─────▶ Box<dyn PendingDevice>
 //!                                            │
+//!                                            └──poll()──▶ Pending | Ready(Box<dyn Device>)
+//!                                                                        │
 //!                                            ├─ resources: buffers, images, views, samplers
 //!                                            ├─ pipelines, layouts, bind groups
 //!                                            ├─ swapchains: create / reconfigure / acquire / present
 //!                                            ├─ command encoders ──▶ Box<dyn CommandEncoder>
 //!                                            └─ submit / wait
 //! ```
+//!
+//! # Device creation is polled, not blocking
+//!
+//! Opening a device is [`Instance::request_device`] →
+//! [`PendingDevice::poll`], the same request/poll pair
+//! [`crate::readback`] already uses, and for the same reason: on WebGPU both
+//! `requestAdapter` and `requestDevice` resolve on a **later turn of the event
+//! loop**, and the browser main thread — where the rAF loop runs — cannot block
+//! waiting for one. A synchronous-only `create_device` was a trait method that
+//! returned [`HalError::Unsupported`] on the target
+//! `docs/plan/10-wasm-webgpu.md` most wants to ship to, which is the exact
+//! mistake [`crate::readback`] and [`crate::swapchain`] were shaped to avoid.
+//!
+//! | Step | Vulkan | WebGPU |
+//! | --- | --- | --- |
+//! | request | `vkCreateDevice`, which returns before this call does | call `requestDevice`, keep the promise |
+//! | poll | hand over the already-open device | has the promise resolved? |
+//! | ready | `Box<dyn Device>` | `Box<dyn Device>` around the resolved `GPUDevice` |
+//!
+//! Neither backend has to invent anything, and neither has to block. A backend
+//! whose creation really is synchronous — `crcbl-vk` — does the work in
+//! `request_device` and completes on its **first** poll; it does not fake
+//! latency. [`crate::null`] can be asked to simulate a slow one with
+//! [`Recorder::set_device_latency`](crate::null::Recorder::set_device_latency),
+//! which is what makes a caller's poll *loop* testable with no GPU.
+//!
+//! ## Two deliberate differences from `poll_readback`
+//!
+//! 1. **The payload rides in the variant.** [`poll_readback`](Device::poll_readback)
+//!    writes into a caller-supplied `&mut [u8]` and returns a `Copy` state, which
+//!    a `Box<dyn Device>` has no equivalent of; an
+//!    `&mut Option<Box<dyn Device>>` out-parameter would be strictly worse than
+//!    [`DeviceRequestState::Ready`] carrying it. The *discipline* — "call once
+//!    per frame, `Pending` means try again, failure is an `Err` and not a third
+//!    state" — is identical.
+//! 2. **`poll` takes `&mut self`.** A readback is polled through the shared
+//!    `&self` device; a pending device is a single-owner, short-lived object, so
+//!    the exclusive borrow is free and lets a backend hold a future without
+//!    inventing interior mutability for it.
+//!
+//! ## `create_device` survives as a native-only convenience
+//!
+//! [`Instance::create_device`] is a **provided** method that requests and then
+//! polls to completion, so every existing native caller — `crcbl screenshot`,
+//! the golden-image tests, `crcbl-render`'s fixtures — is unchanged. It does not
+//! exist on `wasm32` at all: it is `#[cfg(not(target_arch = "wasm32"))]`, so a
+//! browser build that reaches for it fails to *compile* and is pointed at
+//! `request_device`, rather than compiling and returning
+//! [`HalError::Unsupported`] at run time. That is the one place this seam
+//! departs from [`crate::readback`]'s "there is no blocking wrapper" rule, and
+//! it is affordable precisely because the compiler enforces the rule where it
+//! matters.
 //!
 //! # Queues are handles, not a trait
 //!
@@ -313,13 +367,122 @@ pub trait Instance: core::fmt::Debug + crate::threading::HalThreadSafe {
         adapter: AdapterId,
     ) -> Result<SurfaceCaps, HalError>;
 
-    /// Opens a device.
+    /// Starts opening a device. The device itself arrives from
+    /// [`PendingDevice::poll`].
+    ///
+    /// **There is no synchronous device creation on every target.** WebGPU's
+    /// `requestDevice` resolves on a later turn of the event loop and cannot be
+    /// blocked on from the browser main thread; see the [module
+    /// docs](crate::device#device-creation-is-polled-not-blocking) for the full
+    /// argument and the per-backend mapping.
+    ///
+    /// Everything a backend can decide *now* is decided now: an unknown adapter,
+    /// a missing required feature, or a foreign surface is an `Err` from this
+    /// call, not a deferred failure. Only what genuinely depends on the driver
+    /// answering — device loss, a browser refusing the request — surfaces from
+    /// [`PendingDevice::poll`].
     ///
     /// # Errors
     ///
-    /// [`HalError::NoSuchAdapter`], or [`HalError::UnsupportedFeatures`] naming
-    /// exactly which of `required_features` the adapter lacks.
-    fn create_device(&self, desc: &DeviceDesc<'_>) -> Result<Box<dyn Device>, HalError>;
+    /// [`HalError::NoSuchAdapter`], [`HalError::UnsupportedFeatures`] naming
+    /// exactly which of `required_features` the adapter lacks, or
+    /// [`HalError::InvalidHandle`] / [`HalError::ForeignObject`] for
+    /// [`DeviceDesc::compatible_surface`].
+    fn request_device(&self, desc: &DeviceDesc<'_>) -> Result<Box<dyn PendingDevice>, HalError>;
+
+    /// Opens a device, blocking until it is ready.
+    ///
+    /// The convenience wrapper over [`request_device`](Instance::request_device)
+    /// for callers that have nothing else to do — start-up, `crcbl screenshot`,
+    /// every headless test. **Absent on `wasm32`**, where blocking the main
+    /// thread is not an option; browser code polls `request_device` from the
+    /// rAF loop instead, and gets a compile error rather than a run-time
+    /// [`HalError::Unsupported`] if it forgets.
+    ///
+    /// Backends do not normally override this: the default is exactly "request,
+    /// then poll until ready".
+    ///
+    /// # Errors
+    ///
+    /// Anything [`request_device`](Instance::request_device) or
+    /// [`PendingDevice::poll`] can report.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn create_device(&self, desc: &DeviceDesc<'_>) -> Result<Box<dyn Device>, HalError> {
+        let mut pending = self.request_device(desc)?;
+        loop {
+            match pending.poll()? {
+                DeviceRequestState::Ready(device) => return Ok(device),
+                // Yield rather than spin: a backend that really is asynchronous
+                // is waiting on another thread or another task, and a hot loop
+                // would starve it on a single-core CI runner.
+                DeviceRequestState::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+}
+
+/// A device request that has been started and has not finished.
+///
+/// Returned by [`Instance::request_device`]; driven by [`poll`](Self::poll) once
+/// per frame (or once per loop iteration at start-up) until it yields the
+/// device. Dropping one abandons the request, which is legal — a browser
+/// promise that later resolves simply has nobody listening.
+///
+/// The trait exists rather than an `async fn` because the seam's traits are
+/// object-safe by design (see the crate docs): `async fn` in a trait is not
+/// object-safe without boxing every call, and `async-trait` would put an
+/// allocation and a `Pin<Box<dyn Future>>` in the seam's vocabulary to serve one
+/// call made once per process.
+pub trait PendingDevice: core::fmt::Debug + crate::threading::HalThreadSafe {
+    /// Which backend this request will produce a device for. For logs and bug
+    /// reports — never for behaviour.
+    fn backend(&self) -> BackendKind;
+
+    /// Advances the request. `Pending` means "ask again"; `Ready` hands over the
+    /// device.
+    ///
+    /// This is a poll, not a wait: it must never block. Polling again after a
+    /// `Ready` is a caller bug — the device was moved out — and reports
+    /// [`HalError::InvalidDescriptor`] rather than producing a second device.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::DeviceLost`] if the driver or the browser refused the
+    /// request, [`HalError::UnsupportedFeatures`] if the refusal named features,
+    /// or [`HalError::InvalidDescriptor`] for a poll after completion.
+    fn poll(&mut self) -> Result<DeviceRequestState, HalError>;
+}
+
+/// Where a device request has got to — the [`ReadbackState`] of device creation.
+///
+/// [`ReadbackState`]: crate::ReadbackState
+///
+/// Failure is an `Err` from [`PendingDevice::poll`] rather than a third variant,
+/// for the same reason readback has no `Failed`: the reason is the only useful
+/// part of a device-creation failure and a bare state would throw it away.
+#[derive(Debug)]
+pub enum DeviceRequestState {
+    /// Not open yet. Poll again next frame.
+    Pending,
+    /// Open. The device is yours.
+    Ready(Box<dyn Device>),
+}
+
+impl DeviceRequestState {
+    /// Whether the device is available.
+    #[must_use]
+    pub const fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready(_))
+    }
+
+    /// The device, or `None` while the request is still pending.
+    #[must_use]
+    pub fn into_device(self) -> Option<Box<dyn Device>> {
+        match self {
+            Self::Ready(device) => Some(device),
+            Self::Pending => None,
+        }
+    }
 }
 
 /// An open device: creates resources, records and submits work, presents.
@@ -728,16 +891,28 @@ mod tests {
         const _INSTANCE: Option<&dyn Instance> = None;
         const _DEVICE: Option<&dyn Device> = None;
         const _ENCODER: Option<&dyn CommandEncoder> = None;
+        const _PENDING: Option<&dyn PendingDevice> = None;
         // Boxing each one is the property that matters; naming all three in a
         // single function type only trips `clippy::type_complexity`.
         fn boxes_instance(_: Box<dyn Instance>) {}
         fn boxes_device(_: Box<dyn Device>) {}
         fn boxes_encoder(_: Box<dyn CommandEncoder>) {}
+        fn boxes_pending(_: Box<dyn PendingDevice>) {}
         let _ = (
             boxes_instance as fn(_),
             boxes_device as fn(_),
             boxes_encoder as fn(_),
+            boxes_pending as fn(_),
         );
+    }
+
+    /// `DeviceRequestState` answers two things, not three: the payload rides in
+    /// `Ready` and failure leaves through `Err`, exactly as `ReadbackState` does.
+    #[test]
+    fn a_pending_request_yields_nothing_and_says_so() {
+        let pending = DeviceRequestState::Pending;
+        assert!(!pending.is_ready());
+        assert!(pending.into_device().is_none());
     }
 
     #[test]

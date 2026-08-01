@@ -31,6 +31,35 @@
 //! driver was missing would look like a black screen, and
 //! [`GpuError::NoBackend`] names the actual problem. Null is reachable only by
 //! asking for it.
+//!
+//! # Opening is polled, because the web says so
+//!
+//! [`request_open`] returns a [`PendingInstance`] whose [`poll`](PendingInstance::poll)
+//! yields `None` (ask again) or the instance — the same shape `crcbl-hal` uses
+//! for [`request_device`](crcbl_hal::Instance::request_device) and for readback,
+//! and for the same reason. `wgpu`'s adapter enumeration is
+//! `GPUAdapter`-shaped: on the web it is a `Promise` and the main thread cannot
+//! block on it, so the registry stores a *future factory* rather than a
+//! function that returns an instance. [`open`] and [`open_backend`] are the
+//! blocking wrappers over it, unchanged for every native caller.
+//!
+//! Fallback belongs to the pending object, not to the caller: a poll that
+//! observes an auto-selectable backend failing moves on to the next entry and
+//! reports `Pending`, so "try Vulkan, then wgpu" reads the same whether it is
+//! being driven by a `while` loop at start-up or by a rAF callback.
+//!
+//! # Recorded gap: this crate does not build for `wasm32` yet
+//!
+//! [`REGISTRY`](self) still names `crcbl-vk` unconditionally, and the umbrella's
+//! manifest pulls in `crcbl-vk`, `cpal` and the native shells regardless of
+//! target. The polled shape here is what a browser build *needs*, and the
+//! per-target dependency split is a separate slice (P5.x); until it lands,
+//! `cargo check --target wasm32-unknown-unknown` on this crate fails for
+//! dependency reasons rather than for anything in this module.
+
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll, Waker};
 
 use crcbl_hal::{HalError, Instance};
 
@@ -118,13 +147,32 @@ pub enum GpuError {
     },
 }
 
+/// A backend being opened.
+///
+/// Boxed rather than a concrete future because the registry is one static table
+/// of function pointers over three unrelated backends. Not `Send`: an instance
+/// is opened once, on the thread that will drive the frame loop, and on the web
+/// there is only one thread anyway.
+type InstanceFuture = Pin<Box<dyn Future<Output = Result<Box<dyn Instance>, HalError>>>>;
+
+/// Wraps an already-decided result as a future that completes on its first poll.
+///
+/// What a backend whose open really is synchronous returns; the seam's
+/// `crcbl-vk` half says the same thing about `vkCreateDevice`.
+fn ready(result: Result<Box<dyn Instance>, HalError>) -> InstanceFuture {
+    Box::pin(core::future::ready(result))
+}
+
 /// One entry in the backend table.
 struct Registration {
     backend: GpuBackend,
     /// Whether [`open`] may select this entry without being asked for it by
     /// name. `false` for [`GpuBackend::Null`] — see the module docs.
     auto: bool,
-    open: fn() -> Result<Box<dyn Instance>, HalError>,
+    /// Starts opening this backend. Returning a future rather than an instance
+    /// is what makes the web path expressible; two of the three complete on
+    /// their first poll.
+    open: fn() -> InstanceFuture,
 }
 
 /// Every backend compiled into this build, in the order [`open`] tries them.
@@ -133,20 +181,30 @@ static REGISTRY: &[Registration] = &[
         backend: GpuBackend::Vulkan,
         auto: true,
         open: || {
-            crcbl_vk::VkInstance::open()
-                .map(|instance| Box::new(instance) as Box<dyn Instance>)
-                .map_err(HalError::from)
+            ready(
+                crcbl_vk::VkInstance::open()
+                    .map(|instance| Box::new(instance) as Box<dyn Instance>)
+                    .map_err(HalError::from),
+            )
         },
     },
     Registration {
         backend: GpuBackend::Wgpu,
         auto: false,
-        open: || match crcbl_wgpu::create_native() {
-            Some(instance) => Ok(Box::new(instance) as Box<dyn Instance>),
-            None => Err(HalError::Unsupported {
-                backend: crcbl_hal::BackendKind::Wgpu,
-                what: "no wgpu adapter found",
-            }),
+        // `new_async`, not `create_native`: adapter enumeration is a future on
+        // the WebGPU backend and `create_native` is the `pollster::block_on`
+        // wrapper that cannot exist there. Awaiting it costs one extra poll on
+        // native and means CI exercises the same code path the browser will.
+        open: || {
+            Box::pin(async {
+                crcbl_wgpu::WgpuInstance::new_async()
+                    .await
+                    .map(|instance| Box::new(instance) as Box<dyn Instance>)
+                    .ok_or(HalError::Unsupported {
+                        backend: crcbl_hal::BackendKind::Wgpu,
+                        what: "no wgpu adapter found",
+                    })
+            })
         },
     },
     Registration {
@@ -156,7 +214,7 @@ static REGISTRY: &[Registration] = &[
         // device does — timeline semaphores, explicit acquire semaphores — and
         // a `--backend null` run is a meaningful rehearsal rather than a
         // different program.
-        open: || Ok(Box::new(crcbl_hal::null::NullInstance::tier_a())),
+        open: || ready(Ok(Box::new(crcbl_hal::null::NullInstance::tier_a()))),
     },
 ];
 
@@ -169,18 +227,120 @@ fn registry_names(entries: impl Iterator<Item = GpuBackend>) -> String {
     }
 }
 
-/// Opens the best available GPU backend for this process.
+/// A backend open in flight.
 ///
-/// Reads [`BACKEND_ENV_VAR`]: when it names a backend, that backend is opened
-/// and a failure is *not* fallen back from — someone who set the variable meant
-/// it. Otherwise the auto-selectable backends are tried in order.
+/// The non-blocking half of [`open`] / [`open_backend`], for a caller that must
+/// not block — the browser's rAF loop. Poll it until it hands over the instance;
+/// see the module docs for why it exists in this shape.
+pub struct PendingInstance {
+    /// The entry being tried, and its future. `None` once the instance has been
+    /// handed over or every candidate has failed.
+    current: Option<(GpuBackend, InstanceFuture)>,
+    /// Auto-selectable entries not tried yet. Empty for a by-name open, whose
+    /// failure is final.
+    remaining: &'static [Registration],
+    /// Whether a failure falls through to `remaining` rather than being fatal.
+    fallback: bool,
+    tried: Vec<GpuBackend>,
+    last: String,
+}
+
+impl core::fmt::Debug for PendingInstance {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PendingInstance")
+            .field(
+                "trying",
+                &self.current.as_ref().map(|(backend, _)| *backend),
+            )
+            .field("tried", &self.tried)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PendingInstance {
+    /// Advances the open. `Ok(None)` means "not yet, poll again".
+    ///
+    /// A no-op waker, for the reason `crcbl-wgpu` gives for the same choice: the
+    /// browser's event loop resolves the promise on its own and the caller's
+    /// loop is the executor, so there is nobody for a waker to wake.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError::Backend`] when a backend asked for **by name** refused, or
+    /// [`GpuError::NoBackend`] when every auto-selectable one did. Polling after
+    /// the instance was handed over reports [`GpuError::NoBackend`] naming that.
+    pub fn poll(&mut self) -> Result<Option<Box<dyn Instance>>, GpuError> {
+        loop {
+            let Some((backend, future)) = self.current.as_mut() else {
+                return Err(GpuError::NoBackend {
+                    tried: registry_names(self.tried.iter().copied()),
+                    last: self.last.clone(),
+                });
+            };
+            let backend = *backend;
+            let waker = Waker::noop();
+            match future.as_mut().poll(&mut Context::from_waker(waker)) {
+                Poll::Pending => return Ok(None),
+                Poll::Ready(Ok(instance)) => {
+                    self.current = None;
+                    log::info!("opened the {backend} GPU backend");
+                    return Ok(Some(instance));
+                }
+                Poll::Ready(Err(error)) => {
+                    if !self.fallback {
+                        self.current = None;
+                        self.last = error.to_string();
+                        return Err(GpuError::Backend {
+                            backend,
+                            source: error,
+                        });
+                    }
+                    // Normal on a machine with no driver for this backend, so a
+                    // debug line — but never silent, because "why did it pick
+                    // that one?" is a question someone will ask.
+                    log::debug!("{backend} GPU backend unavailable: {error}");
+                    self.last = error.to_string();
+                    self.advance();
+                }
+            }
+        }
+    }
+
+    /// Moves to the next auto-selectable candidate, if there is one.
+    fn advance(&mut self) {
+        while let Some((entry, rest)) = self.remaining.split_first() {
+            self.remaining = rest;
+            if !entry.auto {
+                continue;
+            }
+            self.tried.push(entry.backend);
+            self.current = Some((entry.backend, (entry.open)()));
+            return;
+        }
+        self.current = None;
+    }
+
+    /// Polls until the instance arrives. The blocking half of [`open`].
+    fn block(mut self) -> Result<Box<dyn Instance>, GpuError> {
+        loop {
+            if let Some(instance) = self.poll()? {
+                return Ok(instance);
+            }
+            std::thread::yield_now();
+        }
+    }
+}
+
+/// Starts opening the best available GPU backend, without blocking.
+///
+/// The non-blocking form of [`open`], with the same [`BACKEND_ENV_VAR`]
+/// handling. Drive the returned [`PendingInstance`] until it yields.
 ///
 /// # Errors
 ///
-/// [`GpuError::UnknownBackend`] for a name this build does not have,
-/// [`GpuError::Backend`] when a named backend refused, or
-/// [`GpuError::NoBackend`] when nothing auto-selectable worked.
-pub fn open() -> Result<Box<dyn Instance>, GpuError> {
+/// [`GpuError::UnknownBackend`] for a name this build does not have. Everything
+/// else is reported from [`PendingInstance::poll`], because it is not known yet.
+pub fn request_open() -> Result<PendingInstance, GpuError> {
     match std::env::var(BACKEND_ENV_VAR) {
         Ok(value) if !value.trim().is_empty() => {
             let Some(requested) = GpuBackend::from_name(&value) else {
@@ -189,10 +349,60 @@ pub fn open() -> Result<Box<dyn Instance>, GpuError> {
                     available: registry_names(REGISTRY.iter().map(|entry| entry.backend)),
                 });
             };
-            open_backend(requested)
+            request_open_backend(requested)
         }
-        _ => open_auto(),
+        _ => Ok(request_open_auto(REGISTRY)),
     }
+}
+
+/// Starts opening a specific backend, without blocking and ignoring
+/// [`BACKEND_ENV_VAR`].
+///
+/// A failure is **not** fallen back from: someone who named a backend meant it.
+///
+/// # Errors
+///
+/// [`GpuError::UnknownBackend`] if this build has no such backend.
+pub fn request_open_backend(backend: GpuBackend) -> Result<PendingInstance, GpuError> {
+    let entry = lookup(REGISTRY, backend)?;
+    Ok(PendingInstance {
+        current: Some((backend, (entry.open)())),
+        remaining: &[],
+        fallback: false,
+        tried: vec![backend],
+        last: "nothing was tried".to_string(),
+    })
+}
+
+/// The auto-selection pending object over an arbitrary registry, so the
+/// "nothing auto-selectable worked" arm is reachable from a test.
+fn request_open_auto(registry: &'static [Registration]) -> PendingInstance {
+    let mut pending = PendingInstance {
+        current: None,
+        remaining: registry,
+        fallback: true,
+        tried: Vec::new(),
+        last: "nothing was tried".to_string(),
+    };
+    pending.advance();
+    pending
+}
+
+/// Opens the best available GPU backend for this process.
+///
+/// Reads [`BACKEND_ENV_VAR`]: when it names a backend, that backend is opened
+/// and a failure is *not* fallen back from — someone who set the variable meant
+/// it. Otherwise the auto-selectable backends are tried in order.
+///
+/// Blocks until a backend answers. Browser code polls [`request_open`] instead.
+///
+/// # Errors
+///
+/// [`GpuError::UnknownBackend`] for a name this build does not have,
+/// [`GpuError::Backend`] when a named backend refused, or
+/// [`GpuError::NoBackend`] when nothing auto-selectable worked.
+pub fn open() -> Result<Box<dyn Instance>, GpuError> {
+    request_open()?.block()
 }
 
 /// Opens a specific backend, ignoring [`BACKEND_ENV_VAR`].
@@ -202,8 +412,7 @@ pub fn open() -> Result<Box<dyn Instance>, GpuError> {
 /// [`GpuError::UnknownBackend`] if this build has no such backend, or
 /// [`GpuError::Backend`] if it failed to open.
 pub fn open_backend(backend: GpuBackend) -> Result<Box<dyn Instance>, GpuError> {
-    let entry = lookup(REGISTRY, backend)?;
-    (entry.open)().map_err(|source| GpuError::Backend { backend, source })
+    request_open_backend(backend)?.block()
 }
 
 /// Finds `backend` in `registry`, or names what the registry does have.
@@ -225,32 +434,6 @@ fn lookup(
             requested: backend.as_str().to_string(),
             available: registry_names(registry.iter().map(|entry| entry.backend)),
         })
-}
-
-/// Tries every auto-selectable backend in order.
-fn open_auto() -> Result<Box<dyn Instance>, GpuError> {
-    let mut tried = Vec::new();
-    let mut last = "nothing was tried".to_string();
-    for entry in REGISTRY.iter().filter(|entry| entry.auto) {
-        tried.push(entry.backend);
-        match (entry.open)() {
-            Ok(instance) => {
-                log::info!("opened the {} GPU backend", entry.backend);
-                return Ok(instance);
-            }
-            // Normal on a machine with no driver for this backend, so a debug
-            // line — but never silent, because "why did it pick that one?" is a
-            // question someone will ask.
-            Err(error) => {
-                log::debug!("{} GPU backend unavailable: {error}", entry.backend);
-                last = error.to_string();
-            }
-        }
-    }
-    Err(GpuError::NoBackend {
-        tried: registry_names(tried.into_iter()),
-        last,
-    })
 }
 
 #[cfg(test)]
@@ -278,7 +461,7 @@ mod tests {
         static ONLY_NULL: &[Registration] = &[Registration {
             backend: GpuBackend::Null,
             auto: false,
-            open: || Ok(Box::new(crcbl_hal::null::NullInstance::tier_a())),
+            open: || ready(Ok(Box::new(crcbl_hal::null::NullInstance::tier_a()))),
         }];
 
         let Err(error) = lookup(ONLY_NULL, GpuBackend::Vulkan) else {
@@ -355,7 +538,7 @@ mod tests {
     /// message, which is what a developer with no driver actually sees.
     #[test]
     fn automatic_selection_reports_what_it_tried() {
-        match open_auto() {
+        match request_open_auto(REGISTRY).block() {
             Ok(instance) => assert_eq!(
                 instance.backend(),
                 crcbl_hal::BackendKind::Vulkan,
@@ -366,6 +549,105 @@ mod tests {
                 assert!(!last.is_empty(), "and the last failure explains itself");
             }
             Err(error) => panic!("unexpected error: {error}"),
+        }
+    }
+
+    /// The polled form is the one the browser will use, and it must reach the
+    /// same instance the blocking one does — through a real `Pending` when the
+    /// backend's future is not ready on its first poll.
+    #[test]
+    fn the_polled_open_reaches_the_same_instance_as_the_blocking_one() {
+        let mut pending = request_open_backend(GpuBackend::Null).expect("null is registered");
+        let mut polls = 0;
+        let instance = loop {
+            polls += 1;
+            assert!(polls < 64, "the null backend must not poll forever");
+            if let Some(instance) = pending.poll().expect("null always opens") {
+                break instance;
+            }
+        };
+        assert_eq!(instance.backend(), crcbl_hal::BackendKind::Null);
+
+        // And a second poll is the caller bug it is, not a second instance.
+        let error = pending.poll().expect_err("the instance was already taken");
+        assert!(matches!(error, GpuError::NoBackend { .. }), "{error}");
+    }
+
+    /// Auto-selection over a registry whose only auto entry always fails: the
+    /// fallback walk lives in `PendingInstance::poll`, so this is the arm that
+    /// proves it reports every attempt rather than the first.
+    #[test]
+    fn a_polled_auto_open_walks_the_table_and_then_gives_up() {
+        static ALWAYS_FAILS: &[Registration] = &[
+            Registration {
+                backend: GpuBackend::Vulkan,
+                auto: true,
+                open: || {
+                    ready(Err(HalError::Unsupported {
+                        backend: crcbl_hal::BackendKind::Vulkan,
+                        what: "no driver in this test",
+                    }))
+                },
+            },
+            Registration {
+                backend: GpuBackend::Wgpu,
+                auto: true,
+                open: || {
+                    ready(Err(HalError::Unsupported {
+                        backend: crcbl_hal::BackendKind::Wgpu,
+                        what: "no adapter in this test",
+                    }))
+                },
+            },
+            // Not auto: it would succeed, and it must never be reached.
+            Registration {
+                backend: GpuBackend::Null,
+                auto: false,
+                open: || ready(Ok(Box::new(crcbl_hal::null::NullInstance::tier_a()))),
+            },
+        ];
+
+        let error = request_open_auto(ALWAYS_FAILS)
+            .block()
+            .expect_err("every auto entry refuses");
+        match error {
+            GpuError::NoBackend { tried, last } => {
+                assert_eq!(tried, "vk, wgpu", "both attempts, in registry order");
+                assert!(last.contains("no adapter in this test"), "{last}");
+            }
+            other => panic!("wrong error: {other}"),
+        }
+    }
+
+    /// A backend asked for **by name** does not fall back — that is the whole
+    /// difference between `request_open_backend` and `request_open_auto`.
+    #[test]
+    fn a_named_backend_that_refuses_is_final() {
+        static ONLY_A_BROKEN_VK: &[Registration] = &[Registration {
+            backend: GpuBackend::Vulkan,
+            auto: true,
+            open: || {
+                ready(Err(HalError::Unsupported {
+                    backend: crcbl_hal::BackendKind::Vulkan,
+                    what: "no driver in this test",
+                }))
+            },
+        }];
+
+        let entry = lookup(ONLY_A_BROKEN_VK, GpuBackend::Vulkan).expect("it is right there");
+        let mut pending = PendingInstance {
+            current: Some((GpuBackend::Vulkan, (entry.open)())),
+            remaining: &[],
+            fallback: false,
+            tried: vec![GpuBackend::Vulkan],
+            last: "nothing was tried".to_string(),
+        };
+        match pending.poll().expect_err("it refused") {
+            GpuError::Backend { backend, source } => {
+                assert_eq!(backend, GpuBackend::Vulkan);
+                assert!(source.to_string().contains("no driver in this test"));
+            }
+            other => panic!("wrong error: {other}"),
         }
     }
 }
