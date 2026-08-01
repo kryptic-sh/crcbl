@@ -95,6 +95,53 @@ jobs:
       - name: Build the site
         run: ./web/build.sh
 
+      # THE ASSUMPTIONS THE BROWSER GATE MAKES, CHECKED RATHER THAN HOPED FOR.
+      # `ubuntu-latest` ships `/usr/bin/google-chrome` and `Xvfb`, and both of
+      # those are facts about an image that changes; a runner that stopped
+      # shipping either would otherwise turn the gate below into a step that
+      # skips and reports success, which is the failure mode
+      # `docs/plan/12-testing.md` warns about by name.
+      - name: Check the browser gate's assumptions
+        run: |
+          browser="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+          if [ -z "$browser" ]; then
+            echo "::error::no Chrome or Chromium on this runner. The image is assumed to ship /usr/bin/google-chrome."
+            exit 1
+          fi
+          echo "browser: $browser ($("$browser" --version))"
+          if ! command -v Xvfb >/dev/null 2>&1; then
+            echo "Xvfb is not on this image; installing it."
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends xvfb
+          fi
+          echo "Xvfb: $(command -v Xvfb)"
+
+      # THE P5 GATE. Loads the site that was just built in a real browser,
+      # opens a WebGPU device, drives a real Space key into the canvas, and
+      # reads the canvas back to prove it is neither blank nor still.
+      #
+      # A GitHub runner has no GPU, which is why the harness runs the browser
+      # inside Xvfb against Chromium's bundled SwiftShader: that is the one
+      # combination whose canvas pixels can be read back at all (the table is in
+      # `web/run-browser-e2e.sh`). It verifies that for itself with a
+      # known-colour clear before it interprets anything, so a runner where the
+      # readback stops working fails here rather than reporting a working
+      # renderer as blank.
+      - name: Render the demo in a real browser
+        run: ./web/run-browser-e2e.sh
+
+      # The canvas as a PNG and the page's whole log. On a failure these are the
+      # first two things anyone will ask for, and neither can be reconstructed
+      # from the step log.
+      - name: Upload the browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-e2e
+          path: target/web-e2e
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Upload the site
         uses: actions/upload-artifact@v7
         with:

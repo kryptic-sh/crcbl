@@ -66,10 +66,43 @@ The CLI version is not pinned in a second place — `build.sh` reads it out of
 glue whose imports the module does not have and the failure surfaces in
 somebody's browser rather than in the build.
 
+## Checking it in a browser
+
+`run-browser-e2e.sh` is the P5 gate. It builds nothing itself — point it at a
+site `build.sh` already produced, or pass `--build`:
+
+```sh
+./web/run-browser-e2e.sh --build      # Xvfb + Chromium, then 18 checks
+./web/run-browser-e2e.sh --headless --hardware   # the real GPU, no display
+```
+
+It starts its own Xvfb and its own static server, opens Chromium over the
+DevTools protocol, sends a **real** click and a **real** Space key into the
+canvas, and reads the canvas back to assert the frame is neither one flat colour
+nor identical from frame to frame while the ball is in flight. It fails if zero
+checks ran.
+
+**It needs no GPU**, which is what lets it run on a CI runner. Getting there
+took measuring something undocumented: three of the four obvious ways to read a
+WebGPU canvas back return transparent black regardless of what was drawn.
+
+| display  | adapter     | `canvas.toDataURL()` |
+| -------- | ----------- | -------------------- |
+| headless | hardware    | the pixels           |
+| headless | SwiftShader | transparent black    |
+| Xvfb     | SwiftShader | the pixels           |
+| Xvfb     | hardware    | transparent black    |
+
+(`drawImage(canvas, …)` and `createImageBitmap(canvas)` return transparent black
+in all four.) Nothing in the harness trusts that table: it clears a canvas to a
+known colour in the same browser with the same flags first, tries both adapters,
+and refuses to interpret the render checks unless the control comes back with
+the colour it drew. The flags, and the failure each one prevents, are in the two
+files' headers.
+
 ## Checking it without a browser
 
-CI has no GPU and no browser, so the browser cannot be tested here. These can
-be, and are, on every PR:
+Cheaper, and they catch a different class of mistake. Both run on every PR:
 
 ```sh
 ./web/build.sh                                   # builds and runs both checks below
@@ -90,7 +123,8 @@ drives the documented call order — `prepare`, the fetch pre-load round trip, t
 OPFS restore, `boot`, a key event through the scratch, `shutdown`. It stops at
 the first `frame` that would request a device, because a device is
 `navigator.gpu`. Everything before that line is plain Rust behind a
-browser-shaped ABI, and it all runs here.
+browser-shaped ABI, and it all runs here. What it cannot see, a black canvas
+included, is what `run-browser-e2e.sh` is for.
 
 ## What is not here
 
