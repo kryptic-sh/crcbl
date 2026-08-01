@@ -310,7 +310,7 @@ impl PhysicsWorld {
     ///
     /// Traversing the segment's bounds inflated by `radius` offers a superset
     /// instead. The extra candidates cost one exact test each and are rejected
-    /// by [`Self::closest_swept`], which is the same narrow phase as before.
+    /// by the same narrow phase as before.
     #[must_use]
     pub fn sweep_sphere(
         &mut self,

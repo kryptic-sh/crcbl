@@ -39,6 +39,13 @@ jobs:
         with:
           cache: false
       - run: cargo fmt --all --check
+      # `--all` covers the workspace, and `crates/crcbl-net/fuzz` is its own
+      # workspace, so it is invisible to the line above. The check used to live
+      # in the `decoder-fuzz` job, which pins a nightly toolchain that carries
+      # no `cargo-fmt` — so it failed on rustup rather than on formatting, and
+      # the fuzz target's actual drift went unreported. Formatting is checked
+      # here, on the toolchain that does the formatting.
+      - run: cargo fmt --manifest-path crates/crcbl-net/fuzz/Cargo.toml --check
 
   clippy:
     name: clippy (linux)
@@ -674,8 +681,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libasound2-dev
-      - name: Check fuzz target formatting
-        run: cargo fmt --manifest-path crates/crcbl-net/fuzz/Cargo.toml --check
+      # The fuzz target's formatting is checked by the `rustfmt` job: this
+      # toolchain is pinned to a nightly with no `cargo-fmt` in it.
       - name: Replay named corpus assertions
         run: >-
           cargo test --manifest-path crates/crcbl-net/fuzz/Cargo.toml
