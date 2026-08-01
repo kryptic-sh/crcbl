@@ -721,10 +721,14 @@ jobs:
     # Instrumented build plus a full suite re-run.
     timeout-minutes: 45
     env:
-      # Measured on this commit: 76.73% of lines. The floor sits just below it
-      # so a genuine regression fails and normal churn does not. Verified
-      # locally: `--fail-under-lines 75` exits 0 and `77` exits 1.
-      COVERAGE_FLOOR: "75"
+      # Measured on this commit: 77.59% of lines locally, 77.43% on the runner
+      # once this job got a Vulkan driver (see the install step). The floor sits
+      # just below it so a genuine regression fails and normal churn does not.
+      # Verified locally: `--fail-under-lines 76` exits 0 and `78` exits 1.
+      #
+      # Raised from 75, which was calibrated at 76.73% on a developer machine
+      # and had never been enforced by a run that got this far.
+      COVERAGE_FLOOR: "76"
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v1
