@@ -322,6 +322,14 @@ fn screenshot_json_carries_the_path_and_the_dimensions() {
 
 /// `std::env::args()` panics on a non-UTF-8 argument, so every path-taking flag
 /// used to abort with exit 101 rather than doing its job or failing cleanly.
+///
+/// The path is never created. What is under test is the *argument* surviving
+/// the trip through `args()` into the command, and both invocations below
+/// expect exit 1 for a path that is not there — a directory that is not a
+/// checkout and a replay file that does not exist. Creating it used to be part
+/// of the setup and made the test macOS-only by accident: APFS enforces UTF-8
+/// in filenames and answers `EILSEQ`, so the run died in `create_dir_all`
+/// before the binary was ever invoked.
 #[cfg(unix)]
 #[test]
 fn a_non_utf8_path_argument_is_not_a_panic() {
@@ -330,7 +338,10 @@ fn a_non_utf8_path_argument_is_not_a_panic() {
 
     let temporary = TempDir::new("nonutf8");
     let weird = temporary.path().join(OsStr::from_bytes(b"n\xfft-utf8"));
-    std::fs::create_dir_all(&weird).expect("a directory a filesystem accepts");
+    assert!(
+        weird.to_str().is_none(),
+        "the argument under test has to be non-UTF-8: {weird:?}",
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_crcbl"))
         .arg("new")
@@ -342,8 +353,8 @@ fn a_non_utf8_path_argument_is_not_a_panic() {
         .output()
         .expect("the crcbl binary runs");
 
-    // Exit 1: the invocation parsed fine and the directory is simply not a
-    // checkout. What matters is that it is not 101.
+    // Exit 1: the invocation parsed fine and the directory is simply not an
+    // engine checkout. What matters is that it is not 101.
     assert_eq!(
         code(&output),
         1,

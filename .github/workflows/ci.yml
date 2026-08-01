@@ -55,6 +55,20 @@ jobs:
           # can never share (llvm-cov injects `-C instrument-coverage`); the
           # cross-platform legs are keyed by runner OS automatically.
           shared-key: lint
+      # `cpal` — `crcbl-audio`'s native output — links ALSA through `alsa-sys`,
+      # whose build script shells out to `pkg-config alsa`. The runner image
+      # does not carry `libasound2-dev`, so every linux job that compiles the
+      # workspace for the host died in that build script before reaching a line
+      # of our own code, and the whole board went red at once.
+      #
+      # The `-dev` package, unlike the runtime-only Wayland and X11 packages the
+      # e2e jobs install: those libraries are `dlopen`ed and this one is linked,
+      # so it needs the headers and `alsa.pc`. Every other linux job that
+      # compiles the workspace repeats this step and points back here.
+      - name: Install the ALSA headers cpal links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       # Every other job passes `--all-features`, so without this line nothing
       # ever compiles the crates as a consumer gets them. A feature that only
@@ -76,6 +90,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: docs
+      # ALSA headers for `cpal`; see the `clippy` job for why.
+      - name: Install the ALSA headers cpal links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev
       # `--no-deps`: only our own docs are our problem. Catches broken
       # intra-doc links, which is what a workspace of cross-referencing crates
       # accumulates fastest.
@@ -189,6 +208,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.140
+      # ALSA headers for `cpal`; see the `clippy` job for why.
+      - name: Install the ALSA headers cpal links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev
       - run: cargo nextest run --workspace --all-features --locked --profile ci
       # nextest does not run doctests — without this step every `//!`/`///`
       # example in the engine is unexecuted documentation.
@@ -412,6 +436,8 @@ jobs:
       # process. `mesa-vulkan-drivers` brings lavapipe. `vulkan-tools` is only
       # for the harness's `vulkaninfo --summary` dump, which is the first thing
       # anyone reads when this job goes red.
+      # `libasound2-dev` is the odd one out in this list: the ALSA headers
+      # `cpal` links against rather than anything Vulkan. See the `clippy` job.
       - name: Install the Vulkan loader, lavapipe and the validation layers
         run: |
           sudo apt-get update
@@ -419,7 +445,8 @@ jobs:
             libvulkan1 \
             mesa-vulkan-drivers \
             vulkan-validationlayers \
-            vulkan-tools
+            vulkan-tools \
+            libasound2-dev
       # The ICD is pinned rather than discovered: a GitHub runner that grew a
       # GPU tomorrow would otherwise silently stop testing the software path,
       # which is the one path every other developer's machine does not have.
@@ -487,6 +514,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.140
+      # `libasound2-dev` is the one `-dev` package here, and the one that is not
+      # about a display: the ALSA headers `cpal` links against. See the `clippy`
+      # job.
       - name: Install Xvfb, the X client libraries and lavapipe
         run: |
           sudo apt-get update
@@ -498,7 +528,8 @@ jobs:
             libxkbcommon0 \
             libxkbcommon-x11-0 \
             libvulkan1 \
-            mesa-vulkan-drivers
+            mesa-vulkan-drivers \
+            libasound2-dev
       # The ICD is pinned for the same reason `vk-e2e` pins it: a runner that
       # grew a GPU tomorrow would otherwise stop testing the software path
       # silently. The script fails if the manifest resolves to nothing, and
@@ -636,6 +667,13 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz@0.13.1
+      # ALSA headers for `cpal`; see the `clippy` job for why. The fuzz target
+      # is `crcbl-net`'s, but `cargo test` on its manifest builds the workspace
+      # dependency graph that reaches `crcbl-audio`.
+      - name: Install the ALSA headers cpal links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev
       - name: Check fuzz target formatting
         run: cargo fmt --manifest-path crates/crcbl-net/fuzz/Cargo.toml --check
       - name: Replay named corpus assertions
@@ -684,6 +722,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.140
+      # ALSA headers for `cpal`; see the `clippy` job for why.
+      - name: Install the ALSA headers cpal links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev
       - name: Run tests under instrumentation
         run: cargo llvm-cov --no-report nextest --workspace --all-features --locked
       - name: Generate lcov report
