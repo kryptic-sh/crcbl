@@ -1,0 +1,612 @@
+//! End-to-end suite against a **real GPU through wgpu**.
+//!
+//! ```text
+//! crates/crcbl-wgpu/tests/run-wgpu-e2e.sh [extra nextest args…]
+//! ```
+//!
+//! Feature-gated *and* `#[ignore]`d, exactly like `crcbl-vk`'s suite: a plain
+//! `cargo nextest run --workspace --all-features` on a machine with no adapter
+//! must stay green, and the harness script is the only thing that turns these on
+//! — and it fails when the suite reports zero tests run, because
+//! `docs/plan/12-testing.md` calls a silently-skipped e2e job a known trap.
+//!
+//! # What this covers, and what the script covers
+//!
+//! Everything here is **offscreen**, through
+//! [`SurfaceTarget::Offscreen`](crcbl_core::SurfaceTarget::Offscreen): the image
+//! ring, the acquire/present cycle over it, and the `map_async` readback that
+//! turns a rendered frame into bytes. That is the half a windowless CI runner
+//! can exercise, and it is the half the cross-backend image comparison needs.
+//!
+//! The **windowed** acquire/present cycle cannot be a test here — it needs a
+//! window system — so the harness script drives `apps/sandbox` and
+//! `apps/breakout` under Xvfb for a fixed frame budget instead. That is not
+//! decoration: presenting is what returns a swapchain image to the presentation
+//! engine, and a backend that dropped the acquired texture instead ran for
+//! exactly `image_count` frames and then blocked until it timed out. A frame
+//! budget larger than the ring is what catches it.
+
+#![cfg(feature = "wgpu-e2e")]
+
+use std::time::{Duration, Instant};
+
+use crcbl_core::SurfaceTarget;
+use crcbl_hal::{
+    Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
+    CommandEncoderDesc, CompositeAlpha, Device, DeviceDesc, Extent3d, Features, Format, HalError,
+    ImageAspect, ImageSubresourceLayers, ImageSubresourceRange, Instance, LoadOp, MemoryLocation,
+    Offset3d, PresentInfo, PresentMode, QueueKind, ReadbackDesc, ReadbackState, Rect2d,
+    RenderPassDesc, ResourceState, StoreOp, SubmitInfo, SurfaceError, SwapchainDesc,
+};
+use crcbl_wgpu::WgpuInstance;
+
+/// The size every offscreen test renders at.
+///
+/// 64 pixels wide is deliberate: `64 * 4` is exactly wgpu's 256-byte row-pitch
+/// requirement for a buffer↔image copy, so the copy is legal without padding
+/// while the height still makes a row-stride mistake visible.
+const EXTENT: (u32, u32) = (64, 48);
+
+/// A distinctive clear colour. Every channel differs and none is 0 or 1, so a
+/// channel swap or an sRGB round-trip bug shows up in the bytes.
+const CLEAR: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
+
+/// How long a readback may take before the test calls it a failure.
+const READBACK_DEADLINE: Duration = Duration::from_secs(20);
+
+/// Opens an instance, or explains why the suite cannot run.
+///
+/// A missing adapter is a hard failure, not a skip: this suite is only ever
+/// started by the harness, which has already established that a GPU is present.
+fn instance() -> WgpuInstance {
+    let instance = crcbl_wgpu::create_native().unwrap_or_else(|| {
+        panic!(
+            "the harness starts this suite only when an adapter is available, so finding none \
+             here is a real failure"
+        )
+    });
+    for adapter in instance.adapters() {
+        eprintln!(
+            "wgpu e2e: adapter {:?} ({:?}) driver {:?} tier {:?}",
+            adapter.name,
+            adapter.device_type,
+            adapter.driver,
+            adapter.caps.tier()
+        );
+    }
+    instance
+}
+
+/// An offscreen surface, a device, and a swapchain-shaped image ring.
+struct Headless {
+    instance: WgpuInstance,
+    device: Box<dyn Device>,
+    surface: crcbl_hal::SurfaceHandle,
+    swapchain: crcbl_hal::SwapchainHandle,
+    queue: crcbl_hal::QueueHandle,
+    format: Format,
+}
+
+impl Headless {
+    fn open() -> Self {
+        Self::open_with(EXTENT, 2)
+    }
+
+    fn open_with(extent: (u32, u32), image_count: u32) -> Self {
+        let (instance, device, surface, queue, format) = Self::open_device();
+        let swapchain = device
+            .create_swapchain(&SwapchainDesc {
+                label: Some("wgpu e2e ring"),
+                surface,
+                format,
+                extent,
+                image_count,
+                present_mode: PresentMode::Fifo,
+                composite_alpha: CompositeAlpha::Opaque,
+            })
+            .expect("the ring is created");
+
+        Self {
+            instance,
+            device,
+            surface,
+            swapchain,
+            queue,
+            format,
+        }
+    }
+
+    /// Everything up to but not including the swapchain, so a test can try to
+    /// create a bad one.
+    fn open_device() -> (
+        WgpuInstance,
+        Box<dyn Device>,
+        crcbl_hal::SurfaceHandle,
+        crcbl_hal::QueueHandle,
+        Format,
+    ) {
+        let instance = instance();
+        let adapter = instance.adapters().remove(0);
+
+        let target = SurfaceTarget::Offscreen;
+        // SAFETY: `Offscreen` names no platform object at all, so there is
+        // nothing to outlive the surface. The teardown below destroys the
+        // swapchain before the surface regardless, which is the general rule.
+        let surface = unsafe { instance.create_surface(&target) }
+            .expect("an offscreen surface needs no window system");
+
+        let caps = instance
+            .surface_caps(surface, adapter.id)
+            .expect("the offscreen ring reports its own caps");
+        assert_eq!(
+            caps.current_extent, None,
+            "an offscreen ring has no opinion about its size, exactly like Wayland"
+        );
+        let format = caps.preferred_format().expect("some format is offered");
+
+        let device = instance
+            .create_device(&DeviceDesc {
+                label: Some("wgpu e2e"),
+                adapter: adapter.id,
+                required_features: Features::empty(),
+                optional_features: Features::TIER_A | Features::DEBUG_MARKERS,
+                compatible_surface: Some(surface),
+            })
+            .expect("a device opens");
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("a graphics queue always exists");
+        (instance, device, surface, queue, format)
+    }
+
+    /// Tears down in the order `crcbl-hal`'s obligation 2 requires.
+    fn finish(self) {
+        self.device.wait_idle().expect("idle");
+        self.device.destroy_swapchain(self.swapchain);
+        self.instance.destroy_surface(self.surface);
+        drop(self.device);
+        drop(self.instance);
+    }
+
+    /// Clears the acquired frame through a real render pass, submits, and
+    /// presents. Returns the command buffer so the caller can retire it.
+    fn clear_frame(&self, acquired: &crcbl_hal::AcquiredFrame) -> crcbl_hal::CommandBufferHandle {
+        let mut encoder = self.device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("wgpu e2e frame"),
+            queue: self.queue,
+        });
+        encoder.pipeline_barrier(&Barriers {
+            images: &[crcbl_hal::ImageBarrier::new(
+                acquired.image,
+                ImageSubresourceRange::all(self.format),
+                ResourceState::Undefined,
+                ResourceState::ColorAttachment,
+            )],
+            ..Barriers::default()
+        });
+        encoder.begin_render_pass(&RenderPassDesc {
+            label: Some("clear"),
+            color_attachments: &[ColorAttachment {
+                view: acquired.view,
+                resolve: None,
+                load: LoadOp::Clear,
+                store: StoreOp::Store,
+                clear: ClearValue::color(CLEAR),
+            }],
+            depth_stencil_attachment: None,
+            render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
+        });
+        encoder.end_render_pass();
+        let commands = encoder.finish().expect("recording succeeded");
+        self.device
+            .submit(self.queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+        self.device
+            .present(
+                self.queue,
+                &PresentInfo {
+                    swapchain: self.swapchain,
+                    waits: acquired.present_semaphore.as_slice(),
+                },
+            )
+            .expect("present");
+        commands
+    }
+}
+
+/// Polls a readback to completion, or fails on the deadline.
+fn drain(device: &dyn Device, readback: crcbl_hal::ReadbackHandle, out: &mut [u8]) {
+    let deadline = Instant::now() + READBACK_DEADLINE;
+    loop {
+        match device
+            .poll_readback(readback, out)
+            .expect("the readback did not fail")
+        {
+            ReadbackState::Ready => return,
+            ReadbackState::Pending => assert!(
+                Instant::now() < deadline,
+                "the readback never completed within {READBACK_DEADLINE:?}"
+            ),
+        }
+        std::thread::yield_now();
+    }
+}
+
+/// The slice's deliverable, end to end: a frame rendered offscreen through wgpu
+/// reaches a host buffer with the colour it was given.
+///
+/// A `clear_buffer` would put bytes somewhere while exercising none of the
+/// attachment, load-op or ring machinery, so this goes through
+/// `begin_render_pass` with [`LoadOp::Clear`] — and then through
+/// `copy_image_to_buffer` and `map_async`, which is the pair the cross-backend
+/// image comparison needs and which this backend refused outright until now.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_render_pass_clear_reaches_host_memory_with_the_colour_it_was_given() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+
+    let acquired = device
+        .acquire_next_frame(headless.swapchain)
+        .expect("the ring always has an image");
+    assert!(
+        acquired.acquire_semaphore.is_none() && acquired.present_semaphore.is_none(),
+        "an offscreen ring has an implicit acquire, like WebGPU's"
+    );
+    assert_eq!(
+        acquired.extent, EXTENT,
+        "an offscreen ring has no window system to clamp against"
+    );
+    assert_eq!(acquired.index, 0, "the first acquire hands out image zero");
+
+    let pixels = u64::from(EXTENT.0 * EXTENT.1 * 4);
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("wgpu e2e readback"),
+            size: pixels,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a readback buffer");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("wgpu e2e frame"),
+        queue: headless.queue,
+    });
+    encoder.begin_render_pass(&RenderPassDesc {
+        label: Some("clear"),
+        color_attachments: &[ColorAttachment {
+            view: acquired.view,
+            resolve: None,
+            load: LoadOp::Clear,
+            store: StoreOp::Store,
+            clear: ClearValue::color(CLEAR),
+        }],
+        depth_stencil_attachment: None,
+        render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
+    });
+    encoder.end_render_pass();
+    encoder.copy_image_to_buffer(&BufferImageCopy {
+        buffer: staging,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: acquired.image,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d::default(),
+        image_extent: Extent3d::d2(EXTENT.0, EXTENT.1),
+    });
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device
+        .present(
+            headless.queue,
+            &PresentInfo {
+                swapchain: headless.swapchain,
+                waits: acquired.present_semaphore.as_slice(),
+            },
+        )
+        .expect("present");
+
+    let readback = device
+        .request_readback(&ReadbackDesc {
+            label: Some("wgpu e2e pixels"),
+            buffer: staging,
+            offset: 0,
+            size: pixels,
+            after: None,
+        })
+        .expect("a readback request");
+
+    let mut bytes = vec![0u8; pixels as usize];
+    drain(device, readback, &mut bytes);
+
+    // The ring's format is sRGB, so the clear's linear values are encoded on
+    // write. Rather than reimplement the transfer function, assert the two
+    // properties that catch the bugs this test is for: every pixel is identical
+    // (so the whole attachment really was cleared), and the channels are ordered
+    // and distinct (so no channel swap or all-zero "nothing happened" slipped
+    // through).
+    let first: [u8; 4] = bytes[0..4].try_into().expect("four bytes");
+    assert!(
+        bytes.chunks_exact(4).all(|pixel| pixel == first),
+        "the whole render area must be cleared uniformly; got {first:?} then {:?}",
+        &bytes[4..8]
+    );
+    assert_ne!(first, [0, 0, 0, 0], "an all-zero result means nothing ran");
+    assert_eq!(first[3], 255, "alpha 1.0 must survive");
+    let (r, g, b) = match headless.format {
+        Format::Bgra8Unorm | Format::Bgra8UnormSrgb => (first[2], first[1], first[0]),
+        _ => (first[0], first[1], first[2]),
+    };
+    assert!(
+        r < g && g < b,
+        "the clear was {CLEAR:?}, so red < green < blue must survive into memory; got r={r} g={g} \
+         b={b} in {:?}",
+        headless.format
+    );
+
+    // Polling again after `Ready` is legal and yields the same bytes — the
+    // seam says so, and this backend has to keep the mapping alive to honour
+    // it.
+    let mut again = vec![0u8; pixels as usize];
+    assert_eq!(
+        device
+            .poll_readback(readback, &mut again)
+            .expect("a second poll is legal"),
+        ReadbackState::Ready
+    );
+    assert_eq!(again, bytes, "a second poll must yield the same bytes");
+
+    device.destroy_readback(readback);
+    device.destroy_buffer(staging);
+    device.destroy_command_buffer(commands);
+    headless.finish();
+}
+
+/// The frame budget the windowed runs prove, proved here on the ring: more
+/// frames than the ring has images, all of them presented.
+///
+/// A backend that never handed an image back would stop at `image_count`. The
+/// index sequence is also the check that present *advances* the ring rather
+/// than handing out the same image forever — a difference no clear colour can
+/// see.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn the_ring_keeps_presenting_past_its_own_image_count() {
+    let headless = Headless::open_with(EXTENT, 2);
+    let device = headless.device.as_ref();
+
+    let mut indices = Vec::new();
+    let mut retired = Vec::new();
+    for _ in 0..8 {
+        let acquired = device
+            .acquire_next_frame(headless.swapchain)
+            .expect("the ring always has an image");
+        indices.push(acquired.index);
+        retired.push(headless.clear_frame(&acquired));
+    }
+    device.wait_idle().expect("idle");
+    for commands in retired {
+        device.destroy_command_buffer(commands);
+    }
+
+    assert_eq!(
+        indices,
+        vec![0, 1, 0, 1, 0, 1, 0, 1],
+        "present advances the ring cursor, and the ring wraps"
+    );
+    headless.finish();
+}
+
+/// A second acquire with a frame still outstanding is refused by name.
+///
+/// On the windowed path this is what would silently *discard* the previous
+/// swapchain image — wgpu's `SurfaceTexture::drop` discards rather than
+/// presents — and a discarded image never comes back, so the failure would
+/// surface four frames later as a timeout with no cause attached to it.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn acquiring_twice_without_a_present_is_refused_rather_than_dropping_a_frame() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+
+    let acquired = device
+        .acquire_next_frame(headless.swapchain)
+        .expect("the first acquire works");
+    let error = device
+        .acquire_next_frame(headless.swapchain)
+        .expect_err("the second must not");
+    assert!(
+        matches!(error, SurfaceError::Hal(HalError::InvalidDescriptor(ref m)) if m.contains("present it first")),
+        "{error}"
+    );
+
+    // And presenting the first one puts it right.
+    let commands = headless.clear_frame(&acquired);
+    device
+        .acquire_next_frame(headless.swapchain)
+        .expect("after a present the ring hands out the next image");
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(commands);
+    headless.finish();
+}
+
+/// Present without an acquire is a caller bug the backend names, not a no-op.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn presenting_without_an_acquire_is_refused() {
+    let headless = Headless::open();
+    let error = headless
+        .device
+        .present(
+            headless.queue,
+            &PresentInfo {
+                swapchain: headless.swapchain,
+                waits: &[],
+            },
+        )
+        .expect_err("nothing was acquired");
+    assert!(
+        matches!(error, SurfaceError::Hal(HalError::InvalidDescriptor(ref m)) if m.contains("without a matching acquire")),
+        "{error}"
+    );
+    headless.finish();
+}
+
+/// A zero extent is the caller's problem — obligation 4 — and the message says
+/// so rather than producing a ring of images nothing can render into.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_zero_extent_offscreen_ring_is_refused_with_the_rule_named() {
+    let (instance, device, surface, _queue, format) = Headless::open_device();
+    for extent in [(0, 48), (64, 0), (0, 0)] {
+        let error = device
+            .create_swapchain(&SwapchainDesc {
+                label: Some("zero"),
+                surface,
+                format,
+                extent,
+                image_count: 2,
+                present_mode: PresentMode::Fifo,
+                composite_alpha: CompositeAlpha::Opaque,
+            })
+            .expect_err("a zero-extent ring has no images");
+        let SurfaceError::Hal(HalError::InvalidDescriptor(message)) = error else {
+            panic!("{extent:?} gave the wrong variant");
+        };
+        assert!(message.contains("do not create one yet"), "{message}");
+    }
+    instance.destroy_surface(surface);
+    drop(device);
+    drop(instance);
+}
+
+/// The readback's descriptor checks, which exist because wgpu **panics** on a
+/// misaligned or unmappable range rather than returning — and a panic through a
+/// trait object is not a diagnosis.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_readback_of_the_wrong_buffer_or_range_is_refused_instead_of_panicking() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+
+    let device_local = device
+        .create_buffer(&BufferDesc {
+            label: Some("device local"),
+            size: 256,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a buffer");
+    let host = device
+        .create_buffer(&BufferDesc {
+            label: Some("host readback"),
+            size: 256,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a buffer");
+
+    let request = |buffer, offset, size| {
+        device.request_readback(&ReadbackDesc {
+            label: Some("bad"),
+            buffer,
+            offset,
+            size,
+            after: None,
+        })
+    };
+
+    for (what, result) in [
+        (
+            "a device-local buffer has no MAP_READ",
+            request(device_local, 0, 256),
+        ),
+        ("past the end of the buffer", request(host, 0, 512)),
+        ("a misaligned offset", request(host, 4, 128)),
+        ("a zero size", request(host, 0, 0)),
+    ] {
+        assert!(
+            matches!(result, Err(HalError::InvalidDescriptor(_))),
+            "{what}: {result:?}"
+        );
+    }
+
+    // And two live readbacks of one buffer, which wgpu panics on rather than
+    // refusing — a buffer can be mapped once.
+    let first = request(host, 0, 256).expect("the first readback is fine");
+    let second = request(host, 0, 256);
+    assert!(
+        matches!(second, Err(HalError::InvalidDescriptor(ref m)) if m.contains("maps a buffer once")),
+        "{second:?}"
+    );
+    // Destroying a readback that never resolved must release the buffer, not
+    // leave it mapped for the life of the process — wgpu's `unmap` aborts a
+    // pending map, and this is the check that it is actually called. Polling
+    // the replacement to `Ready` is what makes the check real: if the abandoned
+    // map were still holding the buffer, wgpu would refuse the second one
+    // immediately and this would be an error rather than bytes.
+    device.destroy_readback(first);
+    let third = request(host, 0, 256).expect("a second request is a fresh readback");
+    let mut bytes = vec![0u8; 256];
+    drain(device, third, &mut bytes);
+    device.destroy_readback(third);
+
+    device.destroy_buffer(device_local);
+    device.destroy_buffer(host);
+    headless.finish();
+}
+
+/// A reconfigure reissues the ring, and the old handles stop resolving — the
+/// seam's rule for holding an image across a resize, which an offscreen ring has
+/// to obey too because `crcbl screenshot` and the headless shell both resize.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn reconfiguring_an_offscreen_ring_reissues_its_images() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+
+    let before = device
+        .acquire_next_frame(headless.swapchain)
+        .expect("an image");
+    let commands = headless.clear_frame(&before);
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(commands);
+
+    let bigger = (128, 96);
+    device
+        .reconfigure_swapchain(
+            headless.swapchain,
+            &SwapchainDesc {
+                label: Some("wgpu e2e ring"),
+                surface: headless.surface,
+                format: headless.format,
+                extent: bigger,
+                image_count: 2,
+                present_mode: PresentMode::Fifo,
+                composite_alpha: CompositeAlpha::Opaque,
+            },
+        )
+        .expect("a ring reconfigures");
+
+    let after = device
+        .acquire_next_frame(headless.swapchain)
+        .expect("an image");
+    assert_eq!(after.extent, bigger, "the ring reports its new size");
+    assert_ne!(
+        after.image, before.image,
+        "a reconfigure reissues every handle, so a caller holding one gets InvalidHandle"
+    );
+    let commands = headless.clear_frame(&after);
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(commands);
+    headless.finish();
+}

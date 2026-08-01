@@ -17,7 +17,8 @@ use crcbl_core::Pool;
 
 use crate::conv;
 use crate::resources::{
-    BufferSlot, CommandBufferSlot, PendingSignal, Pools, SurfaceSlot, SwapchainSlot,
+    BufferSlot, CommandBufferSlot, MapStatus, OffscreenRing, PendingSignal, Pools, ReadbackSlot,
+    SurfaceSlot, SwapchainKind, SwapchainSlot, WindowedSwapchain,
 };
 
 /// wgpu requires buffer copy offsets and sizes to be multiples of this.
@@ -317,17 +318,208 @@ impl Device for WgpuDevice {
         }
         Ok(())
     }
-    fn request_readback(&self, _d: &ReadbackDesc<'_>) -> Result<ReadbackHandle, HalError> {
-        Err(Self::unsupported(
-            "readback: wgpu's map_async completes on a later turn of the event loop and this \
-             backend has no polling ring for it yet",
-        ))
+    fn request_readback(&self, desc: &ReadbackDesc<'_>) -> Result<ReadbackHandle, HalError> {
+        let buffer = {
+            let buffers = self.pools.buffers.lock().unwrap();
+            let slot = buffers
+                .get(desc.buffer.cast())
+                .ok_or_else(|| HalError::invalid_handle("buffer", desc.buffer))?;
+            if slot.memory != hal::MemoryLocation::HostReadback {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "request_readback needs a HostReadback buffer — that is what carries wgpu's \
+                     MAP_READ usage; this one is {:?}",
+                    slot.memory
+                )));
+            }
+            let end = desc.offset.checked_add(desc.size).ok_or_else(|| {
+                HalError::InvalidDescriptor("readback range overflows".to_string())
+            })?;
+            if end > slot.size {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "readback range {}..{end} exceeds the buffer's {} bytes",
+                    desc.offset, slot.size
+                )));
+            }
+            // Alignment is checked here rather than left to wgpu, which
+            // *panics* on a misaligned `map_async` — the seam's contract for a
+            // bad range is `InvalidDescriptor`, and a panic through a trait
+            // object is not a diagnosis.
+            if !desc.offset.is_multiple_of(wgpu::MAP_ALIGNMENT) {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "readback offset {} is not a multiple of {}, which wgpu requires of a mapped \
+                     range",
+                    desc.offset,
+                    wgpu::MAP_ALIGNMENT
+                )));
+            }
+            if desc.size == 0 || !desc.size.is_multiple_of(COPY_ALIGNMENT) {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "readback size {} must be a non-zero multiple of {COPY_ALIGNMENT}, which wgpu \
+                     requires of a mapped range",
+                    desc.size
+                )));
+            }
+            slot.buffer.clone()
+        };
+
+        // A buffer can be mapped once, and wgpu **panics** on the second
+        // `map_async` rather than returning. Two live readbacks of one buffer is
+        // therefore a caller bug this backend has to name, even though
+        // `crcbl-vk` — which reads an always-mapped allocation — can serve it.
+        if self
+            .pools
+            .readbacks
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, slot)| slot.buffer == desc.buffer)
+        {
+            return Err(HalError::InvalidDescriptor(
+                "a second readback of a buffer that already has one in flight: wgpu maps a buffer \
+                 once, so destroy the first readback before requesting another"
+                    .to_string(),
+            ));
+        }
+
+        // `map_async` already resolves only after everything submitted that
+        // touches this buffer has completed, which is the seam's `after: None`
+        // exactly. An explicit completion point can be *later* than that, so it
+        // is resolved to the submission that will signal it and checked as well.
+        let after = match desc.after {
+            None => None,
+            Some(wait) => {
+                self.resolve_semaphores();
+                let semaphores = self.pools.semaphores.lock().unwrap();
+                let slot = semaphores
+                    .get(wait.semaphore.cast())
+                    .ok_or_else(|| HalError::invalid_handle("semaphore", wait.semaphore))?;
+                if slot.value >= wait.value {
+                    None
+                } else {
+                    match slot
+                        .pending
+                        .iter()
+                        .filter(|signal| signal.value >= wait.value)
+                        .min_by_key(|signal| signal.value)
+                    {
+                        Some(signal) => Some(signal.submission.clone()),
+                        None => {
+                            return Err(Self::unsupported(
+                                "ReadbackDesc::after names a timeline value no submitted work \
+                                 signals: wgpu has no standalone semaphore to signal it later",
+                            ));
+                        }
+                    }
+                }
+            }
+        };
+
+        let status = Shared::new(Lock::new(MapStatus::Pending));
+        let sink = status.clone();
+        buffer
+            .slice(desc.offset..desc.offset + desc.size)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                *sink.lock().unwrap() = match result {
+                    Ok(()) => MapStatus::Mapped,
+                    Err(error) => MapStatus::Failed(error.to_string()),
+                };
+            });
+
+        Ok(self
+            .pools
+            .readbacks
+            .lock()
+            .unwrap()
+            .insert(ReadbackSlot {
+                buffer: desc.buffer,
+                offset: desc.offset,
+                size: desc.size,
+                status,
+                after,
+            })
+            .cast())
     }
-    fn poll_readback(&self, r: ReadbackHandle, _out: &mut [u8]) -> Result<ReadbackState, HalError> {
-        // No readback can have been created, so any handle is stale.
-        Err(HalError::invalid_handle("readback", r))
+    fn poll_readback(&self, r: ReadbackHandle, out: &mut [u8]) -> Result<ReadbackState, HalError> {
+        // Nothing else drives wgpu's callbacks on native: `map_async` only
+        // resolves inside a poll, and this is the seam's poll.
+        let _ = self.device.poll(wgpu::PollType::Poll);
+
+        let (buffer_handle, offset, size, status, after) = {
+            let readbacks = self.pools.readbacks.lock().unwrap();
+            let slot = readbacks
+                .get(r.cast())
+                .ok_or_else(|| HalError::invalid_handle("readback", r))?;
+            (
+                slot.buffer,
+                slot.offset,
+                slot.size,
+                slot.status.clone(),
+                slot.after.clone(),
+            )
+        };
+        if out.len() as u64 != size {
+            return Err(HalError::InvalidDescriptor(format!(
+                "poll_readback needs exactly {size} bytes, got {}",
+                out.len()
+            )));
+        }
+        match &*status.lock().unwrap() {
+            MapStatus::Pending => return Ok(ReadbackState::Pending),
+            MapStatus::Failed(message) => {
+                return Err(HalError::DeviceLost(format!(
+                    "wgpu could not map the readback buffer: {message}"
+                )));
+            }
+            MapStatus::Mapped => {}
+        }
+        // The mapping is live; the explicit completion point may not be.
+        if let Some(submission) = after
+            && self
+                .device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(submission),
+                    timeout: Some(core::time::Duration::ZERO),
+                })
+                .is_err()
+        {
+            return Ok(ReadbackState::Pending);
+        }
+
+        let buffers = self.pools.buffers.lock().unwrap();
+        let slot = buffers
+            .get(buffer_handle.cast())
+            .ok_or_else(|| HalError::invalid_handle("buffer", buffer_handle))?;
+        // Dropped before this function returns, which is what lets the next
+        // poll take its own view of the same range.
+        let view = slot
+            .buffer
+            .slice(offset..offset + size)
+            .get_mapped_range()
+            .map_err(|error| {
+                HalError::InvalidDescriptor(format!("wgpu refused the mapped range: {error}"))
+            })?;
+        out.copy_from_slice(&view);
+        Ok(ReadbackState::Ready)
     }
-    fn destroy_readback(&self, _r: ReadbackHandle) {}
+    fn destroy_readback(&self, r: ReadbackHandle) {
+        let Some(slot) = self.pools.readbacks.lock().unwrap().remove(r.cast()) else {
+            return;
+        };
+        // The seam says this call *is* the `unmap`, and wgpu's `unmap` covers
+        // both live states: it releases an `Active` mapping and *aborts* a
+        // `Waiting` one, which is what makes destroying a readback that never
+        // resolved release the buffer rather than leave it mapped forever.
+        //
+        // The one state it must not be called in is the one where wgpu already
+        // gave up: a failed `map_async` leaves the buffer idle, and `unmap` on
+        // an idle buffer is a validation error rather than a no-op.
+        if matches!(&*slot.status.lock().unwrap(), MapStatus::Failed(_)) {
+            return;
+        }
+        if let Some(buffer) = self.pools.buffers.lock().unwrap().get(slot.buffer.cast()) {
+            buffer.buffer.unmap();
+        }
+    }
 
     // ---------- images ----------
     fn create_image(&self, desc: &ImageDesc<'_>) -> Result<ImageHandle, HalError> {
@@ -1075,25 +1267,50 @@ impl Device for WgpuDevice {
 
     // ---------- swapchain ----------
     fn create_swapchain(&self, desc: &SwapchainDesc<'_>) -> Result<SwapchainHandle, SurfaceError> {
-        let surfaces = self.pools.surfaces.lock().unwrap();
-        let surface_slot = surfaces
-            .get(desc.surface.cast())
-            .ok_or(SurfaceError::Lost)?;
+        let kind = {
+            let surfaces = self.pools.surfaces.lock().unwrap();
+            let surface_slot = surfaces
+                .get(desc.surface.cast())
+                .ok_or(SurfaceError::Lost)?;
 
-        let config = swapchain_config(desc);
-        surface_slot.surface.configure(&self.device, &config);
+            match surface_slot.surface.as_ref() {
+                Some(surface) => {
+                    let config = swapchain_config(desc);
+                    surface.configure(&self.device, &config);
+                    Some(config)
+                }
+                // Built after the surface lock is released: creating the ring
+                // takes the image and view pools.
+                None => None,
+            }
+        };
 
+        let (kind, extent) = match kind {
+            Some(config) => (
+                SwapchainKind::Windowed(WindowedSwapchain {
+                    config,
+                    acquired: None,
+                    frame_image: None,
+                    frame_view: None,
+                }),
+                desc.extent,
+            ),
+            None => {
+                // The ring's own answer, which is not always what was asked for.
+                let extent = resolve_offscreen_extent(desc, &self.caps)?;
+                (
+                    SwapchainKind::Offscreen(self.build_offscreen_ring(desc, extent)),
+                    extent,
+                )
+            }
+        };
         let slot = SwapchainSlot {
             surface_handle: desc.surface,
-            config: Some(config),
-            acquired: None,
-            frame_image: None,
-            frame_view: None,
-            extent: desc.extent,
+            kind,
+            extent,
             format: desc.format,
             suboptimal: false,
         };
-        drop(surfaces); // release lock before locking swapchains
 
         let mut swapchains = self.pools.swapchains.lock().unwrap();
         Ok(swapchains.insert(slot).cast())
@@ -1104,31 +1321,64 @@ impl Device for WgpuDevice {
         swapchain: SwapchainHandle,
         desc: &SwapchainDesc<'_>,
     ) -> Result<(), SurfaceError> {
+        // The ring is built before the swapchain lock is taken, for the same
+        // reason `create_swapchain` builds it outside the surface lock.
+        let offscreen = {
+            let swapchains = self.pools.swapchains.lock().unwrap();
+            let slot = swapchains.get(swapchain.cast()).ok_or(SurfaceError::Lost)?;
+            if slot.surface_handle != desc.surface {
+                return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
+                    "reconfigure_swapchain cannot move a swapchain to a different surface"
+                        .to_string(),
+                )));
+            }
+            matches!(slot.kind, SwapchainKind::Offscreen(_))
+        };
+        let replacement = if offscreen {
+            let extent = resolve_offscreen_extent(desc, &self.caps)?;
+            Some((self.build_offscreen_ring(desc, extent), extent))
+        } else {
+            None
+        };
+
         let surfaces = self.pools.surfaces.lock().unwrap();
         let mut swapchains = self.pools.swapchains.lock().unwrap();
         let slot = swapchains
             .get_mut(swapchain.cast())
             .ok_or(SurfaceError::Lost)?;
 
-        // Drop any pending acquired texture before reconfiguring, and release
-        // the handles it put in the pools.
-        slot.acquired = None;
-        let (stale_image, stale_view) = (slot.frame_image.take(), slot.frame_view.take());
-
-        let surface_slot = surfaces
-            .get(slot.surface_handle.cast())
-            .ok_or(SurfaceError::Lost)?;
-
-        let config = swapchain_config(desc);
-        surface_slot.surface.configure(&self.device, &config);
-
-        slot.config = Some(config);
-        slot.extent = desc.extent;
-        slot.format = desc.format;
+        let stale = match (&mut slot.kind, replacement) {
+            (SwapchainKind::Windowed(windowed), _) => {
+                let surface_slot = surfaces
+                    .get(slot.surface_handle.cast())
+                    .ok_or(SurfaceError::Lost)?;
+                let surface = surface_slot.surface.as_ref().ok_or(SurfaceError::Lost)?;
+                // The acquired texture is *presented* rather than dropped: a
+                // dropped `SurfaceTexture` is discarded, and a discarded image
+                // never returns to the presentation engine.
+                if let Some(texture) = windowed.acquired.take() {
+                    self.queue.present(texture);
+                }
+                let config = swapchain_config(desc);
+                surface.configure(&self.device, &config);
+                windowed.config = config;
+                slot.extent = desc.extent;
+                slot.format = desc.format;
+                Stale::Frame(windowed.frame_image.take(), windowed.frame_view.take())
+            }
+            (SwapchainKind::Offscreen(ring), Some((fresh, extent))) => {
+                let previous = core::mem::replace(ring, fresh);
+                slot.extent = extent;
+                slot.format = desc.format;
+                Stale::Ring(previous)
+            }
+            (SwapchainKind::Offscreen(_), None) => {
+                unreachable!("an offscreen swapchain always builds a replacement ring above")
+            }
+        };
         drop(swapchains);
         drop(surfaces);
-        self.release_frame_handles(stale_image, stale_view);
-
+        self.release_stale(stale);
         Ok(())
     }
 
@@ -1139,9 +1389,17 @@ impl Device for WgpuDevice {
             .lock()
             .unwrap()
             .remove(swapchain.cast())
-            .map(|mut slot| (slot.frame_image.take(), slot.frame_view.take()));
-        if let Some((image, view)) = stale {
-            self.release_frame_handles(image, view);
+            .map(|slot| match slot.kind {
+                SwapchainKind::Windowed(mut windowed) => {
+                    if let Some(texture) = windowed.acquired.take() {
+                        self.queue.present(texture);
+                    }
+                    Stale::Frame(windowed.frame_image, windowed.frame_view)
+                }
+                SwapchainKind::Offscreen(ring) => Stale::Ring(ring),
+            });
+        if let Some(stale) = stale {
+            self.release_stale(stale);
         }
     }
 
@@ -1154,53 +1412,96 @@ impl Device for WgpuDevice {
         let slot = swapchains
             .get_mut(swapchain.cast())
             .ok_or(SurfaceError::Lost)?;
+        let extent = slot.extent;
+        let surface_handle = slot.surface_handle;
 
-        let surface_slot = surfaces
-            .get(slot.surface_handle.cast())
-            .ok_or(SurfaceError::Lost)?;
+        // Checked **before** anything is acquired, on both shapes. An acquire
+        // with one still outstanding would drop the previous
+        // `wgpu::SurfaceTexture`, and dropping one *discards* the image instead
+        // of presenting it — the presentation engine never gets it back and the
+        // swapchain runs dry. Refused by name rather than turned into a timeout
+        // several frames later; and refused before `get_current_texture`, so the
+        // refusal does not itself acquire a texture it would have to discard.
+        let outstanding = match &slot.kind {
+            SwapchainKind::Windowed(windowed) => windowed.acquired.is_some(),
+            SwapchainKind::Offscreen(ring) => ring.acquired.is_some(),
+        };
+        if outstanding {
+            return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
+                "acquire_next_frame with a frame already acquired; present it first".to_string(),
+            )));
+        }
 
-        let (surface_texture, suboptimal) = match surface_slot.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
-            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
-            wgpu::CurrentSurfaceTexture::Timeout => return Err(SurfaceError::Timeout),
-            wgpu::CurrentSurfaceTexture::Outdated => return Err(SurfaceError::OutOfDate),
-            wgpu::CurrentSurfaceTexture::Lost => return Err(SurfaceError::Lost),
-            _ => return Err(SurfaceError::Lost),
+        let ring = match &mut slot.kind {
+            SwapchainKind::Offscreen(ring) => ring,
+            SwapchainKind::Windowed(_) => {
+                let surface_slot = surfaces
+                    .get(surface_handle.cast())
+                    .ok_or(SurfaceError::Lost)?;
+                let surface = surface_slot.surface.as_ref().ok_or(SurfaceError::Lost)?;
+                let (surface_texture, suboptimal) = match surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
+                    wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
+                    wgpu::CurrentSurfaceTexture::Timeout => return Err(SurfaceError::Timeout),
+                    wgpu::CurrentSurfaceTexture::Outdated => return Err(SurfaceError::OutOfDate),
+                    wgpu::CurrentSurfaceTexture::Lost => return Err(SurfaceError::Lost),
+                    _ => return Err(SurfaceError::Lost),
+                };
+
+                // Clone the texture (Arc-backed) so we can store it separately.
+                let texture = surface_texture.texture.clone();
+                let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("swapchain_view"),
+                    ..Default::default()
+                });
+
+                let image: ImageHandle = self.pools.images.lock().unwrap().insert(texture).cast();
+                let view: ImageViewHandle =
+                    self.pools.image_views.lock().unwrap().insert(view).cast();
+
+                let SwapchainKind::Windowed(windowed) = &mut slot.kind else {
+                    unreachable!("matched Windowed above")
+                };
+                // The previous frame's handles die here: a swapchain texture is
+                // re-acquired every frame, so keeping them would leak two pool
+                // slots per frame for the life of the process.
+                let stale = Stale::Frame(windowed.frame_image.take(), windowed.frame_view.take());
+                windowed.acquired = Some(surface_texture);
+                windowed.frame_image = Some(image);
+                windowed.frame_view = Some(view);
+                slot.suboptimal = suboptimal;
+
+                drop(swapchains);
+                drop(surfaces);
+                self.release_stale(stale);
+
+                return Ok(AcquiredFrame {
+                    image,
+                    view,
+                    extent,
+                    // WebGPU has no stable image index to give — the seam's
+                    // swapchain docs say so, and say what the field is for.
+                    index: 0,
+                    acquire_semaphore: None,
+                    present_semaphore: None,
+                    suboptimal,
+                });
+            }
         };
 
-        // Clone the texture (Arc-backed) so we can store it separately.
-        let texture = surface_texture.texture.clone();
-        let view = texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("swapchain_view"),
-            ..Default::default()
-        });
-
-        // The previous frame's handles die here: a swapchain texture is
-        // re-acquired every frame, so keeping them would leak two pool slots
-        // per frame for the life of the process.
-        let (stale_image, stale_view) = (slot.frame_image.take(), slot.frame_view.take());
-
-        let image: ImageHandle = self.pools.images.lock().unwrap().insert(texture).cast();
-        let view: ImageViewHandle = self.pools.image_views.lock().unwrap().insert(view).cast();
-
-        slot.acquired = Some(surface_texture);
-        slot.frame_image = Some(image);
-        slot.frame_view = Some(view);
-        slot.suboptimal = suboptimal;
-        let extent = slot.extent;
-
-        drop(swapchains);
-        drop(surfaces);
-        self.release_frame_handles(stale_image, stale_view);
-
+        // The offscreen ring: the implicit-acquire shape, which is what the seam
+        // was designed around. No semaphores, and the caller's
+        // `Option::as_slice()` splices nothing.
+        let index = ring.next;
+        ring.acquired = Some(index);
         Ok(AcquiredFrame {
-            image,
-            view,
+            image: ring.images[index as usize],
+            view: ring.views[index as usize],
             extent,
-            index: 0,
+            index,
             acquire_semaphore: None,
             present_semaphore: None,
-            suboptimal,
+            suboptimal: false,
         })
     }
 
@@ -1208,32 +1509,208 @@ impl Device for WgpuDevice {
         if queue != self.graphics_queue {
             return Err(SurfaceError::Hal(HalError::invalid_handle("queue", queue)));
         }
-        let (image, view) = {
+        // wgpu has no queue-side wait to express these: one queue's submissions
+        // run in order, so a present after the submission that signalled is
+        // ordered after it by construction — the argument `submit` makes about
+        // the same semaphores. The handles are still resolved, so a stale one is
+        // an error rather than something nobody looked at.
+        {
+            let semaphores = self.pools.semaphores.lock().unwrap();
+            for handle in present.waits {
+                semaphores.get(handle.cast()).ok_or_else(|| {
+                    SurfaceError::Hal(HalError::invalid_handle("semaphore", *handle))
+                })?;
+            }
+        }
+
+        let (texture, stale) = {
             let mut swapchains = self.pools.swapchains.lock().unwrap();
             let slot = swapchains
                 .get_mut(present.swapchain.cast())
                 .ok_or(SurfaceError::Lost)?;
 
-            // Dropping the SurfaceTexture auto-presents.
-            slot.acquired = None;
-            (slot.frame_image.take(), slot.frame_view.take())
+            match &mut slot.kind {
+                SwapchainKind::Windowed(windowed) => {
+                    let Some(texture) = windowed.acquired.take() else {
+                        return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
+                            "present without a matching acquire_next_frame".to_string(),
+                        )));
+                    };
+                    (
+                        Some(texture),
+                        Stale::Frame(windowed.frame_image.take(), windowed.frame_view.take()),
+                    )
+                }
+                SwapchainKind::Offscreen(ring) => {
+                    let Some(index) = ring.acquired.take() else {
+                        return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
+                            "present without a matching acquire_next_frame".to_string(),
+                        )));
+                    };
+                    // "Presenting" a ring image is advancing the ring. The image
+                    // stays valid and is reused when the cursor comes back
+                    // round, exactly as a real swapchain image is.
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        ring.next = (index + 1) % ring.images.len() as u32;
+                    }
+                    (None, Stale::Nothing)
+                }
+            }
         };
-        self.release_frame_handles(image, view);
+
+        // The derived view and the cloned texture go first: they are the last
+        // references this backend holds into the acquired image, and present
+        // hands it back to the presentation engine.
+        self.release_stale(stale);
+        if let Some(texture) = texture {
+            // **The whole of the fix.** `Queue::present` is what hands the
+            // image back; `SurfaceTexture`'s `Drop` *discards* it instead, and
+            // a discarded image is never returned to the presentation engine —
+            // which exhausted the swapchain after `image_count` frames and made
+            // every later acquire block until it timed out.
+            self.queue.present(texture);
+        }
         Ok(())
     }
 }
 
+/// Pool rows a swapchain operation orphaned, released once its locks are gone.
+enum Stale {
+    /// Nothing to release — an offscreen present keeps its ring.
+    Nothing,
+    /// One acquire's image and view, from a windowed swapchain.
+    Frame(Option<ImageHandle>, Option<ImageViewHandle>),
+    /// A whole offscreen ring, from a reconfigure or a destroy.
+    Ring(OffscreenRing),
+}
+
 impl WgpuDevice {
-    /// Drops the pool entries an acquire created. Separate so every caller
-    /// releases the pool locks first.
-    fn release_frame_handles(&self, image: Option<ImageHandle>, view: Option<ImageViewHandle>) {
-        if let Some(view) = view {
-            self.pools.image_views.lock().unwrap().remove(view.cast());
-        }
-        if let Some(image) = image {
-            self.pools.images.lock().unwrap().remove(image.cast());
+    /// Drops the pool entries a swapchain operation orphaned. Separate so every
+    /// caller releases the pool locks first.
+    fn release_stale(&self, stale: Stale) {
+        match stale {
+            Stale::Nothing => {}
+            Stale::Frame(image, view) => {
+                if let Some(view) = view {
+                    self.pools.image_views.lock().unwrap().remove(view.cast());
+                }
+                if let Some(image) = image {
+                    self.pools.images.lock().unwrap().remove(image.cast());
+                }
+            }
+            Stale::Ring(ring) => {
+                let mut views = self.pools.image_views.lock().unwrap();
+                for view in ring.views {
+                    views.remove(view.cast());
+                }
+                drop(views);
+                let mut images = self.pools.images.lock().unwrap();
+                for image in ring.images {
+                    images.remove(image.cast());
+                }
+            }
         }
     }
+
+    /// Builds the ring of textures an offscreen "swapchain" is.
+    ///
+    /// The images are the swapchain's, for its whole life — not one texture
+    /// borrowed per frame — which is what makes an offscreen
+    /// [`AcquiredFrame::index`] a real index rather than the constant zero a
+    /// windowed acquire has to report.
+    ///
+    /// `extent` is the one [`resolve_offscreen_extent`] settled on, passed in so
+    /// the caller and the ring cannot disagree about the size the images were
+    /// created at.
+    fn build_offscreen_ring(&self, desc: &SwapchainDesc<'_>, extent: (u32, u32)) -> OffscreenRing {
+        let caps = crate::instance::offscreen_surface_caps();
+        let count = desc
+            .image_count
+            .clamp(caps.min_image_count, caps.max_image_count);
+        let format = conv::map_format(desc.format);
+
+        let mut textures = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let label = desc.label.map(|label| format!("{label} [{index}]"));
+            textures.push(self.device.create_texture(&wgpu::TextureDescriptor {
+                label: label.as_deref(),
+                size: wgpu::Extent3d {
+                    width: extent.0,
+                    height: extent.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                // `COPY_SRC` is what makes this a screenshot target and
+                // `TEXTURE_BINDING` what makes it a tonemap input — the same
+                // four `crcbl-vk`'s offscreen ring asks for, so a caller that
+                // works against one works against the other.
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[format],
+            }));
+        }
+
+        let views: Vec<_> = textures
+            .iter()
+            .map(|texture| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("offscreen ring view"),
+                    ..Default::default()
+                })
+            })
+            .collect();
+
+        let image_handles = {
+            let mut images = self.pools.images.lock().unwrap();
+            textures
+                .into_iter()
+                .map(|texture| images.insert(texture).cast())
+                .collect()
+        };
+        let view_handles = {
+            let mut pool = self.pools.image_views.lock().unwrap();
+            views
+                .into_iter()
+                .map(|view| pool.insert(view).cast())
+                .collect()
+        };
+
+        OffscreenRing {
+            images: image_handles,
+            views: view_handles,
+            next: 0,
+            acquired: None,
+        }
+    }
+}
+
+/// The extent an offscreen ring is actually created at.
+///
+/// There is no window system to clamp against, so the only bound is the
+/// device's own `max_texture_dimension_2d`. A zero extent is refused rather than
+/// guessed at — obligation 4 of the seam's swapchain rules, and the same answer
+/// `crcbl-vk` gives.
+fn resolve_offscreen_extent(
+    desc: &SwapchainDesc<'_>,
+    caps: &DeviceCaps,
+) -> Result<(u32, u32), SurfaceError> {
+    let (width, height) = desc.extent;
+    if width == 0 || height == 0 {
+        return Err(SurfaceError::Hal(HalError::InvalidDescriptor(format!(
+            "SwapchainDesc::extent is {:?}; a zero-extent swapchain has no images, and an \
+             unconfigured or minimized window means 'do not create one yet' rather than 'pick \
+             something'",
+            desc.extent
+        ))));
+    }
+    let max = caps.limits.max_image_2d.max(1);
+    Ok((width.min(max), height.min(max)))
 }
 
 /// `ImageSubresourceRange::ALL` → wgpu's "all remaining", which is `None`.

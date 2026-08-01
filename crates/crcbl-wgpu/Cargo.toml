@@ -20,5 +20,13 @@ raw-window-handle = "0.6"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.4"
 
+[features]
+# The suite in `tests/wgpu_e2e.rs`, which needs a real adapter. Feature-gated
+# *and* `#[ignore]`d, exactly like `crcbl-vk`'s `vk-e2e`: a plain
+# `cargo nextest run --all-features` on a machine with no GPU must stay green,
+# and `tests/run-wgpu-e2e.sh` is the only thing that turns them on — and it
+# fails when the suite reports zero tests run.
+wgpu-e2e = []
+
 [lints]
 workspace = true

@@ -15,15 +15,76 @@
 //!   [`Unsupported`](crcbl_hal::HalError::Unsupported) and the timestamp
 //!   features are therefore never advertised, so the profiler HUD degrades
 //!   rather than asking for something that will be refused.
-//! * **No readback.** wgpu's `map_async` completes on a later turn of the event
-//!   loop; the polling ring the seam's `request_readback` needs is not wired
-//!   yet, and the method says so.
 //! * **One queue.** `Device::queue` returns `None` for
 //!   [`Compute`](crcbl_hal::QueueKind::Compute) and
 //!   [`Transfer`](crcbl_hal::QueueKind::Transfer).
 //! * **No semaphore objects.** Submissions on one queue run in order and wgpu
 //!   inserts its own hazard barriers, so `pipeline_barrier` is a real no-op and
 //!   a timeline "signal" is the completion of the submission that carries it.
+//!
+//! # Presenting: `Queue::present`, never a drop (P5.11)
+//!
+//! [`Device::present`](crcbl_hal::Device::present) hands the acquired
+//! `wgpu::SurfaceTexture` to `wgpu::Queue::present`. That is not a stylistic
+//! choice: `SurfaceTexture`'s `Drop` **discards** the image instead of
+//! presenting it, and a discarded image is never returned to the presentation
+//! engine. This backend used to drop it — the code said "dropping the
+//! SurfaceTexture auto-presents", which is the opposite of what wgpu does — so a
+//! windowed run acquired `image_count` images, exhausted the swapchain, and
+//! blocked in the next acquire until it reported
+//! [`SurfaceError::Timeout`](crcbl_hal::SurfaceError::Timeout). It died on frame
+//! four of every run, and any frame budget shorter than the ring hid it.
+//!
+//! Two consequences are in the code as rules rather than as comments: a second
+//! [`acquire_next_frame`](crcbl_hal::Device::acquire_next_frame) with a frame
+//! still outstanding is refused (it would drop, and therefore discard, the
+//! first), and a reconfigure or destroy presents an outstanding frame rather
+//! than dropping it.
+//!
+//! ## Known gap, upstream: a validation error on every windowed acquire
+//!
+//! On Linux, a windowed run over wgpu's Vulkan backend logs
+//! `VUID-vkAcquireNextImageKHR-fence-10066` once per acquire. **It is not
+//! reachable from this crate.** `wgpu-hal` 30.0.0's `NativeSwapchain` owns a
+//! `vk::Fence` (`src/vulkan/swapchain/native.rs`), passes it to *every*
+//! `vkAcquireNextImageKHR`, and waits on and resets it only inside a
+//! `#[cfg(target_os = "windows")]` block — the fence exists for a Windows-only
+//! frame-pacing fix (gfx-rs/wgpu#8310, #8354). Off Windows it is therefore still
+//! signalled from the previous acquire when the next one is made. Nothing above
+//! `wgpu` can see the object, 30.0.0 is the newest published version, and the
+//! frames are correct: the run completes its whole budget and presents every
+//! frame. Recorded here rather than silenced, because turning validation off is
+//! the one response that would make it invisible without making it untrue.
+//!
+//! # Offscreen: a ring of textures, not a surface (P5.11)
+//!
+//! [`SurfaceTarget::Offscreen`](crcbl_core::SurfaceTarget::Offscreen) creates a
+//! surface with no `wgpu::Surface` behind it, and its "swapchain" is a ring of
+//! plain textures this backend allocates —
+//! `RENDER_ATTACHMENT | COPY_SRC | COPY_DST | TEXTURE_BINDING`, the same four
+//! `crcbl-vk`'s offscreen ring asks for. Acquire rotates the ring and present
+//! advances it, so `crcbl screenshot`, the headless shell and the golden-image
+//! path run through the *same* caller code on both backends. Unlike the windowed
+//! path, the ring owns its images for its whole life, so
+//! [`AcquiredFrame::index`](crcbl_hal::AcquiredFrame::index) is a real index
+//! there and the constant `0` the seam permits only on a real surface.
+//!
+//! # Readback: `map_async`, polled (P5.11)
+//!
+//! [`request_readback`](crcbl_hal::Device::request_readback) starts a
+//! `map_async` and keeps the callback's answer;
+//! [`poll_readback`](crcbl_hal::Device::poll_readback) drives `Device::poll` once
+//! and reports `Pending` until it lands;
+//! [`destroy_readback`](crcbl_hal::Device::destroy_readback) is the `unmap`.
+//! That is the mapping `crcbl_hal::readback`'s table asked each backend for, and
+//! it is why the seam is poll-shaped: nothing here blocks, so the same three
+//! calls work on the browser's main thread.
+//!
+//! Every range is checked before wgpu sees it — a misaligned offset, a size that
+//! is not a non-zero multiple of four, a buffer without
+//! [`MemoryLocation::HostReadback`](crcbl_hal::MemoryLocation::HostReadback) —
+//! because wgpu *panics* on those rather than returning, and a panic through a
+//! trait object is not a diagnosis.
 //!
 //! # Shaders: WGSL first
 //!
@@ -38,17 +99,13 @@
 //! descriptor carrying neither format is an error naming the gap, not a module
 //! handle no pipeline could use.
 //!
-//! ## Known gap: `ui.slang` still does not compile here
-//!
-//! WGSL has no push constants, and Slang's WGSL target emits the block as a
-//! module-scope `var<uniform>` with no `@group`/`@binding` — invalid WGSL,
-//! which `naga` refuses. `mesh`, `tonemap` and `triangle` compile; `ui` does
-//! not, so `apps/breakout` under `--backend wgpu` stops at that module while
-//! `apps/sandbox`, which has no UI pass, gets past every shader it needs. The
-//! fix is a uniform buffer in place of the push-constant block in
-//! `crcbl-render`'s UI pass and in `ui.slang` — the Tier B data-layout rule
-//! `docs/plan/10-wasm-webgpu.md` states for this backend anyway. Recorded in
-//! full in `crcbl-shaders`' crate docs.
+//! `ui.slang` was the last module that would not compile here: WGSL has no push
+//! constants, and Slang's WGSL target emitted the block as a module-scope
+//! `var<uniform>` with no `@group`/`@binding`, which `naga` refuses. P5.10's
+//! uniform-buffer path in `crcbl-render`'s UI pass — the Tier B data-layout rule
+//! `docs/plan/10-wasm-webgpu.md` states for this backend anyway — replaced it,
+//! so `apps/breakout` now builds every module it needs and draws its HUD through
+//! this backend.
 //!
 //! # wasm32
 //!

@@ -5,7 +5,8 @@ use crate::cell::{Lock, Shared};
 use crcbl_core::Pool;
 use crcbl_hal::{
     AdapterId, AdapterInfo, BackendKind, CompositeAlpha, DeviceCaps, DeviceDesc, DeviceType,
-    Features, HalError, Instance, Limits, PresentMode, SurfaceCaps, SurfaceHandle, SurfaceTarget,
+    Features, Format, HalError, Instance, Limits, PresentMode, SurfaceCaps, SurfaceHandle,
+    SurfaceTarget,
 };
 
 use crate::device::WgpuDevice;
@@ -271,13 +272,23 @@ impl Instance for WgpuInstance {
             .get(surface.cast())
             .ok_or_else(|| HalError::invalid_handle("surface", surface))?;
 
+        let Some(surface_ref) = slot.surface.as_ref() else {
+            // The adapter still has to exist — a caller doing adapter selection
+            // must not get an answer about an adapter that does not.
+            self.adapters
+                .iter()
+                .find(|(info, _)| info.id == adapter)
+                .ok_or(HalError::NoSuchAdapter(adapter.0))?;
+            return Ok(offscreen_surface_caps());
+        };
+
         let (_, wgpu_adapter) = self
             .adapters
             .iter()
             .find(|(info, _)| info.id == adapter)
             .ok_or(HalError::NoSuchAdapter(adapter.0))?;
 
-        let caps = slot.surface.get_capabilities(wgpu_adapter);
+        let caps = surface_ref.get_capabilities(wgpu_adapter);
 
         // An adapter that cannot present to this surface must be an error, not
         // an empty format list — `Instance::surface_caps` says so, and callers
@@ -339,6 +350,20 @@ impl Instance for WgpuInstance {
     }
 
     unsafe fn create_surface(&self, target: &SurfaceTarget) -> Result<SurfaceHandle, HalError> {
+        // Offscreen names no window-system object, so there is nothing for wgpu
+        // to wrap: the surface is a marker, and `create_swapchain` builds a ring
+        // of plain textures on it. Same shape as `crcbl-vk`, which stores a null
+        // `VkSurfaceKHR` for exactly this case.
+        if matches!(target, SurfaceTarget::Offscreen) {
+            let mut surfaces = self.surfaces.lock().unwrap();
+            return Ok(surfaces
+                .insert(SurfaceSlot {
+                    surface: None,
+                    platform: "offscreen",
+                })
+                .cast());
+        }
+
         let (raw_window, raw_display, platform) = unsafe { map_surface_target(target)? };
 
         let surface = unsafe {
@@ -351,7 +376,12 @@ impl Instance for WgpuInstance {
         .map_err(|e| HalError::Backend(format!("wgpu create_surface on {platform}: {e}")))?;
 
         let mut surfaces = self.surfaces.lock().unwrap();
-        Ok(surfaces.insert(SurfaceSlot { surface, platform }).cast())
+        Ok(surfaces
+            .insert(SurfaceSlot {
+                surface: Some(surface),
+                platform,
+            })
+            .cast())
     }
 
     fn destroy_surface(&self, surface: SurfaceHandle) {
@@ -434,12 +464,37 @@ unsafe fn map_surface_target(
         SurfaceTarget::Web { .. } => unsupported("a Web canvas surface outside a wasm32 build"),
         SurfaceTarget::Win32 { .. } => unsupported("Win32 (P14)"),
         SurfaceTarget::AppKit { .. } => unsupported("AppKit (P14)"),
-        SurfaceTarget::Offscreen => {
-            // Offscreen: no real window system surface. wgpu doesn't have a
-            // direct offscreen surface API, so we return an error for now.
-            // The renderer can use a plain texture ring instead.
-            unsupported("Offscreen (not yet wired)")
-        }
+        // Handled before this function is reached: an offscreen "surface" has
+        // no raw handle pair to map, which is the whole of what this maps.
+        SurfaceTarget::Offscreen => unsupported("Offscreen has no raw window handle to map"),
+    }
+}
+
+/// The capabilities an offscreen "surface" reports.
+///
+/// There is no window system to ask, so this is a statement of what the ring
+/// supports rather than a query — and it is deliberately the same statement
+/// `crcbl-vk`'s `offscreen_surface_caps` makes, so a caller that picks a format
+/// from these caps gets the same frame out of either backend. `Fifo` because the
+/// seam promises it always exists; `Rgba8UnormSrgb` first because
+/// [`SurfaceCaps::preferred_format`] picks the first sRGB format and a golden
+/// image wants a display-referred one. `current_extent: None` because nothing
+/// here has an opinion about the size.
+#[must_use]
+pub(crate) fn offscreen_surface_caps() -> SurfaceCaps {
+    SurfaceCaps {
+        formats: vec![
+            Format::Rgba8UnormSrgb,
+            Format::Bgra8UnormSrgb,
+            Format::Rgba8Unorm,
+            Format::Bgra8Unorm,
+            Format::Rgba16Float,
+        ],
+        present_modes: vec![PresentMode::Fifo, PresentMode::Immediate],
+        composite_alpha: vec![CompositeAlpha::Opaque],
+        min_image_count: 1,
+        max_image_count: 8,
+        current_extent: None,
     }
 }
 
