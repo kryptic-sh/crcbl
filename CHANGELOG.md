@@ -16,6 +16,50 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl-phys**: the broadphase BVH is **dynamic**. `Bvh::insert` and
+  `Bvh::remove` add and drop one element along a single root-to-leaf path, and
+  `PhysicsWorld::add_*` / `PhysicsWorld::remove` use them, so a world whose tree
+  already exists no longer throws it away on every spawn and kill. A game that
+  fires a bullet per shot and splits a rock into two used to pay a full
+  `O(n log n)` rebuild for each of those events, every frame, on a tree it had
+  just built. Batch population before the first query is unchanged: with no tree
+  yet, adds accumulate and one bulk `Bvh::build` still runs, which produces a
+  better tree than the same elements inserted one at a time.
+
+  Insertion picks where a leaf goes by the surface area heuristic and the walk
+  back to the root **rebalances** (AVL single rotation), which is what makes the
+  quality claim hold rather than depend on the input. Measured over 20k
+  insert/remove pairs: peak depth 13 at 1024 elements against an ideal of 11
+  (`ceil(log2 n) + 1`), and 9 at 64 against 7. Without the rotation the same run
+  on 1024 _coincident_ boxes — where every candidate site costs the same and the
+  heuristic has nothing to choose by — reached depth 623, a tree that is very
+  nearly a linked list. `Bvh::depth`, `Bvh::len` and `Bvh::is_empty` are public
+  so the property is observable; `crates/crcbl-phys/tests/churn.rs` bounds depth
+  by the AVL bound over thousands of operations and checks every query against a
+  brute-force scan after each one.
+
+- **crcbl-phys**: `ThrustForce` and `DampingForce`, the first two L1 force
+  providers driven by a game rather than by physics for its own sake.
+
+  `ThrustForce` is the first force that reads the body's _orientation_:
+  `F = magnitude · (rotation × local_direction)`. The local axis is named rather
+  than fixed at `Transform::forward` (`-Z`) because a top-down 2D game turns its
+  ship about Z, where `-Z` points at the camera and thrusting along it would
+  drive the ship out of the playfield plane. `ThrustForce::world_force` exposes
+  the same vector to callers who are not using the provider pipeline.
+
+  `DampingForce` is `F = -min(k, m/dt)·v`. The cap is the point: plain `-k·v`
+  integrated at `k·dt/m ≥ 2` _reverses_ the velocity and then grows it, so a
+  coefficient that behaves at a 240 Hz substep explodes at a 10 Hz one. With the
+  cap the worst case is a velocity that reaches exactly zero. `DragForce` is
+  deliberately left uncapped — it is the physical law, and a caller modelling a
+  fluid wants the law.
+
+- **crcbl-phys**: `PhysicsSystem::apply_force(entity, force)` adds a force to
+  one entity for the next `step`. Force providers are global — every dynamic
+  body gets every provider — which is right for gravity and wrong for the thrust
+  of the one ship among a screenful of rocks.
+
 - **crcbl-ui**, **crcbl-render**, **breakout**, **flappy**, **sandbox**: the
   samples' start, pause and end-of-game states are **menus** — a nine-sliced
   pixel-art window frame with skinned buttons inside it, centred in the

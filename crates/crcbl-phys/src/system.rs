@@ -112,8 +112,35 @@ impl PhysicsSystem {
 
     /// Add a force provider. Providers are applied in order before
     /// integration.
+    ///
+    /// Providers are **global**: every dynamic body gets every provider. That
+    /// is right for a field force — gravity, drag — and wrong for one that
+    /// belongs to a single entity, such as the thrust of the one ship among a
+    /// screenful of rocks. For that, use [`PhysicsSystem::apply_force`].
     pub fn add_force_provider(&mut self, provider: Box<dyn ForceProvider>) {
         self.force_providers.push(provider);
+    }
+
+    /// Add a world-space force to one entity's accumulator for the next
+    /// [`PhysicsSystem::step`]. Returns `false` if the entity has no body.
+    ///
+    /// This is how a game applies a force only some entities feel — the
+    /// player's thrust, a shove from a pickup — without a provider that would
+    /// apply it to everything. Like a provider's contribution it lasts one
+    /// substep: the integrator clears the accumulator, so a force held down
+    /// over time is re-applied each tick.
+    ///
+    /// [`crate::ThrustForce::world_force`] computes the thrust vector to pass
+    /// here from a body's orientation, so a per-entity thrust and a pipeline
+    /// one are the same model either way.
+    pub fn apply_force(&mut self, entity: Entity, force: DVec3) -> bool {
+        match self.bodies.get_mut(&entity) {
+            Some(body) => {
+                body.apply_force(force);
+                true
+            }
+            None => false,
+        }
     }
 
     // ── Collider management ────────────────────────────────────────────

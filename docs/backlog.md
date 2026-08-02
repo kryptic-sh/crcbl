@@ -356,6 +356,56 @@ The modular panel is built and all three samples switch it on with F3 (or
   the first tagged release, or not at all — there are no releases yet for a
   reader to be missing entries from.
 
+## What asteroids still needs from `crcbl-phys`
+
+P6 delivered dynamic BVH churn, sphere overlap against the broadphase, and the
+first two L1 force providers. What the sample doc
+(`docs/plan/sample/02-asteroids.md`) names and this slice did **not** deliver:
+
+- **Segment CCD as a single entry point.** `PhysicsSystem::sweep_sphere` exists
+  and is what a bullet should go through (`prev → cur` as the segment, the
+  bullet's radius as the sweep radius), so the machinery is there. What is not
+  there is a bullet-shaped API — the sample will be writing "sweep from where it
+  was to where it is, and if it hit anything, that is the impact" by hand, in
+  every sample that fires anything. Decide when asteroids writes it whether it
+  earns a named method. Not blocking.
+
+- **`PhysicsSystem::overlap_sphere` fabricates its `ShapeHit`.** It returns
+  `t: 0.0`, `normal: DVec3::Y`, `started_inside: true` for every result — those
+  are not measurements, they are filler. Asteroids only asks _whether_ the ship
+  touched a rock, so it does not bite yet, but the type promises a contact and
+  does not deliver one. Either compute a real deepest-point normal or change the
+  return type to entity ids. `PhysicsWorld::overlap_sphere` underneath it is
+  honest — it returns `Vec<ColliderId>` and nothing more.
+
+- **Rotational dynamics are absent.** `Transform` carries a `DQuat` and
+  `ThrustForce` reads it, but there is no angular velocity, no torque and no
+  quaternion integration: `RigidBody` has `velocity` and `force_accum` and
+  nothing angular. A ship that turns must have its rotation written by game code
+  through `set_transform`. That is fine for asteroids (turn rate is a constant,
+  not a physical response) and wrong for the inertia tensor the design doc
+  describes. Whoever needs real torque adds `angular_velocity`, `torque_accum`
+  and an inertia term to `RigidBody` and a rotation step to `SemiImplicitEuler`.
+
+- **Screen wrap has no broadphase story.** The sample doc says the wrap teleport
+  "exercises `WorldPos` rebase + broadphase re-insertion". A teleport today is a
+  `set_transform`, which refits the leaf where it stands — and
+  `Bvh::update_aabb` deliberately does not re-pick the leaf's place in the tree,
+  so a body that jumps across the playfield leaves its ancestors' bounds
+  stretched across the whole field. Remove-and-re-insert is the correct move for
+  a teleport and nothing does it automatically. Cheap to add (`PhysicsWorld`
+  knows both), but it needs a rule for _when_ — a distance threshold, or an
+  explicit `teleport()` call by the caller. Left for whoever writes the wrap.
+
+- **No benchmark, and no rebuild policy.** Churn cost was measured as tree
+  _depth_, not as time: the claim "insert/remove beats a rebuild" is an
+  algorithmic one (one root-to-leaf path against `O(n log n)`) and was not
+  timed. There is also no policy that ever rebuilds a churned tree — the AVL
+  bound is what makes one unnecessary, but a bulk build still produces a tighter
+  tree by surface area than incremental insertion does, and nobody has measured
+  the query-cost difference between the two. The horde sample (P8, 10k bodies)
+  is where that stops being academic.
+
 ## Deferred decisions
 
 Questions that came up mid-slice and were answered by judgement rather than by

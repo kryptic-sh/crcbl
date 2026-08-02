@@ -39,14 +39,25 @@ vertical slices, each pulled in by the sample that needs it (sample rule 7 — a
 collision/motion goes through `crcbl-phys`, no game-code collision math
 anywhere):
 
-| Slice                                                           | Demanded by | Layer    |
-| --------------------------------------------------------------- | ----------- | -------- |
-| Box/sphere colliders, swept-sphere TOI, contact normal response | breakout    | L0+CCD   |
-| Dynamic BVH churn, sphere overlap, segment CCD, thrust+damping  | asteroids   | L0+L1    |
-| Batch overlap queries at 10k bodies, refit cost, sleeping       | horde       | L0       |
-| Sector frames, gravity/drag/atmosphere, Kepler on-rails, SOI    | orbit       | L1       |
-| TOI vs moving targets, triggers, character controller           | towers      | L0+CCD   |
-| Lag-compensated rewind queries                                  | arena       | post-MVP |
+| Slice                                                           | Demanded by | Layer  |
+| --------------------------------------------------------------- | ----------- | ------ |
+| Box/sphere colliders, swept-sphere TOI, contact normal response | breakout    | L0+CCD |
+| Dynamic BVH churn, sphere overlap, segment CCD, thrust+damping  | asteroids   | L0+L1  |
+
+**Slice 2 (P6) has landed.** `Bvh::insert` / `Bvh::remove` churn the tree in
+place (surface area heuristic for placement, AVL rotation on the way back up, so
+depth stays logarithmic even when every element sits in the same spot);
+`PhysicsWorld::overlap_sphere` was already the sphere-overlap-against-broadphase
+entry point and now has the property test proving it agrees with a brute-force
+scan under churn; `ThrustForce` and `DampingForce` are the first two L1 force
+providers, and `PhysicsSystem::apply_force` is how a single entity feels one.
+Segment CCD rides on the existing `sweep_sphere`. What is still owed —
+rotational dynamics, a teleport-aware re-insert for screen wrap, and a real
+`ShapeHit` from `PhysicsSystem::overlap_sphere` — is in `docs/backlog.md`. |
+Batch overlap queries at 10k bodies, refit cost, sleeping | horde | L0 | |
+Sector frames, gravity/drag/atmosphere, Kepler on-rails, SOI | orbit | L1 | |
+TOI vs moving targets, triggers, character controller | towers | L0+CCD | |
+Lag-compensated rewind queries | arena | post-MVP |
 
 Stage 5 "exit" therefore overlaps stages 6–8 in wall-clock: the stage is done
 when the full L0/L1/CCD surface exists and the orbit sample passes, not when a

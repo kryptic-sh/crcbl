@@ -47,6 +47,9 @@ impl ColliderId {
 // Collider shape storage
 // ---------------------------------------------------------------------------
 
+/// `bvh_slot_to_elem` entry for a collider slot with no element in the tree.
+const NO_ELEMENT: u32 = u32::MAX;
+
 /// A collider stored in the [`PhysicsWorld`], with an optional trigger flag.
 #[derive(Debug, Clone)]
 struct ColliderSlot {
@@ -118,6 +121,19 @@ impl PhysicsWorld {
 
     /// Register a sphere collider. Returns a [`ColliderId`] that can be used
     /// to remove or update the collider later.
+    ///
+    /// # Adding does not cost a rebuild
+    ///
+    /// Once the BVH exists, a new collider is *inserted* into it
+    /// ([`Bvh::insert`]) rather than the tree being dropped and rebuilt on the
+    /// next query. A game that spawns and kills colliders every tick — a
+    /// bullet per shot, two rocks per split — would otherwise pay `O(n log n)`
+    /// per frame for a tree it had already built, and pay it again for the
+    /// removal.
+    ///
+    /// Before the first query there is no tree, and adds simply accumulate: a
+    /// world populated in one batch still gets one bulk [`Bvh::build`], which
+    /// produces a better tree than the same elements inserted one at a time.
     pub fn add_sphere(&mut self, sphere: Sphere) -> ColliderId {
         self.add(ColliderEntry::Sphere(sphere))
     }
@@ -178,6 +194,10 @@ impl PhysicsWorld {
     ///
     /// The slot is recycled, but its generation is bumped first, so `id` (and
     /// any copy of it) stops resolving even once a new collider lands there.
+    ///
+    /// If a BVH is built, the element is taken out of it incrementally rather
+    /// than the tree being thrown away — see [`PhysicsWorld::add_sphere`] for
+    /// why that matters.
     pub fn remove(&mut self, id: ColliderId) -> bool {
         let Some(slot) = self.slot_of(id) else {
             return false;
@@ -186,8 +206,18 @@ impl PhysicsWorld {
         self.generations[slot] = self.generations[slot].wrapping_add(1);
         self.free_slots.push(slot as u32);
         self.live_count -= 1;
-        self.bvh = None;
-        self.bvh_slot_to_elem.clear();
+
+        if let Some(bvh) = self.bvh.as_mut() {
+            match self.bvh_slot_to_elem.get(slot).copied() {
+                Some(elem) if elem != NO_ELEMENT && bvh.remove(elem as usize) => {
+                    self.bvh_slot_to_elem[slot] = NO_ELEMENT;
+                }
+                // A live collider with no element in a built tree should not
+                // happen; if it ever does, the tree no longer describes the
+                // collider set and querying it would report a ghost.
+                _ => self.invalidate_bvh(),
+            }
+        }
         true
     }
 
@@ -206,7 +236,7 @@ impl PhysicsWorld {
         // Build slot→elem reverse mapping.  `elem_idx` is the element's
         // position in the array handed to `Bvh::build` — its *build order* —
         // which is exactly what `Bvh::update_aabb` is indexed by.
-        self.bvh_slot_to_elem = vec![u32::MAX; self.colliders.len()];
+        self.bvh_slot_to_elem = vec![NO_ELEMENT; self.colliders.len()];
         for (elem_idx, (_, slot)) in elements.iter().enumerate() {
             self.bvh_slot_to_elem[*slot as usize] = elem_idx as u32;
         }
@@ -357,6 +387,7 @@ impl PhysicsWorld {
     }
 
     fn add(&mut self, entry: ColliderEntry) -> ColliderId {
+        let aabb = entry.aabb();
         let slot_data = ColliderSlot {
             entry,
             is_trigger: false,
@@ -371,9 +402,24 @@ impl PhysicsWorld {
             idx
         };
         self.live_count += 1;
+
+        // A tree that exists absorbs the new collider; one that does not stays
+        // absent, so a batch of adds before the first query still costs one
+        // bulk build rather than n insertions.
+        if let Some(bvh) = self.bvh.as_mut() {
+            let elem = bvh.insert(aabb, index);
+            if self.bvh_slot_to_elem.len() <= index as usize {
+                self.bvh_slot_to_elem.resize(index as usize + 1, NO_ELEMENT);
+            }
+            self.bvh_slot_to_elem[index as usize] = elem as u32;
+        }
+        self.id_for_slot(index)
+    }
+
+    /// Drop the BVH so the next query rebuilds it from the collider set.
+    fn invalidate_bvh(&mut self) {
         self.bvh = None;
         self.bvh_slot_to_elem.clear();
-        self.id_for_slot(index)
     }
 
     /// Update an existing collider entry, refitting the BVH if built.
@@ -390,14 +436,13 @@ impl PhysicsWorld {
         // queried against stale geometry.
         let refit = match self.bvh {
             Some(ref mut bvh) => match self.bvh_slot_to_elem.get(slot).copied() {
-                Some(elem) if elem != u32::MAX => bvh.update_aabb(elem as usize, new_aabb),
+                Some(elem) if elem != NO_ELEMENT => bvh.update_aabb(elem as usize, new_aabb),
                 _ => false,
             },
             None => false,
         };
         if !refit {
-            self.bvh = None;
-            self.bvh_slot_to_elem.clear();
+            self.invalidate_bvh();
         }
         true
     }
@@ -610,6 +655,77 @@ mod tests {
         world.rebuild(); // no panics
         let ray = Ray::new(DVec3::ZERO, DVec3::X);
         assert!(world.cast_ray(&ray).is_none());
+    }
+
+    #[test]
+    fn churn_after_the_first_query_keeps_the_tree() {
+        // The behaviour the asteroids sample turns on: once the tree exists,
+        // spawning and killing colliders updates it in place. If either path
+        // dropped the tree instead, `bvh_cached` would read false right after
+        // the mutation and every frame would pay a rebuild.
+        let mut world = PhysicsWorld::new();
+        let keep = world.add_sphere(Sphere::new(DVec3::new(20.0, 0.0, 0.0), 1.0));
+        assert!(world.cast_ray(&Ray::new(DVec3::ZERO, DVec3::X)).is_some());
+        assert!(format!("{world:?}").contains("bvh_cached: true"));
+
+        let bullet = world.add_sphere(Sphere::new(DVec3::new(5.0, 0.0, 0.0), 0.5));
+        assert!(
+            format!("{world:?}").contains("bvh_cached: true"),
+            "adding a collider threw the tree away"
+        );
+        // The new collider is in the tree, not merely in the slot array: the
+        // ray now stops at it rather than at the one it used to reach.
+        let (hit_id, _) = world.cast_ray(&Ray::new(DVec3::ZERO, DVec3::X)).unwrap();
+        assert_eq!(hit_id, bullet);
+
+        assert!(world.remove(bullet));
+        assert!(
+            format!("{world:?}").contains("bvh_cached: true"),
+            "removing a collider threw the tree away"
+        );
+        let (hit_id, _) = world.cast_ray(&Ray::new(DVec3::ZERO, DVec3::X)).unwrap();
+        assert_eq!(hit_id, keep, "the removed collider still answers queries");
+        assert_eq!(world.len(), 1);
+    }
+
+    #[test]
+    fn churn_through_a_recycled_slot_tracks_the_right_element() {
+        // Collider slots and BVH element indices are two independent recycling
+        // schemes. If the mapping between them went stale, the new occupant of
+        // a slot would refit the *old* occupant's leaf — a collider that moves
+        // when a different one is moved.
+        let mut world = PhysicsWorld::new();
+        let far = world.add_sphere(Sphere::new(DVec3::new(100.0, 0.0, 0.0), 1.0));
+        let doomed = world.add_sphere(Sphere::new(DVec3::new(10.0, 0.0, 0.0), 1.0));
+        assert!(world.cast_ray(&Ray::new(DVec3::ZERO, DVec3::X)).is_some());
+
+        assert!(world.remove(doomed));
+        let reused = world.add_sphere(Sphere::new(DVec3::new(30.0, 0.0, 0.0), 1.0));
+        assert_eq!(reused.index(), doomed.index(), "the slot must be recycled");
+
+        // Move the new occupant, then ask a *local* question about where it
+        // landed. A local query is the one that can tell: it only descends
+        // into leaves whose bounds reach the query, so a refit applied to some
+        // other collider's leaf leaves this one still sitting at its old
+        // bounds and out of reach. A long ray would not catch it — the ray
+        // would pass through the stale bounds anyway and the narrow phase
+        // would re-read the correct shape and paper over the mistake.
+        assert!(world.set_sphere(reused, Sphere::new(DVec3::new(3.0, 0.0, 0.0), 1.0)));
+        assert_eq!(
+            world.overlap_sphere(DVec3::new(3.0, 0.0, 0.0), 0.5),
+            vec![reused],
+            "the refit did not move the collider that was asked to move"
+        );
+        // And nothing else moved with it.
+        assert!(
+            world
+                .overlap_sphere(DVec3::new(30.0, 0.0, 0.0), 0.5)
+                .is_empty()
+        );
+        assert_eq!(
+            world.aabb_of(far).unwrap().centre(),
+            DVec3::new(100.0, 0.0, 0.0)
+        );
     }
 
     #[test]

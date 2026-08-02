@@ -79,6 +79,27 @@ impl Aabb {
         self.min.x > self.max.x || self.min.y > self.max.y || self.min.z > self.max.z
     }
 
+    /// Half the true surface area of this box — `wh + hd + dw`.
+    ///
+    /// This is the cost term of the surface area heuristic the dynamic BVH
+    /// picks insertion sites with. The factor of two the real surface area
+    /// carries is dropped because every comparison the heuristic makes is
+    /// between two of these, and a constant factor common to both sides cannot
+    /// change which one is smaller.
+    ///
+    /// An empty box has no surface, so it costs `0` rather than the `NaN` that
+    /// `(-inf) - (+inf)` arithmetic on [`Aabb::EMPTY`] would otherwise produce
+    /// and propagate into every subsequent comparison.
+    #[inline]
+    #[must_use]
+    pub(crate) fn half_surface_area(&self) -> f64 {
+        if self.is_empty() {
+            return 0.0;
+        }
+        let e = self.extents();
+        e.x * e.y + e.y * e.z + e.z * e.x
+    }
+
     /// Widen this AABB by a uniform margin on every side.
     #[inline]
     #[must_use]
