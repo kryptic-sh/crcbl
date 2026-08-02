@@ -3,11 +3,15 @@
 //! ```text
 //! SpriteRenderer ──register_sheet──▶ uploads a sheet, returns a SheetId
 //!      │
-//!      ├──begin_frame──▶ uploads one instance per sprite, and the constants
-//!      │                 batches consecutive sprites sharing a sheet
+//!      ├──begin_frame──▶ batches consecutive sprites sharing a sheet, uploads
+//!      │                 one instance per sprite and one constant block per
+//!      │                 batch
 //!      │
 //!      └──add_pass────▶ inserts an alpha-blended render pass into the graph:
-//!                       one draw(0..6, first..last) per batch
+//!                       one draw(0..6, 0..count) per batch, with the batch's
+//!                       place in the instance buffer arriving as a dynamic
+//!                       offset into the constants — see `add_pass` for why it
+//!                       cannot be the draw's own firstInstance
 //! ```
 //!
 //! # Why this exists
@@ -153,10 +157,14 @@ pub fn sheet_lane(width: u32, height: u32, mode: SampleMode) -> [f32; 4] {
     [width as f32, height as f32, sample, 0.0]
 }
 
-/// The per-frame constant block, matching `struct SpriteConstants` in
+/// The per-**batch** constant block, matching `struct SpriteConstants` in
 /// `sprite.slang`.
 ///
-/// A uniform buffer on every tier — see this module's docs.
+/// A uniform buffer on every tier — see this module's docs. One block per batch
+/// rather than one per frame, addressed by a dynamic offset: only
+/// [`base`](Self::base) differs between the blocks of one frame, and
+/// [`SpriteRenderer::add_pass`] explains why it cannot be the draw's
+/// `firstInstance` instead.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SpriteConstants {
@@ -168,14 +176,26 @@ pub struct SpriteConstants {
     /// Read by the vertex stage, which needs the map from NDC to the pixel grid
     /// to round a [`SampleMode::Pixel`] quad's corners onto it.
     pub viewport: [f32; 2],
+    /// **This batch's first sprite, as an index into the frame's instance
+    /// buffer.** The vertex stage adds it to `SV_InstanceID`.
+    ///
+    /// Every draw this pass emits starts at instance 0, so `SV_InstanceID` means
+    /// the same thing on SPIR-V and on WGSL — which it does *not* when
+    /// `firstInstance` is non-zero. [`SpriteRenderer::add_pass`] and
+    /// `sprite.slang`'s header both carry the whole story.
+    pub base: u32,
     /// Pads the block to 80 bytes. `std140` rounds a uniform block's size up to
     /// a multiple of 16, and naga *enforces* that where a Vulkan driver would
     /// quietly accept the short binding.
-    pub pad: [f32; 2],
+    pub pad: u32,
 }
 
-/// Bytes in the constant block. 64 for the matrix, 8 for the viewport, 8 of
-/// padding.
+/// Bytes in one constant block: 64 for the matrix, 8 for the viewport, 4 for the
+/// base and 4 of padding.
+///
+/// This is the *binding* size, not the stride between one batch's block and the
+/// next — see [`SpriteRenderer::constant_stride`], which rounds it up to the
+/// device's dynamic-offset alignment.
 pub const CONSTANTS_SIZE: u64 = size_of::<SpriteConstants>() as u64;
 
 // ---------------------------------------------------------------------------
@@ -277,6 +297,13 @@ const FRAMES_IN_FLIGHT: usize = 2;
 /// that wants more grows it once.
 const INITIAL_RING_BYTES: u64 = 1024;
 
+/// How many per-batch constant blocks the ring starts with.
+///
+/// Eight, because a batch is a *sheet change* and not a sprite: both shipped
+/// samples draw four, so eight is a frame's worth of headroom for one 2 KiB
+/// allocation on Tier B and 1 KiB on Tier A. A frame with more grows it once.
+const INITIAL_BATCH_BLOCKS: u64 = 8;
+
 /// Set 0: the frame. Constants at binding 0, instances at binding 1.
 const FRAME_SET: u32 = 0;
 
@@ -304,8 +331,22 @@ fn grown(needed: u64) -> u64 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Batch {
     sheet: SheetId,
-    /// The instance range this draw covers, as `draw`'s second argument.
+    /// Where this batch's sprites are in the **frame's** instance buffer.
+    ///
+    /// Deliberately *not* what `draw` is handed — see
+    /// [`SpriteRenderer::add_pass`]. The draw covers `0..count()`, and
+    /// `instances.start` reaches the shader as [`SpriteConstants::base`].
     instances: Range<u32>,
+    /// Byte offset of this batch's constant block, and the dynamic offset set 0
+    /// is bound with. `n * SpriteRenderer::constant_stride()`.
+    constant_offset: u32,
+}
+
+impl Batch {
+    /// How many instances this batch draws.
+    const fn count(&self) -> u32 {
+        self.instances.end - self.instances.start
+    }
 }
 
 /// A registered sheet: the uploaded image, the bind group naming it, and the
@@ -357,6 +398,22 @@ pub struct SpriteRenderer {
     /// that made [`crate::ui_pass`] destroy and recreate both its rings and its
     /// bind group on every steady-state frame.
     instance_capacity: Vec<u64>,
+    /// How many **bytes** each constant buffer holds, on the same terms. The
+    /// constants are one [`constant_stride`](Self::constant_stride)-sized block
+    /// per batch now, so this grows with the number of batches a frame draws.
+    constant_capacity: Vec<u64>,
+    /// Bytes between one batch's constant block and the next.
+    ///
+    /// [`CONSTANTS_SIZE`] rounded up to the device's
+    /// `min_uniform_buffer_offset_alignment`, because a dynamic offset must be a
+    /// multiple of it — 256 on WebGPU, 64 on a typical desktop Vulkan driver.
+    /// Read from the device at construction rather than assumed: a hard-coded
+    /// 256 wastes memory on Tier A and a hard-coded 64 is a validation error on
+    /// Tier B.
+    ///
+    /// `u32` because that is what `bind_group` takes a dynamic offset as, so the
+    /// conversion happens once here rather than at every bind.
+    constant_stride: u32,
     /// This frame's draw calls, in submission order.
     batches: Vec<Vec<Batch>>,
     frame: usize,
@@ -424,10 +481,14 @@ impl SpriteRenderer {
                 BindGroupLayoutEntry {
                     binding: 0,
                     visibility: ShaderStages::VERTEX,
-                    // `dynamic: false`: one buffer per frame in flight, bound
-                    // whole, so a dynamic offset would only ever be zero. Same
-                    // call `ui_pass` documents at length.
-                    kind: BindingKind::UniformBuffer { dynamic: false },
+                    // `dynamic: true`, unlike `ui_pass`'s equivalent binding.
+                    // This is the one thing that lets a batch say where its
+                    // instances start without the draw's `firstInstance` — which
+                    // `add_pass` explains cannot be used, because the two
+                    // shading languages disagree about what it does to
+                    // `SV_InstanceID`. One buffer, one block per batch, one
+                    // offset at bind time.
+                    kind: BindingKind::UniformBuffer { dynamic: true },
                     count: 1,
                     flags: BindingFlags::empty(),
                 },
@@ -466,10 +527,25 @@ impl SpriteRenderer {
         })?;
         rollback.bind_group_layouts.push(sheet_layout);
 
+        // A dynamic offset must be a multiple of the device's alignment, and the
+        // block has to fit inside one stride. `u32` because that is what a
+        // dynamic offset is; an alignment that did not fit would be a device
+        // nobody can bind a dynamic uniform on at all.
+        let alignment = device.caps().limits.min_uniform_buffer_offset_alignment;
+        let constant_stride =
+            u32::try_from(CONSTANTS_SIZE.next_multiple_of(alignment)).map_err(|_| {
+                HalError::InvalidDescriptor(format!(
+                    "min_uniform_buffer_offset_alignment is {alignment}, which no dynamic \
+                     offset can express"
+                ))
+            })?;
+        let initial_constant_bytes = u64::from(constant_stride) * INITIAL_BATCH_BLOCKS;
+
         let mut frame_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut instance_buffers = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut constant_buffers = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut instance_capacity = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut constant_capacity = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut batches = Vec::with_capacity(FRAMES_IN_FLIGHT);
         for _ in 0..FRAMES_IN_FLIGHT {
             let instances = device.create_buffer(&BufferDesc {
@@ -481,7 +557,7 @@ impl SpriteRenderer {
             rollback.buffers.push(instances);
             let constants = device.create_buffer(&BufferDesc {
                 label: Some("sprite constants"),
-                size: CONSTANTS_SIZE,
+                size: initial_constant_bytes,
                 usage: BufferUsage::UNIFORM,
                 memory: MemoryLocation::HostUpload,
             })?;
@@ -498,6 +574,7 @@ impl SpriteRenderer {
             constant_buffers.push(constants);
             frame_groups.push(group);
             instance_capacity.push(INITIAL_RING_BYTES);
+            constant_capacity.push(initial_constant_bytes);
             batches.push(Vec::new());
         }
 
@@ -554,6 +631,8 @@ impl SpriteRenderer {
             instance_buffers,
             constant_buffers,
             instance_capacity,
+            constant_capacity,
+            constant_stride,
             batches,
             frame: 0,
             target_format,
@@ -565,6 +644,18 @@ impl SpriteRenderer {
     #[must_use]
     pub const fn target_format(&self) -> Format {
         self.target_format
+    }
+
+    /// Bytes between one batch's constant block and the next, and therefore the
+    /// dynamic offset [`add_pass`](Self::add_pass) binds set 0 with for batch
+    /// `n`: `n * constant_stride()`.
+    ///
+    /// [`CONSTANTS_SIZE`] rounded up to the device's
+    /// `min_uniform_buffer_offset_alignment`. Public so a test can predict the
+    /// offsets rather than restate a number the device chose.
+    #[must_use]
+    pub const fn constant_stride(&self) -> u32 {
+        self.constant_stride
     }
 
     /// How many sheets are registered.
@@ -719,19 +810,29 @@ impl SpriteRenderer {
             device.write_buffer(self.instance_buffers[idx], 0, bytes)?;
         }
 
-        let constants = SpriteConstants {
-            view_proj: view_projection.to_cols_array(),
-            viewport: [extent.0 as f32, extent.1 as f32],
-            pad: [0.0; 2],
-        };
-        device.write_buffer(
-            self.constant_buffers[idx],
-            0,
-            bytemuck::bytes_of(&constants),
-        )?;
+        // Batched here rather than at `add_pass`, and now before the constants
+        // are written rather than after: there is one constant block per batch,
+        // so the batching has to have happened before there is anything to write.
+        let batches = batch(sprites, self.constant_stride);
+        let blocks = constant_blocks(view_projection, extent, &batches, self.constant_stride);
+        if blocks.len() as u64 > self.constant_capacity[idx] {
+            let size = grown_constants(blocks.len() as u64, self.constant_stride);
+            let fresh = device.create_buffer(&BufferDesc {
+                label: Some("sprite constants"),
+                size,
+                usage: BufferUsage::UNIFORM,
+                memory: MemoryLocation::HostUpload,
+            })?;
+            device.destroy_buffer(core::mem::replace(&mut self.constant_buffers[idx], fresh));
+            self.constant_capacity[idx] = size;
+            buffer_replaced = true;
+        }
+        device.write_buffer(self.constant_buffers[idx], 0, &blocks)?;
 
-        // Only a new instance buffer makes the frame group stale; the constants
-        // buffer never moves, so a steady-state frame writes no descriptors.
+        // A frame that grew *either* buffer needs the group rewritten; a
+        // steady-state frame writes no descriptors, which is still true now that
+        // the constants can move too — a scene draws the same batch count frame
+        // after frame.
         if buffer_replaced {
             let fresh = device.create_bind_group(&BindGroupDesc {
                 label: Some("sprite frame"),
@@ -742,16 +843,39 @@ impl SpriteRenderer {
             device.destroy_bind_group(core::mem::replace(&mut self.frame_groups[idx], fresh));
         }
 
-        self.batches[idx] = batch(sprites);
+        self.batches[idx] = batches;
         Ok(())
     }
 
     /// Adds the sprite pass to `graph`, drawing on top of `target`.
     ///
-    /// One `draw(0..6, batch)` per batch, in submission order, with set 1
-    /// rebound between batches and set 0 bound once. A frame with no sprites
-    /// adds **no pass at all** rather than an empty one: a render pass that
-    /// draws nothing still costs a load and a store of the whole target.
+    /// One `draw(0..6, 0..count)` per batch, in submission order, with **both**
+    /// sets rebound between batches: set 1 for the sheet, and set 0 at the
+    /// dynamic offset of that batch's constant block. A frame with no sprites
+    /// adds **no pass at all** rather than an empty one: a render pass that draws
+    /// nothing still costs a load and a store of the whole target.
+    ///
+    /// # Every draw starts at instance 0, and that is load-bearing
+    ///
+    /// The obvious spelling is `draw(0..6, batch.instances)` — point the draw at
+    /// its slice of the frame's instance buffer with `firstInstance` and let the
+    /// shader index the buffer absolutely. That is what this pass did, and it
+    /// drew **every batch after the first from the first batch's instances**: a
+    /// four-sheet frame put one rectangle on screen in the last sheet's colours
+    /// and left the other three empty. Both shipped samples registered four
+    /// sheets, so both were rendering wrong.
+    ///
+    /// The reason is that `SV_InstanceID` is not the same number on the two
+    /// targets `sprite.slang` is compiled for. `slangc` lowers it to
+    /// `InstanceIndex - BaseInstance` on SPIR-V, which is HLSL's definition —
+    /// relative to the draw — and straight to `@builtin(instance_index)` on
+    /// WGSL, which WebGPU defines to *start at* `firstInstance`. No shader source
+    /// is correct on both while `firstInstance` is non-zero.
+    ///
+    /// So it is always zero, the two lowerings agree because with a zero base
+    /// they are the same number, and the batch's offset into the buffer travels
+    /// in [`SpriteConstants::base`] instead. The cost is one extra `bind_group`
+    /// per batch, against a bind this pass was already doing for the sheet.
     ///
     /// `extent` is deliberately absent — see [`begin_frame`](Self::begin_frame).
     pub fn add_pass<'a>(&'a self, graph: &mut RenderGraph<'a>, target: ImageId) {
@@ -771,14 +895,22 @@ impl SpriteRenderer {
             .execute(move |ctx| {
                 let encoder = ctx.encoder();
                 encoder.bind_graphics_pipeline(pipeline);
-                encoder.bind_group(FRAME_SET, frame_group, &[], pipeline_layout);
                 for batch in batches {
+                    // The block `begin_frame` wrote for this batch, and the only
+                    // thing that tells the shader where the batch's instances
+                    // start.
+                    encoder.bind_group(
+                        FRAME_SET,
+                        frame_group,
+                        &[batch.constant_offset],
+                        pipeline_layout,
+                    );
                     // Indexing is safe by construction: `begin_frame` refuses a
                     // sprite naming an unregistered sheet, and sheets are never
                     // removed.
                     let group = sheets[batch.sheet.index() as usize].group;
                     encoder.bind_group(SHEET_SET, group, &[], pipeline_layout);
-                    encoder.draw(0..QUAD_VERTICES, batch.instances.clone());
+                    encoder.draw(0..QUAD_VERTICES, 0..batch.count());
                 }
             });
     }
@@ -860,7 +992,17 @@ const fn frame_entries(constants: BufferHandle, instances: BufferHandle) -> [Bin
         BindGroupEntry {
             binding: 0,
             array_index: 0,
-            resource: BindingResource::whole_buffer(constants),
+            // **One block, not the whole buffer.** The binding is dynamic, so
+            // the offset the bind adds is on top of this one, and both Vulkan
+            // and WebGPU require `offset + dynamic + size` to stay inside the
+            // buffer. Bound whole, the very first non-zero dynamic offset would
+            // be out of range — which is a validation error rather than a wrong
+            // picture, but only on a machine running the layer.
+            resource: BindingResource::Buffer {
+                buffer: constants,
+                offset: 0,
+                size: CONSTANTS_SIZE,
+            },
         },
         BindGroupEntry {
             binding: 1,
@@ -870,14 +1012,15 @@ const fn frame_entries(constants: BufferHandle, instances: BufferHandle) -> [Bin
     ]
 }
 
-/// Splits `sprites` into runs of consecutive sprites sharing a sheet.
+/// Splits `sprites` into runs of consecutive sprites sharing a sheet, giving
+/// each run the byte offset of its constant block.
 ///
 /// **Consecutive, not grouped.** `A A B A` is three batches, not two: the
 /// submission order is the caller's compositing order, and reordering it behind
 /// their back to save a bind is how a sprite ends up behind the thing it was
 /// drawn after. Pure and free of a device, so the batching rule is testable
 /// without one.
-fn batch(sprites: &[Sprite]) -> Vec<Batch> {
+fn batch(sprites: &[Sprite], stride: u32) -> Vec<Batch> {
     let mut batches: Vec<Batch> = Vec::new();
     for (index, sprite) in sprites.iter().enumerate() {
         let index = index as u32;
@@ -886,10 +1029,60 @@ fn batch(sprites: &[Sprite]) -> Vec<Batch> {
             _ => batches.push(Batch {
                 sheet: sprite.sheet,
                 instances: index..index + 1,
+                // Saturating rather than wrapping: an offset that wrapped would
+                // bind a *valid-looking* block belonging to some other batch,
+                // which is the failure mode this whole arrangement exists to
+                // remove. A saturated one is out of the buffer and the layer
+                // says so. Reaching it needs about 17 million batches.
+                constant_offset: (batches.len() as u32).saturating_mul(stride),
             }),
         }
     }
     batches
+}
+
+/// The bytes of one frame's constant buffer: one [`SpriteConstants`] per batch,
+/// laid out at `stride`.
+///
+/// Pure, so the one thing a recorder cannot see — that batch `n`'s block
+/// actually carries batch `n`'s first instance — is assertable without a device.
+/// **A frame with no batches still gets one block**, so a frame that draws
+/// nothing writes the same number of buffers as one that draws something and the
+/// buffer is never zero-sized.
+fn constant_blocks(
+    view_projection: Mat4,
+    extent: (u32, u32),
+    batches: &[Batch],
+    stride: u32,
+) -> Vec<u8> {
+    let stride = stride as usize;
+    let blocks = batches.len().max(1);
+    let mut bytes = vec![0u8; blocks * stride];
+    let view_proj = view_projection.to_cols_array();
+    let viewport = [extent.0 as f32, extent.1 as f32];
+    for index in 0..blocks {
+        let constants = SpriteConstants {
+            view_proj,
+            viewport,
+            // The empty-frame block draws nothing, so its base is 0 by the same
+            // arithmetic rather than by a special case.
+            base: batches.get(index).map_or(0, |batch| batch.instances.start),
+            pad: 0,
+        };
+        bytes[index * stride..index * stride + CONSTANTS_SIZE as usize]
+            .copy_from_slice(bytemuck::bytes_of(&constants));
+    }
+    bytes
+}
+
+/// The size the constant ring grows to when `needed` bytes no longer fit.
+///
+/// Doubling in **blocks** rather than in bytes, so the result stays a whole
+/// number of `stride`-sized blocks and the offset arithmetic above never lands
+/// past the end.
+fn grown_constants(needed: u64, stride: u32) -> u64 {
+    let stride = u64::from(stride);
+    needed.div_ceil(stride).next_power_of_two() * stride
 }
 
 /// `sprite.slang`'s entry point for `stage`.
@@ -1092,6 +1285,22 @@ mod tests {
             .collect()
     }
 
+    /// The dynamic offsets each set-0 bind carried, in order.
+    fn frame_bind_offsets(recorder: &Recorder) -> Vec<Vec<u32>> {
+        recorder
+            .commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::BindGroup {
+                    slot,
+                    dynamic_offsets,
+                    ..
+                } if slot == FRAME_SET => Some(dynamic_offsets),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn as_floats(bytes: &[u8]) -> Vec<f32> {
         bytes
             .chunks_exact(4)
@@ -1226,9 +1435,10 @@ mod tests {
     }
 
     /// The same for the constant block: the matrix first, then the viewport the
-    /// vertex stage snaps against, then the padding `std140` insists on.
+    /// vertex stage snaps against, then the batch's base instance, then the
+    /// padding `std140` insists on.
     #[test]
-    fn the_constants_are_the_matrix_then_the_viewport_then_padding() {
+    fn the_constants_are_the_matrix_then_the_viewport_then_the_base() {
         assert_eq!(CONSTANTS_SIZE, 80);
         assert_eq!(
             CONSTANTS_SIZE % 16,
@@ -1239,14 +1449,21 @@ mod tests {
         let constants = SpriteConstants {
             view_proj: Mat4::from_scale(glam::Vec3::new(2.0, 3.0, 4.0)).to_cols_array(),
             viewport: [1280.0, 720.0],
-            pad: [0.0; 2],
+            base: 0x0102_0304,
+            pad: 0,
         };
-        let floats = as_floats(bytemuck::bytes_of(&constants));
+        let bytes = bytemuck::bytes_of(&constants);
+        let floats = as_floats(bytes);
         assert_eq!(floats.len(), 20);
         assert_eq!(floats[0], 2.0, "m00 in the first four bytes");
         assert_eq!(floats[5], 3.0, "m11 twenty bytes in — column-major");
         assert_eq!(floats[10], 4.0, "m22");
         assert_eq!(&floats[16..18], &[1280.0, 720.0], "viewport at byte 64");
+        assert_eq!(
+            u32::from_le_bytes(bytes[72..76].try_into().expect("four bytes")),
+            0x0102_0304,
+            "the base instance sits at byte 72, which is `Offset 72` in the SPIR-V"
+        );
 
         let wgsl = crcbl_shaders::SPRITE
             .wgsl()
@@ -1267,7 +1484,8 @@ mod tests {
             [
                 "@align(16) view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0",
                 "@align(16) viewport_0 : vec2<f32>",
-                "@align(8) pad_0 : vec2<f32>",
+                "@align(8) base_0 : u32",
+                "@align(4) pad_0 : u32",
             ],
             "the shader's constant layout no longer matches SpriteConstants"
         );
@@ -1306,7 +1524,8 @@ mod tests {
             writes,
             [
                 (instance_buffer, 0, 3 * INSTANCE_STRIDE),
-                (constant_buffer, 0, CONSTANTS_SIZE as usize),
+                // Three sprites on one sheet is one batch, so one block.
+                (constant_buffer, 0, renderer.constant_stride as usize),
             ],
             "a frame writes exactly its instances and its constants, once each"
         );
@@ -1325,31 +1544,115 @@ mod tests {
     fn interleaving_two_sheets_makes_three_batches_not_two() {
         let (a, b) = (SheetId(0), SheetId(1));
         assert_eq!(
-            batch(&[sprite(a), sprite(a), sprite(b), sprite(a)]),
+            batch(&[sprite(a), sprite(a), sprite(b), sprite(a)], 256),
             [
                 Batch {
                     sheet: a,
-                    instances: 0..2
+                    instances: 0..2,
+                    constant_offset: 0,
                 },
                 Batch {
                     sheet: b,
-                    instances: 2..3
+                    instances: 2..3,
+                    constant_offset: 256,
                 },
                 Batch {
                     sheet: a,
-                    instances: 3..4
+                    instances: 3..4,
+                    constant_offset: 512,
                 },
             ]
         );
         // The consecutive case still collapses.
         assert_eq!(
-            batch(&[sprite(a), sprite(a), sprite(a)]),
+            batch(&[sprite(a), sprite(a), sprite(a)], 256),
             [Batch {
                 sheet: a,
-                instances: 0..3
+                instances: 0..3,
+                constant_offset: 0,
             }]
         );
-        assert!(batch(&[]).is_empty());
+        assert!(batch(&[], 256).is_empty());
+    }
+
+    /// **Batch `n` gets batch `n`'s first sprite, and every block gets the same
+    /// camera.** The recorder can see that a constant buffer was written and how
+    /// long the write was; it cannot see what was *in* it, and what is in it is
+    /// the entire fix — a block whose `base` was wrong would record identically.
+    ///
+    /// So the layout function is pure and this reads it directly.
+    #[test]
+    fn each_batchs_constant_block_carries_that_batchs_first_instance() {
+        let (a, b) = (SheetId(0), SheetId(1));
+        let stride = 256u32;
+        let batches = batch(&[sprite(a), sprite(a), sprite(b), sprite(a)], stride);
+        let blocks = constant_blocks(Mat4::IDENTITY, (640, 480), &batches, stride);
+
+        assert_eq!(
+            blocks.len(),
+            3 * stride as usize,
+            "one stride-sized block per batch"
+        );
+        let base_at = |index: usize| {
+            let start = index * stride as usize + 72;
+            u32::from_le_bytes(blocks[start..start + 4].try_into().expect("four bytes"))
+        };
+        assert_eq!(
+            [base_at(0), base_at(1), base_at(2)],
+            [0, 2, 3],
+            "the bases must be the batches' own instance starts — all-zero here is \
+             exactly the bug, every batch drawing the first batch's sprites"
+        );
+        // And every block still carries the frame's camera and viewport, which a
+        // per-batch block is easy to leave stale in.
+        for index in 0..3 {
+            let start = index * stride as usize;
+            let floats = as_floats(&blocks[start..start + CONSTANTS_SIZE as usize]);
+            assert_eq!(floats[0], 1.0, "block {index} lost the identity matrix");
+            assert_eq!(
+                &floats[16..18],
+                &[640.0, 480.0],
+                "block {index} lost the viewport"
+            );
+        }
+
+        // A frame with nothing to draw still writes one block, so the buffer is
+        // never zero-sized and the write count does not depend on the scene.
+        assert_eq!(
+            constant_blocks(Mat4::IDENTITY, (640, 480), &[], stride).len(),
+            stride as usize
+        );
+    }
+
+    /// The constant ring grows in whole blocks, so an offset can never point
+    /// past the end of the buffer that was allocated for it.
+    ///
+    /// **80 is in the list of strides on purpose.** A device whose
+    /// `min_uniform_buffer_offset_alignment` is 16 gets a stride of exactly
+    /// [`CONSTANTS_SIZE`], which is not a power of two — and rounding the *byte*
+    /// count to a power of two instead of the block count passes every check at
+    /// 128 and 256 and lands on a partial block there. `Limits::desktop` reports
+    /// 64 and WebGPU reports 256, so nothing else in this suite would notice.
+    #[test]
+    fn the_constant_ring_grows_in_whole_blocks() {
+        assert_eq!(grown_constants(256, 256), 256);
+        assert_eq!(grown_constants(257, 256), 512);
+        assert_eq!(grown_constants(5 * 256, 256), 8 * 256);
+        for stride in [80u32, 128, 256] {
+            for blocks in 1u64..40 {
+                let needed = blocks * u64::from(stride);
+                let size = grown_constants(needed, stride);
+                assert_eq!(
+                    size % u64::from(stride),
+                    0,
+                    "{blocks} blocks of {stride} rounded to a partial block: {size}"
+                );
+                assert!(
+                    size >= needed,
+                    "{blocks} blocks of {stride} shrank to {size}"
+                );
+            }
+        }
     }
 
     /// And that reaches the command stream: three draws, in that order, each
@@ -1371,7 +1674,24 @@ mod tests {
         recorder.clear();
         run_pass(device.as_ref(), queue, &renderer);
 
-        assert_eq!(draws(&recorder), [0..2, 2..3, 3..4]);
+        // **Every draw starts at instance 0.** Not `0..2, 2..3, 3..4`, which is
+        // what this recorded until the multi-sheet bug was found: a non-zero
+        // `firstInstance` means one thing to SPIR-V's `SV_InstanceID` and the
+        // opposite to WGSL's, so no shader can read it correctly on both. The
+        // batch's place in the buffer travels in the constants instead — see the
+        // dynamic offsets below and `add_pass`.
+        assert_eq!(draws(&recorder), [0..2, 0..1, 0..1]);
+
+        let offsets = frame_bind_offsets(&recorder);
+        let stride = renderer.constant_stride;
+        assert_eq!(
+            offsets,
+            [vec![0], vec![stride], vec![2 * stride]],
+            "set 0 is rebound per batch at that batch's block; one bind for the \
+             whole pass, or the same offset twice, is every batch reading the \
+             first batch's instances again"
+        );
+
         let binds = sheet_binds(&recorder);
         assert_eq!(binds.len(), 3, "one set-1 bind per batch");
         assert_eq!(
@@ -1435,10 +1755,17 @@ mod tests {
 
         assert_eq!(
             draws(&recorder),
-            [0..3, 3..5],
+            [0..3, 0..2],
             "the back layer's three sprites, then the front layer's two — five \
              draws would mean the stack never grouped, and one would mean the \
              pass sorted"
+        );
+        assert_eq!(
+            frame_bind_offsets(&recorder),
+            [vec![0], vec![renderer.constant_stride]],
+            "and the front layer's draw reads the *front* layer's block — the \
+             draw ranges above both start at zero, so this is the only thing \
+             that says the second draw is not the first three sprites again"
         );
         let binds = sheet_binds(&recorder);
         assert_eq!(
@@ -1477,9 +1804,36 @@ mod tests {
         recorder.clear();
         run_pass(device.as_ref(), queue, &renderer);
 
+        // **A draw's range is no longer the sprites it covers.** Every draw
+        // starts at instance 0; which sprites it lands on is the draw's count
+        // *plus* the constant block the set-0 bind selected. So the absolute
+        // range is reconstructed the way the shader reconstructs it — the block
+        // the recorded dynamic offset names, plus the recorded count.
+        //
+        // That the block at offset `n * stride` really holds batch `n`'s first
+        // sprite is `each_batchs_constant_block_carries_that_batchs_first_instance`,
+        // which reads the bytes the recorder cannot.
+        let stride = renderer.constant_stride;
+        let batches = &renderer.batches[renderer.frame];
+        let absolute: Vec<Range<u32>> = frame_bind_offsets(&recorder)
+            .into_iter()
+            .zip(draws(&recorder))
+            .map(|(offsets, drawn)| {
+                assert_eq!(offsets.len(), 1, "set 0 has exactly one dynamic binding");
+                let block = (offsets[0] / stride) as usize;
+                let base = batches[block].instances.start;
+                assert_eq!(
+                    offsets[0] % stride,
+                    0,
+                    "an offset that is not a whole block"
+                );
+                base + drawn.start..base + drawn.end
+            })
+            .collect();
+
         let mut covered = vec![0u32; sprites.len()];
-        for range in draws(&recorder) {
-            for index in range {
+        for range in &absolute {
+            for index in range.clone() {
                 covered[index as usize] += 1;
             }
         }
@@ -1491,9 +1845,8 @@ mod tests {
 
         // And each draw's sheet is the sheet those sprites actually named.
         let binds = sheet_binds(&recorder);
-        let ranges = draws(&recorder);
-        assert_eq!(binds.len(), ranges.len());
-        for (group, range) in binds.iter().zip(&ranges) {
+        assert_eq!(binds.len(), absolute.len());
+        for (group, range) in binds.iter().zip(&absolute) {
             for index in range.clone() {
                 let expected =
                     renderer.sheets[sprites[index as usize].sheet.index() as usize].group;

@@ -209,6 +209,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-render**, **crcbl-shaders**: the sprite pass drew **every batch after
+  the first from the first batch's sprites** on Vulkan. A batch is a run of
+  sprites sharing a sheet, and `SpriteRenderer::add_pass` pointed each draw at
+  its slice of the frame's instance buffer with `firstInstance` — but `slangc`
+  lowers `SV_InstanceID` to `InstanceIndex - BaseInstance` for SPIR-V, so the
+  index restarted at zero for every batch and each one redrew the first batch's
+  sprites with a later sheet bound. A four-sheet frame put one rectangle on
+  screen and left the rest empty. **Both samples register four sheets**, so
+  `breakout` and `flappy` were affected on every native run since the pass
+  shipped; the browser was not, because `slangc` lowers the same source to
+  WGSL's `@builtin(instance_index)`, which WebGPU defines to include
+  `firstInstance`.
+
+  No shader source is correct on both targets while `firstInstance` is non-zero,
+  so it is now always zero: every draw is `draw(0..6, 0..count)` and the batch's
+  offset arrives in the new `SpriteConstants::base` field, through a
+  dynamic-offset binding of set 0. **`SpriteConstants` is one block per batch
+  rather than one per frame**, laid out at `SpriteRenderer::constant_stride()` —
+  `CONSTANTS_SIZE` rounded up to the device's
+  `min_uniform_buffer_offset_alignment` — and its `pad: [f32; 2]` has become
+  `base: u32, pad: u32`. Callers of the pass are unaffected; anyone building
+  `SpriteConstants` by hand is not.
+
+  `crates/crcbl-vk/tests/vk_e2e.rs` gains a golden of three solid-colour sheets
+  at four rectangles, which is red against the old pass; the batching tests in
+  `crcbl-render` now pin the draw ranges at zero and the dynamic offset per
+  batch.
+
 - **breakout**, **flappy**: a window that lost focus kept playing, and kept
   saying so. The samples ignored `ShellEvent::Focus` entirely — on every
   platform, native and browser — so alt-tabbing away left the simulation running

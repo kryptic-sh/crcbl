@@ -39,7 +39,37 @@
 // sampler, created once when a sheet is registered and never touched again.
 // Folding the sheet into set 0 would mean rebuilding every registered sheet's
 // bind group whenever the instance ring grew; folding the frame into set 1
-// would mean the same in the other direction. Batching rebinds only set 1.
+// would mean the same in the other direction.
+//
+// # Why the batch's base instance is a *constant* and not `firstInstance`
+//
+// A batch is a run of consecutive sprites sharing a sheet, and each one is one
+// draw. The obvious way to point a draw at its slice of the frame's instance
+// buffer is the draw's own `firstInstance`, and that is what this pass did until
+// it was found to render every batch after the first from the *first* batch's
+// instances. The cause is that `SV_InstanceID` does not mean the same thing on
+// the two targets this file is compiled for:
+//
+// * On **SPIR-V**, `slangc` lowers it to `InstanceIndex - BaseInstance`, which is
+//   HLSL's definition — the id counts from the start of the *draw* and excludes
+//   `StartInstanceLocation`. Indexing a frame-wide buffer with it restarts at 0
+//   for every batch.
+// * On **WGSL**, `slangc` lowers it straight to `@builtin(instance_index)`, and
+//   WebGPU defines that builtin to *start at* `firstInstance`. So the same source
+//   indexes absolutely there.
+//
+// Both cannot be right, and nothing in this file can be written that is correct
+// on both while `firstInstance` is non-zero. So the pass stopped using it:
+// every draw is `draw(0..6, 0..count)`, which makes the two lowerings agree —
+// with a zero base they are the same number — and the batch's offset into the
+// buffer arrives in `SpriteConstants::base`, through a dynamic-offset binding of
+// set 0. Set 0 and set 1 are then both rebound per batch.
+//
+// The alternative was to add `SV_StartInstanceLocation` back on for SPIR-V only.
+// It compiles, but `slangc` rejects that semantic outright for WGSL, so the
+// source would have to be `#if`-split per target — and, worse, the WGSL half
+// would then be relying on Slang's WGSL lowering *disagreeing* with its SPIR-V
+// one. A Slang release that made the two agree would silently break the browser.
 
 /// Per-frame constants. A uniform buffer on every tier — see the header.
 struct SpriteConstants
@@ -52,9 +82,21 @@ struct SpriteConstants
     /// rounding a position to the pixel grid needs the map from NDC to that
     /// grid, and this is it.
     float2 viewport;
+    /// **The index of this batch's first sprite in the frame's instance buffer.**
+    ///
+    /// Added to `SV_InstanceID` — which is zero-based within the draw on both
+    /// targets, because every draw this pass emits has `firstInstance == 0` — to
+    /// give the absolute index. The header records why the draw's own
+    /// `firstInstance` cannot carry it.
+    ///
+    /// This is the only field that differs between the blocks of one frame, and
+    /// it is why there is a block per *batch* rather than per frame: the whole
+    /// struct is re-emitted at each dynamic-offset stride so that one binding can
+    /// address any of them.
+    uint base;
     /// Pads the block to a multiple of 16 bytes, which `std140` requires of a
     /// uniform buffer's size and which naga enforces where a driver would not.
-    float2 pad;
+    uint pad;
 };
 
 [[vk::binding(0, 0)]]
@@ -151,7 +193,11 @@ struct SpriteVarying
 [shader("vertex")]
 SpriteVarying vertexMain(uint vertex: SV_VertexID, uint instance: SV_InstanceID)
 {
-    SpriteInstance s = sprites[instance];
+    // `instance` counts from zero within this draw on both targets — see the
+    // header — and `constants.base` is where this batch starts in the frame's
+    // buffer. Neither half is optional: dropping the base draws every batch from
+    // the first one's instances, which is the bug this arrangement exists for.
+    SpriteInstance s = sprites[instance + constants.base];
     float2 corner = CORNERS[vertex];
 
     // The quad in world units: minimum corner plus the corner's fraction of the

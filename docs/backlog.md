@@ -21,54 +21,37 @@ carries what has no phase yet.
   the symbols must not collide — so the shape is probably a macro over a generic
   core rather than a plain function.
 
-## The sprite pass draws every batch but the first from the wrong instances
+## The browser gate is red on focus and pause, and was before this slice
 
-**Found while blessing the menu golden; not fixed, and both shipped samples are
-affected.** `shaders/sprite.slang`'s vertex stage reads
-`sprites[SV_InstanceID]`, and Slang compiles `SV_InstanceID` to
-`InstanceIndex - BaseInstance` — HLSL's semantics, where the id excludes
-`StartInstanceLocation`. `SpriteRenderer::add_pass` assumes the opposite: it
-emits one `draw(0..6, batch.instances)` per batch and expects the shader to
-index the frame's instance buffer absolutely. So **every batch after the first
-re-reads the first batch's instances**, drawing the earlier sprites again with
-the later sheet bound.
+**Found while checking the sprite fix against the browser; not caused by it, and
+not fixed here.** `CRCBL_WEB_E2E_DEMO=breakout ./web/run-browser-e2e.sh` and the
+same for `flappy` report **23/25**, both failures in section E:
 
-Confirmed on radv (Mesa 26.1.6) with three 1×1 sheets — red, green, blue — at
-three separate rectangles: only the red rectangle was drawn, in blue, and the
-other two rectangles were empty.
-`spirv-dis crates/crcbl-shaders/spirv/sprite.spv` shows the `OpISub` of
-`BaseInstance` from `InstanceIndex` at the top of `vertexMain`.
+- `focus coming back does not resume on its own — status 3`, and
+- `the simulation runs again after resuming — 0 HUD line(s) in 4000 ms`.
 
-**What it means for the samples.** `apps/breakout` registers four sheets and
-`apps/flappy` four, so both draw a frame of four batches and only the first
-survives. Nothing caught it: every existing sprite test registers one sheet, and
-the two that register two (`sprite_pixel` / `sprite_smooth`) upload the _same
-pixels_ twice and differ only in `SampleMode`, which is per-instance and so
-still visible.
+The story the log tells is coherent: refocusing the canvas resumes the demo by
+itself, and the Escape that the driver then sends toggles it back to paused, so
+the run that follows logs nothing. `breakout`'s own changelog entry says
+"regaining focus deliberately does not resume", so the demo is doing the
+opposite of what it is documented to do — but only in the browser; nothing in
+the native path is known to be affected.
 
-**The menu sidesteps it rather than fixing it** — `assets/menu.crpix` is one
-sheet, so a menu is one batch — which is why the menu renders correctly today
-while the game behind it does not.
+**It is not this slice's doing, and that was measured rather than assumed.** A
+`git worktree` at `HEAD`, site built from it, same script: breakout **22/25**
+with the same two failures plus `Escape resumes the demo`. So `HEAD` is at worst
+as red as the working tree. The third failure appearing in one run and not the
+other means there is a race in it as well as a defect.
 
-The fix is one of two, and neither is in `crcbl-render` alone:
+**Anyone reading "25/25 today" should know where that number came from.** A run
+without `--build` uses whatever is in `target/site`, and that directory outlives
+the commit it was built from — a stale site is how a green run gets reported for
+code that is red. Both demos were 25/25 against a site built before the focus,
+pause and menu work landed. Pass `--build`, or delete `target/site` first.
 
-- **Change the shader** to index by `InstanceIndex` (a `[[vk::builtin]]` or
-  Slang's `SV_StartInstanceLocation` added back). One line, but it is
-  `crcbl-shaders`, and both the `spirv/` and `wgsl/` artifacts are regenerated
-  and committed. WebGPU's `@builtin(instance_index)` already _includes_
-  `firstInstance`, so the WGSL half may be correct today and the two backends
-  may be disagreeing — worth checking before assuming one fix covers both.
-- **Stop using `firstInstance` for indexing**: make the instance buffer a
-  dynamic storage binding, pad each batch to
-  `min_storage_buffer_offset_alignment`, and bind the frame set per batch with
-  the batch's offset. Entirely inside `crcbl-render`, but it changes the frame
-  bind-group layout and therefore touches every backend that implements dynamic
-  offsets — including `crcbl-wgpu`, which the browser demos run on.
-
-Whichever lands, the regression test is a golden of **two different sheets in
-one frame**: the shape of the repro above, in `crates/crcbl-vk/tests/vk_e2e.rs`.
-It is deliberately not committed today, because it would be a red test in a
-green suite.
+Where to look: the `Focus` handling in `apps/breakout/src/app.rs` and
+`apps/flappy/src/app.rs` against `web/tools/browser-e2e.mjs`'s section E, and
+whether the browser delivers a focus event the native shells do not.
 
 ## The sprite system, and what is left of the retrofit
 
@@ -207,8 +190,20 @@ The modular panel is built and all three samples switch it on with F3 (or
   over a flat clear colour on an offscreen ring; no test composites one over
   breakout's brick grid or flappy's course, and no human has confirmed the scrim
   reads well over either. The browser gate reaches a paused demo but only counts
-  HUD lines. This compounds with the sprite-pass finding above: until that is
-  fixed, the game _behind_ the menu is drawn from the wrong sheets anyway.
+  HUD lines. The browser gate's canvas capture is the closest thing there is,
+  and it happens to fire while the pause menu is up — a human has now looked at
+  it for both demos and it reads fine, but nothing asserts it.
+- **No test and no tool captures a native sample's pixels.** `breakout` and
+  `flappy` take `--headless --frames N` and print a summary; neither has a
+  screenshot path, so "the Vulkan build of the game draws the right picture" is
+  reachable only by running it on a desktop. The multi-sheet bug lived in the
+  shipped samples for that reason: the evidence that it is gone is
+  `every_batch_draws_its_own_instances_rather_than_the_first_batchs` exercising
+  the same `SpriteRenderer` on radv, plus both samples running 120 headless
+  frames with `CRCBL_VK_VALIDATION` and sync validation clean — **not** a
+  picture of either game. What it would take: a `--capture <path>` on the sample
+  front ends, reading the swapchain image back the way `vk_e2e.rs`'s
+  `render_sprites` does.
 - **The menus' `MenuKind`/`Menus`/`MenuAction` scaffolding is written three
   times.** `apps/breakout/src/menu.rs`, `apps/flappy/src/menu.rs` and
   `apps/sandbox/src/menu.rs` share the container, the show/select/press/activate
@@ -581,6 +576,39 @@ uncertainty.
   harness, pausing it would be noise.
 
 ## Considered and declined
+
+- **Fixing the multi-sheet sprite bug in the shader, by adding
+  `SV_StartInstanceLocation` back on.** It works, and it is one line:
+  `sprites[instance + base]` with `uint base : SV_StartInstanceLocation`
+  restores the `BaseInstance` that `SV_InstanceID` subtracts, giving the
+  absolute index that the old `draw(0..6, batch.instances)` needed. Measured
+  with slangc 2026.14: the SPIR-V comes out with the `OpIAdd` next to the
+  `OpISub` and no extra capability beyond the `DrawParameters` the file already
+  declares.
+
+  Declined for two reasons. First, `slangc` **rejects that semantic for WGSL** —
+  `error[E55202]: system value semantic 'sv_startinstancelocation' is not supported for the current target`
+  — so the source would have to be `#if`-split per target, and there is no
+  target macro to split on (probed: `__TARGET_SPIRV__`, `SLANG_SPIRV`,
+  `__SPIRV__`, `__TARGET_WGSL__` are all undefined; only `__SLANG_COMPILER__`
+  is), so `tools/compile-shaders.sh` would have to start passing its own `-D`
+  per target. Second and worse, the WGSL half would then be correct **because
+  Slang's two lowerings disagree**: `SV_InstanceID` becomes
+  `InstanceIndex - BaseInstance` on SPIR-V and a bare `@builtin(instance_index)`
+  on WGSL, and only the SPIR-V one matches HLSL. A Slang release that made WGSL
+  consistent with the rest would silently break the browser, with nothing in
+  this repository pointing at the cause. Always drawing from instance 0 depends
+  on neither lowering.
+
+- **A dynamic offset on the instance _storage_ buffer rather than a per-batch
+  constant block.** The obvious shape — bind `sprites` with `dynamic: true` and
+  offset it to the batch — needs the binding's declared **size** to be fixed at
+  bind-group creation while `offset + size` must stay inside the buffer, so the
+  size would have to be "the largest batch", which is a per-frame quantity the
+  group is not rebuilt for. Batches would also have to be padded to
+  `min_storage_buffer_offset_alignment` (256 on WebGPU) rather than packed at
+  `INSTANCE_STRIDE`. The constants block is 80 bytes and fixed, so the same
+  mechanism costs nothing there.
 
 - **Sharing `apps/*/src/audio.rs` and the best-score file between the two
   samples directly.** The duplication is real (findings 4 and 5) and the fix is

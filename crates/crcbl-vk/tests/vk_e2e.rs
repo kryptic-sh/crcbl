@@ -3860,6 +3860,24 @@ fn quad_sheet() -> Vec<u8> {
     .collect()
 }
 
+/// A 1×1 opaque sheet of one colour.
+///
+/// One texel, so the whole quad is that colour whatever the filter does, and a
+/// rectangle's colour is a direct read-out of **which sheet was bound** with no
+/// UV arithmetic in between. That separation is the point — see
+/// [`every_batch_draws_its_own_instances_rather_than_the_first_batchs`].
+fn solid_sheet(rgb: [u8; 3]) -> Vec<u8> {
+    vec![rgb[0], rgb[1], rgb[2], 255]
+}
+
+/// The three [`solid_sheet`] colours the multi-sheet test registers, with the
+/// names its failure message uses.
+const SOLID_SHEETS: [(&str, [u8; 3]); 3] = [
+    ("red", [255, 0, 0]),
+    ("green", [0, 255, 0]),
+    ("blue", [0, 0, 255]),
+];
+
 /// A 2×2 sheet with a different alpha in each texel.
 ///
 /// ```text
@@ -4266,6 +4284,131 @@ fn a_sprite_is_drawn_the_right_way_up_in_the_right_place_from_the_right_frame() 
     assert_background(&image, SPRITE_EXTENT.0 - 3, SPRITE_EXTENT.1 - 3);
 
     let verdict = sprite_golden("sprite", &image);
+    renderer.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+    report_goldens(vec![verdict]);
+}
+
+/// **Every batch draws its own instances.** Four sprites over three sheets —
+/// red, green, blue, then red again — at four separate rectangles, which is
+/// four batches because a batch is a *consecutive* run of one sheet.
+///
+/// The regression this exists for, written up in `docs/backlog.md` before it was
+/// fixed: `SpriteRenderer::add_pass` used to emit one
+/// `draw(0..6, batch.instances)` per batch, so `firstInstance` was the batch's
+/// start index and `sprite.slang` had to index the frame's instance buffer
+/// **absolutely** for that to mean anything. It did not — Slang compiles
+/// `SV_InstanceID` to `InstanceIndex - BaseInstance` on SPIR-V, which is HLSL's
+/// semantics where the id excludes `StartInstanceLocation` — so every batch
+/// after the first re-read the *first* batch's instances and redrew the first
+/// rectangle with a later sheet bound. Three rectangles came out empty and one
+/// came out the wrong colour.
+///
+/// **Solid one-texel sheets on purpose.** A rectangle's colour names the sheet
+/// that was bound and its position names the instance that was read, so the two
+/// halves of the mistake are separable: the old bug moved the colour without
+/// moving the rectangle. Every sprite test above this one registers a single
+/// sheet, and the two filtering tests register two sheets whose *pixels are
+/// identical*, so all of them passed with the bug in place — which is exactly
+/// why it shipped.
+///
+/// **Four sprites, not three.** The fourth names the first sheet again, so the
+/// batch bases are 0, 1, 2, 3 and one sheet is bound twice at two different
+/// bases. A fix that only worked while each sheet appeared once would pass with
+/// three.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn every_batch_draws_its_own_instances_rather_than_the_first_batchs() {
+    assert_the_camera_maps_a_world_unit_to_a_pixel();
+
+    let headless = Headless::open_for_sprites();
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::SpriteRenderer::new(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+    )
+    .expect("the sprite renderer builds");
+
+    let sheets: Vec<crcbl_render::SheetId> = SOLID_SHEETS
+        .iter()
+        .map(|(name, rgb)| {
+            register_sheet(
+                &mut renderer,
+                headless.device.as_ref(),
+                name,
+                1,
+                1,
+                crcbl_render::SampleMode::Pixel,
+                &solid_sheet(*rgb),
+            )
+        })
+        .collect();
+
+    // Four 48×48 rectangles in a row, 16 world units apart, so the "two pixels
+    // outside the edge is still the clear colour" checks below cannot reach a
+    // neighbour.
+    let rects: [[f32; 4]; 4] = [
+        [-116.0, 20.0, 48.0, 48.0],
+        [-52.0, 20.0, 48.0, 48.0],
+        [12.0, 20.0, 48.0, 48.0],
+        [76.0, 20.0, 48.0, 48.0],
+    ];
+    // Sheet 0, 1, 2, 0 — four batches, three sheets.
+    let named: [usize; 4] = [0, 1, 2, 0];
+
+    let sprites: Vec<crcbl_render::Sprite> = rects
+        .iter()
+        .zip(named)
+        .map(|(rect, sheet)| crcbl_render::Sprite {
+            sheet: sheets[sheet],
+            rect: *rect,
+            uv: [0.0, 0.0, 1.0, 1.0],
+            tint: [1.0; 4],
+        })
+        .collect();
+
+    let image = render_sprites(&headless, &mut renderer, &mut pool, &sprites);
+
+    // Anti-vacuity: three sheet colours plus the clear is four, and the bug drew
+    // one rectangle in one colour over the clear, which is two.
+    let colors = image.distinct_colors(32);
+    assert!(
+        colors >= 4,
+        "the frame must contain all three sheet colours and the clear; found {colors}"
+    );
+
+    for (index, (rect, sheet)) in rects.iter().zip(named).enumerate() {
+        let (name, expected) = SOLID_SHEETS[sheet];
+        let centre = world_to_pixel([rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0]);
+        let (x, y) = (centre[0] as u32, centre[1] as u32);
+        let actual = rgb(&image, x, y);
+        assert!(
+            close(actual, expected, 2),
+            "batch {index} should have drawn its own instance — rectangle {index} at \
+             pixel ({x}, {y}) should be the {name} sheet {expected:?}, got {actual:?}. \
+             The clear colour here means this batch drew somewhere else entirely, \
+             which is the batch reading the first batch's instance."
+        );
+    }
+
+    // And each rectangle stops where its own instance says it does. Without
+    // this, four full-width bands would satisfy everything above.
+    for rect in rects {
+        let low = world_to_pixel([rect[0], rect[1]]);
+        let high = world_to_pixel([rect[0] + rect[2], rect[1] + rect[3]]);
+        let middle_y = ((low[1] + high[1]) / 2.0) as u32;
+        let middle_x = ((low[0] + high[0]) / 2.0) as u32;
+        assert_background(&image, low[0] as u32 - 2, middle_y);
+        assert_background(&image, high[0] as u32 + 2, middle_y);
+        assert_background(&image, middle_x, high[1] as u32 - 2);
+        assert_background(&image, middle_x, low[1] as u32 + 2);
+    }
+    assert_background(&image, 2, 2);
+    assert_background(&image, SPRITE_EXTENT.0 - 3, SPRITE_EXTENT.1 - 3);
+
+    let verdict = sprite_golden("sprite_multi_sheet", &image);
     renderer.destroy(headless.device.as_ref());
     pool.destroy(headless.device.as_ref());
     headless.finish();
