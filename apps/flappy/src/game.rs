@@ -278,6 +278,11 @@ struct GameLogic {
     /// Live pipe positions for the renderer, reused rather than rebuilt so a
     /// steady-state tick does not allocate.
     pipe_views: Vec<PipeView>,
+    /// Cues raised this tick: `(sound id, world x, world y)`. Drained by the
+    /// facade, which owns the output stream — audio does not belong on the
+    /// simulation's side of the seam, and a frame that ran two ticks must play
+    /// both of their cues rather than only the last one's.
+    cues: Vec<(u32, f64, f64)>,
     /// Ticks the module has actually run. The facade asserts this advances by
     /// exactly one per [`Game::tick`].
     ticks: u64,
@@ -335,6 +340,7 @@ fn lock(shared: &Mutex<GameLogic>) -> MutexGuard<'_, GameLogic> {
 /// One tick of flappy, inside the server's tick, after physics has stepped.
 fn run_tick(logic: &mut GameLogic, world: &mut World) {
     logic.ticks += 1;
+    logic.cues.clear();
     let dt = world.tick_dt();
     let intent = std::mem::take(&mut logic.intent);
     let bird = logic.bird;
@@ -351,6 +357,7 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
                 phys.set_body(bird, RigidBody::new_dynamic(1.0));
                 set_velocity(phys, bird, DVec3::new(SCROLL_SPEED, FLAP_SPEED, 0.0));
             });
+            flap_cue(logic);
         }
         GameState::Playing if intent.flap => {
             with_physics(world, |phys| {
@@ -362,6 +369,7 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
                     phys.set_body(bird, flapped);
                 }
             });
+            flap_cue(logic);
         }
         _ => {}
     }
@@ -465,6 +473,13 @@ fn fatal(logic: &GameLogic, world: &mut World, dt: f64) -> Option<Death> {
     hit.flatten()
 }
 
+/// Raises the wing-beat where the bird is.
+fn flap_cue(logic: &mut GameLogic) {
+    logic
+        .cues
+        .push((crate::audio::SOUND_FLAP, logic.bird_pos.x, logic.bird_pos.y));
+}
+
 /// Ends the run where the bird is.
 fn die(logic: &mut GameLogic, world: &mut World, cause: Death) {
     logic.state = GameState::Dead;
@@ -478,6 +493,11 @@ fn die(logic: &mut GameLogic, world: &mut World, cause: Death) {
     with_physics(world, |phys| {
         phys.set_body(bird, RigidBody::new_kinematic())
     });
+    logic.cues.push((
+        crate::audio::SOUND_DEATH,
+        logic.bird_pos.x,
+        logic.bird_pos.y,
+    ));
     log::info!(
         "run over after {} pipes ({cause:?}) at x = {:.1}",
         logic.score,
@@ -707,6 +727,7 @@ pub struct RenderState {
     pub bird_velocity: DVec3,
     pub pipes: Vec<PipeView>,
     pub score: u32,
+    pub best: u32,
     pub state: Option<GameState>,
     pub death: Option<Death>,
 }
@@ -724,6 +745,8 @@ pub struct Game {
     ticks_run: u64,
     /// Queued key events from the shell pump, replayed after `begin_tick`.
     pending_keys: Vec<(KeyCode, bool)>,
+    pub audio: crate::audio::Audio,
+    pub best: crate::best::Best,
     /// Mirrors of the shared state, refreshed after each tick so the render and
     /// HUD paths never take the lock.
     pub state: GameState,
@@ -772,8 +795,8 @@ impl Game {
     /// # Panics
     ///
     /// If `tick_hz` is zero.
-    pub fn new(tick_hz: u32) -> Result<Self, GameError> {
-        Self::with_seed(tick_hz, DEFAULT_SEED)
+    pub fn new(headless: bool, tick_hz: u32) -> Result<Self, GameError> {
+        Self::with_seed(headless, tick_hz, DEFAULT_SEED)
     }
 
     /// The same, on a named course.
@@ -790,7 +813,7 @@ impl Game {
     /// # Panics
     ///
     /// If `tick_hz` is zero.
-    pub fn with_seed(tick_hz: u32, seed: u64) -> Result<Self, GameError> {
+    pub fn with_seed(headless: bool, tick_hz: u32, seed: u64) -> Result<Self, GameError> {
         assert!(tick_hz > 0, "tick rate must be positive");
         let mut world = World::new();
 
@@ -837,6 +860,7 @@ impl Game {
             seed,
             runs: 0,
             pipe_views: Vec::new(),
+            cues: Vec::new(),
             ticks: 0,
         }));
 
@@ -882,6 +906,8 @@ impl Game {
             sim_time: Duration::ZERO,
             ticks_run: 0,
             pending_keys: Vec::new(),
+            audio: crate::audio::Audio::new(headless),
+            best: crate::best::Best::load(headless),
             state: GameState::WaitingToStart,
             score: 0,
             death: None,
@@ -955,6 +981,16 @@ impl Game {
         self.ticks_run += 1;
 
         let (state, score, death, bird, velocity, ticks_after) = {
+            let mut logic = lock(&self.shared);
+            // Drained under the same lock the tick filled it under, so a frame
+            // that ran two ticks plays both of their cues rather than the last
+            // one's. `listener` is the camera's centre; see `crate::audio`.
+            let cues: Vec<_> = logic.cues.drain(..).collect();
+            drop(logic);
+            for (id, x, y) in cues {
+                let listener = self.bird.x;
+                self.audio.play_at(id, listener, x, y);
+            }
             let logic = lock(&self.shared);
             (
                 logic.state,
@@ -971,6 +1007,9 @@ impl Game {
             "game logic must run exactly once per physics tick",
         );
 
+        if state == GameState::Dead && self.state != GameState::Dead {
+            self.best.update(score);
+        }
         self.state = state;
         self.score = score;
         self.death = death;
@@ -1004,6 +1043,8 @@ impl Game {
         out.score = logic.score;
         out.state = Some(logic.state);
         out.death = logic.death;
+        drop(logic);
+        out.best = self.best.get();
     }
 
     /// The course in play, for a caller that wants to name a pipe — a bug
@@ -1068,7 +1109,7 @@ mod tests {
     impl Harness {
         fn new(frame_hz: u32, tick_hz: u32) -> Self {
             Self {
-                game: Game::new(tick_hz).expect("a headless game always starts"),
+                game: Game::new(true, tick_hz).expect("a headless game always starts"),
                 clock: FrameClock::new(tick_hz),
                 time: ManualTime::new(),
                 frame_step: FrameClock::new(frame_hz).tick_dt(),
@@ -1555,6 +1596,59 @@ mod tests {
         let first = run();
         assert!(first.0 >= 5, "only {} pipes scored", first.0);
         assert_eq!(first, run());
+    }
+
+    // ---- cues and the best score ---------------------------------------------
+
+    /// A flap is heard, and so is the end of a run.
+    ///
+    /// The cue queue is filled by the simulation and drained by the facade, so
+    /// a cue that never crossed that seam would be a game that ran silently
+    /// while every other test passed.
+    #[test]
+    fn a_flap_and_a_death_reach_the_audio() {
+        let mut harness = Harness::new(60, 60);
+        assert_eq!(harness.game.audio.voices(), 0, "silence before the run");
+
+        harness.run_ticks(1, &flap_at(0));
+        assert!(
+            harness.game.audio.voices() >= 1,
+            "the flap that started the run was not heard"
+        );
+
+        // Fall to the ground without flapping again.
+        let before = harness.game.audio.voices();
+        harness.run_ticks(120, &flap_at(0));
+        assert_eq!(harness.game.state, GameState::Dead);
+        assert!(
+            harness.game.audio.voices() > before,
+            "the end of the run was not heard"
+        );
+    }
+
+    /// The best score is recorded when the run ends, once.
+    #[test]
+    fn the_best_score_is_taken_when_a_run_ends() {
+        let mut harness = Harness::new(60, 60);
+        assert_eq!(harness.game.best.get(), 0);
+
+        harness.fly_ticks(500);
+        let scored = harness.game.score;
+        assert!(scored > 0, "the run has to score something first");
+        assert_eq!(
+            harness.game.best.get(),
+            0,
+            "a run still in progress is not a best score"
+        );
+
+        // Stop flying and hit the ground.
+        harness.run_ticks(harness.ticks + 200, &[]);
+        assert_eq!(harness.game.state, GameState::Dead);
+        assert_eq!(
+            harness.game.best.get(),
+            scored,
+            "the finished run was not recorded"
+        );
     }
 
     // ---- the course ---------------------------------------------------------

@@ -206,7 +206,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         clock_source: Clock,
         events: u64,
     ) -> Result<Self, FlappyError> {
-        let game = Game::with_seed(options.tick_hz, options.seed)?;
+        let game = Game::with_seed(options.headless, options.tick_hz, options.seed)?;
         Ok(Self {
             windowed: !options.headless,
             shell,
@@ -516,12 +516,12 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
 struct HudStrings {
     score: String,
     state: String,
-    last: Option<(u32, Option<GameState>, Option<game::Death>)>,
+    last: Option<(u32, u32, Option<GameState>, Option<game::Death>)>,
 }
 
 impl HudStrings {
     fn refresh(&mut self, render: &RenderState) {
-        let key = (render.score, render.state, render.death);
+        let key = (render.score, render.best, render.state, render.death);
         if self.last == Some(key) {
             return;
         }
@@ -529,7 +529,7 @@ impl HudStrings {
 
         use std::fmt::Write as _;
         self.score.clear();
-        let _ = write!(self.score, "Score: {}", render.score);
+        let _ = write!(self.score, "Score: {}  Best: {}", render.score, render.best);
         self.state.clear();
         self.state.push_str(match (render.state, render.death) {
             (Some(GameState::WaitingToStart) | None, _) => "Press SPACE to fly",

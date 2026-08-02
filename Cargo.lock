@@ -560,6 +560,7 @@ name = "flappy"
 version = "0.1.0"
 dependencies = [
  "crcbl",
+ "crcbl-audio",
  "crcbl-client",
  "crcbl-core",
  "crcbl-ecs",
@@ -567,6 +568,7 @@ dependencies = [
  "crcbl-net",
  "crcbl-phys",
  "crcbl-server",
+ "crcbl-store",
  "glam",
  "log",
 ]
