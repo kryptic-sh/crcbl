@@ -257,6 +257,13 @@ struct GameLogic {
     bird_pos: DVec3,
     bird_vel: DVec3,
     state: GameState,
+    /// Pipes flown past this run.
+    score: u32,
+    /// The index of the next pipe that can be scored. See
+    /// [`score_passed_pipes`].
+    next_score: u32,
+    /// What ended the run, once one has.
+    death: Option<Death>,
     /// The pipes that currently exist, oldest first.
     pipes: Vec<Pipe>,
     /// The next pipe index to build. Only ever goes up within a run, so the
@@ -279,6 +286,9 @@ struct GameLogic {
 impl GameLogic {
     fn reset_run(&mut self) {
         self.state = GameState::WaitingToStart;
+        self.score = 0;
+        self.next_score = 0;
+        self.death = None;
     }
 
     /// The seed of the course in play.
@@ -325,6 +335,7 @@ fn lock(shared: &Mutex<GameLogic>) -> MutexGuard<'_, GameLogic> {
 /// One tick of flappy, inside the server's tick, after physics has stepped.
 fn run_tick(logic: &mut GameLogic, world: &mut World) {
     logic.ticks += 1;
+    let dt = world.tick_dt();
     let intent = std::mem::take(&mut logic.intent);
     let bird = logic.bird;
 
@@ -335,6 +346,9 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
         GameState::WaitingToStart if intent.flap => {
             logic.state = GameState::Playing;
             with_physics(world, |phys| {
+                // Dynamic again: a run that has ended leaves the bird
+                // kinematic so that gravity stops acting on the corpse.
+                phys.set_body(bird, RigidBody::new_dynamic(1.0));
                 set_velocity(phys, bird, DVec3::new(SCROLL_SPEED, FLAP_SPEED, 0.0));
             });
         }
@@ -353,7 +367,10 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
     }
 
     // --- hold the bird still until the run starts ------------------------
-    if logic.state != GameState::Playing {
+    //
+    // `WaitingToStart` only. A dead bird stays where it died, because where it
+    // died is the one piece of feedback the player gets about what went wrong.
+    if logic.state == GameState::WaitingToStart {
         with_physics(world, |phys| park_bird(phys, bird));
     }
 
@@ -382,8 +399,120 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
         });
     }
 
+    read_bird(logic, world);
+
+    if logic.state == GameState::Playing {
+        // Collision first, so a tick that ends the run awards nothing: a bird
+        // that clipped the far edge of a pipe on its way past does not get the
+        // point for it.
+        if let Some(cause) = fatal(logic, world, dt) {
+            die(logic, world, cause);
+        } else {
+            score_passed_pipes(logic);
+        }
+    }
+
     advance_course(logic, world);
     refresh_render_state(logic, world);
+}
+
+/// Why a run ended. Kept apart because the two want different feedback and,
+/// later, different sounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Death {
+    /// Flown into a pipe.
+    Pipe,
+    /// Flown into the ground.
+    Ground,
+}
+
+/// Whether the bird's path over the tick that just ran ended the run.
+///
+/// The pipe half is a swept sphere over the path rather than a test of where
+/// the bird ended up — the same `crcbl-phys` CCD query breakout's ball uses.
+///
+/// **Honestly: this game cannot tell the difference.** At [`SCROLL_SPEED`] the
+/// bird advances a tenth of a unit a tick against a pipe 1.6 wide, so a point
+/// test at the end of the tick passes every test in this file, and it still
+/// does at a tick rate as coarse as 3 Hz. The sweep is here because it is the
+/// correct query and because the cost is nil, not because anything demonstrates
+/// it; `docs/backlog.md` records that as the coverage gap it is rather than
+/// leaving a comment claiming a guarantee no check enforces.
+fn fatal(logic: &GameLogic, world: &mut World, dt: f64) -> Option<Death> {
+    let bird = logic.bird;
+    if logic.bird_pos.y - BIRD_RADIUS <= WORLD_FLOOR {
+        return Some(Death::Ground);
+    }
+
+    let hit = with_physics(world, |phys| {
+        let (body, transform) = phys
+            .body(bird)
+            .copied()
+            .zip(phys.transform(bird).copied())?;
+        let segment = crcbl_phys::Segment {
+            start: transform.position - body.velocity * dt,
+            end: transform.position,
+        };
+        // The bird's own collider sits at the far end of the segment, and the
+        // sweep has no exclusion list — left in the world it reports the bird
+        // hitting itself at t = 0 and every run ends on its first tick. Breakout
+        // pays the same price for the same reason.
+        phys.remove_collider(bird);
+        let hit = phys.sweep_sphere(&segment, BIRD_RADIUS);
+        phys.set_collider(bird, &BIRD_COLLIDER, &transform);
+        hit.map(|_| Death::Pipe)
+    });
+    hit.flatten()
+}
+
+/// Ends the run where the bird is.
+fn die(logic: &mut GameLogic, world: &mut World, cause: Death) {
+    logic.state = GameState::Dead;
+    logic.death = Some(cause);
+    let bird = logic.bird;
+    // **Kinematic, not merely stopped.** Zeroing the velocity leaves the body
+    // dynamic, so the integrator puts gravity straight back into it and the
+    // bird sinks a fraction of a unit every tick for as long as the game-over
+    // screen is up — slowly enough to look like nothing, and far enough to end
+    // up off the bottom of the world.
+    with_physics(world, |phys| {
+        phys.set_body(bird, RigidBody::new_kinematic())
+    });
+    log::info!(
+        "run over after {} pipes ({cause:?}) at x = {:.1}",
+        logic.score,
+        logic.bird_pos.x
+    );
+}
+
+/// Counts the pipes the bird has flown past since the last tick.
+///
+/// A running index rather than a flag per pipe: the bird only ever moves
+/// forward, so the pipes are passed in order and "which is next" is one number.
+/// It is also what makes the score survive the treadmill — a pipe is scored on
+/// the way past, long before it is destroyed behind.
+fn score_passed_pipes(logic: &mut GameLogic) {
+    while logic.next_score < logic.next_index
+        && pipe_x(logic.next_score) + PIPE_HALF_WIDTH < logic.bird_pos.x
+    {
+        logic.next_score += 1;
+        logic.score += 1;
+    }
+}
+
+/// Copies the bird's authoritative state out of the physics world.
+fn read_bird(logic: &mut GameLogic, world: &mut World) {
+    let bird = logic.bird;
+    let state = with_physics(world, |phys| {
+        let position = phys.transform(bird).map(|t| t.position);
+        let velocity = phys.body(bird).map(|b| b.velocity);
+        position.zip(velocity)
+    })
+    .flatten();
+    if let Some((position, velocity)) = state {
+        logic.bird_pos = position;
+        logic.bird_vel = velocity;
+    }
 }
 
 /// Builds the pipes that have come into range and destroys the ones that have
@@ -439,21 +568,9 @@ fn restart(logic: &mut GameLogic, world: &mut World) {
     advance_course(logic, world);
 }
 
-/// Copies the authoritative bird state the renderer needs out of the physics
-/// world, and the course alongside it.
+/// Copies the authoritative state the renderer needs out of the physics world.
 fn refresh_render_state(logic: &mut GameLogic, world: &mut World) {
-    let bird = logic.bird;
-    let state = with_physics(world, |phys| {
-        let position = phys.transform(bird).map(|t| t.position);
-        let velocity = phys.body(bird).map(|b| b.velocity);
-        position.zip(velocity)
-    })
-    .flatten();
-    if let Some((position, velocity)) = state {
-        logic.bird_pos = position;
-        logic.bird_vel = velocity;
-    }
-
+    read_bird(logic, world);
     logic.pipe_views.clear();
     logic
         .pipe_views
@@ -589,7 +706,9 @@ pub struct RenderState {
     pub bird: DVec3,
     pub bird_velocity: DVec3,
     pub pipes: Vec<PipeView>,
+    pub score: u32,
     pub state: Option<GameState>,
+    pub death: Option<Death>,
 }
 
 pub struct Game {
@@ -608,6 +727,8 @@ pub struct Game {
     /// Mirrors of the shared state, refreshed after each tick so the render and
     /// HUD paths never take the lock.
     pub state: GameState,
+    pub score: u32,
+    pub death: Option<Death>,
     pub bird: DVec3,
     pub bird_velocity: DVec3,
     prev_log_state: GameState,
@@ -708,6 +829,9 @@ impl Game {
             bird_pos: BIRD_START,
             bird_vel: DVec3::ZERO,
             state: GameState::WaitingToStart,
+            score: 0,
+            next_score: 0,
+            death: None,
             pipes: Vec::new(),
             next_index: 0,
             seed,
@@ -759,6 +883,8 @@ impl Game {
             ticks_run: 0,
             pending_keys: Vec::new(),
             state: GameState::WaitingToStart,
+            score: 0,
+            death: None,
             bird: BIRD_START,
             bird_velocity: DVec3::ZERO,
             prev_log_state: GameState::WaitingToStart,
@@ -828,9 +954,16 @@ impl Game {
         let _alpha = self.client.update(self.sim_time);
         self.ticks_run += 1;
 
-        let (state, bird, velocity, ticks_after) = {
+        let (state, score, death, bird, velocity, ticks_after) = {
             let logic = lock(&self.shared);
-            (logic.state, logic.bird_pos, logic.bird_vel, logic.ticks)
+            (
+                logic.state,
+                logic.score,
+                logic.death,
+                logic.bird_pos,
+                logic.bird_vel,
+                logic.ticks,
+            )
         };
         debug_assert_eq!(
             ticks_after,
@@ -839,6 +972,8 @@ impl Game {
         );
 
         self.state = state;
+        self.score = score;
+        self.death = death;
         self.bird = bird;
         self.bird_velocity = velocity;
 
@@ -846,8 +981,9 @@ impl Game {
         self.prev_log_state = self.state;
         if state_changed || self.ticks_run.is_multiple_of(60) {
             log::info!(
-                "[HUD] {:?}  x: {:.1}  y: {:.1}  vy: {:+.1}",
+                "[HUD] {:?}  score: {}  x: {:.1}  y: {:.1}  vy: {:+.1}",
                 self.state,
+                self.score,
                 self.bird.x,
                 self.bird.y,
                 self.bird_velocity.y,
@@ -865,7 +1001,9 @@ impl Game {
         out.bird_velocity = logic.bird_vel;
         out.pipes.clear();
         out.pipes.extend_from_slice(&logic.pipe_views);
+        out.score = logic.score;
         out.state = Some(logic.state);
+        out.death = logic.death;
     }
 
     /// The course in play, for a caller that wants to name a pipe — a bug
@@ -973,6 +1111,22 @@ mod tests {
             }
         }
 
+        /// Runs `ticks` of them under [`autopilot`] — a player who is trying.
+        fn fly_ticks(&mut self, ticks: u64) {
+            while self.ticks < ticks {
+                self.time.advance(self.frame_step);
+                self.clock.update(self.time.elapsed());
+                while self.ticks < ticks && self.clock.consume_tick() {
+                    if self.game.state == GameState::WaitingToStart || autopilot(&self.game) {
+                        self.game.key_event(KeyCode::Space, true);
+                        self.game.key_event(KeyCode::Space, false);
+                    }
+                    self.game.tick();
+                    self.ticks += 1;
+                }
+            }
+        }
+
         /// Runs for `seconds` of simulated wall time.
         fn run(&mut self, seconds: f64, script: &Script) {
             let frames = (seconds / self.frame_step.as_secs_f64()).round() as u64;
@@ -990,13 +1144,40 @@ mod tests {
         ]
     }
 
-    /// A player who keeps flapping: a press every twelve ticks, for long enough
-    /// to cover any run in this suite.
-    fn fly() -> Vec<(u64, KeyCode, bool)> {
-        (0..3000)
-            .step_by(12)
-            .flat_map(|tick| flap_at(tick as u64))
-            .collect()
+    /// How far below the line into the next gap the autopilot lets itself sink
+    /// before flapping.
+    ///
+    /// It has to be about the height a flap gains, or the controller ratchets:
+    /// flap while still above the target and the next flap starts higher again,
+    /// and after four of them the bird is riding the top of the gap instead of
+    /// the middle of it. A whole unit of sag against a gap 1.7 either side
+    /// leaves room for both the sag and the climb.
+    const SAG: f64 = 1.0;
+
+    /// How far ahead the autopilot looks, in seconds. Small: enough to notice
+    /// that it is already falling fast, not enough to act on a fall that has
+    /// not started.
+    const LOOKAHEAD: f64 = 0.05;
+
+    /// A competent player, in four lines: aim at the gap ahead, and flap when
+    /// the bird has sagged a unit below the line into it.
+    ///
+    /// Deliberately a **decision per tick from simulation state**, not a
+    /// recorded script. That is what makes it usable in the frame-rate tests:
+    /// the state a given tick sees is the same at 20 fps as at 240, so the
+    /// controller presses the button on the same ticks in both and the runs are
+    /// comparable. A controller keyed on frames would not be.
+    ///
+    /// It is not a good player — it flies the middle of every gap and takes no
+    /// account of the one after — but it clears more than thirty pipes, which
+    /// is all any test here asks of it.
+    fn autopilot(game: &Game) -> bool {
+        let target = game
+            .pipes()
+            .iter()
+            .find(|pipe| pipe.x + PIPE_HALF_WIDTH >= game.bird.x)
+            .map_or(0.0, |pipe| pipe.gap_centre);
+        game.bird.y + game.bird_velocity.y * LOOKAHEAD < target - SAG
     }
 
     /// The bird does not move until the player asks it to. Without this, a page
@@ -1185,13 +1366,20 @@ mod tests {
     #[test]
     fn the_ceiling_holds_the_bird_rather_than_ending_the_run() {
         let mut harness = Harness::new(60, 60);
-        // Flap every few ticks for long enough to pin the bird against the top.
+        // Flap every few ticks for long enough to pin the bird against the top,
+        // and stop before the first pipe — this is about the lid, and a run that
+        // ended on a pipe would prove nothing either way.
         let mut script = Vec::new();
-        for tick in (0..240).step_by(4) {
+        for tick in (0..60).step_by(4) {
             script.push((tick, KeyCode::Space, true));
             script.push((tick + 1, KeyCode::Space, false));
         }
-        harness.run(4.0, &script);
+        harness.run_ticks(60, &script);
+        assert!(
+            harness.game.bird.x < FIRST_PIPE_X - PIPE_HALF_WIDTH,
+            "the bird reached the first pipe: {}",
+            harness.game.bird.x
+        );
 
         assert_eq!(harness.game.state, GameState::Playing);
         assert!(
@@ -1204,6 +1392,169 @@ mod tests {
             "the bird should be held against the lid, not somewhere below it: {}",
             harness.game.bird.y
         );
+    }
+
+    // ---- dying and scoring ---------------------------------------------------
+
+    /// A bird nobody flaps hits the ground, and that ends the run.
+    #[test]
+    fn hitting_the_ground_ends_the_run() {
+        let mut harness = Harness::new(60, 60);
+        harness.run_ticks(120, &flap_at(0));
+
+        assert_eq!(harness.game.state, GameState::Dead);
+        assert_eq!(harness.game.death, Some(Death::Ground));
+        assert!(
+            harness.game.bird.x < FIRST_PIPE_X,
+            "this run should have ended before the first pipe, at x = {}",
+            harness.game.bird.x
+        );
+    }
+
+    /// Flying into a pipe ends the run, and says it was the pipe.
+    ///
+    /// The line flown is deliberately the naive one — hold the middle of the
+    /// world and hope — so the run reaches a pipe under its own steam and dies
+    /// on it rather than on the floor.
+    #[test]
+    fn flying_into_a_pipe_ends_the_run() {
+        let mut harness = Harness::new(60, 60);
+        // A player who keeps the bird level at y = 0 and takes no notice of
+        // where the gaps are.
+        for _ in 0..600 {
+            if harness.game.state != GameState::Playing || harness.game.bird.y < 0.0 {
+                harness.game.key_event(KeyCode::Space, true);
+                harness.game.key_event(KeyCode::Space, false);
+            }
+            if harness.game.state == GameState::Dead && harness.ticks > 0 {
+                break;
+            }
+            harness.run_ticks(harness.ticks + 1, &[]);
+        }
+
+        assert_eq!(harness.game.state, GameState::Dead);
+        assert_eq!(
+            harness.game.death,
+            Some(Death::Pipe),
+            "the run should have ended on a pipe, at x = {} y = {}",
+            harness.game.bird.x,
+            harness.game.bird.y
+        );
+        assert!(
+            harness.game.bird.y - BIRD_RADIUS > WORLD_FLOOR,
+            "and not on the floor: y = {}",
+            harness.game.bird.y
+        );
+    }
+
+    /// A dead bird stays where it died. Where it died is the only feedback the
+    /// player gets about what went wrong.
+    #[test]
+    fn a_dead_bird_stays_where_it_died() {
+        let mut harness = Harness::new(60, 60);
+        harness.run_ticks(120, &flap_at(0));
+        assert_eq!(harness.game.state, GameState::Dead);
+
+        let resting = harness.game.bird;
+        harness.run_ticks(180, &[]);
+        assert_eq!(
+            harness.game.bird, resting,
+            "the bird kept moving after the run ended"
+        );
+        assert_eq!(harness.game.bird_velocity, DVec3::ZERO);
+    }
+
+    /// A pipe flown past is a point, and only one.
+    #[test]
+    fn every_pipe_flown_past_scores_exactly_once() {
+        let mut harness = Harness::new(60, 60);
+        harness.fly_ticks(600);
+
+        assert_eq!(
+            harness.game.state,
+            GameState::Playing,
+            "the run ended early"
+        );
+        // Every pipe whose trailing edge is behind the bird, and no others.
+        let expected = (0..)
+            .take_while(|&index| pipe_x(index) + PIPE_HALF_WIDTH < harness.game.bird.x)
+            .count();
+        assert!(expected >= 5, "only {expected} pipes were passed");
+        assert_eq!(
+            harness.game.score as usize, expected,
+            "the score does not match the pipes actually behind the bird at x = {}",
+            harness.game.bird.x
+        );
+    }
+
+    /// The score never moves while the bird sits in front of a pipe it has not
+    /// passed — the failure a per-tick "is a pipe near?" test would produce.
+    #[test]
+    fn the_score_does_not_move_while_a_pipe_is_still_ahead() {
+        let mut harness = Harness::new(60, 60);
+        harness.fly_ticks(100);
+        assert!(
+            harness.game.bird.x < FIRST_PIPE_X - PIPE_HALF_WIDTH,
+            "the bird has already reached the first pipe: {}",
+            harness.game.bird.x
+        );
+        assert_eq!(harness.game.score, 0);
+    }
+
+    /// A restart clears the score, and the next run starts from zero however
+    /// far the last one got.
+    #[test]
+    fn a_restart_clears_the_score() {
+        let mut harness = Harness::new(60, 60);
+        harness.fly_ticks(400);
+        assert!(harness.game.score > 0, "the run must score something first");
+
+        harness.game.key_event(KeyCode::KeyR, true);
+        harness.game.tick();
+
+        assert_eq!(harness.game.score, 0);
+        assert_eq!(harness.game.state, GameState::WaitingToStart);
+        assert_eq!(harness.game.death, None);
+    }
+
+    /// **The determinism criterion.** The same script reaches the same score at
+    /// every frame rate.
+    ///
+    /// The autopilot is the script here: it decides from simulation state, so a
+    /// given tick sees the same world at 20 fps as at 240 and presses the button
+    /// on the same ticks. A score that differed would mean the simulation had
+    /// learned something about the frame loop.
+    #[test]
+    fn the_same_flight_reaches_the_same_score_at_every_frame_rate() {
+        let mut reference: Option<(u32, DVec3, GameState)> = None;
+        for frame_hz in [20, 60, 240] {
+            let mut harness = Harness::new(frame_hz, 60);
+            harness.fly_ticks(900);
+            let observed = (harness.game.score, harness.game.bird, harness.game.state);
+            match reference {
+                None => {
+                    assert!(observed.0 >= 5, "only {} pipes scored", observed.0);
+                    reference = Some(observed);
+                }
+                Some(expected) => {
+                    assert_eq!(observed, expected, "{frame_hz} fps flew a different run",)
+                }
+            }
+        }
+    }
+
+    /// Two games given the same seed and the same flight agree about
+    /// everything — the replay property, without a replay file.
+    #[test]
+    fn two_games_on_one_seed_fly_the_same_run() {
+        let run = || {
+            let mut harness = Harness::new(60, 60);
+            harness.fly_ticks(900);
+            (harness.game.score, harness.game.bird, harness.game.pipes())
+        };
+        let first = run();
+        assert!(first.0 >= 5, "only {} pipes scored", first.0);
+        assert_eq!(first, run());
     }
 
     // ---- the course ---------------------------------------------------------
@@ -1293,7 +1644,7 @@ mod tests {
     #[test]
     fn pipes_are_built_ahead_of_the_bird_and_destroyed_behind_it() {
         let mut harness = Harness::new(60, 60);
-        harness.run_ticks(600, &fly());
+        harness.fly_ticks(600);
 
         let bird = harness.game.bird.x;
         assert!(bird > 40.0, "the bird has to actually travel: {bird}");
@@ -1334,10 +1685,9 @@ mod tests {
         let ceiling = 1 + 2 * window;
 
         let mut harness = Harness::new(60, 60);
-        let script = fly();
         let mut worst = 0;
         for step in 1..=40 {
-            harness.run_ticks(step * 60, &script);
+            harness.fly_ticks(step * 60);
             worst = worst.max(harness.game.entity_count());
         }
 
@@ -1365,7 +1715,7 @@ mod tests {
         let mut reference: Option<Vec<PipeView>> = None;
         for frame_hz in [20, 60, 240] {
             let mut harness = Harness::new(frame_hz, 60);
-            harness.run_ticks(600, &fly());
+            harness.fly_ticks(600);
             let pipes = harness.game.pipes();
             match &reference {
                 None => {
