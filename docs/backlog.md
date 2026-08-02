@@ -516,34 +516,70 @@ The modular panel is built and all three samples switch it on with F3 (or
   picture of either game. What it would take: a `--capture <path>` on the sample
   front ends, reading the swapchain image back the way `vk_e2e.rs`'s
   `render_sprites` does.
-- **The menus' `MenuKind`/`Menus`/`MenuAction` scaffolding is written five
-  times.** `apps/breakout/src/menu.rs`, `apps/flappy/src/menu.rs`,
-  `apps/sandbox/src/menu.rs`, `apps/asteroids/src/menu.rs` and now
-  `apps/horde/src/menu.rs` share the container, the show/select/press/activate
-  surface and the pointer split, and differ in the menus they hold and what the
-  actions do. It is the same shape as the `web.rs` duplication in the first
-  section and has the same answer: the generic half belongs in the engine, and
-  the per-game half — which menu belongs to which state, and what a button does
-  — genuinely does not. The fifth sample has now arrived, so this is due with
-  `web.rs` rather than after it.
+- **Four samples' `switching_menus_drops_the_press` asserts nothing.**
+  `apps/breakout/src/menu.rs`, `apps/flappy/src/menu.rs`,
+  `apps/asteroids/src/menu.rs` and `apps/horde/src/menu.rs` each press the
+  **first** button of one menu and then release over the first button of
+  another. `UiState::interact` fires on release only when the capture names the
+  same `WidgetId` the cursor is over, and no two of those samples' menus share
+  an id in slot 0 — breakout's pause menu opens with `Resume`, its start menu
+  with `Launch` — so the release could not have fired whatever the container
+  did, and the test passes with the capture never cleared at all. Its other
+  assertion is vacuous the same way: the menu being switched _to_ was never
+  pressed, so "the new menu inherited a press" cannot be observed on it.
 
-  **Horde adds one thing the shared half would have to grow**: a menu whose
-  buttons are not fixed. `Menus::set_offer` rebuilds the level-up panel when the
-  offer changes and clears the pointer capture with it, because a rebuilt panel
-  is a different panel. Any extraction has to carry a "the menu's contents are
-  state" case rather than assuming a menu built once at start-up.
+  Verified by falsification, not by reading: deleting `self.ui.clear()` from
+  `MenuSet::show` leaves all four green. This predates the extraction — the
+  tests are the originals, unchanged in shape — and `crcbl-ui`'s own
+  `switching_menus_drops_the_press` now covers the behaviour with teeth (it goes
+  red, because it presses the `FULLSCREEN` button both menus carry under one
+  id). **Not fixed here** because the behaviour is entirely the engine's now and
+  a per-sample copy of it is redundant; what would make the four bite is
+  pressing slot 1 rather than slot 0, except in horde, whose pause and level-up
+  menus share no id at all and which would have to switch pause → start instead.
+  `apps/sandbox/src/menu.rs`'s `hiding_the_menu_drops_the_press` does bite, and
+  horde's `a_new_offer_drops_the_press` does too — both confirmed red.
 
 - **The loop's pause / fullscreen / focus / pointer-capture block is written
   four times.** `apps/breakout/src/app.rs`, `apps/flappy/src/app.rs`,
-  `apps/asteroids/src/app.rs` and now `apps/horde/src/app.rs` carry the same
+  `apps/asteroids/src/app.rs` and `apps/horde/src/app.rs` carry the same
   `Loop::paused` field, the same `lose_focus` (drain the held keys, then pause),
   the same F11 `toggle_fullscreen` reading the mode back rather than remembering
   it, the same "drain the accumulator while paused" tick loop, and the same
-  `pointer_held` / `pointer_down` press-capture bookkeeping in the pump. Roughly
-  150 lines each. The four copies have not yet drifted, which is exactly when to
-  fold them — the shape is a `SampleLoop` helper owning the flags and the pump's
-  non-game branches, with the sample supplying its own key bindings and its own
-  `MenuAction` handler. It belongs in the same slice as `web.rs` and `menu.rs`.
+  `pointer_held` / `pointer_down` press-capture bookkeeping in the pump. The
+  shape is a `SampleLoop` helper owning the flags and the pump's non-game
+  branches, with the sample supplying its own key bindings and its own
+  `MenuAction` handler.
+
+  **The menu half of that slice has landed** — `crcbl_ui::menu::MenuSet` — and
+  the loop half deliberately has not. Measured on the current tree, with the
+  game names normalised away (`BreakoutError` → `GameError`, `breakout` →
+  `game`, `glam::` stripped): breakout and flappy share **1708 identical lines**
+  of 2318 and 2271, with runs of 141, 108, 102 and 99 lines; asteroids and horde
+  share 1124 of 1700 and 1969; breakout and asteroids 1101, with runs of 74
+  and 67. The error type is **byte-identical in all four** after that
+  normalisation — 52 lines covering the enum, `Display`, `Error` and the four
+  `From` impls — which is the piece to be most careful with, because
+  `pub fn frame(&mut self) -> Result<Flow, BreakoutError>` is each bin crate's
+  public signature and the `From` impls name each crate's own `gpu::GpuError`
+  and `game::GameError`. A shared error therefore needs generics or boxing, and
+  touches every signature in five binaries; it is the reason this is not a
+  one-sitting change rather than an incidental detail.
+
+  What the extraction has to carry, found while doing the menu half:
+
+  - The pump's menu branches call `select_previous` / `select_next` / `press` /
+    `activate` on a `MenuSet<K>` whose `K` is the sample's own enum, so an
+    extracted pump is generic over `K` or takes buffered menu commands and lets
+    the caller replay them. Buffering is behaviour-preserving — nothing else in
+    the pump reads menu state, and `menu_showing` is sampled once _before_ the
+    pump — but it is a real change of shape and wants saying out loud.
+  - The pump captures `&mut self.game` and calls
+    `game.key_event(code, pressed)`; a closure argument covers it, but
+    `held_keys` is mutated in the same branch and belongs to the loop, not the
+    game.
+  - Sandbox is the fifth consumer of `run`, `BootStage` and `check_mode_request`
+    and the only one with no `MenuKind`; it must be in the slice, not after it.
 
 - **Flappy's swept-sphere collision is exercised, not demonstrated.**
   `game::fatal` sweeps the bird's path with `PhysicsSystem::sweep_sphere`
@@ -1445,6 +1481,37 @@ uncertainty.
   switched on the same way in all of them. It costs about fifteen lines.
   _Changes it_: nothing likely; if the sandbox ever became a pure benchmark
   harness, pausing it would be noise.
+
+- **Should `MenuSet::activate` and `MenuSet::point` return the game's own
+  `MenuAction` rather than a `WidgetId`?** _No — they return the id, and each
+  sample maps it._ Returning the action needs a trait
+  (`fn from_id(WidgetId) -> Option<Self>`) that every game with a menu must
+  implement, to save one `.and_then(MenuAction::from_id)` at two call sites in
+  `app.rs` and two test helpers per sample. The id is also what the layer
+  beneath actually deals in: `Menu::activate` and `Menu::point` both return
+  `Option<WidgetId>`, so the set passing it through adds no translation of its
+  own. _Changes it_: a consumer that threads the action through several layers,
+  where the `and_then` would start appearing at call sites that have no business
+  knowing about ids.
+
+- **Should the sandbox get a `MenuKind` enum for symmetry with the other four,
+  instead of keying its set by `bool`?** _No._ `MenuSet<bool>` is what its one
+  menu actually is, `false` is the state with no entry, and
+  `apps/sandbox/src/app.rs` already called `self.menus.show(self.paused)` — the
+  `bool` was always the key. An enum would be code added to make five files
+  rhyme. _Changes it_: the sandbox growing a second panel, or the loop
+  extraction turning out to need one `K` across all five.
+
+- **Where does horde's "has the offer changed?" guard live now that the
+  container is the engine's?** _In a `LevelUpOffer` type in
+  `apps/horde/src/menu.rs`, and horde's `Loop` gained a field for it._
+  `MenuSet::replace` rebuilds unconditionally and drops the capture; deciding
+  _when_ a panel is stale needs `built_from: Option<(u32, [Upgrade; 3])>`, which
+  the engine cannot hold because it knows nothing about upgrades. The
+  alternative was putting that field on `Loop` and inlining the comparison in
+  `draw_menu`, which is the same state in a place where it could not be unit
+  tested. _Changes it_: a second sample growing a rebuilt panel, at which point
+  the guard is a shape and not horde's alone.
 
 ## Considered and declined
 
