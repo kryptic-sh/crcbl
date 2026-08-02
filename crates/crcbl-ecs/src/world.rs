@@ -122,6 +122,21 @@ impl World {
         &mut self.schedule
     }
 
+    /// The first system of type `T`, if the schedule holds one.
+    ///
+    /// The typed form of walking [`Schedule::iter_mut`] and downcasting, which
+    /// every game that reaches for its physics system was writing out. The type
+    /// is the whole query: a caller that also compares
+    /// [`SystemTrait::name`] is asking the same question twice and getting a
+    /// silent `None` the day the system is renamed, where the downcast keeps
+    /// answering. Systems are few and this scans them, so it belongs in setup
+    /// and tooling rather than inside a tick.
+    pub fn system_mut<T: SystemTrait + 'static>(&mut self) -> Option<&mut T> {
+        self.schedule
+            .iter_mut()
+            .find_map(|system| system.as_any_mut().downcast_mut::<T>())
+    }
+
     /// Whether `entity` is still alive (in the pool, not yet swept).
     #[must_use]
     pub fn is_alive(&self, entity: Entity) -> bool {
@@ -246,8 +261,69 @@ mod tests {
         world.register_system(Box::new(rec));
         world.tick();
         assert!(!world.is_alive(e));
-        // Can't easily read back the ticked flag from Box<dyn SystemTrait>,
-        // but we know tick() ran because sweep happened after.
+        assert!(
+            world
+                .system_mut::<Record>()
+                .expect("the registered system is still there")
+                .ticked,
+            "the sweep having run says nothing about the system having ticked — \
+             this reads the flag the system set"
+        );
+    }
+
+    /// The type is the whole query, so a system answers to it under any name.
+    ///
+    /// This is the property that made the four samples' hand-written
+    /// `with_physics` fragile: each compared `name() == "physics"` before
+    /// downcasting, so renaming the system would have turned every physics call
+    /// in every game into a silent no-op with nothing failing to say so.
+    #[test]
+    fn a_system_is_found_by_its_type_whatever_it_is_called() {
+        struct Odd(u32);
+        impl SystemTrait for Odd {
+            fn name(&self) -> &str {
+                "not the name anybody would guess"
+            }
+            fn tick(&mut self, _dt: f64) {}
+            fn entity_count(&self) -> usize {
+                0
+            }
+            fn sweep(&mut self, _dead: &[Entity]) {}
+            fn debug_draw(&mut self, _ctx: &crate::system::DebugCtx) {}
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+
+        let mut world = World::new();
+        world.register_system(Box::new(Odd(7)));
+        assert_eq!(
+            world.system_mut::<Odd>().map(|odd| odd.0),
+            Some(7),
+            "the downcast is what answers, not the name"
+        );
+
+        world.system_mut::<Odd>().expect("registered above").0 = 9;
+        assert_eq!(
+            world.system_mut::<Odd>().map(|odd| odd.0),
+            Some(9),
+            "the borrow is the real system, not a copy of it"
+        );
+    }
+
+    /// A type the schedule does not hold is `None`, not the wrong system.
+    #[test]
+    fn asking_for_a_system_that_is_not_there_answers_none() {
+        let mut world = World::new();
+        world.register_system(Box::new(System::<i32>::new("ints")));
+        assert!(
+            world.system_mut::<System<u8>>().is_none(),
+            "a different component type is a different system"
+        );
+        assert!(
+            world.system_mut::<System<i32>>().is_some(),
+            "and the one that is there is still found"
+        );
     }
 
     #[test]

@@ -606,14 +606,7 @@ fn refresh_render_state(logic: &mut GameLogic, world: &mut World) {
 
 /// Runs `f` against the world's physics system, if it has one.
 fn with_physics<R>(world: &mut World, f: impl FnOnce(&mut PhysicsSystem) -> R) -> Option<R> {
-    for sys in world.schedule_mut().iter_mut() {
-        if sys.name() == "physics"
-            && let Some(phys) = sys.as_any_mut().downcast_mut::<PhysicsSystem>()
-        {
-            return Some(f(phys));
-        }
-    }
-    None
+    world.system_mut::<PhysicsSystem>().map(f)
 }
 
 /// Builds the two boxes of pipe `index` and returns the pair.
