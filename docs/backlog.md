@@ -133,32 +133,68 @@ sign-off.
 Nothing else about `crpix` on Windows was reviewed; these three are what CI
 reports, not the result of a Windows audit.
 
-## The offscreen-ring hazard cannot be reproduced on a developer machine
+## `run-vk-e2e.sh` pins no ICD by default, so nobody was running CI's gate
 
-The `SYNC-HAZARD-WRITE-AFTER-READ` that `crcbl-vk`'s offscreen ring produced
-(fixed — `Device::acquire_next_frame` now waits on the retire timeline for the
-frame that had the image) was reported by CI's validation layer and by nothing
-locally. `synchronisation_validation_catches_a_missing_barrier` prints the
-reason: an Arch box running `VK_LAYER_KHRONOS_validation` 1.4.357 reports
-`record-time=yes one-submission=yes cross-submission=no`, and every hazard that
-spans a frame boundary is cross-submission. Setting
-`khronos_validation.syncval_submit_time_validation` through both
-`VK_LAYER_SETTINGS_PATH` and the `VK_KHRONOS_VALIDATION_*` environment form was
-tried and moved the measured reach not at all, so **there is currently no known
-way to widen it on that machine** — CI's older layer is the only thing that sees
-this class.
+The script's header says it "is what a developer runs to see what CI sees". That
+was not true unless the developer happened to set `CRCBL_VK_ICD`: the pin block
+is wrapped in `if [ -n "${CRCBL_VK_ICD:-}" ]`, and with the variable unset the
+script exports nothing and the Vulkan loader picks whatever is installed. On a
+workstation that is the discrete GPU. Measured here: a bare
+`crates/crcbl-vk/tests/run-vk-e2e.sh` reports
+`adapter "AMD Radeon RX 7900 XTX (RADV NAVI31)"`, while CI's job sets
+`CRCBL_VK_ICD=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json` and gets llvmpipe.
+The suite printed the adapter it got all along, but an adapter line is not
+something anyone reads looking for an absence.
 
-The gate that does not depend on a layer is
-`reusing_an_offscreen_ring_image_waits_for_the_frame_that_had_it` in
-`crates/crcbl-vk/tests/vk_e2e.rs`, which asserts the ordering directly (a
-readback of the first frame's copy, requested before the reusing acquire, must
-be `Ready` the first time it is polled). It needs an ICD but no particular
-layer. It was falsified by disabling the wait: red ten runs out of ten.
+The script now prints a warning naming the gap and the command that closes it,
+and still runs — testing against real hardware deliberately is worth doing, and
+this is how. **It is still not a hard failure**, which is a judgement worth
+revisiting: the alternative is defaulting `CRCBL_VK_ICD` to lavapipe so the bare
+invocation is CI's invocation, and requiring an explicit opt-out to use the real
+GPU. That is probably the better default and was not taken here because it
+changes what an existing command does.
 
-What was **not** checked: whether `crcbl-wgpu`'s offscreen path has the same
-gap. Its acquire also reports `acquire_semaphore: None`, but wgpu owns the
-synchronisation behind it and `wgpu e2e (lavapipe, Xvfb)` is green, so there is
-no evidence either way — only an untested assumption that wgpu handles it.
+## This machine's validation layer cannot see the two-submission hazard
+
+`crcbl-vk`'s offscreen-ring write-after-read (fixed — see `CHANGELOG.md`) is
+reported by CI's layer and by nothing here, and the difference is the **layer**,
+not the ICD. Measured under CI's own ICD, so the ICD is ruled out:
+`CRCBL_VK_ICD=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json` (which the script
+resolves to Arch's `lvp_icd.json`), adapter
+`llvmpipe (Mesa 26.1.6-arch1.1 (LLVM 22.1.8))`, layer
+`VK_LAYER_KHRONOS_validation spec 1.4.357` — and
+`synchronisation_validation_catches_a_missing_barrier` still reports
+`record-time=yes one-submission=yes cross-submission=no`.
+
+`syncval_submit_time_validation` **defaults to true** in that layer build (read
+out of `/usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json`),
+and setting it explicitly through `VK_LAYER_SETTINGS_PATH` and through the
+`VK_KHRONOS_VALIDATION_*` environment form both left the measured reach
+unchanged. So the switch is not the explanation and there is no known way to
+widen it here. What that costs: the **two-submission** instance of this bug can
+only be observed in CI.
+
+What stands in for it locally is
+`reusing_an_offscreen_ring_image_is_ordered_against_the_frame_that_had_it` in
+`crates/crcbl-vk/tests/vk_e2e.rs`, which provokes the same missing dependency at
+record-time distance — a one-image ring, both trips recorded into one command
+buffer — where every layer build sees it. It was falsified by disabling the
+widening in `VkCommandEncoder::pipeline_barrier`: red, with the layer naming
+`vkCmdPipelineBarrier2 performs image layout transition on the VkImage ... which was previously read by vkCmdCopyImageToBuffer`.
+
+**A CPU wait was tried first and does not work**, which is worth keeping because
+it is a plausible idea. `acquire_next_frame` blocked on the retire timeline
+before handing a reused image back. Instrumentation confirmed it ran (`reuse=3`
+and `reuse=4` on the third and fourth frames of the failing test), and CI
+reported the identical hazard anyway: a host-side wait establishes real ordering
+but is not a queue dependency, and syncval reasons about submitted commands. It
+also costs exactly the frame overlap the ring exists to provide. It was removed
+rather than kept alongside the barrier.
+
+Still **not** checked: whether `crcbl-wgpu`'s offscreen path has the same gap.
+Its acquire also reports `acquire_semaphore: None`, but wgpu owns the
+synchronisation behind it and `wgpu e2e (lavapipe, Xvfb)` is green — no evidence
+either way, only an untested assumption.
 
 ## The demo site's social preview is blank
 
