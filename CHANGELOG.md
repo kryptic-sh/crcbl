@@ -453,6 +453,44 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl-audio`**: the `Mixer` can now be driven by the game that owns it, and
+  all four samples use it instead of a hand-rolled copy.
+
+  `Mixer::play` took `&mut self` while `AudioStream::open` consumes its source,
+  so once the stream was running nothing could reach the mixer to play through
+  it — the shipped mixer was unreachable, and `apps/breakout`, `apps/flappy`,
+  `apps/asteroids` and `apps/horde` had each written their own `Sound`, `Voice`,
+  `VoiceQueue` and `MixerSource` around it. `play` now takes `&self` and answers
+  with a `VoiceId`; `AudioSource` is implemented for `Arc<T>`, so
+  `AudioStream::open(Arc::clone(&mixer))` leaves the game a handle to go on
+  playing through. Existing callers keep compiling: no signature was narrowed,
+  and `Mixer::play`'s new return value can be ignored.
+
+  New alongside it: `Mixer::stop`, `Mixer::is_playing`, `Mixer::set_mix` and
+  `Mixer::voice_mixes`; `VoiceId` and `VoiceMix`, with
+  `VoiceMix::from(&SpatialCue)` as the "play this buffer once, panned" glue each
+  sample was writing by hand (the cue's `itd_samples` is dropped — a `Voice` has
+  no delay line); `Voice::with_mix`, `Voice::mix`, `Voice::is_looping` and
+  `Voice::from_shared`; and `SoundBank::sound` / `SoundBank::insert_shared`.
+
+  **`SoundBank::create_voice` no longer copies the sound.** `Voice` holds
+  `Arc<[AudioSample]>`, so a voice is a playhead over the bank's buffer rather
+  than a clone of it — at horde's cue rate that was an allocation the size of
+  the sound per cue.
+
+- **asteroids**: the engine is a real held sound, and an audio detail has left
+  the simulation. `game::THRUST_CUE_PERIOD` and `GameLogic`'s `thrust_cue_timer`
+  are **removed**: thrust used to be a one-shot re-fired on a countdown that
+  lived in the deterministic tick, because the crate had no reachable looping
+  voice. It is now one looping voice that `audio::Audio::set_thrust` starts on
+  the first burning tick, re-aims at the ship every tick after (so the engine
+  still pans across the field), and stops the tick the key comes up or the ship
+  dies. What the simulation keeps is a plain `thrusting` bool, mirrored onto
+  `Game::thrusting`.
+
+  `THRUST_CUE_PERIOD` was re-exported from `apps/asteroids/src/lib.rs` and is
+  gone from there too.
+
 - **horde**: the game no longer starts itself. It opens on a `HORDE` start
   screen with a `PLAY` button — `Space`, which is the key breakout, flappy and
   asteroids print on theirs, and `R` still works — and the simulation does not

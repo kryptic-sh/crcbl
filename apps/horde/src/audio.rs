@@ -1,10 +1,10 @@
 //! Audio for horde: five procedural cues through `crcbl-audio`'s spatial
-//! grammar, and the first voice cap any sample has needed.
+//! grammar and its mixer, and the first voice cap any sample has needed.
 //!
 //! The gun, an enemy coming apart, a gem banked, a level gained and the player
 //! dying, all synthesised at start-up — this sample has no sound assets by
-//! design. The game thread pushes voices onto a shared queue; the audio thread
-//! drains it.
+//! design. The waveforms are banked in a [`SoundBank`]; the game thread plays
+//! voices into a [`Mixer`] the audio thread fills from.
 //!
 //! # Where the listener stands, and why this game moves it
 //!
@@ -26,10 +26,10 @@
 //! about it. Here a kill is a cue, a gem is a cue, and the gun's cooldown floor
 //! is [`crate::game::FIRE_COOLDOWN_FLOOR`] — a twentieth of a second — so a
 //! late run raises up to about forty a second and every one of them is a voice
-//! that lives until it runs out. `crcbl-audio` has **no voice limit, no
-//! priority and no stealing**: `AudioSource::fill` walks whatever is in the
-//! queue, so a game that pushes faster than its sounds finish pays for all of
-//! it on the audio thread.
+//! that lives until it runs out. [`Mixer`] has **no voice limit, no priority and
+//! no stealing**: [`crcbl_audio::AudioSource::fill`] walks whatever is in the
+//! list, so a game that plays faster than its sounds finish pays for all of it
+//! on the audio thread.
 //!
 //! [`MAX_VOICES`] is this sample's answer and it is deliberately the crudest
 //! one that is honest: refuse the new voice rather than steal an old one, and
@@ -38,27 +38,23 @@
 //! free" are different questions and a test asking the first must not be
 //! answered by the second.
 //!
-//! # This is the *fourth* copy of this file, and the copies have drifted
+//! That the cap lives here rather than in the engine is a finding, not a
+//! preference: `docs/backlog.md` carries it.
 //!
-//! `docs/plan/ROADMAP.md`'s S1B finding 5 says `crcbl-audio` offers a device, a
-//! stream, a decoder and a cue grammar, and nothing in between — no "play this
-//! buffer once, panned" — so each sample writes its own voice queue, its own
-//! mixer source and its own interleaved-stereo playhead. Writing it a fourth
-//! time confirms it and adds one thing the third could not: the crate has no
-//! answer for **too many** sounds either.
+//! # What this file used to be
 //!
-//! The four copies now spell their entry point three different ways —
-//! `play_panned(id, emitter_x)` in breakout, `play_at(id, listener_x, x, y)` in
-//! flappy, `play_at(id, x, y)` in asteroids and `play_at(id, listener, x, y)`
-//! here — and breakout still has no play counter at all. A duplication that
-//! drifts is worse than one that does not: reading any one copy no longer tells
-//! you what the pattern is.
-//!
-//! None of it is fixed here: growing the engine is what a sample is meant to
-//! *reveal* the need for. It is owed by P10.
+//! A hand-written `Sound`, `Voice`, `VoiceQueue` and `MixerSource` — the fourth
+//! copy of the same four types, because `Mixer::play` wanted `&mut self` while
+//! `AudioStream::open` consumed its source, so nothing could hold both ends.
+//! `play` takes `&self` now and the stream takes an [`Arc`], so the playhead,
+//! the queue and the mixing loop are the engine's. What is still local is the
+//! sound design: the waveforms, the cue ids, the listener convention and the
+//! cap.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use crcbl_audio::mixer::{Mixer, SoundBank, VoiceMix};
+use crcbl_audio::spatial::{CueGrammar, compute_cue};
 use crcbl_audio::{AudioSample, AudioStream};
 use glam::DVec3;
 
@@ -73,6 +69,12 @@ pub const SOUND_LEVEL: u32 = 4;
 /// The player running out of hit points.
 pub const SOUND_DEATH: u32 = 5;
 
+/// How many cue ids this game has, and how long [`Audio::plays`] is.
+const SOUND_COUNT: usize = 5;
+
+/// How loud a cue is against the volume the grammar asks for. See breakout's.
+const MASTER_GAIN: f32 = 0.5;
+
 /// How many voices may be sounding at once.
 ///
 /// See this module's header. Sixteen is about a third of a second of this
@@ -81,76 +83,10 @@ pub const SOUND_DEATH: u32 = 5;
 /// work stays bounded no matter what the simulation does.
 pub const MAX_VOICES: usize = 16;
 
-/// A procedural sound: interleaved stereo f32 samples.
-#[derive(Debug)]
-struct Sound {
-    data: Vec<AudioSample>,
-}
-
-/// A playing voice with its own playhead.
-///
-/// `playhead` counts **frames**, not samples: `Sound::data` is interleaved
-/// stereo, so a playhead advancing one *index* per output frame plays every
-/// sound at half speed and twice the length. Breakout shipped that bug once and
-/// all three later copies carry the comment rather than the bug.
-#[derive(Debug)]
-struct Voice {
-    sound: Arc<Sound>,
-    playhead: f64,
-    volume: f32,
-    pitch: f32,
-    gain_l: f32,
-    gain_r: f32,
-}
-
-impl Voice {
-    /// Mixes this voice into `buffer` and reports whether it has audio left.
-    fn render_block(&mut self, buffer: &mut [AudioSample]) -> bool {
-        let data = &self.sound.data;
-        let frames = data.len() / 2;
-        // A ratio of 1.0 is one source frame per output frame. Non-finite or
-        // non-positive ratios would stall the voice forever or index backwards.
-        let step = if self.pitch.is_finite() && self.pitch > 0.0 {
-            f64::from(self.pitch)
-        } else {
-            1.0
-        };
-
-        for out in buffer.chunks_exact_mut(2) {
-            let frame = self.playhead as usize;
-            if frame >= frames {
-                return false;
-            }
-            out[0] += data[frame * 2] * self.volume * self.gain_l;
-            out[1] += data[frame * 2 + 1] * self.volume * self.gain_r;
-            self.playhead += step;
-        }
-        (self.playhead as usize) < frames
-    }
-}
-
-/// Thread-safe voice queue. The game thread pushes, the audio thread drains.
-#[derive(Debug)]
-struct VoiceQueue {
-    inner: Mutex<Vec<Voice>>,
-}
-
-/// The audio source fed to `AudioStream`, called from the audio thread.
-struct MixerSource {
-    queue: Arc<VoiceQueue>,
-}
-
-impl crcbl_audio::AudioSource for MixerSource {
-    fn fill(&self, buffer: &mut [AudioSample], _sample_rate: u32) {
-        let mut voices = self.queue.inner.lock().unwrap_or_else(|e| e.into_inner());
-        voices.retain_mut(|voice| voice.render_block(buffer));
-    }
-}
-
 /// Owns the cues and the output stream.
 #[derive(Debug)]
 pub struct Audio {
-    sounds: Vec<Arc<Sound>>,
+    bank: SoundBank,
     /// How many times each cue has been **emitted**, indexed as `id - 1`.
     ///
     /// Only ever increases, and only from the game thread. [`Audio::voices`]
@@ -176,7 +112,7 @@ pub struct Audio {
     /// read. Test-only: a shipped build has no reason to keep the list.
     #[cfg(test)]
     played: Vec<(u32, f64, f64)>,
-    queue: Arc<VoiceQueue>,
+    mixer: Arc<Mixer>,
     _stream: Option<AudioStream>,
 }
 
@@ -189,51 +125,42 @@ const SAMPLE_RATE: u32 = 48_000;
 
 impl Audio {
     pub fn new(headless: bool) -> Self {
-        let queue = Arc::new(VoiceQueue {
-            inner: Mutex::new(Vec::new()),
-        });
         // Short high blip for the gun, a filtered noise burst for an enemy
         // coming apart, a brighter and shorter blip for a gem, a two-tone rise
         // for a level, and a long low burst for the player's own end. Every one
         // of them is shorter than the last sample's equivalents, because this
         // game raises far more of them: see `MAX_VOICES`.
-        let sounds = vec![
-            Arc::new(Sound {
-                data: sine(760.0, 0.045, SAMPLE_RATE),
-            }),
-            Arc::new(Sound {
-                data: noise(0.14, 12.0, SAMPLE_RATE),
-            }),
-            Arc::new(Sound {
-                data: sine(1_320.0, 0.05, SAMPLE_RATE),
-            }),
-            Arc::new(Sound {
-                data: rise(440.0, 880.0, 0.30, SAMPLE_RATE),
-            }),
-            Arc::new(Sound {
-                data: noise(0.55, 4.0, SAMPLE_RATE),
-            }),
-        ];
+        //
+        // Banked once. `SoundBank::create_voice` shares the buffer rather than
+        // copying it, which at this game's cue rate is the difference between a
+        // playhead and an allocation the size of the sound per kill.
+        let mut bank = SoundBank::new();
+        bank.insert(SOUND_SHOT, sine(760.0, 0.045, SAMPLE_RATE));
+        bank.insert(SOUND_KILL, noise(0.14, 12.0, SAMPLE_RATE));
+        bank.insert(SOUND_PICKUP, sine(1_320.0, 0.05, SAMPLE_RATE));
+        bank.insert(SOUND_LEVEL, rise(440.0, 880.0, 0.30, SAMPLE_RATE));
+        bank.insert(SOUND_DEATH, noise(0.55, 4.0, SAMPLE_RATE));
+        debug_assert_eq!(bank.len(), SOUND_COUNT, "a cue id is missing from the bank");
 
-        let source = MixerSource {
-            queue: Arc::clone(&queue),
-        };
+        // The stream takes a handle, not the mixer: this copy is what stays
+        // behind to play voices through.
+        let mixer = Arc::new(Mixer::new());
         let stream = if headless {
-            Some(AudioStream::open_null(source))
+            Some(AudioStream::open_null(Arc::clone(&mixer)))
         } else {
-            AudioStream::open(source)
+            AudioStream::open(Arc::clone(&mixer))
         };
         if stream.is_none() && !headless {
             log::info!("audio: no output device available; the game will be silent");
         }
 
         Self {
-            plays: vec![0; sounds.len()],
-            sounds,
+            bank,
+            plays: vec![0; SOUND_COUNT],
             dropped: 0,
             #[cfg(test)]
             played: Vec::new(),
-            queue,
+            mixer,
             _stream: stream,
         }
     }
@@ -244,26 +171,36 @@ impl Audio {
     /// listener moves: it is the player, and the camera follows them. See the
     /// module docs.
     pub fn play_at(&mut self, id: u32, listener: DVec3, at: DVec3) {
-        // Ids are 1-based; `id - 1` on a `u32` underflows to `u32::MAX` for id
-        // zero rather than simply missing the table.
-        let Some(index) = id.checked_sub(1).map(|i| i as usize) else {
-            log::debug!("audio: sound id 0 is not a sound");
-            return;
-        };
-        let Some(sound) = self.sounds.get(index).map(Arc::clone) else {
+        // An id the bank does not know is simply absent, so there is no `id - 1`
+        // to underflow on the lookup — only on the counter below, which is
+        // reached solely for an id the bank *did* answer to.
+        let Some(voice) = self.bank.create_voice(id) else {
+            log::debug!("audio: no sound registered at id {id}");
             return;
         };
         // Counted before the cap, not after: the cue happened either way, and a
         // counter that only counted the audible ones could not tell a game that
         // never fired from one that fired into a full mixer.
-        //
-        // `plays` is as long as `sounds` and neither ever grows, so an index
-        // that found a sound finds a counter.
-        self.plays[index] += 1;
+        if let Some(count) = id
+            .checked_sub(1)
+            .and_then(|i| self.plays.get_mut(i as usize))
+        {
+            *count += 1;
+        }
         #[cfg(test)]
         self.played.push((id, at.x, at.y));
 
-        let cue = crcbl_audio::spatial::compute_cue(
+        // The cap, read and acted on in two separate locks rather than one. The
+        // game thread is the only one that adds and the audio thread only ever
+        // removes, so the count can be *stale low* by the time the voice goes
+        // in and never stale high: this refuses a cue that had just been made
+        // room for, and never exceeds `MAX_VOICES`.
+        if self.mixer.voice_count() >= MAX_VOICES {
+            self.dropped += 1;
+            return;
+        }
+
+        let cue = compute_cue(
             [0.0, 0.0, 0.0],
             [
                 (at.x - listener.x) as f32,
@@ -272,22 +209,12 @@ impl Audio {
                 // still at a defined direction rather than a zero vector.
                 1.0,
             ],
-            &crcbl_audio::spatial::CueGrammar::default(),
+            &CueGrammar::default(),
         );
-        let mut voices = self.queue.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if voices.len() >= MAX_VOICES {
-            drop(voices);
-            self.dropped += 1;
-            return;
-        }
-        voices.push(Voice {
-            sound,
-            playhead: 0.0,
-            volume: cue.volume * 0.5,
-            pitch: cue.pitch_ratio,
-            gain_l: cue.gain_left,
-            gain_r: cue.gain_right,
-        });
+        self.mixer.play(voice.with_mix(VoiceMix {
+            volume: cue.volume * MASTER_GAIN,
+            ..VoiceMix::from(&cue)
+        }));
     }
 
     /// Every cue played so far, with the world position it was played at.
@@ -307,11 +234,7 @@ impl Audio {
     /// whether a cue happened.
     #[must_use]
     pub fn voices(&self) -> usize {
-        self.queue
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
+        self.mixer.voice_count()
     }
 
     /// How many times cue `id` has been emitted since start-up.
@@ -436,33 +359,22 @@ fn fade(i: usize, total: usize) -> f32 {
 mod tests {
     use super::*;
 
-    /// The sound is interleaved stereo, so one output frame must advance the
-    /// playhead by one *source frame*.
+    /// Every generator here produces **interleaved stereo**, which is what the
+    /// mixer's playhead assumes: an odd-length or mono buffer would be played at
+    /// half speed over twice the length. Breakout shipped that bug once.
     #[test]
-    fn a_voice_plays_at_the_rate_it_was_recorded() {
-        let frames = 100;
-        let sound = Arc::new(Sound {
-            data: sine(440.0, frames as f32 / 48_000.0, 48_000),
-        });
-        assert_eq!(sound.data.len(), frames * 2);
-
-        let mut voice = Voice {
-            sound: Arc::clone(&sound),
-            playhead: 0.0,
-            volume: 1.0,
-            pitch: 1.0,
-            gain_l: 1.0,
-            gain_r: 1.0,
-        };
-        let mut buffer = vec![0.0f32; frames * 2];
-        voice.render_block(&mut buffer);
-        assert!(
-            (voice.playhead - frames as f64).abs() < 1.0,
-            "playhead at {} after {frames} frames",
-            voice.playhead
-        );
-        assert_eq!(buffer[0], sound.data[0]);
-        assert_eq!(buffer[2], sound.data[2], "every frame was played twice");
+    fn every_cue_is_interleaved_stereo_of_the_length_it_asked_for() {
+        for (name, data, seconds) in [
+            ("sine", sine(760.0, 0.045, SAMPLE_RATE), 0.045f32),
+            ("noise", noise(0.14, 12.0, SAMPLE_RATE), 0.14),
+            ("rise", rise(440.0, 880.0, 0.30, SAMPLE_RATE), 0.30),
+        ] {
+            let frames = (SAMPLE_RATE as f32 * seconds) as usize;
+            assert_eq!(data.len(), frames * 2, "{name} is not stereo pairs");
+            for frame in data.chunks_exact(2) {
+                assert_eq!(frame[0], frame[1], "{name} is not the same in both ears");
+            }
+        }
     }
 
     /// An id nothing answers to is ignored rather than underflowing or panicking.
@@ -472,8 +384,8 @@ mod tests {
         audio.play_at(0, DVec3::ZERO, DVec3::ZERO);
         audio.play_at(9999, DVec3::ZERO, DVec3::ZERO);
         assert_eq!(audio.voices(), 0);
-        // `plays` shares `play_at`'s `id - 1`, so it has the same underflow to
-        // avoid, and it must not report a play for a cue that was refused.
+        // `plays` still spells `id - 1`, so it still has the underflow to avoid,
+        // and it must not report a play for a cue that was refused.
         assert_eq!(audio.plays(0), 0);
         assert_eq!(audio.plays(9999), 0);
         assert_eq!(audio.plays(SOUND_SHOT), 0);
@@ -497,9 +409,6 @@ mod tests {
 
         // Reap it by hand rather than waiting on the audio thread, so the test
         // is not itself a race: `fill` is exactly what that thread calls.
-        let source = MixerSource {
-            queue: Arc::clone(&audio.queue),
-        };
         let mut block = vec![0.0f32; 256 * 2];
         let start = std::time::Instant::now();
         while audio.voices() > 0 {
@@ -508,7 +417,7 @@ mod tests {
                 "the shot voice never finished"
             );
             block.fill(0.0);
-            crcbl_audio::AudioSource::fill(&source, &mut block, 48_000);
+            crcbl_audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
         }
         assert_eq!(
             audio.plays(SOUND_SHOT),
@@ -545,11 +454,8 @@ mod tests {
 
         // …and a voice that finishes makes room again, or the cap is a mute
         // button rather than a limit.
-        let source = MixerSource {
-            queue: Arc::clone(&audio.queue),
-        };
         let mut block = vec![0.0f32; 48_000 * 2];
-        crcbl_audio::AudioSource::fill(&source, &mut block, 48_000);
+        crcbl_audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
         assert_eq!(audio.voices(), 0, "a whole second did not drain the queue");
         audio.play_at(SOUND_KILL, DVec3::ZERO, DVec3::ZERO);
         assert_eq!(audio.voices(), 1);
@@ -578,19 +484,18 @@ mod tests {
             DVec3::new(-14.0, 6.0, 0.0),
             DVec3::new(-14.0, 6.0, 0.0),
         );
-        let voices = audio.queue.inner.lock().expect("no other thread");
-        let (near, left, right, moved) = (&voices[0], &voices[1], &voices[2], &voices[3]);
+        let mixes = audio.mixer.voice_mixes();
+        assert_eq!(mixes.len(), 4, "a cue went missing");
+        let (near, left, right, moved) = (mixes[0].1, mixes[1].1, mixes[2].1, mixes[3].1);
         assert!(
-            left.gain_l > left.gain_r,
-            "a cue to the left should be louder on the left: {} vs {}",
-            left.gain_l,
-            left.gain_r
+            left.gains.0 > left.gains.1,
+            "a cue to the left should be louder on the left: {:?}",
+            left.gains,
         );
         assert!(
-            right.gain_r > right.gain_l,
-            "and one to the right, on the right: {} vs {}",
-            right.gain_l,
-            right.gain_r
+            right.gains.1 > right.gains.0,
+            "and one to the right, on the right: {:?}",
+            right.gains,
         );
         assert!(
             left.volume < near.volume,

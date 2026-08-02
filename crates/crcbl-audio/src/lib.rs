@@ -43,7 +43,6 @@ pub mod spatial;
 pub mod wav;
 pub mod web;
 
-#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -84,6 +83,23 @@ pub trait AudioSource: Send + Sync + 'static {
     /// Implementations should *add* to existing samples (not overwrite) so
     /// the stream's zero-init produces silence when nothing is playing.
     fn fill(&self, buffer: &mut [AudioSample], sample_rate: u32);
+}
+
+/// A shared source is a source.
+///
+/// [`AudioStream::open`] consumes what it is given and hands it to a thread the
+/// caller cannot reach, so a source the game also needs to *drive* — a
+/// [`Mixer`](mixer::Mixer) it goes on playing voices through — has to be shared
+/// rather than moved. This impl is what makes `AudioStream::open(Arc::clone(&mixer))`
+/// type-check, and it is blanket rather than one impl on `Arc<Mixer>` because
+/// nothing about the reasoning is specific to the mixer.
+///
+/// `?Sized`, so `Arc<dyn AudioSource>` works too: a caller choosing between
+/// sources at run time does not have to name a concrete type.
+impl<T: AudioSource + ?Sized> AudioSource for Arc<T> {
+    fn fill(&self, buffer: &mut [AudioSample], sample_rate: u32) {
+        (**self).fill(buffer, sample_rate);
+    }
 }
 
 // ---------------------------------------------------------------------------

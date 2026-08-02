@@ -1083,7 +1083,7 @@ mod tests {
         // A DC block, so what comes out the other end of the resampler is a
         // value rather than a waveform to reason about.
         bank.insert(1, vec![0.5; 4_096 * CHANNELS]);
-        let mut mixer = Mixer::new();
+        let mixer = Mixer::new();
         mixer.play(bank.create_voice(1).expect("registered"));
 
         let mut output = WebAudioOutput::new(mixer);

@@ -4,7 +4,8 @@
 //! state (position, volume, looping flag). [`Mixer::fill`] advances every
 //! active voice each audio block, mixing the result into the output buffer.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::{AudioSample, AudioSource, CHANNELS};
 
@@ -22,11 +23,83 @@ fn finite_or(value: f32, fallback: f32, min: f32, max: f32) -> f32 {
     }
 }
 
+/// How a voice sits in the mix: level, pan and speed.
+///
+/// The three parameters a spatialiser produces, in one value, so a caller can
+/// hand the same thing to [`Voice::with_mix`] when the voice starts and to
+/// [`Mixer::set_mix`] every tick the emitter moves after that. An emitter that
+/// crosses the field while one held voice plays is the case a per-voice setter
+/// cannot serve, because the caller no longer owns the [`Voice`].
+///
+/// The fields are raw caller input. Both entry points clamp them exactly as
+/// [`Voice::with_volume`], [`Voice::with_gains`] and [`Voice::with_pitch`] do,
+/// so a NaN out of a divide-by-zero distance cannot reach the audio thread.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VoiceMix {
+    /// Linear volume multiplier, clamped to `[0, 1]`.
+    pub volume: f32,
+    /// Per-channel gains `(left, right)`, each clamped to `[0, 1]`.
+    pub gains: (f32, f32),
+    /// Varispeed ratio, clamped to `[0.25, 4.0]`.
+    pub pitch: f32,
+}
+
+impl VoiceMix {
+    /// Full volume, centre, normal speed — what a bare [`Voice::new`] plays at.
+    pub const UNITY: Self = Self {
+        volume: 1.0,
+        gains: (1.0, 1.0),
+        pitch: 1.0,
+    };
+}
+
+impl Default for VoiceMix {
+    fn default() -> Self {
+        Self::UNITY
+    }
+}
+
+/// The spatialiser's answer, as something a voice can be played at.
+///
+/// The glue every game was writing by hand: [`compute_cue`] produces gains, a
+/// pitch ratio and a volume, and this is what carries them to [`Mixer::play`].
+///
+/// **[`SpatialCue::itd_samples`] is dropped**, because a [`Voice`] has no
+/// per-channel delay line to put it in. The pan that survives is the gain
+/// difference alone, which is most of the direction and none of the timing.
+///
+/// [`compute_cue`]: crate::spatial::compute_cue
+/// [`SpatialCue::itd_samples`]: crate::spatial::SpatialCue::itd_samples
+impl From<&crate::spatial::SpatialCue> for VoiceMix {
+    fn from(cue: &crate::spatial::SpatialCue) -> Self {
+        Self {
+            volume: cue.volume,
+            gains: (cue.gain_left, cue.gain_right),
+            pitch: cue.pitch_ratio,
+        }
+    }
+}
+
+/// A handle to a voice a [`Mixer`] is playing.
+///
+/// Handed out by [`Mixer::play`] and accepted by [`Mixer::stop`],
+/// [`Mixer::set_mix`] and [`Mixer::is_playing`]. Ids are never reused, so a
+/// handle kept past the end of its sound is *stale* rather than aimed at
+/// whatever started next — every one of those calls answers `false` for it,
+/// which is what lets a caller hold one across the frames a sound is playing
+/// without tracking whether it finished.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct VoiceId(u64);
+
 /// A single playable sound.
 #[derive(Debug)]
 pub struct Voice {
-    /// Interleaved stereo sample data.
-    data: Vec<AudioSample>,
+    /// Interleaved stereo sample data, shared with whoever holds the sound.
+    ///
+    /// `Arc<[_]>` rather than `Vec`: [`SoundBank::create_voice`] hands the same
+    /// buffer to every voice it makes, and a game raising tens of cues a second
+    /// copied the whole sound on each one while this was owned data.
+    data: Arc<[AudioSample]>,
     /// Current playback position in **frames** (one frame = [`CHANNELS`]
     /// interleaved samples).
     playhead: usize,
@@ -49,6 +122,15 @@ impl Voice {
     /// Create a voice from interleaved stereo data.
     #[must_use]
     pub fn new(data: Vec<AudioSample>) -> Self {
+        Self::from_shared(data.into())
+    }
+
+    /// Create a voice over sample data something else owns.
+    ///
+    /// The buffer is shared, the playback state is not: two voices over one
+    /// sound have their own playhead, volume, pan and pitch.
+    #[must_use]
+    pub fn from_shared(data: Arc<[AudioSample]>) -> Self {
         Self {
             data,
             playhead: 0,
@@ -91,6 +173,39 @@ impl Voice {
     pub fn with_looping(mut self) -> Self {
         self.looping = true;
         self
+    }
+
+    /// Set level, pan and speed together, clamped as the individual setters do.
+    #[must_use]
+    pub fn with_mix(mut self, mix: VoiceMix) -> Self {
+        self.apply_mix(mix);
+        self
+    }
+
+    /// The parameters currently in force.
+    #[must_use]
+    pub fn mix(&self) -> VoiceMix {
+        VoiceMix {
+            volume: self.volume,
+            gains: self.gains,
+            pitch: self.pitch,
+        }
+    }
+
+    /// Whether the voice loops rather than ending.
+    #[must_use]
+    pub fn is_looping(&self) -> bool {
+        self.looping
+    }
+
+    /// The shared clamp behind [`Voice::with_mix`] and [`Mixer::set_mix`].
+    fn apply_mix(&mut self, mix: VoiceMix) {
+        self.volume = finite_or(mix.volume, 0.0, 0.0, 1.0);
+        self.gains = (
+            finite_or(mix.gains.0, 1.0, 0.0, 1.0),
+            finite_or(mix.gains.1, 1.0, 0.0, 1.0),
+        );
+        self.pitch = finite_or(mix.pitch, 1.0, 0.25, 4.0);
     }
 
     /// Stop playback after the current block.
@@ -149,9 +264,13 @@ impl Voice {
 /// uncontended mutex costs a pair of atomics.
 ///
 /// Implements [`AudioSource`] so it can be handed directly to
-/// [`AudioStream`](crate::AudioStream).
+/// [`AudioStream`](crate::AudioStream) — through an [`Arc`], which is what
+/// leaves the game a handle to go on playing through. See [`Mixer::play`].
 pub struct Mixer {
-    voices: Mutex<Vec<Voice>>,
+    voices: Mutex<Vec<(VoiceId, Voice)>>,
+    /// The next handle to hand out. Monotonic; ids are never reused, so a
+    /// stale [`VoiceId`] can never name a later voice.
+    next_id: AtomicU64,
 }
 
 impl Mixer {
@@ -160,12 +279,77 @@ impl Mixer {
     pub fn new() -> Self {
         Self {
             voices: Mutex::new(Vec::new()),
+            next_id: AtomicU64::new(1),
         }
     }
 
-    /// Add a voice. The mixer takes ownership.
-    pub fn play(&mut self, voice: Voice) {
-        self.voices_mut().push(voice);
+    /// Start a voice, and answer with the handle that steers it.
+    ///
+    /// **Takes `&self`, which is the whole reason a game can use this mixer at
+    /// all.** [`AudioStream::open`](crate::AudioStream::open) consumes its
+    /// source, so once the stream is running the only reference left is a
+    /// shared one — a `&mut self` here meant nothing could ever play a sound.
+    /// The voice list is already behind a [`Mutex`] for [`AudioSource::fill`],
+    /// so this costs the same uncontended lock that path costs.
+    ///
+    /// The handle is worth keeping only for a sound that outlives the call:
+    /// [`Mixer::stop`] and [`Mixer::set_mix`] need it. A one-shot cue can drop
+    /// it, which is why this is not `#[must_use]`.
+    pub fn play(&self, voice: Voice) -> VoiceId {
+        let id = VoiceId(self.next_id.fetch_add(1, Ordering::Relaxed));
+        self.lock().push((id, voice));
+        id
+    }
+
+    /// Stop `id` and drop it now. Answers whether it was still playing.
+    ///
+    /// Dropped here rather than marked and reaped at the next block, so
+    /// [`Mixer::voice_count`] and [`Mixer::is_playing`] answer immediately even
+    /// when nothing is filling this mixer — a headless test and a game whose
+    /// output device failed to open both have no audio thread to do the reaping,
+    /// and a cap counting voices that will never be reaped is a mute button.
+    pub fn stop(&self, id: VoiceId) -> bool {
+        let mut voices = self.lock();
+        let before = voices.len();
+        voices.retain(|(voice_id, _)| *voice_id != id);
+        voices.len() != before
+    }
+
+    /// Whether `id` is still sounding.
+    ///
+    /// `false` for a one-shot that has run out, for a voice
+    /// [`stopped`](Mixer::stop), and for a handle this mixer never issued.
+    #[must_use]
+    pub fn is_playing(&self, id: VoiceId) -> bool {
+        self.lock().iter().any(|(voice_id, _)| *voice_id == id)
+    }
+
+    /// Re-aim a playing voice. Answers whether it was still playing.
+    ///
+    /// What a held sound needs: a looping engine on a ship that crosses the
+    /// field is one voice whose pan and volume move under it, not a new voice
+    /// per frame. Clamped exactly as [`Voice::with_mix`] is.
+    pub fn set_mix(&self, id: VoiceId, mix: VoiceMix) -> bool {
+        let mut voices = self.lock();
+        let Some((_, voice)) = voices.iter_mut().find(|(voice_id, _)| *voice_id == id) else {
+            return false;
+        };
+        voice.apply_mix(mix);
+        true
+    }
+
+    /// A snapshot of every sounding voice's handle and mix parameters.
+    ///
+    /// For debug overlays and for tests asking what a spatialiser actually
+    /// queued. A snapshot rather than a closure over the live list because the
+    /// [`Mutex`] is not reentrant: a caller that reached [`Mixer::voice_count`]
+    /// from inside a borrow of the voices would deadlock the audio thread.
+    #[must_use]
+    pub fn voice_mixes(&self) -> Vec<(VoiceId, VoiceMix)> {
+        self.lock()
+            .iter()
+            .map(|(id, voice)| (*id, voice.mix()))
+            .collect()
     }
 
     /// Number of active voices.
@@ -178,13 +362,8 @@ impl Mixer {
     ///
     /// A panic in one `fill` must not silently kill audio for the rest of the
     /// process; the voice list is a plain `Vec` and is left consistent.
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Voice>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<(VoiceId, Voice)>> {
         self.voices.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Unlocked access, available because `&mut self` proves exclusivity.
-    fn voices_mut(&mut self) -> &mut Vec<Voice> {
-        self.voices.get_mut().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -200,13 +379,15 @@ impl Default for Mixer {
 
 /// Pre-loaded sound data keyed by numeric id.
 ///
-/// A [`SoundBank`] holds raw interleaved stereo samples that can be
-/// cloned into new [`Voice`]s on demand. It is the server↔client bridge
-/// for audio events: the server sends `(sound_id, position)` and the
-/// client creates a spatial voice from the bank.
+/// A [`SoundBank`] holds raw interleaved stereo samples that new [`Voice`]s are
+/// opened over on demand. It is the server↔client bridge for audio events: the
+/// server sends `(sound_id, position)` and the client creates a spatial voice
+/// from the bank.
+///
+/// The buffers are shared, not copied — see [`SoundBank::create_voice`].
 #[derive(Debug, Clone)]
 pub struct SoundBank {
-    sounds: std::collections::HashMap<u32, Vec<AudioSample>>,
+    sounds: std::collections::HashMap<u32, Arc<[AudioSample]>>,
 }
 
 impl SoundBank {
@@ -220,7 +401,21 @@ impl SoundBank {
 
     /// Register a sound at `id` with the given interleaved stereo data.
     pub fn insert(&mut self, id: u32, data: Vec<AudioSample>) {
+        self.sounds.insert(id, data.into());
+    }
+
+    /// Register a sound whose buffer something else already holds.
+    pub fn insert_shared(&mut self, id: u32, data: Arc<[AudioSample]>) {
         self.sounds.insert(id, data);
+    }
+
+    /// The samples registered at `id`, if any.
+    ///
+    /// A read-back, so a caller can check what it banked — the length a cue
+    /// actually came out at, or whether a buffer meant to loop is fit to.
+    #[must_use]
+    pub fn sound(&self, id: u32) -> Option<&Arc<[AudioSample]>> {
+        self.sounds.get(&id)
     }
 
     /// Number of registered sounds.
@@ -235,7 +430,11 @@ impl SoundBank {
         self.sounds.is_empty()
     }
 
-    /// Create a new [`Voice`] from the stored sound data.
+    /// Create a new [`Voice`] over the stored sound data.
+    ///
+    /// **The buffer is shared, not copied.** A voice is a playhead and a set of
+    /// mix parameters over the bank's samples, so a game raising cues at its
+    /// frame rate does not allocate a sound per cue.
     ///
     /// Returns `None` if `id` is not registered, or if its data is too short to
     /// hold a single interleaved frame — there is no sound to play, and a
@@ -245,7 +444,7 @@ impl SoundBank {
         self.sounds
             .get(&id)
             .filter(|data| data.len() >= CHANNELS)
-            .map(|data| Voice::new(data.clone()))
+            .map(|data| Voice::from_shared(Arc::clone(data)))
     }
 }
 
@@ -263,7 +462,7 @@ impl std::fmt::Display for SoundBank {
 
 impl AudioSource for Mixer {
     fn fill(&self, buffer: &mut [AudioSample], _sample_rate: u32) {
-        self.lock().retain_mut(|voice| voice.mix_block(buffer));
+        self.lock().retain_mut(|(_, voice)| voice.mix_block(buffer));
 
         // Clip once, here, where the finished mix is written: N voices summing
         // past ±1.0 would otherwise wrap or distort in the device. A NaN that
@@ -344,7 +543,7 @@ mod tests {
     #[test]
     fn voice_volume_scales_output() {
         let data = vec![1.0f32; 64 * CHANNELS];
-        let mut mixer = Mixer::new();
+        let mixer = Mixer::new();
         mixer.play(Voice::new(data).with_volume(0.25));
         let mut buf = vec![0.0f32; 32 * CHANNELS];
         mixer.fill(&mut buf, 48_000);
@@ -353,10 +552,214 @@ mod tests {
         }
     }
 
+    /// **The gap that made the whole mixer unusable.** A stream owns its source,
+    /// so a game only ever holds a shared handle; a `play` that wanted `&mut`
+    /// could not be called at all once the audio was running.
+    ///
+    /// The observable is the *output*, not the voice count: a `play` through the
+    /// shared handle that pushed onto a different mixer — or onto a copy — would
+    /// leave this buffer silent.
+    #[test]
+    fn a_shared_handle_both_plays_and_fills() {
+        let mixer = Arc::new(Mixer::new());
+        let source: &dyn AudioSource = &Arc::clone(&mixer);
+
+        mixer.play(Voice::new(vec![0.5f32; 64 * CHANNELS]));
+
+        let mut buf = vec![0.0f32; 32 * CHANNELS];
+        source.fill(&mut buf, 48_000);
+        for &s in &buf {
+            assert!(
+                (s - 0.5).abs() < 1e-6,
+                "the shared handle played nothing: {s}"
+            );
+        }
+    }
+
+    /// A handle stops the voice it was issued for, immediately — no fill in
+    /// between, because a mixer nothing is filling still has to answer.
+    #[test]
+    fn a_handle_stops_its_own_voice_and_leaves_the_others() {
+        let mixer = Mixer::new();
+        let first = mixer.play(Voice::new(vec![0.5f32; 64 * CHANNELS]));
+        let second = mixer.play(Voice::new(vec![0.25f32; 64 * CHANNELS]));
+        assert!(mixer.is_playing(first) && mixer.is_playing(second));
+
+        assert!(mixer.stop(first), "the first voice was not playing");
+        assert!(!mixer.is_playing(first));
+        assert!(mixer.is_playing(second), "stop took the wrong voice");
+        assert_eq!(mixer.voice_count(), 1);
+
+        // And it is audibly gone: 0.5 + 0.25 would be 0.75 here.
+        let mut buf = vec![0.0f32; 16 * CHANNELS];
+        mixer.fill(&mut buf, 48_000);
+        for &s in &buf {
+            assert!(
+                (s - 0.25).abs() < 1e-6,
+                "the stopped voice is still audible: {s}"
+            );
+        }
+
+        assert!(!mixer.stop(first), "stopping twice reported a second kill");
+    }
+
+    /// Ids are never reused, so a handle held past the end of its sound is inert
+    /// rather than aimed at whatever started next.
+    #[test]
+    fn a_stale_handle_never_steers_a_later_voice() {
+        let mixer = Mixer::new();
+        let spent = mixer.play(Voice::new(vec![0.5f32; 4 * CHANNELS]));
+        let mut buf = vec![0.0f32; 8 * CHANNELS];
+        mixer.fill(&mut buf, 48_000);
+        assert!(!mixer.is_playing(spent), "the voice did not run out");
+
+        let live = mixer.play(Voice::new(vec![0.5f32; 64 * CHANNELS]));
+        assert_ne!(spent, live, "an id was reused");
+        assert!(!mixer.stop(spent), "a stale handle stopped a later voice");
+        assert!(
+            !mixer.set_mix(spent, VoiceMix::UNITY),
+            "a stale handle re-aimed a later voice",
+        );
+        assert!(mixer.is_playing(live), "the later voice was collateral");
+    }
+
+    /// **`set_mix` reaches a voice that is already sounding**, which is what a
+    /// held sound on a moving emitter needs.
+    ///
+    /// Measured on the output either side of the call: hard left, then hard
+    /// right, from one voice that never restarts. A `set_mix` that silently
+    /// missed would leave the second block panned left like the first.
+    #[test]
+    fn set_mix_re_aims_a_voice_that_is_already_playing() {
+        let mixer = Mixer::new();
+        let id = mixer.play(
+            Voice::new(vec![0.5f32; 4096 * CHANNELS]).with_mix(VoiceMix {
+                volume: 1.0,
+                gains: (1.0, 0.0),
+                pitch: 1.0,
+            }),
+        );
+
+        let mut buf = vec![0.0f32; 16 * CHANNELS];
+        mixer.fill(&mut buf, 48_000);
+        for frame in buf.chunks_exact(CHANNELS) {
+            assert!((frame[0] - 0.5).abs() < 1e-6, "left silent: {frame:?}");
+            assert!(frame[1].abs() < 1e-6, "right should be muted: {frame:?}");
+        }
+
+        assert!(mixer.set_mix(
+            id,
+            VoiceMix {
+                volume: 1.0,
+                gains: (0.0, 1.0),
+                pitch: 1.0,
+            },
+        ));
+
+        buf.fill(0.0);
+        mixer.fill(&mut buf, 48_000);
+        for frame in buf.chunks_exact(CHANNELS) {
+            assert!(frame[0].abs() < 1e-6, "left should be muted now: {frame:?}");
+            assert!((frame[1] - 0.5).abs() < 1e-6, "right silent: {frame:?}");
+        }
+        assert_eq!(
+            mixer.voice_mixes(),
+            vec![(
+                id,
+                VoiceMix {
+                    volume: 1.0,
+                    gains: (0.0, 1.0),
+                    pitch: 1.0
+                }
+            )],
+        );
+    }
+
+    /// Non-finite parameters are clamped on the way *in through a live voice*
+    /// too, not only when the voice is built.
+    #[test]
+    fn set_mix_clamps_what_it_is_given() {
+        let mixer = Mixer::new();
+        let id = mixer.play(Voice::new(vec![0.5f32; 64 * CHANNELS]));
+        assert!(mixer.set_mix(
+            id,
+            VoiceMix {
+                volume: f32::NAN,
+                gains: (2.0, f32::INFINITY),
+                pitch: -1.0,
+            },
+        ));
+
+        let mut buf = vec![0.0f32; 16 * CHANNELS];
+        mixer.fill(&mut buf, 48_000);
+        assert!(buf.iter().all(|s| s.is_finite()), "{buf:?}");
+        assert_eq!(
+            mixer.voice_mixes()[0].1,
+            VoiceMix {
+                volume: 0.0,
+                gains: (1.0, 1.0),
+                pitch: 0.25
+            },
+        );
+    }
+
+    /// **A looping voice outlives its own sample data**, which is the whole
+    /// point of one: it is what a held cue is made of.
+    ///
+    /// Sixteen blocks of a four-frame sound. A one-shot is gone after the first
+    /// and every later block is silence, so both halves of this fail loudly.
+    #[test]
+    fn a_looping_voice_keeps_sounding_past_the_end_of_its_sound() {
+        let mixer = Mixer::new();
+        let id = mixer.play(Voice::new(vec![0.5f32; 4 * CHANNELS]).with_looping());
+
+        let mut buf = vec![0.0f32; 64 * CHANNELS];
+        for block in 0..16 {
+            buf.fill(0.0);
+            mixer.fill(&mut buf, 48_000);
+            assert!(mixer.is_playing(id), "the loop ended at block {block}");
+            for &s in &buf {
+                assert!((s - 0.5).abs() < 1e-6, "silence at block {block}: {s}");
+            }
+        }
+
+        // …and it ends when, and only when, it is told to.
+        assert!(mixer.stop(id));
+        buf.fill(0.0);
+        mixer.fill(&mut buf, 48_000);
+        assert!(buf.iter().all(|s| *s == 0.0), "the loop survived stop");
+    }
+
+    /// A bank hands out voices over one buffer rather than a copy each.
+    ///
+    /// The strong count is the observable: this test is here because
+    /// `create_voice` used to clone the samples, which at a game's cue rate is
+    /// an allocation the size of the sound per cue.
+    #[test]
+    fn a_bank_shares_one_buffer_with_every_voice_it_makes() {
+        let mut bank = SoundBank::new();
+        bank.insert(1, vec![0.5f32; 64 * CHANNELS]);
+        let stored = Arc::clone(bank.sounds.get(&1).expect("just inserted"));
+        assert_eq!(Arc::strong_count(&stored), 2, "the bank plus this handle");
+
+        let voices: Vec<Voice> = (0..8).map(|_| bank.create_voice(1).unwrap()).collect();
+        assert_eq!(
+            Arc::strong_count(&stored),
+            10,
+            "a voice copied the buffer instead of sharing it",
+        );
+        for voice in &voices {
+            assert!(
+                Arc::ptr_eq(&voice.data, &stored),
+                "a voice is playing some other buffer",
+            );
+        }
+    }
+
     #[test]
     fn mixer_removes_finished_voices() {
         let data = vec![0.5f32; 8 * CHANNELS];
-        let mut mixer = Mixer::new();
+        let mixer = Mixer::new();
         mixer.play(Voice::new(data));
         let mut buf = vec![0.0f32; 16 * CHANNELS];
         mixer.fill(&mut buf, 48_000);
@@ -365,7 +768,7 @@ mod tests {
 
     #[test]
     fn two_voices_sum() {
-        let mut mixer = Mixer::new();
+        let mixer = Mixer::new();
         mixer.play(Voice::new(vec![0.25f32; 64 * CHANNELS]));
         mixer.play(Voice::new(vec![0.25f32; 64 * CHANNELS]));
         let mut buf = vec![0.0f32; 32 * CHANNELS];
@@ -378,7 +781,7 @@ mod tests {
     /// Golden-buffer test: a known mix → exact sample values.
     #[test]
     fn golden_buffer_dc_sum() {
-        let mut mixer = Mixer::new();
+        let mixer = Mixer::new();
         // Two DC voices at different volumes.
         mixer.play(Voice::new(vec![0.2f32; 16 * CHANNELS]).with_volume(1.0));
         mixer.play(Voice::new(vec![0.3f32; 16 * CHANNELS]).with_volume(1.0));
@@ -455,7 +858,7 @@ mod tests {
 
     #[test]
     fn mix_is_clipped_to_unit_range() {
-        let mut mixer = Mixer::new();
+        let mixer = Mixer::new();
         for _ in 0..8 {
             mixer.play(Voice::new(vec![0.9f32; 16 * CHANNELS]));
         }
@@ -470,7 +873,7 @@ mod tests {
     fn non_finite_voice_params_are_rejected() {
         // NaN gain/volume/pitch used to reach the mix: `f32::clamp` returns NaN
         // for NaN and `pos += NaN` makes the voice immortal.
-        let mut mixer = Mixer::new();
+        let mixer = Mixer::new();
         mixer.play(
             Voice::new(vec![0.5f32; 4 * CHANNELS])
                 .with_gains(f32::NAN, f32::INFINITY)
@@ -488,7 +891,7 @@ mod tests {
 
     #[test]
     fn non_finite_sample_data_never_reaches_the_output() {
-        let mut mixer = Mixer::new();
+        let mixer = Mixer::new();
         mixer.play(Voice::new(vec![f32::NAN; 8 * CHANNELS]));
         let mut buf = vec![0.0f32; 8 * CHANNELS];
         mixer.fill(&mut buf, 48_000);
@@ -499,7 +902,7 @@ mod tests {
     fn mixer_is_sync_and_fill_is_serialised() {
         use std::sync::Arc;
 
-        let mut mixer = Mixer::new();
+        let mixer = Mixer::new();
         for _ in 0..16 {
             mixer.play(Voice::new(vec![0.1f32; 4096 * CHANNELS]).with_looping());
         }

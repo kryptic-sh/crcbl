@@ -1,9 +1,10 @@
 //! Audio for asteroids: three procedural cues through `crcbl-audio`'s spatial
-//! grammar.
+//! grammar and its mixer.
 //!
 //! The engine, the gun and the rocks coming apart, all synthesised at start-up —
-//! this sample has no sound assets by design. The game thread pushes voices onto
-//! a shared queue; the audio thread drains it.
+//! this sample has no sound assets by design. The waveforms are banked in a
+//! [`SoundBank`]; the game thread plays voices into a [`Mixer`] the audio thread
+//! fills from.
 //!
 //! # Where the listener stands, and why this game finally makes it matter
 //!
@@ -22,120 +23,62 @@
 //!
 //! [`compute_cue`]: crcbl_audio::spatial::compute_cue
 //!
-//! # This is the *third* copy of this file, and the copies have drifted
+//! # The engine is a *held* sound, and it is now held rather than faked
 //!
-//! `docs/plan/ROADMAP.md`'s S1B finding 5 says `crcbl-audio` offers a device, a
-//! stream, a decoder and a cue grammar, and nothing in between — no "play this
-//! buffer once, panned" — so each sample writes its own voice queue, its own
-//! mixer source and its own interleaved-stereo playhead. Writing it a third time
-//! confirms that and adds three things the second copy could not show:
+//! Thrust is the one cue in any sample that is sustained rather than an edge —
+//! the player holds the key. It used to be a one-shot re-fired on a timer the
+//! *simulation* owned (`game::THRUST_CUE_PERIOD`), which put an audio
+//! implementation detail inside the deterministic tick: the pulse counter was
+//! tick state, so an audio decision was part of what a replay had to reproduce.
 //!
-//! * **The copies do not stay in step.** `apps/breakout/src/audio.rs` still
-//!   spells its entry point `play_panned(id, emitter_x)` — one axis, no `y`, no
-//!   listener argument — and has no play counter at all, so breakout's cues
-//!   cannot be asserted about; `apps/flappy/src/audio.rs` has `play_at`, a `y`,
-//!   a listener and [`Audio::plays`]. They were the same file and are not any
-//!   more. Nothing brought the counter back to breakout, because nothing links
-//!   the two. A duplication that drifts is worse than one that does not: reading
-//!   either copy no longer tells you what the pattern *is*.
-//! * **There is no listener anywhere in the crate.**
-//!   [`compute_cue`](crcbl_audio::spatial::compute_cue) takes the listener's
-//!   position as an argument on every single call, so "where the ears are" is a
-//!   convention each game invents and re-derives at each call site. Three games,
-//!   three conventions, and two of them undocumented until this file said so.
-//! * **A held sound has no representation at all.** Thrust is the first cue in
-//!   any sample that is *sustained* rather than an edge — the player holds the
-//!   key — and the crate has one-shot voices and nothing else: no looping voice,
-//!   no start/stop handle, no way to say "this is playing until I say
-//!   otherwise". So [`SOUND_THRUST`] is faked as a one-shot re-fired on a timer
-//!   the *simulation* owns (`game::THRUST_CUE_PERIOD`), which puts an audio
-//!   implementation detail inside the deterministic tick. That is the one thing
-//!   here that is not merely duplication.
+//! It is one looping [`Voice`](crcbl_audio::mixer::Voice) now.
+//! [`Audio::set_thrust`] starts it on the first burning tick, re-aims it with
+//! [`Mixer::set_mix`] on every tick after that — the ship crosses the field, so
+//! a pan frozen at ignition would be wrong within a second — and
+//! [`Mixer::stop`]s it the tick the key comes up. The simulation is left with
+//! one plain bool, `thrusting`, which is a fact about the ship rather than about
+//! the speakers.
 //!
-//! None of it is fixed here: growing the engine is what a sample is meant to
-//! *reveal* the need for. It is owed by P10.
+//! # What this file used to be
+//!
+//! A hand-written `Sound`, `Voice`, `VoiceQueue` and `MixerSource`, copied into
+//! all four samples, because `Mixer::play` wanted `&mut self` while
+//! `AudioStream::open` consumed its source. What is still local is the sound
+//! design: the waveforms, the cue ids and the listener convention above.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use crcbl_audio::mixer::{Mixer, SoundBank, VoiceId, VoiceMix};
+use crcbl_audio::spatial::{CueGrammar, compute_cue};
 use crcbl_audio::{AudioSample, AudioStream};
 
-/// The engine, while thrust is held. Re-fired on a timer; see the module docs.
+/// The engine, while thrust is held. One looping voice; see the module docs.
 pub const SOUND_THRUST: u32 = 1;
 /// A shot leaving the gun.
 pub const SOUND_SHOT: u32 = 2;
 /// A rock coming apart, or the ship doing the same.
 pub const SOUND_EXPLOSION: u32 = 3;
 
-/// A procedural sound: interleaved stereo f32 samples.
-#[derive(Debug)]
-struct Sound {
-    data: Vec<AudioSample>,
-}
+/// How many cue ids this game has, and how long [`Audio::plays`] is.
+const SOUND_COUNT: usize = 3;
 
-/// A playing voice with its own playhead.
+/// How loud a one-shot cue is against the volume the grammar asks for.
 ///
-/// `playhead` counts **frames**, not samples: `Sound::data` is interleaved
-/// stereo, so a playhead advancing one *index* per output frame plays every
-/// sound at half speed and twice the length. Breakout shipped that bug once and
-/// both later copies carry the comment rather than the bug.
-#[derive(Debug)]
-struct Voice {
-    sound: Arc<Sound>,
-    playhead: f64,
-    volume: f32,
-    pitch: f32,
-    gain_l: f32,
-    gain_r: f32,
-}
+/// Halved: the grammar's `volume` is a distance rolloff that reaches 1.0 on top
+/// of the listener, and several cues overlapping at full scale clip.
+const MASTER_GAIN: f32 = 0.5;
 
-impl Voice {
-    /// Mixes this voice into `buffer` and reports whether it has audio left.
-    fn render_block(&mut self, buffer: &mut [AudioSample]) -> bool {
-        let data = &self.sound.data;
-        let frames = data.len() / 2;
-        // A ratio of 1.0 is one source frame per output frame. Non-finite or
-        // non-positive ratios would stall the voice forever or index backwards.
-        let step = if self.pitch.is_finite() && self.pitch > 0.0 {
-            f64::from(self.pitch)
-        } else {
-            1.0
-        };
-
-        for out in buffer.chunks_exact_mut(2) {
-            let frame = self.playhead as usize;
-            if frame >= frames {
-                return false;
-            }
-            out[0] += data[frame * 2] * self.volume * self.gain_l;
-            out[1] += data[frame * 2 + 1] * self.volume * self.gain_r;
-            self.playhead += step;
-        }
-        (self.playhead as usize) < frames
-    }
-}
-
-/// Thread-safe voice queue. The game thread pushes, the audio thread drains.
-#[derive(Debug)]
-struct VoiceQueue {
-    inner: Mutex<Vec<Voice>>,
-}
-
-/// The audio source fed to `AudioStream`, called from the audio thread.
-struct MixerSource {
-    queue: Arc<VoiceQueue>,
-}
-
-impl crcbl_audio::AudioSource for MixerSource {
-    fn fill(&self, buffer: &mut [AudioSample], _sample_rate: u32) {
-        let mut voices = self.queue.inner.lock().unwrap_or_else(|e| e.into_inner());
-        voices.retain_mut(|voice| voice.render_block(buffer));
-    }
-}
+/// The same, for the engine.
+///
+/// Lower than [`MASTER_GAIN`] because the engine is *continuous*: the old pulse
+/// was audible about half the time it was burning, and a loop at the one-shot
+/// level sits on top of the gun rather than under it.
+const ENGINE_GAIN: f32 = 0.25;
 
 /// Owns the cues and the output stream.
 #[derive(Debug)]
 pub struct Audio {
-    sounds: Vec<Arc<Sound>>,
+    bank: SoundBank,
     /// How many times each cue has been **emitted**, indexed as `id - 1`.
     ///
     /// Only ever increases, and only from the game thread. [`Audio::voices`]
@@ -143,8 +86,12 @@ pub struct Audio {
     /// sounding, and the audio thread reaps each one as it finishes, so the
     /// number falls again on a clock nothing here controls. Flappy had to add
     /// this to test its two cues; breakout still has no equivalent.
+    ///
+    /// [`SOUND_THRUST`] is counted once per **burn**, not once per block of
+    /// engine noise: it is one voice that runs until the key comes up.
     plays: Vec<u64>,
-    /// Every `(id, x, y)` handed to [`Audio::play_at`], in order.
+    /// Every `(id, x, y)` handed to [`Audio::play_at`], in order, plus the
+    /// position each burn of the engine *started* at.
     ///
     /// **The only place a cue's world position still exists as a position.**
     /// `play_at` turns it into a pan and a volume immediately, and the game
@@ -153,7 +100,9 @@ pub struct Audio {
     /// read. Test-only: a shipped build has no reason to keep the list.
     #[cfg(test)]
     played: Vec<(u32, f64, f64)>,
-    queue: Arc<VoiceQueue>,
+    /// The engine, while it is burning. See [`Audio::set_thrust`].
+    thrust: Option<VoiceId>,
+    mixer: Arc<Mixer>,
     _stream: Option<AudioStream>,
 }
 
@@ -164,46 +113,49 @@ pub struct Audio {
 /// and what every device this has run on reports.
 const SAMPLE_RATE: u32 = 48_000;
 
+/// How many cycles of the engine tone one loop of it holds.
+///
+/// Eleven at [`ENGINE_HZ`] over [`SAMPLE_RATE`] is 4 800 frames — a tenth of a
+/// second, and a whole number of both, which is what makes the loop seamless.
+const ENGINE_CYCLES: u32 = 11;
+
+/// The engine's pitch.
+const ENGINE_HZ: f32 = 110.0;
+
 impl Audio {
     pub fn new(headless: bool) -> Self {
-        let queue = Arc::new(VoiceQueue {
-            inner: Mutex::new(Vec::new()),
-        });
-        // A low pulse for the engine, a short high blip for the gun, and a
-        // filtered noise burst for a rock coming apart. The thrust cue is
-        // deliberately a shade shorter than `game::THRUST_CUE_PERIOD`, so a held
-        // key is a pulsing engine rather than a stack of overlapping voices that
-        // grows for as long as the player holds it.
-        let sounds = vec![
-            Arc::new(Sound {
-                data: sine(110.0, 0.10, SAMPLE_RATE),
-            }),
-            Arc::new(Sound {
-                data: sine(900.0, 0.05, SAMPLE_RATE),
-            }),
-            Arc::new(Sound {
-                data: noise(0.32, SAMPLE_RATE),
-            }),
-        ];
+        // A low tone for the engine, a short high blip for the gun, and a
+        // filtered noise burst for a rock coming apart. The engine's is built by
+        // `looped_sine` rather than `sine`: it is the one cue that plays as a
+        // loop, so it must not be faded to zero at its ends.
+        let mut bank = SoundBank::new();
+        bank.insert(
+            SOUND_THRUST,
+            looped_sine(ENGINE_HZ, ENGINE_CYCLES, SAMPLE_RATE),
+        );
+        bank.insert(SOUND_SHOT, sine(900.0, 0.05, SAMPLE_RATE));
+        bank.insert(SOUND_EXPLOSION, noise(0.32, SAMPLE_RATE));
+        debug_assert_eq!(bank.len(), SOUND_COUNT, "a cue id is missing from the bank");
 
-        let source = MixerSource {
-            queue: Arc::clone(&queue),
-        };
+        // The stream takes a handle, not the mixer: this copy is what stays
+        // behind to play voices through.
+        let mixer = Arc::new(Mixer::new());
         let stream = if headless {
-            Some(AudioStream::open_null(source))
+            Some(AudioStream::open_null(Arc::clone(&mixer)))
         } else {
-            AudioStream::open(source)
+            AudioStream::open(Arc::clone(&mixer))
         };
         if stream.is_none() && !headless {
             log::info!("audio: no output device available; the game will be silent");
         }
 
         Self {
-            plays: vec![0; sounds.len()],
-            sounds,
+            bank,
+            plays: vec![0; SOUND_COUNT],
             #[cfg(test)]
             played: Vec::new(),
-            queue,
+            thrust: None,
+            mixer,
             _stream: stream,
         }
     }
@@ -213,17 +165,84 @@ impl Audio {
     /// The listener is the camera, at the origin — see the module docs. There is
     /// no listener argument because, unlike in flappy, there is nothing for it
     /// to vary with: this camera does not move.
+    ///
+    /// One-shots only. The engine is [`Audio::set_thrust`]'s.
     pub fn play_at(&mut self, id: u32, x: f64, y: f64) {
-        // Ids are 1-based; `id - 1` on a `u32` underflows to `u32::MAX` for id
-        // zero rather than simply missing the table.
-        let Some(index) = id.checked_sub(1).map(|i| i as usize) else {
-            log::debug!("audio: sound id 0 is not a sound");
+        // An id the bank does not know is simply absent, so there is no `id - 1`
+        // to underflow on the lookup — only on the counter below, which is
+        // reached solely for an id the bank *did* answer to.
+        let Some(voice) = self.bank.create_voice(id) else {
+            log::debug!("audio: no sound registered at id {id}");
             return;
         };
-        let Some(sound) = self.sounds.get(index).map(Arc::clone) else {
+        self.mixer
+            .play(voice.with_mix(self.cue_mix(x, y, MASTER_GAIN)));
+        self.count(id, x, y);
+    }
+
+    /// Starts, re-aims or stops the engine.
+    ///
+    /// Called once a tick with the ship's own position. `burning` is
+    /// `game::Game::thrusting` — whether the ship is under power this tick —
+    /// and everything about how that becomes a sound lives here rather than in
+    /// the simulation. See the module docs.
+    ///
+    /// Re-aiming every tick is the point: the ship crosses a 32-unit field in a
+    /// couple of seconds, so a pan and a volume fixed at ignition would be
+    /// audibly wrong long before the burn ends.
+    pub fn set_thrust(&mut self, burning: bool, x: f64, y: f64) {
+        if !burning {
+            if let Some(id) = self.thrust.take() {
+                self.mixer.stop(id);
+            }
+            return;
+        }
+
+        let mix = self.cue_mix(x, y, ENGINE_GAIN);
+        // `set_mix` answers `false` for a handle whose voice is gone, which is
+        // the restart condition: a looping voice only ends if something stopped
+        // it, so this is also what recovers if anything ever does.
+        if let Some(id) = self.thrust
+            && self.mixer.set_mix(id, mix)
+        {
+            return;
+        }
+        let Some(voice) = self.bank.create_voice(SOUND_THRUST) else {
             return;
         };
-        let cue = crcbl_audio::spatial::compute_cue(
+        self.thrust = Some(self.mixer.play(voice.with_looping().with_mix(mix)));
+        self.count(SOUND_THRUST, x, y);
+    }
+
+    /// Whether the engine is sounding right now.
+    ///
+    /// Asked of the mixer, not of the handle: a voice that was stopped is gone
+    /// whatever this end still remembers.
+    #[must_use]
+    pub fn thrust_playing(&self) -> bool {
+        self.thrust.is_some_and(|id| self.mixer.is_playing(id))
+    }
+
+    /// Drives a second of audio through the mixer and answers what is *still*
+    /// sounding after it.
+    ///
+    /// The only honest way to ask "did anything leak". [`Audio::thrust_playing`]
+    /// reads the handle this end kept, so a `set_thrust` that dropped the handle
+    /// without stopping the voice would answer "silent" while a looping engine
+    /// ran for the rest of the process — the exact shape of a check that cannot
+    /// fail. Nothing survives this but a loop: every one-shot in this game is
+    /// under a third of a second.
+    #[cfg(test)]
+    #[must_use]
+    pub fn voices_after_a_second(&self) -> usize {
+        let mut block = vec![0.0f32; SAMPLE_RATE as usize * 2];
+        crcbl_audio::AudioSource::fill(self.mixer.as_ref(), &mut block, SAMPLE_RATE);
+        self.mixer.voice_count()
+    }
+
+    /// The mix for a cue at `(x, y)`, heard from the camera at the origin.
+    fn cue_mix(&self, x: f64, y: f64, gain: f32) -> VoiceMix {
+        let cue = compute_cue(
             [0.0, 0.0, 0.0],
             [
                 x as f32, y as f32,
@@ -231,25 +250,28 @@ impl Audio {
                 // still at a defined direction rather than a zero vector.
                 1.0,
             ],
-            &crcbl_audio::spatial::CueGrammar::default(),
+            &CueGrammar::default(),
         );
-        self.queue
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(Voice {
-                sound,
-                playhead: 0.0,
-                volume: cue.volume * 0.5,
-                pitch: cue.pitch_ratio,
-                gain_l: cue.gain_left,
-                gain_r: cue.gain_right,
-            });
-        // `plays` is as long as `sounds` and neither ever grows, so an index
+        VoiceMix {
+            volume: cue.volume * gain,
+            ..VoiceMix::from(&cue)
+        }
+    }
+
+    /// Records that cue `id` was emitted at `(x, y)`.
+    fn count(&mut self, id: u32, x: f64, y: f64) {
+        // `plays` is as long as the bank and neither ever grows, so an index
         // that found a sound finds a counter.
-        self.plays[index] += 1;
+        if let Some(count) = id
+            .checked_sub(1)
+            .and_then(|i| self.plays.get_mut(i as usize))
+        {
+            *count += 1;
+        }
         #[cfg(test)]
         self.played.push((id, x, y));
+        #[cfg(not(test))]
+        let _ = (x, y);
     }
 
     /// Every cue played so far, with the world position it was played at.
@@ -269,18 +291,15 @@ impl Audio {
     /// whether a cue happened.
     #[must_use]
     pub fn voices(&self) -> usize {
-        self.queue
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
+        self.mixer.voice_count()
     }
 
     /// How many times cue `id` has been played since start-up.
     ///
     /// Monotonic, so it answers the question [`Audio::voices`] cannot: whether
     /// a cue was ever emitted, however long ago it finished. An id no sound
-    /// answers to has never been played and reports zero.
+    /// answers to has never been played and reports zero. [`SOUND_THRUST`] is
+    /// one per burn.
     #[must_use]
     pub fn plays(&self, id: u32) -> u64 {
         id.checked_sub(1)
@@ -297,6 +316,31 @@ fn sine(freq_hz: f32, seconds: f32, sample_rate: u32) -> Vec<AudioSample> {
     for i in 0..frames {
         let t = i as f32 / sample_rate as f32;
         let value = 0.3 * (2.0 * std::f32::consts::PI * freq_hz * t).sin() * fade(i, frames);
+        out.push(value);
+        out.push(value);
+    }
+    out
+}
+
+/// A sine that can be played end-to-end forever without a click.
+///
+/// The generator this sample adds, and the one that only a *looping* voice
+/// needs. Two things make the seam inaudible and both are the opposite of what
+/// [`sine`] does:
+///
+/// * **A whole number of cycles**, so the waveform arrives back at phase zero
+///   exactly as the buffer runs out. The phase is stepped as
+///   `2π · cycles · i / frames` rather than as `2π · f · t`, which makes that
+///   exact by construction however `frames` rounds — the effective frequency
+///   moves by a fraction of a hertz instead of the phase jumping.
+/// * **No fade.** A fade to zero at each end is what stops a *one-shot*
+///   clicking; on a loop it is a hole punched in the tone ten times a second.
+fn looped_sine(freq_hz: f32, cycles: u32, sample_rate: u32) -> Vec<AudioSample> {
+    let frames = ((cycles as f32 * sample_rate as f32) / freq_hz).round() as usize;
+    let mut out = Vec::with_capacity(frames * 2);
+    for i in 0..frames {
+        let phase = 2.0 * std::f32::consts::PI * cycles as f32 * (i as f32 / frames as f32);
+        let value = 0.3 * phase.sin();
         out.push(value);
         out.push(value);
     }
@@ -368,33 +412,74 @@ fn fade(i: usize, total: usize) -> f32 {
 mod tests {
     use super::*;
 
-    /// The sound is interleaved stereo, so one output frame must advance the
-    /// playhead by one *source frame*.
+    /// Every generator here produces **interleaved stereo**, which is what the
+    /// mixer's playhead assumes: an odd-length or mono buffer would be played at
+    /// half speed over twice the length. Breakout shipped that bug once.
     #[test]
-    fn a_voice_plays_at_the_rate_it_was_recorded() {
-        let frames = 100;
-        let sound = Arc::new(Sound {
-            data: sine(440.0, frames as f32 / 48_000.0, 48_000),
-        });
-        assert_eq!(sound.data.len(), frames * 2);
+    fn every_cue_is_interleaved_stereo_of_the_length_it_asked_for() {
+        for (name, data, frames) in [
+            ("sine", sine(900.0, 0.05, SAMPLE_RATE), 2_400usize),
+            ("noise", noise(0.32, SAMPLE_RATE), 15_360),
+            (
+                "looped_sine",
+                looped_sine(ENGINE_HZ, ENGINE_CYCLES, SAMPLE_RATE),
+                4_800,
+            ),
+        ] {
+            assert_eq!(data.len(), frames * 2, "{name} is not stereo pairs");
+            for frame in data.chunks_exact(2) {
+                assert_eq!(frame[0], frame[1], "{name} is not the same in both ears");
+            }
+        }
+    }
 
-        let mut voice = Voice {
-            sound: Arc::clone(&sound),
-            playhead: 0.0,
-            volume: 1.0,
-            pitch: 1.0,
-            gain_l: 1.0,
-            gain_r: 1.0,
-        };
-        let mut buffer = vec![0.0f32; frames * 2];
-        voice.render_block(&mut buffer);
-        assert!(
-            (voice.playhead - frames as f64).abs() < 1.0,
-            "playhead at {} after {frames} frames",
-            voice.playhead
+    /// **The engine's buffer is a bare tone: a whole number of cycles, and no
+    /// envelope on it.** Read out of the bank, so it is the buffer the game will
+    /// actually loop and not whatever this test asks the generator for.
+    ///
+    /// Compared against the closed form rather than against neighbouring
+    /// samples, because what goes wrong here is quiet: [`FADE_FRAMES`] is 60 of
+    /// these 4 800, so a faded buffer arrives at *zero* on both ends — the seam
+    /// looks smoother than the tone does, and a seam-only check passes while the
+    /// loop has a hole punched in it ten times a second. Restating the waveform
+    /// is the point; it is the contract this cue has to meet, and a `sine` in
+    /// the bank instead of a `looped_sine` fails it at the sixtieth sample.
+    #[test]
+    fn the_engine_loops_a_whole_number_of_cycles_with_no_envelope() {
+        let audio = Audio::new(true);
+        let data = audio
+            .bank
+            .sound(SOUND_THRUST)
+            .expect("the engine is banked");
+        let frames = data.len() / 2;
+        assert_eq!(frames, 4_800, "a tenth of a second at {SAMPLE_RATE} Hz");
+
+        for (i, frame) in data.chunks_exact(2).enumerate() {
+            let phase =
+                2.0 * std::f32::consts::PI * ENGINE_CYCLES as f32 * (i as f32 / frames as f32);
+            let expected = 0.3 * phase.sin();
+            assert!(
+                (frame[0] - expected).abs() < 1e-6,
+                "frame {i} is {} and the bare tone is {expected}",
+                frame[0],
+            );
+        }
+
+        // Whole cycles, so playing the buffer end to end continues the tone
+        // rather than jumping phase — and at the pitch that was asked for.
+        let crossings = (1..frames)
+            .filter(|i| (data[i * 2] < 0.0) != (data[(i - 1) * 2] < 0.0))
+            .count();
+        assert_eq!(
+            crossings,
+            2 * ENGINE_CYCLES as usize - 1,
+            "not whole cycles"
         );
-        assert_eq!(buffer[0], sound.data[0]);
-        assert_eq!(buffer[2], sound.data[2], "every frame was played twice");
+        let effective = ENGINE_CYCLES as f32 * SAMPLE_RATE as f32 / frames as f32;
+        assert!(
+            (effective - ENGINE_HZ).abs() < 0.5,
+            "the loop runs at {effective} Hz, not {ENGINE_HZ}",
+        );
     }
 
     /// An id nothing answers to is ignored rather than underflowing or panicking.
@@ -404,8 +489,8 @@ mod tests {
         audio.play_at(0, 0.0, 0.0);
         audio.play_at(9999, 0.0, 0.0);
         assert_eq!(audio.voices(), 0);
-        // `plays` shares `play_at`'s `id - 1`, so it has the same underflow to
-        // avoid, and it must not report a play for a cue that was refused.
+        // `plays` still spells `id - 1`, so it still has the underflow to avoid,
+        // and it must not report a play for a cue that was refused.
         assert_eq!(audio.plays(0), 0);
         assert_eq!(audio.plays(9999), 0);
         assert_eq!(audio.plays(SOUND_SHOT), 0);
@@ -428,9 +513,6 @@ mod tests {
 
         // Reap it by hand rather than waiting on the audio thread, so the test
         // is not itself a race: `fill` is exactly what that thread calls.
-        let source = MixerSource {
-            queue: Arc::clone(&audio.queue),
-        };
         let mut block = vec![0.0f32; 256 * 2];
         let start = std::time::Instant::now();
         while audio.voices() > 0 {
@@ -439,13 +521,96 @@ mod tests {
                 "the shot voice never finished"
             );
             block.fill(0.0);
-            crcbl_audio::AudioSource::fill(&source, &mut block, 48_000);
+            crcbl_audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
         }
         assert_eq!(
             audio.plays(SOUND_SHOT),
             1,
             "the shot stopped being counted once it stopped sounding"
         );
+    }
+
+    /// **The engine is one voice that survives its own sample data**, and it
+    /// ends when the key comes up rather than when the buffer runs out.
+    ///
+    /// The engine buffer is a tenth of a second; this drives ten seconds of
+    /// audio through the mixer by hand. A one-shot — which is what this cue used
+    /// to be — is gone after the first block, so `thrust_playing` going false
+    /// anywhere in that loop is the pulse hack coming back.
+    #[test]
+    fn the_engine_is_one_looping_voice_that_outlives_its_buffer() {
+        let mut audio = Audio::new(true);
+        assert!(!audio.thrust_playing(), "the engine started on its own");
+
+        audio.set_thrust(true, 0.0, 0.0);
+        assert!(audio.thrust_playing());
+        assert_eq!(audio.plays(SOUND_THRUST), 1);
+        assert_eq!(audio.voices(), 1);
+
+        let mut block = vec![0.0f32; 4_800 * 2]; // a tenth of a second
+        for tenth in 0..100 {
+            block.fill(0.0);
+            crcbl_audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
+            assert!(
+                audio.thrust_playing(),
+                "the engine stopped after {tenth} tenths of a second",
+            );
+            assert!(
+                block.iter().any(|s| s.abs() > 1e-3),
+                "the engine went silent after {tenth} tenths of a second",
+            );
+            // Held, so the game keeps saying so — and it is still one voice.
+            audio.set_thrust(true, 0.0, 0.0);
+            assert_eq!(audio.voices(), 1, "a second engine voice was started");
+            assert_eq!(audio.plays(SOUND_THRUST), 1, "the burn was recounted");
+        }
+
+        audio.set_thrust(false, 0.0, 0.0);
+        assert!(
+            !audio.thrust_playing(),
+            "the key came up and it kept running"
+        );
+        assert_eq!(audio.voices(), 0);
+        block.fill(0.0);
+        crcbl_audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
+        assert!(
+            block.iter().all(|s| *s == 0.0),
+            "the stopped engine is still audible",
+        );
+
+        // A second burn is a second play, and a new voice.
+        audio.set_thrust(true, 0.0, 0.0);
+        assert_eq!(audio.plays(SOUND_THRUST), 2);
+        assert!(audio.thrust_playing());
+    }
+
+    /// **The engine follows the ship**, which is what a re-aimable voice buys
+    /// over a stack of one-shots: one voice, two pans.
+    ///
+    /// Without the `set_mix` call in `set_thrust` this fails — the mix would
+    /// stay whatever it was at ignition — and no other test would notice.
+    #[test]
+    fn the_engine_pans_with_the_ship_without_restarting() {
+        let mut audio = Audio::new(true);
+        audio.set_thrust(true, -14.0, 0.0);
+        let left = audio.mixer.voice_mixes();
+        assert_eq!(left.len(), 1);
+        assert!(
+            left[0].1.gains.0 > left[0].1.gains.1,
+            "a ship on the left should be louder on the left: {:?}",
+            left[0].1.gains,
+        );
+
+        audio.set_thrust(true, 14.0, 0.0);
+        let right = audio.mixer.voice_mixes();
+        assert_eq!(right.len(), 1, "the engine restarted instead of turning");
+        assert_eq!(right[0].0, left[0].0, "a new voice, not the same one");
+        assert!(
+            right[0].1.gains.1 > right[0].1.gains.0,
+            "a ship on the right should be louder on the right: {:?}",
+            right[0].1.gains,
+        );
+        assert_eq!(audio.plays(SOUND_THRUST), 1, "one burn, one play");
     }
 
     /// The grammar is actually consulted: a cue away from the listener is not
@@ -462,19 +627,18 @@ mod tests {
         audio.play_at(SOUND_EXPLOSION, 0.0, 0.0);
         audio.play_at(SOUND_EXPLOSION, -14.0, 6.0);
         audio.play_at(SOUND_EXPLOSION, 14.0, 6.0);
-        let voices = audio.queue.inner.lock().expect("no other thread");
-        let (near, left, right) = (&voices[0], &voices[1], &voices[2]);
+        let mixes = audio.mixer.voice_mixes();
+        assert_eq!(mixes.len(), 3, "a cue went missing");
+        let (near, left, right) = (mixes[0].1, mixes[1].1, mixes[2].1);
         assert!(
-            left.gain_l > left.gain_r,
-            "a cue to the left should be louder on the left: {} vs {}",
-            left.gain_l,
-            left.gain_r
+            left.gains.0 > left.gains.1,
+            "a cue to the left should be louder on the left: {:?}",
+            left.gains,
         );
         assert!(
-            right.gain_r > right.gain_l,
-            "and one to the right, on the right: {} vs {}",
-            right.gain_l,
-            right.gain_r
+            right.gains.1 > right.gains.0,
+            "and one to the right, on the right: {:?}",
+            right.gains,
         );
         assert!(
             left.volume < near.volume,

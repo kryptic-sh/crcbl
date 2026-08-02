@@ -64,7 +64,7 @@ pub use game::{
     FIRE_COOLDOWN, FIRST_WAVE_ROCKS, Game, GameError, GameState, MAX_BULLETS, MAX_WAVE_ROCKS,
     RESPAWN_CLEAR_RADIUS, RESPAWN_DELAY, RESPAWN_MAX_WAIT, RenderState, RockSize, RockView,
     SHIP_DAMPING, SHIP_RADIUS, SHIP_THRUST, SHIP_TURN_RATE, SPLIT_CHILDREN, STARTING_LIVES,
-    THRUST_CUE_PERIOD, WORLD_HALF_HEIGHT, WORLD_HALF_WIDTH, hash_unit, heading_vector, lerp_angle,
-    wave_rock_position, wave_rock_velocity, wave_rocks, wrap_axis, wrap_position, wrap_to_pi,
+    WORLD_HALF_HEIGHT, WORLD_HALF_WIDTH, hash_unit, heading_vector, lerp_angle, wave_rock_position,
+    wave_rock_velocity, wave_rocks, wrap_axis, wrap_position, wrap_to_pi,
 };
 pub use menu::{MenuAction, MenuKind, Menus};

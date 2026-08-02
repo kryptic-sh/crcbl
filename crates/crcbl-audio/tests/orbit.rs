@@ -83,7 +83,7 @@ fn orbit_cue_changes_over_time() {
     let listener = [0.0f32, 0.0, 0.0];
 
     for event in &events {
-        let mut mixer = Mixer::new();
+        let mixer = Mixer::new();
         let cue = compute_cue(listener, event.position, &grammar);
         let voice = bank
             .create_voice(event.sound_id)
@@ -123,7 +123,7 @@ fn centre_position_is_symmetric() {
         .with_gains(cue.gain_left, cue.gain_right)
         .with_volume(cue.volume);
 
-    let mut mixer = Mixer::new();
+    let mixer = Mixer::new();
     mixer.play(voice);
 
     let mut buf = vec![0.0f32; block * CHANNELS];
@@ -154,7 +154,7 @@ fn right_position_pans_to_right() {
         .with_gains(cue.gain_left, cue.gain_right)
         .with_volume(cue.volume);
 
-    let mut mixer = Mixer::new();
+    let mixer = Mixer::new();
     mixer.play(voice);
 
     let mut buf = vec![0.0f32; block * CHANNELS];
@@ -192,7 +192,7 @@ fn orbit_integration_deterministic() {
         // and not merely on the set of blocks.
         let mut hasher = DefaultHasher::new();
         for event in events {
-            let mut mixer = Mixer::new();
+            let mixer = Mixer::new();
             let cue = compute_cue(listener, event.position, grammar);
             let voice = bank
                 .create_voice(event.sound_id)
@@ -224,8 +224,10 @@ fn orbit_integration_deterministic() {
     );
 }
 
+/// Two voices over one banked sound share the samples and nothing else: the
+/// volume set on the second must not reach the first.
 #[test]
-fn sound_bank_clone_voice_independent() {
+fn sound_bank_voices_share_samples_but_not_state() {
     let mut bank = SoundBank::new();
     bank.insert(1, vec![0.5f32; 64 * CHANNELS]);
 
@@ -233,7 +235,7 @@ fn sound_bank_clone_voice_independent() {
     let voice_b = bank.create_voice(1).unwrap().with_volume(0.0);
 
     // voice_a at full volume, voice_b silent — they don't interfere.
-    let mut mixer = Mixer::new();
+    let mixer = Mixer::new();
     mixer.play(voice_a);
     mixer.play(voice_b);
 

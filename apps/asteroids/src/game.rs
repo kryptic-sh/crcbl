@@ -182,21 +182,6 @@ pub const MAX_BULLETS: usize = 4;
 /// it.
 const MUZZLE_OFFSET: f64 = SHIP_RADIUS + BULLET_RADIUS + 0.05;
 
-/// How often the engine cue is re-fired while thrust is held, in seconds.
-///
-/// **A timing constant that exists only because of an audio gap, and it sits in
-/// the simulation.** Thrust is the first *sustained* cue any sample has needed —
-/// the player holds the key — and `crcbl-audio` has one-shot voices and nothing
-/// else: no looping voice, no start/stop handle. So the engine is a short pulse
-/// re-fired on this period, and the period has to live here rather than in
-/// `crate::audio`, because the cue is raised inside the deterministic tick and
-/// anything the tick reads is simulation state. See `crate::audio`'s header.
-///
-/// Shorter than the cue itself (0.10 s) would stack overlapping voices for as
-/// long as the key is held; much longer reads as a stutter rather than an
-/// engine. 0.12 s is one pulse just after the last one has faded.
-pub const THRUST_CUE_PERIOD: f64 = 0.12;
-
 // ---------------------------------------------------------------------------
 // Rocks
 // ---------------------------------------------------------------------------
@@ -591,13 +576,19 @@ struct GameLogic {
     respawn_timer: f64,
     /// Seconds until the next shot is allowed.
     fire_timer: f64,
-    /// Seconds until the engine cue is re-fired, while thrust is held.
+    /// Whether the ship is under power this tick.
     ///
-    /// Reset to zero the moment thrust is released, so the first pulse of the
-    /// next burn is immediate — an engine that took a tenth of a second to be
-    /// heard reads as input lag rather than as an engine. See
-    /// [`THRUST_CUE_PERIOD`] for why an audio timer is simulation state.
-    thrust_cue_timer: f64,
+    /// A fact about the ship, not about the speakers: it is `intent.thrust`
+    /// narrowed to the ticks where the engine can actually fire. The facade
+    /// reads it and hands it to `crate::audio::Audio::set_thrust`, which is
+    /// where every decision about *how a held sound is made* now lives.
+    ///
+    /// This replaced a countdown that re-fired a one-shot cue every
+    /// `THRUST_CUE_PERIOD` seconds, back when the crate had no looping voice.
+    /// That timer was accumulating tick state, so an audio detail was part of
+    /// what a replay had to reproduce; this is a bool derived from the same
+    /// tick's input and carries no history.
+    thrusting: bool,
 
     rocks: Vec<Rock>,
     bullets: Vec<Bullet>,
@@ -745,6 +736,9 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
         // The cooldown still runs down while the ship is gone, so a respawned
         // ship can shoot immediately rather than inheriting a stale timer.
         logic.fire_timer = (logic.fire_timer - dt).max(0.0);
+        // Nothing is burning on the title screen or behind the game-over panel,
+        // however hard the key is being held. `drive_ship` sets the other half.
+        logic.thrusting = false;
     }
 
     // Before the sweeps, so a rock destroyed this tick is never advanced past
@@ -822,36 +816,9 @@ fn drive_ship(logic: &mut GameLogic, world: &mut World, intent: Intent, dt: f64)
             phys.apply_force(ship, damping_force(body.velocity, body.mass, dt));
         }
     });
-    thrust_cue(logic, intent, dt);
-}
-
-/// Pulses the engine cue while thrust is held, and silences it the moment it is
-/// not.
-///
-/// A held sound the crate cannot express, faked as a one-shot on a timer — see
-/// [`THRUST_CUE_PERIOD`]. The cue is raised **where the ship is**, so the engine
-/// pans across the field with the ship rather than sitting in the middle.
-fn thrust_cue(logic: &mut GameLogic, intent: Intent, dt: f64) {
-    if !intent.thrust {
-        // Not "count it down anyway": a burn that starts a tick after the last
-        // one ended must be heard at once, not two thirds of a period later.
-        logic.thrust_cue_timer = 0.0;
-        return;
-    }
-    // Counted down first and tested after, exactly as `fire` does with its
-    // cooldown: the other order spends a whole extra tick at zero, which makes
-    // the real period `THRUST_CUE_PERIOD + dt` and the pulse rate a function of
-    // the tick rate.
-    logic.thrust_cue_timer -= dt;
-    if logic.thrust_cue_timer > 0.0 {
-        return;
-    }
-    logic.thrust_cue_timer = THRUST_CUE_PERIOD;
-    logic.cues.push((
-        crate::audio::SOUND_THRUST,
-        logic.ship_pos.x,
-        logic.ship_pos.y,
-    ));
+    // Recorded, not sounded. The engine is a held cue and the facade owns it;
+    // see `GameLogic::thrusting`.
+    logic.thrusting = intent.thrust;
 }
 
 /// The damping force `crcbl_phys::DampingForce` would apply to a body of `mass`
@@ -1004,6 +971,9 @@ fn destroy_ship(logic: &mut GameLogic, world: &mut World) {
     logic.ship_alive = false;
     logic.respawn_timer = 0.0;
     logic.lives = logic.lives.saturating_sub(1);
+    // The engine dies with the ship, in the same tick. `run_tick`'s else branch
+    // only runs on the *next* one, which is a tick of engine over the wreck.
+    logic.thrusting = false;
     // **Kinematic, not merely stopped.** Zeroing the velocity leaves the body
     // dynamic, so the next tick's damping and thrust act on a wreck — and the
     // wreck keeps drifting across the field behind the game-over screen.
@@ -1402,7 +1372,7 @@ fn restart(logic: &mut GameLogic, world: &mut World) {
     logic.lives = STARTING_LIVES;
     logic.wave = 0;
     logic.fire_timer = 0.0;
-    logic.thrust_cue_timer = 0.0;
+    logic.thrusting = false;
     logic.spawn_counter = 0;
     place_ship(logic, world, DVec3::ZERO, 0.0, DVec3::ZERO);
     deal_wave(logic, world);
@@ -1553,6 +1523,12 @@ pub struct Game {
     /// these mirrors rather than [`Game::render_state`] can interpolate too.
     pub ship_heading_prev: f64,
     pub ship_alive: bool,
+    /// Whether the ship was under power on the tick just run.
+    ///
+    /// Mirrored for the same reason the rest are, and read by [`Game::tick`]
+    /// itself: it is what drives the held engine cue. See
+    /// `GameLogic::thrusting`.
+    pub thrusting: bool,
     prev_log_state: GameState,
 }
 
@@ -1649,7 +1625,7 @@ impl Game {
             ship_alive: false,
             respawn_timer: 0.0,
             fire_timer: 0.0,
-            thrust_cue_timer: 0.0,
+            thrusting: false,
             rocks: Vec::new(),
             bullets: Vec::new(),
             score: 0,
@@ -1722,6 +1698,7 @@ impl Game {
             ship_heading: 0.0,
             ship_heading_prev: 0.0,
             ship_alive: true,
+            thrusting: false,
             prev_log_state: GameState::WaitingToStart,
         };
         log::info!(
@@ -1815,8 +1792,17 @@ impl Game {
             self.ship_heading = logic.heading;
             self.ship_heading_prev = logic.prev_heading;
             self.ship_alive = logic.ship_alive;
+            self.thrusting = logic.thrusting;
             logic.ticks
         };
+
+        // **The engine, after the mirrors and outside the lock.** It is a held
+        // cue: one looping voice that starts on the first burning tick, is
+        // re-aimed at the ship on every tick after that, and is stopped the tick
+        // the key comes up. `crate::audio::Audio::set_thrust` owns all of that —
+        // the simulation only says whether the ship is burning.
+        self.audio
+            .set_thrust(self.thrusting, self.ship.x, self.ship.y);
         debug_assert_eq!(
             ticks_after,
             ticks_before + u64::from(server_ticks),
@@ -3319,15 +3305,19 @@ mod tests {
         );
     }
 
-    /// **The engine is a held sound, so it pulses**, and it stops the tick the
-    /// key comes up.
+    /// **The engine is a held sound, so it is one voice held**, and it stops the
+    /// tick the key comes up.
     ///
-    /// The cue `crcbl-audio` cannot express — see [`THRUST_CUE_PERIOD`]. The
-    /// count is checked as a *range* derived from the period rather than as a
-    /// number read off a passing run: a cue per tick and a cue per burn are both
-    /// wrong, and both are outside it.
+    /// This used to assert a *pulse count* against `THRUST_CUE_PERIOD`, a
+    /// countdown in the simulation that re-fired a one-shot, because the crate
+    /// had no looping voice. It has one, the timer is gone, and what a burn
+    /// leaves behind is a single sounding voice rather than a stream of plays —
+    /// so both halves are checked: exactly one play, and the voice still there
+    /// a whole second later. A per-tick or per-period re-fire fails the first;
+    /// the old one-shot fails the second, because its buffer is a tenth of a
+    /// second long.
     #[test]
-    fn the_engine_pulses_while_thrust_is_held_and_stops_when_it_is_not() {
+    fn the_engine_is_one_held_voice_while_thrust_is_down_and_stops_when_it_is_not() {
         use crate::audio::SOUND_THRUST;
 
         let mut harness = Harness::new(60, 60);
@@ -3339,30 +3329,77 @@ mod tests {
             DVec3::ZERO,
             RockSize::Small,
         );
+        assert!(!harness.game.audio.thrust_playing(), "silence before");
 
         let ticks = 60u64;
         harness.game.key_event(KeyCode::ArrowUp, true);
         harness.run_ticks(harness.ticks + ticks, &[]);
-        harness.game.key_event(KeyCode::ArrowUp, false);
-
-        let burn = harness.game.audio.plays(SOUND_THRUST);
-        let expected = (ticks as f64 * harness.game.tick_dt_secs() / THRUST_CUE_PERIOD) as u64;
-        assert!(expected > 1, "the burn is too short to pulse at all");
         assert!(
-            burn >= expected && burn <= expected + 2,
-            "a {ticks}-tick burn fired {burn} engine cues, not about {expected}",
+            harness.game.thrusting,
+            "a whole second of held thrust and the ship is not burning",
         );
         assert!(
-            burn < ticks,
-            "the engine fired once a tick; the period is doing nothing",
+            harness.game.audio.thrust_playing(),
+            "the engine is not sounding a second into the burn",
         );
-
-        // The key is up. Nothing more may sound, however long the game runs.
-        harness.run_ticks(harness.ticks + 60, &[]);
         assert_eq!(
             harness.game.audio.plays(SOUND_THRUST),
-            burn,
+            1,
+            "the burn is being re-fired rather than held",
+        );
+
+        harness.game.key_event(KeyCode::ArrowUp, false);
+        harness.run_ticks(harness.ticks + 1, &[]);
+        assert!(!harness.game.thrusting, "the ship is still burning");
+        assert!(
+            !harness.game.audio.thrust_playing(),
             "the engine kept running after the key came up",
+        );
+
+        // And nothing restarts it on its own, however long the game runs.
+        harness.run_ticks(harness.ticks + 60, &[]);
+        assert!(!harness.game.audio.thrust_playing());
+        assert_eq!(harness.game.audio.plays(SOUND_THRUST), 1);
+
+        // **The voice is gone, not merely forgotten.** `thrust_playing` reads
+        // the handle this side kept; a release that dropped the handle without
+        // stopping the voice would answer "silent" above and leave a loop
+        // running for the rest of the process. Nothing but a loop survives a
+        // second of mixing.
+        assert_eq!(
+            harness.game.audio.voices_after_a_second(),
+            0,
+            "the engine voice is still in the mixer",
+        );
+    }
+
+    /// **The engine dies with the ship**, in the tick the ship does — not on the
+    /// next one, which would be a tick of engine noise over the wreck.
+    #[test]
+    fn the_engine_stops_the_tick_the_ship_is_destroyed() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        harness.game.stage_ship(DVec3::ZERO, 0.0, DVec3::ZERO);
+        harness.game.key_event(KeyCode::ArrowUp, true);
+        harness.run_ticks(harness.ticks + 5, &[]);
+        assert!(harness.game.audio.thrust_playing(), "no engine to stop");
+
+        // A rock right on top of the ship, with the key still held.
+        harness
+            .game
+            .stage_rock(DVec3::ZERO, DVec3::ZERO, RockSize::Small);
+        harness.run_ticks(harness.ticks + 1, &[]);
+        assert!(!harness.game.ship_alive, "the ship survived the rock");
+        assert!(
+            !harness.game.audio.thrust_playing(),
+            "the wreck is still under power",
+        );
+        // The explosion the death raised does not survive a second of mixing; a
+        // leaked engine loop would. See `Audio::voices_after_a_second`.
+        assert_eq!(
+            harness.game.audio.voices_after_a_second(),
+            0,
+            "the engine voice outlived the ship",
         );
     }
 
