@@ -17,6 +17,9 @@ OPTIONS:
                          clock, the ECS timestep and the integrator.
     --backend <B>        GPU backend: vk, vulkan, null, none or wgpu
     --seed <N>           Course seed. The same seed is the same pipes.
+    --debug-overlay      Start with the debug panel visible (F3 toggles it)
+    --no-debug-overlay   Start with it hidden. The default is 'visible in a
+                         debug build, hidden in a release build'
     -h, --help           Print this help";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,6 +29,13 @@ pub struct Options {
     pub tick_hz: u32,
     pub backend: Option<crcbl::backend::GpuBackend>,
     pub seed: u64,
+    /// Whether the debug overlay starts visible, or `None` for the default.
+    ///
+    /// Three-valued because the default is not a constant:
+    /// `docs/plan/sample/00-samples-overview.md` rule 4 is "on by default in dev
+    /// builds", so `None` means [`Options::debug_overlay_visible`]'s
+    /// `cfg!(debug_assertions)` and either flag overrides it.
+    pub debug_overlay: Option<bool>,
 }
 
 impl Default for Options {
@@ -36,6 +46,7 @@ impl Default for Options {
             tick_hz: crate::game::DEFAULT_TICK_HZ,
             backend: None,
             seed: crate::game::DEFAULT_SEED,
+            debug_overlay: None,
         }
     }
 }
@@ -48,6 +59,12 @@ impl Options {
             (None, true) => Some(120),
             (None, false) => None,
         }
+    }
+
+    /// Whether the debug overlay starts visible.
+    #[must_use]
+    pub fn debug_overlay_visible(&self) -> bool {
+        self.debug_overlay.unwrap_or(cfg!(debug_assertions))
     }
 }
 
@@ -66,6 +83,8 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--headless" => options.headless = true,
+            "--debug-overlay" => options.debug_overlay = Some(true),
+            "--no-debug-overlay" => options.debug_overlay = Some(false),
             "-h" | "--help" => return Invocation::Help,
             "--frames" => {
                 let Some(val) = args.next() else {
@@ -189,6 +208,23 @@ mod tests {
             Some(7)
         );
         assert_eq!(parsed(&["--frames", "7"]).frame_budget(), Some(7));
+    }
+
+    /// Switching the debug overlay on is one flag, and the default follows the
+    /// build profile rather than a constant.
+    #[test]
+    fn the_debug_overlay_flags_override_the_build_profile_default() {
+        assert_eq!(parsed(&[]).debug_overlay, None);
+        assert_eq!(
+            parsed(&[]).debug_overlay_visible(),
+            cfg!(debug_assertions),
+            "the default is 'on in a dev build'",
+        );
+        assert!(parsed(&["--debug-overlay"]).debug_overlay_visible());
+        assert!(!parsed(&["--no-debug-overlay"]).debug_overlay_visible());
+        // Last flag wins, so a wrapper script can append an override.
+        assert!(!parsed(&["--debug-overlay", "--no-debug-overlay"]).debug_overlay_visible());
+        assert!(USAGE.contains("--debug-overlay"));
     }
 
     #[test]

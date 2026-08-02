@@ -7,6 +7,8 @@
 //! # Architecture
 //!
 //! ```text
+//! Debug overlay ([`debug`])     ←  the modular profiler panel
+//!      │
 //! Widgets (Label, Button, …)   ←  this slice (P4-b)
 //!      │
 //!      ▼
@@ -16,16 +18,25 @@
 //! Render backend (future)
 //! ```
 //!
+//! [`debug`] is the one panel every sample switches on: frame timing and FPS
+//! always, and a section per system that has one to contribute. It names no
+//! system — see that module's docs.
+//!
 //! The draw list is the only interface between the UI and the renderer. The
 //! render backend takes a [`DrawList`] and emits GPU draw calls.
 //!
 //! See `docs/plan/07-ui-debug.md` for the full design.
 
+pub mod debug;
 pub mod draw_list;
 pub mod hud;
 pub mod text;
 pub mod widget;
 
+pub use debug::{
+    DEFAULT_FRAME_WINDOW, DebugModule, DebugOverlay, DebugPanel, DebugRow, DebugSection,
+    DebugStyle, FrameStats,
+};
 pub use draw_list::{DrawCommand, DrawList, Vertex2d};
 pub use hud::{Anchor, Hud, HudPanel};
 pub use text::{

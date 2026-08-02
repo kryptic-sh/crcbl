@@ -53,14 +53,23 @@ use crcbl::backend::GpuBackend;
 //
 // `MAX_CONSECUTIVE_RECONFIGURES` is what makes `--frames N` terminate when the
 // swapchain never becomes presentable — a budget of *presented* frames cannot.
+use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Clock, ConfigureError, ExitReason, Flow, MAX_CONSECUTIVE_RECONFIGURES, Pending, WINDOWED_IDLE,
     accept_close, wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{LogicalSize, ShellBackend as Backend, WindowId, open, open_backend};
+use crcbl::ui::DebugOverlay;
+use crcbl::ui::draw_list::DrawList;
 
 use crate::gpu::{FrameOutcome, Gpu, GpuError};
+
+/// The key that shows and hides the debug overlay.
+///
+/// F3, the same key breakout and flappy use: "switching it on is one thing" is
+/// only true if it is the *same* thing in every sample.
+pub const DEBUG_OVERLAY_KEY: KeyCode = KeyCode::F3;
 
 /// Which projection the camera uses.
 ///
@@ -132,6 +141,13 @@ pub struct Options {
     pub title: String,
     /// Which projection the camera uses — milestone 5.
     pub camera: CameraMode,
+    /// Whether the debug overlay starts visible, or `None` for the default.
+    ///
+    /// Three-valued because the default is not a constant:
+    /// `docs/plan/sample/00-samples-overview.md` rule 4 is "on by default in dev
+    /// builds", so `None` means [`Options::debug_overlay_visible`]'s
+    /// `cfg!(debug_assertions)` and either flag overrides it.
+    pub debug_overlay: Option<bool>,
 }
 
 impl Default for Options {
@@ -143,6 +159,7 @@ impl Default for Options {
             tick_hz: 60,
             title: "Crucible sandbox".to_string(),
             camera: CameraMode::default(),
+            debug_overlay: None,
         }
     }
 }
@@ -157,6 +174,12 @@ impl Options {
             (None, true) => Some(120),
             (None, false) => None,
         }
+    }
+
+    /// Whether the debug overlay starts visible.
+    #[must_use]
+    pub fn debug_overlay_visible(&self) -> bool {
+        self.debug_overlay.unwrap_or(cfg!(debug_assertions))
     }
 }
 
@@ -257,6 +280,12 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
     gpu: Gpu,
     clock_source: Clock,
     frame_clock: FrameClock,
+    /// Reused every frame rather than reallocated, like the samples' HUD lists.
+    draw_list: DrawList,
+    /// The modular debug panel. The sandbox has no HUD and no connection, so
+    /// this is the whole of its UI: frame timing, plus GPU pass timings when
+    /// the device has timestamp queries.
+    debug: DebugOverlay,
     frames: u64,
     ticks: u64,
     events: u64,
@@ -365,6 +394,8 @@ impl<S: Shell + ?Sized> Loop<S> {
             gpu,
             clock_source,
             frame_clock: FrameClock::new(options.tick_hz),
+            draw_list: DrawList::new(),
+            debug: DebugOverlay::with_visible(options.debug_overlay_visible()),
             frames: 0,
             ticks: 0,
             events,
@@ -394,11 +425,25 @@ impl<S: Shell + ?Sized> Loop<S> {
         }
 
         let mut pending = Pending::default();
+        let mut toggle_debug = false;
         // The sink borrows `pending` mutably while `self.shell` is borrowed
         // mutably too, which is exactly why replies (`reply_close_request`,
         // `resize`) are recorded here and acted on below rather than inline.
-        self.shell.pump(&mut |event| pending.observe(&event));
+        self.shell.pump(&mut |event| {
+            pending.observe(&event);
+            if let ShellEvent::Key {
+                key_code: Some(DEBUG_OVERLAY_KEY),
+                state: crcbl::shell::ButtonState::Pressed,
+                ..
+            } = event
+            {
+                toggle_debug = true;
+            }
+        });
         self.events += pending.count;
+        if toggle_debug {
+            self.debug.toggle();
+        }
 
         if pending.destroyed {
             return Ok(Flow::Stop(ExitReason::WindowDestroyed));
@@ -415,6 +460,10 @@ impl<S: Shell + ?Sized> Loop<S> {
 
         let now = self.clock_source.advance();
         self.frame_clock.update(now);
+        // The frame interval the clock just measured, recorded whether or not
+        // the panel is visible — a window that only fills while you are looking
+        // at it shows two seconds of nothing every time you press F3.
+        self.debug.record(self.frame_clock.render_dt());
         while self.frame_clock.consume_tick() {
             self.ticks += 1;
             tick(self.frame_clock.tick_dt_secs());
@@ -429,6 +478,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         // `alpha` is read after the tick loop, never before: before, the
         // accumulator may still hold whole ticks.
         render(self.frame_clock.alpha());
+        self.draw_debug_overlay();
         match self.gpu.frame()? {
             FrameOutcome::Presented => {
                 self.frames += 1;
@@ -448,6 +498,29 @@ impl<S: Shell + ?Sized> Loop<S> {
             }
         }
         Ok(Flow::Continue)
+    }
+
+    /// Gathers this frame's debug sections and draws the panel.
+    ///
+    /// **This is the whole of "switching it on".** Frame timing comes with the
+    /// overlay; the only sandbox-specific line is the one that offers the GPU
+    /// timings, and it is a `Some` check because a device without timestamp
+    /// queries has no timers at all. There is no network module here either —
+    /// the sandbox has no connection at all, which is a stronger version of
+    /// breakout's and flappy's in-memory one.
+    fn draw_debug_overlay(&mut self) {
+        self.draw_list.clear();
+        self.debug.begin_frame();
+        if let Some(timings) = self.gpu.timings() {
+            self.debug.panel.add(timings);
+        }
+        let (width, height) = self.gpu.extent();
+        self.debug.render(
+            &mut self.draw_list,
+            crcbl::math::Vec2::new(width as f32, height as f32),
+            self.gpu.atlas(),
+        );
+        self.gpu.take_draw_list(&mut self.draw_list);
     }
 
     /// Tears the window and the GPU down and reports what happened.
@@ -558,7 +631,127 @@ mod tests {
             tick_hz: 60,
             title: "test".to_string(),
             camera: CameraMode::Perspective,
+            debug_overlay: None,
         }
+    }
+
+    /// The value drawn immediately after the row labelled `label`.
+    fn row_value(drawn: &[String], label: &str) -> String {
+        let at = drawn
+            .iter()
+            .position(|text| text == label)
+            .unwrap_or_else(|| panic!("no {label} row in {drawn:?}"));
+        drawn
+            .get(at + 1)
+            .unwrap_or_else(|| panic!("no value after {label} in {drawn:?}"))
+            .clone()
+    }
+
+    /// Every `Text` command the frame handed to the UI pass.
+    fn ui_text(engine: &Loop<HeadlessShell>) -> Vec<String> {
+        use crcbl::ui::draw_list::DrawCommand;
+        engine
+            .gpu
+            .draw_list()
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The sandbox can turn the panel on too, and F3 is all it takes.**
+    ///
+    /// Rule 4 applies to the sandbox as much as to a game, and the sandbox had
+    /// no UI pass at all before this — which is exactly the finding the rule
+    /// exists to surface. It has no HUD and never will; the overlay is the whole
+    /// of its UI.
+    #[test]
+    fn f3_toggles_the_debug_overlay_in_the_sandbox() {
+        let mut engine = scripted(&Options {
+            debug_overlay: Some(false),
+            ..headless(16)
+        });
+        let window = engine.window();
+
+        engine.frame().expect("a frame");
+        engine.frame().expect("a frame");
+        assert!(
+            ui_text(&engine).is_empty(),
+            "the sandbox draws no UI at all while the panel is off",
+        );
+        assert!(
+            !engine.gpu.last_dump().contains("ui-composite"),
+            "and declares no UI pass either:\n{}",
+            engine.gpu.last_dump(),
+        );
+
+        engine
+            .shell_mut()
+            .key_press(window, DEBUG_OVERLAY_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        let drawn = ui_text(&engine);
+        for row in ["frame", "fps", "avg", "worst", "window"] {
+            assert!(drawn.iter().any(|t| t == row), "missing {row}: {drawn:?}");
+        }
+
+        // **The numbers come from the clock, not from nowhere.** A frame that
+        // never fed the window would draw the same labels with 0.00 ms beside
+        // them, which is the failure a "the rows are present" assertion misses.
+        // The first frame's interval is the clock's zero-length sentinel and is
+        // dropped, so three frames leave two samples of the headless step.
+        assert_eq!(engine.debug.frame.len(), 2, "two real intervals so far");
+        assert_eq!(
+            engine.debug.frame.mean(),
+            crcbl::engine::HEADLESS_FRAME_STEP,
+            "the window holds the clock's own step",
+        );
+        assert_eq!(row_value(&drawn, "avg"), "16.67 ms");
+        assert_eq!(row_value(&drawn, "window"), "2/120");
+        assert_eq!(row_value(&drawn, "fps"), "60.0");
+
+        // And the panel is composed of exactly the modules the sandbox has: the
+        // frame's, plus the renderer's when the device has timestamp queries.
+        // There is no connection here at all, so there is no network module —
+        // the stronger version of breakout's and flappy's in-memory one.
+        let titles: Vec<&str> = engine
+            .debug
+            .panel
+            .sections()
+            .iter()
+            .map(crcbl::ui::DebugSection::title)
+            .collect();
+        let expected: &[&str] = if engine.gpu.timings().is_some() {
+            &["frame", "gpu"]
+        } else {
+            &["frame"]
+        };
+        assert_eq!(titles, expected, "no module appears that no system offered");
+
+        // **And it reaches the GPU.** `UiRenderer::add_pass` declares nothing
+        // when the draw list is empty, so the pass's presence in the frame's
+        // graph is the difference between "the overlay was drawn" and "the
+        // overlay was composited onto the frame the player sees".
+        assert!(
+            engine.gpu.last_dump().contains("ui-composite"),
+            "the UI pass must be in the frame:\n{}",
+            engine.gpu.last_dump(),
+        );
+
+        engine
+            .shell_mut()
+            .key_press(window, DEBUG_OVERLAY_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(
+            ui_text(&engine).is_empty(),
+            "F3 again must take it away: {:?}",
+            ui_text(&engine),
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
     /// The CI-visible promise: a headless run terminates, and terminates with

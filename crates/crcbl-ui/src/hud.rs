@@ -33,6 +33,32 @@ pub enum Anchor {
     Center,
 }
 
+impl Anchor {
+    /// The top-left pixel position of a `content`-sized box inset by `offset`
+    /// from this anchor on a `screen_size` screen.
+    ///
+    /// The content extent is needed because `offset` is an *inset*: a
+    /// right-anchored box's right edge is `offset.x` in from the right of the
+    /// screen, so its left edge — what this returns — depends on how wide it is.
+    /// Returning `screen.x - offset.x` as the left edge, as [`HudPanel`] used
+    /// to, runs a right-anchored panel straight off the screen.
+    ///
+    /// On [`Anchor`] rather than on [`HudPanel`] because the debug overlay
+    /// anchors the same way and a second copy of this arithmetic is a second
+    /// place for that bug to come back.
+    #[must_use]
+    pub fn position(self, screen_size: Vec2, offset: Vec2, content: Vec2) -> Vec2 {
+        let far = screen_size - offset - content;
+        match self {
+            Self::TopLeft => offset,
+            Self::TopRight => Vec2::new(far.x, offset.y),
+            Self::BottomLeft => Vec2::new(offset.x, far.y),
+            Self::BottomRight => far,
+            Self::Center => (screen_size - content) * 0.5 + offset,
+        }
+    }
+}
+
 /// A positioned panel in the HUD.
 #[derive(Debug, Clone)]
 pub struct HudPanel {
@@ -159,22 +185,9 @@ impl HudPanel {
     }
 
     /// Compute the top-left pixel position of this panel from its anchor and
-    /// the extent of its content.
-    ///
-    /// The content extent is needed because `offset` is an *inset*: a
-    /// right-anchored panel's right edge is `offset.x` in from the right of the
-    /// screen, so its left edge — what this returns — depends on how wide it
-    /// is. Returning `screen.x - offset.x` as the left edge, as this used to,
-    /// runs a right-anchored panel straight off the screen.
+    /// the extent of its content. See [`Anchor::position`].
     fn anchor_pos(&self, screen_size: Vec2, content: Vec2) -> Vec2 {
-        let far = screen_size - self.offset - content;
-        match self.anchor {
-            Anchor::TopLeft => self.offset,
-            Anchor::TopRight => Vec2::new(far.x, self.offset.y),
-            Anchor::BottomLeft => Vec2::new(self.offset.x, far.y),
-            Anchor::BottomRight => far,
-            Anchor::Center => (screen_size - content) * 0.5 + self.offset,
-        }
+        self.anchor.position(screen_size, self.offset, content)
     }
 }
 

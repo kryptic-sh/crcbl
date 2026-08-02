@@ -16,6 +16,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl-ui**: `crcbl_ui::debug` — the modular debug overlay every sample now
+  ships. `DebugPanel` holds `DebugSection`s and names no system; a system
+  contributes by implementing `DebugModule`, whose one method fills a section it
+  is handed, and the frame calls `DebugPanel::add` once per system it actually
+  has. `FrameStats` is the module every frame has: a rolling window of frame
+  intervals reporting FPS, average, last, best and worst. FPS is frames divided
+  by the time they took, not the mean of the instantaneous rates — the two
+  disagree in exactly the case a profiler exists for. `DebugOverlay` bundles the
+  panel with the frame window so a sample switches the whole thing on in one
+  line. `Anchor::position` is the panel's anchoring arithmetic, lifted off
+  `HudPanel` so there is one copy of it.
+- **crcbl-render**: `FrameTimings` implements `crcbl_ui::debug::DebugModule`, so
+  the per-pass GPU timestamps that already existed appear in the overlay as a
+  `gpu` section — one row per pass, plus the total and the frame number. The
+  adapter lives here rather than in `crcbl-ui` because the overlay is not
+  allowed to know that a render pass exists.
+- **breakout**, **flappy**, **sandbox**: the debug overlay, toggled with **F3**
+  and defaulting to visible in a debug build. `--debug-overlay` and
+  `--no-debug-overlay` override the default. Neither game has a network module —
+  both run over `InMemoryTransport` — which is what makes them the check that
+  the panel composes rather than hard-codes its sections. The sandbox gained a
+  UI pass to carry it; it still has no HUD and is not getting one.
 - **flappy**: a second game, playable natively and at
   `https://crcbl.kryptic.sh/demos/flappy/`. One button, a bird under gravity,
   and an endless procession of pipes whose gaps are a pure function of a seed

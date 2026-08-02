@@ -21,12 +21,14 @@
 
 use core::time::Duration;
 
+use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Clock, ConfigureError, ExitReason, Flow, FrameOutcome, GpuError, MAX_CONSECUTIVE_RECONFIGURES,
     Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{LogicalSize, ShellBackend as Backend, WindowId, open, open_backend};
+use crcbl::ui::DebugOverlay;
 
 use crate::game::{self, Game, GameState, RenderState};
 use crate::gpu::{Gpu, PendingGpu};
@@ -109,6 +111,13 @@ impl From<ConfigureError> for BreakoutError {
 
 // ---- the loop ---------------------------------------------------------------
 
+/// The key that shows and hides the debug overlay.
+///
+/// F3 because that is what a player already tries. Every sample uses the same
+/// one for the same reason `--debug-overlay` is spelled the same way in each:
+/// "switching it on is one thing" is only true if it is the *same* thing.
+pub const DEBUG_OVERLAY_KEY: KeyCode = KeyCode::F3;
+
 #[derive(Debug)]
 pub struct Loop<S: Shell + ?Sized = dyn Shell> {
     shell: Box<S>,
@@ -122,6 +131,10 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
     draw_list: crcbl::ui::draw_list::DrawList,
     render_state: RenderState,
     hud: HudStrings,
+    /// The modular debug panel: frame timing always, GPU pass timings when the
+    /// device has timestamp queries, and nothing else — breakout runs over
+    /// `InMemoryTransport`, so it has no network module to add.
+    debug: DebugOverlay,
     frames: u64,
     ticks: u64,
     events: u64,
@@ -221,6 +234,7 @@ impl<S: Shell + ?Sized> Loop<S> {
             draw_list: crcbl::ui::draw_list::DrawList::new(),
             render_state: RenderState::default(),
             hud: HudStrings::default(),
+            debug: DebugOverlay::with_visible(options.debug_overlay_visible()),
             frames: 0,
             ticks: 0,
             events,
@@ -255,6 +269,19 @@ impl<S: Shell + ?Sized> Loop<S> {
         &mut self.game
     }
 
+    /// The shell, at whatever type this loop was built with — so a test can
+    /// inject the key events a compositor would deliver.
+    #[cfg(test)]
+    fn shell_mut(&mut self) -> &mut S {
+        self.shell.as_mut()
+    }
+
+    /// The window this loop is driving.
+    #[cfg(test)]
+    const fn window(&self) -> WindowId {
+        self.window
+    }
+
     /// The swapchain's current extent, in pixels.
     #[must_use]
     pub const fn extent(&self) -> (u32, u32) {
@@ -276,6 +303,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         }
 
         let mut pending = Pending::default();
+        let mut toggle_debug = false;
         let game = &mut self.game;
         self.shell.pump(&mut |event| {
             pending.observe(&event);
@@ -287,10 +315,21 @@ impl<S: Shell + ?Sized> Loop<S> {
                 ..
             } = event
             {
-                game.key_event(code, matches!(state, crcbl::shell::ButtonState::Pressed));
+                let pressed = matches!(state, crcbl::shell::ButtonState::Pressed);
+                // The overlay is not simulation, so its key never reaches the
+                // game: a toggle recorded into the tick's input would change
+                // what a scripted run replays.
+                if code == DEBUG_OVERLAY_KEY {
+                    toggle_debug |= pressed;
+                    return;
+                }
+                game.key_event(code, pressed);
             }
         });
         self.events += pending.count;
+        if toggle_debug {
+            self.debug.toggle();
+        }
 
         if pending.destroyed {
             return Ok(Flow::Stop(ExitReason::WindowDestroyed));
@@ -305,6 +344,10 @@ impl<S: Shell + ?Sized> Loop<S> {
 
         let now = self.clock_source.advance();
         self.frame_clock.update(now);
+        // The frame interval the clock just measured, recorded whether or not
+        // the panel is visible — a window that only fills while you are looking
+        // at it shows two seconds of nothing every time you press F3.
+        self.debug.record(self.frame_clock.render_dt());
         while self.frame_clock.consume_tick() {
             self.ticks += 1;
             self.game.tick();
@@ -316,6 +359,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         self.draw_list.clear();
         self.hud.refresh(&self.render_state);
         draw_hud(&mut self.draw_list, &self.hud);
+        self.draw_debug_overlay();
         self.gpu.take_draw_list(&mut self.draw_list);
 
         match self.gpu.frame()? {
@@ -331,6 +375,27 @@ impl<S: Shell + ?Sized> Loop<S> {
             }
         }
         Ok(Flow::Continue)
+    }
+
+    /// Gathers this frame's debug sections and draws the panel.
+    ///
+    /// **This is the whole of "switching it on".** Frame timing comes with the
+    /// overlay; the only sample-specific line is the one that offers the GPU
+    /// timings, and it is a `Some` check because a device without timestamp
+    /// queries has no timers at all. Breakout adds nothing else — it runs over
+    /// `InMemoryTransport`, so there is no network module, and the panel renders
+    /// exactly the same way without one.
+    fn draw_debug_overlay(&mut self) {
+        self.debug.begin_frame();
+        if let Some(timings) = self.gpu.timings() {
+            self.debug.panel.add(timings);
+        }
+        let (width, height) = self.gpu.extent();
+        self.debug.render(
+            &mut self.draw_list,
+            glam::Vec2::new(width as f32, height as f32),
+            self.gpu.atlas(),
+        );
     }
 
     /// Tears the frame down and reports what the run did.
@@ -644,6 +709,7 @@ mod tests {
             backend: Some(GpuBackend::Null),
             frames: Some(frames),
             tick_hz: 60,
+            debug_overlay: None,
         }
     }
 
@@ -756,6 +822,135 @@ mod tests {
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
+    /// The value drawn immediately after the row labelled `label`.
+    fn row_value(drawn: &[String], label: &str) -> String {
+        let at = drawn
+            .iter()
+            .position(|text| text == label)
+            .unwrap_or_else(|| panic!("no {label} row in {drawn:?}"));
+        drawn
+            .get(at + 1)
+            .unwrap_or_else(|| panic!("no value after {label} in {drawn:?}"))
+            .clone()
+    }
+
+    /// Every `Text` command the frame handed to the UI pass.
+    fn ui_text(engine: &Loop<HeadlessShell>) -> Vec<String> {
+        use crcbl::ui::draw_list::DrawCommand;
+        engine
+            .gpu
+            .draw_list()
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **Switching the panel on is one thing, and it works through the real
+    /// loop.** F3 arrives as an ordinary shell key event and the very next
+    /// frame's draw list gains the frame section; F3 again and it is gone. The
+    /// game's HUD is untouched either way.
+    #[test]
+    fn f3_toggles_the_debug_overlay_in_the_frames_draw_list() {
+        let mut engine = scripted(&Options {
+            debug_overlay: Some(false),
+            ..headless(16)
+        });
+        let window = engine.window();
+
+        // Two frames so the frame clock has a non-zero interval to report.
+        engine.frame().expect("a frame");
+        engine.frame().expect("a frame");
+        let hidden = ui_text(&engine);
+        assert!(
+            hidden.iter().any(|t| t.starts_with("Score:")),
+            "the game HUD is always drawn: {hidden:?}",
+        );
+        assert!(
+            !hidden.iter().any(|t| t == "frame"),
+            "the overlay starts hidden here: {hidden:?}",
+        );
+
+        engine
+            .shell_mut()
+            .key_press(window, DEBUG_OVERLAY_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        let shown = ui_text(&engine);
+        assert!(
+            shown.iter().any(|t| t == "frame") && shown.iter().any(|t| t == "fps"),
+            "F3 must show the frame section: {shown:?}",
+        );
+        assert!(
+            shown.iter().any(|t| t.starts_with("Score:")),
+            "the game HUD survives the overlay: {shown:?}",
+        );
+        engine
+            .shell_mut()
+            .key_press(window, DEBUG_OVERLAY_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        let hidden_again = ui_text(&engine);
+        assert!(
+            !hidden_again.iter().any(|t| t == "frame"),
+            "F3 again must hide it: {hidden_again:?}",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **The panel renders with no network module.** Breakout is one half of the
+    /// modularity check: it runs over `InMemoryTransport`, so the sections it
+    /// has are the frame's, plus the GPU's when the device has timestamp
+    /// queries. Nothing else, and no configuration decided that — the panel got
+    /// what the sample's systems offered.
+    #[test]
+    fn the_overlay_is_composed_of_exactly_the_modules_breakout_has() {
+        let mut engine = scripted(&Options {
+            debug_overlay: Some(true),
+            ..headless(8)
+        });
+        engine.frame().expect("a frame");
+        engine.frame().expect("a frame");
+
+        let titles: Vec<&str> = engine
+            .debug
+            .panel
+            .sections()
+            .iter()
+            .map(crcbl::ui::DebugSection::title)
+            .collect();
+        let expected: &[&str] = if engine.gpu.timings().is_some() {
+            &["frame", "gpu"]
+        } else {
+            &["frame"]
+        };
+        assert_eq!(titles, expected, "no module appears that no system offered");
+
+        let drawn = ui_text(&engine);
+        for row in ["frame", "fps", "avg", "worst", "window"] {
+            assert!(drawn.iter().any(|t| t == row), "missing {row}: {drawn:?}");
+        }
+
+        // **The numbers come from the clock, not from nowhere.** A frame that
+        // never fed the window would draw the same labels with 0.00 ms beside
+        // them, which is the failure a "the rows are present" assertion misses.
+        // The first frame's interval is the clock's zero-length sentinel and is
+        // dropped, so two frames leave exactly one sample: the headless step.
+        assert_eq!(engine.debug.frame.len(), 1, "one real interval so far");
+        assert_eq!(
+            engine.debug.frame.mean(),
+            crcbl::engine::HEADLESS_FRAME_STEP,
+            "the window holds the clock's own step",
+        );
+        assert_eq!(row_value(&drawn, "avg"), "16.67 ms");
+        assert_eq!(row_value(&drawn, "window"), "1/120");
+        assert_eq!(row_value(&drawn, "fps"), "60.0");
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
     /// Helper: build a Loop<HeadlessShell> for scripting.
     fn scripted(options: &Options) -> Loop<HeadlessShell> {
         Loop::with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
@@ -856,6 +1051,7 @@ mod tests {
             backend: Some(GpuBackend::Null),
             frames: Some(60),
             tick_hz: 60,
+            debug_overlay: None,
         };
 
         let mut fast = poll_to_completion(&options, Clock::manual(Duration::ZERO)).0;

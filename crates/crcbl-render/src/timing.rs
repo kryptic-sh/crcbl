@@ -40,6 +40,7 @@
 use core::fmt::Write as _;
 
 use crcbl_hal::{CommandEncoder, Device, Features, QueryKind, QuerySetDesc, QuerySetHandle};
+use crcbl_ui::debug::{DebugModule, DebugSection};
 
 use crate::graph::CompiledPass;
 
@@ -111,6 +112,43 @@ impl FrameTimings {
             );
         }
         out
+    }
+}
+
+/// The renderer's contribution to the debug overlay.
+///
+/// `docs/plan/07-ui-debug.md`'s first profiler surface is "stage 2/3 GPU pass
+/// timestamps"; this is the adapter that puts them there. It lives here, not in
+/// `crcbl-ui`, because the overlay is not allowed to know that a render pass
+/// exists — the module is contributed by the system it reports on. `crcbl-render`
+/// already depends on `crcbl-ui` (it owns the UI pass), so this is the direction
+/// the dependency already runs.
+///
+/// Every row is a number [`PassTimers`] resolved from a timestamp query. No row
+/// is derived from anything else, and there is no CPU number here: this struct
+/// measures the GPU and says so.
+impl DebugModule for FrameTimings {
+    fn debug_section(&self, out: &mut DebugSection) {
+        out.set_title("gpu");
+        if self.passes.is_empty() {
+            // Reached when the device has timers but the ring has not come round
+            // yet — the report is deliberately frames latent. A device with no
+            // timestamps at all has no `PassTimers`, so the caller adds no
+            // section.
+            out.row_str("timings", "pending");
+            return;
+        }
+        for pass in &self.passes {
+            out.row(
+                &pass.label,
+                format_args!("{:.3} ms", pass.gpu_nanos as f64 / 1.0e6),
+            );
+        }
+        out.row(
+            "total",
+            format_args!("{:.3} ms", self.total_nanos() as f64 / 1.0e6),
+        );
+        out.row("frame", format_args!("{}", self.frame));
     }
 }
 
@@ -360,6 +398,90 @@ mod tests {
         let report = timings.report();
         assert!(!report.contains("NaN"), "{report}");
         assert!(report.contains("0.0%"), "{report}");
+    }
+
+    /// **The numbers on the overlay are the renderer's own.** Every pass the
+    /// timers resolved appears as a row, with the label the graph gave it and
+    /// the milliseconds its own nanoseconds convert to — and the whole thing
+    /// reaches the draw list, not just the section.
+    #[test]
+    fn the_debug_section_carries_the_passes_the_renderer_reported() {
+        use crcbl_ui::debug::{DebugOverlay, DebugRow};
+        use crcbl_ui::draw_list::{DrawCommand, DrawList};
+        use crcbl_ui::text::FontAtlas;
+        use glam::Vec2;
+
+        let timings = FrameTimings {
+            frame: 7,
+            passes: vec![
+                PassTiming {
+                    label: "sprites".to_string(),
+                    gpu_nanos: 2_500_000,
+                },
+                PassTiming {
+                    label: "ui".to_string(),
+                    gpu_nanos: 250_000,
+                },
+            ],
+        };
+
+        let mut section = DebugSection::default();
+        timings.debug_section(&mut section);
+        assert_eq!(section.title(), "gpu");
+        let rows: Vec<(&str, &str)> = section
+            .rows()
+            .iter()
+            .map(|DebugRow { label, value }| (label.as_str(), value.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("sprites", "2.500 ms"),
+                ("ui", "0.250 ms"),
+                ("total", "2.750 ms"),
+                ("frame", "7"),
+            ],
+        );
+
+        // And through the panel: the same strings land in the draw list under
+        // the frame section, in the order the modules were added.
+        let mut overlay = DebugOverlay::with_visible(true);
+        overlay.record(core::time::Duration::from_millis(16));
+        overlay.begin_frame();
+        overlay.add(&timings);
+        let mut dl = DrawList::new();
+        overlay.render(&mut dl, Vec2::new(1280.0, 720.0), &FontAtlas::built_in());
+
+        let drawn: Vec<&str> = dl
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(drawn.first(), Some(&"frame"), "{drawn:?}");
+        let gpu = drawn
+            .iter()
+            .position(|text| *text == "gpu")
+            .expect("the gpu section is drawn");
+        assert_eq!(
+            &drawn[gpu..],
+            [
+                "gpu", "sprites", "2.500 ms", "ui", "0.250 ms", "total", "2.750 ms", "frame", "7",
+            ],
+        );
+    }
+
+    /// A device that has timers but has not resolved a frame yet says so rather
+    /// than reporting a 0.000 ms frame that never ran.
+    #[test]
+    fn a_latent_report_renders_as_pending_rather_than_zero() {
+        let mut section = DebugSection::default();
+        FrameTimings::default().debug_section(&mut section);
+        assert_eq!(section.title(), "gpu");
+        assert_eq!(section.rows().len(), 1);
+        assert_eq!(section.rows()[0].value, "pending");
     }
 
     /// The device this runs against has no timestamp queries, so the whole

@@ -28,6 +28,10 @@ OPTIONS:
                           Default: unlimited windowed, 120 headless.
         --tick-hz <N>     Simulation rate. Default: 60.
         --title <TITLE>   Window title. Default: \"Crucible sandbox\".
+        --debug-overlay   Start with the debug panel visible. F3 toggles it.
+        --no-debug-overlay
+                          Start with it hidden. The default is `visible in a
+                          debug build, hidden in a release build`.
     -h, --help            Print this text.
 
 ENVIRONMENT:
@@ -57,6 +61,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--headless" => options.headless = true,
+            "--debug-overlay" => options.debug_overlay = Some(true),
+            "--no-debug-overlay" => options.debug_overlay = Some(false),
             "-h" | "--help" => return Invocation::Help,
             "--backend" => match args.next() {
                 Some(name) => match GpuBackend::from_name(&name) {
@@ -138,6 +144,23 @@ mod tests {
         assert!(!options.headless);
         assert_eq!(options.frames, None);
         assert_eq!(options.tick_hz, 60);
+    }
+
+    /// Switching the debug overlay on is one flag, and the default follows the
+    /// build profile rather than a constant.
+    #[test]
+    fn the_debug_overlay_flags_override_the_build_profile_default() {
+        assert_eq!(options(&[]).debug_overlay, None);
+        assert_eq!(
+            options(&[]).debug_overlay_visible(),
+            cfg!(debug_assertions),
+            "the default is 'on in a dev build'",
+        );
+        assert!(options(&["--debug-overlay"]).debug_overlay_visible());
+        assert!(!options(&["--no-debug-overlay"]).debug_overlay_visible());
+        // Last flag wins, so a wrapper script can append an override.
+        assert!(!options(&["--debug-overlay", "--no-debug-overlay"]).debug_overlay_visible());
+        assert!(USAGE.contains("--debug-overlay"));
     }
 
     #[test]

@@ -309,6 +309,23 @@ impl Gpu {
         self.timers.as_ref().map(PassTimers::latest)
     }
 
+    /// The glyph atlas the UI pass renders text from.
+    ///
+    /// The debug overlay measures its own panel with it, and must measure with
+    /// the *same* atlas the pass draws with or the background rect is the wrong
+    /// size for the text inside it.
+    #[must_use]
+    pub const fn atlas(&self) -> &FontAtlas {
+        &self.atlas
+    }
+
+    /// The UI geometry this frame handed over, for the loop's own tests — the
+    /// list the UI pass actually uploads, HUD and debug overlay together.
+    #[cfg(test)]
+    pub const fn draw_list(&self) -> &DrawList {
+        &self.draw_list
+    }
+
     /// Records, submits and presents one frame.
     ///
     /// # Errors

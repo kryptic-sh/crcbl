@@ -110,16 +110,18 @@ use crcbl::engine::{GpuContext, GpuContextDesc};
 use crcbl::hal::CommandEncoderDesc;
 use crcbl::prelude::*;
 use crcbl::render::{
-    Camera, DirectionalLight, ForwardRenderer, PassTimers, RenderGraph, TransientPool,
+    Camera, DirectionalLight, ForwardRenderer, PassTimers, RenderGraph, TransientPool, UiRenderer,
 };
 use crcbl::shell::WindowId;
+use crcbl::ui::draw_list::DrawList;
+use crcbl::ui::text::FontAtlas;
 
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
 
 /// How many passes the per-pass GPU timers can bracket.
 ///
-/// The frame has two. Eight leaves room for a debug pass or two without a
-/// resize of the query sets, and costs sixteen timestamps.
+/// The frame has three — forward, tonemap, UI. Eight leaves room for a debug
+/// pass or two without a resize of the query sets, and costs sixteen timestamps.
 const MAX_TIMED_PASSES: u32 = 8;
 
 /// The sandbox's GPU side: the shared join plus the milestone 3–5 renderer.
@@ -136,11 +138,26 @@ pub struct Gpu {
     pub camera: Camera,
     /// The single directional light of milestone 4.
     pub light: DirectionalLight,
+    /// UI compositing, for the debug overlay.
+    ///
+    /// The sandbox has no game HUD and is not getting one — it is a milestone
+    /// harness, not a game. It has a UI pass because
+    /// `docs/plan/sample/00-samples-overview.md` rule 4 applies to it too, and
+    /// a sample that cannot turn the panel on is a finding about the panel.
+    ui: UiRenderer,
+    atlas: FontAtlas,
+    draw_list: DrawList,
     /// Seconds of animation, advanced by the loop rather than read from a clock
     /// here — a headless run must produce the same picture on every machine.
     elapsed: f32,
     /// Whether the graph dump has been logged since the last shape change.
     dumped: bool,
+    /// The last frame's graph dump, kept only for the loop's own tests: it is
+    /// how a test sees whether the UI pass was in the frame at all. `add_pass`
+    /// declares nothing when the draw list is empty, so the pass's presence in
+    /// this string *is* "the overlay reached the GPU".
+    #[cfg(test)]
+    last_dump: String,
 }
 
 impl Gpu {
@@ -178,6 +195,15 @@ impl Gpu {
         if timers.is_none() {
             log::info!("hal: no timestamp queries on this device; per-pass timing is off");
         }
+        // Rolled back by hand: `Gpu` has no `Drop`, so a `?` here would leak the
+        // forward renderer's pipelines rather than release them.
+        let ui = match UiRenderer::new(ctx.device(), ctx.queue(), ctx.format()) {
+            Ok(ui) => ui,
+            Err(error) => {
+                renderer.destroy(ctx.device());
+                return Err(GpuError::Hal(error));
+            }
+        };
 
         Ok(Self {
             ctx,
@@ -186,8 +212,13 @@ impl Gpu {
             timers,
             camera: Camera::default().with_projection(projection),
             light: DirectionalLight::default(),
+            ui,
+            atlas: FontAtlas::built_in(),
+            draw_list: DrawList::new(),
             elapsed: 0.0,
             dumped: false,
+            #[cfg(test)]
+            last_dump: String::new(),
         })
     }
 
@@ -211,6 +242,34 @@ impl Gpu {
     #[must_use]
     pub fn timings(&self) -> Option<&crcbl::render::FrameTimings> {
         self.timers.as_ref().map(PassTimers::latest)
+    }
+
+    /// Takes this frame's UI geometry, handing the previous frame's allocation
+    /// back so the caller can refill it instead of building a new one.
+    pub fn take_draw_list(&mut self, dl: &mut DrawList) {
+        std::mem::swap(&mut self.draw_list, dl);
+    }
+
+    /// The glyph atlas the UI pass renders text from.
+    ///
+    /// The debug overlay measures its own panel with it, and must measure with
+    /// the *same* atlas the pass draws with or the background rect is the wrong
+    /// size for the text inside it.
+    #[must_use]
+    pub const fn atlas(&self) -> &FontAtlas {
+        &self.atlas
+    }
+
+    /// The UI geometry this frame handed over, for the loop's own tests.
+    #[cfg(test)]
+    pub const fn draw_list(&self) -> &DrawList {
+        &self.draw_list
+    }
+
+    /// The last frame's render-graph dump, for the loop's own tests.
+    #[cfg(test)]
+    pub fn last_dump(&self) -> &str {
+        &self.last_dump
     }
 
     /// Advances the animation by `dt` seconds.
@@ -246,6 +305,10 @@ impl Gpu {
             ForwardRenderer::spin(self.elapsed),
             extent,
         )?;
+        // Upload this frame's UI geometry: the debug overlay, and only that.
+        self.ui
+            .begin_frame(self.ctx.device(), &self.draw_list, &self.atlas, 1.0)
+            .map_err(GpuError::Hal)?;
 
         let format = self.ctx.format();
         let compiled = {
@@ -255,6 +318,9 @@ impl Gpu {
                 ForwardRenderer::present_target(acquired.image, acquired.view, format, extent),
             );
             let _hdr = self.renderer.add_passes(&mut graph, target, extent);
+            // Composited on top of the tonemapped scene, so the overlay is
+            // readable over whatever the frame drew.
+            self.ui.add_pass(&mut graph, target, extent);
             // The pool is what remembers the previous frame, so the barriers
             // that open this one are ordered against it rather than against
             // nothing.
@@ -264,6 +330,10 @@ impl Gpu {
         // "The graph must be able to explain itself" — §2.4's debug-tools
         // principle. Once per shape rather than once per frame, because a dump
         // every frame is a log nobody reads.
+        #[cfg(test)]
+        {
+            self.last_dump = compiled.dump();
+        }
         if !self.dumped {
             log::debug!("render graph for the sandbox frame:\n{}", compiled.dump());
             self.dumped = true;
@@ -315,6 +385,7 @@ impl Gpu {
     pub fn destroy(mut self) -> Result<(), GpuError> {
         // Nothing may be destroyed while the device might still be using it.
         self.ctx.drain()?;
+        self.ui.destroy(self.ctx.device());
         self.pool.destroy(self.ctx.device());
         if let Some(timers) = self.timers.as_mut() {
             timers.destroy(self.ctx.device());

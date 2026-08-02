@@ -77,6 +77,55 @@ left:
   wants `nine: 12 12 0 0` and `art::paddle_rect` already produces the target
   rectangle `expand` would take.
 
+## The debug overlay, and what is left of it
+
+The modular panel is built and all three samples switch it on with F3 (or
+`--debug-overlay`): `crcbl_ui::debug` owns `DebugPanel`, `DebugSection`,
+`DebugModule`, `FrameStats` and `DebugOverlay`; `crcbl-render` contributes the
+`gpu` section by implementing `DebugModule` for `FrameTimings`. What is left:
+
+- **There is no network module, and no sample could show one yet.** The panel is
+  ready for it — a module is a `DebugModule` impl and one `add` call — but
+  nothing was written, for two reasons. The first is that `23-netcode.md`'s
+  netgraph list (RTT, jitter, loss, send/recv bandwidth, snapshot size, resend
+  counts, tick-lead) is **not measurable today**: `InMemoryTransport` has no
+  timing, no loss and no byte accounting, and `Client` exposes only
+  `is_connected`, `session_id`, `last_applied_tick`, `baseline_entity_count`,
+  `baseline_system_count`, `processing_error_count`, `auth_failure_count` and
+  `rate_limited_message_count`/`rate_limited_byte_count`. Those are real numbers
+  and a module could show them, but they are a connection-health readout, not a
+  netgraph, and shipping them under that name would make the P10 work look done.
+  The second is placement: the module belongs in the crate that owns the numbers
+  (`crcbl-client`, following `crcbl-render`'s example), which means a
+  `crcbl-client → crcbl-ui` dependency. That is not obviously wrong — `crcbl-ui`
+  depends on nothing but `glam` and `bytemuck`, so there is no cycle — but it is
+  the first time a simulation crate would depend on the UI, and it is a call
+  worth making deliberately rather than in passing. **What it would take**: the
+  transport growing byte and timing counters, then a `DebugModule` impl beside
+  them, then one `add` line in each sample that has a connection.
+- **The wiring is four lines, repeated three times.** Every sample's
+  `draw_debug_overlay` is the same: `begin_frame`, offer the GPU timings, render
+  into the draw list at the swapchain's extent. It is short enough not to hurt
+  at three copies and it is exactly the shape `web.rs` took before it became a
+  finding. The right home is `crcbl::engine`, next to `GpuContext` — the place
+  the shell and the HAL already meet — but that crate was out of scope for the
+  slice that built this. Fold it in when the fourth sample arrives, at the
+  latest.
+- **The panel's own cost is unmeasured.** It is designed not to perturb what it
+  measures — `DebugPanel::add` returns immediately while hidden so no module's
+  `debug_section` runs and no string is built, and section/row allocations are
+  reused across frames — but no benchmark says what it costs when visible.
+  `07-ui-debug.md`'s exit criterion is "<0.5 ms GPU for the debug overlay at
+  1080p", and that number has never been taken. The CPU side is one `DrawList`
+  text command per row (two allocations each, because `DrawList::text` takes an
+  owned `String`) plus one background rect.
+- **The overlay starts hidden in a release wasm build.** The default is
+  `cfg!(debug_assertions)`, which is sample rule 4's "on by default in dev
+  builds" taken literally; the demos on `crcbl.kryptic.sh` are release builds,
+  so a visitor has to press F3. Whether the published demos should default it on
+  is a product decision nobody has made. `web.rs` builds `Options::default()`,
+  so turning it on there is one field.
+
 ## Coverage gaps
 
 - **Flappy's swept-sphere collision is exercised, not demonstrated.**
@@ -94,6 +143,20 @@ left:
   the world through the real view-projection at five aspect ratios, which is
   stronger than the hand-written mapping it replaced, and is still not a pixel
   check that would catch the framing drifting.
+- **Only the sandbox asserts that its UI pass reaches the render graph.**
+  `f3_toggles_the_debug_overlay_in_the_sandbox` reads the frame's graph dump and
+  requires `ui-composite` to be present when the overlay is on and absent when
+  it is off, which is what makes "the overlay was drawn" mean "the overlay was
+  composited". Breakout and flappy have no equivalent — their tests stop at the
+  draw list reaching `Gpu` — because neither `Gpu` keeps the dump. This predates
+  the overlay: nothing ever asserted their HUD's pass either. Closing it is a
+  `#[cfg(test)] last_dump: String` in each, the same three lines the sandbox now
+  has.
+- **The overlay has never been looked at.** Every test over it is draw-list
+  strings and rectangles; no golden image, and no human has confirmed the panel
+  is legible over a lit scene or a bright sprite background. The layout maths
+  (value column past the longest label, panel inside the screen at two sizes) is
+  asserted; the _appearance_ is not.
 - **Nothing has looked at either sample's art come out of a GPU.** Every test
   over it is `Sheet` data, sprite rectangles and layer membership; the pictures
   in both retrofit reports were composited in software from the same sprite
@@ -236,14 +299,34 @@ uncertainty.
   different label. Nothing depends on the string except the roadmap's own
   cross-references and this file.
 
-- **Where does the debug panel's frame-timing core live in the plan?** Taken:
-  **pulled forward out of P10 and built as the next slice**, rather than given a
-  new phase number or left at P10. P10 keeps the rest of `07-ui-debug.md`'s
-  debug suite and `23-netcode.md`'s netgraph module. The reason is that both
-  existing samples want it now and two more are planned before P10, so leaving
-  it there would guarantee a third and fourth per-sample HUD — the shape
-  `web.rs` already took twice. _Changes it_: a decision to run the whole of P10
-  earlier instead, which would make the pull-forward unnecessary.
+- **What stays at P10 now that the frame-timing core is built?** Taken: **the
+  rest of it.** The core shipped early, out of P10, because both existing
+  samples wanted it and two more are planned before P10 — leaving it there would
+  have guaranteed a third and fourth per-sample HUD, the shape `web.rs` already
+  took twice. What P10 still owes is the rest of `07-ui-debug.md`'s suite
+  (inspector, console, culling stats, debug-draw controls, UI inspector) and
+  `23-netcode.md`'s netgraph, which is unbuildable before the transport can
+  measure itself. _Changes it_: a sample that needs one of those sooner, which
+  is the same argument that moved the frame-timing core.
+
+- **How does a module register with the panel — retained list or per frame?**
+  Taken: **per frame**, `DebugPanel::add(&dyn DebugModule)` once per system the
+  frame actually has, matching the crate's immediate-mode authoring. A retained
+  registry would need the panel to hold borrows or `Rc`s of every system that
+  reports, which is the plugin framework `07-ui-debug.md` explicitly does not
+  want, and it would make "a section appears because the system is present" into
+  "a section appears because someone remembered to register and to unregister".
+  _Changes it_: a module whose data is expensive enough to want gathering off
+  the frame path, which would want a handle rather than a per-frame call.
+
+- **What does the panel's FPS number mean?** Taken: **frames divided by the time
+  they took** over a rolling 120-frame window, not the mean of the per-frame
+  rates. The two agree only when every frame is the same length: 10 ms and 30 ms
+  average to 67 FPS as reciprocals and to 50 FPS as `2 / 40 ms`, and the second
+  is what the window actually ran at. 120 frames is two seconds at 60 Hz — short
+  enough to react while you are looking at it, long enough to read. _Changes
+  it_: wanting a 1%-low figure, which needs the sorted window this deliberately
+  does not keep.
 
 - **Which samples are exempt from the pixel-art rule?** Taken: **hud, viewer and
   sparks**, on the ground that each one's _subject_ is something other than
@@ -271,6 +354,17 @@ uncertainty.
   `flappy-and-breakout-utils` would be a third place for the same code to rot,
   and it would hide the evidence that `crcbl-audio` and `crcbl-store` are
   missing a layer.
+- **A `visible` check inside `DebugPanel::layout`.** It was written, and it
+  could not be made to fail: `add` refuses to gather while hidden and
+  `set_visible` drops what was gathered, so a hidden panel has no sections and
+  the emptiness check already returns `None`. A guard that no test can reach is
+  a guard that reports "passed" for reasons unrelated to what it guards, so it
+  was deleted and the reasoning left in its place.
+- **A `DebugSection::row` taking `String`s.** It takes `fmt::Arguments` instead,
+  so a module writes `row("fps", format_args!("{fps:.1}"))` and formats straight
+  into a `String` the section already owns. The ugly signature buys a
+  steady-state section rebuild that allocates nothing, which matters for the one
+  widget whose job is not to disturb the thing it is measuring.
 - **Tinting one brick sprite four ways instead of authoring four frames.** It is
   the cheaper sheet and it is what `app.rs`'s colour table used to do. Four
   frames is what lets the rows differ in their _shading_ — a lit top edge and a
