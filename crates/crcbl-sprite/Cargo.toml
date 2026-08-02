@@ -10,9 +10,13 @@ repository.workspace = true
 # the *description* of a sprite sheet plus the `.crpix` parser: no dependencies
 # at all, so anything can depend on it. `bake` adds the half a build script
 # wants — PNG encoding and the Aseprite sidecar — and is off by default so a
-# runtime consumer does not link an encoder it will never call.
+# runtime consumer does not link an encoder it will never call. `load` is the
+# other direction, for the runtime that reads what a build baked; it needs the
+# same codec, so a game enables `load` and a `build.rs` enables `bake`, and
+# neither links the other's half.
 [features]
 bake = ["dep:png"]
+load = ["dep:png"]
 
 [dependencies]
 png = { workspace = true, optional = true }

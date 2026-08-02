@@ -34,6 +34,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   bytes — correct only because `R8Unorm` is one byte per texel. The pitch is now
   computed in bytes and converted back once, at the copy, so an RGBA8 upload
   lands where it says it does.
+- **crcbl-sprite**: a `load` feature — `decode_png`, `read_aseprite_json` and
+  `load`, which take a baked sheet back apart into a `Sheet` and tightly packed
+  RGBA8. §7 of `docs/specs/crcbl/pix.md` specified what the sidecar contains and
+  nothing read it, so a baked sidecar was write-only. `SampleMode` does not
+  survive the trip — Aseprite's schema has nowhere to put it — and that is
+  asserted rather than assumed.
 
 ### Changed
 

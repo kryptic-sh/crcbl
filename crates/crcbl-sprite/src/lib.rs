@@ -48,6 +48,9 @@ pub mod trace;
 #[cfg(feature = "bake")]
 pub mod bake;
 
+#[cfg(feature = "load")]
+pub mod load;
+
 use core::fmt;
 
 /// A rectangle in sheet texels.

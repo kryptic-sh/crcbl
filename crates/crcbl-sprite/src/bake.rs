@@ -221,7 +221,12 @@ pub fn aseprite_json(sheet: &Sheet, image: &str, tick_hz: u32) -> String {
 ///
 /// Floored at 1: a zero-duration frame is "skip me" to some readers, and a
 /// sheet held for one tick at 240 Hz rounds to zero without it.
-fn duration_ms(hold: u32, tick_hz: u32) -> u32 {
+///
+/// Public so the reader's inverse can be tested against it directly rather
+/// than against a copy of the formula, which is the one thing a test of an
+/// inverse must not do.
+#[must_use]
+pub fn duration_ms(hold: u32, tick_hz: u32) -> u32 {
     let ms = (u64::from(hold) * 1000).div_ceil(u64::from(tick_hz));
     u32::try_from(ms).unwrap_or(u32::MAX).max(1)
 }
