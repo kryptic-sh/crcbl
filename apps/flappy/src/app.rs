@@ -294,22 +294,23 @@ impl<S: Shell + ?Sized> Loop<S> {
 
         let now = self.clock_source.advance();
         self.frame_clock.update(now);
+        let mut ticks_this_frame = 0;
         while self.frame_clock.consume_tick() {
             self.ticks += 1;
+            ticks_this_frame += 1;
             self.game.tick();
         }
 
         self.game.render_state(&mut self.render_state);
-        self.gpu.set_bird(self.render_state.bird);
+        self.gpu.set_world(&self.render_state);
+        // The bird's flap is on the simulation's clock, not the frame's — see
+        // `crate::art::Scene::advance`. A frame that ran no ticks advances it by
+        // nothing, which is what makes a paused game's bird hold still.
+        self.gpu.advance_animation(ticks_this_frame);
 
         self.draw_list.clear();
         self.hud.refresh(&self.render_state);
-        draw_world(
-            &mut self.draw_list,
-            &self.render_state,
-            self.gpu.extent(),
-            &self.hud,
-        );
+        draw_hud(&mut self.draw_list, &self.hud);
         self.gpu.take_draw_list(&mut self.draw_list);
 
         match self.gpu.frame()? {
@@ -542,110 +543,24 @@ impl HudStrings {
     }
 }
 
-/// Maps the scrolling world onto the surface, in pixels.
+/// Draws the HUD, and nothing else.
 ///
-/// Built from [`crate::gpu::camera_x`] and [`crate::gpu::camera_half_height`],
-/// the same two functions the camera itself uses. That is the whole reason they
-/// are public: the bird is drawn by the forward pass through the camera and the
-/// pipes are drawn by the UI pass through this, and the two only agree if there
-/// is one definition of where the view is.
-#[derive(Clone, Copy, Debug)]
-struct WorldToScreen {
-    centre_x: f32,
-    half_width: f32,
-    half_height: f32,
-    width: f32,
-    height: f32,
-}
-
-impl WorldToScreen {
-    fn new(extent: (u32, u32), bird_x: f64) -> Self {
-        Self {
-            centre_x: crate::gpu::camera_x(bird_x, extent),
-            half_width: crate::gpu::camera_half_width(extent),
-            half_height: crate::gpu::camera_half_height(),
-            width: extent.0.max(1) as f32,
-            height: extent.1.max(1) as f32,
-        }
-    }
-
-    fn point(self, x: f64, y: f64) -> glam::Vec2 {
-        glam::Vec2::new(
-            ((x as f32 - self.centre_x) / self.half_width * 0.5 + 0.5) * self.width,
-            (0.5 - y as f32 / self.half_height * 0.5) * self.height,
-        )
-    }
-
-    /// A world-space axis-aligned box as a screen-space `(min, max)` pair.
-    fn quad(self, cx: f64, cy: f64, half_w: f64, half_h: f64) -> (glam::Vec2, glam::Vec2) {
-        let a = self.point(cx - half_w, cy + half_h);
-        let b = self.point(cx + half_w, cy - half_h);
-        (a, b)
-    }
-}
-
-/// Draws the course and the HUD over it.
+/// # The world used to be in here
 ///
-/// # Why the pipes are quads
+/// Until the sprite pass existed it had to be: `crcbl-render`'s
+/// [`crcbl::render::ForwardRenderer`] draws **one** instance — `begin_frame`
+/// takes a single `model: Mat4` — so the bird was that instance and every pipe
+/// went through the UI pass as a screen-space quad, re-triangulated on the CPU
+/// every frame. Breakout hit the same wall with its bricks, independently,
+/// which is what made it a finding rather than a quirk.
 ///
-/// `crcbl-render`'s [`crcbl::render::ForwardRenderer`] draws **one** instance:
-/// `begin_frame` takes a single `model: Mat4` and `add_passes` records exactly
-/// `draw_indexed(0..index_count, 0, 0..1)`. The bird is that one instance; every
-/// pipe on screen has to go through the UI pass, which is the app's only
-/// multi-quad seam. Breakout hit the same wall with its bricks, which is the
-/// point worth recording: two games with nothing else in common were pushed into
-/// the same workaround by the same missing feature.
-fn draw_world(
-    dl: &mut crcbl::ui::draw_list::DrawList,
-    render: &RenderState,
-    extent: (u32, u32),
-    hud: &HudStrings,
-) {
-    use crate::game::{GAP_HALF_HEIGHT, PIPE_HALF_WIDTH, WORLD_CEILING, WORLD_FLOOR};
+/// It is closed. The course and the bird are sprites in world coordinates now,
+/// and with them went `WorldToScreen`, the world→pixel mapping this function
+/// used to build: there is one mapping, the camera's, and nothing left here
+/// that could disagree with it. The HUD is measured in pixels because a HUD is,
+/// which is what the UI pass has always been for.
+fn draw_hud(dl: &mut crcbl::ui::draw_list::DrawList, hud: &HudStrings) {
     use glam::Vec2;
-
-    let map = WorldToScreen::new(extent, render.bird.x);
-
-    // The ground and the lid, so the band the bird flies in has visible edges.
-    let (min, max) = map.quad(render.bird.x, WORLD_FLOOR - 1.0, map.half_width as f64, 1.0);
-    dl.rect(min, max, [0.20, 0.35, 0.20, 1.0]);
-
-    // Pipes: two boxes with the gap between them, clipped to the visible band
-    // rather than drawn to their real height, which runs twenty units past the
-    // top and bottom of the world.
-    for pipe in &render.pipes {
-        let top = pipe.gap_centre + GAP_HALF_HEIGHT;
-        let bottom = pipe.gap_centre - GAP_HALF_HEIGHT;
-        let ceiling = WORLD_CEILING + 1.0;
-        let floor = WORLD_FLOOR - 1.0;
-
-        let (min, max) = map.quad(
-            pipe.x,
-            f64::midpoint(top, ceiling),
-            PIPE_HALF_WIDTH,
-            (ceiling - top) / 2.0,
-        );
-        dl.rect(min, max, [0.25, 0.65, 0.30, 1.0]);
-
-        let (min, max) = map.quad(
-            pipe.x,
-            f64::midpoint(bottom, floor),
-            PIPE_HALF_WIDTH,
-            (bottom - floor) / 2.0,
-        );
-        dl.rect(min, max, [0.25, 0.65, 0.30, 1.0]);
-    }
-
-    // The bird, outlined rather than filled: the forward pass already draws it
-    // as a lit cube, and the outline is what shows the collider agrees with the
-    // mesh.
-    let (min, max) = map.quad(
-        render.bird.x,
-        render.bird.y,
-        crate::game::BIRD_RADIUS,
-        crate::game::BIRD_RADIUS,
-    );
-    dl.rect_outline(min, max, 2.0, [1.0, 0.85, 0.30, 1.0]);
 
     // HUD panel.
     dl.rect(
@@ -839,9 +754,15 @@ mod tests {
         assert_eq!(summary.state, GameState::WaitingToStart);
     }
 
-    /// The draw list carries the course, not just the bird.
+    /// **The course reaches the frame, and the HUD is all the draw list has.**
+    ///
+    /// This replaces `the_frame_draws_every_visible_pipe`, which counted the
+    /// pipes as UI rectangles. They are sprites now, so counting rectangles
+    /// would count the HUD panel forever and never notice the course had
+    /// stopped being drawn; what is checked instead is that the pipes reach
+    /// [`Gpu::set_world`] and that nothing but the HUD is left in the draw list.
     #[test]
-    fn the_frame_draws_every_visible_pipe() {
+    fn the_frame_hands_the_course_to_the_sprite_pass_and_the_hud_to_the_ui_pass() {
         use crcbl::ui::draw_list::{DrawCommand, DrawList};
 
         let mut engine = Loop::start(&headless(4)).expect("headless runs everywhere");
@@ -850,26 +771,23 @@ mod tests {
         let mut render = RenderState::default();
         engine.game.render_state(&mut render);
         assert!(!render.pipes.is_empty(), "the course is empty");
+        assert_eq!(
+            engine.gpu.pipes(),
+            render.pipes.as_slice(),
+            "the course never reached the renderer"
+        );
 
         let mut hud = HudStrings::default();
         hud.refresh(&render);
         let mut dl = DrawList::new();
-        draw_world(&mut dl, &render, engine.gpu.extent(), &hud);
-
-        // Two boxes per pipe, plus the ground and the HUD panel.
-        let rects = dl
-            .commands()
-            .iter()
-            .filter(|c| matches!(c, DrawCommand::Rect { .. }))
-            .count();
-        assert_eq!(rects, render.pipes.len() * 2 + 2, "{rects} rects");
+        draw_hud(&mut dl, &hud);
         assert_eq!(
             dl.commands()
                 .iter()
-                .filter(|c| matches!(c, DrawCommand::RectOutline { .. }))
+                .filter(|c| matches!(c, DrawCommand::Rect { .. }))
                 .count(),
             1,
-            "the bird outline is missing",
+            "only the HUD panel is a UI rectangle now",
         );
         assert_eq!(
             dl.commands()
@@ -878,70 +796,47 @@ mod tests {
                 .count(),
             2,
         );
+        assert!(
+            !dl.commands()
+                .iter()
+                .any(|c| matches!(c, DrawCommand::RectOutline { .. })),
+            "the bird is art now, not an outline",
+        );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
-    /// **The pipes scroll and the bird does not.** The bird is drawn through the
-    /// camera and the pipes through `WorldToScreen`; if the two disagreed about
-    /// where the view is, the course would slide against the bird as the run
-    /// went on — and every static screenshot would still look right.
+    /// The animation is on the simulation's clock: a frame that ran `n` ticks
+    /// advances the flap by exactly `n`.
+    ///
+    /// **At 120 Hz, not at 60.** A headless frame is pinned to 1/60 s, so at the
+    /// default rate every frame owes exactly one tick and a flap advanced once
+    /// per *frame* would agree with one advanced once per tick — the same
+    /// vacuity `ticks_are_paced_by_the_clock_not_the_frame_rate` exists to
+    /// avoid. At 120 Hz each frame owes two, and the two answers differ by a
+    /// factor of two.
     #[test]
-    fn the_bird_stays_put_on_screen_while_the_course_moves_past_it() {
-        let extent = (960, 720);
-        let mut previous: Option<(f32, f32)> = None;
-        for bird_x in [0.0, 5.0, 50.0, 500.0] {
-            let map = WorldToScreen::new(extent, bird_x);
-            let on_screen = map.point(bird_x, 0.0);
-            let pipe = map.point(FIRST_PIPE_X, 0.0);
-
-            if let Some((bird_before, pipe_before)) = previous {
-                assert!(
-                    (on_screen.x - bird_before).abs() < 1e-3,
-                    "the bird moved on screen from {bird_before} to {}",
-                    on_screen.x
-                );
-                assert!(
-                    pipe.x < pipe_before,
-                    "a fixed pipe should slide left as the bird advances: {pipe_before} then {}",
-                    pipe.x
-                );
-            }
-            previous = Some((on_screen.x, pipe.x));
+    fn the_flap_advances_by_the_ticks_the_frame_ran_and_not_by_the_frames() {
+        let mut engine = Loop::start(&Options {
+            tick_hz: 120,
+            ..headless(40)
+        })
+        .expect("headless runs everywhere");
+        let mut frames = 0u64;
+        while let Ok(Flow::Continue) = engine.frame() {
+            frames += 1;
         }
-        let map = WorldToScreen::new(extent, 0.0);
-        let fraction = map.point(0.0, 0.0).x / map.width;
+        let ticks = engine.ticks;
+        let elapsed = engine.gpu.animation_ticks();
+        assert!(ticks > 0, "a run with no ticks proves nothing");
         assert!(
-            (0.25..0.35).contains(&fraction),
-            "the bird should sit about a third across, not {fraction}"
+            ticks > frames,
+            "at 120 Hz a 60 fps run owes two ticks a frame; {ticks} ticks over \
+             {frames} frames cannot tell the two apart"
         );
+        assert_eq!(
+            elapsed, ticks,
+            "the flap has seen {elapsed} ticks and the simulation has run {ticks}"
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
-
-    /// The whole playable band is on screen at every aspect ratio a window or a
-    /// canvas can hand us. Breakout's camera cropped its field at 4:3, which is
-    /// exactly the shape the demo site's canvas is styled with.
-    #[test]
-    fn the_playable_band_is_on_screen_at_every_aspect_ratio() {
-        use crate::game::{WORLD_CEILING, WORLD_FLOOR};
-
-        for extent in [
-            (960, 720),   // what the window opens at, and the canvas's ratio
-            (800, 600),   // 4:3 again, smaller
-            (1920, 1080), // 16:9
-            (1440, 400),  // a canvas clamped by `max-height: 68vh`
-            (600, 900),   // taller than it is wide
-        ] {
-            let map = WorldToScreen::new(extent, 0.0);
-            for y in [WORLD_CEILING, WORLD_FLOOR] {
-                let point = map.point(0.0, y);
-                assert!(
-                    point.y >= 0.0 && point.y <= map.height,
-                    "{extent:?} put y = {y} at {} of {}",
-                    point.y,
-                    map.height
-                );
-            }
-        }
-    }
-
-    use crate::game::FIRST_PIPE_X;
 }

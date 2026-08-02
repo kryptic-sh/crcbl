@@ -1,0 +1,85 @@
+# The bird, and its flap.
+#
+# 16x16 because that is the size a wing can be drawn at three times and still
+# read as the same bird: the three frames differ only in rows 5-12, which is
+# where the wing lives, and everything above the wing — head, eye, beak — is
+# byte-identical so the head does not shimmer as the wing beats.
+#
+# One world unit is `art::TEXELS_PER_UNIT` texels, so this draws 0.8 x 0.8
+# world units against a collider of 2 * BIRD_RADIUS = 0.7. The sprite is a
+# little larger than the thing it collides with, which is the right way round:
+# a bird that visibly clears a pipe it actually hit is the complaint.
+crpix: 16 16 3 7 1
+
+palette:
+  . c None
+  k c #2b1d10
+  y c #f2c14e
+  o c #d8862f
+  w c #ffffff
+  r c #e05a2b
+  b c #b5772e
+
+# Wing up: the down-beat has just finished and the wing is above the body, so
+# rows 8-9 are plain flank.
+frame up:
+  ................
+  .....kkkkkk.....
+  ...kkyyyyyykk...
+  ..kyyyyyyyyyyk..
+  .kyyyyyyyywwyyk.
+  kyybbbbbbywkyyyk
+  kyybbbbbbyyykrrr
+  kyybbbbbbyyykrr.
+  kyyyyyyyyyyyyk..
+  .kyyyyyyyyyyyk..
+  .kyyyyyyyyyyk...
+  ..koooooooook...
+  ...kooooooook...
+  ....kkoookk.....
+  ......kkkk......
+  ................
+
+# Wing level: mid-stroke, the wing across the flank.
+frame level:
+  ................
+  .....kkkkkk.....
+  ...kkyyyyyykk...
+  ..kyyyyyyyyyyk..
+  .kyyyyyyyywwyyk.
+  kyyyyyyyyywkyyyk
+  kyyyyyyyyyyykrrr
+  kyyyyyyyyyyykrr.
+  kyybbbbbbyyyyk..
+  .kyybbbbbbyyyk..
+  .kyyyyyyyyyyk...
+  ..koooooooook...
+  ...kooooooook...
+  ....kkoookk.....
+  ......kkkk......
+  ................
+
+# Wing down: the stroke that lifts, the wing dropped through the belly line.
+frame down:
+  ................
+  .....kkkkkk.....
+  ...kkyyyyyykk...
+  ..kyyyyyyyyyyk..
+  .kyyyyyyyywwyyk.
+  kyyyyyyyyywkyyyk
+  kyyyyyyyyyyykrrr
+  kyyyyyyyyyyykrr.
+  kyyyyyyyyyyyyk..
+  .kyyyyyyyyyyyk..
+  .kybbbbbbyyyyk..
+  ..kbbbbbbooook..
+  ...kbbbboook....
+  ....kkoookk.....
+  ......kkkk......
+  ................
+
+# Ping-pong rather than forward: up-level-down-level, so the wing returns the
+# way it went rather than snapping from down back to up. Five ticks a showing
+# is twenty ticks a cycle, three flaps a second at the default 60 Hz.
+clip flap: up level down @ 5 loop pingpong
+sample: pixel

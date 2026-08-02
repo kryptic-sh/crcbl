@@ -31,6 +31,7 @@
 
 mod app;
 mod args;
+mod art;
 mod audio;
 mod best;
 mod game;

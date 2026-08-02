@@ -15,23 +15,45 @@
 //! frame, or the pipes slide against the bird they are supposed to be fixed
 //! relative to.
 //!
-//! That is why [`camera_x`] is public and `app.rs` derives its world→screen
-//! mapping from it rather than keeping a second copy of the offset. Two copies
-//! of a number that has to agree is how the first version of breakout's camera
+//! That is why [`camera_x`] is public and everything placed against the view —
+//! the sprites, and the parallax offset every background band takes — is
+//! derived from **one** call to it per frame, in [`Gpu::frame`]. Two copies of
+//! a number that has to agree is how the first version of breakout's camera
 //! went wrong.
+//!
+//! # There is no forward pass
+//!
+//! There was one, and it drew the bird as a lit cube, because
+//! `ForwardRenderer::begin_frame` takes a single `model: Mat4` and one instance
+//! was all flappy could get out of it. The bird is a sprite now, so the forward
+//! renderer had nothing left to draw — and it was carrying an HDR scene target,
+//! a depth buffer, a tonemap pass and a cube mesh to draw it. All of that is
+//! gone; what the pass also did, and what had to be replaced, is **clear the
+//! swapchain**, which is now a one-line `clear_color` pass named `sky`.
+//! [`ForwardRenderer::present_target`] survives as the import helper, which is
+//! an associated function and needs no renderer.
+//!
+//! # Pass order is declaration order
+//!
+//! `sky` (clear) → `sprites` (the game) → `ui` (the HUD). The last two both
+//! load the target rather than clearing it, so declaring the UI pass first
+//! would put the course on top of the score.
 
 use crcbl::backend::GpuBackend;
 use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError, PendingGpuContext};
 use crcbl::hal::{CommandEncoderDesc, Features};
-use crcbl::math::{Mat4, Vec3};
+use crcbl::math::Vec3;
 use crcbl::prelude::*;
 use crcbl::render::{
-    Camera, DirectionalLight, ForwardRenderer, PassTimers, Projection, RenderGraph, TransientPool,
+    Camera, ForwardRenderer, PassTimers, Projection, RenderGraph, SpriteRenderer, TransientPool,
     UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::text::FontAtlas;
+
+use crate::art::{Scene, TEXELS_PER_UNIT};
+use crate::game::{PipeView, RenderState};
 
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
 const MAX_TIMED_PASSES: u32 = 8;
@@ -67,10 +89,10 @@ pub fn camera_half_width(extent: (u32, u32)) -> f32 {
 
 /// Where the camera is centred when the bird is at `bird_x`.
 ///
-/// Public because `app.rs`'s world→screen mapping has to use the same value:
-/// the pipes are drawn as UI quads and the bird as a lit cube through the
-/// forward pass, and the two only line up if both are placed against this
-/// number.
+/// Public because everything on screen is placed against it: the sprite pass's
+/// view-projection, and — through [`crate::art::Scene::build`] — the offset
+/// every parallax band takes. [`Gpu::frame`] calls it **once** and passes the
+/// result to both.
 #[must_use]
 pub fn camera_x(bird_x: f64, extent: (u32, u32)) -> f32 {
     let half_width = camera_half_width(extent);
@@ -80,9 +102,16 @@ pub fn camera_x(bird_x: f64, extent: (u32, u32)) -> f32 {
 }
 
 /// The camera projection for an `extent`-sized viewport.
+///
+/// **In sprite units, not world units.** [`crate::art`]'s header sets out why
+/// the sprite plane is scaled: a nine-slice's fixed bands are its insets taken
+/// as one target unit per texel, so the pipe's cap only keeps its shape if one
+/// texel is one unit of the space the sprites are drawn in. The camera is
+/// scaled to match here, in the same function that decides the half-height, so
+/// there is one place the two can be made to disagree and it is this one.
 fn projection() -> Projection {
     Projection::Orthographic {
-        half_height: camera_half_height(),
+        half_height: camera_half_height() * TEXELS_PER_UNIT,
         near: 0.1,
         far: 100.0,
     }
@@ -93,14 +122,17 @@ fn projection() -> Projection {
 #[derive(Debug)]
 pub struct Gpu {
     ctx: GpuContext,
-    renderer: ForwardRenderer,
     pool: TransientPool,
     timers: Option<PassTimers>,
     camera: Camera,
-    light: DirectionalLight,
-    /// Where the bird is this frame, from the game. Drives both the camera and
-    /// the cube the forward pass draws.
+    /// Where the bird is this frame, from the game. Drives the camera and the
+    /// bird sprite.
     bird: glam::DVec3,
+    /// The course this frame, refilled rather than reallocated.
+    pipes: Vec<PipeView>,
+    /// The sprite pass, and the art it draws.
+    sprites: SpriteRenderer,
+    scene: Scene,
     /// UI compositing.
     ui: UiRenderer,
     atlas: FontAtlas,
@@ -185,26 +217,38 @@ impl Gpu {
         })
     }
 
-    /// Builds this game's renderers on an already-open context.
+    /// Builds this game's renderers on an already-open context, and uploads the
+    /// art.
     ///
     /// # Errors
     ///
-    /// [`GpuError`] if the forward renderer or the UI compositor refused the
-    /// device.
+    /// [`GpuError`] if the sprite pass or the UI compositor refused the device,
+    /// or if a sheet upload failed.
     fn from_context(ctx: GpuContext) -> Result<Self, GpuError> {
         let format = ctx.format();
-        let renderer = ForwardRenderer::new(ctx.device(), ctx.queue(), format)?;
         let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
+        let mut sprites =
+            SpriteRenderer::new(ctx.device(), ctx.queue(), format).map_err(GpuError::Hal)?;
+        // Registering a sheet is a blocking staging upload — start-up work,
+        // like the glyph atlas below it, and never something a frame does.
+        let scene = match Scene::new(ctx.device(), &mut sprites) {
+            Ok(scene) => scene,
+            Err(error) => {
+                sprites.destroy(ctx.device());
+                return Err(GpuError::Hal(error));
+            }
+        };
         let ui = UiRenderer::new(ctx.device(), ctx.queue(), format).map_err(GpuError::Hal)?;
 
         Ok(Self {
             ctx,
-            renderer,
             pool: TransientPool::new(),
             timers,
             camera: Camera::default().with_projection(projection()),
-            light: DirectionalLight::default(),
             bird: crate::game::BIRD_START,
+            pipes: Vec::new(),
+            sprites,
+            scene,
             ui,
             atlas: FontAtlas::built_in(),
             draw_list: DrawList::new(),
@@ -217,9 +261,32 @@ impl Gpu {
         self.ctx.extent()
     }
 
-    /// Set the bird's world position for the current frame.
-    pub const fn set_bird(&mut self, bird: glam::DVec3) {
-        self.bird = bird;
+    /// Takes this frame's world: where the bird is, and where the course is.
+    ///
+    /// The pipes are copied into a `Vec` this struct keeps rather than borrowed,
+    /// because [`Gpu::frame`] runs after the caller has moved on and the list is
+    /// refilled every frame from a treadmill that hands over a fresh one.
+    pub fn set_world(&mut self, render: &RenderState) {
+        self.bird = render.bird;
+        self.pipes.clear();
+        self.pipes.extend_from_slice(&render.pipes);
+    }
+
+    /// Moves the bird's flap on by whole simulation ticks.
+    pub const fn advance_animation(&mut self, ticks: u64) {
+        self.scene.advance(ticks);
+    }
+
+    /// The course this frame, for the loop's own tests.
+    #[cfg(test)]
+    pub fn pipes(&self) -> &[PipeView] {
+        &self.pipes
+    }
+
+    /// How many ticks the bird's flap has been advanced by, for the same.
+    #[cfg(test)]
+    pub const fn animation_ticks(&self) -> u64 {
+        self.scene.animation_ticks()
     }
 
     /// Takes this frame's draw list, handing the previous frame's allocation
@@ -249,18 +316,23 @@ impl Gpu {
         // The swapchain's extent, not the one the resize event reported: on the
         // frame a reconfigure lands they can differ, and the camera must agree
         // with the surface actually being drawn into.
-        let centre = camera_x(self.bird.x, extent);
+        //
+        // **One call to `camera_x`, and everything else is derived from it.**
+        // The sprite plane is `TEXELS_PER_UNIT` times the world (see
+        // `crate::art`), so the scale is applied here, once, to the value both
+        // the projection and the parallax offsets are built from.
+        let centre = camera_x(self.bird.x, extent) * TEXELS_PER_UNIT;
+        let half_width = camera_half_width(extent) * TEXELS_PER_UNIT;
         self.camera.projection = projection();
         self.camera.eye = Vec3::new(centre, 0.0, 2.0);
         self.camera.target = Vec3::new(centre, 0.0, 0.0);
 
-        self.renderer.begin_frame(
-            self.ctx.device(),
-            &self.camera,
-            &self.light,
-            bird_model(self.bird),
-            extent,
-        )?;
+        let aspect = extent.0.max(1) as f32 / extent.1.max(1) as f32;
+        let view_projection = self.camera.view_projection(aspect);
+        let sprites = self.scene.build(self.bird, &self.pipes, centre, half_width);
+        self.sprites
+            .begin_frame(self.ctx.device(), sprites, view_projection, extent)
+            .map_err(GpuError::Hal)?;
         self.ui
             .begin_frame(self.ctx.device(), &self.draw_list, &self.atlas, 1.0)
             .map_err(GpuError::Hal)?;
@@ -272,7 +344,13 @@ impl Gpu {
                 "swapchain",
                 ForwardRenderer::present_target(acquired.image, acquired.view, format, extent),
             );
-            let _hdr = self.renderer.add_passes(&mut graph, target, extent);
+            // The clear the forward pass used to do on its way to a tonemap.
+            // Declared first, and it is the only pass that does not load.
+            graph
+                .add_render_pass("sky")
+                .clear_color(target, crate::art::SKY)
+                .execute(|_| {});
+            self.sprites.add_pass(&mut graph, target);
             self.ui.add_pass(&mut graph, target, extent);
             graph.compile(&self.pool)?
         };
@@ -324,27 +402,13 @@ impl Gpu {
     pub fn destroy(mut self) -> Result<(), GpuError> {
         self.ctx.drain()?;
         self.ui.destroy(self.ctx.device());
+        self.sprites.destroy(self.ctx.device());
         self.pool.destroy(self.ctx.device());
         if let Some(timers) = self.timers.as_mut() {
             timers.destroy(self.ctx.device());
         }
-        self.renderer.destroy(self.ctx.device());
         self.ctx.destroy()
     }
-}
-
-/// Model matrix for the bird: a small cube at its world position.
-///
-/// The forward pass draws exactly one instance — `begin_frame` takes a single
-/// `model: Mat4` — so the bird is the one thing in this game that can go through
-/// it. The pipes are UI quads for the same reason breakout's bricks are.
-fn bird_model(bird: glam::DVec3) -> Mat4 {
-    let size = (crate::game::BIRD_RADIUS * 2.0) as f32;
-    Mat4::from_scale_rotation_translation(
-        Vec3::splat(size),
-        glam::Quat::IDENTITY,
-        Vec3::new(bird.x as f32, bird.y as f32, 0.0),
-    )
 }
 
 #[cfg(test)]
@@ -371,10 +435,52 @@ mod tests {
 
     /// The whole playable band is on screen whatever the window's shape, because
     /// the camera is fitted to the height and never to the width.
+    ///
+    /// Measured **through the real projection**, at every aspect ratio a window
+    /// or a canvas can hand us: this is where `app.rs`'s
+    /// `the_playable_band_is_on_screen_at_every_aspect_ratio` moved to when
+    /// `WorldToScreen` — the hand-written mapping it used to check — went away,
+    /// and it is a stronger test there than it was here, because the matrix the
+    /// sprite pass is actually given is what answers.
     #[test]
-    fn the_playable_band_is_always_on_screen() {
+    fn the_playable_band_is_on_screen_at_every_aspect_ratio() {
         let half_height = camera_half_height();
         assert!(half_height > crate::game::WORLD_CEILING as f32);
         assert!(-half_height < crate::game::WORLD_FLOOR as f32);
+
+        for extent in [
+            (960, 720),   // what the window opens at, and the canvas's ratio
+            (800, 600),   // 4:3 again, smaller
+            (1920, 1080), // 16:9
+            (1440, 400),  // a canvas clamped by `max-height: 68vh`
+            (600, 900),   // taller than it is wide
+        ] {
+            let aspect = extent.0.max(1) as f32 / extent.1.max(1) as f32;
+            let centre = camera_x(0.0, extent) * TEXELS_PER_UNIT;
+            let mut camera = Camera::default().with_projection(projection());
+            camera.eye = Vec3::new(centre, 0.0, 2.0);
+            camera.target = Vec3::new(centre, 0.0, 0.0);
+            let view_projection = camera.view_projection(aspect);
+
+            for y in [crate::game::WORLD_CEILING, crate::game::WORLD_FLOOR] {
+                // The bird's own column — `camera_x` was asked where the view
+                // goes when the bird is at 0 — so the horizontal assertion below
+                // is about the bird and not about the middle of the screen.
+                let world = glam::Vec4::new(0.0, y as f32 * TEXELS_PER_UNIT, 0.0, 1.0);
+                let clip = view_projection * world;
+                let ndc = clip.y / clip.w;
+                assert!(
+                    (-1.0..=1.0).contains(&ndc),
+                    "{extent:?} put y = {y} at {ndc} in NDC"
+                );
+                // And the horizontal placement is the bird's third, in the same
+                // matrix rather than in a second mapping.
+                let across = (clip.x / clip.w) * 0.5 + 0.5;
+                assert!(
+                    (0.25..0.35).contains(&across),
+                    "{extent:?} put the bird {across} across"
+                );
+            }
+        }
     }
 }

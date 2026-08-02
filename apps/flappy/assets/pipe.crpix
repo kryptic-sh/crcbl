@@ -1,0 +1,59 @@
+# A pipe, as a three-slice.
+#
+# `nine: 0 0 6 6` — no horizontal insets at all, so this is a three-slice and
+# not a nine: a pipe stretches vertically and never horizontally, and the six
+# quads a full nine would emit for bands with no texels in them are six
+# invisible instances. `NineSliceSource::expand` drops them for exactly this.
+#
+# **A cap at each end, and only one of them is ever seen.** A top pipe hangs
+# from above the ceiling and a bottom pipe stands from below the floor, so the
+# far cap is always outside the camera's band; making the art symmetric is what
+# lets one image serve both without a flip the sprite pass does not have.
+#
+# The insets are 6 texels, so `minimum_size` is 12 texels = 0.6 world units.
+# The shortest pipe the course can generate is
+# `WORLD_CEILING - GAP_CENTRE_RANGE - GAP_HALF_HEIGHT` = 1.0 world units, so
+# there is never a pipe the two caps cannot fit inside — `art.rs`'s
+# `the_pipe_cap_fits_the_shortest_pipe_the_course_can_make` derives both sides
+# and checks it rather than trusting this paragraph.
+#
+# The shaft is narrower than the caps because columns 0-2 and 29-31 are
+# transparent on the shaft rows and opaque on the cap rows. The lip is the
+# whole of that effect; there is no second sprite.
+crpix: 32 24 1 5 1
+
+palette:
+  . c None
+  k c #16300f
+  l c #86d977
+  g c #4faa46
+  d c #2f7a34
+
+frame pipe:
+  kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk
+  klllggggggggggggggggggggggggdddk
+  klllggggggggggggggggggggggggdddk
+  klllggggggggggggggggggggggggdddk
+  klllggggggggggggggggggggggggdddk
+  kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk
+  ...kllggggggggggggggggggggddk...
+  ...kllggggggggggggggggggggddk...
+  ...kllggggggggggggggggggggddk...
+  ...kllggggggggggggggggggggddk...
+  ...kllggggggggggggggggggggddk...
+  ...kllggggggggggggggggggggddk...
+  ...kllggggggggggggggggggggddk...
+  ...kllggggggggggggggggggggddk...
+  ...kllggggggggggggggggggggddk...
+  ...kllggggggggggggggggggggddk...
+  ...kllggggggggggggggggggggddk...
+  ...kllggggggggggggggggggggddk...
+  kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk
+  klllggggggggggggggggggggggggdddk
+  klllggggggggggggggggggggggggdddk
+  klllggggggggggggggggggggggggdddk
+  klllggggggggggggggggggggggggdddk
+  kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk
+
+nine: 0 0 6 6
+sample: pixel

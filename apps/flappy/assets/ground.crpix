@@ -1,0 +1,32 @@
+# The ground band, in front of the hills and behind the course.
+#
+# Two rows of lit grass, two of shaded grass, then dirt with a few stones and a
+# dark base. It tiles horizontally: every row is a full-width run and the
+# stones sit well inside the tile, so nothing has to line up at the join.
+crpix: 64 16 1 4 1
+
+palette:
+  t c #7ecf5e
+  g c #55a344
+  d c #9a6b3a
+  b c #6b4526
+
+frame ground:
+  tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt
+  tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt
+  gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg
+  gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg
+  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  ddddddddbbddddddddddddddddddddddddddddddbbdddddddddddddddddddddd
+  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  ddddddddddddddddddddddbbddddddddddddddddddddddddddddbbdddddddddd
+  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  dddddbbdddddddddddddddddddddddddddbbdddddddddddddddddddddddddddd
+  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+sample: pixel

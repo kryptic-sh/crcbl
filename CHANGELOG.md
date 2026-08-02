@@ -89,6 +89,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **flappy**: the game has art. A bird with a three-frame flap, a nine-sliced
+  pipe, and hills and a ground band on parallax layers, all authored as `.crpix`
+  text under `apps/flappy/assets/` and baked to PNG + sidecar by a new
+  `build.rs` — nothing baked is committed, so the text is the only source of
+  truth and editing it rebuilds the game. The pipes were screen-space UI quads
+  and the bird a lit cube through the forward pass; both are sprites in world
+  coordinates now, drawn by `SpriteRenderer` between a `sky` clear and the HUD.
+  Nothing about how the game _plays_ changed.
+- **flappy**: `ForwardRenderer` is gone from the frame, and with it the HDR
+  scene target, the depth buffer, the tonemap pass and the cube. The forward
+  pass drew exactly one instance and the bird was it; a one-line `clear_color`
+  pass replaces the clear it also happened to do.
 - **web tooling**: `check-exports.mjs` and `smoke.mjs` take `--sample <name>`,
   and `run-browser-e2e.sh` takes `CRCBL_WEB_E2E_DEMO`. Each was written when
   there was one demo and asserted against the whole workspace or against

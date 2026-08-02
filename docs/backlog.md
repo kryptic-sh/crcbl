@@ -20,61 +20,36 @@ phase yet.
   the symbols must not collide — so the shape is probably a macro over a generic
   core rather than a plain function.
 
-## The sprite system is an asset pipeline, not a renderer
+## The sprite system, and what is left of the retrofit
 
-`crcbl-sprite` describes sheets and converts art; **nothing draws a sprite**.
-The crate is referenced by no line outside itself, its only dependency is an
-optional PNG codec, and every public function takes text or bytes and returns
-text or bytes — none takes a device, a camera, a transform or a draw list. Both
-samples still draw solid quads and will until the list below is done.
+The pipeline is joined up end to end for one game: `apps/flappy` authors
+`.crpix` text under `assets/`, a `build.rs` bakes it, and `art::Scene` draws it
+through `SpriteRenderer` on three parallax layers. What is left:
 
-Stated bluntly because the crate has 52 passing tests, and a green suite over
-the half that does not render reads as a working feature.
-
-What exists: the `Sheet` model (frames, clips with direction and loop,
-nine-slice insets, sample mode), the `.crpix` format and parser
-(`docs/specs/crcbl/pix.md`), baking to PNG + Aseprite JSON, and an
-images-to-`.crpix` converter.
-
-In dependency order, each item blocked by the one above it:
-
-1. **RGBA texture upload through the HAL.** The engine has never uploaded one.
-   `crcbl-render`'s `upload_texture_r8` is single-channel and written for the
-   glyph atlas; a sprite needs RGBA8 and more than one texture bound at a time.
-2. **Loading.** PNG decode, and the Aseprite JSON _reader_. §7 of the spec
-   specifies what is written; nothing reads it back, so a baked sidecar is
-   currently write-only.
-3. **`SpriteRenderer`** — an instanced orthographic pass with its own
-   `sprite.slang`, alpha blending and both sample modes in the shader. The
-   largest single piece. It is also the fix for S1B finding 1: both games push
-   their worlds through the UI pass because `ForwardRenderer` draws one
-   instance, and a quad-instance pass is the instance path the roadmap's locked
-   decision asks for rather than a second 2D renderer.
-   - `SampleMode::Pixel` is **not** nearest-neighbour. At non-integer scale
-     nearest makes some art pixels four screen pixels across and their
-     neighbours five, and the unevenness crawls as the sprite moves. The
-     intended implementation samples linearly with the UV bent so the blend
-     happens only inside a one-fragment band at each texel boundary, plus
-     snapping the quad's screen rect to whole device pixels. Neither exists.
-   - The pinned `slangc 2026.14` is not installed here but does reproduce every
-     committed artifact byte-for-byte, so authoring a new shader is possible —
-     see `crates/crcbl-shaders/tools/compile-shaders.sh` for the install line.
-4. **Clip playback.** Advancing over ticks, what ping-pong does at the ends,
-   one-shots holding their last frame. `Clip` has no `advance`.
-5. **Layers and parallax.** Nothing is designed. Note that Aseprite's
-   `meta.layers` is about _compositing layers within one sheet_, which is not
-   the same thing as a parallax layer a sprite is drawn on; §9 of the spec flags
-   that they have been conflated nowhere yet and should not be.
-6. **Nine-slice geometry.** The insets are stored and validated; turning them
-   into nine quads with the corners fixed and the edges stretched on one axis is
-   not written. This is what the flappy pipes need.
-7. **Nine-slice buttons in `crcbl-ui`.** Blocked on 6, and on the UI pass being
-   able to sample a second texture.
-8. **Retrofit flappy, then breakout**, so the samples stop being solid blocks.
-
-Also owed, and small: the **`crcbl crpix` CLI subcommand** wrapping
-`crcbl_sprite::trace`. The library half is done and tested; the argument parsing
-in `crcbl-cli/src/args.rs` is not written.
+- **Breakout is still solid quads.** Its bricks, paddle and ball go through the
+  UI pass for the reason flappy's pipes did, and the whole path they need now
+  exists. The pattern to copy is `apps/flappy/src/art.rs` plus its `build.rs`;
+  the one thing that will not copy verbatim is the sprite-space scale, because
+  breakout's field is measured differently.
+- **Nine-slice geometry is in world units, at one unit per texel, and there is
+  no way to say otherwise.** `NineSliceSource::expand` takes its insets as
+  target units directly, so a 6-texel cap is 6 units tall whatever the caller's
+  world is. Flappy's playable band is 12 units, so it had to scale the whole
+  sprite plane by `art::TEXELS_PER_UNIT` and give the sprite pass a camera in
+  those units — which works and is documented, but it is a convention every
+  caller now has to reinvent. If a second game hits this, the fix is a texels →
+  units scale on `NineSliceSource` (or on `expand`) rather than a third copy of
+  the convention. Not done here because one caller is not a pattern.
+- **The tick rate the art is baked at is written twice** — `ART_TICK_HZ` in
+  `apps/flappy/build.rs` and again in `apps/flappy/src/art.rs`. A build script
+  cannot `use` the crate it builds, and the sidecar's durations are
+  milliseconds, so the two conversions have to agree. Guarded rather than
+  solved: `the_art_bakes_to_the_sheets_it_declares` asserts the authored hold in
+  ticks survives the round trip, which is red the moment they drift.
+- **Flappy's flap is a free-running loop.** It advances with ticks and never
+  looks at the bird's velocity, so the wing does not beat when the player flaps.
+  A `Playback::restart` on the flap edge would do it; left out because this
+  slice was about the art existing, not about tuning it.
 
 ## Coverage gaps
 
@@ -88,15 +63,23 @@ in `crcbl-cli/src/args.rs` is not written.
   coherent at. Closing it honestly means a faster consumer, not a contrived test
   here.
 - **No golden image covers the play field's framing, in either sample.** The
-  browser gate reads the canvas back and asserts it is neither blank nor still,
-  and `app::WorldToScreen` is asserted to keep the field on screen at five
-  aspect ratios. Neither is a pixel check that would catch the framing drifting.
-- **Nothing in `crcbl-sprite` is tested against a real image or a real
-  renderer.** Every test is text in, bytes out, or a round trip between the two.
-  The PNG tests decode what they just encoded, which proves the encoder agrees
-  with the decoder and nothing about whether a GPU can sample the result. The
-  first honest check of that is a golden image through the sprite pass, which
-  does not exist.
+  browser gate reads the canvas back and asserts it is neither blank nor still.
+  Flappy's `gpu::the_playable_band_is_on_screen_at_every_aspect_ratio` now puts
+  the world through the real view-projection at five aspect ratios, which is
+  stronger than the hand-written mapping it replaced, and is still not a pixel
+  check that would catch the framing drifting.
+- **Nothing has looked at flappy's art come out of a GPU.** Every test over it
+  is `Sheet` data, sprite rectangles and layer membership; the picture in this
+  slice's report was composited in software from the same sprite list, so it
+  says the scene is assembled correctly and nothing about the shader, the
+  sampler or the blend. `crcbl screenshot` cannot help — it renders the sandbox
+  cube through `ForwardRenderer`, which flappy no longer uses. Closing this
+  means either a golden through the sprite pass with flappy's own sheets, or an
+  offscreen path the samples can drive.
+- **The bird sprite is not checked against the bird collider.** It is drawn 0.8
+  world units across against a `2 * BIRD_RADIUS` of 0.7, deliberately, and
+  nothing asserts the relationship — so art that grew to twice the collider
+  would look wrong and pass.
 - **The changelog starts mid-project.** `CHANGELOG.md` covers changes from
   2026-08-01 onward; everything before it is in `git log` only. Worth doing at
   the first tagged release, or not at all — there are no releases yet for a
@@ -114,3 +97,15 @@ in `crcbl-cli/src/args.rs` is not written.
   deterministically (`course_seed(seed, runs)`) instead. A clock would make the
   course unreproducible, and the sample's exit criterion is that a recorded
   script replays to the same score.
+- **Authoring flappy's background bands at one texel per sprite unit.** They are
+  drawn at `art::BACKGROUND_SCALE` = 2 instead. At `TEXELS_PER_UNIT` = 20 a hill
+  wide enough to read as a hill is a couple of hundred texels of hand-written
+  rows for a silhouette with two bumps in it; the pipe is deliberately **not**
+  scaled, because its caps are measured in texels and scaling would stretch
+  them. If the bands ever gain detail that the doubling makes obvious, redraw
+  them rather than adding a second scale knob.
+- **Committing the baked PNGs beside the `.crpix` text.** It would make the
+  build faster and reviewable in a diff, and it would create two sources of
+  truth for one picture — the one a reviewer reads being the one that is not
+  loaded. `docs/specs/crcbl/pix.md` is explicit that `.crpix` is a build input;
+  `apps/flappy/build.rs` keeps it that way.
