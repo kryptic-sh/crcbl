@@ -230,9 +230,24 @@ mod tests {
 
     /// A stem the format cannot spell back is refused before anything is
     /// written, rather than producing a `.crpix` its own parser rejects.
+    ///
+    /// Every fixture carries a leading directory because of the colon one.
+    /// Windows reads a `:` as a drive separator, but only in the first two
+    /// bytes of the whole path — `parse_prefix` matches `[drive, b':', ..]`
+    /// against the path's own bytes and is called once, on the path, never on a
+    /// later component. So `a:b.png` is drive `A:` there and its stem is `b`,
+    /// while `art/a:b.png` has no prefix, two ordinary components, and the stem
+    /// `a:b` on every platform. The stem each path is expected to yield is
+    /// written down beside it so the fixture asserts what it *parsed*, not only
+    /// that something was refused: a platform that split these differently
+    /// would fail here rather than quietly testing another string.
     #[test]
     fn a_stem_the_format_cannot_spell_is_refused() {
-        for path in ["my art.png", "a:b.png", "a#b.png"] {
+        for (path, stem) in [
+            ("art/my art.png", "my art"),
+            ("art/a:b.png", "a:b"),
+            ("art/a#b.png", "a#b"),
+        ] {
             let failure = match frame_name(Path::new(path)) {
                 Ok(name) => panic!("`{path}` must not yield a frame name, and gave `{name}`"),
                 Err(failure) => failure,
@@ -240,6 +255,14 @@ mod tests {
             assert!(
                 failure.message.contains(path),
                 "the refusal must name the file: {}",
+                failure.message
+            );
+            // The backticks matter: every stem here is also a substring of its
+            // own path, so a bare `contains(stem)` would be satisfied by the
+            // line above and could never fail on its own.
+            assert!(
+                failure.message.contains(&format!("`{stem}`")),
+                "`{path}` must have been refused for the stem `{stem}`: {}",
                 failure.message
             );
         }

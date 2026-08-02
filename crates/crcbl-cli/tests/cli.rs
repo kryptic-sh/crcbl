@@ -80,6 +80,34 @@ fn has_field(json: &str, key: &str, value: &str) -> bool {
     json.contains(&format!("\"{key}\":{value}"))
 }
 
+/// A path as it appears *inside* the JSON, rather than as it was typed.
+///
+/// The CLI escapes its strings on the way out, so a Windows path is written
+/// `C:\\Users\\…\\tall.png` and a search for the path as typed finds nothing —
+/// the assertion would be reporting on the separator and not on the file. This
+/// escapes the needle the same way: on Unix it is the identity and the check is
+/// unchanged, on Windows it is the difference between a check that can pass and
+/// one that cannot.
+///
+/// Only the two escapes a path can plausibly trigger are applied, and the
+/// assertion is what keeps that "plausibly" honest: a fixture path carrying
+/// anything else JSON escapes fails here rather than silently building a needle
+/// that could never match.
+fn json_fragment(path: &Path) -> String {
+    let raw = arg(path);
+    assert!(
+        !raw.chars().any(|character| character < ' '),
+        "a fixture path with a control character in it needs the whole escape table: {raw:?}"
+    );
+    raw.replace('\\', r"\\").replace('"', "\\\"")
+}
+
+/// The whole JSON string a path is written as, quotes included, for the checks
+/// that want a `"key":<value>` match rather than a substring.
+fn json_string(path: &Path) -> String {
+    format!("\"{}\"", json_fragment(path))
+}
+
 #[test]
 fn help_and_version_exit_zero() {
     let temporary = TempDir::new("help");
@@ -313,11 +341,7 @@ fn screenshot_json_carries_the_path_and_the_dimensions() {
     assert!(has_field(&json, "width", "32"), "{json}");
     assert!(has_field(&json, "height", "24"), "{json}");
     assert!(
-        has_field(
-            &json,
-            "path",
-            &format!("{:?}", target.to_str().expect("a UTF-8 path"))
-        ),
+        has_field(&json, "path", &json_string(&target)),
         "the path a CI job has to pick up is in the object: {json}"
     );
     assert!(target.is_file(), "the PNG named in the JSON exists");
@@ -451,7 +475,7 @@ fn crpix_round_trips_one_png_to_a_sheet() {
     assert!(has_field(&json, "colours", "4"), "{json}");
     assert!(has_field(&json, "names", r#"["bird-up"]"#), "{json}");
     assert!(
-        has_field(&json, "path", &format!("{:?}", arg(&output))),
+        has_field(&json, "path", &json_string(&output)),
         "the path a script picks up is in the object: {json}"
     );
 
@@ -521,9 +545,12 @@ fn crpix_refuses_frames_of_different_sizes_and_names_the_file() {
         json.starts_with(r#"{"ok":false,"command":"crpix""#),
         "{json}"
     );
-    assert!(json.contains(arg(&tall)), "the offender is named: {json}");
     assert!(
-        json.contains(arg(&small)),
+        json.contains(&json_fragment(&tall)),
+        "the offender is named: {json}"
+    );
+    assert!(
+        json.contains(&json_fragment(&small)),
         "so is what it disagrees with: {json}"
     );
     assert!(json.contains("2x3"), "its own size: {json}");
@@ -603,9 +630,18 @@ fn crpix_fails_cleanly_on_a_missing_file_and_on_a_file_that_is_not_a_png() {
     let missing = temporary.path().join("nowhere.png");
     let impostor = temporary.path().join("impostor.png");
     std::fs::write(&impostor, b"I am a text file wearing a hat").expect("the impostor");
+    // A third input whose *name* holds a backslash, which Unix allows in a file
+    // name and JSON has to escape. It is what keeps the escaping half of
+    // `json_fragment` honest on a platform whose paths have no separators to
+    // escape: without it the helper is the identity function here, and the only
+    // machine that ever exercises the escape is Windows CI. On Windows the name
+    // is read as two components instead and the case degrades into a second
+    // missing file, which the CLI still has to name — so the assertion holds
+    // either way and needs no `cfg`.
+    let escaped = temporary.path().join(r"back\slash.png");
     let output = temporary.path().join("out.crpix");
 
-    for input in [&missing, &impostor] {
+    for input in [&missing, &impostor, &escaped] {
         let out = crcbl(
             temporary.path(),
             &["crpix", arg(input), "-o", arg(&output), "--json"],
@@ -618,7 +654,10 @@ fn crpix_fails_cleanly_on_a_missing_file_and_on_a_file_that_is_not_a_png() {
             "{json}"
         );
         assert!(json.contains(r#""error":"#), "{json}");
-        assert!(json.contains(arg(input)), "the file is named: {json}");
+        assert!(
+            json.contains(&json_fragment(input)),
+            "the file is named: {json}"
+        );
         assert!(!output.exists(), "{}", input.display());
     }
 }
