@@ -325,6 +325,190 @@ fn a_render_pass_clear_reaches_memory_with_the_colour_it_was_given() {
     headless.finish();
 }
 
+/// Coming back round the offscreen ring waits for the frame that had the image
+/// last — the ordering `vkAcquireNextImageKHR` and its fence give the windowed
+/// path, which a ring hand-built out of plain images does not get for free.
+///
+/// [`AcquiredFrame::acquire_semaphore`] is `None` here and the seam calls that
+/// an "implicit acquire". Implicit was true of the *semaphores* and false of the
+/// ordering: `acquire_next_frame` handed the image straight back, so a caller
+/// that renders more frames than the ring has images was writing into an image
+/// the GPU had not finished reading. CI's validation layer reported it as
+/// `SYNC-HAZARD-WRITE-AFTER-READ` between one frame's `vkCmdCopyImageToBuffer`
+/// and the next frame's opening layout transition.
+///
+/// The hazard is asserted here rather than left to the layer because the layer
+/// half that sees across two submissions is the half a developer's build often
+/// does not run — `synchronisation_validation_catches_a_missing_barrier`
+/// measures and prints exactly that reach, and on a machine reporting
+/// `cross-submission=no` nothing else in this file would notice.
+///
+/// The observable is a readback of the *first* frame's copy, requested before
+/// the reusing acquire so it cannot be Ready merely because the request came
+/// late: its wait value is that first frame's submission and nothing later. If
+/// the acquire waited, the copy has completed and the very first poll says so —
+/// no polling loop, because a loop would turn "it waited" into "it finished
+/// eventually", which is what is being tested. The frame is deliberately
+/// expensive for the reason [`queue_hazard_reported`] gives about its own
+/// payload: work that finishes too quickly turns a real answer into a lucky one.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn reusing_an_offscreen_ring_image_waits_for_the_frame_that_had_it() {
+    /// A megabyte an image, which is cheap to hold two of.
+    const BIG: (u32, u32) = (512, 512);
+    /// One megabyte of copying is over in an instant; thirty-two is not — the
+    /// same size, and for the same reason, as [`queue_hazard_reported`]'s.
+    /// Each copy lands on its **own** slice of the staging buffer: writing them
+    /// all to offset zero would be a write-after-write between the copies
+    /// themselves, which is a different hazard and one the layer catches at
+    /// record time.
+    const COPIES: u64 = 32;
+
+    let headless = Headless::open_with(BIG, 2);
+    let device = headless.device.as_ref();
+    let pixels = u64::from(BIG.0) * u64::from(BIG.1) * 4;
+    let staging_size = pixels * COPIES;
+
+    // One frame: clear the acquired image, copy it out `COPIES` times, present.
+    let frame = |staging| {
+        let acquired = device
+            .acquire_next_frame(headless.swapchain)
+            .expect("the ring always has an image");
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("ring reuse frame"),
+            queue: headless.queue,
+        });
+        encoder.pipeline_barrier(&Barriers {
+            images: &[crcbl_hal::ImageBarrier::new(
+                acquired.image,
+                ImageSubresourceRange::all(headless.format),
+                ResourceState::Undefined,
+                ResourceState::ColorAttachment,
+            )],
+            ..Barriers::default()
+        });
+        encoder.begin_render_pass(&RenderPassDesc {
+            label: Some("ring reuse clear"),
+            color_attachments: &[ColorAttachment {
+                view: acquired.view,
+                resolve: None,
+                load: LoadOp::Clear,
+                store: StoreOp::Store,
+                clear: ClearValue::color(CLEAR),
+            }],
+            depth_stencil_attachment: None,
+            render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
+        });
+        encoder.end_render_pass();
+        encoder.pipeline_barrier(&Barriers {
+            images: &[crcbl_hal::ImageBarrier::new(
+                acquired.image,
+                ImageSubresourceRange::all(headless.format),
+                ResourceState::ColorAttachment,
+                ResourceState::TransferSrc,
+            )],
+            ..Barriers::default()
+        });
+        for slice in 0..COPIES {
+            encoder.copy_image_to_buffer(&BufferImageCopy {
+                buffer: staging,
+                buffer_offset: slice * pixels,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image: acquired.image,
+                image_subresource: ImageSubresourceLayers {
+                    aspect: ImageAspect::COLOR,
+                    mip: 0,
+                    base_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: crcbl_hal::Offset3d::default(),
+                image_extent: Extent3d::d2(BIG.0, BIG.1),
+            });
+        }
+        let commands = encoder.finish().expect("recording succeeded");
+        device
+            .submit(headless.queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+        device
+            .present(
+                headless.queue,
+                &PresentInfo {
+                    swapchain: headless.swapchain,
+                    waits: acquired.present_semaphore.as_slice(),
+                },
+            )
+            .expect("present");
+        (acquired.index, commands)
+    };
+
+    let readback_buffer = |label| {
+        device
+            .create_buffer(&BufferDesc {
+                label: Some(label),
+                size: staging_size,
+                usage: BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::HostReadback,
+            })
+            .expect("a readback buffer")
+    };
+    let (first_staging, second_staging) = (readback_buffer("ring 0"), readback_buffer("ring 1"));
+
+    let (first_index, first_commands) = frame(first_staging);
+    assert_eq!(first_index, 0, "the ring starts at its first image");
+
+    // Requested here, between the two frames, so its wait value names the first
+    // frame's submission alone. Requesting it after the second frame would make
+    // a Ready below prove only that *both* frames had finished, which no longer
+    // isolates the acquire.
+    let pending = device
+        .request_readback(&ReadbackDesc {
+            label: Some("ring reuse pixels"),
+            buffer: first_staging,
+            offset: 0,
+            size: pixels,
+            after: None,
+        })
+        .expect("a readback request");
+
+    let (second_index, second_commands) = frame(second_staging);
+    assert_eq!(
+        second_index, 1,
+        "a two-image ring hands out the other one next"
+    );
+
+    let (reused_index, reused_commands) = frame(first_staging);
+    assert_eq!(
+        reused_index, 0,
+        "a two-image ring comes back round on the third acquire, which is the \
+         whole premise of this test"
+    );
+
+    let mut bytes = vec![0u8; pixels as usize];
+    assert_eq!(
+        device
+            .poll_readback(pending, &mut bytes)
+            .expect("the readback did not fail"),
+        ReadbackState::Ready,
+        "the third acquire handed image 0 back while the first frame's copies \
+         out of it were still running. The next frame's opening barrier \
+         discards that image's layout, so it would be writing under a read \
+         still in flight — the write-after-read a windowed swapchain's acquire \
+         fence exists to prevent, and which an offscreen ring has to prevent \
+         for itself"
+    );
+
+    device.destroy_readback(pending);
+    device.wait_idle().expect("idle");
+    for handle in [first_commands, second_commands, reused_commands] {
+        device.destroy_command_buffer(handle);
+    }
+    for handle in [first_staging, second_staging] {
+        device.destroy_buffer(handle);
+    }
+    headless.finish();
+}
+
 /// The other half of the validation gate: prove the messenger is **wired**, not
 /// merely quiet.
 ///

@@ -2144,8 +2144,34 @@ impl Device for VkDevice {
             // The implicit-acquire shape, which is also `crcbl-wgpu`'s: no
             // semaphores, and the caller's `Option::as_slice()` splices nothing.
             let index = entry.next_offscreen;
+            let reuse = entry.offscreen_retire[index as usize];
             entry.acquired = Some(index);
-            return Ok(entry.frame(index, None, false));
+            let frame = entry.frame(index, None, false);
+            // "Implicit" is about the semaphores, not about the ordering. The
+            // windowed path below waits on this slot's acquire fence because
+            // handing out an image the GPU has not finished with is the classic
+            // hand-rolled-swapchain bug; a ring built here out of plain images
+            // has exactly the same bug and no fence of its own. The retire
+            // timeline is that fence: `present` recorded the submission counter
+            // for this image, so reaching it proves every submission that
+            // touched the image last time round has completed — including the
+            // copy a headless caller reads its pixels back with, which the next
+            // frame's first barrier would otherwise discard the layout under.
+            if reuse > 0 {
+                let semaphores = [self.inner.retire_timeline];
+                let values = [reuse];
+                let info = vk::SemaphoreWaitInfo::default()
+                    .semaphores(&semaphores)
+                    .values(&values);
+                // SAFETY: `retire_timeline` is a live timeline semaphore of this
+                // device, and `reuse` is a value a submission already in flight
+                // is committed to signal — so this cannot wait on work that will
+                // never be queued.
+                unsafe { self.inner.raw.wait_semaphores(&info, u64::MAX) }.map_err(|error| {
+                    SurfaceError::Hal(conv::hal_error("vkWaitSemaphores", error))
+                })?;
+            }
+            return Ok(frame);
         }
 
         let raw = entry.raw;
@@ -2202,6 +2228,9 @@ impl Device for VkDevice {
 
     fn present(&self, queue: QueueHandle, present: &PresentInfo<'_>) -> Result<(), SurfaceError> {
         let slot = self.inner.queue_slot(queue)?;
+        // Read before the tables are borrowed: the offscreen branch below needs
+        // it, and `submissions` only ever grows.
+        let submissions = self.inner.submissions();
         let mut state = self.inner.state();
         let inner = Arc::clone(&self.inner);
 
@@ -2225,7 +2254,11 @@ impl Device for VkDevice {
         if entry.is_offscreen() {
             // "Presenting" a ring image is advancing the ring. The image stays
             // valid and is reused when the cursor comes back round, exactly as
-            // a real swapchain image is.
+            // a real swapchain image is — so the acquire that reuses it needs to
+            // know when this frame's work on it is done. Everything this frame
+            // submitted is at or below the counter's value now, which makes one
+            // number enough and keeps this path free of per-image bookkeeping.
+            entry.offscreen_retire[index as usize] = submissions;
             #[allow(clippy::cast_possible_truncation)]
             {
                 entry.next_offscreen = (index + 1) % entry.images.len() as u32;
@@ -2440,6 +2473,8 @@ impl VkDevice {
             sync: Some(sync),
             acquired: None,
             next_offscreen: 0,
+            // A WSI swapchain's reuse is ordered by the acquire fence above.
+            offscreen_retire: Vec::new(),
             pending_suboptimal: false,
         })
     }
@@ -2564,6 +2599,7 @@ impl VkDevice {
             extent.configured.1,
             desc.format,
         );
+        let ring = images.len();
         Ok(SwapchainEntry {
             owner: self.inner.id,
             surface_raw: vk::SurfaceKHR::null(),
@@ -2577,6 +2613,9 @@ impl VkDevice {
             sync: None,
             acquired: None,
             next_offscreen: 0,
+            // Zero means "never presented", which is the one value that needs
+            // no wait: nothing has been submitted against this image yet.
+            offscreen_retire: vec![0; ring],
             pending_suboptimal: false,
         })
     }

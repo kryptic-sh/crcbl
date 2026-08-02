@@ -514,6 +514,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-vk**: the offscreen image ring handed an image back out **while the
+  GPU was still using it from the last time round the ring**.
+  `Device::acquire_next_frame` advanced the ring cursor and returned, with
+  nothing waiting on the frame that had the image before — so a caller that
+  renders more frames than the ring has images was writing into an image whose
+  previous frame's work had not finished. The windowed path never had this: it
+  waits on the acquire fence `vkAcquireNextImageKHR` armed. The symptom on a
+  validation layer that models hazards across submissions is
+  `SYNC-HAZARD-WRITE-AFTER-READ` between one frame's `vkCmdCopyImageToBuffer`
+  and the next frame's opening layout transition; without such a layer it is a
+  data race that a slower GPU or a busier machine decides the outcome of.
+
+  `present` now records the submission counter against the image it retires, and
+  the acquire that comes back round to that image waits on the retire timeline
+  for it. `AcquiredFrame::acquire_semaphore` is still `None` for an offscreen
+  ring — the acquire remains implicit in the sense of needing no semaphores from
+  the caller, and callers need no change.
+
+  Affects any offscreen or headless Vulkan rendering that outlives the ring:
+  `crcbl screenshot`, the `crcbl-vk` e2e suite, and `--headless --backend vk`
+  runs. Windowed rendering is unchanged.
+
 - **crcbl-render**, **crcbl-shaders**: the sprite pass drew **every batch after
   the first from the first batch's sprites** on Vulkan. A batch is a run of
   sprites sharing a sheet, and `SpriteRenderer::add_pass` pointed each draw at
