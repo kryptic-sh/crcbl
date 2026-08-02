@@ -173,6 +173,17 @@ impl NineSliceSource {
         })
     }
 
+    /// The insets this source actually expands with, in texels.
+    ///
+    /// [`NineSliceSource::nine`] as given, trimmed so it cannot exceed the frame
+    /// — the same trimming [`NineSliceSource::expand`] applies, exposed because a
+    /// caller laying out *around* the fixed bands (a button sizing itself to its
+    /// corners) has to agree with the geometry rather than with the request.
+    #[must_use]
+    pub fn insets(&self) -> NineSlice {
+        self.clamped()
+    }
+
     /// The smallest target this source draws at its natural corner size, in
     /// world units — [`NineSlice::minimum_size`] as floats.
     #[must_use]

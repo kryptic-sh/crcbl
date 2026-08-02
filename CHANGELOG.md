@@ -73,6 +73,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   back-to-front bands, each taking a chosen fraction of the camera's motion. A
   layer is a container rather than a field on `Sprite`, so nothing sorts and
   submission order inside a layer is still exactly what the caller gave.
+- **crcbl-ui / crcbl-render**: skinned buttons. `Button::with_skin` takes the
+  nine-slice insets its art was cut with, so its minimum size and its label's
+  centring follow the frame rather than being guessed; `ButtonSkin` turns a
+  state and a rectangle into the quads that draw it. Resizing moves the edges
+  and leaves the corners alone, which is the whole point. The skin goes through
+  the sprite pass rather than the UI pass — the UI atlas is a single-channel
+  glyph mask, and `crcbl-render` already depends on `crcbl-ui`, so the reverse
+  could never have happened.
 
 ### Changed
 

@@ -33,5 +33,6 @@ pub use text::{
     GLYPH_WIDTH, GlyphMetrics, LAST_CHAR, LINE_HEIGHT, NOTDEF_INDEX, glyph_index,
 };
 pub use widget::{
-    Button, ButtonState, Label, NATURAL_FONT_SIZE, PointerInput, Style, UiState, WidgetId,
+    Button, ButtonState, Label, NATURAL_FONT_SIZE, PointerInput, SkinInsets, Style, UiState,
+    WidgetId,
 };

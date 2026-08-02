@@ -117,6 +117,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+pub mod button_skin;
 pub mod camera;
 pub mod forward;
 pub mod graph;
@@ -128,6 +129,7 @@ pub mod timing;
 pub mod transient;
 pub mod ui_pass;
 
+pub use button_skin::{ButtonSkin, screen_rect_to_target};
 pub use camera::{Camera, DirectionalLight, Projection};
 /// Re-exported because [`SheetDesc::sample`] is spelled in it: a crate whose
 /// public API names a foreign type and does not export it is one every caller
@@ -136,6 +138,11 @@ pub use camera::{Camera, DirectionalLight, Projection};
 /// [`NineSlice`] and [`Rect`] are here for the same reason —
 /// [`NineSliceSource`]'s fields are spelled in both.
 pub use crcbl_sprite::{NineSlice, Rect, SampleMode};
+/// Re-exported for the same reason as [`NineSlice`]: [`ButtonSkin::source`] and
+/// [`ButtonSkin::quads`] are spelled in [`ButtonState`], and
+/// [`ButtonSkin::insets`] returns a [`SkinInsets`]. A caller that can name this
+/// crate's button API should not have to add a second dependency to call it.
+pub use crcbl_ui::{ButtonState, SkinInsets};
 pub use forward::ForwardRenderer;
 pub use graph::{
     Attachment, BufferId, CompiledGraph, CompiledPass, GraphBarriers, GraphBufferBarrier,
