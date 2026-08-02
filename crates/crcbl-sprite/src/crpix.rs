@@ -190,8 +190,7 @@ pub enum CrpixErrorKind {
     Unrecognised(String),
     /// A palette entry that is not `<key> [context] <colour>`.
     BadPaletteEntry(String),
-    /// A colour that is not `None`, `transparent`, `#rgb`, `#rrggbb` or
-    /// `#rrggbbaa`.
+    /// A colour that is not `None`, a hex form, or a known XPM colour name.
     BadColour(String),
     /// A palette key not followed by a space.
     ///
@@ -253,8 +252,8 @@ impl fmt::Display for CrpixError {
             ),
             CrpixErrorKind::BadColour(text) => write!(
                 f,
-                "`{text}` is not a colour; write `None`, `#rgb`, `#rrggbb` or `#rrggbbaa`. \
-                 X11 colour names are deliberately not accepted"
+                "`{text}` is not a colour; write `None`, a hex form (`#rgb`, `#rrggbb`, \
+                 `#rrggbbaa`, `#rrrrggggbbbb`) or one of the XPM colour names"
             ),
             CrpixErrorKind::KeyNotSeparated { key, chars } => write!(
                 f,
@@ -776,7 +775,12 @@ fn parse_colour(text: &str, line: usize) -> Result<Rgba, CrpixError> {
         line,
         kind: CrpixErrorKind::BadColour(text.to_string()),
     };
-    let hex = text.strip_prefix('#').ok_or_else(bad)?;
+    let Some(hex) = text.strip_prefix('#') else {
+        // Not hex, so it is either an XPM colour name or a mistake. The table
+        // is the one `magick -list color` marks XPM-compliant, so a palette
+        // block pasted out of a real `.xpm` resolves.
+        return crate::colours::lookup(text).ok_or_else(bad);
+    };
     if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(bad());
     }
@@ -788,6 +792,10 @@ fn parse_colour(text: &str, line: usize) -> Result<Rgba, CrpixError> {
         3 => [nibble(0), nibble(1), nibble(2), 255],
         6 => [byte(0, 2), byte(2, 4), byte(4, 6), 255],
         8 => [byte(0, 2), byte(2, 4), byte(4, 6), byte(6, 8)],
+        // XPM's 16-bits-per-channel form, which is what ImageMagick writes.
+        // Truncated to the high byte rather than rounded: `#ffffffffffff` must
+        // land on `0xff` exactly, and rounding the low byte in would carry.
+        12 => [byte(0, 2), byte(4, 6), byte(8, 10), 255],
         _ => return Err(bad()),
     })
 }
@@ -1008,14 +1016,51 @@ clip flap: up down @ 6 loop
         assert_eq!(px(1), [0x24, 0x1c, 0x1c, 0xff]);
     }
 
-    /// X11 colour names are not accepted, and the message says so rather than
-    /// leaving the author to guess.
+    /// XPM colour names resolve, so a palette block pasted out of a real
+    /// `.xpm` — where names are ordinary — works without being rewritten.
     #[test]
-    fn a_colour_name_is_refused_with_the_reason() {
+    fn xpm_colour_names_resolve() {
+        let art = parsed(
+            "crpix: 3 1 1 3 1\n\npalette:\n  o c white\n  b c CornflowerBlue\n  \
+             g c gold\n\nframe a:\n  obg\n",
+        );
+        let px = |i: usize| &art.frames[0].pixels[i * 4..i * 4 + 4];
+        assert_eq!(px(0), [255, 255, 255, 255]);
+        assert_eq!(px(1), [100, 149, 237, 255]);
+        assert_eq!(px(2), [255, 215, 0, 255]);
+    }
+
+    /// A name that is not one is refused rather than guessed at, and the
+    /// message lists what a colour may be.
+    #[test]
+    fn a_name_that_is_not_a_colour_is_refused() {
         let error =
-            rejected("crpix: 1 1 1 1 1\n\npalette:\n  k c cornflowerblue\n\nframe a:\n  k\n");
-        assert!(matches!(error.kind, CrpixErrorKind::BadColour(_)));
-        assert!(error.to_string().contains("names"), "{error}");
+            rejected("crpix: 1 1 1 1 1\n\npalette:\n  k c cornflowerbloo\n\nframe a:\n  k\n");
+        assert!(
+            matches!(error.kind, CrpixErrorKind::BadColour(_)),
+            "{error}"
+        );
+        assert!(error.to_string().contains("#rrggbb"), "{error}");
+    }
+
+    /// XPM's 16-bit-per-channel colours, which is what ImageMagick writes.
+    ///
+    /// The channels below differ in their low byte from their high one, so a
+    /// reader taking the wrong half gets a visibly different colour — a fixture
+    /// of `#f2f2c1c14e4e` would pass either way and prove nothing.
+    #[test]
+    fn twelve_digit_hex_is_truncated_to_its_high_bytes() {
+        let art = parsed(
+            "crpix: 2 1 1 2 1\n\npalette:\n  a c #f200c1114e22\n  b c #ffffffffffff\n\n\
+             frame f:\n  ab\n",
+        );
+        let px = |i: usize| &art.frames[0].pixels[i * 4..i * 4 + 4];
+        assert_eq!(px(0), [0xf2, 0xc1, 0x4e, 255]);
+        assert_eq!(
+            px(1),
+            [255, 255, 255, 255],
+            "white must land exactly on white, which rounding would carry past"
+        );
     }
 
     #[test]

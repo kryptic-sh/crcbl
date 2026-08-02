@@ -41,7 +41,9 @@
 //! whole pixels, half a texel is always a bug, and the conversion to UVs needs
 //! the image's size, which a description of a sheet does not have to know.
 
+pub mod colours;
 pub mod crpix;
+pub mod trace;
 
 #[cfg(feature = "bake")]
 pub mod bake;

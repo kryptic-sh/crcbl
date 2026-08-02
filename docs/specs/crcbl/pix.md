@@ -121,16 +121,22 @@ this engine uses; `m`, `g` and `s` (monochrome, greyscale, symbolic) are parsed
 and skipped. A file that omits the context entirely — `k #241c1c` — is accepted,
 and is the shorter form to write by hand.
 
-| Colour                | Meaning                                                      |
-| --------------------- | ------------------------------------------------------------ |
-| `None`, `transparent` | Fully transparent, and **all four channels zeroed**          |
-| `#rgb`                | Each digit expanded by ×17, as CSS does: `#fff` is `#ffffff` |
-| `#rrggbb`             | Opaque                                                       |
-| `#rrggbbaa`           | Straight (non-premultiplied) alpha                           |
+| Colour                | Meaning                                                       |
+| --------------------- | ------------------------------------------------------------- |
+| `None`, `transparent` | Fully transparent, and **all four channels zeroed**           |
+| `#rgb`                | Each digit expanded by ×17, as CSS does: `#fff` is `#ffffff`  |
+| `#rrggbb`             | Opaque                                                        |
+| `#rrggbbaa`           | Straight (non-premultiplied) alpha                            |
+| `#rrrrggggbbbb`       | XPM's 16-bit form, truncated to the high byte of each channel |
+| a colour name         | One of the 234 names `magick -list color` marks XPM-compliant |
 
-X11 colour names are **not** accepted. The table is unbounded, hex is
-unambiguous, and a misspelled name is a colour that silently is not the one you
-meant.
+Colour names are matched **case-insensitively, ignoring spaces and
+underscores**, as X11's own lookup is: `AliceBlue`, `aliceblue` and `alice blue`
+are one colour. A name that is not in the table is refused with an error naming
+what a colour may be — it is never guessed at.
+
+The 16-bit form is truncated rather than rounded, so `#ffffffffffff` lands on
+`#ffffff` exactly; rounding the low byte in would carry past it.
 
 Zeroing all four channels for transparency is not cosmetic: a transparent texel
 carrying leftover RGB shows as a halo the moment a sampler blends across it.
@@ -222,26 +228,43 @@ row by row; this was verified against ImageMagick before the rule was adopted.
 
 ## 6. Relationship to XPM
 
-Adopted, deliberately and by name:
+**A `.crpix` is not an XPM, and an XPM is not a `.crpix`.** There is no backward
+compatibility in either direction and none is intended: feeding a real `.xpm` to
+the parser fails on its first line. What is shared is the _palette entry_, which
+was taken deliberately so a palette block pasted out of an `.xpm` resolves
+without being rewritten.
 
-| XPM feature                                                | Here                                                     |
-| ---------------------------------------------------------- | -------------------------------------------------------- |
-| A header declaring width, height, colours, chars-per-pixel | `crpix:`, plus a frame count                             |
-| `c None` for transparency                                  | Identical                                                |
-| Multiple characters per pixel                              | Identical, via the header's fifth field                  |
-| `<key> c <colour>` entries with colour contexts            | Identical, so an `.xpm` palette line pastes in unchanged |
+Taken:
 
-Not adopted:
+| XPM feature                                                | Here                                                    |
+| ---------------------------------------------------------- | ------------------------------------------------------- |
+| A header declaring width, height, colours, chars-per-pixel | `crpix:`, plus a frame count                            |
+| `c None` for transparency                                  | Identical                                               |
+| Multiple characters per pixel                              | Identical, via the header's fifth field                 |
+| `<key> c <colour>` entries with colour contexts            | Identical                                               |
+| Colour names                                               | The 234 XPM-compliant ones, plus `#rrrrggggbbbb` (§4.2) |
 
-- **`m`, `g`, `s` contexts** are parsed and ignored rather than refused. They
-  serve monochrome and greyscale displays this engine will never meet, and
-  refusing them would break the paste-an-XPM-palette property for nothing.
-- **X11 colour names** — see §4.2.
-- **C source syntax** (`static char *name[] = { … };`, quotes, commas). It buys
-  compilability into a C program, which is not a thing anyone wants here, and it
-  costs a quote and a comma on every line of art.
-- **`XPMEXT` extensions.** The metadata they would carry has first-class
-  sections instead.
+Not taken, and therefore where a real `.xpm` will fail:
+
+- **C source syntax** — `/* XPM */`, `static char *name[] = { … };`, quoted and
+  comma-separated rows. It buys compilability into a C program, which nothing
+  here wants, at the cost of a quote and a comma on every line of art.
+- **`/* … */` comments.** Comments are `#`.
+- **The header's position and shape.** XPM's is a quoted string inside the array
+  with four fields; this one is keyword-led, unquoted, and has five.
+- **The optional hotspot and `XPMEXT`** in the header line.
+- **`%hhhhssssvvvv`** HSV colours.
+- **`#` as a palette key**, which is impossible here because it opens a comment.
+- **`m`, `g`, `s` contexts** are parsed and _skipped_ rather than honoured. They
+  serve monochrome and greyscale displays this engine will never meet; skipping
+  rather than refusing is what keeps the paste-a-palette property.
+
+**Why full compatibility is not pursued.** The migration already exists: the
+engine reads PNG, so `magick bird.xpm bird.png` puts an XPM into the engine
+today, and `crcbl crpix bird.png` (§7.1) puts it into _this_ format. Supporting
+XPM's container would cost a C-wrapper tolerance, a second comment syntax, a
+second header form and a mode-dependent lexer — and the moment a second frame, a
+clip or a nine-slice is wanted, XPM has nowhere to put them.
 
 ## 7. Baking
 
@@ -281,6 +304,31 @@ to some consumers, and one tick at 240 Hz rounds to zero without it.
 `meta.app` names this repository, **not** aseprite.org. The schema is
 Aseprite's; the file was not written by Aseprite, and claiming otherwise in a
 field whose purpose is provenance would be a lie a future reader might act on.
+
+### 7.1 The other direction: images to `.crpix`
+
+`crcbl_sprite::trace::trace(images, options)` — and `crcbl crpix` over it —
+turns one or more PNGs into the text of a `.crpix`, for getting existing art
+into the format.
+
+- **Several images make one sheet.** They are given in playback order, one per
+  frame, and each becomes a `frame` section. **Every image must be the same
+  size**; a mismatch is an error rather than a pad or a crop, because silently
+  padding one would move the art on that frame alone and point at nothing.
+- **The palette is first-seen order**, scanning each image left to right and top
+  to bottom, images in the order given. Stable, so the same input always
+  produces the same file, and roughly the order a person would have written.
+- **Fully transparent pixels are one colour** whatever RGB they carry, and
+  always take the key `.`. A paint program leaves whatever was underneath, and
+  each variant would otherwise take an entry no reader can tell apart.
+- **More colours than the alphabet widens the keys** to two characters, and the
+  header says so — XPM's own escape hatch.
+- **It is a conversion, not a quantiser.** Colours are reproduced exactly, and
+  art with more than 512 distinct ones is refused as a photograph rather than
+  pixel art. Reducing an image's colours is the drawing tool's job.
+
+The property that matters, and the one the tests hold it to: **what comes out
+parses, and parses back to the pixels that went in.**
 
 ---
 
@@ -343,8 +391,14 @@ to 2, forward, repeating forever, with each frame at 100 ms.
   of the sheet it came from.
 - **A packed atlas.** Frames are a strip; nothing here forbids a packer later,
   and the sidecar's per-frame rects already express one.
+- **Reading Aseprite JSON.** §7 specifies what is _written_; the reader that
+  turns a sidecar back into a `Sheet` is owed by the loading slice.
 
 ## 10. Version history
 
 - **1** — this document. Header, palette with XPM contexts, frames, clips with
   direction and loop, nine-slice, sample mode; bakes to PNG + Aseprite JSON.
+  Colour names and `#rrrrggggbbbb` were added before anything depended on the
+  format, along with the image-to-`.crpix` converter (§7.1); the earlier
+  argument for refusing names — that a misspelling would be silently wrong — was
+  simply false, since an unknown name is refused.
