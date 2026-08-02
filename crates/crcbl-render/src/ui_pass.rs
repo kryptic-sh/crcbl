@@ -83,13 +83,11 @@
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BlendState, BufferDesc,
-    BufferHandle, BufferImageCopy, BufferUsage, ColorTargetState, ColorWrites, CommandEncoderDesc,
-    Device, Extent3d, Features, FilterMode, Format, GraphicsPipelineDesc, GraphicsPipelineHandle,
-    HalError, ImageDesc, ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageType,
-    ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType, IndexFormat, LoadOp, MemoryLocation,
-    Offset3d, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState, PushConstantRange,
-    QueueHandle, ResourceState, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry,
-    ShaderModuleDesc, ShaderStages, StoreOp, SubmitInfo,
+    BufferHandle, BufferUsage, ColorTargetState, ColorWrites, Device, Features, FilterMode, Format,
+    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageViewHandle, IndexFormat, LoadOp,
+    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState, PushConstantRange,
+    QueueHandle, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
+    ShaderStages, StoreOp,
 };
 
 use crcbl_shaders::{Stage, UI};
@@ -97,6 +95,7 @@ use crcbl_ui::draw_list::{DrawList, Vertex2d};
 use crcbl_ui::text::FontAtlas;
 
 use crate::graph::{ImageId, RenderGraph};
+use crate::texture::{UploadedTexture, upload_texture};
 
 /// The constant block matching `ui.slang`'s `UiConstants`.
 ///
@@ -196,8 +195,7 @@ pub struct UiRenderer {
     bind_group_layout: BindGroupLayoutHandle,
 
     // Glyph atlas
-    atlas_image: ImageHandle,
-    atlas_view: ImageViewHandle,
+    atlas: UploadedTexture,
     atlas_sampler: SamplerHandle,
 
     // Per-frame bind groups (each contains atlas+sampler+vertex_buffer, plus
@@ -288,10 +286,16 @@ impl UiRenderer {
         let (atlas_w, atlas_h, atlas_pixels) = atlas.glyph_bitmap();
 
         // Upload glyph atlas texture via staging.
-        let (atlas_image, atlas_view) =
-            upload_texture_r8(device, queue, atlas_w, atlas_h, &atlas_pixels)?;
-        rollback.images.push(atlas_image);
-        rollback.image_views.push(atlas_view);
+        let atlas = upload_texture(
+            device,
+            queue,
+            "ui glyph atlas",
+            Format::R8Unorm,
+            atlas_w,
+            atlas_h,
+            &atlas_pixels,
+        )?;
+        rollback.textures.push(atlas);
 
         let atlas_sampler = device.create_sampler(&SamplerDesc {
             label: Some("ui glyph atlas"),
@@ -389,7 +393,7 @@ impl UiRenderer {
                     Some(cb)
                 }
             };
-            let (entries, used) = frame_entries(atlas_view, atlas_sampler, vb, cb);
+            let (entries, used) = frame_entries(atlas.view, atlas_sampler, vb, cb);
             let bg = device.create_bind_group(&BindGroupDesc {
                 label: Some("ui frame"),
                 layout: bind_group_layout,
@@ -467,8 +471,7 @@ impl UiRenderer {
             pipeline_layout,
             pipeline,
             bind_group_layout,
-            atlas_image,
-            atlas_view,
+            atlas,
             atlas_sampler,
             frame_groups,
             vertex_buffers,
@@ -580,7 +583,7 @@ impl UiRenderer {
         // sampler never change, so a steady-state frame writes no descriptors.
         if vertex_buffer_replaced {
             let (entries, used) = frame_entries(
-                self.atlas_view,
+                self.atlas.view,
                 self.atlas_sampler,
                 self.vertex_buffers[idx],
                 self.constant_buffers.get(idx).copied(),
@@ -688,8 +691,7 @@ impl UiRenderer {
             device.destroy_buffer(cb);
         }
         device.destroy_sampler(self.atlas_sampler);
-        device.destroy_image_view(self.atlas_view);
-        device.destroy_image(self.atlas_image);
+        self.atlas.destroy(device);
         device.destroy_graphics_pipeline(self.pipeline);
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group_layout(self.bind_group_layout);
@@ -722,8 +724,7 @@ struct Rollback {
     pipeline_layouts: Vec<PipelineLayoutHandle>,
     pipelines: Vec<GraphicsPipelineHandle>,
     samplers: Vec<SamplerHandle>,
-    image_views: Vec<ImageViewHandle>,
-    images: Vec<ImageHandle>,
+    textures: Vec<UploadedTexture>,
 }
 
 impl Rollback {
@@ -739,11 +740,8 @@ impl Rollback {
         for handle in self.samplers {
             device.destroy_sampler(handle);
         }
-        for handle in self.image_views {
-            device.destroy_image_view(handle);
-        }
-        for handle in self.images {
-            device.destroy_image(handle);
+        for texture in self.textures {
+            texture.destroy(device);
         }
         for handle in self.pipelines {
             device.destroy_graphics_pipeline(handle);
@@ -838,174 +836,6 @@ fn ui_shader(delivery: ConstantDelivery) -> &'static crcbl_shaders::Shader {
     &UI
 }
 
-/// Uploads an R8_UNORM texture via a staging buffer copy.
-///
-/// Every object this creates is released on every path out, including the
-/// failing ones: a `?` that dropped the staging buffer on the floor would leak
-/// one per failed startup, and the recorder's leak assertions would only notice
-/// once something actually failed.
-fn upload_texture_r8(
-    device: &dyn Device,
-    queue: QueueHandle,
-    width: u32,
-    height: u32,
-    pixels: &[u8],
-) -> Result<(ImageHandle, ImageViewHandle), HalError> {
-    // Rows are padded to the device's copy alignment rather than packed
-    // tightly. Vulkan takes either; WebGPU requires a 256-byte row pitch and
-    // says so through this limit, so padding here is what makes one upload path
-    // work on both instead of one that only ever ran on the backend it was
-    // written against. `R8Unorm` is one byte per texel, so bytes and texels are
-    // the same number throughout.
-    let alignment = device
-        .caps()
-        .limits
-        .optimal_buffer_copy_offset_alignment
-        .max(1);
-    let row_pitch = u64::from(width).next_multiple_of(alignment);
-    let size = row_pitch * u64::from(height);
-    let mut padded = vec![0u8; usize::try_from(size).unwrap_or(usize::MAX)];
-    for row in 0..height as usize {
-        let src = row * width as usize;
-        let dst = row * row_pitch as usize;
-        padded[dst..dst + width as usize].copy_from_slice(&pixels[src..src + width as usize]);
-    }
-
-    let staging = device.create_buffer(&BufferDesc {
-        label: Some("ui atlas staging"),
-        size,
-        usage: BufferUsage::TRANSFER_SRC,
-        memory: MemoryLocation::HostUpload,
-    })?;
-    let row_texels = u32::try_from(row_pitch).unwrap_or(u32::MAX);
-    let outcome = upload_atlas_image(device, queue, width, height, row_texels, staging, &padded);
-    device.destroy_buffer(staging);
-    outcome
-}
-
-/// The half of [`upload_texture_r8`] that owns the image and the view.
-fn upload_atlas_image(
-    device: &dyn Device,
-    queue: QueueHandle,
-    width: u32,
-    height: u32,
-    row_texels: u32,
-    staging: BufferHandle,
-    pixels: &[u8],
-) -> Result<(ImageHandle, ImageViewHandle), HalError> {
-    device.write_buffer(staging, 0, pixels)?;
-
-    let image = device.create_image(&ImageDesc {
-        label: Some("ui glyph atlas"),
-        image_type: ImageType::D2,
-        format: Format::R8Unorm,
-        extent: Extent3d::d2(width, height),
-        mip_levels: 1,
-        samples: 1,
-        usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
-        memory: MemoryLocation::DeviceLocal,
-    })?;
-
-    let view = match device.create_image_view(&ImageViewDesc {
-        label: Some("ui glyph atlas"),
-        image,
-        view_type: ImageViewType::D2,
-        format: Format::R8Unorm,
-        range: ImageSubresourceRange {
-            aspect: crcbl_hal::ImageAspect::COLOR,
-            base_mip: 0,
-            mip_count: 1,
-            base_layer: 0,
-            layer_count: 1,
-        },
-    }) {
-        Ok(view) => view,
-        Err(error) => {
-            device.destroy_image(image);
-            return Err(error);
-        }
-    };
-
-    match record_atlas_upload(device, queue, image, staging, width, height, row_texels) {
-        Ok(()) => Ok((image, view)),
-        Err(error) => {
-            device.destroy_image_view(view);
-            device.destroy_image(image);
-            Err(error)
-        }
-    }
-}
-
-/// Records, submits and drains the staging copy.
-fn record_atlas_upload(
-    device: &dyn Device,
-    queue: QueueHandle,
-    image: ImageHandle,
-    staging: BufferHandle,
-    width: u32,
-    height: u32,
-    row_texels: u32,
-) -> Result<(), HalError> {
-    let range = ImageSubresourceRange {
-        aspect: crcbl_hal::ImageAspect::COLOR,
-        base_mip: 0,
-        mip_count: 1,
-        base_layer: 0,
-        layer_count: 1,
-    };
-
-    // Upload via staging copy with barriers
-    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-        label: Some("ui atlas upload"),
-        queue,
-    });
-
-    // Transition image: Undefined → TransferDst
-    encoder.pipeline_barrier(&crcbl_hal::Barriers {
-        images: &[crcbl_hal::ImageBarrier::new(
-            image,
-            range,
-            ResourceState::Undefined,
-            ResourceState::TransferDst,
-        )],
-        ..Default::default()
-    });
-
-    encoder.copy_buffer_to_image(&BufferImageCopy {
-        buffer: staging,
-        buffer_offset: 0,
-        buffer_row_length: row_texels,
-        buffer_image_height: height,
-        image,
-        image_subresource: ImageSubresourceLayers {
-            aspect: crcbl_hal::ImageAspect::COLOR,
-            mip: 0,
-            base_layer: 0,
-            layer_count: 1,
-        },
-        image_offset: Offset3d { x: 0, y: 0, z: 0 },
-        image_extent: Extent3d::d2(width, height),
-    });
-
-    // Transition image: TransferDst → ShaderRead
-    encoder.pipeline_barrier(&crcbl_hal::Barriers {
-        images: &[crcbl_hal::ImageBarrier::new(
-            image,
-            range,
-            ResourceState::TransferDst,
-            ResourceState::ShaderRead,
-        )],
-        ..Default::default()
-    });
-
-    let commands = encoder.finish()?;
-    let submitted = device
-        .submit(queue, &SubmitInfo::new(&[commands]))
-        .and_then(|()| device.wait_idle());
-    device.destroy_command_buffer(commands);
-    submitted
-}
-
 fn entry(shader: &crcbl_shaders::Shader, stage: Stage) -> Result<&'static str, HalError> {
     shader.entry_point(stage).ok_or_else(|| {
         HalError::ShaderCompilation(format!(
@@ -1043,6 +873,102 @@ mod tests {
         let renderer = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb)
             .expect("the null backend accepts everything");
         renderer.destroy(device.as_ref());
+    }
+
+    /// The glyph atlas upload moved to [`crate::texture`] and must not have
+    /// changed on the way: one byte per texel, the atlas's own extent, and
+    /// `Undefined → TransferDst → ShaderRead` around the copy.
+    ///
+    /// The image's *format* is not observable through the recorder — it logs a
+    /// kind and a label, not the descriptor — so the staging write's length
+    /// stands in for it: `R8Unorm` writes `width * height`, and the same call
+    /// with `Rgba8Unorm` would write four times that.
+    ///
+    /// The atlas is 768 texels wide, which is already a multiple of Tier A's
+    /// 4-byte copy alignment, so *this* upload pads nothing and the numbers are
+    /// spelled out rather than recomputed. The padding itself is exercised in
+    /// [`crate::texture`]'s own tests, against Tier B's 256-byte alignment.
+    #[test]
+    fn the_glyph_atlas_is_still_an_r8_upload_at_the_same_pitch() {
+        use crcbl_hal::null::{Command, Event};
+        use crcbl_hal::{Extent3d, Offset3d, ResourceState};
+
+        let recorder = crcbl_hal::null::Recorder::new();
+        let instance = NullInstance::tier_a().with_recorder(recorder.clone());
+        let adapter = instance.adapters().remove(0);
+        let device = instance
+            .create_device(&DeviceDesc {
+                label: None,
+                adapter: adapter.id,
+                required_features: Features::TIER_A,
+                optional_features: Features::PUSH_CONSTANTS,
+                compatible_surface: None,
+            })
+            .expect("the null backend always opens");
+        let queue = device.queue(QueueKind::Graphics).expect("always present");
+
+        let (atlas_w, atlas_h, atlas_pixels) = FontAtlas::built_in().glyph_bitmap();
+        assert_eq!((atlas_w, atlas_h), (768, 13));
+        assert_eq!(atlas_pixels.len(), 768 * 13);
+        assert_eq!(
+            768 % device.caps().limits.optimal_buffer_copy_offset_alignment,
+            0,
+            "the pitch below is the unpadded width only because the row is already aligned"
+        );
+
+        let renderer = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb)
+            .expect("the null backend accepts everything");
+
+        let written = recorder
+            .events()
+            .into_iter()
+            .find_map(|event| match event {
+                Event::BufferWritten { len, .. } => Some(len),
+                _ => None,
+            })
+            .expect("the atlas staging buffer is written before any frame buffer");
+        assert_eq!(
+            written,
+            768 * 13,
+            "one byte per texel: the same call with an Rgba8Unorm atlas would write four times this"
+        );
+
+        let commands = recorder.commands();
+        let copy = commands
+            .iter()
+            .find_map(|command| match command {
+                Command::CopyBufferToImage(copy) => Some(*copy),
+                _ => None,
+            })
+            .expect("the atlas is uploaded with one buffer-to-image copy");
+        assert_eq!(
+            copy.buffer_row_length, 768,
+            "R8 is one byte per texel, so the texel pitch equals the byte pitch"
+        );
+        assert_eq!(copy.buffer_image_height, atlas_h);
+        assert_eq!(copy.image_extent, Extent3d::d2(atlas_w, atlas_h));
+        assert_eq!(copy.image_offset, Offset3d { x: 0, y: 0, z: 0 });
+
+        let transitions: Vec<_> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Barrier { images, .. } => Some(images.clone()),
+                _ => None,
+            })
+            .flatten()
+            .map(|barrier| (barrier.from, barrier.to))
+            .collect();
+        assert_eq!(
+            transitions,
+            [
+                (ResourceState::Undefined, ResourceState::TransferDst),
+                (ResourceState::TransferDst, ResourceState::ShaderRead),
+            ],
+            "the atlas is the only barrier the UI renderer's construction records"
+        );
+
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
     }
 
     #[test]

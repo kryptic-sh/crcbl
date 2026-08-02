@@ -28,6 +28,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   reports everything through its return values is unaffected.
 - **breakout**: the ball's speed ramps 2% per brick broken, capped at 1.6x the
   launch speed. A lost life and a restart both put it back.
+- **crcbl-render**: `texture::upload_texture` and `UploadedTexture`, a
+  format-agnostic staging upload. It replaces `ui_pass`'s private R8-only
+  helper, whose row pitch was computed in texels and passed to a copy that wants
+  bytes — correct only because `R8Unorm` is one byte per texel. The pitch is now
+  computed in bytes and converted back once, at the copy, so an RGBA8 upload
+  lands where it says it does.
 
 ### Changed
 
