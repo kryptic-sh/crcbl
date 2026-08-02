@@ -37,11 +37,13 @@
 //! ## Status codes
 //!
 //! [`STATUS_IDLE`] `0`, [`STATUS_PREPARED`] `1`, [`STATUS_BOOTING`] `2`,
-//! [`STATUS_RUNNING`] `3`, [`STATUS_STOPPED`] `4`, [`STATUS_FAILED`] `5`.
+//! [`STATUS_RUNNING`] `3`, [`STATUS_STOPPED`] `4`, [`STATUS_FAILED`] `5`,
+//! [`STATUS_PAUSED`] `6`.
 //!
-//! The shim drives `requestAnimationFrame` while the status is `BOOTING` or
-//! `RUNNING` and stops on anything else. `FAILED` is the only one that sets an
-//! error message.
+//! The shim drives `requestAnimationFrame` while the status is `BOOTING`,
+//! `RUNNING` **or** `PAUSED` and stops on anything else — a paused demo is
+//! still drawing, and it is a keystroke away from playing again. `FAILED` is
+//! the only one that sets an error message.
 //!
 //! ## Call ordering
 //!
@@ -134,6 +136,15 @@ pub const STATUS_RUNNING: u32 = 3;
 pub const STATUS_STOPPED: u32 = 4;
 /// Something failed; [`__crcbl_breakout_error_ptr`] says what.
 pub const STATUS_FAILED: u32 = 5;
+/// Running, but the simulation is stopped: the player pressed Escape, or the
+/// canvas lost focus.
+///
+/// A separate code rather than a flag beside `RUNNING`, because the page's
+/// status line is a *status* — it said "Playing." for as long as the demo was
+/// alive, including while the canvas sat unfocused behind something else, which
+/// is the browser half of the bug this slice fixes. Numbered after `FAILED` so
+/// the codes already published to the shim keep their values.
+pub const STATUS_PAUSED: u32 = 6;
 
 /// The base URL the [`FetchSource`] resolves asset keys against.
 ///
@@ -177,7 +188,7 @@ impl Stage {
             Self::Idle => STATUS_IDLE,
             Self::Prepared => STATUS_PREPARED,
             Self::Booting(_) => STATUS_BOOTING,
-            Self::Running(_) => STATUS_RUNNING,
+            Self::Running(engine) => running_status(engine),
             Self::Stopped => STATUS_STOPPED,
             Self::Failed => STATUS_FAILED,
         }
@@ -459,9 +470,10 @@ pub extern "C" fn __crcbl_breakout_frame(now_ms: f64) -> u32 {
             Stage::Booting(mut pending) => match pending.poll() {
                 Ok(Some(engine)) => {
                     log::info!("breakout: running at {:?}", engine.extent());
+                    let status = running_status(&engine);
                     app.stage = Stage::Running(Box::new(engine));
                     app.last_ms = Some(now_ms);
-                    STATUS_RUNNING
+                    status
                 }
                 Ok(None) => {
                     app.stage = Stage::Booting(pending);
@@ -473,8 +485,9 @@ pub extern "C" fn __crcbl_breakout_frame(now_ms: f64) -> u32 {
                 engine.set_frame_step(step_from(app.last_ms.replace(now_ms), now_ms));
                 match engine.frame() {
                     Ok(Flow::Continue) => {
+                        let status = running_status(&engine);
                         app.stage = Stage::Running(engine);
-                        STATUS_RUNNING
+                        status
                     }
                     Ok(Flow::Stop(reason)) => finish(app, engine, reason),
                     Err(error) => {
@@ -495,6 +508,19 @@ pub extern "C" fn __crcbl_breakout_frame(now_ms: f64) -> u32 {
             }
         }
     })
+}
+
+/// [`STATUS_PAUSED`] or [`STATUS_RUNNING`], from the loop itself.
+///
+/// Asked of the loop rather than tracked here: the page has no way to know that
+/// a `blur` paused the game, and a second copy of the answer would be the thing
+/// that drifts.
+fn running_status(engine: &Loop<dyn crcbl::shell::Shell>) -> u32 {
+    if engine.is_paused() {
+        STATUS_PAUSED
+    } else {
+        STATUS_RUNNING
+    }
 }
 
 /// Tears `engine` down and records how it ended.

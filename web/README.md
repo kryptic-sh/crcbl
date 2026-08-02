@@ -8,20 +8,20 @@ framework that owns policy — and it applies here for the same reason.
 
 ## Layout
 
-| Path                      | What it is                                              |
-| ------------------------- | ------------------------------------------------------- |
-| `index.html`              | the demo site index                                     |
-| `style.css`               | one stylesheet for the site                             |
-| `engine/wasm.js`          | reading/writing wasm memory, and the detached-view rule |
-| `engine/shell.js`         | canvas, DPI/resize, keyboard, pointer → `__crcbl_web_*` |
-| `engine/storage.js`       | asset pre-load over `fetch()`, OPFS restore and drain   |
-| `engine/audio.js`         | main-thread half of the AudioWorklet feed               |
-| `engine/audio-worklet.js` | the `AudioWorkletProcessor` itself                      |
-| `engine/log.js`           | drains the engine's log queue into the console          |
-| `demos/breakout/`         | the breakout demo page and its boot sequence            |
-| `tools/check-exports.mjs` | the JS↔wasm symbol contract check                       |
-| `tools/smoke.mjs`         | runs the artifact's boot sequence under node            |
-| `build.sh`                | assembles `target/site/`                                |
+| Path                      | What it is                                                                 |
+| ------------------------- | -------------------------------------------------------------------------- |
+| `index.html`              | the demo site index                                                        |
+| `style.css`               | one stylesheet for the site                                                |
+| `engine/wasm.js`          | reading/writing wasm memory, and the detached-view rule                    |
+| `engine/shell.js`         | canvas, DPI/resize, focus, fullscreen, keyboard, pointer → `__crcbl_web_*` |
+| `engine/storage.js`       | asset pre-load over `fetch()`, OPFS restore and drain                      |
+| `engine/audio.js`         | main-thread half of the AudioWorklet feed                                  |
+| `engine/audio-worklet.js` | the `AudioWorkletProcessor` itself                                         |
+| `engine/log.js`           | drains the engine's log queue into the console                             |
+| `demos/breakout/`         | the breakout demo page and its boot sequence                               |
+| `tools/check-exports.mjs` | the JS↔wasm symbol contract check                                          |
+| `tools/smoke.mjs`         | runs the artifact's boot sequence under node                               |
+| `build.sh`                | assembles `target/site/`                                                   |
 
 Each `engine/` module implements the JS side of an ABI a Rust module already
 specified symbol by symbol. Those specifications are the source of truth:

@@ -47,12 +47,13 @@ meta-->
 <div class="note">
   <strong>Click the canvas first.</strong> A canvas has to hold keyboard focus
   to receive keys, and browsers will not start audio until you have interacted
-  with the page.
+  with the page. Clicking away pauses the game and lets go of whatever key was
+  held — no platform sends the release for a key that was down when focus left.
 </div>
 
 <section id="controls">
   <h2>controls</h2>
-  <h3>Two keys and a bar.</h3>
+  <h3>Two keys and a bar, plus the three the loop keeps.</h3>
   <ul class="keys">
     <li class="key-row">
       <span>Move the paddle</span>
@@ -65,6 +66,18 @@ meta-->
     <li class="key-row">
       <span>Restart after a win or loss</span>
       <span><kbd>Space</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Pause and resume</span>
+      <span><kbd>Esc</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Fullscreen</span>
+      <span><kbd>F11</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Debug overlay</span>
+      <span><kbd>F3</kbd></span>
     </li>
   </ul>
 </section>

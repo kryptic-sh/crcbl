@@ -149,6 +149,18 @@ const ADAPTER = args.adapter ?? process.env.CRCBL_WEB_E2E_ADAPTER ?? 'auto';
 /** How many times the canvas is read back once the ball is in flight. */
 const SAMPLE_COUNT = 16;
 
+/**
+ * How long the focus/pause group watches for a HUD heartbeat.
+ *
+ * Both samples log one every sixty ticks — a second of *simulated* time. Under
+ * SwiftShader a frame is slow enough that the accumulator's 64 ms clamp makes
+ * simulated time run behind wall time, so the window is several times that
+ * second rather than a hair over it. The group's first check is the control
+ * that keeps this number honest: a window too short to hold a heartbeat fails
+ * there rather than making "a paused demo runs no ticks" pass for free.
+ */
+const TICK_WINDOW_MS = 4_000;
+
 /** The control page's clear colour, and what it must read back as. */
 const CONTROL_RGB = [0, 51, 204];
 
@@ -953,8 +965,12 @@ try {
 
   const settled = await until(async () => {
     const status = await evaluate(page, `crcbl.status()`);
-    // 3 is STATUS_RUNNING; 4 STOPPED and 5 FAILED are terminal, so stop asking.
-    return status === 3 || status === 4 || status === 5 ? { status } : null;
+    // 3 is STATUS_RUNNING, 6 STATUS_PAUSED; 4 STOPPED and 5 FAILED are
+    // terminal, so stop asking. 6 is here because a headless Chrome that never
+    // gave the canvas focus is a legitimate way to arrive, and it settles the
+    // wait rather than spinning it out — the check below still insists on 3,
+    // and reports the 6 instead of "never settled" when it is not.
+    return [3, 4, 5, 6].includes(status) ? { status } : null;
   });
 
   check(
@@ -979,7 +995,9 @@ try {
     'B',
     'the demo reached STATUS_RUNNING',
     settled?.status === 3,
-    `status ${settled?.status ?? 'never settled'}`
+    settled?.status === 6
+      ? 'status 6 (PAUSED) — the canvas never had focus'
+      : `status ${settled?.status ?? 'never settled'}`
   );
   // `/favicon.ico` is requested by the browser, not by the shim, and the site
   // deliberately has none. Every other 404 is an asset the page wanted.
@@ -1149,6 +1167,108 @@ try {
     'the canvas changes between frames while the simulation runs',
     frames.size > 1,
     `${frames.size} distinct frame(s) across ${samples.length} samples`
+  );
+
+  group('E — focus and pause');
+
+  // **The reported bug, in a real browser.** A canvas that loses keyboard focus
+  // used to keep simulating and keep saying "Playing." — for a game sitting
+  // behind another window, that is a life lost while nobody is looking.
+  //
+  // The blur is real, not synthesized: moving focus to another element in the
+  // document fires a `FocusEvent` at the canvas exactly as clicking outside it
+  // does, which is the shim listener under test. There is no way to make the
+  // browser blur an element through `Input.dispatch*` — Tab is swallowed by the
+  // shim precisely so the page does not steal the game's keys.
+  //
+  // **What is measured is the HUD heartbeat**, which both samples log every
+  // sixty ticks, whatever state the game is in. The canvas would be the more
+  // direct observable and was tried first: breakout's ball dies within a second
+  // of the last paddle input, so a still board is the *normal* state by this
+  // point in the run and "the picture stopped changing" passes whether or not
+  // anything paused. A line that only the tick loop can emit does not.
+  const heartbeats = async () => {
+    const before = hud().length;
+    await pause(TICK_WINDOW_MS);
+    return hud().length - before;
+  };
+
+  // The control, and it is what makes the next check mean something: if the
+  // window below is ever too short to contain a heartbeat, this fails loudly
+  // instead of the pause check passing for free.
+  const running = await heartbeats();
+  check(
+    'E',
+    'a running demo logs its HUD from inside the tick',
+    running > 0,
+    `${running} HUD line(s) in ${TICK_WINDOW_MS} ms`
+  );
+
+  await evaluate(page, `document.getElementById('stop').focus()`);
+  const paused = await until(async () => {
+    const status = await evaluate(page, `crcbl.status()`);
+    return status === 6 ? status : null;
+  });
+  check(
+    'E',
+    'blurring the canvas pauses the demo',
+    paused === 6,
+    `status ${await evaluate(page, `crcbl.status()`)}`
+  );
+
+  const whilePaused = await heartbeats();
+  check(
+    'E',
+    'a paused demo runs no ticks at all',
+    whilePaused === 0,
+    `${whilePaused} HUD line(s) in ${TICK_WINDOW_MS} ms`
+  );
+
+  // Clicking back in deliberately does not resume — the pause menu is dismissed
+  // on purpose — so this is two steps and the first one must not be enough.
+  for (const type of ['mousePressed', 'mouseReleased']) {
+    await page.send('Input.dispatchMouseEvent', {
+      type,
+      x: rect.x,
+      y: rect.y,
+      button: 'left',
+      clickCount: 1,
+      buttons: type === 'mousePressed' ? 1 : 0,
+    });
+  }
+  await pause(200);
+  check(
+    'E',
+    'focus coming back does not resume on its own',
+    (await evaluate(page, `crcbl.status()`)) === 6,
+    `status ${await evaluate(page, `crcbl.status()`)}`
+  );
+
+  for (const type of ['keyDown', 'keyUp']) {
+    await page.send('Input.dispatchKeyEvent', {
+      type,
+      code: 'Escape',
+      key: 'Escape',
+      windowsVirtualKeyCode: 27,
+      nativeVirtualKeyCode: 27,
+    });
+  }
+  const resumed = await until(async () => {
+    const status = await evaluate(page, `crcbl.status()`);
+    return status === 3 ? status : null;
+  });
+  check(
+    'E',
+    'Escape resumes the demo',
+    resumed === 3,
+    `status ${await evaluate(page, `crcbl.status()`)}`
+  );
+  const afterResume = await heartbeats();
+  check(
+    'E',
+    'the simulation runs again after resuming',
+    afterResume > 0,
+    `${afterResume} HUD line(s) in ${TICK_WINDOW_MS} ms`
   );
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and

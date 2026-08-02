@@ -180,6 +180,35 @@ The modular panel is built and all three samples switch it on with F3 (or
   have to read as different surfaces; a change to one is invisible to the tests.
   Low stakes — it is a look, not a behaviour — but it is the one number in
   breakout's art with nothing holding it.
+- **Nothing has run the fullscreen toggle against a real compositor.** The
+  Wayland and X11 backends already implement `Shell::set_mode` and report an
+  effective mode back, and the samples' F11 path is tested end to end against
+  `HeadlessShell` — including the refusal case, where a windowed configure
+  answers a borderless request. What has _not_ happened is a human pressing F11
+  under a real Wayland compositor or an X11 window manager and confirming that
+  the window covers the monitor, that the swapchain resizes with it, and that
+  `mode_request_honoured` goes true. The development machine for this slice had
+  neither `DISPLAY` nor `WAYLAND_DISPLAY`. A tiling window manager is the
+  interesting case: it is expected to refuse, and the sample is expected to say
+  so rather than pretend.
+- **The browser's fullscreen path has never been exercised.**
+  `web/tools/browser-e2e.mjs` covers focus and pause in a real browser — it
+  blurs the canvas, checks the status becomes `STATUS_PAUSED` and that the HUD
+  heartbeat stops, and that Escape brings it back — but not F11. Headless
+  Chromium's fullscreen behaviour under Xvfb is its own question, and
+  `Input.dispatchKeyEvent` is not a user gesture for the purposes of
+  `requestFullscreen`, so the check would need `Browser.setPermission` or a
+  headed run to mean anything. What is covered instead is the seam:
+  `crcbl-shell`'s `fullscreen_is_the_pages_answer_not_the_engines_request` and
+  `the_mode_is_right_whichever_order_the_resize_and_the_change_arrive_in` drive
+  `__crcbl_web_fullscreen` directly, and `check-exports.mjs` confirms the symbol
+  ships and that the shim calls it.
+- **Nothing has looked at the pause menu.** It is asserted as draw-list strings
+  — the `PAUSED` heading and the first hint line reaching the UI pass — and no
+  human or golden image has confirmed it is legible over either game's art, or
+  that the full-frame dim reads as a dim rather than as a bug. It is
+  deliberately the crudest possible version, behind `draw_pause_menu`, because
+  the next slice replaces it.
 - **The changelog starts mid-project.** `CHANGELOG.md` covers changes from
   2026-08-01 onward; everything before it is in `git log` only. Worth doing at
   the first tagged release, or not at all — there are no releases yet for a
@@ -345,6 +374,75 @@ uncertainty.
   finding is the clearest, since breakout has no forward pass at all. _Changes
   it_: a decision to keep it live, which would mean re-running the review rather
   than patching the findings that happen to have been noticed.
+
+- **What does a paused frame do to the fixed-tick accumulator?** Taken: **update
+  the clock and drain the accumulator without stepping the game.** The three
+  candidates only differ after a long pause. _Not calling `update`_ freezes
+  `FrameClock::last_update`, so the first update after the pause measures the
+  whole of it and the `DEFAULT_MAX_CATCH_UP_TICKS` cap turns it into eight ticks
+  in one frame — measured, not reasoned: falsifying the drain that way makes
+  `resuming_after_a_long_pause_runs_one_tick_not_a_catch_up_burst` report "ran 8
+  ticks" in all three samples. _Updating but not draining_ saturates the
+  accumulator at the same cap and lurches identically, also measured. Draining
+  leaves only the sub-tick remainder, so the first live frame runs the one tick
+  it is owed, and it keeps `render_dt` real so the debug overlay's frame graph
+  does not flatline at whatever it read when Escape was pressed. The cost is
+  that `FrameClock`'s `TickId` advances during a pause; nothing in any sample
+  reads it. _Changes it_: a consumer that does — a networked sample whose tick
+  ids have to line up with a server's — which would want an explicit
+  `FrameClock::reset` rather than a drain loop.
+
+- **Is pause a `GameState` variant or the app loop's?** Taken: **the loop's.**
+  Both samples' `GameState` lives inside `GameLogic`, which the authoritative
+  server's `GameModule` mutates from inside a tick and which the client
+  replicates; a `Paused` variant there would make the server's state depend on
+  which window a player's compositor has focused, and would put a value in
+  `Summary::state` that a headless scripted run could reach. Pause is not
+  something the simulation does — it is the loop declining to advance it — so it
+  is `Loop::paused`, reported through `Loop::is_paused` and `Summary::paused`.
+  _Changes it_: a pause the _simulation_ has to know about, which in a
+  multiplayer build it would: pausing a shared world is a server decision and
+  would be a state on the server, not a client's window losing focus.
+
+- **Does regaining focus resume?** Taken: **no.** A player who clicks back into
+  the window would otherwise arrive mid-ball with no warning, and the pause menu
+  exists to be dismissed on purpose. This also keeps the two edges asymmetric on
+  purpose: focus loss is a thing the platform does _to_ the game, resuming is a
+  thing the player does. _Changes it_: a sample where pausing costs the player
+  something (a timed run), where the two-step would read as a penalty.
+
+- **Which key pauses, given that a browser reserves Escape?** Taken: **Escape
+  anyway.** Neither sample's action map binds it — breakout declares arrows,
+  Space and R; flappy declares Space, Up and R — and it is what a player tries
+  first. In a fullscreen browser demo Escape both leaves fullscreen and pauses,
+  because `requestFullscreen` reserves the key and no page can decline it. That
+  is one keystroke doing two reasonable things rather than a collision worth
+  designing around. _Changes it_: a sample that wants Escape for something else,
+  or a pause menu with a back-navigation stack where "leave fullscreen" and
+  "close the menu" would want to be separate steps.
+
+- **Who calls `requestFullscreen` in the browser — the shell or the page?**
+  Taken: **the page.** A browser grants fullscreen only from inside a
+  user-gesture handler; the shim's `keydown` listener is one and a
+  `requestAnimationFrame` callback is not, and the engine reads a key on the
+  frame _after_ the `keydown` that carried it, by which time the gesture is
+  over. Calling it from Rust would also mean the wasm module's first non-`wbg`
+  import, which `web/tools/check-exports.mjs` exists to prevent. So
+  `web/engine/shell.js` binds F11 itself and reports the outcome through the new
+  `__crcbl_web_fullscreen` entry point, exactly as a compositor answers
+  `Shell::set_mode` with a configure rather than obeying it. The cost is that
+  `FULLSCREEN_KEY` is spelled in four places — three `app.rs` files and
+  `shell.js` — with nothing but a comment holding them together. _Changes it_: a
+  second key wanting a gesture (pointer lock is the obvious one), which would be
+  the point to give the shim a small table the engine can publish rather than a
+  second hard-coded key.
+
+- **Does the sandbox get a pause too?** Taken: **yes.** It has no game, and it
+  does have a cube on the fixed timestep — the one thing in it a player can see
+  stop — and the samples' standing rule is that a facility switched on in one is
+  switched on the same way in all of them. It costs about fifteen lines.
+  _Changes it_: nothing likely; if the sandbox ever became a pure benchmark
+  harness, pausing it would be noise.
 
 ## Considered and declined
 

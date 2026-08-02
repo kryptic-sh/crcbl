@@ -16,6 +16,40 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **breakout**, **flappy**, **sandbox**: a pause state, entered and left with
+  **Escape** and entered by losing window focus. A paused loop stops calling the
+  game's tick, so the simulation does not advance at all; the HUD's status line
+  reads `PAUSED` rather than whatever the server last thought, and a menu is
+  drawn over the frame — text through the existing HUD path, behind a single
+  `draw_pause_menu(&mut DrawList, extent)` per sample that the art slice
+  replaces without touching the state machine. Pause is the loop's, not
+  `GameState`'s: it is the loop declining to advance the simulation, and a
+  `Paused` variant would put a value in the authoritative server's state that
+  depends on which window a compositor has focused. `Loop::is_paused` and
+  `Summary::paused` report it.
+- **breakout**, **flappy**, **sandbox**: a fullscreen toggle on **F11**, which
+  asks the shell for `DisplayMode::Borderless` and reads back what the window
+  system actually did. There is no remembered `fullscreen` flag to disagree with
+  the compositor — `Loop::display_mode` and `Summary::mode` are the _effective_
+  mode, the toggle picks its target from it, and a request the window system
+  refuses is logged once and reported as the mode the window really has.
+- **crcbl-shell**: `__crcbl_web_fullscreen(canvas, state)`, the web backend's
+  new shim entry point. A browser grants `requestFullscreen` only from inside a
+  user-gesture handler and wasm is never inside one, so the page's shim makes
+  the call from its own `keydown` and reports the outcome here; the backend
+  moves `WindowConfiguration::mode` to match, which is what finally lets
+  `WindowState::mode_request_honoured` answer `true` in a browser. An exit
+  nobody asked for — Escape, which reaches no key handler — is reported the same
+  way.
+- **web**: `engine/shell.js` handles **F11** itself (and swallows the browser's
+  own, which fullscreens the window rather than the canvas), listens for
+  `fullscreenchange`, and synthesizes a focus loss on `visibilitychange` — a tab
+  switch does not always blur the focused element, so `blur` alone leaves a game
+  holding keys it will never see released. The demo pages gained a
+  `STATUS_PAUSED` (6) status line, and `tools/browser-e2e.mjs` gained a
+  focus/pause group that blurs the canvas in a real browser and checks that the
+  HUD heartbeat stops.
+
 - **crcbl-ui**: `crcbl_ui::debug` — the modular debug overlay every sample now
   ships. `DebugPanel` holds `DebugSection`s and names no system; a system
   contributes by implementing `DebugModule`, whose one method fills a section it
@@ -143,6 +177,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   has no expectations for rather than passing on a game that never started.
 
 ### Fixed
+
+- **breakout**, **flappy**: a window that lost focus kept playing, and kept
+  saying so. The samples ignored `ShellEvent::Focus` entirely — on every
+  platform, native and browser — so alt-tabbing away left the simulation running
+  with the HUD reading `Playing`, and a life was lost while nobody was looking.
+  Focus loss now pauses the loop and releases every key the game thinks is held,
+  which is the obligation `ShellEvent::Focus`'s own documentation states: no
+  platform delivers releases for keys held when focus leaves. Flappy had the
+  worse half of it — its flap is an edge, and an action map that never saw Space
+  come up raises no further `just_pressed`, so the bird could never flap again.
+  Regaining focus deliberately does not resume.
 
 - **crcbl-wgpu**: a shader module or pipeline that fails to build is reported.
   WebGPU hands back an object either way and delivers the reason to the device's

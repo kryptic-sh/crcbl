@@ -116,6 +116,19 @@ struct Bridge {
     /// What to add to a DOM `timeStamp` to put it on the engine's clock. See
     /// [`Shell::align_event_clock`].
     clock_offset_ms: f64,
+    /// Whether the canvas is the document's `fullscreenElement`, as the shim
+    /// last reported through
+    /// [`__crcbl_web_fullscreen`](shim::__crcbl_web_fullscreen).
+    ///
+    /// Not an event, because there is no `ShellEvent` for "the mode changed" —
+    /// a mode change is observed through
+    /// [`WindowConfiguration::mode`](crate::WindowConfiguration::mode), and the
+    /// size change that comes with it arrives as an ordinary
+    /// [`Resized`](ShellEvent::Resized) from the shim's `ResizeObserver`.
+    /// [`pump`](WebShell::pump) copies this into the shell before it drains the
+    /// queue, so the two orders the browser can produce — `fullscreenchange`
+    /// before the resize, or after it — settle on the same configuration.
+    fullscreen: bool,
 }
 
 type Shared = Rc<RefCell<Bridge>>;
@@ -398,6 +411,32 @@ pub(crate) mod shim {
         });
     }
 
+    /// The canvas entered or left the document's fullscreen element.
+    ///
+    /// **The page owns the gesture, the engine owns the state.** A browser
+    /// grants `requestFullscreen` only from inside a user-gesture handler, and
+    /// wasm is never inside one: the shim's `keydown` listener is, a
+    /// `requestAnimationFrame` callback is not, and the engine only sees a key
+    /// on the frame *after* it was pressed. So the shim calls
+    /// `requestFullscreen` itself and reports the outcome here, exactly as a
+    /// compositor answers [`Shell::set_mode`](crate::Shell::set_mode) with a
+    /// configure rather than obeying it. The answer may also be one nobody
+    /// asked for — Escape leaves fullscreen without any key reaching the engine
+    /// — which is the case
+    /// [`WindowState::mode_request_honoured`](crate::WindowState::mode_request_honoured)
+    /// exists for.
+    ///
+    /// `state & STATE_EDGE` means the canvas *is* the fullscreen element.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub unsafe extern "C" fn __crcbl_web_fullscreen(canvas: u32, state: u32) {
+        let entered = state & STATE_EDGE != 0;
+        with_bridge(|bridge| {
+            if bridge.canvas == canvas {
+                bridge.fullscreen = entered;
+            }
+        });
+    }
+
     /// The page is going away — `beforeunload`, or a close button the page
     /// draws itself.
     ///
@@ -579,6 +618,10 @@ pub struct WebShell {
     monitors: Vec<MonitorInfo>,
     configured: Option<WindowConfiguration>,
     focused: bool,
+    /// The canvas is the document's fullscreen element, as of the last
+    /// [`pump`](Shell::pump). This is the *effective* half of the mode: see
+    /// [`Bridge::fullscreen`].
+    fullscreen: bool,
     pointer_mode: PointerMode,
     cursor: Option<CursorIcon>,
     close_pending: bool,
@@ -621,6 +664,7 @@ impl WebShell {
             monitors,
             configured: None,
             focused: false,
+            fullscreen: false,
             pointer_mode: PointerMode::Free,
             cursor: Some(CursorIcon::Default),
             close_pending: false,
@@ -647,15 +691,28 @@ impl WebShell {
         }
     }
 
+    /// The mode the canvas is actually presented in.
+    ///
+    /// [`Borderless`](DisplayMode::Borderless) exactly when the canvas is the
+    /// document's fullscreen element — a fullscreen canvas *is* a frameless
+    /// surface covering a display with the video mode untouched, which is what
+    /// that variant means. `monitor` is `None` because a page cannot choose
+    /// one; the browser puts the element on whichever display the window is on,
+    /// the same limitation Wayland has and the same reason `None` is documented
+    /// as the only honourable value there.
+    const fn effective_mode(&self) -> DisplayMode {
+        if self.fullscreen {
+            DisplayMode::Borderless { monitor: None }
+        } else {
+            DisplayMode::Windowed
+        }
+    }
+
     fn configure(&mut self, size: PhysicalSize, scale_factor: f64) {
         self.configured = Some(WindowConfiguration {
             size,
             scale_factor,
-            // A canvas sits inside a document: it is not fullscreen, and this
-            // backend never calls `requestFullscreen`, so the effective mode is
-            // windowed however borderless was requested. `mode_request_honoured`
-            // reporting `false` for a borderless request is the honest answer.
-            mode: DisplayMode::Windowed,
+            mode: self.effective_mode(),
         });
         if let Some(monitor) = self.monitors.first_mut() {
             monitor.bounds = PhysicalRect::new(0, 0, size.width, size.height);
@@ -789,10 +846,16 @@ impl Shell for WebShell {
 
     /// Records the requested mode.
     ///
-    /// Never honoured: this backend does not call `requestFullscreen`, so
-    /// [`WindowState::mode_request_honoured`] stays `false` for a borderless
-    /// request — the same answer a tiling window manager produces, and the
-    /// reason the seam keeps request and effect apart.
+    /// **A request, and this backend cannot grant it itself.** A browser gives
+    /// fullscreen only to code running inside a user-gesture handler, and
+    /// nothing on the Rust side ever is: the engine reads a key one frame after
+    /// the `keydown` that carried it. The page's shim calls `requestFullscreen`
+    /// from the gesture and reports the outcome through
+    /// [`__crcbl_web_fullscreen`](shim::__crcbl_web_fullscreen), which is what
+    /// moves [`WindowConfiguration::mode`] — so a request made here is honoured
+    /// a frame or two later on a page whose shim does that, and never on one
+    /// that does not. Read [`WindowState::mode_request_honoured`] rather than
+    /// the request, exactly as on a compositor that may refuse.
     fn set_mode(&mut self, window: WindowId, mode: DisplayMode) -> Result<(), ShellError> {
         self.check(window)?;
         if let DisplayMode::Borderless {
@@ -828,7 +891,23 @@ impl Shell for WebShell {
     fn pump(&mut self, sink: &mut dyn FnMut(ShellEvent)) {
         // Drained into a local first: the sink may call back into a shim entry
         // point, which borrows the same cell.
-        let events: Vec<ShellEvent> = self.shared.borrow_mut().queue.drain(..).collect();
+        let (events, fullscreen): (Vec<ShellEvent>, bool) = {
+            let mut bridge = self.shared.borrow_mut();
+            (bridge.queue.drain(..).collect(), bridge.fullscreen)
+        };
+        // Before the queue, and applied to the *existing* configuration too: a
+        // `fullscreenchange` and the resize it causes arrive in either order,
+        // and one that arrives second must not leave the mode describing the
+        // other. Taking it here rather than in an event handler is also what
+        // makes an Escape-driven exit — which produces no key event at all —
+        // visible to the frame that follows it.
+        if fullscreen != self.fullscreen {
+            self.fullscreen = fullscreen;
+            let mode = self.effective_mode();
+            if let Some(config) = &mut self.configured {
+                config.mode = mode;
+            }
+        }
         for event in events {
             match &event {
                 ShellEvent::Resized {
@@ -1202,6 +1281,100 @@ mod tests {
         );
         assert_eq!(state.requested_constraints, constraints);
         assert_eq!(shell.title, "sandbox");
+    }
+
+    /// **A borderless request is honoured only once the page says it was.**
+    ///
+    /// The whole of the browser's fullscreen story in one sequence: the request
+    /// is recorded and is not yet fact; the shim's `fullscreenchange` makes it
+    /// fact; an exit the engine never asked for — Escape, which reaches no key
+    /// handler — takes it away again and the window reports the mode it really
+    /// has rather than the one that was asked for.
+    #[test]
+    fn fullscreen_is_the_pages_answer_not_the_engines_request() {
+        let (mut shell, window) = shell_with_window(9);
+        // SAFETY: the shim ABI; nothing is dereferenced by these entry points.
+        unsafe { shim::__crcbl_web_resize(9, 800, 600, 1.0) };
+        drain(&mut shell);
+
+        shell
+            .set_mode(window, DisplayMode::Borderless { monitor: None })
+            .expect("the window is live");
+        let state = shell.window_state(window).expect("state");
+        assert_eq!(
+            state.requested_mode,
+            DisplayMode::Borderless { monitor: None }
+        );
+        assert_eq!(
+            state.effective_mode(),
+            Some(DisplayMode::Windowed),
+            "a request the page has not answered is not a fact",
+        );
+        assert!(!state.mode_request_honoured());
+
+        // The page granted it, and the canvas grew to the display.
+        // SAFETY: the shim ABI.
+        unsafe { shim::__crcbl_web_fullscreen(9, shim::STATE_EDGE) };
+        unsafe { shim::__crcbl_web_resize(9, 1920, 1080, 1.0) };
+        drain(&mut shell);
+        let state = shell.window_state(window).expect("state");
+        assert_eq!(
+            state.effective_mode(),
+            Some(DisplayMode::Borderless { monitor: None })
+        );
+        assert!(state.mode_request_honoured());
+        assert_eq!(state.size(), Some(PhysicalSize::new(1920, 1080)));
+
+        // Escape. No key reaches the engine and no `set_mode` is made, so the
+        // request still says borderless while the window is not.
+        // SAFETY: the shim ABI.
+        unsafe { shim::__crcbl_web_fullscreen(9, 0) };
+        drain(&mut shell);
+        let state = shell.window_state(window).expect("state");
+        assert_eq!(state.effective_mode(), Some(DisplayMode::Windowed));
+        assert_eq!(
+            state.requested_mode,
+            DisplayMode::Borderless { monitor: None }
+        );
+        assert!(
+            !state.mode_request_honoured(),
+            "a toggle reading the request back would still be showing fullscreen",
+        );
+    }
+
+    /// The mode survives the two orders a browser can deliver the change in.
+    ///
+    /// `fullscreenchange` and the `ResizeObserver` callback it causes are two
+    /// separate tasks, and nothing specifies which runs first. Reading the flag
+    /// inside the resize handler would be right in one order and wrong in the
+    /// other; `pump` takes it before the queue for exactly that reason.
+    #[test]
+    fn the_mode_is_right_whichever_order_the_resize_and_the_change_arrive_in() {
+        for resize_first in [true, false] {
+            let (mut shell, window) = shell_with_window(11);
+            // SAFETY: the shim ABI.
+            unsafe { shim::__crcbl_web_resize(11, 800, 600, 1.0) };
+            drain(&mut shell);
+
+            if resize_first {
+                // SAFETY: the shim ABI.
+                unsafe { shim::__crcbl_web_resize(11, 1920, 1080, 1.0) };
+                unsafe { shim::__crcbl_web_fullscreen(11, shim::STATE_EDGE) };
+            } else {
+                // SAFETY: the shim ABI.
+                unsafe { shim::__crcbl_web_fullscreen(11, shim::STATE_EDGE) };
+                unsafe { shim::__crcbl_web_resize(11, 1920, 1080, 1.0) };
+            }
+            drain(&mut shell);
+
+            let state = shell.window_state(window).expect("state");
+            assert_eq!(
+                state.effective_mode(),
+                Some(DisplayMode::Borderless { monitor: None }),
+                "resize_first = {resize_first}",
+            );
+            assert_eq!(state.size(), Some(PhysicalSize::new(1920, 1080)));
+        }
     }
 
     #[test]

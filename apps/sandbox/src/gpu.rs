@@ -272,6 +272,16 @@ impl Gpu {
         &self.last_dump
     }
 
+    /// Seconds of animation this frame will draw.
+    ///
+    /// Test-only, and the strongest thing the sandbox has to say "the
+    /// simulation did not advance": the cube's angle is a pure function of it,
+    /// so a single tick that slipped through a pause changes it.
+    #[cfg(test)]
+    pub const fn elapsed(&self) -> f32 {
+        self.elapsed
+    }
+
     /// Advances the animation by `dt` seconds.
     ///
     /// Driven by the loop's clock rather than read from one here, so a headless

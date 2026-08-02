@@ -41,6 +41,7 @@ const STATUS = {
   RUNNING: 3,
   STOPPED: 4,
   FAILED: 5,
+  PAUSED: 6,
 };
 
 /** Must match `ASSET_BASE` in `apps/flappy/src/web.rs`. */
@@ -223,8 +224,15 @@ async function main() {
       if (status === STATUS.RUNNING) {
         say(
           'Playing.',
-          '← → move · SPACE launches · click the canvas for keyboard and sound'
+          'SPACE or ↑ to flap · ESC pauses · F11 fullscreen' +
+            ' · click the canvas for keyboard and sound'
         );
+        statusBar.classList.add('running');
+      } else if (status === STATUS.PAUSED) {
+        // A canvas that lost focus reports this too, which is the point: the
+        // line used to read "Playing." for as long as the demo was alive,
+        // including while it sat unfocused behind another window.
+        say('Paused.', 'ESC resumes · click the canvas to give it the keyboard');
         statusBar.classList.add('running');
       } else if (status === STATUS.STOPPED) {
         say('Stopped.', opfsSettled(exports) ? 'High score saved.' : 'Saving…');
@@ -235,7 +243,13 @@ async function main() {
       }
     }
 
-    if (status === STATUS.BOOTING || status === STATUS.RUNNING) {
+    // PAUSED keeps the loop going: a paused demo still draws its menu, and
+    // it is one keystroke from playing.
+    if (
+      status === STATUS.BOOTING ||
+      status === STATUS.RUNNING ||
+      status === STATUS.PAUSED
+    ) {
       requestAnimationFrame(frame);
       return;
     }

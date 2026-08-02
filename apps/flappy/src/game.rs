@@ -1047,6 +1047,18 @@ impl Game {
         out.best = self.best.get();
     }
 
+    /// Whether the action map still counts the flap key as down.
+    ///
+    /// The *input* state, not a flag the loop keeps beside it. It matters more
+    /// here than a held direction would: [`ActionMap`] raises `just_pressed`
+    /// only on the transition, so a Space the map never saw released makes
+    /// every later press a no-op and the bird stops flapping for good.
+    #[cfg(test)]
+    #[must_use]
+    pub fn flap_is_down(&self) -> bool {
+        action_is_down(&self.action_map, ACTION_FLAP)
+    }
+
     /// The course in play, for a caller that wants to name a pipe — a bug
     /// report, a replay header, or a test.
     #[must_use]
@@ -1072,6 +1084,22 @@ impl Game {
 }
 
 // ---- input helpers ----------------------------------------------------------
+
+/// Whether the action map still counts `name` as physically down.
+///
+/// Distinct from [`action_just_pressed`], which is the *edge* and is what the
+/// game reads: a key the map thinks is still down produces no further edges
+/// however many times it is pressed again, which is precisely what a focus loss
+/// with no releases leaves behind.
+#[cfg(test)]
+fn action_is_down(map: &ActionMap, name: &str) -> bool {
+    map.action(name).is_some_and(|v| match v {
+        crcbl_input::ActionValue::Button(b) => {
+            !matches!(b.state, crcbl_input::ButtonState::Released)
+        }
+        _ => false,
+    })
+}
 
 fn action_just_pressed(map: &ActionMap, name: &str) -> bool {
     map.action(name).is_some_and(|v| match v {

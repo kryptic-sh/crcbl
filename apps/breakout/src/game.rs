@@ -912,6 +912,22 @@ impl Game {
         self.pending_keys.push((key, pressed));
     }
 
+    /// Whether the action map reports the move-left action held.
+    ///
+    /// The *input* state, not a flag the loop keeps beside it. A focus-loss
+    /// test that asserted "the loop cleared its list" would pass with the
+    /// release never reaching the action map, which is where the paddle's
+    /// direction actually comes from.
+    ///
+    /// Reads what the last [`tick`](Self::tick) resolved: a release queued by
+    /// [`key_event`](Self::key_event) lands when it is replayed, which is the
+    /// same ordering every other input takes.
+    #[cfg(test)]
+    #[must_use]
+    pub fn move_left_is_held(&self) -> bool {
+        action_held(&self.action_map, ACTION_LEFT)
+    }
+
     /// Advances the simulation by exactly one fixed tick.
     ///
     /// Call it from the loop's fixed-timestep accumulator — once per tick, not

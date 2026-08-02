@@ -1,4 +1,4 @@
-// The canvas half of the shim: size, DPI, focus, keyboard, pointer.
+// The canvas half of the shim: size, DPI, focus, fullscreen, keyboard, pointer.
 //
 // Implements the JS side of `crcbl-shell`'s Web/canvas backend
 // (`crates/crcbl-shell/src/web/mod.rs`). Every browser event becomes one
@@ -47,7 +47,25 @@ const SWALLOWED = new Set([
   'Space',
   'Tab',
   'Slash',
+  // The browser's own F11 makes the *browser window* fullscreen, which is a
+  // different thing from the canvas filling the screen and leaves the page
+  // laid out exactly as it was. The demo binds F11 to its own toggle below.
+  'F11',
 ]);
+
+/**
+ * The key that asks for fullscreen. Must match `FULLSCREEN_KEY` in each
+ * sample's `app.rs`.
+ *
+ * The gesture has to be handled *here* rather than in the engine: a browser
+ * grants `requestFullscreen` only from inside a user-gesture handler, and the
+ * engine reads a key one `requestAnimationFrame` after the `keydown` that
+ * carried it — by which time the gesture is over and the promise rejects. So
+ * the shim makes the call and reports the outcome through
+ * `__crcbl_web_fullscreen`; the engine's own F11 handling records the *request*
+ * and then reads back what actually happened.
+ */
+const FULLSCREEN_KEY = 'F11';
 
 /**
  * @param {KeyboardEvent | MouseEvent | PointerEvent | WheelEvent} event
@@ -157,6 +175,44 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
         (event.repeat ? STATE_REPEAT : 0),
     );
     if (SWALLOWED.has(event.code)) event.preventDefault();
+    // After the forward, so the engine sees the press either way, and only on
+    // a real press: `keyup` would toggle straight back, and a held key's
+    // repeats would toggle once per repeat.
+    if (down && !event.repeat && event.code === FULLSCREEN_KEY) toggleFullscreen();
+  }
+
+  /**
+   * Puts the canvas in or out of the document's fullscreen element.
+   *
+   * Both calls return promises that reject when the browser refuses — no
+   * gesture, a `fullscreen` permission policy that excludes the frame — and a
+   * rejection is not an error the page can do anything about. It is swallowed
+   * rather than thrown because the engine learns the truth from
+   * `fullscreenchange`, which simply does not fire: `mode_request_honoured()`
+   * stays false and the sample is expected to say so.
+   */
+  function toggleFullscreen() {
+    if (document.fullscreenElement === canvas) {
+      void document.exitFullscreen?.().catch(() => {});
+    } else {
+      void canvas.requestFullscreen?.().catch(() => {});
+    }
+  }
+
+  /**
+   * Tells the engine what the document's fullscreen element actually is.
+   *
+   * Fires for changes the page asked for *and* for ones it did not — Escape
+   * leaves fullscreen without delivering a key event anywhere — which is why
+   * this is the engine's only source of truth about the mode.
+   */
+  function onFullscreenChange() {
+    const on = document.fullscreenElement === canvas;
+    exports.__crcbl_web_fullscreen(canvasId, on ? STATE_EDGE : 0);
+    // The element's box changed; `ResizeObserver` will say so too, but the
+    // forced call means the swapchain is resized on the very next frame rather
+    // than one observation later.
+    syncSize(true);
   }
 
   /** @param {PointerEvent} event */
@@ -217,6 +273,18 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
     exports.__crcbl_web_focus(canvasId, event.type === 'focus' ? STATE_EDGE : 0);
   }
 
+  /**
+   * A hidden tab is a canvas that has lost focus, whatever `activeElement` says.
+   *
+   * Only the losing edge is synthesized. Coming back visible does not hand the
+   * keyboard back — the element may or may not still be focused, and a real
+   * `focus` event says so if it is — and inventing one would tell the engine
+   * every key it thought was held is live again.
+   */
+  function onVisibility() {
+    if (document.visibilityState === 'hidden') exports.__crcbl_web_focus(canvasId, 0);
+  }
+
   /** The listeners, so `dispose` removes exactly what was added. */
   const listeners = [
     [canvas, 'keydown', onKey, undefined],
@@ -230,6 +298,16 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
     [canvas, 'wheel', onWheel, { passive: false }],
     [canvas, 'focus', onFocus, undefined],
     [canvas, 'blur', onFocus, undefined],
+    // On the *document*, not the canvas: `fullscreenchange` is fired at the
+    // element in the standard and at the document in WebKit's prefixed history,
+    // and the document form is the one every engine ships.
+    [document, 'fullscreenchange', onFullscreenChange, undefined],
+    // A tab switch does not always blur the focused element — the element stays
+    // `document.activeElement` while the document loses focus — so `blur` alone
+    // leaves a game running with keys it will never see released. rAF stops in a
+    // hidden tab, which freezes the picture but not the engine's idea of what is
+    // held; the synthesized focus loss is what clears it.
+    [document, 'visibilitychange', onVisibility, undefined],
     // The browser's own context menu on a right-click would eat the button.
     [canvas, 'contextmenu', (/** @type {Event} */ e) => e.preventDefault(), undefined],
   ];

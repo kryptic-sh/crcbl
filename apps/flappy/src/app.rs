@@ -28,7 +28,9 @@ use crcbl::engine::{
     Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
 };
 use crcbl::prelude::*;
-use crcbl::shell::{LogicalSize, ShellBackend as Backend, WindowId, open, open_backend};
+use crcbl::shell::{
+    DisplayMode, LogicalSize, ShellBackend as Backend, WindowId, open, open_backend,
+};
 use crcbl::ui::DebugOverlay;
 
 use crate::game::{self, Game, GameState, RenderState};
@@ -48,6 +50,16 @@ pub struct Summary {
     pub exit: ExitReason,
     pub score: u32,
     pub state: GameState,
+    /// Whether the simulation was stopped when the run ended.
+    ///
+    /// Beside `state` rather than inside it: pause is the loop declining to
+    /// advance the simulation, not a state the simulation is in. See
+    /// [`Loop::is_paused`].
+    pub paused: bool,
+    /// The mode the window system actually had the window in, **not** the one
+    /// the run last asked for. A summary that reported the request would say
+    /// "borderless" for every compositor that refused.
+    pub mode: DisplayMode,
 }
 
 // ---- errors -----------------------------------------------------------------
@@ -118,6 +130,24 @@ impl From<ConfigureError> for FlappyError {
 /// if it is the *same* thing in every sample.
 pub const DEBUG_OVERLAY_KEY: KeyCode = KeyCode::F3;
 
+/// The key that pauses and resumes.
+///
+/// Escape, the same key breakout uses, and free in both: flappy's action map
+/// declares Space, Up and R.
+///
+/// **In a browser it is also the key that leaves fullscreen**, which the
+/// browser reserves and no page can decline — so a fullscreen demo's Escape
+/// both drops out of fullscreen and pauses.
+pub const PAUSE_KEY: KeyCode = KeyCode::Escape;
+
+/// The key that asks for fullscreen, and asks to leave it.
+///
+/// F11, the desktop convention, and the key `web/engine/shell.js` binds on its
+/// side: a browser grants fullscreen only from inside a user-gesture handler,
+/// so the shim makes the call and this loop records the request and reads back
+/// what happened.
+pub const FULLSCREEN_KEY: KeyCode = KeyCode::F11;
+
 #[derive(Debug)]
 pub struct Loop<S: Shell + ?Sized = dyn Shell> {
     shell: Box<S>,
@@ -135,6 +165,27 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
     /// device has timestamp queries, and nothing else — flappy runs over
     /// `InMemoryTransport`, so it has no network module to add.
     debug: DebugOverlay,
+    /// Whether the simulation is stopped.
+    ///
+    /// **The loop owns this, not [`GameState`].** `GameState` lives inside
+    /// `GameLogic`, which the authoritative server's module mutates from inside
+    /// a tick and which the client replicates; a `Paused` variant there would
+    /// make the server's state depend on which window a player's compositor has
+    /// focused, and would put a value in `Summary::state` that a seeded,
+    /// scripted run could reach. Pause is not something the simulation does —
+    /// it is the loop declining to advance it.
+    paused: bool,
+    /// Keys forwarded to the game as pressed and not yet released.
+    ///
+    /// [`ShellEvent::Focus`] documents the obligation this discharges: no
+    /// platform delivers releases for keys held when focus leaves, so a
+    /// consumer that keeps its own key state must clear it. A `Vec` because a
+    /// hand holds three keys, not three hundred.
+    held_keys: Vec<KeyCode>,
+    /// Whether the window system was last seen honouring the display mode this
+    /// loop asked for, so a refusal is logged when it happens rather than every
+    /// frame afterwards.
+    mode_honoured: bool,
     frames: u64,
     ticks: u64,
     events: u64,
@@ -231,6 +282,9 @@ impl<S: Shell + ?Sized> Loop<S> {
             render_state: RenderState::default(),
             hud: HudStrings::default(),
             debug: DebugOverlay::with_visible(options.debug_overlay_visible()),
+            paused: false,
+            held_keys: Vec::new(),
+            mode_honoured: true,
             frames: 0,
             ticks: 0,
             events,
@@ -293,31 +347,77 @@ impl<S: Shell + ?Sized> Loop<S> {
         }
 
         let mut pending = Pending::default();
-        let mut toggle_debug = false;
+        // The three keys the loop keeps for itself, and the one event that is
+        // not a key at all.
+        let (mut toggle_debug, mut toggle_pause, mut toggle_fullscreen) = (false, false, false);
+        let mut focus_lost = false;
         let game = &mut self.game;
+        let held = &mut self.held_keys;
         self.shell.pump(&mut |event| {
             pending.observe(&event);
-            if let ShellEvent::Key {
-                key_code: Some(code),
-                state,
-                ..
-            } = event
-            {
-                let pressed = matches!(state, crcbl::shell::ButtonState::Pressed);
-                // The overlay is not simulation, so its key never reaches the
-                // game: a toggle recorded into the tick's input would change
-                // what a seeded, scripted run replays.
-                if code == DEBUG_OVERLAY_KEY {
-                    toggle_debug |= pressed;
-                    return;
+            match event {
+                // Losing focus is not a key event and never will be: the
+                // releases for whatever was held are exactly what no platform
+                // sends. See `ShellEvent::Focus`.
+                ShellEvent::Focus { focused: false, .. } => focus_lost = true,
+                ShellEvent::Key {
+                    key_code: Some(code),
+                    state,
+                    repeat,
+                    ..
+                } => {
+                    let pressed = matches!(state, crcbl::shell::ButtonState::Pressed);
+                    // The loop's own keys never reach the game: a toggle
+                    // recorded into the tick's input would change what a
+                    // seeded, scripted run replays. `!repeat` because holding
+                    // F11 down would otherwise toggle the mode at the
+                    // keyboard's repeat rate.
+                    let edge = pressed && !repeat;
+                    match code {
+                        DEBUG_OVERLAY_KEY => {
+                            toggle_debug |= edge;
+                            return;
+                        }
+                        PAUSE_KEY => {
+                            toggle_pause |= edge;
+                            return;
+                        }
+                        FULLSCREEN_KEY => {
+                            toggle_fullscreen |= edge;
+                            return;
+                        }
+                        _ => {}
+                    }
+                    if pressed {
+                        if !held.contains(&code) {
+                            held.push(code);
+                        }
+                    } else {
+                        held.retain(|key| *key != code);
+                    }
+                    game.key_event(code, pressed);
                 }
-                game.key_event(code, pressed);
+                _ => {}
             }
         });
         self.events += pending.count;
         if toggle_debug {
             self.debug.toggle();
         }
+        // Before the pause toggle, so a batch carrying both a focus loss and an
+        // Escape resolves as "paused, then the player unpaused" rather than the
+        // reverse.
+        if focus_lost {
+            self.lose_focus();
+        }
+        if toggle_pause {
+            self.paused = !self.paused;
+            log::info!("game {}", if self.paused { "paused" } else { "resumed" });
+        }
+        if toggle_fullscreen {
+            self.toggle_fullscreen()?;
+        }
+        self.check_mode_request();
 
         if pending.destroyed {
             return Ok(Flow::Stop(ExitReason::WindowDestroyed));
@@ -336,11 +436,32 @@ impl<S: Shell + ?Sized> Loop<S> {
         // the panel is visible — a window that only fills while you are looking
         // at it shows two seconds of nothing every time you press F3.
         self.debug.record(self.frame_clock.render_dt());
+        // **A paused frame keeps the clock and throws the ticks away.** The
+        // three candidates differ only after a long pause, and only one of them
+        // resumes without a lurch:
+        //
+        // * *Stop calling `update`.* `FrameClock::update` measures `now -
+        //   last_update`, so the first update after the pause covers the whole
+        //   of it. `DEFAULT_MAX_CATCH_UP_TICKS` caps that at 8 ticks and
+        //   discards the rest, so resuming spends one frame running 133 ms of
+        //   simulation and the bird teleports through a pipe.
+        // * *Update but do not drain.* The accumulator saturates at the same
+        //   cap, so resuming runs the same 8 ticks in one frame. No better.
+        // * *Update and drain.* The accumulator holds only the sub-tick
+        //   remainder when the game resumes, so the first live frame runs the
+        //   one tick it is owed. This one.
+        //
+        // Draining also keeps `render_dt` real while paused, which is what the
+        // debug overlay above is recording.
         let mut ticks_this_frame = 0;
-        while self.frame_clock.consume_tick() {
-            self.ticks += 1;
-            ticks_this_frame += 1;
-            self.game.tick();
+        if self.paused {
+            while self.frame_clock.consume_tick() {}
+        } else {
+            while self.frame_clock.consume_tick() {
+                self.ticks += 1;
+                ticks_this_frame += 1;
+                self.game.tick();
+            }
         }
 
         self.game.render_state(&mut self.render_state);
@@ -351,8 +472,11 @@ impl<S: Shell + ?Sized> Loop<S> {
         self.gpu.advance_animation(ticks_this_frame);
 
         self.draw_list.clear();
-        self.hud.refresh(&self.render_state);
+        self.hud.refresh(&self.render_state, self.paused);
         draw_hud(&mut self.draw_list, &self.hud);
+        if self.paused {
+            draw_pause_menu(&mut self.draw_list, self.gpu.extent());
+        }
         self.draw_debug_overlay();
         self.gpu.take_draw_list(&mut self.draw_list);
 
@@ -369,6 +493,94 @@ impl<S: Shell + ?Sized> Loop<S> {
             }
         }
         Ok(Flow::Continue)
+    }
+
+    /// Whether the simulation is stopped.
+    #[must_use]
+    pub const fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// The mode the window system actually has this window in.
+    ///
+    /// Read back rather than remembered. There is deliberately no
+    /// `self.fullscreen` field to disagree with the compositor: a tiling window
+    /// manager makes the question moot, a browser page whose shim never calls
+    /// `requestFullscreen` never grants it, and both are cases where a
+    /// remembered flag would have the sample telling the player it is
+    /// fullscreen while it plainly is not.
+    ///
+    /// Falls back to the request while the window is unconfigured.
+    #[must_use]
+    pub fn display_mode(&self) -> DisplayMode {
+        self.shell
+            .window_state(self.window)
+            .map_or(DisplayMode::Windowed, |state| {
+                state.effective_mode().unwrap_or(state.requested_mode)
+            })
+    }
+
+    /// Every key the game thinks is held comes up, and the game pauses.
+    ///
+    /// Both halves, because they answer different problems. The releases are
+    /// [`ShellEvent::Focus`]'s documented obligation. The pause is the reported
+    /// bug: an unfocused window still gets frames on every desktop, so the bird
+    /// flies into a pipe while nobody is looking and the status still reads
+    /// "Playing".
+    ///
+    /// Regaining focus deliberately does **not** resume.
+    fn lose_focus(&mut self) {
+        for key in self.held_keys.drain(..) {
+            self.game.key_event(key, false);
+        }
+        if !self.paused {
+            self.paused = true;
+            log::info!("game paused: the window lost focus");
+        }
+    }
+
+    /// Asks for the mode the window is not in.
+    ///
+    /// The target comes from [`display_mode`](Self::display_mode) — the mode in
+    /// effect — rather than from what was last requested, so a fullscreen the
+    /// player left by some other route (Escape in a browser, a compositor
+    /// keybinding) leaves F11 meaning "go fullscreen" again.
+    fn toggle_fullscreen(&mut self) -> Result<(), FlappyError> {
+        let target = if self.display_mode().is_borderless() {
+            DisplayMode::Windowed
+        } else {
+            DisplayMode::Borderless { monitor: None }
+        };
+        self.shell.set_mode(self.window, target)?;
+        log::info!("shell: asked for {target}");
+        Ok(())
+    }
+
+    /// Logs the moment the window system stops agreeing with the request.
+    ///
+    /// Once per transition, not once per frame: a backend that cannot do
+    /// fullscreen at all would otherwise print a line every frame forever.
+    fn check_mode_request(&mut self) {
+        let Ok(state) = self.shell.window_state(self.window) else {
+            return;
+        };
+        if !state.is_configured() {
+            return;
+        }
+        let honoured = state.mode_request_honoured();
+        if honoured == self.mode_honoured {
+            return;
+        }
+        self.mode_honoured = honoured;
+        if honoured {
+            log::info!("shell: the window is {}", state.requested_mode);
+        } else {
+            log::warn!(
+                "shell: asked for {} and got {}",
+                state.requested_mode,
+                self.display_mode(),
+            );
+        }
     }
 
     /// Gathers this frame's debug sections and draws the panel.
@@ -414,6 +626,8 @@ impl<S: Shell + ?Sized> Loop<S> {
             exit,
             score: self.game.score,
             state: self.game.state,
+            paused: self.paused,
+            mode: self.display_mode(),
         };
 
         let gpu_result = self.gpu.destroy();
@@ -581,12 +795,28 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
 struct HudStrings {
     score: String,
     state: String,
-    last: Option<(u32, u32, Option<GameState>, Option<game::Death>)>,
+    last: Option<HudKey>,
 }
 
+/// Everything the HUD's text depends on. A named tuple rather than an inline
+/// one because with `paused` in it there are five fields, which is past the
+/// point where the positions read.
+type HudKey = (u32, u32, Option<GameState>, Option<game::Death>, bool);
+
 impl HudStrings {
-    fn refresh(&mut self, render: &RenderState) {
-        let key = (render.score, render.best, render.state, render.death);
+    /// **`paused` wins over the simulation's state, and that is the bug fix.**
+    /// The status line used to read straight off `RenderState::state`, which is
+    /// the *server's* idea of what is happening — and the server is still
+    /// playing while the window sits behind a browser. A player alt-tabbed away
+    /// saw "Playing" and came back dead.
+    fn refresh(&mut self, render: &RenderState, paused: bool) {
+        let key = (
+            render.score,
+            render.best,
+            render.state,
+            render.death,
+            paused,
+        );
         if self.last == Some(key) {
             return;
         }
@@ -596,16 +826,57 @@ impl HudStrings {
         self.score.clear();
         let _ = write!(self.score, "Score: {}  Best: {}", render.score, render.best);
         self.state.clear();
-        self.state.push_str(match (render.state, render.death) {
-            (Some(GameState::WaitingToStart) | None, _) => "Press SPACE to fly",
-            (Some(GameState::Playing), _) => "Playing",
-            (Some(GameState::Dead), Some(game::Death::Ground)) => {
-                "You hit the ground - press SPACE"
+        self.state.push_str(if paused {
+            "PAUSED - press ESC"
+        } else {
+            match (render.state, render.death) {
+                (Some(GameState::WaitingToStart) | None, _) => "Press SPACE to fly",
+                (Some(GameState::Playing), _) => "Playing",
+                (Some(GameState::Dead), Some(game::Death::Ground)) => {
+                    "You hit the ground - press SPACE"
+                }
+                (Some(GameState::Dead), _) => "You hit a pipe - press SPACE",
             }
-            (Some(GameState::Dead), _) => "You hit a pipe - press SPACE",
         });
     }
 }
+
+/// The pause menu.
+///
+/// **This is the seam the art slice replaces, and it is deliberately one
+/// function taking a draw list and an extent.** Everything in it goes through
+/// the same `DrawList` rect-and-text calls the HUD uses, because that is what
+/// exists today; nothing above it knows how a paused frame is drawn, so
+/// swapping this body for a nine-slice panel and real buttons touches this
+/// function and nothing else. The state machine — what pauses, what resumes,
+/// what stops ticking — is settled and does not move with the art.
+fn draw_pause_menu(dl: &mut crcbl::ui::draw_list::DrawList, extent: (u32, u32)) {
+    use glam::Vec2;
+
+    let (width, height) = (extent.0 as f32, extent.1 as f32);
+    dl.rect(Vec2::ZERO, Vec2::new(width, height), [0.0, 0.0, 0.0, 0.6]);
+
+    let panel = Vec2::new(360.0, 132.0);
+    let origin = Vec2::new((width - panel.x) / 2.0, (height - panel.y) / 2.0);
+    dl.rect(origin, panel, [0.08, 0.08, 0.12, 0.92]);
+    dl.text(
+        origin + Vec2::new(24.0, 22.0),
+        "PAUSED",
+        [1.0, 1.0, 0.3, 1.0],
+        32.0,
+    );
+    for (row, line) in PAUSE_MENU_LINES.iter().enumerate() {
+        dl.text(
+            origin + Vec2::new(24.0, 68.0 + row as f32 * 20.0),
+            *line,
+            [0.8, 0.8, 0.9, 1.0],
+            14.0,
+        );
+    }
+}
+
+/// What the pause menu offers. Text today, buttons after the art slice.
+const PAUSE_MENU_LINES: [&str; 3] = ["ESC   resume", "F11   fullscreen", "F3    debug overlay"];
 
 /// Draws the HUD, and nothing else.
 ///
@@ -971,7 +1242,7 @@ mod tests {
         );
 
         let mut hud = HudStrings::default();
-        hud.refresh(&render);
+        hud.refresh(&render, false);
         let mut dl = DrawList::new();
         draw_hud(&mut dl, &hud);
         assert_eq!(
@@ -1082,6 +1353,375 @@ mod tests {
             elapsed, ticks,
             "the flap has seen {elapsed} ticks and the simulation has run {ticks}"
         );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+    // ---- focus, pause and fullscreen ----------------------------------------
+
+    /// Runs `frames` frames, and insists every one of them was a real frame.
+    ///
+    /// The `assert_eq!` is not decoration: `Loop::frame` answers a spent frame
+    /// budget with `Ok(Flow::Stop)` **before** it pumps, so a test that let one
+    /// through would go on injecting key events into a loop that had stopped
+    /// reading them.
+    fn run_frames(engine: &mut Loop<HeadlessShell>, frames: u32) {
+        for _ in 0..frames {
+            assert_eq!(
+                engine.frame().expect("a frame"),
+                Flow::Continue,
+                "the loop stopped early",
+            );
+        }
+    }
+
+    /// **The reported bug, and the obligation `ShellEvent::Focus` documents.**
+    ///
+    /// Flappy's flap is an *edge*, which makes the missing release worse than a
+    /// stuck direction: `ActionMap` raises `just_pressed` only on the
+    /// transition, so a Space it never saw released turns every later press
+    /// into nothing and the bird can never flap again. The assertion is that
+    /// the bird flaps after the round trip, which is the input state and not a
+    /// flag.
+    #[test]
+    fn losing_focus_pauses_the_game_and_lets_go_of_every_held_key() {
+        let mut engine = scripted(&headless(400));
+        let window = engine.window();
+
+        // Hold Space. The bird starts flying and never sees a release.
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::Space)
+            .expect("the window is live");
+        run_frames(&mut engine, 20);
+        assert_eq!(engine.game.state, GameState::Playing, "the bird is flying");
+        assert!(engine.game.flap_is_down(), "Space is down");
+        assert_eq!(engine.held_keys, vec![KeyCode::Space]);
+
+        engine
+            .shell_mut()
+            .set_focus(window, false)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused(), "an unfocused window is not playing");
+        assert!(engine.held_keys.is_empty());
+
+        // Resume, and let the bird fall for a while so a flap is unmistakable.
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        run_frames(&mut engine, 20);
+        assert!(!engine.is_paused());
+        assert!(
+            !engine.game.flap_is_down(),
+            "the action map still holds a key focus loss should have released",
+        );
+        let mut falling = RenderState::default();
+        engine.game.render_state(&mut falling);
+        assert!(
+            falling.bird_velocity.y < 0.0,
+            "the bird has to be falling for a flap to be visible, got {}",
+            falling.bird_velocity.y,
+        );
+
+        // A fresh press, exactly as a keyboard sends it after the player let go
+        // in some other window: a `keydown` with no `keyup` before it.
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::Space)
+            .expect("the window is live");
+        run_frames(&mut engine, 2);
+        let mut flapped = RenderState::default();
+        engine.game.render_state(&mut flapped);
+        assert!(
+            flapped.bird_velocity.y > 0.0,
+            "the bird never flapped again: velocity {} after a fresh Space",
+            flapped.bird_velocity.y,
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// Regaining focus does not resume. The pause menu is dismissed on purpose.
+    #[test]
+    fn focus_coming_back_leaves_the_game_paused() {
+        let mut engine = scripted(&headless(60));
+        let window = engine.window();
+        run_frames(&mut engine, 2);
+
+        engine
+            .shell_mut()
+            .set_focus(window, false)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused());
+
+        engine
+            .shell_mut()
+            .set_focus(window, true)
+            .expect("the window is live");
+        run_frames(&mut engine, 5);
+        assert!(
+            engine.is_paused(),
+            "clicking back in must not drop the player into a live bird",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A paused game's world is byte-identical after any number of frames.**
+    ///
+    /// `RenderState` is the whole course — the bird, its velocity, and every
+    /// pipe on the treadmill — which is a far stronger claim than "the state
+    /// enum did not change": the pipes scroll every single tick, so one tick
+    /// slipping through fails this.
+    #[test]
+    fn a_paused_game_does_not_advance_its_simulation() {
+        let mut engine = scripted(&headless(400));
+        let window = engine.window();
+
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::Space)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::Space)
+            .expect("the window is live");
+        run_frames(&mut engine, 30);
+        assert_eq!(engine.game.state, GameState::Playing);
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused());
+
+        let ticks = engine.ticks;
+        let mut paused = RenderState::default();
+        engine.game.render_state(&mut paused);
+        run_frames(&mut engine, 120);
+        let mut after = RenderState::default();
+        engine.game.render_state(&mut after);
+
+        assert_eq!(after, paused, "120 paused frames moved the world");
+        assert_eq!(engine.ticks, ticks, "a paused frame ran a tick");
+        assert_eq!(
+            engine.gpu.animation_ticks(),
+            engine.ticks,
+            "the wing beat is on the simulation's clock, so a pause holds it too",
+        );
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        run_frames(&mut engine, 20);
+        let mut resumed = RenderState::default();
+        engine.game.render_state(&mut resumed);
+        assert_ne!(resumed, after, "resuming did not restart the simulation");
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A long pause does not lurch on resume.** Five seconds paused is three
+    /// hundred ticks of wall-clock time the simulation did not experience, and
+    /// a resume that caught any of it up would scroll the course through the
+    /// bird in one frame. See the tick loop for the alternatives.
+    #[test]
+    fn resuming_after_a_long_pause_runs_one_tick_not_a_catch_up_burst() {
+        const STEP: Duration = Duration::from_micros(16_667);
+        // A budget past the 320 frames this runs: `frame` answers a spent
+        // budget before it pumps.
+        let options = headless(2_000);
+        let (mut engine, _) = poll_to_completion(&options, Clock::manual(Duration::ZERO));
+        let window = engine.window();
+
+        let step_frame = |engine: &mut Loop<HeadlessShell>| {
+            engine.set_frame_step(STEP);
+            assert_eq!(
+                engine.frame().expect("a frame"),
+                Flow::Continue,
+                "the loop stopped early",
+            );
+        };
+
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::Space)
+            .expect("the window is live");
+        for _ in 0..10 {
+            step_frame(&mut engine);
+        }
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        step_frame(&mut engine);
+        assert!(engine.is_paused());
+
+        let ticks_at_pause = engine.ticks;
+        for _ in 0..300 {
+            step_frame(&mut engine);
+        }
+        assert_eq!(engine.ticks, ticks_at_pause, "a paused frame ran a tick");
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        let before = engine.ticks;
+        step_frame(&mut engine);
+        assert!(!engine.is_paused());
+        let burst = engine.ticks - before;
+        assert!(
+            burst <= 1,
+            "the first frame after a five-second pause ran {burst} ticks",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// The HUD says what the loop is doing, not what the server thinks.
+    #[test]
+    fn the_status_line_reads_paused_while_paused() {
+        let mut engine = scripted(&headless(60));
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::Space)
+            .expect("the window is live");
+        run_frames(&mut engine, 10);
+        assert!(
+            ui_text(&engine).iter().any(|t| t == "Playing"),
+            "the flying game reads as playing: {:?}",
+            ui_text(&engine),
+        );
+
+        engine
+            .shell_mut()
+            .set_focus(window, false)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        let drawn = ui_text(&engine);
+        assert!(
+            drawn.iter().any(|t| t.starts_with("PAUSED")),
+            "an unfocused game still reads as playing: {drawn:?}",
+        );
+        assert!(
+            !drawn.iter().any(|t| t == "Playing"),
+            "both statuses at once: {drawn:?}",
+        );
+        assert!(
+            drawn.iter().any(|t| *t == PAUSE_MENU_LINES[0]),
+            "the pause menu is not drawn: {drawn:?}",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **F11 twice is where it started, and the loop reports the mode the
+    /// window system gave it rather than the one it asked for.**
+    #[test]
+    fn fullscreen_toggles_twice_back_to_windowed() {
+        let mut engine = scripted(&headless(200));
+        let window = engine.window();
+        run_frames(&mut engine, 2);
+        assert_eq!(engine.display_mode(), DisplayMode::Windowed);
+        let windowed_extent = engine.extent();
+
+        engine
+            .shell_mut()
+            .key_press(window, FULLSCREEN_KEY)
+            .expect("the window is live");
+        run_frames(&mut engine, 6);
+        assert_eq!(
+            engine.display_mode(),
+            DisplayMode::Borderless { monitor: None },
+            "the compositor answered and the loop did not notice",
+        );
+        assert!(
+            engine
+                .shell_mut()
+                .window_state(window)
+                .expect("state")
+                .mode_request_honoured()
+        );
+        assert_ne!(engine.extent(), windowed_extent);
+
+        engine
+            .shell_mut()
+            .key_press(window, FULLSCREEN_KEY)
+            .expect("the window is live");
+        run_frames(&mut engine, 6);
+        assert_eq!(
+            engine.display_mode(),
+            DisplayMode::Windowed,
+            "F11 twice must land back where it started",
+        );
+        let summary = engine.finish(ExitReason::FrameBudget).expect("teardown");
+        assert_eq!(summary.mode, DisplayMode::Windowed);
+    }
+
+    /// **A backend that refuses reports the mode it really has.** The
+    /// compositor answers a borderless request with a windowed configure, which
+    /// is what a tiling window manager does and what a browser page whose shim
+    /// never calls `requestFullscreen` does.
+    #[test]
+    fn a_refused_fullscreen_is_reported_as_the_mode_the_window_actually_has() {
+        let mut engine = scripted(&headless(200));
+        let window = engine.window();
+        run_frames(&mut engine, 2);
+        let windowed = engine.extent();
+
+        engine
+            .shell_mut()
+            .key_press(window, FULLSCREEN_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        engine
+            .shell_mut()
+            .resize(
+                window,
+                crcbl::shell::PhysicalSize::new(windowed.0, windowed.1),
+            )
+            .expect("the window is live");
+        run_frames(&mut engine, 4);
+
+        let state = engine.shell_mut().window_state(window).expect("state");
+        assert_eq!(
+            state.requested_mode,
+            DisplayMode::Borderless { monitor: None },
+            "the request is a fact and stands",
+        );
+        assert!(!state.mode_request_honoured());
+        assert_eq!(
+            engine.display_mode(),
+            DisplayMode::Windowed,
+            "the loop must report what it got, not what it asked for",
+        );
+        assert!(!engine.mode_honoured, "the refusal has to be noticed");
+
+        let summary = engine.finish(ExitReason::FrameBudget).expect("teardown");
+        assert_eq!(summary.mode, DisplayMode::Windowed);
+    }
+
+    /// Holding F11 down does not strobe the window between modes.
+    #[test]
+    fn an_auto_repeat_does_not_toggle_anything() {
+        let mut engine = scripted(&headless(60));
+        let window = engine.window();
+        run_frames(&mut engine, 2);
+
+        for _ in 0..8 {
+            engine
+                .shell_mut()
+                .key_repeat(window, FULLSCREEN_KEY)
+                .expect("the window is live");
+            engine
+                .shell_mut()
+                .key_repeat(window, PAUSE_KEY)
+                .expect("the window is live");
+        }
+        run_frames(&mut engine, 6);
+        assert_eq!(engine.display_mode(), DisplayMode::Windowed);
+        assert!(!engine.is_paused());
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 }
