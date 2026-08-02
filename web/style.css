@@ -605,7 +605,11 @@ kbd {
   border-radius: 6px;
   padding: 18px 22px;
   color: var(--fg-dim);
-  max-width: 760px;
+  /* Full width of its column, unlike `section p`, which is capped at a 760px
+     reading measure. A paragraph has no edges, so a short measure just reads as
+     a comfortable line; a callout has a border, and a bordered box stopping
+     short of the column it sits in reads as mis-set against everything around
+     it — the demo window above it, the paragraphs beside it. */
 }
 
 .note strong {
