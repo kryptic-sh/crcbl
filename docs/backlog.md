@@ -87,51 +87,27 @@ with `--target wasm32-unknown-unknown` over the four sample crates — plus the
 nine link fixes it would then demand. Not done here because adding a required CI
 job that fails on two crates this slice may not edit would land the tree red.
 
-## Three `crcbl-cli` tests fail on Windows and the code looks right — needs a decision
+## The Windows `crcbl-cli` fixtures are fixed but nothing has run them on Windows
 
-`build + test (windows-latest)` has been red since `216ea85`
-(`feat(cli): crcbl crpix, PNG frames to a sheet`), and is the **only** job still
-red after the CI repair that fixed the other three. It is three tests, all of
-them asserting something about a path, and in each case the CLI's behaviour on
-Windows looks correct and the _test's_ probe looks like a Unix assumption. That
-is why they were left alone: the standing rule is to fix the code, and there is
-no defect in the code to fix. Someone has to agree the fixtures are wrong before
-they change.
+The three tests that had `build + test (windows-latest)` red since `216ea85` —
+`crpix_refuses_frames_of_different_sizes_and_names_the_file` and
+`crpix_fails_cleanly_on_a_missing_file_and_on_a_file_that_is_not_a_png` in
+`crates/crcbl-cli/tests/cli.rs`, and `a_stem_the_format_cannot_spell_is_refused`
+in `crates/crcbl-cli/src/crpix_cmd.rs` — were fixtures asserting a Unix
+assumption, not defects in the CLI, and the fixtures now assert the property
+they meant to on both platforms. No case was dropped and no `cfg` was added.
 
-**1 and 2 — `crpix_refuses_frames_of_different_sizes_and_names_the_file` and
-`crpix_fails_cleanly_on_a_missing_file_and_on_a_file_that_is_not_a_png`, both in
-`crates/crcbl-cli/tests/cli.rs`.** Each asserts `json.contains(arg(&path))` —
-the raw path as a substring of the one-line JSON. JSON escapes `\` as `\\`, so
-on Windows the output holds `C:\\Users\\RUNNER~1\\…\\tall.png` while `arg()`
-yields `C:\Users\RUNNER~1\…\tall.png` and the substring is not there. The
-emitted JSON is well formed and names the right file; `crcbl_cli::json`'s
-`write_escaped` is correct and has its own test (`strings_are_escaped`). The
-assertion is right about the _intent_ and wrong about the _mechanism_ — it greps
-text the CLI deliberately escapes. The file's own header explains why it does
-not link a JSON parser, which is a good reason and not an argument for an
-unescaped compare: the fix is to escape the expected path the same way before
-searching for it (a `json_fragment(path)` helper beside `has_field`), which
-keeps the teeth on both platforms and gains them on Windows, where the assertion
-currently cannot pass.
+What is **not** verified: this machine cannot compile or run anything for
+Windows, so the claim that `art/a:b.png` has the stem `a:b` there rests on
+reading `parse_prefix` in `library/std/src/sys/path/windows_prefix.rs` — a drive
+prefix is matched as `[drive, b':', ..]` against the whole path's bytes, once,
+never against a later component. The escaping half is exercised on Linux, by a
+fixture whose file _name_ holds a backslash, so that half no longer depends on a
+Windows runner. Only a green `build + test (windows-latest)` closes the rest.
 
-**3 — `a_stem_the_format_cannot_spell_is_refused` in
-`crates/crcbl-cli/src/crpix_cmd.rs`.** It feeds `frame_name` three paths whose
-stems the `.crpix` format cannot spell — `"my art.png"`, `"a:b.png"`,
-`"a#b.png"` — and asserts each is refused. On Windows `a:` is a **drive
-prefix**, so `Path::new("a:b.png").file_stem()` is `b`, which is a perfectly
-spellable frame name, and the test fails with
-`` `a:b.png` must not yield a frame name, and gave `b` ``. That is the right
-answer on Windows: the argument names `b.png` on drive A:. `frame_name` cannot
-be at fault here, because a Windows filename can never contain `:` at all, so
-the case it is being asked to reject is unreachable on that platform. The space
-and hash cases exercise the same property on both platforms and are untouched by
-any fix. The likely resolution is to make the colon case Unix-only
-(`#[cfg(unix)]` over that one fixture, or move it to a `#[cfg(unix)]` sibling
-test) — but that is a fixture change to a passing-on-Linux test and wants
-sign-off.
-
-Nothing else about `crpix` on Windows was reviewed; these three are what CI
-reports, not the result of a Windows audit.
+Nothing else about `crpix` on Windows has been reviewed. These three are what CI
+reported, not the result of an audit, so a second Windows-only failure elsewhere
+in the command would be a new finding rather than a regression.
 
 ## `run-vk-e2e.sh` pins no ICD by default, so nobody was running CI's gate
 
