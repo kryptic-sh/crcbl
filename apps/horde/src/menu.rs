@@ -4,6 +4,7 @@
 //!   paused ──────────────────────────────────────────────► Paused
 //!   Dead ────────────────────────────────────────────────► GameOver
 //!   LevelUp ─────────────────────────────────────────────► LevelUp
+//!   WaitingToStart ──────────────────────────────────────► Start
 //!   Playing ─────────────────────────────────────────────► none
 //! ```
 //!
@@ -20,13 +21,16 @@
 //! are the same five times over; only the titles, the labels and the state
 //! mapping differ. `docs/backlog.md` carries it.
 //!
-//! # There is no start menu, and that is not an omission
+//! # There is a start menu, and it was argued against before it was built
 //!
-//! `game::GameState` has no `WaitingToStart`, and its own docs carry the
-//! argument: this game's board is empty at `t = 0` and fills up because time
-//! passes, so a waiting state is a blank field with a prompt on it. The other
-//! four samples open on a board worth looking at. This one opens playing, and
-//! the menu a run comes back to is `GameOver`'s `TRY AGAIN`.
+//! The first cut of this game had none: the other samples open on a *board*
+//! worth looking at and this one's is empty at `t = 0`, so a start screen here
+//! is a blank arena with a prompt on it. The user played it and asked for the
+//! screen; `game::GameState`'s docs carry the whole of the reversal. What it
+//! costs is the odd shape of the button — `PLAY` and `TRY AGAIN` are the same
+//! [`MenuAction::Restart`], because the simulation has one edge for "begin a
+//! run" and the death screen's button lands on the start screen rather than in
+//! play.
 //!
 //! # The level-up menu is the one that is rebuilt
 //!
@@ -70,7 +74,8 @@ use crate::game::{GameState, RenderState, UPGRADE_CHOICES, Upgrade};
 pub enum MenuAction {
     /// Un-pause.
     Resume,
-    /// Start the next run — the restart edge `run_tick` reads.
+    /// Begin a run — the one edge `run_tick` reads for both `PLAY` on the start
+    /// screen and `TRY AGAIN` on the death screen.
     Restart,
     /// Take the `n`-th upgrade of the current offer, zero-based.
     Choose(usize),
@@ -124,6 +129,8 @@ pub enum MenuKind {
     /// The game is being played: no menu at all.
     #[default]
     None,
+    /// The arena is empty and the run has not begun.
+    Start,
     /// The loop has stopped advancing the simulation.
     Paused,
     /// The simulation has stopped itself, waiting for one of three.
@@ -148,14 +155,19 @@ impl MenuKind {
         match render.state {
             Some(GameState::Dead) => Self::GameOver,
             Some(GameState::LevelUp) => Self::LevelUp,
-            Some(GameState::Playing) | None => Self::None,
+            // `None` is a frame drawn before the first `render_state`, which is
+            // the title screen and not a run in progress — the same mapping
+            // asteroids makes.
+            Some(GameState::WaitingToStart) | None => Self::Start,
+            Some(GameState::Playing) => Self::None,
         }
     }
 }
 
-/// Horde's three menus, the one being shown, and the pointer's capture.
+/// Horde's four menus, the one being shown, and the pointer's capture.
 #[derive(Debug)]
 pub struct Menus {
+    start: Menu,
     paused: Menu,
     level_up: Menu,
     game_over: Menu,
@@ -173,11 +185,23 @@ impl Default for Menus {
 }
 
 impl Menus {
-    /// The three menus, with nothing shown.
+    /// The four menus, with nothing shown.
     #[must_use]
     pub fn new() -> Self {
         use MenuAction::{DebugOverlay, Fullscreen, Restart, Resume};
         Self {
+            // `SPACE`, which is what breakout, flappy and asteroids print on
+            // theirs — a player moving between the demos presses one key. `R` is
+            // bound to the same action and still works; the death screen prints
+            // that one, because it always has.
+            start: Menu::new(
+                "HORDE",
+                vec![
+                    item(Restart, "PLAY", "SPACE"),
+                    item(Fullscreen, "FULLSCREEN", "F11"),
+                    item(DebugOverlay, "DEBUG PANEL", "F3"),
+                ],
+            ),
             paused: Menu::new(
                 "PAUSED",
                 vec![
@@ -271,6 +295,7 @@ impl Menus {
     pub const fn current(&self) -> Option<&Menu> {
         match self.shown {
             MenuKind::None => None,
+            MenuKind::Start => Some(&self.start),
             MenuKind::Paused => Some(&self.paused),
             MenuKind::LevelUp => Some(&self.level_up),
             MenuKind::GameOver => Some(&self.game_over),
@@ -281,6 +306,7 @@ impl Menus {
     pub const fn current_mut(&mut self) -> Option<&mut Menu> {
         match self.shown {
             MenuKind::None => None,
+            MenuKind::Start => Some(&mut self.start),
             MenuKind::Paused => Some(&mut self.paused),
             MenuKind::LevelUp => Some(&mut self.level_up),
             MenuKind::GameOver => Some(&mut self.game_over),
@@ -332,6 +358,7 @@ impl Menus {
         // it, which is the one place this container's shape shows through.
         let menu = match self.shown {
             MenuKind::None => return None,
+            MenuKind::Start => &mut self.start,
             MenuKind::Paused => &mut self.paused,
             MenuKind::LevelUp => &mut self.level_up,
             MenuKind::GameOver => &mut self.game_over,
@@ -368,6 +395,7 @@ mod tests {
     fn a_paused_game_shows_the_pause_menu_and_nothing_else() {
         for state in [
             None,
+            Some(GameState::WaitingToStart),
             Some(GameState::Playing),
             Some(GameState::LevelUp),
             Some(GameState::Dead),
@@ -385,7 +413,12 @@ mod tests {
         let mut menus = Menus::new();
         menus.set_offer(3, Some(OFFER));
         let mut titles = Vec::new();
-        for kind in [MenuKind::Paused, MenuKind::LevelUp, MenuKind::GameOver] {
+        for kind in [
+            MenuKind::Start,
+            MenuKind::Paused,
+            MenuKind::LevelUp,
+            MenuKind::GameOver,
+        ] {
             menus.show(kind);
             titles.push(
                 menus
@@ -397,7 +430,7 @@ mod tests {
         }
         titles.sort();
         titles.dedup();
-        assert_eq!(titles.len(), 3, "two menus share a title");
+        assert_eq!(titles.len(), 4, "two menus share a title");
 
         menus.show(MenuKind::None);
         assert!(menus.current().is_none(), "a playing frame draws no menu");
@@ -411,7 +444,11 @@ mod tests {
             MenuKind::of(false, &render(Some(GameState::Playing))),
             MenuKind::None,
         );
-        assert_eq!(MenuKind::of(false, &render(None)), MenuKind::None);
+        assert_eq!(
+            MenuKind::of(false, &render(Some(GameState::WaitingToStart))),
+            MenuKind::Start,
+        );
+        assert_eq!(MenuKind::of(false, &render(None)), MenuKind::Start);
         assert_eq!(
             MenuKind::of(false, &render(Some(GameState::LevelUp))),
             MenuKind::LevelUp,
@@ -428,7 +465,12 @@ mod tests {
     fn every_button_names_an_action_the_loop_handles() {
         let mut menus = Menus::new();
         menus.set_offer(2, Some(OFFER));
-        for kind in [MenuKind::Paused, MenuKind::LevelUp, MenuKind::GameOver] {
+        for kind in [
+            MenuKind::Start,
+            MenuKind::Paused,
+            MenuKind::LevelUp,
+            MenuKind::GameOver,
+        ] {
             menus.show(kind);
             let menu = menus.current().expect("a menu");
             let actions: Vec<MenuAction> = menu

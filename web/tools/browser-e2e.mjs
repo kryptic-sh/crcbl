@@ -135,18 +135,22 @@ const EXPECTATIONS = {
     moving: /rock x: (-?[\d.]+)/,
     movingLabel: 'the rocks drift after the first shot',
   },
-  // **The one sample with no waiting state**, so "the input reached the
-  // simulation" cannot be "the state left WaitingToStart" here — horde is
-  // `Playing` from the first tick and Space is bound to *restart*. What moves
-  // is the run counter, which nothing but a real restart edge can advance, so
-  // `run: 1` before and `run: 2` after is the same claim the other three make
-  // about their start button. `apps/horde/src/game.rs` logs it for this.
+  // This row used to be the odd one out: horde shipped with no waiting state,
+  // so "the input reached the simulation" was read off the *run counter* —
+  // `run: 1` before and `run: 2` after, because Space was bound to restart. It
+  // has a start screen now, so it makes the same claim the other three do.
+  //
+  // The clock is the right `moving` value and it is stricter than it looks:
+  // this game's clock is stopped on `WaitingToStart`, so two distinct `time:`
+  // values cannot appear unless the key really started the run. The run counter
+  // stays in the HUD line for a bug report, and `run: 1` in `waiting` is what
+  // says the demo booted a fresh run rather than a restarted one.
   horde: {
     key: 'Space',
-    waiting: (line) => line.includes('run: 1'),
-    started: (line) => line.includes('run: 2'),
-    startedLabel: 'Space starts a fresh run',
-    startedFailure: 'the run counter never moved',
+    waiting: (line) => line.includes('WaitingToStart') && line.includes('run: 1'),
+    started: (line) => line.includes('Playing'),
+    startedLabel: 'Space starts the run',
+    startedFailure: 'the state never left WaitingToStart',
     moving: /time: ([\d.]+)/,
     movingLabel: 'the clock advances under its own steam',
   },

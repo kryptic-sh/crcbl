@@ -75,7 +75,19 @@ separation, contact damage, hit points, death and restart; `.crpix` art through
 and a "pick 1 of 3" level-up from a fixed pool of six upgrades; pause, level-up
 and death menus over the shared `crcbl_render::menu` art, with the debug panel
 on; five spatial cues, the longest run kept between sessions, and the browser
-demo at `https://crcbl.kryptic.sh/demos/horde/`. 117 tests.
+demo at `https://crcbl.kryptic.sh/demos/horde/`. 124 tests.
+
+**And a start screen, which was argued against and then asked for.** The slice
+that built the menus deliberately shipped without one: this game's board is
+empty at `t = 0` and fills up because time passes, so a waiting state is a blank
+arena with a prompt on it, and the sample rules do not require one. The user
+played the demo and asked for the screen — _"the horde game autostarts, instead
+of showing the start screen"_ — which settles it. `GameState::WaitingToStart`
+short-circuits `run_tick` on its second line, so nothing spawns, nothing moves
+and the run clock does not start until `R` or `Space` is pressed; `restart` now
+lands on that screen rather than in play, as asteroids' and flappy's do. The
+reasoning is kept in `apps/horde/src/game.rs` so nobody re-derives it and
+re-implements the autostart; the reversal is the user's call and it is final.
 
 **The art is two sheets and that is the sample's own decision.** Everything
 numerous — the player, all three enemy kinds and the gems — is in one
@@ -127,6 +139,14 @@ for a 1.25-unit one collapses 5 280 of the ten thousand onto shared positions,
 and `a_prefilled_field_is_the_size_and_shape_it_was_asked_for` goes red saying
 so. At ten thousand the fitted grid is **0.82 units apart**, which is what ten
 thousand in this arena actually looks like.
+
+**`--prefill` starts its own run**, since the start screen landed: a prefilled
+field left waiting would time a `run_tick` that returns on its second line and
+report the result as the cost of ten thousand enemies. The loop queues the start
+edge into the same action map a key press goes to, and
+`a_prefilled_run_does_not_wait_at_the_title_screen` is what says so. The numbers
+below were taken before the screen existed, on a build that began playing on
+frame zero, and the fixture is the same either way.
 
 ### The render side: flat, and not close to a budget
 

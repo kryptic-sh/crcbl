@@ -717,6 +717,12 @@ const ACTION_UP: &str = "up";
 const ACTION_DOWN: &str = "down";
 const ACTION_LEFT: &str = "left";
 const ACTION_RIGHT: &str = "right";
+/// The one edge that both **starts** a waiting run and **restarts** a live one.
+///
+/// Two jobs on one action, the way asteroids' `fire` both begins a game and
+/// deals a new one from the death screen. `R` and `Space` are both bound to it:
+/// `Space` because that is the key the other three samples' start screens print,
+/// and `R` because it is the one this game's death screen has always printed.
 const ACTION_RESTART: &str = "restart";
 /// The three level-up buttons, in offer order.
 ///
@@ -737,8 +743,11 @@ struct Intent {
     down: bool,
     left: bool,
     right: bool,
-    /// The restart key, on the tick it went down. An *edge*: held, it would
-    /// restart the run sixty times a second.
+    /// The start/restart key, on the tick it went down. An *edge*: held, it
+    /// would restart the run sixty times a second.
+    ///
+    /// On [`GameState::WaitingToStart`] it begins the run rather than clearing
+    /// it — see `run_tick`.
     restart: bool,
     /// Which level-up button was pressed this tick, one-based, or zero for
     /// none. An edge for the same reason `restart` is.
@@ -775,15 +784,24 @@ impl Intent {
 
 /// Where a run is.
 ///
-/// **There is no "waiting to start".** Breakout, flappy and asteroids each open
-/// on a title screen because they open on a *board* — something to look at while
-/// the player decides. This one's board is empty at `t = 0` and fills up because
-/// time passes, so a waiting state would be a blank screen with a prompt on it,
-/// and the first thing the player would do is press the key. It starts playing.
-/// The loop still has a pause menu and a death menu; what it has no state for is
-/// a start one.
+/// **There is a "waiting to start", and it was argued against before it was
+/// built.** The first cut of this game had none: breakout, flappy and asteroids
+/// each open on a title screen because they open on a *board*, and this one's
+/// board is empty at `t = 0`, so a waiting state is a blank arena with a prompt
+/// on it. The user played it and asked for the screen anyway, which settles it —
+/// a demo that starts taking hit points off the player before the window has
+/// been looked at is worse than a blank arena, and four samples that open the
+/// same way is worth more than one clever exception.
+///
+/// So the field a player looks at here is **empty but for the player**, not
+/// frozen: there is nothing to freeze at `t = 0`, because everything on this
+/// field is spawned by time passing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GameState {
+    /// The title screen is up. The arena is empty, the clock is stopped and
+    /// nothing spawns; `run_tick` short-circuits before it can move anything.
+    /// The start edge — `R` or `Space` — begins the run.
+    WaitingToStart,
     /// Running. The clock is going up and the horde is arriving.
     Playing,
     /// The level-up screen is up and the player is picking one of three. The
@@ -1063,10 +1081,12 @@ fn lock(shared: &Mutex<GameLogic>) -> MutexGuard<'_, GameLogic> {
 ///   spawned into the middle of the pass would be steered from a position
 ///   nothing else in the pass knows about.
 ///
-/// [`GameState::LevelUp`] short-circuits the whole of it after the restart edge:
-/// nothing below moves, spends or spawns anything, and the field stays where
-/// `freeze_field` left it. See this module's header for why that is one pass on
-/// entry rather than a branch on the hot path.
+/// Two states short-circuit the whole of it. [`GameState::WaitingToStart`] does
+/// it first and hardest — the title screen is up, so nothing below moves, spends
+/// or spawns anything and the run clock does not start. [`GameState::LevelUp`]
+/// does it after the restart edge: the field stays where `freeze_field` left it.
+/// See this module's header for why that is one pass on entry rather than a
+/// branch on the hot path.
 fn run_tick(logic: &mut GameLogic, world: &mut World) {
     logic.ticks += 1;
     let dt = world.tick_dt();
@@ -1075,7 +1095,21 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
     clamp_bodies(logic, world);
     read_player(logic, world);
 
-    if intent.restart {
+    if logic.state == GameState::WaitingToStart {
+        // **Nothing below runs while the title screen is up**, which is the
+        // whole of "the game does not play itself before it is started": no
+        // clock, no spawner, no gun, no contact damage. The views are still
+        // refreshed, because the renderer draws this frame like any other.
+        //
+        // The start edge is *not* a `restart`: there is nothing to clear, and a
+        // `restart` here would bump the run counter and deal the first run of
+        // the session the second run's seed.
+        if !intent.restart {
+            refresh_views(logic, world);
+            return;
+        }
+        logic.state = GameState::Playing;
+    } else if intent.restart {
         restart(logic, world);
     }
 
@@ -1817,7 +1851,13 @@ fn spawn_enemies(logic: &mut GameLogic, world: &mut World, dt: f64) {
 // Restart and read-back
 // ---------------------------------------------------------------------------
 
-/// Clears the field and starts a run that is not the one just played.
+/// Clears the field and deals a run that is not the one just played.
+///
+/// **It lands on the title screen, not in play** — the same as asteroids'
+/// `restart` and flappy's `reset`. `TRY AGAIN` therefore takes two presses to
+/// get back into a run, and that is the point: a run that begins on the frame a
+/// player is still mashing the key on the death screen is a run they die in
+/// again immediately.
 fn restart(logic: &mut GameLogic, world: &mut World) {
     for enemy in std::mem::take(&mut logic.enemies) {
         with_physics(world, |phys| phys.remove_entity(enemy.entity));
@@ -1833,7 +1873,7 @@ fn restart(logic: &mut GameLogic, world: &mut World) {
     }
     logic.pickup_by_entity.clear();
     logic.runs = logic.runs.wrapping_add(1);
-    logic.state = GameState::Playing;
+    logic.state = GameState::WaitingToStart;
     // **Every upgrade comes off.** The plan's non-goals bar meta-progression,
     // and a `Stats::default()` here is what makes that a property of the code
     // rather than of nobody having written the carry-over yet.
@@ -2119,7 +2159,7 @@ impl Game {
         let shared = Arc::new(Mutex::new(GameLogic {
             player: player_entity,
             intent: Intent::default(),
-            state: GameState::Playing,
+            state: GameState::WaitingToStart,
             player_pos: DVec3::ZERO,
             player_hp: PLAYER_MAX_HP,
             fire_timer: 0.0,
@@ -2199,14 +2239,14 @@ impl Game {
             pending_keys: Vec::new(),
             audio: crate::audio::Audio::new(setup.headless),
             best: crate::best::Best::load(setup.headless),
-            state: GameState::Playing,
+            state: GameState::WaitingToStart,
             player: DVec3::ZERO,
             player_hp: PLAYER_MAX_HP,
             elapsed: 0.0,
             kills: 0,
             level: 1,
             run: 1,
-            prev_log_state: GameState::Playing,
+            prev_log_state: GameState::WaitingToStart,
             prev_elapsed: 0.0,
         };
         log::info!(
@@ -2344,10 +2384,11 @@ impl Game {
         // cadence breakout, flappy and asteroids use.** `web/tools/browser-e2e.mjs`
         // watches for this heartbeat to tell a paused demo from a running one.
         //
-        // `run` is in the line for that gate as well as for a bug report: this
-        // game has no waiting state, so "the input reached the simulation" is
-        // not "the state left `WaitingToStart`" here — it is the run counter
-        // moving, which only a real restart edge can do.
+        // The state is in the line because that is what the gate reads: "the
+        // input reached the simulation" is `WaitingToStart` before the key and
+        // `Playing` after it, the same claim the other three samples make. `run`
+        // is beside it for a bug report, and because it is what tells a restart
+        // from a start — only a real restart edge advances it.
         if state_changed || self.ticks_run.is_multiple_of(60) {
             log::info!(
                 "[HUD] {:?}  run: {}  time: {:.1}  best: {}  kills: {}  hp: {:.0}  lvl: {}  \
@@ -2817,6 +2858,25 @@ mod tests {
         }
 
         fn with_setup(frame_hz: u32, setup: &Setup) -> Self {
+            let mut harness = Self::at_the_title_screen(frame_hz, setup);
+            // **Every harness below starts on tick 0 rather than on the title
+            // screen**, so the tick indices its scripts are keyed on still mean
+            // what they meant before the start screen existed. The edge is
+            // *queued*, not poked: it is replayed into the action map by the
+            // first `Game::tick`, which consumes it and plays the whole of that
+            // tick — so tick 0 is a playing tick, exactly as it was.
+            //
+            // That also makes this the suite's widest check on the start path.
+            // A start edge the simulation stopped honouring leaves every test
+            // below looking at a frozen arena.
+            harness.game.key_event(KeyCode::Space, true);
+            harness.game.key_event(KeyCode::Space, false);
+            harness
+        }
+
+        /// The same, left on the title screen — for the handful of tests that
+        /// are *about* the title screen.
+        fn at_the_title_screen(frame_hz: u32, setup: &Setup) -> Self {
             Self {
                 game: Game::with_setup(setup).expect("a headless game always starts"),
                 clock: FrameClock::new(setup.tick_hz),
@@ -2827,6 +2887,19 @@ mod tests {
                 restarts: 0,
                 levels: 0,
             }
+        }
+
+        /// A game left on the title screen, with its spawner live — the state a
+        /// player's window opens in.
+        fn waiting(frame_hz: u32, tick_hz: u32) -> Self {
+            Self::at_the_title_screen(
+                frame_hz,
+                &Setup {
+                    headless: true,
+                    tick_hz,
+                    ..Setup::default()
+                },
+            )
         }
 
         /// A staged board: no spawner, no enemies, the player where it is asked
@@ -2882,13 +2955,17 @@ mod tests {
                 self.time.advance(self.frame_step);
                 self.clock.update(self.time.elapsed());
                 while self.ticks < ticks && self.clock.consume_tick() {
+                    // Start the next run — **two edges, one tick apart**, because
+                    // a restart lands on the title screen and the title screen
+                    // is left by the same key. Only the first is counted: the
+                    // second is a start, not a restart. The edge is pressed and
+                    // released inside the one tick, and it is the harness that
+                    // does it rather than `autopilot`, because the plan is a set
+                    // of held keys and this is not one.
                     if self.game.state == GameState::Dead {
-                        // Start the next run. The restart is an *edge*, so it
-                        // is pressed and released inside the one tick — and it
-                        // is the harness that does it rather than `autopilot`,
-                        // because the plan is a set of held keys and this is
-                        // not one.
                         self.restarts += 1;
+                    }
+                    if matches!(self.game.state, GameState::Dead | GameState::WaitingToStart) {
                         self.game.key_event(KeyCode::KeyR, true);
                         self.game.key_event(KeyCode::KeyR, false);
                     }
@@ -2910,6 +2987,21 @@ mod tests {
                     self.ticks += 1;
                 }
             }
+        }
+
+        /// A restart, all the way back into play.
+        ///
+        /// **Two edges and two ticks**, because `restart` lands on the title
+        /// screen: the first clears the run, the second leaves the screen. A
+        /// test that wants to *see* the title screen taps once instead.
+        fn restart_run(&mut self) {
+            self.tap(KeyCode::KeyR);
+            assert_eq!(
+                self.game.state,
+                GameState::WaitingToStart,
+                "a restart did not land on the title screen",
+            );
+            self.tap(KeyCode::KeyR);
         }
 
         /// Presses and releases a key on the next tick, and runs it.
@@ -3848,8 +3940,87 @@ mod tests {
         }
     }
 
+    // ---- the title screen ----------------------------------------------------
+
+    /// **The title screen does not play the game.**
+    ///
+    /// Ten simulated seconds of it leave the world bit-identical. Asserted on
+    /// the whole of [`RenderState`] — the struct the renderer draws from, and
+    /// the only thing a player can actually see — rather than on the state enum,
+    /// because an enum comparison passes just as happily on a simulation that
+    /// ran every line of its tick and merely mislabelled itself.
+    ///
+    /// The tick count is asserted too: a run that never ticked would satisfy
+    /// "nothing changed" without testing anything at all.
+    #[test]
+    fn the_title_screen_does_not_advance_the_simulation() {
+        let mut harness = Harness::waiting(60, 60);
+        assert_eq!(harness.game.state, GameState::WaitingToStart);
+        let mut before = RenderState::default();
+        harness.game.render_state(&mut before);
+
+        harness.run_ticks(600, &[]);
+
+        let mut after = RenderState::default();
+        harness.game.render_state(&mut after);
+        assert_eq!(harness.ticks, 600, "the frames ran no ticks");
+        assert_eq!(
+            before, after,
+            "ten seconds of title screen changed the world"
+        );
+        // …and the same again through the facade's own mirrors, which are what
+        // the HUD and the browser gate read. `SPAWN_INTERVAL_START` is half a
+        // second, so a spawner that ran for ten of them owed nineteen enemies.
+        assert_eq!(harness.game.state, GameState::WaitingToStart);
+        assert_eq!(harness.game.enemies_spawned(), 0, "the spawner ran");
+        assert_eq!(harness.game.bolts_fired(), 0, "the gun fired");
+        assert_eq!(harness.game.elapsed, 0.0, "the run clock ran");
+        assert_eq!(harness.game.enemy_count(), 0);
+        assert_eq!(harness.game.player, DVec3::ZERO);
+    }
+
+    /// **Either key that starts a run starts it**, and what follows is a run:
+    /// the clock moves and the spawner deals.
+    ///
+    /// The run counter is asserted *not* to move, which is the difference
+    /// between starting and restarting — a start implemented as a restart would
+    /// hand the session's first run the second run's horde.
+    #[test]
+    fn the_start_key_begins_the_run() {
+        for key in [KeyCode::Space, KeyCode::KeyR] {
+            let mut harness = Harness::waiting(60, 60);
+            harness.run_ticks(60, &[]);
+            assert_eq!(harness.game.state, GameState::WaitingToStart, "{key:?}");
+            let seed = harness.game.run_seed();
+
+            harness.tap(key);
+            assert_eq!(
+                harness.game.state,
+                GameState::Playing,
+                "{key:?} did not start the run",
+            );
+            assert_eq!(harness.game.run, 1, "{key:?} restarted instead of starting");
+            assert_eq!(harness.game.run_seed(), seed, "{key:?} re-dealt the run");
+
+            harness.run_ticks(harness.ticks + 120, &[]);
+            assert!(
+                harness.game.elapsed > 1.5,
+                "{key:?}: the clock never started: {}",
+                harness.game.elapsed,
+            );
+            assert!(
+                harness.game.enemies_spawned() > 0,
+                "{key:?}: the spawner never dealt",
+            );
+        }
+    }
+
     /// A restart puts the clock, the hit points, the kills and the player back,
     /// and deals a horde that is not the one just played.
+    ///
+    /// **It lands on the title screen**, which is the one thing here that
+    /// changed when the start screen arrived: the board it puts back is the
+    /// same, and it takes a second edge to be playing on it.
     #[test]
     fn a_restart_puts_everything_back_and_deals_a_new_horde() {
         let mut harness = Harness::new(60, 60);
@@ -3862,7 +4033,7 @@ mod tests {
         harness.game.stage_player(DVec3::new(11.0, -7.0, 0.0));
 
         harness.tap(KeyCode::KeyR);
-        assert_eq!(harness.game.state, GameState::Playing);
+        assert_eq!(harness.game.state, GameState::WaitingToStart);
         assert_eq!(harness.game.kills, 0);
         assert_eq!(harness.game.player_hp, PLAYER_MAX_HP);
         assert_eq!(
@@ -3883,9 +4054,21 @@ mod tests {
             "a restart re-dealt the identical run, so the seed advance did nothing",
         );
         harness.assert_nothing_leaked();
+
+        // And the second edge is what plays it, on the board the first one
+        // dealt: the seed does not move again.
+        let dealt = harness.game.run_seed();
+        harness.tap(KeyCode::KeyR);
+        assert_eq!(harness.game.state, GameState::Playing);
+        assert_eq!(
+            harness.game.run_seed(),
+            dealt,
+            "leaving the title screen re-dealt the run",
+        );
     }
 
-    /// A dead run restarts, which is the only way out of the death screen.
+    /// A dead run restarts, which is the only way out of the death screen —
+    /// **onto the title screen**, and a second press from there into play.
     #[test]
     fn restarting_after_a_death_starts_a_new_run() {
         let mut harness = Harness::staged(60, 60, DVec3::ZERO);
@@ -3898,9 +4081,12 @@ mod tests {
         assert_eq!(harness.game.state, GameState::Dead);
 
         harness.tap(KeyCode::Space);
-        assert_eq!(harness.game.state, GameState::Playing);
+        assert_eq!(harness.game.state, GameState::WaitingToStart);
         assert_eq!(harness.game.player_hp, PLAYER_MAX_HP);
         assert_eq!(harness.game.enemy_count(), 0);
+
+        harness.tap(KeyCode::Space);
+        assert_eq!(harness.game.state, GameState::Playing);
     }
 
     // ---- spawning ------------------------------------------------------------
@@ -4309,9 +4495,16 @@ mod tests {
     fn two_games_with_one_seed_agree_about_every_run() {
         let seeds = |restarts: u32| {
             let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+            // One tick to spend the harness's queued start edge, or the first
+            // `restart_run` below would find a game still on the title screen
+            // and merely start it.
+            harness.run_ticks(1, &[]);
             let mut seen = vec![harness.game.run_seed()];
             for _ in 0..restarts {
-                harness.tap(KeyCode::KeyR);
+                // The whole restart, not just its first edge: a second `R` on
+                // the title screen *starts* rather than restarts, so a single
+                // tap per iteration would deal the same run twice.
+                harness.restart_run();
                 seen.push(harness.game.run_seed());
             }
             seen
@@ -4996,9 +5189,9 @@ mod tests {
         harness.run_ticks(harness.ticks + 180, &[]);
         let abandoned = harness.game.elapsed;
         assert!(abandoned > 2.9, "the run was only {abandoned}s long");
-        harness.tap(KeyCode::KeyR);
-        // One tick's worth, not zero: `restart` runs at the top of the tick and
-        // the same tick then counts itself.
+        harness.restart_run();
+        // One tick's worth, not zero: the tick that leaves the title screen
+        // counts itself.
         assert!(
             harness.game.elapsed < 0.02,
             "the restart did not reset the clock: {}",
@@ -5031,7 +5224,7 @@ mod tests {
         );
 
         // …and a longer one does.
-        harness.tap(KeyCode::KeyR);
+        harness.restart_run();
         harness.game.freeze_spawns();
         harness.game.clear_enemies();
         harness.run_ticks(harness.ticks + 300, &[]);

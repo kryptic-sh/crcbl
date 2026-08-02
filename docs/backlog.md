@@ -709,6 +709,28 @@ carries the numbers and their conditions; this is what was raised and not
 finished. Entries the measurement closed have been deleted rather than
 annotated.
 
+- **Do not put the autostart back.** This sample shipped without a start screen
+  on purpose — its board is empty at `t = 0`, so a waiting state is a blank
+  arena with a prompt on it, sample rules 4 and 11 do not require one, and
+  adding `WaitingToStart` churned the suite exactly as predicted. **The user
+  played it and asked for the screen**, which reverses that call for good: a
+  demo that starts taking hit points off a player who has not looked at the
+  window yet is worse than a blank arena, and four samples that open the same
+  way are worth more than one clever exception. `GameState::WaitingToStart`
+  short-circuits `run_tick`; `restart` lands on the title screen rather than in
+  play, so `TRY AGAIN` takes two presses, the same as asteroids and flappy. The
+  argument is preserved in `GameState`'s own docs and in `crate::menu`'s header
+  — it is recorded so it is not re-derived, not so it can be re-applied.
+
+- **`--prefill` starts its own run, and that coupling is not obvious.**
+  `Loop::assemble` queues a start edge when `options.prefill > 0`, because the
+  scale fixture would otherwise measure a `run_tick` that returns on its second
+  line. It is one call beside `Game::stage_field` and
+  `a_prefilled_run_does_not_wait_at_the_title_screen` holds it. Anything else
+  that stages a board before the first frame — a replay header, a future demo
+  mode — has to do the same or it will measure nothing and say it measured
+  everything.
+
 - **The plan's exit criteria are internally inconsistent and need rewriting, not
   answering.** "10 000 enemies at 60 Hz tick" is true of a crowd spread over the
   arena (14.66 ms of a 16.67 ms budget) and false of the same crowd converged on

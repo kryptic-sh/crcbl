@@ -453,6 +453,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **horde**: the game no longer starts itself. It opens on a `HORDE` start
+  screen with a `PLAY` button — `Space`, which is the key breakout, flappy and
+  asteroids print on theirs, and `R` still works — and the simulation does not
+  advance until it is pressed: no spawns, no clock, no shots. The new
+  `GameState::WaitingToStart` short-circuits the tick the way `LevelUp` already
+  did, so a player looking at the title screen is looking at a still, empty
+  arena rather than at a run that has been taking hit points off them since the
+  window opened.
+
+  **`TRY AGAIN` on the death screen now lands on that start screen**, not
+  straight back into a run, which is what asteroids and flappy already do —
+  restarting is two presses. `--prefill` starts its own run so the scale
+  measurement still measures a running one. The sample deliberately shipped
+  without a start screen; `docs/backlog.md` carries why that call was reversed.
+
 - **flappy**: the game has art. A bird with a three-frame flap, a three-sliced
   pipe, and hills and a ground band on parallax layers, all authored as `.crpix`
   text under `apps/flappy/assets/` and baked to PNG + sidecar by a new

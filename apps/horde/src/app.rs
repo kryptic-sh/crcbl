@@ -19,10 +19,16 @@
 //! `Game`, for the reason asteroids' `FLY` button does: which upgrade a run took
 //! is state a seeded, scripted replay has to reproduce.
 //!
-//! # There is no start menu
+//! # There is a start menu, and it arrived late
 //!
-//! `game::GameState` has no waiting state and `crate::menu`'s header carries
-//! why. The loop's three menus are pause, level-up and death.
+//! This sample shipped without one — the argument, and the user's reversal of
+//! it, are in `game::GameState`'s docs and `crate::menu`'s header. The loop's
+//! four menus are start, pause, level-up and death, and the loop itself does
+//! **nothing** to hold the game on the first of them: `run_tick` short-circuits
+//! on `GameState::WaitingToStart` exactly as it does on `LevelUp`, so a start
+//! screen that failed to hold would be a simulation bug and not a loop one. A
+//! loop that stopped calling `tick` instead would have nothing to feed the start
+//! key into.
 //!
 //! # The loop
 //!
@@ -183,11 +189,17 @@ pub const MENU_DOWN_KEY: KeyCode = KeyCode::ArrowDown;
 /// See [`MENU_UP_KEY`].
 pub const MENU_ACTIVATE_KEY: KeyCode = KeyCode::Enter;
 
-/// The key the death menu's `TRY AGAIN` button stands for.
+/// The key the start menu's `PLAY` and the death menu's `TRY AGAIN` stand for.
 ///
 /// Fired as a real key event rather than by calling into [`Game`], because
-/// restarting is the simulation's business and the simulation is driven by its
-/// action map.
+/// beginning a run is the simulation's business and the simulation is driven by
+/// its action map.
+///
+/// `R` and not `Space`, even though the start button prints `SPACE`: `game.rs`
+/// binds **both** to the one `restart` action, so the two are the same edge and
+/// the button's hint is the key a player coming from another demo would reach
+/// for. `the_key_the_start_button_prints_starts_the_run` holds the pair
+/// together.
 const RESTART_KEY: KeyCode = KeyCode::KeyR;
 
 /// The keys the level-up menu's three buttons stand for, in offer order. The
@@ -345,6 +357,16 @@ impl<S: Shell + ?Sized> Loop<S> {
                     options.prefill,
                 );
             }
+            // **A prefilled field starts itself.** `--prefill` is the scale
+            // measurement's fixture and every number in
+            // `docs/plan/sample/03-horde.md` was taken through it; left on the
+            // title screen it would time a simulation that short-circuits on its
+            // first line, and report it as ten thousand enemies a tick. The edge
+            // is queued, not poked, so it goes through the same action map a
+            // player's key does.
+            game.key_event(RESTART_KEY, true);
+            game.key_event(RESTART_KEY, false);
+            log::info!("prefill: started the run without waiting for the title screen");
         }
         Ok(Self {
             windowed: !options.headless,
@@ -1080,6 +1102,9 @@ impl HudStrings {
             self.state.push_str("PAUSED - press ESC");
         } else {
             match render.state {
+                Some(GameState::WaitingToStart) | None => {
+                    self.state.push_str("PRESS SPACE TO PLAY - WASD to move");
+                }
                 Some(GameState::Dead) => {
                     let _ = write!(
                         self.state,
@@ -1091,7 +1116,7 @@ impl HudStrings {
                 Some(GameState::LevelUp) => {
                     self.state.push_str("LEVEL UP - press 1, 2 or 3");
                 }
-                Some(GameState::Playing) | None => {
+                Some(GameState::Playing) => {
                     self.state.push_str("WASD to move - the gun aims itself");
                 }
             }
@@ -1166,12 +1191,33 @@ mod tests {
     }
 
     fn headless_loop() -> Loop<dyn Shell> {
-        Loop::start(&headless(8)).expect("a headless loop always starts")
+        let mut engine = Loop::start(&headless(8)).expect("a headless loop always starts");
+        start_the_run(&mut engine.game);
+        engine
     }
 
-    /// A loop on a shell the test can post events to.
+    /// A loop on a shell the test can post events to, with the run started.
     fn scripted(options: &Options) -> Loop<HeadlessShell> {
+        let mut engine = at_the_title_screen(options);
+        start_the_run(&mut engine.game);
+        engine
+    }
+
+    /// The same, left on the title screen — for the tests that are *about* it.
+    fn at_the_title_screen(options: &Options) -> Loop<HeadlessShell> {
         Loop::with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
+    }
+
+    /// Queues the start edge, so the loop's first frame ticks a run that is
+    /// already playing and every test written before the start screen existed
+    /// still measures what it measured.
+    ///
+    /// Through [`Game::key_event`] rather than by poking the state: the first
+    /// tick replays it into the real action map, so a start path that stopped
+    /// working takes the whole file down with it.
+    fn start_the_run(game: &mut Game) {
+        game.key_event(RESTART_KEY, true);
+        game.key_event(RESTART_KEY, false);
     }
 
     fn run_frames(engine: &mut Loop<HeadlessShell>, frames: u32) {
@@ -1505,6 +1551,171 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // The start screen
+    // -----------------------------------------------------------------------
+
+    /// **The window opens on the start screen and the game does not play
+    /// itself.**
+    ///
+    /// Sixty-four frames of it — a second of the loop's own clock, and twenty
+    /// times the half-second the spawner's first enemy is owed at — with the
+    /// whole [`RenderState`] compared before and after. Not the menu kind and
+    /// not the state enum: a simulation that ran every line of its tick and
+    /// mislabelled itself would satisfy both.
+    ///
+    /// The tick count is asserted to have moved, because "nothing changed" over
+    /// a loop that ran no ticks is not a claim about anything.
+    #[test]
+    fn the_loop_opens_on_the_start_screen_and_nothing_moves() {
+        let mut engine = at_the_title_screen(&headless(256));
+        engine.frame().expect("a frame");
+        assert_eq!(engine.menu_kind(), MenuKind::Start);
+        assert_eq!(engine.game_mut().state, game::GameState::WaitingToStart);
+
+        let mut before = RenderState::default();
+        engine.game_mut().render_state(&mut before);
+        let ticks = engine.ticks;
+        run_frames(&mut engine, 64);
+
+        let mut after = RenderState::default();
+        engine.game_mut().render_state(&mut after);
+        assert!(engine.ticks > ticks + 32, "the frames ran no ticks");
+        assert_eq!(before, after, "the start screen played the game");
+        assert_eq!(engine.game_mut().enemies_spawned(), 0, "the spawner ran");
+        assert_eq!(engine.game_mut().elapsed, 0.0, "the run clock ran");
+        assert_eq!(engine.menu_kind(), MenuKind::Start);
+
+        // And it is a screen the player can see: titled, centred and drawn,
+        // like the other three menus.
+        let extent = engine.extent();
+        let centre = engine
+            .menu_layout()
+            .expect("a waiting frame has a menu")
+            .panel_centre();
+        assert!(
+            (centre.x - extent.0 as f32 / 2.0).abs() < 1.0
+                && (centre.y - extent.1 as f32 / 2.0).abs() < 1.0,
+            "the panel is at {centre:?} on a {extent:?} framebuffer",
+        );
+        assert!(
+            !engine.gpu.menu_sprites().is_empty(),
+            "the menu pass got nothing to draw",
+        );
+        let text = ui_text(&engine);
+        assert!(
+            text.iter().any(|line| line == "HORDE") && text.iter().any(|line| line == "PLAY"),
+            "the start menu never reached the UI pass: {text:?}",
+        );
+    }
+
+    /// **The key the button prints is the key that starts it**, through the
+    /// shell, and the run really begins afterwards.
+    ///
+    /// `SPACE` is what the other three samples print on their start screens and
+    /// what the browser gate presses. `RESTART_KEY` is `R`, so a button that
+    /// worked and a hint that lied would look identical without this.
+    #[test]
+    fn the_key_the_start_button_prints_starts_the_run() {
+        let mut engine = at_the_title_screen(&headless(256));
+        engine.frame().expect("a frame");
+        assert_eq!(engine.menu_kind(), MenuKind::Start);
+
+        tap(&mut engine, KeyCode::Space);
+        run_frames(&mut engine, 2);
+        assert_eq!(engine.game_mut().state, game::GameState::Playing);
+        assert_eq!(engine.menu_kind(), MenuKind::None);
+        assert_eq!(
+            engine.game_mut().run,
+            1,
+            "the key restarted rather than started"
+        );
+
+        let elapsed = engine.game_mut().elapsed;
+        run_frames(&mut engine, 16);
+        assert!(
+            engine.game_mut().elapsed > elapsed,
+            "the clock never started",
+        );
+    }
+
+    /// **Clicking `PLAY` starts it too**, on the panel the player can see —
+    /// through the layout the frame actually used, into the action map, into the
+    /// simulation.
+    #[test]
+    fn clicking_play_starts_the_run() {
+        let mut engine = at_the_title_screen(&headless(256));
+        engine.frame().expect("a frame");
+        let target = engine
+            .menu_layout()
+            .expect("a waiting frame has a menu")
+            .items()[0];
+        let over = (target.min + target.max) * 0.5;
+
+        click(&mut engine, over);
+        run_frames(&mut engine, 2);
+        assert_eq!(engine.game_mut().state, game::GameState::Playing);
+        assert_eq!(engine.menu_kind(), MenuKind::None);
+    }
+
+    /// **The start screen composes with the pause and with a focus loss.**
+    ///
+    /// Pause wins over it, as it wins over every other state; resuming goes back
+    /// to the start screen rather than into a run; and a window that lost focus
+    /// on the title screen has not started a game behind the player's back.
+    #[test]
+    fn the_start_screen_composes_with_pause_and_focus_loss() {
+        let mut engine = at_the_title_screen(&headless(256));
+        engine.frame().expect("a frame");
+        assert_eq!(engine.menu_kind(), MenuKind::Start);
+
+        tap(&mut engine, PAUSE_KEY);
+        assert!(engine.is_paused(), "escape did not pause the title screen");
+        assert_eq!(engine.menu_kind(), MenuKind::Paused);
+
+        tap(&mut engine, PAUSE_KEY);
+        assert!(!engine.is_paused(), "escape did not resume");
+        run_frames(&mut engine, 2);
+        assert_eq!(
+            engine.menu_kind(),
+            MenuKind::Start,
+            "resuming from the title screen started the game",
+        );
+
+        let window = engine.window;
+        engine
+            .shell
+            .set_focus(window, false)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused(), "the focus loss did not pause");
+        tap(&mut engine, PAUSE_KEY);
+        run_frames(&mut engine, 8);
+        assert_eq!(engine.game_mut().state, game::GameState::WaitingToStart);
+        assert_eq!(engine.game_mut().elapsed, 0.0, "the run clock ran");
+    }
+
+    /// **`--prefill` starts its own run.**
+    ///
+    /// The scale fixture stages ten thousand enemies and every number in
+    /// `docs/plan/sample/03-horde.md` was measured through it. Left on the title
+    /// screen it would time a `run_tick` that returns on its second line and
+    /// report the result as the cost of a full field.
+    #[test]
+    fn a_prefilled_run_does_not_wait_at_the_title_screen() {
+        // `at_the_title_screen`, deliberately: `scripted` queues a start edge of
+        // its own, and a test that started the run itself would pass on a
+        // `--prefill` that had never learned to.
+        let mut engine = at_the_title_screen(&Options {
+            prefill: 64,
+            ..headless(256)
+        });
+        run_frames(&mut engine, 4);
+        assert_eq!(engine.game_mut().state, game::GameState::Playing);
+        assert!(engine.game_mut().enemy_count() >= 64, "the field went away");
+        assert!(engine.game_mut().elapsed > 0.0, "the clock never started");
+    }
+
+    // -----------------------------------------------------------------------
     // The menus
     // -----------------------------------------------------------------------
 
@@ -1540,6 +1751,11 @@ mod tests {
     fn each_state_gets_its_own_menu_and_a_playing_frame_gets_none() {
         let mut engine = scripted(&headless(256));
         engine.frame().expect("a frame");
+        // **The first frame is the title screen**, whatever this test's helper
+        // queued: a loop's first frame establishes the clock's baseline and runs
+        // no ticks, so nothing has consumed the start edge yet.
+        assert_eq!(engine.menu_kind(), MenuKind::Start);
+        run_frames(&mut engine, 1);
         assert_eq!(engine.menu_kind(), MenuKind::None);
         assert!(engine.menu_layout().is_none());
 
