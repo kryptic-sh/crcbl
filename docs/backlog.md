@@ -59,6 +59,14 @@ carries what has no phase yet.
   piece of work for that reason and the Rust half should be too. **It is now
   owed before S3 (horde), on the same terms and with the same warning.**
 
+  **Status after horde 18a: still owed, and not yet violated.** That sub-slice
+  is the simulation and a native window — there is no `apps/horde/src/web.rs`,
+  so there is no fourth copy. `apps/horde/Cargo.toml` and `src/lib.rs` are
+  already shaped for one (`crate-type = ["cdylib", "rlib"]`, a lib the bin
+  links) so that adopting a shared implementation is adding a module rather than
+  restructuring the package. The deadline is now the horde **web** sub-slice,
+  which is the last point at which the count is three.
+
 ## The rustdoc gate never documents the wasm target, so every `web.rs` is unchecked
 
 CI runs
@@ -578,7 +586,152 @@ Two possible fixes, and the choice is the engine's:
 - **Leave it and document it**, and have `World::entity_count` grow a sibling
   that excludes the queue, so a consumer is not obliged to know.
 
-Not worked around in asteroids beyond making the test honest.
+Not worked around in asteroids beyond making the test honest. **Horde hits it
+harder**: its leak invariant is checked on every tick of a soak, and the queue
+is non-empty on any tick something died — which at a hundred spawns a second is
+most of them.
+
+## What `crcbl-phys` owes at scale, found by writing horde
+
+`apps/horde` runs `N` broadphase overlap queries per tick — one per enemy, for
+separation — plus one for contact damage and one for aiming, so it is the first
+consumer where the _per-query overhead_ rather than the query's answer is the
+cost. Provisional numbers and their conditions are in
+`docs/plan/sample/03-horde.md`; both entries below sit in front of them and
+neither was taken, because either is an API change to `crcbl-phys` and this
+slice was the sample.
+
+- **`overlap_sphere` returns an owned `Vec`, so a game that queries per body
+  allocates per body per tick.** `PhysicsSystem::overlap_sphere` and
+  `PhysicsWorld::overlap_sphere` both build and return a `Vec`, and
+  `Bvh::traverse_aabb` builds another one underneath, so horde's `steer_enemies`
+  does **two** heap allocations per enemy per tick and drops them immediately.
+  At the plan's 10 000 that is 1.2 million allocations a second doing nothing.
+  Wanted: a callback or `&mut Vec` form —
+  `overlap_sphere_into(centre, radius, &mut out)` — through all three layers, so
+  a caller can hoist one buffer out of the loop. Not measured against the
+  alternative, because there is no alternative to measure yet; it is named here
+  as the first thing to try rather than as a proven cause.
+
+- **`PhysicsSystem` has no `body_mut`, so writing a velocity is a `HashMap`
+  insert.** `body()` hands back `&RigidBody`, and the only writer is `set_body`,
+  which does `bodies.insert(entity, body)` and then
+  `transforms.entry(entity).or_insert(…)` — two hash operations to change one
+  `DVec3`. A game whose agents _choose_ their velocity rather than having one
+  integrated onto them (horde's enemies are all `RigidBody::new_kinematic`) does
+  that `N` times a tick. `apply_force` does not help: on a kinematic body it is
+  a no-op, because `inverse_mass` is zero. Wanted:
+  `body_mut(entity) -> Option<&mut RigidBody>`. It is three lines and was not
+  taken here only because it is a public-API addition to a crate this slice had
+  no other reason to open.
+
+- **Steering is embarrassingly parallel and there is nothing to run it on.**
+  Horde's separation pass reads positions, queries, and writes velocities —
+  nothing it writes is read by the broadphase, so the pass is order-independent
+  by construction and every enemy could be done on a different thread. There is
+  no `crcbl-jobs` (P8) and no parallel ECS schedule, so it is a `for` loop. This
+  is the entry the roadmap already predicted; it is repeated here with the
+  evidence that the _shape_ is right, which the roadmap could not know.
+
+- **The neighbour sum's order is the BVH's traversal order, and horde chose to
+  live with it.** Floating-point addition is not associative, so the separation
+  vector depends on the order `overlap_sphere` returns neighbours in. That order
+  is deterministic — the tree is a pure function of the insert/remove sequence,
+  which is a pure function of the seed and the script, and
+  `the_same_script_replays_bit_identically` covers it — but it is deterministic
+  _because of the tree_, not independently of it. Sorting each neighbourhood by
+  entity id would make it independent, at the price of a sort per enemy per
+  tick. **Declined** for that reason. It becomes a real question the moment the
+  tree's build order stops being reproducible — a parallel insert, or a rebuild
+  policy that depends on timing — and whoever adds either should read this
+  first.
+
+- **A sphere overlap of radius `R` returns everything within `R + r_b`, and
+  horde depends on that exactly.** Not a complaint — it is what makes
+  `separation_query_radius` `r_self + slack` rather than
+  `r_self + max_enemy_radius() + slack`, which at a brute's 0.85 would nearly
+  triple the area a grunt searches. It is written down because it is an
+  undocumented consequence of `overlap_sphere` being shape-aware rather than an
+  AABB test, and nothing in `crcbl-phys` says so.
+  `the_separation_query_radius_is_exactly_the_neighbourhood` is the guard, in
+  the consumer, where it does not belong.
+
+## A projectile swept on the tick it is fired is swept backwards through its own muzzle
+
+Segment CCD reconstructs `prev` as `position - velocity * dt`. For a projectile
+created _this_ tick that point is one whole step behind the muzzle — through the
+body that fired it and out the other side — so the sweep covers ground the
+projectile never travelled.
+
+`apps/asteroids/src/game.rs` fires before it sweeps, so it has this: a bullet
+can hit a rock sitting behind the ship on the tick it leaves the gun. It is 0.4
+of a unit at 60 Hz on a 32-unit field, hidden inside the ship's own hull, and no
+asteroids test looks for it — which is why it is a note here rather than a bug
+report. It scales with `1/tick_rate`: at `--tick-hz 4` it is six units.
+
+`apps/horde` fires **after** the sweep instead, so a bolt's first sweep is its
+first real step and `start` is exactly the muzzle;
+`a_bolt_is_never_swept_over_ground_it_did_not_travel` pins it, at 4 Hz where the
+phantom segment is 7.5 units long. Asteroids was not changed to match: the fix
+is a three-line reorder in a sample this slice was not otherwise touching, and
+it wants its own before/after on asteroids' own suite.
+
+## What horde still owes
+
+Slice 18a is the core loop only. `docs/plan/sample/03-horde.md` carries the
+sub-slice split and the provisional scale numbers; this is what was raised and
+not finished.
+
+- **The plan's 10 000-enemy exit criterion is not met and was not attempted.**
+  `DEFAULT_MAX_ENEMIES` is 1 500, and `--max-enemies` exists so raising it needs
+  no rebuild. The one measurement taken says the _simulation_ carries roughly
+  8–9k at 60 Hz on the reference machine and misses 10k by about 10%; the
+  **render** side of the criterion is untouched, because what draws the field
+  today is one `DrawList` quad per visible enemy through the UI pass' per-frame
+  vertex upload. Both halves belong to the scale sub-slice.
+
+- **`app::MAX_DRAWN_ENEMIES` is a cap on the picture, and it is 2 000.** With
+  the view cull in front of it a crowd has to be entirely on screen to reach it,
+  but a crowd that does is silently truncated with no indication in the HUD. It
+  exists so a frame rate measured against the placeholder renderer is not
+  mistaken for a measurement of the simulation. The art sub-slice moves the
+  field to `SpriteRenderer`, at which point the right answer is probably no cap
+  at all.
+
+- **Nothing enforces that the arena is a plane.** Positions are `DVec3`,
+  everything the game produces sits at `z = 0` (`spawn_offset` and the seek and
+  separation vectors are all planar), and `clamp_to_arena` passes `z` through
+  untouched. A body given a non-zero `z` would separate in depth and never be
+  brought back — which a test fixture using `DVec3::splat` did, and which is how
+  this was noticed. Either clamp `z` too or make the fact a type. Not a live
+  bug: no production path can produce one.
+
+- **The horde does not avoid the walls, it is pushed into them.** Seek is a
+  straight line to the player and separation knows nothing about the arena, so a
+  crowd chasing a player along an edge piles into it and the clamp holds it
+  there. It reads acceptably and it is not pathfinding — which is a hard
+  non-goal — but "walk around the obstacle" is the first thing a player will
+  expect if props ever land in the arena.
+
+- **Contact damage has no invulnerability frames**, by choice: it is a damage
+  _rate_ summed over whatever is touching, so a stack of enemies is worse than
+  one and there is no per-enemy timer on the hot path. The consequence is that
+  there is no way to survive being surrounded for even a moment, which is a
+  difficulty decision nobody has played against yet.
+
+- **The spawn ring is relative to the player and clamped into the arena**, so a
+  player standing in a corner gets enemies materialising on the wall beside them
+  instead of walking on from off screen. Rejecting and re-drawing the angle
+  would fix it and would no longer be a pure function of the index, which is the
+  property the determinism suite rests on; the honest fix is to pick the arc
+  that is inside the arena rather than to retry.
+
+- **Not measured, not reviewed:** the windowed native path is compiled and never
+  run (no display in the build environment), so the follow camera, the HUD
+  layout and the death scrim have been checked by test and by argument and by
+  nobody's eyes. There is no golden image and no browser build. Frame timings
+  from a headless run are the _pass_ timings only — 0.021 ms for two passes at
+  an empty field, which measures nothing.
 
 ## What asteroids itself still owes
 

@@ -785,6 +785,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "horde"
+version = "0.1.0"
+dependencies = [
+ "crcbl",
+ "crcbl-client",
+ "crcbl-core",
+ "crcbl-ecs",
+ "crcbl-input",
+ "crcbl-net",
+ "crcbl-phys",
+ "crcbl-server",
+ "glam",
+ "log",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

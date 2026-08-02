@@ -1,0 +1,44 @@
+[package]
+name = "horde"
+description = "Horde — the scale sample: thousands of agents, one broadphase"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# **A library with two front ends, not a binary**, for the reason
+# `apps/asteroids/Cargo.toml` sets out: the same loop has to be reachable from
+# `main.rs` (argv, exit codes) and from a browser's JS shim, and a bin crate has
+# no linkable artifact for the second. Only the first exists in this sub-slice;
+# the shape is here from the start so the web sub-slice adds a module rather
+# than restructuring the package.
+#
+# The lib is not called `horde`. A lib and a bin of the same name in one package
+# write the same `horde.wasm`, which cargo calls an output filename collision.
+[lib]
+name = "crcbl_horde"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "horde"
+path = "src/main.rs"
+
+# Shorter than asteroids' list, and deliberately: this sub-slice is the
+# simulation and the window it runs in. `crcbl-audio`, `crcbl-store` and
+# `crcbl-sprite` arrive with the sub-slices that use them, so `cargo machete`
+# stays meaningful until then.
+[dependencies]
+crcbl = { workspace = true }
+crcbl-ecs = { workspace = true }
+crcbl-net = { workspace = true }
+crcbl-phys = { workspace = true }
+crcbl-input = { workspace = true }
+crcbl-server = { workspace = true }
+crcbl-client = { workspace = true }
+crcbl-core = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+
+[lints]
+workspace = true

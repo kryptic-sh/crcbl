@@ -16,6 +16,36 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **horde** (`apps/horde`): the engine's fourth game and its scale sample — the
+  core loop. One arena, one player with WASD movement and an auto-aiming weapon,
+  three enemy kinds that seek and push off each other, contact damage, hit
+  points, death and restart. Native and headless; `--max-enemies` sets the
+  ceiling on live enemies (default 1500). Drawn as untextured quads through the
+  UI pass, which the art sub-slice replaces.
+
+  Where the earlier samples ask what the engine can host, this one asks **what
+  one tick costs per live body**, so the interesting part is the query pattern.
+  Separation is one `PhysicsSystem::overlap_sphere` per enemy per tick, of
+  radius `r_self + slack` — and the omission of the _neighbour's_ radius is
+  exact rather than sloppy, because a shape-aware overlap of radius `R` returns
+  everything within `R + r_b`, which is precisely the pair set separation wants.
+  Contact damage is one more such query, at `PLAYER_RADIUS`, where every result
+  is by construction a hit. Aiming is a third, at the weapon's range, instead of
+  a scan of the enemy list. The weapon itself is segment CCD.
+
+  Provisional numbers, simulation only, single-threaded, release, on a Ryzen 9
+  9950X3D: 0.62 ms/tick at 1 000 enemies, 3.85 at 5 000, 18.43 at 10 000 —
+  against a 60 Hz budget of 16.67 ms. Recorded with their conditions in
+  `docs/plan/sample/03-horde.md`; the real measurement is the scale sub-slice's.
+
+  Two divergences from asteroids are deliberate. **The gun fires after the bolt
+  sweep**, because a projectile swept on the tick it was created is swept from a
+  point one whole step behind the muzzle, through the thing that fired it —
+  asteroids has the same order the other way round, and the same latent segment.
+  **A wall clamp is not a teleport**: it moves a body by at most one tick of
+  travel, so it is a refit rather than the remove-and-re-insert asteroids'
+  screen wrap needs.
+
 - **crcbl-render**: `Sprite::rotation` — sprites can turn. A per-sprite angle in
   radians, counter-clockwise, about the centre of the sprite's own `rect`. It
   rides in the fourth component of `SpriteInstance::sheet`, which was padding,
