@@ -78,8 +78,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   switch does not always blur the focused element, so `blur` alone leaves a game
   holding keys it will never see released. The demo pages gained a
   `STATUS_PAUSED` (6) status line, and `tools/browser-e2e.mjs` gained a
-  focus/pause group that blurs the canvas in a real browser and checks that the
-  HUD heartbeat stops.
+  focus/pause group that blurs the canvas in a real browser, checks that the HUD
+  heartbeat stops, that focus coming back does not resume on its own, and that
+  Escape does.
+
+  **On a canvas, the click that restores focus is also a click in the game.**
+  There is no title bar to click, so `shell.js` calls `canvas.focus()` from its
+  own `pointerdown` handler — which means "clicking back in" lands a real press
+  at a real position, and a press that lands on the pause menu's `RESUME` button
+  resumes, exactly as it would with the game already focused. Focus itself still
+  never resumes, on any platform. The two are separate and the samples' new
+  `a_focusing_click_off_every_button_leaves_the_game_paused` pins them apart.
 
 - **crcbl-ui**: `crcbl_ui::debug` — the modular debug overlay every sample now
   ships. `DebugPanel` holds `DebugSection`s and names no system; a system

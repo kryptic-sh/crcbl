@@ -16,7 +16,7 @@
 // a WebGPU device and puts pixels on the canvas. A black canvas passes every
 // check those two can make.
 //
-// WHAT IT ASSERTS. Four groups, printed in order:
+// WHAT IT ASSERTS. Five groups, printed in order:
 //
 //   A  the platform — `navigator.gpu`, an adapter, and **that this browser can
 //      report canvas pixels at all** (see below; this one is not a formality)
@@ -25,6 +25,8 @@
 //      Space key launches the ball, and the game's own HUD log line changes
 //   D  it renders — no WebGPU device errors, the canvas is not one flat colour,
 //      and the canvas changes from frame to frame while the ball is in flight
+//   E  focus and pause — a blurred canvas pauses and runs no ticks, focus
+//      coming back does not resume on its own, and Escape does
 //
 // THE READBACK IS THE PART THAT NEEDED PROVING. Three ways to get a WebGPU
 // canvas's pixels into JS look equivalent and are not, measured on Chromium 150
@@ -160,6 +162,19 @@ const SAMPLE_COUNT = 16;
  * there rather than making "a paused demo runs no ticks" pass for free.
  */
 const TICK_WINDOW_MS = 4_000;
+
+/**
+ * How far inside the canvas group E clicks to hand the keyboard back.
+ *
+ * CSS pixels from the canvas's top-left corner. Far enough in that a rounded
+ * `getBoundingClientRect` cannot put the point on the neighbouring element, and
+ * nowhere near the centred pause menu — which is the point, and is why this is a
+ * named constant rather than a `+ 8` in the middle of a check. Each sample's
+ * `a_focusing_click_off_every_button_leaves_the_game_paused` asserts the same
+ * inset is outside every button of every menu, so a menu that grew until it
+ * reached the corner fails a fast Rust test rather than this slow one.
+ */
+const FOCUS_CLICK_INSET = 8;
 
 /** The control page's clear colour, and what it must read back as. */
 const CONTROL_RGB = [0, 51, 204];
@@ -1045,7 +1060,8 @@ try {
     `(() => { const c = document.getElementById('canvas');
               c.scrollIntoView({ block: 'center', behavior: 'instant' });
               const r = c.getBoundingClientRect();
-              return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()`
+              return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2),
+                       left: r.x, top: r.y }; })()`
   );
   const inViewport = await evaluate(
     page,
@@ -1226,17 +1242,59 @@ try {
 
   // Clicking back in deliberately does not resume — the pause menu is dismissed
   // on purpose — so this is two steps and the first one must not be enough.
+  //
+  // **Not the canvas centre**, which is where this check used to click and is
+  // the whole of why this group read 23/25. The pause menu is laid out centred
+  // in the framebuffer and `RESUME` is the item the centre lands in, so a click
+  // there is a click on `RESUME` — the demo resumed, correctly, and the check
+  // read it as focus handling having regressed. It had not: `a_click_on_resume_-
+  // resumes_the_game` in each sample's `app.rs` requires exactly that. A corner
+  // is the part of the canvas least likely to be a widget in any sample, which
+  // is what a check about *focus* rather than about a button needs.
+  // `a_focusing_click_off_every_button_leaves_the_game_paused` pins the inset
+  // used here as being outside every button, in a place a layout change will
+  // trip over.
+  const corner = {
+    x: Math.round(rect.left + FOCUS_CLICK_INSET),
+    y: Math.round(rect.top + FOCUS_CLICK_INSET),
+  };
   for (const type of ['mousePressed', 'mouseReleased']) {
     await page.send('Input.dispatchMouseEvent', {
       type,
-      x: rect.x,
-      y: rect.y,
+      x: corner.x,
+      y: corner.y,
       button: 'left',
       clickCount: 1,
       buttons: type === 'mousePressed' ? 1 : 0,
     });
   }
-  await pause(200);
+
+  // The click has to have *reached the engine* before "it is still paused"
+  // means anything: read the status too early and a demo that would have
+  // resumed still reports 6, and the check passes for the reason it exists to
+  // rule out. A sleep cannot establish that — it only makes the wrong answer
+  // less likely — so wait on the observable instead. The shim's `pointerdown`
+  // listener runs synchronously while `Input.dispatchMouseEvent` is in flight,
+  // so the event is already queued in the wasm backend by the time the command
+  // returns; `frame()` in the demo's `main.js` drains that queue and applies
+  // any menu action, so two `requestAnimationFrame` ticks is the engine having
+  // had, and taken, its chance to resume.
+  await evaluate(
+    page,
+    `new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok)))`
+  );
+
+  // The other half of "the click reached the engine": it also has to have done
+  // the job it was dispatched for, or this is a check about a click that missed
+  // the canvas entirely.
+  const refocused = await evaluate(page, `document.activeElement?.id ?? ''`);
+  check(
+    'E',
+    'a click in the corner hands the canvas its keyboard back',
+    refocused === 'canvas',
+    `activeElement is "${refocused}"`
+  );
+
   check(
     'E',
     'focus coming back does not resume on its own',
@@ -1244,6 +1302,15 @@ try {
     `status ${await evaluate(page, `crcbl.status()`)}`
   );
 
+  // **Read before the key, and required to be 6.** `until` returns the moment
+  // it sees a 3, including the 3 that was already there — so if anything above
+  // left the demo running, this check passes without Escape doing a thing, and
+  // the two checks after it fail instead with no hint of why. That is exactly
+  // how the centred click hid: "focus coming back does not resume" went red,
+  // "Escape resumes the demo" went green off the stale status, and Escape then
+  // *paused* a running demo and took the heartbeat check down with it. A check
+  // that cannot fail is not a check, and neither is one that cannot be reached.
+  const beforeEscape = await evaluate(page, `crcbl.status()`);
   for (const type of ['keyDown', 'keyUp']) {
     await page.send('Input.dispatchKeyEvent', {
       type,
@@ -1253,15 +1320,20 @@ try {
       nativeVirtualKeyCode: 27,
     });
   }
-  const resumed = await until(async () => {
-    const status = await evaluate(page, `crcbl.status()`);
-    return status === 3 ? status : null;
-  });
+  const resumed =
+    beforeEscape === 6 &&
+    (await until(async () => {
+      const status = await evaluate(page, `crcbl.status()`);
+      return status === 3 ? status : null;
+    }));
   check(
     'E',
     'Escape resumes the demo',
     resumed === 3,
-    `status ${await evaluate(page, `crcbl.status()`)}`
+    beforeEscape === 6
+      ? `status ${await evaluate(page, `crcbl.status()`)}`
+      : `the demo was not paused going in (status ${beforeEscape}), so Escape ` +
+        `pausing and Escape resuming are indistinguishable here`
   );
   const afterResume = await heartbeats();
   check(

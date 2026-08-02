@@ -21,37 +21,39 @@ carries what has no phase yet.
   the symbols must not collide — so the shape is probably a macro over a generic
   core rather than a plain function.
 
-## The browser gate is red on focus and pause, and was before this slice
+## Always run the browser gate with `--build`
 
-**Found while checking the sprite fix against the browser; not caused by it, and
-not fixed here.** `CRCBL_WEB_E2E_DEMO=breakout ./web/run-browser-e2e.sh` and the
-same for `flappy` report **23/25**, both failures in section E:
+A run without `--build` uses whatever is in `target/site`, and that directory
+outlives the commit it was built from — a stale site is how a green run gets
+reported for code that is red. This has cost real time once already: both demos
+were signed off at "25/25" against a site built before the focus, pause and menu
+work landed, and the gate had in fact been red the whole time. Pass `--build`,
+or delete `target/site` first.
 
-- `focus coming back does not resume on its own — status 3`, and
-- `the simulation runs again after resuming — 0 HUD line(s) in 4000 ms`.
+## Should the click that refocuses a canvas reach the game at all?
 
-The story the log tells is coherent: refocusing the canvas resumes the demo by
-itself, and the Escape that the driver then sends toggles it back to paused, so
-the run that follows logs nothing. `breakout`'s own changelog entry says
-"regaining focus deliberately does not resume", so the demo is doing the
-opposite of what it is documented to do — but only in the browser; nothing in
-the native path is known to be affected.
+**Behaviour that surprised us, deliberately left alone.** A canvas has no title
+bar, so `web/engine/shell.js` gives it the keyboard from its own `pointerdown`
+handler — which makes the click that "clicks back into the window" also a press
+at a real position inside the game. With the pause menu on screen and `RESUME`
+under the cursor, clicking back in resumes. That is each half behaving correctly
+and the combination being surprising; it is what put the browser gate at 23/25
+for a slice, because section E clicked the canvas's _centre_ to restore focus
+and the menu is centred there.
 
-**It is not this slice's doing, and that was measured rather than assumed.** A
-`git worktree` at `HEAD`, site built from it, same script: breakout **22/25**
-with the same two failures plus `Escape resumes the demo`. So `HEAD` is at worst
-as red as the working tree. The third failure appearing in one run and not the
-other means there is a race in it as well as a defect.
+The alternative is click-to-focus **activation blocking**: the first press after
+a focus gain restores focus and is swallowed rather than delivered, which is
+what several desktop toolkits do. Not done, and not obviously right — swallowing
+a click is its own surprise, and for a paused game the current behaviour is
+arguably the friendlier one (the player clicked on `RESUME`; they got a resume).
+It needs a decision rather than a patch, and it would have to be decided for
+native and web together, since `Loop` cannot tell the two apart.
 
-**Anyone reading "25/25 today" should know where that number came from.** A run
-without `--build` uses whatever is in `target/site`, and that directory outlives
-the commit it was built from — a stale site is how a green run gets reported for
-code that is red. Both demos were 25/25 against a site built before the focus,
-pause and menu work landed. Pass `--build`, or delete `target/site` first.
-
-Where to look: the `Focus` handling in `apps/breakout/src/app.rs` and
-`apps/flappy/src/app.rs` against `web/tools/browser-e2e.mjs`'s section E, and
-whether the browser delivers a focus event the native shells do not.
+What holds the line meanwhile:
+`a_focusing_click_off_every_button_leaves_the_game_paused` in both samples'
+`app.rs` asserts the corner is over no button and the centre is over `RESUME`,
+so a menu that grew until it reached the corner fails a fast Rust test rather
+than the slow browser one.
 
 ## The sprite system, and what is left of the retrofit
 
@@ -541,6 +543,12 @@ uncertainty.
   purpose: focus loss is a thing the platform does _to_ the game, resuming is a
   thing the player does. _Changes it_: a sample where pausing costs the player
   something (a timed run), where the two-step would read as a penalty.
+
+  **Read this together with "Should the click that refocuses a canvas reach the
+  game at all?" above.** "Focus does not resume" is about the focus _event_. In
+  a browser the gesture that delivers it is a click inside the game, so clicking
+  back in onto `RESUME` does resume — one step, not two. The decision above is
+  intact; the gesture is not the same gesture on every platform.
 
 - **Which key pauses, given that a browser reserves Escape?** Taken: **Escape
   anyway.** Neither sample's action map binds it — breakout declares arrows,

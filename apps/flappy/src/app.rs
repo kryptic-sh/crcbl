@@ -1654,6 +1654,102 @@ mod tests {
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
+    /// **A canvas is handed the keyboard by a click *in the game*, and that
+    /// click still must not resume.**
+    ///
+    /// The sibling above moves focus with nothing else attached, which is what a
+    /// window manager does. A browser has no such gesture: `web/engine/shell.js`
+    /// calls `canvas.focus()` from its own `pointerdown` listener, so the event
+    /// that restores focus is also a press at a real position, and whether the
+    /// game resumes depends on what is under it. Both outcomes are correct and
+    /// the browser gate confused them — it clicked the canvas's centre, the pause
+    /// menu is centred, `RESUME` is the item the centre lands in, and a check
+    /// named "focus coming back does not resume on its own" went red because the
+    /// game did what [`a_click_on_resume_resumes_the_game`] requires.
+    ///
+    /// So: the corner is asserted to be over nothing, because
+    /// `web/tools/browser-e2e.mjs` clicks there and a menu that grew until it
+    /// reached the corner would quietly make that gate meaningless again; and the
+    /// centre is asserted to be over `RESUME`, because that is the fact both
+    /// files' comments explain the bug with.
+    #[test]
+    fn a_focusing_click_off_every_button_leaves_the_game_paused() {
+        use crcbl::core::input::PointerButton;
+        use crcbl::shell::{ButtonState as PointerState, PhysicalPoint};
+
+        /// Matches `FOCUS_CLICK_INSET` in `web/tools/browser-e2e.mjs`.
+        const INSET: f32 = 8.0;
+
+        let mut engine = scripted(&headless(60));
+        let window = engine.window();
+        run_frames(&mut engine, 2);
+
+        engine
+            .shell_mut()
+            .set_focus(window, false)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused(), "a blurred window is paused");
+
+        let layout = engine.menu_layout().expect("the pause menu is showing");
+        let over = |point: glam::Vec2| {
+            layout
+                .items()
+                .iter()
+                .find(|item| {
+                    point.x >= item.min.x
+                        && point.x <= item.max.x
+                        && point.y >= item.min.y
+                        && point.y <= item.max.y
+                })
+                .map(|item| item.id)
+        };
+
+        let corner = glam::Vec2::splat(INSET);
+        assert_eq!(
+            over(corner),
+            None,
+            "the inset the browser gate clicks to restore focus is on a button, \
+             so that gate can no longer tell focus from a menu press",
+        );
+        let middle = layout.screen() * 0.5;
+        assert_eq!(
+            over(middle),
+            Some(layout.items()[0].id),
+            "the framebuffer's centre is no longer over RESUME — the comments in \
+             this file and in web/tools/browser-e2e.mjs explain the browser gate's \
+             failure with that fact and need rewriting if it stops being true",
+        );
+
+        // Focus comes back the way a browser gives it back: a press and release
+        // at a real position, which here is over nothing.
+        engine
+            .shell_mut()
+            .set_focus(window, true)
+            .expect("the window is live");
+        let at = PhysicalPoint::new(f64::from(corner.x), f64::from(corner.y));
+        engine
+            .shell_mut()
+            .button(window, PointerButton::Left, PointerState::Pressed, Some(at))
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        engine
+            .shell_mut()
+            .button(
+                window,
+                PointerButton::Left,
+                PointerState::Released,
+                Some(at),
+            )
+            .expect("the window is live");
+        run_frames(&mut engine, 5);
+        assert!(
+            engine.is_paused(),
+            "the click that handed the keyboard back also resumed the game",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
     /// **A paused game's world is byte-identical after any number of frames.**
     ///
     /// `RenderState` is the whole course — the bird, its velocity, and every
