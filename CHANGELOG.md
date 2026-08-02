@@ -16,11 +16,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **flappy**: a second game, playable natively and at
+  `https://crcbl.kryptic.sh/demos/flappy/`. One button, a bird under gravity,
+  and an endless procession of pipes whose gaps are a pure function of a seed
+  and the pipe's index — so the client and the server agree about the course
+  without a byte of it crossing between them. It exists to find out whether the
+  engine could host a game that was not breakout; what it found is written down
+  in `docs/plan/ROADMAP.md`.
 - **crcbl-hal**: `Device::take_error`, for the failures a backend learns about
   outside the call that caused them. Defaults to `None`, so a backend that
   reports everything through its return values is unaffected.
 - **breakout**: the ball's speed ramps 2% per brick broken, capped at 1.6x the
   launch speed. A lost life and a restart both put it back.
+
+### Changed
+
+- **web tooling**: `check-exports.mjs` and `smoke.mjs` take `--sample <name>`,
+  and `run-browser-e2e.sh` takes `CRCBL_WEB_E2E_DEMO`. Each was written when
+  there was one demo and asserted against the whole workspace or against
+  breakout's own strings, so the second demo broke all three. A sample's
+  contract is now scoped to that sample, and the browser gate refuses a demo it
+  has no expectations for rather than passing on a game that never started.
 
 ### Fixed
 

@@ -71,6 +71,20 @@ demo site carry N games" for the price of one small game.
    in the browser, as breakout does.
 5. Published to the demo site as the second entry in the bar.
 
+## Status: done (2026-08-02)
+
+Built in seven slices; the phase table in [../ROADMAP.md](../ROADMAP.md) lists
+them and the findings note there is the deliverable this sample existed for.
+Kept rather than deleted because the _argument_ below — why a second game, and
+what a second game is evidence of — is what the next sample will be judged
+against.
+
+Two things ended up differently from the sketch below. The ceiling stops the
+bird rather than killing it, because a lid that kills punishes the safest answer
+to a low gap. And a restart advances the course seed rather than replaying the
+same hand, deterministically, so both "a new run is a new course" and "a
+recorded script replays exactly" hold at once.
+
 ## Exit criteria
 
 - Playable, losable, restartable, native and in a browser.
