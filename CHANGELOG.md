@@ -514,27 +514,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
-- **crcbl-vk**: the offscreen image ring handed an image back out **while the
-  GPU was still using it from the last time round the ring**.
-  `Device::acquire_next_frame` advanced the ring cursor and returned, with
-  nothing waiting on the frame that had the image before — so a caller that
-  renders more frames than the ring has images was writing into an image whose
-  previous frame's work had not finished. The windowed path never had this: it
-  waits on the acquire fence `vkAcquireNextImageKHR` armed. The symptom on a
-  validation layer that models hazards across submissions is
-  `SYNC-HAZARD-WRITE-AFTER-READ` between one frame's `vkCmdCopyImageToBuffer`
-  and the next frame's opening layout transition; without such a layer it is a
-  data race that a slower GPU or a busier machine decides the outcome of.
+- **crcbl-vk**: reusing an image from the **offscreen ring** was ordered against
+  nothing, so the frame that took the image back could write it while the
+  previous frame was still reading it. A headless frame ends in
+  `vkCmdCopyImageToBuffer` — a read — and the next frame opens with a layout
+  transition out of `ResourceState::Undefined`, which is a write that discards
+  the contents. `Undefined` maps to `srcStageMask = NONE`, which is right for a
+  WSI image because the acquire semaphore already carries that dependency, and
+  wrong for a ring image because there is no such semaphore: the seam hands one
+  back with an implicit acquire. Nothing separated the two.
 
-  `present` now records the submission counter against the image it retires, and
-  the acquire that comes back round to that image waits on the retire timeline
-  for it. `AcquiredFrame::acquire_semaphore` is still `None` for an offscreen
-  ring — the acquire remains implicit in the sense of needing no semaphores from
-  the caller, and callers need no change.
+  The transition out of `Undefined` on a ring image now widens its source stage
+  to `ALL_COMMANDS`, whose first synchronisation scope covers everything already
+  submitted to the queue — the missing dependency, and nothing more: the access
+  mask stays empty, because a write-after-read needs execution ordering and no
+  cache flush, and the contents are still discarded. WSI images, ordinary
+  images, and the seam's public shape are all unchanged, and no caller needs a
+  change.
 
-  Affects any offscreen or headless Vulkan rendering that outlives the ring:
-  `crcbl screenshot`, the `crcbl-vk` e2e suite, and `--headless --backend vk`
-  runs. Windowed rendering is unchanged.
+  Affects offscreen and headless Vulkan rendering that outlives the ring:
+  `crcbl screenshot`, the `crcbl-vk` e2e suite, and `--headless --backend vk`.
+  Windowed rendering is untouched. Validation reports the bug as
+  `SYNC-HAZARD-WRITE-AFTER-READ` with `read_barriers: VkPipelineStageFlags2(0)`
+  — that empty mask being precisely the `NONE` above; without a layer it is a
+  race whose outcome the GPU's speed decides.
 
 - **crcbl-render**, **crcbl-shaders**: the sprite pass drew **every batch after
   the first from the first batch's sprites** on Vulkan. A batch is a run of

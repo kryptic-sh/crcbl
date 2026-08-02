@@ -101,6 +101,17 @@ pub(crate) struct ImageEntry {
     /// Whether a swapchain owns this image. Destroying such a handle drops the
     /// name without touching the `VkImage`.
     swapchain_owned: bool,
+    /// Whether this image is an **offscreen ring** image, whose reuse nothing
+    /// else orders.
+    ///
+    /// A WSI image arrives with an acquire semaphore, and the wait on it is the
+    /// execution dependency separating the frame that is about to write the
+    /// image from whatever last read it. An offscreen ring has no semaphore to
+    /// hand out — the seam calls its acquire implicit — so that dependency has
+    /// to come from somewhere, and the only thing on the queue at the right
+    /// moment is the frame's own opening barrier. See
+    /// [`super::command`]'s `pipeline_barrier`, which widens it.
+    pub(crate) ring_reuse: bool,
 }
 
 /// An image view.
@@ -737,6 +748,16 @@ impl DeviceInner {
         handle: ImageHandle,
     ) -> Result<(vk::Image, Format), HalError> {
         lookup(&state.images, "image", handle, self).map(|entry| (entry.raw, entry.format))
+    }
+
+    /// Whether `handle` is an offscreen ring image, whose reuse the seam orders
+    /// with no semaphore of its own.
+    ///
+    /// A miss answers `false`: the caller has already resolved the image for
+    /// its own purposes and reported the bad handle, and this only ever widens
+    /// a barrier that is about to be recorded anyway.
+    pub(crate) fn image_ring_reuse(&self, state: &DeviceState, handle: ImageHandle) -> bool {
+        lookup(&state.images, "image", handle, self).is_ok_and(|entry| entry.ring_reuse)
     }
 
     /// Resolves an image-view handle, returning its format too — the encoder
@@ -1540,6 +1561,9 @@ impl Device for VkDevice {
                 memory,
                 format: desc.format,
                 swapchain_owned: false,
+                // An ordinary image is reused only when the caller reuses it,
+                // and the caller then owns the barrier that says so.
+                ring_reuse: false,
             })))
     }
 
@@ -2143,35 +2167,18 @@ impl Device for VkDevice {
         if entry.is_offscreen() {
             // The implicit-acquire shape, which is also `crcbl-wgpu`'s: no
             // semaphores, and the caller's `Option::as_slice()` splices nothing.
+            // The reuse dependency is not established here. Blocking the host
+            // until the previous trip round the ring retired was tried and is
+            // the wrong tool twice over: it costs exactly the frame overlap the
+            // ring exists to provide, and it is not a queue dependency, so the
+            // validation layer goes on reporting the hazard — a CPU wait is
+            // invisible to a model that reasons about submitted commands. The
+            // dependency belongs in the command stream, and `pipeline_barrier`
+            // puts it there when it widens an `Undefined` source on a
+            // `ring_reuse` image.
             let index = entry.next_offscreen;
-            let reuse = entry.offscreen_retire[index as usize];
             entry.acquired = Some(index);
-            let frame = entry.frame(index, None, false);
-            // "Implicit" is about the semaphores, not about the ordering. The
-            // windowed path below waits on this slot's acquire fence because
-            // handing out an image the GPU has not finished with is the classic
-            // hand-rolled-swapchain bug; a ring built here out of plain images
-            // has exactly the same bug and no fence of its own. The retire
-            // timeline is that fence: `present` recorded the submission counter
-            // for this image, so reaching it proves every submission that
-            // touched the image last time round has completed — including the
-            // copy a headless caller reads its pixels back with, which the next
-            // frame's first barrier would otherwise discard the layout under.
-            if reuse > 0 {
-                let semaphores = [self.inner.retire_timeline];
-                let values = [reuse];
-                let info = vk::SemaphoreWaitInfo::default()
-                    .semaphores(&semaphores)
-                    .values(&values);
-                // SAFETY: `retire_timeline` is a live timeline semaphore of this
-                // device, and `reuse` is a value a submission already in flight
-                // is committed to signal — so this cannot wait on work that will
-                // never be queued.
-                unsafe { self.inner.raw.wait_semaphores(&info, u64::MAX) }.map_err(|error| {
-                    SurfaceError::Hal(conv::hal_error("vkWaitSemaphores", error))
-                })?;
-            }
-            return Ok(frame);
+            return Ok(entry.frame(index, None, false));
         }
 
         let raw = entry.raw;
@@ -2228,9 +2235,6 @@ impl Device for VkDevice {
 
     fn present(&self, queue: QueueHandle, present: &PresentInfo<'_>) -> Result<(), SurfaceError> {
         let slot = self.inner.queue_slot(queue)?;
-        // Read before the tables are borrowed: the offscreen branch below needs
-        // it, and `submissions` only ever grows.
-        let submissions = self.inner.submissions();
         let mut state = self.inner.state();
         let inner = Arc::clone(&self.inner);
 
@@ -2254,11 +2258,7 @@ impl Device for VkDevice {
         if entry.is_offscreen() {
             // "Presenting" a ring image is advancing the ring. The image stays
             // valid and is reused when the cursor comes back round, exactly as
-            // a real swapchain image is — so the acquire that reuses it needs to
-            // know when this frame's work on it is done. Everything this frame
-            // submitted is at or below the counter's value now, which makes one
-            // number enough and keeps this path free of per-image bookkeeping.
-            entry.offscreen_retire[index as usize] = submissions;
+            // a real swapchain image is.
             #[allow(clippy::cast_possible_truncation)]
             {
                 entry.next_offscreen = (index + 1) % entry.images.len() as u32;
@@ -2406,6 +2406,8 @@ impl VkDevice {
                     memory: vk::DeviceMemory::null(),
                     format: desc.format,
                     swapchain_owned: true,
+                    // A WSI image's acquire semaphore already carries it.
+                    ring_reuse: false,
                 }))
             })
             .collect();
@@ -2473,8 +2475,6 @@ impl VkDevice {
             sync: Some(sync),
             acquired: None,
             next_offscreen: 0,
-            // A WSI swapchain's reuse is ordered by the acquire fence above.
-            offscreen_retire: Vec::new(),
             pending_suboptimal: false,
         })
     }
@@ -2560,9 +2560,12 @@ impl VkDevice {
             .iter()
             .map(|image| {
                 // The ring owns them, so `destroy_image` must not free one —
-                // the same rule a WSI image follows, for the same reason.
+                // the same rule a WSI image follows, for the same reason. The
+                // rule they do *not* share is `ring_reuse`: these come back
+                // round with no semaphore to order the reuse.
                 self.inner.stamp(state.images.insert(ImageEntry {
                     owner: self.inner.id,
+                    ring_reuse: true,
                     raw: *image,
                     memory: vk::DeviceMemory::null(),
                     format: desc.format,
@@ -2599,7 +2602,6 @@ impl VkDevice {
             extent.configured.1,
             desc.format,
         );
-        let ring = images.len();
         Ok(SwapchainEntry {
             owner: self.inner.id,
             surface_raw: vk::SurfaceKHR::null(),
@@ -2613,9 +2615,6 @@ impl VkDevice {
             sync: None,
             acquired: None,
             next_offscreen: 0,
-            // Zero means "never presented", which is the one value that needs
-            // no wait: nothing has been submitted against this image yet.
-            offscreen_retire: vec![0; ring],
             pending_suboptimal: false,
         })
     }

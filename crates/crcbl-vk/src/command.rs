@@ -41,7 +41,8 @@ use crcbl_hal::{
     Barriers, BindGroupHandle, BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle,
     CommandEncoder, CommandEncoderDesc, ComputePassDesc, ComputePipelineHandle, DrawIndirect,
     DrawIndirectCount, GraphicsPipelineHandle, HalError, ImageCopy, IndexFormat,
-    PipelineLayoutHandle, QuerySetHandle, Rect2d, RenderPassDesc, ShaderStages, Viewport,
+    PipelineLayoutHandle, QuerySetHandle, Rect2d, RenderPassDesc, ResourceState, ShaderStages,
+    Viewport,
 };
 
 use crcbl_core::Handle;
@@ -265,8 +266,29 @@ impl CommandEncoder for VkCommandEncoder {
                 self.fail(HalError::invalid_handle("image", barrier.image));
                 return;
             };
-            let from = conv::state_masks(barrier.from);
+            let mut from = conv::state_masks(barrier.from);
             let to = conv::state_masks(barrier.to);
+            // `Undefined` normally means "wait for nothing": the contents are
+            // being discarded, and on a WSI image the acquire semaphore is what
+            // separates this write from whatever read the image last. An
+            // offscreen ring image has no such semaphore — the seam hands one
+            // back with an implicit acquire — so with `NONE` here nothing at all
+            // orders this layout transition against the previous trip round the
+            // ring, whose last act is typically the copy a headless caller reads
+            // its pixels back with. That is a write-after-read, and validation
+            // reports it as one with `read_barriers: 0`, which is this mask.
+            //
+            // A barrier's first synchronisation scope covers everything
+            // submitted earlier to the same queue, so widening the *stage* to
+            // `ALL_COMMANDS` is exactly the missing dependency and nothing more:
+            // the access mask stays empty, because a write-after-read needs
+            // execution ordering and no cache flush, and the contents are still
+            // discarded.
+            if barrier.from == ResourceState::Undefined
+                && self.device.image_ring_reuse(&state, barrier.image)
+            {
+                from.stage = vk::PipelineStageFlags2::ALL_COMMANDS;
+            }
             // The range's aspect comes from the caller, but a caller that used
             // `ImageSubresourceRange::all(swapchain_format)` and a backend that
             // knows the real format must not disagree — so the image's own

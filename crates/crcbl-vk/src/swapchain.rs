@@ -236,18 +236,6 @@ pub(crate) struct SwapchainEntry {
     pub(crate) acquired: Option<u32>,
     /// Ring cursor for the offscreen case.
     pub(crate) next_offscreen: u32,
-    /// Per ring image, the retire-timeline value that must be reached before
-    /// that image may be handed out again. Empty for a WSI swapchain, whose
-    /// reuse is ordered by `vkAcquireNextImageKHR` and its fence instead.
-    ///
-    /// An offscreen "acquire" is implicit only in the sense that it needs no
-    /// semaphores. It is not implicitly *ordered*: the previous time round the
-    /// ring, the caller rendered into this image and very likely copied it out,
-    /// and the next frame's first barrier discards its layout — a write after
-    /// that read, with nothing between them. Present records the submission
-    /// counter here so the acquire that comes back round has one value to wait
-    /// on.
-    pub(crate) offscreen_retire: Vec<u64>,
     /// `vkQueuePresentKHR` returned `SUBOPTIMAL_KHR`.
     ///
     /// The seam's `present` has nowhere to report that — it is not an error and
