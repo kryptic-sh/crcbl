@@ -1,0 +1,99 @@
+<!--meta
+{
+  "out": "demos/asteroids/index.html",
+  "slug": "asteroids",
+  "name": "Asteroids",
+  "title": "Asteroids — Crucible",
+  "description": "Asteroids, the churn sample, compiled to wasm32 and drawing through WebGPU.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/asteroids", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/asteroids\">apps/asteroids</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/asteroids/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● S2</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+  </div>
+  <h1><span class="grad">Asteroids</span></h1>
+  <p class="tagline">
+    A ship that turns, thrusts and wraps; rocks that split twice; waves that
+    grow — the same <code>apps/asteroids</code> that builds a native binary,
+    running here.
+  </p>
+</header>
+
+<!--include demo-window-->
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>Four keys, plus the three the loop keeps.</h3>
+  <ul class="keys">
+    <li class="key-row">
+      <span>Turn</span>
+      <span><kbd>←</kbd> <kbd>→</kbd> or <kbd>A</kbd> <kbd>D</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Thrust</span>
+      <span><kbd>↑</kbd> or <kbd>W</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Fire, and start a game</span>
+      <span><kbd>Space</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Restart at any time</span>
+      <span><kbd>R</kbd></span>
+    </li>
+    <!--include demo-loop-keys-->
+  </ul>
+</section>
+
+<section id="why-this-one">
+  <h2>why a third game</h2>
+  <h3>To find out what happens when entities never stop dying.</h3>
+  <p>
+    Breakout spawns its world once. Flappy runs a treadmill at a couple of
+    entities a second. This one fires a bullet every sixth of a second, turns one
+    rock into two, and deals a whole wave at a time — so generational ids,
+    deferred destruction and pool slot recycling all get hammered, and a leak
+    shows up as a number that climbs. A test asserts the entity and collider
+    accounting on <em>every</em> tick of an eighteen-thousand-tick soak.
+  </p>
+  <p>
+    It is also the first consumer of the second physics slice: thrust and damping
+    through the force pipeline, bullets through segment CCD, and ship-versus-rock
+    through a broadphase sphere overlap — with the screen wrap as the thing that
+    had to decide what a teleport means to a BVH.
+  </p>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>The native sample, with four differences the browser forces.</h3>
+  <p>
+    Start-up is polled across several frames, because
+    <code>requestDevice</code> is a promise and the main thread cannot block on
+    it. The frame loop is driven by <code>requestAnimationFrame</code> out here
+    rather than by a <code>loop</code> inside the engine. The clock is the
+    browser's, because <code>wasm32-unknown-unknown</code> has no
+    <code>Instant</code>. And the best score lives in the Origin Private File
+    System instead of <code>~/.config</code>.
+  </p>
+  <p>
+    Everything else — the ECS, the fixed-tick server, the physics, the render
+    graph, the spatial audio — is the same code the native build runs. This is
+    also the first demo where a drawn thing <em>turns</em>: every angle is
+    integrated once per tick and interpolated the short way round across the
+    frame, so the ship and the rocks are smooth at whatever rate your display
+    happens to run.
+  </p>
+  <!--include demo-console-note-->
+</section>
+<!--/body-->

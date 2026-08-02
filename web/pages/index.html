@@ -37,6 +37,7 @@ meta-->
   <div class="cta">
     <a class="btn primary" href="demos/breakout/">play breakout →</a>
     <a class="btn primary" href="demos/flappy/">play flappy →</a>
+    <a class="btn primary" href="demos/asteroids/">play asteroids →</a>
     <a class="btn" href="https://www.kryptic.sh/projects/crcbl/"
       >about the engine</a
     >
@@ -79,14 +80,16 @@ meta-->
       </a>
     </li>
     <li>
-      <div class="feat soon">
-        <div class="icon">S2 · later</div>
+      <a class="feat" href="demos/asteroids/">
+        <div class="icon">S2 · playable</div>
         <h4>Asteroids</h4>
         <p>
-          Lands with the second physics slice — dynamic BVH churn, overlap
-          queries, and the start of the L1 integrator.
+          The churn sample: bullets four a second, one rock becoming two, a wave
+          at a time. It exists to hammer generational ids, deferred destruction
+          and pool slot recycling — and it drives the second physics slice, with
+          segment CCD, broadphase overlap queries and the first forces.
         </p>
-      </div>
+      </a>
     </li>
   </ul>
 </section>

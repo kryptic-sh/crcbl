@@ -235,7 +235,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   either earlier sample, because turning and thrusting are _held_ actions: a
   release that never arrives is a ship that spins for the rest of the session.
 
-  Audio and the browser entry point follow in their own slices.
+  **Sound**: three spatial cues through `crcbl-audio`'s grammar — the engine,
+  the gun, and a rock (or the ship) coming apart. The listener is the camera at
+  the middle of the field and it never moves, so unlike in either earlier sample
+  the pan and the distance both swing their full range: emitters are spread over
+  the whole 32 × 24 playfield and cross it constantly. The explosion is a
+  decaying burst of low-passed noise from a fixed seed rather than a tone,
+  because a beep reads as scoring rather than as destruction. Thrust is the
+  first _sustained_ cue any sample has needed and `crcbl-audio` has no looping
+  voice, so it is a one-shot re-fired every `THRUST_CUE_PERIOD` — a constant
+  that lives in the simulation, because the cue is raised inside the
+  deterministic tick.
+
+  **A best score**, kept in `~/.config/asteroids/best.bin` natively, in the
+  Origin Private File System in a browser, and nowhere at all under
+  `--headless`. Recorded once, on the edge into game over.
+
+  **A browser build**: `apps/asteroids` is a `cdylib` on
+  `wasm32-unknown-unknown` and the demo is live at
+  `https://crcbl.kryptic.sh/demos/asteroids/`. `Loop` gained
+  `PendingLoop`/`set_frame_step` and `Gpu` gained `request_open`, so start-up is
+  polled across `requestAnimationFrame` frames instead of blocking on a promise
+  the page's own event loop has to resolve. `web/run-browser-e2e.sh` drives it
+  in a real Chromium for 26/26 checks, the same as the other two.
 
 - **crcbl-hal**: `Device::take_error`, for the failures a backend learns about
   outside the call that caused them. Defaults to `None`, so a backend that

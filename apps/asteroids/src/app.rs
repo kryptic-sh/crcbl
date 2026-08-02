@@ -5,8 +5,10 @@
 //! fullscreen and focus handling. **This is the third copy of each of those**,
 //! and `docs/backlog.md` says so: the pump's key branch, `lose_focus`, the F11
 //! toggle, `Loop::paused` and the pointer's press-capture bookkeeping are the
-//! same code in three files. The browser entry point is the fourth thing on that
-//! list and is not here yet.
+//! same code in three files. So, now, are [`PendingLoop`] and
+//! [`Loop::set_frame_step`] — the polled browser start-up below — and
+//! `crate::web`, which is S1B finding 2 written out a third time. See the S2
+//! findings note in `docs/plan/ROADMAP.md`.
 //!
 //! # What is this sample's own
 //!
@@ -31,6 +33,8 @@
 //! frame has a speed proportional to the frame rate, which a headless run —
 //! where a frame is pinned to exactly 1/60 s — cannot see.
 
+use core::time::Duration;
+
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Clock, ConfigureError, ExitReason, Flow, FrameOutcome, GpuError, MAX_CONSECUTIVE_RECONFIGURES,
@@ -45,7 +49,7 @@ use crcbl::ui::{DebugOverlay, PointerInput};
 use glam::Vec2;
 
 use crate::game::{self, Game, GameState, RenderState};
-use crate::gpu::Gpu;
+use crate::gpu::{Gpu, PendingGpu};
 use crate::menu::{MenuAction, MenuKind, Menus};
 
 pub use crate::args::Options;
@@ -297,24 +301,29 @@ impl<S: Shell + ?Sized> Loop<S> {
     /// open, or the game could not be built.
     pub fn with_shell(mut shell: Box<S>, options: &Options) -> Result<Self, AsteroidsError> {
         let clock_source = Clock::new(options.headless);
-        log::info!(
-            "shell: {} backend, caps {:?}",
-            shell.backend(),
-            shell.caps()
-        );
-        shell.align_event_clock(clock_source.elapsed());
-        let window = shell.create_window(&WindowDesc {
-            title: "Asteroids",
-            app_id: "sh.kryptic.crcbl.asteroids",
-            size: LogicalSize::new(960.0, 720.0),
-            ..WindowDesc::default()
-        })?;
+        let window = open_the_window(shell.as_mut(), &clock_source)?;
 
         let mut events = 0;
         let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
         log::info!("shell: first configure at {}x{}", extent.0, extent.1);
 
         let gpu = Gpu::open(shell.as_ref(), window, extent, options.backend)?;
+        Self::assemble(shell, window, gpu, options, clock_source, events)
+    }
+
+    /// The half of start-up that is the same however the GPU arrived.
+    ///
+    /// Shared with [`PendingLoop::poll`], which reaches this point several rAF
+    /// frames later. A second copy of this struct literal is how the browser
+    /// build would come to run a subtly different game from the native one.
+    fn assemble(
+        shell: Box<S>,
+        window: WindowId,
+        gpu: Gpu,
+        options: &Options,
+        clock_source: Clock,
+        events: u64,
+    ) -> Result<Self, AsteroidsError> {
         let game = Game::with_seed(options.headless, options.tick_hz, options.seed)?;
         Ok(Self {
             windowed: !options.headless,
@@ -340,6 +349,20 @@ impl<S: Shell + ?Sized> Loop<S> {
             budget: options.frame_budget(),
             reconfigures_in_a_row: 0,
         })
+    }
+
+    /// Sets how far one [`frame`](Self::frame) advances a manual clock.
+    ///
+    /// **The browser's clock is the browser's.** `Clock::Real` reads
+    /// [`std::time::Instant`], which on `wasm32-unknown-unknown` has no
+    /// implementation at all and panics on the first `now()`. `dt` is clamped to
+    /// [`MAX_FRAME_STEP`]: a backgrounded tab resumes with a multi-second gap,
+    /// and feeding that to the accumulator spends the next frame running
+    /// thousands of ticks.
+    pub fn set_frame_step(&mut self, dt: Duration) {
+        if let Clock::Manual { step, .. } = &mut self.clock_source {
+            *step = dt.min(MAX_FRAME_STEP);
+        }
     }
 
     /// The game, for scripted tests and for an embedder that wants to drive it.
@@ -779,6 +802,152 @@ impl<S: Shell + ?Sized> Loop<S> {
     }
 }
 
+// ---- polled start-up --------------------------------------------------------
+
+/// The largest step [`Loop::set_frame_step`] will accept.
+///
+/// A tab backgrounded for a minute reports a one-minute `requestAnimationFrame`
+/// delta on the frame it comes back. Handing that to a fixed-timestep
+/// accumulator asks for 3600 ticks in one frame, which the user reads as a
+/// crash — and in this game, as a magazine emptied and a field of rocks
+/// teleported across the screen.
+pub const MAX_FRAME_STEP: Duration = Duration::from_millis(64);
+
+/// Creates the one window, and puts the shell's event clock on the engine's.
+fn open_the_window<S: Shell + ?Sized>(
+    shell: &mut S,
+    clock_source: &Clock,
+) -> Result<WindowId, AsteroidsError> {
+    log::info!(
+        "shell: {} backend, caps {:?}",
+        shell.backend(),
+        shell.caps()
+    );
+    shell.align_event_clock(clock_source.elapsed());
+    Ok(shell.create_window(&WindowDesc {
+        title: "Asteroids",
+        app_id: "sh.kryptic.crcbl.asteroids",
+        size: LogicalSize::new(960.0, 720.0),
+        ..WindowDesc::default()
+    })?)
+}
+
+/// How far [`PendingLoop`] has got.
+#[derive(Debug)]
+enum BootStage {
+    /// The window has no size yet.
+    Configure,
+    /// A device has been requested and has not arrived.
+    Device { pending: PendingGpu },
+    /// The loop has been handed over, or a step failed.
+    Done,
+}
+
+/// A [`Loop`] being started one poll at a time.
+///
+/// [`Loop::with_shell`] blocks twice — once waiting for a configure and once
+/// inside `Gpu::open` — and a browser main thread may do neither: both of the
+/// things being waited for are resolved by the very event loop the wait would be
+/// sitting inside.
+#[derive(Debug)]
+pub struct PendingLoop<S: Shell + ?Sized = dyn Shell> {
+    shell: Option<Box<S>>,
+    window: WindowId,
+    options: Options,
+    clock_source: Option<Clock>,
+    stage: BootStage,
+    extent: Option<(u32, u32)>,
+    events: u64,
+}
+
+impl<S: Shell + ?Sized> PendingLoop<S> {
+    /// Creates the window and starts the wait, without blocking on either half.
+    ///
+    /// # Errors
+    ///
+    /// [`AsteroidsError`] if the shell refused the window.
+    pub fn request(
+        mut shell: Box<S>,
+        options: &Options,
+        clock_source: Clock,
+    ) -> Result<Self, AsteroidsError> {
+        let window = open_the_window(shell.as_mut(), &clock_source)?;
+        Ok(Self {
+            shell: Some(shell),
+            window,
+            options: options.clone(),
+            clock_source: Some(clock_source),
+            stage: BootStage::Configure,
+            extent: None,
+            events: 0,
+        })
+    }
+
+    /// Advances start-up. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// [`AsteroidsError`] if the window went away before it had a size, if the
+    /// device request failed, or if the game could not be built.
+    pub fn poll(&mut self) -> Result<Option<Loop<S>>, AsteroidsError> {
+        let Some(shell) = self.shell.as_mut() else {
+            return Err(AsteroidsError::Gpu(GpuError::Unusable(
+                "this asteroids loop was already started",
+            )));
+        };
+
+        let mut pending = Pending::default();
+        shell.pump(&mut |event| pending.observe(&event));
+        self.events += pending.count;
+        if pending.destroyed {
+            return Err(AsteroidsError::Shell(ShellError::invalid_window(
+                self.window,
+            )));
+        }
+        if let Some(size) = pending.resized {
+            self.extent = Some((size.width, size.height));
+        }
+
+        match core::mem::replace(&mut self.stage, BootStage::Done) {
+            BootStage::Configure => {
+                let Some(extent) = self.extent else {
+                    self.stage = BootStage::Configure;
+                    return Ok(None);
+                };
+                log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+                self.stage = BootStage::Device {
+                    pending: Gpu::request_open(
+                        shell.as_ref(),
+                        self.window,
+                        extent,
+                        self.options.backend,
+                    )?,
+                };
+                Ok(None)
+            }
+            BootStage::Device { mut pending } => {
+                let Some(mut gpu) = pending.poll()? else {
+                    self.stage = BootStage::Device { pending };
+                    return Ok(None);
+                };
+                // The canvas may have been resized while the promise was in
+                // flight; the swapchain was requested at the older size.
+                if let Some(extent) = self.extent
+                    && extent != gpu.extent()
+                {
+                    gpu.resize(extent)?;
+                }
+                let shell = self.shell.take().expect("checked at the top");
+                let clock = self.clock_source.take().expect("taken with the shell");
+                Loop::assemble(shell, self.window, gpu, &self.options, clock, self.events).map(Some)
+            }
+            BootStage::Done => Err(AsteroidsError::Gpu(GpuError::Unusable(
+                "this asteroids loop was already started",
+            ))),
+        }
+    }
+}
+
 // ---- drawing ----------------------------------------------------------------
 
 /// The HUD's two lines, rebuilt only when the numbers behind them change.
@@ -792,7 +961,7 @@ struct HudStrings {
     last: Option<HudKey>,
 }
 
-type HudKey = (u32, u32, u32, Option<GameState>, bool);
+type HudKey = (u32, u32, u32, u32, Option<GameState>, bool);
 
 impl HudStrings {
     /// **`paused` wins over the simulation's state**, which is the bug flappy
@@ -802,6 +971,7 @@ impl HudStrings {
     fn refresh(&mut self, render: &RenderState, paused: bool) {
         let key = (
             render.score,
+            render.best,
             render.lives,
             render.wave,
             render.state,
@@ -816,8 +986,9 @@ impl HudStrings {
         self.score.clear();
         let _ = write!(
             self.score,
-            "Score: {}  Lives: {}  Wave: {}",
+            "Score: {}  Best: {}  Lives: {}  Wave: {}",
             render.score,
+            render.best,
             render.lives,
             render.wave + 1,
         );
@@ -836,9 +1007,12 @@ impl HudStrings {
 
 /// Draws the HUD, and nothing else.
 fn draw_hud(dl: &mut DrawList, hud: &HudStrings) {
+    // Wider than flappy's 340 and than this game's own previous 360: the score
+    // line gained `Best: …` when the save file landed, and a panel narrower than
+    // the text it is behind reads as a clipped HUD rather than as a backdrop.
     dl.rect(
         Vec2::new(4.0, 4.0),
-        Vec2::new(360.0, 52.0),
+        Vec2::new(430.0, 52.0),
         [0.1, 0.1, 0.15, 0.85],
     );
     dl.text(
@@ -1379,6 +1553,83 @@ mod tests {
         engine.game_mut().tick();
         assert!(engine.held_keys.is_empty(), "the held list survived");
         assert!(engine.is_paused(), "focus loss must pause");
+    }
+
+    /// **The inset the browser gate clicks to restore focus is over no button,
+    /// and the centre is over `RESUME`.**
+    ///
+    /// Both halves are load-bearing for `web/tools/browser-e2e.mjs`, whose
+    /// group E has to tell "focus came back" from "the player pressed RESUME".
+    /// It clicks the corner precisely because the centre is a button; a menu
+    /// that grew until it reached the corner would make that gate silently
+    /// meaningless, and this fast test is what fails instead. The same test
+    /// exists in `apps/breakout` and `apps/flappy` — a third copy, because the
+    /// menu geometry is per-sample even though the constant is not.
+    #[test]
+    fn a_focusing_click_off_every_button_leaves_the_game_paused() {
+        /// Matches `FOCUS_CLICK_INSET` in `web/tools/browser-e2e.mjs`.
+        const INSET: f32 = 8.0;
+
+        let mut engine = scripted(&headless(60));
+        let window = engine.window;
+        run_frames(&mut engine, 2);
+
+        engine
+            .shell
+            .set_focus(window, false)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused(), "a blurred window is paused");
+
+        let layout = engine.menu_layout().expect("the pause menu is showing");
+        let over = |point: Vec2| {
+            layout
+                .items()
+                .iter()
+                .find(|item| {
+                    point.x >= item.min.x
+                        && point.x <= item.max.x
+                        && point.y >= item.min.y
+                        && point.y <= item.max.y
+                })
+                .map(|item| item.id)
+        };
+
+        let corner = Vec2::splat(INSET);
+        assert_eq!(
+            over(corner),
+            None,
+            "the inset the browser gate clicks to restore focus is on a button, \
+             so that gate can no longer tell focus from a menu press",
+        );
+        let middle = layout.screen() * 0.5;
+        assert_eq!(
+            over(middle),
+            Some(layout.items()[0].id),
+            "the framebuffer's centre is no longer over RESUME — the comments in \
+             web/tools/browser-e2e.mjs explain that gate's failure with this fact \
+             and need rewriting if it stops being true",
+        );
+
+        // Focus comes back the way a browser gives it back: a press and release
+        // at a real position, which here is over nothing.
+        engine
+            .shell
+            .set_focus(window, true)
+            .expect("the window is live");
+        let at = PhysicalPoint::new(f64::from(corner.x), f64::from(corner.y));
+        for state in [PointerState::Pressed, PointerState::Released] {
+            engine
+                .shell
+                .button(window, PointerButton::Left, state, Some(at))
+                .expect("the window is live");
+            engine.frame().expect("a frame");
+        }
+        assert!(
+            engine.is_paused(),
+            "a click that landed on no button resumed the game",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
     /// **The ship does not keep turning after the window loses focus**, which is

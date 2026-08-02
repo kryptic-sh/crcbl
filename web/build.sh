@@ -23,6 +23,7 @@ TARGET=wasm32-unknown-unknown
 DEMOS=(
   "breakout:crcbl_breakout:demos/breakout"
   "flappy:crcbl_flappy:demos/flappy"
+  "asteroids:crcbl_asteroids:demos/asteroids"
 )
 
 # The `wasm-bindgen` CLI must match the `wasm-bindgen` crate the build resolved,

@@ -156,6 +156,9 @@ jobs:
       - name: Render flappy in a real browser
         run: CRCBL_WEB_E2E_DEMO=flappy ./web/run-browser-e2e.sh
 
+      - name: Render asteroids in a real browser
+        run: CRCBL_WEB_E2E_DEMO=asteroids ./web/run-browser-e2e.sh
+
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed
       # from the step log.

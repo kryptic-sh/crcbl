@@ -122,6 +122,19 @@ const EXPECTATIONS = {
     moving: /\bx: (-?[\d.]+)/,
     movingLabel: 'the bird advances after the flap',
   },
+  // `rock x` and not the ship's: this game's ship is stationary until the
+  // player thrusts, and Space only fires. The rocks drift on their own from the
+  // first tick, so a value that changes is the simulation advancing and nothing
+  // else. `apps/asteroids/src/game.rs` logs it for exactly this reason.
+  asteroids: {
+    key: 'Space',
+    waiting: (line) => line.includes('WaitingToStart'),
+    started: (line) => line.includes('Playing'),
+    startedLabel: 'Space starts the game',
+    startedFailure: 'the state never left WaitingToStart',
+    moving: /rock x: (-?[\d.]+)/,
+    movingLabel: 'the rocks drift after the first shot',
+  },
 };
 
 const EXPECTED = EXPECTATIONS[SLUG];

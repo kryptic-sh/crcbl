@@ -32,25 +32,39 @@
 //! drawn per frame stutters, and an angle wraps, so the renderer interpolates it
 //! the short way round. [`lerp_angle`] carries the argument.
 //!
-//! There is no audio and no browser entry point yet — each arrives with its own
-//! sub-slice, and each is a thing the samples before this one already show how
-//! to do.
+//! Three spatial cues — the engine, the gun, and a rock coming apart — through
+//! `crcbl-audio`'s grammar, with the listener at the camera in the middle of the
+//! field; a best score in `~/.config/asteroids` or the browser's Origin Private
+//! File System; and the browser entry point the demo site's shim drives.
+//!
+//! # Two front ends, one loop
+//!
+//! Like breakout and flappy, this is a library because the sample has to be
+//! reachable from two places that share nothing else: `src/main.rs` for the
+//! native binary, and `src/web.rs` — compiled only on `wasm32`, which is why it
+//! is not linked here — for a browser driven from `requestAnimationFrame`.
+//! Everything below them is shared verbatim.
 
 mod app;
 mod args;
 mod art;
+mod audio;
+mod best;
 mod game;
 mod gpu;
 mod menu;
 
-pub use app::{AsteroidsError, Loop, Summary, run};
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+
+pub use app::{AsteroidsError, Loop, MAX_FRAME_STEP, PendingLoop, Summary, run};
 pub use args::{Invocation, Options, USAGE, parse};
 pub use game::{
     BULLET_LIFE, BULLET_RADIUS, BULLET_SPEED, BulletView, DEFAULT_SEED, DEFAULT_TICK_HZ,
     FIRE_COOLDOWN, FIRST_WAVE_ROCKS, Game, GameError, GameState, MAX_BULLETS, MAX_WAVE_ROCKS,
     RESPAWN_CLEAR_RADIUS, RESPAWN_DELAY, RESPAWN_MAX_WAIT, RenderState, RockSize, RockView,
     SHIP_DAMPING, SHIP_RADIUS, SHIP_THRUST, SHIP_TURN_RATE, SPLIT_CHILDREN, STARTING_LIVES,
-    WORLD_HALF_HEIGHT, WORLD_HALF_WIDTH, hash_unit, heading_vector, lerp_angle, wave_rock_position,
-    wave_rock_velocity, wave_rocks, wrap_axis, wrap_position, wrap_to_pi,
+    THRUST_CUE_PERIOD, WORLD_HALF_HEIGHT, WORLD_HALF_WIDTH, hash_unit, heading_vector, lerp_angle,
+    wave_rock_position, wave_rock_velocity, wave_rocks, wrap_axis, wrap_position, wrap_to_pi,
 };
 pub use menu::{MenuAction, MenuKind, Menus};

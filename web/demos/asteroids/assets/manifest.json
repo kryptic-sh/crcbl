@@ -1,0 +1,4 @@
+{
+  "comment": "Asset keys the shim pre-loads through __crcbl_web_fetch_* before the game boots. Asteroids has none: its five .crpix sheets are baked by build.rs and compiled into the wasm module, along with the font atlas and the shaders. The list is the seam, not the content.",
+  "keys": []
+}

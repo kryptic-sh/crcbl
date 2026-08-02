@@ -182,6 +182,21 @@ pub const MAX_BULLETS: usize = 4;
 /// it.
 const MUZZLE_OFFSET: f64 = SHIP_RADIUS + BULLET_RADIUS + 0.05;
 
+/// How often the engine cue is re-fired while thrust is held, in seconds.
+///
+/// **A timing constant that exists only because of an audio gap, and it sits in
+/// the simulation.** Thrust is the first *sustained* cue any sample has needed —
+/// the player holds the key — and `crcbl-audio` has one-shot voices and nothing
+/// else: no looping voice, no start/stop handle. So the engine is a short pulse
+/// re-fired on this period, and the period has to live here rather than in
+/// `crate::audio`, because the cue is raised inside the deterministic tick and
+/// anything the tick reads is simulation state. See `crate::audio`'s header.
+///
+/// Shorter than the cue itself (0.10 s) would stack overlapping voices for as
+/// long as the key is held; much longer reads as a stutter rather than an
+/// engine. 0.12 s is one pulse just after the last one has faded.
+pub const THRUST_CUE_PERIOD: f64 = 0.12;
+
 // ---------------------------------------------------------------------------
 // Rocks
 // ---------------------------------------------------------------------------
@@ -576,6 +591,13 @@ struct GameLogic {
     respawn_timer: f64,
     /// Seconds until the next shot is allowed.
     fire_timer: f64,
+    /// Seconds until the engine cue is re-fired, while thrust is held.
+    ///
+    /// Reset to zero the moment thrust is released, so the first pulse of the
+    /// next burn is immediate — an engine that took a tenth of a second to be
+    /// heard reads as input lag rather than as an engine. See
+    /// [`THRUST_CUE_PERIOD`] for why an audio timer is simulation state.
+    thrust_cue_timer: f64,
 
     rocks: Vec<Rock>,
     bullets: Vec<Bullet>,
@@ -613,6 +635,12 @@ struct GameLogic {
 
     /// Scratch space for the per-tick sweeps, kept here for the same reason.
     scratch_entities: Vec<Entity>,
+
+    /// Cues raised this tick: `(sound id, world x, world y)`. Drained by the
+    /// facade, which owns the output stream — audio does not belong on the
+    /// simulation's side of the seam, and a frame that ran two ticks must play
+    /// both of their cues rather than only the last one's.
+    cues: Vec<(u32, f64, f64)>,
 
     /// The engine, as a force model rather than as a number. See
     /// [`ThrustForce::world_force`], which exists for exactly this case: a game
@@ -794,6 +822,36 @@ fn drive_ship(logic: &mut GameLogic, world: &mut World, intent: Intent, dt: f64)
             phys.apply_force(ship, damping_force(body.velocity, body.mass, dt));
         }
     });
+    thrust_cue(logic, intent, dt);
+}
+
+/// Pulses the engine cue while thrust is held, and silences it the moment it is
+/// not.
+///
+/// A held sound the crate cannot express, faked as a one-shot on a timer — see
+/// [`THRUST_CUE_PERIOD`]. The cue is raised **where the ship is**, so the engine
+/// pans across the field with the ship rather than sitting in the middle.
+fn thrust_cue(logic: &mut GameLogic, intent: Intent, dt: f64) {
+    if !intent.thrust {
+        // Not "count it down anyway": a burn that starts a tick after the last
+        // one ended must be heard at once, not two thirds of a period later.
+        logic.thrust_cue_timer = 0.0;
+        return;
+    }
+    // Counted down first and tested after, exactly as `fire` does with its
+    // cooldown: the other order spends a whole extra tick at zero, which makes
+    // the real period `THRUST_CUE_PERIOD + dt` and the pulse rate a function of
+    // the tick rate.
+    logic.thrust_cue_timer -= dt;
+    if logic.thrust_cue_timer > 0.0 {
+        return;
+    }
+    logic.thrust_cue_timer = THRUST_CUE_PERIOD;
+    logic.cues.push((
+        crate::audio::SOUND_THRUST,
+        logic.ship_pos.x,
+        logic.ship_pos.y,
+    ));
 }
 
 /// The damping force `crcbl_phys::DampingForce` would apply to a body of `mass`
@@ -841,6 +899,12 @@ fn fire(logic: &mut GameLogic, world: &mut World, intent: Intent, dt: f64) {
         life: BULLET_LIFE,
     });
     logic.bullets_fired += 1;
+    // At the muzzle, not at the ship's centre: the two are a fifth of a unit
+    // apart on a 32-unit field, which is inaudible — the point is that the cue
+    // is raised where the *event* is, and the event is a bullet appearing.
+    logic
+        .cues
+        .push((crate::audio::SOUND_SHOT, position.x, position.y));
 }
 
 /// The unit vector a heading of `radians` points along. Zero is +Y.
@@ -946,6 +1010,14 @@ fn destroy_ship(logic: &mut GameLogic, world: &mut World) {
     with_physics(world, |phys| {
         phys.set_body(ship, RigidBody::new_kinematic());
     });
+    // The same cue a rock gets, where the ship was. Deliberately not a fourth
+    // sound: the arcade original does not have one either, and the wreck is the
+    // player's own — hearing it at their own position is the information.
+    logic.cues.push((
+        crate::audio::SOUND_EXPLOSION,
+        logic.ship_pos.x,
+        logic.ship_pos.y,
+    ));
     if logic.lives == 0 {
         logic.state = GameState::GameOver;
         log::info!(
@@ -1117,6 +1189,9 @@ fn shatter(logic: &mut GameLogic, world: &mut World, index: usize) {
 
     with_physics(world, |phys| phys.remove_entity(rock.entity));
     world.despawn(rock.entity);
+    logic
+        .cues
+        .push((crate::audio::SOUND_EXPLOSION, position.x, position.y));
 
     let Some(child) = rock.size.child() else {
         return;
@@ -1327,6 +1402,7 @@ fn restart(logic: &mut GameLogic, world: &mut World) {
     logic.lives = STARTING_LIVES;
     logic.wave = 0;
     logic.fire_timer = 0.0;
+    logic.thrust_cue_timer = 0.0;
     logic.spawn_counter = 0;
     place_ship(logic, world, DVec3::ZERO, 0.0, DVec3::ZERO);
     deal_wave(logic, world);
@@ -1437,6 +1513,8 @@ pub struct RenderState {
     pub rocks: Vec<RockView>,
     pub bullets: Vec<BulletView>,
     pub score: u32,
+    /// The best score this player has ever reached, across sessions.
+    pub best: u32,
     pub lives: u32,
     /// Zero-based. The HUD shows `wave + 1`.
     pub wave: u32,
@@ -1456,6 +1534,12 @@ pub struct Game {
     ticks_run: u64,
     /// Queued key events from the shell pump, replayed after `begin_tick`.
     pending_keys: Vec<(KeyCode, bool)>,
+    /// The output stream and the three cues. On the facade rather than in the
+    /// simulation: the module runs inside the server's tick and must stay a pure
+    /// function of its inputs, and an audio device is neither.
+    pub audio: crate::audio::Audio,
+    /// The best score, and where it is kept.
+    pub best: crate::best::Best,
     /// Mirrors of the shared state, refreshed after each tick so the render and
     /// HUD paths never take the lock.
     pub state: GameState,
@@ -1529,12 +1613,6 @@ impl Game {
     /// If `tick_hz` is zero.
     pub fn with_seed(headless: bool, tick_hz: u32, seed: u64) -> Result<Self, GameError> {
         assert!(tick_hz > 0, "tick rate must be positive");
-        // Taken and not used *yet*: it is what breakout and flappy hand to
-        // their audio stream and their best-score file, and both arrive in the
-        // next sub-slice. Keeping the parameter now is cheaper than changing
-        // every call site then, and keeping the signature identical to the
-        // other two samples is the point of having three of them.
-        let _ = headless;
         let mut world = World::new();
 
         // **No force providers at all.** A provider applies to every dynamic
@@ -1571,6 +1649,7 @@ impl Game {
             ship_alive: false,
             respawn_timer: 0.0,
             fire_timer: 0.0,
+            thrust_cue_timer: 0.0,
             rocks: Vec::new(),
             bullets: Vec::new(),
             score: 0,
@@ -1584,6 +1663,7 @@ impl Game {
             rock_views: Vec::new(),
             bullet_views: Vec::new(),
             scratch_entities: Vec::new(),
+            cues: Vec::new(),
             thrust: ThrustForce::new(SHIP_THRUST, DVec3::Y),
             ticks: 0,
         }));
@@ -1631,6 +1711,8 @@ impl Game {
             sim_time: Duration::ZERO,
             ticks_run: 0,
             pending_keys: Vec::new(),
+            audio: crate::audio::Audio::new(headless),
+            best: crate::best::Best::load(headless),
             state: GameState::WaitingToStart,
             score: 0,
             lives: STARTING_LIVES,
@@ -1709,6 +1791,19 @@ impl Game {
         let _alpha = self.client.update(self.sim_time);
         self.ticks_run += 1;
 
+        // Drained under the same lock the tick filled it under, and *before* the
+        // mirrors are read, so a frame that ran two ticks plays both of their
+        // cues rather than only the last one's. The listener is the camera at
+        // the origin; see `crate::audio`.
+        let cues: Vec<_> = {
+            let mut logic = lock(&self.shared);
+            logic.cues.drain(..).collect()
+        };
+        for (id, x, y) in cues {
+            self.audio.play_at(id, x, y);
+        }
+
+        let was = self.state;
         let ticks_after = {
             let logic = lock(&self.shared);
             self.state = logic.state;
@@ -1728,16 +1823,40 @@ impl Game {
             "game logic must run exactly once per physics tick",
         );
 
+        // **On the edge into `GameOver`, not every tick.** The score is frozen
+        // by then — the ship is gone and the last rock a bullet reached has
+        // already been counted — and an `update` per tick would write the file
+        // sixty times a second for as long as the panel is up.
+        if self.state == GameState::GameOver && was != GameState::GameOver {
+            self.best.update(self.score);
+        }
+
         let state_changed = self.state != self.prev_log_state;
         self.prev_log_state = self.state;
-        if state_changed || self.ticks_run.is_multiple_of(120) {
+        // **Every sixty ticks, which is a second of simulated time, and the same
+        // cadence breakout and flappy use.** `web/tools/browser-e2e.mjs` watches
+        // for this heartbeat to tell a paused demo from a running one, and its
+        // window is written against a second rather than the two this used to
+        // take.
+        if state_changed || self.ticks_run.is_multiple_of(60) {
+            // `rock x` is here for that gate too, and it is the honest choice:
+            // it is the one number in this game that moves on its own. The ship
+            // is stationary unless the player thrusts, the score changes only on
+            // a hit, and a HUD whose numbers can all stand still cannot show
+            // that the simulation is advancing.
+            let rock_x = self
+                .rocks()
+                .first()
+                .map_or(f64::NAN, |rock| rock.position.x);
             log::info!(
-                "[HUD] {:?}  score: {}  lives: {}  wave: {}  rocks: {}",
+                "[HUD] {:?}  score: {}  best: {}  lives: {}  wave: {}  rocks: {}  rock x: {:.2}",
                 self.state,
                 self.score,
+                self.best.get(),
                 self.lives,
                 self.wave + 1,
                 self.rock_count(),
+                rock_x,
             );
         }
     }
@@ -1759,6 +1878,11 @@ impl Game {
         out.lives = logic.lives;
         out.wave = logic.wave;
         out.state = Some(logic.state);
+        drop(logic);
+        // Outside the lock: the best score is the facade's, not the
+        // simulation's — a replay of the same script must not depend on what
+        // some earlier session happened to score.
+        out.best = self.best.get();
     }
 
     /// The board in play, for a caller that wants to name it — a bug report, a
@@ -3134,6 +3258,228 @@ mod tests {
             },
             "two seeds played the same game"
         );
+    }
+
+    // ---- the cues, and the best score ----------------------------------------
+
+    /// **Every cue this game has, fired by the thing it belongs to, counted.**
+    ///
+    /// Counted with [`crate::audio::Audio::plays`] rather than `voices()`, which
+    /// is the trap flappy's `plays` counter was added to close: the audio thread
+    /// reaps a voice as it finishes, so a queue length falls again on a clock no
+    /// test controls. A headless game opens a null stream, so nothing here
+    /// races.
+    ///
+    /// Each cue is asserted against **all three** counters, not just its own. A
+    /// `fire` that pushed `SOUND_EXPLOSION` — or a `shatter` that pushed
+    /// `SOUND_SHOT` — passes any version of this that only checks the count went
+    /// up somewhere.
+    #[test]
+    fn a_shot_and_a_shatter_reach_the_audio_as_themselves() {
+        use crate::audio::{SOUND_EXPLOSION, SOUND_SHOT, SOUND_THRUST};
+
+        let mut harness = one_rock_in_the_sights(60, 60, RockSize::Small, 6.0);
+        harness.run_ticks(1, &[]);
+        let plays = |h: &Harness, id| h.game.audio.plays(id);
+        assert_eq!(plays(&harness, SOUND_SHOT), 0, "silence before");
+        assert_eq!(plays(&harness, SOUND_EXPLOSION), 0, "silence before");
+        assert_eq!(plays(&harness, SOUND_THRUST), 0, "silence before");
+
+        harness.tap(KeyCode::Space);
+        assert_eq!(harness.game.bullet_count(), 1, "the shot did not fire");
+        assert_eq!(plays(&harness, SOUND_SHOT), 1, "the gun was silent");
+        assert_eq!(
+            plays(&harness, SOUND_EXPLOSION),
+            0,
+            "the gun played the explosion",
+        );
+        assert_eq!(
+            plays(&harness, SOUND_THRUST),
+            0,
+            "the gun played the engine"
+        );
+
+        // A small rock has no children, so it simply dies — one explosion.
+        harness.run_ticks(harness.ticks + 40, &[]);
+        assert_eq!(harness.game.score, RockSize::Small.score(), "no hit");
+        assert_eq!(
+            plays(&harness, SOUND_EXPLOSION),
+            1,
+            "the rock came apart in silence",
+        );
+        assert_eq!(
+            plays(&harness, SOUND_SHOT),
+            1,
+            "the shatter played the gun, or the gun fired twice",
+        );
+        assert_eq!(
+            plays(&harness, SOUND_THRUST),
+            0,
+            "nothing thrusted in this test",
+        );
+    }
+
+    /// **The engine is a held sound, so it pulses**, and it stops the tick the
+    /// key comes up.
+    ///
+    /// The cue `crcbl-audio` cannot express — see [`THRUST_CUE_PERIOD`]. The
+    /// count is checked as a *range* derived from the period rather than as a
+    /// number read off a passing run: a cue per tick and a cue per burn are both
+    /// wrong, and both are outside it.
+    #[test]
+    fn the_engine_pulses_while_thrust_is_held_and_stops_when_it_is_not() {
+        use crate::audio::SOUND_THRUST;
+
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        harness.game.stage_ship(DVec3::ZERO, 0.0, DVec3::ZERO);
+        // Off the ship, so nothing collides while it flies.
+        harness.game.stage_rock(
+            DVec3::new(WORLD_HALF_WIDTH - 1.0, WORLD_HALF_HEIGHT - 1.0, 0.0),
+            DVec3::ZERO,
+            RockSize::Small,
+        );
+
+        let ticks = 60u64;
+        harness.game.key_event(KeyCode::ArrowUp, true);
+        harness.run_ticks(harness.ticks + ticks, &[]);
+        harness.game.key_event(KeyCode::ArrowUp, false);
+
+        let burn = harness.game.audio.plays(SOUND_THRUST);
+        let expected = (ticks as f64 * harness.game.tick_dt_secs() / THRUST_CUE_PERIOD) as u64;
+        assert!(expected > 1, "the burn is too short to pulse at all");
+        assert!(
+            burn >= expected && burn <= expected + 2,
+            "a {ticks}-tick burn fired {burn} engine cues, not about {expected}",
+        );
+        assert!(
+            burn < ticks,
+            "the engine fired once a tick; the period is doing nothing",
+        );
+
+        // The key is up. Nothing more may sound, however long the game runs.
+        harness.run_ticks(harness.ticks + 60, &[]);
+        assert_eq!(
+            harness.game.audio.plays(SOUND_THRUST),
+            burn,
+            "the engine kept running after the key came up",
+        );
+    }
+
+    /// **A cue is raised where the thing happened**, not at the origin.
+    ///
+    /// Without this, every `play_at` call could pass `(0, 0)` and the two tests
+    /// above would still pass — the sample would ship a spatial grammar fed a
+    /// constant. `crate::audio`'s `where_a_cue_happens_changes_how_it_sounds`
+    /// covers the other half: that the grammar does something with it.
+    #[test]
+    fn a_cue_carries_the_position_of_the_thing_that_raised_it() {
+        use crate::audio::{SOUND_EXPLOSION, SOUND_SHOT};
+
+        // A corner of the field, as far from the listener at the origin as this
+        // game gets — so "it is where the ship is" and "it is not at (0, 0)" are
+        // two different assertions rather than the same one.
+        let corner = DVec3::new(-(WORLD_HALF_WIDTH - 3.0), WORLD_HALF_HEIGHT - 4.0, 0.0);
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        harness.game.stage_ship(corner, 0.0, DVec3::ZERO);
+        harness.game.stage_rock(
+            corner + DVec3::new(0.0, 3.0, 0.0),
+            DVec3::ZERO,
+            RockSize::Small,
+        );
+        harness.run_ticks(1, &[]);
+
+        harness.tap(KeyCode::Space);
+        harness.run_ticks(harness.ticks + 40, &[]);
+        assert_eq!(harness.game.score, RockSize::Small.score(), "no hit");
+
+        let played = harness.game.audio.played().to_vec();
+        for (id, near) in [
+            (SOUND_SHOT, corner),
+            (SOUND_EXPLOSION, corner + DVec3::Y * 3.0),
+        ] {
+            let (_, x, y) = played
+                .iter()
+                .find(|(played_id, _, _)| *played_id == id)
+                .copied()
+                .unwrap_or_else(|| panic!("cue {id} was never played: {played:?}"));
+            assert!(
+                (x - near.x).abs() < 1.5 && (y - near.y).abs() < 1.5,
+                "cue {id} was heard at ({x:.2}, {y:.2}) and happened at {near:?}",
+            );
+            // The listener is at the origin, so a cue that lost its position
+            // would land exactly there and the check above would still pass for
+            // a game played in the middle of the field. This one would not.
+            assert!(
+                x.abs() > 1.0 && y.abs() > 1.0,
+                "cue {id} is at the origin, so nothing is carrying a position",
+            );
+        }
+    }
+
+    /// **The best score is taken when a game ends, once**, and a worse game does
+    /// not lower it.
+    ///
+    /// Headless, so it is held in memory and the test writes nothing — which is
+    /// itself asserted in `crate::best`'s own suite.
+    #[test]
+    fn the_best_score_is_taken_when_a_game_ends() {
+        let mut harness = one_rock_in_the_sights(60, 60, RockSize::Small, 6.0);
+        assert_eq!(harness.game.best.get(), 0);
+        harness.run_ticks(1, &[]);
+
+        // Score something, and check it is *not* yet recorded: a best score
+        // taken every tick would already be there.
+        harness.tap(KeyCode::Space);
+        harness.run_ticks(harness.ticks + 40, &[]);
+        assert_eq!(harness.game.score, RockSize::Small.score(), "no hit");
+        assert_eq!(harness.game.state, GameState::Playing);
+        assert_eq!(
+            harness.game.best.get(),
+            0,
+            "a game still in progress is not a best score",
+        );
+
+        // A rock parked on the respawn point ends the game, the way
+        // `lives_run_out_and_the_game_ends` does it: the ship returns into it
+        // every time, and `RESPAWN_MAX_WAIT` is what keeps that finite.
+        harness.game.stage_ship(DVec3::ZERO, 0.0, DVec3::ZERO);
+        harness
+            .game
+            .stage_rock(DVec3::ZERO, DVec3::ZERO, RockSize::Large);
+        harness.run_ticks(harness.ticks + 2_000, &[]);
+        assert_eq!(
+            harness.game.state,
+            GameState::GameOver,
+            "the game never ended"
+        );
+        let ended_with = harness.game.score;
+        assert!(ended_with > 0, "the game ended on a score of nothing");
+        assert_eq!(
+            harness.game.best.get(),
+            ended_with,
+            "the run's score never reached the best",
+        );
+
+        // A restart, and a worse game must not lower it.
+        harness.tap(KeyCode::KeyR);
+        assert_eq!(harness.game.score, 0, "the restart kept the score");
+        assert_eq!(
+            harness.game.best.get(),
+            ended_with,
+            "the restart cleared the best score",
+        );
+    }
+
+    /// The best score reaches the renderer, so the HUD can show it.
+    #[test]
+    fn the_best_score_reaches_the_render_state() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.best.update(1_234);
+        let mut render = RenderState::default();
+        harness.game.render_state(&mut render);
+        assert_eq!(render.best, 1_234);
     }
 
     // ---- the entity lifecycle, which is what this sample is for ---------------

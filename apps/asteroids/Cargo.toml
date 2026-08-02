@@ -9,9 +9,8 @@ publish = false
 
 # **A library with two front ends, not a binary**, for the reason
 # `apps/flappy/Cargo.toml` sets out: the same loop has to be reachable from
-# `main.rs` (argv, exit codes) and, in a later sub-slice, from a browser's JS
-# shim — and a bin crate has no linkable artifact for the second. The browser
-# half is not here yet; the shape is, so it does not have to be retrofitted.
+# `main.rs` (argv, exit codes) and from a browser's JS shim, and a bin crate has
+# no linkable artifact for the second. Both front ends exist now.
 #
 # The lib is not called `asteroids`. A lib and a bin of the same name in one
 # package write the same `asteroids.wasm`, which cargo calls an output filename
@@ -24,9 +23,14 @@ crate-type = ["cdylib", "rlib"]
 name = "asteroids"
 path = "src/main.rs"
 
-# A subset of flappy's list, and deliberately smaller: no `crcbl-audio` (no
-# cues yet) and no `crcbl-store` (no best score yet). Each arrives with the
-# sub-slice that uses it, so `cargo machete` stays meaningful.
+# Now the same list flappy names, and for the same reason: `crcbl-audio` for the
+# thrust, shot and explosion cues and `crcbl-store` for the best score arrived
+# with the sub-slice that uses them, so `cargo machete` stayed meaningful up to
+# the commit before this one.
+#
+# Eleven engine crates for a game that draws five sprites is S1B finding 6: the
+# `crcbl` umbrella re-exports the graphics stack and nothing else, so ECS,
+# physics, input, net, server, client, audio and store are each named here.
 [dependencies]
 crcbl = { workspace = true }
 crcbl-ecs = { workspace = true }
@@ -36,6 +40,8 @@ crcbl-input = { workspace = true }
 crcbl-server = { workspace = true }
 crcbl-client = { workspace = true }
 crcbl-core = { workspace = true }
+crcbl-audio = { workspace = true }
+crcbl-store = { workspace = true }
 # The sheet description the sprite pass draws from, and the reader for the pair
 # `build.rs` bakes. `load`, not `bake`: this half never sees a `.crpix`, and a
 # shipped binary that linked the PNG *encoder* would be linking it to encode

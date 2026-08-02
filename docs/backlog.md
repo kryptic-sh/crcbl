@@ -20,19 +20,67 @@ carries what has no phase yet.
   after next rather than after it. Not done in the rotation slice because it
   would have put an API refactor of every caller inside a rendering change.
 
-- **The browser entry point should be written once, before S2.** Finding 2 in
-  that list. `apps/flappy/src/web.rs` and `apps/breakout/src/web.rs` are the
-  same file with a different symbol prefix, and asteroids will be the third.
+- **The browser entry point was to be written once before S2. THE DEADLINE WAS
+  MISSED.** Finding 2 in that list said so in as many words — "owed before S2,
+  which will otherwise write it a third time" — and S2 wrote it a third time.
+  `apps/breakout/src/web.rs`, `apps/flappy/src/web.rs` and
+  `apps/asteroids/src/web.rs` are now the same file with three different symbol
+  prefixes.
+
+  **What it costs now, which is the part that changed.** The fix used to be
+  "write it once, adopt it in two places". It is now one new shared
+  implementation plus **three** call sites to migrate, three sets of `STATUS_*`
+  constants to delete, three prefixes to thread through the macro, and three
+  browser gates (`CRCBL_WEB_E2E_DEMO=…`) to re-run before it can be believed.
+  Every sample after this adds one more of each. The three copies have barely
+  drifted yet: flappy's and asteroids' were diffed with the sample name
+  substituted out, and the executable difference is one extra field in the
+  `finish` log line. The rest is doc-comment wording, including five link fixes
+  asteroids' copy needed and the other two still need — see the rustdoc gap
+  below. That is the one piece of good news and it will not survive the next
+  divergent edit: `apps/*/src/audio.rs` and `apps/*/src/{best,high_score}.rs`
+  are the same duplication one generation older and have already diverged in
+  their public API, their type names and their file names.
+
   What it would take: a crate (or a `crcbl` module) owning the `Stage` state
   machine, the log queue and the `prepare`/`boot`/`frame`/`status`/`shutdown`
   protocol, with the sample supplying only its prefix and its two loop types.
   The prefix has to stay per-sample — two demos can be open in one browser and
-  the symbols must not collide — so the shape is probably a macro over a generic
-  core rather than a plain function. **The JS half of this is now done** —
-  `web/engine/demo.js` is one boot sequence for every demo and
-  `web/demos/<name>/main.js` is only the prefix — and it settles the shape
-  question in the affirmative: the sample-specific part turned out to be ten
-  literal symbol names and two strings, and nothing else. The Rust half stands.
+  the symbols must not collide — and `concat_idents!` is not stable, so the
+  shape is a `macro_rules!` taking the ten symbol names as arguments over a
+  generic core. **The JS half of this is done** — `web/engine/demo.js` is one
+  boot sequence for every demo and `web/demos/<name>/main.js` is 33 lines — and
+  it settles the shape question in the affirmative: the sample-specific part
+  turned out to be ten literal symbol names and two strings, and nothing else.
+
+  Why S2 did not do it: it is an engine-API change to `crates/` plus edits to
+  two samples this slice was not otherwise touching, landing in the same commit
+  as asteroids' audio, save file and demo page. The JS half was done as its own
+  piece of work for that reason and the Rust half should be too. **It is now
+  owed before S3 (horde), on the same terms and with the same warning.**
+
+## The rustdoc gate never documents the wasm target, so every `web.rs` is unchecked
+
+CI runs
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` on
+the host target only, and `apps/*/src/web.rs` is behind
+`#[cfg(target_arch = "wasm32")]`. So the one module in each sample that is pure
+documentation — a symbol table, a call-ordering diagram and the ABI contract the
+JS shim is written against — is the one module the docs gate has never read.
+
+Measured, not assumed.
+`cargo doc -p <sample> --no-deps --target wasm32-unknown-unknown` with the same
+`RUSTDOCFLAGS` reports **4 errors for breakout and 5 for flappy** today:
+`unresolved link to crcbl_shell` (the crate is reachable only as
+`crcbl::shell`), public docs linking to the private `WebLogger`, `Stage` and
+`crate::best`, and a redundant explicit link target. `apps/asteroids/src/web.rs`
+had the same set and was fixed as it was written, so it passes; the other two
+are untouched because this slice's write scope did not include them.
+
+The fix is one line in `.github/workflows/ci.yml` — a second `cargo doc` step
+with `--target wasm32-unknown-unknown` over the three sample crates — plus the
+nine link fixes it would then demand. Not done here because adding a required CI
+job that fails on two crates this slice may not edit would land the tree red.
 
 ## The demo site's social preview is blank
 
@@ -92,10 +140,12 @@ It needs a decision rather than a patch, and it would have to be decided for
 native and web together, since `Loop` cannot tell the two apart.
 
 What holds the line meanwhile:
-`a_focusing_click_off_every_button_leaves_the_game_paused` in both samples'
+`a_focusing_click_off_every_button_leaves_the_game_paused` in all three samples'
 `app.rs` asserts the corner is over no button and the centre is over `RESUME`,
 so a menu that grew until it reached the corner fails a fast Rust test rather
-than the slow browser one.
+than the slow browser one. Three copies of it, because the menu geometry is
+per-sample even though `FOCUS_CLICK_INSET` is not — the same shape as everything
+else in `apps/*/src/app.rs`.
 
 ## The sprite system, and what is left of the retrofit
 
@@ -532,14 +582,33 @@ Not worked around in asteroids beyond making the test honest.
 
 ## What asteroids itself still owes
 
-The simulation slice (S2, first sub-slice) is done. What is not:
+S2 is done — simulation, art, audio, persistence and the browser demo. What is
+not:
 
-- **Audio and the browser entry point.** Neither present. `Game::with_seed`
-  still takes the `headless` flag the other two samples hand to their audio
-  stream and best-score file, and ignores it, so those arrive without a
-  signature change. The browser half is the duplication finding above — it
-  should be written once, not a third time. There is no best score either, and
-  no `crcbl-store` dependency yet.
+- **No thrust flame still, and the audio slice was where it was going to land.**
+  The previous entry here said "do it with the audio slice, where the thrust cue
+  lands anyway", and the audio slice did not: `RenderState` still carries no
+  thrust intent, so the ship draws one frame whatever it is doing and a player
+  hears the engine without seeing it. It is two rows of `assets/ship.crpix`, a
+  `bool` on `RenderState` set from `Intent::thrust`, and a frame index in
+  `art::Scene::build`. Left out because the cue and the picture are different
+  work and the slice was already carrying three things; the cue timer
+  (`game::THRUST_CUE_PERIOD`) is the natural place to drive the flame's frame
+  from when someone does it.
+- **The engine cue is a one-shot on a timer, and the timer is in the
+  simulation.** `crcbl-audio` has no looping voice, so a held sound is faked as
+  a pulse — see `game::THRUST_CUE_PERIOD` and `crate::audio`'s header. The
+  consequence is that an audio implementation detail is now deterministic tick
+  state: change the period and every replay changes, even though nothing audible
+  feeds back into the simulation. It is the strongest form of S1B finding 5
+  anyone has produced, and it is what a real looping-voice API in `crcbl-audio`
+  would delete outright.
+- **No golden buffer for the cues.** The three sounds are synthesised
+  deterministically — `audio::noise` runs splitmix64 from a fixed seed — so a
+  golden buffer is _possible_, and there is not one. What the tests assert is
+  that each cue fires, that it carries the position of the thing that raised it,
+  and that the explosion decays and is not a tone. Nobody has listened to the
+  result on a real device and no test can tell a good explosion from a bad one.
 - **Positions are not interpolated, and the wrap is why.** Every angle asteroids
   draws is lerped across the frame's alpha; every _position_ is the last tick's,
   so a rock at 60 Hz on a 144 Hz display moves in sixtieths. The fix is not
@@ -550,13 +619,11 @@ The simulation slice (S2, first sub-slice) is done. What is not:
   `teleport_if_outside`, with the renderer snapping rather than lerping on that
   tick. That is a change to what the simulation publishes, not to how it is
   drawn, which is why it was not folded into the art slice.
-- **No thrust flame, and no visual for a shot hitting a rock.** The ship draws
-  one frame whatever it is doing, so a player cannot see the engine firing;
-  `RenderState` does not carry the thrust intent. Considered and deliberately
-  left out of the art slice: the plan asks for "ship, three asteroid sizes,
-  bullets" and a second ship frame is a feature rather than the art. It is two
-  rows of `assets/ship.crpix`, a `bool` on `RenderState` and a frame index — do
-  it with the audio slice, where the thrust cue lands anyway.
+- **No visual for a shot hitting a rock.** The explosion is audible and not
+  visible: a rock disappears and two smaller ones appear, with nothing between.
+  Particles are a hard non-goal in `docs/plan/sample/02-asteroids.md`, so
+  whatever this is, it is not that — a two-frame flash sprite at the hit
+  position is the cheapest thing that would read.
 - **Rocks that straddle an edge are drawn once, not twice.** A large rock is 3.4
   units across on a 32-unit field, so for about a tenth of a second per crossing
   half of it is missing rather than appearing on the far side. Drawing a ghost
@@ -577,16 +644,18 @@ The simulation slice (S2, first sub-slice) is done. What is not:
   costs four broadphase queries a tick to fix a one-tick artefact at a boundary
   both bodies cross constantly, and no test could tell the difference without
   being written to.
-- **Nothing checks what the window actually shows.** There is no display in the
-  build environment, so the windowed path is compiled and never run; the
-  headless run does execute the real `Gpu::frame`, and the tests assert what
-  reaches the sprite, menu and UI passes — but **no golden image covers a single
-  asteroids pixel**, and in particular nothing checks that a rotated
+- **No golden image covers a single asteroids pixel.** Weaker than it was: the
+  browser gate now loads the demo in a real Chromium, opens a WebGPU device and
+  reads the canvas back at 26/26, so "the frame is not blank, not one flat
+  colour and changes between frames" is checked — 89 distinct colours across a
+  959×463 canvas on the SwiftShader adapter. What is still unchecked is whether
+  it is the **right** picture, and in particular whether a rotated
   `SampleMode::Pixel` sprite looks right on a real driver.
   `crates/crcbl-vk/tests/vk_e2e.rs` has sprite goldens including a rotated one,
-  so the shader path is covered; the game's own frame is not. The art in this
-  slice was checked by eye, against the baked PNGs, and that is the honest
-  report of it.
+  so the shader path is covered; the game's own frame is not. There is also no
+  display in the build environment, so the _windowed_ native path is compiled
+  and never run. The art was checked by eye against the baked PNGs, and that is
+  the honest report of it.
 - **Tuning constants are compiled in.** The plan's milestone 3 wants them from a
   data file after stage 6. Every one of them is a `pub const` in `game.rs` with
   its reasoning written beside it, which is the form that survives being moved

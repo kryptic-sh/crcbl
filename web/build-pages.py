@@ -60,6 +60,7 @@ DEMOS: list[tuple[str, str, str]] = [
     ("", "demos", "/"),
     ("breakout", "breakout", "/demos/breakout/"),
     ("flappy", "flappy", "/demos/flappy/"),
+    ("asteroids", "asteroids", "/demos/asteroids/"),
 ]
 
 # Partials every demo page must pull in, so "the demo window is one template"
