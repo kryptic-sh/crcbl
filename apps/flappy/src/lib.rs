@@ -22,14 +22,20 @@
 //! rather than worked around here. See
 //! [`docs/plan/sample/12-flappy.md`](https://github.com/kryptic-sh/crcbl/blob/main/docs/plan/sample/12-flappy.md).
 //!
-//! # What is here so far
+//! # Two front ends, one loop
 //!
-//! [`Game`] only: the simulation, running server-authoritatively over an
-//! in-memory transport exactly as breakout's does. The renderer, the native
-//! binary and the browser entry point arrive in later slices.
+//! Like breakout, this is a library because the sample has to be reachable from
+//! two places that share nothing else: `src/main.rs` for the native binary, and
+//! a browser entry point driven from `requestAnimationFrame`. Everything below
+//! them is shared verbatim.
 
+mod app;
+mod args;
 mod game;
+mod gpu;
 
+pub use app::{FlappyError, Loop, MAX_FRAME_STEP, PendingLoop, Summary, run};
+pub use args::{Invocation, Options, USAGE, parse};
 pub use game::{
     BIRD_RADIUS, BIRD_START, DEFAULT_SEED, DEFAULT_TICK_HZ, Death, FIRST_PIPE_X, FLAP_SPEED,
     GAP_CENTRE_RANGE, GAP_HALF_HEIGHT, GRAVITY, Game, GameError, GameState, PIPE_HALF_WIDTH,
