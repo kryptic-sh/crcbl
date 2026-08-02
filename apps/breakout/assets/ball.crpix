@@ -1,0 +1,26 @@
+# The ball.
+#
+# 6 x 6 texels at `art::TEXELS_PER_UNIT` = 10 is `2 * BALL_RADIUS` = 0.6 world
+# units across — the sphere collider's own diameter, so what the player aims is
+# what the sweep tests. It is the smallest thing in the game and the reason the
+# scale is 10 rather than 5: three texels cannot be round.
+#
+# Lit from the top left, shaded to the bottom right, with the corners cut so a
+# six-texel square reads as a ball.
+crpix: 6 6 1 4 1
+
+palette:
+  . c None
+  k c #241c1c
+  w c #ffffff
+  g c #b9c0d0
+
+frame ball:
+  ..kk..
+  .kwwk.
+  kwwwgk
+  kwwggk
+  .kggk.
+  ..kk..
+
+sample: pixel

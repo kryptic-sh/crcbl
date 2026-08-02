@@ -151,6 +151,10 @@ struct BirdArt {
     /// frame does not search by name.
     clip: usize,
     play: Playback,
+    /// The bird's vertical velocity as of the last frame, which is the whole of
+    /// how this side of the seam knows the button was pressed — see
+    /// [`Scene::observe`].
+    climb: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +237,8 @@ impl Scene {
                     .expect("bird.crpix declares a clip called `flap`"),
                 description: bird.sheet,
                 play: Playback::new(),
+                // A parked bird, which is what `WaitingToStart` holds it as.
+                climb: 0.0,
             },
             world,
         })
@@ -245,6 +251,43 @@ impl Scene {
     /// on a float clock lands on a different frame at 20 fps than at 240.
     pub const fn advance(&mut self, ticks: u64) {
         self.bird.play.advance(ticks);
+    }
+
+    /// Takes this frame's vertical velocity, and starts the wing beat over if
+    /// the player just flapped. Answers whether it did.
+    ///
+    /// # Why a velocity and not a button
+    ///
+    /// Nothing on this side of the seam sees the button. The renderer is handed
+    /// a [`crate::game::RenderState`] — where the bird is and how fast it is
+    /// going — because that is the authoritative state the server produced, and
+    /// a second path carrying "was the key down this frame" would be a second
+    /// answer to a question the simulation has already settled.
+    ///
+    /// It does not need one. A flap **replaces** `velocity.y` with
+    /// [`crate::game::FLAP_SPEED`] rather than adding to it, and the only other
+    /// things that touch it are gravity, which subtracts, and the ceiling, which
+    /// clamps toward zero from above. So `velocity.y` **rising** between two
+    /// frames happens if and only if the player flapped, and that edge is the
+    /// signal. Comparing against the previous frame rather than against
+    /// `FLAP_SPEED` itself also catches the first flap of a run, which starts
+    /// the bird from a park at zero.
+    ///
+    /// # Why restart rather than let it run
+    ///
+    /// The clip was free-running: it advanced with ticks and never looked at the
+    /// bird, so the wing beat at a constant three times a second whatever the
+    /// player did, and the one moment the animation exists to sell — the
+    /// down-stroke that lifts the bird — landed wherever the loop happened to
+    /// be. [`Playback::restart`] puts the clip back on its first frame, so the
+    /// stroke starts on the flap.
+    pub fn observe(&mut self, velocity_y: f64) -> bool {
+        let flapped = velocity_y > self.bird.climb;
+        self.bird.climb = velocity_y;
+        if flapped {
+            self.bird.play.restart();
+        }
+        flapped
     }
 
     /// How many ticks the flap has been advanced by, for the loop's own tests.
@@ -799,6 +842,80 @@ mod tests {
                 scene.advance(1);
             }
             assert_ne!(jumped, uv(scene), "seven ticks in is not twenty ticks in");
+        });
+    }
+
+    /// **The wing beat starts when the player flaps, and not otherwise.**
+    ///
+    /// The clip used to be free-running — advanced by ticks, never told about
+    /// the bird — so the one thing the animation is for, a down-stroke on the
+    /// button, happened wherever the loop had got to. Measured as the *frame
+    /// drawn*, not as `Playback::elapsed`, because a restart that did not change
+    /// the picture would not be a fix.
+    #[test]
+    fn the_wing_beat_restarts_on_a_flap_and_not_on_an_idle_tick() {
+        with_scene(|scene| {
+            let (camera, half_width) = camera(0.0, EXTENT);
+            let uv = |scene: &mut Scene| {
+                scene
+                    .build(DVec3::ZERO, &[], camera, half_width)
+                    .last()
+                    .expect("the bird is always drawn")
+                    .uv
+            };
+            let first = scene
+                .description()
+                .uv(0)
+                .expect("the flap's first frame exists");
+
+            // Six ticks of gravity: the clip is past its first showing, so
+            // "restarted" and "never moved" are different pictures.
+            for tick in 0..6u64 {
+                scene.observe(-(tick as f64));
+                scene.advance(1);
+            }
+            let drifted = uv(scene);
+            assert_ne!(
+                drifted, first,
+                "the clip never left its first frame, so a restart would prove \
+                 nothing"
+            );
+            assert_eq!(scene.bird.play.elapsed(), 6);
+
+            // Falling further is not a flap.
+            assert!(!scene.observe(-7.0), "a tick of gravity read as a flap");
+            assert_eq!(uv(scene), drifted, "an idle tick restarted the wing");
+            assert_eq!(scene.bird.play.elapsed(), 6, "and did not touch the clock");
+
+            // The velocity jumping upward is, and only on the tick it jumps.
+            assert!(
+                scene.observe(crate::game::FLAP_SPEED),
+                "a flap was not seen"
+            );
+            assert_eq!(uv(scene), first, "the wing did not beat on the flap");
+            assert_eq!(scene.bird.play.elapsed(), 0);
+
+            // The tick after, the bird is still climbing but slower, which is
+            // gravity and not a second flap.
+            scene.advance(6);
+            let mid_beat = uv(scene);
+            assert!(!scene.observe(crate::game::FLAP_SPEED - 0.4));
+            assert_eq!(
+                uv(scene),
+                mid_beat,
+                "the beat restarted a second time on one press"
+            );
+
+            // And a held bird — parked at zero every tick, as `WaitingToStart`
+            // holds it — never restarts, which is what stops the wing stuttering
+            // on the title screen.
+            scene.observe(0.0);
+            scene.advance(3);
+            let parked = uv(scene);
+            for _ in 0..10 {
+                assert!(!scene.observe(0.0), "a parked bird flapped");
+            }
+            assert_eq!(uv(scene), parked);
         });
     }
 

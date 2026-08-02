@@ -1,0 +1,79 @@
+# The brick grid, one frame per row of it.
+#
+# Four frames, and the frame index **is** the grid row index counting down from
+# `game::BRICK_TOP` — `art::brick_frame` is the one place that mapping is
+# written, and `the_brick_rows_draw_the_frames_they_are_meant_to` asserts each
+# row of a live grid cuts its own cell of the strip. A single brick tinted four
+# ways would have been the other answer; it is not what a sprite sheet is for,
+# and it cannot give the four rows different shading, which is what makes the
+# grid read as four courses of masonry rather than one wall recoloured.
+#
+# 24 x 8 texels at `art::TEXELS_PER_UNIT` = 10 is exactly
+# `BRICK_WIDTH` x `BRICK_HEIGHT` = 2.4 x 0.8 world units, so the picture is the
+# collider, at one texel per sprite unit.
+#
+# Each frame is the same bevel: a dark rim, a lit top and left, a shaded bottom
+# and right. Every brick in a row is the same picture, so the shading is what
+# stops ten identical rectangles reading as one long bar.
+#
+# **Bricks take one hit.** `game::handle_brick_hit` despawns on contact and
+# there is no hit counter to draw, so there is no cracked second frame here. If
+# a brick ever gains a second life, this is where its damaged frame goes.
+crpix: 24 8 4 13 1
+
+palette:
+  k c #241c1c
+  R c #f5878a
+  r c #e64d4d
+  e c #a32f34
+  O c #f5bd7d
+  o c #e69940
+  n c #a66822
+  Y c #ededa0
+  y c #d9d94d
+  u c #9c9c2b
+  G c #96e5a6
+  g c #59cc73
+  v c #33994a
+
+frame red:
+  kkkkkkkkkkkkkkkkkkkkkkkk
+  kRRRRRRRRRRRRRRRRRRRRRRk
+  kRrrrrrrrrrrrrrrrrrrrrek
+  kRrrrrrrrrrrrrrrrrrrrrek
+  kRrrrrrrrrrrrrrrrrrrrrek
+  kRrrrrrrrrrrrrrrrrrrrrek
+  keeeeeeeeeeeeeeeeeeeeeek
+  kkkkkkkkkkkkkkkkkkkkkkkk
+
+frame orange:
+  kkkkkkkkkkkkkkkkkkkkkkkk
+  kOOOOOOOOOOOOOOOOOOOOOOk
+  kOoooooooooooooooooooonk
+  kOoooooooooooooooooooonk
+  kOoooooooooooooooooooonk
+  kOoooooooooooooooooooonk
+  knnnnnnnnnnnnnnnnnnnnnnk
+  kkkkkkkkkkkkkkkkkkkkkkkk
+
+frame yellow:
+  kkkkkkkkkkkkkkkkkkkkkkkk
+  kYYYYYYYYYYYYYYYYYYYYYYk
+  kYyyyyyyyyyyyyyyyyyyyyuk
+  kYyyyyyyyyyyyyyyyyyyyyuk
+  kYyyyyyyyyyyyyyyyyyyyyuk
+  kYyyyyyyyyyyyyyyyyyyyyuk
+  kuuuuuuuuuuuuuuuuuuuuuuk
+  kkkkkkkkkkkkkkkkkkkkkkkk
+
+frame green:
+  kkkkkkkkkkkkkkkkkkkkkkkk
+  kGGGGGGGGGGGGGGGGGGGGGGk
+  kGggggggggggggggggggggvk
+  kGggggggggggggggggggggvk
+  kGggggggggggggggggggggvk
+  kGggggggggggggggggggggvk
+  kvvvvvvvvvvvvvvvvvvvvvvk
+  kkkkkkkkkkkkkkkkkkkkkkkk
+
+sample: pixel

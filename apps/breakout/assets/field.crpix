@@ -1,0 +1,49 @@
+# The play field: three walls and the floor of the court they enclose, as one
+# three-sided nine-slice.
+#
+# **The insets are the walls.** `game.rs` spawns three static boxes half a unit
+# thick either side of `WORLD_LEFT`, `WORLD_RIGHT` and `WORLD_TOP`, so the
+# court's outer bound is x in [-15, 15] and y in [-9, 10] and its walls are one
+# world unit thick. `nine: 10 10 10 0` at
+# `art::TEXELS_PER_UNIT` = 10 is exactly that unit on three sides — and **zero
+# on the fourth**, because breakout's bottom edge is not a wall. It is the way
+# out, and `BALL_DEAD_Y` is a unit below it. A zero inset means the bottom band
+# has no texels in it, so `expand` drops the three quads that would have drawn
+# it and the court comes back as six: two top corners, the top edge between
+# them, the two side edges, and the floor.
+#
+# **This is the one thing here that genuinely stretches.** The court is 300 x
+# 190 sprite units and no one is hand-writing that; the walls have to keep their
+# thickness while the span between them grows, which is the whole of what a
+# nine-slice is. The centre is a flat colour on purpose — a 2 x 2 centre
+# stretched over 280 x 190 units turns any detail into two bands and a smear.
+#
+# The wall's cross-section is a bevel read as depth from the outer face: rim,
+# two of shadow, five of stone, a lit texel, and the rim the ball bounces off.
+# A corner takes the smaller of its two depths, which mitres it for free, and
+# is what makes the stretched edges join the fixed corners without a seam.
+crpix: 22 12 1 5 1
+
+palette:
+  k c #0d0d14
+  s c #2f3145
+  n c #4e5170
+  h c #8f93b8
+  f c #191b26
+
+frame court:
+  kkkkkkkkkkkkkkkkkkkkkk
+  kssssssssssssssssssssk
+  kssssssssssssssssssssk
+  kssnnnnnnnnnnnnnnnnssk
+  kssnnnnnnnnnnnnnnnnssk
+  kssnnnnnnnnnnnnnnnnssk
+  kssnnnnnnnnnnnnnnnnssk
+  kssnnnnnnnnnnnnnnnnssk
+  kssnnnnnhhhhhhnnnnnssk
+  kssnnnnnhkkkkhnnnnnssk
+  kssnnnnnhkffkhnnnnnssk
+  kssnnnnnhkffkhnnnnnssk
+
+nine: 10 10 10 0
+sample: pixel

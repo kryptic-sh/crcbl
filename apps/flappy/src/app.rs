@@ -805,6 +805,58 @@ mod tests {
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
+    /// **A flap through the real loop restarts the wing beat.**
+    ///
+    /// `art::Scene::observe` is tested against a velocity directly; this is the
+    /// wiring, which nothing else would catch — `Gpu::set_world` is the only
+    /// caller, and a `set_world` that dropped the velocity on the floor would
+    /// leave every test in `art.rs` green and the bird's wing free-running
+    /// again. Measured as the clip's own clock going backwards while the
+    /// simulation's goes forwards.
+    #[test]
+    fn a_flap_through_the_loop_restarts_the_wing_beat() {
+        let mut engine = Loop::start(&headless(40)).expect("headless runs everywhere");
+
+        // Let the clip run on. The bird is parked and not flapping, so the only
+        // thing moving is the animation.
+        for _ in 0..8 {
+            engine.frame().expect("a frame");
+        }
+        let before = engine.gpu.animation_ticks();
+        assert!(
+            before > 0,
+            "the clip has not advanced, so a restart would prove nothing"
+        );
+        assert_eq!(
+            engine.gpu.animation_ticks(),
+            before,
+            "an idle frame flapped"
+        );
+
+        engine.game_mut().key_event(KeyCode::Space, true);
+        engine.game_mut().key_event(KeyCode::Space, false);
+        engine.frame().expect("a frame");
+        let after = engine.gpu.animation_ticks();
+        assert!(
+            after < before,
+            "the flap left the wing at {after} ticks, having been at {before} \
+             — the beat did not start over"
+        );
+        assert!(
+            engine.ticks > 0 && after <= engine.ticks,
+            "the clip cannot be ahead of the simulation"
+        );
+
+        // And it stays restarted: the ticks after a flap advance it again
+        // rather than restarting it every frame the bird is still climbing.
+        engine.frame().expect("a frame");
+        assert!(
+            engine.gpu.animation_ticks() > after,
+            "the beat restarts every frame while the bird climbs"
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
     /// The animation is on the simulation's clock: a frame that ran `n` ticks
     /// advances the flap by exactly `n`.
     ///

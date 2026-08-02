@@ -5,21 +5,52 @@
 //! adapter that can present, the swapchain, the frames-in-flight ring, resize
 //! and teardown — lives in [`crcbl::engine::GpuContext`], which
 //! `apps/sandbox/src/gpu.rs` uses too. This file is what is left: an
-//! orthographic camera, the forward renderer, the UI compositor, and the graph
-//! that joins them.
+//! orthographic camera, the sprite pass, the UI compositor, and the graph that
+//! joins them.
+//!
+//! # There is no forward pass
+//!
+//! There was one, and it drew the paddle as a lit cube, because
+//! [`ForwardRenderer::begin_frame`] takes a single `model: Mat4` and one
+//! instance was all breakout could get out of it — which is why the ball and the
+//! forty bricks went through the UI pass as screen-space quads instead. The
+//! paddle is a sprite now, so the forward renderer had nothing left to draw, and
+//! it was carrying an HDR scene target, a depth buffer, a tonemap pass, a
+//! directional light and a cube mesh in order to draw it. All of that is gone;
+//! what the pass also did, and what had to be replaced, is **clear the
+//! swapchain**, which is now a one-line `clear_color` pass named `surround`.
+//! [`ForwardRenderer::present_target`] survives as the import helper, which is
+//! an associated function and needs no renderer.
+//!
+//! # Pass order is declaration order
+//!
+//! `surround` (clear) → `sprites` (the board) → `ui` (the HUD). The last two
+//! both load the target rather than clearing it, so declaring the UI pass first
+//! would put the court on top of the score.
+//!
+//! # The camera is in sprite units
+//!
+//! [`crate::art`]'s header sets out why the sprite plane is scaled by
+//! [`TEXELS_PER_UNIT`]. [`projection`] applies it in the same expression that
+//! decides the half-height, so there is one place the two can be made to
+//! disagree and it is that one.
 
 use crcbl::backend::GpuBackend;
 use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError, PendingGpuContext};
 use crcbl::hal::{CommandEncoderDesc, Features};
-use crcbl::math::{Mat4, Vec3};
+use crcbl::math::Vec3;
 use crcbl::prelude::*;
 use crcbl::render::{
-    Camera, DirectionalLight, ForwardRenderer, PassTimers, Projection, RenderGraph, TransientPool,
+    Camera, ForwardRenderer, PassTimers, Projection, RenderGraph, SpriteRenderer, TransientPool,
     UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::text::FontAtlas;
+use glam::DVec3;
+
+use crate::art::{SURROUND, Scene, TEXELS_PER_UNIT};
+use crate::game::RenderState;
 
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
 const MAX_TIMED_PASSES: u32 = 8;
@@ -40,9 +71,8 @@ const MAX_TIMED_PASSES: u32 = 8;
 /// letterboxed vertically instead of cropped horizontally, and a wide one keeps
 /// 9.0 and shows some empty margin either side.
 ///
-/// Public because `app.rs` derives its world→screen mapping from it: the UI
-/// quads that draw the ball and the bricks have to land where this projection
-/// puts them, and two copies of the number would drift.
+/// **In world units.** [`projection`] is what scales it into sprite units, and
+/// is the only caller that may.
 #[must_use]
 pub fn camera_half_height(extent: (u32, u32)) -> f32 {
     let aspect = extent.0.max(1) as f32 / extent.1.max(1) as f32;
@@ -69,12 +99,34 @@ pub fn camera_half_height(extent: (u32, u32)) -> f32 {
 const VIEW_MARGIN: f32 = 0.5;
 
 /// The camera projection for an `extent`-sized viewport.
+///
+/// **In sprite units, not world units.** [`crate::art`]'s header sets out why
+/// the sprite plane is scaled: a nine-slice's fixed bands are its insets taken
+/// as one target unit per texel, so the court's walls only keep their thickness
+/// if one texel is one unit of the space the sprites are drawn in.
 fn projection(extent: (u32, u32)) -> Projection {
     Projection::Orthographic {
-        half_height: camera_half_height(extent),
+        half_height: camera_half_height(extent) * TEXELS_PER_UNIT,
         near: 0.1,
         far: 100.0,
     }
+}
+
+/// The camera for an `extent`-sized viewport: centred on the origin, looking
+/// down −Z.
+///
+/// **Written out rather than left to [`Camera::default`].** Breakout's field is
+/// fixed and symmetric about the origin, and [`crate::art::Scene::build`]
+/// resolves its layers against a camera of `[0, 0]` because of it — so where the
+/// camera is is a fact this game depends on, and a fact it depends on belongs in
+/// this file where it can be read and tested rather than inherited from another
+/// crate's default. Flappy's camera moves and sets the same two fields for the
+/// same reason.
+fn camera(extent: (u32, u32)) -> Camera {
+    let mut camera = Camera::default().with_projection(projection(extent));
+    camera.eye = Vec3::new(0.0, 0.0, 2.0);
+    camera.target = Vec3::ZERO;
+    camera
 }
 
 // ---- Gpu --------------------------------------------------------------------
@@ -82,13 +134,18 @@ fn projection(extent: (u32, u32)) -> Projection {
 #[derive(Debug)]
 pub struct Gpu {
     ctx: GpuContext,
-    renderer: ForwardRenderer,
     pool: TransientPool,
     timers: Option<PassTimers>,
     camera: Camera,
-    light: DirectionalLight,
     /// Paddle X for this frame, from the game state.
     paddle_x: f64,
+    /// Where the ball is this frame.
+    ball: DVec3,
+    /// The live brick centres this frame, refilled rather than reallocated.
+    bricks: Vec<DVec3>,
+    /// The sprite pass, and the art it draws.
+    sprites: SpriteRenderer,
+    scene: Scene,
     /// UI compositing.
     ui: UiRenderer,
     atlas: FontAtlas,
@@ -189,28 +246,40 @@ impl Gpu {
     ///
     /// # Errors
     ///
-    /// [`GpuError`] if the forward renderer or the UI compositor refused the
-    /// device.
+    /// [`GpuError`] if the sprite pass or the UI compositor refused the device,
+    /// or if a sheet upload failed.
     fn from_context(ctx: GpuContext) -> Result<Self, GpuError> {
         let format = ctx.format();
-        let renderer = ForwardRenderer::new(ctx.device(), ctx.queue(), format)?;
         let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
+        let mut sprites =
+            SpriteRenderer::new(ctx.device(), ctx.queue(), format).map_err(GpuError::Hal)?;
+        // Registering a sheet is a blocking staging upload — start-up work,
+        // like the glyph atlas below it, and never something a frame does.
+        let scene = match Scene::new(ctx.device(), &mut sprites) {
+            Ok(scene) => scene,
+            Err(error) => {
+                sprites.destroy(ctx.device());
+                return Err(GpuError::Hal(error));
+            }
+        };
         let ui = UiRenderer::new(ctx.device(), ctx.queue(), format).map_err(GpuError::Hal)?;
 
         // Breakout is a 2D game: orthographic projection with reversed-Z depth.
         // The extent is the one the context opened at; `frame` re-derives it
         // every frame, because a resize changes the aspect ratio and with it
         // how wide the camera has to be to keep the whole field on screen.
-        let camera = Camera::default().with_projection(projection(ctx.extent()));
+        let camera = camera(ctx.extent());
 
         Ok(Self {
             ctx,
-            renderer,
             pool: TransientPool::new(),
             timers,
             camera,
-            light: DirectionalLight::default(),
             paddle_x: 0.0,
+            ball: DVec3::ZERO,
+            bricks: Vec::new(),
+            sprites,
+            scene,
             ui,
             atlas: FontAtlas::built_in(),
             draw_list: DrawList::new(),
@@ -223,9 +292,22 @@ impl Gpu {
         self.ctx.extent()
     }
 
-    /// Set the paddle X for the current frame.
-    pub const fn set_paddle_x(&mut self, x: f64) {
-        self.paddle_x = x;
+    /// Takes this frame's board: the paddle, the ball, and every live brick.
+    ///
+    /// The brick centres are copied into a `Vec` this struct keeps rather than
+    /// borrowed, because [`Gpu::frame`] runs after the caller has moved on and
+    /// the list is refilled every frame from a buffer the game reuses.
+    pub fn set_board(&mut self, render: &RenderState) {
+        self.paddle_x = render.paddle_x;
+        self.ball = render.ball;
+        self.bricks.clear();
+        self.bricks.extend_from_slice(&render.bricks);
+    }
+
+    /// The live bricks this frame, for the loop's own tests.
+    #[cfg(test)]
+    pub fn bricks(&self) -> &[DVec3] {
+        &self.bricks
     }
 
     /// Takes this frame's draw list, handing the previous frame's allocation
@@ -254,17 +336,15 @@ impl Gpu {
         // The swapchain's extent, not the one the resize event reported: on the
         // frame a reconfigure lands they can differ, and the camera must agree
         // with the surface actually being drawn into.
-        self.camera.projection = projection(extent);
+        self.camera = camera(extent);
 
-        self.renderer.begin_frame(
-            self.ctx.device(),
-            &self.camera,
-            &self.light,
-            paddle_model(self.paddle_x),
-            extent,
-        )?;
-        // Upload UI geometry for this frame: the ball, every live brick, the
-        // paddle outline and the HUD.
+        let aspect = extent.0.max(1) as f32 / extent.1.max(1) as f32;
+        let view_projection = self.camera.view_projection(aspect);
+        let sprites = self.scene.build(self.paddle_x, self.ball, &self.bricks);
+        self.sprites
+            .begin_frame(self.ctx.device(), sprites, view_projection, extent)
+            .map_err(GpuError::Hal)?;
+        // Upload UI geometry for this frame: the HUD, and only the HUD.
         self.ui
             .begin_frame(self.ctx.device(), &self.draw_list, &self.atlas, 1.0)
             .map_err(GpuError::Hal)?;
@@ -276,8 +356,14 @@ impl Gpu {
                 "swapchain",
                 ForwardRenderer::present_target(acquired.image, acquired.view, format, extent),
             );
-            let _hdr = self.renderer.add_passes(&mut graph, target, extent);
-            // Composite the UI on top of the tonemapped target.
+            // The clear the forward pass used to do on its way to a tonemap.
+            // Declared first, and it is the only pass that does not load.
+            graph
+                .add_render_pass("surround")
+                .clear_color(target, SURROUND)
+                .execute(|_| {});
+            self.sprites.add_pass(&mut graph, target);
+            // Composite the UI on top of the board.
             self.ui.add_pass(&mut graph, target, extent);
             graph.compile(&self.pool)?
         };
@@ -332,30 +418,80 @@ impl Gpu {
         // Nothing may be destroyed while the device might still be using it.
         self.ctx.drain()?;
         self.ui.destroy(self.ctx.device());
+        self.sprites.destroy(self.ctx.device());
         self.pool.destroy(self.ctx.device());
         if let Some(timers) = self.timers.as_mut() {
             timers.destroy(self.ctx.device());
         }
-        self.renderer.destroy(self.ctx.device());
         self.ctx.destroy()
     }
 }
 
-/// Model matrix for the paddle: a wide, flat box at `(x, PADDLE_Y, 0)`.
-///
-/// The cube is 1×1×1 centred at origin, so this scales it to the paddle's
-/// collider extents and translates it to the paddle position.
-///
-/// Every number comes from `game.rs`. They used to be re-declared privately in
-/// this file with the same values, so changing the collider moved the paddle
-/// the ball bounces off without moving the one on screen.
-fn paddle_model(x: f64) -> Mat4 {
-    use crate::game::{PADDLE_HALF_HEIGHT, PADDLE_HALF_WIDTH, PADDLE_Y};
-    let scale = Vec3::new(
-        (PADDLE_HALF_WIDTH * 2.0) as f32,
-        (PADDLE_HALF_HEIGHT * 2.0) as f32,
-        (PADDLE_HALF_HEIGHT * 2.0) as f32,
-    );
-    let translation = Vec3::new(x as f32, PADDLE_Y as f32, 0.0);
-    Mat4::from_scale_rotation_translation(scale, glam::Quat::IDENTITY, translation)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::{WORLD_LEFT, WORLD_RIGHT, WORLD_TOP};
+
+    /// The whole play field is on screen, at every aspect ratio a window or a
+    /// canvas can hand us.
+    ///
+    /// The camera used to be a fixed `half_height: 9.0` and the projection
+    /// derives its width from the aspect ratio, so a 4:3 surface — the size the
+    /// window opens at, and the `aspect-ratio: 4 / 3` the web demo's canvas is
+    /// styled with — showed 12 world units either side of a field that runs to
+    /// 14. The ball vanished off the edge at x ≈ ±12 and came back once it had
+    /// bounced off a wall that was never drawn on screen.
+    ///
+    /// **This moved here from `app.rs` when the board became sprites.** It used
+    /// to measure `WorldToScreen`, the hand-written world→pixel mapping the UI
+    /// quads went through; that mapping is gone, and the matrix the sprite pass
+    /// is actually given is what answers now — which is a stronger question than
+    /// the one it replaced, because a projection that disagreed with
+    /// `camera_half_height` used to be invisible to it.
+    #[test]
+    fn the_whole_play_field_is_on_screen_at_every_aspect_ratio() {
+        // The walls' inner faces are as far as anything ever gets: a ball
+        // resolving against one is put back at `face - radius * 1.01`, and the
+        // sweep catches the contact when the surfaces meet.
+        for extent in [
+            (960, 720),   // what the window opens at, and the canvas's ratio
+            (800, 600),   // 4:3 again, smaller
+            (1920, 1080), // 16:9
+            (1440, 400),  // a canvas clamped by `max-height: 68vh`
+            (600, 900),   // taller than it is wide
+        ] {
+            let aspect = extent.0.max(1) as f32 / extent.1.max(1) as f32;
+            let view_projection = camera(extent).view_projection(aspect);
+
+            for x in [WORLD_LEFT, WORLD_RIGHT] {
+                for y in [-WORLD_TOP, WORLD_TOP] {
+                    // Through the same scale the sprites are submitted at.
+                    let world = glam::Vec4::new(
+                        x as f32 * TEXELS_PER_UNIT,
+                        y as f32 * TEXELS_PER_UNIT,
+                        0.0,
+                        1.0,
+                    );
+                    let clip = view_projection * world;
+                    let ndc = glam::Vec2::new(clip.x / clip.w, clip.y / clip.w);
+                    assert!(
+                        (-1.0..=1.0).contains(&ndc.x) && (-1.0..=1.0).contains(&ndc.y),
+                        "{extent:?} put the corner ({x}, {y}) at {ndc:?} in NDC"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The camera is centred on the field, so a sprite at the world origin lands
+    /// in the middle of the surface — the assumption `art::Scene::build` makes
+    /// when it resolves its layers against a camera of `[0, 0]`.
+    #[test]
+    fn the_camera_is_centred_on_the_field() {
+        let extent = (960, 720);
+        let aspect = extent.0 as f32 / extent.1 as f32;
+        let clip = camera(extent).view_projection(aspect) * glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
+        assert!((clip.x / clip.w).abs() < 1e-5, "{clip:?}");
+        assert!((clip.y / clip.w).abs() < 1e-5, "{clip:?}");
+    }
 }

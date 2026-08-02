@@ -33,6 +33,7 @@
 
 mod app;
 mod args;
+mod art;
 mod audio;
 mod game;
 mod gpu;

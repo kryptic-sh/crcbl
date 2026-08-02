@@ -261,13 +261,22 @@ impl Gpu {
         self.ctx.extent()
     }
 
-    /// Takes this frame's world: where the bird is, and where the course is.
+    /// Takes this frame's world: where the bird is, how fast it is climbing, and
+    /// where the course is.
     ///
     /// The pipes are copied into a `Vec` this struct keeps rather than borrowed,
     /// because [`Gpu::frame`] runs after the caller has moved on and the list is
     /// refilled every frame from a treadmill that hands over a fresh one.
+    ///
+    /// The velocity goes to [`Scene::observe`], which starts the wing beat over
+    /// on a flap — see its docs for why the animation reads the bird's motion
+    /// rather than the button. It happens **here**, before
+    /// [`Gpu::advance_animation`], so a frame in which the player flapped
+    /// restarts the clip and then advances it by that frame's ticks, exactly as
+    /// a frame that did not flap advances the clip it was already on.
     pub fn set_world(&mut self, render: &RenderState) {
         self.bird = render.bird;
+        self.scene.observe(render.bird_velocity.y);
         self.pipes.clear();
         self.pipes.extend_from_slice(&render.pipes);
     }

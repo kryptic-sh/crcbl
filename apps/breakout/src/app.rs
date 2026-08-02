@@ -311,16 +311,11 @@ impl<S: Shell + ?Sized> Loop<S> {
         }
 
         self.game.render_state(&mut self.render_state);
-        self.gpu.set_paddle_x(self.game.paddle_x());
+        self.gpu.set_board(&self.render_state);
 
         self.draw_list.clear();
         self.hud.refresh(&self.render_state);
-        draw_field(
-            &mut self.draw_list,
-            &self.render_state,
-            self.gpu.extent(),
-            &self.hud,
-        );
+        draw_hud(&mut self.draw_list, &self.hud);
         self.gpu.take_draw_list(&mut self.draw_list);
 
         match self.gpu.frame()? {
@@ -588,104 +583,26 @@ impl HudStrings {
     }
 }
 
-/// Maps the orthographic world onto the surface, in pixels.
+/// Draws the HUD, and nothing else.
 ///
-/// The camera's half height comes from [`crate::gpu::camera_half_height`] and
-/// the projection derives the width from the aspect ratio, so the visible world
-/// is `±half_height * aspect` across and `±half_height` tall. Deriving the
-/// mapping from the same function the camera uses is what makes the quads land
-/// where the forward pass puts the paddle cube — including on a viewport narrow
-/// enough that the camera had to widen to fit the field.
-#[derive(Clone, Copy, Debug)]
-struct WorldToScreen {
-    half_width: f32,
-    half_height: f32,
-    width: f32,
-    height: f32,
-}
-
-impl WorldToScreen {
-    fn new(extent: (u32, u32)) -> Self {
-        let width = extent.0.max(1) as f32;
-        let height = extent.1.max(1) as f32;
-        let half_height = crate::gpu::camera_half_height(extent);
-        Self {
-            half_width: half_height * (width / height),
-            half_height,
-            width,
-            height,
-        }
-    }
-
-    fn point(self, x: f64, y: f64) -> glam::Vec2 {
-        glam::Vec2::new(
-            (x as f32 / self.half_width * 0.5 + 0.5) * self.width,
-            (0.5 - y as f32 / self.half_height * 0.5) * self.height,
-        )
-    }
-
-    /// A world-space axis-aligned box as a screen-space `(min, max)` pair.
-    fn quad(self, cx: f64, cy: f64, half_w: f64, half_h: f64) -> (glam::Vec2, glam::Vec2) {
-        let a = self.point(cx - half_w, cy + half_h);
-        let b = self.point(cx + half_w, cy - half_h);
-        (a, b)
-    }
-}
-
-/// Draws the whole board — every live brick, the ball, the paddle — and the HUD
-/// on top of it.
+/// # The board used to be in here
 ///
-/// # Why the board is quads and not meshes
+/// Until the sprite pass existed it had to be: `crcbl-render`'s
+/// [`crcbl::render::ForwardRenderer`] draws **one** instance — `begin_frame`
+/// takes a single `model: Mat4` which it writes into a per-frame uniform buffer,
+/// and `add_passes` records exactly `draw_indexed(0..index_count, 0, 0..1)`. The
+/// paddle was that instance, and the ball and the forty bricks went through the
+/// UI pass as screen-space quads, re-triangulated on the CPU every frame.
+/// Flappy hit the same wall with its pipes, independently, which is what made it
+/// a finding rather than a quirk.
 ///
-/// `crcbl-render`'s [`crcbl::render::ForwardRenderer`] draws
-/// **one** instance: `begin_frame` takes a single `model: Mat4` which it writes
-/// into a per-frame uniform buffer, and `add_passes` records exactly
-/// `draw_indexed(0..index_count, 0, 0..1)`. There is no instance buffer, no
-/// per-draw push constant and no second `model` slot, so a caller cannot submit
-/// a ball and forty bricks through it — the seam genuinely cannot express more
-/// than one transform. The paddle keeps the forward pass's lit cube; everything
-/// else goes through the UI pass, which is the app's only multi-quad seam and
-/// composites over the tonemapped target in the same graph.
-fn draw_field(
-    dl: &mut crcbl::ui::draw_list::DrawList,
-    render: &RenderState,
-    extent: (u32, u32),
-    hud: &HudStrings,
-) {
-    use crate::game::{
-        BALL_RADIUS, BRICK_HEIGHT, BRICK_WIDTH, PADDLE_HALF_HEIGHT, PADDLE_HALF_WIDTH, PADDLE_Y,
-    };
+/// It is closed. The court, the grid, the paddle and the ball are sprites in
+/// world coordinates now, and with them went `WorldToScreen`, the world→pixel
+/// mapping this function used to build: there is one mapping, the camera's, and
+/// nothing left here that could disagree with it. The HUD is measured in pixels
+/// because a HUD is, which is what the UI pass has always been for.
+fn draw_hud(dl: &mut crcbl::ui::draw_list::DrawList, hud: &HudStrings) {
     use glam::Vec2;
-
-    let map = WorldToScreen::new(extent);
-
-    // Bricks, coloured by row so the grid reads as a grid.
-    for brick in &render.bricks {
-        let (min, max) = map.quad(brick.x, brick.y, BRICK_WIDTH / 2.0, BRICK_HEIGHT / 2.0);
-        let row = ((7.0 - brick.y) / 1.0).round().clamp(0.0, 3.0) as usize;
-        let color = [
-            [0.90, 0.30, 0.30, 1.0],
-            [0.90, 0.60, 0.25, 1.0],
-            [0.85, 0.85, 0.30, 1.0],
-            [0.35, 0.80, 0.45, 1.0],
-        ][row];
-        dl.rect(min, max, color);
-    }
-
-    // The ball.
-    let (min, max) = map.quad(render.ball.x, render.ball.y, BALL_RADIUS, BALL_RADIUS);
-    dl.rect(min, max, [1.0, 1.0, 1.0, 1.0]);
-
-    // The paddle, outlined rather than filled: the forward pass already draws
-    // it as a lit cube, and the outline is what shows the collider agrees with
-    // the mesh.
-    let (min, max) = map.quad(
-        render.paddle_x,
-        PADDLE_Y,
-        PADDLE_HALF_WIDTH,
-        PADDLE_HALF_HEIGHT,
-    );
-    dl.rect_outline(min, max, 2.0, [0.4, 0.8, 1.0, 1.0]);
 
     // HUD panel.
     dl.rect(
@@ -785,12 +702,18 @@ mod tests {
         assert!(summary.ticks > 0);
     }
 
-    /// The draw list carries the whole board, not just the paddle.
+    /// **The board reaches the frame, and the HUD is all the draw list has.**
     ///
-    /// Finding 4: only `paddle_model(paddle_x)` was ever submitted, so the ball
-    /// and the forty bricks existed solely in a log line.
+    /// This replaces `the_frame_draws_every_live_brick_and_the_ball`, which
+    /// counted the bricks as UI rectangles — the check that closed finding 4,
+    /// when only `paddle_model(paddle_x)` was ever submitted and the ball and
+    /// the forty bricks existed solely in a log line. They are sprites now, so
+    /// counting rectangles would count the HUD panel forever and never notice
+    /// the grid had stopped being drawn; what is checked instead is that the
+    /// bricks reach [`Gpu::set_board`] and that nothing but the HUD is left in
+    /// the draw list.
     #[test]
-    fn the_frame_draws_every_live_brick_and_the_ball() {
+    fn the_frame_hands_the_board_to_the_sprite_pass_and_the_hud_to_the_ui_pass() {
         use crcbl::ui::draw_list::{DrawCommand, DrawList};
 
         let mut engine = scripted(&headless(4));
@@ -799,26 +722,29 @@ mod tests {
         let mut render = RenderState::default();
         engine.game.render_state(&mut render);
         assert_eq!(render.bricks.len(), crate::game::BRICK_COUNT);
+        assert_eq!(
+            engine.gpu.bricks(),
+            render.bricks.as_slice(),
+            "the grid never reached the renderer"
+        );
 
         let mut hud = HudStrings::default();
         hud.refresh(&render);
         let mut dl = DrawList::new();
-        draw_field(&mut dl, &render, engine.gpu.extent(), &hud);
-
-        // 40 bricks + the ball + the HUD panel.
-        let rects = dl
-            .commands()
-            .iter()
-            .filter(|c| matches!(c, DrawCommand::Rect { .. }))
-            .count();
-        assert_eq!(rects, crate::game::BRICK_COUNT + 2, "{rects} rects");
+        draw_hud(&mut dl, &hud);
         assert_eq!(
             dl.commands()
                 .iter()
-                .filter(|c| matches!(c, DrawCommand::RectOutline { .. }))
+                .filter(|c| matches!(c, DrawCommand::Rect { .. }))
                 .count(),
             1,
-            "the paddle outline is missing",
+            "only the HUD panel is a UI rectangle now",
+        );
+        assert!(
+            !dl.commands()
+                .iter()
+                .any(|c| matches!(c, DrawCommand::RectOutline { .. })),
+            "the paddle is art now, not an outline",
         );
         assert_eq!(
             dl.commands()
@@ -828,62 +754,6 @@ mod tests {
             3,
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
-    }
-
-    /// The whole play field is on screen, at every aspect ratio a window or a
-    /// canvas can hand us.
-    ///
-    /// The camera used to be a fixed `half_height: 9.0` and the projection
-    /// derives its width from the aspect ratio, so a 4:3 surface — the size the
-    /// window opens at, and the `aspect-ratio: 4 / 3` the web demo's canvas is
-    /// styled with — showed 12 world units either side of a field that runs to
-    /// 14. The ball vanished off the edge at x ≈ ±12 and came back once it had
-    /// bounced off a wall that was never drawn on screen.
-    #[test]
-    fn the_whole_play_field_is_on_screen_at_every_aspect_ratio() {
-        use crate::game::{WORLD_LEFT, WORLD_RIGHT, WORLD_TOP};
-
-        // The walls' inner faces are as far as anything ever gets: a ball
-        // resolving against one is put back at `face - radius * 1.01`, and the
-        // sweep catches the contact when the surfaces meet.
-        let (reach_x, reach_y) = (WORLD_RIGHT as f32, WORLD_TOP as f32);
-
-        for extent in [
-            (960, 720),   // what the window opens at, and the canvas's ratio
-            (800, 600),   // 4:3 again, smaller
-            (1920, 1080), // 16:9
-            (1440, 400),  // a canvas clamped by `max-height: 68vh`
-            (600, 900),   // taller than it is wide
-        ] {
-            let map = WorldToScreen::new(extent);
-            assert!(
-                map.half_width >= reach_x,
-                "{extent:?} shows {} world units of a field that reaches {reach_x}",
-                map.half_width,
-            );
-            assert!(
-                map.half_height >= reach_y,
-                "{extent:?} shows {} world units of a field that reaches {reach_y}",
-                map.half_height,
-            );
-
-            // And in pixels: both wall faces and the ceiling are inside the
-            // surface, with `gpu::VIEW_MARGIN` still to spare.
-            let (width, height) = (extent.0 as f32, extent.1 as f32);
-            for x in [WORLD_LEFT, WORLD_RIGHT] {
-                for y in [-9.0, WORLD_TOP] {
-                    let p = map.point(x, y);
-                    assert!(
-                        p.x >= -1e-3 && p.x <= width + 1e-3,
-                        "world ({x}, {y}) lands at {p:?} on a {extent:?} surface",
-                    );
-                    assert!(
-                        p.y >= -1e-3 && p.y <= height + 1e-3,
-                        "world ({x}, {y}) lands at {p:?} on a {extent:?} surface",
-                    );
-                }
-            }
-        }
     }
 
     /// Helper: build a Loop<HeadlessShell> for scripting.

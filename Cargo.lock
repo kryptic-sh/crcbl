@@ -124,6 +124,7 @@ dependencies = [
  "crcbl-net",
  "crcbl-phys",
  "crcbl-server",
+ "crcbl-sprite",
  "crcbl-store",
  "glam",
  "log",

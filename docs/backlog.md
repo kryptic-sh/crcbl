@@ -22,34 +22,59 @@ phase yet.
 
 ## The sprite system, and what is left of the retrofit
 
-The pipeline is joined up end to end for one game: `apps/flappy` authors
-`.crpix` text under `assets/`, a `build.rs` bakes it, and `art::Scene` draws it
-through `SpriteRenderer` on three parallax layers. What is left:
+The pipeline is joined up end to end for both games: each of `apps/flappy` and
+`apps/breakout` authors `.crpix` text under `assets/`, a `build.rs` bakes it,
+and an `art::Scene` draws it through `SpriteRenderer` on a layer stack. What is
+left:
 
-- **Breakout is still solid quads.** Its bricks, paddle and ball go through the
-  UI pass for the reason flappy's pipes did, and the whole path they need now
-  exists. The pattern to copy is `apps/flappy/src/art.rs` plus its `build.rs`;
-  the one thing that will not copy verbatim is the sprite-space scale, because
-  breakout's field is measured differently.
-- **Nine-slice geometry is in world units, at one unit per texel, and there is
-  no way to say otherwise.** `NineSliceSource::expand` takes its insets as
-  target units directly, so a 6-texel cap is 6 units tall whatever the caller's
-  world is. Flappy's playable band is 12 units, so it had to scale the whole
-  sprite plane by `art::TEXELS_PER_UNIT` and give the sprite pass a camera in
-  those units — which works and is documented, but it is a convention every
-  caller now has to reinvent. If a second game hits this, the fix is a texels →
-  units scale on `NineSliceSource` (or on `expand`) rather than a third copy of
-  the convention. Not done here because one caller is not a pattern.
-- **The tick rate the art is baked at is written twice** — `ART_TICK_HZ` in
-  `apps/flappy/build.rs` and again in `apps/flappy/src/art.rs`. A build script
-  cannot `use` the crate it builds, and the sidecar's durations are
+- **`NineSliceSource` has no texels → units scale, and there are now two callers
+  working around it.** `expand` takes its insets as target units directly, so a
+  6-texel cap is 6 units tall whatever the caller's world is. Flappy scaled its
+  whole sprite plane by `art::TEXELS_PER_UNIT` = 20 so its pipe's cap would
+  survive a 12-unit playable band; breakout hit the identical wall on
+  `assets/field.crpix`, whose 10-texel walls would otherwise be ten world units
+  thick inside a court 28 across, and reached the same convention at a scale of
+  10 — chosen independently, from the ball rather than from the pipe, which is
+  the only part that did not copy.
+
+  **This was the "if a second game hits this" condition, and it has been hit.**
+  It was not fixed in that slice because the slice was scoped to `apps/*` and
+  the change is in `crcbl-render`. The fix: a scale on `NineSliceSource` — a
+  `texels_per_unit: f32` field set at `from_sheet` time, or an
+  `expand_scaled(target, scale)` beside `expand` — so `minimum_size` and the
+  fixed bands come back in the caller's units and a game whose world is not one
+  unit per texel does not have to scale its camera to compensate. Both
+  `art::TEXELS_PER_UNIT` constants and both `gpu::projection` multiplications
+  come out when it lands; the sprite rectangles stay as they are, because those
+  were never the problem. Nothing else in the workspace calls `expand` —
+  `crcbl-render`'s own `button_skin` does, and would take the same scale of 1.
+
+- **The bake half of `build.rs` is written twice.** `apps/flappy/build.rs` and
+  `apps/breakout/build.rs` differ in their `ASSETS` array and in nothing else:
+  the same parse → bake → write → generate-a-table loop, the same `ART_TICK_HZ`,
+  the same `cargo::error` reporting. Asteroids will be the third. The fix is a
+  real entry point in `crcbl-sprite` — something like
+  `bake::bake_dir(manifest_dir, out_dir, &stems, tick_hz)` returning the table
+  text — because a build script can depend on a workspace library and that is
+  the only shape that removes the copy rather than moving it.
+
+- **The tick rate the art is baked at is written twice per game** —
+  `ART_TICK_HZ` in `apps/*/build.rs` and again in `apps/*/src/art.rs`. A build
+  script cannot `use` the crate it builds, and the sidecar's durations are
   milliseconds, so the two conversions have to agree. Guarded rather than
-  solved: `the_art_bakes_to_the_sheets_it_declares` asserts the authored hold in
-  ticks survives the round trip, which is red the moment they drift.
-- **Flappy's flap is a free-running loop.** It advances with ticks and never
-  looks at the bird's velocity, so the wing does not beat when the player flaps.
-  A `Playback::restart` on the flap edge would do it; left out because this
-  slice was about the art existing, not about tuning it.
+  solved: each game's `the_art_bakes_to_the_sheets_it_declares` asserts an
+  authored hold in ticks survives the round trip. **Breakout's guard is weaker
+  than flappy's**, because nothing breakout draws is animated: it can only
+  assert the default hold of 1 tick, which survives a fairly wide range of wrong
+  rates. It gets real the moment breakout has a clip. Folding it into the
+  `bake_dir` entry point above would close it outright.
+
+- **Breakout's paddle is a plain frame, not a nine-slice.**
+  `game::PADDLE_HALF_WIDTH` is a `const` and nothing shadows it, so the paddle
+  is 10 world units across on every tick of every run and a stretch would have
+  had no caller. If a widening power-up is ever added, `assets/paddle.crpix`
+  wants `nine: 12 12 0 0` and `art::paddle_rect` already produces the target
+  rectangle `expand` would take.
 
 ## Coverage gaps
 
@@ -68,18 +93,29 @@ through `SpriteRenderer` on three parallax layers. What is left:
   the world through the real view-projection at five aspect ratios, which is
   stronger than the hand-written mapping it replaced, and is still not a pixel
   check that would catch the framing drifting.
-- **Nothing has looked at flappy's art come out of a GPU.** Every test over it
-  is `Sheet` data, sprite rectangles and layer membership; the picture in this
-  slice's report was composited in software from the same sprite list, so it
-  says the scene is assembled correctly and nothing about the shader, the
-  sampler or the blend. `crcbl screenshot` cannot help — it renders the sandbox
-  cube through `ForwardRenderer`, which flappy no longer uses. Closing this
-  means either a golden through the sprite pass with flappy's own sheets, or an
-  offscreen path the samples can drive.
+- **Nothing has looked at either sample's art come out of a GPU.** Every test
+  over it is `Sheet` data, sprite rectangles and layer membership; the pictures
+  in both retrofit reports were composited in software from the same sprite
+  lists, so they say the scenes are assembled correctly and nothing about the
+  shader, the sampler or the blend. `crcbl screenshot` cannot help — it renders
+  the sandbox cube through `ForwardRenderer`, which **neither** sample uses now.
+  Closing this means either a golden through the sprite pass with a sample's own
+  sheets, or an offscreen path the samples can drive. It is the same gap for
+  breakout as for flappy and is not worth two entries.
 - **The bird sprite is not checked against the bird collider.** It is drawn 0.8
   world units across against a `2 * BIRD_RADIUS` of 0.7, deliberately, and
   nothing asserts the relationship — so art that grew to twice the collider
-  would look wrong and pass.
+  would look wrong and pass. Breakout closed the equivalent gap
+  (`every_sprite_covers_the_collider_it_stands_for`, which holds all forty
+  bricks, the paddle and the ball to their colliders exactly); flappy's is
+  harder only because the bird is deliberately _not_ exact, so the assertion has
+  to be a stated ratio rather than an equality.
+
+- **Nothing checks breakout's clear colour against the court's interior.**
+  `art::SURROUND` and `field.crpix`'s `f` are two hand-written sRGB values that
+  have to read as different surfaces; a change to one is invisible to the tests.
+  Low stakes — it is a look, not a behaviour — but it is the one number in
+  breakout's art with nothing holding it.
 - **The changelog starts mid-project.** `CHANGELOG.md` covers changes from
   2026-08-01 onward; everything before it is in `git log` only. Worth doing at
   the first tagged release, or not at all — there are no releases yet for a
@@ -93,6 +129,20 @@ through `SpriteRenderer` on three parallax layers. What is left:
   `flappy-and-breakout-utils` would be a third place for the same code to rot,
   and it would hide the evidence that `crcbl-audio` and `crcbl-store` are
   missing a layer.
+- **Giving breakout a parallax band.** Its camera never moves — the field is
+  fixed and the whole of it is on screen — and `Parallax` is
+  `(1 − factor) × camera`, so with a camera at the origin every factor produces
+  the same offset of zero. A "distant" layer and a world-locked one would be the
+  same picture, and a band that scrolled anyway would be motion the player has
+  no reason for. `art::Scene`'s two layers are both `Parallax::WORLD` and exist
+  for depth ordering, which is the half of a `LayerStack` that still means
+  something here.
+- **Tinting one brick sprite four ways instead of authoring four frames.** It is
+  the cheaper sheet and it is what `app.rs`'s colour table used to do. Four
+  frames is what lets the rows differ in their _shading_ — a lit top edge and a
+  shaded bottom in each row's own hue — which a single tinted rectangle cannot
+  express, and it is what a sprite sheet is for. The cost is 96 × 8 texels
+  instead of 24 × 8.
 - **Re-randomising flappy's course from a clock.** A restart advances the seed
   deterministically (`course_seed(seed, runs)`) instead. A clock would make the
   course unreproducible, and the sample's exit criterion is that a recorded

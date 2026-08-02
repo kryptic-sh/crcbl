@@ -84,6 +84,14 @@ pub const PADDLE_Y: f64 = -8.0;
 pub const WORLD_LEFT: f64 = -14.0;
 pub const WORLD_RIGHT: f64 = 14.0;
 pub const WORLD_TOP: f64 = 9.0;
+/// How thick the three walls are, in world units.
+///
+/// The value the wall colliders were always spawned at, named because
+/// [`crate::art`] draws them: `assets/field.crpix`'s nine-slice insets are this
+/// thickness, so the inner face of the drawn wall is the line the ball bounces
+/// off. Two literal halves of it in `Game::new` were what the art would
+/// otherwise have had to guess at.
+pub const WALL_THICKNESS: f64 = 1.0;
 pub const BALL_RADIUS: f64 = 0.3;
 const BALL_START_X: f64 = 0.0;
 const BALL_START_Y: f64 = -5.0;
@@ -149,12 +157,17 @@ pub const BRICK_COLS: usize = 10;
 pub const BRICK_COUNT: usize = BRICK_ROWS * BRICK_COLS;
 pub const BRICK_WIDTH: f64 = 2.4;
 pub const BRICK_HEIGHT: f64 = 0.8;
-const BRICK_GAP: f64 = 0.2;
-const BRICK_TOP: f64 = 7.0;
+pub const BRICK_GAP: f64 = 0.2;
+pub const BRICK_TOP: f64 = 7.0;
 const BRICK_LEFT: f64 = -(BRICK_COLS as f64 * (BRICK_WIDTH + BRICK_GAP)) / 2.0 + BRICK_WIDTH / 2.0;
 
 /// Centre of brick `index` in the grid, in world space.
-fn brick_position(index: usize) -> DVec3 {
+///
+/// Public because [`crate::art`] runs it backwards: the renderer is handed a
+/// bare list of live brick centres and has to recover which row a brick is in to
+/// know which frame of the sheet to draw it with. `art::brick_frame` is the
+/// inverse, and `art`'s tests hold the two to each other.
+pub fn brick_position(index: usize) -> DVec3 {
     let row = index / BRICK_COLS;
     let col = index % BRICK_COLS;
     DVec3::new(
@@ -756,21 +769,25 @@ impl Game {
             DVec3::new(PADDLE_HALF_WIDTH, PADDLE_HALF_HEIGHT, 0.5),
         );
 
+        // `WALL_THICKNESS / 2.0` where three `0.5` literals used to be — the
+        // same numbers, named, because `crate::art` draws these three boxes and
+        // had no way to know how thick they were.
+        let half = WALL_THICKNESS / 2.0;
         let walls = [
             spawn_static_box(
                 &mut world,
-                DVec3::new(WORLD_LEFT - 0.5, 0.0, 0.0),
-                DVec3::new(0.5, WORLD_TOP, 1.0),
+                DVec3::new(WORLD_LEFT - half, 0.0, 0.0),
+                DVec3::new(half, WORLD_TOP, 1.0),
             ),
             spawn_static_box(
                 &mut world,
-                DVec3::new(WORLD_RIGHT + 0.5, 0.0, 0.0),
-                DVec3::new(0.5, WORLD_TOP, 1.0),
+                DVec3::new(WORLD_RIGHT + half, 0.0, 0.0),
+                DVec3::new(half, WORLD_TOP, 1.0),
             ),
             spawn_static_box(
                 &mut world,
-                DVec3::new(0.0, WORLD_TOP + 0.5, 0.0),
-                DVec3::new(WORLD_RIGHT - WORLD_LEFT, 0.5, 1.0),
+                DVec3::new(0.0, WORLD_TOP + half, 0.0),
+                DVec3::new(WORLD_RIGHT - WORLD_LEFT, half, 1.0),
             ),
         ];
 
@@ -1007,6 +1024,13 @@ impl Game {
     }
 
     /// The paddle's authoritative X position.
+    ///
+    /// **Tests only, now.** The loop used to read it here and hand it straight
+    /// to the renderer; it takes the whole board through [`RenderState`]
+    /// instead, which carries the same number out of the same lock. Two ways to
+    /// ask the same question is how the paddle on screen and the paddle the ball
+    /// bounces off end up a frame apart.
+    #[cfg(test)]
     #[must_use]
     pub fn paddle_x(&self) -> f64 {
         lock(&self.shared).paddle_x
