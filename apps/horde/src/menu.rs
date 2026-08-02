@@ -14,12 +14,14 @@
 //! here is the part that genuinely is this game's: **which menu a frame shows,
 //! and what happens when a button is fired.**
 //!
-//! **This is the fifth copy of this file**, after `apps/breakout/src/menu.rs`,
+//! **The container is no longer written here.** `Menus` was the fifth hand-rolled
+//! copy of the same struct, after `apps/breakout/src/menu.rs`,
 //! `apps/flappy/src/menu.rs`, `apps/sandbox/src/menu.rs` and
-//! `apps/asteroids/src/menu.rs`. The `MenuAction` enum, its `WidgetId`
-//! discriminants, the `MenuKind::of` precedence rule and the whole of `Menus`
-//! are the same five times over; only the titles, the labels and the state
-//! mapping differ. `docs/backlog.md` carries it.
+//! `apps/asteroids/src/menu.rs`; it is now
+//! [`crcbl::ui::menu::MenuSet`], keyed by this game's [`MenuKind`]. What stays
+//! per-game is what was always genuinely per-game: the [`MenuAction`] enum and
+//! its `WidgetId` discriminants, the [`MenuKind::of`] precedence rule, the
+//! titles and the labels.
 //!
 //! # There is a start menu, and it was argued against before it was built
 //!
@@ -36,7 +38,7 @@
 //!
 //! Every other menu in every other sample is built once at start-up, because its
 //! buttons never change. This one's are three upgrades drawn from a seed, so
-//! [`Menus::set_offer`] rebuilds it when the offer changes — once per level-up,
+//! [`LevelUpOffer::refresh`] rebuilds it when the offer changes — once per level-up,
 //! never per frame, and guarded by comparing the offer it was last built from.
 //!
 //! # What the menu takes from the keyboard, and the one thing it shadows
@@ -57,8 +59,8 @@
 //! and the level-up screen freezes the field anyway, so there is nothing to walk
 //! away from while it is up.
 
-use crcbl::ui::menu::{Menu, MenuItem};
-use crcbl::ui::{PointerInput, UiState, WidgetId};
+use crcbl::ui::WidgetId;
+use crcbl::ui::menu::{Menu, MenuItem, MenuSet};
 
 use crate::game::{GameState, RenderState, UPGRADE_CHOICES, Upgrade};
 
@@ -164,95 +166,119 @@ impl MenuKind {
     }
 }
 
-/// Horde's four menus, the one being shown, and the pointer's capture.
-#[derive(Debug)]
-pub struct Menus {
-    start: Menu,
-    paused: Menu,
-    level_up: Menu,
-    game_over: Menu,
-    /// The offer `level_up` was last built from, so a frame with an unchanged
-    /// offer rebuilds nothing.
-    built_from: Option<(u32, [Upgrade; UPGRADE_CHOICES])>,
-    shown: MenuKind,
-    ui: UiState,
-}
+/// Horde's menus, keyed by the state each belongs to.
+///
+/// The container is [`crcbl::ui::menu::MenuSet`] — shared with every other
+/// sample, because holding a handful of panels and switching between them
+/// without carrying a half-finished click across is not something a game should
+/// own. [`MenuKind::None`] has no entry in it, which is how a playing frame is
+/// told to draw nothing.
+pub type Menus = MenuSet<MenuKind>;
 
-impl Default for Menus {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Menus {
-    /// The four menus, with nothing shown.
-    #[must_use]
-    pub fn new() -> Self {
-        use MenuAction::{DebugOverlay, Fullscreen, Restart, Resume};
-        Self {
+/// The four menus, with nothing shown.
+///
+/// The level-up panel is a placeholder, replaced by [`LevelUpOffer::refresh`]
+/// before it is ever shown. Built here rather than left out so `current` stays
+/// a total function and a menu is never missing from a frame that maps to it.
+#[must_use]
+pub fn menus() -> Menus {
+    use MenuAction::{DebugOverlay, Fullscreen, Restart, Resume};
+    MenuSet::new(
+        MenuKind::None,
+        vec![
             // `SPACE`, which is what breakout, flappy and asteroids print on
             // theirs — a player moving between the demos presses one key. `R` is
             // bound to the same action and still works; the death screen prints
             // that one, because it always has.
-            start: Menu::new(
-                "HORDE",
-                vec![
-                    item(Restart, "PLAY", "SPACE"),
-                    item(Fullscreen, "FULLSCREEN", "F11"),
-                    item(DebugOverlay, "DEBUG PANEL", "F3"),
-                ],
+            (
+                MenuKind::Start,
+                Menu::new(
+                    "HORDE",
+                    vec![
+                        item(Restart, "PLAY", "SPACE"),
+                        item(Fullscreen, "FULLSCREEN", "F11"),
+                        item(DebugOverlay, "DEBUG PANEL", "F3"),
+                    ],
+                ),
             ),
-            paused: Menu::new(
-                "PAUSED",
-                vec![
-                    item(Resume, "RESUME", "ESC"),
-                    item(Fullscreen, "FULLSCREEN", "F11"),
-                    item(DebugOverlay, "DEBUG PANEL", "F3"),
-                ],
+            (
+                MenuKind::Paused,
+                Menu::new(
+                    "PAUSED",
+                    vec![
+                        item(Resume, "RESUME", "ESC"),
+                        item(Fullscreen, "FULLSCREEN", "F11"),
+                        item(DebugOverlay, "DEBUG PANEL", "F3"),
+                    ],
+                ),
             ),
-            // Placeholder buttons, replaced by `set_offer` before this is ever
-            // shown. Built here rather than as an `Option` so `current` stays a
-            // total function and a menu is never missing from a frame that maps
-            // to it.
-            level_up: Self::offer_menu(1, &[Upgrade::ALL[0], Upgrade::ALL[1], Upgrade::ALL[2]]),
-            game_over: Menu::new(
-                "YOU DIED",
-                vec![
-                    item(Restart, "TRY AGAIN", "R"),
-                    item(Fullscreen, "FULLSCREEN", "F11"),
-                ],
+            (
+                MenuKind::LevelUp,
+                offer_menu(1, &[Upgrade::ALL[0], Upgrade::ALL[1], Upgrade::ALL[2]]),
             ),
-            built_from: None,
-            shown: MenuKind::None,
-            ui: UiState::new(),
-        }
-    }
+            (
+                MenuKind::GameOver,
+                Menu::new(
+                    "YOU DIED",
+                    vec![
+                        item(Restart, "TRY AGAIN", "R"),
+                        item(Fullscreen, "FULLSCREEN", "F11"),
+                    ],
+                ),
+            ),
+        ],
+    )
+}
 
-    /// The level-up panel for one offer.
-    fn offer_menu(level: u32, offer: &[Upgrade; UPGRADE_CHOICES]) -> Menu {
-        Menu::new(
-            format!("LEVEL {level}"),
-            offer
-                .iter()
-                .enumerate()
-                .map(|(index, upgrade)| {
-                    item(
-                        MenuAction::Choose(index),
-                        upgrade.label(),
-                        // One-based, because it is the digit key the player
-                        // presses and `ACTION_CHOOSE` binds.
-                        &(index + 1).to_string(),
-                    )
-                })
-                .collect(),
-        )
-    }
+/// The level-up panel for one offer.
+fn offer_menu(level: u32, offer: &[Upgrade; UPGRADE_CHOICES]) -> Menu {
+    Menu::new(
+        format!("LEVEL {level}"),
+        offer
+            .iter()
+            .enumerate()
+            .map(|(index, upgrade)| {
+                item(
+                    MenuAction::Choose(index),
+                    upgrade.label(),
+                    // One-based, because it is the digit key the player
+                    // presses and `ACTION_CHOOSE` binds.
+                    &(index + 1).to_string(),
+                )
+            })
+            .collect(),
+    )
+}
 
+/// Remembers which offer the level-up panel was built from, so a frame with an
+/// unchanged offer rebuilds nothing.
+///
+/// Every other menu in every sample is built once at start-up, because its
+/// buttons never change. This one's are three upgrades drawn from a seed, so it
+/// has to be rebuilt — once per level-up, and **not** once per frame, because
+/// [`MenuSet::replace`] drops the selection and the pointer's capture with it
+/// and a panel rebuilt sixty times a second could never be clicked.
+///
+/// It is a type of its own rather than a field of [`Menus`] because the set is
+/// the engine's and knows nothing about upgrades: what is stale is horde's
+/// question, and this is horde's answer to it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LevelUpOffer {
+    /// The offer the panel was last built from, or `None` before the first.
+    built_from: Option<(u32, [Upgrade; UPGRADE_CHOICES])>,
+}
+
+impl LevelUpOffer {
     /// Rebuilds the level-up panel if the offer has changed.
     ///
     /// Takes what [`RenderState`] carries — `None` on every frame the screen is
     /// not up — so the loop has one call rather than a condition.
-    pub fn set_offer(&mut self, level: u32, offer: Option<[Upgrade; UPGRADE_CHOICES]>) {
+    pub fn refresh(
+        &mut self,
+        menus: &mut Menus,
+        level: u32,
+        offer: Option<[Upgrade; UPGRADE_CHOICES]>,
+    ) {
         let Some(offer) = offer else {
             return;
         };
@@ -260,123 +286,33 @@ impl Menus {
             return;
         }
         self.built_from = Some((level, offer));
-        self.level_up = Self::offer_menu(level, &offer);
-        // A rebuilt menu is a different menu, so the capture and the selection
-        // that belonged to the old one must not survive into it — the same
-        // argument `show` makes for switching between two.
-        self.ui.clear();
-    }
-
-    /// Switches to the menu this frame shows.
-    ///
-    /// A change drops the previous menu's hover and held key: a menu re-shown
-    /// with a stale press on it draws a button nobody is touching, and a capture
-    /// left in [`UiState`] would credit the next click to a widget that is no
-    /// longer on screen.
-    pub fn show(&mut self, kind: MenuKind) {
-        if kind == self.shown {
-            return;
-        }
-        if let Some(menu) = self.current_mut() {
-            menu.clear_input();
-        }
-        self.ui.clear();
-        self.shown = kind;
-    }
-
-    /// Which menu is being shown.
-    #[must_use]
-    pub const fn kind(&self) -> MenuKind {
-        self.shown
-    }
-
-    /// The menu being shown, or `None` on a frame with no menu on it.
-    #[must_use]
-    pub const fn current(&self) -> Option<&Menu> {
-        match self.shown {
-            MenuKind::None => None,
-            MenuKind::Start => Some(&self.start),
-            MenuKind::Paused => Some(&self.paused),
-            MenuKind::LevelUp => Some(&self.level_up),
-            MenuKind::GameOver => Some(&self.game_over),
-        }
-    }
-
-    /// The menu being shown, mutably.
-    pub const fn current_mut(&mut self) -> Option<&mut Menu> {
-        match self.shown {
-            MenuKind::None => None,
-            MenuKind::Start => Some(&mut self.start),
-            MenuKind::Paused => Some(&mut self.paused),
-            MenuKind::LevelUp => Some(&mut self.level_up),
-            MenuKind::GameOver => Some(&mut self.game_over),
-        }
-    }
-
-    /// Moves the selection down, if there is a menu.
-    pub fn select_next(&mut self) {
-        if let Some(menu) = self.current_mut() {
-            menu.select_next();
-        }
-    }
-
-    /// Moves the selection up, if there is a menu.
-    pub fn select_previous(&mut self) {
-        if let Some(menu) = self.current_mut() {
-            menu.select_previous();
-        }
-    }
-
-    /// Holds the highlighted button down, or lets it up.
-    pub fn press(&mut self, down: bool) {
-        if let Some(menu) = self.current_mut() {
-            menu.press(down);
-        }
-    }
-
-    /// Fires the highlighted button.
-    pub fn activate(&mut self) -> Option<MenuAction> {
-        self.current_mut()
-            .and_then(Menu::activate)
-            .and_then(MenuAction::from_id)
-    }
-
-    /// Runs one frame of pointer input against the menu on screen.
-    ///
-    /// The layout is recomputed here rather than kept, because it depends on the
-    /// framebuffer's size and on the menu's own contents and both can change
-    /// between frames — and a hit test against last frame's rectangles is how a
-    /// resized window gets buttons that are not where they are drawn.
-    pub fn point(
-        &mut self,
-        extent: (u32, u32),
-        atlas: &crcbl::ui::text::FontAtlas,
-        pointer: PointerInput,
-    ) -> Option<MenuAction> {
-        // The menu and the capture are borrowed as **separate fields**: a
-        // `current_mut()` here would borrow the whole struct and `self.ui` with
-        // it, which is the one place this container's shape shows through.
-        let menu = match self.shown {
-            MenuKind::None => return None,
-            MenuKind::Start => &mut self.start,
-            MenuKind::Paused => &mut self.paused,
-            MenuKind::LevelUp => &mut self.level_up,
-            MenuKind::GameOver => &mut self.game_over,
-        };
-        let layout = menu.layout(extent, atlas);
-        menu.point(&layout, &mut self.ui, pointer)
-            .and_then(MenuAction::from_id)
+        menus.replace(MenuKind::LevelUp, offer_menu(level, &offer));
     }
 }
-
 // ---- tests ------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl::ui::ButtonState;
     use crcbl::ui::text::FontAtlas;
+    use crcbl::ui::{ButtonState, PointerInput};
     use glam::Vec2;
+
+    /// The action the highlighted button carries, which is what the loop reads.
+    ///
+    /// The set deals in [`WidgetId`] — it is shared with every other sample and
+    /// has no idea what an id means here — so this is the one translation, in
+    /// one place, the way `app.rs` does it.
+    fn activate(menus: &mut Menus) -> Option<MenuAction> {
+        menus.activate().and_then(MenuAction::from_id)
+    }
+
+    /// The action a frame of pointer input fired, if any.
+    fn point(menus: &mut Menus, extent: (u32, u32), pointer: PointerInput) -> Option<MenuAction> {
+        menus
+            .point(extent, &FontAtlas::built_in(), pointer)
+            .and_then(MenuAction::from_id)
+    }
 
     fn render(state: Option<GameState>) -> RenderState {
         RenderState {
@@ -410,8 +346,9 @@ mod tests {
         // And the container really draws one menu: `current` is a single
         // `Option`, so "and nothing else" is structural — but the titles must
         // differ, or two kinds could draw the same panel and nobody would know.
-        let mut menus = Menus::new();
-        menus.set_offer(3, Some(OFFER));
+        let mut menus = menus();
+        let mut offer = LevelUpOffer::default();
+        offer.refresh(&mut menus, 3, Some(OFFER));
         let mut titles = Vec::new();
         for kind in [
             MenuKind::Start,
@@ -463,8 +400,9 @@ mod tests {
     /// carry the same one, and each prints the key that does the same thing.
     #[test]
     fn every_button_names_an_action_the_loop_handles() {
-        let mut menus = Menus::new();
-        menus.set_offer(2, Some(OFFER));
+        let mut menus = menus();
+        let mut offer = LevelUpOffer::default();
+        offer.refresh(&mut menus, 2, Some(OFFER));
         for kind in [
             MenuKind::Start,
             MenuKind::Paused,
@@ -498,8 +436,9 @@ mod tests {
     /// level, and each button prints the digit that takes it.
     #[test]
     fn the_level_up_menu_is_the_offer_it_was_given() {
-        let mut menus = Menus::new();
-        menus.set_offer(4, Some(OFFER));
+        let mut menus = menus();
+        let mut offer = LevelUpOffer::default();
+        offer.refresh(&mut menus, 4, Some(OFFER));
         menus.show(MenuKind::LevelUp);
         let menu = menus.current().expect("a menu");
         assert_eq!(menu.title, "LEVEL 4");
@@ -515,45 +454,82 @@ mod tests {
 
         // A second offer replaces it rather than appending to it.
         let next = [Upgrade::Vitality, Upgrade::RapidFire, Upgrade::LongBarrel];
-        menus.set_offer(5, Some(next));
+        offer.refresh(&mut menus, 5, Some(next));
         let menu = menus.current().expect("a menu");
         assert_eq!(menu.title, "LEVEL 5");
         assert_eq!(menu.items().len(), UPGRADE_CHOICES);
         assert_eq!(menu.items()[0].label, Upgrade::Vitality.label());
     }
 
+    /// **An unchanged offer rebuilds nothing**, which is what makes the
+    /// level-up screen usable at all.
+    ///
+    /// `draw_menu` calls `refresh` every frame, and
+    /// [`MenuSet::replace`](crcbl::ui::menu::MenuSet::replace) drops the
+    /// selection and the pointer's capture — so a guard that did not hold would
+    /// throw the player's highlight away sixty times a second and no upgrade
+    /// could ever be taken. The `None` case is the same call on the frames the
+    /// screen is not up, which is most of them.
+    #[test]
+    fn an_unchanged_offer_leaves_the_panel_and_its_selection_alone() {
+        let mut menus = menus();
+        let mut offer = LevelUpOffer::default();
+        offer.refresh(&mut menus, 3, Some(OFFER));
+        menus.show(MenuKind::LevelUp);
+        menus.select_next();
+        assert_eq!(activate(&mut menus), Some(MenuAction::Choose(1)));
+
+        // The frames after it: the same offer, then the frames where the screen
+        // is not up at all and `RenderState::offer` is `None`.
+        for _ in 0..3 {
+            offer.refresh(&mut menus, 3, Some(OFFER));
+        }
+        offer.refresh(&mut menus, 3, None);
+        assert_eq!(
+            activate(&mut menus),
+            Some(MenuAction::Choose(1)),
+            "a redundant refresh threw the selection away",
+        );
+        assert_eq!(
+            menus.current().expect("a menu").title,
+            "LEVEL 3",
+            "a `None` offer replaced the panel",
+        );
+    }
+
     /// **Keyboard activation works**, on every menu, and reports the action the
     /// selected button carries.
     #[test]
     fn the_keyboard_selects_and_activates() {
-        let mut menus = Menus::new();
-        menus.set_offer(1, Some(OFFER));
+        let mut menus = menus();
+        let mut offer = LevelUpOffer::default();
+        offer.refresh(&mut menus, 1, Some(OFFER));
         menus.show(MenuKind::Paused);
-        assert_eq!(menus.activate(), Some(MenuAction::Resume));
+        assert_eq!(activate(&mut menus), Some(MenuAction::Resume));
         menus.select_next();
-        assert_eq!(menus.activate(), Some(MenuAction::Fullscreen));
+        assert_eq!(activate(&mut menus), Some(MenuAction::Fullscreen));
         menus.select_next();
-        assert_eq!(menus.activate(), Some(MenuAction::DebugOverlay));
+        assert_eq!(activate(&mut menus), Some(MenuAction::DebugOverlay));
         menus.select_next();
-        assert_eq!(menus.activate(), Some(MenuAction::Resume), "it wraps");
+        assert_eq!(activate(&mut menus), Some(MenuAction::Resume), "it wraps");
         menus.select_previous();
-        assert_eq!(menus.activate(), Some(MenuAction::DebugOverlay));
+        assert_eq!(activate(&mut menus), Some(MenuAction::DebugOverlay));
 
         menus.show(MenuKind::LevelUp);
-        assert_eq!(menus.activate(), Some(MenuAction::Choose(0)));
+        assert_eq!(activate(&mut menus), Some(MenuAction::Choose(0)));
         menus.select_next();
         menus.select_next();
-        assert_eq!(menus.activate(), Some(MenuAction::Choose(2)));
+        assert_eq!(activate(&mut menus), Some(MenuAction::Choose(2)));
 
         menus.show(MenuKind::None);
-        assert_eq!(menus.activate(), None, "there is no menu to activate");
+        assert_eq!(activate(&mut menus), None, "there is no menu to activate");
     }
 
     /// Holding the commit key presses the highlighted button and nothing else,
     /// which is what selects the pressed frame of the skin.
     #[test]
     fn holding_the_commit_key_presses_the_selected_button() {
-        let mut menus = Menus::new();
+        let mut menus = menus();
         menus.show(MenuKind::Paused);
         menus.select_next();
         menus.press(true);
@@ -573,8 +549,9 @@ mod tests {
     fn the_pointer_clicks_a_button() {
         let atlas = FontAtlas::built_in();
         let extent = (960, 720);
-        let mut menus = Menus::new();
-        menus.set_offer(2, Some(OFFER));
+        let mut menus = menus();
+        let mut offer = LevelUpOffer::default();
+        offer.refresh(&mut menus, 2, Some(OFFER));
         menus.show(MenuKind::LevelUp);
 
         let layout = menus.current().expect("a menu").layout(extent, &atlas);
@@ -586,7 +563,7 @@ mod tests {
             down: true,
             released: false,
         };
-        assert_eq!(menus.point(extent, &atlas, down), None);
+        assert_eq!(point(&mut menus, extent, down), None);
         assert_eq!(
             menus.current().expect("a menu").state(1),
             ButtonState::Pressed,
@@ -598,7 +575,7 @@ mod tests {
             released: true,
         };
         assert_eq!(
-            menus.point(extent, &atlas, up),
+            point(&mut menus, extent, up),
             Some(MenuAction::Choose(1)),
             "the pointer took the wrong upgrade",
         );
@@ -608,13 +585,13 @@ mod tests {
             down: true,
             released: false,
         };
-        assert_eq!(menus.point(extent, &atlas, corner), None);
+        assert_eq!(point(&mut menus, extent, corner), None);
         let corner_up = PointerInput {
             pos: Vec2::new(3.0, 3.0),
             down: false,
             released: true,
         };
-        assert_eq!(menus.point(extent, &atlas, corner_up), None);
+        assert_eq!(point(&mut menus, extent, corner_up), None);
     }
 
     /// Switching menus drops the previous one's press capture, so a click that
@@ -624,14 +601,15 @@ mod tests {
     fn switching_menus_drops_the_press() {
         let atlas = FontAtlas::built_in();
         let extent = (960, 720);
-        let mut menus = Menus::new();
-        menus.set_offer(1, Some(OFFER));
+        let mut menus = menus();
+        let mut offer = LevelUpOffer::default();
+        offer.refresh(&mut menus, 1, Some(OFFER));
         menus.show(MenuKind::Paused);
         let layout = menus.current().expect("a menu").layout(extent, &atlas);
         let over = (layout.items()[0].min + layout.items()[0].max) * 0.5;
-        menus.point(
+        point(
+            &mut menus,
             extent,
-            &atlas,
             PointerInput {
                 pos: over,
                 down: true,
@@ -650,9 +628,9 @@ mod tests {
             "the new menu inherited a press nobody is making",
         );
         assert_eq!(
-            menus.point(
+            point(
+                &mut menus,
                 extent,
-                &atlas,
                 PointerInput {
                     pos: over,
                     down: false,
@@ -670,14 +648,15 @@ mod tests {
     fn a_new_offer_drops_the_press() {
         let atlas = FontAtlas::built_in();
         let extent = (960, 720);
-        let mut menus = Menus::new();
-        menus.set_offer(1, Some(OFFER));
+        let mut menus = menus();
+        let mut offer = LevelUpOffer::default();
+        offer.refresh(&mut menus, 1, Some(OFFER));
         menus.show(MenuKind::LevelUp);
         let layout = menus.current().expect("a menu").layout(extent, &atlas);
         let over = (layout.items()[0].min + layout.items()[0].max) * 0.5;
-        menus.point(
+        point(
+            &mut menus,
             extent,
-            &atlas,
             PointerInput {
                 pos: over,
                 down: true,
@@ -685,14 +664,15 @@ mod tests {
             },
         );
 
-        menus.set_offer(
+        offer.refresh(
+            &mut menus,
             2,
             Some([Upgrade::Vitality, Upgrade::Magnet, Upgrade::RapidFire]),
         );
         assert_eq!(
-            menus.point(
+            point(
+                &mut menus,
                 extent,
-                &atlas,
                 PointerInput {
                     pos: over,
                     down: false,

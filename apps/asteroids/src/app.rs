@@ -50,7 +50,7 @@ use glam::Vec2;
 
 use crate::game::{self, Game, GameState, RenderState};
 use crate::gpu::{Gpu, PendingGpu};
-use crate::menu::{MenuAction, MenuKind, Menus};
+use crate::menu::{self, MenuAction, MenuKind, Menus};
 
 pub use crate::args::Options;
 
@@ -336,7 +336,7 @@ impl<S: Shell + ?Sized> Loop<S> {
             draw_list: DrawList::new(),
             render_state: RenderState::default(),
             hud: HudStrings::default(),
-            menus: Menus::new(),
+            menus: menu::menus(),
             menu_layout: None,
             pointer: None,
             pointer_held: false,
@@ -498,7 +498,8 @@ impl<S: Shell + ?Sized> Loop<S> {
                                 if pressed {
                                     menus.press(true);
                                 } else {
-                                    keyboard_action = menus.activate();
+                                    keyboard_action =
+                                        menus.activate().and_then(MenuAction::from_id);
                                 }
                                 return;
                             }
@@ -536,17 +537,20 @@ impl<S: Shell + ?Sized> Loop<S> {
         // resolved here and not inside the pump: the rectangles depend on the
         // framebuffer's size, and a click checked against last frame's would miss
         // on the frame a resize lands.
-        let pointer_action = self.menus.point(
-            self.gpu.extent(),
-            self.gpu.atlas(),
-            PointerInput {
-                // A pointer that has never been in the window is nowhere, not at
-                // the origin — which is a real pixel, inside the HUD.
-                pos: self.pointer.unwrap_or(Vec2::splat(f32::NEG_INFINITY)),
-                down: pointer_down,
-                released: pointer_released,
-            },
-        );
+        let pointer_action = self
+            .menus
+            .point(
+                self.gpu.extent(),
+                self.gpu.atlas(),
+                PointerInput {
+                    // A pointer that has never been in the window is nowhere, not at
+                    // the origin — which is a real pixel, inside the HUD.
+                    pos: self.pointer.unwrap_or(Vec2::splat(f32::NEG_INFINITY)),
+                    down: pointer_down,
+                    released: pointer_released,
+                },
+            )
+            .and_then(MenuAction::from_id);
         if pointer_released {
             self.pointer_held = false;
         }

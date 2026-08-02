@@ -698,6 +698,222 @@ impl MenuLayout {
 }
 
 // ---------------------------------------------------------------------------
+// Menu set
+// ---------------------------------------------------------------------------
+
+/// Every menu one game owns, which of them is on screen, and the pointer's
+/// capture that outlives any single frame.
+///
+/// A [`Menu`] is one panel. A game has several — a start screen, a pause panel,
+/// whatever it shows when a run ends — and needs exactly three things a single
+/// menu cannot give it: a way to say which one this frame draws, a guarantee
+/// that switching between two does not carry a half-finished click across, and
+/// one [`UiState`] shared by all of them so a press captured on a button is the
+/// same capture the release is tested against.
+///
+/// `K` names the panels. It is the game's own enum, not one this crate
+/// dictates, because which states a game has is the one part of a menu system
+/// that is genuinely per-game. **A `K` with no menu in the set draws nothing**,
+/// which is how a "no menu this frame" state is spelled: give the set a `shown`
+/// it holds no entry for — a `None` variant, or `false` for a game whose only
+/// panel is a pause screen — and every method below becomes a no-op.
+///
+/// # What it does with the capture
+///
+/// [`UiState`] latches the widget a press started on so a release somewhere else
+/// fires nothing. That latch has to survive between frames, which means it also
+/// survives a menu being swapped out from under it, and a capture pointing at a
+/// button that is no longer on screen is how a click on the pause menu ends up
+/// firing whatever the start menu happens to draw in the same place. So both
+/// [`show`](Self::show) and [`replace`](Self::replace) drop it.
+///
+/// # Example
+///
+/// ```
+/// use crcbl_ui::menu::{Menu, MenuItem, MenuSet};
+///
+/// #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// enum Kind {
+///     None,
+///     Paused,
+/// }
+///
+/// let mut menus = MenuSet::new(
+///     Kind::None,
+///     vec![(
+///         Kind::Paused,
+///         Menu::new("PAUSED", vec![MenuItem::new(1, "RESUME", "ESC")]),
+///     )],
+/// );
+///
+/// // `Kind::None` has no menu, so the frame draws nothing and the keys do
+/// // nothing.
+/// assert!(!menus.is_showing());
+/// assert_eq!(menus.activate(), None);
+///
+/// menus.show(Kind::Paused);
+/// assert_eq!(menus.activate(), Some(1));
+/// ```
+#[derive(Debug)]
+pub struct MenuSet<K> {
+    /// The panels, keyed by the state each belongs to. A `Vec` rather than a
+    /// map because a game has a handful and they are walked, never hashed.
+    menus: Vec<(K, Menu)>,
+    /// Which of them this frame draws.
+    shown: K,
+    /// The pointer's capture, shared by every menu in the set — see the type's
+    /// docs for why it cannot be per-menu.
+    ui: UiState,
+}
+
+impl<K: Copy + Eq> MenuSet<K> {
+    /// A set of menus, with `shown` on screen.
+    ///
+    /// Pass the state that draws no menu as `shown` to open with none.
+    ///
+    /// # Panics
+    ///
+    /// If two entries name the same `K`. The second would be unreachable —
+    /// every lookup here takes the first match — so a game that built one by
+    /// mistake would have a panel it could never show and no way to notice.
+    #[must_use]
+    pub fn new(shown: K, menus: Vec<(K, Menu)>) -> Self {
+        for (index, (kind, _)) in menus.iter().enumerate() {
+            assert!(
+                !menus[..index].iter().any(|(seen, _)| seen == kind),
+                "two menus claim the same state",
+            );
+        }
+        Self {
+            menus,
+            shown,
+            ui: UiState::new(),
+        }
+    }
+
+    /// Which menu is being shown.
+    #[must_use]
+    pub const fn kind(&self) -> K {
+        self.shown
+    }
+
+    /// Whether this frame has a menu on it.
+    ///
+    /// False for a `shown` the set holds no menu for, which is what the games
+    /// use to decide whether the menu keys are the menu's this frame or the
+    /// simulation's.
+    #[must_use]
+    pub fn is_showing(&self) -> bool {
+        self.current().is_some()
+    }
+
+    /// Switches to the menu this frame shows.
+    ///
+    /// A change drops the outgoing menu's hover and held key and the pointer's
+    /// capture with it: a menu re-shown with a stale press on it draws a button
+    /// nobody is touching, and a capture left in [`UiState`] would credit the
+    /// next click to a widget that is no longer on screen.
+    ///
+    /// Showing what is already shown does nothing, so this is safe to call
+    /// every frame — which is how the games call it.
+    pub fn show(&mut self, kind: K) {
+        if kind == self.shown {
+            return;
+        }
+        if let Some(menu) = self.current_mut() {
+            menu.clear_input();
+        }
+        self.ui.clear();
+        self.shown = kind;
+    }
+
+    /// Swaps the menu a state draws, or adds it if the state had none.
+    ///
+    /// For a panel whose buttons are not known until the game is running — a
+    /// level-up screen offering three upgrades drawn from a seed. The capture
+    /// goes, for the same reason [`show`](Self::show) drops it: the button the
+    /// press landed on no longer says what it said.
+    ///
+    /// The caller decides *when* the menu is stale. This rebuilds
+    /// unconditionally, so calling it every frame would throw away the
+    /// selection every frame.
+    pub fn replace(&mut self, kind: K, menu: Menu) {
+        match self.menus.iter_mut().find(|(seen, _)| *seen == kind) {
+            Some(slot) => slot.1 = menu,
+            None => self.menus.push((kind, menu)),
+        }
+        self.ui.clear();
+    }
+
+    /// The menu being shown, or `None` on a frame with no menu on it.
+    #[must_use]
+    pub fn current(&self) -> Option<&Menu> {
+        let shown = self.shown;
+        self.menus
+            .iter()
+            .find_map(|(kind, menu)| (*kind == shown).then_some(menu))
+    }
+
+    /// The menu being shown, mutably.
+    pub fn current_mut(&mut self) -> Option<&mut Menu> {
+        let shown = self.shown;
+        self.menus
+            .iter_mut()
+            .find_map(|(kind, menu)| (*kind == shown).then_some(menu))
+    }
+
+    /// Moves the selection down, if there is a menu.
+    pub fn select_next(&mut self) {
+        if let Some(menu) = self.current_mut() {
+            menu.select_next();
+        }
+    }
+
+    /// Moves the selection up, if there is a menu.
+    pub fn select_previous(&mut self) {
+        if let Some(menu) = self.current_mut() {
+            menu.select_previous();
+        }
+    }
+
+    /// Holds the highlighted button down, or lets it up.
+    pub fn press(&mut self, down: bool) {
+        if let Some(menu) = self.current_mut() {
+            menu.press(down);
+        }
+    }
+
+    /// Fires the highlighted button, reporting the [`WidgetId`] it carries.
+    pub fn activate(&mut self) -> Option<WidgetId> {
+        self.current_mut().and_then(Menu::activate)
+    }
+
+    /// Runs one frame of pointer input against the menu on screen.
+    ///
+    /// The layout is recomputed here rather than kept, because it depends on
+    /// the framebuffer's size and on the menu's own contents and both can
+    /// change between frames — and a hit test against last frame's rectangles
+    /// is how a resized window gets buttons that are not where they are drawn.
+    pub fn point(
+        &mut self,
+        extent: (u32, u32),
+        atlas: &FontAtlas,
+        pointer: PointerInput,
+    ) -> Option<WidgetId> {
+        // The menus and the capture are borrowed as **separate fields**: a
+        // `self.current_mut()` here would borrow the whole struct and `self.ui`
+        // with it.
+        let shown = self.shown;
+        let menu = self
+            .menus
+            .iter_mut()
+            .find_map(|(kind, menu)| (*kind == shown).then_some(menu))?;
+        let layout = menu.layout(extent, atlas);
+        menu.point(&layout, &mut self.ui, pointer)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1153,5 +1369,290 @@ mod tests {
             let (min, max) = layout.panel();
             assert!(layout.title_pos().x >= min.x && title_end <= max.x);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // MenuSet
+    // -----------------------------------------------------------------------
+
+    /// A stand-in for a game's own menu states — the shape every sample has:
+    /// one variant that draws nothing and the rest one panel each.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Kind {
+        None,
+        Start,
+        Paused,
+    }
+
+    fn start_menu() -> Menu {
+        Menu::new(
+            "START",
+            vec![
+                MenuItem::new(10, "PLAY", "SPACE"),
+                MenuItem::new(2, "FULLSCREEN", "F11"),
+            ],
+        )
+    }
+
+    fn menus() -> MenuSet<Kind> {
+        MenuSet::new(
+            Kind::None,
+            vec![(Kind::Start, start_menu()), (Kind::Paused, pause_menu())],
+        )
+    }
+
+    /// The centre of the `index`-th button, in framebuffer pixels.
+    fn over(menus: &MenuSet<Kind>, extent: (u32, u32), index: usize) -> Vec2 {
+        let layout = menus.current().expect("a menu").layout(extent, &atlas());
+        let item = layout.items()[index];
+        (item.min + item.max) * 0.5
+    }
+
+    fn press_at(pos: Vec2) -> PointerInput {
+        PointerInput {
+            pos,
+            down: true,
+            released: false,
+        }
+    }
+
+    fn release_at(pos: Vec2) -> PointerInput {
+        PointerInput {
+            pos,
+            down: false,
+            released: true,
+        }
+    }
+
+    /// **A state the set holds no menu for draws nothing and takes no input.**
+    /// This is how every sample spells "no menu this frame" — there is no
+    /// separate `Option`, the state simply has no entry — so if any of these
+    /// were to act on the last menu shown, a playing frame would be steering a
+    /// panel nobody can see.
+    #[test]
+    fn a_state_with_no_menu_draws_nothing_and_takes_no_input() {
+        let extent = (960, 720);
+        let mut menus = menus();
+        assert_eq!(menus.kind(), Kind::None);
+        assert!(!menus.is_showing());
+        assert!(menus.current().is_none());
+        assert!(menus.current_mut().is_none());
+        assert_eq!(menus.activate(), None, "there is no menu to activate");
+        assert_eq!(menus.point(extent, &atlas(), press_at(Vec2::ZERO)), None);
+
+        // And the keys are not merely ignored on the way in: they must not have
+        // moved the menu that is *about* to be shown.
+        menus.select_next();
+        menus.select_previous();
+        menus.press(true);
+        menus.show(Kind::Paused);
+        assert!(menus.is_showing());
+        assert_eq!(menus.current().expect("a menu").selected(), 0);
+        assert_eq!(
+            menus.current().expect("a menu").state(0),
+            ButtonState::Hovered
+        );
+    }
+
+    /// **Keyboard activation works**, on whichever menu is shown, and reports
+    /// the id the selected button carries.
+    #[test]
+    fn the_keyboard_selects_and_activates() {
+        let mut menus = menus();
+        menus.show(Kind::Paused);
+        assert_eq!(menus.activate(), Some(1));
+        menus.select_next();
+        assert_eq!(menus.activate(), Some(2));
+        menus.select_next();
+        assert_eq!(menus.activate(), Some(3));
+        menus.select_next();
+        assert_eq!(menus.activate(), Some(1), "it wraps");
+        menus.select_previous();
+        assert_eq!(menus.activate(), Some(3));
+
+        // A different menu has its own selection and its own ids.
+        menus.show(Kind::Start);
+        assert_eq!(menus.activate(), Some(10));
+    }
+
+    /// Holding the commit key presses the highlighted button and nothing else,
+    /// which is what selects the pressed frame of the skin.
+    #[test]
+    fn holding_the_commit_key_presses_the_selected_button() {
+        let mut menus = menus();
+        menus.show(Kind::Paused);
+        menus.select_next();
+        menus.press(true);
+        let menu = menus.current().expect("a menu");
+        assert_eq!(menu.state(1), ButtonState::Pressed);
+        assert_eq!(menu.state(0), ButtonState::Idle);
+        menus.press(false);
+        assert_eq!(
+            menus.current().expect("a menu").state(1),
+            ButtonState::Hovered,
+        );
+    }
+
+    /// **The pointer activates too**, reporting the same ids, and a click over
+    /// nothing fires nothing.
+    #[test]
+    fn the_pointer_clicks_a_button() {
+        let extent = (960, 720);
+        let mut menus = menus();
+        menus.show(Kind::Paused);
+        let target = over(&menus, extent, 1);
+
+        assert_eq!(menus.point(extent, &atlas(), press_at(target)), None);
+        assert_eq!(
+            menus.current().expect("a menu").state(1),
+            ButtonState::Pressed,
+            "the pointer's press did not reach the art",
+        );
+        assert_eq!(menus.point(extent, &atlas(), release_at(target)), Some(2));
+
+        let corner = Vec2::new(3.0, 3.0);
+        assert_eq!(menus.point(extent, &atlas(), press_at(corner)), None);
+        assert_eq!(menus.point(extent, &atlas(), release_at(corner)), None);
+    }
+
+    /// **Switching menus drops the press capture**, so a click that started on
+    /// one menu cannot land on another menu's button.
+    ///
+    /// The reason [`UiState`] lives in the set rather than in each [`Menu`]:
+    /// the capture spans frames, and the menu on screen can change between
+    /// them.
+    ///
+    /// **The press is put on the `FULLSCREEN` button deliberately, because both
+    /// menus carry it under the same [`WidgetId`].** [`UiState::interact`]
+    /// fires on release only when the capture names the *same* id the cursor is
+    /// over, so a press parked on an id the new menu does not have could not
+    /// fire whatever the set did with it — and a test built that way would pass
+    /// with the capture never cleared at all.
+    #[test]
+    fn switching_menus_drops_the_press() {
+        let extent = (960, 720);
+        let mut menus = menus();
+        menus.show(Kind::Paused);
+        assert_eq!(
+            menus.current().expect("a menu").items()[1].id,
+            start_menu().items()[1].id,
+            "the two menus stopped sharing a button, so this test guards nothing",
+        );
+
+        menus.point(extent, &atlas(), press_at(over(&menus, extent, 1)));
+        assert_eq!(
+            menus.current().expect("a menu").state(1),
+            ButtonState::Pressed,
+        );
+
+        menus.show(Kind::Start);
+        assert_eq!(
+            menus.current().expect("a menu").state(0),
+            ButtonState::Hovered,
+            "the new menu inherited a press nobody is making",
+        );
+        let shared = over(&menus, extent, 1);
+        assert_eq!(
+            menus.point(extent, &atlas(), release_at(shared)),
+            None,
+            "a release fired a button whose press was on another menu",
+        );
+
+        // And the menu that was left behind is clean when it comes back. The
+        // capture is only half of it: the outgoing menu holds its own hover and
+        // pressed flags, and a panel re-shown still lit up draws a button
+        // nobody is touching. `Idle` rather than `Hovered` because the pointer
+        // pressed the second button while the selection stayed on the first —
+        // an uncleared menu reports this one `Pressed`.
+        menus.show(Kind::Paused);
+        assert_eq!(
+            menus.current().expect("a menu").state(1),
+            ButtonState::Idle,
+            "the menu came back still holding the press it was left with",
+        );
+    }
+
+    /// Showing what is already shown changes nothing — the samples call `show`
+    /// every frame, so an unconditional clear here would throw the selection
+    /// and the press away sixty times a second.
+    #[test]
+    fn showing_the_same_menu_again_keeps_the_selection_and_the_press() {
+        let mut menus = menus();
+        menus.show(Kind::Paused);
+        menus.select_next();
+        menus.press(true);
+        menus.show(Kind::Paused);
+        assert_eq!(menus.current().expect("a menu").selected(), 1);
+        assert_eq!(
+            menus.current().expect("a menu").state(1),
+            ButtonState::Pressed,
+        );
+    }
+
+    /// **A replaced menu drops the capture too** — the press was on a button
+    /// that no longer says what it said. For a panel whose buttons are built
+    /// while the game runs.
+    ///
+    /// The replacement keeps the **same ids** on purpose, which is what a
+    /// rebuilt panel really looks like: the same three slots, three different
+    /// things in them. Ids that changed would make the stale capture
+    /// unmatchable and the test green whatever `replace` did — see
+    /// [`switching_menus_drops_the_press`].
+    #[test]
+    fn a_replaced_menu_drops_the_press() {
+        let extent = (960, 720);
+        let mut menus = menus();
+        menus.show(Kind::Start);
+        menus.point(extent, &atlas(), press_at(over(&menus, extent, 0)));
+        assert_eq!(
+            menus.current().expect("a menu").state(0),
+            ButtonState::Pressed,
+        );
+
+        menus.replace(
+            Kind::Start,
+            Menu::new(
+                "START",
+                vec![
+                    MenuItem::new(10, "OTHER", "SPACE"),
+                    MenuItem::new(2, "FULLSCREEN", "F11"),
+                ],
+            ),
+        );
+        assert_eq!(
+            menus.current().expect("a menu").items()[0].label,
+            "OTHER",
+            "the swap did not take",
+        );
+        let same_slot = over(&menus, extent, 0);
+        assert_eq!(
+            menus.point(extent, &atlas(), release_at(same_slot)),
+            None,
+            "a release fired a button the player never pressed",
+        );
+    }
+
+    /// `replace` on a state that had no menu adds one, so a set can be filled
+    /// in after it is built.
+    #[test]
+    fn replacing_a_state_with_no_menu_adds_it() {
+        let mut menus = MenuSet::new(Kind::None, vec![(Kind::Paused, pause_menu())]);
+        menus.show(Kind::Start);
+        assert!(!menus.is_showing(), "Start has no menu yet");
+        menus.replace(Kind::Start, start_menu());
+        assert!(menus.is_showing());
+        assert_eq!(menus.current().expect("a menu").title, "START");
+        assert_eq!(menus.activate(), Some(10));
+    }
+
+    /// Two menus for one state is rejected at construction: the second would be
+    /// unreachable, because every lookup takes the first match.
+    #[test]
+    #[should_panic(expected = "two menus claim the same state")]
+    fn two_menus_for_one_state_is_rejected() {
+        let _ = MenuSet::new(
+            Kind::None,
+            vec![(Kind::Paused, pause_menu()), (Kind::Paused, start_menu())],
+        );
     }
 }

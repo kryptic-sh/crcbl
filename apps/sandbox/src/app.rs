@@ -65,7 +65,7 @@ use crcbl::shell::{
 use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::{DebugOverlay, PointerInput};
 
-use crate::menu::{MenuAction, Menus};
+use crate::menu::{self, MenuAction, Menus};
 
 use crate::gpu::{FrameOutcome, Gpu, GpuError};
 
@@ -446,7 +446,7 @@ impl<S: Shell + ?Sized> Loop<S> {
             draw_list: DrawList::new(),
             debug: DebugOverlay::with_visible(options.debug_overlay_visible()),
             paused: false,
-            menus: Menus::new(),
+            menus: menu::menus(),
             pointer: None,
             pointer_held: false,
             mode_honoured: true,
@@ -566,7 +566,7 @@ impl<S: Shell + ?Sized> Loop<S> {
                             if pressed {
                                 menus.press(true);
                             } else {
-                                keyboard_action = menus.activate();
+                                keyboard_action = menus.activate().and_then(MenuAction::from_id);
                             }
                         }
                         _ => {}
@@ -587,19 +587,22 @@ impl<S: Shell + ?Sized> Loop<S> {
         // press capture exists to prevent. Except when the press *also* arrived
         // this frame: a click faster than a frame must latch and fire together.
         let pointer_down = pointer_pressed || (self.pointer_held && !pointer_released);
-        let pointer_action = self.menus.point(
-            self.gpu.extent(),
-            self.gpu.atlas(),
-            PointerInput {
-                // A pointer that has never been in the window is nowhere, not at
-                // the origin — which is a real pixel.
-                pos: self
-                    .pointer
-                    .unwrap_or(crcbl::math::Vec2::splat(f32::NEG_INFINITY)),
-                down: pointer_down,
-                released: pointer_released,
-            },
-        );
+        let pointer_action = self
+            .menus
+            .point(
+                self.gpu.extent(),
+                self.gpu.atlas(),
+                PointerInput {
+                    // A pointer that has never been in the window is nowhere, not at
+                    // the origin — which is a real pixel.
+                    pos: self
+                        .pointer
+                        .unwrap_or(crcbl::math::Vec2::splat(f32::NEG_INFINITY)),
+                    down: pointer_down,
+                    released: pointer_released,
+                },
+            )
+            .and_then(MenuAction::from_id);
         if pointer_released {
             self.pointer_held = false;
         }

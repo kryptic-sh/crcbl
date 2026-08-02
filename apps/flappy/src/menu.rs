@@ -13,6 +13,13 @@
 //! genuinely is flappy's: **which menu a frame of this game shows, and what
 //! happens when a button is fired.**
 //!
+//! **The container is no longer written here.** `Menus` was a hand-rolled copy
+//! of the same struct in every sample; it is now
+//! [`crcbl::ui::menu::MenuSet`], keyed by this game's [`MenuKind`]. What stays
+//! per-game is what was always genuinely per-game: the [`MenuAction`] enum and
+//! its `WidgetId` discriminants, the [`MenuKind::of`] precedence rule, the
+//! titles and the labels.
+//!
 //! # There is no win menu, and that is not an omission
 //!
 //! Flappy is endless. There is no state to reach and no score to beat but the
@@ -39,8 +46,8 @@
 //! rather than a surprise. Nothing else changes: every key still does what it
 //! did the moment the panel is dismissed.
 
-use crcbl::ui::menu::{Menu, MenuItem};
-use crcbl::ui::{PointerInput, UiState, WidgetId};
+use crcbl::ui::WidgetId;
+use crcbl::ui::menu::{Menu, MenuItem, MenuSet};
 
 use crate::game::{GameState, RenderState};
 
@@ -135,153 +142,56 @@ impl MenuKind {
     }
 }
 
-/// Flappy's three menus, the one being shown, and the pointer's capture.
-#[derive(Debug)]
-pub struct Menus {
-    start: Menu,
-    paused: Menu,
-    dead: Menu,
-    shown: MenuKind,
-    ui: UiState,
-}
+/// Flappy's menus, keyed by the state each belongs to.
+///
+/// The container is [`crcbl::ui::menu::MenuSet`] — shared with every other
+/// sample, because holding a handful of panels and switching between them
+/// without carrying a half-finished click across is not something a game should
+/// own. [`MenuKind::None`] has no entry in it, which is how a flying frame is
+/// told to draw nothing.
+pub type Menus = MenuSet<MenuKind>;
 
-impl Default for Menus {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Menus {
-    /// The three menus, with nothing shown.
-    #[must_use]
-    pub fn new() -> Self {
-        use MenuAction::{DebugOverlay, Flap, Fullscreen, Resume};
-        Self {
-            start: Menu::new(
-                "FLAPPY",
-                vec![
-                    item(Flap, "FLY", "SPACE"),
-                    item(Fullscreen, "FULLSCREEN", "F11"),
-                    item(DebugOverlay, "DEBUG PANEL", "F3"),
-                ],
+/// The three menus, with nothing shown.
+#[must_use]
+pub fn menus() -> Menus {
+    use MenuAction::{DebugOverlay, Flap, Fullscreen, Resume};
+    MenuSet::new(
+        MenuKind::None,
+        vec![
+            (
+                MenuKind::Start,
+                Menu::new(
+                    "FLAPPY",
+                    vec![
+                        item(Flap, "FLY", "SPACE"),
+                        item(Fullscreen, "FULLSCREEN", "F11"),
+                        item(DebugOverlay, "DEBUG PANEL", "F3"),
+                    ],
+                ),
             ),
-            paused: Menu::new(
-                "PAUSED",
-                vec![
-                    item(Resume, "RESUME", "ESC"),
-                    item(Fullscreen, "FULLSCREEN", "F11"),
-                    item(DebugOverlay, "DEBUG PANEL", "F3"),
-                ],
+            (
+                MenuKind::Paused,
+                Menu::new(
+                    "PAUSED",
+                    vec![
+                        item(Resume, "RESUME", "ESC"),
+                        item(Fullscreen, "FULLSCREEN", "F11"),
+                        item(DebugOverlay, "DEBUG PANEL", "F3"),
+                    ],
+                ),
             ),
-            dead: Menu::new(
-                "GAME OVER",
-                vec![
-                    item(Flap, "TRY AGAIN", "SPACE"),
-                    item(Fullscreen, "FULLSCREEN", "F11"),
-                ],
+            (
+                MenuKind::Dead,
+                Menu::new(
+                    "GAME OVER",
+                    vec![
+                        item(Flap, "TRY AGAIN", "SPACE"),
+                        item(Fullscreen, "FULLSCREEN", "F11"),
+                    ],
+                ),
             ),
-            shown: MenuKind::None,
-            ui: UiState::new(),
-        }
-    }
-
-    /// Switches to the menu this frame shows.
-    ///
-    /// A change drops the previous menu's hover and held key: a menu re-shown
-    /// with a stale press on it draws a button nobody is touching, and a capture
-    /// left in [`UiState`] would credit the next click to a widget that is no
-    /// longer on screen.
-    pub fn show(&mut self, kind: MenuKind) {
-        if kind == self.shown {
-            return;
-        }
-        if let Some(menu) = self.current_mut() {
-            menu.clear_input();
-        }
-        self.ui.clear();
-        self.shown = kind;
-    }
-
-    /// Which menu is being shown.
-    #[must_use]
-    pub const fn kind(&self) -> MenuKind {
-        self.shown
-    }
-
-    /// The menu being shown, or `None` on a frame with no menu on it.
-    #[must_use]
-    pub const fn current(&self) -> Option<&Menu> {
-        match self.shown {
-            MenuKind::None => None,
-            MenuKind::Start => Some(&self.start),
-            MenuKind::Paused => Some(&self.paused),
-            MenuKind::Dead => Some(&self.dead),
-        }
-    }
-
-    /// The menu being shown, mutably.
-    pub const fn current_mut(&mut self) -> Option<&mut Menu> {
-        match self.shown {
-            MenuKind::None => None,
-            MenuKind::Start => Some(&mut self.start),
-            MenuKind::Paused => Some(&mut self.paused),
-            MenuKind::Dead => Some(&mut self.dead),
-        }
-    }
-
-    /// Moves the selection down, if there is a menu.
-    pub fn select_next(&mut self) {
-        if let Some(menu) = self.current_mut() {
-            menu.select_next();
-        }
-    }
-
-    /// Moves the selection up, if there is a menu.
-    pub fn select_previous(&mut self) {
-        if let Some(menu) = self.current_mut() {
-            menu.select_previous();
-        }
-    }
-
-    /// Holds the highlighted button down, or lets it up.
-    pub fn press(&mut self, down: bool) {
-        if let Some(menu) = self.current_mut() {
-            menu.press(down);
-        }
-    }
-
-    /// Fires the highlighted button.
-    pub fn activate(&mut self) -> Option<MenuAction> {
-        self.current_mut()
-            .and_then(Menu::activate)
-            .and_then(MenuAction::from_id)
-    }
-
-    /// Runs one frame of pointer input against the menu on screen.
-    ///
-    /// The layout is recomputed here rather than kept, because it depends on the
-    /// framebuffer's size and on the menu's own contents and both can change
-    /// between frames — and a hit test against last frame's rectangles is how a
-    /// resized window gets buttons that are not where they are drawn.
-    pub fn point(
-        &mut self,
-        extent: (u32, u32),
-        atlas: &crcbl::ui::text::FontAtlas,
-        pointer: PointerInput,
-    ) -> Option<MenuAction> {
-        // The menu and the capture are borrowed as **separate fields**: a
-        // `current_mut()` here would borrow the whole struct and `self.ui` with
-        // it, which is the one place this container's shape shows through.
-        let menu = match self.shown {
-            MenuKind::None => return None,
-            MenuKind::Start => &mut self.start,
-            MenuKind::Paused => &mut self.paused,
-            MenuKind::Dead => &mut self.dead,
-        };
-        let layout = menu.layout(extent, atlas);
-        menu.point(&layout, &mut self.ui, pointer)
-            .and_then(MenuAction::from_id)
-    }
+        ],
+    )
 }
 
 // ---- tests ------------------------------------------------------------------
@@ -289,9 +199,25 @@ impl Menus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl::ui::ButtonState;
     use crcbl::ui::text::FontAtlas;
+    use crcbl::ui::{ButtonState, PointerInput};
     use glam::Vec2;
+
+    /// The action the highlighted button carries, which is what the loop reads.
+    ///
+    /// The set deals in [`WidgetId`] — it is shared with every other sample and
+    /// has no idea what an id means here — so this is the one translation, in
+    /// one place, the way `app.rs` does it.
+    fn activate(menus: &mut Menus) -> Option<MenuAction> {
+        menus.activate().and_then(MenuAction::from_id)
+    }
+
+    /// The action a frame of pointer input fired, if any.
+    fn point(menus: &mut Menus, extent: (u32, u32), pointer: PointerInput) -> Option<MenuAction> {
+        menus
+            .point(extent, &FontAtlas::built_in(), pointer)
+            .and_then(MenuAction::from_id)
+    }
 
     fn render(state: Option<GameState>) -> RenderState {
         RenderState {
@@ -321,7 +247,7 @@ mod tests {
         // And the container really draws one menu: `current` is a single
         // `Option`, so "and nothing else" is structural — but the titles must
         // differ, or two kinds could draw the same panel and nobody would know.
-        let mut menus = Menus::new();
+        let mut menus = menus();
         let mut titles = Vec::new();
         for kind in [MenuKind::Start, MenuKind::Paused, MenuKind::Dead] {
             menus.show(kind);
@@ -364,7 +290,7 @@ mod tests {
     /// carry the same one, and each prints the key that does the same thing.
     #[test]
     fn every_button_names_an_action_the_loop_handles() {
-        let mut menus = Menus::new();
+        let mut menus = menus();
         for kind in [MenuKind::Start, MenuKind::Paused, MenuKind::Dead] {
             menus.show(kind);
             let menu = menus.current().expect("a menu");
@@ -394,7 +320,7 @@ mod tests {
     /// one the menu does not take — see this module's header.
     #[test]
     fn every_flap_button_prints_the_key_the_menu_does_not_take() {
-        let mut menus = Menus::new();
+        let mut menus = menus();
         for kind in [MenuKind::Start, MenuKind::Dead] {
             menus.show(kind);
             for item in menus.current().expect("a menu").items() {
@@ -409,27 +335,27 @@ mod tests {
     /// selected button carries.
     #[test]
     fn the_keyboard_selects_and_activates() {
-        let mut menus = Menus::new();
+        let mut menus = menus();
         menus.show(MenuKind::Paused);
-        assert_eq!(menus.activate(), Some(MenuAction::Resume));
+        assert_eq!(activate(&mut menus), Some(MenuAction::Resume));
         menus.select_next();
-        assert_eq!(menus.activate(), Some(MenuAction::Fullscreen));
+        assert_eq!(activate(&mut menus), Some(MenuAction::Fullscreen));
         menus.select_next();
-        assert_eq!(menus.activate(), Some(MenuAction::DebugOverlay));
+        assert_eq!(activate(&mut menus), Some(MenuAction::DebugOverlay));
         menus.select_next();
-        assert_eq!(menus.activate(), Some(MenuAction::Resume), "it wraps");
+        assert_eq!(activate(&mut menus), Some(MenuAction::Resume), "it wraps");
         menus.select_previous();
-        assert_eq!(menus.activate(), Some(MenuAction::DebugOverlay));
+        assert_eq!(activate(&mut menus), Some(MenuAction::DebugOverlay));
 
         menus.show(MenuKind::None);
-        assert_eq!(menus.activate(), None, "there is no menu to activate");
+        assert_eq!(activate(&mut menus), None, "there is no menu to activate");
     }
 
     /// Holding the commit key presses the highlighted button and nothing else,
     /// which is what selects the pressed frame of the skin.
     #[test]
     fn holding_the_commit_key_presses_the_selected_button() {
-        let mut menus = Menus::new();
+        let mut menus = menus();
         menus.show(MenuKind::Start);
         menus.select_next();
         menus.press(true);
@@ -449,7 +375,7 @@ mod tests {
     fn the_pointer_clicks_a_button() {
         let atlas = FontAtlas::built_in();
         let extent = (960, 720);
-        let mut menus = Menus::new();
+        let mut menus = menus();
         menus.show(MenuKind::Dead);
 
         let layout = menus.current().expect("a menu").layout(extent, &atlas);
@@ -461,7 +387,7 @@ mod tests {
             down: true,
             released: false,
         };
-        assert_eq!(menus.point(extent, &atlas, down), None);
+        assert_eq!(point(&mut menus, extent, down), None);
         assert_eq!(
             menus.current().expect("a menu").state(0),
             ButtonState::Pressed,
@@ -472,20 +398,20 @@ mod tests {
             down: false,
             released: true,
         };
-        assert_eq!(menus.point(extent, &atlas, up), Some(MenuAction::Flap));
+        assert_eq!(point(&mut menus, extent, up), Some(MenuAction::Flap));
 
         let corner = PointerInput {
             pos: Vec2::new(3.0, 3.0),
             down: true,
             released: false,
         };
-        assert_eq!(menus.point(extent, &atlas, corner), None);
+        assert_eq!(point(&mut menus, extent, corner), None);
         let corner_up = PointerInput {
             pos: Vec2::new(3.0, 3.0),
             down: false,
             released: true,
         };
-        assert_eq!(menus.point(extent, &atlas, corner_up), None);
+        assert_eq!(point(&mut menus, extent, corner_up), None);
     }
 
     /// Switching menus drops the previous one's press capture, so a click that
@@ -495,13 +421,13 @@ mod tests {
     fn switching_menus_drops_the_press() {
         let atlas = FontAtlas::built_in();
         let extent = (960, 720);
-        let mut menus = Menus::new();
+        let mut menus = menus();
         menus.show(MenuKind::Paused);
         let layout = menus.current().expect("a menu").layout(extent, &atlas);
         let over = (layout.items()[0].min + layout.items()[0].max) * 0.5;
-        menus.point(
+        point(
+            &mut menus,
             extent,
-            &atlas,
             PointerInput {
                 pos: over,
                 down: true,
@@ -520,9 +446,9 @@ mod tests {
             "the new menu inherited a press nobody is making",
         );
         assert_eq!(
-            menus.point(
+            point(
+                &mut menus,
                 extent,
-                &atlas,
                 PointerInput {
                     pos: over,
                     down: false,

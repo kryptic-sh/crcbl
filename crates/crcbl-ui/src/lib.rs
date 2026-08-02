@@ -41,7 +41,7 @@ pub use debug::{
 pub use draw_list::{DrawCommand, DrawList, Vertex2d};
 pub use hud::{Anchor, Hud, HudPanel};
 pub use menu::{
-    BUTTON_INSETS, FIT_FRACTION, Menu, MenuItem, MenuItemLayout, MenuLayout, MenuStyle,
+    BUTTON_INSETS, FIT_FRACTION, Menu, MenuItem, MenuItemLayout, MenuLayout, MenuSet, MenuStyle,
     PANEL_INSETS,
 };
 pub use text::{

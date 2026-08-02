@@ -69,7 +69,7 @@ use glam::Vec2;
 
 use crate::game::{self, Game, GameState, RenderState, UPGRADE_CHOICES};
 use crate::gpu::{Gpu, PendingGpu};
-use crate::menu::{MenuAction, MenuKind, Menus};
+use crate::menu::{self, LevelUpOffer, MenuAction, MenuKind, Menus};
 
 pub use crate::args::Options;
 
@@ -221,6 +221,9 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
     hud: HudStrings,
     /// The pause, level-up and death menus, and which is on screen.
     menus: Menus,
+    /// Which offer the level-up panel was last built from — see
+    /// [`LevelUpOffer`], and `draw_menu` for when it is consulted.
+    offer: LevelUpOffer,
     /// Where [`Loop::draw_menu`] last laid the menu out, or `None` on a frame
     /// that showed none.
     ///
@@ -379,7 +382,8 @@ impl<S: Shell + ?Sized> Loop<S> {
             draw_list: DrawList::new(),
             render_state: RenderState::default(),
             hud: HudStrings::default(),
-            menus: Menus::new(),
+            menus: menu::menus(),
+            offer: LevelUpOffer::default(),
             menu_layout: None,
             pointer: None,
             pointer_held: false,
@@ -542,7 +546,8 @@ impl<S: Shell + ?Sized> Loop<S> {
                                 if pressed {
                                     menus.press(true);
                                 } else {
-                                    keyboard_action = menus.activate();
+                                    keyboard_action =
+                                        menus.activate().and_then(MenuAction::from_id);
                                 }
                                 return;
                             }
@@ -580,17 +585,20 @@ impl<S: Shell + ?Sized> Loop<S> {
         // resolved here and not inside the pump: the rectangles depend on the
         // framebuffer's size, and a click checked against last frame's would miss
         // on the frame a resize lands.
-        let pointer_action = self.menus.point(
-            self.gpu.extent(),
-            self.gpu.atlas(),
-            PointerInput {
-                // A pointer that has never been in the window is nowhere, not at
-                // the origin — which is a real pixel, inside the HUD.
-                pos: self.pointer.unwrap_or(Vec2::splat(f32::NEG_INFINITY)),
-                down: pointer_down,
-                released: pointer_released,
-            },
-        );
+        let pointer_action = self
+            .menus
+            .point(
+                self.gpu.extent(),
+                self.gpu.atlas(),
+                PointerInput {
+                    // A pointer that has never been in the window is nowhere, not at
+                    // the origin — which is a real pixel, inside the HUD.
+                    pos: self.pointer.unwrap_or(Vec2::splat(f32::NEG_INFINITY)),
+                    down: pointer_down,
+                    released: pointer_released,
+                },
+            )
+            .and_then(MenuAction::from_id);
         if pointer_released {
             self.pointer_held = false;
         }
@@ -739,8 +747,11 @@ impl<S: Shell + ?Sized> Loop<S> {
     fn draw_menu(&mut self) {
         // Before `show`, so the panel a level-up frame switches to is already
         // the one this level's offer built.
-        self.menus
-            .set_offer(self.render_state.level, self.render_state.offer);
+        self.offer.refresh(
+            &mut self.menus,
+            self.render_state.level,
+            self.render_state.offer,
+        );
         self.menus
             .show(MenuKind::of(self.paused, &self.render_state));
         self.menu_layout = self

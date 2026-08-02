@@ -450,6 +450,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   are named after their file stems; two inputs whose stems collide, or a stem
   the format cannot spell back, are refused rather than written out. An existing
   output is left alone without `--force`.
+- **crcbl-ui**: `MenuSet<K>`, the container a game keeps its menus in. `Menu` is
+  one panel; a game has several and needs to say which one a frame draws, to
+  switch between them without carrying a half-finished click across, and to
+  share one `UiState` so a press and its release are tested against the same
+  capture. `K` is the game's own state type rather than one this crate dictates,
+  and **a `K` the set holds no menu for draws nothing** — which is how "no menu
+  this frame" is spelled, with no separate `Option`. `show`, `current`,
+  `current_mut`, `is_showing`, `kind`, `select_next`, `select_previous`,
+  `press`, `activate`, `point`, and `replace` for a panel whose buttons are
+  built while the game runs. Both `show` and `replace` drop the pointer's
+  capture; two entries claiming the same `K` are refused at construction,
+  because the second would be unreachable.
 
 ### Changed
 
