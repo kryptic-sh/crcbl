@@ -115,16 +115,29 @@ pub struct SpriteInstance {
     pub uv: [f32; 4],
     /// Straight-alpha RGBA multiplied into the sampled texel.
     pub tint: [f32; 4],
-    /// The sheet's texel size and its sample mode: `[width, height, mode, 0]`,
-    /// exactly as [`sheet_lane`] packs it.
+    /// The sheet's texel size, its sample mode, and **this sprite's rotation**:
+    /// `[width, height, mode, radians]`.
     ///
-    /// **Both are properties of the sheet, and they travel per sprite anyway.**
-    /// The shader cannot get them anywhere else: set 1 binds one image and one
-    /// sampler, and a shader has no way to ask a `SamplerState` which filter it
-    /// was created with. See `sprite.slang`'s `SpriteInstance::sheet` for the
-    /// alternatives that were not taken — a third descriptor set, or a second
-    /// pipeline — and why sixteen bytes on a buffer that is written per frame
-    /// anyway is the cheaper one.
+    /// The first three are [`sheet_lane`]'s packing; the fourth is
+    /// [`Sprite::rotation`], stamped on by [`Sprite::instance`] because it is the
+    /// one component of this lane that belongs to the sprite rather than to the
+    /// sheet.
+    ///
+    /// **The size and the mode are properties of the sheet, and they travel per
+    /// sprite anyway.** The shader cannot get them anywhere else: set 1 binds one
+    /// image and one sampler, and a shader has no way to ask a `SamplerState`
+    /// which filter it was created with. See `sprite.slang`'s
+    /// `SpriteInstance::sheet` for the alternatives that were not taken — a third
+    /// descriptor set, or a second pipeline — and why sixteen bytes on a buffer
+    /// that is written per frame anyway is the cheaper one.
+    ///
+    /// **The fourth component was padding.** `sprite.slang` read `sheet.z` for
+    /// the mode and handed `sheet.xyz` to the fragment stage, and nothing —
+    /// neither the Slang source, nor the compiled WGSL, nor the compiled SPIR-V,
+    /// where the only two uses of the loaded lane are a `CompositeExtract … 2`
+    /// and a `VectorShuffle … 0 1 2` — ever touched `w`. So the angle cost no
+    /// bytes: the instance is still four `float4`s and still
+    /// [`INSTANCE_STRIDE`] 64.
     pub sheet: [f32; 4],
 }
 
@@ -148,6 +161,9 @@ pub const SAMPLE_SMOOTH: f32 = 0.0;
 /// A named function rather than a literal inside `register_sheet`, because it is
 /// the one place the mode is turned into a number and the shader's `lerp` weight
 /// is only a selection while that number is exactly 0 or 1.
+///
+/// The fourth component is left `0.0`: it is the *sprite's* rotation, not the
+/// sheet's, and [`Sprite::instance`] writes it when the instance is built.
 #[must_use]
 pub fn sheet_lane(width: u32, height: u32, mode: SampleMode) -> [f32; 4] {
     let sample = match mode {
@@ -259,8 +275,36 @@ pub struct SheetDesc<'a> {
 pub struct Sprite {
     /// Which registered sheet this sprite samples.
     pub sheet: SheetId,
-    /// World-space rectangle: `[x, y, w, h]`, minimum corner first, Y up.
+    /// World-space rectangle **before rotation**: `[x, y, w, h]`, minimum corner
+    /// first, Y up.
     pub rect: [f32; 4],
+    /// Rotation in **radians, counter-clockwise, about the centre of
+    /// [`rect`](Self::rect)** — `0.0` for a sprite that does not turn.
+    ///
+    /// # The pivot is the centre, and only the centre
+    ///
+    /// A ship, a rock and a bullet all turn about themselves, so the centre is
+    /// the case every rotating sprite actually wants. An arbitrary pivot is two
+    /// more floats on a lane that has one component left, and it is not needed to
+    /// express one: rotating a rectangle about an outside point gives the same
+    /// rectangle turned about its own centre and then translated, so a caller
+    /// that wants an orbit computes the translated `rect` and gets it exactly.
+    /// **A pivot offset is deliberately not half-built here** — see
+    /// `docs/backlog.md`.
+    ///
+    /// # What it does to [`SampleMode`]
+    ///
+    /// Nothing, where it is `0.0`: `sprite.slang` branches on the angle and the
+    /// zero case is the arithmetic that was there before rotation existed, not a
+    /// general formula that happens to reduce to it, so a `Smooth` or an
+    /// unrotated `Pixel` sprite is bit-for-bit what it always was.
+    ///
+    /// Where it is not zero, [`SampleMode::Pixel`]'s snap stops rounding each
+    /// corner — a rotated quad has no axis-aligned rectangle to round onto, and
+    /// rounding its corners independently shears it — and instead translates the
+    /// whole quad rigidly so its *centre* lands on the pixel grid. Sharp-bilinear
+    /// itself needs no change at all; `sprite.slang`'s `sharpen` records why.
+    pub rotation: f32,
     /// Normalised sheet UVs: `[u0, v0, u1, v1]`, top-left corner first.
     pub uv: [f32; 4],
     /// Straight-alpha RGBA multiplied into the sampled texel. `[1.0; 4]` is
@@ -275,13 +319,18 @@ impl Sprite {
     /// [`Sprite`] itself does not carry — a caller writes a [`SheetId`] and the
     /// renderer holds the size and the mode it was registered with, so there is
     /// exactly one place either can be wrong.
+    ///
+    /// The lane's fourth component is *not* the one `sheet_lane` produced: it is
+    /// this sprite's [`rotation`](Self::rotation), because the angle is the one
+    /// thing in that `float4` that belongs to the sprite. A zero rotation writes
+    /// the `0.0` that was already there, so the bytes are unchanged.
     #[must_use]
     pub const fn instance(&self, sheet: [f32; 4]) -> SpriteInstance {
         SpriteInstance {
             rect: self.rect,
             uv: self.uv,
             tint: self.tint,
-            sheet,
+            sheet: [sheet[0], sheet[1], sheet[2], self.rotation],
         }
     }
 }
@@ -1189,6 +1238,7 @@ mod tests {
         Sprite {
             sheet,
             rect: [0.0, 0.0, 1.0, 1.0],
+            rotation: 0.0,
             uv: [0.0, 0.0, 1.0, 1.0],
             tint: [1.0; 4],
         }
@@ -1336,6 +1386,7 @@ mod tests {
         let sprite = Sprite {
             sheet: SheetId(0),
             rect: [-3.5, 12.0, 64.0, 32.0],
+            rotation: 1.25,
             uv: [0.25, 0.5, 0.75, 1.0],
             tint: [0.1, 0.2, 0.3, 0.4],
         };
@@ -1348,8 +1399,9 @@ mod tests {
         assert_eq!(&floats[8..12], &[0.1, 0.2, 0.3, 0.4], "tint at byte 32");
         assert_eq!(
             &floats[12..16],
-            &[16.0, 8.0, SAMPLE_PIXEL, 0.0],
-            "sheet size and sample mode at byte 48"
+            &[16.0, 8.0, SAMPLE_PIXEL, 1.25],
+            "sheet size, sample mode and rotation at byte 48 — the angle is the \
+             fourth component and nothing else is"
         );
 
         // And the shader really does read them in that order. `slangc` names the
@@ -1431,6 +1483,109 @@ mod tests {
         assert!(
             wgsl.contains("constants_0.viewport_0"),
             "and the snap must read the viewport rather than guess it: {wgsl}"
+        );
+    }
+
+    /// **A zero angle writes the bytes the pass wrote before rotation existed.**
+    ///
+    /// The angle rides in the fourth component of the sheet lane, which was
+    /// padding and was already `0.0`, so a sprite that does not turn produces
+    /// exactly the sixty-four bytes it always did. That is what makes the eight
+    /// golden images in `crates/crcbl-vk/tests/golden/` a regression check for
+    /// this slice rather than eight pictures that had to be re-blessed: none of
+    /// them draws a rotated sprite, and none of their instances changed.
+    #[test]
+    fn a_zero_rotation_writes_the_same_instance_bytes_as_a_sprite_without_one() {
+        let lane = sheet_lane(16, 8, SampleMode::Pixel);
+        let flat = Sprite {
+            sheet: SheetId(0),
+            rect: [-3.5, 12.0, 64.0, 32.0],
+            rotation: 0.0,
+            uv: [0.25, 0.5, 0.75, 1.0],
+            tint: [0.1, 0.2, 0.3, 0.4],
+        };
+        // What `instance` built before this slice: the sheet lane copied
+        // verbatim, trailing pad and all.
+        let before = SpriteInstance {
+            rect: flat.rect,
+            uv: flat.uv,
+            tint: flat.tint,
+            sheet: lane,
+        };
+        assert_eq!(
+            bytemuck::bytes_of(&flat.instance(lane)),
+            bytemuck::bytes_of(&before),
+            "an unrotated sprite's instance must be byte-identical to the one \
+             this pass produced before it could rotate at all"
+        );
+
+        // And a turned one differs in the last four bytes and nowhere else — so
+        // the angle cost no space and displaced nothing.
+        let turned = Sprite {
+            rotation: core::f32::consts::FRAC_PI_2,
+            ..flat
+        };
+        let turned_instance = turned.instance(lane);
+        let turned_bytes = bytemuck::bytes_of(&turned_instance);
+        let flat_bytes = bytemuck::bytes_of(&before);
+        assert_eq!(
+            &turned_bytes[..60],
+            &flat_bytes[..60],
+            "rect, uv, tint and the sheet's own size and mode must not move"
+        );
+        assert_eq!(
+            f32::from_le_bytes(turned_bytes[60..64].try_into().expect("four bytes")),
+            core::f32::consts::FRAC_PI_2,
+            "and the angle must land at byte 60, which is `sheet.w`"
+        );
+        assert_eq!(
+            f32::from_le_bytes(flat_bytes[60..64].try_into().expect("four bytes")),
+            0.0,
+            "where an unrotated sprite leaves the zero that was already there"
+        );
+    }
+
+    /// **The compiled shader reads the angle from where this side writes it, and
+    /// the fragment stage never sees it.**
+    ///
+    /// The Rust half above is bytes; this is the *artifact's* account of what is
+    /// done with them, so a `.slang` edited without regenerating, or regenerated
+    /// without the rotation, fails here rather than only in a golden image.
+    ///
+    /// **The SPIR-V half was checked by hand rather than here**, because
+    /// `crcbl_shaders::SPRITE::spirv` is a byte blob with no disassembler behind
+    /// it. `spirv-dis` on the committed `spirv/sprite.spv` shows the same shape
+    /// as the WGSL below: an `OpCompositeExtract %float … 3` for the angle, an
+    /// `OpBranchConditional` on `angle != 0`, `GLSL.std.450 Sin`/`Cos` inside it,
+    /// and — the part that matters — an untaken path whose instructions are the
+    /// same `OpFMul`/`OpFAdd` pair the pass emitted before this slice.
+    #[test]
+    fn the_compiled_shader_turns_the_quad_from_the_lanes_fourth_component() {
+        let wgsl = crcbl_shaders::SPRITE
+            .wgsl()
+            .expect("sprite has a WGSL half");
+        assert!(
+            wgsl.contains("s_0.sheet_0.w"),
+            "the vertex stage must read the angle from the sheet lane's fourth \
+             component: {wgsl}"
+        );
+        assert!(
+            wgsl.contains("sin(angle_0)") && wgsl.contains("cos(angle_0)"),
+            "and actually build a rotation from it: {wgsl}"
+        );
+        assert!(
+            wgsl.contains("output_0.sheet_2 = s_0.sheet_0.xyz;"),
+            "the varying is still xyz — rotation is a vertex-stage concern and \
+             the fragment stage must not have grown a fourth component: {wgsl}"
+        );
+        assert!(
+            wgsl.contains("round(pixels_0)"),
+            "an unrotated Pixel quad still rounds its own corners: {wgsl}"
+        );
+        assert!(
+            wgsl.contains("round(centrePixels_0)"),
+            "and a rotated one snaps its centre instead — rounding four turned \
+             corners independently shears the quad: {wgsl}"
         );
     }
 

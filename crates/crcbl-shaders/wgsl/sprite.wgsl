@@ -39,18 +39,61 @@ struct SpriteVarying_0
 fn vertexMain(@builtin(vertex_index) vertex_0 : u32, @builtin(instance_index) instance_0 : u32) -> SpriteVarying_0
 {
     var s_0 : SpriteInstance_std430_0 = sprites_0[instance_0 + constants_0.base_0];
+    var _S1 : vec2<f32> = s_0.rect_0.xy;
+    var _S2 : vec2<f32> = s_0.rect_0.zw;
+    var _S3 : vec2<f32> = CORNERS_0[vertex_0] * _S2;
+    var _S4 : vec2<f32> = _S1 + _S3;
+    var angle_0 : f32 = s_0.sheet_0.w;
+    var _S5 : bool = angle_0 != 0.0f;
+    var world_0 : vec2<f32>;
+    if(_S5)
+    {
+        var pivot_0 : vec2<f32> = _S2 * vec2<f32>(0.5f);
+        var offset_0 : vec2<f32> = _S3 - pivot_0;
+        var sinA_0 : f32 = sin(angle_0);
+        var cosA_0 : f32 = cos(angle_0);
+        var _S6 : f32 = offset_0.x;
+        var _S7 : f32 = offset_0.y;
+        world_0 = _S1 + pivot_0 + vec2<f32>(_S6 * cosA_0 - _S7 * sinA_0, _S6 * sinA_0 + _S7 * cosA_0);
+    }
+    else
+    {
+        world_0 = _S4;
+    }
     var uv_2 : vec2<f32> = vec2<f32>(mix(s_0.uv_0.x, s_0.uv_0.z, CORNERS_0[vertex_0].x), mix(s_0.uv_0.w, s_0.uv_0.y, CORNERS_0[vertex_0].y));
-    var _S1 : vec4<f32> = (((vec4<f32>(s_0.rect_0.xy + CORNERS_0[vertex_0] * s_0.rect_0.zw, 0.0f, 1.0f)) * (mat4x4<f32>(constants_0.view_proj_0.data_0[i32(0)][i32(0)], constants_0.view_proj_0.data_0[i32(1)][i32(0)], constants_0.view_proj_0.data_0[i32(2)][i32(0)], constants_0.view_proj_0.data_0[i32(3)][i32(0)], constants_0.view_proj_0.data_0[i32(0)][i32(1)], constants_0.view_proj_0.data_0[i32(1)][i32(1)], constants_0.view_proj_0.data_0[i32(2)][i32(1)], constants_0.view_proj_0.data_0[i32(3)][i32(1)], constants_0.view_proj_0.data_0[i32(0)][i32(2)], constants_0.view_proj_0.data_0[i32(1)][i32(2)], constants_0.view_proj_0.data_0[i32(2)][i32(2)], constants_0.view_proj_0.data_0[i32(3)][i32(2)], constants_0.view_proj_0.data_0[i32(0)][i32(3)], constants_0.view_proj_0.data_0[i32(1)][i32(3)], constants_0.view_proj_0.data_0[i32(2)][i32(3)], constants_0.view_proj_0.data_0[i32(3)][i32(3)]))));
-    var clip_0 : vec4<f32> = _S1;
+    var _S8 : vec4<f32> = (((vec4<f32>(world_0, 0.0f, 1.0f)) * (mat4x4<f32>(constants_0.view_proj_0.data_0[i32(0)][i32(0)], constants_0.view_proj_0.data_0[i32(1)][i32(0)], constants_0.view_proj_0.data_0[i32(2)][i32(0)], constants_0.view_proj_0.data_0[i32(3)][i32(0)], constants_0.view_proj_0.data_0[i32(0)][i32(1)], constants_0.view_proj_0.data_0[i32(1)][i32(1)], constants_0.view_proj_0.data_0[i32(2)][i32(1)], constants_0.view_proj_0.data_0[i32(3)][i32(1)], constants_0.view_proj_0.data_0[i32(0)][i32(2)], constants_0.view_proj_0.data_0[i32(1)][i32(2)], constants_0.view_proj_0.data_0[i32(2)][i32(2)], constants_0.view_proj_0.data_0[i32(3)][i32(2)], constants_0.view_proj_0.data_0[i32(0)][i32(3)], constants_0.view_proj_0.data_0[i32(1)][i32(3)], constants_0.view_proj_0.data_0[i32(2)][i32(3)], constants_0.view_proj_0.data_0[i32(3)][i32(3)]))));
+    var clip_0 : vec4<f32> = _S8;
     var pixelMode_0 : f32 = s_0.sheet_0.z;
     var viewport_1 : vec2<f32> = max(constants_0.viewport_0, vec2<f32>(1.0f, 1.0f));
-    if((_S1.w) > 0.0f)
+    if((_S8.w) > 0.0f)
     {
-        var _S2 : vec2<f32> = vec2<f32>(0.5f);
-        var pixels_0 : vec2<f32> = (clip_0.xy / vec2<f32>(clip_0.w) * _S2 + _S2) * viewport_1;
-        var _S3 : vec2<f32> = (mix(pixels_0, round(pixels_0), vec2<f32>(pixelMode_0)) / viewport_1 * vec2<f32>(2.0f) - vec2<f32>(1.0f)) * vec2<f32>(clip_0.w);
-        clip_0.x = _S3.x;
-        clip_0.y = _S3.y;
+        var _S9 : vec2<f32> = vec2<f32>(0.5f);
+        var pixels_0 : vec2<f32> = (clip_0.xy / vec2<f32>(clip_0.w) * _S9 + _S9) * viewport_1;
+        var _S10 : vec2<f32> = vec2<f32>(pixelMode_0);
+        var _S11 : vec2<f32> = mix(pixels_0, round(pixels_0), _S10);
+        var snapped_0 : vec2<f32>;
+        if(_S5)
+        {
+            var centreClip_0 : vec4<f32> = (((vec4<f32>(_S1 + _S2 * _S9, 0.0f, 1.0f)) * (mat4x4<f32>(constants_0.view_proj_0.data_0[i32(0)][i32(0)], constants_0.view_proj_0.data_0[i32(1)][i32(0)], constants_0.view_proj_0.data_0[i32(2)][i32(0)], constants_0.view_proj_0.data_0[i32(3)][i32(0)], constants_0.view_proj_0.data_0[i32(0)][i32(1)], constants_0.view_proj_0.data_0[i32(1)][i32(1)], constants_0.view_proj_0.data_0[i32(2)][i32(1)], constants_0.view_proj_0.data_0[i32(3)][i32(1)], constants_0.view_proj_0.data_0[i32(0)][i32(2)], constants_0.view_proj_0.data_0[i32(1)][i32(2)], constants_0.view_proj_0.data_0[i32(2)][i32(2)], constants_0.view_proj_0.data_0[i32(3)][i32(2)], constants_0.view_proj_0.data_0[i32(0)][i32(3)], constants_0.view_proj_0.data_0[i32(1)][i32(3)], constants_0.view_proj_0.data_0[i32(2)][i32(3)], constants_0.view_proj_0.data_0[i32(3)][i32(3)]))));
+            var _S12 : f32 = centreClip_0.w;
+            if(_S12 > 0.0f)
+            {
+                var centrePixels_0 : vec2<f32> = (centreClip_0.xy / vec2<f32>(_S12) * _S9 + _S9) * viewport_1;
+                snapped_0 = pixels_0 + (round(centrePixels_0) - centrePixels_0);
+            }
+            else
+            {
+                snapped_0 = pixels_0;
+            }
+            snapped_0 = mix(pixels_0, snapped_0, _S10);
+        }
+        else
+        {
+            snapped_0 = _S11;
+        }
+        var _S13 : vec2<f32> = (snapped_0 / viewport_1 * vec2<f32>(2.0f) - vec2<f32>(1.0f)) * vec2<f32>(clip_0.w);
+        clip_0.x = _S13.x;
+        clip_0.y = _S13.y;
     }
     var output_0 : SpriteVarying_0;
     output_0.position_0 = clip_0;
@@ -62,10 +105,10 @@ fn vertexMain(@builtin(vertex_index) vertex_0 : u32, @builtin(instance_index) in
 
 fn sharpen_0( uv_3 : vec2<f32>,  size_0 : vec2<f32>) -> vec2<f32>
 {
-    var _S4 : vec2<f32> = vec2<f32>(0.5f);
-    var s_1 : vec2<f32> = uv_3 * size_0 - _S4;
+    var _S14 : vec2<f32> = vec2<f32>(0.5f);
+    var s_1 : vec2<f32> = uv_3 * size_0 - _S14;
     var whole_0 : vec2<f32> = floor(s_1);
-    return (whole_0 + saturate((s_1 - whole_0 - _S4) / max((fwidth((s_1))), vec2<f32>(9.99999997475242708e-07f, 9.99999997475242708e-07f)) + _S4) + _S4) / size_0;
+    return (whole_0 + saturate((s_1 - whole_0 - _S14) / max((fwidth((s_1))), vec2<f32>(9.99999997475242708e-07f, 9.99999997475242708e-07f)) + _S14) + _S14) / size_0;
 }
 
 struct pixelOutput_0
@@ -81,9 +124,9 @@ struct pixelInput_0
 };
 
 @fragment
-fn fragmentMain( _S5 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) -> pixelOutput_0
+fn fragmentMain( _S15 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) -> pixelOutput_0
 {
-    var _S6 : pixelOutput_0 = pixelOutput_0( (textureSample((sheet_1), (sheetSampler_0), (mix(_S5.uv_4, sharpen_0(_S5.uv_4, max(_S5.sheet_3.xy, vec2<f32>(1.0f, 1.0f))), vec2<f32>(_S5.sheet_3.z))))) * _S5.tint_2 );
-    return _S6;
+    var _S16 : pixelOutput_0 = pixelOutput_0( (textureSample((sheet_1), (sheetSampler_0), (mix(_S15.uv_4, sharpen_0(_S15.uv_4, max(_S15.sheet_3.xy, vec2<f32>(1.0f, 1.0f))), vec2<f32>(_S15.sheet_3.z))))) * _S15.tint_2 );
+    return _S16;
 }
 

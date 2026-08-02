@@ -16,6 +16,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl-render**: `Sprite::rotation` — sprites can turn. A per-sprite angle in
+  radians, counter-clockwise, about the centre of the sprite's own `rect`. It
+  rides in the fourth component of `SpriteInstance::sheet`, which was padding,
+  so the instance is still 64 bytes and no buffer, stride or bind group changed.
+  `Sprite` gains a field, so every struct literal that builds one needs
+  `rotation: 0.0`; that is the only source-breaking part.
+
+  Rotation interacts with `SampleMode::Pixel`, and both halves are decided
+  rather than left to fall out. The **snap** stops rounding each corner once the
+  quad is turned — a rotated quad has no axis-aligned rectangle to round onto,
+  and rounding four corners independently shears it, changes its size and
+  changes its effective angle, so a slowly turning ship would wobble — and
+  instead translates the whole quad rigidly so its _centre_ lands on the pixel
+  grid, which keeps the shape exact and still removes the sub-pixel crawl that
+  translation causes. **Sharp bilinear needs no change at all**: `fwidth` is a
+  per-fragment screen-space derivative, so it tracks the turned UV gradient by
+  itself; being an L1 norm it reports up to root two times the scale on the
+  diagonal, which widens the crossover band to about 1.4 fragments and never
+  narrows it.
+
+  A sprite with `rotation: 0.0` is **bit-identical** to one from before this
+  change, by construction rather than by rounding luck: `sprite.slang` branches
+  on the angle and the zero path is the arithmetic that was already there, down
+  to the same SPIR-V `OpFMul`/`OpFAdd` pair. All eight existing golden images
+  pass unchanged, at zero differing pixels.
+
 - **crcbl-phys**: the broadphase BVH is **dynamic**. `Bvh::insert` and
   `Bvh::remove` add and drop one element along a single root-to-leaf path, and
   `PhysicsWorld::add_*` / `PhysicsWorld::remove` use them, so a world whose tree

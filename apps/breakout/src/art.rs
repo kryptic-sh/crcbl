@@ -228,6 +228,7 @@ impl Scene {
             bricks.iter().map(move |centre| Sprite {
                 sheet: brick_art.sheet,
                 rect: brick_rect(*centre),
+                rotation: 0.0,
                 uv: brick_art.uv[brick_frame(centre.y)],
                 tint: UNTINTED,
             }),
@@ -238,6 +239,7 @@ impl Scene {
             Sprite {
                 sheet: self.paddle.sheet,
                 rect: paddle_rect(paddle_x),
+                rotation: 0.0,
                 uv: self.paddle.uv,
                 tint: UNTINTED,
             },
@@ -249,6 +251,7 @@ impl Scene {
             Sprite {
                 sheet: self.ball.sheet,
                 rect: ball_rect(ball),
+                rotation: 0.0,
                 uv: self.ball.uv,
                 tint: UNTINTED,
             },

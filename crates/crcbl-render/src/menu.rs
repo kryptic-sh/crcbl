@@ -240,6 +240,8 @@ impl MenuArt {
         out.push(Sprite {
             sheet: self.sheet,
             rect: target(scrim_min, scrim_max),
+            // A menu is screen furniture; nothing in it turns.
+            rotation: 0.0,
             uv: self.scrim_uv,
             tint: layout.style().scrim_color,
         });

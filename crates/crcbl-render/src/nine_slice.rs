@@ -110,6 +110,14 @@ impl NineQuads {
         self.as_slice().iter().map(move |quad| Sprite {
             sheet,
             rect: quad.rect,
+            // **Unrotated, and there is no overload that is not.** The nine
+            // quads of a slice are stretched against each other on two axes;
+            // turning them individually about their own centres would open a
+            // gap at every band boundary, and turning the frame as a whole
+            // needs one pivot shared by all nine, which is a different feature
+            // from `Sprite::rotation`. A rotated panel is not in this slice —
+            // see `docs/backlog.md`.
+            rotation: 0.0,
             uv: quad.uv,
             tint,
         })

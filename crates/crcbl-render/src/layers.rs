@@ -183,7 +183,8 @@ struct Band {
 /// #     sample: crcbl_render::SampleMode::Pixel, pixels: &[255; 4],
 /// # })?;
 /// # let sprite = |x: f32| Sprite {
-/// #     sheet, rect: [x, 0.0, 1.0, 1.0], uv: [0.0, 0.0, 1.0, 1.0], tint: [1.0; 4],
+/// #     sheet, rect: [x, 0.0, 1.0, 1.0], rotation: 0.0,
+/// #     uv: [0.0, 0.0, 1.0, 1.0], tint: [1.0; 4],
 /// # };
 /// let mut stack = LayerStack::new();
 /// let hills = stack.push_layer(Parallax::new(0.5).expect("finite"));
@@ -360,6 +361,7 @@ mod tests {
         Sprite {
             sheet,
             rect: [position[0], position[1], 4.0, 4.0],
+            rotation: 0.0,
             uv: [0.0, 0.0, 1.0, 1.0],
             tint: [1.0; 4],
         }

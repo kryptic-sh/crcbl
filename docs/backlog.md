@@ -11,6 +11,15 @@ that owes the fix. **Finding 1 is closed** (P4B bought `SpriteRenderer` and both
 samples now draw through it); five stand. They are not repeated here; this file
 carries what has no phase yet.
 
+- **`Sprite` is a public-field struct, so every new field is a breaking
+  change.** Adding `rotation` broke five literals in `apps/*/src/art.rs` and
+  four inside `crcbl-render` itself, none of which had anything to do with
+  turning. The next field — a pivot, a z, a flip — breaks them all again, and
+  the sample count is going up. The fix is a constructor plus `with_*` methods
+  (or `#[non_exhaustive]` and `..Default::default()`), decided before the field
+  after next rather than after it. Not done in the rotation slice because it
+  would have put an API refactor of every caller inside a rendering change.
+
 - **The browser entry point should be written once, before S2.** Finding 2 in
   that list. `apps/flappy/src/web.rs` and `apps/breakout/src/web.rs` are the
   same file with a different symbol prefix, and asteroids will be the third.
@@ -152,6 +161,39 @@ left:
   had no caller. If a widening power-up is ever added, `assets/paddle.crpix`
   wants `nine: 12 12 0 0` and `art::paddle_rect` already produces the target
   rectangle `expand` would take.
+
+- **`Sprite::rotation` has no pivot offset, and that was a decision.** The angle
+  turns the quad about the centre of its own `rect` and there is no way to name
+  another point. Considered and declined: the sheet lane has exactly one
+  component left, an offset needs two, and the case it would serve is
+  expressible without it — a rectangle rotated about an outside point is the
+  same rectangle rotated about its own centre and then translated, so a caller
+  wanting an orbit computes the translated `rect` and gets it exactly. Reopen it
+  if something wants a pivot that is _animated_ independently of position, which
+  is the one shape the translation trick makes awkward; it would need a fifth
+  `float4` on the instance, taking it from 64 bytes to 80.
+
+- **A nine-slice cannot be rotated, and neither can a menu or a button skin.**
+  `NineQuads::sprites` hard-codes `rotation: 0.0` with a comment saying why: the
+  nine quads are stretched against each other, so turning each about its own
+  centre opens a gap at every band boundary, and turning the frame as a whole
+  needs one pivot shared by all nine — which is a different feature from
+  `Sprite::rotation`, and would be `expand`'s job rather than the instance's.
+  Nothing has asked for it. If something does, the shape is a rotation on
+  `NineSliceSource::expand`'s target that it applies to all nine quads about the
+  target's centre, which needs the per-sprite pivot above or a rect-plus-angle
+  that is not the rect's own centre.
+
+- **Nothing in the workspace sets a non-zero rotation yet.** Both samples pass
+  `rotation: 0.0` at all five of their `Sprite` literals, and there is no
+  interpolation of an angle anywhere: `crcbl-phys` has no angular velocity (see
+  "What asteroids still needs from `crcbl-phys`" below), and the interpolation
+  buffer carries `Transform`s, whose `DQuat` no sprite path reads. Asteroids is
+  the first caller and will need to decide where the ship's angle comes from —
+  game code writing it through `set_transform` each tick, then a `slerp` or a
+  scalar lerp in the render path — because a turn rate applied to the _rendered_
+  angle without interpolation will stutter at any frame rate that is not the
+  tick rate. That is the next real question this slice does not answer.
 
 ## The debug overlay, and what is left of it
 

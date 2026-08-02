@@ -316,6 +316,7 @@ impl Scene {
             let sprites = tiles(band.width, factor, camera, half_width).map(move |x| Sprite {
                 sheet: band.sheet,
                 rect: [x, band.bottom, band.width, band.height],
+                rotation: 0.0,
                 uv: band.uv,
                 tint: UNTINTED,
             });
@@ -353,6 +354,7 @@ impl Scene {
                 width,
                 height,
             ],
+            rotation: 0.0,
             uv: self
                 .description()
                 .uv(index)

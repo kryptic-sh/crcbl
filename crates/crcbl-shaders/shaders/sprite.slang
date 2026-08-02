@@ -119,14 +119,16 @@ struct SpriteInstance
     float4 uv;
     /// Straight-alpha RGBA multiplied into the sampled texel.
     float4 tint;
-    /// **How this sprite's sheet is sampled, and how big it is.**
+    /// **How this sprite's sheet is sampled, how big it is, and how far the
+    /// sprite is turned.**
     ///
-    /// `xy` is the sheet image's size in texels and `z` is the sample mode:
+    /// `xy` is the sheet image's size in texels, `z` is the sample mode —
     /// `1.0` for `crcbl_sprite::SampleMode::Pixel` and `0.0` for
-    /// `SampleMode::Smooth`. `w` pads the lane.
+    /// `SampleMode::Smooth` — and `w` is the rotation in **radians,
+    /// counter-clockwise, about the quad's own centre**.
     ///
-    /// Both are properties of the *sheet*, not of the sprite, and they still
-    /// travel on the instance — because the alternative is worse in every
+    /// The first two are properties of the *sheet*, not of the sprite, and they
+    /// still travel on the instance — because the alternative is worse in every
     /// direction. The mode cannot come from the sampler: set 1 binds one
     /// `SamplerState` and a shader has no way to ask which filter it got. It
     /// could come from a second uniform block rebound per batch, which is a
@@ -136,6 +138,12 @@ struct SpriteInstance
     /// Two `float4` lanes of a buffer that is already written per sprite per
     /// frame cost one 16-byte store and buy one pipeline, one sampler and one
     /// descriptor set for both modes.
+    ///
+    /// **`w` was padding and is now the angle**, which cost nothing at all: the
+    /// instance is still four `float4`s and 64 bytes, so no buffer, no stride
+    /// and no layout rule moved. Only the vertex stage reads it —
+    /// `SpriteVarying::sheet` still carries `xyz` — so the fragment stage is
+    /// untouched by rotation.
     float4 sheet;
 };
 
@@ -205,6 +213,40 @@ SpriteVarying vertexMain(uint vertex: SV_VertexID, uint instance: SV_InstanceID)
     // and layer ordering is the caller's, not this shader's.
     float2 world = s.rect.xy + corner * s.rect.zw;
 
+    // # Rotation, about the quad's own centre
+    //
+    // The pivot is the centre and nothing else. A ship, a rock and a bullet all
+    // turn about themselves, an arbitrary pivot is another two floats on a lane
+    // that has exactly one left, and a caller that genuinely wants to swing a
+    // sprite about a distant point can place `rect` accordingly — the rotation
+    // of a rectangle about an outside point is the same rectangle rotated about
+    // its centre and then translated.
+    //
+    // **The zero case is the expression above, untouched, and that is
+    // deliberate.** The tempting spelling is one formula for both —
+    // `centre + rotate(corner - 0.5) * size` — which is the same number in real
+    // arithmetic and *not* the same float: subtracting half the size and adding
+    // it back lands an ulp away from `rect.xy + corner * rect.zw`, and an ulp of
+    // world position is a quad edge that can fall on the other side of a
+    // fragment centre. Every golden image in the suite is a sprite with no
+    // angle, so "unchanged where the angle is zero" has to be a property of the
+    // code rather than a hope about rounding.
+    float angle = s.sheet.w;
+    if (angle != 0.0)
+    {
+        float2 pivot = s.rect.zw * 0.5;
+        float2 offset = corner * s.rect.zw - pivot;
+        float sinA = sin(angle);
+        float cosA = cos(angle);
+        // Counter-clockwise with Y up, which is what a positive angle means
+        // everywhere above this file.
+        float2 turned = float2(
+            offset.x * cosA - offset.y * sinA,
+            offset.x * sinA + offset.y * cosA
+        );
+        world = s.rect.xy + pivot + turned;
+    }
+
     // **The UV's Y runs the other way from the world's.** `corner.y == 0` is the
     // world-space *bottom* of the quad, and the bottom of the quad shows the
     // *bottom* of the frame — which in image order is `uv.w`, the larger v. Take
@@ -231,6 +273,28 @@ SpriteVarying vertexMain(uint vertex: SV_VertexID, uint instance: SV_InstanceID)
     //
     // `pixelMode` is 1 for `SampleMode::Pixel` and 0 for `Smooth`, so the `lerp`
     // leaves a smooth sprite's clip position bit-for-bit as it was.
+    //
+    // # And what that means once the quad is turned
+    //
+    // Rounding each corner is only defined because an unrotated quad's corners
+    // are the corners of an axis-aligned rectangle: rounding them keeps it a
+    // rectangle, and `ceil(a - 0.5) == round(a)` keeps its coverage. A rotated
+    // quad has no such rectangle. Rounding its four corners independently moves
+    // each of them up to half a pixel in a *different* direction, which shears
+    // the quad, changes its size and changes its effective angle — and does so
+    // differently at every position, so a ship turning slowly would visibly
+    // wobble and breathe. That is worse than the crawl the snap exists to
+    // remove.
+    //
+    // So a rotated quad is snapped as a **rigid body**: the sprite's centre is
+    // projected, the offset that would put *it* on the pixel grid is computed
+    // once, and every corner is translated by that same offset. Shape, size and
+    // angle survive exactly; what goes away is the sub-pixel drift of the whole
+    // sprite against the fragment grid, which is the part of the crawl that
+    // translation causes and the part a moving rock or ship actually shows. The
+    // rest — a hard edge stepping as the angle changes — is inherent to
+    // rasterising a turning rectangle without coverage, and no snap addresses
+    // it.
     float pixelMode = s.sheet.z;
     // A zero viewport would divide by zero. `begin_frame` always writes the
     // target's real extent, so this is a floor and not a fallback.
@@ -244,6 +308,21 @@ SpriteVarying vertexMain(uint vertex: SV_VertexID, uint instance: SV_InstanceID)
         float2 ndc = clip.xy / clip.w;
         float2 pixels = (ndc * 0.5 + 0.5) * viewport;
         float2 snapped = lerp(pixels, round(pixels), pixelMode);
+        if (angle != 0.0)
+        {
+            // The rigid snap. One extra transform of one point per vertex, and
+            // only for a sprite that is actually turned.
+            float2 centre = s.rect.xy + s.rect.zw * 0.5;
+            float4 centreClip = mul(constants.view_proj, float4(centre, 0.0, 1.0));
+            float2 turnedSnap = pixels;
+            if (centreClip.w > 0.0)
+            {
+                float2 centrePixels =
+                    ((centreClip.xy / centreClip.w) * 0.5 + 0.5) * viewport;
+                turnedSnap = pixels + (round(centrePixels) - centrePixels);
+            }
+            snapped = lerp(pixels, turnedSnap, pixelMode);
+        }
         clip.xy = ((snapped / viewport) * 2.0 - 1.0) * clip.w;
     }
 
@@ -287,6 +366,30 @@ SpriteVarying vertexMain(uint vertex: SV_VertexID, uint instance: SV_InstanceID)
 /// approximately: with `n` screen pixels per texel the fragment centres nearest a
 /// boundary sit `0.5/n` texels either side of it, which is exactly the half-width
 /// of the ramp, so they evaluate to a clean 0 and 1.
+///
+/// # Rotation needs nothing here, and this is why
+///
+/// `fwidth` is a **per-fragment** derivative of the interpolated value, so it is
+/// taken from whatever the vertex stage actually produced: turn the quad and the
+/// UV gradient turns with it, and `s` still advances by the same number of texels
+/// per fragment. Nothing in this function knows or needs to know the angle.
+///
+/// The one thing rotation does change is `fwidth`'s *shape*. It is
+/// `abs(ddx) + abs(ddy)` — an L1 norm — so for an axis-aligned quad one term is
+/// zero and it reports the scale exactly, while at 45° both terms are the scale
+/// over root two and it reports root two times the scale. The band is therefore
+/// up to ~1.41 fragments wide on the diagonal instead of 1. That is the safe
+/// direction (a band narrower than a fragment aliases; a slightly wider one only
+/// softens), it never reaches zero for a quad with area, and the `max` below
+/// still catches the degenerate case.
+///
+/// Measured on the `sprite_rotation` golden, whose six sprites are 32 device
+/// pixels per texel across and 16 down: at 0°, 90°, 180° and 270° **zero** of
+/// the ~1860 interior pixels are anything but one of the sheet's four texel
+/// colours — the quarter turns are as exactly flat as no turn at all — and at
+/// 45° it is 66 of 1870, a crossover two pixels wide measured along a scanline
+/// that crosses the boundary diagonally, which is the ~1.41 fragments
+/// perpendicular that the L1 norm predicts.
 float2 sharpen(float2 uv, float2 size)
 {
     // Texel-space position, shifted so integers are texel centres.
