@@ -189,6 +189,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   without a byte of it crossing between them. It exists to find out whether the
   engine could host a game that was not breakout; what it found is written down
   in `docs/plan/ROADMAP.md`.
+- **asteroids**: a third game, playable headless and natively, and the
+  workspace's first sample built around **entity churn** rather than around a
+  fixed world. A ship that turns, thrusts and wraps; bullets that never miss;
+  rocks in three sizes that split twice; waves that grow to a ceiling; score,
+  three lives, game over and restart. Every random-looking number — where a wave
+  enters, which way a split throws its children — is a pure function of a seed
+  and an index, so a recorded script replays bit-identically and two games on
+  one seed are the same game.
+
+  It is the first consumer of the P6 physics slice, and the seams it uses are
+  the ones that slice was bought for: `ThrustForce::world_force` through
+  `PhysicsSystem::apply_force` for the engine, `sweep_sphere` over a
+  `prev → cur` segment for every bullet, and `overlap_sphere` against the
+  broadphase for the ship. **A wrap is a teleport, and a teleport is a
+  remove-and-re-insert** — the rule `docs/backlog.md` left to whoever wrote the
+  wrap, chosen here and applied uniformly to everything in the broadphase.
+
+  This slice is the simulation. There is no art yet: the native binary opens a
+  window and draws the field as untextured placeholder quads through the UI
+  pass, beside the HUD and the F3 debug panel. Sprites, menus, audio and the
+  browser entry point follow in their own slices.
+
 - **crcbl-hal**: `Device::take_error`, for the failures a backend learns about
   outside the call that caused them. Defaults to `None`, so a backend that
   reports everything through its return values is unaffected.

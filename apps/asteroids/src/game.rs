@@ -1,0 +1,3067 @@
+//! Asteroids' simulation: a ship that turns and thrusts, bullets that sweep,
+//! rocks that split, and a playfield with no edges.
+//!
+//! # What is different about this one
+//!
+//! Breakout spawns its world once and only ever removes from it. Flappy runs a
+//! treadmill at a couple of entities a second. This game creates and destroys
+//! entities *constantly* — a bullet every sixth of a second, two rocks for every
+//! one shot, a whole wave at a time — which is the reason
+//! `docs/plan/sample/02-asteroids.md` picked it: generational ids, deferred
+//! destruction and pool slot recycling all get hammered, and a leak shows up as
+//! a number that climbs.
+//!
+//! # Three seams into `crcbl-phys`, and each is a different query
+//!
+//! * **The ship** is a dynamic body driven by the L1 force pipeline —
+//!   [`ThrustForce`] for the engine, a matching damping term for the coast. Its
+//!   *rotation* is not: `crcbl-phys` has no angular velocity and no torque (see
+//!   `docs/backlog.md`), so [`SHIP_TURN_RATE`] is integrated by hand here and
+//!   written into the [`Transform`] the thrust then reads.
+//! * **Bullets** are segment CCD. A bullet has no collider at all: every tick it
+//!   sweeps `prev → cur` with [`PhysicsSystem::sweep_sphere`], so the fastest
+//!   bullet the game can produce cannot pass through the thinnest rock. See
+//!   [`sweep_bullets`].
+//! * **The ship against the rocks** is a sphere overlap against the broadphase,
+//!   [`PhysicsSystem::overlap_sphere`], centred on the ship. The ship itself is
+//!   not *in* the broadphase — every collider in this world is a rock — which
+//!   falls out of that query taking a free centre rather than an entity. See
+//!   [`check_ship`].
+//!
+//! # A wrap is a teleport, and a teleport is a remove-and-re-insert
+//!
+//! This is the rule this sample had to choose, because nothing in `crcbl-phys`
+//! chooses it — see [`teleport`] for the argument and for what was measured.
+//!
+//! # Where the simulation runs
+//!
+//! Inside the server's tick, in [`AsteroidsModule::tick`] — the hook `crcbl-ecs`
+//! documents as running every server tick *after* the ECS schedule, which means
+//! after [`PhysicsSystem::step`] has integrated everything. [`Game`] is the
+//! client-side facade: it resolves input into an [`Intent`], advances the server
+//! and the client by exactly one tick period, and reads back what to draw.
+
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+
+use crcbl_client::Client;
+use crcbl_core::FrameClock;
+use crcbl_core::input::KeyCode;
+use crcbl_ecs::{Entity, GameModule, World};
+use crcbl_input::{ActionDecl, ActionKind, ActionMap, Binding};
+use crcbl_net::{InMemoryTransport, ProtocolCompatibility};
+use crcbl_phys::{ColliderComponent, PhysicsSystem, RigidBody, Segment, ThrustForce, Transform};
+use crcbl_server::Server;
+use glam::{DQuat, DVec3};
+
+/// Distinct from breakout's and flappy's, because they are distinct protocols:
+/// a client built for one must not hand-shake with a server running another.
+const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
+    protocol_version: 3,
+    engine_build_id: 0x0043_5243_424C,
+    schema_hash: 0x0041_5354_524F,
+};
+
+/// The default simulation rate. The value reaches the server, the client, the
+/// ECS `tick_dt` and the integrator, so there is exactly one rate in the
+/// process.
+pub const DEFAULT_TICK_HZ: u32 = 60;
+
+// ---------------------------------------------------------------------------
+// The playfield
+// ---------------------------------------------------------------------------
+
+/// Half the width of the playfield, in world units.
+///
+/// 4:3 against [`WORLD_HALF_HEIGHT`], which is the shape of the window
+/// `app.rs` opens and of the canvas the browser demo will use. A field that did
+/// not match the viewport would either hide rocks or show empty margin, and in a
+/// wrapping game both read as a bug rather than as a border.
+pub const WORLD_HALF_WIDTH: f64 = 16.0;
+
+/// Half the height of the playfield, in world units.
+pub const WORLD_HALF_HEIGHT: f64 = 12.0;
+
+// ---------------------------------------------------------------------------
+// The ship
+// ---------------------------------------------------------------------------
+
+/// How close a rock has to come to the ship's centre to kill it.
+///
+/// Not a collider — the ship has none, see this module's header — but the
+/// radius of the sphere it queries the broadphase with, which comes to the same
+/// thing.
+/// Smaller than the hull will look once there is art: a ship whose kill radius
+/// matches its longest spine dies to near misses, and asteroids is a game of
+/// near misses.
+pub const SHIP_RADIUS: f64 = 0.55;
+
+/// How fast the ship turns, in radians per second.
+///
+/// 3.4 rad/s is a full revolution in 1.85 s. Faster than that and a tap of the
+/// key overshoots the rock; slower and the far side of the screen takes longer
+/// to aim at than to fly to.
+pub const SHIP_TURN_RATE: f64 = 3.4;
+
+/// The engine's thrust, in newtons, against a ship of one kilogram.
+pub const SHIP_THRUST: f64 = 14.0;
+
+/// The coast, as a damping coefficient in kg/s.
+///
+/// Two constants in one, which is why they are tuned together:
+///
+/// * **Terminal speed is `SHIP_THRUST / SHIP_DAMPING`** — 14 units/s, which
+///   crosses the 32-unit field in 2.3 s. There is deliberately no separate speed
+///   clamp: a clamp is a second mechanism that can disagree with this one, and a
+///   guard that the damping makes unreachable is not a guard.
+/// * **The coast's time constant is `mass / SHIP_DAMPING`** — 1 s to fall to
+///   `1/e` of a speed. Long enough that the ship drifts (which is the game),
+///   short enough that a panicked burst is recoverable inside a wave.
+pub const SHIP_DAMPING: f64 = 1.0;
+
+/// The ship's mass, in kilograms. One, so thrust in newtons reads as
+/// acceleration in units per second squared.
+const SHIP_MASS: f64 = 1.0;
+
+/// How long a destroyed ship stays gone, in seconds, before it may return.
+pub const RESPAWN_DELAY: f64 = 1.0;
+
+/// How long it may wait for a clear centre beyond that, in seconds.
+///
+/// The ship returns to the middle of the field, and returning it into a rock
+/// would spend a life on nothing the player did. So it waits for
+/// [`RESPAWN_CLEAR_RADIUS`] to be empty — but not forever: rocks drift, and a
+/// slow one crossing the centre must not stall the game, so after this the ship
+/// comes back regardless.
+pub const RESPAWN_MAX_WAIT: f64 = 5.0;
+
+/// How much room around the centre must be clear before the ship returns.
+pub const RESPAWN_CLEAR_RADIUS: f64 = 3.5;
+
+/// Lives a game starts with.
+pub const STARTING_LIVES: u32 = 3;
+
+// ---------------------------------------------------------------------------
+// Bullets
+// ---------------------------------------------------------------------------
+
+/// Muzzle speed, in world units per second, added to the ship's own velocity.
+///
+/// Added, because a bullet is a thing that leaves a moving ship. 24 against a
+/// terminal [`SHIP_THRUST`] / [`SHIP_DAMPING`] of 14 keeps the shot ahead of the
+/// ship even at full speed, which is the property that makes it a weapon.
+pub const BULLET_SPEED: f64 = 24.0;
+
+/// The radius the bullet's sweep uses. A bullet has no collider — see this
+/// module's header — so this is only ever the radius of the swept sphere.
+pub const BULLET_RADIUS: f64 = 0.12;
+
+/// How long a bullet lives, in seconds.
+///
+/// At [`BULLET_SPEED`] that is 19.2 units of travel, which is deliberately
+/// **less than the field is tall** (24) and well short of how wide it is (32).
+/// The playfield wraps, so a longer-lived shot comes back round and arrives
+/// behind the ship that fired it — which is not a rule anybody would guess and
+/// reads as the game cheating. At one second it did exactly that: 24 units up a
+/// 24-unit field is one lap. `the_reach_of_a_shot_is_less_than_one_lap` asserts
+/// the relation rather than the number.
+pub const BULLET_LIFE: f64 = 0.8;
+
+/// The gap between shots, in seconds.
+pub const FIRE_COOLDOWN: f64 = 0.16;
+
+/// How many of the player's bullets may be in the air at once.
+///
+/// Four, the arcade original's number, and the reason firing has a rhythm rather
+/// than being a held key.
+pub const MAX_BULLETS: usize = 4;
+
+/// How far in front of the ship's centre a bullet appears.
+///
+/// Outside [`SHIP_RADIUS`], so a shot never begins inside the hull that fired
+/// it.
+const MUZZLE_OFFSET: f64 = SHIP_RADIUS + BULLET_RADIUS + 0.05;
+
+// ---------------------------------------------------------------------------
+// Rocks
+// ---------------------------------------------------------------------------
+
+/// How big a rock is, which decides everything else about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RockSize {
+    Large,
+    Medium,
+    Small,
+}
+
+impl RockSize {
+    /// The collider radius.
+    #[must_use]
+    pub const fn radius(self) -> f64 {
+        match self {
+            Self::Large => 1.7,
+            Self::Medium => 1.0,
+            Self::Small => 0.55,
+        }
+    }
+
+    /// How fast a rock of this size drifts, in world units per second.
+    ///
+    /// Smaller is faster, which is the whole difficulty curve: shooting a large
+    /// rock does not clear the screen, it fills it with quicker ones.
+    #[must_use]
+    pub const fn speed(self) -> f64 {
+        match self {
+            Self::Large => 2.2,
+            Self::Medium => 3.2,
+            Self::Small => 4.4,
+        }
+    }
+
+    /// What destroying one is worth. The arcade original's values.
+    #[must_use]
+    pub const fn score(self) -> u32 {
+        match self {
+            Self::Large => 20,
+            Self::Medium => 50,
+            Self::Small => 100,
+        }
+    }
+
+    /// What it breaks into, or `None` for the size that simply dies.
+    #[must_use]
+    pub const fn child(self) -> Option<Self> {
+        match self {
+            Self::Large => Some(Self::Medium),
+            Self::Medium => Some(Self::Small),
+            Self::Small => None,
+        }
+    }
+
+    /// The collider a rock of this size carries.
+    #[must_use]
+    pub const fn collider(self) -> ColliderComponent {
+        ColliderComponent::Sphere {
+            offset: DVec3::ZERO,
+            radius: self.radius(),
+            is_trigger: false,
+        }
+    }
+}
+
+/// How many children a split produces. Two, and the count is named because the
+/// entity-lifecycle tests assert against it rather than against a literal.
+pub const SPLIT_CHILDREN: usize = 2;
+
+/// The narrowest angle, in radians, between a child's course and its parent's.
+const SPLIT_ANGLE_MIN: f64 = 0.35;
+
+/// How much wider than [`SPLIT_ANGLE_MIN`] a child's course may be.
+const SPLIT_ANGLE_RANGE: f64 = 0.6;
+
+// ---------------------------------------------------------------------------
+// Waves
+// ---------------------------------------------------------------------------
+
+/// How many rocks the first wave puts on the field.
+pub const FIRST_WAVE_ROCKS: u32 = 4;
+
+/// The ceiling on that count.
+///
+/// Without one the twentieth wave is unplayable *and* slow, and neither is the
+/// difficulty curve the game wants. Eleven large rocks split to 44, which is
+/// already more than the screen holds comfortably.
+pub const MAX_WAVE_ROCKS: u32 = 11;
+
+/// How many rocks wave `wave` opens with. Wave 0 is the first.
+#[must_use]
+pub const fn wave_rocks(wave: u32) -> u32 {
+    let count = FIRST_WAVE_ROCKS + wave;
+    if count > MAX_WAVE_ROCKS {
+        MAX_WAVE_ROCKS
+    } else {
+        count
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Determinism: every random-looking number is a pure function of a seed
+// ---------------------------------------------------------------------------
+
+/// The board every game is dealt unless a caller picks another.
+pub const DEFAULT_SEED: u64 = 0x4153_5452_4F49_4453;
+
+/// A uniform value in `[0, 1)` from `seed` and `index`.
+///
+/// **A pure function, not a running generator**, for the reason
+/// `apps/flappy/src/game.rs`'s `gap_centre` gives at length: an RNG whose
+/// position depends on how many rocks have been spawned so far is hidden state,
+/// and hidden state is what makes two runs of the same script diverge. Hashing
+/// the index instead means the third rock of wave 5 is in the same place however
+/// the run reached it.
+///
+/// splitmix64's finaliser, taken as 53 bits of mantissa — an f64 has exactly 53,
+/// so this is uniform with nothing thrown away twice.
+#[must_use]
+pub fn hash_unit(seed: u64, index: u64) -> f64 {
+    let mut z = seed.wrapping_add(index.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// The seed the `runs`-th board of a game seeded with `seed` is dealt from.
+///
+/// A restart deals a different board, because a game that dealt the same hand
+/// every time would be memorised rather than played. It changes it
+/// *deterministically* — the run counter is simulation state like any other — so
+/// a recorded script replayed from a fresh game meets the same rocks.
+#[must_use]
+fn board_seed(seed: u64, runs: u32) -> u64 {
+    seed ^ u64::from(runs).wrapping_mul(0xD1B5_4A32_D192_ED03)
+}
+
+/// Index space for wave spawns. Disjoint from the split space below, so a wave
+/// and a split never draw the same number.
+const fn wave_index(wave: u32, rock: u32, which: u64) -> u64 {
+    (wave as u64) << 20 | (rock as u64) << 4 | which
+}
+
+/// Index space for splits: the top bit, plus the spawn counter.
+const fn split_index(counter: u64) -> u64 {
+    0x8000_0000_0000_0000 | counter
+}
+
+/// Where rock `rock` of wave `wave` enters the field.
+///
+/// **On the border, never in the middle.** The ship respawns at the centre and
+/// a wave arrives while the player is standing there, so a position drawn freely
+/// from the field would sooner or later put a rock on top of the ship — a life
+/// lost to the dealer rather than to the player. Walking the perimeter is a pure
+/// function *and* is provably far from the centre, where a rejection loop would
+/// be neither.
+#[must_use]
+pub fn wave_rock_position(seed: u64, wave: u32, rock: u32) -> DVec3 {
+    let t = hash_unit(seed, wave_index(wave, rock, 0));
+    perimeter_point(t)
+}
+
+/// Which way rock `rock` of wave `wave` drifts.
+#[must_use]
+pub fn wave_rock_velocity(seed: u64, wave: u32, rock: u32) -> DVec3 {
+    let angle = hash_unit(seed, wave_index(wave, rock, 1)) * std::f64::consts::TAU;
+    DVec3::new(angle.cos(), angle.sin(), 0.0) * RockSize::Large.speed()
+}
+
+/// The point `t` of the way around the playfield's border, `t` in `[0, 1)`.
+fn perimeter_point(t: f64) -> DVec3 {
+    let (w, h) = (WORLD_HALF_WIDTH, WORLD_HALF_HEIGHT);
+    // Four sides, each parameterised over a quarter of `t`. Uneven in length —
+    // a wide field gets more of its rocks per unit of edge on the short sides —
+    // which nothing here cares about and which keeps this arithmetic exact.
+    let side = (t * 4.0) as u32;
+    let along = t.mul_add(4.0, -f64::from(side));
+    match side {
+        0 => DVec3::new(-w + along * 2.0 * w, h, 0.0),
+        1 => DVec3::new(w, h - along * 2.0 * h, 0.0),
+        2 => DVec3::new(w - along * 2.0 * w, -h, 0.0),
+        // `t` is in [0, 1) so `side` is in 0..=3; the catch-all is the fourth
+        // side rather than a panic, because a caller is not obliged to know
+        // that.
+        _ => DVec3::new(-w, -h + along * 2.0 * h, 0.0),
+    }
+}
+
+/// The course of split child `child` of a rock destroyed at spawn counter
+/// `counter`, given the parent's direction.
+fn split_velocity(
+    seed: u64,
+    counter: u64,
+    child: usize,
+    parent_dir: DVec3,
+    size: RockSize,
+) -> DVec3 {
+    let jitter = hash_unit(seed, split_index(counter).wrapping_add(child as u64));
+    let magnitude = SPLIT_ANGLE_MIN + jitter * SPLIT_ANGLE_RANGE;
+    // The children go opposite ways around the parent's course, so a split
+    // always opens rather than sending both halves the same way.
+    let angle = if child.is_multiple_of(2) {
+        magnitude
+    } else {
+        -magnitude
+    };
+    (DQuat::from_rotation_z(angle) * parent_dir) * size.speed()
+}
+
+// ---------------------------------------------------------------------------
+// Screen wrap
+// ---------------------------------------------------------------------------
+
+/// Brings `v` back inside `[-half, half)`.
+///
+/// Exact for a value already inside, which matters: the tick decides whether to
+/// teleport a body by comparing this against the position it was given, and a
+/// round trip through `rem_euclid` that returned a value one ulp away would
+/// teleport every body every tick.
+#[must_use]
+pub fn wrap_axis(v: f64, half: f64) -> f64 {
+    if v >= -half && v < half {
+        return v;
+    }
+    let span = 2.0 * half;
+    (v + half).rem_euclid(span) - half
+}
+
+/// Brings a position back inside the playfield.
+#[must_use]
+pub fn wrap_position(position: DVec3) -> DVec3 {
+    DVec3::new(
+        wrap_axis(position.x, WORLD_HALF_WIDTH),
+        wrap_axis(position.y, WORLD_HALF_HEIGHT),
+        position.z,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+
+const ACTION_LEFT: &str = "left";
+const ACTION_RIGHT: &str = "right";
+const ACTION_THRUST: &str = "thrust";
+const ACTION_FIRE: &str = "fire";
+const ACTION_RESTART: &str = "restart";
+
+/// One tick of player intent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Intent {
+    left: bool,
+    right: bool,
+    thrust: bool,
+    /// The trigger, on the tick it went down. An *edge*: a held key would empty
+    /// the magazine into one rock at whatever the tick rate happens to be.
+    fire: bool,
+    restart: bool,
+}
+
+impl Intent {
+    /// The wire form handed to `Client::set_input`.
+    fn to_wire(self) -> u8 {
+        u8::from(self.left)
+            | (u8::from(self.right) << 1)
+            | (u8::from(self.thrust) << 2)
+            | (u8::from(self.fire) << 3)
+            | (u8::from(self.restart) << 4)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+/// Where a game is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GameState {
+    /// Rocks drift, the ship is inert. The first shot begins the game.
+    WaitingToStart,
+    /// Playing.
+    Playing,
+    /// Out of lives. Fire or restart begins a new game.
+    GameOver,
+}
+
+/// One rock.
+#[derive(Clone, Copy, Debug)]
+struct Rock {
+    entity: Entity,
+    size: RockSize,
+}
+
+/// One bullet. No collider: see [`sweep_bullets`].
+#[derive(Clone, Copy, Debug)]
+struct Bullet {
+    entity: Entity,
+    /// Seconds left before it expires.
+    life: f64,
+}
+
+/// What the renderer needs for one rock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RockView {
+    pub position: DVec3,
+    pub size: RockSize,
+}
+
+/// What the renderer needs for one bullet.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BulletView {
+    pub position: DVec3,
+}
+
+/// The mutable game state the server-side module owns.
+#[derive(Debug)]
+struct GameLogic {
+    ship: Entity,
+    intent: Intent,
+    state: GameState,
+
+    /// The ship's heading, in radians, with 0 pointing along +Y.
+    ///
+    /// **Game state, not physics state.** `crcbl-phys` has no angular velocity
+    /// and no torque; this is integrated by hand in [`turn_ship`] and written
+    /// into the [`Transform`] that [`ThrustForce::world_force`] then reads.
+    heading: f64,
+    ship_pos: DVec3,
+    ship_vel: DVec3,
+    /// Whether the ship is on the field. `false` between a death and a respawn.
+    ship_alive: bool,
+    /// Seconds since the ship was destroyed, while it is waiting to return.
+    respawn_timer: f64,
+    /// Seconds until the next shot is allowed.
+    fire_timer: f64,
+
+    rocks: Vec<Rock>,
+    bullets: Vec<Bullet>,
+
+    score: u32,
+    lives: u32,
+    /// Which wave is on the field. Zero-based; the HUD adds one.
+    wave: u32,
+
+    /// The seed the whole game was started with. The board actually in play is
+    /// [`board_seed`] of this and [`Self::runs`].
+    seed: u64,
+    /// How many games have been started. Simulation state, so a replay meets
+    /// the same boards in the same order.
+    runs: u32,
+    /// Every rock ever spawned by a split, counted so [`split_velocity`] has an
+    /// index. Never reset within a game, so two splits never draw the same
+    /// number.
+    spawn_counter: u64,
+
+    /// How many rocks have ever been put on the field, and how many bullets
+    /// have ever left the gun.
+    ///
+    /// **Instrumentation, not mechanism** — nothing reads them to decide
+    /// anything. They exist because the leak test's whole claim is "this ran a
+    /// lot of churn and leaked nothing", and without a count of the churn the
+    /// second half is true of a game that did nothing at all.
+    rocks_spawned: u64,
+    bullets_fired: u64,
+
+    /// Live views for the renderer, refilled rather than rebuilt so a
+    /// steady-state tick does not allocate.
+    rock_views: Vec<RockView>,
+    bullet_views: Vec<BulletView>,
+
+    /// Scratch space for the per-tick sweeps, kept here for the same reason.
+    scratch_entities: Vec<Entity>,
+
+    /// The engine, as a force model rather than as a number. See
+    /// [`ThrustForce::world_force`], which exists for exactly this case: a game
+    /// that thrusts one entity among a field of rocks cannot use a pipeline
+    /// provider, because a provider applies to every body.
+    thrust: ThrustForce,
+
+    /// Ticks the module has actually run. The facade asserts this advances by
+    /// exactly one per [`Game::tick`].
+    ticks: u64,
+}
+
+impl GameLogic {
+    /// The seed of the board in play.
+    fn board(&self) -> u64 {
+        board_seed(self.seed, self.runs)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The module
+// ---------------------------------------------------------------------------
+
+/// Per-tick game logic, run by the server after the ECS physics schedule.
+///
+/// `register` is empty for the same reason breakout's and flappy's are:
+/// `Server::set_module` does not call it, and the physics system is registered
+/// on the world in [`Game::new`] before the server is built.
+struct AsteroidsModule {
+    shared: Arc<Mutex<GameLogic>>,
+}
+
+impl std::fmt::Debug for AsteroidsModule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsteroidsModule").finish_non_exhaustive()
+    }
+}
+
+impl GameModule for AsteroidsModule {
+    fn name(&self) -> &str {
+        "asteroids"
+    }
+
+    fn register(&self, _world: &mut World) {}
+
+    fn tick(&mut self, world: &mut World) {
+        let mut logic = lock(&self.shared);
+        run_tick(&mut logic, world);
+    }
+}
+
+/// A poisoned mutex here means a previous tick panicked. The game state is plain
+/// data with no invariant a panic could have half-broken, so recovering the
+/// guard is strictly better than taking the process down a second time.
+fn lock(shared: &Mutex<GameLogic>) -> MutexGuard<'_, GameLogic> {
+    shared.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// One tick of asteroids, inside the server's tick, after physics has stepped.
+///
+/// **The order is load-bearing**, and the two places it is are:
+///
+/// * The bullet sweeps run **before** the wrap. A sweep is `prev → cur`, and a
+///   bullet wrapped first would be swept across the whole field from the edge it
+///   left to the edge it arrived at, hitting everything on the way.
+/// * The wrap runs **before** the overlap test, so the ship and the rocks are
+///   compared in one frame rather than one of each.
+fn run_tick(logic: &mut GameLogic, world: &mut World) {
+    logic.ticks += 1;
+    let dt = world.tick_dt();
+    let intent = std::mem::take(&mut logic.intent);
+
+    // The integrator has just moved the ship, and everything below places
+    // things relative to where it is *now* — the muzzle a shot leaves from, the
+    // sphere the overlap query is centred on. Reading it at the end of the last
+    // tick instead would put both a tick behind, which at terminal speed is a
+    // quarter of a unit of lag on the gun.
+    read_ship(logic, world);
+
+    match logic.state {
+        _ if intent.restart => restart(logic, world),
+        GameState::WaitingToStart if intent.fire => logic.state = GameState::Playing,
+        GameState::GameOver if intent.fire => restart(logic, world),
+        _ => {}
+    }
+
+    if logic.state == GameState::Playing && logic.ship_alive {
+        turn_ship(logic, world, intent, dt);
+        drive_ship(logic, world, intent, dt);
+        fire(logic, world, intent, dt);
+    } else {
+        // The cooldown still runs down while the ship is gone, so a respawned
+        // ship can shoot immediately rather than inheriting a stale timer.
+        logic.fire_timer = (logic.fire_timer - dt).max(0.0);
+    }
+
+    sweep_bullets(logic, world, dt);
+    wrap_everything(logic, world);
+    // Again, because the wrap is a teleport: a ship that just crossed an edge is
+    // a whole field away from where it was three lines ago, and `check_ship`
+    // below centres its overlap query on this value.
+    read_ship(logic, world);
+    expire_bullets(logic, world, dt);
+
+    if logic.state == GameState::Playing {
+        if logic.ship_alive {
+            check_ship(logic, world);
+        } else {
+            respawn(logic, world, dt);
+        }
+        advance_wave(logic, world);
+    }
+
+    refresh_views(logic, world);
+}
+
+// ---------------------------------------------------------------------------
+// The ship
+// ---------------------------------------------------------------------------
+
+/// Integrates the ship's heading and writes it into the transform.
+///
+/// By hand, because `crcbl-phys` has no rotational dynamics: `RigidBody` carries
+/// `velocity` and `force_accum` and nothing angular, and `SemiImplicitEuler`
+/// steps position only. That is the right answer for this game — a turn rate is
+/// a constant here, not a physical response — and it is recorded in
+/// `docs/backlog.md` as what the crate still owes a game where it is not.
+fn turn_ship(logic: &mut GameLogic, world: &mut World, intent: Intent, dt: f64) {
+    let turn = f64::from(i8::from(intent.left) - i8::from(intent.right));
+    if turn == 0.0 {
+        return;
+    }
+    logic.heading = (logic.heading + turn * SHIP_TURN_RATE * dt).rem_euclid(std::f64::consts::TAU);
+    let ship = logic.ship;
+    let rotation = DQuat::from_rotation_z(logic.heading);
+    with_physics(world, |phys| {
+        if let Some(transform) = phys.transform(ship).copied() {
+            phys.set_transform(ship, Transform::new(transform.position, rotation));
+        }
+    });
+}
+
+/// Applies the engine and the coast.
+///
+/// Both go through [`PhysicsSystem::apply_force`] rather than through a force
+/// provider, because a provider is global and would push every rock on the
+/// field. [`ThrustForce::world_force`] exists for this; **the damping has no
+/// equivalent**, so the `-k·v` below is a hand copy of [`DampingForce`]'s model,
+/// clamp and all. That asymmetry is a finding, recorded in `docs/backlog.md`.
+///
+/// [`DampingForce`]: crcbl_phys::DampingForce
+fn drive_ship(logic: &mut GameLogic, world: &mut World, intent: Intent, dt: f64) {
+    let ship = logic.ship;
+    let thrust = logic.thrust;
+    with_physics(world, |phys| {
+        let Some(transform) = phys.transform(ship).copied() else {
+            return;
+        };
+        if intent.thrust {
+            phys.apply_force(ship, thrust.world_force(&transform));
+        }
+        if let Some(body) = phys.body(ship).copied() {
+            phys.apply_force(ship, damping_force(body.velocity, body.mass, dt));
+        }
+    });
+}
+
+/// The damping force `crcbl_phys::DampingForce` would apply to a body of `mass`
+/// moving at `velocity` over a step of `dt`.
+///
+/// Copied rather than reused because the provider pipeline is global — see
+/// [`drive_ship`]. The `mass / dt` clamp is copied with it: it is what stops a
+/// coarse tick rate from over-damping past zero and reversing the ship, and at
+/// `--tick-hz 1` it is the difference between coasting to a halt and flying
+/// backwards.
+#[must_use]
+fn damping_force(velocity: DVec3, mass: f64, dt: f64) -> DVec3 {
+    let critical = mass / dt;
+    let effective = if SHIP_DAMPING < critical {
+        SHIP_DAMPING
+    } else {
+        critical
+    };
+    -velocity * effective
+}
+
+/// Fires, if the trigger went down, the magazine has room and the cooldown has
+/// run out.
+fn fire(logic: &mut GameLogic, world: &mut World, intent: Intent, dt: f64) {
+    logic.fire_timer = (logic.fire_timer - dt).max(0.0);
+    if !intent.fire || logic.fire_timer > 0.0 || logic.bullets.len() >= MAX_BULLETS {
+        return;
+    }
+    logic.fire_timer = FIRE_COOLDOWN;
+
+    let direction = heading_vector(logic.heading);
+    let position = wrap_position(logic.ship_pos + direction * MUZZLE_OFFSET);
+    let velocity = logic.ship_vel + direction * BULLET_SPEED;
+
+    let entity = world.spawn();
+    let transform = Transform::from_position(position);
+    with_physics(world, |phys| {
+        let mut body = RigidBody::new_dynamic(1.0);
+        body.velocity = velocity;
+        phys.set_body(entity, body);
+        phys.set_transform(entity, transform);
+    });
+    logic.bullets.push(Bullet {
+        entity,
+        life: BULLET_LIFE,
+    });
+    logic.bullets_fired += 1;
+}
+
+/// The unit vector a heading of `radians` points along. Zero is +Y.
+#[must_use]
+pub fn heading_vector(radians: f64) -> DVec3 {
+    DVec3::new(-radians.sin(), radians.cos(), 0.0)
+}
+
+/// Whether the ship is touching a rock, and what happens if it is.
+///
+/// A sphere overlap against the broadphase, which is what the plan asks for.
+/// The [`crcbl_phys::ShapeHit`] each result carries is **discarded**: it is
+/// fabricated (`t: 0.0`, normal `+Y`, `started_inside: true` for every result,
+/// recorded in `docs/backlog.md`), and all this query is asked is *whether*
+/// anything is there. `PhysicsWorld::overlap_sphere` underneath is honest but
+/// returns `ColliderId`s, and the entity mapping lives only on the system.
+///
+/// # The ship is not in the broadphase, and this is why
+///
+/// The ship is the *subject* of every overlap test in this game and the
+/// *target* of none: bullets are excluded from it deliberately, and the only
+/// other query — [`respawn`]'s clear-centre check — runs while the ship is
+/// destroyed. A collider for it would therefore be a leaf in the tree that no
+/// query is allowed to return, and every one of them would have needed
+/// filtering back out by entity id.
+///
+/// That falls out of the shape of the API rather than of this game:
+/// [`PhysicsSystem::overlap_sphere`] takes a free centre and radius, so an
+/// entity that only ever *asks* has no reason to be in the tree. A crate-level
+/// "what does entity E overlap, excluding these" would change the answer.
+/// Recorded in `docs/backlog.md`.
+fn check_ship(logic: &mut GameLogic, world: &mut World) {
+    let centre = logic.ship_pos;
+    let touching = with_physics(world, |phys| {
+        !phys.overlap_sphere(centre, SHIP_RADIUS).is_empty()
+    })
+    .unwrap_or(false);
+    if touching {
+        destroy_ship(logic, world);
+    }
+}
+
+/// Takes the ship off the field and spends a life.
+fn destroy_ship(logic: &mut GameLogic, world: &mut World) {
+    let ship = logic.ship;
+    logic.ship_alive = false;
+    logic.respawn_timer = 0.0;
+    logic.lives = logic.lives.saturating_sub(1);
+    // **Kinematic, not merely stopped.** Zeroing the velocity leaves the body
+    // dynamic, so the next tick's damping and thrust act on a wreck — and the
+    // wreck keeps drifting across the field behind the game-over screen.
+    with_physics(world, |phys| {
+        phys.set_body(ship, RigidBody::new_kinematic());
+    });
+    if logic.lives == 0 {
+        logic.state = GameState::GameOver;
+        log::info!(
+            "game over on wave {} with {} points",
+            logic.wave + 1,
+            logic.score
+        );
+    }
+}
+
+/// Counts down to the ship's return, and returns it when the middle is clear.
+fn respawn(logic: &mut GameLogic, world: &mut World, dt: f64) {
+    logic.respawn_timer += dt;
+    if logic.respawn_timer < RESPAWN_DELAY {
+        return;
+    }
+    let clear = with_physics(world, |phys| {
+        phys.overlap_sphere(DVec3::ZERO, RESPAWN_CLEAR_RADIUS)
+            .is_empty()
+    })
+    .unwrap_or(true);
+    if !clear && logic.respawn_timer < RESPAWN_MAX_WAIT {
+        return;
+    }
+    place_ship(logic, world, DVec3::ZERO, 0.0, DVec3::ZERO);
+}
+
+/// Puts the ship on the field, stationary and facing up.
+fn place_ship(
+    logic: &mut GameLogic,
+    world: &mut World,
+    position: DVec3,
+    heading: f64,
+    velocity: DVec3,
+) {
+    let ship = logic.ship;
+    logic.heading = heading;
+    logic.ship_pos = position;
+    logic.ship_vel = velocity;
+    logic.ship_alive = true;
+    logic.respawn_timer = 0.0;
+    let transform = Transform::new(position, DQuat::from_rotation_z(heading));
+    with_physics(world, |phys| {
+        let mut body = RigidBody::new_dynamic(SHIP_MASS);
+        body.velocity = velocity;
+        phys.set_body(ship, body);
+        phys.set_transform(ship, transform);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Bullets
+// ---------------------------------------------------------------------------
+
+/// Sweeps every bullet along the path it took this tick and resolves what it
+/// hit.
+///
+/// **This is the "never miss at any speed" half of the plan, and it is written
+/// by hand.** `crcbl-phys` has the machinery — [`PhysicsSystem::sweep_sphere`]
+/// takes a [`Segment`] and a radius — and no bullet-shaped entry point, so every
+/// game that fires anything writes this same "from where it was to where it is"
+/// itself. `docs/backlog.md` records that; this is the consumer that decided it
+/// is still worth writing rather than worked around.
+///
+/// A bullet therefore has **no collider**. It is a query, not a body in the
+/// broadphase: giving it one would put the bullet's own shape at the far end of
+/// its own sweep, where it reports hitting itself at `t = 0` — the price flappy
+/// and breakout both pay — and would need a remove-and-re-insert per bullet per
+/// tick to avoid.
+///
+/// Nor is the ship — see [`check_ship`] — so the sweep needs no exclusion list
+/// and cannot report a shot hitting the hull it left. **Every collider in the
+/// world is a rock**, which is what makes the leak test's collider count an
+/// equality rather than a bound.
+fn sweep_bullets(logic: &mut GameLogic, world: &mut World, dt: f64) {
+    if logic.bullets.is_empty() {
+        return;
+    }
+
+    // `(bullet index, rock entity)` for everything that connected this tick.
+    let mut hits: Vec<(usize, Entity)> = Vec::new();
+    let bullets = logic.bullets.clone();
+    with_physics(world, |phys| {
+        for (index, bullet) in bullets.iter().enumerate() {
+            let Some((body, transform)) = phys
+                .body(bullet.entity)
+                .copied()
+                .zip(phys.transform(bullet.entity).copied())
+            else {
+                continue;
+            };
+            let segment = Segment {
+                start: transform.position - body.velocity * dt,
+                end: transform.position,
+            };
+            if let Some((entity, _hit)) = phys.sweep_sphere(&segment, BULLET_RADIUS) {
+                hits.push((index, entity));
+            }
+        }
+    });
+
+    // Highest index first, so removing one bullet does not move the next.
+    for &(index, hit) in hits.iter().rev() {
+        let Some(bullet) = logic.bullets.get(index).copied() else {
+            continue;
+        };
+        // Two bullets can reach the same rock on the same tick. The first
+        // splits it; the second finds an entity that is no longer a rock and is
+        // spent without scoring, which is the arcade's behaviour and, more to
+        // the point, is not a double score.
+        let rock = logic.rocks.iter().position(|rock| rock.entity == hit);
+        despawn_bullet(world, bullet);
+        logic.bullets.remove(index);
+        if let Some(rock) = rock {
+            shatter(logic, world, rock);
+        }
+    }
+}
+
+/// Ages every bullet and destroys the ones that have run out.
+fn expire_bullets(logic: &mut GameLogic, world: &mut World, dt: f64) {
+    let mut dead = std::mem::take(&mut logic.scratch_entities);
+    dead.clear();
+    logic.bullets.retain_mut(|bullet| {
+        bullet.life -= dt;
+        if bullet.life > 0.0 {
+            return true;
+        }
+        dead.push(bullet.entity);
+        false
+    });
+    for entity in dead.drain(..) {
+        despawn_bullet(world, Bullet { entity, life: 0.0 });
+    }
+    logic.scratch_entities = dead;
+}
+
+/// Destroys a bullet, in the physics world and in the ECS.
+///
+/// Both, and in that order — the failure mode a game with this much churn would
+/// produce a hundred times a minute is a body left behind when its entity goes.
+fn despawn_bullet(world: &mut World, bullet: Bullet) {
+    with_physics(world, |phys| phys.remove_entity(bullet.entity));
+    world.despawn(bullet.entity);
+}
+
+// ---------------------------------------------------------------------------
+// Rocks
+// ---------------------------------------------------------------------------
+
+/// Breaks rock `index` into its children, scores it and destroys it.
+fn shatter(logic: &mut GameLogic, world: &mut World, index: usize) {
+    let rock = logic.rocks.swap_remove(index);
+    logic.score += rock.size.score();
+
+    let (position, direction) = with_physics(world, |phys| {
+        let position = phys
+            .transform(rock.entity)
+            .map_or(DVec3::ZERO, |t| t.position);
+        let direction = phys
+            .body(rock.entity)
+            .map_or(DVec3::Y, |b| b.velocity.normalize_or(DVec3::Y));
+        (position, direction)
+    })
+    .unwrap_or((DVec3::ZERO, DVec3::Y));
+
+    with_physics(world, |phys| phys.remove_entity(rock.entity));
+    world.despawn(rock.entity);
+
+    let Some(child) = rock.size.child() else {
+        return;
+    };
+    let seed = logic.board();
+    for which in 0..SPLIT_CHILDREN {
+        let counter = logic.spawn_counter;
+        logic.spawn_counter += 1;
+        let velocity = split_velocity(seed, counter, which, direction, child);
+        spawn_rock(logic, world, child, position, velocity);
+    }
+}
+
+/// Puts one rock on the field.
+fn spawn_rock(
+    logic: &mut GameLogic,
+    world: &mut World,
+    size: RockSize,
+    position: DVec3,
+    velocity: DVec3,
+) -> Entity {
+    let entity = world.spawn();
+    let transform = Transform::from_position(wrap_position(position));
+    with_physics(world, |phys| {
+        let mut body = RigidBody::new_dynamic(1.0);
+        body.velocity = velocity;
+        phys.set_body(entity, body);
+        phys.set_collider(entity, &size.collider(), &transform);
+    });
+    logic.rocks.push(Rock { entity, size });
+    logic.rocks_spawned += 1;
+    entity
+}
+
+/// Deals the next wave once the field is clear.
+fn advance_wave(logic: &mut GameLogic, world: &mut World) {
+    if !logic.rocks.is_empty() {
+        return;
+    }
+    logic.wave += 1;
+    deal_wave(logic, world);
+    log::info!(
+        "wave {} — {} rocks, {} points",
+        logic.wave + 1,
+        logic.rocks.len(),
+        logic.score
+    );
+}
+
+/// Puts the current wave's rocks on the field.
+fn deal_wave(logic: &mut GameLogic, world: &mut World) {
+    let seed = logic.board();
+    let wave = logic.wave;
+    for rock in 0..wave_rocks(wave) {
+        let position = wave_rock_position(seed, wave, rock);
+        let velocity = wave_rock_velocity(seed, wave, rock);
+        spawn_rock(logic, world, RockSize::Large, position, velocity);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The wrap
+// ---------------------------------------------------------------------------
+
+/// Brings everything that has left the field back in on the other side.
+fn wrap_everything(logic: &mut GameLogic, world: &mut World) {
+    let ship = logic.ship;
+    let ship_alive = logic.ship_alive;
+    let rocks: Vec<(Entity, RockSize)> = logic.rocks.iter().map(|r| (r.entity, r.size)).collect();
+    let bullets: Vec<Entity> = logic.bullets.iter().map(|b| b.entity).collect();
+
+    with_physics(world, |phys| {
+        if ship_alive {
+            // `None`: the ship carries no collider (see `check_ship`), so its
+            // wrap has nothing to re-place in the tree. The rocks below are
+            // where the teleport rule actually bites.
+            teleport_if_outside(phys, ship, None);
+        }
+        for (entity, size) in rocks {
+            teleport_if_outside(phys, entity, Some(&size.collider()));
+        }
+        for entity in bullets {
+            teleport_if_outside(phys, entity, None);
+        }
+    });
+}
+
+/// Wraps `entity` if it has left the field, and does nothing at all if it has
+/// not.
+fn teleport_if_outside(
+    phys: &mut PhysicsSystem,
+    entity: Entity,
+    collider: Option<&ColliderComponent>,
+) {
+    let Some(transform) = phys.transform(entity).copied() else {
+        return;
+    };
+    let wrapped = wrap_position(transform.position);
+    if wrapped == transform.position {
+        return;
+    }
+    teleport(
+        phys,
+        entity,
+        Transform::new(wrapped, transform.rotation),
+        collider,
+    );
+}
+
+/// Moves `entity` to `transform` as a **teleport**: its collider comes out of
+/// the broadphase and goes back in, rather than being refitted where it stood.
+///
+/// # The rule this sample had to pick
+///
+/// `docs/backlog.md` left the choice to whoever wrote the wrap, so: **a wrap is
+/// a teleport, and a teleport is a remove-and-re-insert.** Uniformly, for
+/// everything that is in the broadphase at all — which here is every rock, and
+/// nothing else — with no distance threshold, because "did the position change
+/// discontinuously" is exactly what a wrap knows and a threshold would only be
+/// a guess at it.
+///
+/// [`PhysicsSystem::set_collider`] *is* that remove-and-re-insert: it drops the
+/// old collider (bumping its generation and recycling its slot) and inserts a
+/// fresh one, so the leaf is re-placed by the surface area heuristic instead of
+/// staying where it was.
+///
+/// # What was and was not verified
+///
+/// The backlog's entry implies a wrapped body's *collisions* break. **They do
+/// not**, and this was checked: `Bvh::update_aabb` refits every ancestor on the
+/// way to the root, so a leaf dragged across the field leaves its ancestors as
+/// conservative supersets — bigger than they should be, never smaller. A
+/// superset prunes nothing, so `set_transform` still finds every overlap.
+/// Swapping this call for `set_transform` leaves the whole of this crate's suite
+/// green, which is the honest report of it.
+///
+/// What it costs instead is **tree quality**: ancestors stretched across a
+/// 32 × 24 field make every query traverse subtrees it has no business in.
+/// That is a cost this sample **cannot observe** — `PhysicsWorld` exposes no
+/// `depth()`, no node count and no `&Bvh`, though `Bvh::depth` itself is public
+/// — so the rule is chosen on the argument and not on a measurement. Recorded
+/// in `docs/backlog.md` as the gap it is.
+fn teleport(
+    phys: &mut PhysicsSystem,
+    entity: Entity,
+    transform: Transform,
+    collider: Option<&ColliderComponent>,
+) {
+    match collider {
+        Some(component) => phys.set_collider(entity, component, &transform),
+        // Nothing in the tree to re-place. `set_transform` is the whole of the
+        // move for a body that is only ever a query.
+        None => phys.set_transform(entity, transform),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Restart and read-back
+// ---------------------------------------------------------------------------
+
+/// Clears the field and deals a new game on a board that is not the one just
+/// played.
+fn restart(logic: &mut GameLogic, world: &mut World) {
+    for rock in std::mem::take(&mut logic.rocks) {
+        with_physics(world, |phys| phys.remove_entity(rock.entity));
+        world.despawn(rock.entity);
+    }
+    for bullet in std::mem::take(&mut logic.bullets) {
+        despawn_bullet(world, bullet);
+    }
+    logic.runs = logic.runs.wrapping_add(1);
+    logic.state = GameState::WaitingToStart;
+    logic.score = 0;
+    logic.lives = STARTING_LIVES;
+    logic.wave = 0;
+    logic.fire_timer = 0.0;
+    logic.spawn_counter = 0;
+    place_ship(logic, world, DVec3::ZERO, 0.0, DVec3::ZERO);
+    deal_wave(logic, world);
+}
+
+/// Copies the authoritative state the renderer needs out of the physics world.
+fn refresh_views(logic: &mut GameLogic, world: &mut World) {
+    let ship = logic.ship;
+    let rocks: Vec<(Entity, RockSize)> = logic.rocks.iter().map(|r| (r.entity, r.size)).collect();
+    let bullets: Vec<Entity> = logic.bullets.iter().map(|b| b.entity).collect();
+
+    // Taken out and put back rather than borrowed through the guard: the
+    // closure below needs the physics system *and* these two lists, and both
+    // live behind the same `&mut logic`. The allocations survive the round
+    // trip, which is the point of reusing them.
+    let mut rock_views = std::mem::take(&mut logic.rock_views);
+    let mut bullet_views = std::mem::take(&mut logic.bullet_views);
+    rock_views.clear();
+    bullet_views.clear();
+    let ship_state = with_physics(world, |phys| {
+        for (entity, size) in rocks {
+            if let Some(transform) = phys.transform(entity) {
+                rock_views.push(RockView {
+                    position: transform.position,
+                    size,
+                });
+            }
+        }
+        for entity in bullets {
+            if let Some(transform) = phys.transform(entity) {
+                bullet_views.push(BulletView {
+                    position: transform.position,
+                });
+            }
+        }
+        let position = phys.transform(ship).map(|t| t.position);
+        let velocity = phys.body(ship).map(|b| b.velocity);
+        position.zip(velocity)
+    })
+    .flatten();
+    logic.rock_views = rock_views;
+    logic.bullet_views = bullet_views;
+
+    if let Some((position, velocity)) = ship_state {
+        logic.ship_pos = position;
+        logic.ship_vel = velocity;
+    }
+}
+
+/// Copies the ship's authoritative position and velocity out of the physics
+/// world.
+fn read_ship(logic: &mut GameLogic, world: &mut World) {
+    let ship = logic.ship;
+    let state = with_physics(world, |phys| {
+        let position = phys.transform(ship).map(|t| t.position);
+        let velocity = phys.body(ship).map(|b| b.velocity);
+        position.zip(velocity)
+    })
+    .flatten();
+    if let Some((position, velocity)) = state {
+        logic.ship_pos = position;
+        logic.ship_vel = velocity;
+    }
+}
+
+/// Runs `f` against the world's physics system, if it has one.
+fn with_physics<R>(world: &mut World, f: impl FnOnce(&mut PhysicsSystem) -> R) -> Option<R> {
+    for sys in world.schedule_mut().iter_mut() {
+        if sys.name() == "physics"
+            && let Some(phys) = sys.as_any_mut().downcast_mut::<PhysicsSystem>()
+        {
+            return Some(f(phys));
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Game — the client-side facade
+// ---------------------------------------------------------------------------
+
+/// Everything the renderer needs for one frame, in world space.
+///
+/// Filled through [`Game::render_state`], which reuses the caller's allocations
+/// — this game hands over a fresh rock and bullet list every frame forever.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RenderState {
+    pub ship: DVec3,
+    pub ship_heading: f64,
+    pub ship_alive: bool,
+    pub rocks: Vec<RockView>,
+    pub bullets: Vec<BulletView>,
+    pub score: u32,
+    pub lives: u32,
+    /// Zero-based. The HUD shows `wave + 1`.
+    pub wave: u32,
+    pub state: Option<GameState>,
+}
+
+pub struct Game {
+    pub ship_entity: Entity,
+    action_map: ActionMap,
+    server: Server<InMemoryTransport>,
+    client: Client<InMemoryTransport>,
+    shared: Arc<Mutex<GameLogic>>,
+    /// Exactly one tick period per [`Game::tick`], so the server's accumulator
+    /// yields exactly one tick per call.
+    tick_period: Duration,
+    sim_time: Duration,
+    ticks_run: u64,
+    /// Queued key events from the shell pump, replayed after `begin_tick`.
+    pending_keys: Vec<(KeyCode, bool)>,
+    /// Mirrors of the shared state, refreshed after each tick so the render and
+    /// HUD paths never take the lock.
+    pub state: GameState,
+    pub score: u32,
+    pub lives: u32,
+    pub wave: u32,
+    pub ship: DVec3,
+    pub ship_velocity: DVec3,
+    pub ship_heading: f64,
+    pub ship_alive: bool,
+    prev_log_state: GameState,
+}
+
+impl std::fmt::Debug for Game {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Game")
+            .field("ship_entity", &self.ship_entity)
+            .field("state", &self.state)
+            .field("score", &self.score)
+            .field("lives", &self.lives)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+pub enum GameError {
+    Server(String),
+}
+
+impl std::fmt::Display for GameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Server(msg) => write!(f, "server creation failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for GameError {}
+
+impl Game {
+    /// Builds the world, the physics system, the server and the client.
+    ///
+    /// # Errors
+    ///
+    /// [`GameError::Server`] if the operating system would not give the server
+    /// the entropy for a resume credential.
+    ///
+    /// # Panics
+    ///
+    /// If `tick_hz` is zero.
+    pub fn new(headless: bool, tick_hz: u32) -> Result<Self, GameError> {
+        Self::with_seed(headless, tick_hz, DEFAULT_SEED)
+    }
+
+    /// The same, on a named board.
+    ///
+    /// `seed` decides every rock of every wave of every run of this game — see
+    /// [`hash_unit`] — so two games built with the same seed and fed the same
+    /// input are the same game, which is what the determinism tests rest on.
+    ///
+    /// # Errors
+    ///
+    /// [`GameError::Server`] if the operating system would not give the server
+    /// the entropy for a resume credential.
+    ///
+    /// # Panics
+    ///
+    /// If `tick_hz` is zero.
+    pub fn with_seed(headless: bool, tick_hz: u32, seed: u64) -> Result<Self, GameError> {
+        assert!(tick_hz > 0, "tick rate must be positive");
+        // Taken and not used *yet*: it is what breakout and flappy hand to
+        // their audio stream and their best-score file, and both arrive in the
+        // next sub-slice. Keeping the parameter now is cheaper than changing
+        // every call site then, and keeping the signature identical to the
+        // other two samples is the point of having three of them.
+        let _ = headless;
+        let mut world = World::new();
+
+        // **No force providers at all.** A provider applies to every dynamic
+        // body, and every dynamic body here except the ship is a rock or a
+        // bullet, neither of which may be pushed or slowed by anything. The
+        // ship's two forces are per-entity; see `drive_ship`.
+        world.register_system(Box::new(PhysicsSystem::new()));
+
+        let ship_entity = world.spawn();
+
+        let mut action_map = ActionMap::new();
+        for (name, keys) in [
+            (ACTION_LEFT, vec![KeyCode::ArrowLeft, KeyCode::KeyA]),
+            (ACTION_RIGHT, vec![KeyCode::ArrowRight, KeyCode::KeyD]),
+            (ACTION_THRUST, vec![KeyCode::ArrowUp, KeyCode::KeyW]),
+            (ACTION_FIRE, vec![KeyCode::Space]),
+            (ACTION_RESTART, vec![KeyCode::KeyR]),
+        ] {
+            action_map.declare(ActionDecl {
+                name: name.into(),
+                kind: ActionKind::Button,
+                bindings: keys.into_iter().map(Binding::Key).collect(),
+            });
+        }
+
+        let shared = Arc::new(Mutex::new(GameLogic {
+            ship: ship_entity,
+            intent: Intent::default(),
+            state: GameState::WaitingToStart,
+            heading: 0.0,
+            ship_pos: DVec3::ZERO,
+            ship_vel: DVec3::ZERO,
+            ship_alive: false,
+            respawn_timer: 0.0,
+            fire_timer: 0.0,
+            rocks: Vec::new(),
+            bullets: Vec::new(),
+            score: 0,
+            lives: STARTING_LIVES,
+            wave: 0,
+            seed,
+            runs: 0,
+            spawn_counter: 0,
+            rocks_spawned: 0,
+            bullets_fired: 0,
+            rock_views: Vec::new(),
+            bullet_views: Vec::new(),
+            scratch_entities: Vec::new(),
+            thrust: ThrustForce::new(SHIP_THRUST, DVec3::Y),
+            ticks: 0,
+        }));
+
+        // The board exists before the first tick: the player is looking at the
+        // game while deciding whether to press anything, and an empty screen
+        // that fills in on the first shot reads as a bug.
+        {
+            let mut logic = lock(&shared);
+            place_ship(&mut logic, &mut world, DVec3::ZERO, 0.0, DVec3::ZERO);
+            deal_wave(&mut logic, &mut world);
+        }
+
+        let (server_transport, client_transport) = InMemoryTransport::pair();
+        let mut server =
+            Server::try_new_with_compatibility(world, server_transport, tick_hz, COMPATIBILITY)
+                .map_err(|e| GameError::Server(e.to_string()))?;
+        server.set_module(Box::new(AsteroidsModule {
+            shared: Arc::clone(&shared),
+        }));
+
+        let mut client =
+            Client::new_with_compatibility(World::new(), client_transport, tick_hz, COMPATIBILITY);
+
+        let tick_period = FrameClock::new(tick_hz).tick_dt();
+
+        // Both clocks establish their baseline from the first `update`, which
+        // therefore runs no ticks. Spending it here, at time zero, is what lets
+        // `tick` promise that every later call runs exactly one.
+        server.update(Duration::ZERO);
+        client.update(Duration::ZERO);
+
+        {
+            let mut logic = lock(&shared);
+            refresh_views(&mut logic, server.world_mut());
+        }
+
+        let game = Self {
+            ship_entity,
+            action_map,
+            server,
+            client,
+            shared,
+            tick_period,
+            sim_time: Duration::ZERO,
+            ticks_run: 0,
+            pending_keys: Vec::new(),
+            state: GameState::WaitingToStart,
+            score: 0,
+            lives: STARTING_LIVES,
+            wave: 0,
+            ship: DVec3::ZERO,
+            ship_velocity: DVec3::ZERO,
+            ship_heading: 0.0,
+            ship_alive: true,
+            prev_log_state: GameState::WaitingToStart,
+        };
+        log::info!(
+            "sim: {tick_hz} Hz, {:.3} ms per tick, wave 1 of {} rocks",
+            game.tick_dt_secs() * 1e3,
+            wave_rocks(0),
+        );
+        Ok(game)
+    }
+
+    /// The fixed simulation step, in seconds.
+    #[must_use]
+    pub fn tick_dt_secs(&self) -> f64 {
+        self.tick_period.as_secs_f64()
+    }
+
+    /// Queue a key event for replay at the start of the next tick.
+    ///
+    /// The shell pumps events once per **frame** while the action map's edge
+    /// flags are per **tick**, and `ActionMap::begin_tick` resets those flags —
+    /// so an event fed before `begin_tick` has its press edge erased by it.
+    /// Queueing here and replaying after `begin_tick` is the order the action
+    /// map asks for, and it is what makes a frame that runs no ticks lossless.
+    pub fn key_event(&mut self, key: KeyCode, pressed: bool) {
+        self.pending_keys.push((key, pressed));
+    }
+
+    /// Advances the simulation by exactly one fixed tick.
+    ///
+    /// Call it from the loop's fixed-timestep accumulator — once per tick, not
+    /// once per frame. Nothing in here reads a wall clock.
+    pub fn tick(&mut self) {
+        let dt = self.tick_period.as_secs_f64();
+        self.action_map.begin_tick(dt as f32);
+        for (key, pressed) in std::mem::take(&mut self.pending_keys) {
+            self.action_map.key_event(key, pressed);
+        }
+
+        let intent = Intent {
+            left: action_held(&self.action_map, ACTION_LEFT),
+            right: action_held(&self.action_map, ACTION_RIGHT),
+            thrust: action_held(&self.action_map, ACTION_THRUST),
+            fire: action_just_pressed(&self.action_map, ACTION_FIRE),
+            restart: action_just_pressed(&self.action_map, ACTION_RESTART),
+        };
+
+        let ticks_before = {
+            let mut logic = lock(&self.shared);
+            // Held flags are assigned; edges are `|=`, because an edge raised on
+            // a frame that ran no ticks must survive until a tick consumes it.
+            logic.intent.left = intent.left;
+            logic.intent.right = intent.right;
+            logic.intent.thrust = intent.thrust;
+            logic.intent.fire |= intent.fire;
+            logic.intent.restart |= intent.restart;
+            logic.ticks
+        };
+
+        self.client.set_input(vec![intent.to_wire()]);
+
+        self.sim_time += self.tick_period;
+        let server_ticks = self.server.update(self.sim_time);
+        debug_assert_eq!(
+            server_ticks, 1,
+            "one tick period in must be exactly one server tick out",
+        );
+        let _alpha = self.client.update(self.sim_time);
+        self.ticks_run += 1;
+
+        let ticks_after = {
+            let logic = lock(&self.shared);
+            self.state = logic.state;
+            self.score = logic.score;
+            self.lives = logic.lives;
+            self.wave = logic.wave;
+            self.ship = logic.ship_pos;
+            self.ship_velocity = logic.ship_vel;
+            self.ship_heading = logic.heading;
+            self.ship_alive = logic.ship_alive;
+            logic.ticks
+        };
+        debug_assert_eq!(
+            ticks_after,
+            ticks_before + u64::from(server_ticks),
+            "game logic must run exactly once per physics tick",
+        );
+
+        let state_changed = self.state != self.prev_log_state;
+        self.prev_log_state = self.state;
+        if state_changed || self.ticks_run.is_multiple_of(120) {
+            log::info!(
+                "[HUD] {:?}  score: {}  lives: {}  wave: {}  rocks: {}",
+                self.state,
+                self.score,
+                self.lives,
+                self.wave + 1,
+                self.rock_count(),
+            );
+        }
+    }
+
+    /// Everything the renderer draws, in world space.
+    ///
+    /// `out` is reused across frames so a steady-state frame does not allocate.
+    pub fn render_state(&self, out: &mut RenderState) {
+        let logic = lock(&self.shared);
+        out.ship = logic.ship_pos;
+        out.ship_heading = logic.heading;
+        out.ship_alive = logic.ship_alive;
+        out.rocks.clear();
+        out.rocks.extend_from_slice(&logic.rock_views);
+        out.bullets.clear();
+        out.bullets.extend_from_slice(&logic.bullet_views);
+        out.score = logic.score;
+        out.lives = logic.lives;
+        out.wave = logic.wave;
+        out.state = Some(logic.state);
+    }
+
+    /// The board in play, for a caller that wants to name it — a bug report, a
+    /// replay header, or a test.
+    #[must_use]
+    pub fn board_seed(&self) -> u64 {
+        lock(&self.shared).board()
+    }
+
+    /// The rocks on the field right now.
+    #[must_use]
+    pub fn rocks(&self) -> Vec<RockView> {
+        lock(&self.shared).rock_views.clone()
+    }
+
+    /// The bullets in the air right now.
+    #[must_use]
+    pub fn bullets(&self) -> Vec<BulletView> {
+        lock(&self.shared).bullet_views.clone()
+    }
+
+    /// How many rocks are on the field.
+    #[must_use]
+    pub fn rock_count(&self) -> usize {
+        lock(&self.shared).rocks.len()
+    }
+
+    /// How many bullets are in the air.
+    #[must_use]
+    pub fn bullet_count(&self) -> usize {
+        lock(&self.shared).bullets.len()
+    }
+
+    /// How many rocks this game has ever put on the field, across every wave,
+    /// split and restart.
+    ///
+    /// The denominator of the leak test: "nothing leaked" is a claim about a
+    /// run that churned, and this is what says it churned.
+    #[must_use]
+    pub fn rocks_spawned(&self) -> u64 {
+        lock(&self.shared).rocks_spawned
+    }
+
+    /// How many bullets this game has ever fired.
+    #[must_use]
+    pub fn bullets_fired(&self) -> u64 {
+        lock(&self.shared).bullets_fired
+    }
+
+    /// How many entities the simulation is holding.
+    ///
+    /// The number this whole sample exists to watch: it spawns and destroys
+    /// entities forever, and one that climbs is the failure the plan named.
+    #[must_use]
+    pub fn entity_count(&mut self) -> usize {
+        self.server.world_mut().entity_count()
+    }
+
+    /// How many entities are queued for destruction and not yet swept.
+    ///
+    /// **Not an implementation detail — a number the counts above cannot be
+    /// read without.** `crcbl_ecs::World::sweep` runs at the end of
+    /// `World::tick`, and `crcbl-server` calls `GameModule::tick` *after* that,
+    /// so everything this game destroys — and it destroys a great deal — waits
+    /// one tick before the pool lets go of it. A caller comparing
+    /// [`Game::entity_count`] against what it believes exists has to add this,
+    /// or it reads a leak on every tick something died. Recorded in
+    /// `docs/backlog.md` as a finding against the module hook's placement.
+    #[must_use]
+    pub fn pending_despawns(&mut self) -> usize {
+        self.server.world_mut().dead_queue_len()
+    }
+
+    /// How many colliders the physics world is holding.
+    ///
+    /// A second, independent count, because the two leak separately: a collider
+    /// left behind when its entity goes is an invisible wall, and nothing about
+    /// the entity count would notice.
+    #[must_use]
+    pub fn collider_count(&mut self) -> usize {
+        with_physics(self.server.world_mut(), |phys| phys.collider_count()).unwrap_or(0)
+    }
+
+    /// Clears the field and places one rock, for a test that needs a known
+    /// board rather than a dealt one.
+    #[cfg(test)]
+    pub fn stage_rock(&mut self, position: DVec3, velocity: DVec3, size: RockSize) -> Entity {
+        let mut logic = lock(&self.shared);
+        let world = self.server.world_mut();
+        for rock in std::mem::take(&mut logic.rocks) {
+            with_physics(world, |phys| phys.remove_entity(rock.entity));
+            world.despawn(rock.entity);
+        }
+        spawn_rock(&mut logic, world, size, position, velocity)
+    }
+
+    /// Puts the ship somewhere specific, for the same reason.
+    #[cfg(test)]
+    pub fn stage_ship(&mut self, position: DVec3, heading: f64, velocity: DVec3) {
+        let mut logic = lock(&self.shared);
+        let world = self.server.world_mut();
+        place_ship(&mut logic, world, position, heading, velocity);
+    }
+
+    /// Forces the game into [`GameState::Playing`] without a trigger pull, so a
+    /// test can set a board up and then start it.
+    #[cfg(test)]
+    pub fn begin(&mut self) {
+        lock(&self.shared).state = GameState::Playing;
+    }
+
+    /// Whether the action map still counts the fire key as down.
+    ///
+    /// The *input* state, not a flag the loop keeps beside it: [`ActionMap`]
+    /// raises `just_pressed` only on the transition, so a Space the map never
+    /// saw released makes every later press a no-op.
+    #[cfg(test)]
+    #[must_use]
+    pub fn fire_is_down(&self) -> bool {
+        action_held(&self.action_map, ACTION_FIRE)
+    }
+}
+
+// ---- input helpers ----------------------------------------------------------
+
+fn action_held(map: &ActionMap, name: &str) -> bool {
+    map.action(name).is_some_and(|v| match v {
+        crcbl_input::ActionValue::Button(b) => matches!(
+            b.state,
+            crcbl_input::ButtonState::Pressed | crcbl_input::ButtonState::Held { .. }
+        ),
+        _ => false,
+    })
+}
+
+fn action_just_pressed(map: &ActionMap, name: &str) -> bool {
+    map.action(name).is_some_and(|v| match v {
+        crcbl_input::ActionValue::Button(b) => b.just_pressed,
+        _ => false,
+    })
+}
+
+// ---- tests ------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crcbl_core::time::{ManualTime, TimeSource as _};
+
+    /// One entry of a script: `(tick index, key, pressed)`.
+    type Script = [(u64, KeyCode, bool)];
+
+    /// Drives a `Game` the way the app loop will — a frame clock at `frame_hz`,
+    /// a fixed-timestep accumulator at `tick_hz`, and events pumped once per
+    /// frame.
+    ///
+    /// The frame rate and the tick rate are independent knobs on purpose. Every
+    /// property asserted below is a property of *simulated* time, and a loop
+    /// that leaked the frame rate into the simulation is what makes them
+    /// disagree.
+    struct Harness {
+        game: Game,
+        clock: FrameClock,
+        time: ManualTime,
+        frame_step: Duration,
+        ticks: u64,
+        /// What the autopilot currently has held down. Turn and thrust are
+        /// *held* actions, so a controller that pressed and released every tick
+        /// would be testing the edge detector rather than the ship.
+        held: [bool; 3],
+    }
+
+    /// Indices into [`Harness::held`].
+    const HELD_LEFT: usize = 0;
+    const HELD_RIGHT: usize = 1;
+    const HELD_THRUST: usize = 2;
+
+    impl Harness {
+        fn new(frame_hz: u32, tick_hz: u32) -> Self {
+            Self::with_seed(frame_hz, tick_hz, DEFAULT_SEED)
+        }
+
+        fn with_seed(frame_hz: u32, tick_hz: u32, seed: u64) -> Self {
+            Self {
+                game: Game::with_seed(true, tick_hz, seed).expect("a headless game always starts"),
+                clock: FrameClock::new(tick_hz),
+                time: ManualTime::new(),
+                frame_step: FrameClock::new(frame_hz).tick_dt(),
+                ticks: 0,
+                held: [false; 3],
+            }
+        }
+
+        /// One frame: advance the clock, drain whole ticks, exactly as the app
+        /// loop does — stopping at `limit` so a caller counting ticks is not at
+        /// the mercy of how many a single frame happened to release.
+        ///
+        /// The script is keyed on the **tick** index and fed immediately before
+        /// that tick runs, so the input a given tick sees is the same at every
+        /// frame rate.
+        fn frame(&mut self, script: &Script, limit: u64) {
+            self.time.advance(self.frame_step);
+            self.clock.update(self.time.elapsed());
+            while self.ticks < limit && self.clock.consume_tick() {
+                for &(at, key, pressed) in script {
+                    if at == self.ticks {
+                        self.game.key_event(key, pressed);
+                    }
+                }
+                self.game.tick();
+                self.ticks += 1;
+            }
+        }
+
+        /// Runs frames until the simulation has run exactly `ticks` of them.
+        fn run_ticks(&mut self, ticks: u64, script: &Script) {
+            while self.ticks < ticks {
+                self.frame(script, ticks);
+            }
+        }
+
+        /// Presses or releases a held key only when its state has to change.
+        fn hold(&mut self, key: KeyCode, slot: usize, want: bool) {
+            if self.held[slot] != want {
+                self.game.key_event(key, want);
+                self.held[slot] = want;
+            }
+        }
+
+        /// Runs `ticks` of them under [`autopilot`] — a player who is trying.
+        fn play_ticks(&mut self, ticks: u64) {
+            while self.ticks < ticks {
+                self.time.advance(self.frame_step);
+                self.clock.update(self.time.elapsed());
+                while self.ticks < ticks && self.clock.consume_tick() {
+                    let plan = autopilot(&self.game);
+                    self.hold(KeyCode::ArrowLeft, HELD_LEFT, plan.left);
+                    self.hold(KeyCode::ArrowRight, HELD_RIGHT, plan.right);
+                    self.hold(KeyCode::ArrowUp, HELD_THRUST, plan.thrust);
+                    if plan.fire {
+                        self.game.key_event(KeyCode::Space, true);
+                        self.game.key_event(KeyCode::Space, false);
+                    }
+                    self.game.tick();
+                    self.ticks += 1;
+                }
+            }
+        }
+
+        /// Presses and releases a key on the next tick, and runs it.
+        fn tap(&mut self, key: KeyCode) {
+            self.game.key_event(key, true);
+            self.game.key_event(key, false);
+            self.game.tick();
+            self.ticks += 1;
+        }
+
+        /// The invariant that has to hold on **every** tick of every test that
+        /// churns: the ECS holds exactly the ship, the rocks and the bullets,
+        /// and the broadphase holds exactly the rocks plus a live ship.
+        ///
+        /// This is the leak detector. An entity or a collider that outlived
+        /// what it belonged to shows up here on the tick it happened.
+        ///
+        /// `pending` is in the entity sum because destruction is *deferred*:
+        /// the ECS sweeps at the end of `World::tick` and the game module runs
+        /// after that, so everything destroyed this tick is still in the pool
+        /// until the next one. See [`Game::pending_despawns`].
+        fn assert_nothing_leaked(&mut self) {
+            let rocks = self.game.rock_count();
+            let bullets = self.game.bullet_count();
+            let pending = self.game.pending_despawns();
+            assert_eq!(
+                self.game.entity_count(),
+                1 + rocks + bullets + pending,
+                "tick {}: {rocks} rocks, {bullets} bullets and {pending} awaiting the \
+                 sweep do not account for the world",
+                self.ticks,
+            );
+            // An equality, not a bound: every collider in the world is a
+            // rock. The ship is not in the broadphase and neither is a bullet
+            // — see `check_ship` and `sweep_bullets`.
+            assert_eq!(
+                self.game.collider_count(),
+                rocks,
+                "tick {}: {rocks} rocks do not account for the broadphase",
+                self.ticks,
+            );
+        }
+    }
+
+    /// What the autopilot wants this tick.
+    #[derive(Clone, Copy, Debug, Default)]
+    struct Plan {
+        left: bool,
+        right: bool,
+        thrust: bool,
+        fire: bool,
+    }
+
+    /// How close to aimed the autopilot has to be before it shoots, in radians.
+    const AIM_TOLERANCE: f64 = 0.10;
+
+    /// A competent-enough player: turn towards the nearest rock, and shoot when
+    /// pointing at it.
+    ///
+    /// Deliberately a **decision per tick from simulation state**, not a
+    /// recorded script — the same reason flappy's is. The state a given tick
+    /// sees is the same at 20 fps as at 240, so the controller presses the same
+    /// keys on the same ticks in both and the runs are comparable. It never
+    /// thrusts: drifting into a rock is what kills this game, and a stationary
+    /// gun is a better test subject than a good pilot.
+    fn autopilot(game: &Game) -> Plan {
+        if !game.ship_alive || game.state != GameState::Playing {
+            // Fire is also what starts a game and what restarts a finished one.
+            return Plan {
+                fire: true,
+                ..Plan::default()
+            };
+        }
+        let ship = game.ship;
+        let Some(target) = game.rocks().into_iter().min_by(|a, b| {
+            (a.position - ship)
+                .length_squared()
+                .total_cmp(&(b.position - ship).length_squared())
+        }) else {
+            return Plan::default();
+        };
+        let to = target.position - ship;
+        // The inverse of `heading_vector`: a heading of θ points along
+        // (-sin θ, cos θ).
+        let desired = (-to.x).atan2(to.y);
+        let error = wrap_to_pi(desired - game.ship_heading);
+        Plan {
+            left: error > AIM_TOLERANCE,
+            right: error < -AIM_TOLERANCE,
+            thrust: false,
+            fire: error.abs() <= AIM_TOLERANCE,
+        }
+    }
+
+    /// Brings an angle difference into `(-π, π]`.
+    fn wrap_to_pi(angle: f64) -> f64 {
+        let tau = std::f64::consts::TAU;
+        let wrapped = angle.rem_euclid(tau);
+        if wrapped > std::f64::consts::PI {
+            wrapped - tau
+        } else {
+            wrapped
+        }
+    }
+
+    /// Stages a stationary rock straight up the gun's line from a ship that is
+    /// not moving, and returns the harness ready to fire.
+    ///
+    /// `distance` is how far up the line the rock sits. Every split and CCD
+    /// test starts from this, so a change to the muzzle or the ship's radius
+    /// moves all of them together.
+    fn one_rock_in_the_sights(
+        frame_hz: u32,
+        tick_hz: u32,
+        size: RockSize,
+        distance: f64,
+    ) -> Harness {
+        let mut harness = Harness::new(frame_hz, tick_hz);
+        harness.game.begin();
+        harness
+            .game
+            .stage_ship(DVec3::new(0.0, -distance, 0.0), 0.0, DVec3::ZERO);
+        harness.game.stage_rock(DVec3::ZERO, DVec3::ZERO, size);
+        harness
+    }
+
+    // ---- the board -----------------------------------------------------------
+
+    /// A game has a board before anybody presses anything. A screen that fills
+    /// in on the first shot reads as a bug.
+    #[test]
+    fn the_board_is_dealt_before_the_first_tick() {
+        let mut harness = Harness::new(60, 60);
+        let rocks = harness.game.rocks();
+        assert_eq!(rocks.len(), wave_rocks(0) as usize);
+        assert!(
+            rocks.iter().all(|rock| rock.size == RockSize::Large),
+            "a wave opens with large rocks only"
+        );
+        harness.assert_nothing_leaked();
+    }
+
+    /// Every rock a wave deals enters on the border, never on top of the ship.
+    ///
+    /// Checked across seeds and waves rather than at the default, because the
+    /// failure this guards against — a rock dealt onto the respawn point —
+    /// would be a life lost to the dealer, and would show up once in a hundred
+    /// games rather than in the first one.
+    #[test]
+    fn every_rock_a_wave_deals_enters_on_the_border() {
+        for seed in [0, 7, DEFAULT_SEED, u64::MAX] {
+            for wave in 0..40 {
+                for rock in 0..wave_rocks(wave) {
+                    let position = wave_rock_position(seed, wave, rock);
+                    let on_edge = (position.x.abs() - WORLD_HALF_WIDTH).abs() < 1e-9
+                        || (position.y.abs() - WORLD_HALF_HEIGHT).abs() < 1e-9;
+                    assert!(
+                        on_edge,
+                        "seed {seed} wave {wave} rock {rock} was dealt at {position:?}, \
+                         which is not on the border"
+                    );
+                    assert!(
+                        position.length() > RESPAWN_CLEAR_RADIUS + RockSize::Large.radius(),
+                        "seed {seed} wave {wave} rock {rock} at {position:?} \
+                         is within reach of the respawn point"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Two games told the same seed deal the same board, rock for rock.
+    #[test]
+    fn the_same_seed_deals_the_same_board() {
+        for seed in [0, 1, DEFAULT_SEED, u64::MAX] {
+            let deal = |()| -> Vec<(DVec3, DVec3)> {
+                (0..200)
+                    .map(|i| {
+                        (
+                            wave_rock_position(seed, i / 8, i % 8),
+                            wave_rock_velocity(seed, i / 8, i % 8),
+                        )
+                    })
+                    .collect()
+            };
+            assert_eq!(
+                deal(()),
+                deal(()),
+                "seed {seed} is not a function of its index"
+            );
+        }
+    }
+
+    /// Different seeds are different boards. Without this the seed would be
+    /// decoration and every game would be the same game.
+    #[test]
+    fn different_seeds_deal_different_boards() {
+        let a: Vec<DVec3> = (0..100).map(|i| wave_rock_position(1, 0, i)).collect();
+        let b: Vec<DVec3> = (0..100).map(|i| wave_rock_position(2, 0, i)).collect();
+        let shared = a.iter().zip(&b).filter(|(x, y)| x == y).count();
+        assert!(
+            shared < 5,
+            "{shared} of 100 rocks coincided between two seeds"
+        );
+    }
+
+    /// Waves grow, and then stop growing.
+    #[test]
+    fn waves_grow_to_a_ceiling_and_no_further() {
+        assert_eq!(wave_rocks(0), FIRST_WAVE_ROCKS);
+        assert_eq!(wave_rocks(1), FIRST_WAVE_ROCKS + 1);
+        assert!(wave_rocks(3) > wave_rocks(2));
+        for wave in 0..500 {
+            assert!(wave_rocks(wave) <= MAX_WAVE_ROCKS);
+            assert!(
+                wave_rocks(wave + 1) >= wave_rocks(wave),
+                "wave {wave} shrank"
+            );
+        }
+        assert_eq!(wave_rocks(500), MAX_WAVE_ROCKS);
+    }
+
+    // ---- the ship ------------------------------------------------------------
+
+    /// The ship does not move until the player asks it to.
+    #[test]
+    fn a_ship_nobody_has_flown_stays_exactly_where_it_started() {
+        let mut harness = Harness::new(60, 60);
+        harness.run_ticks(120, &[]);
+        assert_eq!(harness.game.state, GameState::WaitingToStart);
+        assert_eq!(harness.game.ship, DVec3::ZERO);
+        assert_eq!(harness.game.ship_velocity, DVec3::ZERO);
+        assert_eq!(harness.game.ship_heading, 0.0);
+    }
+
+    /// A held turn key turns the ship at exactly [`SHIP_TURN_RATE`], and the
+    /// two keys turn opposite ways.
+    ///
+    /// The rate is asserted against the constant rather than against "it
+    /// moved": rotation is the one part of this ship the physics crate does not
+    /// own, so it is the part with nothing else checking it.
+    #[test]
+    fn a_held_turn_key_turns_the_ship_at_the_stated_rate() {
+        for (key, sign) in [(KeyCode::ArrowLeft, 1.0), (KeyCode::ArrowRight, -1.0f64)] {
+            let mut harness = Harness::new(60, 60);
+            harness.run_ticks(1, &[(0, KeyCode::Space, true), (1, KeyCode::Space, false)]);
+            assert_eq!(harness.game.state, GameState::Playing);
+
+            let turns = 30;
+            let start = harness.ticks;
+            harness.run_ticks(start + turns, &[(start, key, true)]);
+
+            let dt = harness.game.tick_dt_secs();
+            let expected =
+                (sign * SHIP_TURN_RATE * dt * turns as f64).rem_euclid(std::f64::consts::TAU);
+            assert!(
+                (harness.game.ship_heading - expected).abs() < 1e-9,
+                "{key:?} for {turns} ticks left the heading at {}, not {expected}",
+                harness.game.ship_heading,
+            );
+        }
+    }
+
+    /// Thrust pushes the ship along its heading, and only along its heading.
+    #[test]
+    fn thrust_pushes_the_ship_where_it_is_pointing() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        // Pointing 90 degrees left of "up", so a bug that thrusts along a fixed
+        // axis rather than the heading fails rather than coincidentally passes.
+        harness
+            .game
+            .stage_ship(DVec3::ZERO, std::f64::consts::FRAC_PI_2, DVec3::ZERO);
+        harness.game.stage_rock(
+            DVec3::new(0.0, WORLD_HALF_HEIGHT - 1.0, 0.0),
+            DVec3::ZERO,
+            RockSize::Small,
+        );
+
+        harness.run_ticks(30, &[(0, KeyCode::ArrowUp, true)]);
+        let velocity = harness.game.ship_velocity;
+        assert!(
+            velocity.length() > 1.0,
+            "the ship never accelerated: {velocity:?}"
+        );
+        let heading = heading_vector(std::f64::consts::FRAC_PI_2);
+        let along = velocity.normalize().dot(heading);
+        assert!(
+            (along - 1.0).abs() < 1e-9,
+            "the ship accelerated along {:?} rather than its heading {heading:?}",
+            velocity.normalize(),
+        );
+    }
+
+    /// A ship under full thrust settles at `SHIP_THRUST / SHIP_DAMPING`, and a
+    /// ship that lets go coasts back down.
+    ///
+    /// The terminal speed *is* the speed limit — there is no clamp — so a run
+    /// that overshot it would mean the damping was not being applied at all.
+    #[test]
+    fn the_terminal_speed_is_thrust_over_damping_and_the_coast_undoes_it() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        harness.game.stage_ship(DVec3::ZERO, 0.0, DVec3::ZERO);
+        // No rocks: this is about the force pipeline, and a run that ended on a
+        // collision would prove nothing either way.
+        harness.game.stage_rock(
+            DVec3::new(WORLD_HALF_WIDTH - 1.0, WORLD_HALF_HEIGHT - 1.0, 0.0),
+            DVec3::ZERO,
+            RockSize::Small,
+        );
+
+        let terminal = SHIP_THRUST / SHIP_DAMPING;
+        harness.run_ticks(900, &[(0, KeyCode::ArrowUp, true)]);
+        let top = harness.game.ship_velocity.length();
+        assert!(
+            (top - terminal).abs() < 0.05,
+            "fifteen seconds of thrust reached {top}, not the terminal {terminal}"
+        );
+        assert!(top <= terminal, "the ship exceeded its own terminal speed");
+
+        // Let go: one time constant is `mass / SHIP_DAMPING` = 1 s, so a second
+        // of coasting has to take about `1/e` of it off.
+        let start = harness.ticks;
+        harness.run_ticks(start + 60, &[(start, KeyCode::ArrowUp, false)]);
+        let coasted = harness.game.ship_velocity.length();
+        let expected = top * std::f64::consts::E.recip();
+        assert!(
+            (coasted - expected).abs() < 0.2,
+            "a second of coasting left {coasted}, not about {expected}"
+        );
+    }
+
+    /// The hand-rolled damping is [`crcbl_phys::DampingForce`]'s model, not a
+    /// lookalike.
+    ///
+    /// It is copied because the force pipeline is global and this game damps
+    /// exactly one of its bodies (see `drive_ship`). A copy that drifted from
+    /// the original would be a second physics model in the process, and nothing
+    /// else in this file would notice — so the copy is checked against the
+    /// original directly, including the `mass / dt` clamp at tick rates coarse
+    /// enough to reach it.
+    #[test]
+    fn the_hand_rolled_damping_is_the_engines_own() {
+        use crcbl_phys::{DampingForce, ForceProvider as _};
+
+        let provider = DampingForce::new(SHIP_DAMPING);
+        for dt in [1.0 / 240.0, 1.0 / 60.0, 0.5, 1.0, 4.0] {
+            for velocity in [
+                DVec3::ZERO,
+                DVec3::new(3.0, -4.0, 0.0),
+                DVec3::new(-14.0, 0.0, 0.0),
+            ] {
+                let mut body = RigidBody::new_dynamic(SHIP_MASS);
+                body.velocity = velocity;
+                provider.apply(&mut body, &Transform::IDENTITY, dt);
+                assert_eq!(
+                    body.force_accum,
+                    damping_force(velocity, SHIP_MASS, dt),
+                    "dt {dt} at {velocity:?}"
+                );
+            }
+        }
+        // And the clamp is genuinely reached rather than being decoration: at
+        // this step the raw coefficient would be stronger than critical.
+        let coarse = 4.0;
+        assert!(
+            SHIP_DAMPING > SHIP_MASS / coarse,
+            "the clamp case is unreachable"
+        );
+        let velocity = DVec3::new(10.0, 0.0, 0.0);
+        assert_eq!(
+            damping_force(velocity, SHIP_MASS, coarse),
+            -velocity * (SHIP_MASS / coarse),
+        );
+    }
+
+    // ---- the wrap ------------------------------------------------------------
+
+    /// `wrap_axis` is **bit-exact** inside the field, and periodic outside it.
+    ///
+    /// Exactness is not fussiness. `teleport_if_outside` decides whether to
+    /// take a collider out of the broadphase and put it back by comparing this
+    /// against the position it was given, so a round trip that returned a value
+    /// one ulp away would re-insert every rock on every tick, forever. The
+    /// values below are chosen to be the ones a bare `rem_euclid` gets wrong:
+    /// `0.1 + 16.0 - 16.0` is `0.100000000000001`, not `0.1`.
+    #[test]
+    fn the_wrap_is_exact_inside_the_field_and_periodic_outside_it() {
+        for v in [
+            -15.999_9,
+            -0.5,
+            0.0,
+            7.25,
+            15.999_9,
+            0.1,
+            -0.3,
+            1.0 / 3.0,
+            12.345_678_901_234,
+        ] {
+            assert_eq!(wrap_axis(v, WORLD_HALF_WIDTH), v, "{v} was moved");
+        }
+        // And the whole position, which is what the teleport check compares.
+        for point in [
+            DVec3::new(0.1, -0.3, 0.0),
+            DVec3::new(1.0 / 3.0, -11.345_678_901_234, 0.0),
+        ] {
+            assert_eq!(wrap_position(point), point, "{point:?} was moved");
+        }
+        assert!((wrap_axis(16.1, 16.0) - -15.9).abs() < 1e-12);
+        assert!((wrap_axis(-16.1, 16.0) - 15.9).abs() < 1e-12);
+        // A teleport of many field-widths lands in the same place as one.
+        assert!((wrap_axis(16.1 + 32.0 * 5.0, 16.0) - -15.9).abs() < 1e-9);
+        // The upper edge belongs to the lower one, so there is exactly one
+        // representation of every point.
+        assert_eq!(wrap_axis(16.0, 16.0), -16.0);
+    }
+
+    /// A ship leaving each of the four edges arrives at the opposite one.
+    #[test]
+    fn a_ship_leaving_each_edge_arrives_at_the_other() {
+        let cases = [
+            (
+                DVec3::new(WORLD_HALF_WIDTH - 0.2, 0.0, 0.0),
+                DVec3::new(8.0, 0.0, 0.0),
+            ),
+            (
+                DVec3::new(-WORLD_HALF_WIDTH + 0.2, 0.0, 0.0),
+                DVec3::new(-8.0, 0.0, 0.0),
+            ),
+            (
+                DVec3::new(0.0, WORLD_HALF_HEIGHT - 0.2, 0.0),
+                DVec3::new(0.0, 8.0, 0.0),
+            ),
+            (
+                DVec3::new(0.0, -WORLD_HALF_HEIGHT + 0.2, 0.0),
+                DVec3::new(0.0, -8.0, 0.0),
+            ),
+        ];
+        for (start, velocity) in cases {
+            let mut harness = Harness::new(60, 60);
+            harness.game.begin();
+            harness.game.stage_ship(start, 0.0, velocity);
+            // One rock, parked in a corner well away from the ship's line, so
+            // the field is not empty and the wave machinery stays quiet.
+            harness.game.stage_rock(
+                DVec3::new(WORLD_HALF_WIDTH - 2.0, WORLD_HALF_HEIGHT - 2.0, 0.0),
+                DVec3::ZERO,
+                RockSize::Small,
+            );
+
+            harness.run_ticks(30, &[]);
+            let after = harness.game.ship;
+            assert!(
+                after.x >= -WORLD_HALF_WIDTH && after.x < WORLD_HALF_WIDTH,
+                "from {start:?} at {velocity:?} the ship ended outside the field: {after:?}"
+            );
+            assert!(
+                after.y >= -WORLD_HALF_HEIGHT && after.y < WORLD_HALF_HEIGHT,
+                "from {start:?} at {velocity:?} the ship ended outside the field: {after:?}"
+            );
+            // And it came out of the *opposite* side, not merely stayed inside.
+            let travelled = velocity.normalize();
+            let displacement = after - start;
+            assert!(
+                displacement.dot(travelled) < 0.0,
+                "from {start:?} at {velocity:?} the ship reached {after:?}, \
+                 which is not on the far side"
+            );
+        }
+    }
+
+    /// **A wrapped ship still collides.** The wrap is a teleport, and a
+    /// teleport that moved the game's idea of where the ship is without moving
+    /// its collider would leave a ship that flies through everything on the far
+    /// side of the field — and a test that only checked the position would pass
+    /// while it happened.
+    #[test]
+    fn a_ship_that_has_wrapped_still_collides_on_the_far_side() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        harness.game.stage_ship(
+            DVec3::new(WORLD_HALF_WIDTH - 0.2, 0.0, 0.0),
+            0.0,
+            DVec3::new(8.0, 0.0, 0.0),
+        );
+        // Just inside the *left* edge: the ship can only reach it by wrapping.
+        let rock = DVec3::new(-WORLD_HALF_WIDTH + 1.0, 0.0, 0.0);
+        harness.game.stage_rock(rock, DVec3::ZERO, RockSize::Large);
+
+        harness.run_ticks(1, &[]);
+        assert_eq!(
+            harness.game.lives, STARTING_LIVES,
+            "it died before wrapping"
+        );
+        assert!(
+            harness.game.ship.x > 0.0,
+            "the ship should still be on the right: {:?}",
+            harness.game.ship
+        );
+
+        harness.run_ticks(40, &[]);
+        assert!(
+            harness.game.ship.x < 0.0 || !harness.game.ship_alive,
+            "the ship never reached the left side: {:?}",
+            harness.game.ship
+        );
+        assert_eq!(
+            harness.game.lives,
+            STARTING_LIVES - 1,
+            "the wrapped ship flew through a rock it was on top of"
+        );
+        assert!(!harness.game.ship_alive);
+    }
+
+    /// **The tick a ship wraps is the tick it collides on the far side**, not
+    /// the one after.
+    ///
+    /// The sharper form of the test above, and the one that pins the *order*
+    /// inside a tick: the ship's overlap query is centred on a position read
+    /// back from physics, and reading it before the wrap rather than after
+    /// leaves the query a whole field away from the ship for one tick. The
+    /// looser test cannot see that — it runs forty ticks and the collision
+    /// merely arrives late — so this one runs exactly one.
+    #[test]
+    fn a_ship_collides_on_the_very_tick_it_wraps() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        // Placed so that one tick of travel takes it just over the right edge:
+        // 8 units/s at 60 Hz is 0.133 of a unit, against 0.05 of clearance.
+        harness.game.stage_ship(
+            DVec3::new(WORLD_HALF_WIDTH - 0.05, 0.0, 0.0),
+            0.0,
+            DVec3::new(8.0, 0.0, 0.0),
+        );
+        // Where it will come out, near enough: the wrap lands it at about
+        // -15.917 and the rock's radius is twenty times the difference.
+        harness.game.stage_rock(
+            DVec3::new(-WORLD_HALF_WIDTH + 0.1, 0.0, 0.0),
+            DVec3::ZERO,
+            RockSize::Small,
+        );
+
+        harness.run_ticks(1, &[]);
+        assert!(
+            harness.game.ship.x < 0.0,
+            "the ship did not wrap on the first tick: {:?}",
+            harness.game.ship
+        );
+        assert_eq!(
+            harness.game.lives,
+            STARTING_LIVES - 1,
+            "the collision was a tick late, so the query was centred on where \
+             the ship used to be"
+        );
+    }
+
+    /// The same for a rock: one that wraps is still found by the ship's overlap
+    /// query on the far side.
+    #[test]
+    fn a_rock_that_has_wrapped_still_collides_on_the_far_side() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        // A stationary ship a little inside the left edge, and a rock leaving
+        // the right one. Only the rock moves, so only the rock's teleport can
+        // bring them together.
+        harness.game.stage_ship(
+            DVec3::new(-WORLD_HALF_WIDTH + 1.0, 0.0, 0.0),
+            0.0,
+            DVec3::ZERO,
+        );
+        harness.game.stage_rock(
+            DVec3::new(WORLD_HALF_WIDTH - 0.2, 0.0, 0.0),
+            DVec3::new(6.0, 0.0, 0.0),
+            RockSize::Large,
+        );
+
+        harness.run_ticks(1, &[]);
+        assert_eq!(harness.game.lives, STARTING_LIVES);
+        harness.run_ticks(40, &[]);
+        assert_eq!(
+            harness.game.lives,
+            STARTING_LIVES - 1,
+            "a rock that wrapped onto the ship did not touch it"
+        );
+    }
+
+    // ---- bullets and CCD -----------------------------------------------------
+
+    /// **A bullet that crosses a rock inside one tick still hits it.**
+    ///
+    /// The whole point of sweeping `prev → cur` rather than testing where the
+    /// bullet ended up. The tick rate is turned down until one tick of travel is
+    /// wider than the rock, and the test then *proves the discrete test would
+    /// have missed*: it checks that no tick ever left the bullet inside the
+    /// rock, and that the tick which hit it began on one side and ended on the
+    /// other.
+    #[test]
+    fn a_bullet_that_crosses_a_rock_within_one_tick_still_hits_it() {
+        // 4 Hz: a quarter-second step, so a bullet covers six units while the
+        // rock it must not skip is barely one across.
+        let mut harness = one_rock_in_the_sights(4, 4, RockSize::Small, 8.0);
+        let dt = harness.game.tick_dt_secs();
+        let reach = RockSize::Small.radius() + BULLET_RADIUS;
+        assert!(
+            BULLET_SPEED * dt > 2.0 * reach,
+            "this tick rate does not make the bullet skip the rock at all: \
+             {} against {}",
+            BULLET_SPEED * dt,
+            2.0 * reach,
+        );
+
+        harness.tap(KeyCode::Space);
+        assert_eq!(harness.game.bullet_count(), 1, "nothing was fired");
+        assert_eq!(harness.game.score, 0);
+
+        // One tick of flight, which lands the bullet short of the rock.
+        harness.run_ticks(harness.ticks + 1, &[]);
+        let before = harness.game.bullets().first().copied().map(|b| b.position);
+        let Some(before) = before else {
+            panic!("the bullet vanished before it reached anything");
+        };
+        assert!(
+            before.y < -reach,
+            "the bullet is already at the rock: {before:?}"
+        );
+        let after = before + DVec3::new(0.0, BULLET_SPEED * dt, 0.0);
+        assert!(
+            after.y > reach,
+            "the next tick does not clear the rock, so this proves nothing: {after:?}"
+        );
+
+        // The tick that steps straight over it.
+        harness.run_ticks(harness.ticks + 1, &[]);
+        assert_eq!(
+            harness.game.score,
+            RockSize::Small.score(),
+            "the bullet stepped over the rock: it went from {before:?} to {after:?}"
+        );
+        assert_eq!(harness.game.bullet_count(), 0, "the bullet was not spent");
+    }
+
+    /// A bullet fired at a rock at the ordinary tick rate hits it too — the
+    /// case the CCD test above deliberately makes impossible for a point test,
+    /// asserted here for the case that is not.
+    #[test]
+    fn a_bullet_hits_the_rock_it_was_aimed_at() {
+        let mut harness = one_rock_in_the_sights(60, 60, RockSize::Large, 6.0);
+        harness.tap(KeyCode::Space);
+        harness.run_ticks(harness.ticks + 30, &[]);
+        assert_eq!(harness.game.score, RockSize::Large.score());
+    }
+
+    /// A bullet that hits nothing expires, and takes its entity with it.
+    #[test]
+    fn a_bullet_that_hits_nothing_expires() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        harness.game.stage_ship(DVec3::ZERO, 0.0, DVec3::ZERO);
+        // The one rock is off in a corner, nowhere near the column the shot
+        // flies up. Deliberately *not* directly behind the ship: the field
+        // wraps, so "behind" is also "a long way ahead", and a shot fired up a
+        // column that had a rock at the bottom of it would arrive there.
+        harness.game.stage_rock(
+            DVec3::new(WORLD_HALF_WIDTH - 2.0, WORLD_HALF_HEIGHT - 2.0, 0.0),
+            DVec3::ZERO,
+            RockSize::Small,
+        );
+
+        harness.tap(KeyCode::Space);
+        assert_eq!(harness.game.bullet_count(), 1);
+        let entities = harness.game.entity_count();
+
+        harness.run_ticks(harness.ticks + 70, &[]);
+        assert_eq!(
+            harness.game.bullet_count(),
+            0,
+            "the bullet outlived its life"
+        );
+        assert_eq!(harness.game.score, 0, "it hit something it should not have");
+        assert_eq!(
+            harness.game.entity_count(),
+            entities - 1,
+            "the expired bullet left its entity behind"
+        );
+        assert_eq!(harness.game.pending_despawns(), 0, "the sweep never ran");
+        harness.assert_nothing_leaked();
+    }
+
+    /// **A shot cannot lap the field.** The playfield wraps, so a bullet that
+    /// lived long enough would come round and arrive behind the ship that fired
+    /// it — a rule nobody would guess, and the one that made
+    /// `a_bullet_that_hits_nothing_expires` fail while [`BULLET_LIFE`] was a
+    /// second against a field exactly 24 units tall.
+    ///
+    /// The relation is asserted, not the number, so a later tuning pass that
+    /// changes either constant is told rather than left to find out.
+    #[test]
+    fn the_reach_of_a_shot_is_less_than_one_lap() {
+        let reach = BULLET_SPEED * BULLET_LIFE;
+        assert!(
+            reach < 2.0 * WORLD_HALF_HEIGHT,
+            "a shot reaches {reach}, which laps a field {} tall",
+            2.0 * WORLD_HALF_HEIGHT
+        );
+        assert!(reach < 2.0 * WORLD_HALF_WIDTH);
+        // And it still crosses most of the screen, or it is not a weapon.
+        assert!(reach > WORLD_HALF_HEIGHT, "a shot only reaches {reach}");
+    }
+
+    /// A shot never finds the hull it left, however long the ship sits still.
+    ///
+    /// True today because the ship has no collider at all (see `check_ship`),
+    /// which is why this reads as a regression guard rather than as a test of
+    /// an exclusion list: it goes red the moment somebody puts one in the tree
+    /// without also excluding it from the sweep.
+    #[test]
+    fn a_ship_cannot_shoot_itself() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        harness.game.stage_ship(DVec3::ZERO, 0.0, DVec3::ZERO);
+        harness.game.stage_rock(
+            DVec3::new(WORLD_HALF_WIDTH - 2.0, WORLD_HALF_HEIGHT - 2.0, 0.0),
+            DVec3::ZERO,
+            RockSize::Small,
+        );
+        for _ in 0..20 {
+            harness.tap(KeyCode::Space);
+            harness.run_ticks(harness.ticks + 12, &[]);
+        }
+        assert_eq!(harness.game.lives, STARTING_LIVES, "the ship shot itself");
+        assert_eq!(harness.game.score, 0);
+    }
+
+    /// The magazine holds four, and the trigger has a rhythm.
+    #[test]
+    fn no_more_than_four_bullets_are_ever_in_the_air() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        harness.game.stage_ship(DVec3::ZERO, 0.0, DVec3::ZERO);
+        harness.game.stage_rock(
+            DVec3::new(0.0, -WORLD_HALF_HEIGHT + 1.0, 0.0),
+            DVec3::ZERO,
+            RockSize::Small,
+        );
+
+        let mut worst = 0;
+        for _ in 0..120 {
+            harness.tap(KeyCode::Space);
+            worst = worst.max(harness.game.bullet_count());
+            assert!(
+                harness.game.bullet_count() <= MAX_BULLETS,
+                "{} bullets in the air",
+                harness.game.bullet_count()
+            );
+        }
+        assert_eq!(
+            worst, MAX_BULLETS,
+            "the magazine never filled, so the cap is untested"
+        );
+    }
+
+    /// **The trigger has a cooldown, and it is [`FIRE_COOLDOWN`] long.**
+    ///
+    /// Its own test rather than a bound tacked onto the magazine one: with a
+    /// four-shot cap and a bullet that lives 48 ticks, a cooldown of *zero*
+    /// still only lets twelve shots out in 120 ticks, so any inequality loose
+    /// enough to be safe is loose enough to pass with the cooldown deleted.
+    /// The gap between the first two shots is exact and cannot be.
+    #[test]
+    fn the_trigger_has_a_cooldown_of_exactly_the_stated_length() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        harness.game.stage_ship(DVec3::ZERO, 0.0, DVec3::ZERO);
+        harness.game.stage_rock(
+            DVec3::new(WORLD_HALF_WIDTH - 2.0, WORLD_HALF_HEIGHT - 2.0, 0.0),
+            DVec3::ZERO,
+            RockSize::Small,
+        );
+
+        harness.tap(KeyCode::Space);
+        assert_eq!(
+            harness.game.bullet_count(),
+            1,
+            "the first shot did not fire"
+        );
+        let first = harness.ticks;
+
+        // Pull the trigger every tick until a second shot gets out.
+        let mut waited = 0;
+        while harness.game.bullet_count() < 2 {
+            harness.tap(KeyCode::Space);
+            waited += 1;
+            assert!(waited < 60, "no second shot in a whole second");
+        }
+        let expected = (FIRE_COOLDOWN / harness.game.tick_dt_secs()).ceil() as u64;
+        assert_eq!(
+            harness.ticks - first,
+            expected,
+            "the second shot came {} ticks after the first, not {expected}",
+            harness.ticks - first,
+        );
+        assert!(expected > 1, "a one-tick cooldown is no cooldown");
+    }
+
+    // ---- splits --------------------------------------------------------------
+
+    /// A large rock becomes exactly two mediums, and a medium exactly two
+    /// smalls. Counts asserted exactly, by size, because "the number went up"
+    /// would pass for a split that produced three.
+    #[test]
+    fn a_rock_splits_into_exactly_two_of_the_next_size_down() {
+        for (size, child) in [
+            (RockSize::Large, RockSize::Medium),
+            (RockSize::Medium, RockSize::Small),
+        ] {
+            let mut harness = one_rock_in_the_sights(60, 60, size, 6.0);
+            harness.run_ticks(1, &[]);
+            assert_eq!(harness.game.rock_count(), 1);
+
+            harness.tap(KeyCode::Space);
+            harness.run_ticks(harness.ticks + 30, &[]);
+
+            let rocks = harness.game.rocks();
+            assert_eq!(rocks.len(), SPLIT_CHILDREN, "{size:?} did not split in two");
+            assert!(
+                rocks.iter().all(|rock| rock.size == child),
+                "{size:?} produced {rocks:?} rather than two {child:?}"
+            );
+            assert_eq!(harness.game.score, size.score());
+            assert_eq!(
+                harness.game.wave, 0,
+                "the wave advanced while rocks remained"
+            );
+            harness.assert_nothing_leaked();
+        }
+    }
+
+    /// A small rock simply dies — and, because it was the last one, the next
+    /// wave arrives with more rocks than the last.
+    ///
+    /// The two halves are one test because they are one tick: the split that
+    /// produces nothing is exactly what empties the field.
+    #[test]
+    fn a_small_rock_dies_and_clears_the_wave_for_a_bigger_one() {
+        let mut harness = one_rock_in_the_sights(60, 60, RockSize::Small, 6.0);
+        harness.run_ticks(1, &[]);
+        assert_eq!(harness.game.wave, 0);
+        assert_eq!(harness.game.rock_count(), 1);
+
+        harness.tap(KeyCode::Space);
+        harness.run_ticks(harness.ticks + 30, &[]);
+
+        assert_eq!(harness.game.score, RockSize::Small.score());
+        assert_eq!(
+            harness.game.wave, 1,
+            "the field emptied and no wave followed"
+        );
+        let rocks = harness.game.rocks();
+        assert_eq!(
+            rocks.len(),
+            wave_rocks(1) as usize,
+            "the second wave is not the size the ramp says"
+        );
+        assert!(
+            rocks.len() > wave_rocks(0) as usize,
+            "the second wave is no bigger than the first"
+        );
+        assert!(rocks.iter().all(|rock| rock.size == RockSize::Large));
+        harness.assert_nothing_leaked();
+    }
+
+    /// A split sends its children apart rather than both the same way, at the
+    /// speed their new size drifts at.
+    #[test]
+    fn a_splits_children_go_different_ways_at_their_own_speed() {
+        let parent = DVec3::Y;
+        for counter in 0..64 {
+            let a = split_velocity(DEFAULT_SEED, counter, 0, parent, RockSize::Medium);
+            let b = split_velocity(DEFAULT_SEED, counter, 1, parent, RockSize::Medium);
+            assert!(
+                (a.length() - RockSize::Medium.speed()).abs() < 1e-9,
+                "child speed was {}",
+                a.length()
+            );
+            assert!((b.length() - RockSize::Medium.speed()).abs() < 1e-9);
+            // Apart, and by at least twice the narrowest permitted angle.
+            let between = a.normalize().dot(b.normalize()).clamp(-1.0, 1.0).acos();
+            assert!(
+                between >= 2.0 * SPLIT_ANGLE_MIN - 1e-9,
+                "counter {counter}: the children left {between} radians apart"
+            );
+        }
+    }
+
+    // ---- lives, game over, restart -------------------------------------------
+
+    /// Lives run out one at a time, and the third takes the game with it.
+    #[test]
+    fn lives_run_out_and_the_game_ends() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        // A rock parked on the respawn point. The ship returns into it every
+        // time, which is exactly what the `RESPAWN_MAX_WAIT` escape hatch is
+        // for and what makes this test finish.
+        harness.game.stage_ship(DVec3::ZERO, 0.0, DVec3::ZERO);
+        harness
+            .game
+            .stage_rock(DVec3::ZERO, DVec3::ZERO, RockSize::Large);
+
+        harness.run_ticks(1, &[]);
+        assert_eq!(
+            harness.game.lives,
+            STARTING_LIVES - 1,
+            "the first life went"
+        );
+        assert!(!harness.game.ship_alive);
+        assert_eq!(harness.game.state, GameState::Playing);
+
+        harness.run_ticks(2000, &[]);
+        assert_eq!(harness.game.lives, 0);
+        assert_eq!(harness.game.state, GameState::GameOver);
+        harness.assert_nothing_leaked();
+    }
+
+    /// A ship that has been destroyed comes back, in the middle, once the
+    /// middle is clear.
+    #[test]
+    fn a_destroyed_ship_comes_back_to_a_clear_centre() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        harness
+            .game
+            .stage_ship(DVec3::ZERO, 1.0, DVec3::new(5.0, 5.0, 0.0));
+        // A rock that hits the ship and keeps going, so the centre clears.
+        harness
+            .game
+            .stage_rock(DVec3::ZERO, DVec3::new(9.0, 0.0, 0.0), RockSize::Small);
+
+        harness.run_ticks(1, &[]);
+        assert!(
+            !harness.game.ship_alive,
+            "the ship survived a rock on top of it"
+        );
+        assert_eq!(harness.game.lives, STARTING_LIVES - 1);
+
+        // Not before the delay is up.
+        let delay_ticks = (RESPAWN_DELAY / harness.game.tick_dt_secs()) as u64;
+        harness.run_ticks(delay_ticks - 2, &[]);
+        assert!(!harness.game.ship_alive, "the ship came back early");
+
+        harness.run_ticks(delay_ticks + 60, &[]);
+        assert!(harness.game.ship_alive, "the ship never came back");
+        assert_eq!(
+            harness.game.ship,
+            DVec3::ZERO,
+            "it came back somewhere else"
+        );
+        assert_eq!(harness.game.ship_velocity, DVec3::ZERO);
+        assert_eq!(harness.game.ship_heading, 0.0);
+        harness.assert_nothing_leaked();
+    }
+
+    /// A restart puts the score, the lives, the wave and the ship back, and
+    /// deals a board that is not the one just played.
+    #[test]
+    fn a_restart_puts_everything_back_and_deals_a_new_board() {
+        let mut harness = Harness::new(60, 60);
+        let first: Vec<DVec3> = harness.game.rocks().iter().map(|r| r.position).collect();
+
+        harness.play_ticks(400);
+        assert!(
+            harness.game.score > 0,
+            "the run has to have done something first"
+        );
+
+        harness.tap(KeyCode::KeyR);
+        assert_eq!(harness.game.score, 0);
+        assert_eq!(harness.game.lives, STARTING_LIVES);
+        assert_eq!(harness.game.wave, 0);
+        assert_eq!(harness.game.state, GameState::WaitingToStart);
+        assert_eq!(harness.game.ship, DVec3::ZERO);
+        assert!(harness.game.ship_alive);
+        assert_eq!(
+            harness.game.bullet_count(),
+            0,
+            "a bullet survived the restart"
+        );
+
+        let second: Vec<DVec3> = harness.game.rocks().iter().map(|r| r.position).collect();
+        assert_eq!(first.len(), second.len(), "the same wave should be dealt");
+        assert_ne!(
+            first, second,
+            "a restart re-dealt the identical board, so the seed advance did nothing"
+        );
+        harness.assert_nothing_leaked();
+    }
+
+    /// …and it deals a *predictable* different board, so a recorded script
+    /// replayed from a fresh game meets the same rocks on its second run as the
+    /// recording did on its second run.
+    #[test]
+    fn two_games_with_one_seed_agree_about_every_board() {
+        let board = |restarts: u32| {
+            let mut harness = Harness::new(60, 60);
+            for _ in 0..restarts {
+                harness.tap(KeyCode::KeyR);
+            }
+            (
+                harness.game.board_seed(),
+                harness
+                    .game
+                    .rocks()
+                    .iter()
+                    .map(|r| r.position)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        for restarts in 0..4 {
+            assert_eq!(
+                board(restarts),
+                board(restarts),
+                "run {restarts} was not reproducible"
+            );
+        }
+        assert_ne!(board(0).0, board(1).0, "a restart did not change the board");
+    }
+
+    /// Game over is not the end: firing starts a new game.
+    #[test]
+    fn firing_after_a_game_over_starts_a_new_game() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        harness.game.stage_ship(DVec3::ZERO, 0.0, DVec3::ZERO);
+        harness
+            .game
+            .stage_rock(DVec3::ZERO, DVec3::ZERO, RockSize::Large);
+        harness.run_ticks(2000, &[]);
+        assert_eq!(harness.game.state, GameState::GameOver);
+
+        harness.tap(KeyCode::Space);
+        assert_eq!(harness.game.state, GameState::WaitingToStart);
+        assert_eq!(harness.game.lives, STARTING_LIVES);
+        assert_eq!(harness.game.score, 0);
+        assert!(harness.game.ship_alive);
+    }
+
+    // ---- determinism ---------------------------------------------------------
+
+    /// **The determinism criterion.** The same script replays to the same
+    /// score, twice, bit-identically.
+    ///
+    /// Everything observable is compared, not just the score: a run that agreed
+    /// about the number and disagreed about where the rocks were would be a
+    /// coincidence, not determinism.
+    #[test]
+    fn the_same_script_replays_bit_identically() {
+        let run = || {
+            let mut harness = Harness::new(60, 60);
+            harness.play_ticks(900);
+            (
+                harness.game.score,
+                harness.game.lives,
+                harness.game.wave,
+                harness.game.ship,
+                harness.game.ship_velocity,
+                harness.game.ship_heading,
+                harness.game.rocks(),
+                harness.game.bullets(),
+                harness.game.rocks_spawned(),
+            )
+        };
+        let first = run();
+        assert!(first.0 > 0, "the reference run scored nothing");
+        assert!(
+            first.8 > u64::from(wave_rocks(0)),
+            "the reference run split nothing: {} rocks ever spawned",
+            first.8
+        );
+        assert_eq!(first, run());
+    }
+
+    /// **The frame rate is not the tick rate.** The same flight reaches the
+    /// same place at 20, 60 and 240 frames a second, because the simulation
+    /// runs on its own fixed step and the frame loop only decides how often it
+    /// is asked to.
+    #[test]
+    fn the_same_flight_plays_out_the_same_at_every_frame_rate() {
+        let mut reference: Option<(u32, u32, u32, DVec3, Vec<RockView>)> = None;
+        for frame_hz in [20, 60, 240] {
+            let mut harness = Harness::new(frame_hz, 60);
+            harness.play_ticks(900);
+            assert_eq!(harness.ticks, 900);
+            let observed = (
+                harness.game.score,
+                harness.game.lives,
+                harness.game.wave,
+                harness.game.ship,
+                harness.game.rocks(),
+            );
+            match &reference {
+                None => {
+                    assert!(observed.0 > 0, "the reference run scored nothing");
+                    reference = Some(observed);
+                }
+                Some(expected) => {
+                    assert_eq!(
+                        &observed, expected,
+                        "{frame_hz} fps played a different game"
+                    )
+                }
+            }
+        }
+    }
+
+    /// Two games given the same seed play the same game.
+    #[test]
+    fn two_games_on_one_seed_play_the_same_game() {
+        for seed in [1, DEFAULT_SEED] {
+            let run = || {
+                let mut harness = Harness::with_seed(60, 60, seed);
+                harness.play_ticks(600);
+                (harness.game.score, harness.game.rocks())
+            };
+            assert_eq!(run(), run(), "seed {seed} was not reproducible");
+        }
+        assert_ne!(
+            {
+                let mut h = Harness::with_seed(60, 60, 1);
+                h.play_ticks(600);
+                h.game.rocks()
+            },
+            {
+                let mut h = Harness::with_seed(60, 60, 2);
+                h.play_ticks(600);
+                h.game.rocks()
+            },
+            "two seeds played the same game"
+        );
+    }
+
+    // ---- the entity lifecycle, which is what this sample is for ---------------
+
+    /// **Hundreds of spawns and deaths, and nothing leaks.**
+    ///
+    /// `docs/plan/sample/02-asteroids.md` says this is what the sample exists to
+    /// justify: bullets at four a second, two rocks for every one shot, a wave
+    /// at a time, and a restart that wipes the field — all of it hammering
+    /// generational ids, deferred destruction and pool slot recycling.
+    ///
+    /// The invariant is checked on **every** tick rather than at the end,
+    /// because a leak that is cleaned up before the last tick is still a leak
+    /// while it is happening, and because the failure names the tick it started
+    /// on. The churn counters at the bottom are what stop it passing vacuously:
+    /// a game that spawned nothing would satisfy every assertion above them.
+    #[test]
+    fn hundreds_of_spawns_and_deaths_leak_nothing() {
+        let mut harness = Harness::new(60, 60);
+        let mut restarts = 0;
+        let mut peak_entities = 0;
+
+        while harness.ticks < 18_000 {
+            harness.play_ticks(harness.ticks + 1);
+            harness.assert_nothing_leaked();
+            peak_entities = peak_entities.max(harness.game.entity_count());
+            // A finished game is restarted rather than left sitting, so the
+            // soak keeps churning — and a restart is itself the largest single
+            // piece of churn in the game.
+            if harness.game.state == GameState::GameOver {
+                harness.tap(KeyCode::KeyR);
+                restarts += 1;
+            }
+        }
+
+        let spawned = harness.game.rocks_spawned();
+        let fired = harness.game.bullets_fired();
+        assert!(
+            spawned >= 300,
+            "only {spawned} rocks were ever spawned, which is not enough churn to test"
+        );
+        assert!(
+            fired >= 1_000,
+            "only {fired} bullets were ever fired, which is not enough churn to test"
+        );
+        assert!(
+            restarts > 0 || harness.game.wave >= 3,
+            "the soak cleared only {} waves and finished no game, so neither the \
+             wave respawn nor the restart path was exercised",
+            harness.game.wave,
+        );
+        // The most the world can legitimately hold: the ship, a full magazine,
+        // every rock of the largest wave broken all the way down to smalls, and
+        // — because destruction is deferred by a tick — as many again waiting
+        // for the sweep on the tick a restart wipes the field. Derived rather
+        // than measured: a number taken from a passing run breaks on the next
+        // tuning change for a reason that is not a leak.
+        let ceiling = 2 * (1 + MAX_BULLETS + 4 * MAX_WAVE_ROCKS as usize);
+        assert!(
+            peak_entities <= ceiling,
+            "the world peaked at {peak_entities} entities against a ceiling of {ceiling}"
+        );
+        assert!(
+            peak_entities > 1 + wave_rocks(0) as usize,
+            "the world never grew past its opening board, so the ceiling proves nothing"
+        );
+
+        // The queue drains: a few quiet ticks and the pool has let go of
+        // everything, which is what "back to baseline" means for a deferred
+        // sweep.
+        harness.run_ticks(harness.ticks + 3, &[]);
+        assert_eq!(
+            harness.game.pending_despawns(),
+            0,
+            "the destruction queue never emptied"
+        );
+        // And the final state is accounted for exactly, entity for entity.
+        harness.assert_nothing_leaked();
+        log::info!(
+            "soak: {spawned} rocks, {fired} bullets, {restarts} restarts, \
+             peak {peak_entities} entities"
+        );
+    }
+
+    /// A game left alone forever does not grow.
+    ///
+    /// The complement of the soak above: that one churns hard and checks
+    /// nothing is left behind; this one checks that a game with *nothing*
+    /// happening does not accumulate either — the failure mode where a tick
+    /// re-registers something it already had.
+    #[test]
+    fn an_idle_game_stays_exactly_the_size_it_started() {
+        let mut harness = Harness::new(60, 60);
+        harness.run_ticks(1, &[]);
+        let entities = harness.game.entity_count();
+        let colliders = harness.game.collider_count();
+        assert_eq!(entities, 1 + wave_rocks(0) as usize);
+        assert_eq!(colliders, wave_rocks(0) as usize);
+
+        harness.run_ticks(600, &[]);
+        assert_eq!(harness.game.entity_count(), entities);
+        assert_eq!(harness.game.collider_count(), colliders);
+    }
+}

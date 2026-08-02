@@ -61,6 +61,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "asteroids"
+version = "0.1.0"
+dependencies = [
+ "crcbl",
+ "crcbl-client",
+ "crcbl-core",
+ "crcbl-ecs",
+ "crcbl-input",
+ "crcbl-net",
+ "crcbl-phys",
+ "crcbl-server",
+ "glam",
+ "log",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

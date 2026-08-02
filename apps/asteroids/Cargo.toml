@@ -1,0 +1,44 @@
+[package]
+name = "asteroids"
+description = "Asteroids — the churn sample: entities spawn and die every tick"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# **A library with two front ends, not a binary**, for the reason
+# `apps/flappy/Cargo.toml` sets out: the same loop has to be reachable from
+# `main.rs` (argv, exit codes) and, in a later sub-slice, from a browser's JS
+# shim — and a bin crate has no linkable artifact for the second. The browser
+# half is not here yet; the shape is, so it does not have to be retrofitted.
+#
+# The lib is not called `asteroids`. A lib and a bin of the same name in one
+# package write the same `asteroids.wasm`, which cargo calls an output filename
+# collision.
+[lib]
+name = "crcbl_asteroids"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "asteroids"
+path = "src/main.rs"
+
+# A subset of flappy's list, and deliberately smaller: this sub-slice is the
+# simulation. No `crcbl-audio` (no cues yet), no `crcbl-store` (no best score
+# yet), no `crcbl-sprite` (no art yet) — each arrives with the sub-slice that
+# uses it, so `cargo machete` stays meaningful.
+[dependencies]
+crcbl = { workspace = true }
+crcbl-ecs = { workspace = true }
+crcbl-net = { workspace = true }
+crcbl-phys = { workspace = true }
+crcbl-input = { workspace = true }
+crcbl-server = { workspace = true }
+crcbl-client = { workspace = true }
+crcbl-core = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+
+[lints]
+workspace = true

@@ -398,46 +398,85 @@ The modular panel is built and all three samples switch it on with F3 (or
   the first tagged release, or not at all — there are no releases yet for a
   reader to be missing entries from.
 
-## What asteroids still needs from `crcbl-phys`
+## What `crcbl-phys` owes, found by writing asteroids
 
-P6 delivered dynamic BVH churn, sphere overlap against the broadphase, and the
-first two L1 force providers. What the sample doc
-(`docs/plan/sample/02-asteroids.md`) names and this slice did **not** deliver:
+`apps/asteroids` is the P6 physics slice's first consumer. Two of the questions
+P6 left open are answered below and no longer open; the rest are what building
+against the crate turned up.
 
-- **Segment CCD as a single entry point.** `PhysicsSystem::sweep_sphere` exists
-  and is what a bullet should go through (`prev → cur` as the segment, the
-  bullet's radius as the sweep radius), so the machinery is there. What is not
-  there is a bullet-shaped API — the sample will be writing "sweep from where it
-  was to where it is, and if it hit anything, that is the impact" by hand, in
-  every sample that fires anything. Decide when asteroids writes it whether it
-  earns a named method. Not blocking.
+**Answered — the wrap's broadphase rule.** P6 left "when is a move a teleport"
+to whoever wrote the wrap. Asteroids' `teleport` (in
+`apps/asteroids/src/game.rs`) chose: **a wrap is a teleport, and a teleport is a
+remove-and-re-insert**, done by calling `PhysicsSystem::set_collider` again,
+applied uniformly to everything in the broadphase with no distance threshold —
+"did the position change discontinuously" is what a wrap knows and a threshold
+would only guess at it.
 
-- **`PhysicsSystem::overlap_sphere` fabricates its `ShapeHit`.** It returns
-  `t: 0.0`, `normal: DVec3::Y`, `started_inside: true` for every result — those
-  are not measurements, they are filler. Asteroids only asks _whether_ the ship
-  touched a rock, so it does not bite yet, but the type promises a contact and
-  does not deliver one. Either compute a real deepest-point normal or change the
-  return type to entity ids. `PhysicsWorld::overlap_sphere` underneath it is
-  honest — it returns `Vec<ColliderId>` and nothing more.
+**Corrected — the wrap is not a correctness bug.** The old entry here said a
+teleported body "leaves its ancestors' bounds stretched across the whole field",
+implying collisions break. They do not, and this was checked by falsification:
+swapping `set_collider` for `set_transform` in that function leaves the whole of
+`apps/asteroids`' 49-test suite green, because `Bvh::update_aabb` refits every
+ancestor on the way to the root and a stretched ancestor is a conservative
+_superset_ — bigger than it should be, never smaller, so it prunes nothing. What
+it costs is **tree quality**, not answers.
+
+- **A consumer cannot see the cost it is being asked to avoid.** `Bvh::depth` is
+  public; `PhysicsWorld` exposes no `depth()`, no node count and no `&Bvh`, so a
+  game has no way to measure whether its teleport rule helps. The rule above is
+  therefore chosen on the argument and not on a measurement. Either expose a
+  `PhysicsWorld::broadphase_stats()` or accept that the claim stays unverified.
+  Ties into the missing benchmark below.
+
+- **`DampingForce` has no per-entity route and `ThrustForce` does.**
+  `ThrustForce::world_force` is public precisely so a game can thrust one entity
+  among a field of rocks through `PhysicsSystem::apply_force`, because a force
+  _provider_ is global. `DampingForce` and `DragForce` have no equivalent, so
+  asteroids re-implements `-k·v` and the `mass/dt` clamp by hand in
+  `damping_force`. It is a faithful copy —
+  `the_hand_rolled_damping_is_the_engines_own` checks it against
+  `DampingForce::apply` directly, including at tick rates coarse enough to reach
+  the clamp — but it is a second copy of a physics model in the workspace. Fix:
+  give both a `world_force`-shaped method, or give `PhysicsSystem` per-entity
+  providers.
+
+- **There is no "what does entity E overlap" query.**
+  `PhysicsSystem::overlap_sphere` takes a free centre and radius. An entity that
+  is only ever the _subject_ of overlap tests therefore has no reason to be in
+  the broadphase at all — asteroids' ship carries no collider, because a leaf no
+  query is allowed to return would have needed filtering back out of every
+  result by entity id. That is fine here and will not be for a game where two
+  things test against each other. What is wanted is an entity-shaped overlap
+  with an exclusion list; the same exclusion list is what `sweep_sphere` needs
+  and what breakout and flappy both work around by removing the sweeper's own
+  collider and putting it back.
+
+- **`PhysicsSystem::overlap_sphere` still fabricates its `ShapeHit`.** `t: 0.0`,
+  `normal: DVec3::Y`, `started_inside: true` for every result. Asteroids only
+  asks _whether_ anything is there, so it discards the hit outright — which
+  means the type is promising a contact that no caller in the workspace can use.
+  Either compute a real deepest-point normal or change the return type to entity
+  ids. `PhysicsWorld::overlap_sphere` underneath is honest.
+
+- **Segment CCD earns a named method, and still has none.** P6 said "decide when
+  asteroids writes it". Asteroids wrote it (`sweep_bullets`), and the verdict is
+  yes: `Segment { start: pos - vel * dt, end: pos }` then `sweep_sphere` is the
+  same six lines in every game that fires anything, and getting `dt` or the
+  order wrong is silent —
+  `a_bullet_that_crosses_a_rock_within_one_tick_still_hits_it` goes red under
+  exactly that mistake. Wanted: something like
+  `PhysicsSystem::sweep_body(entity, dt, exclude)` that reads the body's own
+  velocity and radius. Not blocking; three samples in, it is a pattern.
 
 - **Rotational dynamics are absent.** `Transform` carries a `DQuat` and
   `ThrustForce` reads it, but there is no angular velocity, no torque and no
   quaternion integration: `RigidBody` has `velocity` and `force_accum` and
-  nothing angular. A ship that turns must have its rotation written by game code
-  through `set_transform`. That is fine for asteroids (turn rate is a constant,
-  not a physical response) and wrong for the inertia tensor the design doc
-  describes. Whoever needs real torque adds `angular_velocity`, `torque_accum`
-  and an inertia term to `RigidBody` and a rotation step to `SemiImplicitEuler`.
-
-- **Screen wrap has no broadphase story.** The sample doc says the wrap teleport
-  "exercises `WorldPos` rebase + broadphase re-insertion". A teleport today is a
-  `set_transform`, which refits the leaf where it stands — and
-  `Bvh::update_aabb` deliberately does not re-pick the leaf's place in the tree,
-  so a body that jumps across the playfield leaves its ancestors' bounds
-  stretched across the whole field. Remove-and-re-insert is the correct move for
-  a teleport and nothing does it automatically. Cheap to add (`PhysicsWorld`
-  knows both), but it needs a rule for _when_ — a distance threshold, or an
-  explicit `teleport()` call by the caller. Left for whoever writes the wrap.
+  nothing angular. Asteroids' ship integrates its own heading in `turn_ship` and
+  writes it through `set_transform`. That is right for this game — a turn rate
+  is a constant, not a physical response — and wrong for the inertia tensor the
+  design doc describes. Whoever needs real torque adds `angular_velocity`,
+  `torque_accum` and an inertia term to `RigidBody` and a rotation step to
+  `SemiImplicitEuler`.
 
 - **No benchmark, and no rebuild policy.** Churn cost was measured as tree
   _depth_, not as time: the claim "insert/remove beats a rebuild" is an
@@ -447,6 +486,69 @@ first two L1 force providers. What the sample doc
   tree by surface area than incremental insertion does, and nobody has measured
   the query-cost difference between the two. The horde sample (P8, 10k bodies)
   is where that stops being academic.
+
+## `GameModule::tick` runs after the ECS sweep, so a game's destructions lag
+
+`crcbl_ecs::World::tick` runs the schedule and then `sweep`s the deferred
+destruction queue. `crcbl_server::Server::tick` calls `world.tick()` **and
+then** `module.tick(&mut world)`. So every entity a `GameModule` despawns sits
+in the pool for one more tick before the pool lets go of it — and a game reading
+`World::entity_count()` between ticks sees a count that is high by however many
+things died last tick.
+
+Found by asteroids, whose leak test compares `entity_count()` against
+`1 + rocks + bullets` on every tick and failed immediately; it now adds
+`World::dead_queue_len()` to the sum. `apps/flappy`'s equivalent test asserts a
+`<=` ceiling, which tolerated this without noticing it.
+
+Two possible fixes, and the choice is the engine's:
+
+- **Sweep after the module**, i.e. `Server::tick` calls `world.sweep()` between
+  the module and `emit_snapshot`. Arguably more correct anyway: today's snapshot
+  is emitted while entities the module destroyed are still in the pool.
+- **Leave it and document it**, and have `World::entity_count` grow a sibling
+  that excludes the queue, so a consumer is not obliged to know.
+
+Not worked around in asteroids beyond making the test honest.
+
+## What asteroids itself still owes
+
+The simulation slice (S2, first sub-slice) is done. What is not:
+
+- **Art.** No `.crpix` sheets, no `build.rs`, no sprite pass. `app.rs`'s
+  `draw_field` draws the field as untextured UI-pass quads — a border, an
+  outline per rock, a filled square for the ship and one for its nose — which is
+  a placeholder the art sub-slice replaces wholesale, not a base it builds on.
+  The plan calls this the first real test of **rotation through the sprite
+  pass**, and none of that has happened yet.
+- **Menus, audio and the browser entry point.** None present. `Game::with_seed`
+  still takes the `headless` flag the other two samples hand to their audio
+  stream and best-score file, and ignores it, so those arrive without a
+  signature change. The browser half is the duplication finding above — it
+  should be written once, not a third time.
+- **The 10-minute soak in the exit criteria was not run.** What runs in CI is
+  `hundreds_of_spawns_and_deaths_leak_nothing`: 18,000 ticks (five minutes of
+  simulated play), 337 rocks spawned, 1,221 bullets fired, six waves cleared,
+  checking the entity and collider accounting on **every** tick. Ten minutes of
+  wall-clock soak with the inspector open, and the "no stale-handle panics with
+  entities selected as they die" criterion, both need the entity inspector,
+  which this sample does not use yet.
+- **The overlap query does not know about the seam.** Ship-versus-rock is a
+  single `overlap_sphere` at the ship's position, so a ship straddling an edge
+  does not see a rock straddling the opposite one until one of them has wrapped.
+  A full answer queries up to four offset positions. Deliberately not done: it
+  costs four broadphase queries a tick to fix a one-tick artefact at a boundary
+  both bodies cross constantly, and no test could tell the difference without
+  being written to.
+- **Nothing checks what the window actually shows.** There is no display in the
+  build environment, so the windowed path is compiled and never run; the
+  headless run does execute the real `Gpu::frame` (both passes report timings),
+  but no golden image covers the placeholder draw. Worth a golden only once
+  there is art.
+- **Tuning constants are compiled in.** The plan's milestone 3 wants them from a
+  data file after stage 6. Every one of them is a `pub const` in `game.rs` with
+  its reasoning written beside it, which is the form that survives being moved
+  into a file.
 
 ## Deferred decisions
 
