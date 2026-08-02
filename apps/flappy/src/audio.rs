@@ -108,6 +108,13 @@ impl crcbl_audio::AudioSource for MixerSource {
 #[derive(Debug)]
 pub struct Audio {
     sounds: Vec<Arc<Sound>>,
+    /// How many times each cue has been **emitted**, indexed as `id - 1`.
+    ///
+    /// Only ever increases, and only from the game thread. [`Audio::voices`]
+    /// cannot answer "was this cue played?" — it counts the voices still
+    /// sounding, and the audio thread reaps each one as it finishes, so the
+    /// number falls again on a clock nothing here controls.
+    plays: Vec<u64>,
     queue: Arc<VoiceQueue>,
     _stream: Option<AudioStream>,
 }
@@ -142,6 +149,7 @@ impl Audio {
         }
 
         Self {
+            plays: vec![0; sounds.len()],
             sounds,
             queue,
             _stream: stream,
@@ -158,7 +166,7 @@ impl Audio {
             log::debug!("audio: sound id 0 is not a sound");
             return;
         };
-        let Some(sound) = self.sounds.get(index) else {
+        let Some(sound) = self.sounds.get(index).map(Arc::clone) else {
             return;
         };
         let cue = crcbl_audio::spatial::compute_cue(
@@ -177,16 +185,23 @@ impl Audio {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(Voice {
-                sound: Arc::clone(sound),
+                sound,
                 playhead: 0.0,
                 volume: cue.volume * 0.5,
                 pitch: cue.pitch_ratio,
                 gain_l: cue.gain_left,
                 gain_r: cue.gain_right,
             });
+        // `plays` is as long as `sounds` and neither ever grows, so an index
+        // that found a sound finds a counter.
+        self.plays[index] += 1;
     }
 
-    /// How many voices are queued. For tests and for a debug HUD.
+    /// How many voices are **currently sounding**. For a debug HUD.
+    ///
+    /// Not a record of what was played: the audio thread drops each voice as it
+    /// runs out, so this falls again on its own. Use [`Audio::plays`] to ask
+    /// whether a cue happened.
     #[must_use]
     pub fn voices(&self) -> usize {
         self.queue
@@ -194,6 +209,19 @@ impl Audio {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .len()
+    }
+
+    /// How many times cue `id` has been played since start-up.
+    ///
+    /// Monotonic, so it answers the question [`Audio::voices`] cannot: whether
+    /// a cue was ever emitted, however long ago it finished. An id no sound
+    /// answers to has never been played and reports zero.
+    #[must_use]
+    pub fn plays(&self, id: u32) -> u64 {
+        id.checked_sub(1)
+            .and_then(|i| self.plays.get(i as usize))
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -269,8 +297,47 @@ mod tests {
         audio.play_at(0, 0.0, 0.0, 0.0);
         audio.play_at(9999, 0.0, 0.0, 0.0);
         assert_eq!(audio.voices(), 0);
+        // `plays` shares `play_at`'s `id - 1`, so it has the same underflow to
+        // avoid, and it must not report a play for a cue that was refused.
+        assert_eq!(audio.plays(0), 0);
+        assert_eq!(audio.plays(9999), 0);
+        assert_eq!(audio.plays(SOUND_FLAP), 0);
+
         audio.play_at(SOUND_FLAP, 0.0, 0.0, 0.0);
         assert_eq!(audio.voices(), 1);
+        assert_eq!(audio.plays(SOUND_FLAP), 1);
+        assert_eq!(audio.plays(SOUND_DEATH), 0, "only the flap was played");
+    }
+
+    /// `plays` counts emissions, not the voices still sounding — the whole
+    /// reason it exists. One that merely reported `voices()` would agree with
+    /// this test right up until the audio thread reaped the voice.
+    #[test]
+    fn a_cue_stays_counted_after_its_voice_is_gone() {
+        let mut audio = Audio::new(true);
+        audio.play_at(SOUND_FLAP, 0.0, 0.0, 0.0);
+        assert_eq!(audio.plays(SOUND_FLAP), 1);
+
+        // Reap it by hand rather than waiting on the audio thread, so the test
+        // is not itself a race: `fill` is exactly what that thread calls.
+        let source = MixerSource {
+            queue: Arc::clone(&audio.queue),
+        };
+        let mut block = vec![0.0f32; 256 * 2];
+        let start = std::time::Instant::now();
+        while audio.voices() > 0 {
+            assert!(
+                start.elapsed().as_secs() < 5,
+                "the flap voice never finished"
+            );
+            block.fill(0.0);
+            crcbl_audio::AudioSource::fill(&source, &mut block, 48_000);
+        }
+        assert_eq!(
+            audio.plays(SOUND_FLAP),
+            1,
+            "the flap stopped being counted once it stopped sounding"
+        );
     }
 
     /// The grammar is actually consulted: a cue away from the listener is not

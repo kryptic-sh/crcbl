@@ -1605,24 +1605,45 @@ mod tests {
     /// The cue queue is filled by the simulation and drained by the facade, so
     /// a cue that never crossed that seam would be a game that ran silently
     /// while every other test passed.
+    ///
+    /// Counted with `plays`, never `voices`. A headless game still opens a null
+    /// stream, and that stream's polling thread drops each voice about 50 ms of
+    /// *wall clock* after it starts — while the 120 simulated ticks below take
+    /// no wall clock worth speaking of. Asking `voices()` whether the flap was
+    /// heard therefore asks how busy the machine is, and it answers "no" under
+    /// load: that is the flake this test used to be.
     #[test]
     fn a_flap_and_a_death_reach_the_audio() {
+        use crate::audio::{SOUND_DEATH, SOUND_FLAP};
+
         let mut harness = Harness::new(60, 60);
-        assert_eq!(harness.game.audio.voices(), 0, "silence before the run");
+        assert_eq!(harness.game.audio.plays(SOUND_FLAP), 0, "silence before");
+        assert_eq!(harness.game.audio.plays(SOUND_DEATH), 0, "silence before");
 
         harness.run_ticks(1, &flap_at(0));
-        assert!(
-            harness.game.audio.voices() >= 1,
+        assert_eq!(
+            harness.game.audio.plays(SOUND_FLAP),
+            1,
             "the flap that started the run was not heard"
+        );
+        assert_eq!(
+            harness.game.audio.plays(SOUND_DEATH),
+            0,
+            "the run ended on the tick it started"
         );
 
         // Fall to the ground without flapping again.
-        let before = harness.game.audio.voices();
         harness.run_ticks(120, &flap_at(0));
         assert_eq!(harness.game.state, GameState::Dead);
-        assert!(
-            harness.game.audio.voices() > before,
+        assert_eq!(
+            harness.game.audio.plays(SOUND_DEATH),
+            1,
             "the end of the run was not heard"
+        );
+        assert_eq!(
+            harness.game.audio.plays(SOUND_FLAP),
+            1,
+            "the fall flapped on its own"
         );
     }
 
