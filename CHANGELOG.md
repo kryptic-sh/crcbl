@@ -46,8 +46,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   S1B finding 1 asks for: `ForwardRenderer` draws exactly one instance, which is
   why both samples push their worlds through the UI pass. Constants go through a
   uniform buffer on every tier, so unlike `ui.slang` there is no second source
-  file to keep in step. `SampleMode::Pixel` currently binds a nearest sampler
-  and is not yet the sharp-bilinear the spec describes.
+  file to keep in step.
+- **crcbl-render**: `SampleMode::Pixel` is sharp bilinear, not nearest. The
+  linear blend is squeezed into a band one fragment wide at each texel boundary,
+  so art pixels stay flat inside and cross over in one screen pixel at any
+  scale, and the sprite's screen rect is snapped to whole device pixels.
+  Nearest-neighbour was the placeholder: at a non-integer scale it makes some
+  art pixels four screen pixels across and their neighbours five, and the
+  unevenness crawls as the sprite moves. `SpriteInstance` grew a fourth `float4`
+  carrying the sheet's size and the mode, so its layout changed.
 
 ### Changed
 

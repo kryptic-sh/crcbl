@@ -35,28 +35,38 @@
 //! vertex on Tier A; the tier split cost a second `.slang` that has to be kept
 //! in step by hand, and the trade is not close.
 //!
-//! # Sample modes, and the placeholder in the middle of them
+//! # Sample modes, and where the mode lives
 //!
-//! Two samplers are created up front, and a sheet's [`SampleMode`] decides which
-//! its bind group names. [`SampleMode::Smooth`] gets linear, which is correct
-//! and final.
+//! There is **one sampler**, linear, and every sheet's bind group names it. The
+//! mode is not in the bind group at all: it rides on the instance, in
+//! [`SpriteInstance::sheet`], alongside the sheet's size in texels.
 //!
-//! [`SampleMode::Pixel`] gets **nearest, which is a placeholder slice 4
-//! replaces**. `crcbl_sprite::SampleMode`'s own docs say why it is wrong: at a
+//! That is forced by what [`SampleMode::Pixel`] actually is.
+//! `crcbl_sprite::SampleMode`'s own docs say it is *not* nearest-neighbour: at a
 //! non-integer scale — a 320-wide field across a 1366-wide canvas — nearest
 //! makes some art pixels four screen pixels across and their neighbours five,
-//! and the unevenness crawls as the sprite moves. The fix is sharp-bilinear:
-//! sample linearly, but bend the UV so the blend happens only inside a
-//! one-fragment band at each texel boundary. That needs the viewport size in the
-//! shader, which is why [`SpriteConstants::viewport`] is already written and
-//! already read by nothing.
+//! and the unevenness crawls as the sprite moves. What it is instead is
+//! **sharp-bilinear**: sample *linearly*, with the UV bent so the blend happens
+//! only inside a one-fragment band at each texel boundary, plus the quad's
+//! screen rectangle snapped to whole device pixels so its edges cannot straddle
+//! a fragment. Both halves need a linear sampler and both need numbers — the
+//! sheet's texel size, and the target's size in pixels — that a
+//! `SamplerState` cannot supply. So the sampler stops being the carrier: one
+//! sampler, one pipeline, one shader, and two `float4` lanes on a buffer that
+//! was already written once per sprite per frame.
 //!
-//! # What this slice does *not* prove
+//! [`SampleMode::Smooth`] samples the vertex stage's UV unchanged and is not
+//! snapped, which is what art that is not pixel art wants.
+//! `sprite.slang`'s `sharpen` carries the derivation of the band's width.
 //!
-//! There is no golden image until slice 4, so nothing here is evidence that the
-//! shader draws the right picture. The tests below assert what the recorder can
-//! see — the instance bytes, the batching, the draw coverage, the teardown — and
-//! that is the whole of the evidence.
+//! # What the tests below are and are not
+//!
+//! They are recorder assertions: the instance bytes, the batching, the draw
+//! coverage, the teardown. The evidence that this draws the right *picture* is
+//! `crates/crcbl-vk/tests/vk_e2e.rs`'s sprite goldens, which run the real pass
+//! against a real driver and read the pixels back — including the one assertion
+//! that pins the sharp-bilinear arithmetic, that a `Pixel` sprite at a whole
+//! scale is exactly flat inside each texel.
 
 use core::ops::Range;
 
@@ -83,8 +93,8 @@ use crate::texture::{UploadedTexture, upload_texture};
 /// One sprite, in the byte layout `struct SpriteInstance` in
 /// `crates/crcbl-shaders/shaders/sprite.slang` declares.
 ///
-/// Three `[f32; 4]`s: 48 bytes, no padding under any layout rule, and every
-/// element of the array 16-byte aligned because 48 is a multiple of 16. A
+/// Four `[f32; 4]`s: 64 bytes, no padding under any layout rule, and every
+/// element of the array 16-byte aligned because 64 is a multiple of 16. A
 /// `[f32; 2]` pair here would acquire alignment padding in the shader that this
 /// side would have to reproduce exactly, which is a layout that drifts silently.
 ///
@@ -101,11 +111,47 @@ pub struct SpriteInstance {
     pub uv: [f32; 4],
     /// Straight-alpha RGBA multiplied into the sampled texel.
     pub tint: [f32; 4],
+    /// The sheet's texel size and its sample mode: `[width, height, mode, 0]`,
+    /// exactly as [`sheet_lane`] packs it.
+    ///
+    /// **Both are properties of the sheet, and they travel per sprite anyway.**
+    /// The shader cannot get them anywhere else: set 1 binds one image and one
+    /// sampler, and a shader has no way to ask a `SamplerState` which filter it
+    /// was created with. See `sprite.slang`'s `SpriteInstance::sheet` for the
+    /// alternatives that were not taken — a third descriptor set, or a second
+    /// pipeline — and why sixteen bytes on a buffer that is written per frame
+    /// anyway is the cheaper one.
+    pub sheet: [f32; 4],
 }
 
 /// Bytes per instance. Named so the buffer arithmetic and the tests read the
-/// same number rather than each spelling 48.
+/// same number rather than each spelling 64.
 pub const INSTANCE_STRIDE: usize = size_of::<SpriteInstance>();
+
+/// [`SpriteInstance::sheet`]`[2]` for [`SampleMode::Pixel`]: sharp-bilinear
+/// sampling and a pixel-snapped quad.
+///
+/// The shader uses it as a `lerp` weight rather than as a branch, so the two
+/// values must be exactly `1.0` and exactly `0.0` and nothing else.
+pub const SAMPLE_PIXEL: f32 = 1.0;
+
+/// [`SpriteInstance::sheet`]`[2]` for [`SampleMode::Smooth`]: plain linear
+/// sampling of the UV the vertex stage produced, and no snapping.
+pub const SAMPLE_SMOOTH: f32 = 0.0;
+
+/// The [`SpriteInstance::sheet`] lane for a sheet of this size and mode.
+///
+/// A named function rather than a literal inside `register_sheet`, because it is
+/// the one place the mode is turned into a number and the shader's `lerp` weight
+/// is only a selection while that number is exactly 0 or 1.
+#[must_use]
+pub fn sheet_lane(width: u32, height: u32, mode: SampleMode) -> [f32; 4] {
+    let sample = match mode {
+        SampleMode::Pixel => SAMPLE_PIXEL,
+        SampleMode::Smooth => SAMPLE_SMOOTH,
+    };
+    [width as f32, height as f32, sample, 0.0]
+}
 
 /// The per-frame constant block, matching `struct SpriteConstants` in
 /// `sprite.slang`.
@@ -117,12 +163,10 @@ pub struct SpriteConstants {
     /// World → clip, column-major, exactly as [`Mat4::to_cols_array`] produces
     /// it. `sprite.slang`'s header records why no transpose is needed.
     pub view_proj: [f32; 16],
-    /// The target's size in pixels.
+    /// The target's size in device pixels.
     ///
-    /// **Written and not yet read.** Slice 4's sharp-bilinear filtering needs
-    /// the fragments-per-texel ratio, and widening a uniform block later is a
-    /// change to every consumer of the layout; carrying the field from the start
-    /// costs eight bytes once per frame.
+    /// Read by the vertex stage, which needs the map from NDC to the pixel grid
+    /// to round a [`SampleMode::Pixel`] quad's corners onto it.
     pub viewport: [f32; 2],
     /// Pads the block to 80 bytes. `std140` rounds a uniform block's size up to
     /// a multiple of 16, and naga *enforces* that where a Vulkan driver would
@@ -196,12 +240,18 @@ pub struct Sprite {
 
 impl Sprite {
     /// The bytes the shader reads for this sprite.
+    ///
+    /// `sheet` is the [`sheet_lane`] of the sheet this sprite names, which the
+    /// [`Sprite`] itself does not carry — a caller writes a [`SheetId`] and the
+    /// renderer holds the size and the mode it was registered with, so there is
+    /// exactly one place either can be wrong.
     #[must_use]
-    pub const fn instance(&self) -> SpriteInstance {
+    pub const fn instance(&self, sheet: [f32; 4]) -> SpriteInstance {
         SpriteInstance {
             rect: self.rect,
             uv: self.uv,
             tint: self.tint,
+            sheet,
         }
     }
 }
@@ -213,7 +263,7 @@ impl Sprite {
 /// How many frames of instance and constant buffers to keep in flight.
 const FRAMES_IN_FLIGHT: usize = 2;
 
-/// Starting size of the instance ring, in bytes. Twenty-one sprites; a frame
+/// Starting size of the instance ring, in bytes. Sixteen sprites; a frame
 /// that wants more grows it once.
 const INITIAL_RING_BYTES: u64 = 1024;
 
@@ -248,11 +298,15 @@ struct Batch {
     instances: Range<u32>,
 }
 
-/// A registered sheet: the uploaded image, and the bind group naming it.
+/// A registered sheet: the uploaded image, the bind group naming it, and the
+/// instance lane every sprite drawn from it carries.
 #[derive(Clone, Copy, Debug)]
 struct RegisteredSheet {
     texture: UploadedTexture,
     group: BindGroupHandle,
+    /// [`sheet_lane`] for this sheet's size and [`SampleMode`], computed once at
+    /// registration and copied into every instance that names it.
+    lane: [f32; 4],
 }
 
 /// The sprite renderer.
@@ -267,11 +321,13 @@ pub struct SpriteRenderer {
     frame_layout: BindGroupLayoutHandle,
     sheet_layout: BindGroupLayoutHandle,
 
-    /// Both samplers exist from construction, whatever any sheet asks for: two
-    /// objects for the life of the renderer, against a branch that would have to
-    /// create one lazily and then remember whether it had.
-    linear_sampler: SamplerHandle,
-    nearest_sampler: SamplerHandle,
+    /// **One sampler, linear, for every sheet whatever its [`SampleMode`].**
+    ///
+    /// Slice 3 created a nearest one beside it and gave it to
+    /// [`SampleMode::Pixel`]; sharp-bilinear *is* linear sampling of a bent UV,
+    /// so a nearest sampler would flatten the bend and undo the whole thing. The
+    /// mode now travels on the instance instead — see [`SpriteInstance::sheet`].
+    sampler: SamplerHandle,
 
     /// Registered sheets, indexed by [`SheetId::index`].
     sheets: Vec<RegisteredSheet>,
@@ -342,7 +398,7 @@ impl SpriteRenderer {
         target_format: Format,
         rollback: &mut Rollback,
     ) -> Result<Self, HalError> {
-        let linear_sampler = device.create_sampler(&SamplerDesc {
+        let sampler = device.create_sampler(&SamplerDesc {
             label: Some("sprite linear"),
             mag_filter: FilterMode::Linear,
             min_filter: FilterMode::Linear,
@@ -350,16 +406,7 @@ impl SpriteRenderer {
             address_mode: [SamplerAddressMode::ClampToEdge; 3],
             ..SamplerDesc::default()
         })?;
-        rollback.samplers.push(linear_sampler);
-        let nearest_sampler = device.create_sampler(&SamplerDesc {
-            label: Some("sprite nearest"),
-            mag_filter: FilterMode::Nearest,
-            min_filter: FilterMode::Nearest,
-            mip_filter: FilterMode::Nearest,
-            address_mode: [SamplerAddressMode::ClampToEdge; 3],
-            ..SamplerDesc::default()
-        })?;
-        rollback.samplers.push(nearest_sampler);
+        rollback.samplers.push(sampler);
 
         let frame_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
             label: Some("sprite frame"),
@@ -490,8 +537,7 @@ impl SpriteRenderer {
             pipeline,
             frame_layout,
             sheet_layout,
-            linear_sampler,
-            nearest_sampler,
+            sampler,
             sheets: Vec::new(),
             queue,
             frame_groups,
@@ -549,7 +595,6 @@ impl SpriteRenderer {
             desc.height,
             desc.pixels,
         )?;
-        let sampler = self.sampler_for(desc.sample);
         let group = match device.create_bind_group(&BindGroupDesc {
             label: Some(desc.label),
             layout: self.sheet_layout,
@@ -562,7 +607,7 @@ impl SpriteRenderer {
                 BindGroupEntry {
                     binding: 1,
                     array_index: 0,
-                    resource: BindingResource::Sampler(sampler),
+                    resource: BindingResource::Sampler(self.sampler),
                 },
             ],
             variable_count: None,
@@ -578,21 +623,12 @@ impl SpriteRenderer {
         let id = SheetId(u32::try_from(self.sheets.len()).map_err(|_| {
             HalError::InvalidDescriptor("more than u32::MAX sprite sheets".to_string())
         })?);
-        self.sheets.push(RegisteredSheet { texture, group });
+        self.sheets.push(RegisteredSheet {
+            texture,
+            group,
+            lane: sheet_lane(desc.width, desc.height, desc.sample),
+        });
         Ok(id)
-    }
-
-    /// Which sampler a sheet with this mode binds.
-    ///
-    /// [`SampleMode::Pixel`] answers `nearest`, **which is the placeholder slice
-    /// 4 replaces with sharp-bilinear** — see this module's docs. Left as a
-    /// named method rather than an inline `match` so the seam is one line to
-    /// find and one line to change.
-    const fn sampler_for(&self, mode: SampleMode) -> SamplerHandle {
-        match mode {
-            SampleMode::Pixel => self.nearest_sampler,
-            SampleMode::Smooth => self.linear_sampler,
-        }
     }
 
     /// Uploads this frame's sprites and constants, and advances the ring.
@@ -641,8 +677,13 @@ impl SpriteRenderer {
         self.frame = (self.frame + 1) % FRAMES_IN_FLIGHT;
         let idx = self.frame;
 
-        let instances: Vec<SpriteInstance> =
-            sprites.iter().map(|sprite| sprite.instance()).collect();
+        // The sheet's size and mode are stamped onto the instance here, from the
+        // sheet the sprite named — the loop above has already established that
+        // every one of those indices is registered.
+        let instances: Vec<SpriteInstance> = sprites
+            .iter()
+            .map(|sprite| sprite.instance(self.sheets[sprite.sheet.index() as usize].lane))
+            .collect();
 
         // Grow only when this frame genuinely needs more room. Both sides are
         // **bytes**.
@@ -753,8 +794,7 @@ impl SpriteRenderer {
         for buffer in self.constant_buffers.drain(..) {
             device.destroy_buffer(buffer);
         }
-        device.destroy_sampler(self.linear_sampler);
-        device.destroy_sampler(self.nearest_sampler);
+        device.destroy_sampler(self.sampler);
         device.destroy_graphics_pipeline(self.pipeline);
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group_layout(self.frame_layout);
@@ -1053,17 +1093,17 @@ mod tests {
     // The ABI
     // -----------------------------------------------------------------------
 
-    /// **The field-reordering test.** A `rect`/`uv`/`tint` permutation between
-    /// Rust and Slang is invisible until a golden image, and there is no golden
-    /// image until slice 4 — so both sides are pinned here.
+    /// **The field-reordering test.** A `rect`/`uv`/`tint`/`sheet` permutation
+    /// between Rust and Slang is the kind of mistake that renders *something*,
+    /// so both sides are pinned here as well as in the goldens.
     ///
     /// The Rust half is the actual bytes, decoded back to floats at named
     /// offsets. The Slang half is the *compiled* WGSL, which `build.rs`
     /// hash-checks against the committed `.slang`, so a reorder on either side
     /// moves one of the two and this fails.
     #[test]
-    fn an_instance_is_three_float4s_in_the_order_the_shader_reads() {
-        assert_eq!(INSTANCE_STRIDE, 48);
+    fn an_instance_is_four_float4s_in_the_order_the_shader_reads() {
+        assert_eq!(INSTANCE_STRIDE, 64);
         assert_eq!(align_of::<SpriteInstance>(), 4);
         assert_eq!(
             INSTANCE_STRIDE % 16,
@@ -1080,13 +1120,18 @@ mod tests {
             uv: [0.25, 0.5, 0.75, 1.0],
             tint: [0.1, 0.2, 0.3, 0.4],
         };
-        let instance = sprite.instance();
+        let instance = sprite.instance(sheet_lane(16, 8, SampleMode::Pixel));
         let bytes = bytemuck::bytes_of(&instance);
         assert_eq!(bytes.len(), INSTANCE_STRIDE);
         let floats = as_floats(bytes);
         assert_eq!(&floats[0..4], &[-3.5, 12.0, 64.0, 32.0], "rect at byte 0");
         assert_eq!(&floats[4..8], &[0.25, 0.5, 0.75, 1.0], "uv at byte 16");
         assert_eq!(&floats[8..12], &[0.1, 0.2, 0.3, 0.4], "tint at byte 32");
+        assert_eq!(
+            &floats[12..16],
+            &[16.0, 8.0, SAMPLE_PIXEL, 0.0],
+            "sheet size and sample mode at byte 48"
+        );
 
         // And the shader really does read them in that order. `slangc` names the
         // members and emits their alignment, so this is the compiled artifact's
@@ -1111,13 +1156,67 @@ mod tests {
                 "@align(16) rect_0 : vec4<f32>",
                 "@align(16) uv_0 : vec4<f32>",
                 "@align(16) tint_0 : vec4<f32>",
+                "@align(16) sheet_0 : vec4<f32>",
             ],
             "the shader's instance layout no longer matches SpriteInstance"
         );
     }
 
-    /// The same for the constant block: the matrix first, then the viewport
-    /// slice 4 will read, then the padding `std140` insists on.
+    /// The mode reaches the shader as an exact `lerp` weight, and the sheet's
+    /// texel size reaches it at all.
+    ///
+    /// `sprite.slang` selects between the plain and the bent UV with
+    /// `lerp(plain, sharp, sheet.z)` rather than a branch — the fragment stage
+    /// must stay in uniform control flow — so a mode that arrived as anything
+    /// other than exactly 0 or exactly 1 would silently blend the two filters.
+    #[test]
+    fn the_sample_mode_is_an_exact_zero_or_one_and_the_size_rides_beside_it() {
+        assert_eq!(SAMPLE_PIXEL, 1.0);
+        assert_eq!(SAMPLE_SMOOTH, 0.0);
+        assert_eq!(
+            sheet_lane(64, 32, SampleMode::Pixel),
+            [64.0, 32.0, 1.0, 0.0]
+        );
+        assert_eq!(
+            sheet_lane(64, 32, SampleMode::Smooth),
+            [64.0, 32.0, 0.0, 0.0]
+        );
+        // Width and height in that order, and not swapped: a square sheet is the
+        // one that cannot tell.
+        let lane = sheet_lane(7, 3, SampleMode::Smooth);
+        assert_eq!((lane[0], lane[1]), (7.0, 3.0));
+
+        // The shader reads `sheet.xy` as the size and `sheet.z` as the mode, and
+        // hands `xyz` on to the fragment stage flat — the compiled artifact's own
+        // account of it, so a renamed or reordered varying fails here.
+        let wgsl = crcbl_shaders::SPRITE
+            .wgsl()
+            .expect("sprite has a WGSL half");
+        assert!(
+            wgsl.contains("output_0.sheet_2 = s_0.sheet_0.xyz;"),
+            "the vertex stage must pass the sheet lane through: {wgsl}"
+        );
+        assert!(
+            wgsl.contains("@interpolate(flat)"),
+            "the mode is a lerp weight and must not be interpolated: {wgsl}"
+        );
+        assert!(
+            wgsl.contains("fwidth("),
+            "sharp-bilinear's ramp width is a screen-space derivative; without \
+             fwidth there is no ramp: {wgsl}"
+        );
+        assert!(
+            wgsl.contains("round(pixels_0)"),
+            "the vertex stage must snap the quad to the pixel grid: {wgsl}"
+        );
+        assert!(
+            wgsl.contains("constants_0.viewport_0"),
+            "and the snap must read the viewport rather than guess it: {wgsl}"
+        );
+    }
+
+    /// The same for the constant block: the matrix first, then the viewport the
+    /// vertex stage snaps against, then the padding `std140` insists on.
     #[test]
     fn the_constants_are_the_matrix_then_the_viewport_then_padding() {
         assert_eq!(CONSTANTS_SIZE, 80);
@@ -1444,26 +1543,92 @@ mod tests {
         );
     }
 
-    /// A pixel sheet binds nearest and a smooth one binds linear.
+    /// **Both modes bind the same linear sampler, and the mode reaches the
+    /// shader on the instance instead.**
     ///
-    /// Nearest is the **placeholder slice 4 replaces with sharp-bilinear** — see
-    /// this module's docs. When it does, this test is the thing that says the
-    /// seam moved.
+    /// This is the test that says the seam moved. Slice 3 gave
+    /// [`SampleMode::Pixel`] a nearest sampler as a named placeholder; a nearest
+    /// sampler would flatten sharp-bilinear's bent UV back onto a texel centre
+    /// and produce exactly the nearest-neighbour picture the mode exists to
+    /// avoid. So there is one sampler, and the difference between the modes is
+    /// entirely in the instance bytes — which is what this checks, end to end,
+    /// through `begin_frame`'s real write.
     #[test]
-    fn a_pixel_sheet_binds_nearest_and_a_smooth_sheet_binds_linear() {
+    fn both_modes_share_one_linear_sampler_and_differ_only_on_the_instance() {
         let recorder = Recorder::new();
         let (device, queue) = open(&recorder);
-        let renderer = SpriteRenderer::new(device.as_ref(), queue, TARGET).expect("built");
-        assert_ne!(renderer.nearest_sampler, renderer.linear_sampler);
+        let mut renderer = SpriteRenderer::new(device.as_ref(), queue, TARGET).expect("built");
+
         assert_eq!(
-            renderer.sampler_for(SampleMode::Pixel),
-            renderer.nearest_sampler
+            recorder.live_objects(crcbl_hal::null::ObjectKind::Sampler),
+            1,
+            "one sampler for the whole pass: a second one would be the nearest \
+             placeholder coming back"
+        );
+
+        // Two sheets of *different* sizes as well as different modes, so a lane
+        // taken from the wrong sheet is visible and not just the mode being
+        // wrong.
+        let big = vec![255u8; 4 * 2 * 4];
+        let small = [255u8; 2 * 2 * 4];
+        let sharp = renderer
+            .register_sheet(
+                device.as_ref(),
+                &SheetDesc {
+                    label: "pixel sheet",
+                    width: 4,
+                    height: 2,
+                    sample: SampleMode::Pixel,
+                    pixels: &big,
+                },
+            )
+            .expect("upload");
+        let smooth = renderer
+            .register_sheet(
+                device.as_ref(),
+                &SheetDesc {
+                    label: "smooth sheet",
+                    width: 2,
+                    height: 2,
+                    sample: SampleMode::Smooth,
+                    pixels: &small,
+                },
+            )
+            .expect("upload");
+
+        assert_eq!(
+            recorder.live_objects(crcbl_hal::null::ObjectKind::Sampler),
+            1,
+            "registering sheets in two different modes must not create a second \
+             sampler either"
         );
         assert_eq!(
-            renderer.sampler_for(SampleMode::Smooth),
-            renderer.linear_sampler
+            renderer.sheets[sharp.index() as usize].lane,
+            [4.0, 2.0, SAMPLE_PIXEL, 0.0],
+            "a Pixel sheet's lane is its texel size and mode 1"
         );
+        assert_eq!(
+            renderer.sheets[smooth.index() as usize].lane,
+            [2.0, 2.0, SAMPLE_SMOOTH, 0.0],
+            "a Smooth sheet's lane is its texel size and mode 0"
+        );
+
+        // And that lane is what `begin_frame` stamps onto the instance, from the
+        // sheet the sprite named rather than from the sprite.
+        let stamped = sprite(smooth).instance(renderer.sheets[smooth.index() as usize].lane);
+        assert_eq!(stamped.sheet, [2.0, 2.0, SAMPLE_SMOOTH, 0.0]);
+
+        renderer
+            .begin_frame(
+                device.as_ref(),
+                &[sprite(sharp), sprite(smooth)],
+                Mat4::IDENTITY,
+                EXTENT,
+            )
+            .expect("upload");
+
         renderer.destroy(device.as_ref());
+        recorder.assert_valid();
     }
 
     // -----------------------------------------------------------------------
@@ -1630,7 +1795,7 @@ mod tests {
             INITIAL_RING_BYTES
         );
 
-        // 1024 bytes holds 21 instances; 64 needs 3072.
+        // 1024 bytes holds 16 instances; 64 needs 4096.
         let big = vec![sprite(sheet); 64];
         let before_groups = renderer.frame_groups.clone();
         for _ in 0..FRAMES_IN_FLIGHT {

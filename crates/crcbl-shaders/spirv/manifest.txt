@@ -17,11 +17,11 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [sprite]
 source = shaders/sprite.slang
-source-sha256 = dd037344d2ee0aa8190a1bd8d035bd7e61c86dda72e6d7f7151a5756ce108a95
+source-sha256 = 58c5fd6be65f89472d08dc19b1d92d6992d3157023c4be9f035d8ab3e7dd6071
 spirv = spirv/sprite.spv
-spirv-sha256 = c23f75b249634b29921b69838e4640213a150206f0306af1260c0419ab571735
+spirv-sha256 = 059da28d4ef4b471987f8aa36c4fbe27348ea0fdecb0cdc7e4184b3604ec645e
 wgsl = wgsl/sprite.wgsl
-wgsl-sha256 = 976588ba008b02a36c4499281f17505b382b4c711b0825f04d195ad1201d693e
+wgsl-sha256 = d2de78f739a0dc562e6b3baeea6eba6c5948a8d9667dc1390cf8c46faf87894b
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [tonemap]

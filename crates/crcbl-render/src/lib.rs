@@ -127,6 +127,10 @@ pub mod transient;
 pub mod ui_pass;
 
 pub use camera::{Camera, DirectionalLight, Projection};
+/// Re-exported because [`SheetDesc::sample`] is spelled in it: a crate whose
+/// public API names a foreign type and does not export it is one every caller
+/// has to add a dependency for.
+pub use crcbl_sprite::SampleMode;
 pub use forward::ForwardRenderer;
 pub use graph::{
     Attachment, BufferId, CompiledGraph, CompiledPass, GraphBarriers, GraphBufferBarrier,
@@ -134,8 +138,8 @@ pub use graph::{
     PassContext, PassKind, RenderGraph,
 };
 pub use sprite_pass::{
-    CONSTANTS_SIZE, INSTANCE_STRIDE, SheetDesc, SheetId, Sprite, SpriteConstants, SpriteInstance,
-    SpriteRenderer,
+    CONSTANTS_SIZE, INSTANCE_STRIDE, SAMPLE_PIXEL, SAMPLE_SMOOTH, SheetDesc, SheetId, Sprite,
+    SpriteConstants, SpriteInstance, SpriteRenderer, sheet_lane,
 };
 pub use texture::{UploadedTexture, upload_texture};
 pub use timing::{FrameTimings, PassTimers, PassTiming};
