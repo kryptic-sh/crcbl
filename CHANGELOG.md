@@ -81,6 +81,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the sprite pass rather than the UI pass — the UI atlas is a single-channel
   glyph mask, and `crcbl-render` already depends on `crcbl-ui`, so the reverse
   could never have happened.
+- **crcbl-cli**: `crcbl crpix`, which turns PNG frames into one `.crpix` sheet
+  in the order given, with `--nine`, `--sample`, `--clip` and `--hold`. Frames
+  are named after their file stems; two inputs whose stems collide, or a stem
+  the format cannot spell back, are refused rather than written out. An existing
+  output is left alone without `--force`.
 
 ### Changed
 

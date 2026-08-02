@@ -50,6 +50,8 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use crcbl_sprite::{NineSlice, SampleMode};
+
 /// Top-level `--help`.
 pub const USAGE: &str = "\
 crcbl — the Crucible engine's headless control CLI
@@ -63,6 +65,7 @@ COMMANDS:
     build         Build the project in the current directory.
     screenshot    Offscreen render the scene and write a PNG.
     replay        Read a .crpl replay file and dump its metadata.
+    crpix         Convert PNG frames into one .crpix sprite sheet.
 
 OPTIONS (every command):
         --json    Emit one JSON object instead of human output.
@@ -144,6 +147,37 @@ OPTIONS:
         --json           Emit one JSON object instead of human output.
     -h, --help           Print this text.";
 
+/// `crcbl crpix --help`.
+pub const CRPIX_USAGE: &str = "\
+crcbl crpix — convert PNG frames into one .crpix sprite sheet
+
+USAGE:
+    crcbl crpix <PNG>... -o <FILE> [OPTIONS]
+
+The images become the sheet's frames, in the order given on the command line,
+and every one of them must be the same size — a mismatch names the file rather
+than padding it. Each frame is named after its file stem, so `art/bird-up.png`
+becomes the frame `bird-up`, and two inputs whose stems collide are an error:
+a clip could not tell the two apart. A stem that is empty, is not text, or
+carries whitespace, `:` or `#` is refused for the same reason — the format
+could not spell it back.
+
+    crcbl crpix up.png mid.png down.png -o bird.crpix --clip flap --hold 6
+
+OPTIONS:
+    -o, --output <FILE>   Write the .crpix here. Required; an existing file is
+                          left alone unless --force is given.
+        --force           Overwrite the output file if it already exists.
+        --nine <L,R,T,B>  Nine-slice insets in pixels, left, right, top,
+                          bottom. Default: no nine-slice.
+        --sample <MODE>   `pixel` (the default) or `smooth`.
+        --clip <NAME>     Also write a looping clip named NAME over every
+                          frame, in order. Default: no clip.
+        --hold <TICKS>    Ticks that clip holds each frame for. Default: 1.
+                          Needs --clip, which is the only thing that reads it.
+        --json            Emit one JSON object instead of human output.
+    -h, --help            Print this text.";
+
 /// What the command line asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Invocation {
@@ -170,6 +204,8 @@ pub enum Command {
     Screenshot(ScreenshotArgs),
     /// Read a .crpl replay file.
     Replay(ReplayArgs),
+    /// PNG frames → one .crpix sheet.
+    Crpix(CrpixArgs),
 }
 
 impl Command {
@@ -181,6 +217,7 @@ impl Command {
             Self::Build(_) => "build",
             Self::Screenshot(_) => "screenshot",
             Self::Replay(_) => "replay",
+            Self::Crpix(_) => "crpix",
         }
     }
 
@@ -192,6 +229,7 @@ impl Command {
             Self::Build(args) => args.json,
             Self::Screenshot(args) => args.json,
             Self::Replay(args) => args.json,
+            Self::Crpix(args) => args.json,
         }
     }
 }
@@ -279,6 +317,33 @@ pub struct ReplayArgs {
     pub json: bool,
 }
 
+/// `crcbl crpix`.
+///
+/// The nine-slice and the sample mode are `crcbl_sprite`'s own types rather
+/// than a pair of parallel ones: they are exactly what `trace::Options` takes,
+/// and a second enum meaning the same thing is a translation layer that can
+/// only ever drift.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CrpixArgs {
+    /// The PNGs, in frame order. Never empty — the parser requires one.
+    pub inputs: Vec<PathBuf>,
+    /// Where the `.crpix` goes. Required; there is no default.
+    pub output: PathBuf,
+    /// Overwrite an existing output file.
+    pub force: bool,
+    /// Nine-slice insets to write into the sheet.
+    pub nine: Option<NineSlice>,
+    /// How the sheet asks to be sampled.
+    pub sample: SampleMode,
+    /// Name of a clip over every frame, in order. `None` writes no clip.
+    pub clip: Option<String>,
+    /// Ticks that clip holds each frame for. Meaningless without `clip`, which
+    /// is why supplying it alone is a bad invocation rather than a no-op.
+    pub hold: u32,
+    /// Machine-readable output.
+    pub json: bool,
+}
+
 /// `crcbl replay --help`.
 pub const REPLAY_USAGE: &str = "\
 crcbl replay — read a .crpl replay file and dump its metadata
@@ -305,6 +370,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Invocation {
         Some("build") => parse_build(args),
         Some("screenshot") => parse_screenshot(args),
         Some("replay") => parse_replay(args),
+        Some("crpix") => parse_crpix(args),
         Some(other) if other.starts_with('-') => {
             Invocation::BadUsage(format!("unrecognized option `{other}`"))
         }
@@ -551,6 +617,175 @@ fn parse_replay(args: impl Iterator<Item = OsString>) -> Invocation {
     Invocation::Command(Command::Replay(parsed))
 }
 
+fn parse_crpix(mut args: impl Iterator<Item = OsString>) -> Invocation {
+    let mut parsed = CrpixArgs {
+        inputs: Vec::new(),
+        output: PathBuf::new(),
+        force: false,
+        nine: None,
+        sample: SampleMode::default(),
+        clip: None,
+        hold: 1,
+        json: false,
+    };
+    let mut output = None;
+    // Tracked rather than inferred from `hold != 1`, so `--hold 1 ` without a
+    // clip is refused too: it is the same mistake, and reading as accepted
+    // teaches that the pair is optional.
+    let mut hold_given = false;
+
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("-h" | "--help") => return Invocation::Help(CRPIX_USAGE),
+            Some("--json") => parsed.json = true,
+            Some("--force") => parsed.force = true,
+            // A path, so it stays an `OsString` all the way to `PathBuf`.
+            Some("-o" | "--output") => match args.next() {
+                Some(value) => output = Some(PathBuf::from(value)),
+                None => return bad("--output needs a path"),
+            },
+            Some("--nine") => {
+                let Some(value) = args.next() else {
+                    return bad("--nine needs a value");
+                };
+                match value.to_str().map(parse_insets) {
+                    Some(Ok(nine)) => parsed.nine = Some(nine),
+                    Some(Err(reason)) => return Invocation::BadUsage(reason),
+                    None => {
+                        return Invocation::BadUsage(insets_syntax(&value.to_string_lossy()));
+                    }
+                }
+            }
+            Some("--sample") => {
+                let Some(value) = args.next() else {
+                    return bad("--sample needs a value");
+                };
+                match value.to_str() {
+                    Some("pixel") => parsed.sample = SampleMode::Pixel,
+                    Some("smooth") => parsed.sample = SampleMode::Smooth,
+                    _ => {
+                        return Invocation::BadUsage(format!(
+                            "unknown sample mode `{}` (known: pixel, smooth)",
+                            value.to_string_lossy()
+                        ));
+                    }
+                }
+            }
+            // A clip name is written into the file as text, so it has to be
+            // text, and it has to be text the format can spell back.
+            Some("--clip") => match args.next() {
+                Some(value) => match value.into_string() {
+                    Ok(name) => match check_sheet_name(&name) {
+                        Ok(()) => parsed.clip = Some(name),
+                        Err(reason) => {
+                            return Invocation::BadUsage(format!(
+                                "`{name}` is not a usable clip name: {reason}"
+                            ));
+                        }
+                    },
+                    Err(value) => return not_text("crpix", "clip name", &value),
+                },
+                None => return bad("--clip needs a name"),
+            },
+            // Zero is refused here rather than passed on: `trace` writes the
+            // hold only when it is above 1 and the parser refuses `@ 0`, so a
+            // zero would be silently read back as 1 — a flag that did nothing.
+            Some("--hold") => {
+                let Some(value) = args.next() else {
+                    return bad("--hold needs a value");
+                };
+                match value
+                    .to_str()
+                    .and_then(|text| text.parse::<u32>().ok())
+                    .filter(|ticks| *ticks > 0)
+                {
+                    Some(ticks) => {
+                        parsed.hold = ticks;
+                        hold_given = true;
+                    }
+                    None => {
+                        return Invocation::BadUsage(format!(
+                            "`--hold` expects a whole number of ticks, at least 1; got `{}`",
+                            value.to_string_lossy()
+                        ));
+                    }
+                }
+            }
+            Some(other) if other.starts_with('-') => {
+                return Invocation::BadUsage(format!("`crpix` has no option `{other}`"));
+            }
+            // An input PNG. A path, so any bytes a filesystem accepts.
+            Some(_) | None => parsed.inputs.push(PathBuf::from(arg)),
+        }
+    }
+
+    let Some(output) = output else {
+        return bad("`crpix` needs an output path (-o <FILE>)");
+    };
+    if parsed.inputs.is_empty() {
+        return bad("`crpix` needs at least one PNG");
+    }
+    if hold_given && parsed.clip.is_none() {
+        return bad(
+            "`--hold` is the hold of a clip, and `--clip` is what writes one; pass both or \
+             neither",
+        );
+    }
+    parsed.output = output;
+    Invocation::Command(Command::Crpix(parsed))
+}
+
+/// `L,R,T,B`, in the order [`NineSlice::new`] takes.
+///
+/// Comma-separated rather than four flags or four positionals because the four
+/// numbers are one value: three of them without the fourth is not a nine-slice,
+/// and the parser should say so in one message instead of three.
+fn parse_insets(raw: &str) -> Result<NineSlice, String> {
+    let mut parts = raw.split(',');
+    let mut edges = [0u32; 4];
+    for edge in &mut edges {
+        let Some(Ok(value)) = parts.next().map(str::parse::<u32>) else {
+            return Err(insets_syntax(raw));
+        };
+        *edge = value;
+    }
+    if parts.next().is_some() {
+        return Err(insets_syntax(raw));
+    }
+    // Whether the insets *fit* is checked once the frame size is known, which
+    // is after the first PNG has been decoded. Here there is nothing to check
+    // them against.
+    Ok(NineSlice::new(edges[0], edges[1], edges[2], edges[3]))
+}
+
+fn insets_syntax(raw: &str) -> String {
+    format!("`--nine` expects L,R,T,B, e.g. 4,4,4,4; got `{raw}`")
+}
+
+/// Whether `name` is a frame or clip name a `.crpix` can spell back.
+///
+/// Checked because `trace` writes the name into the file verbatim and does not
+/// look at it: a name with a space in it becomes two tokens in a clip's frame
+/// list, a `:` ends the name early in a `frame …:` line, and a `#` opens a
+/// comment. Each produces a file the format's own parser refuses or, worse,
+/// reads as something else — so the refusal belongs here, before anything is
+/// written.
+pub fn check_sheet_name(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() {
+        return Err("it is empty");
+    }
+    if name.chars().any(char::is_whitespace) {
+        return Err("a clip lists its frames separated by spaces, so a name cannot contain one");
+    }
+    if name.contains(':') {
+        return Err("`:` is what ends a name in the format");
+    }
+    if name.contains('#') {
+        return Err("`#` opens a comment, so the rest of the name would be discarded");
+    }
+    Ok(())
+}
+
 /// `WxH`, bounded on both ends.
 ///
 /// The upper bound is [`crcbl::screenshot::MAX_DIMENSION`] and it is enforced
@@ -661,6 +896,7 @@ mod tests {
             vec!["build", "--json"],
             vec!["screenshot", "--json"],
             vec!["replay", "file.crpl", "--json"],
+            vec!["crpix", "a.png", "-o", "a.crpix", "--json"],
         ] {
             assert!(command(&args).json(), "{args:?} should have set --json");
         }
@@ -767,6 +1003,41 @@ mod tests {
             vec!["screenshot", "--size", "16385x16"],
             vec!["screenshot", "--size", "16x16385"],
             vec!["screenshot", "-o"],
+            // `crpix` needs both halves of its invocation, and every flag that
+            // takes a value needs one.
+            vec!["crpix"],
+            vec!["crpix", "a.png"],
+            vec!["crpix", "-o", "out.crpix"],
+            vec!["crpix", "a.png", "-o"],
+            vec!["crpix", "a.png", "-o", "out.crpix", "--nine"],
+            vec!["crpix", "a.png", "-o", "out.crpix", "--nine", "4,4,4"],
+            vec!["crpix", "a.png", "-o", "out.crpix", "--nine", "4,4,4,4,4"],
+            vec!["crpix", "a.png", "-o", "out.crpix", "--nine", "4,4,4,x"],
+            vec!["crpix", "a.png", "-o", "out.crpix", "--nine", "-1,0,0,0"],
+            vec!["crpix", "a.png", "-o", "out.crpix", "--sample"],
+            vec!["crpix", "a.png", "-o", "out.crpix", "--sample", "linear"],
+            vec!["crpix", "a.png", "-o", "out.crpix", "--clip"],
+            vec!["crpix", "a.png", "-o", "out.crpix", "--clip", "two words"],
+            vec!["crpix", "a.png", "-o", "out.crpix", "--clip", "a:b"],
+            vec!["crpix", "a.png", "-o", "out.crpix", "--clip", ""],
+            vec!["crpix", "a.png", "-o", "out.crpix", "--hold"],
+            vec!["crpix", "a.png", "-o", "out.crpix", "--hold", "many"],
+            // The library writes no `@` for a hold of 0 and the parser refuses
+            // `@ 0`, so a zero would silently read back as 1. `--clip` is here
+            // so this case tests the zero and not the rule below it.
+            vec![
+                "crpix",
+                "a.png",
+                "-o",
+                "out.crpix",
+                "--clip",
+                "flap",
+                "--hold",
+                "0",
+            ],
+            // A hold with nothing to hold: `--clip` is what writes the clip.
+            vec!["crpix", "a.png", "-o", "out.crpix", "--hold", "6"],
+            vec!["crpix", "a.png", "-o", "out.crpix", "--nope"],
         ] {
             assert!(
                 matches!(parse_args(&args), Invocation::BadUsage(_)),
@@ -867,6 +1138,79 @@ mod tests {
                 "{args:?} should be a bad invocation"
             );
         }
+    }
+
+    /// Every option `crpix` advertises reaches the struct the command reads,
+    /// and the inputs keep the order they were typed in — which is the frame
+    /// order of the sheet, so it is the one thing here that is not cosmetic.
+    #[test]
+    fn crpix_takes_its_inputs_in_order_and_all_of_its_options() {
+        let Command::Crpix(args) = command(&[
+            "crpix",
+            "up.png",
+            "mid.png",
+            "down.png",
+            "-o",
+            "bird.crpix",
+            "--force",
+            "--nine",
+            "1,2,3,4",
+            "--sample",
+            "smooth",
+            "--clip",
+            "flap",
+            "--hold",
+            "6",
+        ]) else {
+            panic!("expected crpix");
+        };
+        assert_eq!(
+            args.inputs,
+            ["up.png", "mid.png", "down.png"].map(PathBuf::from)
+        );
+        assert_eq!(args.output, PathBuf::from("bird.crpix"));
+        assert!(args.force);
+        // Left, right, top, bottom — the order `NineSlice::new` takes and the
+        // order the generated `nine:` line is written in.
+        assert_eq!(args.nine, Some(NineSlice::new(1, 2, 3, 4)));
+        assert_eq!(args.sample, SampleMode::Smooth);
+        assert_eq!(args.clip.as_deref(), Some("flap"));
+        assert_eq!(args.hold, 6);
+    }
+
+    /// The defaults, stated as a test because they are the documented surface:
+    /// no nine-slice, `pixel`, no clip, a hold of one tick, and no overwrite.
+    #[test]
+    fn crpix_defaults_to_a_plain_sheet_that_will_not_overwrite() {
+        let Command::Crpix(args) = command(&["crpix", "a.png", "-o", "a.crpix"]) else {
+            panic!("expected crpix");
+        };
+        assert_eq!(args.nine, None);
+        assert_eq!(args.sample, SampleMode::Pixel);
+        assert_eq!(args.clip, None);
+        assert_eq!(args.hold, 1);
+        assert!(!args.force);
+        assert!(!args.json);
+    }
+
+    /// An input path is a path: it may be anything a filesystem accepts, and
+    /// a flag-looking one after `-o` is that flag's value, not a new flag.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_input_or_output_reaches_the_command() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let weird = || OsString::from_vec(b"/tmp/fr\xffme.png".to_vec());
+        let Invocation::Command(Command::Crpix(args)) = parse(vec![
+            OsString::from("crpix"),
+            weird(),
+            OsString::from("-o"),
+            weird(),
+        ]) else {
+            panic!("a non-UTF-8 input and output are a usable invocation");
+        };
+        assert_eq!(args.inputs, vec![PathBuf::from(weird())]);
+        assert_eq!(args.output, PathBuf::from(weird()));
     }
 
     #[test]

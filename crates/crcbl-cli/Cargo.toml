@@ -32,4 +32,10 @@ workspace = true
 [dependencies]
 crcbl = { workspace = true }
 crcbl-golden = { workspace = true }
+# `load`, not `bake`: `crpix` reads PNGs and writes text, so it needs the
+# decoder and nothing else. `bake` is the other direction — a `.crpix` out to a
+# PNG plus an Aseprite sidecar — and no subcommand asks for it, so enabling it
+# would link an encoder this binary never calls. `crcbl-golden` already brings
+# `png` in for `screenshot`, so the feature costs no new crate either way.
+crcbl-sprite = { workspace = true, features = ["load"] }
 crcbl-store = { workspace = true }
