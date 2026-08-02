@@ -30,7 +30,10 @@
 //!
 //! # Nothing here knows a backend
 //!
-//! This crate depends on `crcbl-hal`, `crcbl-core`, `crcbl-shaders` and `glam`.
+//! This crate depends on `crcbl-hal`, `crcbl-core`, `crcbl-shaders`, `glam`, and
+//! the two description-only crates whose data it turns into pixels — `crcbl-ui`
+//! for [`ui_pass`]'s draw list and `crcbl-sprite` for [`sprite_pass`]'s sample
+//! modes, neither of which depends on a backend or on this crate.
 //! It contains no `ash`, no `crcbl-vk`, and no `#[cfg(target_os = …)]`, per
 //! `docs/plan/01-foundations.md` §1.3 — which also names the render graph
 //! specifically as living above the seam rather than in it. The graph compiles
@@ -53,6 +56,12 @@
 //! artifact does not exist, because `slangc` was unavailable when the Rust half
 //! landed and the committed artifacts are hash-verified. The follow-up is one
 //! new `.slang` file and one run of `compile-shaders.sh`.
+//!
+//! [`sprite_pass`] deliberately does **not** repeat that split: its constants
+//! are a bound uniform buffer on every tier, so it ships one shader artifact and
+//! one code path and has no [`ConstantDelivery`] of its own. The tier is a
+//! permutation axis only for a pass that reads a push constant, and the cheapest
+//! way not to have the axis is not to read one.
 //!
 //! # What this crate is *not*, at P1
 //!
@@ -111,6 +120,7 @@
 pub mod camera;
 pub mod forward;
 pub mod graph;
+pub mod sprite_pass;
 pub mod texture;
 pub mod timing;
 pub mod transient;
@@ -122,6 +132,10 @@ pub use graph::{
     Attachment, BufferId, CompiledGraph, CompiledPass, GraphBarriers, GraphBufferBarrier,
     GraphError, GraphImageBarrier, ImageId, ImportedBuffer, ImportedImage, PassBuilder,
     PassContext, PassKind, RenderGraph,
+};
+pub use sprite_pass::{
+    CONSTANTS_SIZE, INSTANCE_STRIDE, SheetDesc, SheetId, Sprite, SpriteConstants, SpriteInstance,
+    SpriteRenderer,
 };
 pub use texture::{UploadedTexture, upload_texture};
 pub use timing::{FrameTimings, PassTimers, PassTiming};

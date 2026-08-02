@@ -21,6 +21,13 @@ log = { workspace = true }
 # nothing at all, so the forward pass can name the engine's own shaders without
 # this crate learning a backend.
 crcbl-shaders = { workspace = true }
+# The sprite pass needs `SampleMode` and nothing else, but taking it from here
+# rather than re-declaring it is what stops a caller mapping one two-variant
+# enum onto another at every call site. This is not a dependency inversion:
+# `crcbl-sprite` depends on *nothing* (an optional `png` behind `bake`/`load`
+# and no workspace crate at all), and its own module docs already name this
+# crate as the one that "turn[s] a description into pixels".
+crcbl-sprite = { workspace = true }
 crcbl-ui = { workspace = true }
 bytemuck = { workspace = true }
 thiserror = { workspace = true }

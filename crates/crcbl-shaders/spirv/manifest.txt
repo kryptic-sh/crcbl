@@ -15,6 +15,15 @@ wgsl = wgsl/mesh.wgsl
 wgsl-sha256 = 7749dd7473397643249ec2760e1ab44f13476ef4011bae9674560bd068ceab01
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
+[sprite]
+source = shaders/sprite.slang
+source-sha256 = dd037344d2ee0aa8190a1bd8d035bd7e61c86dda72e6d7f7151a5756ce108a95
+spirv = spirv/sprite.spv
+spirv-sha256 = c23f75b249634b29921b69838e4640213a150206f0306af1260c0419ab571735
+wgsl = wgsl/sprite.wgsl
+wgsl-sha256 = 976588ba008b02a36c4499281f17505b382b4c711b0825f04d195ad1201d693e
+entry-points = vertexMain:vertex, fragmentMain:fragment
+
 [tonemap]
 source = shaders/tonemap.slang
 source-sha256 = e043ab6a3d10df8166631a05b671f8d632eee5c8f83f5cc8fc18a5359d613d4f

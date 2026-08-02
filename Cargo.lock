@@ -357,6 +357,7 @@ dependencies = [
  "crcbl-core",
  "crcbl-hal",
  "crcbl-shaders",
+ "crcbl-sprite",
  "crcbl-ui",
  "glam",
  "log",

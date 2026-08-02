@@ -40,6 +40,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   nothing read it, so a baked sidecar was write-only. `SampleMode` does not
   survive the trip — Aseprite's schema has nowhere to put it — and that is
   asserted rather than assumed.
+- **crcbl-render**: `SpriteRenderer` and `sprite.slang`, an instanced
+  world-space pass that draws one quad per sprite out of a registered sheet,
+  alpha blended, batched by sheet in submission order. This is the instance path
+  S1B finding 1 asks for: `ForwardRenderer` draws exactly one instance, which is
+  why both samples push their worlds through the UI pass. Constants go through a
+  uniform buffer on every tier, so unlike `ui.slang` there is no second source
+  file to keep in step. `SampleMode::Pixel` currently binds a nearest sampler
+  and is not yet the sharp-bilinear the spec describes.
 
 ### Changed
 
