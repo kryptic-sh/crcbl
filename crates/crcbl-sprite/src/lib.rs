@@ -16,8 +16,8 @@
 //! # Two formats, and only one of them reaches the engine
 //!
 //! ```text
-//! .pix (text, in git) ──build──▶ PNG + Aseprite-schema JSON ─┐
-//! Aseprite ──────────export───▶ PNG + Aseprite-schema JSON ──┴──▶ [`Sheet`]
+//! .crpix (text, in git) ──bake──▶ PNG + Aseprite-schema JSON ─┐
+//! Aseprite ──────────export────▶ PNG + Aseprite-schema JSON ──┴──▶ [`Sheet`]
 //! ```
 //!
 //! **Aseprite is the interchange format**, because it is the one the world
@@ -27,11 +27,12 @@
 //! nine-slice. Reading that schema means art drawn in Aseprite drops in with no
 //! engine change.
 //!
-//! [`pix`] is the other half: a small text format for art authored **in this
-//! repository**, converted to a PNG and the same Aseprite schema at build time.
-//! It exists because a sheet written by hand wants dimensions inferred rather
-//! than declared, and because a bespoke build input costs nothing to replace —
-//! nothing downstream of the converter knows it exists.
+//! [`crpix`] is the other half: a text format for art authored **in this
+//! repository**, baked to a PNG and that same Aseprite schema at build time. It
+//! takes XPM's design — a declared header that acts as a checksum, `c None`,
+//! multi-character palette keys — and adds the frames XPM has no concept of.
+//! `docs/specs/crcbl/pix.md` is its specification; nothing downstream of the
+//! converter knows it exists.
 //!
 //! # Pixels are the unit
 //!
@@ -40,7 +41,10 @@
 //! whole pixels, half a texel is always a bug, and the conversion to UVs needs
 //! the image's size, which a description of a sheet does not have to know.
 
-pub mod pix;
+pub mod crpix;
+
+#[cfg(feature = "bake")]
+pub mod bake;
 
 use core::fmt;
 

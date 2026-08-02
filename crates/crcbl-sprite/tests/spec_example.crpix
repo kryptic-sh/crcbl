@@ -1,0 +1,36 @@
+# apps/flappy/art/bird.crpix
+crpix: 8 6 3 5 1                 # w h frames colours chars-per-pixel
+
+palette:
+  . c None
+  k c #241c1c
+  y c #f2c14e
+  o c #e08a3c
+  w c #ffffff
+
+frame up:
+  ..kkkk..
+  .kyyyyk.
+  kyywwyyk
+  kyyyyyyk
+  .kkoookk
+  ..kkkk..
+
+frame level:
+  ..kkkk..
+  .kyyyyk.
+  kyywwyyk
+  kyyyyyyk
+  .kkoookk
+  ..kkkk..
+
+frame down:
+  ..kkkk..
+  .kyyyyk.
+  kyywwyyk
+  kyyyyyyk
+  .kkoookk
+  ..kkkk..
+
+clip flap: up level down @ 6 loop
+sample: pixel

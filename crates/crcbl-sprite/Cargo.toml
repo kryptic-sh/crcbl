@@ -6,13 +6,21 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# **No GPU, no I/O, no image codec.** This crate is the *description* of a sprite
-# sheet and the parser for the text form the samples author their art in;
-# turning that into pixels is `crcbl-render`'s job and reading a PNG is the
-# caller's. Keeping it free of both is what lets a build script depend on it
-# without pulling a renderer into `build.rs`, and what makes every rule below
-# testable without a device.
+# **No GPU, and no image codec unless you ask for one.** The default build is
+# the *description* of a sprite sheet plus the `.crpix` parser: no dependencies
+# at all, so anything can depend on it. `bake` adds the half a build script
+# wants — PNG encoding and the Aseprite sidecar — and is off by default so a
+# runtime consumer does not link an encoder it will never call.
+[features]
+bake = ["dep:png"]
+
 [dependencies]
+png = { workspace = true, optional = true }
 
 [lints]
 workspace = true
+
+# The spec test decodes the PNG it just encoded, so it needs the codec whatever
+# the feature set — `dev-dependencies` cannot be optional.
+[dev-dependencies]
+png = { workspace = true }

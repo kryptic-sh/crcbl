@@ -407,6 +407,9 @@ dependencies = [
 [[package]]
 name = "crcbl-sprite"
 version = "0.1.0"
+dependencies = [
+ "png",
+]
 
 [[package]]
 name = "crcbl-store"
