@@ -1,0 +1,40 @@
+# The small rock — the one the scale was chosen from.
+#
+# 11 x 11 texels at `art::TEXELS_PER_UNIT` = 10 is exactly `2 *
+# RockSize::Small.radius()` = 1.1 world units, so the frame is the collider's
+# bounding square to the texel.
+#
+# **Eleven is the floor, and the floor is what fixed the scale.** A rock has to
+# be lumpy or the split does not read — three sizes of the same circle is one
+# rock at three magnifications — and a lump needs a texel to stick out and a
+# texel to bite in on either side of a rim that is already one texel of outline.
+# Below about eleven across there is no room for that and the silhouette
+# collapses back to a circle. Eleven over 1.1 units is ten texels to the unit,
+# and the other two rock radii then land on whole texels as well: 1.0 is 20 and
+# 1.7 is 34. See `art::TEXELS_PER_UNIT`.
+#
+# The silhouette is its own, not a shrunk copy of the other two — see
+# `art::tests::the_three_rock_sizes_are_three_different_pictures`.
+crpix: 11 11 1 5 1
+
+palette:
+  . c None
+  k c #241f1c
+  l c #cfc6b6
+  m c #8f877a
+  d c #57514a
+
+frame rock:
+  ....kkk....
+  ...klllkk..
+  ..kllllmmk.
+  ..klllmmdk.
+  .kllmmmddk.
+  klllmmdddk.
+  kllmmddddk.
+  .kmmdddddk.
+  .kmddddkk..
+  ..kkkkk....
+  ...........
+
+sample: pixel

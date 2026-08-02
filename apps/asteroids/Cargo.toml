@@ -24,10 +24,9 @@ crate-type = ["cdylib", "rlib"]
 name = "asteroids"
 path = "src/main.rs"
 
-# A subset of flappy's list, and deliberately smaller: this sub-slice is the
-# simulation. No `crcbl-audio` (no cues yet), no `crcbl-store` (no best score
-# yet), no `crcbl-sprite` (no art yet) — each arrives with the sub-slice that
-# uses it, so `cargo machete` stays meaningful.
+# A subset of flappy's list, and deliberately smaller: no `crcbl-audio` (no
+# cues yet) and no `crcbl-store` (no best score yet). Each arrives with the
+# sub-slice that uses it, so `cargo machete` stays meaningful.
 [dependencies]
 crcbl = { workspace = true }
 crcbl-ecs = { workspace = true }
@@ -37,8 +36,19 @@ crcbl-input = { workspace = true }
 crcbl-server = { workspace = true }
 crcbl-client = { workspace = true }
 crcbl-core = { workspace = true }
+# The sheet description the sprite pass draws from, and the reader for the pair
+# `build.rs` bakes. `load`, not `bake`: this half never sees a `.crpix`, and a
+# shipped binary that linked the PNG *encoder* would be linking it to encode
+# nothing.
+crcbl-sprite = { workspace = true, features = ["load"] }
 glam = { workspace = true }
 log = { workspace = true }
+
+# The other half, and the other feature. Cargo resolves build-dependency
+# features separately from normal ones, so `bake`'s PNG encoder reaches the
+# build script and not the game.
+[build-dependencies]
+crcbl-sprite = { workspace = true, features = ["bake"] }
 
 [lints]
 workspace = true

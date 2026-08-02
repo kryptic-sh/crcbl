@@ -206,10 +206,36 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   remove-and-re-insert** — the rule `docs/backlog.md` left to whoever wrote the
   wrap, chosen here and applied uniformly to everything in the broadphase.
 
-  This slice is the simulation. There is no art yet: the native binary opens a
-  window and draws the field as untextured placeholder quads through the UI
-  pass, beside the HUD and the F3 debug panel. Sprites, menus, audio and the
-  browser entry point follow in their own slices.
+  It is drawn as **pixel art through the sprite pass**: five `.crpix` sheets
+  under `apps/asteroids/assets/` — a ship, a shot, and one per rock size — baked
+  to PNG by its own `build.rs` and drawn with `SampleMode::Pixel`. Ten texels to
+  the world unit, chosen by the small rock: eleven texels is the least a rock
+  can be and still have a lump stick out and a bite go in, and eleven over that
+  rock's 1.1-unit diameter fixes the scale. Every rock's frame is then its
+  collider's bounding square to the texel — 34, 20 and 11 — and the three are
+  three drawings rather than one at three magnifications, which is what makes a
+  split read as a rock breaking rather than as a rock shrinking.
+
+  **It is also the first sample where a drawn thing turns**, which the
+  `Sprite::rotation` above only made possible. The ship's heading and every
+  rock's tumble are integrated once per simulation tick, so drawing the newest
+  value on every frame stutters at any refresh rate that is not the tick rate;
+  the renderer interpolates instead, with the frame clock's alpha.
+  `game::lerp_angle` takes the **short way round**, which is the whole
+  difficulty: a plain lerp from 350° to 10° spins the long way, once, on the
+  frame after the heading crosses zero — and `turn_ship` keeps the heading in
+  `[0, τ)`, so it crosses constantly. Positions are deliberately _not_
+  interpolated: this playfield wraps, and unlike an angle a wrapped position is
+  a real discontinuity.
+
+  Presentation is the shape the other two samples set: start, pause and
+  game-over menus through `crcbl_render::MenuRenderer`, Escape to pause, F11 for
+  fullscreen, F3 for the debug panel, and a window that loses focus pausing and
+  releasing every key it was holding. That last one matters more here than in
+  either earlier sample, because turning and thrusting are _held_ actions: a
+  release that never arrives is a ship that spins for the rest of the session.
+
+  Audio and the browser entry point follow in their own slices.
 
 - **crcbl-hal**: `Device::take_error`, for the failures a backend learns about
   outside the call that caused them. Defaults to `None`, so a backend that

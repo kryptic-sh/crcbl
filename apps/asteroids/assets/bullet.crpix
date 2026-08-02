@@ -1,0 +1,27 @@
+# The shot.
+#
+# 4 x 4 texels at `art::TEXELS_PER_UNIT` = 10 is 0.4 x 0.4 world units, against
+# a `game::BULLET_RADIUS` of 0.12. **Deliberately bigger than what it sweeps**,
+# and the one sprite in this game that is: 0.24 units is 2.4 texels, and a
+# two-texel square cannot be told from a speck of dust on the screen. The radius
+# is the width of the swept sphere the CCD uses, not a collider anything else
+# tests against — nothing in the game can be hit *by* the drawn shot — so
+# drawing it larger costs nothing and being unable to see your own bullets costs
+# the game.
+#
+# A hot core in a warmer rim, which is what makes it read as a tracer rather
+# than as a square at four texels.
+crpix: 4 4 1 3 1
+
+palette:
+  . c None
+  y c #ffb347
+  w c #fff6d5
+
+frame shot:
+  .yy.
+  ywwy
+  ywwy
+  .yy.
+
+sample: pixel

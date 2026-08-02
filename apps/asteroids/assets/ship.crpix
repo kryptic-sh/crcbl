@@ -1,0 +1,41 @@
+# The ship.
+#
+# 16 x 16 texels at `art::TEXELS_PER_UNIT` = 10 is 1.6 x 1.6 world units, drawn
+# against a kill radius of `game::SHIP_RADIUS` = 0.55 — so the hull is visibly
+# **larger** than the sphere that kills it. That is the right way round and it
+# is what `game.rs` asks for in as many words: "a ship whose kill radius matches
+# its longest spine dies to near misses, and asteroids is a game of near
+# misses". The fins and the nozzle are the part that sticks out past the sphere.
+#
+# **The nose points up the frame**, because a `.crpix` row 0 is the world's +Y
+# and `game::heading_vector` puts a heading of zero along +Y. That makes the
+# sprite's rotation the ship's heading with no offset — see `art::ship_sprite`,
+# which passes it straight through.
+crpix: 16 16 1 5 1
+
+palette:
+  . c None
+  k c #161a26
+  w c #dfe9f5
+  b c #4bb3e8
+  r c #ff9a3c
+
+frame hull:
+  .......kk.......
+  .......kk.......
+  ......kwwk......
+  ......kwwk......
+  .....kwbbwk.....
+  .....kwbbwk.....
+  ....kwwbbwwk....
+  ....kwwbbwwk....
+  ...kwwwwwwwwk...
+  ...kwwwwwwwwk...
+  ..kwwwwwwwwwwk..
+  ..kwwkwwwwkwwk..
+  .kwwk.kwwk.kwwk.
+  .kwk..krrk..kwk.
+  .kk...krrk...kk.
+  ......kkkk......
+
+sample: pixel

@@ -134,12 +134,16 @@ left:
   divides by the style's scale instead, exactly as the two samples scale theirs.
   It comes out with the other two when `expand` learns a scale.
 
-- **The bake half of `build.rs` is written three times.**
-  `apps/flappy/build.rs`, `apps/breakout/build.rs` and now
-  `crates/crcbl-render/build.rs` differ in their `ASSETS` array and in nothing
-  else: the same parse → bake → write → generate-a-table loop, the same
-  `ART_TICK_HZ`, the same `cargo::error` reporting. Asteroids will be the third.
-  The fix is a real entry point in `crcbl-sprite` — something like
+- **The bake half of `build.rs` is written four times, and it got worse.**
+  `apps/flappy/build.rs`, `apps/breakout/build.rs`,
+  `crates/crcbl-render/build.rs` and now `apps/asteroids/build.rs` differ in
+  their `ASSETS` array and in nothing else: the same parse → bake → write →
+  generate-a-table loop, the same `ART_TICK_HZ`, the same `cargo::error`
+  reporting. `docs/plan/ROADMAP.md` says this was owed **before the third
+  sample**; the third sample shipped with a copy instead, because closing it is
+  a change to `crcbl-sprite` and to three other build scripts and the slice that
+  would have paid for it was the art slice. The fix is unchanged: a real entry
+  point in `crcbl-sprite` — something like
   `bake::bake_dir(manifest_dir, out_dir, &stems, tick_hz)` returning the table
   text — because a build script can depend on a workspace library and that is
   the only shape that removes the copy rather than moving it.
@@ -149,11 +153,13 @@ left:
   script cannot `use` the crate it builds, and the sidecar's durations are
   milliseconds, so the two conversions have to agree. Guarded rather than
   solved: each game's `the_art_bakes_to_the_sheets_it_declares` asserts an
-  authored hold in ticks survives the round trip. **Breakout's guard is weaker
-  than flappy's**, because nothing breakout draws is animated: it can only
-  assert the default hold of 1 tick, which survives a fairly wide range of wrong
-  rates. It gets real the moment breakout has a clip. Folding it into the
-  `bake_dir` entry point above would close it outright.
+  authored hold in ticks survives the round trip. **Breakout's and asteroids'
+  guards are weaker than flappy's**, because neither draws anything animated:
+  both can only assert the default hold of 1 tick, which survives a fairly wide
+  range of wrong rates. Asteroids' ship and rocks _turn_, which is a rotation
+  applied to a still frame and not a clip, so it does not help. Either gets real
+  the moment that game has a clip. Folding it into the `bake_dir` entry point
+  above would close it outright.
 
 - **Breakout's paddle is a plain frame, not a nine-slice.**
   `game::PADDLE_HALF_WIDTH` is a `const` and nothing shadows it, so the paddle
@@ -184,16 +190,17 @@ left:
   target's centre, which needs the per-sprite pivot above or a rect-plus-angle
   that is not the rect's own centre.
 
-- **Nothing in the workspace sets a non-zero rotation yet.** Both samples pass
-  `rotation: 0.0` at all five of their `Sprite` literals, and there is no
-  interpolation of an angle anywhere: `crcbl-phys` has no angular velocity (see
-  "What asteroids still needs from `crcbl-phys`" below), and the interpolation
-  buffer carries `Transform`s, whose `DQuat` no sprite path reads. Asteroids is
-  the first caller and will need to decide where the ship's angle comes from —
-  game code writing it through `set_transform` each tick, then a `slerp` or a
-  scalar lerp in the render path — because a turn rate applied to the _rendered_
-  angle without interpolation will stutter at any frame rate that is not the
-  tick rate. That is the next real question this slice does not answer.
+- **The angle a sample interpolates is the sample's own, and the third one will
+  copy it.** Asteroids answered the open question — `game::lerp_angle`, a
+  shortest-arc scalar lerp between the previous tick's angle and this one,
+  driven by `FrameClock::alpha` — but it answered it _in the sample_. Nothing in
+  `crcbl-render` or `crcbl-client` offers it: `Client::interpolate` lerps
+  `Transform`s, whose `DQuat` no sprite path reads, and `crcbl-phys` still has
+  no angular velocity, so game code owns every angle. The next sample that turns
+  something writes the same twenty lines. Worth promoting only when there is a
+  second caller — the shape would be a `lerp_angle` in `crcbl-core`'s math, or a
+  `Sprite` that could take the pair and the alpha, and the second is a much
+  bigger claim than it looks.
 
 ## The debug overlay, and what is left of it
 
@@ -302,15 +309,27 @@ The modular panel is built and all three samples switch it on with F3 (or
   picture of either game. What it would take: a `--capture <path>` on the sample
   front ends, reading the swapchain image back the way `vk_e2e.rs`'s
   `render_sprites` does.
-- **The menus' `MenuKind`/`Menus`/`MenuAction` scaffolding is written three
-  times.** `apps/breakout/src/menu.rs`, `apps/flappy/src/menu.rs` and
-  `apps/sandbox/src/menu.rs` share the container, the show/select/press/activate
-  surface and the pointer split, and differ in the menus they hold and what the
-  actions do. It is the same shape as the `web.rs` duplication in the first
-  section and has the same answer: the generic half belongs in the engine, and
-  the per-game half — which menu belongs to which state, and what a button does
-  — genuinely does not. Worth folding in when the fourth sample arrives, with
-  `web.rs`.
+- **The menus' `MenuKind`/`Menus`/`MenuAction` scaffolding is written four
+  times.** `apps/breakout/src/menu.rs`, `apps/flappy/src/menu.rs`,
+  `apps/sandbox/src/menu.rs` and now `apps/asteroids/src/menu.rs` share the
+  container, the show/select/press/activate surface and the pointer split, and
+  differ in the menus they hold and what the actions do. It is the same shape as
+  the `web.rs` duplication in the first section and has the same answer: the
+  generic half belongs in the engine, and the per-game half — which menu belongs
+  to which state, and what a button does — genuinely does not. The fourth sample
+  has now arrived, so this is due with `web.rs` rather than after it.
+
+- **The loop's pause / fullscreen / focus / pointer-capture block is written
+  three times.** `apps/breakout/src/app.rs`, `apps/flappy/src/app.rs` and now
+  `apps/asteroids/src/app.rs` carry the same `Loop::paused` field, the same
+  `lose_focus` (drain the held keys, then pause), the same F11
+  `toggle_fullscreen` reading the mode back rather than remembering it, the same
+  "drain the accumulator while paused" tick loop, and the same `pointer_held` /
+  `pointer_down` press-capture bookkeeping in the pump. Roughly 150 lines each.
+  The three copies have not yet drifted, which is exactly when to fold them —
+  the shape is a `SampleLoop` helper owning the flags and the pump's non-game
+  branches, with the sample supplying its own key bindings and its own
+  `MenuAction` handler. It belongs in the same slice as `web.rs` and `menu.rs`.
 
 - **Flappy's swept-sphere collision is exercised, not demonstrated.**
   `game::fatal` sweeps the bird's path with `PhysicsSystem::sweep_sphere`
@@ -515,17 +534,35 @@ Not worked around in asteroids beyond making the test honest.
 
 The simulation slice (S2, first sub-slice) is done. What is not:
 
-- **Art.** No `.crpix` sheets, no `build.rs`, no sprite pass. `app.rs`'s
-  `draw_field` draws the field as untextured UI-pass quads — a border, an
-  outline per rock, a filled square for the ship and one for its nose — which is
-  a placeholder the art sub-slice replaces wholesale, not a base it builds on.
-  The plan calls this the first real test of **rotation through the sprite
-  pass**, and none of that has happened yet.
-- **Menus, audio and the browser entry point.** None present. `Game::with_seed`
+- **Audio and the browser entry point.** Neither present. `Game::with_seed`
   still takes the `headless` flag the other two samples hand to their audio
   stream and best-score file, and ignores it, so those arrive without a
   signature change. The browser half is the duplication finding above — it
-  should be written once, not a third time.
+  should be written once, not a third time. There is no best score either, and
+  no `crcbl-store` dependency yet.
+- **Positions are not interpolated, and the wrap is why.** Every angle asteroids
+  draws is lerped across the frame's alpha; every _position_ is the last tick's,
+  so a rock at 60 Hz on a 144 Hz display moves in sixtieths. The fix is not
+  "lerp those too": the playfield wraps, so a body that crossed an edge has a
+  previous position a whole field away and interpolating it would fly it back
+  across the screen. What it needs is for `RockView` / `BulletView` / the ship
+  to carry the previous position **and a flag saying it teleported**, set by
+  `teleport_if_outside`, with the renderer snapping rather than lerping on that
+  tick. That is a change to what the simulation publishes, not to how it is
+  drawn, which is why it was not folded into the art slice.
+- **No thrust flame, and no visual for a shot hitting a rock.** The ship draws
+  one frame whatever it is doing, so a player cannot see the engine firing;
+  `RenderState` does not carry the thrust intent. Considered and deliberately
+  left out of the art slice: the plan asks for "ship, three asteroid sizes,
+  bullets" and a second ship frame is a feature rather than the art. It is two
+  rows of `assets/ship.crpix`, a `bool` on `RenderState` and a frame index — do
+  it with the audio slice, where the thrust cue lands anyway.
+- **Rocks that straddle an edge are drawn once, not twice.** A large rock is 3.4
+  units across on a 32-unit field, so for about a tenth of a second per crossing
+  half of it is missing rather than appearing on the far side. Drawing a ghost
+  copy at the wrapped offset is a handful of extra sprites and no simulation
+  change; not done because the slice was scoped to the art and this is a
+  rendering rule the other two samples have no precedent for.
 - **The 10-minute soak in the exit criteria was not run.** What runs in CI is
   `hundreds_of_spawns_and_deaths_leak_nothing`: 18,000 ticks (five minutes of
   simulated play), 337 rocks spawned, 1,221 bullets fired, six waves cleared,
@@ -542,9 +579,14 @@ The simulation slice (S2, first sub-slice) is done. What is not:
   being written to.
 - **Nothing checks what the window actually shows.** There is no display in the
   build environment, so the windowed path is compiled and never run; the
-  headless run does execute the real `Gpu::frame` (both passes report timings),
-  but no golden image covers the placeholder draw. Worth a golden only once
-  there is art.
+  headless run does execute the real `Gpu::frame`, and the tests assert what
+  reaches the sprite, menu and UI passes — but **no golden image covers a single
+  asteroids pixel**, and in particular nothing checks that a rotated
+  `SampleMode::Pixel` sprite looks right on a real driver.
+  `crates/crcbl-vk/tests/vk_e2e.rs` has sprite goldens including a rotated one,
+  so the shader path is covered; the game's own frame is not. The art in this
+  slice was checked by eye, against the baked PNGs, and that is the honest
+  report of it.
 - **Tuning constants are compiled in.** The plan's milestone 3 wants them from a
   data file after stage 6. Every one of them is a `pub const` in `game.rs` with
   its reasoning written beside it, which is the form that survives being moved
@@ -595,7 +637,10 @@ uncertainty.
   only while a menu is on screen. _Changes it_: a sample that binds Enter or the
   vertical arrows to something a player uses _while a menu is up_ — which today
   is nothing, because a menu is only on screen when the simulation is stopped or
-  waiting.
+  waiting. **Asteroids is the second, and it shadows `ArrowUp` too** — its
+  second thrust binding, beside `KeyW`, which is not shadowed. Same trade, one
+  sample later, and it costs less there: a menu is up only on a frame the ship
+  is not being flown.
 
 - **Does the world keep drawing behind a menu?** Taken: **yes, and it is
   dimmed** by a scrim sprite the menu's own pass draws. A frozen screenshot

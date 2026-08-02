@@ -1,69 +1,104 @@
-//! GPU setup for asteroids: the shared [`crcbl::engine`] join, a clear, and the
-//! UI pass.
+//! GPU setup for asteroids: the shared [`crcbl::engine`] join, a clear, the
+//! sprite pass, the menu pass and the UI pass.
 //!
-//! # There is deliberately no sprite pass yet
+//! Everything that is not specific to this game — opening a backend, choosing an
+//! adapter that can present, the swapchain, the frames-in-flight ring, resize
+//! and teardown — lives in [`crcbl::engine::GpuContext`], which
+//! `apps/breakout/src/gpu.rs`, `apps/flappy/src/gpu.rs` and
+//! `apps/sandbox/src/gpu.rs` use too.
 //!
-//! `docs/plan/sample/02-asteroids.md` calls for `.crpix` sprites, and this
-//! sub-slice is the simulation. A sprite pass with no sheet to draw is not a
-//! placeholder, it is a texture upload of nothing: [`SpriteRenderer`] takes a
-//! registered sheet, a sheet comes from `build.rs` baking authored `.crpix`
-//! files, and none of that is cheaper than the two-line alternative below. So
-//! the field is drawn as untextured quads through the UI pass — a rectangle per
-//! rock, per bullet and for the ship — which is exactly what breakout and flappy
-//! did before the sprite pass existed, and which the art sub-slice replaces
-//! wholesale rather than builds on.
+//! # The camera is fitted to the field, and the field never moves
 //!
-//! The mapping from world to pixels lives in [`world_to_screen`] here, beside
-//! the extent it depends on, rather than in `app.rs`.
+//! Breakout's shape rather than flappy's: this world is bounded on both axes,
+//! the whole of it has to be on screen at once, and the origin is the middle of
+//! it. A rock the player cannot see is indistinguishable from a bug in a game
+//! whose defining move is disappearing off one edge and arriving at the other,
+//! so [`camera_half_height`] widens the view until the field fits and lets a
+//! narrow window letterbox rather than crop.
+//!
+//! There is no forward pass and no UI-pass placeholder any more: what this drew
+//! as untextured quads is [`crate::art`]'s five sheets now.
+//! [`ForwardRenderer::present_target`] survives as the import helper, which is an
+//! associated function and needs no renderer.
 //!
 //! # Pass order is declaration order
 //!
-//! `space` (clear) → `ui` (the field and the HUD). The UI pass loads rather than
-//! clears, so declaring it first would paint under the clear.
-//!
-//! [`SpriteRenderer`]: crcbl::render::SpriteRenderer
+//! `space` (clear) → `sprites` (the game) → `menu` → `ui` (the HUD and the debug
+//! panel). The last three load rather than clear. The menu is **between** the
+//! game and the text for the reason `crcbl_render::menu` gives: its scrim dims
+//! what is already in the target, so it must come after the game, and its panel
+//! is opaque while its labels are UI-pass text, so it must come before the UI.
 
 use crcbl::backend::GpuBackend;
 use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError};
 use crcbl::hal::{CommandEncoderDesc, Features};
+use crcbl::math::Vec3;
 use crcbl::prelude::*;
-use crcbl::render::{ForwardRenderer, PassTimers, RenderGraph, TransientPool, UiRenderer};
+use crcbl::render::{
+    Camera, ForwardRenderer, MenuRenderer, PassTimers, Projection, RenderGraph, SpriteRenderer,
+    TransientPool, UiRenderer,
+};
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
+use crcbl::ui::menu::{Menu, MenuLayout};
 use crcbl::ui::text::FontAtlas;
-use glam::Vec2;
 
-use crate::game::{WORLD_HALF_HEIGHT, WORLD_HALF_WIDTH};
+use crate::art::{SPACE, Scene, TEXELS_PER_UNIT};
+use crate::game::{RenderState, WORLD_HALF_HEIGHT, WORLD_HALF_WIDTH};
 
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
-const MAX_TIMED_PASSES: u32 = 4;
+const MAX_TIMED_PASSES: u32 = 8;
 
-/// What the swapchain is cleared to. Not black: a field with no visible edge
-/// makes the wrap impossible to read, and a near-black lets the border rectangle
-/// the loop draws show against it.
-pub const SPACE: [f32; 4] = [0.02, 0.02, 0.06, 1.0];
-
-/// How many pixels one world unit is, at `extent`.
+/// Slack kept outside the playfield, in world units.
 ///
-/// The **smaller** of the two fits, so the whole playfield is on screen whatever
-/// shape the window is. A field that overflowed the viewport would put rocks
-/// where the player cannot see them, and in a wrapping game an off-screen rock
-/// is indistinguishable from a bug.
+/// Framing only. The field wraps, so nothing is ever *outside* it — but a rock
+/// whose art is flush with the last row of pixels on the surface reads as
+/// clipping rather than as a wrap, and half a unit is cheap.
+const VIEW_MARGIN: f32 = 0.5;
+
+/// Half the vertical extent of the orthographic camera, **in world units**.
+///
+/// [`Projection::Orthographic`] takes a half *height* and derives the width from
+/// the aspect ratio, so a fixed 12.5 shows `12.5 * aspect` horizontally — which
+/// at 4:3 is 16.7 against a field that runs to [`WORLD_HALF_WIDTH`] = 16, and at
+/// 5:4 is 15.6, which crops it. Widening the camera until the whole field fits
+/// holds at every aspect ratio: a viewport too narrow at 12.5 letterboxes
+/// vertically instead of cropping horizontally.
+///
+/// [`projection`] is what scales this into sprite units, and is the only caller
+/// that may.
 #[must_use]
-pub fn pixels_per_unit(extent: (u32, u32)) -> f32 {
-    let by_width = extent.0.max(1) as f32 / (2.0 * WORLD_HALF_WIDTH as f32);
-    let by_height = extent.1.max(1) as f32 / (2.0 * WORLD_HALF_HEIGHT as f32);
-    by_width.min(by_height)
+pub fn camera_half_height(extent: (u32, u32)) -> f32 {
+    let aspect = extent.0.max(1) as f32 / extent.1.max(1) as f32;
+    let half_height = WORLD_HALF_HEIGHT as f32 + VIEW_MARGIN;
+    let half_width = WORLD_HALF_WIDTH as f32 + VIEW_MARGIN;
+    half_height.max(half_width / aspect)
 }
 
-/// Where a world point lands in framebuffer pixels.
+/// The camera projection for an `extent`-sized viewport.
 ///
-/// Y is flipped: the world's `+Y` is up and the framebuffer's is down.
-#[must_use]
-pub fn world_to_screen(world: glam::DVec3, extent: (u32, u32)) -> Vec2 {
-    let scale = pixels_per_unit(extent);
-    let centre = Vec2::new(extent.0 as f32 / 2.0, extent.1 as f32 / 2.0);
-    centre + Vec2::new(world.x as f32 * scale, -world.y as f32 * scale)
+/// **In sprite units, not world units** — see [`crate::art`]'s header for what
+/// that convention is and, in this sample, what it is not.
+fn projection(extent: (u32, u32)) -> Projection {
+    Projection::Orthographic {
+        half_height: camera_half_height(extent) * TEXELS_PER_UNIT,
+        near: 0.1,
+        far: 100.0,
+    }
+}
+
+/// The camera for an `extent`-sized viewport: centred on the origin, looking
+/// down −Z.
+///
+/// Written out rather than left to [`Camera::default`], as breakout's is: where
+/// the camera is is a fact [`crate::art::Scene::build`] depends on — it resolves
+/// its layers against `[0, 0]` — and a fact this game depends on belongs in the
+/// file where it can be read and tested.
+fn camera(extent: (u32, u32)) -> Camera {
+    let mut camera = Camera::default().with_projection(projection(extent));
+    camera.eye = Vec3::new(0.0, 0.0, 2.0);
+    camera.target = Vec3::ZERO;
+    camera
 }
 
 // ---- Gpu --------------------------------------------------------------------
@@ -73,6 +108,19 @@ pub struct Gpu {
     ctx: GpuContext,
     pool: TransientPool,
     timers: Option<PassTimers>,
+    camera: Camera,
+    /// This frame's world, copied rather than borrowed: [`Gpu::frame`] runs
+    /// after the caller has moved on, and the state is refilled every frame.
+    render: RenderState,
+    /// How far this frame sits between the last tick and the next.
+    alpha: f32,
+    /// The sprite pass, and the art it draws.
+    sprites: SpriteRenderer,
+    scene: Scene,
+    /// The menu pass: its own sheets, its own screen-space camera, and a pass
+    /// that declares nothing on a frame with no menu on it.
+    menu: MenuRenderer,
+    /// UI compositing.
     ui: UiRenderer,
     atlas: FontAtlas,
     draw_list: DrawList,
@@ -96,8 +144,8 @@ fn desc(backend: Option<GpuBackend>) -> GpuContextDesc<'static> {
 }
 
 impl Gpu {
-    /// Opens a backend, a surface, a device and a swapchain, and builds the UI
-    /// renderer.
+    /// Opens a backend, a surface, a device and a swapchain, and builds the
+    /// sprite, menu and UI renderers.
     ///
     /// # Errors
     ///
@@ -108,14 +156,56 @@ impl Gpu {
         extent: (u32, u32),
         backend: Option<GpuBackend>,
     ) -> Result<Self, GpuError> {
-        let ctx = GpuContext::open(shell, window, extent, &desc(backend))?;
+        Self::from_context(GpuContext::open(shell, window, extent, &desc(backend))?)
+    }
+
+    /// Builds this game's renderers on an already-open context, and uploads the
+    /// art.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if a renderer refused the device or a sheet upload failed.
+    fn from_context(ctx: GpuContext) -> Result<Self, GpuError> {
         let format = ctx.format();
         let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
-        let ui = UiRenderer::new(ctx.device(), ctx.queue(), format).map_err(GpuError::Hal)?;
+        let mut sprites =
+            SpriteRenderer::new(ctx.device(), ctx.queue(), format).map_err(GpuError::Hal)?;
+        // Registering a sheet is a blocking staging upload — start-up work, like
+        // the glyph atlas below it, and never something a frame does.
+        let scene = match Scene::new(ctx.device(), &mut sprites) {
+            Ok(scene) => scene,
+            Err(error) => {
+                sprites.destroy(ctx.device());
+                return Err(GpuError::Hal(error));
+            }
+        };
+        let menu = match MenuRenderer::new(ctx.device(), ctx.queue(), format) {
+            Ok(menu) => menu,
+            Err(error) => {
+                sprites.destroy(ctx.device());
+                return Err(GpuError::Hal(error));
+            }
+        };
+        let ui = match UiRenderer::new(ctx.device(), ctx.queue(), format) {
+            Ok(ui) => ui,
+            Err(error) => {
+                menu.destroy(ctx.device());
+                sprites.destroy(ctx.device());
+                return Err(GpuError::Hal(error));
+            }
+        };
+
+        let extent = ctx.extent();
         Ok(Self {
+            camera: camera(extent),
             ctx,
             pool: TransientPool::new(),
             timers,
+            render: RenderState::default(),
+            alpha: 0.0,
+            sprites,
+            scene,
+            menu,
             ui,
             atlas: FontAtlas::built_in(),
             draw_list: DrawList::new(),
@@ -128,10 +218,57 @@ impl Gpu {
         self.ctx.extent()
     }
 
+    /// Takes this frame's world and how far through a tick the frame sits.
+    ///
+    /// The alpha rides with the state because the two have to be from the same
+    /// frame: last frame's alpha applied to this frame's angles is a smaller
+    /// stutter than no interpolation at all, and a harder one to see.
+    pub fn set_world(&mut self, render: &RenderState, alpha: f32) {
+        self.render.clone_from(render);
+        self.alpha = alpha;
+    }
+
     /// Takes this frame's draw list, handing the previous frame's allocation
     /// back so the caller can refill it instead of building a new one.
     pub fn take_draw_list(&mut self, dl: &mut DrawList) {
         std::mem::swap(&mut self.draw_list, dl);
+    }
+
+    /// Takes this frame's menu, or `None` on a frame that shows none.
+    ///
+    /// CPU only — the upload happens inside [`Gpu::frame`], at the extent the
+    /// swapchain was actually acquired at.
+    pub fn set_menu(&mut self, menu: Option<(&Menu, &MenuLayout)>) {
+        self.menu.set_menu(menu);
+    }
+
+    /// The sprites the menu pass will draw this frame, for the loop's own tests.
+    #[cfg(test)]
+    pub fn menu_sprites(&self) -> &[crcbl::render::Sprite] {
+        self.menu.frame_sprites()
+    }
+
+    /// The UI geometry this frame handed over, for the loop's own tests — the
+    /// list the UI pass actually uploads, HUD and debug overlay together.
+    #[cfg(test)]
+    pub const fn draw_list(&self) -> &DrawList {
+        &self.draw_list
+    }
+
+    /// How far through a tick this frame was drawn at, for the loop's own tests.
+    #[cfg(test)]
+    pub const fn alpha_for_test(&self) -> f32 {
+        self.alpha
+    }
+
+    /// The game's own sprites for this frame, for the same.
+    #[cfg(test)]
+    pub fn scene_sprites(&mut self) -> Vec<crcbl::render::Sprite> {
+        let alpha = self.alpha;
+        let render = std::mem::take(&mut self.render);
+        let sprites = self.scene.build(&render, alpha).to_vec();
+        self.render = render;
+        sprites
     }
 
     #[must_use]
@@ -162,6 +299,20 @@ impl Gpu {
         };
         let extent = acquired.extent;
 
+        // The swapchain's extent, not the one the resize event reported: on the
+        // frame a reconfigure lands they can differ, and the camera must agree
+        // with the surface actually being drawn into.
+        self.camera = camera(extent);
+        let aspect = extent.0.max(1) as f32 / extent.1.max(1) as f32;
+        let view_projection = self.camera.view_projection(aspect);
+
+        let sprites = self.scene.build(&self.render, self.alpha);
+        self.sprites
+            .begin_frame(self.ctx.device(), sprites, view_projection, extent)
+            .map_err(GpuError::Hal)?;
+        self.menu
+            .begin_frame(self.ctx.device(), extent)
+            .map_err(GpuError::Hal)?;
         self.ui
             .begin_frame(self.ctx.device(), &self.draw_list, &self.atlas, 1.0)
             .map_err(GpuError::Hal)?;
@@ -177,6 +328,8 @@ impl Gpu {
                 .add_render_pass("space")
                 .clear_color(target, SPACE)
                 .execute(|_| {});
+            self.sprites.add_pass(&mut graph, target);
+            self.menu.add_pass(&mut graph, target);
             self.ui.add_pass(&mut graph, target, extent);
             graph.compile(&self.pool)?
         };
@@ -228,6 +381,8 @@ impl Gpu {
     pub fn destroy(mut self) -> Result<(), GpuError> {
         self.ctx.drain()?;
         self.ui.destroy(self.ctx.device());
+        self.menu.destroy(self.ctx.device());
+        self.sprites.destroy(self.ctx.device());
         self.pool.destroy(self.ctx.device());
         if let Some(timers) = self.timers.as_mut() {
             timers.destroy(self.ctx.device());
@@ -239,39 +394,62 @@ impl Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::DVec3;
 
-    /// The whole playfield is on screen whatever the window's shape. A rock the
-    /// player cannot see is indistinguishable from a rock that leaked.
+    /// The whole playfield is on screen whatever the window's shape, measured
+    /// **through the real projection** rather than through a second mapping.
+    ///
+    /// A rock the player cannot see is indistinguishable from a rock that
+    /// leaked, and in a wrapping game it is indistinguishable from a bug in the
+    /// wrap.
     #[test]
     fn the_whole_field_fits_at_every_aspect_ratio() {
-        for extent in [(960, 720), (1920, 1080), (600, 900), (1440, 400)] {
-            for corner in [
-                DVec3::new(WORLD_HALF_WIDTH, WORLD_HALF_HEIGHT, 0.0),
-                DVec3::new(-WORLD_HALF_WIDTH, -WORLD_HALF_HEIGHT, 0.0),
-                DVec3::new(WORLD_HALF_WIDTH, -WORLD_HALF_HEIGHT, 0.0),
-                DVec3::new(-WORLD_HALF_WIDTH, WORLD_HALF_HEIGHT, 0.0),
+        for extent in [
+            (960, 720),   // what the window opens at
+            (800, 600),   // 4:3 again, smaller
+            (1920, 1080), // 16:9
+            (1440, 400),  // a canvas clamped by `max-height: 68vh`
+            (600, 900),   // taller than it is wide
+            (1000, 800),  // 5:4 — the one a fixed half-height would crop
+        ] {
+            let aspect = extent.0.max(1) as f32 / extent.1.max(1) as f32;
+            let view_projection = camera(extent).view_projection(aspect);
+            for (x, y) in [
+                (WORLD_HALF_WIDTH, WORLD_HALF_HEIGHT),
+                (-WORLD_HALF_WIDTH, -WORLD_HALF_HEIGHT),
+                (WORLD_HALF_WIDTH, -WORLD_HALF_HEIGHT),
+                (-WORLD_HALF_WIDTH, WORLD_HALF_HEIGHT),
             ] {
-                let pixel = world_to_screen(corner, extent);
+                let world = glam::Vec4::new(
+                    x as f32 * TEXELS_PER_UNIT,
+                    y as f32 * TEXELS_PER_UNIT,
+                    0.0,
+                    1.0,
+                );
+                let clip = view_projection * world;
+                let ndc = glam::Vec2::new(clip.x / clip.w, clip.y / clip.w);
                 assert!(
-                    (-0.5..=extent.0 as f32 + 0.5).contains(&pixel.x)
-                        && (-0.5..=extent.1 as f32 + 0.5).contains(&pixel.y),
-                    "{extent:?} put the corner {corner:?} at {pixel:?}"
+                    (-1.0..=1.0).contains(&ndc.x) && (-1.0..=1.0).contains(&ndc.y),
+                    "{extent:?} put the corner ({x}, {y}) at {ndc:?} in NDC",
                 );
             }
         }
     }
 
-    /// The origin is the middle of the window, and `+Y` is up.
+    /// The origin is the middle of the view, and `+Y` is up the screen.
     #[test]
-    fn the_mapping_centres_the_origin_and_flips_y() {
+    fn the_camera_centres_the_origin_and_keeps_y_up() {
         let extent = (960, 720);
-        let centre = world_to_screen(DVec3::ZERO, extent);
-        assert_eq!(centre, Vec2::new(480.0, 360.0));
-        let above = world_to_screen(DVec3::new(0.0, 1.0, 0.0), extent);
+        let aspect = extent.0 as f32 / extent.1 as f32;
+        let view_projection = camera(extent).view_projection(aspect);
+
+        let centre = view_projection * glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
+        assert!((centre.x / centre.w).abs() < 1e-5);
+        assert!((centre.y / centre.w).abs() < 1e-5);
+
+        let above = view_projection * glam::Vec4::new(0.0, TEXELS_PER_UNIT, 0.0, 1.0);
         assert!(
-            above.y < centre.y,
-            "world +Y must go up the screen: {above:?} against {centre:?}"
+            above.y / above.w > 0.0,
+            "world +Y must be the top of the NDC cube",
         );
     }
 }

@@ -1,0 +1,44 @@
+# The medium rock.
+#
+# 20 x 20 texels at `art::TEXELS_PER_UNIT` = 10 is exactly `2 *
+# RockSize::Medium.radius()` = 2.0 world units — the collider's bounding square,
+# to the texel, as for the other two sizes.
+#
+# **Its own shape, drawn at its own size.** A `Sprite` takes a rectangle, so
+# three sizes could have been one picture and three rects, and it would have
+# been a lie the sheet told silently: the whole point of a split is that the two
+# halves are not the parent, and a rock that only ever changes magnification
+# says the opposite. This one is bitten in at the upper right and bulges lower
+# left, with a single crater; the large and the small are dented elsewhere.
+crpix: 20 20 1 5 1
+
+palette:
+  . c None
+  k c #241f1c
+  l c #cfc6b6
+  m c #8f877a
+  d c #57514a
+
+frame rock:
+  ....................
+  .......kkkkkk.......
+  ......kllllllkk.....
+  .....kllllllllk.....
+  ....kllllllllmmk....
+  ...klldlllllmmmk....
+  ..klldddlllmmmmdk...
+  .klllddddmmmmmdddk..
+  .kllldddmmmmmdddddk.
+  .kllllllmmmmddddddk.
+  .klllllmmmmddddddddk
+  .kllllmmmmmddddddddk
+  .klllmmmmdddddddddk.
+  ..klmmmmddddddddddk.
+  ..kkmmmdddddddddddk.
+  ....kkkddddddddddk..
+  .......kddddddddk...
+  ........kdddddkk....
+  .........kkkkk......
+  ....................
+
+sample: pixel

@@ -22,17 +22,26 @@
 //!
 //! # What is here, and what is not
 //!
-//! This is the **simulation** slice. The game is complete and playable headless;
-//! the native binary opens a window and draws the field as untextured
-//! placeholder quads through the UI pass, plus the HUD and the debug panel.
-//! There is no art, no `.crpix` sheet, no menus, no audio and no browser entry
-//! point — each arrives with its own sub-slice, and each is a thing the samples
-//! before this one already show how to do.
+//! The simulation, and the picture of it: `.crpix` art baked by `build.rs` and
+//! drawn through `SpriteRenderer` with `SampleMode::Pixel`, the ship and the
+//! rocks turning through the sprite pass's `rotation`, start / pause / game-over
+//! menus, the debug panel, pause, fullscreen and focus handling.
+//!
+//! **This is the first sample where a drawn thing turns**, so it is also where
+//! the question that opened had to be answered: an angle integrated per tick and
+//! drawn per frame stutters, and an angle wraps, so the renderer interpolates it
+//! the short way round. [`lerp_angle`] carries the argument.
+//!
+//! There is no audio and no browser entry point yet — each arrives with its own
+//! sub-slice, and each is a thing the samples before this one already show how
+//! to do.
 
 mod app;
 mod args;
+mod art;
 mod game;
 mod gpu;
+mod menu;
 
 pub use app::{AsteroidsError, Loop, Summary, run};
 pub use args::{Invocation, Options, USAGE, parse};
@@ -41,6 +50,7 @@ pub use game::{
     FIRE_COOLDOWN, FIRST_WAVE_ROCKS, Game, GameError, GameState, MAX_BULLETS, MAX_WAVE_ROCKS,
     RESPAWN_CLEAR_RADIUS, RESPAWN_DELAY, RESPAWN_MAX_WAIT, RenderState, RockSize, RockView,
     SHIP_DAMPING, SHIP_RADIUS, SHIP_THRUST, SHIP_TURN_RATE, SPLIT_CHILDREN, STARTING_LIVES,
-    WORLD_HALF_HEIGHT, WORLD_HALF_WIDTH, hash_unit, heading_vector, wave_rock_position,
-    wave_rock_velocity, wave_rocks, wrap_axis, wrap_position,
+    WORLD_HALF_HEIGHT, WORLD_HALF_WIDTH, hash_unit, heading_vector, lerp_angle, wave_rock_position,
+    wave_rock_velocity, wave_rocks, wrap_axis, wrap_position, wrap_to_pi,
 };
+pub use menu::{MenuAction, MenuKind, Menus};

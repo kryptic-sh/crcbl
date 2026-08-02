@@ -238,6 +238,30 @@ impl RockSize {
         }
     }
 
+    /// How fast a rock of this size tumbles, in radians per second — the
+    /// magnitude; `spawn_rock` draws the sign from the board's seed.
+    ///
+    /// **Smaller is faster, as [`Self::speed`] is**, and for the same reason: a
+    /// small rock is a chip off a bigger one and reads as lighter. The numbers
+    /// are bounded by what the *art* can show rather than by physics — a rock is
+    /// 34, 20 or 11 texels across, so a turn faster than about half a revolution
+    /// a second stops reading as a tumble and starts reading as a flicker.
+    ///
+    /// This is game state and not physics state, exactly as
+    /// [`SHIP_TURN_RATE`] is: `crcbl-phys` has no angular velocity, so
+    /// `tumble_rocks` integrates it by hand. It never reaches a collider —
+    /// every rock's collider is a sphere, and a sphere that turns is the same
+    /// sphere — so a tumble is a pure presentation term and cannot change what
+    /// the simulation does.
+    #[must_use]
+    pub const fn spin(self) -> f64 {
+        match self {
+            Self::Large => 0.55,
+            Self::Medium => 0.9,
+            Self::Small => 1.5,
+        }
+    }
+
     /// The collider a rock of this size carries.
     #[must_use]
     pub const fn collider(self) -> ColliderComponent {
@@ -331,6 +355,15 @@ const fn wave_index(wave: u32, rock: u32, which: u64) -> u64 {
 /// Index space for splits: the top bit, plus the spawn counter.
 const fn split_index(counter: u64) -> u64 {
     0x8000_0000_0000_0000 | counter
+}
+
+/// Index space for a rock's tumble: bit 62, the spawn counter, and which of the
+/// two draws — the starting angle or the direction of spin.
+///
+/// Disjoint from both of the above. [`wave_index`] shifts a `u32` wave left by
+/// 20 and so cannot reach bit 62, and [`split_index`] sets bit 63.
+const fn tumble_index(spawned: u64, which: u64) -> u64 {
+    0x4000_0000_0000_0000 | (spawned << 1) | which
 }
 
 /// Where rock `rock` of wave `wave` enters the field.
@@ -476,6 +509,17 @@ pub enum GameState {
 struct Rock {
     entity: Entity,
     size: RockSize,
+    /// How far it has tumbled, in radians, kept in `[0, τ)`.
+    ///
+    /// Presentation state that lives in the simulation, for the same reason the
+    /// ship's heading does: it is integrated per tick from a seed, so it is
+    /// deterministic, it replays, and the renderer never has to own a clock.
+    angle: f64,
+    /// The same at the end of the previous tick, so the renderer can interpolate
+    /// across a frame that lands between two ticks. See [`lerp_angle`].
+    prev_angle: f64,
+    /// Radians per second, signed. [`RockSize::spin`] is the magnitude.
+    spin: f64,
 }
 
 /// One bullet. No collider: see [`sweep_bullets`].
@@ -491,6 +535,11 @@ struct Bullet {
 pub struct RockView {
     pub position: DVec3,
     pub size: RockSize,
+    /// How far it has tumbled at the end of this tick, in radians.
+    pub angle: f64,
+    /// The same at the end of the previous tick. `angle` and this are what
+    /// [`lerp_angle`] takes; a rock that has just spawned has them equal.
+    pub prev_angle: f64,
 }
 
 /// What the renderer needs for one bullet.
@@ -512,6 +561,13 @@ struct GameLogic {
     /// and no torque; this is integrated by hand in [`turn_ship`] and written
     /// into the [`Transform`] that [`ThrustForce::world_force`] then reads.
     heading: f64,
+    /// The heading at the end of the previous tick, for [`lerp_angle`].
+    ///
+    /// Reset alongside [`Self::heading`] wherever the heading is *assigned*
+    /// rather than integrated — [`place_ship`] — because a respawn that put the
+    /// ship back facing up while this still held the heading it died on would
+    /// make the new ship spin through the difference over one tick.
+    prev_heading: f64,
     ship_pos: DVec3,
     ship_vel: DVec3,
     /// Whether the ship is on the field. `false` between a death and a respawn.
@@ -629,6 +685,16 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
     let dt = world.tick_dt();
     let intent = std::mem::take(&mut logic.intent);
 
+    // Every angle the renderer interpolates is `(previous, current)`, and the
+    // previous one is fixed here — **before** anything this tick can change a
+    // heading or a tumble. Doing it per-writer instead would mean every future
+    // caller of `turn_ship` remembering to, which is the shape of bug that only
+    // shows up as a one-frame flick at a frame rate nobody tests at.
+    logic.prev_heading = logic.heading;
+    for rock in &mut logic.rocks {
+        rock.prev_angle = rock.angle;
+    }
+
     // The integrator has just moved the ship, and everything below places
     // things relative to where it is *now* — the muzzle a shot leaves from, the
     // sphere the overlap query is centred on. Reading it at the end of the last
@@ -652,6 +718,12 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
         // ship can shoot immediately rather than inheriting a stale timer.
         logic.fire_timer = (logic.fire_timer - dt).max(0.0);
     }
+
+    // Before the sweeps, so a rock destroyed this tick is never advanced past
+    // the frame it was drawn at, and unconditional on the game's state: a rock
+    // keeps turning on the title screen and behind the game-over panel, which is
+    // what makes both look like a game rather than a screenshot.
+    tumble_rocks(logic, dt);
 
     sweep_bullets(logic, world, dt);
     wrap_everything(logic, world);
@@ -777,6 +849,57 @@ pub fn heading_vector(radians: f64) -> DVec3 {
     DVec3::new(-radians.sin(), radians.cos(), 0.0)
 }
 
+/// Brings an angle into `(-π, π]`.
+///
+/// Public because it is half of [`lerp_angle`] and because the tests' autopilot
+/// needs the same arithmetic to steer with — it had its own copy, which is one
+/// place for the two to disagree about what "the short way" means.
+#[must_use]
+pub fn wrap_to_pi(angle: f64) -> f64 {
+    let wrapped = angle.rem_euclid(std::f64::consts::TAU);
+    if wrapped > std::f64::consts::PI {
+        wrapped - std::f64::consts::TAU
+    } else {
+        wrapped
+    }
+}
+
+/// Interpolates from angle `from` to angle `to`, **the short way round**, and
+/// returns the result in `(-π, π]`.
+///
+/// # Why a game with no angular velocity still needs this
+///
+/// Every angle this game renders — the ship's heading, every rock's tumble — is
+/// integrated once per *tick*, at [`DEFAULT_TICK_HZ`]. A window runs at whatever
+/// rate the compositor gives it, and on any rate that is not the tick rate a
+/// frame lands between two ticks. Drawing the newer of the two angles on both
+/// frames is a stutter: the ship turns in sixtieths of a revolution at 144 Hz
+/// instead of turning smoothly, and it is worst on exactly the thing this sample
+/// exists to show. So the renderer lerps, with the frame clock's alpha — the
+/// same shape `Client::interpolate` uses for positions, which this game does not
+/// go through because its positions **wrap**. See [`RenderState`].
+///
+/// # Angles wrap, and that is the whole of the difficulty
+///
+/// `lerp(350°, 10°, 0.5)` is 180° — the ship spins right round the wrong way,
+/// once, on the frame after it crosses the seam, and the seam is crossed
+/// constantly because `turn_ship` keeps the heading in `[0, τ)`. Interpolating
+/// the *difference* brought into `(-π, π]` takes the 20° arc instead of the 340°
+/// one, so the value at 0.5 is 0° and not 180°.
+///
+/// A position wrap is the opposite case and is why this is not applied to
+/// positions: a rock crossing the field's edge really is somewhere else, and
+/// "the short way" would slide it back across the whole field. An angle wrap is
+/// not a discontinuity at all — τ is the identity — which is what makes the
+/// short way *correct* here rather than merely nicer.
+///
+/// `alpha` is clamped, so a caller that hands over an out-of-range value gets an
+/// endpoint rather than an extrapolation.
+#[must_use]
+pub fn lerp_angle(from: f64, to: f64, alpha: f64) -> f64 {
+    wrap_to_pi(from + wrap_to_pi(to - from) * alpha.clamp(0.0, 1.0))
+}
+
 /// Whether the ship is touching a rock, and what happens if it is.
 ///
 /// A sphere overlap against the broadphase, which is what the plan asks for.
@@ -860,6 +983,9 @@ fn place_ship(
 ) {
     let ship = logic.ship;
     logic.heading = heading;
+    // See `GameLogic::prev_heading`: an assignment, not an integration, so the
+    // renderer must not interpolate through it.
+    logic.prev_heading = heading;
     logic.ship_pos = position;
     logic.ship_vel = velocity;
     logic.ship_alive = true;
@@ -1004,6 +1130,18 @@ fn shatter(logic: &mut GameLogic, world: &mut World, index: usize) {
     }
 }
 
+/// Turns every rock on the field by one tick's worth of its own spin.
+///
+/// Kept in `[0, τ)`, as [`turn_ship`] keeps the heading, so the value cannot
+/// drift into the range where an `f64`'s spacing is coarser than the turn — and
+/// so the wrap the renderer's [`lerp_angle`] has to survive is crossed by every
+/// rock, several times a minute, rather than being a case only a test reaches.
+fn tumble_rocks(logic: &mut GameLogic, dt: f64) {
+    for rock in &mut logic.rocks {
+        rock.angle = (rock.angle + rock.spin * dt).rem_euclid(std::f64::consts::TAU);
+    }
+}
+
 /// Puts one rock on the field.
 fn spawn_rock(
     logic: &mut GameLogic,
@@ -1020,7 +1158,29 @@ fn spawn_rock(
         phys.set_body(entity, body);
         phys.set_collider(entity, &size.collider(), &transform);
     });
-    logic.rocks.push(Rock { entity, size });
+    // Where it starts and which way it turns, from the board's seed and this
+    // rock's place in the spawn order — a pure function of the same two things
+    // every other random-looking number in this game comes from, so a replay
+    // tumbles the same way. A fixed starting angle would have every rock of a
+    // fresh wave in the same attitude, which reads as a stamp rather than a
+    // field.
+    let spawned = logic.rocks_spawned;
+    let seed = logic.board();
+    let angle = hash_unit(seed, tumble_index(spawned, 0)) * std::f64::consts::TAU;
+    let spin = if hash_unit(seed, tumble_index(spawned, 1)) < 0.5 {
+        -size.spin()
+    } else {
+        size.spin()
+    };
+    logic.rocks.push(Rock {
+        entity,
+        size,
+        angle,
+        // Equal, so the first frame a rock is on screen interpolates to itself
+        // rather than sweeping in from wherever the previous tick's value was.
+        prev_angle: angle,
+        spin,
+    });
     logic.rocks_spawned += 1;
     entity
 }
@@ -1175,7 +1335,7 @@ fn restart(logic: &mut GameLogic, world: &mut World) {
 /// Copies the authoritative state the renderer needs out of the physics world.
 fn refresh_views(logic: &mut GameLogic, world: &mut World) {
     let ship = logic.ship;
-    let rocks: Vec<(Entity, RockSize)> = logic.rocks.iter().map(|r| (r.entity, r.size)).collect();
+    let rocks: Vec<Rock> = logic.rocks.clone();
     let bullets: Vec<Entity> = logic.bullets.iter().map(|b| b.entity).collect();
 
     // Taken out and put back rather than borrowed through the guard: the
@@ -1187,11 +1347,13 @@ fn refresh_views(logic: &mut GameLogic, world: &mut World) {
     rock_views.clear();
     bullet_views.clear();
     let ship_state = with_physics(world, |phys| {
-        for (entity, size) in rocks {
-            if let Some(transform) = phys.transform(entity) {
+        for rock in rocks {
+            if let Some(transform) = phys.transform(rock.entity) {
                 rock_views.push(RockView {
                     position: transform.position,
-                    size,
+                    size: rock.size,
+                    angle: rock.angle,
+                    prev_angle: rock.prev_angle,
                 });
             }
         }
@@ -1252,10 +1414,25 @@ fn with_physics<R>(world: &mut World, f: impl FnOnce(&mut PhysicsSystem) -> R) -
 ///
 /// Filled through [`Game::render_state`], which reuses the caller's allocations
 /// — this game hands over a fresh rock and bullet list every frame forever.
+///
+/// # Angles come in pairs and positions do not
+///
+/// Every rotation here is `(previous tick, this tick)`, and
+/// `art::Scene::build` takes the frame clock's alpha and [`lerp_angle`]s
+/// between them. Positions are a single value, deliberately: this playfield
+/// **wraps**, so a rock's previous position and its current one are on opposite
+/// sides of the field on the tick it crosses an edge, and interpolating between
+/// them would fly it back across the whole screen. Closing that needs the view
+/// to carry "this one teleported", which is a change to what the simulation
+/// publishes rather than to how it is drawn — `docs/backlog.md` carries it. An
+/// angle has no such case: a wrap of τ is the identity, which is exactly why the
+/// angles could be interpolated first.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RenderState {
     pub ship: DVec3,
     pub ship_heading: f64,
+    /// The ship's heading at the end of the previous tick.
+    pub ship_heading_prev: f64,
     pub ship_alive: bool,
     pub rocks: Vec<RockView>,
     pub bullets: Vec<BulletView>,
@@ -1288,6 +1465,9 @@ pub struct Game {
     pub ship: DVec3,
     pub ship_velocity: DVec3,
     pub ship_heading: f64,
+    /// The heading at the end of the tick before last, so a caller that reads
+    /// these mirrors rather than [`Game::render_state`] can interpolate too.
+    pub ship_heading_prev: f64,
     pub ship_alive: bool,
     prev_log_state: GameState,
 }
@@ -1385,6 +1565,7 @@ impl Game {
             intent: Intent::default(),
             state: GameState::WaitingToStart,
             heading: 0.0,
+            prev_heading: 0.0,
             ship_pos: DVec3::ZERO,
             ship_vel: DVec3::ZERO,
             ship_alive: false,
@@ -1457,6 +1638,7 @@ impl Game {
             ship: DVec3::ZERO,
             ship_velocity: DVec3::ZERO,
             ship_heading: 0.0,
+            ship_heading_prev: 0.0,
             ship_alive: true,
             prev_log_state: GameState::WaitingToStart,
         };
@@ -1536,6 +1718,7 @@ impl Game {
             self.ship = logic.ship_pos;
             self.ship_velocity = logic.ship_vel;
             self.ship_heading = logic.heading;
+            self.ship_heading_prev = logic.prev_heading;
             self.ship_alive = logic.ship_alive;
             logic.ticks
         };
@@ -1566,6 +1749,7 @@ impl Game {
         let logic = lock(&self.shared);
         out.ship = logic.ship_pos;
         out.ship_heading = logic.heading;
+        out.ship_heading_prev = logic.prev_heading;
         out.ship_alive = logic.ship_alive;
         out.rocks.clear();
         out.rocks.extend_from_slice(&logic.rock_views);
@@ -1913,17 +2097,6 @@ mod tests {
             right: error < -AIM_TOLERANCE,
             thrust: false,
             fire: error.abs() <= AIM_TOLERANCE,
-        }
-    }
-
-    /// Brings an angle difference into `(-π, π]`.
-    fn wrap_to_pi(angle: f64) -> f64 {
-        let tau = std::f64::consts::TAU;
-        let wrapped = angle.rem_euclid(tau);
-        if wrapped > std::f64::consts::PI {
-            wrapped - tau
-        } else {
-            wrapped
         }
     }
 
@@ -3063,5 +3236,243 @@ mod tests {
         harness.run_ticks(600, &[]);
         assert_eq!(harness.game.entity_count(), entities);
         assert_eq!(harness.game.collider_count(), colliders);
+    }
+
+    // -----------------------------------------------------------------------
+    // Angles: the wrap, and the interpolation the renderer runs on
+    // -----------------------------------------------------------------------
+
+    /// **The short way round, across the seam.**
+    ///
+    /// The case the renderer exists to get right: a heading that has just
+    /// crossed zero has a previous value near τ and a current one near zero, and
+    /// a plain `from + (to - from) * α` sends the ship the long way round —
+    /// 350° to 10° through 180° instead of through 0°. The **intermediate**
+    /// value is what says which route was taken; the endpoints are identical
+    /// either way, so a test that only checked those would pass on the bug.
+    #[test]
+    fn an_angle_interpolates_the_short_way_across_the_wrap() {
+        let deg = |d: f64| d.to_radians();
+        let from = deg(350.0);
+        let to = deg(10.0);
+
+        // Quarter, half and three-quarters of the way. The short arc is 20°, so
+        // the midpoint is 0° — the naive lerp would put it at 180°.
+        for (alpha, expected) in [(0.25, 355.0), (0.5, 0.0), (0.75, 5.0)] {
+            let got = lerp_angle(from, to, alpha);
+            assert!(
+                wrap_to_pi(got - deg(expected)).abs() < 1e-12,
+                "at alpha = {alpha} the short way is {expected} degrees, this went to {}",
+                got.to_degrees(),
+            );
+            // And explicitly: nowhere near the long way's midpoint.
+            assert!(
+                wrap_to_pi(got - std::f64::consts::PI).abs() > deg(90.0),
+                "alpha = {alpha} took the long way round: {}",
+                got.to_degrees(),
+            );
+        }
+
+        // The other direction across the same seam, so the sign is not being
+        // read off one example.
+        let back = lerp_angle(to, from, 0.5);
+        assert!(wrap_to_pi(back).abs() < 1e-12, "{}", back.to_degrees());
+
+        // The endpoints are the endpoints, modulo tau, and alpha is clamped
+        // rather than extrapolated.
+        for (alpha, expected) in [(0.0, from), (1.0, to), (-3.0, from), (7.0, to)] {
+            assert!(
+                wrap_to_pi(lerp_angle(from, to, alpha) - expected).abs() < 1e-12,
+                "alpha = {alpha}",
+            );
+        }
+    }
+
+    /// A plain interval interpolates plainly — the wrap handling must not bend
+    /// an angle that never crosses the seam.
+    #[test]
+    fn an_angle_that_does_not_wrap_interpolates_straight_through() {
+        for (from, to) in [(0.5, 1.5), (2.0, 1.0), (-0.4, 0.4), (3.0, 3.1)] {
+            for alpha in [0.0, 0.2, 0.5, 0.9, 1.0] {
+                let expected = from + (to - from) * alpha;
+                let got = lerp_angle(from, to, alpha);
+                assert!(
+                    wrap_to_pi(got - expected).abs() < 1e-12,
+                    "{from} to {to} at {alpha} gave {got}, not {expected}",
+                );
+            }
+        }
+    }
+
+    /// **`wrap_to_pi` is the half-open interval it says it is**, which is what
+    /// makes the midpoint above exact rather than nearly right.
+    #[test]
+    fn wrapping_lands_in_the_half_open_interval() {
+        use std::f64::consts::{PI, TAU};
+        for angle in [0.0, 0.3, PI, -PI, TAU, TAU + 0.3, -0.3, -TAU - 0.3, 17.0] {
+            let wrapped = wrap_to_pi(angle);
+            assert!(
+                wrapped > -PI && wrapped <= PI,
+                "{angle} wrapped to {wrapped}",
+            );
+            let turns = (wrapped - angle) / TAU;
+            assert!(
+                (turns - turns.round()).abs() < 1e-12,
+                "{angle} wrapped to {wrapped}, which is a different angle",
+            );
+        }
+        assert_eq!(wrap_to_pi(PI), PI, "pi stays pi; it is the closed end");
+        assert_eq!(wrap_to_pi(-PI), PI, "minus pi is the same angle as pi");
+        assert_eq!(wrap_to_pi(TAU), 0.0);
+    }
+
+    /// **Rocks tumble, each its own way, and the previous angle trails the
+    /// current one by exactly one tick.**
+    ///
+    /// The three things the renderer's interpolation rests on: that the angle
+    /// moves at all, that `prev_angle` is the value from the tick before rather
+    /// than a copy of this one, and that the pair is the same on two runs of one
+    /// seed — a tumble drawn from a running RNG would replay differently and
+    /// take the determinism suite with it.
+    #[test]
+    fn every_rock_tumbles_its_own_way_and_the_same_way_on_a_replay() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.tick();
+        let first = harness.game.rocks();
+        assert_eq!(first.len(), wave_rocks(0) as usize);
+
+        harness.game.tick();
+        let second = harness.game.rocks();
+        let mut steps = Vec::new();
+        for (before, now) in first.iter().zip(&second) {
+            assert_eq!(
+                now.prev_angle, before.angle,
+                "prev_angle is not the previous tick's value",
+            );
+            let step = wrap_to_pi(now.angle - now.prev_angle);
+            assert!(step.abs() > 1e-6, "a rock did not turn at all");
+            let expected = before.size.spin() / f64::from(DEFAULT_TICK_HZ);
+            assert!(
+                (step.abs() - expected).abs() < 1e-9,
+                "a {:?} rock turned {step} rather than plus or minus {expected}",
+                before.size,
+            );
+            steps.push(step);
+        }
+        assert!(
+            steps.iter().any(|s| *s > 0.0) && steps.iter().any(|s| *s < 0.0),
+            "every rock in the wave turns the same way: {steps:?}",
+        );
+        assert!(
+            first.iter().any(|r| r.angle != first[0].angle),
+            "every rock in the wave started at the same attitude",
+        );
+
+        // And the whole of it replays: the same seed, the same tumble.
+        let mut replay = Harness::new(60, 60);
+        replay.game.tick();
+        replay.game.tick();
+        assert_eq!(
+            replay.game.rocks(),
+            second,
+            "the tumble is not deterministic",
+        );
+
+        // A different board tumbles differently, so the seed really reaches it.
+        let mut other = Harness::with_seed(60, 60, DEFAULT_SEED ^ 0x5EED);
+        other.game.tick();
+        other.game.tick();
+        assert_ne!(
+            other
+                .game
+                .rocks()
+                .iter()
+                .map(|r| r.angle)
+                .collect::<Vec<_>>(),
+            second.iter().map(|r| r.angle).collect::<Vec<_>>(),
+        );
+    }
+
+    /// A rock crosses the seam while it tumbles, which is what makes the
+    /// renderer's short-way interpolation load-bearing rather than theoretical.
+    ///
+    /// Caught as a step of more than a radian in one tick: no spin rate in the
+    /// game is anywhere near that, so the only thing it can be is the wrap.
+    #[test]
+    fn a_tumbling_rock_crosses_the_seam() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.tick();
+        let mut wrapped = 0;
+        // A large rock at 0.55 rad/s takes about 11.5 s for a revolution, so
+        // twelve seconds is enough for every rock to have crossed zero once
+        // whatever attitude it started at.
+        for _ in 0..720 {
+            harness.game.tick();
+            for rock in harness.game.rocks() {
+                if (rock.angle - rock.prev_angle).abs() > 1.0 {
+                    wrapped += 1;
+                }
+            }
+        }
+        assert!(
+            wrapped > 0,
+            "no rock crossed zero in twelve seconds, so the wrap is untested",
+        );
+        for rock in harness.game.rocks() {
+            assert!(
+                (0.0..std::f64::consts::TAU).contains(&rock.angle),
+                "a rock's angle escaped [0, tau): {}",
+                rock.angle,
+            );
+        }
+    }
+
+    /// The ship's previous heading trails by one tick while it turns, and is
+    /// **reset rather than carried** when the ship is placed back facing up — a
+    /// renderer interpolating from the heading the last one died on would spin
+    /// the new ship through the difference over a single frame.
+    #[test]
+    fn the_ships_previous_heading_trails_a_tick_and_resets_when_it_is_placed() {
+        let mut harness = Harness::new(60, 60);
+        harness.tap(KeyCode::Space);
+        assert_eq!(harness.game.state, GameState::Playing);
+
+        harness.game.key_event(KeyCode::ArrowLeft, true);
+        let before = harness.game.ship_heading;
+        harness.game.tick();
+        assert_eq!(
+            harness.game.ship_heading_prev, before,
+            "prev is not the heading from the tick before",
+        );
+        assert!(
+            harness.game.ship_heading > harness.game.ship_heading_prev,
+            "a held turn left prev and current equal",
+        );
+
+        // The render state carries the same pair the mirrors do, which is what
+        // `art::Scene::build` actually reads.
+        let mut render = RenderState::default();
+        harness.game.render_state(&mut render);
+        assert_eq!(render.ship_heading, harness.game.ship_heading);
+        assert_eq!(render.ship_heading_prev, harness.game.ship_heading_prev);
+
+        for _ in 0..60 {
+            harness.game.tick();
+        }
+        assert!(
+            harness.game.ship_heading != 0.0,
+            "the ship never turned, so the reset below proves nothing",
+        );
+
+        // A restart runs `place_ship`, which *assigns* the heading. Both halves
+        // have to land on it.
+        harness.game.key_event(KeyCode::ArrowLeft, false);
+        harness.tap(KeyCode::KeyR);
+        assert_eq!(harness.game.ship_heading, 0.0);
+        assert_eq!(
+            harness.game.ship_heading_prev, 0.0,
+            "a fresh ship would be drawn spinning out of the heading the last \
+             one was flying",
+        );
     }
 }
