@@ -32,6 +32,14 @@ claim, demonstrated as gameplay instead of a synthetic sandbox scene.
 - XP pickups + one "pick 1 of 3" level-up choice screen (exercises game UI
   mid-session) — but a small fixed upgrade pool.
 - Timer, kill count, death screen. 5-minute survival target.
+- **`.crpix` sprites for the player, the enemy types and the pickups** (sample
+  rule 11), and **the debug panel on** (rule 4) — which this sample needs more
+  than any other on the ladder, because its whole claim is a flat CPU cost at
+  10k instances and the panel's frame-timing module is where that is read. The
+  arena and props follow whatever P9's asset path provides; the actors are
+  sprites. Ten thousand enemies drawn from a handful of sheets is also the first
+  time `SpriteRenderer`'s per-sheet batching is under real pressure, which is a
+  finding either way.
 
 ## Non-goals (hard cap)
 

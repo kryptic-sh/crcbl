@@ -48,10 +48,28 @@ Deliberately the smallest thing that is a _game_ and not a demo.
 - Sound: bounce/brick-break cues through the spatial grammar (P4A lands audio
   before this sample — the earlier "no sound" line predated that decision).
 
+- **The board is `.crpix` art** (retrofitted at P4B, sample rule 11). Four
+  bevelled brick frames where a brick's frame is read back out of its row, a
+  paddle, a ball, and a nine-sliced stone court whose wall faces land exactly on
+  the colliders the ball bounces off — near them is not good enough in a game
+  whose whole subject is where the ball rebounds. Authored under `assets/`,
+  baked by `build.rs`, drawn through `SpriteRenderer`; `ForwardRenderer` is gone
+  from the frame entirely.
+
 ## Non-goals (hard cap)
 
 Power-ups, levels, menus beyond start/game-over, juice (particles/screenshake),
 local multiplayer. Any of these appearing = scope violation.
+
+Art is **not** a non-goal and was never meant to be one — see sample rule 11.
+The earlier "untextured quads" reading of this cap is what put forty bricks
+through the UI draw list, which became S1B finding 1.
+
+## Still owed
+
+The debug panel (sample rule 4), once its frame-timing core lands. Breakout is
+the other sample with no network module to show, for the same reason flappy is:
+it runs client and server over `InMemoryTransport`.
 
 ## Milestones
 

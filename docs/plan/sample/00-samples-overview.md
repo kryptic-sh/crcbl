@@ -60,8 +60,14 @@ as one game; it starts only after arena has proven prediction/lag comp.
 3. **Scenes from files** (once stage 6 exists): samples load `.scn/` scene dirs,
    and after stage 8 their scenes are maintained _in the editor_. Hand-edited
    scene files after that point are a smell.
-4. **Debug overlay on by default in dev builds.** Samples are also the test bed
-   for the debug tools.
+4. **Debug overlay on by default in dev builds, and switching it on is one
+   thing.** Not a HUD each sample writes: one **modular** panel, where frame
+   timing and FPS are always present and each further system contributes its own
+   module — network stats appear because the sample has a connection, not
+   because the sample asked for them. A sample that has no connection shows the
+   panel without that module and is the check that the modularity is real.
+   Samples are also the test bed for the debug tools, so a sample that cannot
+   turn the panel on is a finding about the panel.
 5. **CI-built, clippy-clean, same bar as engine crates.** Playtest scripts
    (input-script determinism runs from stage 4) where feasible.
 6. **Scope charters are hard caps.** Each sample doc lists non-goals; feature
@@ -85,3 +91,16 @@ as one game; it starts only after arena has proven prediction/lag comp.
     implements `GameModule` (static binding for dev; breakout also ships as
     `.wasm` for the P6A equivalence gate). Engine-internal systems stay native;
     sample code is module code — proving the API games and mods will live on.
+11. **Pixel art through the sprite system, for every sample that should have
+    any.** Authored as `.crpix` text under the sample's `assets/`, baked at
+    build time to PNG + sidecar by its `build.rs`, drawn through
+    `SpriteRenderer` with `SampleMode::Pixel`. Nothing baked is committed — the
+    text is the only source of truth, which is what makes the art reviewable in
+    a diff. "Untextured quads for now" is not an available answer: breakout and
+    flappy both gave it, and P4B is what unwinding it twice cost.
+
+    **"Should have" is the exemption, and it is narrow.** A sample whose subject
+    is not pictures does not fake one: hud is a widget gallery, viewer opens
+    arbitrary glTF, sparks is a particle workbench. Everything else on the
+    ladder is 2D or has 2D chrome. A sample claiming the exemption says so in
+    its own doc and says why.

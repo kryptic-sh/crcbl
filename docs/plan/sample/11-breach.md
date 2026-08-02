@@ -64,6 +64,16 @@ small module, not forks of the game.
 - Economy: simplified CS-style buy (kill/round rewards, no skins/trading).
 - No progression, no cosmetic economy, no matchmaking (direct connect +
   `crcbl-mint` dev tier 3), no clan/social systems.
+- **Debug panel on, network module included** (sample rule 4). Ten clients on a
+  real transport with prediction, lag comp and an integrity gate is the widest
+  the netgraph ever gets asked to be, and the buy menu, the inventory grid and
+  the scoreboard are where the panel has to coexist with a dense game UI rather
+  than float over an empty frame.
+- **`.crpix` art for the 2D layer** (sample rule 11): the grid-inventory kit's
+  item icons above all — topic 34's grid is item _shapes_, so every item is a
+  hand-drawn sheet with known texel dimensions, which is exactly what the format
+  is for — plus the buy menu, the killfeed and the scoreboard. The maps, weapons
+  and players are 3D.
 
 ## Non-goals
 

@@ -40,7 +40,7 @@
 //! keep, and the layout here does not foreclose it — `dynamic: false` becomes
 //! `dynamic: true` and the offset joins the `bind_group` call.
 //!
-//! # Open: the Tier B shader artifact does not exist yet
+//! # The tier is a shader permutation, and both artifacts are committed
 //!
 //! The two paths need two *shader* spellings of the same block, and one Slang
 //! source cannot carry both: an entry point either reads a `[[vk::push_constant]]`
@@ -49,22 +49,8 @@
 //! — `03-gpu-driven-rendering.md`'s own words — and the permutation is a second
 //! artifact named `ui_tier_b`.
 //!
-//! That artifact is **not committed**, because `slangc` was not available on the
-//! machine that wrote this and the committed artifacts are verified byte-for-byte
-//! against `crates/crcbl-shaders/spirv/manifest.txt`; hand-written ones would be
-//! a lie the manifest could not catch. Until it lands, the Tier B path resolves
-//! back to `ui`'s artifacts and logs a warning naming this gap — a Tier B
-//! *device* will then fail at shader-module or pipeline creation rather than
-//! draw a mis-scaled UI.
-//!
-//! Note that this is not a regression the Tier B path introduced: `ui.wgsl` as
-//! committed today declares `var<uniform> constants_0` with **no** `@group` or
-//! `@binding`, which is invalid WGSL and which `naga` rejects, so the UI pass has
-//! never had a working browser shader.
-//!
-//! The follow-up is mechanical and needs only a machine with the pinned
-//! `slangc`. Add `crates/crcbl-shaders/shaders/ui_tier_b.slang`, which is
-//! `ui.slang` with exactly one declaration changed:
+//! `crates/crcbl-shaders/shaders/ui_tier_b.slang` is `ui.slang` with exactly one
+//! declaration changed:
 //!
 //! ```text
 //! // ui.slang (Tier A)                 ui_tier_b.slang (Tier B)
@@ -73,12 +59,19 @@
 //!     constants;                           constants;
 //! ```
 //!
-//! then run `crates/crcbl-shaders/tools/compile-shaders.sh` and commit
-//! `spirv/ui_tier_b.spv`, `wgsl/ui_tier_b.wgsl` and the regenerated
-//! `spirv/manifest.txt`. Nothing in this file changes: the shader is resolved by
-//! name out of `crcbl_shaders::ALL`, so the moment the artifact exists the
-//! warning stops and the Tier B pipeline is built from it. `ui.slang` itself is
-//! untouched, so `spirv/ui.spv` stays byte-identical and Tier A cannot move.
+//! `ui.slang` itself was untouched, so `spirv/ui.spv` stayed byte-identical and
+//! Tier A could not move. Both artifacts are verified byte-for-byte against
+//! `crates/crcbl-shaders/spirv/manifest.txt`, and `wgsl/ui_tier_b.wgsl` declares
+//! `@binding(3) @group(0) var<uniform> constants_0`, which is what makes it the
+//! WGSL a browser will accept.
+//!
+//! `wgsl/ui.wgsl` is **not** that, and never was: it declares
+//! `var<uniform> constants_0` with no `@group` or `@binding`, because that is
+//! what Slang's WGSL target lowers a push-constant block to, and `naga` rejects
+//! it. Nothing consumes it. The only backend that ingests WGSL is `crcbl-wgpu`,
+//! which deliberately never reports [`Features::PUSH_CONSTANTS`] on any target
+//! (see `crcbl-wgpu`'s `instance::hal_features_for`), so every WGSL consumer
+//! resolves `ui_tier_b`.
 
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
@@ -808,16 +801,15 @@ fn frame_entries(
 /// them.
 ///
 /// Resolved **by name** out of [`crcbl_shaders::ALL`] rather than by naming a
-/// static, so the Tier B permutation can land as an artifact alone: the moment
-/// `crates/crcbl-shaders/shaders/ui_tier_b.slang` and its compiled outputs are
-/// committed, this finds them with no change here. See this module's docs for
-/// the exact follow-up.
+/// static, which is how the Tier B permutation was able to land as an artifact
+/// alone with no change here. Both names resolve today.
 ///
-/// Until then the Tier B path falls back to `ui`, whose SPIR-V takes a push
-/// constant and whose WGSL declares an unbound uniform. That is a pipeline a
-/// real Tier B device will refuse — loudly, at module or pipeline creation —
-/// which is the honest outcome, and it is what keeps a `NullBackend` test able
-/// to exercise the Rust half of the path today.
+/// The fallback below is therefore unreachable in this workspace and is kept as
+/// the honest failure for a build that drops an artifact: falling back to `ui`
+/// hands a Tier B device a pipeline whose SPIR-V takes a push constant and whose
+/// WGSL declares an unbound uniform, which it will refuse loudly at module or
+/// pipeline creation rather than draw a mis-scaled UI. A silent `unwrap` here
+/// would be a panic in a renderer instead.
 fn ui_shader(delivery: ConstantDelivery) -> &'static crcbl_shaders::Shader {
     let wanted = delivery.shader_name();
     if let Some(shader) = crcbl_shaders::ALL

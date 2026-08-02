@@ -37,6 +37,14 @@ Node-graph authoring, custom per-particle scripting, gameplay of any kind,
 effects requiring engine features that don't exist (no requests smuggled in as
 "the gallery needs it" — the workbench exercises what topic 20 ships).
 
+**Exempt from sample rule 11** (`.crpix` art through the sprite pass): a
+particle's texture comes from topic 20's own authoring path, and routing it
+through the sprite pass instead would be demonstrating the wrong system.
+`.crpix` is still the right source for a _particle_ sheet where one is
+hand-drawn — the format is a PNG baker and does not care who samples the result
+— but that is an authoring convenience here, not the rule. Rule 4's debug panel
+applies, and a particle workbench without live frame timing is not a workbench.
+
 ## Milestones
 
 1. Gallery with billboards + curves (topic 20 slice 1 proof).

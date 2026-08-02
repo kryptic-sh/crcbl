@@ -29,6 +29,13 @@ MVP netcode _cannot_ serve well — it exists to force the post-MVP netcode work
   limit. 2–8 players, native + browser clients.
 - Bots (dumb roam+shoot) so netcode testing doesn't require 8 humans — doubles
   as headless load-test client harness (engine tool fallout).
+- **Debug panel on, network module included** (sample rule 4). This sample is
+  the prediction/lag-comp driver, so the netgraph is not a status readout here —
+  it is the instrument: corrections/sec and rollback depth (topic 26's extension
+  of it) beside RTT, jitter and loss, on eight clients at once. A fairness
+  finding that cannot be read off the panel is a finding about the panel.
+- **`.crpix` art for the 2D layer** (sample rule 11): scoreboard, hit markers,
+  damage numbers, respawn timer. The arena and the players are 3D.
 
 ## Non-goals
 

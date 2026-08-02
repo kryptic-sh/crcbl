@@ -89,7 +89,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
-- **flappy**: the game has art. A bird with a three-frame flap, a nine-sliced
+- **flappy**: the game has art. A bird with a three-frame flap, a three-sliced
   pipe, and hills and a ground band on parallax layers, all authored as `.crpix`
   text under `apps/flappy/assets/` and baked to PNG + sidecar by a new
   `build.rs` — nothing baked is committed, so the text is the only source of
@@ -101,13 +101,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   scene target, the depth buffer, the tonemap pass and the cube. The forward
   pass drew exactly one instance and the bird was it; a one-line `clear_color`
   pass replaces the clear it also happened to do.
-- **breakout**: the board is art. Four bevelled brick frames — the frame index
-  is the grid row, so a row's colour cannot drift from its position — a paddle,
-  a ball, and a nine-sliced stone court whose wall faces land exactly on the
-  colliders the ball bounces off. Authored as `.crpix` under
-  `apps/breakout/assets/`, baked by a `build.rs` like flappy's. The forty bricks
-  went through the UI draw list and the paddle was the one lit mesh; both are
-  sprites now, and `ForwardRenderer` is gone from breakout too.
+- **breakout**: the board is art. Four bevelled brick frames — a brick's frame
+  is read back out of its row, so a row's colour follows its position rather
+  than being tracked beside it — a paddle, a ball, and a nine-sliced stone court
+  whose wall faces land exactly on the colliders the ball bounces off. Authored
+  as `.crpix` under `apps/breakout/assets/`, baked by a `build.rs` like
+  flappy's. The forty bricks went through the UI draw list and the paddle was
+  the one lit mesh; both are sprites now, and `ForwardRenderer` is gone from
+  breakout too.
 - **flappy**: the wing beats when the player flaps. The clip was a free-running
   loop that never looked at the bird, so the animation and the button had
   nothing to do with each other; a rising vertical velocity is exactly a flap,

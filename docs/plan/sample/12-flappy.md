@@ -56,8 +56,14 @@ demo site carry N games" for the price of one small game.
 
 - No new engine subsystem. If flappy appears to need one, that is a finding to
   record, not a reason to grow the engine here.
-- No art. The same untextured quads breakout draws; this is an engine sample,
-  not a game jam entry.
+- ~~No art. The same untextured quads breakout draws.~~ **Withdrawn at P4B.**
+  This held while it was written and it was the wrong cap: untextured quads were
+  what forced both games through the UI pass, which became S1B finding 1, which
+  bought the sprite system. Flappy is now `.crpix` art under `assets/` — a bird
+  whose three-frame flap restarts on a rising vertical velocity, a three-sliced
+  pipe, hills and a ground band on parallax layers — baked by `build.rs` and
+  drawn through `SpriteRenderer`. Nothing about how the game _plays_ changed,
+  which is the part the cap was actually protecting. See sample rule 11.
 - No netcode beyond what breakout already does (in-memory transport,
   server-authoritative tick, interpolated render).
 
@@ -84,6 +90,13 @@ bird rather than killing it, because a lid that kills punishes the safest answer
 to a low gap. And a restart advances the course seed rather than replaying the
 same hand, deterministically, so both "a new run is a new course" and "a
 recorded script replays exactly" hold at once.
+
+**Retrofitted at P4B**, along with breakout: the art non-goal was withdrawn and
+the game is drawn as sprites. Still owed, and shared with breakout: the debug
+panel (sample rule 4) once its frame-timing core lands. Flappy is one of the two
+samples that will show it with no network module, because it runs over
+`InMemoryTransport` — which is the check that the panel is modular rather than
+assembled around a connection.
 
 ## Exit criteria
 

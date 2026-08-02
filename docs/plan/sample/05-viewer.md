@@ -35,6 +35,12 @@ Animation playback (post-MVP engine feature), material _editing_, export, scene
 composition (that's the editor), PBR environment lighting/IBL beyond the single
 light + exposure.
 
+**Exempt from sample rule 11** (`.crpix` art through the sprite pass): the whole
+point is that the viewer shows _the user's_ asset, unadorned. Authored art in
+the viewport would be exactly the thing it must not do. Rule 4's debug panel
+applies as it does everywhere — this sample is already the tool that dogfoods
+the inspector, and the panel is the same surface.
+
 ## Milestones
 
 1. Load + orbit + grid (stage 6 exit demo).

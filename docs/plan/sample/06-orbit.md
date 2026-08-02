@@ -32,6 +32,11 @@ The physics stage's acceptance test as a playable toy.
 - Win condition: land on the moon and return. Crash = restart.
 - Solo only; server-authoritative rule still applies (sim on server, in-memory
   transport — timewarp is a server command).
+- **`.crpix` art for the flight UI's chrome and the map view** (sample rule 11)
+  — the navball-lite, the prograde/retrograde markers, the apo/peri glyphs. The
+  bodies and the rocket are 3D and stay 3D; the 2D layer over them is sprites,
+  not hand-placed quads. **Debug panel on** (rule 4): timewarp ×1000 is a frame
+  budget question before it is a physics question.
 
 ## Non-goals (hard cap)
 

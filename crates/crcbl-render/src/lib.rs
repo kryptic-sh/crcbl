@@ -51,11 +51,10 @@
 //! [`ConstantDelivery`]. [`forward`] needs no such branch; its camera has been
 //! in a uniform buffer since P1 for exactly this reason.
 //!
-//! One thing that split needs is **not** closed, and is recorded in
-//! [`ui_pass`]'s own docs rather than worked around here: the Tier B *shader*
-//! artifact does not exist, because `slangc` was unavailable when the Rust half
-//! landed and the committed artifacts are hash-verified. The follow-up is one
-//! new `.slang` file and one run of `compile-shaders.sh`.
+//! The Tier B *shader* artifact that split needs is committed —
+//! `crates/crcbl-shaders/shaders/ui_tier_b.slang` and its `spirv/` and `wgsl/`
+//! outputs — so both tiers now resolve a real artifact. [`ui_pass`]'s own docs
+//! carry what the permutation is and why it could not be one source.
 //!
 //! [`sprite_pass`] deliberately does **not** repeat that split: its constants
 //! are a bound uniform buffer on every tier, so it ships one shader artifact and

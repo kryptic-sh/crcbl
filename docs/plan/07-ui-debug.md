@@ -196,6 +196,29 @@ settings list — the classic console-menu UX failure, banned by rule.
 
 ## Debug tools (`crcbl-ui::debug` or thin crate atop it)
 
+**One panel, assembled from modules, that every sample switches on.** This is a
+standing requirement on samples, not a feature they opt into — see
+[ROADMAP.md](ROADMAP.md)'s standing requirements and sample rule 4 in
+[sample/00-samples-overview.md](sample/00-samples-overview.md). Three
+consequences for how it is built:
+
+- **Frame timing and FPS are unconditional.** Every sample has a frame, so the
+  first module has no precondition and no configuration. This is the part
+  **pulled forward out of P10** and built before S2, because breakout and flappy
+  both want it now and asteroids and horde arrive before P10 does. The rest of
+  the list below stays at P10.
+- **Every other module is contributed by the system it reports on**, and appears
+  because that system is present rather than because the sample asked. The
+  netgraph (topic 23) is the first: a sample with a connection gets it, and
+  breakout and flappy — both `InMemoryTransport` — get the panel without it.
+  Those two are therefore the check that the composition is real, because a
+  panel that cannot render without a network module is broken and only a
+  connectionless sample proves it.
+- **Switching it on is one thing.** If a sample needs more than that, the
+  finding is about the panel. The failure to avoid is the one `web.rs` already
+  demonstrated: a per-sample surface written out once per game until nobody
+  notices there are four copies.
+
 Surfaces for instrumentation that already exists:
 
 1. **Profiler HUD** — stage 2/3 GPU pass timestamps + CPU frame phases as

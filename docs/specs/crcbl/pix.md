@@ -380,19 +380,34 @@ to 2, forward, repeating forever, with each frame at 100 ms.
 
 ## 9. Not specified here
 
+This document specifies the authoring format and what it bakes to, and stops at
+the PNG and the sidecar. Everything downstream of those two files is somebody
+else's contract. The first three below now have one and it is named; the last
+two are still open questions.
+
 - **Loading.** How a PNG and a sidecar become a texture and a
-  `crcbl_sprite::Sheet` at runtime, including the Aseprite JSON _reader_.
+  `crcbl_sprite::Sheet` at runtime. `crcbl-sprite`'s `load` module, behind the
+  `load` feature: `decode_png` normalises RGB, palette, grey and grey+alpha to
+  tightly packed RGBA8, `read_aseprite_json` is the inverse of §7's writer, and
+  `load` is the pair. `SampleMode` is the one field that does not survive —
+  Aseprite's schema has nowhere to put it, so a loaded sheet gets the default
+  and the caller supplies the mode.
 - **Playback.** Advancing a clip over ticks, and what `pingpong` does at the
-  ends, beyond the sequence given in §4.4.
+  ends beyond the sequence given in §4.4. `crcbl_sprite::Playback` — a bare tick
+  cursor — with the ends pinned by `Clip::steps`: a looping ping-pong's period
+  is `2n - 2` and a one-shot's is `2n - 1`, because a one-shot has to walk home
+  and park rather than stop halfway.
 - **Rendering.** The sprite pass, the two sample modes' shader behaviour, layers
-  and parallax, and how nine-slice insets become geometry.
+  and parallax, and how nine-slice insets become geometry. `crcbl-render`:
+  `SpriteRenderer` and `shaders/sprite.slang` for the pass and the modes,
+  `layers::Parallax` and `LayerStack` for the bands,
+  `nine_slice::NineSliceSource::expand` for the quads.
 - **Layers.** Aseprite's `meta.layers` is not read and `.crpix` has no
-  equivalent. Parallax layers are currently a property of a _drawn sprite_, not
-  of the sheet it came from.
+  equivalent. Parallax layers remain a property of a _drawn sprite_, not of the
+  sheet it came from.
 - **A packed atlas.** Frames are a strip; nothing here forbids a packer later,
-  and the sidecar's per-frame rects already express one.
-- **Reading Aseprite JSON.** §7 specifies what is _written_; the reader that
-  turns a sidecar back into a `Sheet` is owed by the loading slice.
+  and the sidecar's per-frame rects already express one — the reader consumes
+  arbitrary rects, so a packed sidecar would load today.
 
 ## 10. Version history
 

@@ -11,6 +11,16 @@ running the code (probe programs written outside the repo); the rest were
 verified by reading. Anything that could not be confirmed is marked _unverified_
 together with what would confirm it.
 
+**This is a record of that day, not a description of the tree.** It has not been
+amended since it was written and it will not be: `docs/plan/ROADMAP.md` says its
+findings were fixed across eight commits, and later phases have moved code out
+from under others — the breakout `paddle_model` finding, for instance, describes
+a forward pass breakout no longer has at all, having been redrawn as sprites at
+P4B. Line numbers and `path:line` citations are as of 2026-08-01. Read it for
+what was found and how, and read `git log` for what happened next. Patching the
+findings that happen to get noticed would leave a document that is neither a
+record nor current; the honest way to refresh it is to run the review again.
+
 ## Contents
 
 - [Executive summary](#executive-summary)
@@ -1240,11 +1250,9 @@ exists — both documented. No frustum-plane extraction exists in `camera.rs`.
   buffers in hand, a collision silently drops a real update (client keeps stale
   component data with no error path), and hashing both sides is slower than
   `data != baseline_data` for small blobs.
-- **`crates/crcbl-net/src/condition.rs:187 — `reorder_window` is honoured as a
-  boolean** (correctness/YAGNI). Documented as "shuffle up to this many
-  consecutive ready messages", but the code tests `window > 1` and shuffles the
-  entire `ready` vector, so reorder depth is not configurable and scripted tests
-  do not reproduce the window they claim.
+- **`crates/crcbl-net/src/condition.rs:187 — `reorder_window`is honoured as a boolean** (correctness/YAGNI). Documented as "shuffle up to this many consecutive ready messages", but the code tests`window >
+  1`and shuffles the entire`ready` vector, so reorder depth is not configurable
+  and scripted tests do not reproduce the window they claim.
 - **`crates/crcbl-server/src/lib.rs:283` — production `assert!` on a duplicated
   invariant** (correctness). `assert!(self.session.try_reconnect(...))` is
   guarded by a preceding `can_reconnect`; the two functions re-implement the
@@ -2260,8 +2268,11 @@ up. No `unsafe` in any file in scope outside the emitted-code templates.
   `--fail-under-lines`; the TODO says the gate is off until P1 "because every
   crate is empty in P0". The repo is well past P0, so a job that measures 0%
   coverage and reports success is a green check that asserts nothing.
-- **`.github/workflows/**`and`cron.yml:21`— no miri and no sanitizer job, with real`unsafe`in the tree** (ci).`cron.yml`'s comment schedules miri for "when nontrivial unsafe arrives (crcbl-vk at P1)". `crcbl-vk`is present and full of`unsafe`, and neither workflow has a miri, ASan or TSan job. The workspace denies `unsafe_op_in_unsafe_fn`
-  — a lint, not a UB check.
+- **`.github/workflows/**`and`cron.yml:21`— no miri and no sanitizer job, with
+  real`unsafe`in the tree** (ci).`cron.yml`'s comment schedules miri for "when
+  nontrivial unsafe arrives (crcbl-vk at P1)". `crcbl-vk`is present and full
+  of`unsafe`, and neither workflow has a miri, ASan or TSan job. The workspace
+  denies `unsafe_op_in_unsafe_fn` — a lint, not a UB check.
 - **`rust-toolchain.toml:7` — `channel = "stable"` is not a pin, contradicting
   the file's own claim** (ci). The header says "CI installs the same toolchain
   from this file, so local and CI never drift", but `stable` resolves to

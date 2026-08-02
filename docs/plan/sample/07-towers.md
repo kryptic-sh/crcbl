@@ -48,6 +48,15 @@ without needing prediction.
 - Save/resume (topic 14): manual + between-wave autosave; solo and
   dedicated-server co-op (world save server-side, clients rejoin into it — save
   = same snapshot machinery as join-in-progress).
+- **`.crpix` art throughout the 2D layer** (sample rule 11): tower and creep
+  icons, the wave banner, the build menu, the range indicators. As the flagship
+  this is also where skinned buttons (`Button::with_skin`, nine-slice) stop
+  being a `crcbl-vk` golden and become a real UI — a build menu is the first
+  place a button's corners surviving a resize is something a player sees.
+- **Debug panel on, with its network module** (sample rule 4). Towers is the
+  first sample where that module is not decoration: 1–4 players over a real
+  transport is what the netgraph — RTT, jitter, loss, snapshot size, tick-lead —
+  was specified for, and this is the sample that finds out whether it reads.
 
 ## Non-goals (until engine post-MVP)
 

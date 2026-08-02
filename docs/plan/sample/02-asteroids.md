@@ -30,8 +30,17 @@ churn sample — entities spawn and die constantly.
   rebase + broadphase re-insertion (sector-crossing machinery in miniature).
 - Asteroids: 3 sizes, split twice, wave count scales.
 - Score + lives + game-over/restart. Keyboard input.
-- Rendering: flat-shaded meshes or sprites — whatever stage state provides; this
-  sample is not about looks.
+- **Rendering: `.crpix` sprites** (sample rule 11). Ship, three asteroid sizes,
+  bullets — authored as text under `assets/`, baked by `build.rs`, drawn through
+  `SpriteRenderer` with `SampleMode::Pixel`. The earlier "flat-shaded meshes or
+  sprites, whatever stage state provides" is superseded: the sprite system
+  exists, and asteroids is the first sample that gets to start with it rather
+  than be retrofitted onto it. This is also the first real test of rotation
+  through the sprite pass — breakout and flappy draw nothing that turns.
+- **The debug panel on from the first slice** (sample rule 4), rather than added
+  at the end. Asteroids is the first sample built after the panel exists, so it
+  is the evidence that "switch it on" is genuinely one thing; if it is not, that
+  is a finding about the panel, in the same shape as the S1B findings.
 
 ## Non-goals (hard cap)
 

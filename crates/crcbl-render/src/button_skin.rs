@@ -24,7 +24,8 @@
 //! art. Routing it through the UI pass would mean a second bound image in a
 //! second format, a per-quad branch selecting between two samplers, a
 //! UV-carrying draw command that [`DrawList`](crcbl_ui::DrawList) does not have,
-//! and an RGB path in a shader whose Tier B artifact is not even committed yet.
+//! and an RGB path in a shader that would need adding to both of its tier
+//! permutations by hand.
 //!
 //! All of which duplicates a pass that now exists. [`SpriteRenderer`] is an
 //! instanced `Rgba8UnormSrgb` pass with alpha blending and both sample modes,
@@ -55,7 +56,8 @@
 //! them.
 //!
 //! The other half of the join is layout. [`crcbl_ui::Button`] cannot name a
-//! sheet or a [`NineSlice`] — `crcbl-render` depends on `crcbl-ui`, so the
+//! sheet or a [`NineSlice`](crcbl_sprite::NineSlice) — `crcbl-render` depends
+//! on `crcbl-ui`, so the
 //! reverse is a cycle — and it does not need to. It carries the four floats it
 //! needs to lay out *around* the art, as [`SkinInsets`], and
 //! [`ButtonSkin::insets`] reads them straight off the art so the two cannot

@@ -20,6 +20,50 @@ engine's public face and its continuous cross-backend regression test.
 
 ## Status (as of 2026-08-02)
 
+**P4B is complete: pixel art has a pipeline, and both games are drawn with it.**
+Eleven slices merged, from a format nothing could read to two retrofitted
+samples. `crcbl-sprite` gained a reader — `decode_png`, `read_aseprite_json`,
+`load` — so a baked sheet stopped being write-only, and `Playback`, a bare tick
+cursor that answers `frame_index` as a closed form so catching up after a stall
+lands where tick-by-tick would. `crcbl-render` gained `texture::upload_texture`
+(format-agnostic, replacing `ui_pass`'s private R8-only helper whose row pitch
+was correct only because `R8Unorm` makes texels and bytes the same number),
+`SpriteRenderer` and `sprite.slang` (one instance per sprite, batched by sheet
+in submission order, constants from a uniform buffer on every tier so there is
+no second `.slang` to keep in step), `NineSliceSource::expand`, `LayerStack` and
+`Parallax`, and `button_skin` — which draws a skinned button through the sprite
+pass, because the UI atlas is a single-channel glyph mask and a skin is RGBA
+colour art. `crcbl crpix` turns PNG frames into a `.crpix` sheet, for art
+authored anywhere else.
+
+**`SampleMode::Pixel` is sharp bilinear, not nearest**, and that is the decision
+the pipeline turns on. Nearest at a non-integer scale — a 320-wide field across
+a 1366-wide canvas — makes some art pixels four screen pixels across and their
+neighbours five, and the unevenness crawls as the sprite moves. Instead the
+linear blend is squeezed into a band one fragment wide at each texel boundary
+and the sprite's screen rectangle is snapped to whole device pixels.
+
+**Both samples are retrofitted, and `ForwardRenderer` is gone from both
+frames**, taking the HDR scene target, the depth buffer and the tonemap pass
+with it — the forward pass drew exactly one instance, and in each game that
+instance was the player. Flappy has a bird whose three-frame flap restarts on a
+rising vertical velocity rather than free-running, a three-sliced pipe, and
+hills and a ground band on parallax layers; breakout has four bevelled brick
+rows, a paddle, a ball, and a nine-sliced stone court whose wall faces land
+exactly on the colliders the ball bounces off. Every picture in both is `.crpix`
+text under `apps/*/assets/`, baked to PNG + sidecar by a `build.rs`; nothing
+baked is committed, so the text is the only source of truth.
+
+**The pictures are checked against a real driver, not only asserted.** Six
+golden images run the real passes through `crcbl-vk` and read the pixels back:
+`sprite`, `sprite_alpha`, `sprite_pixel`, `sprite_smooth`, `sprite_nine_slice`
+and `button_skin_widths`. `sprite_pixel` is the one that pins the sharp-bilinear
+arithmetic — a `Pixel` sprite at a whole scale is exactly flat inside each
+texel, which no recorder assertion can tell you.
+
+**S1B finding 1 is closed by this work**, and is struck through in the findings
+list below. The other five stand.
+
 **S1B is complete: the demo site carries two games.** Flappy — a bird under
 gravity, one button, and an endless procession of procedurally placed pipes — is
 playable natively and in a browser, and `web/run-browser-e2e.sh` drives it in a
@@ -95,19 +139,20 @@ was intended.
 | **P3** — phys L0  | **done** | `5665da2` overlaps, `cbfd6b1` dynamic BVH refit, `b1924dd` swept-capsule TOI + triggers, `c4db85d` ECS components, `b765640` PhysicsSystem, `a2be1f6` integrator, `6b30532` force providers, `60dd95e` integration loop, `05dd23a` property tests                                                                                                                                                                                                                                                                     |
 | **P4** — UI L0    | **done** | `49ec170` draw-list, `b40ca95` label/button/HUD, `ab17700` `0352112` `510ce31` triangulation, `9f65472` snapshot tests; `1270c72` replay; `264a7fd` crash ring                                                                                                                                                                                                                                                                                                                                                        |
 | **P4A** — audio   | **done** | `6bd33b2` device seam, `a7e94c2` mixer/voices/golden, `912234f` WAV, `2abbd2d` QOA, `916d51f` cue grammar rules 1–4, `bf9a245` clippy                                                                                                                                                                                                                                                                                                                                                                                 |
+| **P4B** — sprites | **done** | `5f0c723` texture upload, `3f7cbd6` sheet reader, `0f2f434` sprite pass, `44837fc` flappy cue counting, `ed92170` sharp bilinear + sprite goldens, `250f287` clip playback, `acd75be` nine-slice + layers, `2d65fb4` skinned buttons, `216ea85` `crcbl crpix`, `37ce45d` flappy art, `7e2458c` breakout art + wing beat                                                                                                                                                                                               |
 | **S1** — breakout | **done** | `d747a84` scaffold, `71d931c` paddle+input, `5989f1b` ball+physics, `495a7fb` bricks+scoring, `ee3bea5` audio+HUD, `fa4e20b` spatial panning, `3bcf327` client interpolation, `a6c2e6b` high score, `ecfd85a` determinism tests, `ab71b1e` input fix, `968b65a` launch fix, `e3fd64d` persistence test, `5f47a12` UI compositing pass                                                                                                                                                                                 |
 | **S1B** — flappy  | **done** | `1de08a6` wgpu device errors, `8411987` bird + gravity + flap, `86bb004` seeded course + treadmill, `0c1991b` collision + score + restart, `69e6624` scrolling camera + HUD, `c898e1a` audio + best score, `c0446be` demo-site publish                                                                                                                                                                                                                                                                                |
 | **P5** — wasm     | **done** | `a61bd26` polled device creation, `b932e28` AudioWorklet output, `325b8ba` wasm32 dependency graph, `9c1b48e` fetch + OPFS storage, `c5c2a13` JS shim + entry point + Pages deploy, `fd0bc23` WGSL across the seam, `df45682` Tier B constants, `33d4dc0` wgpu push-constant capability, `afb4579` wgpu present + offscreen, `e52e28c` cross-backend gate, `4d7c7c8` uniform-control-flow shader fix, `ed3e726` headless-browser gate. Earlier: `84e531b` WebShell, `afd63bf` wasm32 target, `f7d28ad` WGSL artifacts |
 
 ### What exists now
 
-- **Workspace + CI**: 20 crates, 5 apps/support crates. CI is 16 required jobs —
-  fmt, clippy `-D warnings`, rustdoc `-D warnings`, `cargo-machete`,
-  `cargo-deny`, nextest on Linux and cross-platform (macOS + Windows), coverage,
-  a weekly advisory cron, seven e2e suites (Wayland under nested sway, X11 under
-  Xvfb, Vulkan on lavapipe, wgpu on lavapipe under Xvfb, the cross-backend
-  vk↔wgpu image compare, the CLI scaffold, and the shader-manifest check), and a
-  decoder fuzz job.
+- **Workspace + CI**: 22 crates under `crates/`, 4 under `apps/`. CI is 16
+  required jobs — fmt, clippy `-D warnings`, rustdoc `-D warnings`,
+  `cargo-machete`, `cargo-deny`, nextest on Linux and cross-platform (macOS +
+  Windows), coverage, a weekly advisory cron, seven e2e suites (Wayland under
+  nested sway, X11 under Xvfb, Vulkan on lavapipe, wgpu on lavapipe under Xvfb,
+  the cross-backend vk↔wgpu image compare, the CLI scaffold, and the
+  shader-manifest check), and a decoder fuzz job.
 - **`crcbl-core`**: `Handle`/`Pool`, sector-tiled `WorldPos` (`I64Vec3` sectors,
   2^20 m cells), `FrameArena`, `FrameClock` with an injected `TimeSource`, the
   input vocabulary, `SurfaceTarget`, logging.
@@ -283,6 +328,26 @@ was intended.
   compositing pass on top of the tonemap target) and the `ui.slang` shader in
   `crcbl-shaders` (screen-space vertex pulling, push-constant viewport
   transform, glyph atlas sampling).
+- **`crcbl-sprite`** (P4B): the pixel-art pipeline's data half — the `.crpix`
+  parser and baker (`crpix`, `bake`, `colours`, `trace`) that turn hand-written
+  text into a PNG strip plus an Aseprite-schema sidecar, and behind the `load`
+  feature the reader that takes them back apart (`decode_png` normalising RGB,
+  palette, grey and grey+alpha to packed RGBA8; `read_aseprite_json` as §7's
+  exact inverse; `load` as the pair). `Sheet`, `Frame`, `Clip`, `NineSlice`,
+  `SampleMode`, and `Playback` — a tick cursor that holds neither sheet nor
+  clip. No renderer dependency: `docs/specs/crcbl/pix.md` is the format's spec
+  and it stops at the two baked files.
+- **`crcbl-render` sprite stack** (P4B): `SpriteRenderer` — instanced,
+  world-space, alpha-blended quads cut out of registered sheets, one instance
+  per sprite from `SV_InstanceID`, batched by sheet in submission order and
+  nothing sorting behind the caller. `SampleMode::Pixel` is sharp bilinear
+  rather than nearest, carried on the instance rather than in the sampler, so
+  there is one sampler and one pipeline. `NineSliceSource::expand` turns stored
+  insets into up to nine quads that tile the target exactly, stretching and
+  never tiling; `LayerStack`/`Parallax` band them back to front; `button_skin`
+  makes a skinned `crcbl-ui` button nine of them. `texture::upload_texture` is
+  the shared format-agnostic staging upload underneath, and the UI pass now uses
+  it too.
 - **`crcbl-audio`** (P4A): `AudioStream` device seam (cpal native, null for CI),
   audio thread polling at hardware sample rate, `Mixer` with pooled `Voice`s
   (loop, stop, volume), stereo f32 internal format, WAV decoder (mono/stereo
@@ -291,14 +356,16 @@ was intended.
   pitch for behind, elevation pitch for above/below, distance rolloff), and
   golden-buffer test.
 
-**1550 unit/integration tests**, plus 29 Vulkan e2e (run on both radv and
-lavapipe), 33 Wayland e2e, 29 X11 e2e and 1 CLI e2e. The whole workspace suite
-passes with no Vulkan driver present at all, and the shell suites pass under
-32-way CPU contention. The browser half adds two checks that need no browser:
-`web/tools/check-exports.mjs` (Rust's declared symbols == the artifact's exports
-== what the shim calls) and `web/tools/smoke.mjs`, which instantiates the
-deployed artifact under node with every import stubbed and drives the documented
-boot order.
+**1812 unit/integration tests**
+(`cargo nextest run --workspace --all-features --locked`: 1812 passed, 107
+skipped — the skips are the `#[ignore]`d e2e harnesses below), plus 29 Vulkan
+e2e (run on both radv and lavapipe), 33 Wayland e2e, 29 X11 e2e and 1 CLI e2e.
+The whole workspace suite passes with no Vulkan driver present at all, and the
+shell suites pass under 32-way CPU contention. The browser half adds two checks
+that need no browser: `web/tools/check-exports.mjs` (Rust's declared symbols ==
+the artifact's exports == what the shim calls) and `web/tools/smoke.mjs`, which
+instantiates the deployed artifact under node with every import stubbed and
+drives the documented boot order.
 
 ### S1B findings: what a second game found
 
@@ -311,14 +378,18 @@ same workaround, which is the only evidence that distinguishes a gap from a
 preference. None of them were fixed inside the sample: growing the engine is
 what this sample is meant to _reveal_ the need for.
 
-1. **`ForwardRenderer` draws exactly one instance, so both games draw their
-   world through the UI pass.** `begin_frame` takes a single `model: Mat4` and
-   `add_passes` records exactly `draw_indexed(0..index_count, 0, 0..1)`.
-   Breakout put its forty bricks through `crcbl-ui`'s draw list and kept the
-   paddle as the one lit mesh; flappy put its pipes through the same door and
-   kept the bird. Two unrelated games, the same shape, the same reason. **Owed
-   by P7**, which already has instance deltas and indirect draws in scope — this
-   is the consumer evidence for it.
+1. **~~`ForwardRenderer` draws exactly one instance, so both games draw their
+   world through the UI pass.~~ Closed at P4B.** `begin_frame` takes a single
+   `model: Mat4` and `add_passes` records exactly
+   `draw_indexed(0..index_count, 0, 0..1)`. Breakout put its forty bricks
+   through `crcbl-ui`'s draw list and kept the paddle as the one lit mesh;
+   flappy put its pipes through the same door and kept the bird. Two unrelated
+   games, the same shape, the same reason — which is what bought
+   `SpriteRenderer`, an instanced world-space pass, rather than a third
+   workaround. Both samples now draw their worlds through it and neither uses
+   `ForwardRenderer` at all. **P7 still owes the 3D half** — instance deltas,
+   GPU culling and indirect draws; this finding is what says a 2D game could not
+   wait for it.
 
 2. **The browser entry point is per-sample and is the same file twice.**
    `apps/flappy/src/web.rs` is `apps/breakout/src/web.rs` with a different
@@ -450,6 +521,55 @@ records it as the gap it is.
 - The seam does **not** freeze until P5 exit, when a second backend
   (`crcbl-wgpu`) implements it. Changes before then are expected and cheap.
 
+### Standing requirements every sample inherits
+
+These are not items on a list that gets ticked once. They are properties a
+sample is expected to have, and a new sample that lacks one is incomplete rather
+than pending. `sample/00-samples-overview.md` carries them as rules 4 and 11;
+they are restated here because the roadmap is what a phase is planned from.
+
+**1. Every sample ships the debug overlay, and switching it on is one thing.** A
+modular panel: frame timing and FPS on every sample always, network stats on
+every sample that has a connection, and each further system contributing its own
+module rather than the overlay knowing about it. Modular is the load-bearing
+word — a sample turns the panel on and gets whatever the systems it uses
+registered, which is why this does not become a per-sample HUD written twelve
+times the way `web.rs` was written twice.
+
+The frame-timing core is **pulled forward out of P10** and built as the next
+slice, because every sample that already exists wants it and two more are
+planned before P10. What stays at P10 is the rest of
+[07-ui-debug.md](07-ui-debug.md)'s debug suite — inspector, console, culling
+stats, debug-draw controls, UI inspector — and the network module is
+[23-netcode.md](23-netcode.md)'s netgraph (RTT, jitter, loss, send/recv
+bandwidth, snapshot size, resend counts, tick-lead), which lands with it. Both
+docs already name these; this is the same work with an earlier start and a
+stated obligation on samples, not a second plan.
+
+Breakout and flappy are the retrofit consumers, and they are the check that the
+panel is genuinely modular: neither has a network module to show, because both
+run over `InMemoryTransport`, so a panel that cannot render without one is
+broken. Flappy's `Audio::plays` counter already exists for exactly this.
+
+**2. Every sample that should have pixel art uses the sprite system.** Authored
+as `.crpix` text in the repository, baked at build time to PNG + sidecar by the
+sample's `build.rs`, drawn through `SpriteRenderer` with `SampleMode::Pixel`.
+Nothing baked is committed, so the text a reviewer reads is the picture that
+loads — `docs/specs/crcbl/pix.md` is explicit that `.crpix` is a build input.
+
+"Should have" is the whole of the judgement. A sample whose subject is not
+pictures is exempt: **hud** is a widget gallery, **viewer** opens arbitrary
+glTF, **sparks** is a particle workbench, and none of them wants a sprite sheet
+in place of what they exist to show. Every other sample on the ladder is 2D or
+has 2D chrome, and for those "we will draw untextured quads for now" is no
+longer an available answer — it was the answer breakout and flappy both gave,
+and P4B is the cost of unwinding it twice.
+
+The engine-side gaps this obligation is currently paying for are in
+`docs/backlog.md`: `NineSliceSource` has no texels-to-units scale, and the bake
+half of `build.rs` is copied per sample. Both are owed before the third sample,
+for the ordinary reason — two consumers is evidence, three is a habit.
+
 ### How work proceeds (read this before starting a phase)
 
 Phases are cut into **slices** small enough to review in one sitting. Each slice
@@ -546,17 +666,18 @@ gets recorded in the relevant crate's docs rather than worked around silently.
 | **P3** ✅  | `crcbl-phys` slice 1 (L0): box/sphere colliders, BVH, ray/segment, swept-sphere TOI + contact normals                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | 5                 | Physics unit+property suite + debug draw                                           |
 | **P4** ✅  | `crcbl-ui` slice 1: draw-list pass, glyph atlas text, label/button, HUD basics; draw-list snapshot tests; black-box replay ring + crash dump + `crcbl replay` CLI (topic 22)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 7, 12             | Text + score HUD renders through engine                                            |
 | **P4A** ✅ | `crcbl-audio`: device seam (cpal), audio thread, mixer/buses, WAV/QOA, voices, **full spatial cue grammar** (topic 13), server-event wiring, golden-buffer e2e                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | 13                | Grammar-trainer orbit test audible + green e2e                                     |
+| **P4B** ✅ | `crcbl-sprite` load half (`decode_png`, `read_aseprite_json`, `load`, `Playback`); `crcbl-render` sprite stack: `texture::upload_texture`, `SpriteRenderer` + `sprite.slang` (sharp-bilinear `SampleMode::Pixel`), `NineSliceSource::expand`, `LayerStack`/`Parallax`, `button_skin`; `crcbl crpix` (PNG frames → `.crpix`); both samples retrofitted off `ForwardRenderer`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | 3, 6, 11, 12      | Sprite goldens through a real driver; breakout + flappy drawn as `.crpix` art      |
 | **S1** ✅  | **Sample: breakout** — first playable; all deps (P0–P4A) exist. **12 slices merged**: scaffold, paddle+input, ball+physics (swept-sphere CCD), bricks+scoring+game states, audio (sine-wave bounce/brick-break), spatial panning via `compute_cue`, client-interpolated ball state with drift detection, high score persistence via `crcbl_store::write_atomic`, determinism tests, input-queue fix, launch-speed fix, persistence RTT, render-graph UI compositing pass (glyph atlas, per-frame vertex/index upload, alpha-blended on-screen HUD with score/lives/state).                                                                                                                                                                                                                                                                                                                                                                                                   | —                 | Winnable/losable native game with on-screen HUD                                    |
 | **S1B** ✅ | **Sample: flappy** — one-button side-scroller, deliberately smaller than breakout. Needs no engine work past P4A; it exists to answer whether the engine can host a _second_ game without breakout's shape having leaked into the API, and to prove the demo site carries more than one. See [sample/12-flappy.md](sample/12-flappy.md). **Seven slices merged**, listed in the status table above.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | —                 | **Done.** Playable native + browser; the findings note is above                    |
 | **P5**     | **Wasm early**: `crcbl-wgpu` Tier B backend, canvas/rAF platform, Slang→WGSL, `FetchSource`-lite, AudioWorklet output; cross-backend image compare (vk↔wgpu); **GitHub Pages demo site + CI deploy**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | 10 (part), 12, 13 | **breakout playable in browser at the Pages URL**                                  |
 | **P6**     | Phys slice 2: dynamic BVH churn, overlap queries, L1 integrator start (thrust, damping)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | 5                 |                                                                                    |
-| **S2**     | **Sample: asteroids**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | —                 | Native + published web demo                                                        |
+| **S2**     | **Sample: asteroids** — first sample built after the standing requirements, so it is the first to get `.crpix` art and the debug panel from its first slice rather than as a retrofit                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | —                 | Native + published web demo, sprite art, debug panel on                            |
 | **P6A**    | Wasm module host (topic 16): `wasmtime` behind `WasmHost` seam (NaN canonicalization, fuel limits), Rust guest SDK, component schemas                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | 16                | breakout-as-`.wasm` equivalence gate: state hash == static build, native + browser |
 | **P7**     | GPU-driven rendering full: geometry pools, instance deltas, GPU culling, indirect draws — Tier A _and_ Tier B paths; **HDR target + tonemap + FXAA; sun CSM shadows** (culling-integrated, topic 18); **LOD mechanism**: chains + cull-shader selection + hand-LOD import (topic 25)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | 3                 | 10k-instance sandbox, flat CPU cost, both backends                                 |
 | **P8**     | Phys slice 3: batch queries at scale, sleeping/islands pressure; **crcbl-jobs core** (topic 21): work-stealing pool, par_for deterministic mode, mailbox/ring primitives, ECS parallel schedule, pipeline threads + timeline profiler; threads-1-vs-N hash test in CI                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | 5                 |                                                                                    |
 | **S3**     | **Sample: horde**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | —                 | 10k enemies @60; perf numbers recorded; web demo (smaller budget)                  |
 | **P9**     | Assets + scenes: `AssetSource` (Dir/Fetch), glTF import, RON scene format, hot reload; **material templates+instances + render↔surface link + `mat check` lint** (topic 37); `crcbl import`; glTF corpus e2e                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 6, 11, 12         | Sponza-class scene through full path                                               |
-| **P10**    | UI slice 2 + debug tools: widget set, panels/splitters, profiler HUD, inspector, console, **UI inspector**; music streaming + ducking + cue inspector; audio occlusion; **bloom** (18); **gamepad evdev+web + rebind UI** (19); **UI focus + spatial pad/kb navigation** (7 — arrows/WASD 1:1 dpad); **time-scrub debugger + replay browser + CI determinism verifier** (22)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 7, 13             | Debug overlay live over loaded scene                                               |
+| **P10**    | UI slice 2 + debug tools: widget set, panels/splitters, the rest of the profiler HUD (its frame-timing/FPS core is pulled forward before S2 — see the standing requirements), inspector, console, **UI inspector**; music streaming + ducking + cue inspector; audio occlusion; **bloom** (18); **gamepad evdev+web + rebind UI** (19); **UI focus + spatial pad/kb navigation** (7 — arrows/WASD 1:1 dpad); **time-scrub debugger + replay browser + CI determinism verifier** (22)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | 7, 13             | Debug overlay live over loaded scene                                               |
 | **S4**     | **Samples: hud complete + viewer** (hud skeleton exists since P4 as the UI fixture; viewer = native tool, web build stretch)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | —                 | Widget gallery + themes golden-framed; arbitrary glTF opens, panels work           |
 | **P11**    | Phys slice 4 (L1 full): sector frames + SOI, gravity/drag/atmosphere, Kepler on-rails, bubbles, timewarp                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | 5                 | Physics stage exit nears                                                           |
 | **S5**     | **Sample: orbit** — physics acceptance test                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | —                 | Full mission; **flashiest web demo**                                               |
@@ -609,7 +730,13 @@ slice tables):
   score); OPFS wasm at P5; settings UI at P10; co-op world save/resume proven in
   towers (S6).
 - **Debug tools** (in [07-ui-debug.md](07-ui-debug.md)) — each system lands with
-  its overlay/inspector hooks.
+  its overlay/inspector hooks, and contributes a **module** to the one debug
+  panel every sample switches on. Frame timing and FPS are unconditional; the
+  netgraph appears when the sample has a connection. See the standing
+  requirements above; the frame-timing core is pulled forward out of P10.
+- **Pixel art** ([specs/crcbl/pix.md](../specs/crcbl/pix.md)) — `.crpix` text
+  baked at build time and drawn through `SpriteRenderer`. Every sample that
+  should have pixel art uses it; see the standing requirements above.
 
 ## Notes
 

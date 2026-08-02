@@ -47,6 +47,14 @@ No gameplay, no scene rendering behind the HUD beyond a static backdrop, no
 widget additions that no other consumer needs (the gallery shows what exists; it
 doesn't drive speculative widgets — that's the reverse of the rule).
 
+**Exempt from sample rule 11** (`.crpix` art through the sprite pass): this
+sample's subject _is_ the widget system, and a sprite sheet in front of it would
+be showing something other than what it exists to show. The one place art does
+belong is skinned buttons — `Button::with_skin` takes nine-slice insets and the
+gallery is where every state of a skinned widget is on one screen at once, so
+the skin sheets themselves are `.crpix`. Rule 4's debug panel still applies, and
+here it is the dogfood case: the panel is built out of these widgets.
+
 ## Milestones
 
 1. **P4 skeleton**: HUD page with the slice-1 primitives (blocks, spans, text,
