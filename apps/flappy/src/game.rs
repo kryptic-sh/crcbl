@@ -101,6 +101,85 @@ const BIRD_COLLIDER: ColliderComponent = ColliderComponent::Sphere {
     is_trigger: false,
 };
 
+/// Where the first pipe stands. Far enough ahead that the course is visible
+/// before the player commits to the first flap.
+pub const FIRST_PIPE_X: f64 = 12.0;
+
+/// Distance between one pipe and the next.
+///
+/// At [`SCROLL_SPEED`] that is 1.5 s between gaps, which is about four flaps —
+/// enough to correct a bad line, not enough to coast.
+pub const PIPE_SPACING: f64 = 9.0;
+
+/// Half the width of a pipe.
+pub const PIPE_HALF_WIDTH: f64 = 0.8;
+
+/// Half the height of the hole through a pipe.
+///
+/// 1.7 makes the gap 3.4 units against a bird 0.7 across, so the opening is
+/// nearly five bird-widths. Tight enough to need aiming, wide enough that the
+/// first-time visitor the demo site sends here clears one.
+pub const GAP_HALF_HEIGHT: f64 = 1.7;
+
+/// How far from the middle of the band a gap's centre may be placed.
+///
+/// Bounded rather than free so that every gap is *reachable*: a gap flush with
+/// the ceiling cannot be flown into, because the lid stops the climb before the
+/// bird is high enough. `WORLD_CEILING - GAP_HALF_HEIGHT` would be the flush
+/// case, so this leaves a bird's height of clearance on each side.
+pub const GAP_CENTRE_RANGE: f64 = WORLD_CEILING - GAP_HALF_HEIGHT - 1.0;
+
+/// How far ahead of the bird pipes are built.
+///
+/// Comfortably past the edge of any camera the sample will use, so a pipe is
+/// never seen appearing.
+const SPAWN_AHEAD: f64 = 34.0;
+
+/// How far behind the bird a pipe survives before it is destroyed.
+const CULL_BEHIND: f64 = 10.0;
+
+/// The x of pipe `index`.
+#[must_use]
+pub fn pipe_x(index: u32) -> f64 {
+    FIRST_PIPE_X + f64::from(index) * PIPE_SPACING
+}
+
+/// The centre of the gap through pipe `index` of the course `seed` describes.
+///
+/// **A pure function, not a running generator.** The obvious way to place gaps
+/// is to keep an RNG in the simulation and pull the next value each time a pipe
+/// is spawned, and it is the wrong way here: the value would then depend on how
+/// many pipes had been spawned so far, which depends on where the bird got to,
+/// which is exactly the sort of hidden state that makes two runs of the same
+/// script diverge. Hashing the index instead means pipe 40 is in the same place
+/// whether it was the fortieth spawned or the first — and it is why the client
+/// and the server agree about the course without a byte of it being sent.
+///
+/// splitmix64's finaliser over `seed` and `index`, taken as 53 bits of mantissa.
+#[must_use]
+pub fn gap_centre(seed: u64, index: u32) -> f64 {
+    let mut z = seed.wrapping_add(u64::from(index).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    // The top 53 bits are the ones splitmix64 mixes best, and 53 is exactly an
+    // f64's mantissa, so this is a uniform value in [0, 1) with nothing thrown
+    // away twice.
+    let unit = (z >> 11) as f64 / (1u64 << 53) as f64;
+    (unit * 2.0 - 1.0) * GAP_CENTRE_RANGE
+}
+
+/// The seed the `runs`-th course of a game seeded with `seed` is laid out from.
+///
+/// A restart changes the course, because a game that dealt the same hand every
+/// time would be memorised rather than played. It changes it *deterministically*
+/// — the run counter is simulation state like any other — so a recorded script
+/// replayed from a fresh game still meets the same pipes in the same places.
+#[must_use]
+fn course_seed(seed: u64, runs: u32) -> u64 {
+    seed ^ u64::from(runs).wrapping_mul(0xD1B5_4A32_D192_ED03)
+}
+
 const ACTION_FLAP: &str = "flap";
 const ACTION_RESTART: &str = "restart";
 
@@ -148,6 +227,26 @@ impl Intent {
 // Shared logic — owned jointly by the facade and the server-side module
 // ---------------------------------------------------------------------------
 
+/// One pipe: two boxes with a hole between them.
+///
+/// Two entities rather than one, because a collider is per entity and a pipe is
+/// not a convex shape. The pair is created and destroyed together and nothing
+/// else ever refers to one half.
+#[derive(Clone, Copy, Debug)]
+struct Pipe {
+    index: u32,
+    gap_centre: f64,
+    top: Entity,
+    bottom: Entity,
+}
+
+/// What the renderer needs to draw one pipe.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PipeView {
+    pub x: f64,
+    pub gap_centre: f64,
+}
+
 /// The mutable game state the server-side module owns.
 #[derive(Debug)]
 struct GameLogic {
@@ -158,6 +257,20 @@ struct GameLogic {
     bird_pos: DVec3,
     bird_vel: DVec3,
     state: GameState,
+    /// The pipes that currently exist, oldest first.
+    pipes: Vec<Pipe>,
+    /// The next pipe index to build. Only ever goes up within a run, so the
+    /// treadmill cannot build the same pipe twice.
+    next_index: u32,
+    /// The seed the whole game was started with. The course actually in play is
+    /// [`course_seed`] of this and [`Self::runs`].
+    seed: u64,
+    /// How many runs have been started. Part of the simulation, so a replay
+    /// meets the same courses in the same order.
+    runs: u32,
+    /// Live pipe positions for the renderer, reused rather than rebuilt so a
+    /// steady-state tick does not allocate.
+    pipe_views: Vec<PipeView>,
     /// Ticks the module has actually run. The facade asserts this advances by
     /// exactly one per [`Game::tick`].
     ticks: u64,
@@ -166,6 +279,11 @@ struct GameLogic {
 impl GameLogic {
     fn reset_run(&mut self) {
         self.state = GameState::WaitingToStart;
+    }
+
+    /// The seed of the course in play.
+    fn course(&self) -> u64 {
+        course_seed(self.seed, self.runs)
     }
 }
 
@@ -264,18 +382,65 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
         });
     }
 
+    advance_course(logic, world);
     refresh_render_state(logic, world);
 }
 
-/// Puts the run back to its opening position.
+/// Builds the pipes that have come into range and destroys the ones that have
+/// gone out of it behind the bird.
+///
+/// **The treadmill, and the only place entities are created or destroyed after
+/// start-up.** Breakout spawns its whole world once and then only ever removes
+/// from it; this runs forever, at a steady couple of entities a second, which is
+/// what makes it the first legible test of slot recycling under churn.
+fn advance_course(logic: &mut GameLogic, world: &mut World) {
+    let bird_x = logic.bird_pos.x;
+    let seed = logic.course();
+
+    // Build forward. `next_index` never rewinds inside a run, so a pipe cannot
+    // be built twice however the bird moves.
+    while pipe_x(logic.next_index) <= bird_x + SPAWN_AHEAD {
+        let pipe = spawn_pipe(world, seed, logic.next_index);
+        logic.pipes.push(pipe);
+        logic.next_index += 1;
+    }
+
+    // Cull behind. Retained in place rather than filtered into a new vector: the
+    // list is short and ordered, and the whole point of this function is that a
+    // long run does not allocate.
+    let cutoff = bird_x - CULL_BEHIND;
+    let mut removed = Vec::new();
+    logic.pipes.retain(|pipe| {
+        let alive = pipe_x(pipe.index) >= cutoff;
+        if !alive {
+            removed.push(*pipe);
+        }
+        alive
+    });
+    for pipe in removed {
+        despawn_pipe(world, pipe);
+    }
+}
+
+/// Puts the run back to its opening position, on a course that is not the one
+/// just played.
 fn restart(logic: &mut GameLogic, world: &mut World) {
+    for pipe in std::mem::take(&mut logic.pipes) {
+        despawn_pipe(world, pipe);
+    }
+    logic.next_index = 0;
+    logic.runs = logic.runs.wrapping_add(1);
     logic.reset_run();
     let bird = logic.bird;
     with_physics(world, |phys| park_bird(phys, bird));
+    // From the parked position, so the opening course is the same whatever the
+    // bird was doing when the run ended.
+    logic.bird_pos = BIRD_START;
+    advance_course(logic, world);
 }
 
 /// Copies the authoritative bird state the renderer needs out of the physics
-/// world.
+/// world, and the course alongside it.
 fn refresh_render_state(logic: &mut GameLogic, world: &mut World) {
     let bird = logic.bird;
     let state = with_physics(world, |phys| {
@@ -288,6 +453,14 @@ fn refresh_render_state(logic: &mut GameLogic, world: &mut World) {
         logic.bird_pos = position;
         logic.bird_vel = velocity;
     }
+
+    logic.pipe_views.clear();
+    logic
+        .pipe_views
+        .extend(logic.pipes.iter().map(|pipe| PipeView {
+            x: pipe_x(pipe.index),
+            gap_centre: pipe.gap_centre,
+        }));
 }
 
 // ---------------------------------------------------------------------------
@@ -304,6 +477,79 @@ fn with_physics<R>(world: &mut World, f: impl FnOnce(&mut PhysicsSystem) -> R) -
         }
     }
     None
+}
+
+/// Builds the two boxes of pipe `index` and returns the pair.
+///
+/// The halves reach a long way past the ceiling and the floor rather than
+/// stopping at them: a bird that clears the lid must still not be able to fly
+/// over a pipe, and a box that ended at [`WORLD_CEILING`] would let it.
+fn spawn_pipe(world: &mut World, seed: u64, index: u32) -> Pipe {
+    let centre = gap_centre(seed, index);
+    let x = pipe_x(index);
+    let far = 20.0;
+
+    let top_bottom = centre + GAP_HALF_HEIGHT;
+    let bottom_top = centre - GAP_HALF_HEIGHT;
+    let top = spawn_static_box(
+        world,
+        DVec3::new(x, (top_bottom + WORLD_CEILING + far) / 2.0, 0.0),
+        DVec3::new(
+            PIPE_HALF_WIDTH,
+            (WORLD_CEILING + far - top_bottom) / 2.0,
+            1.0,
+        ),
+    );
+    let bottom = spawn_static_box(
+        world,
+        DVec3::new(x, (bottom_top + WORLD_FLOOR - far) / 2.0, 0.0),
+        DVec3::new(
+            PIPE_HALF_WIDTH,
+            (bottom_top - (WORLD_FLOOR - far)) / 2.0,
+            1.0,
+        ),
+    );
+
+    Pipe {
+        index,
+        gap_centre: centre,
+        top,
+        bottom,
+    }
+}
+
+/// Destroys both halves of a pipe, in the physics world and in the ECS.
+///
+/// Both, and in that order. A collider left behind when the entity goes is a
+/// wall the player cannot see, which is the failure mode this treadmill would
+/// produce a hundred times a minute.
+fn despawn_pipe(world: &mut World, pipe: Pipe) {
+    with_physics(world, |phys| {
+        phys.remove_entity(pipe.top);
+        phys.remove_entity(pipe.bottom);
+    });
+    world.despawn(pipe.top);
+    world.despawn(pipe.bottom);
+}
+
+/// Spawns a kinematic box collider at `centre`.
+fn spawn_static_box(world: &mut World, centre: DVec3, half_extents: DVec3) -> Entity {
+    let entity = world.spawn();
+    let transform = Transform::from_position(centre);
+    with_physics(world, |phys| {
+        phys.set_body(entity, RigidBody::new_kinematic());
+        phys.set_transform(entity, transform);
+        phys.set_collider(
+            entity,
+            &ColliderComponent::Box {
+                offset: DVec3::ZERO,
+                half_extents,
+                is_trigger: false,
+            },
+            &transform,
+        );
+    });
+    entity
 }
 
 /// Returns the bird to the start, stationary, and re-seats its collider there.
@@ -326,11 +572,23 @@ fn set_velocity(phys: &mut PhysicsSystem, entity: Entity, velocity: DVec3) {
 // Game — the client-side facade
 // ---------------------------------------------------------------------------
 
+/// The course every game is laid out from unless a caller picks another.
+///
+/// A constant rather than "whatever the clock said", so the demo everyone plays
+/// is the demo the tests describe, and a bug report can name a pipe.
+pub const DEFAULT_SEED: u64 = 0x666C_6170_7079_0001;
+
 /// Everything the renderer needs for one frame, in world space.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+///
+/// Filled through [`Game::render_state`], which reuses the caller's `pipes`
+/// allocation — the treadmill hands over a fresh list every frame forever, and
+/// a per-frame `Vec` for it is the sort of thing that only shows up in a
+/// profile.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RenderState {
     pub bird: DVec3,
     pub bird_velocity: DVec3,
+    pub pipes: Vec<PipeView>,
     pub state: Option<GameState>,
 }
 
@@ -394,6 +652,24 @@ impl Game {
     ///
     /// If `tick_hz` is zero.
     pub fn new(tick_hz: u32) -> Result<Self, GameError> {
+        Self::with_seed(tick_hz, DEFAULT_SEED)
+    }
+
+    /// The same, on a named course.
+    ///
+    /// `seed` decides where every gap in every run of this game will be — see
+    /// [`gap_centre`] — so two games built with the same seed and fed the same
+    /// input are the same game, which is what the determinism tests rest on.
+    ///
+    /// # Errors
+    ///
+    /// [`GameError::Server`] if the operating system would not give the server
+    /// the entropy for a resume credential.
+    ///
+    /// # Panics
+    ///
+    /// If `tick_hz` is zero.
+    pub fn with_seed(tick_hz: u32, seed: u64) -> Result<Self, GameError> {
         assert!(tick_hz > 0, "tick rate must be positive");
         let mut world = World::new();
 
@@ -432,8 +708,21 @@ impl Game {
             bird_pos: BIRD_START,
             bird_vel: DVec3::ZERO,
             state: GameState::WaitingToStart,
+            pipes: Vec::new(),
+            next_index: 0,
+            seed,
+            runs: 0,
+            pipe_views: Vec::new(),
             ticks: 0,
         }));
+
+        // The opening stretch of course, before the first tick: the player is
+        // looking at the game while deciding whether to press anything, and an
+        // empty screen that fills in on the first flap reads as a bug.
+        {
+            let mut logic = lock(&shared);
+            advance_course(&mut logic, &mut world);
+        }
 
         let (server_transport, client_transport) = InMemoryTransport::pair();
         let mut server =
@@ -567,14 +856,39 @@ impl Game {
     }
 
     /// Everything the renderer draws, in world space.
-    #[must_use]
-    pub fn render_state(&self) -> RenderState {
+    ///
+    /// `out` is reused across frames so a steady-state frame does not allocate
+    /// a fresh pipe list.
+    pub fn render_state(&self, out: &mut RenderState) {
         let logic = lock(&self.shared);
-        RenderState {
-            bird: logic.bird_pos,
-            bird_velocity: logic.bird_vel,
-            state: Some(logic.state),
-        }
+        out.bird = logic.bird_pos;
+        out.bird_velocity = logic.bird_vel;
+        out.pipes.clear();
+        out.pipes.extend_from_slice(&logic.pipe_views);
+        out.state = Some(logic.state);
+    }
+
+    /// The course in play, for a caller that wants to name a pipe — a bug
+    /// report, a replay header, or a test.
+    #[must_use]
+    pub fn course_seed(&self) -> u64 {
+        lock(&self.shared).course()
+    }
+
+    /// The pipes that exist right now, nearest first.
+    #[must_use]
+    pub fn pipes(&self) -> Vec<PipeView> {
+        lock(&self.shared).pipe_views.clone()
+    }
+
+    /// How many entities the simulation is holding.
+    ///
+    /// A number worth being able to see: this game creates and destroys
+    /// entities forever, and one that climbs steadily is the whole failure mode
+    /// the treadmill has to avoid.
+    #[must_use]
+    pub fn entity_count(&mut self) -> usize {
+        self.server.world_mut().entity_count()
     }
 }
 
@@ -674,6 +988,15 @@ mod tests {
             (tick, KeyCode::Space, true),
             (tick + 1, KeyCode::Space, false),
         ]
+    }
+
+    /// A player who keeps flapping: a press every twelve ticks, for long enough
+    /// to cover any run in this suite.
+    fn fly() -> Vec<(u64, KeyCode, bool)> {
+        (0..3000)
+            .step_by(12)
+            .flat_map(|tick| flap_at(tick as u64))
+            .collect()
     }
 
     /// The bird does not move until the player asks it to. Without this, a page
@@ -881,6 +1204,224 @@ mod tests {
             "the bird should be held against the lid, not somewhere below it: {}",
             harness.game.bird.y
         );
+    }
+
+    // ---- the course ---------------------------------------------------------
+
+    /// Two games told the same seed lay out the same course, pipe for pipe.
+    ///
+    /// The property everything else about the pipes rests on: the client and
+    /// the server agree about where the gaps are without a byte of the course
+    /// being sent, and a replay meets the pipes the recording met.
+    #[test]
+    fn the_same_seed_lays_out_the_same_course() {
+        for seed in [0, 1, DEFAULT_SEED, u64::MAX] {
+            let first: Vec<f64> = (0..500).map(|i| gap_centre(seed, i)).collect();
+            let second: Vec<f64> = (0..500).map(|i| gap_centre(seed, i)).collect();
+            assert_eq!(first, second, "seed {seed} is not a function of its index");
+        }
+    }
+
+    /// Different seeds are different courses. Without this the seed would be
+    /// decoration and every game would be the same game.
+    #[test]
+    fn different_seeds_lay_out_different_courses() {
+        let a: Vec<f64> = (0..100).map(|i| gap_centre(1, i)).collect();
+        let b: Vec<f64> = (0..100).map(|i| gap_centre(2, i)).collect();
+        let shared = a.iter().zip(&b).filter(|(x, y)| x == y).count();
+        assert!(
+            shared < 5,
+            "{shared} of 100 gaps coincided between two seeds"
+        );
+    }
+
+    /// **Every gap can be flown into.** The ceiling stops a climb, so a gap
+    /// placed flush against it is one the bird can never reach — a course that
+    /// is not merely hard but impossible, and one no amount of playtesting
+    /// would find if it were the four-hundredth pipe.
+    #[test]
+    fn every_gap_the_generator_can_produce_is_reachable() {
+        for seed in [0, 7, DEFAULT_SEED, u64::MAX] {
+            for index in 0..2000 {
+                let centre = gap_centre(seed, index);
+                assert!(
+                    centre + GAP_HALF_HEIGHT < WORLD_CEILING,
+                    "seed {seed} pipe {index}: the gap runs into the lid at {centre}"
+                );
+                assert!(
+                    centre - GAP_HALF_HEIGHT > WORLD_FLOOR,
+                    "seed {seed} pipe {index}: the gap runs into the floor at {centre}"
+                );
+            }
+        }
+    }
+
+    /// The generator uses the whole band it is allowed rather than clustering in
+    /// the middle. A course of near-identical gaps is one flap held down.
+    #[test]
+    fn the_generator_uses_the_whole_band() {
+        let mut lowest = f64::INFINITY;
+        let mut highest = f64::NEG_INFINITY;
+        for index in 0..2000 {
+            let centre = gap_centre(DEFAULT_SEED, index);
+            lowest = lowest.min(centre);
+            highest = highest.max(centre);
+        }
+        assert!(
+            lowest < -GAP_CENTRE_RANGE * 0.9 && highest > GAP_CENTRE_RANGE * 0.9,
+            "the gaps only ever fell between {lowest} and {highest}"
+        );
+    }
+
+    /// A game has a course before anybody presses anything. A screen that fills
+    /// in on the first flap reads as a bug.
+    #[test]
+    fn the_course_is_laid_out_before_the_first_tick() {
+        let harness = Harness::new(60, 60);
+        let pipes = harness.game.pipes();
+        assert!(!pipes.is_empty(), "no pipes at all");
+        assert_eq!(pipes[0].x, FIRST_PIPE_X);
+        let furthest = pipes.last().expect("non-empty").x;
+        assert!(
+            furthest <= SPAWN_AHEAD && furthest + PIPE_SPACING > SPAWN_AHEAD,
+            "the course should reach exactly as far ahead as the window allows, \
+             not {furthest}"
+        );
+    }
+
+    /// Pipes are built ahead of the bird and destroyed behind it, forever.
+    #[test]
+    fn pipes_are_built_ahead_of_the_bird_and_destroyed_behind_it() {
+        let mut harness = Harness::new(60, 60);
+        harness.run_ticks(600, &fly());
+
+        let bird = harness.game.bird.x;
+        assert!(bird > 40.0, "the bird has to actually travel: {bird}");
+
+        let pipes = harness.game.pipes();
+        assert!(!pipes.is_empty(), "the course ran out from under the bird");
+        for pipe in &pipes {
+            assert!(
+                pipe.x >= bird - CULL_BEHIND - PIPE_SPACING,
+                "a pipe at {} survived well behind a bird at {bird}",
+                pipe.x
+            );
+            assert!(
+                pipe.x <= bird + SPAWN_AHEAD + PIPE_SPACING,
+                "a pipe at {} was built far beyond a bird at {bird}",
+                pipe.x
+            );
+        }
+        assert!(
+            pipes
+                .iter()
+                .all(|p| p.x + PIPE_HALF_WIDTH > bird - CULL_BEHIND - PIPE_SPACING),
+            "pipes behind the cutoff are still in the world"
+        );
+    }
+
+    /// **A run that goes on forever must not grow forever.** The treadmill
+    /// creates and destroys a couple of entities a second; if the destruction
+    /// half were missing, the world would climb steadily and nothing else in
+    /// this suite would notice.
+    #[test]
+    fn a_long_run_keeps_the_world_the_same_size() {
+        // One bird plus both halves of every pipe in the window, which is
+        // `CULL_BEHIND + SPAWN_AHEAD` wide and therefore holds at most this many
+        // — the count breathes by one pipe as the window slides, so a ceiling is
+        // the honest assertion and a fixed number would not be.
+        let window = ((CULL_BEHIND + SPAWN_AHEAD) / PIPE_SPACING).floor() as usize + 1;
+        let ceiling = 1 + 2 * window;
+
+        let mut harness = Harness::new(60, 60);
+        let script = fly();
+        let mut worst = 0;
+        for step in 1..=40 {
+            harness.run_ticks(step * 60, &script);
+            worst = worst.max(harness.game.entity_count());
+        }
+
+        let travelled = harness.game.bird.x;
+        assert!(
+            travelled > 150.0,
+            "the run has to pass many pipes to mean anything: x = {travelled}"
+        );
+        let built = (travelled + SPAWN_AHEAD - FIRST_PIPE_X) / PIPE_SPACING;
+        assert!(
+            built > 20.0,
+            "only {built} pipes were ever built, which is not enough churn to test"
+        );
+        assert!(
+            worst <= ceiling,
+            "the world peaked at {worst} entities against a window that holds {ceiling}, \
+             so pipes are being built and never destroyed"
+        );
+    }
+
+    /// The course a run meets does not depend on how often the frame loop asked
+    /// for a tick.
+    #[test]
+    fn the_course_is_the_same_at_every_frame_rate() {
+        let mut reference: Option<Vec<PipeView>> = None;
+        for frame_hz in [20, 60, 240] {
+            let mut harness = Harness::new(frame_hz, 60);
+            harness.run_ticks(600, &fly());
+            let pipes = harness.game.pipes();
+            match &reference {
+                None => {
+                    assert!(pipes.len() > 2, "too few pipes to compare");
+                    reference = Some(pipes);
+                }
+                Some(expected) => {
+                    assert_eq!(&pipes, expected, "{frame_hz} fps met a different course");
+                }
+            }
+        }
+    }
+
+    /// A restart deals a different course. A game that replayed the same hand
+    /// every time would be memorised rather than played.
+    #[test]
+    fn a_restart_deals_a_different_course() {
+        let mut harness = Harness::new(60, 60);
+        let first = harness.game.pipes();
+
+        harness.game.key_event(KeyCode::KeyR, true);
+        harness.game.tick();
+        let second = harness.game.pipes();
+
+        assert_eq!(
+            first.len(),
+            second.len(),
+            "the same stretch of course should be laid out"
+        );
+        assert_eq!(first[0].x, second[0].x, "and start in the same place");
+        assert_ne!(
+            first, second,
+            "a restart re-dealt the identical course, so the seed advance did nothing"
+        );
+    }
+
+    /// …and it deals a *predictable* different course. The run counter is
+    /// simulation state, so a recorded script replayed from a fresh game meets
+    /// the same pipes on its second run as the recording did on its second run.
+    #[test]
+    fn two_games_with_one_seed_agree_about_every_course() {
+        let course = |restarts: u32| {
+            let mut harness = Harness::new(60, 60);
+            for _ in 0..restarts {
+                harness.game.key_event(KeyCode::KeyR, true);
+                harness.game.tick();
+            }
+            harness.game.pipes()
+        };
+        for restarts in 0..4 {
+            assert_eq!(
+                course(restarts),
+                course(restarts),
+                "run {restarts} was not reproducible"
+            );
+        }
     }
 
     /// A restart puts the run back to a bird that has not moved, whatever it was
