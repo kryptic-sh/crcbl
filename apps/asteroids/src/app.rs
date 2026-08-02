@@ -1038,9 +1038,16 @@ mod tests {
     use crcbl::shell::{ButtonState as PointerState, HeadlessShell, PhysicalPoint, ShellBackend};
     use crcbl::ui::draw_list::DrawCommand;
 
+    /// Options every test in this module builds its loop from.
+    ///
+    /// `Null` is not a detail: `headless` only says "no window", and without a
+    /// backend named here the loop picks the real one and fails to start on any
+    /// machine with no Vulkan driver — which is every plain CI runner. Breakout
+    /// and flappy pin it for the same reason.
     fn headless(frames: u64) -> Options {
         Options {
             headless: true,
+            backend: Some(GpuBackend::Null),
             frames: Some(frames),
             ..Options::default()
         }
