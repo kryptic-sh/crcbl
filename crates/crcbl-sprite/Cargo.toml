@@ -1,0 +1,18 @@
+[package]
+name = "crcbl-sprite"
+description = "Crucible sprite sheets: frames, animation clips and nine-slice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# **No GPU, no I/O, no image codec.** This crate is the *description* of a sprite
+# sheet and the parser for the text form the samples author their art in;
+# turning that into pixels is `crcbl-render`'s job and reading a PNG is the
+# caller's. Keeping it free of both is what lets a build script depend on it
+# without pulling a renderer into `build.rs`, and what makes every rule below
+# testable without a device.
+[dependencies]
+
+[lints]
+workspace = true
