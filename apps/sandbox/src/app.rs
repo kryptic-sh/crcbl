@@ -62,8 +62,10 @@ use crcbl::prelude::*;
 use crcbl::shell::{
     DisplayMode, LogicalSize, ShellBackend as Backend, WindowId, open, open_backend,
 };
-use crcbl::ui::DebugOverlay;
 use crcbl::ui::draw_list::DrawList;
+use crcbl::ui::{DebugOverlay, PointerInput};
+
+use crate::menu::{MenuAction, Menus};
 
 use crate::gpu::{FrameOutcome, Gpu, GpuError};
 
@@ -85,6 +87,17 @@ pub const PAUSE_KEY: KeyCode = KeyCode::Escape;
 ///
 /// F11, the desktop convention.
 pub const FULLSCREEN_KEY: KeyCode = KeyCode::F11;
+
+/// The keys the pause menu takes for itself while it is on screen.
+///
+/// The same three in every sample, for the reason F3, Escape and F11 are the
+/// same in every sample. The sandbox binds nothing else at all, so here they
+/// collide with nothing.
+pub const MENU_UP_KEY: KeyCode = KeyCode::ArrowUp;
+/// See [`MENU_UP_KEY`].
+pub const MENU_DOWN_KEY: KeyCode = KeyCode::ArrowDown;
+/// See [`MENU_UP_KEY`].
+pub const MENU_ACTIVATE_KEY: KeyCode = KeyCode::Enter;
 
 /// Which projection the camera uses.
 ///
@@ -310,6 +323,14 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
     /// Whether the simulation is stopped. See [`Loop::frame`]'s tick loop for
     /// what a paused frame does to the accumulator.
     paused: bool,
+    /// The pause menu, and whether it is on screen.
+    menus: Menus,
+    /// Where the pointer was last seen, in framebuffer pixels. `None` until it
+    /// has been inside the window, so the menu does not open with a phantom
+    /// cursor at the origin.
+    pointer: Option<crcbl::math::Vec2>,
+    /// Whether the primary pointer button is down — press capture spans frames.
+    pointer_held: bool,
     /// Whether the window system was last seen honouring the display mode this
     /// loop asked for, so a refusal is logged when it happens rather than every
     /// frame afterwards.
@@ -425,6 +446,9 @@ impl<S: Shell + ?Sized> Loop<S> {
             draw_list: DrawList::new(),
             debug: DebugOverlay::with_visible(options.debug_overlay_visible()),
             paused: false,
+            menus: Menus::new(),
+            pointer: None,
+            pointer_held: false,
             mode_honoured: true,
             frames: 0,
             ticks: 0,
@@ -462,27 +486,126 @@ impl<S: Shell + ?Sized> Loop<S> {
         // The sink borrows `pending` mutably while `self.shell` is borrowed
         // mutably too, which is exactly why replies (`reply_close_request`,
         // `resize`) are recorded here and acted on below rather than inline.
+        // The pointer's three facts for this frame. `pointer_pos` starts at what
+        // the last frame left, because motion and buttons are separate events
+        // and a click carries a position only on some backends.
+        let mut pointer_pos = self.pointer;
+        let (mut pointer_pressed, mut pointer_released) = (false, false);
+        let mut keyboard_action: Option<MenuAction> = None;
+        let menus = &mut self.menus;
+        // **Last frame's menu, deliberately.** The pump runs before this frame's
+        // state is known, and the menu the player is pressing keys at is the one
+        // that was on screen when they pressed them.
+        let menu_showing = menus.is_showing();
         self.shell.pump(&mut |event| {
             pending.observe(&event);
             match event {
                 ShellEvent::Focus { focused: false, .. } => focus_lost = true,
+                ShellEvent::PointerMotion {
+                    abs: Some(point), ..
+                } => pointer_pos = Some(crcbl::math::Vec2::new(point.x as f32, point.y as f32)),
+                // A pointer that left the window is not hovering anything, and
+                // must not leave the last button it crossed lit up.
+                ShellEvent::PointerFocus {
+                    entered, position, ..
+                } => {
+                    pointer_pos = if entered {
+                        position.map(|point| crcbl::math::Vec2::new(point.x as f32, point.y as f32))
+                    } else {
+                        None
+                    };
+                }
+                ShellEvent::Button {
+                    button: crcbl::core::input::PointerButton::Left,
+                    state,
+                    position,
+                    ..
+                } => {
+                    if let Some(point) = position {
+                        pointer_pos = Some(crcbl::math::Vec2::new(point.x as f32, point.y as f32));
+                    }
+                    if matches!(state, crcbl::shell::ButtonState::Pressed) {
+                        pointer_pressed = true;
+                    } else {
+                        pointer_released = true;
+                    }
+                }
+                // The commit key needs both edges — it presses on the way down
+                // and fires on the way up — so key handling can no longer match
+                // `Pressed` in the pattern.
                 ShellEvent::Key {
                     key_code: Some(code),
-                    state: crcbl::shell::ButtonState::Pressed,
+                    state,
+                    repeat,
+                    ..
+                } => {
+                    let pressed = matches!(state, crcbl::shell::ButtonState::Pressed);
                     // `!repeat`: holding F11 down would otherwise toggle the
                     // mode at the keyboard's repeat rate.
-                    repeat: false,
-                    ..
-                } => match code {
-                    DEBUG_OVERLAY_KEY => toggle_debug = true,
-                    PAUSE_KEY => toggle_pause = true,
-                    FULLSCREEN_KEY => toggle_fullscreen = true,
-                    _ => {}
-                },
+                    let edge = pressed && !repeat;
+                    match code {
+                        DEBUG_OVERLAY_KEY => toggle_debug |= edge,
+                        PAUSE_KEY => toggle_pause |= edge,
+                        FULLSCREEN_KEY => toggle_fullscreen |= edge,
+                        // The menu's three keys, taken only while it is on
+                        // screen. Repeats move the selection, because holding
+                        // Down to walk a list is what a player expects; the
+                        // commit key fires on **release**, so the pressed frame
+                        // of the skin is on screen while the key is held.
+                        MENU_UP_KEY if menu_showing => {
+                            if pressed {
+                                menus.select_previous();
+                            }
+                        }
+                        MENU_DOWN_KEY if menu_showing => {
+                            if pressed {
+                                menus.select_next();
+                            }
+                        }
+                        MENU_ACTIVATE_KEY if menu_showing => {
+                            if pressed {
+                                menus.press(true);
+                            } else {
+                                keyboard_action = menus.activate();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 _ => {}
             }
         });
         self.events += pending.count;
+        self.pointer = pointer_pos;
+        if pointer_pressed {
+            self.pointer_held = true;
+        }
+        // **`down` must be false on the frame the button came up**, or
+        // `UiState::interact` latches the capture and fires it in the same call —
+        // and a press that started in the corner of the screen would be credited
+        // to whatever the cursor was over at release, which is the exact bug
+        // press capture exists to prevent. Except when the press *also* arrived
+        // this frame: a click faster than a frame must latch and fire together.
+        let pointer_down = pointer_pressed || (self.pointer_held && !pointer_released);
+        let pointer_action = self.menus.point(
+            self.gpu.extent(),
+            self.gpu.atlas(),
+            PointerInput {
+                // A pointer that has never been in the window is nowhere, not at
+                // the origin — which is a real pixel.
+                pos: self
+                    .pointer
+                    .unwrap_or(crcbl::math::Vec2::splat(f32::NEG_INFINITY)),
+                down: pointer_down,
+                released: pointer_released,
+            },
+        );
+        if pointer_released {
+            self.pointer_held = false;
+        }
+        for action in [keyboard_action, pointer_action].into_iter().flatten() {
+            self.apply(action)?;
+        }
         if toggle_debug {
             self.debug.toggle();
         }
@@ -640,6 +763,61 @@ impl<S: Shell + ?Sized> Loop<S> {
         }
     }
 
+    /// What a fired menu button does.
+    ///
+    /// The one place a button becomes an effect. Both input devices arrive here:
+    /// [`MENU_ACTIVATE_KEY`] and a click produce the same [`MenuAction`] and this
+    /// cannot tell them apart.
+    ///
+    /// # Errors
+    ///
+    /// [`SandboxError`] if the shell refused a display-mode change.
+    fn apply(&mut self, action: MenuAction) -> Result<(), SandboxError> {
+        match action {
+            MenuAction::Resume => {
+                if self.paused {
+                    self.paused = false;
+                    log::info!("sandbox resumed");
+                }
+            }
+            MenuAction::Fullscreen => self.toggle_fullscreen()?,
+            MenuAction::DebugOverlay => self.debug.toggle(),
+        }
+        Ok(())
+    }
+
+    /// Lays out the pause menu and emits both halves of it.
+    ///
+    /// **Two halves, two passes.** The window frame and the buttons are
+    /// nine-sliced sprites and go to [`crcbl::render::MenuRenderer`]; the title
+    /// and the labels are text and go to the UI pass through the draw list.
+    /// `gpu.rs` declares the menu pass between the scene and the UI for exactly
+    /// this reason.
+    fn draw_menu(&mut self) {
+        self.menus.show(self.paused);
+        let layout = self
+            .menus
+            .current()
+            .map(|menu| menu.layout(self.gpu.extent(), self.gpu.atlas()));
+        match &layout {
+            Some(layout) => {
+                let menu = self.menus.current().expect("a layout implies a menu");
+                menu.render(&mut self.draw_list, layout);
+                self.gpu.set_menu(Some((menu, layout)));
+            }
+            None => self.gpu.set_menu(None),
+        }
+    }
+
+    /// Where this frame's menu was laid out, for the loop's own tests — so a
+    /// scripted click lands on the button the player would have seen.
+    #[cfg(test)]
+    fn menu_layout(&self) -> Option<crcbl::ui::menu::MenuLayout> {
+        self.menus
+            .current()
+            .map(|menu| menu.layout(self.gpu.extent(), self.gpu.atlas()))
+    }
+
     /// Gathers this frame's debug sections and draws the panel.
     ///
     /// **This is the whole of "switching it on".** Frame timing comes with the
@@ -650,9 +828,7 @@ impl<S: Shell + ?Sized> Loop<S> {
     /// breakout's and flappy's in-memory one.
     fn draw_debug_overlay(&mut self) {
         self.draw_list.clear();
-        if self.paused {
-            draw_pause_menu(&mut self.draw_list, self.gpu.extent());
-        }
+        self.draw_menu();
         self.debug.begin_frame();
         if let Some(timings) = self.gpu.timings() {
             self.debug.panel.add(timings);
@@ -731,41 +907,6 @@ impl<S: Shell + ?Sized> Loop<S> {
         self.window
     }
 }
-
-/// The pause menu.
-///
-/// **The seam the art slice replaces**, and the same one breakout and flappy
-/// have: one function taking a draw list and an extent, everything in it going
-/// through `DrawList`'s rect-and-text path because that is what exists today.
-/// The sandbox has no HUD of its own, so this is the only thing it draws
-/// besides the debug panel.
-fn draw_pause_menu(dl: &mut DrawList, extent: (u32, u32)) {
-    use crcbl::math::Vec2;
-
-    let (width, height) = (extent.0 as f32, extent.1 as f32);
-    dl.rect(Vec2::ZERO, Vec2::new(width, height), [0.0, 0.0, 0.0, 0.6]);
-
-    let panel = Vec2::new(360.0, 132.0);
-    let origin = Vec2::new((width - panel.x) / 2.0, (height - panel.y) / 2.0);
-    dl.rect(origin, panel, [0.08, 0.08, 0.12, 0.92]);
-    dl.text(
-        origin + Vec2::new(24.0, 22.0),
-        "PAUSED",
-        [1.0, 1.0, 0.3, 1.0],
-        32.0,
-    );
-    for (row, line) in PAUSE_MENU_LINES.iter().enumerate() {
-        dl.text(
-            origin + Vec2::new(24.0, 68.0 + row as f32 * 20.0),
-            *line,
-            [0.8, 0.8, 0.9, 1.0],
-            14.0,
-        );
-    }
-}
-
-/// What the pause menu offers. Text today, buttons after the art slice.
-const PAUSE_MENU_LINES: [&str; 3] = ["ESC   resume", "F11   fullscreen", "F3    debug overlay"];
 
 /// One fixed simulation step.
 ///
@@ -1164,7 +1305,181 @@ mod tests {
         engine.frame().expect("a frame");
         let drawn = ui_text(&engine);
         assert!(drawn.iter().any(|t| t == "PAUSED"), "{drawn:?}");
-        assert!(drawn.iter().any(|t| *t == PAUSE_MENU_LINES[0]), "{drawn:?}");
+        assert!(drawn.iter().any(|t| t == "RESUME"), "{drawn:?}");
+        // And the picture reached the *other* pass: the scrim, the nine-slice
+        // frame, and nine quads for each of three buttons.
+        let sprites = engine.gpu.menu_sprites();
+        assert_eq!(sprites.len(), 1 + 9 + 9 * 3, "{}", sprites.len());
+        let extent = engine.gpu.extent();
+        let scale = engine
+            .menu_layout()
+            .expect("a menu is showing")
+            .style()
+            .scale;
+        assert_eq!(
+            sprites[0].rect,
+            [
+                -(extent.0 as f32) / (2.0 * scale),
+                -(extent.1 as f32) / (2.0 * scale),
+                extent.0 as f32 / scale,
+                extent.1 as f32 / scale,
+            ],
+            "the scrim does not cover the framebuffer",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A running sandbox submits no menu sprites at all**, which is what makes
+    /// the menu pass free rather than cheap.
+    #[test]
+    fn a_running_sandbox_draws_no_menu() {
+        let mut engine = scripted(&headless(60));
+        run_frames(&mut engine, 4);
+        assert!(
+            engine.gpu.menu_sprites().is_empty(),
+            "a running frame submitted {} menu sprites",
+            engine.gpu.menu_sprites().len(),
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **Keyboard activation works through the real loop.** Escape opens the
+    /// pause menu, Enter fires `RESUME`, and the sandbox is running again — with
+    /// no pointer anywhere in the story.
+    #[test]
+    fn enter_on_the_pause_menu_resumes() {
+        let mut engine = scripted(&headless(60));
+        let window = engine.window();
+        run_frames(&mut engine, 2);
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused());
+
+        // Press and release, because the commit fires on the *release* — the
+        // pressed frame of the skin has to be on screen while the key is down.
+        engine
+            .shell_mut()
+            .key_press(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused(), "the press alone must not fire it");
+
+        engine
+            .shell_mut()
+            .key_release(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(!engine.is_paused(), "Enter on RESUME did not resume");
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// The arrows move the selection, and Enter fires **what is selected** —
+    /// asserted on an effect the window system reports, not on an index.
+    #[test]
+    fn the_arrows_choose_which_button_enter_fires() {
+        let mut engine = scripted(&headless(200));
+        let window = engine.window();
+        run_frames(&mut engine, 2);
+        assert_eq!(engine.display_mode(), DisplayMode::Windowed);
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+
+        engine
+            .shell_mut()
+            .key_press(window, MENU_DOWN_KEY)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_press(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        run_frames(&mut engine, 6);
+
+        assert_eq!(
+            engine.display_mode(),
+            DisplayMode::Borderless { monitor: None },
+            "Enter fired the wrong button, or the arrows did not move",
+        );
+        assert!(
+            engine.is_paused(),
+            "the second button resumed the sandbox, so the selection never moved",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A click fires the button under it**, through the same action path the
+    /// keyboard uses — and a click that started somewhere else fires nothing.
+    #[test]
+    fn a_click_on_resume_resumes() {
+        use crcbl::core::input::PointerButton;
+        use crcbl::shell::{ButtonState as PointerState, PhysicalPoint};
+
+        let mut engine = scripted(&headless(60));
+        let window = engine.window();
+        run_frames(&mut engine, 2);
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused());
+
+        let layout = engine.menu_layout().expect("the pause menu is showing");
+        let resume = layout.items()[0];
+        let centre = (resume.min + resume.max) * 0.5;
+        let at = PhysicalPoint::new(f64::from(centre.x), f64::from(centre.y));
+
+        engine
+            .shell_mut()
+            .button(
+                window,
+                PointerButton::Left,
+                PointerState::Pressed,
+                Some(PhysicalPoint::new(3.0, 3.0)),
+            )
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        engine
+            .shell_mut()
+            .button(
+                window,
+                PointerButton::Left,
+                PointerState::Released,
+                Some(at),
+            )
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(
+            engine.is_paused(),
+            "a press that started off the button still fired it",
+        );
+
+        engine
+            .shell_mut()
+            .button(window, PointerButton::Left, PointerState::Pressed, Some(at))
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        engine
+            .shell_mut()
+            .button(
+                window,
+                PointerButton::Left,
+                PointerState::Released,
+                Some(at),
+            )
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(!engine.is_paused(), "a click on RESUME did not resume");
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 

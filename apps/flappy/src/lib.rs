@@ -36,6 +36,7 @@ mod audio;
 mod best;
 mod game;
 mod gpu;
+mod menu;
 
 #[cfg(target_arch = "wasm32")]
 pub mod web;

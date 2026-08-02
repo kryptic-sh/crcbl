@@ -45,11 +45,12 @@ use crcbl::hal::{CommandEncoderDesc, Features};
 use crcbl::math::Vec3;
 use crcbl::prelude::*;
 use crcbl::render::{
-    Camera, ForwardRenderer, PassTimers, Projection, RenderGraph, SpriteRenderer, TransientPool,
-    UiRenderer,
+    Camera, ForwardRenderer, MenuRenderer, PassTimers, Projection, RenderGraph, SpriteRenderer,
+    TransientPool, UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
+use crcbl::ui::menu::{Menu, MenuLayout};
 use crcbl::ui::text::FontAtlas;
 
 use crate::art::{Scene, TEXELS_PER_UNIT};
@@ -133,6 +134,9 @@ pub struct Gpu {
     /// The sprite pass, and the art it draws.
     sprites: SpriteRenderer,
     scene: Scene,
+    /// The menu pass: its own sheets, its own screen-space camera, and a pass
+    /// that declares nothing on a frame with no menu on it.
+    menu: MenuRenderer,
     /// UI compositing.
     ui: UiRenderer,
     atlas: FontAtlas,
@@ -238,7 +242,21 @@ impl Gpu {
                 return Err(GpuError::Hal(error));
             }
         };
-        let ui = UiRenderer::new(ctx.device(), ctx.queue(), format).map_err(GpuError::Hal)?;
+        let menu = match MenuRenderer::new(ctx.device(), ctx.queue(), format) {
+            Ok(menu) => menu,
+            Err(error) => {
+                sprites.destroy(ctx.device());
+                return Err(GpuError::Hal(error));
+            }
+        };
+        let ui = match UiRenderer::new(ctx.device(), ctx.queue(), format) {
+            Ok(ui) => ui,
+            Err(error) => {
+                menu.destroy(ctx.device());
+                sprites.destroy(ctx.device());
+                return Err(GpuError::Hal(error));
+            }
+        };
 
         Ok(Self {
             ctx,
@@ -249,6 +267,7 @@ impl Gpu {
             pipes: Vec::new(),
             sprites,
             scene,
+            menu,
             ui,
             atlas: FontAtlas::built_in(),
             draw_list: DrawList::new(),
@@ -302,6 +321,20 @@ impl Gpu {
     /// back so the caller can refill it instead of building a new one.
     pub fn take_draw_list(&mut self, dl: &mut DrawList) {
         std::mem::swap(&mut self.draw_list, dl);
+    }
+
+    /// Takes this frame's menu, or `None` on a frame that shows none.
+    ///
+    /// CPU only — the upload happens inside [`Gpu::frame`], at the extent the
+    /// swapchain was actually acquired at.
+    pub fn set_menu(&mut self, menu: Option<(&Menu, &MenuLayout)>) {
+        self.menu.set_menu(menu);
+    }
+
+    /// The sprites the menu pass will draw this frame, for the loop's own tests.
+    #[cfg(test)]
+    pub fn menu_sprites(&self) -> &[crcbl::render::Sprite] {
+        self.menu.frame_sprites()
     }
 
     #[must_use]
@@ -359,6 +392,9 @@ impl Gpu {
         self.sprites
             .begin_frame(self.ctx.device(), sprites, view_projection, extent)
             .map_err(GpuError::Hal)?;
+        self.menu
+            .begin_frame(self.ctx.device(), extent)
+            .map_err(GpuError::Hal)?;
         self.ui
             .begin_frame(self.ctx.device(), &self.draw_list, &self.atlas, 1.0)
             .map_err(GpuError::Hal)?;
@@ -377,6 +413,12 @@ impl Gpu {
                 .clear_color(target, crate::art::SKY)
                 .execute(|_| {});
             self.sprites.add_pass(&mut graph, target);
+            // **Between the course and the text, and that order is the whole
+            // join.** The menu's scrim dims what is already in the target, so it
+            // has to come after the course; the panel is opaque and the labels
+            // are UI-pass text, so it has to come before the UI or the frame
+            // paints over its own words.
+            self.menu.add_pass(&mut graph, target);
             self.ui.add_pass(&mut graph, target, extent);
             graph.compile(&self.pool)?
         };
@@ -428,6 +470,7 @@ impl Gpu {
     pub fn destroy(mut self) -> Result<(), GpuError> {
         self.ctx.drain()?;
         self.ui.destroy(self.ctx.device());
+        self.menu.destroy(self.ctx.device());
         self.sprites.destroy(self.ctx.device());
         self.pool.destroy(self.ctx.device());
         if let Some(timers) = self.timers.as_mut() {

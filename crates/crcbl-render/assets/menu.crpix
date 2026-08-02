@@ -1,0 +1,163 @@
+# The whole menu, in one sheet: the window frame, a button per `ButtonState`,
+# and the scrim behind them.
+#
+# **Shared by every sample, which is why it lives in `crcbl-render` and not in
+# an app.** `apps/*` cannot depend on each other, so per-sample art would be
+# three copies of this file drifting apart — and three games whose menus look
+# like three different engines. See `src/menu.rs` for the whole argument.
+#
+# # One sheet, and it is not a filing decision
+#
+# `ButtonSkin`'s own docs give the reason for its three frames: *"One sheet and
+# not three, so the whole button is a single `Sprite` batch: the sprite pass
+# starts a new batch every time the sheet changes between consecutive sprites."*
+# A menu is the same argument one level up — panel, buttons and scrim are drawn
+# back to back every frame — so all five frames are here and the entire menu is
+# **one bind and one draw**.
+#
+# It is currently load-bearing beyond the instance count. `docs/backlog.md`
+# carries the finding: `sprite.slang` reads `sprites[InstanceIndex -
+# BaseInstance]`, so a frame with more than one batch draws the *first* batch's
+# instances again for every later one. A menu split across three sheets renders
+# the panel with the buttons' art. One sheet sidesteps it; it does not fix it,
+# and the samples' own art still has four sheets each.
+#
+# # Every frame is 16x16 with `nine: 4 4 4 4`
+#
+# A `.crpix` carries one frame size and one set of insets for the whole sheet,
+# and making the buttons agree with the panel is what lets `Sheet::nine` and
+# `ButtonSkin::from_sheet` be used as they are rather than hand-built. Four
+# texels is deep enough for an outline, a highlight and two of body, and
+# `crcbl_ui::menu`'s `PANEL_INSETS` and `BUTTON_INSETS` are these numbers.
+#
+# **Every stretched band is one colour along its whole span, on both axes and in
+# every frame.** Columns 4-11 of any row are uniform and rows 4-11 of any column
+# are uniform, which is the property that makes a stretched nine-slice a frame
+# rather than a smear. It is worth checking by eye before changing a row.
+crpix: 16 16 5 11 1
+
+palette:
+  k c #0b0b12
+  l c #9aa0cc
+  n c #43466a
+  d c #2a2c40
+  f c #14161f
+  a c #7f86c4
+  b c #3c4070
+  c c #262845
+  e c #a7aeee
+  g c #4d5390
+  w c #ffffff
+
+# The window frame. A bevel read from the outside in: outline, highlight, two of
+# body, then the interior. The light comes from the top left — `l` along the top
+# and down the left, `d` along the bottom and down the right — which is what
+# makes it read as a raised window rather than as a bordered rectangle. The
+# interior is **opaque**: the scrim below is what dims the game, and a panel you
+# could see through would put the brick grid behind the text.
+frame panel:
+  kkkkkkkkkkkkkkkk
+  kllllllllllllldk
+  klnnnnnnnnnnnndk
+  klnnnnnnnnnnnndk
+  klnnffffffffnndk
+  klnnffffffffnndk
+  klnnffffffffnndk
+  klnnffffffffnndk
+  klnnffffffffnndk
+  klnnffffffffnndk
+  klnnffffffffnndk
+  klnnffffffffnndk
+  klnnnnnnnnnnnndk
+  klnnnnnnnnnnnndk
+  kddddddddddddddk
+  kkkkkkkkkkkkkkkk
+
+# At rest: lit from the top left, standing on a two-texel base.
+frame idle:
+  kkkkkkkkkkkkkkkk
+  kaaaaaaaaaaaaack
+  kabbbbbbbbbbbbck
+  kabbbbbbbbbbbbck
+  kabbbbbbbbbbbbck
+  kabbbbbbbbbbbbck
+  kabbbbbbbbbbbbck
+  kabbbbbbbbbbbbck
+  kabbbbbbbbbbbbck
+  kabbbbbbbbbbbbck
+  kabbbbbbbbbbbbck
+  kabbbbbbbbbbbbck
+  kabbbbbbbbbbbbck
+  kcccccccccccccck
+  kcccccccccccccck
+  kkkkkkkkkkkkkkkk
+
+# Under the cursor, or holding the keyboard's selection: the same shape lifted —
+# a brighter face and a brighter highlight, so it reads as the one that will
+# happen next.
+frame hovered:
+  kkkkkkkkkkkkkkkk
+  keeeeeeeeeeeeenk
+  keggggggggggggnk
+  keggggggggggggnk
+  keggggggggggggnk
+  keggggggggggggnk
+  keggggggggggggnk
+  keggggggggggggnk
+  keggggggggggggnk
+  keggggggggggggnk
+  keggggggggggggnk
+  keggggggggggggnk
+  keggggggggggggnk
+  knnnnnnnnnnnnnnk
+  knnnnnnnnnnnnnnk
+  kkkkkkkkkkkkkkkk
+
+# Held down: the bevel is **inverted** — dark along the top and left, light
+# along the bottom and right — so the face looks pushed into the panel. This is
+# what three frames buy that three tints could not: a multiply can darken a
+# button, it cannot move its highlight.
+frame pressed:
+  kkkkkkkkkkkkkkkk
+  kddddddddddddank
+  kdccccccccccccak
+  kdccccccccccccak
+  kdccccccccccccak
+  kdccccccccccccak
+  kdccccccccccccak
+  kdccccccccccccak
+  kdccccccccccccak
+  kdccccccccccccak
+  kdccccccccccccak
+  kdccccccccccccak
+  kdccccccccccccak
+  kaaaaaaaaaaaaaak
+  kaaaaaaaaaaaaaak
+  kkkkkkkkkkkkkkkk
+
+# The scrim: flat white, stretched over the whole framebuffer and tinted.
+# White because `Sprite::tint` multiplies — the colour and the opacity are
+# `crcbl_ui::MenuStyle::scrim_color`'s, in one place — and **a sprite** rather
+# than a `DrawList` rectangle because the UI pass runs *after* the sprite pass,
+# so a scrim drawn as a UI rect would dim the menu's own frame along with the
+# game behind it.
+frame scrim:
+  wwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwww
+  wwwwwwwwwwwwwwww
+
+nine: 4 4 4 4
+sample: pixel

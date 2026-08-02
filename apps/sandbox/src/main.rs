@@ -18,6 +18,7 @@
 mod app;
 mod args;
 mod gpu;
+mod menu;
 
 use std::process::ExitCode;
 

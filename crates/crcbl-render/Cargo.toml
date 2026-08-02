@@ -27,10 +27,21 @@ crcbl-shaders = { workspace = true }
 # `crcbl-sprite` depends on *nothing* (an optional `png` behind `bake`/`load`
 # and no workspace crate at all), and its own module docs already name this
 # crate as the one that "turn[s] a description into pixels".
-crcbl-sprite = { workspace = true }
+#
+# `load` is on because [`menu`] reads back the sheets `build.rs` bakes: the menu
+# art is shipped *by this crate* rather than by each sample, so the decoder that
+# used to be a game's business is now this crate's. It is the same `png` the
+# samples already enable, so nothing new reaches a binary that did not have it.
+crcbl-sprite = { workspace = true, features = ["load"] }
 crcbl-ui = { workspace = true }
 bytemuck = { workspace = true }
 thiserror = { workspace = true }
+
+# The other half, and the other feature. Cargo resolves build-dependency
+# features separately from normal ones, so `bake`'s PNG encoder reaches the
+# build script and not the renderer.
+[build-dependencies]
+crcbl-sprite = { workspace = true, features = ["bake"] }
 
 [lints]
 workspace = true

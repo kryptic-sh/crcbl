@@ -121,6 +121,7 @@ pub mod camera;
 pub mod forward;
 pub mod graph;
 pub mod layers;
+pub mod menu;
 pub mod nine_slice;
 pub mod sprite_pass;
 pub mod texture;
@@ -137,6 +138,13 @@ pub use camera::{Camera, DirectionalLight, Projection};
 /// [`NineSlice`] and [`Rect`] are here for the same reason —
 /// [`NineSliceSource`]'s fields are spelled in both.
 pub use crcbl_sprite::{NineSlice, Rect, SampleMode};
+/// Re-exported for the same reason: [`MenuArt::extend`] is spelled in [`Menu`]
+/// and [`MenuLayout`], and a caller that can name this crate's menu API should
+/// not have to add a second dependency to build one. It is also what lets
+/// `crcbl-vk`'s end-to-end suite — which depends on this crate and not on
+/// `crcbl-ui` — take a golden image of the real menu rather than of a replica.
+pub use crcbl_ui::menu::{Menu, MenuItem, MenuItemLayout, MenuLayout, MenuStyle};
+pub use crcbl_ui::text::FontAtlas;
 /// Re-exported for the same reason as [`NineSlice`]: [`ButtonSkin::source`] and
 /// [`ButtonSkin::quads`] are spelled in [`ButtonState`], and
 /// [`ButtonSkin::insets`] returns a [`SkinInsets`]. A caller that can name this
@@ -149,6 +157,7 @@ pub use graph::{
     PassContext, PassKind, RenderGraph,
 };
 pub use layers::{Layer, LayerStack, Parallax};
+pub use menu::{MenuArt, MenuRenderer, menu_camera, menu_view_projection};
 pub use nine_slice::{NineQuads, NineSliceSource, SliceQuad};
 pub use sprite_pass::{
     CONSTANTS_SIZE, INSTANCE_STRIDE, SAMPLE_PIXEL, SAMPLE_SMOOTH, SheetDesc, SheetId, Sprite,

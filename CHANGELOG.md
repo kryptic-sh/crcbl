@@ -16,6 +16,37 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl-ui**, **crcbl-render**, **breakout**, **flappy**, **sandbox**: the
+  samples' start, pause and end-of-game states are **menus** — a nine-sliced
+  pixel-art window frame with skinned buttons inside it, centred in the
+  framebuffer at every aspect ratio, replacing the flat rectangle and three
+  lines of text each sample drew from its own `draw_pause_menu`.
+
+  The art is **shared** and lives in `crates/crcbl-render/assets/menu.crpix`,
+  baked by that crate's new `build.rs`: `apps/*` cannot depend on each other, so
+  per-sample art would have been the same window authored three times and three
+  games that looked like three engines. `crcbl_ui::menu` owns the model and the
+  layout — `Menu`, `MenuItem`, `MenuStyle`, `MenuLayout`, all in screen pixels
+  with no device in the room — and `crcbl_render::menu` owns the pictures:
+  `MenuArt` cuts the five frames out of the sheet, `MenuRenderer` draws them
+  through a `SpriteRenderer` of its own with a screen-space camera, and the
+  labels stay on the UI pass. `crcbl_render::ButtonSkin` and
+  `crcbl_ui::Button::with_skin`, which shipped unused, are what the buttons are
+  drawn with.
+
+  **The keyboard still works, and the mouse now does too.** Every key a sample
+  bound still does exactly what it did, and each is printed on the button beside
+  it; the menus add Up, Down and Enter, taken only while a menu is on screen.
+  Pointer motion and clicks reach `Menu::point` through `UiState`'s press
+  capture, so a press that starts on one button and is released over another
+  fires neither. Both devices produce the same action.
+
+  Behind the menu the game keeps drawing and is dimmed by a scrim sprite — drawn
+  by the menu's own pass, between the game and the UI, so the panel and its
+  labels are not dimmed with it. Breakout's start menu is a fresh game only:
+  `WaitingForLaunch` is also where a player waits after losing a life, and a
+  modal between every life would be three panels a game.
+
 - **breakout**, **flappy**, **sandbox**: a pause state, entered and left with
   **Escape** and entered by losing window focus. A paused loop stops calling the
   game's tick, so the simulation does not advance at all; the HUD's status line

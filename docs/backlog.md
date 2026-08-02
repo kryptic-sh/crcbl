@@ -21,6 +21,55 @@ carries what has no phase yet.
   the symbols must not collide — so the shape is probably a macro over a generic
   core rather than a plain function.
 
+## The sprite pass draws every batch but the first from the wrong instances
+
+**Found while blessing the menu golden; not fixed, and both shipped samples are
+affected.** `shaders/sprite.slang`'s vertex stage reads
+`sprites[SV_InstanceID]`, and Slang compiles `SV_InstanceID` to
+`InstanceIndex - BaseInstance` — HLSL's semantics, where the id excludes
+`StartInstanceLocation`. `SpriteRenderer::add_pass` assumes the opposite: it
+emits one `draw(0..6, batch.instances)` per batch and expects the shader to
+index the frame's instance buffer absolutely. So **every batch after the first
+re-reads the first batch's instances**, drawing the earlier sprites again with
+the later sheet bound.
+
+Confirmed on radv (Mesa 26.1.6) with three 1×1 sheets — red, green, blue — at
+three separate rectangles: only the red rectangle was drawn, in blue, and the
+other two rectangles were empty.
+`spirv-dis crates/crcbl-shaders/spirv/sprite.spv` shows the `OpISub` of
+`BaseInstance` from `InstanceIndex` at the top of `vertexMain`.
+
+**What it means for the samples.** `apps/breakout` registers four sheets and
+`apps/flappy` four, so both draw a frame of four batches and only the first
+survives. Nothing caught it: every existing sprite test registers one sheet, and
+the two that register two (`sprite_pixel` / `sprite_smooth`) upload the _same
+pixels_ twice and differ only in `SampleMode`, which is per-instance and so
+still visible.
+
+**The menu sidesteps it rather than fixing it** — `assets/menu.crpix` is one
+sheet, so a menu is one batch — which is why the menu renders correctly today
+while the game behind it does not.
+
+The fix is one of two, and neither is in `crcbl-render` alone:
+
+- **Change the shader** to index by `InstanceIndex` (a `[[vk::builtin]]` or
+  Slang's `SV_StartInstanceLocation` added back). One line, but it is
+  `crcbl-shaders`, and both the `spirv/` and `wgsl/` artifacts are regenerated
+  and committed. WebGPU's `@builtin(instance_index)` already _includes_
+  `firstInstance`, so the WGSL half may be correct today and the two backends
+  may be disagreeing — worth checking before assuming one fix covers both.
+- **Stop using `firstInstance` for indexing**: make the instance buffer a
+  dynamic storage binding, pad each batch to
+  `min_storage_buffer_offset_alignment`, and bind the frame set per batch with
+  the batch's offset. Entirely inside `crcbl-render`, but it changes the frame
+  bind-group layout and therefore touches every backend that implements dynamic
+  offsets — including `crcbl-wgpu`, which the browser demos run on.
+
+Whichever lands, the regression test is a golden of **two different sheets in
+one frame**: the shape of the repro above, in `crates/crcbl-vk/tests/vk_e2e.rs`.
+It is deliberately not committed today, because it would be a red test in a
+green suite.
+
 ## The sprite system, and what is left of the retrofit
 
 The pipeline is joined up end to end for both games: each of `apps/flappy` and
@@ -50,11 +99,20 @@ left:
   were never the problem. Nothing else in the workspace calls `expand` —
   `crcbl-render`'s own `button_skin` does, and would take the same scale of 1.
 
-- **The bake half of `build.rs` is written twice.** `apps/flappy/build.rs` and
-  `apps/breakout/build.rs` differ in their `ASSETS` array and in nothing else:
-  the same parse → bake → write → generate-a-table loop, the same `ART_TICK_HZ`,
-  the same `cargo::error` reporting. Asteroids will be the third. The fix is a
-  real entry point in `crcbl-sprite` — something like
+  **A third caller has now appeared, inside `crcbl-render` itself.**
+  `crcbl_render::menu_camera` exists only because of this: the menu is laid out
+  in device pixels, and drawing it through a camera of one unit per pixel would
+  make the window frame's four-texel corner four _pixels_ at every scale, so a
+  menu drawn three times as large would keep a hairline border. The camera
+  divides by the style's scale instead, exactly as the two samples scale theirs.
+  It comes out with the other two when `expand` learns a scale.
+
+- **The bake half of `build.rs` is written three times.**
+  `apps/flappy/build.rs`, `apps/breakout/build.rs` and now
+  `crates/crcbl-render/build.rs` differ in their `ASSETS` array and in nothing
+  else: the same parse → bake → write → generate-a-table loop, the same
+  `ART_TICK_HZ`, the same `cargo::error` reporting. Asteroids will be the third.
+  The fix is a real entry point in `crcbl-sprite` — something like
   `bake::bake_dir(manifest_dir, out_dir, &stems, tick_hz)` returning the table
   text — because a build script can depend on a workspace library and that is
   the only shape that removes the copy rather than moving it.
@@ -127,6 +185,39 @@ The modular panel is built and all three samples switch it on with F3 (or
   so turning it on there is one field.
 
 ## Coverage gaps
+
+- **The menu golden cannot see an inset larger than the one authored.**
+  `menu_frame_two_sizes` compares the two panels' corner blocks pixel for pixel,
+  which catches a corner that _scaled_ with the target — measured: making the
+  panel's insets a function of the target width failed it. It cannot catch an
+  inset that grew uniformly, because `menu.crpix`'s panel is uniform fill past
+  texel 3 on both axes, so a `nine` of 6 draws exactly the same picture as a
+  `nine` of 4. That number is pinned instead by
+  `crcbl_render::menu::the_shipped_art_has_the_insets_the_layout_assumes` and by
+  the layout tests, both of which go red on it.
+- **The golden's reference is weak on small-area art changes.** The image is
+  416×576, so recolouring a one-texel band moves under 1% of the pixels and
+  compares inside `Tolerance::RASTERISER` — measured: swapping the panel's
+  shadow colour for its own channels reversed passed the reference. The pixel
+  assertions carry that weight instead (`assert_menu_pixels` samples the
+  highlight and the shadow on all four edges, and that _did_ catch it). Worth
+  knowing before adding a claim to this golden that only the reference would
+  hold.
+- **Nothing has looked at a menu over a real game.** The golden renders the menu
+  over a flat clear colour on an offscreen ring; no test composites one over
+  breakout's brick grid or flappy's course, and no human has confirmed the scrim
+  reads well over either. The browser gate reaches a paused demo but only counts
+  HUD lines. This compounds with the sprite-pass finding above: until that is
+  fixed, the game _behind_ the menu is drawn from the wrong sheets anyway.
+- **The menus' `MenuKind`/`Menus`/`MenuAction` scaffolding is written three
+  times.** `apps/breakout/src/menu.rs`, `apps/flappy/src/menu.rs` and
+  `apps/sandbox/src/menu.rs` share the container, the show/select/press/activate
+  surface and the pointer split, and differ in the menus they hold and what the
+  actions do. It is the same shape as the `web.rs` duplication in the first
+  section and has the same answer: the generic half belongs in the engine, and
+  the per-game half — which menu belongs to which state, and what a button does
+  — genuinely does not. Worth folding in when the fourth sample arrives, with
+  `web.rs`.
 
 - **Flappy's swept-sphere collision is exercised, not demonstrated.**
   `game::fatal` sweeps the bird's path with `PhysicsSystem::sweep_sphere`
@@ -225,6 +316,51 @@ about the answer; most of these are probably right.
 Distinct from _Considered and declined_ below, which is for ideas rejected on
 their merits and expected to stay rejected. These are answers taken under
 uncertainty.
+
+- **Where does the menu art live?** Taken: **`crates/crcbl-render/assets/`**,
+  baked by that crate's own `build.rs`. `apps/*` cannot depend on each other, so
+  per-sample art is the same window authored three times and three games that
+  look like three engines. The rejected alternative was a shared `assets/`
+  directory both build scripts reach into: it shares the `.crpix` and nothing
+  else — each script still bakes, each `art.rs` still loads, each game still
+  writes the layout — and it puts a `../../..` path outside a package's own
+  tree, which cargo does not track for rebuilds the way it tracks a package's
+  files. It also gives `crcbl-vk`'s suite nothing, because that crate cannot see
+  `apps/`, so the golden would be a picture of a replica. _Changes it_: art that
+  is genuinely one game's. A sample that wants its own frame should author it
+  under its own `assets/` and pass its own `MenuArt`; the shape for that is a
+  constructor beside `MenuArt::register` taking a `Sheet`, not a fork of this
+  one.
+
+- **What size is the menu drawn at?** Taken: **the largest whole scale in 1..=4
+  whose panel fits inside 90% of the framebuffer**, a pure function of the
+  extent and the menu's own contents (`Menu::layout`). Whole numbers because the
+  art is pixel art and a fractional scale puts a nine-slice corner on a half
+  pixel; a fit rather than a constant because a fixed size is either lost on a
+  4K screen or off the bottom of a 1440×400 canvas. _Changes it_: a settings
+  screen with a UI-scale slider, at which point the scale is the player's and
+  `layout_with` is already the entry point that takes one.
+
+- **Does the menu shadow a key a sample had bound?** Taken: **yes, once** —
+  flappy's `ArrowUp`, which is the _second_ binding of its flap action beside
+  `Space`. The three menu keys (Up, Down, Enter) are the same three in every
+  sample, for the reason F3, Escape and F11 are; two of the three are free in
+  every game and this one is not. Space is never shadowed, is what the HUD has
+  always named, and is printed on every button that flaps. The keys are consumed
+  only while a menu is on screen. _Changes it_: a sample that binds Enter or the
+  vertical arrows to something a player uses _while a menu is up_ — which today
+  is nothing, because a menu is only on screen when the simulation is stopped or
+  waiting.
+
+- **Does the world keep drawing behind a menu?** Taken: **yes, and it is
+  dimmed** by a scrim sprite the menu's own pass draws. A frozen screenshot
+  would need a captured frame and a second code path; a menu with nothing behind
+  it loses the player's place. The scrim is a _sprite_ and not a `DrawList`
+  rectangle because the UI pass runs after the sprite pass, so a UI-pass scrim
+  would dim the menu's own frame along with the game. _Changes it_: a menu that
+  wants the game genuinely stopped in the background — a settings screen over a
+  paused multiplayer session, where the world is still ticking and the motion is
+  a distraction.
 
 - **Does a looping ping-pong replay its end frames?** Taken: **no.** A looping
   ping-pong's period is `2n - 2` — four frames run `0 1 2 3 2 1` and then `0`
