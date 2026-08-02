@@ -67,19 +67,42 @@ a game costume — keep the costume thin.
 
 ## Where this stands
 
-**Slice 18a — the core loop — has landed** (`apps/horde`). One arena, one player
-with WASD movement and a gun that aims itself, three enemy kinds with seek plus
-separation, contact damage, hit points, death and restart, drawn as untextured
-quads through the UI pass with the debug panel on. 59 tests.
+**Slices 18a and 18b have landed** (`apps/horde`). One arena, one player with
+WASD movement and a gun that aims itself, three enemy kinds with seek plus
+separation, contact damage, hit points, death and restart; `.crpix` art through
+`SpriteRenderer` with `SampleMode::Pixel`; XP gems that drop where an enemy died
+and a "pick 1 of 3" level-up from a fixed pool of six upgrades; pause, level-up
+and death menus over the shared `crcbl_render::menu` art, with the debug panel
+on. 90 tests.
 
-Still owed, in the order the sub-slices take them:
+**The art is two sheets and that is the sample's own decision.** Everything
+numerous — the player, all three enemy kinds and the gems — is in one
+`assets/actors.crpix` at one frame size (34 texels, which is the brute's
+collider box at 20 texels a unit), so the whole field is a single
+`SpriteRenderer` batch **whatever order it is emitted in** and `art::Scene`
+needs no grouping pass over the crowd. Asteroids has three rock sheets and has
+to emit largest-first to hold three batches; a field of ten thousand walked in
+the order the game holds it would be ten thousand. The shot is the only second
+sheet, because it is 8 texels and would otherwise be drawn in a quad twenty
+times its own area. The price is the transparent margin round the small kinds —
+a runner is 13 texels of art in a 34-texel quad — and it is bounded by the
+screen rather than by the horde. 18c measures both halves.
 
-- **18b — art and progression.** `.crpix` sprites for the player, the three
-  enemy kinds and the pickups (rule 11); XP pickups and the "pick 1 of 3"
-  level-up screen; the sprite pass replacing `app::draw_field`.
+**The level-up freezes the field**, and the freeze is simulation state rather
+than a loop pause: the choice changes what the simulation does, so a seeded
+script has to replay it. `GameState::LevelUp` short-circuits `run_tick` and
+`freeze_field` writes a zero velocity to the player, every enemy and every bolt
+**once**, on the tick the screen opens — so nothing moves for as long as it is
+up and no branch is added to the hot path. Bolts keep their velocity so it can
+be handed back; enemies do not need to, because `steer_enemies` writes them a
+fresh one on the first tick after.
+
+Still owed:
+
 - **18c — scale, measurement and the web demo.** The numbers below, done
-  properly; the browser build and its Pages entry; the profiler capture the exit
-  criteria ask for.
+  properly, now including batch count and the fill cost of the shared frame; the
+  browser build and its Pages entry; the profiler capture the exit criteria ask
+  for.
 
 ## Early scale signal (provisional, not the exit measurement)
 
@@ -113,11 +136,12 @@ What that says, and what it does not:
   That is the plan's target within striking distance **without P8** — which is a
   better position than the roadmap assumed, and the reason 18c is worth doing
   before `crcbl-jobs` rather than after.
-- **The render side is not in these numbers at all.** The placeholder emits one
-  `DrawList` quad per visible enemy through the UI pass' per-frame vertex
-  upload, which is the opposite of the instanced path the 10k claim rests on;
-  `app::MAX_DRAWN_ENEMIES` caps it at 2 000 so the two numbers stay separable.
-  The exit criteria's "60 fps render" is untouched by any of this.
+- **The render side is not in these numbers at all.** It is the instanced sprite
+  path now rather than the `DrawList` placeholder, and the draw cap the
+  placeholder needed is gone — what is left in front of it is a CPU view cull,
+  which is itself `N` comparisons a frame. Nothing has drawn more than a few
+  hundred enemies at once. The exit criteria's "60 fps render" is untouched by
+  any of this.
 - Two named, un-taken wins sit in front of the tick number, both recorded in
   `docs/backlog.md`: `PhysicsSystem::overlap_sphere` returns an owned `Vec`, so
   separation allocates `N` times a tick, and `PhysicsSystem` has no `body_mut`,

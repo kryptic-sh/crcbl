@@ -46,6 +46,41 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   travel, so it is a refit rather than the remove-and-re-insert asteroids'
   screen wrap needs.
 
+- **horde** (`apps/horde`): art and progression. `.crpix` sprites for the
+  player, the three enemy kinds and the XP pickups, baked by a `build.rs` and
+  drawn through `SpriteRenderer` with `SampleMode::Pixel`, replacing the
+  untextured quads the core loop shipped with. XP gems drop where an enemy died
+  and are collected by walking over them; banking a threshold opens a "pick 1 of
+  3" level-up screen over the frozen field, from a fixed pool of six upgrades
+  (`RAPID FIRE`, `HEAVY BOLTS`, `SWIFT BOOTS`, `LONG BARREL`, `VITALITY`,
+  `MAGNET`). Pause, level-up and death menus over `crcbl_render`'s shared menu
+  art, with the pointer, F11 and focus handling the other samples have.
+
+  **Two sheets, and the split is a batching decision.** `SpriteRenderer` starts
+  a batch whenever consecutive sprites name a different sheet, so the player,
+  all three enemy kinds and the gems are one 34-texel frame size in one sheet:
+  the whole field is a single batch **whatever order it is emitted in**, with no
+  grouping pass over the crowd and no way for the batch count to grow with the
+  horde. Asteroids has to emit its rocks largest-first to hold three batches;
+  this cannot get it wrong. What it costs is the transparent margin round the
+  two small kinds — a runner is 13 texels of art inside a 34-texel quad — and
+  that is bounded by the screen rather than by the field.
+
+  The scale is 20 texels a world unit, chosen from the runner: three enemy kinds
+  have to be told apart at a glance in a crowd, which needs about thirteen
+  texels across, and 13 / 0.64 units is 20.3. No scale makes all three enemy
+  collider boxes a whole number of texels — the radii were picked for how the
+  game plays, and it would take 50 texels a unit — so the shared frame is the
+  largest one, which at 20 is exactly 34, and each silhouette is drawn to its
+  own collider inside it.
+
+  A level-up **freezes the field**, and the freeze is simulation state rather
+  than the loop's pause: which upgrade a run took changes what the simulation
+  does, so a seeded replay has to reproduce it, and the menu presses a real
+  digit key into the action map rather than calling into the game. The freeze
+  costs one pass on the tick it opens — a zero velocity written to the player,
+  every enemy and every bolt — rather than a branch on the tick's hot path.
+
 - **crcbl-render**: `Sprite::rotation` — sprites can turn. A per-sprite angle in
   radians, counter-clockwise, about the centre of the sprite's own `rect`. It
   rides in the fourth component of `SpriteInstance::sheet`, which was padding,

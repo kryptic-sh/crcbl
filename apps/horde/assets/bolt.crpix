@@ -1,0 +1,38 @@
+# The gun's shot, and the one thing on the field that is not in `actors.crpix`.
+#
+# 8 x 8 texels at `art::TEXELS_PER_UNIT` = 20 is 0.4 x 0.4 world units, against
+# a `game::BOLT_RADIUS` of 0.15 — **deliberately larger than what it sweeps**,
+# as asteroids' shot is and for the same reason. The radius is the width of the
+# swept sphere the CCD uses, not a collider anything can be hit *by*, so a shot
+# drawn at 0.3 units would be six texels of dust for no gain.
+#
+# # Why this is a second sheet
+#
+# Every other picture in this game shares one 34-texel frame so the whole field
+# is one batch (see `actors.crpix`). A shot is 8 texels; putting it in that
+# sheet would draw a 0.4-unit picture inside a 1.7-unit quad — twenty times the
+# fill, on the one thing that is fired four times a second and lives 0.6 of one.
+# Two sheets is two batches a frame and both numbers are constant in the size of
+# the horde, which is what the scale sub-slice is measuring.
+#
+# A hot core in a warm rim, which is what makes it read as a tracer rather than
+# as a square.
+
+crpix: 8 8 1 3 1
+
+palette:
+  . c None
+  o c #ffb347
+  w c #fff6d5
+
+frame shot:
+  ..oooo..
+  .oooooo.
+  oowwwwoo
+  oowwwwoo
+  oowwwwoo
+  oowwwwoo
+  .oooooo.
+  ..oooo..
+
+sample: pixel

@@ -796,6 +796,7 @@ dependencies = [
  "crcbl-net",
  "crcbl-phys",
  "crcbl-server",
+ "crcbl-sprite",
  "glam",
  "log",
 ]

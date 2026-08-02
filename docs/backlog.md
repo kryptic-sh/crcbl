@@ -192,19 +192,21 @@ left:
   divides by the style's scale instead, exactly as the two samples scale theirs.
   It comes out with the other two when `expand` learns a scale.
 
-- **The bake half of `build.rs` is written four times, and it got worse.**
+- **The bake half of `build.rs` is written five times, and it got worse again.**
   `apps/flappy/build.rs`, `apps/breakout/build.rs`,
-  `crates/crcbl-render/build.rs` and now `apps/asteroids/build.rs` differ in
-  their `ASSETS` array and in nothing else: the same parse → bake → write →
-  generate-a-table loop, the same `ART_TICK_HZ`, the same `cargo::error`
-  reporting. `docs/plan/ROADMAP.md` says this was owed **before the third
-  sample**; the third sample shipped with a copy instead, because closing it is
-  a change to `crcbl-sprite` and to three other build scripts and the slice that
-  would have paid for it was the art slice. The fix is unchanged: a real entry
-  point in `crcbl-sprite` — something like
-  `bake::bake_dir(manifest_dir, out_dir, &stems, tick_hz)` returning the table
-  text — because a build script can depend on a workspace library and that is
-  the only shape that removes the copy rather than moving it.
+  `crates/crcbl-render/build.rs`, `apps/asteroids/build.rs` and now
+  `apps/horde/build.rs` differ in their `ASSETS` array and in nothing else: the
+  same parse → bake → write → generate-a-table loop, the same `ART_TICK_HZ`, the
+  same `cargo::error` reporting. `docs/plan/ROADMAP.md` says this was owed
+  **before the third sample**; the third and the fourth both shipped with a copy
+  instead, because closing it is a change to `crcbl-sprite` and to four other
+  build scripts and the slice that would have paid for it was, both times, the
+  art slice. The fix is unchanged: a real entry point in `crcbl-sprite` —
+  something like `bake::bake_dir(manifest_dir, out_dir, &stems, tick_hz)`
+  returning the table text — because a build script can depend on a workspace
+  library and that is the only shape that removes the copy rather than moving
+  it. It is now the cheapest of the five duplications to close and the one with
+  the most copies.
 
 - **The tick rate the art is baked at is written twice per game** —
   `ART_TICK_HZ` in `apps/*/build.rs` and again in `apps/*/src/art.rs`. A build
@@ -367,26 +369,33 @@ The modular panel is built and all three samples switch it on with F3 (or
   picture of either game. What it would take: a `--capture <path>` on the sample
   front ends, reading the swapchain image back the way `vk_e2e.rs`'s
   `render_sprites` does.
-- **The menus' `MenuKind`/`Menus`/`MenuAction` scaffolding is written four
+- **The menus' `MenuKind`/`Menus`/`MenuAction` scaffolding is written five
   times.** `apps/breakout/src/menu.rs`, `apps/flappy/src/menu.rs`,
-  `apps/sandbox/src/menu.rs` and now `apps/asteroids/src/menu.rs` share the
-  container, the show/select/press/activate surface and the pointer split, and
-  differ in the menus they hold and what the actions do. It is the same shape as
-  the `web.rs` duplication in the first section and has the same answer: the
-  generic half belongs in the engine, and the per-game half — which menu belongs
-  to which state, and what a button does — genuinely does not. The fourth sample
-  has now arrived, so this is due with `web.rs` rather than after it.
+  `apps/sandbox/src/menu.rs`, `apps/asteroids/src/menu.rs` and now
+  `apps/horde/src/menu.rs` share the container, the show/select/press/activate
+  surface and the pointer split, and differ in the menus they hold and what the
+  actions do. It is the same shape as the `web.rs` duplication in the first
+  section and has the same answer: the generic half belongs in the engine, and
+  the per-game half — which menu belongs to which state, and what a button does
+  — genuinely does not. The fifth sample has now arrived, so this is due with
+  `web.rs` rather than after it.
+
+  **Horde adds one thing the shared half would have to grow**: a menu whose
+  buttons are not fixed. `Menus::set_offer` rebuilds the level-up panel when the
+  offer changes and clears the pointer capture with it, because a rebuilt panel
+  is a different panel. Any extraction has to carry a "the menu's contents are
+  state" case rather than assuming a menu built once at start-up.
 
 - **The loop's pause / fullscreen / focus / pointer-capture block is written
-  three times.** `apps/breakout/src/app.rs`, `apps/flappy/src/app.rs` and now
-  `apps/asteroids/src/app.rs` carry the same `Loop::paused` field, the same
-  `lose_focus` (drain the held keys, then pause), the same F11
-  `toggle_fullscreen` reading the mode back rather than remembering it, the same
-  "drain the accumulator while paused" tick loop, and the same `pointer_held` /
-  `pointer_down` press-capture bookkeeping in the pump. Roughly 150 lines each.
-  The three copies have not yet drifted, which is exactly when to fold them —
-  the shape is a `SampleLoop` helper owning the flags and the pump's non-game
-  branches, with the sample supplying its own key bindings and its own
+  four times.** `apps/breakout/src/app.rs`, `apps/flappy/src/app.rs`,
+  `apps/asteroids/src/app.rs` and now `apps/horde/src/app.rs` carry the same
+  `Loop::paused` field, the same `lose_focus` (drain the held keys, then pause),
+  the same F11 `toggle_fullscreen` reading the mode back rather than remembering
+  it, the same "drain the accumulator while paused" tick loop, and the same
+  `pointer_held` / `pointer_down` press-capture bookkeeping in the pump. Roughly
+  150 lines each. The four copies have not yet drifted, which is exactly when to
+  fold them — the shape is a `SampleLoop` helper owning the flags and the pump's
+  non-game branches, with the sample supplying its own key bindings and its own
   `MenuAction` handler. It belongs in the same slice as `web.rs` and `menu.rs`.
 
 - **Flappy's swept-sphere collision is exercised, not demonstrated.**
@@ -678,25 +687,39 @@ it wants its own before/after on asteroids' own suite.
 
 ## What horde still owes
 
-Slice 18a is the core loop only. `docs/plan/sample/03-horde.md` carries the
-sub-slice split and the provisional scale numbers; this is what was raised and
-not finished.
+Slices 18a and 18b are the core loop, the art and the progression.
+`docs/plan/sample/03-horde.md` carries the sub-slice split and the provisional
+scale numbers; this is what was raised and not finished.
 
 - **The plan's 10 000-enemy exit criterion is not met and was not attempted.**
   `DEFAULT_MAX_ENEMIES` is 1 500, and `--max-enemies` exists so raising it needs
   no rebuild. The one measurement taken says the _simulation_ carries roughly
-  8–9k at 60 Hz on the reference machine and misses 10k by about 10%; the
-  **render** side of the criterion is untouched, because what draws the field
-  today is one `DrawList` quad per visible enemy through the UI pass' per-frame
-  vertex upload. Both halves belong to the scale sub-slice.
+  8–9k at 60 Hz on the reference machine and misses 10k by about 10%. The
+  **render** side is now the instanced sprite path rather than the `DrawList`
+  placeholder, and is still unmeasured: nothing has drawn more than a few
+  hundred enemies at once. Both halves belong to the scale sub-slice.
 
-- **`app::MAX_DRAWN_ENEMIES` is a cap on the picture, and it is 2 000.** With
-  the view cull in front of it a crowd has to be entirely on screen to reach it,
-  but a crowd that does is silently truncated with no indication in the HUD. It
-  exists so a frame rate measured against the placeholder renderer is not
-  mistaken for a measurement of the simulation. The art sub-slice moves the
-  field to `SpriteRenderer`, at which point the right answer is probably no cap
-  at all.
+- **The batching claim is argued and not measured.** `art::Scene` puts the
+  player, all three enemy kinds and the gems in one sheet so the field is one
+  `SpriteRenderer` batch whatever order it is emitted in, and the shot in a
+  second — two batches, both constant in the size of the horde. That is asserted
+  on a 34-sprite field by `an_interleaved_field_of_every_kind_is_two_batches`
+  and by nothing at 10k, and the _cost_ of the choice — a runner is 13 texels of
+  art in a 34-texel quad, so roughly seven times the fill — has been reasoned
+  about (bounded by screen area times packing density, under 2× the framebuffer)
+  and never profiled. The scale sub-slice should measure both: batch count per
+  frame, and whether the transparent margin is visible in a GPU pass timing at a
+  full screen of grunts. The alternative it would be measured against is a sheet
+  per kind at each kind's own frame size, which needs an emission order and a
+  grouping pass over the crowd.
+
+- **The cull is per-sprite on the CPU, and it is `N` per frame.** `Scene::build`
+  walks every enemy, every gem and every bolt and tests four comparisons against
+  the view box. At 10k that is 10k rejections a frame for a field where most are
+  off screen, which is exactly the work P7's GPU culling exists to delete. There
+  is no spatial index in front of it — the broadphase has one, and using it
+  would mean a render pass querying the physics world, which is a coupling
+  nobody wants yet.
 
 - **Nothing enforces that the arena is a plane.** Positions are `DVec3`,
   everything the game produces sits at `z = 0` (`spawn_offset` and the seek and
@@ -726,12 +749,57 @@ not finished.
   property the determinism suite rests on; the honest fix is to pick the arc
   that is inside the arena rather than to retry.
 
+- **Nothing pulls a gem towards the player.** `Upgrade::Magnet` widens the
+  radius the collection query runs at, so a gem inside it is banked on the tick
+  it comes into range and one outside it is not. The genre's version drifts the
+  gem to the player, which reads far better and which would be `P` steering
+  updates a tick on top of the `N` the sample already measures. Left out
+  deliberately: the point of this slice's pool is that each upgrade is one line.
+
+- **A gem that is never collected is lost, silently.** `MAX_PICKUPS` is 512 and
+  a kill on a full field drops nothing; `Game::pickups_dropped` counts the
+  refusals and nothing shows them. It is bounded and deterministic, which is
+  what it was for, and a player kiting away from a heap of loot in a long run
+  will not be told why their level-ups stopped. A HUD line, or dropping the
+  _oldest_ gem instead of refusing the newest, would both fix it.
+
+- **The level-up screen has no way out but forwards.** There is no "skip", and a
+  choice out of range is ignored, so a run that reached `LevelUp` stays there
+  until one of the three digits is pressed. The loop's Escape still pauses over
+  it and the death menu cannot be reached from it — nothing can kill the player
+  while the field is frozen, so this is not a soft-lock, but it does mean a
+  browser demo left on the level-up screen looks stopped. `browser-e2e.mjs`
+  watches the once-a-second `[HUD]` heartbeat, which keeps firing, so the gate
+  itself is fine.
+
+- **The upgrade pool is repeatable without limit.** `RapidFire` has a floor
+  (`FIRE_COOLDOWN_FLOOR`) and the other five do not, so a very long run has an
+  unbounded weapon range, walk speed and hit-point ceiling. It is a five-minute
+  game and nobody has played it for twenty; caps are a balance decision, not a
+  bug, and they are not there.
+
+- **Enemies do not turn to face anything.** Every silhouette is deliberately
+  non-directional — a lump, a four-legged X, a horned slab — so no sprite
+  rotation is needed and no `atan2` runs per enemy per frame. It is the right
+  trade at 10k and it does mean the crowd has no sense of heading.
+
 - **Not measured, not reviewed:** the windowed native path is compiled and never
-  run (no display in the build environment), so the follow camera, the HUD
-  layout and the death scrim have been checked by test and by argument and by
-  nobody's eyes. There is no golden image and no browser build. Frame timings
-  from a headless run are the _pass_ timings only — 0.021 ms for two passes at
-  an empty field, which measures nothing.
+  run (no display in the build environment), so the follow camera, the sprite
+  pass, the three menus and the HUD layout have been checked by test and by
+  argument and by nobody's eyes **in the running game**. What _was_ looked at is
+  the art: the baked `actors.png` and `bolt.png` at 8× and composed into a crowd
+  at the exact on-screen scale the game draws at (25.71 px per world unit at
+  720p, so 1.29 screen pixels per texel), which is a picture of the real baked
+  bytes and not of the game. There is no golden image and no browser build.
+  Frame timings from a headless run are the _pass_ timings only, which measures
+  nothing.
+
+- **Nothing checks that a `.crpix` texel lands on a whole screen pixel.** At
+  `TEXELS_PER_UNIT` = 20 and a 720-pixel-high view of 28 world units, one texel
+  is 1.286 screen pixels, so `SampleMode::Pixel`'s nearest sampling drops and
+  doubles rows as the camera moves. Every sample has this and none of them
+  addresses it; the fix is an integer-scaled render target, which is a renderer
+  feature nobody has asked for.
 
 ## What asteroids itself still owes
 

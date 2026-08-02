@@ -9,10 +9,26 @@
 //! agents and then ten thousand**, so the interesting number is not how often
 //! something spawns but how much work one tick does per live body.
 //!
-//! `docs/plan/sample/03-horde.md` is the plan. This sub-slice is the core loop
-//! only — arena, player, enemies, damage, death. The art, the XP and the
-//! level-up screen are the next one; the scale push, the measurement and the
-//! browser demo are the one after.
+//! `docs/plan/sample/03-horde.md` is the plan. What is here is the core loop —
+//! arena, player, enemies, damage, death — plus the progression the art
+//! sub-slice added: XP that drops where an enemy died, and a "pick 1 of 3"
+//! level-up from a fixed pool of six upgrades. The scale push, the measurement
+//! and the browser demo are the sub-slice after.
+//!
+//! # A level-up freezes the field, and the freeze is simulation state
+//!
+//! [`GameState::LevelUp`] is a state of the *simulation*, not of the loop —
+//! unlike pause, which the window owns. It has to be, because the choice the
+//! player makes changes what the simulation does, and a seeded script has to
+//! replay it. While it is up, nothing is steered, spawned, swept or damaged and
+//! the run clock is stopped.
+//!
+//! The freeze is **one pass, on the tick it starts**, not a check on the hot
+//! path: `freeze_field` writes a zero velocity to the player, every enemy and
+//! every bolt once, and the integrator then moves nothing for as long as the
+//! screen is up. A bolt keeps its velocity in [`Bolt::velocity`] so it can be
+//! given back the moment the screen closes; an enemy needs no such thing,
+//! because `steer_enemies` writes it a fresh velocity on the first tick after.
 //!
 //! # Three seams into `crcbl-phys`, and each is a different query
 //!
@@ -257,6 +273,20 @@ impl EnemyKind {
         }
     }
 
+    /// How much experience the gem it drops is worth.
+    ///
+    /// Flat for the two cheap kinds and five times that for a brute, which is
+    /// roughly what six bolts against two is worth — so shooting the thing that
+    /// takes work is paid for, and the level-up rate tracks the *effort* a run
+    /// puts in rather than the number of bodies it walks past.
+    #[must_use]
+    pub const fn xp(self) -> u64 {
+        match self {
+            Self::Grunt | Self::Runner => 1,
+            Self::Brute => 5,
+        }
+    }
+
     /// The collider one of these carries.
     #[must_use]
     pub const fn collider(self) -> ColliderComponent {
@@ -294,6 +324,170 @@ pub fn max_enemy_radius() -> f64 {
         .iter()
         .map(|kind| kind.radius())
         .fold(0.0f64, f64::max)
+}
+
+// ---------------------------------------------------------------------------
+// Experience, pickups and the level-up
+// ---------------------------------------------------------------------------
+
+/// The radius of a dropped gem's collider, in world units.
+///
+/// 0.7 units across, which at `art::TEXELS_PER_UNIT` is a whole 14 texels, and
+/// a little larger than a runner — a gem the player cannot see is a gem the
+/// player does not walk to.
+///
+/// **A trigger, not a solid.** `crcbl_phys` skips triggers in
+/// [`PhysicsSystem::sweep_sphere`], so a bolt flies through a gem instead of
+/// being spent on it; `overlap_sphere` does *not* skip them, which is exactly
+/// what `collect_pickups` wants and what the separation and aiming queries have
+/// to filter back out. Both filters are the `by_entity` lookups those passes
+/// already did.
+pub const XP_RADIUS: f64 = 0.35;
+
+/// The most gems that may be lying on the field at once.
+///
+/// A ceiling rather than a lifetime: gems do not rot, so a player who never
+/// picks one up would otherwise accumulate one collider per kill forever, and
+/// the broadphase this sample exists to measure would be measuring litter. When
+/// it is full a kill drops nothing, which is a pressure to go and collect
+/// rather than a silent loss — `pickups_dropped` counts what was skipped.
+pub const MAX_PICKUPS: usize = 512;
+
+/// How much experience the run needs to leave `level` for the next one.
+///
+/// Linear, for the reason [`spawn_interval`] is: the thing the player feels is
+/// the *rate* of level-ups, and a linearly growing threshold against a spawn
+/// rate that is itself accelerating already slows that down.
+#[must_use]
+pub const fn xp_for_next_level(level: u32) -> u64 {
+    8 + 4 * (level as u64).saturating_sub(1)
+}
+
+/// One thing a level-up can give the player.
+///
+/// **Six, fixed, and every one of them is a single number.** The plan's
+/// non-goals bar meta-progression and a wide weapon table; what this is for is
+/// to exercise game UI mid-session, so the pool is the smallest one where the
+/// choice is a choice. Each variant is one line of `apply_upgrade` and every
+/// one may be taken again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Upgrade {
+    /// Shorter gap between shots.
+    RapidFire,
+    /// More damage a bolt.
+    HeavyBolts,
+    /// A faster player.
+    SwiftBoots,
+    /// The auto-aim looks further.
+    LongBarrel,
+    /// More hit points, and that much healed on the spot.
+    Vitality,
+    /// Gems are collected from further away.
+    Magnet,
+}
+
+impl Upgrade {
+    /// Every upgrade, in a fixed order. The order is the shuffle's input, so it
+    /// is part of what a seed decides.
+    pub const ALL: [Self; 6] = [
+        Self::RapidFire,
+        Self::HeavyBolts,
+        Self::SwiftBoots,
+        Self::LongBarrel,
+        Self::Vitality,
+        Self::Magnet,
+    ];
+
+    /// What the level-up menu prints on the button.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::RapidFire => "RAPID FIRE",
+            Self::HeavyBolts => "HEAVY BOLTS",
+            Self::SwiftBoots => "SWIFT BOOTS",
+            Self::LongBarrel => "LONG BARREL",
+            Self::Vitality => "VITALITY",
+            Self::Magnet => "MAGNET",
+        }
+    }
+}
+
+/// How many an offer holds.
+pub const UPGRADE_CHOICES: usize = 3;
+
+/// The floor [`Upgrade::RapidFire`] cannot take the cooldown below, in seconds.
+///
+/// Twenty shots a second. Without it the multiplier is unbounded and a long run
+/// ends up firing once a tick, which is not a weapon, it is a stress test of
+/// the bolt list wearing a weapon's name.
+pub const FIRE_COOLDOWN_FLOOR: f64 = 0.05;
+
+/// Keeps the upgrade draws out of the spawn table's index space.
+///
+/// [`spawn_index`] packs a spawn counter and a draw number into the whole of a
+/// `u64`, so there is no room left in it for a second stream. Salting the *seed*
+/// instead gives the offers an independent sequence that is still a pure
+/// function of the run — a restart deals different upgrades as well as
+/// different hordes.
+const UPGRADE_SALT: u64 = 0x5550_4752_4144_4553;
+
+/// The three upgrades offered on reaching `level`, in run `seed`.
+///
+/// **Exactly three, and always distinct**, because it is a partial
+/// Fisher–Yates over [`Upgrade::ALL`] rather than three independent draws —
+/// three draws would offer the same upgrade twice about one level in three, and
+/// a menu with two identical buttons is not a choice.
+#[must_use]
+pub fn upgrade_offer(seed: u64, level: u32) -> [Upgrade; UPGRADE_CHOICES] {
+    let seed = seed ^ UPGRADE_SALT;
+    let mut pool = Upgrade::ALL;
+    let mut offer = [Upgrade::RapidFire; UPGRADE_CHOICES];
+    for (i, slot) in offer.iter_mut().enumerate() {
+        let remaining = pool.len() - i;
+        let roll = hash_unit(seed, u64::from(level) * 8 + i as u64);
+        // `hash_unit` is in `[0, 1)`, so this is in `0..remaining`; the `min`
+        // is there for the one input where a rounding of 1.0 would not be.
+        let pick = i + ((roll * remaining as f64) as usize).min(remaining - 1);
+        pool.swap(i, pick);
+        *slot = pool[i];
+    }
+    offer
+}
+
+/// The numbers a run can raise, and the only mutable ones in the game.
+///
+/// Everything else is a `const`. These start at the constants above and are
+/// reset by `restart`, so a new run is a new set — the plan's non-goals bar
+/// meta-progression, and the shape of this struct is what makes that structural
+/// rather than a promise.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stats {
+    /// Seconds between shots. See [`FIRE_COOLDOWN`].
+    pub fire_cooldown: f64,
+    /// Damage one bolt does. See [`BOLT_DAMAGE`].
+    pub bolt_damage: f64,
+    /// World units a second. See [`PLAYER_SPEED`].
+    pub player_speed: f64,
+    /// How far the auto-aim looks. See [`WEAPON_RANGE`].
+    pub weapon_range: f64,
+    /// The player's ceiling. See [`PLAYER_MAX_HP`].
+    pub max_hp: f64,
+    /// The radius `collect_pickups` queries at. Starts at [`PLAYER_RADIUS`], so
+    /// a gem is picked up by walking over it and no sooner.
+    pub pickup_radius: f64,
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self {
+            fire_cooldown: FIRE_COOLDOWN,
+            bolt_damage: BOLT_DAMAGE,
+            player_speed: PLAYER_SPEED,
+            weapon_range: WEAPON_RANGE,
+            max_hp: PLAYER_MAX_HP,
+            pickup_radius: PLAYER_RADIUS,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -524,6 +718,13 @@ const ACTION_DOWN: &str = "down";
 const ACTION_LEFT: &str = "left";
 const ACTION_RIGHT: &str = "right";
 const ACTION_RESTART: &str = "restart";
+/// The three level-up buttons, in offer order.
+///
+/// Bound to the digit row, and pressed by the level-up menu as **real key
+/// events** rather than by calling into the simulation — the argument asteroids
+/// makes for its `FLY` button, and it matters more here: which upgrade a run
+/// took is simulation state a seeded script has to be able to replay.
+const ACTION_CHOOSE: [&str; UPGRADE_CHOICES] = ["choose1", "choose2", "choose3"];
 
 /// One tick of player intent.
 ///
@@ -539,6 +740,9 @@ struct Intent {
     /// The restart key, on the tick it went down. An *edge*: held, it would
     /// restart the run sixty times a second.
     restart: bool,
+    /// Which level-up button was pressed this tick, one-based, or zero for
+    /// none. An edge for the same reason `restart` is.
+    choose: u8,
 }
 
 impl Intent {
@@ -551,12 +755,17 @@ impl Intent {
     }
 
     /// The wire form handed to `Client::set_input`.
+    ///
+    /// The choice takes the top two bits, which is enough for
+    /// [`UPGRADE_CHOICES`] plus "none" and is asserted to be by
+    /// `the_wire_form_carries_every_bit_of_intent`.
     fn to_wire(self) -> u8 {
         u8::from(self.up)
             | (u8::from(self.down) << 1)
             | (u8::from(self.left) << 2)
             | (u8::from(self.right) << 3)
             | (u8::from(self.restart) << 4)
+            | ((self.choose & 0b11) << 5)
     }
 }
 
@@ -566,16 +775,21 @@ impl Intent {
 
 /// Where a run is.
 ///
-/// **Two states, where breakout, flappy and asteroids each have three.** Those
-/// games open on a title screen because they open on a *board* — something to
-/// look at while the player decides. This one's board is empty at `t = 0` and
-/// fills up because time passes, so a "waiting to start" state would be a blank
-/// screen with a prompt on it, and the first thing the player would do is press
-/// the key. It starts playing.
+/// **There is no "waiting to start".** Breakout, flappy and asteroids each open
+/// on a title screen because they open on a *board* — something to look at while
+/// the player decides. This one's board is empty at `t = 0` and fills up because
+/// time passes, so a waiting state would be a blank screen with a prompt on it,
+/// and the first thing the player would do is press the key. It starts playing.
+/// The loop still has a pause menu and a death menu; what it has no state for is
+/// a start one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GameState {
     /// Running. The clock is going up and the horde is arriving.
     Playing,
+    /// The level-up screen is up and the player is picking one of three. The
+    /// whole field is frozen — see this module's header — and the run clock is
+    /// stopped.
+    LevelUp,
     /// The player's hit points reached zero. The clock is stopped and the kill
     /// count is frozen; the horde keeps moving, so the screen is a game and not
     /// a screenshot. Restart begins a new run.
@@ -606,6 +820,22 @@ struct Bolt {
     entity: Entity,
     /// Seconds left before it expires.
     life: f64,
+    /// The velocity it was fired at.
+    ///
+    /// Kept because `freeze_field` zeroes it for the level-up screen and
+    /// nothing else could put it back: a bolt's direction is not recoverable
+    /// from its position, and an enemy's is (`steer_enemies` recomputes one
+    /// every tick).
+    velocity: DVec3,
+}
+
+/// One dropped gem.
+#[derive(Clone, Copy, Debug)]
+struct Pickup {
+    entity: Entity,
+    position: DVec3,
+    /// How much experience collecting it is worth. See [`EnemyKind::xp`].
+    xp: u64,
 }
 
 /// What the renderer needs for one enemy.
@@ -620,6 +850,12 @@ pub struct EnemyView {
 /// What the renderer needs for one bolt.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoltView {
+    pub position: DVec3,
+}
+
+/// What the renderer needs for one gem.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PickupView {
     pub position: DVec3,
 }
 
@@ -653,6 +889,22 @@ struct GameLogic {
     by_entity: HashMap<Entity, usize>,
     bolts: Vec<Bolt>,
 
+    /// The gems on the ground, and where each is in the list — the same pair
+    /// [`Self::enemies`] and [`Self::by_entity`] are, for the same reason: both
+    /// the collection query and the separation query hand back entity ids.
+    pickups: Vec<Pickup>,
+    pickup_by_entity: HashMap<Entity, usize>,
+
+    /// Experience banked towards the next level, and which level the run is on.
+    /// The run starts at level 1.
+    xp: u64,
+    level: u32,
+    /// The three upgrades the level-up screen is offering, or `None` when it is
+    /// not up. Refreshed by `enter_level_up` and consumed by `apply_choice`.
+    offer: Option<[Upgrade; UPGRADE_CHOICES]>,
+    /// The numbers this run has raised. See [`Stats`].
+    stats: Stats,
+
     /// The seed the whole game was started with. The run actually in play is
     /// `run_seed` of this and [`Self::runs`].
     seed: u64,
@@ -675,11 +927,14 @@ struct GameLogic {
     /// second half is true of a game that did nothing at all.
     enemies_spawned: u64,
     bolts_fired: u64,
+    /// How many gems a full field refused to drop. See [`MAX_PICKUPS`].
+    pickups_dropped: u64,
 
     /// Live views for the renderer, refilled rather than rebuilt so a
     /// steady-state tick does not allocate.
     enemy_views: Vec<EnemyView>,
     bolt_views: Vec<BoltView>,
+    pickup_views: Vec<PickupView>,
 
     /// Scratch space for the per-tick passes, kept here for the same reason.
     scratch_entities: Vec<Entity>,
@@ -712,6 +967,24 @@ fn remove_enemy(logic: &mut GameLogic, index: usize) -> Enemy {
     logic.by_entity.remove(&removed.entity);
     if let Some(moved) = logic.enemies.get(index) {
         logic.by_entity.insert(moved.entity, index);
+    }
+    removed
+}
+
+/// The same pair for the gems.
+fn push_pickup(logic: &mut GameLogic, pickup: Pickup) {
+    logic
+        .pickup_by_entity
+        .insert(pickup.entity, logic.pickups.len());
+    logic.pickups.push(pickup);
+}
+
+/// The same `swap_remove` and the same follow-up write. See [`remove_enemy`].
+fn remove_pickup(logic: &mut GameLogic, index: usize) -> Pickup {
+    let removed = logic.pickups.swap_remove(index);
+    logic.pickup_by_entity.remove(&removed.entity);
+    if let Some(moved) = logic.pickups.get(index) {
+        logic.pickup_by_entity.insert(moved.entity, index);
     }
     removed
 }
@@ -779,6 +1052,11 @@ fn lock(shared: &Mutex<GameLogic>) -> MutexGuard<'_, GameLogic> {
 ///   not swept and not asked for contact damage until the tick after. An enemy
 ///   spawned into the middle of the pass would be steered from a position
 ///   nothing else in the pass knows about.
+///
+/// [`GameState::LevelUp`] short-circuits the whole of it after the restart edge:
+/// nothing below moves, spends or spawns anything, and the field stays where
+/// `freeze_field` left it. See this module's header for why that is one pass on
+/// entry rather than a branch on the hot path.
 fn run_tick(logic: &mut GameLogic, world: &mut World) {
     logic.ticks += 1;
     let dt = world.tick_dt();
@@ -789,6 +1067,14 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
 
     if intent.restart {
         restart(logic, world);
+    }
+
+    if logic.state == GameState::LevelUp {
+        if intent.choose > 0 {
+            apply_choice(logic, world, usize::from(intent.choose - 1));
+        }
+        refresh_views(logic, world);
+        return;
     }
 
     if logic.state == GameState::Playing {
@@ -812,8 +1098,15 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
 
     if logic.state == GameState::Playing {
         contact_damage(logic, world, dt);
+        collect_pickups(logic, world);
         spawn_enemies(logic, world, dt);
         logic.elapsed += dt;
+        // Last, and guarded again: a tick that both banked the level and ran
+        // the player out of hit points is a death, not a level-up. The screen
+        // it would otherwise open has no way back.
+        if logic.state == GameState::Playing {
+            maybe_level_up(logic, world);
+        }
     }
 
     refresh_views(logic, world);
@@ -876,7 +1169,7 @@ fn clamp_one(phys: &mut PhysicsSystem, entity: Entity, radius: f64) -> Option<DV
 /// and there is nothing to be gained by pretending otherwise.
 fn drive_player(logic: &mut GameLogic, world: &mut World, intent: Intent) {
     let player = logic.player;
-    let velocity = intent.direction() * PLAYER_SPEED;
+    let velocity = intent.direction() * logic.stats.player_speed;
     with_physics(world, |phys| {
         if let Some(mut body) = phys.body(player).copied() {
             body.velocity = velocity;
@@ -911,9 +1204,17 @@ fn fire(logic: &mut GameLogic, world: &mut World, dt: f64) {
     }
 
     let origin = logic.player_pos;
+    let range = logic.stats.weapon_range;
+    // **The filter that stops the gun aiming at the loot.** A dropped gem is a
+    // trigger collider and `overlap_sphere` does not skip triggers, so without
+    // this a player standing over a gem in an empty field would fire at their
+    // own XP forever. Taken out and put back rather than borrowed, because the
+    // closure below holds the physics system for the whole query.
+    let by_entity = std::mem::take(&mut logic.by_entity);
     let target = with_physics(world, |phys| {
-        phys.overlap_sphere(origin, WEAPON_RANGE)
+        phys.overlap_sphere(origin, range)
             .into_iter()
+            .filter(|(entity, _hit)| by_entity.contains_key(entity))
             .filter_map(|(entity, _hit)| {
                 let position = phys.transform(entity)?.position;
                 Some((entity, position))
@@ -926,6 +1227,7 @@ fn fire(logic: &mut GameLogic, world: &mut World, dt: f64) {
             })
     })
     .flatten();
+    logic.by_entity = by_entity;
 
     // No cooldown is spent on an empty field: the gun is ready the instant
     // something walks into range, which is what stops the first enemy of a wave
@@ -938,7 +1240,7 @@ fn fire(logic: &mut GameLogic, world: &mut World, dt: f64) {
         // fire in, and contact damage is already dealing with it.
         return;
     };
-    logic.fire_timer = FIRE_COOLDOWN;
+    logic.fire_timer = logic.stats.fire_cooldown;
 
     let position = origin + direction * MUZZLE_OFFSET;
     let velocity = direction * BOLT_SPEED;
@@ -953,6 +1255,7 @@ fn fire(logic: &mut GameLogic, world: &mut World, dt: f64) {
     logic.bolts.push(Bolt {
         entity,
         life: BOLT_LIFE,
+        velocity,
     });
     logic.bolts_fired += 1;
 }
@@ -1067,7 +1370,7 @@ fn sweep_bolts(logic: &mut GameLogic, world: &mut World, dt: f64) {
         // kill it; the second finds an entity that is no longer an enemy and is
         // spent without scoring, which is not a double kill.
         if let Some(&target) = logic.by_entity.get(&hit) {
-            damage_enemy(logic, world, target, BOLT_DAMAGE);
+            damage_enemy(logic, world, target, logic.stats.bolt_damage);
         }
     }
 }
@@ -1116,6 +1419,187 @@ fn damage_enemy(logic: &mut GameLogic, world: &mut World, index: usize, amount: 
     with_physics(world, |phys| phys.remove_entity(dead.entity));
     world.despawn(dead.entity);
     logic.kills += 1;
+    drop_pickup(logic, world, dead.position, dead.kind.xp());
+}
+
+// ---------------------------------------------------------------------------
+// Experience
+// ---------------------------------------------------------------------------
+
+/// Leaves a gem where an enemy died, if the field has room for one.
+///
+/// The collider is a **trigger**, which is the whole of how a gem stays out of
+/// the game's other three queries: `crcbl_phys` skips triggers in the sweep, so
+/// a bolt flies through it; `fire` and `steer_enemies` filter theirs back out
+/// through the enemy index they already consult. See [`XP_RADIUS`].
+fn drop_pickup(logic: &mut GameLogic, world: &mut World, position: DVec3, xp: u64) {
+    if logic.pickups.len() >= MAX_PICKUPS {
+        logic.pickups_dropped += 1;
+        return;
+    }
+    let position = clamp_to_arena(position, XP_RADIUS);
+    let entity = world.spawn();
+    let transform = Transform::from_position(position);
+    with_physics(world, |phys| {
+        phys.set_collider(
+            entity,
+            &ColliderComponent::Sphere {
+                offset: DVec3::ZERO,
+                radius: XP_RADIUS,
+                is_trigger: true,
+            },
+            &transform,
+        );
+    });
+    push_pickup(
+        logic,
+        Pickup {
+            entity,
+            position,
+            xp,
+        },
+    );
+}
+
+/// Banks every gem the player is standing on.
+///
+/// **One query, and the radius is exact for the same reason contact damage's
+/// is**: a shape-aware overlap of radius `R` returns every collider whose centre
+/// is within `R + r_b`, so querying at `stats.pickup_radius` picks up exactly
+/// the gems whose surface the player is touching. [`Upgrade::Magnet`] raises
+/// that radius and nothing else changes.
+///
+/// The query also returns enemies — they are colliders too — and the
+/// `pickup_by_entity` lookup is what rejects them.
+fn collect_pickups(logic: &mut GameLogic, world: &mut World) {
+    if logic.pickups.is_empty() {
+        return;
+    }
+    let centre = logic.player_pos;
+    let radius = logic.stats.pickup_radius;
+    let pickup_by_entity = std::mem::take(&mut logic.pickup_by_entity);
+    let mut taken = std::mem::take(&mut logic.scratch_entities);
+    taken.clear();
+    with_physics(world, |phys| {
+        for (entity, _hit) in phys.overlap_sphere(centre, radius) {
+            if pickup_by_entity.contains_key(&entity) {
+                taken.push(entity);
+            }
+        }
+    });
+    logic.pickup_by_entity = pickup_by_entity;
+
+    for entity in taken.drain(..) {
+        let Some(&index) = logic.pickup_by_entity.get(&entity) else {
+            continue;
+        };
+        let gem = remove_pickup(logic, index);
+        with_physics(world, |phys| phys.remove_entity(gem.entity));
+        world.despawn(gem.entity);
+        logic.xp += gem.xp;
+    }
+    logic.scratch_entities = taken;
+}
+
+/// Opens the level-up screen if the run has banked enough experience.
+fn maybe_level_up(logic: &mut GameLogic, world: &mut World) {
+    if logic.xp < xp_for_next_level(logic.level) {
+        return;
+    }
+    logic.xp -= xp_for_next_level(logic.level);
+    logic.level += 1;
+    logic.offer = Some(upgrade_offer(logic.run(), logic.level));
+    logic.state = GameState::LevelUp;
+    freeze_field(logic, world);
+    log::info!(
+        "level {} at {:.1}s, offering {:?}",
+        logic.level,
+        logic.elapsed,
+        logic.offer,
+    );
+}
+
+/// Takes the `index`-th upgrade of the offer and puts the field back in motion.
+///
+/// A choice out of range is ignored rather than clamped: it can only come from a
+/// caller that made one up, and silently taking a different upgrade from the one
+/// asked for is worse than doing nothing.
+///
+/// **One more threshold may already be crossed** — a brute's gem is five
+/// experience against a step of four — so this re-checks and opens the next
+/// screen rather than banking a level the player never chose for.
+fn apply_choice(logic: &mut GameLogic, world: &mut World, index: usize) {
+    let Some(upgrade) = logic.offer.and_then(|offer| offer.get(index).copied()) else {
+        return;
+    };
+    apply_upgrade(logic, upgrade);
+    log::info!("took {} at level {}", upgrade.label(), logic.level);
+    logic.offer = None;
+    logic.state = GameState::Playing;
+    thaw_field(logic, world);
+    maybe_level_up(logic, world);
+}
+
+/// What one upgrade does. One line each, which is the point of the pool.
+fn apply_upgrade(logic: &mut GameLogic, upgrade: Upgrade) {
+    let stats = &mut logic.stats;
+    match upgrade {
+        Upgrade::RapidFire => {
+            stats.fire_cooldown = (stats.fire_cooldown * 0.85).max(FIRE_COOLDOWN_FLOOR);
+        }
+        Upgrade::HeavyBolts => stats.bolt_damage += 2.0,
+        Upgrade::SwiftBoots => stats.player_speed += 0.6,
+        Upgrade::LongBarrel => stats.weapon_range += 2.0,
+        Upgrade::Vitality => {
+            stats.max_hp += 25.0;
+            // Healed on the spot as well, or the upgrade is a promise that only
+            // pays off after the next twenty-five points of damage.
+            logic.player_hp = (logic.player_hp + 25.0).min(stats.max_hp);
+        }
+        Upgrade::Magnet => stats.pickup_radius += 1.0,
+    }
+}
+
+/// Stops everything that is moving, once, for the level-up screen.
+///
+/// See this module's header: the integrator runs before the game module every
+/// tick, so a frozen field is one whose velocities are all zero rather than one
+/// the module keeps stepping over.
+fn freeze_field(logic: &mut GameLogic, world: &mut World) {
+    let player = logic.player;
+    let entities: Vec<Entity> = std::iter::once(player)
+        .chain(logic.enemies.iter().map(|enemy| enemy.entity))
+        .chain(logic.bolts.iter().map(|bolt| bolt.entity))
+        .collect();
+    with_physics(world, |phys| {
+        for entity in entities {
+            if let Some(mut body) = phys.body(entity).copied() {
+                body.velocity = DVec3::ZERO;
+                phys.set_body(entity, body);
+            }
+        }
+    });
+}
+
+/// Hands the bolts their velocities back.
+///
+/// Only the bolts: `drive_player` and `steer_enemies` both write a fresh
+/// velocity on the first tick the game is playing again, and a bolt has nothing
+/// that would.
+fn thaw_field(logic: &mut GameLogic, world: &mut World) {
+    let bolts: Vec<(Entity, DVec3)> = logic
+        .bolts
+        .iter()
+        .map(|bolt| (bolt.entity, bolt.velocity))
+        .collect();
+    with_physics(world, |phys| {
+        for (entity, velocity) in bolts {
+            if let Some(mut body) = phys.body(entity).copied() {
+                body.velocity = velocity;
+                phys.set_body(entity, body);
+            }
+        }
+    });
 }
 
 /// Seeks the player, and pushes off the neighbours, for every enemy on the
@@ -1318,9 +1802,21 @@ fn restart(logic: &mut GameLogic, world: &mut World) {
     for bolt in std::mem::take(&mut logic.bolts) {
         despawn_bolt(world, bolt.entity);
     }
+    for gem in std::mem::take(&mut logic.pickups) {
+        with_physics(world, |phys| phys.remove_entity(gem.entity));
+        world.despawn(gem.entity);
+    }
+    logic.pickup_by_entity.clear();
     logic.runs = logic.runs.wrapping_add(1);
     logic.state = GameState::Playing;
-    logic.player_hp = PLAYER_MAX_HP;
+    // **Every upgrade comes off.** The plan's non-goals bar meta-progression,
+    // and a `Stats::default()` here is what makes that a property of the code
+    // rather than of nobody having written the carry-over yet.
+    logic.stats = Stats::default();
+    logic.player_hp = logic.stats.max_hp;
+    logic.xp = 0;
+    logic.level = 1;
+    logic.offer = None;
     logic.elapsed = 0.0;
     logic.kills = 0;
     logic.fire_timer = 0.0;
@@ -1354,6 +1850,15 @@ fn refresh_views(logic: &mut GameLogic, world: &mut World) {
         health: (enemy.hp / enemy.kind.max_hp()).clamp(0.0, 1.0),
     }));
     logic.enemy_views = enemy_views;
+
+    // Straight off `Pickup::position`, which never changes: a gem is dropped
+    // where an enemy died and stays there until it is walked over.
+    let mut pickup_views = std::mem::take(&mut logic.pickup_views);
+    pickup_views.clear();
+    pickup_views.extend(logic.pickups.iter().map(|gem| PickupView {
+        position: gem.position,
+    }));
+    logic.pickup_views = pickup_views;
 
     let bolts: Vec<Entity> = logic.bolts.iter().map(|bolt| bolt.entity).collect();
     let mut bolt_views = std::mem::take(&mut logic.bolt_views);
@@ -1410,13 +1915,22 @@ fn with_physics<R>(world: &mut World, f: impl FnOnce(&mut PhysicsSystem) -> R) -
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RenderState {
     pub player: DVec3,
-    /// What is left of the player's hit points.
+    /// What is left of the player's hit points, and the ceiling they are
+    /// against — the ceiling moves, so the HUD cannot read it off a constant.
     pub player_hp: f64,
+    pub player_max_hp: f64,
     pub enemies: Vec<EnemyView>,
     pub bolts: Vec<BoltView>,
+    pub pickups: Vec<PickupView>,
     /// How long this run has lasted, in simulated seconds.
     pub elapsed: f64,
     pub kills: u64,
+    /// Experience banked towards the next level, and how much that needs.
+    pub xp: u64,
+    pub xp_needed: u64,
+    pub level: u32,
+    /// The three upgrades on the level-up screen, or `None` when it is not up.
+    pub offer: Option<[Upgrade; UPGRADE_CHOICES]>,
     pub state: Option<GameState>,
 }
 
@@ -1465,6 +1979,7 @@ pub struct Game {
     pub player_hp: f64,
     pub elapsed: f64,
     pub kills: u64,
+    pub level: u32,
     prev_log_state: GameState,
 }
 
@@ -1546,6 +2061,9 @@ impl Game {
             (ACTION_LEFT, vec![KeyCode::ArrowLeft, KeyCode::KeyA]),
             (ACTION_RIGHT, vec![KeyCode::ArrowRight, KeyCode::KeyD]),
             (ACTION_RESTART, vec![KeyCode::KeyR, KeyCode::Space]),
+            (ACTION_CHOOSE[0], vec![KeyCode::Digit1]),
+            (ACTION_CHOOSE[1], vec![KeyCode::Digit2]),
+            (ACTION_CHOOSE[2], vec![KeyCode::Digit3]),
         ] {
             action_map.declare(ActionDecl {
                 name: name.into(),
@@ -1567,14 +2085,22 @@ impl Game {
             enemies: Vec::new(),
             by_entity: HashMap::new(),
             bolts: Vec::new(),
+            pickups: Vec::new(),
+            pickup_by_entity: HashMap::new(),
+            xp: 0,
+            level: 1,
+            offer: None,
+            stats: Stats::default(),
             seed: setup.seed,
             runs: 0,
             spawn_counter: 0,
             max_enemies: setup.max_enemies,
             enemies_spawned: 0,
             bolts_fired: 0,
+            pickups_dropped: 0,
             enemy_views: Vec::new(),
             bolt_views: Vec::new(),
+            pickup_views: Vec::new(),
             scratch_entities: Vec::new(),
             ticks: 0,
         }));
@@ -1631,6 +2157,7 @@ impl Game {
             player_hp: PLAYER_MAX_HP,
             elapsed: 0.0,
             kills: 0,
+            level: 1,
             prev_log_state: GameState::Playing,
         };
         log::info!(
@@ -1670,12 +2197,20 @@ impl Game {
             self.action_map.key_event(key, pressed);
         }
 
+        // First match wins, so two digits in one frame take the earlier button
+        // rather than the later one — the same rule an edge follows everywhere
+        // else here.
+        let choose = ACTION_CHOOSE
+            .iter()
+            .position(|name| action_just_pressed(&self.action_map, name))
+            .map_or(0, |index| index as u8 + 1);
         let intent = Intent {
             up: action_held(&self.action_map, ACTION_UP),
             down: action_held(&self.action_map, ACTION_DOWN),
             left: action_held(&self.action_map, ACTION_LEFT),
             right: action_held(&self.action_map, ACTION_RIGHT),
             restart: action_just_pressed(&self.action_map, ACTION_RESTART),
+            choose,
         };
 
         let ticks_before = {
@@ -1688,6 +2223,9 @@ impl Game {
             logic.intent.left = intent.left;
             logic.intent.right = intent.right;
             logic.intent.restart |= intent.restart;
+            if logic.intent.choose == 0 {
+                logic.intent.choose = intent.choose;
+            }
             logic.ticks
         };
 
@@ -1709,6 +2247,7 @@ impl Game {
             self.player_hp = logic.player_hp;
             self.elapsed = logic.elapsed;
             self.kills = logic.kills;
+            self.level = logic.level;
             logic.ticks
         };
         debug_assert_eq!(
@@ -1724,13 +2263,16 @@ impl Game {
         // watches for this heartbeat to tell a paused demo from a running one.
         if state_changed || self.ticks_run.is_multiple_of(60) {
             log::info!(
-                "[HUD] {:?}  time: {:.1}  kills: {}  hp: {:.0}  enemies: {}  bolts: {}",
+                "[HUD] {:?}  time: {:.1}  kills: {}  hp: {:.0}  lvl: {}  \
+                 enemies: {}  bolts: {}  gems: {}",
                 self.state,
                 self.elapsed,
                 self.kills,
                 self.player_hp,
+                self.level,
                 self.enemy_count(),
                 self.bolt_count(),
+                self.pickup_count(),
             );
         }
     }
@@ -1742,12 +2284,19 @@ impl Game {
         let logic = lock(&self.shared);
         out.player = logic.player_pos;
         out.player_hp = logic.player_hp;
+        out.player_max_hp = logic.stats.max_hp;
         out.enemies.clear();
         out.enemies.extend_from_slice(&logic.enemy_views);
         out.bolts.clear();
         out.bolts.extend_from_slice(&logic.bolt_views);
+        out.pickups.clear();
+        out.pickups.extend_from_slice(&logic.pickup_views);
         out.elapsed = logic.elapsed;
         out.kills = logic.kills;
+        out.xp = logic.xp;
+        out.xp_needed = xp_for_next_level(logic.level);
+        out.level = logic.level;
+        out.offer = logic.offer;
         out.state = Some(logic.state);
     }
 
@@ -1782,6 +2331,30 @@ impl Game {
         lock(&self.shared).bolts.len()
     }
 
+    /// How many gems are on the ground.
+    #[must_use]
+    pub fn pickup_count(&self) -> usize {
+        lock(&self.shared).pickups.len()
+    }
+
+    /// Experience banked towards the next level.
+    #[must_use]
+    pub fn xp(&self) -> u64 {
+        lock(&self.shared).xp
+    }
+
+    /// The three upgrades on offer, or `None` when the screen is not up.
+    #[must_use]
+    pub fn offer(&self) -> Option<[Upgrade; UPGRADE_CHOICES]> {
+        lock(&self.shared).offer
+    }
+
+    /// The numbers this run has raised. See [`Stats`].
+    #[must_use]
+    pub fn stats(&self) -> Stats {
+        lock(&self.shared).stats
+    }
+
     /// How many enemies this game has ever put on the field, across every run.
     ///
     /// The denominator of the leak test: "nothing leaked" is a claim about a run
@@ -1795,6 +2368,12 @@ impl Game {
     #[must_use]
     pub fn bolts_fired(&self) -> u64 {
         lock(&self.shared).bolts_fired
+    }
+
+    /// How many gems a full field refused to drop. See [`MAX_PICKUPS`].
+    #[must_use]
+    pub fn pickups_dropped(&self) -> u64 {
+        lock(&self.shared).pickups_dropped
     }
 
     /// The ceiling on live enemies this game was built with.
@@ -1885,6 +2464,47 @@ impl Game {
     #[cfg(test)]
     pub fn set_player_hp(&mut self, hp: f64) {
         lock(&self.shared).player_hp = hp;
+    }
+
+    /// Banks experience directly, so a test reaches a level-up screen without
+    /// killing eight grunts first.
+    #[cfg(test)]
+    pub fn bank_xp(&mut self, xp: u64) {
+        lock(&self.shared).xp += xp;
+    }
+
+    /// Drops a gem at a named place, and returns its entity.
+    #[cfg(test)]
+    pub fn stage_pickup(&mut self, position: DVec3, xp: u64) -> Entity {
+        let mut logic = lock(&self.shared);
+        let world = self.server.world_mut();
+        drop_pickup(&mut logic, world, position, xp);
+        logic.pickups.last().expect("just dropped one").entity
+    }
+
+    /// Where every gem on the ground is.
+    #[cfg(test)]
+    #[must_use]
+    pub fn pickup_positions(&self) -> Vec<DVec3> {
+        lock(&self.shared)
+            .pickups
+            .iter()
+            .map(|gem| gem.position)
+            .collect()
+    }
+
+    /// Where every bolt in the air is, straight off the physics world.
+    #[cfg(test)]
+    #[must_use]
+    pub fn bolt_positions(&mut self) -> Vec<DVec3> {
+        let bolts: Vec<Entity> = lock(&self.shared).bolts.iter().map(|b| b.entity).collect();
+        with_physics(self.server.world_mut(), |phys| {
+            bolts
+                .into_iter()
+                .filter_map(|entity| phys.transform(entity).map(|t| t.position))
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     /// The neighbourhood `steer_enemies` would see for `entity`, through the
@@ -2007,6 +2627,9 @@ mod tests {
         /// wipes the whole field — so a soak that never reached one has not
         /// tested the path.
         restarts: u32,
+        /// How many level-up screens `Harness::play_ticks` has answered, for the
+        /// same reason: a soak that never opened one never froze the field.
+        levels: u32,
     }
 
     /// Indices into [`Harness::held`], and the key each one drives.
@@ -2033,6 +2656,7 @@ mod tests {
                 ticks: 0,
                 held: [false; 4],
                 restarts: 0,
+                levels: 0,
             }
         }
 
@@ -2099,6 +2723,16 @@ mod tests {
                         self.game.key_event(KeyCode::KeyR, true);
                         self.game.key_event(KeyCode::KeyR, false);
                     }
+                    // **A level-up screen has to be answered or the soak
+                    // stops.** The field freezes while it is up and the spawner
+                    // does not run, so an autopilot that walked past it would
+                    // measure a frozen field for the rest of the run — which is
+                    // exactly the shape of a soak that silently tests nothing.
+                    if self.game.state == GameState::LevelUp {
+                        self.levels += 1;
+                        self.game.key_event(KeyCode::Digit1, true);
+                        self.game.key_event(KeyCode::Digit1, false);
+                    }
                     let plan = autopilot(&self.game, self.ticks);
                     for (slot, want) in plan.iter().copied().enumerate() {
                         self.hold(slot, want);
@@ -2131,21 +2765,23 @@ mod tests {
         fn assert_nothing_leaked(&mut self) {
             let enemies = self.game.enemy_count();
             let bolts = self.game.bolt_count();
+            let gems = self.game.pickup_count();
             let pending = self.game.pending_despawns();
             assert_eq!(
                 self.game.entity_count(),
-                1 + enemies + bolts + pending,
-                "tick {}: {enemies} enemies, {bolts} bolts and {pending} awaiting the \
-                 sweep do not account for the world",
+                1 + enemies + bolts + gems + pending,
+                "tick {}: {enemies} enemies, {bolts} bolts, {gems} gems and {pending} \
+                 awaiting the sweep do not account for the world",
                 self.ticks,
             );
-            // An equality, not a bound: every collider in the world is an
-            // enemy. The player is not in the broadphase and neither is a bolt
-            // — see `contact_damage` and `sweep_bolts`.
+            // An equality, not a bound: every collider in the world is an enemy
+            // or a gem. The player is not in the broadphase and neither is a
+            // bolt — see `contact_damage` and `sweep_bolts`.
             assert_eq!(
                 self.game.collider_count(),
-                enemies,
-                "tick {}: {enemies} enemies do not account for the broadphase",
+                enemies + gems,
+                "tick {}: {enemies} enemies and {gems} gems do not account for the \
+                 broadphase",
                 self.ticks,
             );
         }
@@ -3170,8 +3806,15 @@ mod tests {
         // while the run is: a stationary player is dead inside ten seconds, and
         // what would then be under test is the death screen rather than the cap.
         let mut peak = 0;
-        while harness.ticks < 3_600 {
+        while harness.ticks < 7_200 {
             harness.game.set_player_hp(PLAYER_MAX_HP);
+            // The spawner does not run while the level-up screen is up, so a
+            // run that walked past one would stop spawning and the cap would
+            // never be reached — see `Harness::play_ticks`.
+            if harness.game.state == GameState::LevelUp {
+                harness.game.key_event(KeyCode::Digit1, true);
+                harness.game.key_event(KeyCode::Digit1, false);
+            }
             harness.run_ticks(harness.ticks + 1, &[]);
             peak = peak.max(harness.game.enemy_count());
             assert!(
@@ -3519,5 +4162,510 @@ mod tests {
                 "restart {index} re-dealt an earlier run's seed",
             );
         }
+    }
+
+    // ---- experience, pickups and the level-up --------------------------------
+
+    /// Every field of an [`Intent`] survives the wire form.
+    ///
+    /// The choice is the one that could silently not: it is two bits at the top
+    /// of a `u8` that already carried five flags, and a shift one place out
+    /// would take a button with it.
+    #[test]
+    fn the_wire_form_carries_every_bit_of_intent() {
+        let mut seen = Vec::new();
+        for choose in 0..=UPGRADE_CHOICES as u8 {
+            for flags in 0..32u8 {
+                let intent = Intent {
+                    up: flags & 1 != 0,
+                    down: flags & 2 != 0,
+                    left: flags & 4 != 0,
+                    right: flags & 8 != 0,
+                    restart: flags & 16 != 0,
+                    choose,
+                };
+                let wire = intent.to_wire();
+                assert!(
+                    !seen.contains(&wire),
+                    "{intent:?} shares a wire form with an earlier intent",
+                );
+                seen.push(wire);
+            }
+        }
+        assert_eq!(seen.len(), 4 * 32, "the loop did not cover what it claims");
+    }
+
+    /// **XP drops where an enemy died, is collected on contact, and nothing is
+    /// left behind.**
+    ///
+    /// All three halves, because each fails silently on its own: a gem that
+    /// never dropped, a gem that could not be picked up, and a gem picked up
+    /// whose collider stayed in the broadphase as an invisible obstacle.
+    #[test]
+    fn an_enemy_that_dies_drops_a_gem_and_walking_over_it_banks_the_experience() {
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        let at = DVec3::new(4.0, 0.0, 0.0);
+        harness.game.stage_enemy(EnemyKind::Grunt, at);
+        assert_eq!(harness.game.pickup_count(), 0);
+
+        // Shot until it dies. Six bolts' worth of ticks is plenty for a grunt,
+        // which takes two.
+        harness.run_ticks(harness.ticks + 90, &[]);
+        assert_eq!(harness.game.enemy_count(), 0, "the grunt never died");
+        assert_eq!(harness.game.kills, 1);
+        assert_eq!(harness.game.pickup_count(), 1, "no gem was dropped");
+        let gem = harness.game.pickup_positions()[0];
+        // Where it *died*, which is not quite where it was staged: a grunt walks
+        // towards the player while it is being shot. The bound is one step of
+        // its own travel over the ticks it survived, not a shrug.
+        assert!(
+            (gem - at).length() < 2.0 && gem.x > 1.0,
+            "the gem landed at {gem:?}, not on the path the grunt walked from {at:?}",
+        );
+        assert_eq!(harness.game.xp(), 0, "the gem banked itself");
+        harness.assert_nothing_leaked();
+
+        // Walk onto it. The player is at the origin and the gem is four units
+        // away; PLAYER_SPEED covers that in well under a second.
+        harness.run_ticks(harness.ticks + 120, &[(harness.ticks, KeyCode::KeyD, true)]);
+        assert_eq!(
+            harness.game.xp(),
+            EnemyKind::Grunt.xp(),
+            "walking over the gem banked nothing",
+        );
+        assert_eq!(harness.game.pickup_count(), 0, "the gem was not removed");
+        harness.assert_nothing_leaked();
+    }
+
+    /// A brute's gem is worth more than a grunt's, which is what makes the
+    /// level-up rate track effort rather than bodies.
+    #[test]
+    fn a_brutes_gem_is_worth_more_than_a_grunts() {
+        assert!(EnemyKind::Brute.xp() > EnemyKind::Grunt.xp());
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        let entity = harness.game.stage_pickup(DVec3::new(0.2, 0.0, 0.0), 7);
+        assert!(harness.game.pickup_positions().len() == 1, "{entity:?}");
+        harness.run_ticks(harness.ticks + 2, &[]);
+        assert_eq!(harness.game.xp(), 7, "the gem's own value was not banked");
+    }
+
+    /// **A gem is a trigger, so a bolt flies through it.**
+    ///
+    /// The property the whole pickup design rests on: gems are in the same
+    /// broadphase the weapon sweeps, and a solid one would eat every shot fired
+    /// across a battlefield covered in loot.
+    #[test]
+    fn a_bolt_flies_through_a_gem_and_kills_what_is_behind_it() {
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        let enemy = harness
+            .game
+            .stage_enemy(EnemyKind::Brute, DVec3::new(6.0, 0.0, 0.0));
+        // Directly on the line of fire, and closer than the target.
+        harness.game.stage_pickup(DVec3::new(3.0, 0.0, 0.0), 1);
+        let before = harness.game.enemy_hp(enemy).expect("a live brute");
+        harness.run_ticks(harness.ticks + 60, &[]);
+        let after = harness.game.enemy_hp(enemy).expect("still alive");
+        assert!(
+            after < before,
+            "the gem in the way absorbed every bolt: {before} -> {after}",
+        );
+        assert_eq!(harness.game.pickup_count(), 1, "a bolt destroyed the gem");
+    }
+
+    /// **The gun does not aim at the loot.**
+    ///
+    /// `overlap_sphere` does not skip triggers, so `fire`'s target query has to
+    /// reject gems itself — and a gun that locked onto one would stop shooting
+    /// the moment the field had anything to pick up.
+    #[test]
+    fn the_gun_ignores_gems_when_there_is_nothing_to_shoot() {
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        harness.game.stage_pickup(DVec3::new(4.0, 3.0, 0.0), 1);
+        harness.run_ticks(harness.ticks + 120, &[]);
+        assert_eq!(
+            harness.game.bolts_fired(),
+            0,
+            "the gun fired at a gem it cannot hurt",
+        );
+    }
+
+    /// **A full field stops dropping gems** rather than growing a collider per
+    /// kill forever, and it says how many it refused.
+    #[test]
+    fn a_field_full_of_gems_drops_no_more() {
+        let mut harness = Harness::staged(60, 60, DVec3::new(40.0, 30.0, 0.0));
+        for i in 0..MAX_PICKUPS {
+            harness
+                .game
+                .stage_pickup(DVec3::new(-40.0 + (i % 60) as f64 * 0.1, -30.0, 0.0), 1);
+        }
+        assert_eq!(harness.game.pickup_count(), MAX_PICKUPS);
+        assert_eq!(harness.game.pickups_dropped(), 0);
+        harness.game.stage_pickup(DVec3::ZERO, 1);
+        assert_eq!(
+            harness.game.pickup_count(),
+            MAX_PICKUPS,
+            "the cap did not hold"
+        );
+        assert_eq!(
+            harness.game.pickups_dropped(),
+            1,
+            "the refusal was not counted"
+        );
+    }
+
+    /// **Banking the threshold opens the level-up screen**, takes the threshold
+    /// out of the bank and leaves the remainder.
+    #[test]
+    fn banking_the_threshold_opens_the_level_up_screen() {
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        assert_eq!(harness.game.level, 1);
+        assert_eq!(harness.game.offer(), None);
+
+        // One short of the threshold: nothing happens, which is what makes the
+        // assertion below about the threshold and not about any XP at all.
+        harness.game.bank_xp(xp_for_next_level(1) - 1);
+        harness.run_ticks(harness.ticks + 2, &[]);
+        assert_eq!(harness.game.state, GameState::Playing);
+        assert_eq!(harness.game.level, 1);
+
+        harness.game.bank_xp(3);
+        harness.run_ticks(harness.ticks + 1, &[]);
+        assert_eq!(harness.game.state, GameState::LevelUp);
+        assert_eq!(harness.game.level, 2);
+        assert_eq!(
+            harness.game.xp(),
+            2,
+            "the threshold was not taken out of the bank",
+        );
+        assert!(harness.game.offer().is_some(), "no offer was rolled");
+    }
+
+    /// **An offer is exactly three distinct upgrades from the pool**, at every
+    /// level of every run — and across enough of them the whole pool appears,
+    /// which is what says the shuffle is a shuffle and not a fixed prefix.
+    #[test]
+    fn an_offer_is_three_distinct_upgrades_and_the_pool_is_used() {
+        let mut seen: Vec<Upgrade> = Vec::new();
+        for seed in 0..64u64 {
+            for level in 1..40u32 {
+                let offer = upgrade_offer(seed, level);
+                assert_eq!(offer.len(), UPGRADE_CHOICES);
+                for (index, upgrade) in offer.iter().enumerate() {
+                    assert!(
+                        Upgrade::ALL.contains(upgrade),
+                        "{upgrade:?} is not in the pool",
+                    );
+                    assert!(
+                        !offer[..index].contains(upgrade),
+                        "seed {seed} level {level} offered {upgrade:?} twice: {offer:?}",
+                    );
+                    if !seen.contains(upgrade) {
+                        seen.push(*upgrade);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            Upgrade::ALL.len(),
+            "only {seen:?} of the pool is ever offered",
+        );
+        // Deterministic: the same seed and level deal the same three.
+        assert_eq!(upgrade_offer(7, 3), upgrade_offer(7, 3));
+        assert_ne!(
+            upgrade_offer(7, 3),
+            upgrade_offer(8, 3),
+            "the offer does not depend on the seed",
+        );
+    }
+
+    /// The digit keys the level-up screen is driven by, in offer order.
+    const CHOICE_KEYS: [KeyCode; UPGRADE_CHOICES] =
+        [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3];
+
+    /// A run seed whose **first** level-up offers `upgrade`, and where in the
+    /// offer it sits.
+    ///
+    /// Searched rather than constructed, because `upgrade_offer` is a pure
+    /// function of the run seed and the level and there is no way to ask it for
+    /// a particular answer. The first level-up takes the run to level 2, so that
+    /// is the level to search.
+    fn seed_offering(upgrade: Upgrade) -> (u64, usize) {
+        (0..4096u64)
+            .find_map(|seed| {
+                let offer = upgrade_offer(run_seed(seed, 0), 2);
+                offer
+                    .iter()
+                    .position(|found| *found == upgrade)
+                    .map(|index| (seed, index))
+            })
+            .unwrap_or_else(|| panic!("no seed under 4096 offers {upgrade:?} at level 2"))
+    }
+
+    /// A staged run that has taken `upgrade` and nothing else, or — for `None` —
+    /// the same run with no upgrade at all.
+    ///
+    /// The two are the same seed and the same board, so anything that differs
+    /// between them is the upgrade.
+    fn with_upgrade(upgrade: Option<Upgrade>) -> Harness {
+        let (seed, index) = upgrade.map_or((DEFAULT_SEED, 0), seed_offering);
+        let mut harness = Harness::with_setup(
+            60,
+            &Setup {
+                headless: true,
+                seed,
+                ..Setup::default()
+            },
+        );
+        harness.game.freeze_spawns();
+        harness.game.clear_enemies();
+        harness.game.stage_player(DVec3::ZERO);
+        let Some(upgrade) = upgrade else {
+            return harness;
+        };
+        harness.game.bank_xp(xp_for_next_level(1));
+        harness.run_ticks(harness.ticks + 1, &[]);
+        assert_eq!(harness.game.state, GameState::LevelUp, "no screen opened");
+        assert_eq!(
+            harness.game.offer().expect("an offer")[index],
+            upgrade,
+            "the search found the wrong seed",
+        );
+        harness.tap(CHOICE_KEYS[index]);
+        assert_eq!(
+            harness.game.state,
+            GameState::Playing,
+            "the screen stayed up"
+        );
+        harness
+    }
+
+    /// **Taking an upgrade changes what the simulation does** — every one of
+    /// them, measured as behaviour rather than as a field that moved.
+    ///
+    /// Each arm names an *observable*: how far the player walked, how many bolts
+    /// left the gun, how much damage landed, whether a shot was taken at all,
+    /// how much of the bar came back, whether a gem out of reach was collected.
+    /// A test that read `Game::stats()` back would pass on an `apply_upgrade`
+    /// that wrote the number and on nothing that read it.
+    #[test]
+    fn every_upgrade_in_the_pool_changes_what_the_simulation_does() {
+        for upgrade in Upgrade::ALL {
+            let (mut base, mut up) = (with_upgrade(None), with_upgrade(Some(upgrade)));
+            match upgrade {
+                Upgrade::SwiftBoots => {
+                    let walk = |h: &mut Harness| {
+                        let from = h.game.player;
+                        h.run_ticks(h.ticks + 60, &[(h.ticks, KeyCode::KeyD, true)]);
+                        h.game.player.x - from.x
+                    };
+                    let (slow, fast) = (walk(&mut base), walk(&mut up));
+                    assert!(fast > slow + 0.4, "walked {slow} then {fast}");
+                }
+                Upgrade::RapidFire => {
+                    let shots = |h: &mut Harness| {
+                        // A dozen brutes, so the gun never runs out of targets:
+                        // one dies to six bolts and the count would then be
+                        // measuring how long a brute lasts.
+                        for i in 0..12 {
+                            h.game.stage_enemy(
+                                EnemyKind::Brute,
+                                DVec3::new(5.0, -6.0 + i as f64, 0.0),
+                            );
+                        }
+                        h.run_ticks(h.ticks + 180, &[]);
+                        h.game.bolts_fired()
+                    };
+                    let (slow, fast) = (shots(&mut base), shots(&mut up));
+                    assert!(fast > slow, "fired {slow} then {fast}");
+                }
+                Upgrade::HeavyBolts => {
+                    let hurt = |h: &mut Harness| {
+                        let brute = h
+                            .game
+                            .stage_enemy(EnemyKind::Brute, DVec3::new(5.0, 0.0, 0.0));
+                        h.run_ticks(h.ticks + 40, &[]);
+                        h.game.enemy_hp(brute).expect("a live brute")
+                    };
+                    let (light, heavy) = (hurt(&mut base), hurt(&mut up));
+                    assert!(heavy < light, "left {light} hp then {heavy}");
+                }
+                Upgrade::LongBarrel => {
+                    let fired = |h: &mut Harness| {
+                        // Outside the base reach and inside the extended one, so
+                        // this is a shot that could not otherwise be taken. A
+                        // brute because it is the slowest thing in the game: the
+                        // target walks in, and the window below has to be short
+                        // enough that it has not walked into the *base* reach by
+                        // the end of it — 1.65 units at 1.9 a second is 52 ticks.
+                        h.game.stage_enemy(
+                            EnemyKind::Brute,
+                            DVec3::new(WEAPON_RANGE + 2.5, 0.0, 0.0),
+                        );
+                        h.run_ticks(h.ticks + 20, &[]);
+                        h.game.bolts_fired()
+                    };
+                    assert_eq!(fired(&mut base), 0, "the base reach already covers it");
+                    assert!(fired(&mut up) > 0, "the longer barrel did not reach");
+                }
+                Upgrade::Vitality => {
+                    // The heal is the observable a `max_hp += 25` alone would
+                    // not produce: the run took the upgrade at full health, so
+                    // the ceiling moved and the bar has to follow it.
+                    assert!(up.game.player_hp > base.game.player_hp);
+                    let survive = |h: &mut Harness| {
+                        h.game.stage_enemy(EnemyKind::Brute, DVec3::ZERO);
+                        h.run_ticks(h.ticks + 120, &[]);
+                        h.game.player_hp
+                    };
+                    let (weak, tough) = (survive(&mut base), survive(&mut up));
+                    assert!(tough > weak, "left {weak} hp then {tough}");
+                }
+                Upgrade::Magnet => {
+                    let collect = |h: &mut Harness| {
+                        // Out of reach of a bare player — `PLAYER_RADIUS +
+                        // XP_RADIUS` is 0.85 — and inside a magnet's.
+                        h.game.stage_pickup(DVec3::new(1.1, 0.0, 0.0), 1);
+                        h.run_ticks(h.ticks + 10, &[]);
+                        h.game.xp()
+                    };
+                    assert_eq!(collect(&mut base), 0, "it was already in reach");
+                    assert_eq!(collect(&mut up), 1, "the magnet did not reach");
+                }
+            }
+        }
+    }
+
+    /// **A restart takes every upgrade back off.**
+    ///
+    /// The plan's non-goals bar meta-progression, and this is what makes that a
+    /// property of the code rather than of nobody having written the carry-over.
+    #[test]
+    fn a_restart_takes_every_upgrade_back_off() {
+        let mut harness = with_upgrade(Some(Upgrade::HeavyBolts));
+        assert_ne!(harness.game.stats(), Stats::default());
+        assert!(harness.game.level > 1);
+        harness.tap(KeyCode::KeyR);
+        assert_eq!(harness.game.stats(), Stats::default());
+        assert_eq!(harness.game.level, 1);
+        assert_eq!(harness.game.xp(), 0);
+        assert_eq!(harness.game.offer(), None);
+    }
+
+    /// **The field does not advance while the level-up screen is up.**
+    ///
+    /// Every moving thing, and the run clock with them: the enemies stay where
+    /// they were, the bolts hang in the air, nothing spawns, nothing takes
+    /// damage. Asserted as bit equality rather than as a tolerance, because the
+    /// mechanism is a zeroed velocity and `position += 0 * dt` is exact.
+    #[test]
+    fn the_field_does_not_advance_while_the_level_up_screen_is_up() {
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        for i in 0..8 {
+            harness
+                .game
+                .stage_enemy(EnemyKind::Grunt, DVec3::new(6.0 + i as f64, 2.0, 0.0));
+        }
+        // Run until there is actually a bolt in flight rather than for a
+        // number of ticks that happens to leave one: a bolt lives 0.6 s and the
+        // gun fires every 0.25, so "some ticks later" lands on an empty sky
+        // about as often as not.
+        for _ in 0..120 {
+            harness.run_ticks(harness.ticks + 1, &[]);
+            if harness.game.bolt_count() > 0 {
+                break;
+            }
+        }
+        assert!(harness.game.bolt_count() > 0, "no bolt to freeze");
+
+        harness.game.bank_xp(xp_for_next_level(1));
+        harness.run_ticks(harness.ticks + 1, &[]);
+        assert_eq!(harness.game.state, GameState::LevelUp);
+        // One more tick, so the zeroed velocities have been through the
+        // integrator once and the field is at rest rather than mid-step.
+        harness.run_ticks(harness.ticks + 1, &[]);
+
+        let enemies = harness.game.enemy_positions();
+        let bolts = harness.game.bolt_positions();
+        let (elapsed, kills, hp) = (
+            harness.game.elapsed,
+            harness.game.kills,
+            harness.game.player_hp,
+        );
+        let (live, shots) = (harness.game.enemy_count(), harness.game.bolt_count());
+
+        // Held movement keys too: a frozen field that the *player* could still
+        // walk across would be half a freeze.
+        harness.run_ticks(harness.ticks + 120, &[(harness.ticks, KeyCode::KeyD, true)]);
+
+        assert_eq!(harness.game.state, GameState::LevelUp, "it closed itself");
+        assert_eq!(harness.game.enemy_positions(), enemies, "the crowd moved");
+        assert_eq!(harness.game.bolt_positions(), bolts, "the bolts moved");
+        assert_eq!(harness.game.player, DVec3::ZERO, "the player walked away");
+        assert_eq!(harness.game.elapsed, elapsed, "the run clock advanced");
+        assert_eq!(harness.game.kills, kills);
+        assert_eq!(harness.game.player_hp, hp, "damage was dealt");
+        assert_eq!(harness.game.enemy_count(), live, "the spawner ran");
+        assert_eq!(harness.game.bolt_count(), shots, "a bolt expired");
+        harness.assert_nothing_leaked();
+    }
+
+    /// **And it starts again when the screen closes** — the freeze is a pause,
+    /// not a stop. The bolts are the half that could not recover on their own:
+    /// an enemy is given a fresh velocity every tick and a bolt is not.
+    #[test]
+    fn taking_an_upgrade_puts_the_field_back_in_motion() {
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        for i in 0..4 {
+            harness
+                .game
+                .stage_enemy(EnemyKind::Grunt, DVec3::new(6.0 + i as f64, 2.0, 0.0));
+        }
+        for _ in 0..120 {
+            harness.run_ticks(harness.ticks + 1, &[]);
+            if harness.game.bolt_count() > 0 {
+                break;
+            }
+        }
+        harness.game.bank_xp(xp_for_next_level(1));
+        harness.run_ticks(harness.ticks + 2, &[]);
+        assert_eq!(harness.game.state, GameState::LevelUp);
+        assert!(harness.game.bolt_count() > 0, "no bolt to thaw");
+
+        let frozen_enemies = harness.game.enemy_positions();
+        let frozen_bolts = harness.game.bolt_positions();
+        harness.tap(KeyCode::Digit1);
+        assert_eq!(harness.game.state, GameState::Playing);
+        harness.run_ticks(harness.ticks + 4, &[]);
+
+        assert_ne!(
+            harness.game.enemy_positions(),
+            frozen_enemies,
+            "the crowd never started moving again",
+        );
+        assert_ne!(
+            harness.game.bolt_positions(),
+            frozen_bolts,
+            "the bolts never got their velocity back",
+        );
+        assert!(harness.game.elapsed > 0.0);
+    }
+
+    /// A choice that names no button is ignored, and the screen stays up.
+    #[test]
+    fn a_choice_outside_the_offer_takes_nothing() {
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        harness.game.bank_xp(xp_for_next_level(1));
+        harness.run_ticks(harness.ticks + 1, &[]);
+        assert_eq!(harness.game.state, GameState::LevelUp);
+        let before = harness.game.stats();
+        {
+            let mut logic = lock(&harness.game.shared);
+            logic.intent.choose = 9;
+        }
+        harness.run_ticks(harness.ticks + 1, &[]);
+        assert_eq!(harness.game.state, GameState::LevelUp, "it closed anyway");
+        assert_eq!(harness.game.stats(), before, "something was applied");
     }
 }
