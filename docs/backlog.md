@@ -20,6 +20,47 @@ carries what has no phase yet.
   after next rather than after it. Not done in the rotation slice because it
   would have put an API refactor of every caller inside a rendering change.
 
+- **The four samples still spell the audio entry point three different ways**,
+  and the mixer-adoption slice deliberately did not unify them.
+  `play_panned(id, emitter_x)` in breakout, `play_at(id, listener_x, x, y)` in
+  flappy, `play_at(id, x, y)` in asteroids and `play_at(id, listener, at)` in
+  horde. Each is right for its game's listener convention — fixed at the camera,
+  fixed with one moving axis, fixed at the origin, riding the player — and the
+  engine has no listener at all: `spatial::compute_cue` takes the listener
+  position on every call and nothing in `crcbl-audio` remembers one. That is the
+  real missing piece, and it is a design question rather than a refactor: a
+  `Listener` on the mixer, set once a frame, would collapse all four signatures
+  to `play_at(id, world_position)`. Not attempted here because it changes what
+  the spatial grammar's API means, and the adoption slice was already touching
+  four samples.
+
+- **`VoiceMix::from(&SpatialCue)` drops `itd_samples` on the floor.** A `Voice`
+  has no per-channel delay line, so the interaural time difference the cue
+  grammar computes — rule 1's other half — reaches nothing. What survives is the
+  gain difference, which is the direction without the timing. Documented on the
+  `From` impl in `crates/crcbl-audio/src/mixer.rs` so it is not a silent loss.
+  Fixing it means a fractional delay per channel inside `Voice::mix_block`, at a
+  cost the audio thread has not been measured for.
+
+- **`Mixer::stop` cuts a voice dead rather than fading it.** It removes the
+  voice from the list immediately — which is what makes `voice_count` and
+  `is_playing` answer without an audio thread to reap, and what horde's cap
+  needs — but a loud voice stopped mid-cycle is a click. Asteroids' engine is
+  the only caller and it is quiet enough not to matter. A short release ramp
+  (mark stopped, fade over one block, then drop) is the fix and it would have to
+  keep the immediate accounting: `stop` must still make room in the cap on the
+  spot.
+
+- **Nothing has listened to the migrated cues on a real device.** Every sample's
+  audio was rewritten onto `crcbl_audio::mixer` and the checks are all
+  structural: buffer shapes, pan ordering, voice counts, loop seams. Two
+  audible-only risks are unverified. Asteroids' engine changed from a pulsed
+  one-shot to a continuous loop at `ENGINE_GAIN` = 0.25 against the one-shots'
+  0.5, and that ratio was chosen by reasoning rather than by hearing it. The
+  loop seam is asserted to be a bare tone with no envelope, which is the right
+  property, but nobody has heard whether ten joins a second is inaudible in
+  practice. Both want a person with headphones.
+
 - **The browser entry point was to be written once before S2, then before S3.
   THE DEADLINE HAS NOW BEEN MISSED TWICE.** Finding 2 in that list said so in as
   many words — "owed before S2, which will otherwise write it a third time" — S2
@@ -36,11 +77,14 @@ carries what has no phase yet.
   Every sample after this adds one more of each. The four copies have still
   barely drifted — horde's was produced from asteroids' by substituting the
   sample name, and the executable difference is one `log::info!` line reporting
-  a different summary — which is the one piece of good news and is now the
-  _only_ piece: `apps/*/src/audio.rs` and `apps/*/src/{best,high_score}.rs` are
-  the same duplication one generation older and have diverged in their public
-  API, their type names, their file names and, as of horde, in **what they
-  store** (three keep a score; horde keeps a time in whole seconds).
+  a different summary — which is the one piece of good news. The `web.rs` four
+  are now the _worst_ remaining copy of this shape:
+  `apps/*/src/{best,high_score}.rs` still diverge in their public API, their
+  type names, their file names and, as of horde, in **what they store** (three
+  keep a score; horde keeps a time in whole seconds), and `apps/*/src/audio.rs`
+  has been migrated onto `crcbl_audio::mixer` — what is left in each is the
+  waveforms, the cue ids, the listener convention and horde's voice cap, all of
+  which are genuinely per-game.
 
   What it would take: a crate (or a `crcbl` module) owning the `Stage` state
   machine, the log queue and the `prepare`/`boot`/`frame`/`status`/`shutdown`
@@ -398,6 +442,23 @@ The modular panel is built and all three samples switch it on with F3 (or
   so turning it on there is one field.
 
 ## Coverage gaps
+
+- **The mixer adoption was not verified by ear, and two of its choices are
+  audible-only.** See the entry under _Owed_ above. Structurally everything is
+  pinned; nothing has been listened to.
+
+- **`Mixer` is exercised single-threaded in every sample test.** The engine has
+  `mixer_is_sync_and_fill_is_serialised`, which drives four threads through
+  `fill` while voices loop, but nothing tests `play`/`stop`/`set_mix` racing
+  against a live `fill` — which is exactly what happens in a real game, where
+  the game thread calls all three while the audio callback runs. The `Mutex`
+  makes it safe by construction and no test says so.
+
+- **The `wasm32` audio path is not built by the local verification loop.**
+  `AudioStream::open` on `wasm32` goes through `web::install`, and the blanket
+  `impl AudioSource for Arc<T>` is what makes an `Arc<Mixer>` acceptable there
+  too. The browser gate (`web/run-browser-e2e.sh --build`) covers the four demos
+  end to end, which is the only place that path runs.
 
 - **Nothing checks the demo site's HTML in CI.** The 2026-08-02 audit ran
   `npx html-validate` (recommended + document + a11y presets) and a stdlib
@@ -855,7 +916,8 @@ annotated.
   0.17 % of a frame to this sample. Keep it as the reason P7 exists for _other_
   scenes; it is not the reason it exists for this one.
 
-- **`crcbl-audio` has no voice limit, no priority and no stealing.**
+- **`crcbl-audio` has no voice limit, no priority and no stealing.** Still true
+  after the mixer-adoption slice, which deliberately left it there.
   `apps/horde/src/audio.rs` caps itself at `MAX_VOICES` = 16 and refuses the
   newest voice, counting refusals in `Audio::dropped()`. Refusing the newest is
   the crudest answer that is honest and it is audibly wrong in one case: a
@@ -863,6 +925,14 @@ annotated.
   tick. Wanted in the crate: a voice budget with a priority, so an important cue
   steals the oldest cheap one. Nothing shows `dropped()` yet — it is on `Audio`
   and not on the debug panel.
+
+  One detail changed with the adoption and is worth knowing before anyone moves
+  the cap into the crate: horde now reads `Mixer::voice_count` and then calls
+  `Mixer::play`, two lock acquisitions where the hand-rolled queue held one
+  across both. Only the game thread adds and only the audio thread removes, so
+  the count can be stale **low** and never stale high — the cap can refuse a cue
+  that had just been made room for, and can never let the count past
+  `MAX_VOICES`. A cap inside the crate would not need the two-step at all.
 
 - **Nothing has listened to the five cues**, on any device. They are synthesised
   deterministically from a fixed seed, so a golden buffer is possible and there
@@ -982,18 +1052,11 @@ not:
   thrust intent, so the ship draws one frame whatever it is doing and a player
   hears the engine without seeing it. It is two rows of `assets/ship.crpix`, a
   `bool` on `RenderState` set from `Intent::thrust`, and a frame index in
-  `art::Scene::build`. Left out because the cue and the picture are different
-  work and the slice was already carrying three things; the cue timer
-  (`game::THRUST_CUE_PERIOD`) is the natural place to drive the flame's frame
-  from when someone does it.
-- **The engine cue is a one-shot on a timer, and the timer is in the
-  simulation.** `crcbl-audio` has no looping voice, so a held sound is faked as
-  a pulse — see `game::THRUST_CUE_PERIOD` and `crate::audio`'s header. The
-  consequence is that an audio implementation detail is now deterministic tick
-  state: change the period and every replay changes, even though nothing audible
-  feeds back into the simulation. It is the strongest form of S1B finding 5
-  anyone has produced, and it is what a real looping-voice API in `crcbl-audio`
-  would delete outright.
+  `art::Scene::build`. The `bool` now exists on the simulation side —
+  `GameLogic::thrusting`, mirrored onto `Game::thrusting` — so what is left is
+  carrying it onto `RenderState` and picking the frame. The cue timer that used
+  to be suggested as the flame's clock is gone; a flame that flickers wants its
+  own, and the frame's alpha is the honest source.
 - **No golden buffer for the cues.** The three sounds are synthesised
   deterministically — `audio::noise` runs splitmix64 from a fixed seed — so a
   golden buffer is _possible_, and there is not one. What the tests assert is
@@ -1063,6 +1126,53 @@ about the answer; most of these are probably right.
 Distinct from _Considered and declined_ below, which is for ideas rejected on
 their merits and expected to stay rejected. These are answers taken under
 uncertainty.
+
+- **Should `SoundBank` hold `Arc<[AudioSample]>` rather than `Vec`, so
+  `create_voice` stops copying the sound?** _Yes, and it is why horde adopted
+  the bank at all._ `SoundBank::create_voice` cloned the whole sample buffer per
+  voice, which at horde's cue rate — up to about forty a second, each an
+  allocation the size of the sound — was the one measured reason to keep the
+  hand-rolled `Arc<Sound>` bank instead. Changing `Voice::data` to
+  `Arc<[AudioSample]>` and `create_voice` to `Arc::clone` deletes the reason,
+  and `Voice::new(Vec)` still compiles for every existing caller.
+  `a_bank_shares_one_buffer_with_every_voice_it_makes` in
+  `crates/crcbl-audio/src/mixer.rs` pins it on `Arc::strong_count`. **What would
+  change it:** a bank that wants to hand out _mutable_ sample data, which
+  nothing does.
+
+- **Should `AudioStream::open` have kept taking `impl AudioSource` by value, or
+  changed to `Arc<dyn AudioSource>`?** _Kept — the sharing went into a blanket
+  `impl<T: AudioSource + ?Sized> AudioSource for Arc<T>` instead._ Changing
+  `open`'s signature would have broken every existing caller, including the
+  `wasm32` `web::install` path and the crate's own tests, for a case a blanket
+  impl serves without touching any of them:
+  `AudioStream::open(Arc::clone(&mixer))` now type-checks and a non-shared
+  source still moves in as before. The cost is one redundant `Arc` layer on the
+  shared path — `open` wraps whatever it is given in an `Arc` of its own — which
+  is a pointer chase per block, not per sample. **What would change it:** a
+  source that needs to be reached from the stream _and_ from two other places
+  with different types, where the double `Arc` stops being the only wart.
+
+- **Should the voice cap have moved into `Mixer` while the samples were being
+  migrated?** _No — horde keeps `MAX_VOICES` and its refuse-newest policy._ The
+  crate has no cap, no priority and no stealing, and the honest version of that
+  feature is a voice budget with priorities so a death cue can steal a kill cue,
+  not a bare count. Shipping the bare count in the engine would have frozen the
+  crude policy as the crate's answer and taken the evidence for the good one
+  with it, since horde's `Audio::dropped()` is the only measurement of the
+  problem anyone has. **What would change it:** a second sample needing a cap,
+  which would make it a pattern rather than one game's answer.
+
+- **Should the samples' spatial assertions read the mixer, or the rendered
+  audio?** _The mixer, through `Mixer::voice_mixes`._ Rendering a block and
+  measuring left against right is the stronger observable and it was tried: it
+  races the null stream's polling thread, which is draining the same mixer every
+  five milliseconds and will have eaten an unpredictable prefix of any voice by
+  the time the test looks. The gain-reaches-the-output half is checked once, in
+  the engine, where a test can own a `Mixer` with no stream attached —
+  `set_mix_re_aims_a_voice_that_is_already_playing`. **What would change it:** a
+  headless `Audio` that opens no stream at all, which would make the render
+  check deterministic in every sample.
 
 - **Where does the menu art live?** Taken: **`crates/crcbl-render/assets/`**,
   baked by that crate's own `build.rs`. `apps/*` cannot depend on each other, so

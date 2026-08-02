@@ -386,12 +386,22 @@ was intended.
   the shared format-agnostic staging upload underneath, and the UI pass now uses
   it too.
 - **`crcbl-audio`** (P4A): `AudioStream` device seam (cpal native, null for CI),
-  audio thread polling at hardware sample rate, `Mixer` with pooled `Voice`s
-  (loop, stop, volume), stereo f32 internal format, WAV decoder (mono/stereo
+  audio thread polling at hardware sample rate, a `Mixer` of `Voice`s (looping,
+  volume, pan, varispeed), stereo f32 internal format, WAV decoder (mono/stereo
   8/16/ 24/32-bit PCM + float), QOA decoder, `SpatialCue` compute with
   deterministic cue grammar rules 1–4 (ITD + ILD for pan, rear attenuation +
   pitch for behind, elevation pitch for above/below, distance rolloff), and
   golden-buffer test.
+
+  P4A shipped the `Mixer` **unusable**, which is what finding 5 below was really
+  reporting: `play` took `&mut self` while `AudioStream::open` consumed its
+  source, so once the stream was running nothing could reach the mixer to play
+  anything through it. All four samples wrote their own queue instead. The S3
+  follow-up slice fixed the shape — `play(&self) -> VoiceId`, `stop`, `set_mix`,
+  `AudioSource for Arc<T>`, `VoiceMix::from(&SpatialCue)`, and `SoundBank`
+  buffers shared rather than copied per voice — and migrated all four samples
+  onto it. `MAX_VOICES`, priority and stealing are still not in the crate;
+  `docs/backlog.md` carries that.
 
 **2061 unit/integration tests**
 (`cargo nextest run --workspace --all-features --locked`: 2061 passed, 110
@@ -467,6 +477,15 @@ what this sample is meant to _reveal_ the need for.
    Both got the playhead right only because breakout had already got it wrong
    once and left the comment. **Owed by P10**, alongside music streaming and
    ducking.
+
+   **Resolved after S3**, and the diagnosis above was half wrong in a way worth
+   recording: the layer was not missing, it was
+   `crates/crcbl-audio/src/mixer.rs` all along and it could not be called.
+   `Mixer::play` wanted `&mut self`, `AudioStream::open` took its source by
+   value, and nothing could hold both ends — so four samples independently
+   concluded the crate had nothing to offer. A gap and an API that cannot be
+   reached look identical from a call site. The fix is in the delivered list
+   above; music streaming and ducking are still owed.
 
 6. **The `crcbl` umbrella re-exports the graphics stack and nothing else.**
    `apps/flappy/Cargo.toml` names ten engine crates for the same reason
@@ -550,12 +569,17 @@ no.
    listener transform, nothing that makes the answer one thing.
 
    And thrust is the first cue any sample has needed that is _sustained_ rather
-   than an edge: the player holds the key. The crate has one-shot voices and
-   nothing else — no looping voice, no start/stop handle — so the engine is a
-   short pulse re-fired every `game::THRUST_CUE_PERIOD`, and because the cue is
-   raised inside the deterministic tick that period is now **simulation state**.
-   An audio implementation detail sits in the replay hash. This is the strongest
-   form finding 5 has taken, and a real looping-voice API deletes it outright.
+   than an edge: the player holds the key. The crate had one-shot voices and
+   nothing reachable else — no start/stop handle — so the engine was a short
+   pulse re-fired every `game::THRUST_CUE_PERIOD`, and because the cue was
+   raised inside the deterministic tick that period was **simulation state**. An
+   audio implementation detail sat in the replay hash. This was the strongest
+   form finding 5 took, and a real looping-voice API deleted it outright:
+   `THRUST_CUE_PERIOD` and `GameLogic::thrust_cue_timer` are gone, the
+   simulation keeps a plain `thrusting` bool derived from the same tick's input,
+   and `audio::Audio::set_thrust` holds one looping voice and re-aims it at the
+   ship each tick. Note that `Voice::with_looping` had existed since P4A — the
+   loop was never the missing piece, the handle to steer one was.
 
 4. **`crcbl-phys` owes six things, found by being the P6 slice's first
    consumer.** Itemised in `docs/backlog.md`; in short: `DampingForce` has no
