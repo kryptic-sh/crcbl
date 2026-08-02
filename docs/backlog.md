@@ -19,7 +19,40 @@ carries what has no phase yet.
   protocol, with the sample supplying only its prefix and its two loop types.
   The prefix has to stay per-sample — two demos can be open in one browser and
   the symbols must not collide — so the shape is probably a macro over a generic
-  core rather than a plain function.
+  core rather than a plain function. **The JS half of this is now done** —
+  `web/engine/demo.js` is one boot sequence for every demo and
+  `web/demos/<name>/main.js` is only the prefix — and it settles the shape
+  question in the affirmative: the sample-specific part turned out to be ten
+  literal symbol names and two strings, and nothing else. The Rust half stands.
+
+## The demo site's social preview is blank
+
+No `og:image`, so every link posted to Slack, Discord or a Mastodon timeline
+renders as a bare title and description. `web/templates/layout.html` is where
+the tag would go and the site already carries `og:title`, `og:description`,
+`og:type`, `og:url` and `og:site_name`, so the tag itself is one line — the
+missing half is the image. It cannot be the `favicon.svg`: the platforms that
+matter want a raster of about 1200×630, and several ignore SVG entirely.
+
+Deliberately not invented here, because the choice is a design one: a rendered
+frame of a demo, a wordmark on the site's own background, or a per-demo card.
+Whatever it is has to be baked from a committed source the way
+`crates/crcbl-render/assets/menu.crpix` is, not a PNG dropped into `web/` with
+no way to regenerate it.
+
+## `/favicon.ico` is still a 404, deliberately
+
+`web/favicon.svg` is declared by the layout, which is what stops the browsers in
+the requirements list (Chrome/Edge 113+, Safari 18+, Firefox) asking for
+`/favicon.ico` at all — verified: `curl` against the live site returned 404 for
+that path before the change, and the built pages now carry
+`<link rel="icon" href="/favicon.svg">`. A browser that ignores the declaration
+still gets a 404 and no icon.
+
+Not fixed because an `.ico` is a binary blob and this repo bakes its art from
+committed text. `web/build.sh` has no image toolchain and adding one for a 16×16
+icon is a worse trade than the miss. `web/tools/browser-e2e.mjs` still filters
+`favicon.ico` out of its 404 assertion for the same reason.
 
 ## Always run the browser gate with `--build`
 
@@ -171,6 +204,27 @@ The modular panel is built and all three samples switch it on with F3 (or
 
 ## Coverage gaps
 
+- **Nothing checks the demo site's HTML in CI.** The 2026-08-02 audit ran
+  `npx html-validate` (recommended + document + a11y presets) and a stdlib
+  Python parser over the three built pages, plus `curl` over every external link
+  and a headless-Chromium screenshot at 1280 and at 390 wide. All of that was a
+  human running commands; `web/build.sh` runs `check-exports.mjs` and
+  `smoke.mjs` and nothing that reads the HTML it just wrote. What it would take,
+  in the no-npm spirit of `web/`: fold the link-and-asset resolution check into
+  `build-pages.py`, which already knows every page it wrote and every file the
+  site will contain. The tag-balance half is what `html-validate` does better,
+  and that one needs a dependency.
+- **`html-validate` reports `require-sri` on every `<link>` and `<script>`, and
+  it is being ignored.** Subresource Integrity guards a resource served by
+  someone else; the stylesheet and the demo shims are same-origin files this
+  repo builds in the same step as the page that names them, and a hash pinned in
+  the layout would have to be regenerated on every edit to `style.css`. Recorded
+  so the next person to run the validator does not re-litigate it.
+- **No visual regression baseline for the site.** The browser gate captures the
+  _canvas_ — deliberately, since the page's chrome is not what it tests — so a
+  stylesheet or template change that breaks the layout around the canvas would
+  pass all 26 checks. The screenshots taken during the 2026-08-02 audit were
+  looked at by a human and thrown away.
 - **The menu golden cannot see an inset larger than the one authored.**
   `menu_frame_two_sizes` compares the two panels' corner blocks pixel for pixel,
   which catches a corner that _scaled_ with the target — measured: making the
@@ -585,6 +639,24 @@ uncertainty.
 
 ## Considered and declined
 
+- **Building the demos' export names in `web/engine/demo.js` from the sample's
+  slug.**
+  `exports[\`**crcbl\_${sample}\_frame\`]`would delete the thirty-line`bind`block from each`web/demos/<name>/main.js`and is the obvious way to write it. Declined because it defeats the gate:`web/tools/check-exports.mjs`learns which exports the JS depends on by scanning for a literal`.**crcbl\_…`and fails when one is missing from the artifact. Verified both directions — with the names spelled out, renaming`\_\_crcbl_breakout_frame`to`…\_framee`in`main.js`fails the check with that symbol named; behind a template literal the scan sees nothing and a typo becomes a`TypeError`
+  in somebody's browser. The per-sample file is the price of keeping the check
+  able to fail.
+- **Folding the demo pages' "what is actually running" prose into a partial
+  too.** Its opening paragraph differs between breakout and flappy by two words
+  ("high score" / "best score") and its second paragraph differs materially —
+  flappy's explains the seeded course, breakout's names swept-sphere collision.
+  Templating it would mean the layout carrying three prose variables, which is a
+  generator, not a partial. The shared blocks are the ones that are identical
+  and structural: the window, the loop's keys, and the console note.
+- **Reformatting `web/tools/browser-e2e.mjs` with prettier.** It is not
+  prettier-clean at the width the rest of `web/` uses — confirmed against the
+  version at `HEAD`, so it predates this work — and this slice touched only a
+  three-line comment in it. Reformatting a 1400-line gate file to fix a
+  whitespace complaint would bury that comment in a diff nobody can review.
+  Worth doing on its own, with the gate run either side of it.
 - **Fixing the multi-sheet sprite bug in the shader, by adding
   `SV_StartInstanceLocation` back on.** It works, and it is one line:
   `sprites[instance + base]` with `uint base : SV_StartInstanceLocation`

@@ -209,6 +209,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   loop that never looked at the bird, so the animation and the button had
   nothing to do with each other; a rising vertical velocity is exactly a flap,
   and it restarts the clip.
+- **demo site**: the demo window is **one template**. The terminal frame, the
+  canvas, the status bar, the focus note, the three keys the engine's loop keeps
+  and the console note were the same markup written out per demo page; they are
+  `web/templates/demo-*.html` now, pulled into a page with `<!--include …-->`.
+  `build-pages.py` fails the build for a demo page that does not include them,
+  so the next demo cannot go back to a copy.
+- **demo site**: `web/engine/demo.js` is the boot sequence and the frame loop
+  for every demo. `web/demos/breakout/main.js` and `web/demos/flappy/main.js`
+  were 288 lines each and differed in the sample name, one status line and one
+  comment — the shape that had already shipped breakout's control hint on
+  flappy's page. Each is ~30 lines now: this sample's `__crcbl_<name>_*`
+  symbols, written out literally so `check-exports.mjs` still sees every one,
+  plus what to press and what it saves.
 - **web tooling**: `check-exports.mjs` and `smoke.mjs` take `--sample <name>`,
   and `run-browser-e2e.sh` takes `CRCBL_WEB_E2E_DEMO`. Each was written when
   there was one demo and asserted against the whole workspace or against

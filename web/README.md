@@ -10,18 +10,38 @@ framework that owns policy — and it applies here for the same reason.
 
 | Path                      | What it is                                                                 |
 | ------------------------- | -------------------------------------------------------------------------- |
-| `index.html`              | the demo site index                                                        |
+| `pages/*.html`            | one content file per page: its metadata, its prose, its includes           |
+| `templates/layout.html`   | the chrome every page is rendered into                                     |
+| `templates/demo-*.html`   | the blocks every demo shares — the window, the loop's keys, the log note   |
+| `build-pages.py`          | fills the layout from `pages/`, expands the includes                       |
 | `style.css`               | one stylesheet for the site                                                |
+| `favicon.svg`             | the site icon, declared by the layout                                      |
+| `engine/demo.js`          | the boot sequence and the frame loop, shared by every demo                 |
 | `engine/wasm.js`          | reading/writing wasm memory, and the detached-view rule                    |
 | `engine/shell.js`         | canvas, DPI/resize, focus, fullscreen, keyboard, pointer → `__crcbl_web_*` |
 | `engine/storage.js`       | asset pre-load over `fetch()`, OPFS restore and drain                      |
 | `engine/audio.js`         | main-thread half of the AudioWorklet feed                                  |
 | `engine/audio-worklet.js` | the `AudioWorkletProcessor` itself                                         |
 | `engine/log.js`           | drains the engine's log queue into the console                             |
-| `demos/breakout/`         | the breakout demo page and its boot sequence                               |
+| `demos/<name>/main.js`    | that sample's `__crcbl_<name>_*` symbols and its two status strings        |
 | `tools/check-exports.mjs` | the JS↔wasm symbol contract check                                          |
 | `tools/smoke.mjs`         | runs the artifact's boot sequence under node                               |
 | `build.sh`                | assembles `target/site/`                                                   |
+
+## Adding a demo
+
+Four things, none of them an edit to an existing demo:
+
+1. a row in `build.sh`'s `DEMOS` and a line in `build-pages.py`'s `DEMOS`;
+2. `pages/<name>.html` — metadata, the game's own prose, and the three
+   `<!--include …-->` directives every demo page carries;
+3. `demos/<name>/main.js` — roughly thirty lines binding this sample's
+   `__crcbl_<name>_*` exports, plus what to press and what it saves;
+4. `demos/<name>/assets/manifest.json`, even if its `keys` are empty.
+
+The demo window itself is not in that list, which is the point:
+`templates/demo-window.html` is the only copy of it, and `build-pages.py` fails
+the build for a demo page that renders its own instead.
 
 Each `engine/` module implements the JS side of an ABI a Rust module already
 specified symbol by symbol. Those specifications are the source of truth:
@@ -72,7 +92,7 @@ somebody's browser rather than in the build.
 site `build.sh` already produced, or pass `--build`:
 
 ```sh
-./web/run-browser-e2e.sh --build      # Xvfb + Chromium, then 18 checks
+./web/run-browser-e2e.sh --build      # Xvfb + Chromium, then 26 checks
 ./web/run-browser-e2e.sh --headless --hardware   # the real GPU, no display
 ```
 

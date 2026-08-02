@@ -12,15 +12,20 @@
     <meta property="og:type" content="website" />
     <meta property="og:url" content="{{canonical}}" />
     <meta property="og:site_name" content="kryptic.sh" />
+    <!-- Declared rather than left to the `/favicon.ico` fallback, which Pages
+         answers with a 404 in every visitor's console. -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/style.css" />
     {{head_extra}}
   </head>
   <body>
-    <nav class="siblings">
+    <!-- Both navigations are named: a screen reader announces "navigation"
+         for each otherwise, and neither one says where it goes. -->
+    <nav class="siblings" aria-label="Across kryptic.sh">
       <div class="siblings-inner">{{siblings}}</div>
     </nav>
 
-    <nav class="top">
+    <nav class="top" aria-label="This page">
       <div class="brand">{{brand}}</div>
       <div class="links">{{nav_links}}</div>
     </nav>

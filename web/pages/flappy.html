@@ -2,6 +2,7 @@
 {
   "out": "demos/flappy/index.html",
   "slug": "flappy",
+  "name": "Flappy",
   "title": "Flappy — Crucible",
   "description": "Flappy, the engine's second game, compiled to wasm32 and drawing through WebGPU.",
   "nav": [
@@ -27,29 +28,7 @@ meta-->
   </p>
 </header>
 
-<div class="stage terminal">
-  <div class="bar">
-    <span class="dot r"></span><span class="dot y"></span
-    ><span class="dot g"></span>
-    <span class="title">flappy — crcbl</span>
-  </div>
-  <!-- `data-raw-handle` is stamped by the shim rather than written here,
-             so the id lives in exactly one place (`main.js`). -->
-  <canvas id="canvas" tabindex="0" aria-label="Flappy game"></canvas>
-  <div class="status" id="statusbar">
-    <span class="live"></span>
-    <span id="status">Starting…</span>
-    <span id="detail"></span>
-    <button id="stop" type="button">Stop</button>
-  </div>
-</div>
-
-<div class="note">
-  <strong>Click the canvas first.</strong> A canvas has to hold keyboard focus
-  to receive keys, and browsers will not start audio until you have interacted
-  with the page. Clicking away pauses the game and lets go of whatever key was
-  held — no platform sends the release for a key that was down when focus left.
-</div>
+<!--include demo-window-->
 
 <section id="controls">
   <h2>controls</h2>
@@ -67,18 +46,7 @@ meta-->
       <span>Restart at any time</span>
       <span><kbd>R</kbd></span>
     </li>
-    <li class="key-row">
-      <span>Pause and resume</span>
-      <span><kbd>Esc</kbd></span>
-    </li>
-    <li class="key-row">
-      <span>Fullscreen</span>
-      <span><kbd>F11</kbd></span>
-    </li>
-    <li class="key-row">
-      <span>Debug overlay</span>
-      <span><kbd>F3</kbd></span>
-    </li>
+    <!--include demo-loop-keys-->
   </ul>
 </section>
 
@@ -119,11 +87,6 @@ meta-->
     seed and the pipe's index, so the client and the server agree about a
     thousand pipes without a byte crossing between them.
   </p>
-  <div class="note">
-    <strong>Open the console for the engine's log.</strong> The wasm module
-    imports nothing, not even <code>console.log</code>, so log lines are queued
-    inside wasm and drained by the page each frame. <code>crcbl.audio()</code>,
-    <code>crcbl.saves()</code> and <code>crcbl.logLevel(4)</code> are there too.
-  </div>
+  <!--include demo-console-note-->
 </section>
 <!--/body-->

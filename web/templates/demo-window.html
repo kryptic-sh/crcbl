@@ -1,0 +1,34 @@
+<!--
+  The demo window. Every demo renders this and nothing else: a page in
+  `web/pages/` pulls it in with an `include demo-window` directive, and
+  `build-pages.py` fails the build for a demo page that does not, so a change
+  here lands on all of them at once.
+
+  `{{slug}}` and `{{name}}` come from the page's metadata block. The ids are the
+  shim's contract — `web/engine/demo.js` looks up `canvas`, `statusbar`,
+  `status`, `detail` and `stop` by name — so renaming one here changes every
+  demo, which is the point.
+-->
+<div class="stage terminal">
+  <div class="bar">
+    <span class="dot r"></span><span class="dot y"></span
+    ><span class="dot g"></span>
+    <span class="title">{{slug}} — crcbl</span>
+  </div>
+  <!-- `data-raw-handle` is stamped by the shim rather than written here, so the
+       id lives in exactly one place (`web/engine/demo.js`). -->
+  <canvas id="canvas" tabindex="0" aria-label="{{name}} game"></canvas>
+  <div class="status" id="statusbar">
+    <span class="live"></span>
+    <span id="status">Starting…</span>
+    <span id="detail"></span>
+    <button id="stop" type="button">Stop</button>
+  </div>
+</div>
+
+<div class="note">
+  <strong>Click the canvas first.</strong> A canvas has to hold keyboard focus
+  to receive keys, and browsers will not start audio until you have interacted
+  with the page. Clicking away pauses the game and lets go of whatever key was
+  held — no platform sends the release for a key that was down when focus left.
+</div>

@@ -1014,8 +1014,9 @@ try {
       ? 'status 6 (PAUSED) — the canvas never had focus'
       : `status ${settled?.status ?? 'never settled'}`
   );
-  // `/favicon.ico` is requested by the browser, not by the shim, and the site
-  // deliberately has none. Every other 404 is an asset the page wanted.
+  // The pages declare `/favicon.svg`, which exists, so this filter is now the
+  // belt to that braces: a browser that ignores the declaration and asks for
+  // `/favicon.ico` anyway is not the page wanting an asset. Every other 404 is.
   const missing = site.misses.filter((m) => !m.endsWith('favicon.ico'));
   check(
     'B',

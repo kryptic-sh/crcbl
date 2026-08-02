@@ -1,0 +1,10 @@
+<!--
+  What the console gives you. Describes `web/engine/demo.js`, which is now one
+  file for every demo, so this note is one file too.
+-->
+<div class="note">
+  <strong>Open the console for the engine's log.</strong> The wasm module
+  imports nothing, not even <code>console.log</code>, so log lines are queued
+  inside wasm and drained by the page each frame. <code>crcbl.audio()</code>,
+  <code>crcbl.saves()</code> and <code>crcbl.logLevel(4)</code> are there too.
+</div>
