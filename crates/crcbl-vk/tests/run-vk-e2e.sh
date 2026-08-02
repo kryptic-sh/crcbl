@@ -116,6 +116,20 @@ if [ -n "${CRCBL_VK_ICD:-}" ]; then
     export VK_DRIVER_FILES="$CRCBL_VK_ICD"
     export VK_ICD_FILENAMES="$CRCBL_VK_ICD"
     echo "crcbl vk e2e: pinned ICD $CRCBL_VK_ICD"
+else
+    # Say so. The header above claims this script is what a developer runs to
+    # see what CI sees, and with no ICD pinned that claim is false: the loader
+    # picks whatever is installed, which on a workstation is the discrete GPU
+    # and never the software rasteriser CI runs. The suite prints the adapter it
+    # got, but nobody reads an adapter line looking for an absence — this is the
+    # line that names it. Not a hard failure: running against real hardware is a
+    # thing worth doing deliberately, and this is exactly how.
+    cat >&2 <<'NOICD'
+crcbl vk e2e: CRCBL_VK_ICD is not set, so the loader will choose the driver.
+              CI pins lavapipe and this run does not, so a green run here is
+              NOT the run CI makes. To reproduce CI:
+                CRCBL_VK_ICD=/usr/share/vulkan/icd.d/lvp_icd.json $0
+NOICD
 fi
 
 # Fail early and legibly rather than letting every test panic with the same
