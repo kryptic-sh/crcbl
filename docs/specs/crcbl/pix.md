@@ -32,15 +32,15 @@ else, so art from Aseprite needs no engine change.
 **Authoring by hand**, in a repository, in a diff. Nothing standard covers it
 adequately:
 
-| Candidate | Why not |
-| --- | --- |
-| **XPM** (X11) | The right shape, and the closest thing to a standard — a palette of characters and rows of them. Holds exactly one image, with nowhere to put frames, clips or a nine-slice rect. |
-| Netpbm plain (P1/P2/P3) | Open and universal, but ASCII *numbers*, not characters. No palette, no alpha in P3. Not readable as art. |
-| XBM | One bit per pixel. |
-| SVG | A real standard, but pixel art as `<rect>` elements is worse than XPM in every respect. |
-| Sixel | An actual DEC/ANSI standard and printable-ASCII encoded, but a terminal transmission format, not something written by hand. |
-| ANSI/ASCII art with SAUCE | Character-cell art. A different medium. |
-| `.piskel`, Tiled `.tmx` | Open and text, but `.piskel` wraps base64 PNGs and `.tmx` references images rather than containing them. |
+| Candidate                 | Why not                                                                                                                                                                           |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **XPM** (X11)             | The right shape, and the closest thing to a standard — a palette of characters and rows of them. Holds exactly one image, with nowhere to put frames, clips or a nine-slice rect. |
+| Netpbm plain (P1/P2/P3)   | Open and universal, but ASCII _numbers_, not characters. No palette, no alpha in P3. Not readable as art.                                                                         |
+| XBM                       | One bit per pixel.                                                                                                                                                                |
+| SVG                       | A real standard, but pixel art as `<rect>` elements is worse than XPM in every respect.                                                                                           |
+| Sixel                     | An actual DEC/ANSI standard and printable-ASCII encoded, but a terminal transmission format, not something written by hand.                                                       |
+| ANSI/ASCII art with SAUCE | Character-cell art. A different medium.                                                                                                                                           |
+| `.piskel`, Tiled `.tmx`   | Open and text, but `.piskel` wraps base64 PNGs and `.tmx` references images rather than containing them.                                                                          |
 
 So `.crpix` is bespoke, and the mitigation is structural rather than a promise:
 it is a **build input**, it is converted to the standard pair, and nothing
@@ -55,12 +55,13 @@ Its design is XPM's, deliberately — see §6.
 A `.crpix` file is UTF-8 text, read line by line.
 
 - **Comments.** Everything from the first `#` on a line to the end of the line
-  is discarded, *except* on palette-entry lines, which are read from the raw
+  is discarded, _except_ on palette-entry lines, which are read from the raw
   line (§4.2). A consequence, and a rule: **`#` cannot be a palette key**, and
   therefore never appears in a row.
 - **Blank lines** — empty after comment removal — are ignored anywhere.
-- **Indentation is not significant.** Rows and palette entries are conventionally
-  indented two spaces for readability; the parser trims both ends.
+- **Indentation is not significant.** Rows and palette entries are
+  conventionally indented two spaces for readability; the parser trims both
+  ends.
 - **A space is never a pixel.** Rows are trimmed at both ends, so a file that
   looks aligned is aligned. Write empty as `.` by convention (any key will do —
   the convention is not enforced).
@@ -115,17 +116,17 @@ required separator is what catches a one-character key written under a
 `chars: 2` header, which would otherwise swallow the following space and leave
 every row unmatched.
 
-After the key come XPM colour *contexts*. `c` is the colour one and the only one
+After the key come XPM colour _contexts_. `c` is the colour one and the only one
 this engine uses; `m`, `g` and `s` (monochrome, greyscale, symbolic) are parsed
 and skipped. A file that omits the context entirely — `k #241c1c` — is accepted,
 and is the shorter form to write by hand.
 
-| Colour | Meaning |
-| --- | --- |
-| `None`, `transparent` | Fully transparent, and **all four channels zeroed** |
-| `#rgb` | Each digit expanded by ×17, as CSS does: `#fff` is `#ffffff` |
-| `#rrggbb` | Opaque |
-| `#rrggbbaa` | Straight (non-premultiplied) alpha |
+| Colour                | Meaning                                                      |
+| --------------------- | ------------------------------------------------------------ |
+| `None`, `transparent` | Fully transparent, and **all four channels zeroed**          |
+| `#rgb`                | Each digit expanded by ×17, as CSS does: `#fff` is `#ffffff` |
+| `#rrggbb`             | Opaque                                                       |
+| `#rrggbbaa`           | Straight (non-premultiplied) alpha                           |
 
 X11 colour names are **not** accepted. The table is unbounded, hex is
 unambiguous, and a misspelled name is a colour that silently is not the one you
@@ -188,31 +189,31 @@ is specific: art whose rows are one character short renders as a sheared sprite,
 and a sheared sprite is blamed on the renderer for an afternoon before anybody
 counts the characters.
 
-| Rule | Error |
-| --- | --- |
-| File opens with a header | `MissingHeader` |
-| Header is five positive integers | `BadHeader` |
-| Header appears once | `RepeatedHeader` |
-| Every row is exactly `width * chars` characters | `RowWrongWidth` |
-| Every frame has exactly `height` rows | `FrameWrongHeight` |
-| The file holds exactly `frames` frames | `CountMismatch` |
-| The palette holds exactly `colours` entries | `CountMismatch` |
-| A palette key is followed by whitespace | `KeyNotSeparated` |
-| No two entries share a key | `DuplicateKey` |
-| Every cell is a palette key | `UnknownPixel` |
-| A colour is `None` or hex | `BadColour` |
-| A clip names only defined frames | `UnknownFrame` |
-| A clip's frames are a contiguous ascending run | `ClipNotContiguous` |
-| A hold is a positive integer | `BadHold` |
-| `nine:` is four integers, and the insets fit the frame | `BadNine`, `Sheet` |
-| `sample:` is `pixel` or `smooth` | `BadSample` |
+| Rule                                                   | Error               |
+| ------------------------------------------------------ | ------------------- |
+| File opens with a header                               | `MissingHeader`     |
+| Header is five positive integers                       | `BadHeader`         |
+| Header appears once                                    | `RepeatedHeader`    |
+| Every row is exactly `width * chars` characters        | `RowWrongWidth`     |
+| Every frame has exactly `height` rows                  | `FrameWrongHeight`  |
+| The file holds exactly `frames` frames                 | `CountMismatch`     |
+| The palette holds exactly `colours` entries            | `CountMismatch`     |
+| A palette key is followed by whitespace                | `KeyNotSeparated`   |
+| No two entries share a key                             | `DuplicateKey`      |
+| Every cell is a palette key                            | `UnknownPixel`      |
+| A colour is `None` or hex                              | `BadColour`         |
+| A clip names only defined frames                       | `UnknownFrame`      |
+| A clip's frames are a contiguous ascending run         | `ClipNotContiguous` |
+| A hold is a positive integer                           | `BadHold`           |
+| `nine:` is four integers, and the insets fit the frame | `BadNine`, `Sheet`  |
+| `sample:` is `pixel` or `smooth`                       | `BadSample`         |
 
 Parsing stops at the first failure: a build error needs the first cause, not the
 noise downstream of it.
 
 **Why the counts are declared.** They look like redundancy that will rot. They
 are a checksum, and the checking is only possible because they exist. A row one
-character short is detectable *at all* only against a declared width — and a
+character short is detectable _at all_ only against a declared width — and a
 frame with two rows wrong in compensating directions is invisible to any check
 that compares rows against each other. Real XPM readers enforce the same thing
 row by row; this was verified against ImageMagick before the rule was adopted.
@@ -223,12 +224,12 @@ row by row; this was verified against ImageMagick before the rule was adopted.
 
 Adopted, deliberately and by name:
 
-| XPM feature | Here |
-| --- | --- |
-| A header declaring width, height, colours, chars-per-pixel | `crpix:`, plus a frame count |
-| `c None` for transparency | Identical |
-| Multiple characters per pixel | Identical, via the header's fifth field |
-| `<key> c <colour>` entries with colour contexts | Identical, so an `.xpm` palette line pastes in unchanged |
+| XPM feature                                                | Here                                                     |
+| ---------------------------------------------------------- | -------------------------------------------------------- |
+| A header declaring width, height, colours, chars-per-pixel | `crpix:`, plus a frame count                             |
+| `c None` for transparency                                  | Identical                                                |
+| Multiple characters per pixel                              | Identical, via the header's fifth field                  |
+| `<key> c <colour>` entries with colour contexts            | Identical, so an `.xpm` palette line pastes in unchanged |
 
 Not adopted:
 
@@ -253,26 +254,26 @@ sheet of eight 16×16 frames does not have a problem with, at the cost of a
 bin-packer between the art and the screen. The encode names its compression
 level so a crate version bump cannot silently change the bytes.
 
-**The JSON sidecar**, *only if* the art has more than one frame, or any clip, or
+**The JSON sidecar**, _only if_ the art has more than one frame, or any clip, or
 a nine-slice. A single still frame is fully described by its image, and a
 sidecar saying "one frame, the whole picture" is a file to fetch, parse and
 learn nothing from.
 
 The mapping, field by field:
 
-| `.crpix` | Aseprite JSON |
-| --- | --- |
-| frame name | `frames[i].filename` |
-| frame position in the strip | `frames[i].frame` |
-| — | `rotated: false`, `trimmed: false`, `spriteSourceSize` = the frame, `sourceSize` = the frame |
-| `hold` ticks | `frames[i].duration`, milliseconds: `ceil(hold * 1000 / tick_hz)`, floored at 1 |
-| clip name | `meta.frameTags[i].name` |
-| clip's frame run | `from` / `to` |
-| `reverse` / `pingpong` | `direction` |
-| `loop` | `repeat` **absent** (Aseprite's "forever") |
-| no `loop` | `repeat: "1"` |
-| `nine: l r t b` on a `w × h` frame | `meta.slices[0].keys[0].center` = `{x: l, y: t, w: w-l-r, h: h-t-b}` |
-| sheet size | `meta.size` |
+| `.crpix`                           | Aseprite JSON                                                                                |
+| ---------------------------------- | -------------------------------------------------------------------------------------------- |
+| frame name                         | `frames[i].filename`                                                                         |
+| frame position in the strip        | `frames[i].frame`                                                                            |
+| —                                  | `rotated: false`, `trimmed: false`, `spriteSourceSize` = the frame, `sourceSize` = the frame |
+| `hold` ticks                       | `frames[i].duration`, milliseconds: `ceil(hold * 1000 / tick_hz)`, floored at 1              |
+| clip name                          | `meta.frameTags[i].name`                                                                     |
+| clip's frame run                   | `from` / `to`                                                                                |
+| `reverse` / `pingpong`             | `direction`                                                                                  |
+| `loop`                             | `repeat` **absent** (Aseprite's "forever")                                                   |
+| no `loop`                          | `repeat: "1"`                                                                                |
+| `nine: l r t b` on a `w × h` frame | `meta.slices[0].keys[0].center` = `{x: l, y: t, w: w-l-r, h: h-t-b}`                         |
+| sheet size                         | `meta.size`                                                                                  |
 
 Durations are floored at 1 ms because a zero-duration frame reads as "skip me"
 to some consumers, and one tick at 240 Hz rounds to zero without it.
@@ -332,13 +333,13 @@ to 2, forward, repeating forever, with each frame at 100 ms.
 ## 9. Not specified here
 
 - **Loading.** How a PNG and a sidecar become a texture and a
-  `crcbl_sprite::Sheet` at runtime, including the Aseprite JSON *reader*.
+  `crcbl_sprite::Sheet` at runtime, including the Aseprite JSON _reader_.
 - **Playback.** Advancing a clip over ticks, and what `pingpong` does at the
   ends, beyond the sequence given in §4.4.
 - **Rendering.** The sprite pass, the two sample modes' shader behaviour, layers
   and parallax, and how nine-slice insets become geometry.
 - **Layers.** Aseprite's `meta.layers` is not read and `.crpix` has no
-  equivalent. Parallax layers are currently a property of a *drawn sprite*, not
+  equivalent. Parallax layers are currently a property of a _drawn sprite_, not
   of the sheet it came from.
 - **A packed atlas.** Frames are a strip; nothing here forbids a packer later,
   and the sidecar's per-frame rects already express one.
