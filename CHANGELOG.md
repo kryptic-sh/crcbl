@@ -55,6 +55,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   art pixels four screen pixels across and their neighbours five, and the
   unevenness crawls as the sprite moves. `SpriteInstance` grew a fourth `float4`
   carrying the sheet's size and the mode, so its layout changed.
+- **crcbl-sprite**: `Playback`, which advances a clip over ticks — a bare `u64`
+  cursor answering `frame_index` and `finished` as a closed form, so catching up
+  after a stall lands exactly where tick-by-tick would. Ping-pong shows each end
+  once (period `2n - 2` looping, `2n - 1` for a one-shot that has to walk home),
+  and reverse carries each frame's hold with the frame rather than reversing the
+  holds too. Also `Sheet::uv`, the frame rect as normalised UVs, which every
+  caller was spelling out by hand.
 
 ### Changed
 
