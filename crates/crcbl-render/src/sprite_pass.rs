@@ -187,8 +187,14 @@ pub const CONSTANTS_SIZE: u64 = size_of::<SpriteConstants>() as u64;
 /// Opaque and per-renderer: an id from one renderer means nothing to another,
 /// and [`SpriteRenderer::begin_frame`] rejects one it does not know rather than
 /// binding whatever is at that index.
+///
+/// The field is `pub(crate)` rather than private so that [`crate::nine_slice`]
+/// and [`crate::layers`] — which build [`Sprite`]s without a device — can be
+/// tested against an id at all. It stays opaque to every caller outside this
+/// crate, and [`SpriteRenderer::begin_frame`] still refuses an id it did not
+/// hand out, so nothing about the guarantee changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SheetId(u32);
+pub struct SheetId(pub(crate) u32);
 
 impl SheetId {
     /// The index this id addresses, for tests and diagnostics.
@@ -224,7 +230,11 @@ pub struct SheetDesc<'a> {
 /// The submission order of a `&[Sprite]` **is** the compositing order. Nothing
 /// here sorts, by sheet or by anything else: a caller that interleaves two
 /// sheets gets two batches, which is the price of the ordering it asked for.
-/// Layer and parallax ordering are slice 6's, and they belong above this.
+///
+/// Layer and parallax ordering live above this, in [`crate::layers`]: a
+/// [`LayerStack`](crate::layers::LayerStack) groups sprites into bands and
+/// flattens them back to front when the *caller* asks it to, so the frame this
+/// slice receives is still exactly the order it was handed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sprite {
     /// Which registered sheet this sprite samples.
@@ -1371,6 +1381,74 @@ mod tests {
         assert_ne!(binds[0], binds[1], "the middle batch is the other sheet");
         assert_eq!(binds[0], renderer.sheets[a.index() as usize].group);
         assert_eq!(binds[1], renderer.sheets[b.index() as usize].group);
+
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **Layer 0 draws behind layer 1, all the way to the command stream.**
+    ///
+    /// The ordering slice 6 adds is [`crate::layers::LayerStack::resolve`]'s and
+    /// nothing else's: this pass still batches consecutive sprites and still
+    /// never sorts, so the evidence that back-to-front happened is that the
+    /// *recorded draws* come out in layer order.
+    ///
+    /// Each layer gets its own sheet, so the two are distinguishable in the
+    /// command stream — a draw range on its own cannot say which layer it came
+    /// from. The submission is deliberately interleaved across layers, which is
+    /// what a game does: a stack that appended to one flat list would record the
+    /// two sheets alternating instead of two clean batches.
+    #[test]
+    fn the_back_layer_is_drawn_before_the_front_one() {
+        use crate::layers::{LayerStack, Parallax};
+
+        let recorder = Recorder::new();
+        let (device, queue) = open(&recorder);
+        let mut renderer = SpriteRenderer::new(device.as_ref(), queue, TARGET).expect("built");
+        let back_sheet = register(&mut renderer, device.as_ref(), "background");
+        let front_sheet = register(&mut renderer, device.as_ref(), "foreground");
+
+        let mut stack = LayerStack::new();
+        let back = stack.push_layer(Parallax::new(0.5).expect("finite"));
+        let front = stack.push_layer(Parallax::WORLD);
+        for (layer, sheet) in [
+            (front, front_sheet),
+            (back, back_sheet),
+            (front, front_sheet),
+            (back, back_sheet),
+            (back, back_sheet),
+        ] {
+            stack.push(layer, sprite(sheet));
+        }
+
+        renderer
+            .begin_frame(
+                device.as_ref(),
+                stack.resolve([0.0, 0.0]),
+                Mat4::IDENTITY,
+                EXTENT,
+            )
+            .expect("upload");
+
+        recorder.clear();
+        run_pass(device.as_ref(), queue, &renderer);
+
+        assert_eq!(
+            draws(&recorder),
+            [0..3, 3..5],
+            "the back layer's three sprites, then the front layer's two — five \
+             draws would mean the stack never grouped, and one would mean the \
+             pass sorted"
+        );
+        let binds = sheet_binds(&recorder);
+        assert_eq!(
+            binds,
+            [
+                renderer.sheets[back_sheet.index() as usize].group,
+                renderer.sheets[front_sheet.index() as usize].group,
+            ],
+            "and the first draw is the *back* layer's sheet"
+        );
 
         renderer.destroy(device.as_ref());
         recorder.assert_valid();

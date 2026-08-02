@@ -62,6 +62,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and reverse carries each frame's hold with the frame rather than reversing the
   holds too. Also `Sheet::uv`, the frame rect as normalised UVs, which every
   caller was spelling out by hand.
+- **crcbl-render**: `NineSliceSource::expand`, which turns stored insets into
+  the quads that draw them — corners at their natural size, edges stretched on
+  one axis, centre on both. Empty bands emit nothing, so a three-slice is three
+  quads and a frame with no insets is one; the cut lines are computed once and
+  indexed, so adjacent quads share their edges exactly and no seam opens up. A
+  target below the corners' combined size shrinks them proportionally rather
+  than letting them overlap and mirror.
+- **crcbl-render**: `LayerStack`, `Layer` and `Parallax` — sprites grouped into
+  back-to-front bands, each taking a chosen fraction of the camera's motion. A
+  layer is a container rather than a field on `Sprite`, so nothing sorts and
+  submission order inside a layer is still exactly what the caller gave.
 
 ### Changed
 

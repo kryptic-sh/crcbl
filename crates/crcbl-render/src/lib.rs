@@ -120,6 +120,8 @@
 pub mod camera;
 pub mod forward;
 pub mod graph;
+pub mod layers;
+pub mod nine_slice;
 pub mod sprite_pass;
 pub mod texture;
 pub mod timing;
@@ -130,13 +132,18 @@ pub use camera::{Camera, DirectionalLight, Projection};
 /// Re-exported because [`SheetDesc::sample`] is spelled in it: a crate whose
 /// public API names a foreign type and does not export it is one every caller
 /// has to add a dependency for.
-pub use crcbl_sprite::SampleMode;
+///
+/// [`NineSlice`] and [`Rect`] are here for the same reason —
+/// [`NineSliceSource`]'s fields are spelled in both.
+pub use crcbl_sprite::{NineSlice, Rect, SampleMode};
 pub use forward::ForwardRenderer;
 pub use graph::{
     Attachment, BufferId, CompiledGraph, CompiledPass, GraphBarriers, GraphBufferBarrier,
     GraphError, GraphImageBarrier, ImageId, ImportedBuffer, ImportedImage, PassBuilder,
     PassContext, PassKind, RenderGraph,
 };
+pub use layers::{Layer, LayerStack, Parallax};
+pub use nine_slice::{NineQuads, NineSliceSource, SliceQuad};
 pub use sprite_pass::{
     CONSTANTS_SIZE, INSTANCE_STRIDE, SAMPLE_PIXEL, SAMPLE_SMOOTH, SheetDesc, SheetId, Sprite,
     SpriteConstants, SpriteInstance, SpriteRenderer, sheet_lane,
