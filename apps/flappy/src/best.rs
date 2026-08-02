@@ -31,12 +31,7 @@ enum Backing {
     #[cfg(not(target_arch = "wasm32"))]
     Native(PathBuf),
     /// The page's Origin Private File System, drained by the JS shim.
-    ///
-    /// Nothing constructs this until [`crate::web`] lands with the entry point
-    /// that installs the store; the read and write arms for it are written
-    /// because they are what that slice will wire up, not because they run yet.
     #[cfg(target_arch = "wasm32")]
-    #[expect(dead_code, reason = "constructed once crate::web installs the store")]
     Opfs(std::rc::Rc<crcbl_store::web::OpfsStorage>),
 }
 
@@ -71,14 +66,15 @@ impl Best {
         }
     }
 
-    /// The browser's backing, once there is a browser entry point to install
-    /// the store. Until then a wasm build keeps the score in memory for the
-    /// session — the read and write paths below are already OPFS-shaped, and
-    /// this is the one line that changes when [`crate::web`] lands.
     #[cfg(target_arch = "wasm32")]
     fn platform_backing() -> Backing {
-        log::warn!("best: no OPFS store installed yet; scores will not persist");
-        Backing::None
+        match crate::web::opfs_store() {
+            Some(store) => Backing::Opfs(store),
+            None => {
+                log::warn!("best: no OPFS store installed; scores will not persist");
+                Backing::None
+            }
+        }
     }
 
     /// Decodes the stored value, or `None` when there is not one to decode.

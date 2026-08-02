@@ -147,8 +147,14 @@ jobs:
       # known-colour clear before it interprets anything, so a runner where the
       # readback stops working fails here rather than reporting a working
       # renderer as blank.
-      - name: Render the demo in a real browser
-        run: ./web/run-browser-e2e.sh
+      # Once per demo, and named per demo, so "the browser gate failed" says
+      # which game. The site is built once; each run launches its own browser
+      # because the driver reads one canvas.
+      - name: Render breakout in a real browser
+        run: CRCBL_WEB_E2E_DEMO=breakout ./web/run-browser-e2e.sh
+
+      - name: Render flappy in a real browser
+        run: CRCBL_WEB_E2E_DEMO=flappy ./web/run-browser-e2e.sh
 
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed

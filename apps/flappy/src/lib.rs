@@ -36,6 +36,9 @@ mod best;
 mod game;
 mod gpu;
 
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+
 pub use app::{FlappyError, Loop, MAX_FRAME_STEP, PendingLoop, Summary, run};
 pub use args::{Invocation, Options, USAGE, parse};
 pub use game::{

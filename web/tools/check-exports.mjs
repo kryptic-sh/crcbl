@@ -22,8 +22,14 @@
 // breakout and that is fine, but a whole ABI going unused usually means a shim
 // forgot a step.
 //
+// A sample owns its own `__crcbl_<sample>_*` prefix, so the check is run once
+// per sample and scoped to it: another sample's Rust sources and another
+// sample's shim are not this artifact's contract. Without that scoping the
+// second sample in the repo makes the first one's check fail, which is exactly
+// what happened when flappy landed.
+//
 // Usage:
-//   node web/tools/check-exports.mjs <path-to.wasm> [--quiet]
+//   node web/tools/check-exports.mjs <path-to.wasm> --sample <name> [--quiet]
 
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -34,8 +40,10 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 /** Where `#[unsafe(no_mangle)] pub … extern "C" fn __crcbl_…` may live. */
 const RUST_ROOTS = [join(REPO, 'crates'), join(REPO, 'apps')];
 
-/** Where the shim lives. */
-const JS_ROOTS = [join(REPO, 'web')];
+/** Where the shared half of the shim lives. The per-demo half is added by
+ * `--sample`, because one demo's `main.js` says nothing about another's
+ * artifact. */
+const JS_SHARED = join(REPO, 'web', 'engine');
 
 /**
  * The declaration form the engine uses for every wasm export.
@@ -107,12 +115,32 @@ function list(label, names) {
   for (const name of sorted) console.log(`  ${name}`);
 }
 
+/**
+ * Whether `file` belongs to a sample other than `sample`.
+ *
+ * Attribution by path rather than by symbol name: it needs no naming
+ * convention, and it is exact. `apps/breakout/src/web.rs` declares breakout's
+ * exports and nothing else's, whatever they happen to be called.
+ *
+ * @param {string} file
+ * @param {string} sample
+ */
+function belongsToAnotherSample(file, sample) {
+  const match = file.slice(REPO.length + 1).match(/^apps[/\\]([^/\\]+)[/\\]/);
+  return match !== null && match[1] !== sample;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const quiet = args.includes('--quiet');
-  const wasmPath = args.find((a) => !a.startsWith('--'));
-  if (!wasmPath) {
-    console.error('usage: node web/tools/check-exports.mjs <path-to.wasm> [--quiet]');
+  const positional = args.filter((a) => !a.startsWith('--'));
+  const sampleFlag = args.indexOf('--sample');
+  const wasmPath = positional.find((a) => a !== args[sampleFlag + 1]);
+  const sample = sampleFlag >= 0 ? args[sampleFlag + 1] : undefined;
+  if (!wasmPath || !sample) {
+    console.error(
+      'usage: node web/tools/check-exports.mjs <path-to.wasm> --sample <name> [--quiet]'
+    );
     process.exit(2);
   }
   try {
@@ -124,22 +152,42 @@ async function main() {
   }
 
   const module = new WebAssembly.Module(await readFile(wasmPath));
-  const exported = new Set(WebAssembly.Module.exports(module).map((e) => e.name));
+  const exported = new Set(
+    WebAssembly.Module.exports(module).map((e) => e.name)
+  );
   const imports = WebAssembly.Module.imports(module);
 
-  const declared = await collect(RUST_ROOTS, (n) => n.endsWith('.rs'), RUST_EXPORT);
-  const used = await collect(JS_ROOTS, (n) => n.endsWith('.js'), JS_USE);
+  const allDeclared = await collect(
+    RUST_ROOTS,
+    (n) => n.endsWith('.rs'),
+    RUST_EXPORT
+  );
+  const declared = new Map(
+    [...allDeclared].filter(([, files]) =>
+      files.some((file) => !belongsToAnotherSample(file, sample))
+    )
+  );
+  const used = await collect(
+    [JS_SHARED, join(REPO, 'web', 'demos', sample)],
+    (n) => n.endsWith('.js'),
+    JS_USE
+  );
 
   /** @type {string[]} */
   const failures = [];
 
-  const missingFromArtifact = [...declared.keys()].filter((n) => !exported.has(n));
+  const missingFromArtifact = [...declared.keys()].filter(
+    (n) => !exported.has(n)
+  );
   if (missingFromArtifact.length > 0) {
     failures.push(
       `${missingFromArtifact.length} symbol(s) declared in Rust are not exported by ${basename(wasmPath)}:\n` +
         missingFromArtifact
-          .map((n) => `    ${n}  (${(declared.get(n) ?? []).map((f) => f.slice(REPO.length + 1)).join(', ')})`)
-          .join('\n'),
+          .map(
+            (n) =>
+              `    ${n}  (${(declared.get(n) ?? []).map((f) => f.slice(REPO.length + 1)).join(', ')})`
+          )
+          .join('\n')
     );
   }
 
@@ -148,13 +196,18 @@ async function main() {
     failures.push(
       `${missingForShim.length} symbol(s) the shim calls do not exist in the artifact:\n` +
         missingForShim
-          .map((n) => `    ${n}  (${(used.get(n) ?? []).map((f) => f.slice(REPO.length + 1)).join(', ')})`)
-          .join('\n'),
+          .map(
+            (n) =>
+              `    ${n}  (${(used.get(n) ?? []).map((f) => f.slice(REPO.length + 1)).join(', ')})`
+          )
+          .join('\n')
     );
   }
 
   if (!exported.has('memory')) {
-    failures.push("the artifact does not export `memory`; every ABI here is an offset into it");
+    failures.push(
+      'the artifact does not export `memory`; every ABI here is an offset into it'
+    );
   }
 
   // wasm-bindgen rewrites the placeholder module to the name of the glue file it
@@ -166,25 +219,29 @@ async function main() {
     './' + basename(wasmPath).replace(/_bg\.wasm$/, '_bg.js'),
   ]);
   const strayModules = [...new Set(imports.map((i) => i.module))].filter(
-    (m) => !ALLOWED_IMPORT_MODULES.has(m),
+    (m) => !ALLOWED_IMPORT_MODULES.has(m)
   );
   if (strayModules.length > 0) {
     failures.push(
       `the artifact imports from ${strayModules.length} unexpected module(s): ${strayModules.join(', ')}.\n` +
-        '    The engine ABI is exports-plus-polling; the only imports allowed are wasm-bindgen\'s\n' +
-        '    own glue for `wgpu`. See `apps/breakout/src/web.rs`.',
+        "    The engine ABI is exports-plus-polling; the only imports allowed are wasm-bindgen's\n" +
+        `    own glue for \`wgpu\`. See \`apps/${sample}/src/web.rs\`.`
     );
   }
 
   if (!quiet) {
-    console.log(`artifact:        ${wasmPath}`);
-    console.log(`exports:         ${exported.size} total, ${[...exported].filter((n) => n.startsWith('__crcbl_')).length} __crcbl_*`);
-    console.log(`imports:         ${imports.length} from ${[...new Set(imports.map((i) => i.module))].join(', ')}`);
+    console.log(`artifact:        ${wasmPath}  (sample: ${sample})`);
+    console.log(
+      `exports:         ${exported.size} total, ${[...exported].filter((n) => n.startsWith('__crcbl_')).length} __crcbl_*`
+    );
+    console.log(
+      `imports:         ${imports.length} from ${[...new Set(imports.map((i) => i.module))].join(', ')}`
+    );
     console.log(`declared in Rust: ${declared.size}`);
     console.log(`called by the shim: ${used.size}`);
     list(
       'exported but never called by the shim',
-      [...declared.keys()].filter((n) => !used.has(n)),
+      [...declared.keys()].filter((n) => !used.has(n))
     );
   }
 

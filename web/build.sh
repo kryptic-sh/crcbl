@@ -22,6 +22,7 @@ TARGET=wasm32-unknown-unknown
 # `web/demos/`.
 DEMOS=(
   "breakout:crcbl_breakout:demos/breakout"
+  "flappy:crcbl_flappy:demos/flappy"
 )
 
 # The `wasm-bindgen` CLI must match the `wasm-bindgen` crate the build resolved,
@@ -100,10 +101,10 @@ for row in "${DEMOS[@]}"; do
   wasm-bindgen --target web --no-typescript --out-dir "$SITE/$dest" "$wasm"
 
   echo "==> checking the JS↔wasm export contract"
-  node "$REPO/web/tools/check-exports.mjs" "$SITE/$dest/${lib}_bg.wasm" --quiet
+  node "$REPO/web/tools/check-exports.mjs" "$SITE/$dest/${lib}_bg.wasm" --sample "$crate" --quiet
 
   echo "==> smoke-testing the artifact under node"
-  node "$REPO/web/tools/smoke.mjs" "$SITE/$dest/${lib}_bg.wasm"
+  node "$REPO/web/tools/smoke.mjs" "$SITE/$dest/${lib}_bg.wasm" --sample "$crate"
 done
 
 echo "==> $SITE"

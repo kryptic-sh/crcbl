@@ -1,0 +1,116 @@
+<!--meta
+{
+  "out": "demos/flappy/index.html",
+  "slug": "flappy",
+  "title": "Flappy — Crucible",
+  "description": "Flappy, the engine's second game, compiled to wasm32 and drawing through WebGPU.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/flappy", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/flappy\">apps/flappy</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/flappy/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● S1B</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+  </div>
+  <h1><span class="grad">Flappy</span></h1>
+  <p class="tagline">
+    One button, an endless procession of pipes, and no second chances — the same
+    <code>apps/flappy</code> that builds a native binary, running here.
+  </p>
+</header>
+
+<div class="stage terminal">
+  <div class="bar">
+    <span class="dot r"></span><span class="dot y"></span
+    ><span class="dot g"></span>
+    <span class="title">flappy — crcbl</span>
+  </div>
+  <!-- `data-raw-handle` is stamped by the shim rather than written here,
+             so the id lives in exactly one place (`main.js`). -->
+  <canvas id="canvas" tabindex="0" aria-label="Flappy game"></canvas>
+  <div class="status" id="statusbar">
+    <span class="live"></span>
+    <span id="status">Starting…</span>
+    <span id="detail"></span>
+    <button id="stop" type="button">Stop</button>
+  </div>
+</div>
+
+<div class="note">
+  <strong>Click the canvas first.</strong> A canvas has to hold keyboard focus
+  to receive keys, and browsers will not start audio until you have interacted
+  with the page.
+</div>
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>One key.</h3>
+  <ul class="keys">
+    <li class="key-row">
+      <span>Flap</span>
+      <span><kbd>Space</kbd> or <kbd>↑</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Start a run, or begin again after one ends</span>
+      <span><kbd>Space</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Restart at any time</span>
+      <span><kbd>R</kbd></span>
+    </li>
+  </ul>
+</section>
+
+<section id="why-this-one">
+  <h2>why a second game</h2>
+  <h3>To find out what the first one's shape left behind.</h3>
+  <p>
+    Breakout proved the engine can host a game. A single consumer cannot tell a
+    design from an accident, though — every convenience that happens to suit a
+    paddle and a brick grid reads as good design until something else needs the
+    same seam. So this one is deliberately different: continuous forward motion
+    instead of a fixed field, pipes created ahead and destroyed behind instead
+    of a static grid, one button instead of two axes, and no lives at all.
+  </p>
+  <p>
+    Every place the engine resisted that is written down rather than worked
+    around quietly — the findings are in the roadmap, next to the phase that
+    owes the fix.
+  </p>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>The native sample, with four differences the browser forces.</h3>
+  <p>
+    Start-up is polled across several frames, because
+    <code>requestDevice</code> is a promise and the main thread cannot block on
+    it. The frame loop is driven by <code>requestAnimationFrame</code> out here
+    rather than by a <code>loop</code> inside the engine. The clock is the
+    browser's, because <code>wasm32-unknown-unknown</code> has no
+    <code>Instant</code>. And the best score lives in the Origin Private File
+    System instead of <code>~/.config</code>.
+  </p>
+  <p>
+    Everything else — the ECS, the fixed-tick server, the physics, the render
+    graph, the spatial audio — is the same code the native build runs. The
+    course itself is not sent anywhere: gap positions are a pure function of a
+    seed and the pipe's index, so the client and the server agree about a
+    thousand pipes without a byte crossing between them.
+  </p>
+  <div class="note">
+    <strong>Open the console for the engine's log.</strong> The wasm module
+    imports nothing, not even <code>console.log</code>, so log lines are queued
+    inside wasm and drained by the page each frame. <code>crcbl.audio()</code>,
+    <code>crcbl.saves()</code> and <code>crcbl.logLevel(4)</code> are there too.
+  </div>
+</section>
+<!--/body-->

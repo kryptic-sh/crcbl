@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Drives the built demo site in a real headless Chromium and asserts that
-// breakout *renders*.
+// the demo under test *renders*.
 //
 //   node web/tools/browser-e2e.mjs [--site target/site] [--demo demos/breakout/]
 //
@@ -87,6 +87,50 @@ for (let i = 2; i < process.argv.length; i += 1) {
 
 const SITE = resolve(REPO, args.site ?? process.env.SITE_DIR ?? 'target/site');
 const DEMO = args.demo ?? 'demos/breakout/';
+
+/** The demo's own name, for filenames and messages. */
+const SLUG = DEMO.replace(/^demos\//, '').replace(/\/$/, '');
+
+/**
+ * The two assertions that are about the *game* rather than about the browser.
+ *
+ * Everything else this file checks — a device opened, a canvas that is neither
+ * blank nor still, no page errors — is true of any demo. These two are not:
+ * "the run started" and "it is advancing on its own" have to be read out of
+ * whatever HUD line the game happens to log. Keeping them in one table is what
+ * lets the same gate cover a second game; before flappy they were breakout's
+ * strings inline, which is the shape that only ever works once.
+ */
+const EXPECTATIONS = {
+  breakout: {
+    key: 'Space',
+    waiting: (line) => line.includes('WAITING'),
+    started: (line) => line.includes('PLAYING'),
+    startedLabel: 'Space launches the ball',
+    startedFailure: 'the state never left WAITING',
+    moving: /Ball x: (-?[\d.]+)/,
+    movingLabel: 'the ball moves after the launch',
+  },
+  flappy: {
+    key: 'Space',
+    waiting: (line) => line.includes('WaitingToStart'),
+    started: (line) => line.includes('Playing'),
+    startedLabel: 'Space starts the run',
+    startedFailure: 'the state never left WaitingToStart',
+    moving: /\bx: (-?[\d.]+)/,
+    movingLabel: 'the bird advances after the flap',
+  },
+};
+
+const EXPECTED = EXPECTATIONS[SLUG];
+if (!EXPECTED) {
+  console.error(
+    `browser-e2e: no expectations for demo "${SLUG}". Add it to EXPECTATIONS ` +
+      `in this file — a gate that does not know what the game logs would pass ` +
+      `on a game that never started.`
+  );
+  process.exit(2);
+}
 const OUT = resolve(REPO, args.out ?? 'target/web-e2e');
 const TIMEOUT_MS = Number(
   args.timeout ?? process.env.CRCBL_WEB_E2E_TIMEOUT_MS ?? 90_000
@@ -963,7 +1007,7 @@ try {
   check(
     'C',
     'the game reports its state before any input',
-    beforeLaunch > 0 && hud()[0].includes('WAITING'),
+    beforeLaunch > 0 && EXPECTED.waiting(hud()[0]),
     hud()[0]?.trim() ?? 'no HUD line'
   );
 
@@ -1031,13 +1075,13 @@ try {
   const launched = await until(async () =>
     hud()
       .slice(beforeLaunch)
-      .find((line) => line.includes('PLAYING'))
+      .find((line) => EXPECTED.started(line))
   );
   check(
     'C',
-    'Space launches the ball',
+    EXPECTED.startedLabel,
     Boolean(launched),
-    (launched ?? 'the state never left WAITING').trim()
+    (launched ?? EXPECTED.startedFailure).trim()
   );
 
   // The ball's x is in every HUD line, and two different values is the
@@ -1047,14 +1091,14 @@ try {
     const seen = new Set(
       hud()
         .slice(beforeLaunch)
-        .map((line) => line.match(/Ball x: (-?[\d.]+)/)?.[1])
+        .map((line) => line.match(EXPECTED.moving)?.[1])
         .filter(Boolean)
     );
     return seen.size > 1 ? seen : null;
   });
   check(
     'C',
-    'the ball moves after the launch',
+    EXPECTED.movingLabel,
     Boolean(positions),
     positions
       ? `x took ${positions.size} values: ${[...positions].join(', ')}`
@@ -1102,7 +1146,7 @@ try {
   const frames = new Set(samples.map((s) => s.hash));
   check(
     'D',
-    'the canvas changes between frames while the ball is in flight',
+    'the canvas changes between frames while the simulation runs',
     frames.size > 1,
     `${frames.size} distinct frame(s) across ${samples.length} samples`
   );
@@ -1114,14 +1158,14 @@ try {
     page,
     `document.getElementById('canvas').toDataURL().slice(22)`
   );
-  const shotPath = join(OUT, `breakout-${chosen.mode}.png`);
+  const shotPath = join(OUT, `${SLUG}-${chosen.mode}.png`);
   writeFileSync(shotPath, Buffer.from(png, 'base64'));
   writeFileSync(
-    join(OUT, `breakout-${chosen.mode}.log`),
+    join(OUT, `${SLUG}-${chosen.mode}.log`),
     consoleLines.join('\n')
   );
   console.log(`\nweb e2e: canvas  ${shotPath}`);
-  console.log(`web e2e: page log ${join(OUT, `breakout-${chosen.mode}.log`)}`);
+  console.log(`web e2e: page log ${join(OUT, `${SLUG}-${chosen.mode}.log`)}`);
 
   page.close();
   exitCode = 0;

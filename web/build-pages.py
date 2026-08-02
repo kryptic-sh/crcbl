@@ -42,6 +42,7 @@ SITE_URL = "https://crcbl.kryptic.sh"
 DEMOS: list[tuple[str, str, str]] = [
     ("", "demos", "/"),
     ("breakout", "breakout", "/demos/breakout/"),
+    ("flappy", "flappy", "/demos/flappy/"),
 ]
 
 META_RE = re.compile(r"<!--meta\s*(.*?)\s*meta-->", re.S)

@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Load the built demo site in a real browser and check that breakout renders.
+# Load the built demo site in a real browser and check that a demo renders.
+#
+# CRCBL_WEB_E2E_DEMO picks which one; `breakout` by default. One demo per run —
+# the driver launches a browser and reads one canvas — so CI runs this script
+# once per demo and a failure names the game.
 #
 #   ./web/run-browser-e2e.sh [--build] [--headless] [--hardware] [driver args…]
 #
@@ -140,8 +144,12 @@ if [ "$BUILD" = "1" ] || [ ! -d "$SITE" ]; then
     SITE_DIR="$SITE" "$REPO/web/build.sh"
 fi
 
-if [ ! -f "$SITE/demos/breakout/index.html" ]; then
-    echo "crcbl web e2e: $SITE has no breakout demo; run ./web/build.sh" >&2
+# Which demo this run drives. One at a time, because the driver launches its own
+# browser and reads one canvas; the loop over every demo is the caller's, and CI
+# runs the script once per demo so a failure names the game.
+DEMO="${CRCBL_WEB_E2E_DEMO:-breakout}"
+if [ ! -f "$SITE/demos/$DEMO/index.html" ]; then
+    echo "crcbl web e2e: $SITE has no $DEMO demo; run ./web/build.sh" >&2
     exit 1
 fi
 
@@ -229,7 +237,7 @@ else
 fi
 
 set +e
-node "$REPO/web/tools/browser-e2e.mjs" --site "$SITE" "$@" 2>&1 | tee "$OUTPUT"
+node "$REPO/web/tools/browser-e2e.mjs" --site "$SITE" --demo "demos/$DEMO/" "$@" 2>&1 | tee "$OUTPUT"
 STATUS=${PIPESTATUS[0]}
 set -e
 
@@ -263,4 +271,4 @@ if [ -z "$CONFIG" ]; then
     exit 1
 fi
 echo "crcbl web e2e: $RAN checks ran in a real browser, ${CONFIG#running against the }"
-echo "crcbl web e2e: breakout booted, opened a WebGPU device, took a real key event, and drew moving frames"
+echo "crcbl web e2e: $DEMO booted, opened a WebGPU device, took a real key event, and drew moving frames"
