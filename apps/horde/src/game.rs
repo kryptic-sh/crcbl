@@ -939,6 +939,16 @@ struct GameLogic {
     /// Scratch space for the per-tick passes, kept here for the same reason.
     scratch_entities: Vec<Entity>,
 
+    /// Cues raised this tick, as `(sound id, where it happened)`.
+    ///
+    /// **Filled inside the tick and drained outside it**, by [`Game::tick`],
+    /// which is what keeps an audio device out of a module that has to stay a
+    /// pure function of its inputs. Nothing in the simulation ever reads this
+    /// back, so a build with no sound is the same game as one with sound —
+    /// which asteroids cannot say, because its thrust pulse is on a timer the
+    /// tick owns. See `crate::audio`'s header.
+    cues: Vec<(u32, DVec3)>,
+
     /// Ticks the module has actually run. The facade asserts this advances by
     /// exactly one per [`Game::tick`].
     ticks: u64,
@@ -1258,6 +1268,10 @@ fn fire(logic: &mut GameLogic, world: &mut World, dt: f64) {
         velocity,
     });
     logic.bolts_fired += 1;
+    // At the muzzle rather than at the player's centre: the two are half a unit
+    // apart and inaudible, and the point is that a cue is raised where the
+    // *event* is — a bolt appearing.
+    logic.cues.push((crate::audio::SOUND_SHOT, position));
 }
 
 /// Applies one tick of contact damage, and kills the player if it runs them out.
@@ -1306,6 +1320,9 @@ fn contact_damage(logic: &mut GameLogic, world: &mut World, dt: f64) {
     if logic.player_hp <= 0.0 {
         logic.player_hp = 0.0;
         logic.state = GameState::Dead;
+        logic
+            .cues
+            .push((crate::audio::SOUND_DEATH, logic.player_pos));
         log::info!(
             "died after {:.1}s with {} kills, {} enemies on the field",
             logic.elapsed,
@@ -1419,6 +1436,7 @@ fn damage_enemy(logic: &mut GameLogic, world: &mut World, index: usize, amount: 
     with_physics(world, |phys| phys.remove_entity(dead.entity));
     world.despawn(dead.entity);
     logic.kills += 1;
+    logic.cues.push((crate::audio::SOUND_KILL, dead.position));
     drop_pickup(logic, world, dead.position, dead.kind.xp());
 }
 
@@ -1497,6 +1515,7 @@ fn collect_pickups(logic: &mut GameLogic, world: &mut World) {
         with_physics(world, |phys| phys.remove_entity(gem.entity));
         world.despawn(gem.entity);
         logic.xp += gem.xp;
+        logic.cues.push((crate::audio::SOUND_PICKUP, gem.position));
     }
     logic.scratch_entities = taken;
 }
@@ -1510,6 +1529,12 @@ fn maybe_level_up(logic: &mut GameLogic, world: &mut World) {
     logic.level += 1;
     logic.offer = Some(upgrade_offer(logic.run(), logic.level));
     logic.state = GameState::LevelUp;
+    // On the player, not out in the field: this is the one cue in the game that
+    // is about the *run* rather than about something that happened somewhere,
+    // so it is heard dead centre at full volume.
+    logic
+        .cues
+        .push((crate::audio::SOUND_LEVEL, logic.player_pos));
     freeze_field(logic, world);
     log::info!(
         "level {} at {:.1}s, offering {:?}",
@@ -1932,6 +1957,10 @@ pub struct RenderState {
     /// The three upgrades on the level-up screen, or `None` when it is not up.
     pub offer: Option<[Upgrade; UPGRADE_CHOICES]>,
     pub state: Option<GameState>,
+    /// The longest run this player has survived, in whole seconds.
+    ///
+    /// **The facade's, not the simulation's** — see [`Game::render_state`].
+    pub best: u32,
 }
 
 /// How a [`Game`] is built.
@@ -1972,6 +2001,12 @@ pub struct Game {
     ticks_run: u64,
     /// Queued key events from the shell pump, replayed after `begin_tick`.
     pending_keys: Vec<(KeyCode, bool)>,
+    /// The output stream and the five cues. On the facade rather than in the
+    /// simulation: the module runs inside the server's tick and must stay a pure
+    /// function of its inputs, and an audio device is neither.
+    pub audio: crate::audio::Audio,
+    /// The longest run, and where it is kept.
+    pub best: crate::best::Best,
     /// Mirrors of the shared state, refreshed after each tick so the render and
     /// HUD paths never take the lock.
     pub state: GameState,
@@ -1980,7 +2015,16 @@ pub struct Game {
     pub elapsed: f64,
     pub kills: u64,
     pub level: u32,
+    /// Which run is in play, counted from 1. Mirrors `GameLogic::runs + 1`.
+    pub run: u32,
     prev_log_state: GameState,
+    /// `elapsed` at the end of the previous tick.
+    ///
+    /// The only way the facade can see a **restart**: `run_tick` resets
+    /// `elapsed` to zero, so a clock that went backwards is a run that ended
+    /// without a death screen — and a four-minute run abandoned by pressing R
+    /// is still the record. See [`Game::tick`].
+    prev_elapsed: f64,
 }
 
 impl std::fmt::Debug for Game {
@@ -2102,6 +2146,7 @@ impl Game {
             bolt_views: Vec::new(),
             pickup_views: Vec::new(),
             scratch_entities: Vec::new(),
+            cues: Vec::new(),
             ticks: 0,
         }));
 
@@ -2152,13 +2197,17 @@ impl Game {
             sim_time: Duration::ZERO,
             ticks_run: 0,
             pending_keys: Vec::new(),
+            audio: crate::audio::Audio::new(setup.headless),
+            best: crate::best::Best::load(setup.headless),
             state: GameState::Playing,
             player: DVec3::ZERO,
             player_hp: PLAYER_MAX_HP,
             elapsed: 0.0,
             kills: 0,
             level: 1,
+            run: 1,
             prev_log_state: GameState::Playing,
+            prev_elapsed: 0.0,
         };
         log::info!(
             "sim: {} Hz, {:.3} ms per tick, up to {} enemies",
@@ -2240,6 +2289,21 @@ impl Game {
         let _alpha = self.client.update(self.sim_time);
         self.ticks_run += 1;
 
+        // Drained under the same lock the tick filled it under, and *before* the
+        // mirrors are read, so a frame that ran two ticks plays both of their
+        // cues rather than only the last one's. The listener is the player,
+        // which is the position read back below; taken here so a cue raised on
+        // this tick is heard from where the player is on this tick.
+        let (cues, listener) = {
+            let mut logic = lock(&self.shared);
+            let listener = logic.player_pos;
+            (logic.cues.drain(..).collect::<Vec<_>>(), listener)
+        };
+        for (id, at) in cues {
+            self.audio.play_at(id, listener, at);
+        }
+
+        let was = self.state;
         let ticks_after = {
             let logic = lock(&self.shared);
             self.state = logic.state;
@@ -2248,6 +2312,7 @@ impl Game {
             self.elapsed = logic.elapsed;
             self.kills = logic.kills;
             self.level = logic.level;
+            self.run = logic.runs.saturating_add(1);
             logic.ticks
         };
         debug_assert_eq!(
@@ -2256,17 +2321,41 @@ impl Game {
             "game logic must run exactly once per physics tick",
         );
 
+        // **Two edges bank a record, and the second is this game's own.** Death
+        // is the obvious one, on the edge rather than every tick, because the
+        // clock is frozen by then and an `update` per tick would write the file
+        // sixty times a second for as long as the panel is up. The other is a
+        // **restart**: `run_tick` puts `elapsed` back to zero, so a clock that
+        // went backwards means a run ended without a death screen, and the run
+        // it ended is worth exactly what it lasted. Without this, a player who
+        // pressed R at four minutes would have that run count for nothing.
+        let died = self.state == GameState::Dead && was != GameState::Dead;
+        let restarted = self.elapsed < self.prev_elapsed;
+        if died {
+            self.best.update(self.elapsed);
+        } else if restarted {
+            self.best.update(self.prev_elapsed);
+        }
+        self.prev_elapsed = self.elapsed;
+
         let state_changed = self.state != self.prev_log_state;
         self.prev_log_state = self.state;
         // **Every sixty ticks, which is a second of simulated time, and the same
         // cadence breakout, flappy and asteroids use.** `web/tools/browser-e2e.mjs`
         // watches for this heartbeat to tell a paused demo from a running one.
+        //
+        // `run` is in the line for that gate as well as for a bug report: this
+        // game has no waiting state, so "the input reached the simulation" is
+        // not "the state left `WaitingToStart`" here — it is the run counter
+        // moving, which only a real restart edge can do.
         if state_changed || self.ticks_run.is_multiple_of(60) {
             log::info!(
-                "[HUD] {:?}  time: {:.1}  kills: {}  hp: {:.0}  lvl: {}  \
+                "[HUD] {:?}  run: {}  time: {:.1}  best: {}  kills: {}  hp: {:.0}  lvl: {}  \
                  enemies: {}  bolts: {}  gems: {}",
                 self.state,
+                self.run,
                 self.elapsed,
+                self.best.get(),
                 self.kills,
                 self.player_hp,
                 self.level,
@@ -2298,6 +2387,11 @@ impl Game {
         out.level = logic.level;
         out.offer = logic.offer;
         out.state = Some(logic.state);
+        drop(logic);
+        // Outside the lock: the record is the facade's, not the simulation's —
+        // a replay of the same script must not depend on how long some earlier
+        // session happened to survive.
+        out.best = self.best.get();
     }
 
     /// The run in play, for a caller that wants to name it — a bug report, a
@@ -2409,6 +2503,81 @@ impl Game {
     #[must_use]
     pub fn collider_count(&mut self) -> usize {
         with_physics(self.server.world_mut(), |phys| phys.collider_count()).unwrap_or(0)
+    }
+
+    /// Fills the arena with `count` enemies before the first tick.
+    ///
+    /// **The scale sub-slice's fixture, and the only reason it is not
+    /// `#[cfg(test)]`.** The spawner ramps from one enemy every half second to
+    /// one every sixteenth (see [`spawn_interval`]), so a field of ten thousand
+    /// is somewhere over ten minutes of play that nothing survives — there is no
+    /// way to *measure* the plan's target by playing to it. `--prefill` puts the
+    /// field there on frame zero instead, and the numbers in
+    /// `docs/plan/sample/03-horde.md` are all taken through it.
+    ///
+    /// The layout is a grid over the **whole arena**, sized so `count` fits:
+    /// staging them at the 1.25 units separation settles at would need 125 × 125
+    /// units for ten thousand and the arena is 96 × 72, so a fixture written
+    /// that way would pile most of the field onto the walls under
+    /// [`clamp_to_arena`] and measure a crowd nothing produces. Spreading them
+    /// evenly is what ten thousand in this arena actually looks like: about 0.83
+    /// units apart, which is denser than separation wants and is the point.
+    ///
+    /// The kinds follow the same [`spawn_kind`] table the spawner draws from, so
+    /// the mix is the game's rather than a field of grunts, and the counter is
+    /// the run's own — a prefilled run and a played one never draw the same
+    /// number twice.
+    ///
+    /// Refuses to go past `max_enemies`, and reports how many it actually
+    /// staged.
+    pub fn stage_field(&mut self, count: usize) -> usize {
+        let mut logic = lock(&self.shared);
+        let world = self.server.world_mut();
+        let room = logic.max_enemies.saturating_sub(logic.enemies.len());
+        let wanted = count.min(room);
+        if wanted == 0 {
+            return 0;
+        }
+
+        // A grid with the arena's own aspect, so the spacing is the same on both
+        // axes and the crowd is isotropic. `+ 1` on the divisor keeps every
+        // enemy strictly inside the walls rather than on them.
+        let aspect = ARENA_HALF_WIDTH / ARENA_HALF_HEIGHT;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let cols = ((wanted as f64 * aspect).sqrt().ceil() as usize).max(1);
+        let rows = wanted.div_ceil(cols).max(1);
+        let step_x = (2.0 * ARENA_HALF_WIDTH) / (cols + 1) as f64;
+        let step_y = (2.0 * ARENA_HALF_HEIGHT) / (rows + 1) as f64;
+
+        for index in 0..wanted {
+            let (col, row) = (index % cols, index / cols);
+            let position = DVec3::new(
+                -ARENA_HALF_WIDTH + step_x * (col + 1) as f64,
+                -ARENA_HALF_HEIGHT + step_y * (row + 1) as f64,
+                0.0,
+            );
+            let counter = logic.spawn_counter;
+            logic.spawn_counter += 1;
+            let seed = logic.run();
+            spawn_enemy(
+                &mut logic,
+                world,
+                spawn_kind(seed, counter),
+                position,
+                spawn_jitter(seed, counter),
+            );
+        }
+        // The views are what the renderer reads and they were built when the
+        // field was empty; without this the first frame draws nothing and the
+        // measurement's first frame is the wrong one.
+        refresh_views(&mut logic, world);
+        log::info!(
+            "prefill: staged {wanted} enemies on a {cols}x{rows} grid, \
+             {:.2} x {:.2} units apart",
+            step_x,
+            step_y,
+        );
+        wanted
     }
 
     /// Puts the player somewhere specific, for a test that needs a known board.
@@ -4667,5 +4836,297 @@ mod tests {
         harness.run_ticks(harness.ticks + 1, &[]);
         assert_eq!(harness.game.state, GameState::LevelUp, "it closed anyway");
         assert_eq!(harness.game.stats(), before, "something was applied");
+    }
+
+    // -----------------------------------------------------------------------
+    // Audio
+    // -----------------------------------------------------------------------
+
+    /// **All five cues fire, and each one is heard where its event happened.**
+    ///
+    /// Counted with [`crate::audio::Audio::plays`] rather than `voices()`: a
+    /// voice is reaped by the audio thread on a clock nothing here controls, and
+    /// this game's cap refuses a voice outright on a busy frame — so a test
+    /// written against the live voice count would be a race *and* would report a
+    /// cue that happened as one that did not. That is flappy's trap, and it is
+    /// worse here.
+    #[test]
+    fn every_cue_fires_and_carries_the_position_of_what_raised_it() {
+        use crate::audio::{SOUND_DEATH, SOUND_KILL, SOUND_LEVEL, SOUND_PICKUP, SOUND_SHOT};
+
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        let plays = |h: &Harness, id| h.game.audio.plays(id);
+        for id in [
+            SOUND_SHOT,
+            SOUND_KILL,
+            SOUND_PICKUP,
+            SOUND_LEVEL,
+            SOUND_DEATH,
+        ] {
+            assert_eq!(plays(&harness, id), 0, "cue {id} fired before anything did");
+        }
+
+        // A grunt in range: the gun fires at it, and it dies.
+        let at = DVec3::new(4.0, 0.0, 0.0);
+        harness.game.stage_enemy(EnemyKind::Grunt, at);
+        harness.run_ticks(harness.ticks + 90, &[]);
+        assert!(plays(&harness, SOUND_SHOT) > 0, "the gun was silent");
+        assert_eq!(plays(&harness, SOUND_KILL), 1, "the kill was silent");
+        assert_eq!(plays(&harness, SOUND_PICKUP), 0, "the gem banked itself");
+
+        // …and the gem it left, walked onto.
+        harness.run_ticks(harness.ticks + 120, &[(harness.ticks, KeyCode::KeyD, true)]);
+        assert_eq!(plays(&harness, SOUND_PICKUP), 1, "the gem was silent");
+
+        // A level, which is the one cue that is about the run rather than about
+        // a place.
+        harness.game.key_event(KeyCode::KeyD, false);
+        harness.game.bank_xp(xp_for_next_level(harness.game.level));
+        harness.run_ticks(harness.ticks + 2, &[]);
+        assert_eq!(harness.game.state, GameState::LevelUp);
+        assert_eq!(plays(&harness, SOUND_LEVEL), 1, "the level was silent");
+
+        // And the end of the run. The player walked east to reach the gem, so
+        // the brute goes where the player *is* — a fixture that staged it at the
+        // origin would touch nothing and this would report a silent death that
+        // never happened.
+        harness.tap(KeyCode::Digit1);
+        harness.game.set_player_hp(0.000_1);
+        let player = harness.game.player;
+        harness.game.stage_enemy(EnemyKind::Brute, player);
+        harness.run_ticks(harness.ticks + 8, &[]);
+        assert_eq!(harness.game.state, GameState::Dead);
+        assert_eq!(plays(&harness, SOUND_DEATH), 1, "the death was silent");
+
+        // **Where**, not just whether. Every cue carries a world position, and
+        // a `play_at` handed a constant would satisfy every count above.
+        let played = harness.game.audio.played().to_vec();
+        let position_of = |want: u32| {
+            played
+                .iter()
+                .find(|(id, _, _)| *id == want)
+                .map(|(_, x, y)| DVec3::new(*x, *y, 0.0))
+                .unwrap_or_else(|| panic!("cue {want} was counted, so it was played"))
+        };
+
+        // The shot leaves the **muzzle**, not the player's centre: the grunt is
+        // due east, so the first bolt is exactly `MUZZLE_OFFSET` along +X.
+        let shot = position_of(SOUND_SHOT);
+        assert!(
+            (shot - DVec3::new(MUZZLE_OFFSET, 0.0, 0.0)).length() < 1e-9,
+            "the shot was heard at {shot:?}, not at the muzzle",
+        );
+        let killed_at = position_of(SOUND_KILL);
+        assert!(
+            (killed_at - at).length() < 2.0,
+            "the kill was heard at {killed_at:?}, not near the grunt at {at:?}",
+        );
+        // The level is heard on the player, who by now has walked east to the
+        // gem — so it is nowhere near either of the two above.
+        let level = position_of(SOUND_LEVEL);
+        assert!(
+            level.x > 3.0 && (level - killed_at).length() > 1.0,
+            "the level was heard at {level:?}, not on the player",
+        );
+        let distinct: std::collections::HashSet<(u64, u64)> = played
+            .iter()
+            .map(|(_, x, y)| (x.to_bits(), y.to_bits()))
+            .collect();
+        assert!(
+            distinct.len() >= 3,
+            "every cue was heard in the same place: {distinct:?}",
+        );
+    }
+
+    /// The cue queue is drained every tick, so it cannot grow without bound and
+    /// a tick's cues never leak into the next one's.
+    ///
+    /// The failure this guards is the one a queue filled inside the tick and
+    /// read outside it invites: a drain that missed a path — a frame that ran
+    /// two ticks, a level-up's early return — leaves cues sitting in simulation
+    /// state, which at this game's kill rate is an unbounded `Vec` on the hot
+    /// path.
+    #[test]
+    fn the_cue_queue_never_survives_the_tick_that_filled_it() {
+        let mut harness = Harness::new(60, 60);
+        harness.play_ticks(1_200);
+        assert!(harness.game.kills > 0, "the soak killed nothing");
+        assert_eq!(
+            lock(&harness.game.shared).cues.len(),
+            0,
+            "cues were left in the simulation",
+        );
+        // A frame that runs several ticks at once must drain all of them, not
+        // the last one's: a frame clock at 10 Hz over a 60 Hz tick runs six.
+        let mut slow = Harness::new(10, 60);
+        slow.play_ticks(600);
+        assert_eq!(lock(&slow.game.shared).cues.len(), 0);
+        assert!(
+            slow.game.audio.plays(crate::audio::SOUND_SHOT) > 0,
+            "a six-tick frame played none of its cues",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The record
+    // -----------------------------------------------------------------------
+
+    /// **Both edges bank a record**: dying, and pressing restart on a live run.
+    ///
+    /// The second is this game's own and the one a copy of asteroids' would
+    /// miss — asteroids' game is over when the ship runs out and the score is
+    /// frozen, while a horde run can be abandoned at any moment and is still
+    /// worth what it lasted.
+    ///
+    /// The file itself is asserted in `crate::best`'s own suite; this is the
+    /// wiring.
+    #[test]
+    fn the_longest_run_is_banked_by_a_death_and_by_a_restart() {
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        assert_eq!(harness.game.best.get(), 0);
+
+        // Three seconds of survival, then a restart. The record is the run that
+        // ended, not the one that started.
+        //
+        // `elapsed as u32` rather than a literal 3: `elapsed` is 180 additions
+        // of 1/60 and lands a few ulps under three, which the record truncates
+        // to 2 — and the HUD's clock truncates the same way, so the two agree
+        // and a literal here would be asserting arithmetic rather than
+        // behaviour.
+        harness.run_ticks(harness.ticks + 180, &[]);
+        let abandoned = harness.game.elapsed;
+        assert!(abandoned > 2.9, "the run was only {abandoned}s long");
+        harness.tap(KeyCode::KeyR);
+        // One tick's worth, not zero: `restart` runs at the top of the tick and
+        // the same tick then counts itself.
+        assert!(
+            harness.game.elapsed < 0.02,
+            "the restart did not reset the clock: {}",
+            harness.game.elapsed,
+        );
+        assert_eq!(
+            harness.game.best.get(),
+            abandoned as u32,
+            "the abandoned run was worth nothing",
+        );
+
+        // A shorter run that ends in a death does not beat it…
+        harness.game.freeze_spawns();
+        harness.game.clear_enemies();
+        harness.run_ticks(harness.ticks + 60, &[]);
+        harness.game.set_player_hp(0.000_1);
+        harness
+            .game
+            .stage_enemy(EnemyKind::Brute, harness.game.player);
+        harness.run_ticks(harness.ticks + 8, &[]);
+        assert_eq!(harness.game.state, GameState::Dead);
+        assert!(
+            harness.game.elapsed < abandoned,
+            "the short run was not short"
+        );
+        assert_eq!(
+            harness.game.best.get(),
+            abandoned as u32,
+            "a shorter run took the record",
+        );
+
+        // …and a longer one does.
+        harness.tap(KeyCode::KeyR);
+        harness.game.freeze_spawns();
+        harness.game.clear_enemies();
+        harness.run_ticks(harness.ticks + 300, &[]);
+        let survived = harness.game.elapsed;
+        harness.game.set_player_hp(0.000_1);
+        harness
+            .game
+            .stage_enemy(EnemyKind::Brute, harness.game.player);
+        harness.run_ticks(harness.ticks + 8, &[]);
+        assert_eq!(harness.game.state, GameState::Dead);
+        assert!(survived > abandoned, "the long run was not longer");
+        assert_eq!(
+            harness.game.best.get(),
+            harness.game.elapsed as u32,
+            "the longest run did not take the record",
+        );
+    }
+
+    /// The record reaches the renderer, and it is the **facade's** number: a
+    /// replay of the same script must not depend on what an earlier session
+    /// survived, so it is read outside the simulation's lock.
+    #[test]
+    fn the_record_reaches_the_render_state_without_entering_the_simulation() {
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        let mut render = RenderState::default();
+        harness.game.render_state(&mut render);
+        assert_eq!(render.best, 0);
+
+        harness.game.best.update(212.0);
+        harness.game.render_state(&mut render);
+        assert_eq!(render.best, 212);
+
+        // Nothing the simulation hashes changed: the same seed and script still
+        // produce the same field.
+        let mut fresh = Harness::staged(60, 60, DVec3::ZERO);
+        fresh.run_ticks(120, &[]);
+        harness.run_ticks(120, &[]);
+        assert_eq!(harness.game.enemy_positions(), fresh.game.enemy_positions());
+    }
+
+    // -----------------------------------------------------------------------
+    // The scale fixture
+    // -----------------------------------------------------------------------
+
+    /// **A prefilled field is the size it was asked for, inside the arena, and
+    /// made of the game's own mix of kinds.**
+    ///
+    /// The fixture every number in `docs/plan/sample/03-horde.md` is taken
+    /// through, so a fixture that quietly staged a tenth of what it was asked
+    /// for — or piled the whole field onto one wall, which is what a 1.25-unit
+    /// grid does at ten thousand — would make every one of those numbers a
+    /// measurement of something else.
+    #[test]
+    fn a_prefilled_field_is_the_size_and_shape_it_was_asked_for() {
+        let mut game = Game::with_setup(&Setup {
+            headless: true,
+            max_enemies: 10_000,
+            ..Setup::default()
+        })
+        .expect("a headless game always starts");
+        assert_eq!(game.stage_field(10_000), 10_000);
+        assert_eq!(game.enemy_count(), 10_000);
+
+        let positions = game.enemy_positions();
+        for position in &positions {
+            assert!(
+                position.x.abs() <= ARENA_HALF_WIDTH && position.y.abs() <= ARENA_HALF_HEIGHT,
+                "{position:?} is outside the arena",
+            );
+        }
+        // Spread, not stacked: a fixture that put them all in one place would
+        // pass every count above and measure a crowd that does not exist.
+        let distinct: std::collections::HashSet<(i64, i64)> = positions
+            .iter()
+            .map(|p| ((p.x * 100.0) as i64, (p.y * 100.0) as i64))
+            .collect();
+        assert_eq!(
+            distinct.len(),
+            10_000,
+            "the grid put two enemies in one spot"
+        );
+
+        // …and the view holds a real crowd rather than the whole field, which is
+        // the number the render measurement turns on.
+        let mut render = RenderState::default();
+        game.render_state(&mut render);
+        assert_eq!(render.enemies.len(), 10_000);
+
+        // Every kind, from the spawner's own table.
+        let mut kinds: Vec<EnemyKind> = render.enemies.iter().map(|e| e.kind).collect();
+        kinds.sort_unstable_by_key(|k| format!("{k:?}"));
+        kinds.dedup();
+        assert_eq!(kinds.len(), 3, "the prefill deals one kind: {kinds:?}");
+
+        // The cap is honoured rather than ignored.
+        assert_eq!(game.stage_field(500), 0, "the prefill went past the cap");
     }
 }

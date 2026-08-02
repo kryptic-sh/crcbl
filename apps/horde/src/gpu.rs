@@ -32,7 +32,7 @@
 //! UI.
 
 use crcbl::backend::GpuBackend;
-use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError};
+use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError, PendingGpuContext};
 use crcbl::hal::{CommandEncoderDesc, Features};
 use crcbl::math::Vec3;
 use crcbl::prelude::*;
@@ -46,7 +46,7 @@ use crcbl::ui::menu::{Menu, MenuLayout};
 use crcbl::ui::text::FontAtlas;
 use glam::DVec3;
 
-use crate::art::{GROUND, Scene, TEXELS_PER_UNIT};
+use crate::art::{GROUND, Scene, SceneStats, TEXELS_PER_UNIT};
 use crate::game::{ARENA_HALF_HEIGHT, ARENA_HALF_WIDTH, RenderState, VIEW_HALF_HEIGHT, clamp_axis};
 
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
@@ -148,9 +148,33 @@ fn desc(backend: Option<GpuBackend>) -> GpuContextDesc<'static> {
     }
 }
 
+/// A [`Gpu`] being opened one poll at a time — the browser's half of
+/// [`Gpu::open`].
+#[derive(Debug)]
+pub struct PendingGpu {
+    pending: PendingGpuContext,
+}
+
+impl PendingGpu {
+    /// Advances the open. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the device request failed or a renderer refused the
+    /// device it produced.
+    pub fn poll(&mut self) -> Result<Option<Gpu>, GpuError> {
+        match self.pending.poll()? {
+            Some(ctx) => Gpu::from_context(ctx).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
 impl Gpu {
     /// Opens a backend, a surface, a device and a swapchain, and builds the
     /// sprite, menu and UI renderers.
+    ///
+    /// **Blocks**, so this is the native path only.
     ///
     /// # Errors
     ///
@@ -162,6 +186,23 @@ impl Gpu {
         backend: Option<GpuBackend>,
     ) -> Result<Self, GpuError> {
         Self::from_context(GpuContext::open(shell, window, extent, &desc(backend))?)
+    }
+
+    /// Starts opening the same thing without blocking.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the registry has no such backend or the window went away
+    /// before its surface could be described.
+    pub fn request_open<S: Shell + ?Sized>(
+        shell: &S,
+        window: WindowId,
+        extent: (u32, u32),
+        backend: Option<GpuBackend>,
+    ) -> Result<PendingGpu, GpuError> {
+        Ok(PendingGpu {
+            pending: GpuContext::request_open(shell, window, extent, &desc(backend))?,
+        })
     }
 
     /// Builds this game's renderers on an already-open context, and uploads the
@@ -272,6 +313,17 @@ impl Gpu {
     #[must_use]
     pub fn timings(&self) -> Option<&crcbl::render::FrameTimings> {
         self.timers.as_ref().map(PassTimers::latest)
+    }
+
+    /// What the last [`Gpu::frame`] handed the sprite pass. See [`SceneStats`].
+    ///
+    /// The frame *before* the one being built, when the debug overlay reads it:
+    /// the panel is gathered before `frame()` runs. One frame of lag on a
+    /// counter nobody steers by, and the alternative is building the scene
+    /// twice.
+    #[must_use]
+    pub const fn scene_stats(&self) -> SceneStats {
+        self.scene.stats()
     }
 
     /// The glyph atlas the UI pass renders text from.

@@ -53,7 +53,8 @@ a game costume — keep the costume thin.
    from file).
 2. Combat loop complete (damage, XP, level-up UI) — after stage 7.
 3. Scale push: raise counts until a budget breaks; file engine findings; record
-   the numbers in this doc.
+   the numbers in this doc. **Done — see "The scale push (milestone 3),
+   measured" below.** The budget that broke is the tick's, not the render's.
 
 ## Exit criteria
 
@@ -67,13 +68,14 @@ a game costume — keep the costume thin.
 
 ## Where this stands
 
-**Slices 18a and 18b have landed** (`apps/horde`). One arena, one player with
-WASD movement and a gun that aims itself, three enemy kinds with seek plus
+**Slices 18a, 18b and 18c have landed** (`apps/horde`). One arena, one player
+with WASD movement and a gun that aims itself, three enemy kinds with seek plus
 separation, contact damage, hit points, death and restart; `.crpix` art through
 `SpriteRenderer` with `SampleMode::Pixel`; XP gems that drop where an enemy died
 and a "pick 1 of 3" level-up from a fixed pool of six upgrades; pause, level-up
 and death menus over the shared `crcbl_render::menu` art, with the debug panel
-on. 90 tests.
+on; five spatial cues, the longest run kept between sessions, and the browser
+demo at `https://crcbl.kryptic.sh/demos/horde/`. 117 tests.
 
 **The art is two sheets and that is the sample's own decision.** Everything
 numerous — the player, all three enemy kinds and the gems — is in one
@@ -86,7 +88,8 @@ the order the game holds it would be ten thousand. The shot is the only second
 sheet, because it is 8 texels and would otherwise be drawn in a quad twenty
 times its own area. The price is the transparent margin round the small kinds —
 a runner is 13 texels of art in a 34-texel quad — and it is bounded by the
-screen rather than by the horde. 18c measures both halves.
+screen rather than by the horde. **18c measured both halves and both hold**; see
+"The batching claim, measured" below.
 
 **The level-up freezes the field**, and the freeze is simulation state rather
 than a loop pause: the choice changes what the simulation does, so a seeded
@@ -97,24 +100,229 @@ up and no branch is added to the hot path. Bolts keep their velocity so it can
 be handed back; enemies do not need to, because `steer_enemies` writes them a
 fresh one on the first tick after.
 
-Still owed:
+## The scale push (milestone 3), measured
 
-- **18c — scale, measurement and the web demo.** The numbers below, done
-  properly, now including batch count and the fill cost of the shared frame; the
-  browser build and its Pages entry; the profiler capture the exit criteria ask
-  for.
+**This is the exit measurement.** Everything below was taken on the reference
+Linux machine with the release binary, and the conditions are stated per table
+because they are not the same conditions.
 
-## Early scale signal (provisional, not the exit measurement)
+### The machine, and what it could and could not be run on
 
-Taken during 18a because it was one command, **not** as the milestone-3 scale
-push, which is 18c's. Read it as a bound on the shape of the problem rather than
-as a result.
+| What    | Which                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CPU     | AMD Ryzen 9 9950X3D, 32 threads. **Single-threaded**: there is no `crcbl-jobs` (P8) and no parallel ECS schedule, so every number here is one core.                                                                                                                                                                                                                                                                                                            |
+| GPU     | AMD Radeon RX 7900 XTX, radv (Mesa 26.1.6). `lavapipe` is installed and was not used.                                                                                                                                                                                                                                                                                                                                                                          |
+| Build   | `cargo build --release -p horde`.                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Window  | **There is none.** The build environment has no `DISPLAY` and no `WAYLAND_DISPLAY`, so every run is `--headless`, which gives `crcbl-vk` an **offscreen image ring** at 960 × 720 rather than a swapchain on a surface. It is the same acquire → record → submit → present code path — `SurfaceTarget::Offscreen` exists so that it is — but it is **not** a windowed present and it is not vsynced. The windowed native path is still compiled and never run. |
+| Browser | A separate measurement was not taken. `web/run-browser-e2e.sh` runs the demo under Chromium's SwiftShader, which measures the software rasteriser rather than the browser. Tier B / wasm gets its own recorded budget when there is a machine with a real browser GPU to take it on; the exit criteria already treat that as a separate number.                                                                                                                |
+
+The fixture is **`--prefill N`**, which stages `N` enemies over the whole arena
+on a grid before the first frame. The spawner ramps from one enemy every half
+second to one every sixteenth, so reaching ten thousand by playing is over ten
+minutes that nothing survives; and staging them at the 1.25 units separation
+settles at — which is what the 18a fixture did — needs 125 × 125 units for ten
+thousand against an arena of 96 × 72, so most of that field lands on a wall
+under `clamp_to_arena`. Falsified, not argued: swapping the arena-fitted grid
+for a 1.25-unit one collapses 5 280 of the ten thousand onto shared positions,
+and `a_prefilled_field_is_the_size_and_shape_it_was_asked_for` goes red saying
+so. At ten thousand the fitted grid is **0.82 units apart**, which is what ten
+thousand in this arena actually looks like.
+
+### The render side: flat, and not close to a budget
+
+Conditions: release, headless, `--backend vk` on radv (RX 7900 XTX), 960 × 720
+offscreen ring, `--wall-clock --tick-hz 1 --frames 20000`. The tick rate is one
+hertz so that the run — which takes about two seconds of wall time — contains no
+more than two ticks and the frame being measured is the **render path alone**.
+
+- **CPU** is the debug overlay's own frame-timing module (`FrameStats`), the
+  mean over its rolling 120-frame window, driven by the real monotonic clock.
+  `--wall-clock` exists for this: a headless run's clock is a fake one stepping
+  exactly 1/60 s, so without it the panel reports 16.667 ms at every count and
+  measures nothing.
+- **GPU** is `PassTimers` — real timestamp queries on the same device. It is
+  **one resolved frame's** timestamps (`PassTimers::latest`), not an average,
+  taken from frame 19 997; three repeats of each row agreed to the microsecond.
+- The two columns are not addable. The GPU work overlaps the next frame's CPU.
+
+|  field | drawn | batches | CPU frame | `arena` GPU | `sprites` GPU | `ui-composite` GPU |
+| -----: | ----: | ------: | --------: | ----------: | ------------: | -----------------: |
+|      0 |     1 |       1 |  0.096 ms |    0.005 ms |      0.006 ms |           0.005 ms |
+|  1 000 |   182 |       2 |  0.096 ms |    0.005 ms |      0.009 ms |           0.006 ms |
+|  2 000 |   497 |       2 |  0.107 ms |    0.005 ms |      0.008 ms |           0.004 ms |
+|  5 000 |   852 |       2 |  0.099 ms |    0.005 ms |      0.011 ms |           0.005 ms |
+| 10 000 | 2 446 |       2 |  0.120 ms |    0.005 ms |      0.023 ms |           0.004 ms |
+
+`drawn` is what survived the CPU view cull and reached the pass — the arena is
+96 × 72 units against a view of about 37 × 28, so most of a large horde is off
+screen and the number on screen is bounded by the **screen** rather than by the
+field. `field`, `culled`, `drawn` and `batches` are a `scene` section this
+sample adds to the debug panel, so they are readable in the running game and not
+only from a test.
+
+**The exit criterion "CPU frame time demonstrably flat 1k → 10k on the render
+side" is met, and by a wide margin.** 0.096 ms at one thousand and 0.120 ms at
+ten thousand: the whole marginal cost of nine thousand more enemies is **24 µs a
+frame**, or 0.14 % of a 16.67 ms budget. The render path carries ten thousand at
+something like 8 300 frames a second and would carry ten times that before the
+frame budget noticed.
+
+The same series with `--backend vk` swapped for `--backend null` isolates the
+game's own CPU from the driver's: **0.005 ms at zero enemies and 0.033 ms at ten
+thousand**, so the game's share is 2.8 ns per field enemy — the `RenderState`
+copy, the cull's four comparisons and the instance build — and the other 0.09 ms
+is command recording, submit and present, which does not move with the field at
+all.
+
+### The batching claim, measured
+
+**It holds.** `batches` is 2 at every populated count in the table above and 1
+when no bolt happens to be in the air, and it does not move between one thousand
+and ten thousand. Pushed harder than the running game can:
+`ten_thousand_visible_enemies_are_still_two_batches` packs the whole ten
+thousand _inside_ the view so nothing is culled, interleaves the three kinds in
+the order `swap_remove` leaves behind, and asserts two batches over 10 009
+sprites. It goes red at three if the shots are moved onto the crowd's layer.
+
+**One caveat, and it is a real one.** The count is `art::batches`, this sample's
+**mirror** of `sprite_pass`'s rule (a batch is a run of consecutive sprites
+naming one sheet) rather than the pass's own answer: `SpriteRenderer` exposes no
+batch count, and `crates/` was out of this slice's write scope. So the number is
+right about the sprite list and would not notice the engine's batching rule
+changing underneath it.
+`a_batch_is_a_run_of_one_sheet_and_not_a_distinct_sheet_count` pins the mirror
+to `A A B A` = 3, which is the case a distinct-sheet count gets wrong and which
+this game's own frames cannot distinguish. Recorded in `docs/backlog.md`.
+
+### The fill margin: visible in a pass timing, and irrelevant to the budget
+
+**Visible.** The `sprites` pass goes 0.006 → 0.023 ms from an empty field to a
+full screen of the crowd, against a full-screen `arena` clear that is 0.005 ms
+flat. At 960 × 720 a world unit is 25.71 screen pixels, so the shared 34-texel
+quad is 43.7 pixels square, and the 2 445 actor quads at ten thousand are **4.67
+megapixels — 6.8 times the framebuffer** — of blended fill. The pass grows with
+it, which is the answer to "does the transparent margin show up in a GPU pass
+timing": yes. `SpriteRenderer` has no alpha discard, so a transparent fragment
+costs what an opaque one costs.
+
+**Irrelevant.** `two_thirds_of_the_shared_frame_is_transparent_margin` measures
+the opaque bounding box of each baked silhouette and weights them by the mix
+`EnemyKind::from_roll` actually deals (62 % grunt at 18 texels, 28 % runner at
+13, 10 % brute at 34): the average enemy fills **31.5 %** of its 34 × 34 quad,
+so 68.5 % of that fill is margin. Applied to the 17 µs the pass costs above an
+empty field, the whole price of the one-sheet decision at a full screen of the
+crowd is about **12 µs a frame — 0.07 % of the budget**. The alternative — a
+sheet per kind at each kind's own frame size — buys those 12 µs and costs a
+grouping pass over the crowd and an emission order to get wrong. It is not worth
+it at any count this sample can reach.
+
+### The simulation side: this is what breaks
+
+Conditions: release, headless, `--backend null` so nothing is drawn, fixed-step
+clock so exactly one tick runs per frame, single-threaded. Measured as a
+**marginal**: wall time for `--frames 180` minus wall time for `--frames 60`,
+over the 120 ticks between them, best of three each — so process start-up and
+the prefill's own cost cancel exactly rather than being estimated. The 120
+frames of render inside the window are about 4 ms of a 1 759 ms measurement at
+ten thousand, 0.2 %.
+
+| enemies | ms/tick, ticks 60–180 | µs/enemy | ms/tick, ticks 480–600 | µs/enemy |
+| ------: | --------------------: | -------: | ---------------------: | -------: |
+|     500 |                 0.241 |    0.481 |                  0.939 |    1.877 |
+|   1 000 |                 0.418 |    0.418 |                  2.158 |    2.158 |
+|   2 000 |                 1.190 |    0.595 |                  6.026 |    3.013 |
+|   5 000 |                 4.854 |    0.971 |                 26.289 |    5.258 |
+|  10 000 |                14.658 |    1.466 |                 84.087 |    8.409 |
+
+**The two columns are the finding.** They are the same field at the same count,
+one to three seconds in and eight to ten seconds in, and they differ by five to
+six times. The tick is `N` broadphase overlap queries for separation, and an
+overlap query's cost is the size of its **answer** — so the tick's cost is a
+function of local _density_, not of `N`. The horde converges on the player by
+construction; a crowd that has arrived is several times more expensive than the
+same crowd spread over the arena. Nothing before this measured a converged
+horde, and it is the state the game spends most of its time in.
+
+Against the 16.67 ms budget:
+
+- **Spread, the tick carries ten thousand — just.** 14.66 ms of 16.67, with two
+  milliseconds to spare and the render path costing a tenth of one.
+- **Converged, it breaks between two and five thousand.** 6.0 ms at two thousand
+  and 26.3 ms at five thousand, so the crossing is somewhere near three
+  thousand. Ten thousand converged is 84 ms — **five times over budget, a tick
+  rate of 12 Hz.**
+
+That supersedes 18a's provisional 8–9k, and it supersedes it in both directions:
+18a measured a field spread at 1.25 units regardless of count, which at ten
+thousand is a field larger than the arena and therefore a game that cannot
+exist, and it never let the crowd converge. The honest answer is a range, not a
+number: **this sample carries about 10 000 spread and about 3 000 converged**,
+and the plan's single figure was always going to be one or the other.
+
+### The exit criteria, answered
+
+- **"10 000 enemies at 60 fps render / 60 Hz tick."** Render: **yes**, with two
+  orders of magnitude to spare. Tick: **no** — spread it is 14.66 ms against a
+  16.67 ms budget and passes; converged it is 84 ms and fails by 5×. The
+  criterion as written does not say which, and the difference is a factor of
+  six, so it needs rewriting rather than answering.
+- **"CPU frame time demonstrably flat 1k → 10k on the render side."** **Yes**:
+  0.096 → 0.120 ms, and 0.005 → 0.033 ms with the driver taken out.
+- **"Playable and mildly fun for 5 minutes."** **No, and not close.** A default
+  run — no prefill, the spawner doing its own work — ends in a **death at about
+  24 seconds** with 30 kills and 46 things on the field. At `--prefill 5000` and
+  above the player dies in **under a second**: ten thousand enemies in a 96 × 72
+  arena is 0.82 units apart, which is several of them inside `PLAYER_RADIUS` on
+  frame zero, and contact damage is a rate summed over everything touching. The
+  plan's target count and the plan's "survive five minutes" cannot both be true
+  of this arena. That is a design finding rather than an engine one and it is in
+  `docs/backlog.md`.
+- **"Profiler capture archived in the doc."** The tables above are it: the CPU
+  numbers are the debug overlay's frame-timing module and the GPU numbers are
+  `PassTimers`, which are the two instruments the plan names. There is no
+  captured _image_ of the panel — there is no display to take one on.
+
+### What the numbers say P7 and P8 have to buy
+
+The roadmap put this sample **after** P7 (GPU-driven rendering) and P8
+(`crcbl-jobs` + a parallel ECS schedule) on the assumption that it needed both.
+It needed neither to be built, and the measurement says the two phases are worth
+very different amounts to it:
+
+- **P8 is the whole of it.** Every millisecond that matters is in the tick, and
+  the tick is `N` independent broadphase queries writing `N` velocities that
+  nothing else in the pass reads — order-independent by construction, which is
+  the easiest possible thing to parallelise. Sixteen cores on a converged ten
+  thousand would take 84 ms to something like 6 ms if it scaled, and it should:
+  there is no shared mutable state in the pass at all. Before that, two named
+  single-threaded wins sit in front of it and neither has been taken:
+  `PhysicsSystem::overlap_sphere` returns an owned `Vec` (two heap allocations
+  per enemy per tick, 1.2 million a second at ten thousand) and `PhysicsSystem`
+  has no `body_mut` (two hash operations to change one `DVec3`). Both are in
+  `docs/backlog.md`.
+- **P7 buys this sample almost nothing.** GPU culling replaces a CPU cull that
+  costs 28 µs at ten thousand; indirect draws replace two draw calls; instance
+  deltas replace an upload of 2 446 × 64 bytes. The whole render path is 0.12 ms
+  of a 16.67 ms frame, so the maximum P7 can return here is 0.7 % of the budget.
+  It is still worth building — for 3D, for the scenes that are not a flat plane
+  of 34-texel quads — but **this sample is not the argument for it**, and the
+  roadmap's ordering, which put horde behind it, was wrong about which phase
+  this sample was waiting on.
+
+## Early scale signal (superseded, kept for the record)
+
+Taken during 18a because it was one command. **Superseded by the tables above**,
+which use a fixture that fits inside the arena and which distinguish a spread
+crowd from a converged one; this is kept because it is what the sample was
+steered by for two sub-slices and because the difference between it and the real
+measurement is itself the finding.
 
 Conditions: `cargo test --release`, headless, **simulation only — nothing is
-rendered**, single-threaded (there is no `crcbl-jobs` and no parallel schedule),
-AMD Ryzen 9 9950X3D. `N` grunts staged on a 1.25-unit grid — which is the
-spacing separation itself settles at, so the neighbourhoods are the ones the
-real game produces rather than empty — then 60 ticks timed and averaged.
+rendered**, single-threaded, AMD Ryzen 9 9950X3D. `N` grunts staged on a
+1.25-unit grid — which is the spacing separation settles at, and which at ten
+thousand is a field of 125 × 125 units against an arena of 96 × 72, so the top
+row of this table describes a board the game cannot produce — then 60 ticks
+timed and averaged.
 
 | enemies | ms/tick | µs/enemy |
 | ------: | ------: | -------: |
@@ -124,25 +332,9 @@ real game produces rather than empty — then 60 ticks timed and averaged.
 |   5 000 |   3.848 |     0.77 |
 |  10 000 |  18.433 |     1.84 |
 
-What that says, and what it does not:
-
-- **Per-enemy cost is flat from 1k to 5k** (0.62 → 0.77 µs) and then **triples
-  by 10k**. The tick is `N` broadphase queries plus `N` `HashMap` writes, so a
-  flat region and then a cliff is the shape of a working set leaving cache, not
-  of an algorithmic change — but nothing here profiled it, so that is a
-  hypothesis and 18c's job to confirm.
-- **The 60 Hz tick budget is 16.67 ms**, so on this machine the simulation alone
-  carries somewhere around 8–9k before it misses, and 10k misses by about 10%.
-  That is the plan's target within striking distance **without P8** — which is a
-  better position than the roadmap assumed, and the reason 18c is worth doing
-  before `crcbl-jobs` rather than after.
-- **The render side is not in these numbers at all.** It is the instanced sprite
-  path now rather than the `DrawList` placeholder, and the draw cap the
-  placeholder needed is gone — what is left in front of it is a CPU view cull,
-  which is itself `N` comparisons a frame. Nothing has drawn more than a few
-  hundred enemies at once. The exit criteria's "60 fps render" is untouched by
-  any of this.
-- Two named, un-taken wins sit in front of the tick number, both recorded in
-  `docs/backlog.md`: `PhysicsSystem::overlap_sphere` returns an owned `Vec`, so
-  separation allocates `N` times a tick, and `PhysicsSystem` has no `body_mut`,
-  so writing a velocity is a full `HashMap` insert.
+What it got right: the shape — flat per-enemy cost through the middle of the
+range, and a tick that is `N` broadphase queries plus `N` `HashMap` writes. What
+it got wrong: it read the rise at ten thousand as a working set leaving cache,
+and the real cause is that its own grid got denser relative to the arena it was
+being clamped into. Density, not cache, is what the cost tracks — which the
+spread-versus-converged columns above show directly, at a fixed `N`.

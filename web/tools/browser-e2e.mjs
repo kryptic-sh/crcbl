@@ -135,6 +135,21 @@ const EXPECTATIONS = {
     moving: /rock x: (-?[\d.]+)/,
     movingLabel: 'the rocks drift after the first shot',
   },
+  // **The one sample with no waiting state**, so "the input reached the
+  // simulation" cannot be "the state left WaitingToStart" here — horde is
+  // `Playing` from the first tick and Space is bound to *restart*. What moves
+  // is the run counter, which nothing but a real restart edge can advance, so
+  // `run: 1` before and `run: 2` after is the same claim the other three make
+  // about their start button. `apps/horde/src/game.rs` logs it for this.
+  horde: {
+    key: 'Space',
+    waiting: (line) => line.includes('run: 1'),
+    started: (line) => line.includes('run: 2'),
+    startedLabel: 'Space starts a fresh run',
+    startedFailure: 'the run counter never moved',
+    moving: /time: ([\d.]+)/,
+    movingLabel: 'the clock advances under its own steam',
+  },
 };
 
 const EXPECTED = EXPECTATIONS[SLUG];

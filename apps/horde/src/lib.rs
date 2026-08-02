@@ -31,34 +31,46 @@
 //! the player, all three enemy kinds and the gems — shares one sheet at one
 //! frame size, so the whole field is a single `SpriteRenderer` batch whatever
 //! order it is emitted in; only the shot is separate. `src/art.rs` carries the
-//! argument, and the scale sub-slice is what measures it.
+//! argument, and [`SceneStats`] is where the game reports the number it
+//! produces.
 //!
-//! The scale push, the measured budgets and the browser demo are the sub-slice
-//! after, and until then the enemy cap is [`DEFAULT_MAX_ENEMIES`] rather than the
-//! plan's ten thousand — see that constant for why that is a decision and not an
-//! oversight.
+//! Five spatial cues — the gun, an enemy coming apart, a gem, a level and the
+//! player's own end — through `crcbl-audio`'s grammar with the listener on the
+//! player, which is the first sample whose listener moves; the longest run kept
+//! in `~/.config/horde` or the browser's Origin Private File System; and the
+//! browser entry point the demo site's shim drives.
+//!
+//! The default enemy cap is [`DEFAULT_MAX_ENEMIES`] rather than the plan's ten
+//! thousand — see that constant for why that is a decision and not an oversight
+//! — and `--prefill` is how the measurement gets to ten thousand without waiting
+//! for a spawner that would take ten minutes to put them there.
 //!
 //! # Two front ends, one loop
 //!
 //! Like breakout, flappy and asteroids, this is a library because the sample has
 //! to be reachable from two places that share nothing else: `src/main.rs` for
-//! the native binary, and a browser entry point driven from
-//! `requestAnimationFrame`. Only the first exists yet; the package's shape is
-//! here from the start so the second is a module rather than a restructure.
+//! the native binary, and `src/web.rs` — compiled only on `wasm32`, which is why
+//! it is not linked here — for a browser driven from `requestAnimationFrame`.
+//! Everything below them is shared verbatim.
 
 mod app;
 mod args;
 mod art;
+mod audio;
+mod best;
 mod game;
 mod gpu;
 mod menu;
 
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+
 pub use app::{
-    DEBUG_OVERLAY_KEY, FULLSCREEN_KEY, HordeError, Loop, MENU_ACTIVATE_KEY, MENU_DOWN_KEY,
-    MENU_UP_KEY, PAUSE_KEY, Summary, run,
+    DEBUG_OVERLAY_KEY, FULLSCREEN_KEY, HordeError, Loop, MAX_FRAME_STEP, MENU_ACTIVATE_KEY,
+    MENU_DOWN_KEY, MENU_UP_KEY, PAUSE_KEY, PendingLoop, Summary, run,
 };
 pub use args::{Invocation, Options, USAGE, parse};
-pub use art::{ACTOR_HALF_EXTENT, BOLT_HALF_EXTENT, GROUND, Scene, TEXELS_PER_UNIT};
+pub use art::{ACTOR_HALF_EXTENT, BOLT_HALF_EXTENT, GROUND, Scene, SceneStats, TEXELS_PER_UNIT};
 pub use game::{
     ARENA_HALF_HEIGHT, ARENA_HALF_WIDTH, BOLT_DAMAGE, BOLT_LIFE, BOLT_RADIUS, BOLT_SPEED, BoltView,
     DEFAULT_MAX_ENEMIES, DEFAULT_SEED, DEFAULT_TICK_HZ, EnemyKind, EnemyView, FIRE_COOLDOWN,

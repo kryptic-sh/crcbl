@@ -46,6 +46,8 @@
 //! `DrawList` quad was six vertices uploaded per frame; an instanced sprite is
 //! not, so [`crate::art`] culls to the view and draws everything that survives.
 
+use core::time::Duration;
+
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Clock, ConfigureError, ExitReason, Flow, FrameOutcome, GpuError, MAX_CONSECUTIVE_RECONFIGURES,
@@ -60,7 +62,7 @@ use crcbl::ui::{DebugOverlay, PointerInput};
 use glam::Vec2;
 
 use crate::game::{self, Game, GameState, RenderState, UPGRADE_CHOICES};
-use crate::gpu::Gpu;
+use crate::gpu::{Gpu, PendingGpu};
 use crate::menu::{MenuAction, MenuKind, Menus};
 
 pub use crate::args::Options;
@@ -304,26 +306,46 @@ impl<S: Shell + ?Sized> Loop<S> {
     /// [`HordeError`] if the window never configured, the GPU would not open, or
     /// the game could not be built.
     pub fn with_shell(mut shell: Box<S>, options: &Options) -> Result<Self, HordeError> {
-        let clock_source = Clock::new(options.headless);
-        log::info!(
-            "shell: {} backend, caps {:?}",
-            shell.backend(),
-            shell.caps()
-        );
-        shell.align_event_clock(clock_source.elapsed());
-        let window = shell.create_window(&WindowDesc {
-            title: "Horde",
-            app_id: "sh.kryptic.crcbl.horde",
-            size: LogicalSize::new(960.0, 720.0),
-            ..WindowDesc::default()
-        })?;
+        // **`--wall-clock` is why this is not `Clock::new(options.headless)`.**
+        // A headless run's clock is a fake one stepping exactly 1/60 s, which is
+        // what makes a scripted run reproducible and what makes the debug
+        // panel's frame timing report the step rather than the frame. The scale
+        // measurement needs the second of those to be a real number; every other
+        // headless run needs the first. See `crate::args`.
+        let clock_source = Clock::new(!options.real_clock());
+        let window = open_the_window(shell.as_mut(), &clock_source)?;
 
         let mut events = 0;
         let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
         log::info!("shell: first configure at {}x{}", extent.0, extent.1);
 
         let gpu = Gpu::open(shell.as_ref(), window, extent, options.backend)?;
-        let game = Game::with_setup(&options.setup())?;
+        Self::assemble(shell, window, gpu, options, clock_source, events)
+    }
+
+    /// The half of start-up that is the same however the GPU arrived.
+    ///
+    /// Shared with [`PendingLoop::poll`], which reaches this point several rAF
+    /// frames later. A second copy of this struct literal is how the browser
+    /// build would come to run a subtly different game from the native one.
+    fn assemble(
+        shell: Box<S>,
+        window: WindowId,
+        gpu: Gpu,
+        options: &Options,
+        clock_source: Clock,
+        events: u64,
+    ) -> Result<Self, HordeError> {
+        let mut game = Game::with_setup(&options.setup())?;
+        if options.prefill > 0 {
+            let staged = game.stage_field(options.prefill);
+            if staged < options.prefill {
+                log::warn!(
+                    "prefill: asked for {} enemies and the cap left room for {staged}",
+                    options.prefill,
+                );
+            }
+        }
         Ok(Self {
             windowed: !options.headless,
             shell,
@@ -348,6 +370,21 @@ impl<S: Shell + ?Sized> Loop<S> {
             budget: options.frame_budget(),
             reconfigures_in_a_row: 0,
         })
+    }
+
+    /// Sets how far one [`frame`](Self::frame) advances a manual clock.
+    ///
+    /// **The browser's clock is the browser's.** `Clock::Real` reads
+    /// [`std::time::Instant`], which on `wasm32-unknown-unknown` has no
+    /// implementation at all and panics on the first `now()`. `dt` is clamped to
+    /// [`MAX_FRAME_STEP`]: a backgrounded tab resumes with a multi-second gap,
+    /// and feeding that to the accumulator spends the next frame running
+    /// thousands of ticks — which in this game is a minute of spawns arriving at
+    /// once.
+    pub fn set_frame_step(&mut self, dt: Duration) {
+        if let Clock::Manual { step, .. } = &mut self.clock_source {
+            *step = dt.min(MAX_FRAME_STEP);
+        }
     }
 
     /// The game, for scripted tests and for an embedder that wants to drive it.
@@ -749,6 +786,13 @@ impl<S: Shell + ?Sized> Loop<S> {
         if let Some(timings) = self.gpu.timings() {
             self.debug.panel.add(timings);
         }
+        // **This sample's own module, and the first one any sample has added.**
+        // Asteroids' finding 8 said switching the panel on needs no per-sample
+        // plumbing, and it does not; adding a per-sample *section* is the other
+        // half of the same claim and it is four lines. The numbers are the ones
+        // this game's whole argument rests on — how much of the field survived
+        // the cull, and how many draw calls the survivors cost.
+        self.debug.panel.add(&self.gpu.scene_stats());
         let (width, height) = self.gpu.extent();
         self.debug.render(
             &mut self.draw_list,
@@ -769,6 +813,30 @@ impl<S: Shell + ?Sized> Loop<S> {
             && !timings.is_empty()
         {
             log::info!("{}", timings.report().trim_end());
+        }
+        // **The CPU half of the same report, and the reason `--wall-clock`
+        // exists.** `FrameTimings` is GPU timestamps; this is the monotonic
+        // clock the loop was driven from, which on a headless run without
+        // `--wall-clock` is the fixed step and therefore says nothing. Printed
+        // either way, with the clock named, because a number whose conditions
+        // are not stated is not a measurement.
+        let frame = &self.debug.frame;
+        if let (Some(best), Some(worst)) = (frame.best(), frame.worst()) {
+            log::info!(
+                "frame cpu ({} clock, last {} frames): mean {:.3} ms ({:.1} fps), \
+                 best {:.3} ms, worst {:.3} ms; scene {:?}",
+                if matches!(self.clock_source, Clock::Real(_)) {
+                    "real"
+                } else {
+                    "fixed-step"
+                },
+                frame.len(),
+                frame.mean().as_secs_f64() * 1e3,
+                frame.fps(),
+                best.as_secs_f64() * 1e3,
+                worst.as_secs_f64() * 1e3,
+                self.gpu.scene_stats(),
+            );
         }
         let summary = Summary {
             backend: self.shell.backend(),
@@ -798,6 +866,150 @@ impl<S: Shell + ?Sized> Loop<S> {
     }
 }
 
+// ---- polled start-up --------------------------------------------------------
+
+/// The largest step [`Loop::set_frame_step`] will accept.
+///
+/// A tab backgrounded for a minute reports a one-minute `requestAnimationFrame`
+/// delta on the frame it comes back. Handing that to a fixed-timestep
+/// accumulator asks for 3600 ticks in one frame, which the user reads as a
+/// crash — and in this game, as a minute of spawns landing at once on a player
+/// who has already been eaten.
+pub const MAX_FRAME_STEP: Duration = Duration::from_millis(64);
+
+/// Creates the one window, and puts the shell's event clock on the engine's.
+fn open_the_window<S: Shell + ?Sized>(
+    shell: &mut S,
+    clock_source: &Clock,
+) -> Result<WindowId, HordeError> {
+    log::info!(
+        "shell: {} backend, caps {:?}",
+        shell.backend(),
+        shell.caps()
+    );
+    shell.align_event_clock(clock_source.elapsed());
+    Ok(shell.create_window(&WindowDesc {
+        title: "Horde",
+        app_id: "sh.kryptic.crcbl.horde",
+        size: LogicalSize::new(960.0, 720.0),
+        ..WindowDesc::default()
+    })?)
+}
+
+/// How far [`PendingLoop`] has got.
+#[derive(Debug)]
+enum BootStage {
+    /// The window has no size yet.
+    Configure,
+    /// A device has been requested and has not arrived.
+    Device { pending: PendingGpu },
+    /// The loop has been handed over, or a step failed.
+    Done,
+}
+
+/// A [`Loop`] being started one poll at a time.
+///
+/// [`Loop::with_shell`] blocks twice — once waiting for a configure and once
+/// inside `Gpu::open` — and a browser main thread may do neither: both of the
+/// things being waited for are resolved by the very event loop the wait would be
+/// sitting inside.
+#[derive(Debug)]
+pub struct PendingLoop<S: Shell + ?Sized = dyn Shell> {
+    shell: Option<Box<S>>,
+    window: WindowId,
+    options: Options,
+    clock_source: Option<Clock>,
+    stage: BootStage,
+    extent: Option<(u32, u32)>,
+    events: u64,
+}
+
+impl<S: Shell + ?Sized> PendingLoop<S> {
+    /// Creates the window and starts the wait, without blocking on either half.
+    ///
+    /// # Errors
+    ///
+    /// [`HordeError`] if the shell refused the window.
+    pub fn request(
+        mut shell: Box<S>,
+        options: &Options,
+        clock_source: Clock,
+    ) -> Result<Self, HordeError> {
+        let window = open_the_window(shell.as_mut(), &clock_source)?;
+        Ok(Self {
+            shell: Some(shell),
+            window,
+            options: options.clone(),
+            clock_source: Some(clock_source),
+            stage: BootStage::Configure,
+            extent: None,
+            events: 0,
+        })
+    }
+
+    /// Advances start-up. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// [`HordeError`] if the window went away before it had a size, if the
+    /// device request failed, or if the game could not be built.
+    pub fn poll(&mut self) -> Result<Option<Loop<S>>, HordeError> {
+        let Some(shell) = self.shell.as_mut() else {
+            return Err(HordeError::Gpu(GpuError::Unusable(
+                "this horde loop was already started",
+            )));
+        };
+
+        let mut pending = Pending::default();
+        shell.pump(&mut |event| pending.observe(&event));
+        self.events += pending.count;
+        if pending.destroyed {
+            return Err(HordeError::Shell(ShellError::invalid_window(self.window)));
+        }
+        if let Some(size) = pending.resized {
+            self.extent = Some((size.width, size.height));
+        }
+
+        match core::mem::replace(&mut self.stage, BootStage::Done) {
+            BootStage::Configure => {
+                let Some(extent) = self.extent else {
+                    self.stage = BootStage::Configure;
+                    return Ok(None);
+                };
+                log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+                self.stage = BootStage::Device {
+                    pending: Gpu::request_open(
+                        shell.as_ref(),
+                        self.window,
+                        extent,
+                        self.options.backend,
+                    )?,
+                };
+                Ok(None)
+            }
+            BootStage::Device { mut pending } => {
+                let Some(mut gpu) = pending.poll()? else {
+                    self.stage = BootStage::Device { pending };
+                    return Ok(None);
+                };
+                // The canvas may have been resized while the promise was in
+                // flight; the swapchain was requested at the older size.
+                if let Some(extent) = self.extent
+                    && extent != gpu.extent()
+                {
+                    gpu.resize(extent)?;
+                }
+                let shell = self.shell.take().expect("checked at the top");
+                let clock = self.clock_source.take().expect("taken with the shell");
+                Loop::assemble(shell, self.window, gpu, &self.options, clock, self.events).map(Some)
+            }
+            BootStage::Done => Err(HordeError::Gpu(GpuError::Unusable(
+                "this horde loop was already started",
+            ))),
+        }
+    }
+}
+
 // ---- drawing ----------------------------------------------------------------
 
 /// The HUD's lines, rebuilt only when the numbers behind them change.
@@ -813,7 +1025,7 @@ struct HudStrings {
     last: Option<HudKey>,
 }
 
-type HudKey = (u64, u64, u32, u32, u64, usize, Option<GameState>, bool);
+type HudKey = (u64, u64, u32, u32, u64, usize, u32, Option<GameState>, bool);
 
 /// `seconds` as `m:ss`.
 fn clock(seconds: f64) -> String {
@@ -834,6 +1046,7 @@ impl HudStrings {
             render.level,
             render.xp,
             render.enemies.len(),
+            render.best,
             render.state,
             paused,
         );
@@ -857,6 +1070,12 @@ impl HudStrings {
             render.enemies.len(),
         );
         self.state.clear();
+        // **The record lives on the second line, not the first**, and that is a
+        // width decision rather than a taste one: the stat line already runs to
+        // most of a 960-pixel window at the counts this game reaches, and the
+        // second line is short in every state. `the_hud_fits_the_panel_it_is_drawn_on`
+        // is what holds both of them.
+        let _ = write!(self.state, "Best {}   ", clock(f64::from(render.best)));
         if paused {
             self.state.push_str("PAUSED - press ESC");
         } else {
@@ -887,27 +1106,46 @@ impl HudStrings {
 /// menu, so a second would dim the field twice on exactly the frames a menu is
 /// up.
 fn draw_hud(dl: &mut DrawList, hud: &HudStrings) {
-    // Wider than the placeholder's 430: the stat line gained a level and an
-    // experience fraction, and a panel narrower than the text it is behind reads
-    // as a clipped HUD rather than as a backdrop.
     dl.rect(
-        Vec2::new(4.0, 4.0),
-        Vec2::new(560.0, 52.0),
+        HUD_ORIGIN,
+        Vec2::new(HUD_PANEL_RIGHT, 52.0),
         [0.1, 0.1, 0.15, 0.85],
     );
     dl.text(
-        Vec2::new(10.0, 10.0),
+        Vec2::new(HUD_TEXT_X, 10.0),
         hud.stats.as_str(),
         [1.0, 1.0, 0.3, 1.0],
-        16.0,
+        HUD_STAT_SIZE,
     );
     dl.text(
-        Vec2::new(10.0, 32.0),
+        Vec2::new(HUD_TEXT_X, 32.0),
         hud.state.as_str(),
         [0.7, 0.7, 1.0, 1.0],
-        14.0,
+        HUD_STATE_SIZE,
     );
 }
+
+/// The HUD backdrop's top-left corner, in framebuffer pixels.
+const HUD_ORIGIN: Vec2 = Vec2::new(4.0, 4.0);
+/// Where the backdrop ends. See [`HUD_STAT_SIZE`].
+const HUD_PANEL_RIGHT: f32 = 820.0;
+/// Where both lines of text start.
+const HUD_TEXT_X: f32 = 10.0;
+/// The stat line's font size, and the reason the panel is as wide as it is.
+///
+/// **The width is measured, not guessed** — `the_hud_fits_the_panel_it_is_drawn_on`
+/// puts a stated worst-case run through the real [`FontAtlas`] and requires it
+/// inside [`HUD_PANEL_RIGHT`]. The placeholder renderer's 430 became 560 became
+/// 690 by eye, and the browser gate's capture caught the last of those with the
+/// text running off the end of its own backdrop.
+///
+/// What is bounded is a five-minute run at the shipped enemy cap. `--max-enemies
+/// 10000` with a twenty-minute soak behind it can still outgrow this; that is
+/// recorded in `docs/backlog.md` rather than solved by a panel two thirds of the
+/// window wide.
+const HUD_STAT_SIZE: f32 = 16.0;
+/// The state line's, which is smaller because it is prose.
+const HUD_STATE_SIZE: f32 = 14.0;
 
 // ---- tests ------------------------------------------------------------------
 
@@ -1126,6 +1364,62 @@ mod tests {
         assert!(hud.state.contains("208 kills"), "{}", hud.state);
     }
 
+    /// **Both HUD lines fit the backdrop they are drawn on**, at a worst case
+    /// this game can actually reach.
+    ///
+    /// Measured through the real [`crcbl::ui::text::FontAtlas`] — the same one
+    /// the UI pass draws with — rather than by counting characters, and it is
+    /// the check that was missing: the browser gate's canvas capture showed
+    /// `Enemies: 9` sitting a hundred pixels past the end of its own panel, on a
+    /// line three fields shorter than this one.
+    #[test]
+    fn the_hud_fits_the_panel_it_is_drawn_on() {
+        use crcbl::ui::NATURAL_FONT_SIZE;
+        let atlas = crcbl::ui::text::FontAtlas::built_in();
+
+        // A five-minute run at the shipped cap, with every field at the widest
+        // this game puts in it: nine hundred kills, six Vitality upgrades, a
+        // level in double figures, and a full field.
+        let render = RenderState {
+            state: Some(GameState::Dead),
+            player_hp: 0.0,
+            player_max_hp: 250.0,
+            elapsed: 300.0,
+            kills: 2_048,
+            level: 18,
+            xp: 240,
+            xp_needed: 1_024,
+            best: 359,
+            enemies: vec![
+                game::EnemyView {
+                    position: glam::DVec3::ZERO,
+                    kind: game::EnemyKind::Grunt,
+                    health: 1.0,
+                };
+                game::DEFAULT_MAX_ENEMIES
+            ],
+            ..RenderState::default()
+        };
+        let mut hud = HudStrings::default();
+        hud.refresh(&render, false);
+
+        for (line, size) in [(&hud.stats, HUD_STAT_SIZE), (&hud.state, HUD_STATE_SIZE)] {
+            let right = HUD_TEXT_X + atlas.text_width(line, size / NATURAL_FONT_SIZE);
+            assert!(
+                right <= HUD_PANEL_RIGHT,
+                "\"{line}\" ends at {right:.0} px, past the panel's {HUD_PANEL_RIGHT:.0}",
+            );
+        }
+        // …and the panel is not simply enormous: it fits the window the game
+        // opens at, which is what makes the assertion above a fit rather than a
+        // licence.
+        const { assert!(HUD_PANEL_RIGHT < 960.0) };
+        // The record really is on the second line, or the width above is being
+        // asserted about the wrong string.
+        assert!(hud.state.starts_with("Best 5:59"), "{}", hud.state);
+        assert!(!hud.stats.contains("Best"), "{}", hud.stats);
+    }
+
     /// The clock is `m:ss`, including the cases a naive `{}:{}` gets wrong.
     #[test]
     fn the_clock_reads_as_minutes_and_seconds() {
@@ -1326,6 +1620,86 @@ mod tests {
             game::Upgrade::Magnet => after.pickup_radius += 1.0,
         }
         after
+    }
+
+    // -----------------------------------------------------------------------
+    // The scale knobs
+    // -----------------------------------------------------------------------
+
+    /// **`--prefill` reaches the field, the cap and the first frame's sprites.**
+    ///
+    /// Every number in `docs/plan/sample/03-horde.md` was taken through this
+    /// flag, so a flag that parsed and did nothing — or that staged the field
+    /// but left the views empty, which is exactly what happens if `stage_field`
+    /// forgets to refresh them — would make all of them measurements of an empty
+    /// arena.
+    #[test]
+    fn a_prefilled_run_draws_a_crowd_on_its_very_first_frame() {
+        let options = Options {
+            prefill: 2_000,
+            ..headless(4)
+        };
+        // The cap is raised to fit, or 1 500 of the 2 000 would be silently
+        // dropped and the measurement would be of the wrong field.
+        assert_eq!(options.setup().max_enemies, 2_000);
+
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+        assert_eq!(
+            engine.game_mut().enemy_count(),
+            2_000,
+            "the prefill did not reach the simulation",
+        );
+        let stats = engine.gpu.scene_stats();
+        assert_eq!(stats.field, 2_000, "the renderer was handed an empty field");
+        assert!(
+            stats.culled > 0 && stats.drawn > 1,
+            "a field of 2000 over a 96x72 arena should be partly on screen: {stats:?}",
+        );
+        assert_eq!(stats.batches, 1, "one sheet, one batch");
+
+        // A run with no prefill draws the handful of enemies a fifteenth of a
+        // second produces, which is what says the assertion above is about the
+        // flag and not about the game.
+        let mut plain = scripted(&headless(4));
+        plain.frame().expect("a frame");
+        assert!(
+            plain.gpu.scene_stats().field < 10,
+            "an unprefilled run already had a crowd: {:?}",
+            plain.gpu.scene_stats(),
+        );
+    }
+
+    /// **The scene section reaches the panel**, so the numbers this sample's
+    /// whole claim rests on are readable in the running game rather than only
+    /// from a test.
+    #[test]
+    fn the_debug_panel_carries_this_samples_own_scene_section() {
+        let mut engine = scripted(&Options {
+            debug_overlay: Some(false),
+            ..headless(8)
+        });
+        engine.frame().expect("a frame");
+        assert!(
+            !ui_text(&engine).iter().any(|line| line == "scene"),
+            "a hidden panel gathered a section",
+        );
+
+        tap(&mut engine, DEBUG_OVERLAY_KEY);
+        let text = ui_text(&engine);
+        assert!(
+            text.iter().any(|line| line == "scene"),
+            "the scene section never reached the UI pass: {text:?}",
+        );
+        for row in ["field", "culled", "drawn", "batches"] {
+            assert!(
+                text.iter().any(|line| line == row),
+                "the scene section has no {row} row: {text:?}",
+            );
+        }
+        // The frame-timing module is still there beside it, or this replaced
+        // the panel rather than adding to it.
+        assert!(text.iter().any(|line| line == "frame"), "{text:?}");
     }
 
     /// **A click that focuses the window does not fire a button.**

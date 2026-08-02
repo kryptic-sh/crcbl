@@ -24,9 +24,14 @@ crate-type = ["cdylib", "rlib"]
 name = "horde"
 path = "src/main.rs"
 
-# Shorter than asteroids' list, and deliberately: `crcbl-audio` and
-# `crcbl-store` arrive with the sub-slices that use them, so `cargo machete`
-# stays meaningful until then. `crcbl-sprite` arrived with this one.
+# Now the same list asteroids names, and for the same reason: `crcbl-audio` for
+# the shot, kill, gem, level and death cues and `crcbl-store` for the best run
+# arrived with the sub-slice that uses them, so `cargo machete` stayed
+# meaningful up to the commit before this one.
+#
+# Eleven engine crates for a game whose art is two sheets is S1B finding 6: the
+# `crcbl` umbrella re-exports the graphics stack and nothing else, so ECS,
+# physics, input, net, server, client, audio and store are each named here.
 [dependencies]
 crcbl = { workspace = true }
 crcbl-ecs = { workspace = true }
@@ -36,6 +41,8 @@ crcbl-input = { workspace = true }
 crcbl-server = { workspace = true }
 crcbl-client = { workspace = true }
 crcbl-core = { workspace = true }
+crcbl-audio = { workspace = true }
+crcbl-store = { workspace = true }
 # The sheet description the sprite pass draws from, and the reader for the pair
 # `build.rs` bakes. `load`, not `bake`: this half never sees a `.crpix`, and a
 # shipped binary that linked the PNG *encoder* would be linking it to encode

@@ -18,7 +18,27 @@ Two hard rules govern the ordering:
 breakout onward ships as a browser demo on GitHub Pages. The demo site is the
 engine's public face and its continuous cross-backend regression test.
 
-## Status (as of 2026-08-02)
+## Status (as of 2026-08-03)
+
+**S3 is complete: the demo site carries four games, and the scale sample has its
+numbers.** Horde — one arena, a crowd that converges, a gun that aims itself,
+three enemy kinds, XP gems and a "pick 1 of 3" level-up — is playable natively
+and in a browser, with five spatial cues, the longest run kept in `~/.config` or
+the Origin Private File System, and `web/run-browser-e2e.sh` driving it in a
+real Chromium for 26/26 checks. Breakout, flappy and asteroids are 26/26
+alongside it.
+
+It was built **before** P7 and P8 rather than behind them, which is a departure
+from the phase table below, and the point of doing it that way was to find out
+what those phases actually have to buy. The measurement is in
+[sample/03-horde.md](sample/03-horde.md) with the conditions on every table, and
+it is unambiguous: **the render side carries ten thousand and the tick does
+not.** CPU frame time is 0.096 ms at one thousand enemies and 0.120 ms at ten
+thousand — flat, which is the exit criterion — while the tick is 14.66 ms with
+the crowd spread and 84 ms once it has converged on the player, against a 16.67
+ms budget. So P8 (`crcbl-jobs`, the parallel schedule) is worth the whole of the
+gap and P7 (GPU culling, indirect draws, instance deltas) can return at most 0.7
+% of a frame to this sample. The roadmap had the dependency the other way round.
 
 **S2 is complete: the demo site carries three games.** Asteroids — a ship that
 turns, thrusts and wraps, bullets that never miss, rocks in three sizes that
@@ -158,11 +178,12 @@ was intended.
 | **S1** — breakout  | **done** | `d747a84` scaffold, `71d931c` paddle+input, `5989f1b` ball+physics, `495a7fb` bricks+scoring, `ee3bea5` audio+HUD, `fa4e20b` spatial panning, `3bcf327` client interpolation, `a6c2e6b` high score, `ecfd85a` determinism tests, `ab71b1e` input fix, `968b65a` launch fix, `e3fd64d` persistence test, `5f47a12` UI compositing pass                                                                                                                                                                                 |
 | **S1B** — flappy   | **done** | `1de08a6` wgpu device errors, `8411987` bird + gravity + flap, `86bb004` seeded course + treadmill, `0c1991b` collision + score + restart, `69e6624` scrolling camera + HUD, `c898e1a` audio + best score, `c0446be` demo-site publish                                                                                                                                                                                                                                                                                |
 | **P5** — wasm      | **done** | `a61bd26` polled device creation, `b932e28` AudioWorklet output, `325b8ba` wasm32 dependency graph, `9c1b48e` fetch + OPFS storage, `c5c2a13` JS shim + entry point + Pages deploy, `fd0bc23` WGSL across the seam, `df45682` Tier B constants, `33d4dc0` wgpu push-constant capability, `afb4579` wgpu present + offscreen, `e52e28c` cross-backend gate, `4d7c7c8` uniform-control-flow shader fix, `ed3e726` headless-browser gate. Earlier: `84e531b` WebShell, `afd63bf` wasm32 target, `f7d28ad` WGSL artifacts |
-| **S2** — asteroids | **done** | `da3096d` the game core, `c0f87ef` art, rotation and menus, and this slice: audio, the best score and the browser demo                                                                                                                                                                                                                                                                                                                                                                                                |
+| **S2** — asteroids | **done** | `da3096d` the game core, `c0f87ef` art, rotation and menus, `485e8aa` audio, the best score and the browser demo                                                                                                                                                                                                                                                                                                                                                                                                      |
+| **S3** — horde     | **done** | `63873a7` the core loop, `67c3207` art, experience and the level-up screen, and this slice: audio, the longest run, the browser demo and the scale measurement                                                                                                                                                                                                                                                                                                                                                        |
 
 ### What exists now
 
-- **Workspace + CI**: 22 crates under `crates/`, 4 under `apps/`. CI is 16
+- **Workspace + CI**: 22 crates under `crates/`, 6 under `apps/`. CI is 16
   required jobs — fmt, clippy `-D warnings`, rustdoc `-D warnings`,
   `cargo-machete`, `cargo-deny`, nextest on Linux and cross-platform (macOS +
   Windows), coverage, a weekly advisory cron, seven e2e suites (Wayland under
@@ -417,7 +438,9 @@ what this sample is meant to _reveal_ the need for.
    that owns the loop — is left to every sample to write out. ~~**Owed before
    S2**, which will otherwise write it a third time.~~ **The deadline was
    missed: S2 wrote it a third time**, and the fix now costs three call sites
-   rather than two. Re-owed before S3; see S2 finding 1 and `docs/backlog.md`.
+   rather than two. ~~Re-owed before S3~~ **and missed again: S3 wrote a
+   fourth**, so the fix is now four call sites. See S2 finding 1, S3 finding 1
+   and `docs/backlog.md`.
 
 3. **The web tooling assumed there was one sample, and three pieces of it broke
    on contact.** Closed in this phase rather than carried, because a broken gate
@@ -610,7 +633,9 @@ no.
    The roadmap's claim of "a content file and one line in the demo bar" is
    therefore true of the chrome and understates the build: there are _two_
    lists, one for the bar and one for the artifacts, and nothing keeps them in
-   step.
+   step. **S3 found two more** — the gate's `EXPECTATIONS` table and the
+   per-demo CI step — so the real count is four, and `web/README.md` was wrong
+   about it until horde was added.
 
 **What did not resist.** The ECS, the fixed-tick server, `crcbl-phys`'s bodies
 and colliders, the input action map, the render graph, the shell seam, the
@@ -629,6 +654,174 @@ nothing proves it is the _right_ picture — in particular that a rotated
 `SampleMode::Pixel` sprite looks right on a real driver. And the three audio
 cues are synthesised deterministically from a fixed seed, so a golden buffer is
 possible and there is not one; nobody has listened to them on a real device.
+
+### S3 findings: what a fourth game found, and what the numbers found
+
+Same shape as the S1B and S2 notes above, and the same rule: each entry is a
+place a game with nothing else in common was pushed into a workaround, and none
+of them were fixed inside the sample. Gathered from all three sub-slices — the
+core loop, the art, and this one.
+
+The fourth consumer answers a third kind of question. The second told us whether
+a seam was designed or merely fitted to breakout; the third told us whether the
+gaps the second found were being closed. The fourth tells us what happens to a
+duplication nobody closed on the deadline it was given — and, because this is
+the sample that exists to be measured rather than played, what the phases the
+roadmap was saving it for are actually worth.
+
+1. **S1B finding 2's deadline has now been missed twice, by name, and the cost
+   has grown by a third.** It said the browser entry point was "owed before S2,
+   which will otherwise write it a third time"; S2 wrote it a third time and
+   re-owed it **before S3**. `apps/horde/src/web.rs` is
+   `apps/asteroids/src/web.rs` with a different prefix — the fourth copy, and
+   the second missed deadline for the same reason each time: it is an engine-API
+   change to `crates/` plus edits to samples the slice was not otherwise
+   touching. The fix is now one shared implementation plus **four** call sites,
+   four sets of `STATUS_*` constants, four prefixes through a macro and four
+   browser gates. Findings 4 (`crcbl-store` has no "one number, kept between
+   sessions") and 5 (`crcbl-audio` has no "play this buffer once, panned") were
+   each written a fourth time here too, and finding 6 stands: this manifest
+   names eleven engine crates.
+
+   **What changed is the evidence, not the complaint.** S2 predicted the
+   `web.rs` trio would drift and it still has not; the _other_ two have drifted
+   further. Four samples now spell the audio entry point three different ways —
+   `play_panned(id, emitter_x)`, `play_at(id, listener_x, x, y)`,
+   `play_at(id, x, y)` and `play_at(id, listener, at)` — and breakout still has
+   no play counter. The persistence copies now differ in what they even _store_:
+   three keep a score and this one keeps a **time**, truncated to whole seconds
+   so the comparison agrees with the `m:ss` the HUD shows. That last difference
+   is the useful one, because it says exactly which half is missing from the
+   engine: the _policy_ is genuinely per-game and the _plumbing_ — three
+   platform arms, a four-byte encode, a corrupt-file case,
+   headless-persists-nothing — has been identical in four games running.
+
+2. **`crcbl-audio` has no voice limit, no priority and no stealing**, and this
+   is the first sample that could not ignore it. The other three raise a handful
+   of cues a second. This one raises a cue per kill and a cue per gem against a
+   fire cooldown whose floor is a twentieth of a second, so a late run raises
+   about forty a second and every one of them is a voice that lives until it
+   runs out; `AudioSource::fill` walks whatever is in the queue on the audio
+   thread. `apps/horde/src/audio.rs` caps it at sixteen and refuses the newest
+   voice, which is the crudest answer that is honest, and counts the refusals.
+   It also forced the distinction the crate's shape hides: **"did this cue
+   happen" and "was there a speaker free" are different questions**, so `plays`
+   counts the emission before the cap and `voices()` counts what is sounding —
+   the trap flappy named and the one a `voices()`-based test walks into twice as
+   easily here.
+
+3. **There is still no listener anywhere in the crate, and this game is the one
+   that makes it hurt.** `spatial::compute_cue` takes the listener's position on
+   every call. Breakout pans on one axis; flappy's bird sits at a fixed offset;
+   asteroids nails the listener to the origin because its camera never moves.
+   Horde's camera **follows the player**, so the only listener that agrees with
+   the picture is the player's own position, and it is threaded through every
+   call site by hand. Four games, four conventions, and the fourth is the first
+   one where getting it wrong is audible rather than theoretical: an
+   origin-listener copy of asteroids' version was written first and
+   `where_a_cue_happens_and_where_the_player_stands_both_change_how_it_sounds`
+   is what rejected it.
+
+4. **`crcbl-phys` owes four more things, found at scale rather than by shape.**
+   Itemised in `docs/backlog.md`. In short: `overlap_sphere` returns an owned
+   `Vec` and `Bvh::traverse_aabb` builds another underneath, so a game that
+   queries per body allocates twice per body per tick — 1.2 million allocations
+   a second at the plan's count; `PhysicsSystem` has no `body_mut`, so writing
+   one `DVec3` of velocity is two hash operations; steering is embarrassingly
+   parallel and there is nothing to run it on; and the neighbour sum's order is
+   the BVH's traversal order, which is deterministic _because of the tree_
+   rather than independently of it. None is a defect in an answer the crate
+   gives. All four are the per-query overhead becoming the cost, which is what a
+   consumer running `N` queries a tick is for.
+
+5. **The numbers are themselves a finding about P7 and P8, and they invert the
+   roadmap's estimate.** Full tables and conditions in
+   [sample/03-horde.md](sample/03-horde.md). The render side is **flat**: CPU
+   frame time 0.096 ms at one thousand enemies and 0.120 ms at ten thousand on a
+   Radeon RX 7900 XTX at 960 × 720, so nine thousand more enemies cost 24 µs a
+   frame — 0.14 % of the budget. The tick is **not**: 14.66 ms with the crowd
+   spread over the arena and 84.09 ms once it has converged on the player, at
+   the same count, against 16.67 ms.
+
+   So **P8 is worth the whole gap and P7 is worth 0.7 % of a frame to this
+   sample.** GPU culling would replace a CPU cull that costs 28 µs; indirect
+   draws would replace two draw calls; instance deltas would replace an upload
+   of 2 446 × 64 bytes. P7 is still worth building, for 3D and for scenes that
+   are not a plane of 34-texel quads — but the roadmap put horde _behind_ P7 on
+   the assumption that a field of ten thousand was a rendering problem, and it
+   is not. It is a broadphase problem with no threads.
+
+6. **The tick's cost tracks local density, not entity count**, which is the
+   measurement nobody would have predicted from the code. The same ten thousand
+   enemies cost 14.66 ms spread and 84.09 ms converged, because an overlap query
+   costs what its _answer_ costs and a horde converges by construction. 18a's
+   provisional 8–9k figure read the same rise as a working set leaving cache and
+   was wrong about the cause; it was also taken on a fixture staged at 1.25
+   units regardless of count, which at ten thousand is a field of 125 × 125
+   units against an arena of 96 × 72 — a board the game cannot produce. Any
+   future claim about this budget has to say which crowd it means.
+
+7. **A sample can add its own section to the debug panel, and it is four
+   lines.** S2's finding 8 recorded that switching the panel _on_ needs no
+   per-sample plumbing. This is the other half of the same claim and it is also
+   not a finding: `art::SceneStats` implements `DebugModule`,
+   `Loop::draw_debug_overlay` calls `panel.add(&self.gpu.scene_stats())`, and
+   the running game shows how much of the field survived the cull and how many
+   draws the survivors cost. Recorded as a result because the rule asked for one
+   either way.
+
+   **And the panel's own cost is now measured**, which closes a gap
+   `docs/backlog.md` has carried since P10's core landed: at 960 × 720 with ten
+   thousand enemies on the field, switching the panel on moves the
+   `ui-composite` pass from 0.004 ms to 0.005 ms and leaves the CPU frame time
+   inside its own noise. `07-ui-debug.md`'s criterion is "<0.5 ms GPU at 1080p"
+   and this is 960 × 720, so the criterion is not _closed_ — but it is two
+   orders of magnitude the right side of it.
+
+8. **`SpriteRenderer` will not tell a caller how many batches it drew**, so the
+   claim this sample's whole art decision rests on can only be checked against a
+   copy of the rule. `art::batches` counts runs of consecutive sprites naming
+   one sheet, which is what `sprite_pass::batch` does, and `SpriteRenderer`
+   exposes `sheet_count()` and nothing else. The mirror is pinned to `A A B A` =
+   3 by a test — the case a distinct-sheet count gets wrong and the case this
+   game's own frames cannot distinguish, which is why it needed writing — but a
+   change to the engine's batching rule would leave the mirror green and the
+   picture wrong. Wanted: a `batch_count()` beside `sheet_count()`. Not taken
+   because `crates/` was outside this slice's write scope, which is the same
+   sentence as finding 1 and is starting to look like the shape of every
+   deferral here.
+
+9. **The plan's target count and the plan's "playable for five minutes" cannot
+   both be true of this arena**, and only a measurement could have said so. Ten
+   thousand enemies in 96 × 72 units is 0.82 units apart; several are inside
+   `PLAYER_RADIUS` on frame zero; contact damage is a rate summed over
+   everything touching, so the player dies in **under a second**. A default run
+   — the spawner doing its own work — dies at about 24 seconds with 46 things on
+   the field. This is a design finding rather than an engine one, and the honest
+   version of the exit criterion is that ten thousand is a _renderer and
+   broadphase_ target that this arena cannot host as gameplay. It is in
+   `docs/backlog.md` with the two ways out (a bigger arena, or a target that
+   admits it is a benchmark).
+
+**What did not resist.** The ECS, the fixed-tick server, the client, the input
+action map, the render graph, the shell seam, the polled browser start-up,
+`crcbl-store`'s atomic write, `crcbl-audio`'s cue grammar and null stream, the
+sprite pass, the layer stack and the menu system all took a fourth game — one
+holding ten thousand bodies, steering every one of them, and drawing two
+thousand of them a frame — with no change and no argument. `SpriteRenderer` in
+particular held up exactly as designed: two sheets, two draw calls, at every
+count from one to ten thousand, with no grouping pass and no emission order to
+get wrong. The gaps above are still all in the _convenience_ layer and in the
+things that were never built (threads); the seams themselves have now survived
+four unrelated games.
+
+**Two coverage notes, not findings.** The windowed native path is still compiled
+and never run — there is no display in this environment, so the follow camera,
+the sprite pass and the three menus have been checked by test, by argument, and
+now by a **browser** capture at 26/26, but by nobody's eyes in the running
+native game. And every number above was taken on an offscreen image ring rather
+than a real swapchain: it is the same acquire/record/submit/present path by
+construction, and it is not a windowed present and is not vsynced.
 
 ### Known gaps, carried forward deliberately
 
@@ -855,7 +1048,7 @@ gets recorded in the relevant crate's docs rather than worked around silently.
 | **P6A**    | Wasm module host (topic 16): `wasmtime` behind `WasmHost` seam (NaN canonicalization, fuel limits), Rust guest SDK, component schemas                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | 16                | breakout-as-`.wasm` equivalence gate: state hash == static build, native + browser            |
 | **P7**     | GPU-driven rendering full: geometry pools, instance deltas, GPU culling, indirect draws — Tier A _and_ Tier B paths; **HDR target + tonemap + FXAA; sun CSM shadows** (culling-integrated, topic 18); **LOD mechanism**: chains + cull-shader selection + hand-LOD import (topic 25)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | 3                 | 10k-instance sandbox, flat CPU cost, both backends                                            |
 | **P8**     | Phys slice 3: batch queries at scale, sleeping/islands pressure; **crcbl-jobs core** (topic 21): work-stealing pool, par_for deterministic mode, mailbox/ring primitives, ECS parallel schedule, pipeline threads + timeline profiler; threads-1-vs-N hash test in CI                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | 5                 |                                                                                               |
-| **S3**     | **Sample: horde**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | —                 | 10k enemies @60; perf numbers recorded; web demo (smaller budget)                             |
+| **S3** ✅  | **Sample: horde** — the scale sample, and the one built **out of order**: the plan puts it after P7 and P8 and it was built on what exists instead, because milestone 3 is "raise counts until a budget breaks, file engine findings" and that is worth more before the two phases than after them. **Three slices merged**, listed in the status table above. See [sample/03-horde.md](sample/03-horde.md) for the measured budgets.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | —                 | 10k enemies @60; perf numbers recorded; web demo (smaller budget)                             |
 | **P9**     | Assets + scenes: `AssetSource` (Dir/Fetch), glTF import, RON scene format, hot reload; **material templates+instances + render↔surface link + `mat check` lint** (topic 37); `crcbl import`; glTF corpus e2e                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 6, 11, 12         | Sponza-class scene through full path                                                          |
 | **P10**    | UI slice 2 + debug tools: widget set, panels/splitters, the rest of the profiler HUD (its frame-timing/FPS core is pulled forward before S2 — see the standing requirements), inspector, console, **UI inspector**; music streaming + ducking + cue inspector; audio occlusion; **bloom** (18); **gamepad evdev+web + rebind UI** (19); **UI focus + spatial pad/kb navigation** (7 — arrows/WASD 1:1 dpad); **time-scrub debugger + replay browser + CI determinism verifier** (22)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | 7, 13             | Debug overlay live over loaded scene                                                          |
 | **S4**     | **Samples: hud complete + viewer** (hud skeleton exists since P4 as the UI fixture; viewer = native tool, web build stretch)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | —                 | Widget gallery + themes golden-framed; arbitrary glTF opens, panels work                      |
@@ -882,8 +1075,12 @@ gets recorded in the relevant crate's docs rather than worked around silently.
   edit to every existing page — the property S1B first exercised and S2
   measured: no existing page needed editing, and `build-pages.py` fails a demo
   page that does not `<!--include-->` the shared window. There are, however,
-  **two** one-line lists — the bar in `build-pages.py` and the wasm artifacts in
-  `build.sh` — and nothing keeps them in step. See S2 finding 9.
+  **four** places a new demo has to be named that nothing keeps in step — the
+  bar in `build-pages.py`, the wasm artifacts in `build.sh`, the game's two
+  assertions in `web/tools/browser-e2e.mjs`'s `EXPECTATIONS`, and a per-demo
+  step in `.github/workflows/pages.yml` (the gate reads one canvas, so it runs
+  once per demo). S3 found the last two by hitting them; `web/README.md`'s
+  "Adding a demo" now lists all six pieces. See S2 finding 9.
 - The demos are a **subdomain, not a subpath under the org site**, and that is
   deliberate. `www.kryptic.sh` is prose built from one template by a stdlib
   Python script; this site is build output — `cargo build --target wasm32`,

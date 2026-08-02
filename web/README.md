@@ -30,16 +30,23 @@ framework that owns policy — and it applies here for the same reason.
 
 ## Adding a demo
 
-Four things, none of them an edit to an existing demo:
+Six things, none of them an edit to an existing demo's page:
 
 1. a row in `build.sh`'s `DEMOS` and a line in `build-pages.py`'s `DEMOS`;
 2. `pages/<name>.html` — metadata, the game's own prose, and the three
    `<!--include …-->` directives every demo page carries;
 3. `demos/<name>/main.js` — roughly thirty lines binding this sample's
    `__crcbl_<name>_*` exports, plus what to press and what it saves;
-4. `demos/<name>/assets/manifest.json`, even if its `keys` are empty.
+4. `demos/<name>/assets/manifest.json`, even if its `keys` are empty;
+5. an entry in `tools/browser-e2e.mjs`'s `EXPECTATIONS` — the two assertions
+   that are about the _game_ rather than about the browser, which the gate
+   refuses to run without;
+6. a step in `.github/workflows/pages.yml`, because the gate reads one canvas
+   and therefore runs once per demo.
 
-The demo window itself is not in that list, which is the point:
+The index page's own card and call-to-action are prose and are not on that list.
+
+The demo window itself is not on it either, which is the point:
 `templates/demo-window.html` is the only copy of it, and `build-pages.py` fails
 the build for a demo page that renders its own instead.
 

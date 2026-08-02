@@ -1,0 +1,103 @@
+<!--meta
+{
+  "out": "demos/horde/index.html",
+  "slug": "horde",
+  "name": "Horde",
+  "title": "Horde — Crucible",
+  "description": "Horde, the scale sample, compiled to wasm32 and drawing through WebGPU.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/horde", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/horde\">apps/horde</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/horde/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● S3</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+  </div>
+  <h1><span class="grad">Horde</span></h1>
+  <p class="tagline">
+    A crowd that never stops arriving, a gun that aims itself, and five minutes
+    you are not going to get — the same <code>apps/horde</code> that builds a
+    native binary, running here.
+  </p>
+</header>
+
+<!--include demo-window-->
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>Move, and pick. The shooting is not your problem.</h3>
+  <ul class="keys">
+    <li class="key-row">
+      <span>Walk</span>
+      <span><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> or the arrows</span>
+    </li>
+    <li class="key-row">
+      <span>Fire</span>
+      <span>automatic — the nearest enemy in range, always</span>
+    </li>
+    <li class="key-row">
+      <span>Take an upgrade</span>
+      <span><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd>, or click one</span>
+    </li>
+    <li class="key-row">
+      <span>Start again</span>
+      <span><kbd>R</kbd> or <kbd>Space</kbd></span>
+    </li>
+    <!--include demo-loop-keys-->
+  </ul>
+</section>
+
+<section id="why-this-one">
+  <h2>why a fourth game</h2>
+  <h3>To find out what one tick costs per live body.</h3>
+  <p>
+    Breakout spawns its world once. Flappy runs a treadmill. Asteroids churns
+    hard and holds fifty things. This one holds a thousand and wants ten
+    thousand, and every one of them steers, asks the broadphase what it is
+    standing next to, and is drawn. It is the sample that exists to be
+    <em>measured</em> rather than played: a benchmark in a game costume.
+  </p>
+  <p>
+    The measurement is written down in
+    <a href="https://github.com/kryptic-sh/crcbl/blob/main/docs/plan/sample/03-horde.md">the sample's plan</a>,
+    with the conditions each number was taken under. The short version, on a
+    Radeon RX 7900 XTX: the <em>render</em> side carries ten thousand with room
+    to spare — a frame costs about a tenth of a millisecond of CPU whether the
+    field holds one enemy or ten thousand — and the <em>simulation</em> is what
+    breaks, because separation is one broadphase query per body per tick and
+    there is no job system to spread them over yet.
+  </p>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>The native sample, with four differences the browser forces.</h3>
+  <p>
+    Start-up is polled across several frames, because
+    <code>requestDevice</code> is a promise and the main thread cannot block on
+    it. The frame loop is driven by <code>requestAnimationFrame</code> out here
+    rather than by a <code>loop</code> inside the engine. The clock is the
+    browser's, because <code>wasm32-unknown-unknown</code> has no
+    <code>Instant</code>. And your longest run lives in the Origin Private File
+    System instead of <code>~/.config</code>.
+  </p>
+  <p>
+    Everything else — the ECS, the fixed-tick server, the physics, the render
+    graph, the spatial audio — is the same code the native build runs. The whole
+    crowd is <em>one</em> draw call: the player, all three enemy kinds and the
+    experience gems share a single sprite sheet at a single frame size, so the
+    number of batches a frame costs does not move when the field grows. Press
+    <kbd>F3</kbd> and the panel will tell you how many of the field survived the
+    view cull and how many draws it took.
+  </p>
+  <!--include demo-console-note-->
+</section>
+<!--/body-->

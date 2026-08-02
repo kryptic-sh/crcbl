@@ -33,10 +33,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   is by construction a hit. Aiming is a third, at the weapon's range, instead of
   a scan of the enemy list. The weapon itself is segment CCD.
 
-  Provisional numbers, simulation only, single-threaded, release, on a Ryzen 9
-  9950X3D: 0.62 ms/tick at 1 000 enemies, 3.85 at 5 000, 18.43 at 10 000 —
-  against a 60 Hz budget of 16.67 ms. Recorded with their conditions in
-  `docs/plan/sample/03-horde.md`; the real measurement is the scale sub-slice's.
+  Provisional numbers were taken here and **superseded by the scale sub-slice
+  below**, which measures a fixture that fits inside the arena and which
+  separates a spread crowd from a converged one. Both sets are in
+  `docs/plan/sample/03-horde.md` with their conditions.
 
   Two divergences from asteroids are deliberate. **The gun fires after the bolt
   sweep**, because a projectile swept on the tick it was created is swept from a
@@ -80,6 +80,69 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   digit key into the action map rather than calling into the game. The freeze
   costs one pass on the tick it opens — a zero velocity written to the player,
   every enemy and every bolt — rather than a branch on the tick's hot path.
+
+- **horde** (`apps/horde`): audio, the longest run, the browser demo, and the
+  scale measurement the sample exists for. Five procedural spatial cues — the
+  gun, an enemy coming apart, a gem banked, a level gained and the player's own
+  end — with the listener **on the player**, which is the first sample whose
+  listener moves. The longest run survived is kept in `~/.config/horde/best.bin`
+  or the browser's Origin Private File System, in whole seconds so the record
+  compares as the `m:ss` the HUD shows. The demo is live at
+  `https://crcbl.kryptic.sh/demos/horde/` and the browser gate covers it at
+  26/26, alongside the other three.
+
+  **`crcbl-audio` has no voice limit, and this is the first sample that could
+  not ignore it.** A kill is a cue and a gem is a cue against a fire cooldown
+  whose floor is a twentieth of a second, so a late run raises about forty a
+  second and each is a voice that lives until it runs out. The sample caps
+  itself at sixteen, refuses the newest, and counts the refusals — and keeps
+  counting the _cue_, because "did this happen" and "was there a speaker free"
+  are different questions and only the first is what a test should be able to
+  ask.
+
+  Two flags carry the measurement, and both are in the shipped binary because
+  the numbers have to be reproducible from a command line: **`--prefill N`**
+  stages `N` enemies over the whole arena before the first frame (the spawner
+  would take over ten minutes to reach the plan's target and nothing survives
+  that long) and raises `--max-enemies` to fit them; **`--wall-clock`** drives a
+  headless run from the real monotonic clock, so the debug panel's frame-timing
+  module measures the frame instead of reporting the fixed step a headless clock
+  hands it. The panel also gains this sample's own `scene` section — field,
+  culled, drawn, batches — so the numbers the sample's argument rests on are
+  readable in the running game.
+
+  **The measurement, with its conditions in `docs/plan/sample/03-horde.md`.** On
+  a Radeon RX 7900 XTX (radv), release, headless offscreen ring at 960 × 720,
+  single-threaded:
+  - **The render side is flat and the exit criterion is met.** CPU frame time
+    0.096 ms on an empty field and on a field of a thousand, and 0.120 ms with
+    ten thousand — nine thousand more enemies for 24 µs a frame, 0.14 % of a
+    16.67 ms budget. With the driver taken out (`--backend null`) the game's own
+    share is 0.005 ms to 0.033 ms. The `sprites` GPU pass goes 0.006 ms to 0.023
+    ms.
+  - **The batching claim holds.** Two draw calls at every count, and still two
+    over ten thousand sprites with the whole field packed inside the view so
+    that nothing is culled.
+  - **The transparent margin is visible and does not matter.** The average enemy
+    fills 31.5 % of its shared 34 × 34 quad, weighted by the mix the spawner
+    deals, so about 12 µs of the sprite pass is margin at a full screen of the
+    crowd — 0.07 % of the budget, against a grouping pass and an emission order
+    to get wrong.
+  - **The tick is what breaks, and it breaks on _density_ rather than on
+    count.** Ten thousand enemies cost 14.66 ms a tick spread over the arena and
+    84.09 ms once the crowd has converged on the player. Separation is one
+    broadphase query per body and a query costs what its answer costs; a horde
+    converges by construction. So the sample carries about ten thousand spread
+    and about three thousand converged, and the plan's single figure was always
+    going to be one or the other.
+
+  **What that says about P7 and P8**, which is the reason the sample was built
+  out of order in the first place: P8 (`crcbl-jobs`, the parallel schedule) is
+  worth the whole of the gap — the steering pass is order-independent by
+  construction and has no shared mutable state — and P7 (GPU culling, indirect
+  draws, instance deltas) can return at most 0.7 % of a frame here, because the
+  CPU cull it deletes costs 28 µs. The roadmap had horde waiting on P7; it was
+  waiting on P8.
 
 - **crcbl-render**: `Sprite::rotation` — sprites can turn. A per-sprite angle in
   radians, counter-clockwise, about the centre of the sprite's own `rect`. It

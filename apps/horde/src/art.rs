@@ -185,6 +185,46 @@ pub struct Scene {
     /// player shares the actors sheet, so putting the shots between the crowd
     /// and the player would split the field's one batch into three.
     shots: Layer,
+    /// What the last [`Scene::build`] produced. See [`SceneStats`].
+    stats: SceneStats,
+}
+
+/// What one [`Scene::build`] cost and produced.
+///
+/// **The numbers this sample exists to make visible**, which is why they are a
+/// debug-panel module rather than a comment: the claim in this module's header
+/// is that the batch count does not move with the horde, and the claim in
+/// `docs/plan/sample/03-horde.md` is that the CPU cost of a frame is flat from
+/// one thousand enemies to ten thousand. Neither can be read off a frame rate.
+///
+/// [`SceneStats::batches`] is counted here rather than asked of
+/// [`SpriteRenderer`], which has no public batch count — so it is this module's
+/// **mirror** of `sprite_pass`'s rule (a batch is a run of consecutive sprites
+/// naming one sheet) rather than the pass's own answer. That is a real
+/// weakness and `docs/backlog.md` records it: a change to the engine's batching
+/// rule would leave this number right and the picture wrong.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SceneStats {
+    /// Enemies, gems and bolts the simulation handed over, before the cull.
+    pub field: usize,
+    /// How many of those the view box rejected. The work P7's GPU culling is
+    /// there to delete, counted so it can be seen.
+    pub culled: usize,
+    /// Sprites that survived it, which is what the pass uploads and draws.
+    /// Always at least one, because the player is never culled.
+    pub drawn: usize,
+    /// Draw calls the sprite pass will make for them.
+    pub batches: usize,
+}
+
+impl crcbl::ui::DebugModule for SceneStats {
+    fn debug_section(&self, section: &mut crcbl::ui::DebugSection) {
+        section.set_title("scene");
+        section.row("field", format_args!("{}", self.field));
+        section.row("culled", format_args!("{}", self.culled));
+        section.row("drawn", format_args!("{}", self.drawn));
+        section.row("batches", format_args!("{}", self.batches));
+    }
 }
 
 impl Scene {
@@ -235,7 +275,14 @@ impl Scene {
             crowd,
             hero,
             shots,
+            stats: SceneStats::default(),
         })
+    }
+
+    /// What the last [`Scene::build`] produced.
+    #[must_use]
+    pub const fn stats(&self) -> SceneStats {
+        self.stats
     }
 
     /// This frame's sprites, back to front, culled to the view.
@@ -305,11 +352,42 @@ impl Scene {
                 }),
         );
 
-        self.stack.resolve([
+        let frame = self.stack.resolve([
             (camera.x as f32) * TEXELS_PER_UNIT,
             (camera.y as f32) * TEXELS_PER_UNIT,
-        ])
+        ]);
+
+        // Counted after `resolve`, on the list the pass will actually be handed:
+        // the layer stack decides the emission order and the emission order is
+        // what batching depends on, so counting the pieces as they were pushed
+        // would be counting a different list.
+        let field = render.enemies.len() + render.pickups.len() + render.bolts.len();
+        // `- 1` for the player, which is in `frame` and not in `field`.
+        let drawn = frame.len();
+        self.stats = SceneStats {
+            field,
+            culled: field + 1 - drawn,
+            drawn,
+            batches: batches(frame),
+        };
+        frame
     }
+}
+
+/// How many draw calls a resolved frame will cost.
+///
+/// `SpriteRenderer` starts a new batch whenever consecutive sprites name a
+/// different sheet — `A A B A` is three, not two — so this is a run count and
+/// not a distinct-sheet count. See [`SceneStats`] for why it is a copy of that
+/// rule rather than a call into it.
+fn batches(frame: &[Sprite]) -> usize {
+    if frame.is_empty() {
+        return 0;
+    }
+    1 + frame
+        .windows(2)
+        .filter(|w| w[0].sheet != w[1].sheet)
+        .count()
 }
 
 // ---------------------------------------------------------------------------
@@ -858,6 +936,230 @@ mod tests {
             uvs.sort_unstable();
             uvs.dedup();
             assert_eq!(uvs.len(), 3, "two enemy kinds share a frame");
+        });
+    }
+
+    /// **A batch is a run, not a sheet**, which is `sprite_pass`'s rule and the
+    /// one [`batches`] has to mirror exactly.
+    ///
+    /// Written because the ten-thousand test below **cannot** tell the two
+    /// apart: this game emits its two sheets in one order, so a run count and a
+    /// distinct-sheet count agree on every frame it produces. `A A B A` is
+    /// where they differ, and it is the shape a future layer order would
+    /// produce — so the rule is pinned here rather than left to be discovered
+    /// by a frame that draws in the wrong order and reports the wrong number.
+    #[test]
+    fn a_batch_is_a_run_of_one_sheet_and_not_a_distinct_sheet_count() {
+        with_scene(|scene| {
+            let sprite = |art: FrameArt| Sprite {
+                sheet: art.sheet,
+                rect: [0.0; 4],
+                rotation: 0.0,
+                uv: art.uv,
+                tint: UNTINTED,
+            };
+            let (a, b) = (sprite(scene.player), sprite(scene.bolt));
+            assert_ne!(a.sheet, b.sheet, "the fixture needs two sheets");
+
+            assert_eq!(batches(&[]), 0);
+            assert_eq!(batches(&[a]), 1);
+            assert_eq!(batches(&[a, a, a]), 1);
+            assert_eq!(batches(&[a, b]), 2);
+            assert_eq!(
+                batches(&[a, a, b, a]),
+                3,
+                "A A B A is three draws; a distinct-sheet count says two",
+            );
+            assert_eq!(batches(&[a, b, a, b]), 4);
+        });
+    }
+
+    /// **Ten thousand enemies are still two batches**, which is the number the
+    /// plan's exit criteria ask for and the one the 34-sprite test above cannot
+    /// give.
+    ///
+    /// The whole field is packed *inside* the view so nothing is culled: a
+    /// version that let the cull do its job would assert two batches over the
+    /// fifteen hundred that survive, which is the same claim at a tenth of the
+    /// pressure. The counting rule is [`batches`], this module's mirror of
+    /// `sprite_pass`'s — see [`SceneStats`] and `docs/backlog.md` for why that
+    /// is weaker than asking the pass.
+    #[test]
+    fn ten_thousand_visible_enemies_are_still_two_batches() {
+        const COUNT: usize = 10_000;
+        with_scene(|scene| {
+            // A grid inside the view box, which is 2 * view_half_width by
+            // 2 * VIEW_HALF_HEIGHT around a player at the origin.
+            let half_x = crate::gpu::view_half_width(EXTENT) - 0.5;
+            let half_y = VIEW_HALF_HEIGHT - 0.5;
+            let cols = 125usize;
+            let rows = COUNT / cols;
+            let kinds = [EnemyKind::Brute, EnemyKind::Grunt, EnemyKind::Runner];
+            let enemies: Vec<_> = (0..COUNT)
+                .map(|i| {
+                    let (col, row) = (i % cols, i / cols);
+                    enemy(
+                        // Interleaved, because that is what `swap_remove` leaves
+                        // behind and the claim is that the order does not matter.
+                        kinds[i % 3],
+                        DVec3::new(
+                            -half_x + 2.0 * half_x * (col as f64 / (cols - 1) as f64),
+                            -half_y + 2.0 * half_y * (row as f64 / (rows - 1) as f64),
+                            0.0,
+                        ),
+                    )
+                })
+                .collect();
+            let render = RenderState {
+                player: DVec3::ZERO,
+                enemies,
+                bolts: (0..8)
+                    .map(|i| crate::game::BoltView {
+                        position: DVec3::new(i as f64 * 0.5, 0.0, 0.0),
+                    })
+                    .collect(),
+                ..RenderState::default()
+            };
+
+            let frame = scene.build(&render, EXTENT).to_vec();
+            let stats = scene.stats();
+            assert_eq!(
+                stats.culled, 0,
+                "the fixture put {} of the field outside the view",
+                stats.culled,
+            );
+            assert_eq!(stats.field, COUNT + 8);
+            assert_eq!(stats.drawn, COUNT + 8 + 1, "the player is drawn too");
+            assert_eq!(frame.len(), stats.drawn);
+            assert_eq!(
+                stats.batches, 2,
+                "{} sprites came out as {} batches",
+                stats.drawn, stats.batches,
+            );
+            // …and the two really are the actors sheet then the bolt sheet, or
+            // "two batches" is one sheet drawn twice.
+            let mut sheets: Vec<_> = frame.iter().map(|s| s.sheet).collect();
+            sheets.dedup();
+            assert_eq!(sheets.len(), 2);
+            assert_eq!(sheets[1], scene.bolt.sheet, "the shots come last");
+        });
+    }
+
+    /// **How much of the shared frame is transparent margin**, weighted by the
+    /// mix the spawner actually deals.
+    ///
+    /// The number `docs/plan/sample/03-horde.md` quotes when it says what the
+    /// one-sheet decision costs, pinned here so it is checkable rather than
+    /// recomputed by hand every time someone redraws a silhouette. Everything in
+    /// it is derived — the silhouettes from the baked bytes, the weights from
+    /// [`EnemyKind::from_roll`] — so a kind that changed size, or a spawn table
+    /// that changed the mix, moves this number rather than leaving the doc
+    /// quietly wrong.
+    ///
+    /// A transparent fragment is **not** free: `SpriteRenderer` has no alpha
+    /// discard, so the margin is rasterised and blended exactly like the art.
+    /// That is why this is a fill number and not a memory one.
+    #[test]
+    fn two_thirds_of_the_shared_frame_is_transparent_margin() {
+        let actors = baked("actors", ACTORS_PNG, ACTORS_JSON);
+        // The quad every actor is drawn in, in texels — the same number
+        // `the_art_bakes_to_the_sheets_it_declares` derives, off the constant
+        // rather than off the sheet, so a sheet baked at the wrong size fails
+        // there rather than making this pass against itself.
+        let side = 2.0 * ACTOR_HALF_EXTENT * f64::from(TEXELS_PER_UNIT);
+        let quad = side * side;
+
+        // The spawner's own mix, sampled off `from_roll` rather than copied out
+        // of it: the thresholds are that function's business.
+        const ROLLS: usize = 100_000;
+        let mut weight = [0.0f64; 3];
+        for i in 0..ROLLS {
+            let kind = EnemyKind::from_roll(i as f64 / ROLLS as f64);
+            weight[kind_index(kind)] += 1.0 / ROLLS as f64;
+        }
+        assert!(
+            (weight.iter().sum::<f64>() - 1.0).abs() < 1e-9,
+            "the mix does not sum to one: {weight:?}",
+        );
+
+        let mut opaque = 0.0;
+        for kind in EnemyKind::ALL {
+            let (w, h) = silhouette(&actors, enemy_frame(kind));
+            opaque += weight[kind_index(kind)] * f64::from(w) * f64::from(h);
+        }
+        let fraction = opaque / quad;
+        assert!(
+            (0.30..0.33).contains(&fraction),
+            "the average enemy fills {:.1}% of its {side} x {side} quad; \
+             docs/plan/sample/03-horde.md says 31.5%",
+            fraction * 100.0,
+        );
+        // The brute is the one that fills its frame exactly — the frame size is
+        // its collider — so the margin is entirely the two small kinds'.
+        let (bw, bh) = silhouette(&actors, enemy_frame(EnemyKind::Brute));
+        assert_eq!(
+            (f64::from(bw), f64::from(bh)),
+            (side, side),
+            "the frame is no longer the brute's own size, so the margin moved",
+        );
+    }
+
+    /// **The cull is what keeps the drawn count bounded by the screen**, which
+    /// is the other half of the flat-cost claim: the field grows, the frame
+    /// does not.
+    ///
+    /// A `Scene::build` that stopped culling would pass every batch assertion
+    /// above and hand the pass ten thousand instances a frame.
+    #[test]
+    fn a_field_larger_than_the_view_is_culled_to_the_view() {
+        with_scene(|scene| {
+            // The arena, filled evenly — the same shape `Game::stage_field`
+            // produces, which is the fixture every number in
+            // `docs/plan/sample/03-horde.md` was taken through.
+            let (half_x, half_y) = (
+                crate::game::ARENA_HALF_WIDTH,
+                crate::game::ARENA_HALF_HEIGHT,
+            );
+            let cols = 116usize;
+            let count = 10_000usize;
+            let rows = count.div_ceil(cols);
+            let enemies: Vec<_> = (0..count)
+                .map(|i| {
+                    let (col, row) = (i % cols, i / cols);
+                    enemy(
+                        EnemyKind::Grunt,
+                        DVec3::new(
+                            -half_x + 2.0 * half_x * (col + 1) as f64 / (cols + 1) as f64,
+                            -half_y + 2.0 * half_y * (row + 1) as f64 / (rows + 1) as f64,
+                            0.0,
+                        ),
+                    )
+                })
+                .collect();
+            let render = RenderState {
+                player: DVec3::ZERO,
+                enemies,
+                ..RenderState::default()
+            };
+            scene.build(&render, EXTENT);
+            let stats = scene.stats();
+            assert_eq!(stats.field, count);
+            assert_eq!(
+                stats.field + 1,
+                stats.culled + stats.drawn,
+                "the cull's own arithmetic does not close",
+            );
+
+            // The view is about 37 x 28 units of a 96 x 72 arena, so a little
+            // over an eighth of it. The bound is loose on purpose — the exact
+            // number depends on the grid — but a cull that rejected nothing, or
+            // everything, fails it.
+            assert!(
+                stats.drawn > 500 && stats.drawn < count / 4,
+                "{} of {count} survived the cull",
+                stats.drawn,
+            );
+            assert_eq!(stats.batches, 1, "one sheet, one batch");
         });
     }
 

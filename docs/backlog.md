@@ -20,27 +20,27 @@ carries what has no phase yet.
   after next rather than after it. Not done in the rotation slice because it
   would have put an API refactor of every caller inside a rendering change.
 
-- **The browser entry point was to be written once before S2. THE DEADLINE WAS
-  MISSED.** Finding 2 in that list said so in as many words — "owed before S2,
-  which will otherwise write it a third time" — and S2 wrote it a third time.
-  `apps/breakout/src/web.rs`, `apps/flappy/src/web.rs` and
-  `apps/asteroids/src/web.rs` are now the same file with three different symbol
-  prefixes.
+- **The browser entry point was to be written once before S2, then before S3.
+  THE DEADLINE HAS NOW BEEN MISSED TWICE.** Finding 2 in that list said so in as
+  many words — "owed before S2, which will otherwise write it a third time" — S2
+  wrote it a third time and re-owed it before S3, and S3 wrote a fourth.
+  `apps/breakout/src/web.rs`, `apps/flappy/src/web.rs`,
+  `apps/asteroids/src/web.rs` and `apps/horde/src/web.rs` are now the same file
+  with four different symbol prefixes.
 
   **What it costs now, which is the part that changed.** The fix used to be
   "write it once, adopt it in two places". It is now one new shared
-  implementation plus **three** call sites to migrate, three sets of `STATUS_*`
-  constants to delete, three prefixes to thread through the macro, and three
+  implementation plus **four** call sites to migrate, four sets of `STATUS_*`
+  constants to delete, four prefixes to thread through the macro, and four
   browser gates (`CRCBL_WEB_E2E_DEMO=…`) to re-run before it can be believed.
-  Every sample after this adds one more of each. The three copies have barely
-  drifted yet: flappy's and asteroids' were diffed with the sample name
-  substituted out, and the executable difference is one extra field in the
-  `finish` log line. The rest is doc-comment wording, including five link fixes
-  asteroids' copy needed and the other two still need — see the rustdoc gap
-  below. That is the one piece of good news and it will not survive the next
-  divergent edit: `apps/*/src/audio.rs` and `apps/*/src/{best,high_score}.rs`
-  are the same duplication one generation older and have already diverged in
-  their public API, their type names and their file names.
+  Every sample after this adds one more of each. The four copies have still
+  barely drifted — horde's was produced from asteroids' by substituting the
+  sample name, and the executable difference is one `log::info!` line reporting
+  a different summary — which is the one piece of good news and is now the
+  _only_ piece: `apps/*/src/audio.rs` and `apps/*/src/{best,high_score}.rs` are
+  the same duplication one generation older and have diverged in their public
+  API, their type names, their file names and, as of horde, in **what they
+  store** (three keep a score; horde keeps a time in whole seconds).
 
   What it would take: a crate (or a `crcbl` module) owning the `Stage` state
   machine, the log queue and the `prepare`/`boot`/`frame`/`status`/`shutdown`
@@ -53,19 +53,13 @@ carries what has no phase yet.
   it settles the shape question in the affirmative: the sample-specific part
   turned out to be ten literal symbol names and two strings, and nothing else.
 
-  Why S2 did not do it: it is an engine-API change to `crates/` plus edits to
-  two samples this slice was not otherwise touching, landing in the same commit
-  as asteroids' audio, save file and demo page. The JS half was done as its own
-  piece of work for that reason and the Rust half should be too. **It is now
-  owed before S3 (horde), on the same terms and with the same warning.**
-
-  **Status after horde 18a: still owed, and not yet violated.** That sub-slice
-  is the simulation and a native window — there is no `apps/horde/src/web.rs`,
-  so there is no fourth copy. `apps/horde/Cargo.toml` and `src/lib.rs` are
-  already shaped for one (`crate-type = ["cdylib", "rlib"]`, a lib the bin
-  links) so that adopting a shared implementation is adding a module rather than
-  restructuring the package. The deadline is now the horde **web** sub-slice,
-  which is the last point at which the count is three.
+  Why S2 and S3 both declined: it is an engine-API change to `crates/` plus
+  edits to samples the slice was not otherwise touching, landing in the same
+  commit as that game's audio, save file, demo page and — for S3 — its scale
+  measurement. The JS half was done as its own piece of work for that reason and
+  the Rust half should be too. **Do not attach it to the next sample slice.** It
+  has now been attached to two of them and slipped both times; it wants a slice
+  of its own, with the four browser gates as its exit criterion.
 
 ## The rustdoc gate never documents the wasm target, so every `web.rs` is unchecked
 
@@ -82,11 +76,14 @@ Measured, not assumed.
 `unresolved link to crcbl_shell` (the crate is reachable only as
 `crcbl::shell`), public docs linking to the private `WebLogger`, `Stage` and
 `crate::best`, and a redundant explicit link target. `apps/asteroids/src/web.rs`
-had the same set and was fixed as it was written, so it passes; the other two
-are untouched because this slice's write scope did not include them.
+had the same set and was fixed as it was written, so it passes;
+`apps/horde/src/web.rs` inherited the fixed version and was checked the same way
+(`cargo doc -p horde --no-deps --target wasm32-unknown-unknown` with
+`RUSTDOCFLAGS="-D warnings"` is clean). The other two are untouched because
+neither slice's write scope included them.
 
 The fix is one line in `.github/workflows/ci.yml` — a second `cargo doc` step
-with `--target wasm32-unknown-unknown` over the three sample crates — plus the
+with `--target wasm32-unknown-unknown` over the four sample crates — plus the
 nine link fixes it would then demand. Not done here because adding a required CI
 job that fails on two crates this slice may not edit would land the tree red.
 
@@ -296,14 +293,18 @@ The modular panel is built and all three samples switch it on with F3 (or
   the shell and the HAL already meet — but that crate was out of scope for the
   slice that built this. Fold it in when the fourth sample arrives, at the
   latest.
-- **The panel's own cost is unmeasured.** It is designed not to perturb what it
-  measures — `DebugPanel::add` returns immediately while hidden so no module's
-  `debug_section` runs and no string is built, and section/row allocations are
-  reused across frames — but no benchmark says what it costs when visible.
-  `07-ui-debug.md`'s exit criterion is "<0.5 ms GPU for the debug overlay at
-  1080p", and that number has never been taken. The CPU side is one `DrawList`
-  text command per row (two allocations each, because `DrawList::text` takes an
-  owned `String`) plus one background rect.
+- **The panel's own cost is measured at 960 × 720 and still not at 1080p.**
+  Horde's scale runs took it: with ten thousand enemies on the field and the
+  panel showing three sections, switching it on moves the `ui-composite` GPU
+  pass from 0.004 ms to 0.005 ms and leaves the CPU frame time inside its own
+  noise (0.107/0.109 ms off against 0.100/0.101 ms on, two runs each — the
+  "with" runs came out _lower_, which is the noise floor rather than a saving).
+  `07-ui-debug.md`'s criterion is **"<0.5 ms GPU at 1080p"** and that extent has
+  not been run, so the criterion is not closed; it is two orders of magnitude
+  the right side of it at three quarters the pixels. Conditions: release,
+  `--backend vk` on radv (RX 7900 XTX), headless offscreen ring,
+  `--wall-clock --tick-hz 1 --frames 900 --prefill 10000`, `PassTimers::latest`
+  for the GPU number and the panel's own `FrameStats` mean for the CPU one.
 - **The overlay starts hidden in a release wasm build.** The default is
   `cfg!(debug_assertions)`, which is sample rule 4's "on by default in dev
   builds" taken literally; the demos on `crcbl.kryptic.sh` are release builds,
@@ -640,7 +641,22 @@ slice was the sample.
   by construction and every enemy could be done on a different thread. There is
   no `crcbl-jobs` (P8) and no parallel ECS schedule, so it is a `for` loop. This
   is the entry the roadmap already predicted; it is repeated here with the
-  evidence that the _shape_ is right, which the roadmap could not know.
+  evidence that the _shape_ is right, which the roadmap could not know — and
+  with a number: **14.66 ms a tick at ten thousand spread, 84.09 ms converged**,
+  against a 16.67 ms budget. Sixteen cores is the difference between the sample
+  hitting its target and missing it by 5×, and there is no shared mutable state
+  in the pass to stop them.
+
+- **A broadphase query costs what its _answer_ costs, so the tick's cost tracks
+  local density rather than entity count.** The same ten thousand enemies cost
+  14.66 ms a tick spread over the arena and 84.09 ms after eight seconds of
+  converging on the player — measured, both columns, in
+  `docs/plan/sample/03-horde.md`. This is not a complaint about `crcbl-phys`; it
+  is the fact any budget stated in "N agents" is wrong about, and it is why
+  18a's provisional 8–9k figure was both too optimistic (it never let the crowd
+  converge) and taken on a fixture that at ten thousand described a field larger
+  than the arena. **Anything that quotes a per-agent cost for this crate has to
+  say what the neighbourhoods looked like.**
 
 - **The neighbour sum's order is the BVH's traversal order, and horde chose to
   live with it.** Floating-point addition is not associative, so the separation
@@ -687,47 +703,83 @@ it wants its own before/after on asteroids' own suite.
 
 ## What horde still owes
 
-Slices 18a and 18b are the core loop, the art and the progression.
-`docs/plan/sample/03-horde.md` carries the sub-slice split and the provisional
-scale numbers; this is what was raised and not finished.
+S3 is done — the core loop, the art and progression, and now audio, the longest
+run, the browser demo and the scale measurement. `docs/plan/sample/03-horde.md`
+carries the numbers and their conditions; this is what was raised and not
+finished. Entries the measurement closed have been deleted rather than
+annotated.
 
-- **The plan's 10 000-enemy exit criterion is not met and was not attempted.**
-  `DEFAULT_MAX_ENEMIES` is 1 500, and `--max-enemies` exists so raising it needs
-  no rebuild. The one measurement taken says the _simulation_ carries roughly
-  8–9k at 60 Hz on the reference machine and misses 10k by about 10%. The
-  **render** side is now the instanced sprite path rather than the `DrawList`
-  placeholder, and is still unmeasured: nothing has drawn more than a few
-  hundred enemies at once. Both halves belong to the scale sub-slice.
+- **The plan's exit criteria are internally inconsistent and need rewriting, not
+  answering.** "10 000 enemies at 60 Hz tick" is true of a crowd spread over the
+  arena (14.66 ms of a 16.67 ms budget) and false of the same crowd converged on
+  the player (84.09 ms). The difference is a factor of 5.7 at a fixed count,
+  because separation is a broadphase query whose cost is the size of its answer;
+  a horde converges by construction, so the second number is the one the game
+  spends its time at. Whoever owns the criterion has to say **which crowd**.
 
-- **The batching claim is argued and not measured.** `art::Scene` puts the
-  player, all three enemy kinds and the gems in one sheet so the field is one
-  `SpriteRenderer` batch whatever order it is emitted in, and the shot in a
-  second — two batches, both constant in the size of the horde. That is asserted
-  on a 34-sprite field by `an_interleaved_field_of_every_kind_is_two_batches`
-  and by nothing at 10k, and the _cost_ of the choice — a runner is 13 texels of
-  art in a 34-texel quad, so roughly seven times the fill — has been reasoned
-  about (bounded by screen area times packing density, under 2× the framebuffer)
-  and never profiled. The scale sub-slice should measure both: batch count per
-  frame, and whether the transparent margin is visible in a GPU pass timing at a
-  full screen of grunts. The alternative it would be measured against is a sheet
-  per kind at each kind's own frame size, which needs an emission order and a
-  grouping pass over the crowd.
+- **"Playable and mildly fun for 5 minutes" cannot be true of this arena at the
+  plan's count.** Ten thousand enemies in 96 × 72 units is 0.82 units apart,
+  several inside `PLAYER_RADIUS` on frame zero, and contact damage is a rate
+  summed over everything touching — so `--prefill 5000` and above kills the
+  player in under a second. A default run, spawner only, dies at about 24
+  seconds with 46 things on the field. Two ways out and neither is obviously
+  right: **a bigger arena** (the density falls as the area grows, and the follow
+  camera and `clamp_to_arena` already handle any size, but a 300 × 225 arena
+  changes what the game _is_ — the walls are what makes kiting finite), or
+  **admit the count is a benchmark target** and let the exit criterion carry two
+  numbers, one for the budget and one for the game. Nobody has decided.
 
-- **The cull is per-sprite on the CPU, and it is `N` per frame.** `Scene::build`
-  walks every enemy, every gem and every bolt and tests four comparisons against
-  the view box. At 10k that is 10k rejections a frame for a field where most are
-  off screen, which is exactly the work P7's GPU culling exists to delete. There
-  is no spatial index in front of it — the broadphase has one, and using it
-  would mean a render pass querying the physics world, which is a coupling
-  nobody wants yet.
+- **`SpriteRenderer` has no batch count, so the sample's central claim is
+  checked against a copy of the rule.** `art::batches` counts runs of
+  consecutive sprites naming one sheet, which is exactly what
+  `crcbl_render::sprite_pass::batch` does; `SpriteRenderer` exposes
+  `sheet_count()` and nothing else.
+  `a_batch_is_a_run_of_one_sheet_and_not_a_distinct_sheet_count` pins the mirror
+  at `A A B A` = 3 — the case a distinct-sheet count gets wrong, and one this
+  game's own frames cannot produce, so it had to be written synthetically — but
+  nothing would notice the engine's rule changing underneath. Wanted: a
+  `batch_count()` beside `sheet_count()`, returning
+  `self.batches[self.frame].len()`. Three lines; not taken because `crates/` was
+  outside the slice's write scope.
+
+- **The CPU cull is still per-sprite and still `N` per frame**, and it is now
+  measured: 28 µs at ten thousand, of a 16.67 ms budget. That is the work P7's
+  GPU culling exists to delete, and the measurement says deleting it is worth
+  0.17 % of a frame to this sample. Keep it as the reason P7 exists for _other_
+  scenes; it is not the reason it exists for this one.
+
+- **`crcbl-audio` has no voice limit, no priority and no stealing.**
+  `apps/horde/src/audio.rs` caps itself at `MAX_VOICES` = 16 and refuses the
+  newest voice, counting refusals in `Audio::dropped()`. Refusing the newest is
+  the crudest answer that is honest and it is audibly wrong in one case: a
+  player's _death_ cue can be refused by sixteen kill cues raised on the same
+  tick. Wanted in the crate: a voice budget with a priority, so an important cue
+  steals the oldest cheap one. Nothing shows `dropped()` yet — it is on `Audio`
+  and not on the debug panel.
+
+- **Nothing has listened to the five cues**, on any device. They are synthesised
+  deterministically from a fixed seed, so a golden buffer is possible and there
+  is not one. What the tests assert is that each cue fires, that it carries the
+  position of the thing that raised it, that the listener is the player rather
+  than the origin, and that the level cue actually sweeps in pitch. No test can
+  tell a good kill sound from a bad one.
+
+- **The HUD line can still outgrow its backdrop at extreme settings.**
+  `the_hud_fits_the_panel_it_is_drawn_on` measures both lines through the real
+  `FontAtlas` at a stated worst case — a five-minute run at the shipped enemy
+  cap, level 18, 2 048 kills — and requires them inside `HUD_PANEL_RIGHT`. It
+  does **not** bound `--max-enemies 10000` with a twenty-minute soak behind it:
+  five-digit fields are wider than the panel and the text would run off the end
+  of it, which is what the browser gate's canvas capture caught the last time
+  the panel was too narrow. A real fix is a HUD that measures itself and sizes
+  its own backdrop, which is a `crcbl-ui` widget rather than a `DrawList::rect`.
 
 - **Nothing enforces that the arena is a plane.** Positions are `DVec3`,
-  everything the game produces sits at `z = 0` (`spawn_offset` and the seek and
-  separation vectors are all planar), and `clamp_to_arena` passes `z` through
-  untouched. A body given a non-zero `z` would separate in depth and never be
-  brought back — which a test fixture using `DVec3::splat` did, and which is how
-  this was noticed. Either clamp `z` too or make the fact a type. Not a live
-  bug: no production path can produce one.
+  everything the game produces sits at `z = 0`, and `clamp_to_arena` passes `z`
+  through untouched. A body given a non-zero `z` would separate in depth and
+  never be brought back — which a test fixture using `DVec3::splat` did, and
+  which is how this was noticed. Either clamp `z` too or make the fact a type.
+  Not a live bug: no production path can produce one.
 
 - **The horde does not avoid the walls, it is pushed into them.** Seek is a
   straight line to the player and separation knows nothing about the arena, so a
@@ -738,9 +790,9 @@ scale numbers; this is what was raised and not finished.
 
 - **Contact damage has no invulnerability frames**, by choice: it is a damage
   _rate_ summed over whatever is touching, so a stack of enemies is worse than
-  one and there is no per-enemy timer on the hot path. The consequence is that
-  there is no way to survive being surrounded for even a moment, which is a
-  difficulty decision nobody has played against yet.
+  one and there is no per-enemy timer on the hot path. The consequence is now
+  measured rather than predicted — see the density entry above — and it is what
+  makes the plan's count unplayable in this arena.
 
 - **The spawn ring is relative to the player and clamped into the arena**, so a
   player standing in a corner gets enemies materialising on the wall beside them
@@ -753,8 +805,8 @@ scale numbers; this is what was raised and not finished.
   radius the collection query runs at, so a gem inside it is banked on the tick
   it comes into range and one outside it is not. The genre's version drifts the
   gem to the player, which reads far better and which would be `P` steering
-  updates a tick on top of the `N` the sample already measures. Left out
-  deliberately: the point of this slice's pool is that each upgrade is one line.
+  updates a tick on top of the `N` the sample measures. Left out deliberately:
+  the point of this slice's pool is that each upgrade is one line.
 
 - **A gem that is never collected is lost, silently.** `MAX_PICKUPS` is 512 and
   a kill on a full field drops nothing; `Game::pickups_dropped` counts the
@@ -783,16 +835,27 @@ scale numbers; this is what was raised and not finished.
   rotation is needed and no `atan2` runs per enemy per frame. It is the right
   trade at 10k and it does mean the crowd has no sense of heading.
 
-- **Not measured, not reviewed:** the windowed native path is compiled and never
-  run (no display in the build environment), so the follow camera, the sprite
-  pass, the three menus and the HUD layout have been checked by test and by
-  argument and by nobody's eyes **in the running game**. What _was_ looked at is
-  the art: the baked `actors.png` and `bolt.png` at 8× and composed into a crowd
-  at the exact on-screen scale the game draws at (25.71 px per world unit at
-  720p, so 1.29 screen pixels per texel), which is a picture of the real baked
-  bytes and not of the game. There is no golden image and no browser build.
-  Frame timings from a headless run are the _pass_ timings only, which measures
-  nothing.
+- **Not measured, not reviewed: the windowed native path.** It is compiled and
+  never run — there is no display in this environment — so the follow camera,
+  the sprite pass, the three menus and the HUD layout have been checked by test,
+  by argument, and now by a **browser**: the gate's canvas capture at 26/26 is a
+  picture of the real game, and a human has looked at it. What has still never
+  been seen is the _native_ window, and the fullscreen toggle against a real
+  compositor is the same gap the other three samples carry.
+
+- **Every scale number was taken on an offscreen image ring, not a swapchain.**
+  `--headless` gives `crcbl-vk` a `SurfaceTarget::Offscreen` rotation of images,
+  which exists precisely so that it is the same acquire/record/submit/present
+  path — but it is not a windowed present, it is not vsynced, and it is 960
+  × 720. A windowed 1440p run would raise the sprite pass's fill by about four
+  times, which on a 0.023 ms pass is still nothing, and nobody has taken it.
+
+- **There is no Tier B / browser scale number.** The exit criteria ask for one
+  ("Tier B/wasm gets its own smaller recorded budget") and the only browser this
+  repository can drive is Chromium's SwiftShader under Xvfb, which measures a
+  software rasteriser. It needs a machine with a real browser GPU and a way to
+  read `PassTimers` out of a wasm build — the second of which does not exist:
+  the demo has no way to report its frame timings to the page.
 
 - **Nothing checks that a `.crpix` texel lands on a whole screen pixel.** At
   `TEXELS_PER_UNIT` = 20 and a 720-pixel-high view of 28 world units, one texel

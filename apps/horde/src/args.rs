@@ -2,8 +2,14 @@
 //!
 //! ```text
 //! horde [--headless] [--frames N] [--tick-hz N] [--backend B] [--seed N]
-//!       [--max-enemies N]
+//!       [--max-enemies N] [--prefill N] [--wall-clock]
 //! ```
+//!
+//! The last two are the scale measurement's, and both exist because a headless
+//! run is otherwise unable to answer the plan's questions: nothing reaches ten
+//! thousand enemies by playing, and a headless run's clock is a fake one
+//! stepping exactly 1/60 s, so the debug panel's frame-timing module reports the
+//! step it was handed rather than the frame it measured.
 
 pub const USAGE: &str = "\
 horde — the engine's fourth game, and its scale sample
@@ -21,6 +27,15 @@ OPTIONS:
     --max-enemies <N>    Ceiling on live enemies (default 1500). The plan's
                          target is 10000; raising it is what the scale
                          sub-slice measures.
+    --prefill <N>        Stage N enemies over the whole arena before the first
+                         frame, and raise --max-enemies to fit them. The scale
+                         measurement's fixture: the spawner would take over ten
+                         minutes to reach the plan's target and nothing lives
+                         that long.
+    --wall-clock         Drive a headless run from the real monotonic clock, so
+                         the debug panel's frame timing measures the frame
+                         rather than reporting the fixed step a headless clock
+                         hands it. Windowed runs already do this.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'
@@ -35,6 +50,11 @@ pub struct Options {
     pub seed: u64,
     /// The ceiling on live enemies. See [`crate::game::DEFAULT_MAX_ENEMIES`].
     pub max_enemies: usize,
+    /// How many enemies to stage before the first frame. See
+    /// [`crate::game::Game::stage_field`].
+    pub prefill: usize,
+    /// Whether a headless run reads the real clock. See [`USAGE`].
+    pub wall_clock: bool,
     /// Whether the debug overlay starts visible, or `None` for the default.
     ///
     /// Three-valued because the default is not a constant:
@@ -53,6 +73,8 @@ impl Default for Options {
             backend: None,
             seed: crate::game::DEFAULT_SEED,
             max_enemies: crate::game::DEFAULT_MAX_ENEMIES,
+            prefill: 0,
+            wall_clock: false,
             debug_overlay: None,
         }
     }
@@ -74,14 +96,30 @@ impl Options {
         self.debug_overlay.unwrap_or(cfg!(debug_assertions))
     }
 
+    /// Whether the loop reads the real monotonic clock.
+    ///
+    /// Windowed runs always do. A headless one does only when `--wall-clock`
+    /// asked for it, because the fixed step is what makes a scripted headless
+    /// run reproducible — and reproducibility is worth more than a frame
+    /// timing to every headless run except the one taking a measurement.
+    #[must_use]
+    pub const fn real_clock(&self) -> bool {
+        !self.headless || self.wall_clock
+    }
+
     /// The simulation setup these options describe.
+    ///
+    /// **`--prefill` raises the cap to fit.** A prefill larger than
+    /// `max_enemies` would otherwise be silently truncated by
+    /// [`Game::stage_field`](crate::game::Game::stage_field) and the run would
+    /// measure a field of the wrong size while reporting the flag it was given.
     #[must_use]
     pub fn setup(&self) -> crate::game::Setup {
         crate::game::Setup {
             headless: self.headless,
             tick_hz: self.tick_hz,
             seed: self.seed,
-            max_enemies: self.max_enemies,
+            max_enemies: self.max_enemies.max(self.prefill),
         }
     }
 }
@@ -101,6 +139,7 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--headless" => options.headless = true,
+            "--wall-clock" => options.wall_clock = true,
             "--debug-overlay" => options.debug_overlay = Some(true),
             "--no-debug-overlay" => options.debug_overlay = Some(false),
             "-h" | "--help" => return Invocation::Help,
@@ -129,6 +168,17 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
                 match val.parse::<usize>() {
                     Ok(n) if n > 0 => options.max_enemies = n,
                     _ => return Invocation::BadUsage(format!("not a positive enemy cap: {val}")),
+                }
+            }
+            "--prefill" => {
+                let Some(val) = args.next() else {
+                    return Invocation::BadUsage("--prefill needs a number".into());
+                };
+                match val.parse::<usize>() {
+                    Ok(n) => options.prefill = n,
+                    Err(_) => {
+                        return Invocation::BadUsage(format!("not an enemy count: {val}"));
+                    }
                 }
             }
             "--seed" => {
@@ -235,6 +285,46 @@ mod tests {
             crate::game::DEFAULT_MAX_ENEMIES,
         );
         assert!(USAGE.contains("--max-enemies"));
+    }
+
+    /// **A prefill raises the cap to fit itself.**
+    ///
+    /// `--prefill 10000` against the default cap of 1500 would otherwise stage
+    /// 1500 and report success, which is the flag doing a sixth of what it was
+    /// asked and saying nothing.
+    #[test]
+    fn a_prefill_larger_than_the_cap_raises_the_cap() {
+        let options = parsed(&["--prefill", "10000"]);
+        assert_eq!(options.prefill, 10_000);
+        assert_eq!(options.max_enemies, crate::game::DEFAULT_MAX_ENEMIES);
+        assert_eq!(
+            options.setup().max_enemies,
+            10_000,
+            "the prefill did not reach the simulation's cap",
+        );
+        // An explicit cap above the prefill is left where the caller put it.
+        assert_eq!(
+            parsed(&["--prefill", "1000", "--max-enemies", "9000"])
+                .setup()
+                .max_enemies,
+            9_000,
+        );
+        assert_eq!(parsed(&[]).prefill, 0);
+        assert!(rejected(&["--prefill", "lots"]).contains("enemy count"));
+        assert!(rejected(&["--prefill"]).contains("--prefill"));
+        assert!(USAGE.contains("--prefill"));
+    }
+
+    /// The clock a run reads: real when there is a window, real when the
+    /// measurement asked for it, fixed otherwise.
+    #[test]
+    fn only_a_headless_run_without_wall_clock_gets_the_fixed_step() {
+        assert!(parsed(&[]).real_clock(), "a windowed run reads the clock");
+        assert!(!parsed(&["--headless"]).real_clock());
+        assert!(parsed(&["--headless", "--wall-clock"]).real_clock());
+        assert!(parsed(&["--wall-clock"]).real_clock());
+        assert!(!parsed(&[]).wall_clock);
+        assert!(USAGE.contains("--wall-clock"));
     }
 
     #[test]
