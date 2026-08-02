@@ -87,6 +87,79 @@ with `--target wasm32-unknown-unknown` over the four sample crates — plus the
 nine link fixes it would then demand. Not done here because adding a required CI
 job that fails on two crates this slice may not edit would land the tree red.
 
+## Three `crcbl-cli` tests fail on Windows and the code looks right — needs a decision
+
+`build + test (windows-latest)` has been red since `216ea85`
+(`feat(cli): crcbl crpix, PNG frames to a sheet`), and is the **only** job still
+red after the CI repair that fixed the other three. It is three tests, all of
+them asserting something about a path, and in each case the CLI's behaviour on
+Windows looks correct and the _test's_ probe looks like a Unix assumption. That
+is why they were left alone: the standing rule is to fix the code, and there is
+no defect in the code to fix. Someone has to agree the fixtures are wrong before
+they change.
+
+**1 and 2 — `crpix_refuses_frames_of_different_sizes_and_names_the_file` and
+`crpix_fails_cleanly_on_a_missing_file_and_on_a_file_that_is_not_a_png`, both in
+`crates/crcbl-cli/tests/cli.rs`.** Each asserts `json.contains(arg(&path))` —
+the raw path as a substring of the one-line JSON. JSON escapes `\` as `\\`, so
+on Windows the output holds `C:\\Users\\RUNNER~1\\…\\tall.png` while `arg()`
+yields `C:\Users\RUNNER~1\…\tall.png` and the substring is not there. The
+emitted JSON is well formed and names the right file; `crcbl_cli::json`'s
+`write_escaped` is correct and has its own test (`strings_are_escaped`). The
+assertion is right about the _intent_ and wrong about the _mechanism_ — it greps
+text the CLI deliberately escapes. The file's own header explains why it does
+not link a JSON parser, which is a good reason and not an argument for an
+unescaped compare: the fix is to escape the expected path the same way before
+searching for it (a `json_fragment(path)` helper beside `has_field`), which
+keeps the teeth on both platforms and gains them on Windows, where the assertion
+currently cannot pass.
+
+**3 — `a_stem_the_format_cannot_spell_is_refused` in
+`crates/crcbl-cli/src/crpix_cmd.rs`.** It feeds `frame_name` three paths whose
+stems the `.crpix` format cannot spell — `"my art.png"`, `"a:b.png"`,
+`"a#b.png"` — and asserts each is refused. On Windows `a:` is a **drive
+prefix**, so `Path::new("a:b.png").file_stem()` is `b`, which is a perfectly
+spellable frame name, and the test fails with
+`` `a:b.png` must not yield a frame name, and gave `b` ``. That is the right
+answer on Windows: the argument names `b.png` on drive A:. `frame_name` cannot
+be at fault here, because a Windows filename can never contain `:` at all, so
+the case it is being asked to reject is unreachable on that platform. The space
+and hash cases exercise the same property on both platforms and are untouched by
+any fix. The likely resolution is to make the colon case Unix-only
+(`#[cfg(unix)]` over that one fixture, or move it to a `#[cfg(unix)]` sibling
+test) — but that is a fixture change to a passing-on-Linux test and wants
+sign-off.
+
+Nothing else about `crpix` on Windows was reviewed; these three are what CI
+reports, not the result of a Windows audit.
+
+## The offscreen-ring hazard cannot be reproduced on a developer machine
+
+The `SYNC-HAZARD-WRITE-AFTER-READ` that `crcbl-vk`'s offscreen ring produced
+(fixed — `Device::acquire_next_frame` now waits on the retire timeline for the
+frame that had the image) was reported by CI's validation layer and by nothing
+locally. `synchronisation_validation_catches_a_missing_barrier` prints the
+reason: an Arch box running `VK_LAYER_KHRONOS_validation` 1.4.357 reports
+`record-time=yes one-submission=yes cross-submission=no`, and every hazard that
+spans a frame boundary is cross-submission. Setting
+`khronos_validation.syncval_submit_time_validation` through both
+`VK_LAYER_SETTINGS_PATH` and the `VK_KHRONOS_VALIDATION_*` environment form was
+tried and moved the measured reach not at all, so **there is currently no known
+way to widen it on that machine** — CI's older layer is the only thing that sees
+this class.
+
+The gate that does not depend on a layer is
+`reusing_an_offscreen_ring_image_waits_for_the_frame_that_had_it` in
+`crates/crcbl-vk/tests/vk_e2e.rs`, which asserts the ordering directly (a
+readback of the first frame's copy, requested before the reusing acquire, must
+be `Ready` the first time it is polled). It needs an ICD but no particular
+layer. It was falsified by disabling the wait: red ten runs out of ten.
+
+What was **not** checked: whether `crcbl-wgpu`'s offscreen path has the same
+gap. Its acquire also reports `acquire_semaphore: None`, but wgpu owns the
+synchronisation behind it and `wgpu e2e (lavapipe, Xvfb)` is green, so there is
+no evidence either way — only an untested assumption that wgpu handles it.
+
 ## The demo site's social preview is blank
 
 No `og:image`, so every link posted to Slack, Discord or a Mastodon timeline
