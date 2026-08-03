@@ -238,49 +238,63 @@ makes them worth writing down rather than rediscovering.
 
 **The whole point of the X11 backend is a platform where a window manager is a
 separate program, and the suite has only ever run without one.** Turning that
-around is one environment variable — `CRCBL_E2E_X11_WM=openbox`, which
-`run-x11-e2e.sh` supports and CI installs openbox for — and the backend does not
-survive it. A second CI pass was written, run, and taken back out rather than
-left red; the one line that turns it on again is in `.github/workflows/ci.yml`
-next to the comment saying so.
+around is `CRCBL_E2E_X11_WM=openbox`, which `run-x11-e2e.sh` supports and CI
+installs openbox for. A second CI pass was written, run, and taken back out
+rather than left red; the one line that turns it on again is in
+`.github/workflows/ci.yml` next to the comment saying so.
 
-**How to reproduce without an X11 window manager installed.** sway is an EWMH
-window manager for its own Xwayland clients, so headless sway with
-`xwayland force` in its config gives a real reparenting WM on a machine that has
-no openbox. Wait for `Starting Xwayland on :N` in sway's log (it is only printed
-with `sway -d`; grepping for `xwayland` matches a `sockets.c:47` error line
-first and gives a bogus display number), then run the suite with that `DISPLAY`
-and `CRCBL_E2E_EXPECT_WM=1`. **26–27 of 30 pass.** The failures:
+**The sample-level fullscreen already works**, which is the half a player would
+notice: the sandbox pass under openbox reports
+`--fullscreen was granted and the swapchain followed`, `borderless on monitor 1`
+at 1920x1080. What fails is four tests in the shell suite.
+
+**Do not use sway's Xwayland as a stand-in.** sway is an EWMH window manager for
+its own X clients and is easy to reach (`xwayland force` in the config, then
+wait for `Starting Xwayland on :N` — only logged under `sway -d`, and grepping
+for `xwayland` matches a `sockets.c:47` error line first and yields a bogus
+display number). It was used before openbox was installed and it **disagrees
+with openbox**: it never grants fullscreen at all, which sent a whole
+investigation after a message-encoding theory openbox disproves. Install
+openbox; the real thing turns around in about two minutes.
+
+**Four failures, each reproduced in isolation** (`-E 'test(<name>)'`), so none
+is an ordering artefact:
 
 - `a_mode_request_is_a_request_and_the_effective_mode_is_the_answer` and
   `a_window_created_borderless_does_not_report_its_own_request_as_the_answer` —
-  `mode_request_honoured()` never goes true. `_NET_WM_STATE` is observed going
-  `[]` → `[256]` (`_NET_WM_STATE_FOCUSED`) and never gaining `258`
-  (`_NET_WM_STATE_FULLSCREEN`).
-- `a_control_key_is_a_key_and_not_committed_text` — the synthesised key never
-  arrives. Under sway-as-WM it gets as far as focus and then loses the key;
-  under openbox in CI it never got focus at all. Not diagnosed.
-- `pointer_motion_buttons_and_the_wheel_all_arrive` failed on one run of four
-  and passed on the others, so treat it as a flake until it is seen again.
+  `mode_request_honoured()` never goes true. The events carry a trailing
+  `Resized`, so the geometry _did_ change; what did not is
+  `refresh_effective_mode`'s read of `_NET_WM_STATE`. The sandbox gets a granted
+  fullscreen through the same backend, so the difference to chase is
+  `set_mode`-after-creation (client message) against `WindowDesc::mode` (pre-map
+  property) — the sandbox uses the second.
+- `a_resize_from_outside_is_reported_exactly_once` — **two** `Resized` events
+  where the test wants one. A reparenting manager configures the frame and the
+  client, and the backend's "a move is not a resize" filter does not collapse
+  the pair. Either a real defect (one user resize rebuilding the swapchain
+  twice) or an artefact the test must tolerate; deciding which is the work.
+- `a_window_can_be_unmapped_and_mapped_again` — the `UnmapNotify` never arrives.
+  Reparenting is the suspect: ICCCM has its own withdrawal dance, and what a
+  client observes about its own unmap changes once a frame is in the way.
 
-**One defect was found and fixed on the way, and it is in `CHANGELOG.md`**:
-`apply_fullscreen` chose between writing `_NET_WM_STATE` and sending a client
-message on `XWindow::mapped`, which follows `MapNotify` — but a window manager
-starts managing a window at the map _request_, and on X11 the first configure
-also arrives before `MapNotify`. So a game that opened a window, waited for its
-size and asked for fullscreen wrote a property the window manager then
-overwrote, and the request vanished. Observed directly: the property held our
-`[258]` before the map and `[]` after it. `XWindow::map_requested` is the
-predicate now.
+**Everything else that failed in a full run is downstream of those four.** More
+tests failed on `waiting for keyboard focus` having seen only `["Resized"]`, and
+they pass on their own — a failed test leaves the display in a state the next
+one cannot get focus in. Fix the four and re-measure before believing any other
+count.
 
-**That fix is not what makes the two mode tests pass, and they still fail.** The
-client message is now sent — instrumented and confirmed — and sway's Xwayland
-still does not grant fullscreen. What is not known: whether the message is
-malformed in a way wlroots' `xwm` rejects (`Conn::send_event`'s propagate flag
-and the 32-byte event buffer are the two places to look), or whether sway's
-Xwayland is simply a poor stand-in for openbox here. **Trying it under openbox
-is the next step**, because CI's failure was at a different point (keyboard
-focus, not the mode) and the two may not be the same problem at all.
+**Two things were changed while chasing this and neither is the fix:**
+
+- `Session::focus` re-asks every poll turn instead of once. `SetInputFocus` on a
+  window that is not viewable is a `BadMatch`, the peer's request is unchecked,
+  and under a reparenting manager the window is not viewable until the frame is
+  mapped — which is after the first `ConfigureNotify` the harness waits on.
+  Correct on its own terms, worth about one test.
+- `write_identity` writes `WM_HINTS` with `input = True`. ICCCM 4.1.7 lets a
+  window manager assume what it likes when the property is absent, and "takes no
+  input" is a legal assumption, so its absence was a real conformance gap — but
+  it **changed nothing measurable** under openbox, which evidently defaults the
+  other way. Kept as conformance, not as a fix.
 
 ## Two display-mode defects, and the shape they shared
 

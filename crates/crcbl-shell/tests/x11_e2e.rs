@@ -238,10 +238,25 @@ impl Session {
     /// With no window manager nothing else ever sets the input focus, so
     /// without this every keyboard test would assert against events that were
     /// delivered to the root window instead.
+    ///
+    /// # Asked once per turn, not once
+    ///
+    /// `SetInputFocus` on a window that is not **viewable** is a `BadMatch`,
+    /// and the peer's request is unchecked — so a focus asked for too early is
+    /// dropped in silence and nothing ever asks again. Bare `Xvfb` never showed
+    /// it: a window there is viewable the moment it is mapped. Under a
+    /// reparenting window manager it is not viewable until the manager has
+    /// mapped its frame, and `window` above returns as soon as the first
+    /// `ConfigureNotify` arrives — which on X11 is *before* `MapNotify`. So the
+    /// call usually landed in that gap, and which tests it hit changed from run
+    /// to run.
+    ///
+    /// Retrying inside the poll costs one request per turn against `Xvfb`,
+    /// where the first one has already worked.
     fn focus(&mut self, window: WindowId) {
         let xid = self.xid(window);
-        self.peer.focus(xid);
         self.pump_until("keyboard focus", |session| {
+            session.peer.focus(xid);
             session
                 .shell
                 .window_state(window)

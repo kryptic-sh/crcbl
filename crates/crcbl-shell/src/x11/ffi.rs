@@ -1140,6 +1140,12 @@ pub mod value {
     pub const ATOM_WM_SIZE_HINTS: u32 = 41;
     /// `XCB_ATOM_WM_CLASS`.
     pub const ATOM_WM_CLASS: u32 = 67;
+    /// `XCB_ATOM_WM_HINTS` — the ICCCM property *and* its own type atom.
+    ///
+    /// Not to be confused with [`ATOM_WM_NORMAL_HINTS`](Self::ATOM_WM_NORMAL_HINTS),
+    /// which is the geometry one. This is the property that says whether the
+    /// window wants the keyboard.
+    pub const ATOM_WM_HINTS: u32 = 35;
     /// `XCB_ATOM_RESOURCE_MANAGER` — the root property `Xft.dpi` lives in.
     pub const ATOM_RESOURCE_MANAGER: u32 = 23;
     /// `XCB_INPUT_DEVICE_ALL_MASTER`.

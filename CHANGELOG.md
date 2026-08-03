@@ -16,6 +16,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-shell** (X11): the backend never wrote `WM_HINTS`, so it never told a
+  window manager that its window wants the keyboard. ICCCM 4.1.7 lets a window
+  manager assume convenient values when the property is absent, and "this window
+  takes no input" is one of them — a game whose window is never focused receives
+  no key for its whole run. It now writes `input = True` with `NormalState`,
+  which is ICCCM's passive focus model and what every toolkit does. **Changed
+  nothing measurable under openbox**, which defaults the other way; this is
+  conformance rather than an observed repair.
+
 - **crcbl-shell** (X11): a `set_mode` issued after a window was configured but
   before its `MapNotify` arrived was silently dropped. `apply_fullscreen` chose
   between writing `_NET_WM_STATE` and sending a `ClientMessage` on whether the

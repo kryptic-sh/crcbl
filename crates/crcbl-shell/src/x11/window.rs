@@ -88,6 +88,39 @@ impl X11Shell {
             32,
             &words_to_bytes(&pid),
         );
+
+        // **`WM_HINTS` is how a window says it wants the keyboard**, and
+        // without it a window manager is free to decide it does not.
+        //
+        // ICCCM 4.1.2.4's `input` field selects the focus model, and 4.1.7 says
+        // a window manager "may assume convenient values for all fields" when a
+        // window is mapped without the property. "This window takes no input"
+        // is a convenient value: under `openbox` the window is mapped, drawn
+        // and never focused, so the game receives no key for the whole of its
+        // run. Under bare `Xvfb` nothing was managing focus in the first place,
+        // so the omission cost nothing and stayed invisible.
+        //
+        // `input = True` with no `WM_TAKE_FOCUS` in `WM_PROTOCOLS` is ICCCM's
+        // **passive** model: the window manager sets the focus, the client does
+        // nothing. That is what a game wants. The other three models exist for
+        // clients that manage focus among sub-windows of their own.
+        //
+        // Nine words, in ICCCM's order: flags, input, initial_state,
+        // icon_pixmap, icon_window, icon_x, icon_y, icon_mask, window_group.
+        // Only the first two flags are set, so the remaining six words are the
+        // zeroes a window manager will not read.
+        /// `InputHint | StateHint`.
+        const HINT_FLAGS: u32 = (1 << 0) | (1 << 1);
+        /// ICCCM's `NormalState`.
+        const NORMAL_STATE: u32 = 1;
+        let hints = [HINT_FLAGS, 1, NORMAL_STATE, 0, 0, 0, 0, 0, 0];
+        self.conn.set_property(
+            xid,
+            ffi::value::ATOM_WM_HINTS,
+            ffi::value::ATOM_WM_HINTS,
+            32,
+            &words_to_bytes(&hints),
+        );
     }
 
     /// Writes `WM_NORMAL_HINTS` from the window's current request.
