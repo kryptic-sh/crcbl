@@ -25,13 +25,13 @@ use core::time::Duration;
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Clock, ExitReason, Flow, FrameOutcome, Handled, MAX_CONSECUTIVE_RECONFIGURES, MAX_FRAME_STEP,
-    MenuPump, Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
+    MenuPump, PointerCapture, WINDOWED_IDLE, accept_close, wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{
     DisplayMode, LogicalSize, ShellBackend as Backend, WindowId, open, open_backend,
 };
-use crcbl::ui::{DebugOverlay, PointerInput};
+use crcbl::ui::DebugOverlay;
 
 use crate::game::{self, Game, GameState, RenderState};
 use crate::gpu::Gpu;
@@ -98,20 +98,10 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
     hud: HudStrings,
     /// The start, pause and game-over menus, and which is on screen.
     menus: Menus,
-    /// Where the pointer was last seen, in framebuffer pixels.
+    /// Where the pointer was last seen and whether its button is down.
     ///
-    /// Kept across frames because motion and buttons arrive as separate events
-    /// and a click carries a position only on some backends. `None` until the
-    /// pointer has been inside the window, so a menu does not open with a
-    /// phantom cursor at the origin.
-    pointer: Option<crcbl::math::Vec2>,
-    /// Whether the primary pointer button is down.
-    ///
-    /// Kept here rather than derived per frame because press capture spans
-    /// frames: a press that starts on a button and is released two frames later
-    /// must still be *held* on the frame in between, or the button flickers back
-    /// to idle under the finger.
-    pointer_held: bool,
+    /// Both are needed across frames — see [`PointerCapture`].
+    pointer: PointerCapture,
     /// The modular debug panel: frame timing always, GPU pass timings when the
     /// device has timestamp queries, and nothing else — flappy runs over
     /// `InMemoryTransport`, so it has no network module to add.
@@ -238,8 +228,7 @@ impl<S: Shell + ?Sized> Loop<S> {
             render_state: RenderState::default(),
             hud: HudStrings::default(),
             menus: menu::menus(),
-            pointer: None,
-            pointer_held: false,
+            pointer: PointerCapture::new(),
             debug: DebugOverlay::with_visible(options.common.debug_overlay_visible()),
             paused: false,
             held_keys: Vec::new(),
@@ -308,7 +297,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         // **Carrying the pointer, not defaulting it.** A batch with no pointer
         // event in it has not moved the cursor, and a menu whose hover state
         // reset every still frame would flicker.
-        let mut pending = Pending::carrying(self.pointer);
+        let mut pending = self.pointer.pending();
         let game = &mut self.game;
         // **Last frame's menu, deliberately.** The pump runs before this
         // frame's state is known, and the menu the player is pressing keys at
@@ -331,44 +320,16 @@ impl<S: Shell + ?Sized> Loop<S> {
         });
         let keyboard_action = menu.activated.and_then(MenuAction::from_id);
         self.events += pending.count;
-        self.pointer = pending.pointer;
-        if pending.pointer_pressed {
-            self.pointer_held = true;
-        }
-        // **`down` must be false on the frame the button came up**, or
-        // `UiState::interact` latches the capture and fires it in the same call —
-        // and a press that started in the corner of the screen would be credited
-        // to whatever the cursor was over at release, which is the exact bug
-        // press capture exists to prevent.
-        //
-        // Except when the press *also* arrived this frame: a click faster than a
-        // frame is one event pair, and it must latch and fire together or a quick
-        // tap does nothing.
-        let pointer_down =
-            pending.pointer_pressed || (self.pointer_held && !pending.pointer_released);
         // Hit-tested against **this** frame's layout, which is why the pointer
         // is resolved here and not inside the pump: the rectangles depend on the
-        // framebuffer's size, and a click checked against last frame's would
-        // miss on the frame a resize lands.
+        // framebuffer's size, and a click checked against last frame's would miss
+        // on the frame a resize lands. The press-capture rule under `resolve` is
+        // the engine's.
+        let pointer_input = self.pointer.resolve(&pending);
         let pointer_action = self
             .menus
-            .point(
-                self.gpu.extent(),
-                self.gpu.atlas(),
-                PointerInput {
-                    // A pointer that has never been in the window is nowhere, not at
-                    // the origin — which is a real pixel, inside the HUD.
-                    pos: self
-                        .pointer
-                        .unwrap_or(crcbl::math::Vec2::splat(f32::NEG_INFINITY)),
-                    down: pointer_down,
-                    released: pending.pointer_released,
-                },
-            )
+            .point(self.gpu.extent(), self.gpu.atlas(), pointer_input)
             .and_then(MenuAction::from_id);
-        if pending.pointer_released {
-            self.pointer_held = false;
-        }
         for action in [keyboard_action, pointer_action].into_iter().flatten() {
             self.apply(action)?;
         }

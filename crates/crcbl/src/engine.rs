@@ -1515,6 +1515,77 @@ pub const MENU_DOWN_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode
 /// Commits the selection. See [`MENU_UP_KEY`].
 pub const MENU_ACTIVATE_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::Enter;
 
+/// Everything the loop remembers about the pointer between frames.
+///
+/// Two fields that every sample carried separately and resolved by hand: where
+/// the cursor was left, and whether its button is still down. Both are needed
+/// *across* frames, because pointer motion and button events arrive separately
+/// and a click carries a position only on some backends.
+///
+/// [`Self::pending`] starts a batch from the remembered position and
+/// [`Self::resolve`] folds the batch back in, so the rule below lives in one
+/// place rather than five.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PointerCapture {
+    at: Option<glam::Vec2>,
+    held: bool,
+}
+
+impl PointerCapture {
+    /// A pointer that has never been in the window.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            at: None,
+            held: false,
+        }
+    }
+
+    /// Starts a pump batch from where the last frame left the cursor.
+    ///
+    /// A batch with no pointer event in it has not moved the cursor, and a menu
+    /// whose hover state reset every still frame would flicker.
+    #[must_use]
+    pub fn pending(self) -> Pending {
+        Pending::carrying(self.at)
+    }
+
+    /// Folds `pending` in and answers what the UI should be asked this frame.
+    ///
+    /// **`down` must be false on the frame the button came up**, or
+    /// `UiState::interact` latches the capture and fires it in the same call —
+    /// and a press that started in the corner of the screen would be credited to
+    /// whatever the cursor was over at release, which is the exact bug press
+    /// capture exists to prevent.
+    ///
+    /// **Except when the press also arrived this frame:** a click faster than a
+    /// frame is one event pair, and it must latch and fire together or a quick
+    /// tap does nothing.
+    pub fn resolve(&mut self, pending: &Pending) -> crcbl_ui::PointerInput {
+        self.at = pending.pointer;
+        if pending.pointer_pressed {
+            self.held = true;
+        }
+        let down = pending.pointer_pressed || (self.held && !pending.pointer_released);
+        if pending.pointer_released {
+            self.held = false;
+        }
+        crcbl_ui::PointerInput {
+            // A pointer that has never been in the window is nowhere, not at the
+            // origin — which is a real pixel, inside the HUD.
+            pos: self.at.unwrap_or(glam::Vec2::splat(f32::NEG_INFINITY)),
+            down,
+            released: pending.pointer_released,
+        }
+    }
+
+    /// Where the cursor was last seen, if it has ever been in the window.
+    #[must_use]
+    pub const fn at(self) -> Option<glam::Vec2> {
+        self.at
+    }
+}
+
 /// The menu's half of a pump batch, and the held-key bookkeeping beside it.
 ///
 /// Built for one pump and read after it. What [`Pending`] is to the window, this
@@ -2295,6 +2366,83 @@ mod tests {
             1,
             "a failed start-up asked for another device",
         );
+    }
+
+    /// **A click faster than one frame still latches and fires.**
+    ///
+    /// The exception in [`PointerCapture::resolve`], and the one a naive "down
+    /// is false on the release frame" rule gets wrong: a tap that arrives as one
+    /// event pair must be `down` *and* `released` in the same batch, or
+    /// `UiState::interact` never sees a press and the button does nothing.
+    #[test]
+    fn a_press_and_release_in_one_batch_is_still_a_click() {
+        let mut capture = PointerCapture::new();
+        let mut pending = capture.pending();
+        pending.pointer_pressed = true;
+        pending.pointer_released = true;
+
+        let input = capture.resolve(&pending);
+        assert!(input.down, "a tap inside one frame must latch");
+        assert!(input.released, "and fire in the same call");
+    }
+
+    /// **A press held across frames stays down until the release, and the
+    /// release frame is not down.**
+    ///
+    /// The other half of the same rule. A release frame that still reported
+    /// `down` would credit the press to whatever the cursor was over at release,
+    /// which is the bug press capture exists to prevent.
+    #[test]
+    fn a_press_held_across_frames_goes_down_then_up_exactly_once() {
+        let mut capture = PointerCapture::new();
+
+        let mut press = capture.pending();
+        press.pointer_pressed = true;
+        let input = capture.resolve(&press);
+        assert!(input.down && !input.released, "the press frame");
+
+        // A still frame in between: no pointer events at all.
+        let idle = capture.pending();
+        let input = capture.resolve(&idle);
+        assert!(input.down && !input.released, "the button is still held");
+
+        let mut release = capture.pending();
+        release.pointer_released = true;
+        let input = capture.resolve(&release);
+        assert!(
+            !input.down && input.released,
+            "the release frame must not also be down",
+        );
+
+        // …and the capture is clear afterwards, or the next still frame would
+        // report a button nobody is pressing.
+        let idle = capture.pending();
+        let input = capture.resolve(&idle);
+        assert!(!input.down && !input.released, "the capture did not clear");
+    }
+
+    /// **A cursor that has never been in the window is nowhere, not at the
+    /// origin** — which is a real pixel, and in every sample sits inside the HUD.
+    #[test]
+    fn a_pointer_that_has_never_arrived_is_not_at_the_origin() {
+        let mut capture = PointerCapture::new();
+        let pending = capture.pending();
+        let input = capture.resolve(&pending);
+        assert!(input.pos.x.is_infinite() && input.pos.x.is_sign_negative());
+        assert_eq!(capture.at(), None);
+    }
+
+    /// **The position carries across a batch that had no pointer event.**
+    #[test]
+    fn a_still_frame_does_not_forget_where_the_cursor_is() {
+        let mut capture = PointerCapture::new();
+        let mut moved = capture.pending();
+        moved.pointer = Some(glam::Vec2::new(12.0, 34.0));
+        capture.resolve(&moved);
+
+        let idle = capture.pending();
+        let input = capture.resolve(&idle);
+        assert_eq!(input.pos, glam::Vec2::new(12.0, 34.0));
     }
 
     /// The two states a `MenuPump` is tested in.
