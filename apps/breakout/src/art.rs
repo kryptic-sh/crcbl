@@ -74,16 +74,6 @@ include!(concat!(env!("OUT_DIR"), "/art_data.rs"));
 /// shape that is a rectangle with rounded ends.
 pub const TEXELS_PER_UNIT: f32 = 10.0;
 
-/// The tick rate the sheets' frame holds were baked against.
-///
-/// **Must equal `build.rs`'s `ART_TICK_HZ`.** A `.crpix` counts holds in ticks
-/// and an Aseprite sidecar counts milliseconds; bake converts one way and
-/// [`load`] the other, so a mismatch scales every hold silently. Nothing here
-/// is animated yet, so nothing would show it — which is why
-/// [`tests::the_art_bakes_to_the_sheets_it_declares`] asserts the default hold
-/// of one tick survives the round trip rather than trusting that it must.
-const ART_TICK_HZ: u32 = 60;
-
 /// What is outside the court, as the clear value for the swapchain.
 ///
 /// **Linear, not sRGB.** The target is an sRGB format, so the clear is encoded
@@ -461,7 +451,7 @@ mod tests {
             assert_eq!(
                 frame.hold, 1,
                 "the default hold in ticks did not survive the millisecond \
-                 round trip: build.rs and ART_TICK_HZ disagree"
+                 round trip, so bake and load disagree about milliseconds"
             );
         }
         assert!(

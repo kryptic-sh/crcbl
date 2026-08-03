@@ -48,9 +48,11 @@ use std::path::PathBuf;
 /// A `.crpix` counts holds in **simulation ticks** and an Aseprite sidecar
 /// counts milliseconds, so the pair has to be converted on the way out and back
 /// on the way in — and the two conversions must use the same rate or every
-/// hold changes. `src/art.rs`'s `ART_TICK_HZ` is the other half, and
-/// `the_art_bakes_to_the_sheets_it_declares` asserts the authored hold survives,
-/// which is the check that catches the two drifting apart.
+/// hold changes. `bake_dir` writes this number into the generated table as
+/// `ART_TICK_HZ`, so the loader reads it rather than declaring its own, and
+/// `the_art_bakes_to_the_sheets_it_declares` asserts the authored hold survives
+/// the round trip — which is now a check on the conversion pair rather than on
+/// two constants agreeing.
 const ART_TICK_HZ: u32 = 60;
 
 /// The sheets, by file stem. Each is `assets/<stem>.crpix`.

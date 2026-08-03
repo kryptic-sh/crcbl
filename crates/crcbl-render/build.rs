@@ -41,7 +41,8 @@ use std::path::PathBuf;
 /// clip — so no hold here is anything but the default of one tick. It is
 /// declared because a `.crpix` counts holds in ticks and an Aseprite sidecar
 /// counts milliseconds, and the two conversions must use the same rate or every
-/// hold silently changes. `src/menu.rs`'s `ART_TICK_HZ` is the other half.
+/// hold silently changes. `bake_dir` writes this number into the generated
+/// table as `ART_TICK_HZ`, so the loader reads it rather than declaring its own.
 const ART_TICK_HZ: u32 = 60;
 
 /// The sheets, by file stem. Each is `assets/<stem>.crpix`.

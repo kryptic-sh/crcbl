@@ -93,15 +93,6 @@ include!(concat!(env!("OUT_DIR"), "/art_data.rs"));
 /// three *enemy* boxes whole; `assets/actors.crpix` has the arithmetic.
 pub const TEXELS_PER_UNIT: f32 = 20.0;
 
-/// The tick rate the sheets' frame holds were baked against.
-///
-/// **Must equal `build.rs`'s `ART_TICK_HZ`.** A `.crpix` counts holds in ticks
-/// and an Aseprite sidecar counts milliseconds; bake converts one way and
-/// [`load`] the other, so a mismatch scales every hold silently. Nothing here is
-/// animated, so this guard is as weak as breakout's and asteroids' and for the
-/// same reason. `docs/backlog.md` carries it.
-const ART_TICK_HZ: u32 = 60;
-
 /// What the swapchain is cleared to — the arena's ground.
 ///
 /// **Linear, not sRGB.** The target is an sRGB format, so the clear is encoded
@@ -613,7 +604,7 @@ mod tests {
             assert_eq!(
                 frame.hold, 1,
                 "{}: the default hold in ticks did not survive the millisecond \
-                 round trip — build.rs and ART_TICK_HZ disagree",
+                 round trip, so bake and load disagree about milliseconds",
                 frame.name,
             );
         }

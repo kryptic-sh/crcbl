@@ -64,15 +64,6 @@ include!(concat!(env!("OUT_DIR"), "/art_data.rs"));
 /// across, which is the right way round.
 pub const TEXELS_PER_UNIT: f32 = 20.0;
 
-/// The tick rate the sheets' frame holds were baked against.
-///
-/// **Must equal `build.rs`'s `ART_TICK_HZ`.** A `.crpix` counts holds in ticks
-/// and an Aseprite sidecar counts milliseconds; bake converts one way and
-/// [`load`] the other, so a mismatch scales every hold silently.
-/// [`tests::the_art_bakes_to_the_sheets_it_declares`] asserts the authored
-/// number survives the round trip, which is what would catch it.
-const ART_TICK_HZ: u32 = 60;
-
 /// The sky, as the clear value for the swapchain.
 ///
 /// **Linear, not sRGB.** The target is an sRGB format, so the clear is encoded
@@ -538,7 +529,7 @@ mod tests {
             assert_eq!(
                 frame.hold, 5,
                 "the hold authored in ticks did not survive the millisecond \
-                 round trip: build.rs and ART_TICK_HZ disagree"
+                 round trip, so bake and load disagree about milliseconds"
             );
         }
         let flap = bird.sheet.clip("flap").expect("bird.crpix declares `flap`");

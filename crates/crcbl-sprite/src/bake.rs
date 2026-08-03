@@ -341,6 +341,21 @@ pub fn bake_dir(request: &BakeDir<'_>) {
         request.source_label
     );
 
+    // **The rate the holds were baked at, emitted rather than left to be
+    // agreed on.** A `.crpix` counts holds in simulation ticks and an
+    // Aseprite sidecar counts milliseconds, so the conversion happens here on
+    // the way out and again in the consumer on the way in — and the two must
+    // use the same number. A build script cannot `use` the crate it builds, so
+    // every sample used to declare the rate twice, once here and once beside
+    // the loader, with nothing but a comment holding them together. Writing it
+    // into the table the consumer already includes leaves one source.
+    let vis = request.visibility.keyword();
+    table.push_str(&format!(
+        "/// The tick rate `{}`'s holds were baked at, from `build.rs`.\n\
+         {vis} const ART_TICK_HZ: u32 = {};\n\n",
+        request.source_label, request.tick_hz,
+    ));
+
     for stem in request.stems {
         let relative = format!("assets/{stem}.crpix");
         // **The line that makes editing art rebuild the game.** Without it the
@@ -362,7 +377,6 @@ pub fn bake_dir(request: &BakeDir<'_>) {
         let png = request.out_dir.join(&image);
         write(&png, &baked.png);
 
-        let vis = request.visibility.keyword();
         let upper = stem.to_uppercase();
         table.push_str(&format!(
             "{vis} static {upper}_PNG: &[u8] = include_bytes!({:?});\n",

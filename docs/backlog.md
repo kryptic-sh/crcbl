@@ -466,22 +466,19 @@ left:
   divides by the style's scale instead, exactly as the two samples scale theirs.
   It comes out with the other two when `expand` learns a scale.
 
-- **The tick rate the art is baked at is written twice per game** —
-  `ART_TICK_HZ` in `apps/*/build.rs` and again in `apps/*/src/art.rs`. A build
-  script cannot `use` the crate it builds, and the sidecar's durations are
-  milliseconds, so the two conversions have to agree. Guarded rather than
-  solved: each game's `the_art_bakes_to_the_sheets_it_declares` asserts an
-  authored hold in ticks survives the round trip. **Breakout's and asteroids'
-  guards are weaker than flappy's**, because neither draws anything animated:
-  both can only assert the default hold of 1 tick, which survives a fairly wide
-  range of wrong rates. Asteroids' ship and rocks _turn_, which is a rotation
-  applied to a still frame and not a clip, so it does not help. Either gets real
-  the moment that game has a clip. `crcbl_sprite::bake::bake_dir` closed the
-  five-copy build script and did **not** close this: `bake_dir` takes `tick_hz`
-  as a parameter, so each `build.rs` still declares its own `ART_TICK_HZ` beside
-  the `art.rs` constant it has to agree with. Closing it means the rate coming
-  from somewhere both halves read — a generated constant in the table `bake_dir`
-  already writes is the obvious shape, since `art.rs` includes it.
+- **The tick rate is one constant now, and the guard around it is still weak in
+  three of the five.** `bake_dir` writes `ART_TICK_HZ` into the generated table,
+  so the loader reads the rate the art was actually baked at and the `build.rs`
+  value is its only source — the two halves cannot disagree, and the five
+  hand-written copies beside the loaders are gone. What survives is the
+  _conversion_ pair: a `.crpix` counts holds in ticks, a sidecar counts
+  milliseconds, and each game's `the_art_bakes_to_the_sheets_it_declares`
+  asserts an authored hold makes the round trip. **Breakout's, asteroids' and
+  `crcbl-render`'s are weaker than flappy's and horde's**, because nothing they
+  draw is animated: they can only assert the default hold of one tick, which
+  survives a fairly wide range of wrong arithmetic. Asteroids' ship and rocks
+  _turn_, which is a rotation applied to a still frame and not a clip, so it
+  does not help. Each gets real the moment that game has a clip.
 
 - **Breakout's paddle is a plain frame, not a nine-slice.**
   `game::PADDLE_HALF_WIDTH` is a `const` and nothing shadows it, so the paddle

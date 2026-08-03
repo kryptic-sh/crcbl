@@ -16,6 +16,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl-sprite** (`bake::bake_dir`): the generated table now declares
+  `ART_TICK_HZ`, the rate the holds were baked at. A `.crpix` counts holds in
+  simulation ticks and an Aseprite sidecar counts milliseconds, so the
+  conversion runs once at bake time and once at load time and the two must agree
+  — and a build script cannot `use` the crate it builds, so every consumer
+  declared the number a second time beside its loader. Five copies (`apps/*` and
+  `crcbl-render`) are deleted; the `build.rs` value is the only source.
+
 - **crcbl-phys**: `DampingForce::world_force(velocity, mass, dt)` and
   `DragForce::world_force(velocity)`, beside the `ThrustForce::world_force` that
   already existed. A force provider applies to **every** dynamic body, so a game

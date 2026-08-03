@@ -36,7 +36,8 @@ use std::path::PathBuf;
 /// A `.crpix` counts holds in **simulation ticks** and an Aseprite sidecar
 /// counts milliseconds, so the pair has to be converted on the way out and back
 /// on the way in — and the two conversions must use the same rate or every hold
-/// changes. `src/art.rs`'s `ART_TICK_HZ` is the other half.
+/// changes. `bake_dir` writes this number into the generated table as
+/// `ART_TICK_HZ`, so the loader reads it rather than declaring its own.
 ///
 /// Nothing asteroids draws is animated: the ship turns and the rocks tumble, and
 /// both are a *rotation* applied to a still frame rather than a clip. So no hold

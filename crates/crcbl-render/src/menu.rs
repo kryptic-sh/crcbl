@@ -91,15 +91,6 @@ use crate::sprite_pass::{SheetDesc, SheetId, Sprite, SpriteRenderer};
 // `build.rs` writes this: one `*_PNG` and one `*_JSON` per `assets/*.crpix`.
 include!(concat!(env!("OUT_DIR"), "/menu_art.rs"));
 
-/// The tick rate the sheets' frame holds were baked against.
-///
-/// **Must equal `build.rs`'s `ART_TICK_HZ`.** Nothing here animates, so nothing
-/// would show a mismatch — which is why
-/// `tests::the_shipped_art_bakes_to_the_sheets_it_declares` asserts the default
-/// hold of one tick survives the millisecond round trip rather than trusting
-/// that it must.
-const ART_TICK_HZ: u32 = 60;
-
 /// "The sheet as authored": no tint on the frame or the buttons.
 const UNTINTED: [f32; 4] = [1.0; 4];
 
@@ -566,7 +557,7 @@ mod tests {
             assert_eq!(
                 frame.hold, 1,
                 "the default hold in ticks did not survive the millisecond round \
-                 trip: build.rs and ART_TICK_HZ disagree"
+                 trip, so bake and load disagree about milliseconds"
             );
         }
         assert!(
