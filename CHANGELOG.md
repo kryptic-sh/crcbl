@@ -242,8 +242,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
   The seam grew `Loop::{set_paused, gpu_mut}` for it: a test paused the loop by
   assignment, and its sprite read-back takes `&mut self`.
+  - **sandbox**: the last conversion, and the one that measures the others.
+    `Sandbox` is a struct with **no fields**: the sandbox has no simulation, no
+    HUD and no score, and it still runs, pauses, opens a menu, goes fullscreen
+    and reports a summary — all of that is the engine's now. Its `MenuAction` is
+    `Infallible`, which makes `MenuAction::Game` uninhabited and is the type
+    system agreeing that its three buttons are the loop's.
 
-  sandbox is unconverted and still drives its own `frame()`.
+  It also stops declaring the six reserved keys for itself. `DEBUG_OVERLAY_KEY`
+  and its five siblings were the engine's constants already, and a second
+  declaration is how "the same key does the same thing in every sample" quietly
+  stops being true.
+
+  `app.rs` lost 379 lines and `menu.rs` 29; its 35 tests pass.
+
+  `FrameInfo::tick_dt` and `HostedGame::tick` widened from `f32` to `f64`, which
+  is what `FrameClock::tick_dt_secs` reports — the sandbox is the only game that
+  reads it, and narrowing it was the engine deciding a precision on a game's
+  behalf. `Loop::events` joins the accessors for the same reason the others did:
+  a test read the field.
 
 - **horde**: hosted by `crcbl::engine::Loop`, and the sample that stretched the
   seam. Its level-up panel is three upgrades the run's seed picked, so

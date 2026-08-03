@@ -1,4 +1,5 @@
-//! The engine loop: shell events in, fixed ticks and presented frames out.
+//! The sandbox as the engine hosts it: shell events in, fixed ticks and
+//! presented frames out.
 //!
 //! `docs/plan/01-foundations.md` §1.4 asks for exactly this — "shell window,
 //! event loop, raw surface handle plumbed to where the HAL surface will be
@@ -13,11 +14,17 @@
 //! }
 //! ```
 //!
-//! There is no `Shell::run(closure)` to hand this to and there never will be:
-//! on wasm the outer loop is `requestAnimationFrame`, which calls the engine
-//! and cannot be called by it. [`run`] owns a native `loop {}`; the body it
-//! wraps is [`Loop::frame`], which is one turn and would be the `rAF` callback
-//! unchanged.
+//! **That loop is [`crcbl::engine::Loop`]'s now**, and this file is what a game
+//! plugs into it: [`Sandbox`], which has no fields, and the two empty call sites
+//! [`tick`] and [`render`] that everything later grows around. The sandbox is
+//! the honest measure of how much of a frame the engine owns — a game with
+//! nothing in it still runs, pauses, opens a menu, goes fullscreen and reports a
+//! summary.
+//!
+//! There is still no `Shell::run(closure)` and there never will be: on wasm the
+//! outer loop is `requestAnimationFrame`, which calls the engine and cannot be
+//! called by it. [`crcbl::engine::drive`] owns a native `loop {}`; the body it
+//! wraps is one `Loop::frame`, which would be the `rAF` callback unchanged.
 //!
 //! # Determinism, and why the clock is injected
 //!
@@ -53,51 +60,15 @@ use crcbl::backend::GpuBackend;
 //
 // `MAX_CONSECUTIVE_RECONFIGURES` is what makes `--frames N` terminate when the
 // swapchain never becomes presentable — a budget of *presented* frames cannot.
-use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Clock, ExitReason, Flow, FrameBudget, ModeRequest, Pending, WINDOWED_IDLE, accept_close,
-    run_ticks, wait_for_configure,
+    Booted, Clock, ExitReason, FrameInfo, HostedGame, LoopConfig, RunSummary, wait_for_configure,
 };
 use crcbl::prelude::*;
-use crcbl::shell::{
-    DisplayMode, LogicalSize, ShellBackend as Backend, WindowId, open, open_backend,
-};
+use crcbl::shell::{DisplayMode, LogicalSize, ShellBackend as Backend, open, open_backend};
 use crcbl::ui::draw_list::DrawList;
-use crcbl::ui::{DebugOverlay, PointerInput};
-
-use crate::menu::{self, MenuAction, Menus};
 
 use crate::gpu::Gpu;
-
-/// The key that shows and hides the debug overlay.
-///
-/// F3, the same key breakout and flappy use: "switching it on is one thing" is
-/// only true if it is the *same* thing in every sample.
-pub const DEBUG_OVERLAY_KEY: KeyCode = KeyCode::F3;
-
-/// The key that pauses and resumes.
-///
-/// Escape, the same key breakout and flappy use. The sandbox has no game to
-/// pause, and pauses anyway: the cube on the fixed timestep is the one thing
-/// here a player can see stop, and the same key doing the same thing in all
-/// three samples is the point of naming it in all three.
-pub const PAUSE_KEY: KeyCode = KeyCode::Escape;
-
-/// The key that asks for fullscreen, and asks to leave it.
-///
-/// F11, the desktop convention.
-pub const FULLSCREEN_KEY: KeyCode = KeyCode::F11;
-
-/// The keys the pause menu takes for itself while it is on screen.
-///
-/// The same three in every sample, for the reason F3, Escape and F11 are the
-/// same in every sample. The sandbox binds nothing else at all, so here they
-/// collide with nothing.
-pub const MENU_UP_KEY: KeyCode = KeyCode::ArrowUp;
-/// See [`MENU_UP_KEY`].
-pub const MENU_DOWN_KEY: KeyCode = KeyCode::ArrowDown;
-/// See [`MENU_UP_KEY`].
-pub const MENU_ACTIVATE_KEY: KeyCode = KeyCode::Enter;
+use crate::menu::{self, Menus};
 
 /// Which projection the camera uses.
 ///
@@ -242,10 +213,21 @@ pub struct Summary {
 /// [`Infallible`](core::convert::Infallible) — uninhabited, and free.
 pub type SandboxError = crcbl::engine::LoopError;
 
-/// Everything one turn of the loop needs.
+/// The sandbox, as the engine's loop hosts it.
 ///
-/// Public so a test can drive [`Loop::frame`] directly rather than through the
-/// `loop {}` in [`run`] — the same reason the browser will call it.
+/// **A game with no game in it, and that is the point.** The sandbox exists to
+/// show the engine's frame with nothing of its own in the way: no simulation, no
+/// HUD, no score. What is left is [`tick`] and [`render`], both empty and both
+/// load-bearing — the call sites are what everything later grows around.
+///
+/// It has no state at all, which is the honest measure of how much of a frame
+/// the engine now owns.
+#[derive(Debug)]
+pub struct Sandbox;
+
+/// The loop the sandbox runs in.
+///
+/// A type alias, because the loop is the engine's.
 ///
 /// # Why the shell is a type parameter that defaults to `dyn Shell`
 ///
@@ -256,40 +238,7 @@ pub type SandboxError = crcbl::engine::LoopError;
 /// seam, so a test that wants it needs the concrete type back. A default type
 /// parameter gives both with no downcasting and no `Any` on the trait: `Loop`
 /// still means `Loop<dyn Shell>` everywhere it is written unadorned.
-#[derive(Debug)]
-pub struct Loop<S: Shell + ?Sized = dyn Shell> {
-    shell: Box<S>,
-    window: WindowId,
-    gpu: Gpu,
-    clock_source: Clock,
-    frame_clock: FrameClock,
-    /// Reused every frame rather than reallocated, like the samples' HUD lists.
-    draw_list: DrawList,
-    /// The modular debug panel. The sandbox has no HUD and no connection, so
-    /// this is the whole of its UI: frame timing, plus GPU pass timings when
-    /// the device has timestamp queries.
-    debug: DebugOverlay,
-    /// Whether the simulation is stopped. See [`Loop::frame`]'s tick loop for
-    /// what a paused frame does to the accumulator.
-    paused: bool,
-    /// The pause menu, and whether it is on screen.
-    menus: Menus,
-    /// Where the pointer was last seen, in framebuffer pixels. `None` until it
-    /// has been inside the window, so the menu does not open with a phantom
-    /// cursor at the origin.
-    pointer: Option<crcbl::math::Vec2>,
-    /// Whether the primary pointer button is down — press capture spans frames.
-    pointer_held: bool,
-    /// The fullscreen request, and whether the window system agreed — see
-    /// [`ModeRequest`].
-    mode: ModeRequest,
-    /// Presented frames, the budget they count against, and the guard that
-    /// makes the budget reachable — see [`FrameBudget`].
-    budget: FrameBudget,
-    ticks: u64,
-    events: u64,
-    windowed: bool,
-}
+pub type Loop<S = dyn Shell> = crcbl::engine::Loop<S, Sandbox>;
 
 /// Opens a window (or does not), runs the loop, and tears everything down.
 ///
@@ -297,494 +246,171 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
 ///
 /// [`SandboxError`] if no shell backend opened, if the window was never
 /// configured, or if the HAL seam failed.
-/// Teardown runs on **every** path, including a failing frame. `run` used to
-/// propagate `engine.frame()?`, which skipped `finish` — and therefore
-/// `gpu.destroy()` and `shell.destroy_window()` — because neither `Loop` nor
-/// `Gpu` has a `Drop` impl to fall back on. The `crcbl-vk` `Drop` impls do
-/// reclaim the objects, but they log "N object(s) still alive at device
-/// teardown" while doing it, which is the diagnostic for a real leak.
+/// Teardown runs on **every** path, including a failing frame: neither `Loop`
+/// nor `Gpu` has a `Drop` impl to fall back on, and while the `crcbl-vk` ones do
+/// reclaim the objects, they log "N object(s) still alive at device teardown"
+/// while doing it — which is the diagnostic for a real leak.
 pub fn run(options: &Options) -> Result<Summary, SandboxError> {
-    crcbl::engine::drive(Loop::start(options)?)
+    crcbl::engine::drive(start(options)?)
 }
 
-impl Loop<dyn Shell> {
-    /// Opens the shell the environment asks for, waits for the first configure,
-    /// and joins the window to the HAL.
-    ///
-    /// # Errors
-    ///
-    /// [`SandboxError`] if any of those three steps fails.
-    pub fn start(options: &Options) -> Result<Self, SandboxError> {
-        let shell = if options.headless {
-            // By name, never by fallback: `crcbl-shell`'s registry deliberately
-            // refuses to auto-select headless, because a game that silently ran
-            // without a window would look like a hang.
-            open_backend(Backend::Headless).map_err(SandboxError::Shell)?
-        } else {
-            open().map_err(SandboxError::NoWindowSystem)?
-        };
-        Self::with_shell(shell, options)
-    }
+/// Opens the shell the environment asks for and builds the loop on it.
+///
+/// # Errors
+///
+/// [`SandboxError`] if the shell, the window or the HAL seam refused.
+pub fn start(options: &Options) -> Result<Loop, SandboxError> {
+    let shell = if options.headless {
+        // By name, never by fallback: `crcbl-shell`'s registry deliberately
+        // refuses to auto-select headless, because a game that silently ran
+        // without a window would look like a hang.
+        open_backend(Backend::Headless).map_err(SandboxError::Shell)?
+    } else {
+        open().map_err(SandboxError::NoWindowSystem)?
+    };
+    with_shell(shell, options)
 }
 
-impl<S: Shell + ?Sized> Loop<S> {
-    /// The body of [`start`](Loop::start), once a shell exists.
-    ///
-    /// # Errors
-    ///
-    /// [`SandboxError`] if the window is never configured or the HAL seam
-    /// fails.
-    pub fn with_shell(mut shell: Box<S>, options: &Options) -> Result<Self, SandboxError> {
-        let clock_source = Clock::new(options.headless);
-        crcbl::log::info!(
-            "shell: {} backend, caps {:?}",
-            shell.backend(),
-            shell.caps()
-        );
+/// The body of [`start`], once a shell exists.
+///
+/// # Errors
+///
+/// [`SandboxError`] if the window is never configured or the HAL seam fails.
+pub fn with_shell<S: Shell + ?Sized>(
+    mut shell: Box<S>,
+    options: &Options,
+) -> Result<Loop<S>, SandboxError> {
+    let clock_source = Clock::new(options.headless);
+    crcbl::log::info!(
+        "shell: {} backend, caps {:?}",
+        shell.backend(),
+        shell.caps()
+    );
 
-        // Once, at startup, so input timestamps and frame timestamps share an
-        // origin. Without it every `EventTime` is offset by however long the
-        // process took to get here.
-        shell.align_event_clock(clock_source.elapsed());
+    // Once, at startup, so input timestamps and frame timestamps share an
+    // origin. Without it every `EventTime` is offset by however long the
+    // process took to get here.
+    shell.align_event_clock(clock_source.elapsed());
 
-        let window = shell.create_window(&WindowDesc {
-            title: &options.title,
-            app_id: "sh.kryptic.crcbl.sandbox",
-            size: LogicalSize::new(1280.0, 720.0),
-            ..WindowDesc::default()
-        })?;
+    let window = shell.create_window(&WindowDesc {
+        title: &options.title,
+        app_id: "sh.kryptic.crcbl.sandbox",
+        size: LogicalSize::new(1280.0, 720.0),
+        ..WindowDesc::default()
+    })?;
 
-        let mut events = 0;
-        let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
-        crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+    let mut events = 0;
+    let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
+    crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
 
-        let gpu = Gpu::open(
-            shell.as_ref(),
-            window,
-            extent,
-            options.backend,
-            options.camera.projection(),
-        )?;
+    let gpu = Gpu::open(
+        shell.as_ref(),
+        window,
+        extent,
+        options.backend,
+        options.camera.projection(),
+    )?;
 
-        Ok(Self {
-            windowed: !options.headless,
+    Ok(Loop::new(
+        Booted {
             shell,
             window,
             gpu,
             clock_source,
-            frame_clock: FrameClock::new(options.tick_hz),
-            draw_list: DrawList::new(),
-            debug: DebugOverlay::with_visible(options.debug_overlay_visible()),
-            paused: false,
-            menus: menu::menus(),
-            pointer: None,
-            pointer_held: false,
-            mode: ModeRequest::new(),
-            ticks: 0,
             events,
-            budget: FrameBudget::new(options.frame_budget()),
-        })
+        },
+        Sandbox,
+        LoopConfig {
+            tick_hz: options.tick_hz,
+            frames: options.frame_budget(),
+            debug_overlay: options.debug_overlay_visible(),
+            windowed: !options.headless,
+        },
+    ))
+}
+
+/// The sandbox's half of the frame, which is as little as a game can have.
+///
+/// Two of the seven do anything at all, and neither does much: [`tick`] and
+/// [`render`] are the empty call sites P1's renderer grows into, and the cube's
+/// spin is on the fixed timestep so a `--headless --frames N` run is a
+/// bit-reproducible picture on every machine.
+impl HostedGame for Sandbox {
+    /// The sandbox has no simulation, so it has nothing of its own to fail at.
+    /// [`LoopError`](crcbl::engine::LoopError)'s `Game` variant is uninhabited
+    /// as a result, which is the type system agreeing.
+    type Error = core::convert::Infallible;
+    type Gpu = Gpu;
+    /// Paused or not, which is the sandbox's whole state machine.
+    type MenuKind = bool;
+    /// No menu action is the sandbox's — its three buttons are the loop's.
+    type MenuAction = core::convert::Infallible;
+    type Summary = Summary;
+
+    const NAME: &'static str = "sandbox";
+
+    fn menus() -> Menus {
+        menu::menus()
     }
 
-    /// One turn of the outer loop: drain events, advance the clock, run the
-    /// ticks that fell due, present a frame.
-    ///
-    /// This is the whole engine loop. On wasm it is the `requestAnimationFrame`
-    /// callback with nothing changed.
-    ///
-    /// # Errors
-    ///
-    /// [`SandboxError`] if the shell or the HAL failed. A swapchain that has
-    /// merely gone out of date is not a failure.
-    pub fn frame(&mut self) -> Result<Flow, SandboxError> {
-        if self.budget.is_spent() {
-            return Ok(Flow::Stop(ExitReason::FrameBudget));
-        }
+    fn tick(&mut self, gpu: &mut Gpu, tick_dt: f64) {
+        tick(tick_dt);
+        // The cube spins on the **fixed** timestep, not on the frame rate. That
+        // is what makes `--headless --frames N` render a bit-reproducible
+        // picture on every machine, and therefore what makes a golden image of
+        // it evidence rather than a coincidence.
+        #[allow(clippy::cast_possible_truncation)]
+        gpu.advance(tick_dt as f32);
+    }
 
-        // Advisory, and skipped headless so a `--headless` run never blocks.
-        if self.windowed {
-            self.shell.wait_events(Some(WINDOWED_IDLE));
-        }
+    /// The sandbox binds no keys of its own: the three the loop reserves are
+    /// the three it has.
+    fn key_event(&mut self, _key: crcbl::core::input::KeyCode, _pressed: bool) {}
 
-        let mut pending = Pending::default();
-        // The three keys the loop keeps for itself, and the one event that is
-        // not a key at all.
-        let (mut toggle_debug, mut toggle_pause, mut toggle_fullscreen) = (false, false, false);
-        let mut focus_lost = false;
-        // The sink borrows `pending` mutably while `self.shell` is borrowed
-        // mutably too, which is exactly why replies (`reply_close_request`,
-        // `resize`) are recorded here and acted on below rather than inline.
-        // The pointer's three facts for this frame. `pointer_pos` starts at what
-        // the last frame left, because motion and buttons are separate events
-        // and a click carries a position only on some backends.
-        let mut pointer_pos = self.pointer;
-        let (mut pointer_pressed, mut pointer_released) = (false, false);
-        let mut keyboard_action: Option<MenuAction> = None;
-        let menus = &mut self.menus;
-        // **Last frame's menu, deliberately.** The pump runs before this frame's
-        // state is known, and the menu the player is pressing keys at is the one
-        // that was on screen when they pressed them.
-        let menu_showing = menus.is_showing();
-        self.shell.pump(&mut |event| {
-            pending.observe(&event);
-            match event {
-                ShellEvent::Focus { focused: false, .. } => focus_lost = true,
-                ShellEvent::PointerMotion {
-                    abs: Some(point), ..
-                } => pointer_pos = Some(crcbl::math::Vec2::new(point.x as f32, point.y as f32)),
-                // A pointer that left the window is not hovering anything, and
-                // must not leave the last button it crossed lit up.
-                ShellEvent::PointerFocus {
-                    entered, position, ..
-                } => {
-                    pointer_pos = if entered {
-                        position.map(|point| crcbl::math::Vec2::new(point.x as f32, point.y as f32))
-                    } else {
-                        None
-                    };
-                }
-                ShellEvent::Button {
-                    button: crcbl::core::input::PointerButton::Left,
-                    state,
-                    position,
-                    ..
-                } => {
-                    if let Some(point) = position {
-                        pointer_pos = Some(crcbl::math::Vec2::new(point.x as f32, point.y as f32));
-                    }
-                    if matches!(state, crcbl::shell::ButtonState::Pressed) {
-                        pointer_pressed = true;
-                    } else {
-                        pointer_released = true;
-                    }
-                }
-                // The commit key needs both edges — it presses on the way down
-                // and fires on the way up — so key handling can no longer match
-                // `Pressed` in the pattern.
-                ShellEvent::Key {
-                    key_code: Some(code),
-                    state,
-                    repeat,
-                    ..
-                } => {
-                    let pressed = matches!(state, crcbl::shell::ButtonState::Pressed);
-                    // `!repeat`: holding F11 down would otherwise toggle the
-                    // mode at the keyboard's repeat rate.
-                    let edge = pressed && !repeat;
-                    match code {
-                        DEBUG_OVERLAY_KEY => toggle_debug |= edge,
-                        PAUSE_KEY => toggle_pause |= edge,
-                        FULLSCREEN_KEY => toggle_fullscreen |= edge,
-                        // The menu's three keys, taken only while it is on
-                        // screen. Repeats move the selection, because holding
-                        // Down to walk a list is what a player expects; the
-                        // commit key fires on **release**, so the pressed frame
-                        // of the skin is on screen while the key is held.
-                        MENU_UP_KEY if menu_showing => {
-                            if pressed {
-                                menus.select_previous();
-                            }
-                        }
-                        MENU_DOWN_KEY if menu_showing => {
-                            if pressed {
-                                menus.select_next();
-                            }
-                        }
-                        MENU_ACTIVATE_KEY if menu_showing => {
-                            if pressed {
-                                menus.press(true);
-                            } else {
-                                keyboard_action = menus.activate().and_then(MenuAction::from_id);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                _ => {}
-            }
-        });
-        self.events += pending.count;
-        self.pointer = pointer_pos;
-        if pointer_pressed {
-            self.pointer_held = true;
-        }
-        // **`down` must be false on the frame the button came up**, or
-        // `UiState::interact` latches the capture and fires it in the same call —
-        // and a press that started in the corner of the screen would be credited
-        // to whatever the cursor was over at release, which is the exact bug
-        // press capture exists to prevent. Except when the press *also* arrived
-        // this frame: a click faster than a frame must latch and fire together.
-        let pointer_down = pointer_pressed || (self.pointer_held && !pointer_released);
-        let pointer_action = self
-            .menus
-            .point(
-                self.gpu.extent(),
-                self.gpu.atlas(),
-                PointerInput {
-                    // A pointer that has never been in the window is nowhere, not at
-                    // the origin — which is a real pixel.
-                    pos: self
-                        .pointer
-                        .unwrap_or(crcbl::math::Vec2::splat(f32::NEG_INFINITY)),
-                    down: pointer_down,
-                    released: pointer_released,
-                },
-            )
-            .and_then(MenuAction::from_id);
-        if pointer_released {
-            self.pointer_held = false;
-        }
-        for action in [keyboard_action, pointer_action].into_iter().flatten() {
-            self.apply(action)?;
-        }
-        if toggle_debug {
-            self.debug.toggle();
-        }
-        // Before the pause toggle, so a batch carrying both a focus loss and an
-        // Escape resolves as "paused, then the player unpaused".
-        //
-        // The sandbox holds no key state of its own — it binds nothing but the
-        // three loop keys — so focus loss here is the pause and nothing else.
-        // The samples that do hold key state release it; see `Loop::lose_focus`
-        // in `apps/breakout`.
-        if focus_lost && !self.paused {
-            self.paused = true;
-            crcbl::log::info!("sandbox paused: the window lost focus");
-        }
-        if toggle_pause {
-            self.paused = !self.paused;
-            crcbl::log::info!("sandbox {}", if self.paused { "paused" } else { "resumed" });
-        }
-        if toggle_fullscreen {
-            self.toggle_fullscreen()?;
-        }
-        self.check_mode_request();
+    /// Never called with anything, because nothing above
+    /// [`FIRST_GAME_ID`](crcbl::engine::FIRST_GAME_ID) is in the sandbox's menu.
+    fn menu_action(_id: crcbl::ui::WidgetId) -> Option<core::convert::Infallible> {
+        None
+    }
 
-        if pending.destroyed {
-            return Ok(Flow::Stop(ExitReason::WindowDestroyed));
-        }
-        if pending.close_requested {
-            // A close request is a question. A game would ask the player about
-            // unsaved progress here; the sandbox has none, so it says yes.
-            accept_close(self.shell.as_mut(), self.window)?;
-            return Ok(Flow::Stop(ExitReason::CloseRequested));
-        }
-        if let Some(size) = pending.resized {
-            self.gpu.resize((size.width, size.height))?;
-        }
+    fn apply(&mut self, action: core::convert::Infallible) {
+        match action {}
+    }
 
-        let now = self.clock_source.advance();
-        self.frame_clock.update(now);
-        // The frame interval the clock just measured, recorded whether or not
-        // the panel is visible — a window that only fills while you are looking
-        // at it shows two seconds of nothing every time you press F3.
-        self.debug.record(self.frame_clock.render_dt());
-        // **A paused frame keeps the clock and throws the ticks away.** Not
-        // "stop calling `update`" and not "update but leave the accumulator
-        // full": both of those saturate at `DEFAULT_MAX_CATCH_UP_TICKS` and
-        // spend the first resumed frame running eight ticks at once. Draining
-        // leaves only the sub-tick remainder, so the cube picks up exactly
-        // where it stopped. The same choice, and the same reasoning, as
-        // `apps/breakout` and `apps/flappy`.
-        let dt = self.frame_clock.tick_dt_secs();
-        let gpu = &mut self.gpu;
-        self.ticks += run_ticks(&mut self.frame_clock, self.paused, || {
-            tick(dt);
-            // The cube spins on the **fixed** timestep, not on the frame rate.
-            // That is what makes `--headless --frames N` render a
-            // bit-reproducible picture on every machine, and therefore what
-            // makes a golden image of it evidence rather than a coincidence.
-            #[allow(clippy::cast_possible_truncation)]
-            gpu.advance(dt as f32);
-        });
+    fn menu_kind(&mut self, _menus: &mut Menus, paused: bool) -> bool {
+        paused
+    }
 
+    fn draw(&mut self, _gpu: &mut Gpu, _draw_list: &mut DrawList, frame: FrameInfo) {
         // `alpha` is read after the tick loop, never before: before, the
-        // accumulator may still hold whole ticks.
-        render(self.frame_clock.alpha());
-        self.draw_debug_overlay();
-        self.budget.record(self.gpu.frame()?)?;
-        Ok(Flow::Continue)
+        // accumulator may still hold whole ticks. `FrameInfo` is handed over
+        // after `run_ticks` for exactly that reason.
+        render(frame.alpha);
     }
 
-    /// Whether the simulation is stopped.
-    ///
-    /// `#[cfg(test)]` rather than merely undocumented: the sandbox is a binary
-    /// crate, so a `pub` accessor nobody calls is dead code and CI builds with
-    /// `-D warnings`. Same reason as [`format`](Self::format).
-    #[cfg(test)]
-    const fn is_paused(&self) -> bool {
-        self.paused
-    }
-
-    /// The mode the window system actually has this window in.
-    ///
-    /// Read back rather than remembered, so there is no flag that could
-    /// disagree with the compositor. Falls back to the request while the window
-    /// is unconfigured.
-    #[must_use]
-    pub fn display_mode(&self) -> DisplayMode {
-        ModeRequest::mode(self.shell.as_ref(), self.window)
-    }
-
-    /// Asks for the mode the window is not in.
-    ///
-    /// The target comes from [`display_mode`](Self::display_mode) — the mode in
-    /// effect — rather than from what was last requested, so a fullscreen the
-    /// player left by some other route leaves F11 meaning "go fullscreen"
-    /// again.
-    fn toggle_fullscreen(&mut self) -> Result<(), SandboxError> {
-        Ok(ModeRequest::toggle(self.shell.as_mut(), self.window)?)
-    }
-
-    /// Logs the moment the window system stops agreeing with the request.
-    ///
-    /// Once per transition, not once per frame.
-    fn check_mode_request(&mut self) {
-        self.mode.check(self.shell.as_ref(), self.window);
-    }
-
-    /// What a fired menu button does.
-    ///
-    /// The one place a button becomes an effect. Both input devices arrive here:
-    /// [`MENU_ACTIVATE_KEY`] and a click produce the same [`MenuAction`] and this
-    /// cannot tell them apart.
-    ///
-    /// # Errors
-    ///
-    /// [`SandboxError`] if the shell refused a display-mode change.
-    fn apply(&mut self, action: MenuAction) -> Result<(), SandboxError> {
-        match action {
-            MenuAction::Resume => {
-                if self.paused {
-                    self.paused = false;
-                    crcbl::log::info!("sandbox resumed");
-                }
-            }
-            MenuAction::Fullscreen => self.toggle_fullscreen()?,
-            MenuAction::DebugOverlay => self.debug.toggle(),
-        }
-        Ok(())
-    }
-
-    /// Lays out the pause menu and emits both halves of it.
-    ///
-    /// **Two halves, two passes.** The window frame and the buttons are
-    /// nine-sliced sprites and go to [`crcbl::render::MenuRenderer`]; the title
-    /// and the labels are text and go to the UI pass through the draw list.
-    /// `gpu.rs` declares the menu pass between the scene and the UI for exactly
-    /// this reason.
-    fn draw_menu(&mut self) {
-        self.menus.show(self.paused);
-        let layout = self
-            .menus
-            .current()
-            .map(|menu| menu.layout(self.gpu.extent(), self.gpu.atlas()));
-        match &layout {
-            Some(layout) => {
-                let menu = self.menus.current().expect("a layout implies a menu");
-                menu.render(&mut self.draw_list, layout);
-                self.gpu.set_menu(Some((menu, layout)));
-            }
-            None => self.gpu.set_menu(None),
+    fn summary(&self, run: RunSummary) -> Summary {
+        Summary {
+            backend: run.backend,
+            frames: run.frames,
+            ticks: run.ticks,
+            events: run.events,
+            extent: run.extent,
+            exit: run.exit,
+            paused: run.paused,
+            mode: run.mode,
         }
     }
 
-    /// Where this frame's menu was laid out, for the loop's own tests — so a
-    /// scripted click lands on the button the player would have seen.
-    #[cfg(test)]
-    fn menu_layout(&self) -> Option<crcbl::ui::menu::MenuLayout> {
-        self.menus
-            .current()
-            .map(|menu| menu.layout(self.gpu.extent(), self.gpu.atlas()))
-    }
-
-    /// Gathers this frame's debug sections and draws the panel.
-    ///
-    /// **This is the whole of "switching it on".** Frame timing comes with the
-    /// overlay; the only sandbox-specific line is the one that offers the GPU
-    /// timings, and it is a `Some` check because a device without timestamp
-    /// queries has no timers at all. There is no network module here either —
-    /// the sandbox has no connection at all, which is a stronger version of
-    /// breakout's and flappy's in-memory one.
-    fn draw_debug_overlay(&mut self) {
-        self.draw_list.clear();
-        self.draw_menu();
-        self.debug.begin_frame();
-        if let Some(timings) = self.gpu.timings() {
-            self.debug.panel.add(timings);
-        }
-        let (width, height) = self.gpu.extent();
-        self.debug.render(
-            &mut self.draw_list,
-            crcbl::math::Vec2::new(width as f32, height as f32),
-            self.gpu.atlas(),
+    fn log_summary(summary: &Summary) {
+        crcbl::log::info!(
+            "sandbox: {} frames, {} ticks on the {} shell at {}x{} ({:?})",
+            summary.frames,
+            summary.ticks,
+            summary.backend,
+            summary.extent.0,
+            summary.extent.1,
+            summary.exit,
         );
-        self.gpu.take_draw_list(&mut self.draw_list);
-    }
-
-    /// Tears the window and the GPU down and reports what happened.
-    ///
-    /// # Errors
-    ///
-    /// [`SandboxError`] if teardown failed.
-    pub fn finish(mut self, exit: ExitReason) -> Result<Summary, SandboxError> {
-        // `docs/plan/02-vulkan-backend.md` §2.4: "GPU timestamp per pass,
-        // exposed as a frame-timing report". At `info` so a normal run shows
-        // what the frame cost without `CRCBL_LOG=debug`; empty on a device with
-        // no timestamp queries, which says so rather than printing zeros.
-        if let Some(timings) = self.gpu.timings()
-            && !timings.is_empty()
-        {
-            crcbl::log::info!("{}", timings.report().trim_end());
-        }
-        let summary = Summary {
-            backend: self.shell.backend(),
-            frames: self.budget.presented(),
-            ticks: self.ticks,
-            events: self.events,
-            extent: self.gpu.extent(),
-            exit,
-            paused: self.paused,
-            mode: self.display_mode(),
-        };
-        // Surface and swapchain first: the seam is explicit that the HAL
-        // surface must die before the window whose handles it holds. Both are
-        // attempted even when the first failed — a mapped window left behind
-        // because the GPU teardown errored is strictly worse than the error.
-        let gpu_result = self.gpu.destroy();
-        // A window destroyed in answer to a close request is already gone.
-        let shell_result = if exit.window_survives() {
-            self.shell.destroy_window(self.window)
-        } else {
-            Ok(())
-        };
-        gpu_result?;
-        shell_result?;
-        Ok(summary)
-    }
-
-    /// The swapchain's format, which the HAL chose from the surface's caps.
-    ///
-    /// Test-only, and `#[cfg(test)]` rather than merely undocumented: a `pub`
-    /// accessor nobody calls is dead code in a binary crate, and CI builds with
-    /// `-D warnings`.
-    #[cfg(test)]
-    fn format(&self) -> crcbl::hal::Format {
-        self.gpu.format()
-    }
-
-    /// The shell, at whatever type this loop was built with — so a test that
-    /// built one from a [`HeadlessShell`](crcbl::shell::HeadlessShell) can
-    /// script what a compositor would do.
-    #[cfg(test)]
-    fn shell_mut(&mut self) -> &mut S {
-        self.shell.as_mut()
-    }
-
-    /// The window this loop is driving.
-    #[cfg(test)]
-    fn window(&self) -> WindowId {
-        self.window
     }
 }
 
@@ -806,27 +432,18 @@ fn render(alpha: f32) {
     let _ = alpha;
 }
 
-/// Lets [`crcbl::engine::drive`] step this loop, and the browser's `App` step
-/// the same one.
-///
-/// Two forwards to the inherent methods, which stay because they are this
-/// crate's public surface: a test drives `frame` directly, and so does
-/// `crate::web`.
-impl<S: Shell + ?Sized> crcbl::engine::GameLoop for Loop<S> {
-    type Error = SandboxError;
-    type Summary = Summary;
-
-    fn frame(&mut self) -> Result<Flow, Self::Error> {
-        Self::frame(self)
-    }
-
-    fn finish(self, exit: ExitReason) -> Result<Self::Summary, Self::Error> {
-        Self::finish(self, exit)
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    // The six keys the loop reserves are `crcbl::engine`'s, and always were the
+    // same in every sample: F3 opens the panel, Escape pauses, F11 asks for
+    // fullscreen, and the menu's three navigate it. The sandbox used to declare
+    // all six itself — "switching it on is one thing" is only true if it is the
+    // *same* thing in every sample, and two declarations is how that stops being
+    // true. Only the tests name them now, because the loop that reads them is
+    // the engine's.
+    use crcbl::engine::{
+        DEBUG_OVERLAY_KEY, FULLSCREEN_KEY, Flow, MENU_ACTIVATE_KEY, MENU_DOWN_KEY, PAUSE_KEY,
+    };
     use crcbl::shell::HeadlessShell;
 
     use super::*;
@@ -835,7 +452,7 @@ mod tests {
     /// compositor. `run` uses `dyn Shell`; both go through the same
     /// [`Loop::with_shell`].
     fn scripted(options: &Options) -> Loop<HeadlessShell> {
-        Loop::with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
+        with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
     }
 
     /// Always `--backend null`. These tests run on the macOS and Windows CI
@@ -871,7 +488,7 @@ mod tests {
     fn ui_text(engine: &Loop<HeadlessShell>) -> Vec<String> {
         use crcbl::ui::draw_list::DrawCommand;
         engine
-            .gpu
+            .gpu()
             .draw_list()
             .commands()
             .iter()
@@ -903,9 +520,9 @@ mod tests {
             "the sandbox draws no UI at all while the panel is off",
         );
         assert!(
-            !engine.gpu.last_dump().contains("ui-composite"),
+            !engine.gpu().last_dump().contains("ui-composite"),
             "and declares no UI pass either:\n{}",
-            engine.gpu.last_dump(),
+            engine.gpu().last_dump(),
         );
 
         engine
@@ -923,9 +540,9 @@ mod tests {
         // them, which is the failure a "the rows are present" assertion misses.
         // The first frame's interval is the clock's zero-length sentinel and is
         // dropped, so three frames leave two samples of the headless step.
-        assert_eq!(engine.debug.frame.len(), 2, "two real intervals so far");
+        assert_eq!(engine.debug().frame.len(), 2, "two real intervals so far");
         assert_eq!(
-            engine.debug.frame.mean(),
+            engine.debug().frame.mean(),
             crcbl::engine::HEADLESS_FRAME_STEP,
             "the window holds the clock's own step",
         );
@@ -938,13 +555,13 @@ mod tests {
         // There is no connection here at all, so there is no network module —
         // the stronger version of breakout's and flappy's in-memory one.
         let titles: Vec<&str> = engine
-            .debug
+            .debug()
             .panel
             .sections()
             .iter()
             .map(crcbl::ui::DebugSection::title)
             .collect();
-        let expected: &[&str] = if engine.gpu.timings().is_some() {
+        let expected: &[&str] = if engine.gpu().timings().is_some() {
             &["frame", "gpu"]
         } else {
             &["frame"]
@@ -956,9 +573,9 @@ mod tests {
         // graph is the difference between "the overlay was drawn" and "the
         // overlay was composited onto the frame the player sees".
         assert!(
-            engine.gpu.last_dump().contains("ui-composite"),
+            engine.gpu().last_dump().contains("ui-composite"),
             "the UI pass must be in the frame:\n{}",
-            engine.gpu.last_dump(),
+            engine.gpu().last_dump(),
         );
 
         engine
@@ -1015,8 +632,12 @@ mod tests {
         let engine = scripted(&headless(1));
         // The HAL picked an sRGB format from the surface's caps, which it could
         // only do after a surface existed, which needed the window.
-        assert!(engine.format().is_srgb(), "{:?}", engine.format());
-        assert!(engine.events >= 1, "the first configure is an event");
+        assert!(
+            engine.gpu().format().is_srgb(),
+            "{:?}",
+            engine.gpu().format()
+        );
+        assert!(engine.events() >= 1, "the first configure is an event");
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
@@ -1025,7 +646,7 @@ mod tests {
     #[test]
     fn a_resize_reconfigures_the_swapchain() {
         let mut engine = scripted(&headless(10));
-        assert_eq!(engine.gpu.extent(), (1280, 720));
+        assert_eq!(engine.gpu().extent(), (1280, 720));
         engine.frame().expect("a frame");
 
         let window = engine.window();
@@ -1034,7 +655,7 @@ mod tests {
             .resize(window, PhysicalSize::new(1920, 1080))
             .expect("the window is live");
         engine.frame().expect("a frame after the resize");
-        assert_eq!(engine.gpu.extent(), (1920, 1080));
+        assert_eq!(engine.gpu().extent(), (1920, 1080));
 
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
@@ -1108,7 +729,7 @@ mod tests {
         let mut engine = scripted(&headless(400));
         let window = engine.window();
         run_frames(&mut engine, 20);
-        let spun = engine.gpu.elapsed();
+        let spun = engine.gpu().elapsed();
         assert!(spun > 0.0, "the cube has to be spinning first");
 
         engine
@@ -1118,11 +739,11 @@ mod tests {
         engine.frame().expect("a frame");
         assert!(engine.is_paused(), "an unfocused window is not simulating");
 
-        let ticks = engine.ticks;
+        let ticks = engine.ticks();
         run_frames(&mut engine, 120);
-        assert_eq!(engine.ticks, ticks, "a paused frame ran a tick");
+        assert_eq!(engine.ticks(), ticks, "a paused frame ran a tick");
         assert_eq!(
-            engine.gpu.elapsed(),
+            engine.gpu().elapsed(),
             spun,
             "120 paused frames turned the cube",
         );
@@ -1142,7 +763,7 @@ mod tests {
         run_frames(&mut engine, 10);
         assert!(!engine.is_paused());
         assert!(
-            engine.gpu.elapsed() > spun,
+            engine.gpu().elapsed() > spun,
             "resuming did not restart the simulation",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
@@ -1166,18 +787,18 @@ mod tests {
         engine.frame().expect("a frame");
         assert!(engine.is_paused());
 
-        let paused_at = engine.ticks;
+        let paused_at = engine.ticks();
         run_frames(&mut engine, 300);
-        assert_eq!(engine.ticks, paused_at, "a paused frame ran a tick");
+        assert_eq!(engine.ticks(), paused_at, "a paused frame ran a tick");
 
         engine
             .shell_mut()
             .key_press(window, PAUSE_KEY)
             .expect("the window is live");
-        let before = engine.ticks;
+        let before = engine.ticks();
         engine.frame().expect("a frame");
         assert!(!engine.is_paused());
-        let burst = engine.ticks - before;
+        let burst = engine.ticks() - before;
         assert!(
             burst <= 1,
             "the first frame after a five-second pause ran {burst} ticks",
@@ -1207,9 +828,9 @@ mod tests {
         assert!(drawn.iter().any(|t| t == "RESUME"), "{drawn:?}");
         // And the picture reached the *other* pass: the scrim, the nine-slice
         // frame, and nine quads for each of three buttons.
-        let sprites = engine.gpu.menu_sprites();
+        let sprites = engine.gpu().menu_sprites();
         assert_eq!(sprites.len(), 1 + 9 + 9 * 3, "{}", sprites.len());
-        let extent = engine.gpu.extent();
+        let extent = engine.gpu().extent();
         let scale = engine
             .menu_layout()
             .expect("a menu is showing")
@@ -1235,9 +856,9 @@ mod tests {
         let mut engine = scripted(&headless(60));
         run_frames(&mut engine, 4);
         assert!(
-            engine.gpu.menu_sprites().is_empty(),
+            engine.gpu().menu_sprites().is_empty(),
             "a running frame submitted {} menu sprites",
-            engine.gpu.menu_sprites().len(),
+            engine.gpu().menu_sprites().len(),
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
@@ -1390,7 +1011,7 @@ mod tests {
         let window = engine.window();
         run_frames(&mut engine, 2);
         assert_eq!(engine.display_mode(), DisplayMode::Windowed);
-        let windowed_extent = engine.gpu.extent();
+        let windowed_extent = engine.gpu().extent();
 
         engine
             .shell_mut()
@@ -1408,7 +1029,7 @@ mod tests {
                 .expect("state")
                 .mode_request_honoured()
         );
-        assert_ne!(engine.gpu.extent(), windowed_extent);
+        assert_ne!(engine.gpu().extent(), windowed_extent);
 
         engine
             .shell_mut()
@@ -1431,7 +1052,7 @@ mod tests {
         let mut engine = scripted(&headless(200));
         let window = engine.window();
         run_frames(&mut engine, 2);
-        let windowed = engine.gpu.extent();
+        let windowed = engine.gpu().extent();
 
         engine
             .shell_mut()
@@ -1459,7 +1080,7 @@ mod tests {
             DisplayMode::Windowed,
             "the loop must report what it got, not what it asked for",
         );
-        assert!(!engine.mode.honoured(), "the refusal has to be noticed");
+        assert!(!engine.mode_honoured(), "the refusal has to be noticed");
         let summary = engine.finish(ExitReason::FrameBudget).expect("teardown");
         assert_eq!(summary.mode, DisplayMode::Windowed);
     }

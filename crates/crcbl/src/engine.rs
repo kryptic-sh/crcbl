@@ -2488,7 +2488,11 @@ pub struct FrameInfo {
     /// How far the render sits between the last tick and the next, in `0..1`.
     pub alpha: f32,
     /// One tick's duration, in seconds.
-    pub tick_dt: f32,
+    ///
+    /// `f64` because that is what [`crcbl_core::FrameClock`] reports and
+    /// narrowing it here would be the engine deciding a precision on the game's
+    /// behalf.
+    pub tick_dt: f64,
 }
 
 /// The shared half of what a run reports.
@@ -2563,7 +2567,7 @@ pub trait HostedGame: Sized {
 
     /// One fixed-timestep step. Called zero or more times per frame, never
     /// while paused.
-    fn tick(&mut self, gpu: &mut Self::Gpu, tick_dt: f32);
+    fn tick(&mut self, gpu: &mut Self::Gpu, tick_dt: f64);
 
     /// A key the menu did not claim.
     fn key_event(&mut self, key: crcbl_core::input::KeyCode, pressed: bool);
@@ -2830,8 +2834,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         self.debug.record(self.frame_clock.render_dt());
         // A paused frame keeps the clock and throws the ticks away, which is
         // `run_ticks`'s whole job; its docs carry the argument for why.
-        #[allow(clippy::cast_possible_truncation)]
-        let tick_dt = self.frame_clock.tick_dt_secs() as f32;
+        let tick_dt = self.frame_clock.tick_dt_secs();
         let game = &mut self.game;
         let gpu = &mut self.gpu;
         let ran = run_ticks(&mut self.frame_clock, self.paused, || {
@@ -3069,6 +3072,12 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     #[must_use]
     pub const fn ticks(&self) -> u64 {
         self.ticks
+    }
+
+    /// Shell events observed so far, start-up's included.
+    #[must_use]
+    pub const fn events(&self) -> u64 {
+        self.events
     }
 
     /// Whether the window system agreed with the last display-mode request.
@@ -4734,7 +4743,7 @@ mod tests {
             )
         }
 
-        fn tick(&mut self, _gpu: &mut FakeGpu, _tick_dt: f32) {
+        fn tick(&mut self, _gpu: &mut FakeGpu, _tick_dt: f64) {
             self.ticks += 1;
         }
 

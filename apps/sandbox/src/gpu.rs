@@ -442,3 +442,47 @@ impl Gpu {
         self.ctx.destroy()
     }
 }
+
+/// The frame's half of this bundle, for [`crcbl::engine::Loop`].
+///
+/// Six one-line forwards. Every one already existed for the loop that used to
+/// call them from `app.rs`; the trait is what lets the engine call them instead.
+impl crcbl::engine::GameGpu for Gpu {
+    fn atlas(&self) -> &FontAtlas {
+        Self::atlas(self)
+    }
+
+    fn set_menu(&mut self, menu: Option<(&Menu, &MenuLayout)>) {
+        Self::set_menu(self, menu);
+    }
+
+    fn take_draw_list(&mut self, list: &mut DrawList) {
+        Self::take_draw_list(self, list);
+    }
+
+    fn timings(&self) -> Option<&crcbl::render::FrameTimings> {
+        Self::timings(self)
+    }
+
+    fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
+        Self::frame(self)
+    }
+
+    fn destroy(self) -> Result<(), GpuError> {
+        Self::destroy(self)
+    }
+}
+
+/// The two questions both halves of the engine ask a swapchain's owner.
+///
+/// The sandbox has no browser build and so no `PolledGpu` impl; these two are
+/// the half a running loop needs and are declared once for both.
+impl crcbl::engine::GpuSurface for Gpu {
+    fn extent(&self) -> (u32, u32) {
+        Self::extent(self)
+    }
+
+    fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError> {
+        Self::resize(self, extent)
+    }
+}

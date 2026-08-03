@@ -307,7 +307,7 @@ impl HostedGame for Horde {
         menu::menus()
     }
 
-    fn tick(&mut self, _gpu: &mut Gpu, _tick_dt: f32) {
+    fn tick(&mut self, _gpu: &mut Gpu, _tick_dt: f64) {
         self.game.tick();
     }
 

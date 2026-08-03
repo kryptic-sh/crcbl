@@ -9,7 +9,7 @@
 //!
 //! Everything else is shared: the window frame, the button skin, the layout and
 //! the keyboard model are `crcbl::ui::menu` and `crcbl::render::menu`, the same
-//! three keys navigate it, and the same [`MenuAction`] shape turns a button into
+//! three keys navigate it, and [`crcbl::engine::MenuAction`] turns a button into
 //! an effect. `docs/plan/sample/00-samples-overview.md`'s rule 4 is why the
 //! sandbox has a debug overlay at all, and it is the same reason it has this: a
 //! sample that cannot show the engine's menu is a finding about the menu.
@@ -22,49 +22,7 @@
 //! `false` is the state with no menu in the set — which is what makes every
 //! method on the set a no-op while the sandbox is running.
 
-use crcbl::ui::WidgetId;
 use crcbl::ui::menu::{Menu, MenuItem, MenuSet};
-
-/// What firing a menu button asks the loop to do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MenuAction {
-    /// Un-pause.
-    Resume,
-    /// Toggle borderless fullscreen.
-    Fullscreen,
-    /// Toggle the debug panel.
-    DebugOverlay,
-}
-
-impl MenuAction {
-    /// The [`WidgetId`] this action is carried by.
-    ///
-    /// The discriminant, written out rather than derived, because a `WidgetId`
-    /// that changed when a variant was inserted would silently re-point every
-    /// button.
-    const fn id(self) -> WidgetId {
-        match self {
-            Self::Resume => 1,
-            Self::Fullscreen => 3,
-            Self::DebugOverlay => 4,
-        }
-    }
-
-    /// The action an id names, or `None` for an id from another menu system.
-    ///
-    /// The gap at 2 is deliberate: breakout's and flappy's `Launch`/`Flap` sit
-    /// there, and leaving the number free is what keeps the three samples' ids
-    /// readable side by side.
-    #[must_use]
-    pub const fn from_id(id: WidgetId) -> Option<Self> {
-        match id {
-            1 => Some(Self::Resume),
-            3 => Some(Self::Fullscreen),
-            4 => Some(Self::DebugOverlay),
-            _ => None,
-        }
-    }
-}
 
 /// The sandbox's menus, keyed by whether it is paused.
 pub type Menus = MenuSet<bool>;
@@ -75,7 +33,7 @@ pub type Menus = MenuSet<bool>;
 /// that a running frame draws no menu.
 #[must_use]
 pub fn menus() -> Menus {
-    use MenuAction::{DebugOverlay, Fullscreen, Resume};
+    use crcbl::engine::{DEBUG_OVERLAY_ID, FULLSCREEN_ID, RESUME_ID};
     MenuSet::new(
         false,
         vec![(
@@ -83,9 +41,9 @@ pub fn menus() -> Menus {
             Menu::new(
                 "PAUSED",
                 vec![
-                    MenuItem::new(Resume.id(), "RESUME", "ESC"),
-                    MenuItem::new(Fullscreen.id(), "FULLSCREEN", "F11"),
-                    MenuItem::new(DebugOverlay.id(), "DEBUG PANEL", "F3"),
+                    MenuItem::new(RESUME_ID, "RESUME", "ESC"),
+                    MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                    MenuItem::new(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
                 ],
             ),
         )],
@@ -97,6 +55,17 @@ pub fn menus() -> Menus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sandbox's whole menu vocabulary, which is the loop's three and
+    /// nothing else — [`core::convert::Infallible`] as the game half makes
+    /// [`crcbl::engine::MenuAction::Game`] uninhabited, which is the type
+    /// system saying "this game's menus do nothing only this game can do".
+    type MenuAction = crcbl::engine::MenuAction<core::convert::Infallible>;
+
+    /// This game answers about no id of its own.
+    const fn no_game_action(_: crcbl::ui::WidgetId) -> Option<core::convert::Infallible> {
+        None
+    }
     use crcbl::math::Vec2;
     use crcbl::ui::text::FontAtlas;
     use crcbl::ui::{ButtonState, PointerInput};
@@ -107,14 +76,16 @@ mod tests {
     /// has no idea what an id means here — so this is the one translation, in
     /// one place, the way `app.rs` does it.
     fn activate(menus: &mut Menus) -> Option<MenuAction> {
-        menus.activate().and_then(MenuAction::from_id)
+        menus
+            .activate()
+            .and_then(|id| MenuAction::from_id(id, no_game_action))
     }
 
     /// The action a frame of pointer input fired, if any.
     fn point(menus: &mut Menus, extent: (u32, u32), pointer: PointerInput) -> Option<MenuAction> {
         menus
             .point(extent, &FontAtlas::built_in(), pointer)
-            .and_then(MenuAction::from_id)
+            .and_then(|id| MenuAction::from_id(id, no_game_action))
     }
 
     /// **A running sandbox shows no menu, and a paused one shows exactly the
@@ -145,7 +116,7 @@ mod tests {
             .items()
             .iter()
             .map(|item| {
-                MenuAction::from_id(item.id)
+                MenuAction::from_id(item.id, no_game_action)
                     .unwrap_or_else(|| panic!("{} names no action", item.label))
             })
             .collect();
