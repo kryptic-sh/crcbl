@@ -335,12 +335,122 @@ run_sandbox() {
     echo "crcbl e2e: $how on x11/$backend"
 }
 
+# The X11 half of the `F11` pass — see `run_sandbox_toggle` in
+# `run-wayland-e2e.sh` for the shape and for what the two ends prove. What is
+# different here is *how a key reaches another program*: `XTEST` is a server
+# extension, so the sender needs a connection and nothing else, where the
+# Wayland one has to plug a virtual keyboard into a seat and be started first.
+#
+# The other difference is where the key goes. With no window manager the focus
+# is left at `PointerRoot` and keys follow the *pointer*, so the sender parks it
+# inside the sandbox's window; with one, the manager focuses the window it just
+# mapped and the pointer is irrelevant. The pass therefore runs both ways, like
+# everything else in this script.
+KEY_F11_X11=95
+BIN_DIR="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}/debug"
+TOGGLE_POLL_S=0.1
+
+# Polls a file for a line, or fails naming what never appeared. A deadline and a
+# poll, never a fixed sleep.
+wait_for_line() {
+    local what="$1" file="$2" pattern="$3"
+    local deadline=$(( $(date +%s) + DISPLAY_TIMEOUT_S ))
+    while ! grep -q "$pattern" "$file" 2>/dev/null; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "crcbl e2e: timed out after ${DISPLAY_TIMEOUT_S}s waiting for $what" >&2
+            cat "$file" >&2 || true
+            log_tail
+            exit 1
+        fi
+        sleep "$TOGGLE_POLL_S"
+    done
+}
+
+# `run_sandbox_toggle <backend>`
+run_sandbox_toggle() {
+    local backend="$1"
+    local keys_in="${RUNTIME_DIR}/keys.fifo"
+    local keys_log="${RUNTIME_DIR}/keys.log"
+
+    echo "crcbl e2e: running the sandbox windowed on $backend and pressing F11 at it"
+    for binary in sandbox crcbl-e2e-x11-key; do
+        if [ ! -x "${BIN_DIR}/${binary}" ]; then
+            echo "crcbl e2e: ${BIN_DIR}/${binary} was not built" >&2
+            exit 1
+        fi
+    done
+
+    # The binaries directly rather than `cargo run`: this one has to be killed
+    # from the outside, and killing a `cargo run` leaves the child orphaned
+    # holding the window. No frame budget either — it runs until the window
+    # closes, which is what a player's session is.
+    CRCBL_SHELL=x11 \
+    CRCBL_VK_VALIDATION=1 \
+    CRCBL_LOG="${CRCBL_E2E_SANDBOX_LOG:-info}" \
+        "${BIN_DIR}/sandbox" --backend "$backend" --title "crcbl e2e sandbox" \
+        >"$SANDBOX_LOG" 2>&1 &
+    local sandbox_pid=$!
+
+    # It starts windowed, and reading that back is what stops the wait below
+    # from being satisfied by a state that was already true before F11.
+    wait_for_line "the sandbox to report itself windowed" \
+        "$SANDBOX_LOG" "shell: the window is windowed"
+
+    # A point inside the client area. With no window manager the window is at
+    # the origin, and with one it is placed — but `openbox` centres a window
+    # this much smaller than the screen, so a point a quarter of the way into
+    # the *screen* is inside it either way. The sender only needs the pointer
+    # there for the WM-less case; see its docs.
+    local x=$(( ${SANDBOX_WINDOWED%x*} / 4 ))
+    local y=$(( ${SANDBOX_WINDOWED#*x} / 4 ))
+
+    rm -f "$keys_in"
+    mkfifo "$keys_in"
+    "${BIN_DIR}/crcbl-e2e-x11-key" "$x" "$y" <"$keys_in" >"$keys_log" 2>&1 &
+    local keys_pid=$!
+    # Holds the write end open, so the sender blocks on an empty stream instead
+    # of seeing EOF from the first writer that finishes.
+    exec 9>"$keys_in"
+    wait_for_line "the key sender to reach the display" "$keys_log" "crcbl-e2e-x11-key: ready"
+
+    echo "$KEY_F11_X11" >&9
+
+    # The game's own account of the answer, and there are two of them because
+    # this platform can give either. The engine logs the honoured case at info
+    # and the refused case at warn, both naming the modes, so each branch is
+    # asserted rather than one being assumed from the other.
+    #
+    # What this pass is *for* is the F11 path — key, repeat filter, `set_mode`,
+    # the window system's answer — reaching a running game from another process.
+    # That the swapchain follows a granted mode change is `run_sandbox`'s job
+    # above, which asserts the summary's extent; repeating it here would need a
+    # clean `WM_DELETE_WINDOW`, and finding another process's window to send one
+    # to is a window-manager's job, not a key sender's.
+    if [ -n "${CRCBL_E2E_X11_WM:-}" ]; then
+        wait_for_line "F11 to reach the sandbox and be honoured" \
+            "$SANDBOX_LOG" "shell: the window is borderless"
+        local how="F11 took the sandbox to borderless"
+    else
+        wait_for_line "F11 to reach the sandbox and be refused" \
+            "$SANDBOX_LOG" "shell: asked for borderless and got windowed"
+        local how="F11 was requested, refused, and reported as refused"
+    fi
+
+    kill "$sandbox_pid" 2>/dev/null || true
+    wait "$sandbox_pid" 2>/dev/null || true
+    exec 9>&-
+    wait "$keys_pid" || true
+    rm -f "$keys_in"
+    echo "crcbl e2e: $how on x11/$backend"
+}
+
 # See the equivalent block in `run-wayland-e2e.sh` for why the loader probe is a
 # skip on a developer machine and a hard failure in CI.
 if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so.1 ] \
     || ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1'; then
     run_sandbox vk windowed
     run_sandbox vk fullscreen
+    run_sandbox_toggle vk
 else
     echo "crcbl e2e: no Vulkan loader; skipping the vk sandbox pass" >&2
     if [ -n "${CI:-}" ]; then

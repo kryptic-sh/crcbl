@@ -313,9 +313,13 @@ on those platforms — `NoBackend` naming what was tried, `UnknownBackend` for
 - **Pixels.** Every display-mode assertion on both backends is a summary line, a
   log line, or the compositor's own tree. That a fullscreen frame is _composed_
   at the new extent, rather than merely built at it, is unchecked.
-- **`F11` at a running game on X11.** The Wayland harness drives it through a
-  second process with a virtual keyboard; `run-x11-e2e.sh` has no key sender, so
-  the engine-level toggle is covered on one platform.
+- **The extent after an `F11`, on X11.** The X11 toggle pass asserts the
+  engine's own account of the mode — honoured under `openbox`, refused without —
+  but not the summary line's extent, because the sandbox is killed rather than
+  asked to close: sending `WM_DELETE_WINDOW` means finding another process's
+  window, which needs `QueryTree` and a `WM_CLASS` walk the key sender does not
+  have. `run_sandbox vk fullscreen` covers the swapchain-follows half on the
+  same platform.
 
 ## Two display-mode defects, and the shape they shared
 

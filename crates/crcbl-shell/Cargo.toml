@@ -40,6 +40,15 @@ name = "crcbl-e2e-key"
 path = "tests/bin/send_key.rs"
 required-features = ["wayland-e2e"]
 
+# The X11 counterpart, and separate rather than one binary with a flag: the two
+# reach a running game by different mechanisms — a virtual seat device against
+# a compositor, `XTEST` against a server — and each is gated behind its own
+# feature so a build with one backend's suite on does not compile the other's.
+[[bin]]
+name = "crcbl-e2e-x11-key"
+path = "tests/bin/send_key_x11.rs"
+required-features = ["x11-e2e"]
+
 [features]
 # The nested-compositor end-to-end suite. Off by default so a plain
 # `cargo nextest run` on a machine with no compositor stays green; CI enables it
