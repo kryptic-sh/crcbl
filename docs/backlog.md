@@ -93,15 +93,11 @@ is left is one build-dependency and one file.
   is not. Smallest remaining copy in the tree and nothing about it is urgent;
   the count is here so it is not measured a third time.
 
-**Everything else on this list shipped.** `web.rs` is `crates/crcbl/src/web.rs`
-(the per-sample file is down to 112 code lines from 333, and 26 of them differ
-between breakout and flappy — the `__crcbl_<sample>_` symbols, which
-`web/tools/check-exports.mjs` requires to be literal, see _Considered and
-declined_); `app.rs`'s loop is `crcbl::engine::Loop`; `args.rs` is
-`crcbl::args`; `best.rs`/`high_score.rs` is `crcbl::store::record::Record`; the
-oscillator is `crcbl_audio::synth`; the loopback session is `crcbl::session`;
-`build.rs` is `crcbl_sprite::bake::bake_dir`. Adopting `crcbl_ui::hud` was
-declined on its merits — see that section.
+Everything else that was on this list shipped and is out of it. The one
+non-obvious residue: each sample's `web.rs` still carries its own
+`__crcbl_<sample>_` symbols, which `web/tools/check-exports.mjs` requires to be
+literal — see _Considered and declined_. Adopting `crcbl_ui::hud` was declined
+on its merits, also below.
 
 ## Frame pacing sleeps on the monotonic clock, which is not what a display does
 
@@ -175,24 +171,19 @@ before P6–P8 build on it), then the worker backend behind it.
 ## What the scaffold's gate does not cover
 
 `crcbl new`'s template now hosts `crcbl::engine::Loop`, and the scaffold e2e
-compiles it, lints it, runs its three unit tests and runs it headless — against
-the null backend by default and against lavapipe in CI
-(`CRCBL_CLI_E2E_BACKEND=vk`). Two gaps, both deliberate:
+compiles it, lints it, runs its three unit tests, runs it headless, and — since
+the sway start-up moved into `crates/crcbl-shell/tests/sway-session.sh` — runs
+it **windowed** against a private headless compositor, asserting the summary
+reports the wayland shell at the size the template asks for. Against the null
+backend by default and against lavapipe in CI (`CRCBL_CLI_E2E_BACKEND=vk`). What
+is left:
 
-- **The windowed path has never been run.** The machine that developed it had no
-  compositor reachable, so `open()` returned "no shell backend available" every
-  time. What that leaves unobserved is the template's own share — whether the
-  pause menu, the fullscreen toggle and the resize look right — rather than the
-  machinery behind them, which is `crcbl::engine::Loop`'s and is now driven
-  windowed _and_ borderless against headless sway by `run-wayland-e2e.sh`. The
-  remaining check is `cargo run` in a scaffolded project on a desktop, then
-  `ESC`, `F11`, `F3`.
-
-  The scaffold could join the harness the way the sandbox has: `run-cli-e2e.sh`
-  would have to start sway itself, which today only `run-wayland-e2e.sh` knows
-  how to do. Extracting that start-up — the private `XDG_RUNTIME_DIR`, the
-  socket poll, the log tail — into something both scripts source is the piece of
-  work, and it is worth doing only if a second caller actually wants it.
+- **Nobody has looked at the scaffold.** The windowed pass asserts the window is
+  the size it asked for and that frames were presented; it does not assert what
+  is _in_ them. Whether the pause menu, the fullscreen toggle and the debug
+  panel look right in a generated project is still `cargo run` on a desktop,
+  then `ESC`, `F11`, `F3`. Same class as every other "nothing has looked at it"
+  entry in _Coverage gaps_.
 
 - **Vulkan validation is not gated on it.** Run by hand against lavapipe with
   `CRCBL_VK_VALIDATION=1 CRCBL_VK_SYNC_VALIDATION=1`, the template's graph is
@@ -204,30 +195,59 @@ the null backend by default and against lavapipe in CI
 
 ## Display-mode coverage: what is gated and what is not
 
-The two window systems now answer a game-level `--fullscreen` from both sides —
-sway honours it (`run-wayland-e2e.sh`, borderless at the output size) and a
-WM-less Xvfb refuses it (`run-x11-e2e.sh`, reported as `windowed`). What is
-still uncovered:
+Every combination of {born borderless, toggled with `F11`, imposed by the window
+system} × {honoured, refused} is now executed by a harness. sway honours
+(`run-wayland-e2e.sh`), a WM-less Xvfb refuses and openbox honours
+(`run-x11-e2e.sh`, run twice in CI). `crates/crcbl-shell/tests/bin/send_key.rs`
+is what drives `F11` at a running sample from outside its process. What is still
+uncovered:
 
-- **The `F11` toggle mid-run, at the game level.** The shell suites cover
-  `set_mode` in both directions and `run-wayland-e2e.sh` covers a compositor
-  imposing a mode, but nothing presses `F11` at a running sample. It needs
-  synthesised keyboard input into another process: the shell tests build a
-  `zwlr_virtual_keyboard_v1` from inside the test process, and a harness driving
-  a separate binary would need a small helper that does the same. Worth it only
-  if the toggle path ever breaks in a way `ModeRequest`'s unit tests miss.
 - **The null GPU backend is excluded from every mode assertion, and correctly.**
   It presents by doing nothing, so no `wl_buffer` is attached, so the surface
   never maps: `swaymsg -t get_tree` lists no `app_id` for a null-backend run
   where a Vulkan one lists `sh.kryptic.crcbl.sandbox` — observed, not inferred.
   An unmapped surface gets no fullscreen configure, so any mode assertion there
   would be checking a window the compositor does not have.
-- **X11 with a window manager.** `CRCBL_E2E_X11_WM` starts one and the suite
-  adapts, but CI does not set it, so the honoured-on-X11 branch of both the
-  shell test and the sandbox pass is never taken. Picking a WM to depend on is
-  the open question.
+- **The X11 window-manager branch was never verified on the machine that wrote
+  it.** No X11 window manager is installed here and sway's Xwayland would not
+  bind a socket (`Failed to bind socket @/tmp/.X11-unix/X0`), so the openbox
+  pass was written blind and its verdict comes from reading the CI job log.
+  Everything it asserts is red-on-failure by construction —
+  `CRCBL_E2E_EXPECT_WM` fails `Session::open` if no window manager appears, and
+  the sandbox pass greps for the granted extent — but nobody has falsified it by
+  mutation the way the Wayland side was.
+- **`F11` is only pressed at the sandbox, and only under Wayland.** The four
+  games take the same engine-owned path (`crcbl::engine::FULLSCREEN_KEY`), and
+  `run-x11-e2e.sh` starts no key sender: the equivalent there is XTEST through
+  the suite's own peer client, which is in-process and would need the same
+  out-of-process treatment.
 - **macOS and Windows have no shell backend at all**, so display modes there are
   not late — they do not exist. See the platform sections of `crcbl-shell`.
+
+## Two display-mode defects, and the shape they shared
+
+Both are fixed and in `CHANGELOG.md`; what is worth carrying is the **shape**,
+because it is the one this area keeps producing and neither was found by
+reading. Each was a value that stood in for an observation and was
+indistinguishable from a real one:
+
+1. `crcbl-shell`'s X11 backend derived the effective mode by reading
+   `_NET_WM_STATE` back — a property the _client_ writes to request an initial
+   state — so with no window manager to take ownership it read its own request
+   and called it the answer.
+2. `crcbl::engine::ModeRequest::mode` answered `DisplayMode::Windowed` when the
+   window could not be read, and `Loop::finish` builds the summary _after_
+   accepting a close request destroys the window. Every session a player ended
+   the ordinary way reported windowed.
+
+Both were found by an end-to-end pass that ran the whole thing and read the line
+at the end, and both would have gone on passing every unit test. **The open
+question this leaves**: `ModeRequest::mode` still returns a `DisplayMode` rather
+than an `Option`, so a caller with a dead window still gets an invented
+`Windowed` — `mode_at_exit` is the fix for the one caller that had the problem,
+not for the type. Changing the signature would touch `Loop::display_mode` and
+`ModeRequest::toggle`, both of which genuinely have a live window and would have
+to unwrap something they know cannot fail.
 
 ## Five sample `gpu.rs` files, two of them identical
 
@@ -244,58 +264,6 @@ scrolls, and the two files agreeing today may be the coincidence of two 2D games
 at the same stage rather than one piece of knowledge written twice. Revisit when
 a third game wants the same bundle; a helper with two callers that then needs a
 flag per caller is the failure mode.
-
-## The wasm rustdoc gate covers everything that builds for wasm
-
-CI ran `cargo doc` on the host target only, so `apps/*/src/web.rs` — behind
-`#[cfg(target_arch = "wasm32")]`, and the one module in each game that is
-_entirely_ documentation — had never been read by a docs gate. Four samples were
-carrying broken intra-doc links, and widening the line to the engine crates
-turned up 24 more.
-
-Both halves are fixed and the `wasm32` job now runs
-`cargo doc --workspace --exclude crcbl-vk --exclude crcbl-cli --target wasm32-unknown-unknown`
-under `RUSTDOCFLAGS: -D warnings`, so the class is closed rather than sampled.
-Falsified before committing: restoring one fixed link fails the gate by name.
-
-**What the engine half turned out to be**, because it decides how the next one
-should be fixed: almost every error was a link to something deliberately absent
-on `wasm32` — `Instance::create_device` (a browser build must fail to _compile_
-rather than get a run-time `HalError::Unsupported`), and `crcbl::backend::open`
-/ `open_backend` (same rule, one layer up). Those are not broken links; they are
-correct prose about a native-only API, read on a target where the item does not
-exist. They became code spans, which costs the native reader a hyperlink and is
-the cheapest honest fix — `#[cfg_attr]`-ing two versions of each sentence would
-put the same prose in two places and guarantee they drift.
-
-One was a real defect the host gate could not see:
-`crates/crcbl-store/src/record.rs` had
-`[`StorageSource`](crate::StorageSource)`, which rustdoc calls a _redundant_
-explicit target on wasm (where the bare name resolves) and an _unresolved_ link
-on the host (where it does not). Writing the path as the display text satisfies
-both.
-
-## The Windows `crcbl-cli` fixtures are fixed but nothing has run them on Windows
-
-The three tests that had `build + test (windows-latest)` red since `216ea85` —
-`crpix_refuses_frames_of_different_sizes_and_names_the_file` and
-`crpix_fails_cleanly_on_a_missing_file_and_on_a_file_that_is_not_a_png` in
-`crates/crcbl-cli/tests/cli.rs`, and `a_stem_the_format_cannot_spell_is_refused`
-in `crates/crcbl-cli/src/crpix_cmd.rs` — were fixtures asserting a Unix
-assumption, not defects in the CLI, and the fixtures now assert the property
-they meant to on both platforms. No case was dropped and no `cfg` was added.
-
-What is **not** verified: this machine cannot compile or run anything for
-Windows, so the claim that `art/a:b.png` has the stem `a:b` there rests on
-reading `parse_prefix` in `library/std/src/sys/path/windows_prefix.rs` — a drive
-prefix is matched as `[drive, b':', ..]` against the whole path's bytes, once,
-never against a later component. The escaping half is exercised on Linux, by a
-fixture whose file _name_ holds a backslash, so that half no longer depends on a
-Windows runner. Only a green `build + test (windows-latest)` closes the rest.
-
-Nothing else about `crpix` on Windows has been reviewed. These three are what CI
-reported, not the result of an audit, so a second Windows-only failure elsewhere
-in the command would be a new finding rather than a regression.
 
 ## `run-vk-e2e.sh` pins no ICD by default, so nobody was running CI's gate
 
@@ -736,17 +704,11 @@ The modular panel is built and all three samples switch it on with F3 (or
   have to read as different surfaces; a change to one is invisible to the tests.
   Low stakes — it is a look, not a behaviour — but it is the one number in
   breakout's art with nothing holding it.
-- **Nothing has run the fullscreen toggle against a real compositor.** The
-  Wayland and X11 backends already implement `Shell::set_mode` and report an
-  effective mode back, and the samples' F11 path is tested end to end against
-  `HeadlessShell` — including the refusal case, where a windowed configure
-  answers a borderless request. What has _not_ happened is a human pressing F11
-  under a real Wayland compositor or an X11 window manager and confirming that
-  the window covers the monitor, that the swapchain resizes with it, and that
-  `mode_request_honoured` goes true. The development machine for this slice had
-  neither `DISPLAY` nor `WAYLAND_DISPLAY`. A tiling window manager is the
-  interesting case: it is expected to refuse, and the sample is expected to say
-  so rather than pretend.
+- **Nobody has _looked_ at a fullscreen window.** The mechanism is gated end to
+  end now — see _Display-mode coverage_ — but every assertion is a summary line
+  or a compositor's tree, not a picture. That the frame is composed correctly at
+  the new extent, rather than merely built at it, is unchecked, and is the same
+  gap as every other "nothing has looked at it" entry here.
 - **The browser's fullscreen path has never been exercised.**
   `web/tools/browser-e2e.mjs` covers focus and pause in a real browser — it
   blurs the canvas, checks the status becomes `STATUS_PAUSED` and that the HUD
