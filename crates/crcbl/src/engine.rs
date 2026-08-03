@@ -225,6 +225,76 @@ pub enum FrameOutcome {
 // Swapchain config
 // ---------------------------------------------------------------------------
 
+/// How presented frames are paced against the display.
+///
+/// # One value, so the exclusive cases cannot both be asked for
+///
+/// Vsync and adaptive sync are alternatives, not switches: a display is either
+/// following a fixed refresh or following the application's presents, and it
+/// cannot do both. Two booleans would make "vsync on, VRR on" a state a caller
+/// can write down and the engine has to reject at runtime; one value makes it a
+/// state that cannot be spelled.
+///
+/// # What the engine can and cannot do about VRR
+///
+/// **Nothing here turns adaptive sync on.** VRR is negotiated between the
+/// display, the driver and the compositor, and an application never enables it
+/// — what changes is what presenting *means*: on a VRR panel the present does
+/// not wait for a fixed vblank, the panel follows the presents. So the choice
+/// this enum makes is which present mode to ask for, and the job left to the
+/// frame limiter is staying inside the panel's range.
+///
+/// Which mode is actually running is a separate question the engine cannot
+/// answer yet — it needs `VK_EXT_present_timing`, which has no Rust bindings in
+/// the pinned `ash` and is still a provisional extension. Until then
+/// [`Adaptive`](Self::Adaptive) is a request, not an observation, and the
+/// default is [`Vsync`](Self::Vsync) because it is the one every surface
+/// supports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Pacing {
+    /// Wait for the display. [`PresentMode::Fifo`], which is the only mode
+    /// guaranteed to exist — and the only one WebGPU has.
+    #[default]
+    Vsync,
+    /// Follow the display when it can follow us: [`PresentMode::FifoRelaxed`]
+    /// where the surface offers it, otherwise [`PresentMode::Mailbox`].
+    ///
+    /// `FifoRelaxed` is the closer fit — it waits for vblank when the frame is
+    /// on time and tears rather than stalling when it is late, which is what
+    /// keeps a VRR panel inside its range instead of dropping to a duplicated
+    /// frame.
+    Adaptive,
+    /// Do not wait: [`PresentMode::Mailbox`] where offered, otherwise
+    /// [`PresentMode::Immediate`]. Tears on `Immediate`. For latency work and
+    /// for benchmarks, where the [`FrameLimit`] is the only thing pacing the
+    /// loop.
+    Off,
+}
+
+impl Pacing {
+    /// The present modes to try, best first.
+    ///
+    /// Every list ends in a mode the surface must support, so
+    /// [`SurfaceCaps::choose_present_mode`](crcbl_hal::SurfaceCaps::choose_present_mode)
+    /// cannot fall through to a mode that is not there.
+    #[must_use]
+    pub const fn preferences(self) -> &'static [PresentMode] {
+        match self {
+            Self::Vsync => &[PresentMode::Fifo],
+            Self::Adaptive => &[
+                PresentMode::FifoRelaxed,
+                PresentMode::Mailbox,
+                PresentMode::Fifo,
+            ],
+            Self::Off => &[
+                PresentMode::Mailbox,
+                PresentMode::Immediate,
+                PresentMode::Fifo,
+            ],
+        }
+    }
+}
+
 /// The swapchain parameters, kept so a reconfigure changes exactly one of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SwapchainConfig {
@@ -265,6 +335,12 @@ pub struct GpuContextDesc<'a> {
     /// Features to enable if present. Absent ones are simply not enabled — ask
     /// the returned [`GpuContext::device`] what it got.
     pub optional_features: Features,
+    /// How presented frames are paced against the display.
+    ///
+    /// The swapchain's present mode comes from this. A game that wants to
+    /// change it after start-up reconfigures the context; the mode is a
+    /// swapchain property and cannot be edited in place.
+    pub pacing: Pacing,
 }
 
 impl Default for GpuContextDesc<'_> {
@@ -282,6 +358,7 @@ impl Default for GpuContextDesc<'_> {
             optional_features: Features::TIER_A
                 | Features::TIMESTAMP_QUERY
                 | Features::DEBUG_MARKERS,
+            pacing: Pacing::default(),
         }
     }
 }
@@ -353,6 +430,9 @@ pub struct PendingGpuContext {
     label: String,
     required_features: Features,
     optional_features: Features,
+    /// Carried from the desc because the swapchain is built at the end of the
+    /// open, several polls after the caller handed it over.
+    pacing: Pacing,
 }
 
 impl PendingGpuContext {
@@ -382,6 +462,7 @@ impl PendingGpuContext {
                         &self.label,
                         self.required_features,
                         self.optional_features,
+                        self.pacing,
                     )?;
                 }
                 OpenStage::Device {
@@ -504,6 +585,7 @@ impl GpuContext {
             label: desc.label.to_string(),
             required_features: desc.required_features,
             optional_features: desc.optional_features,
+            pacing: desc.pacing,
         })
     }
 
@@ -515,6 +597,7 @@ impl GpuContext {
         label: &str,
         required_features: Features,
         optional_features: Features,
+        pacing: Pacing,
     ) -> Result<OpenStage, GpuError> {
         let adapters = instance.adapters();
         if adapters.is_empty() {
@@ -581,7 +664,7 @@ impl GpuContext {
         let format = caps
             .preferred_format()
             .ok_or(GpuError::Unusable("the surface offers no format"))?;
-        let present_mode = caps.choose_present_mode(&[PresentMode::Mailbox, PresentMode::Fifo]);
+        let present_mode = caps.choose_present_mode(pacing.preferences());
         let image_count = caps
             .min_image_count
             .saturating_add(1)
@@ -904,6 +987,152 @@ impl GpuContext {
 // Clock
 // ---------------------------------------------------------------------------
 
+/// The most frames a second a real-time loop will run.
+///
+/// # Why a limit at all, and why this one
+///
+/// A loop with nothing to wait for runs as fast as the machine can draw, which
+/// on a menu or a paused game means a pegged GPU and audible fans for frames
+/// nobody sees. The default here is deliberately *high* — high enough that no
+/// display or hand can tell, so it is a runaway guard rather than a pacing
+/// policy — and a game that wants a real cap says so.
+///
+/// # This is a floor on the frame period, not a promise about it
+///
+/// [`Clock::advance`] sleeps until the period has passed, and a sleep may
+/// overrun. At the default the period is a millisecond, which is the same order
+/// as a scheduler's granularity, so the *observed* rate can sit under the limit
+/// on a loaded machine. That is the honest behaviour for a limiter: it can slow
+/// a loop down and can never speed one up.
+///
+/// # Under vsync it usually does nothing
+///
+/// With [`PresentMode::Fifo`] the present itself blocks on vblank, so the frame
+/// period is already the display's and this never fires. It earns its keep on
+/// [`Pacing::Adaptive`] and [`Pacing::Off`], where nothing else is pacing the
+/// loop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameLimit {
+    /// The least time one frame may take, or `None` for no limit.
+    period: Option<Duration>,
+}
+
+impl FrameLimit {
+    /// The default ceiling: a thousand frames a second.
+    pub const DEFAULT_FPS: u32 = 1000;
+
+    /// A limit of `fps` frames a second.
+    ///
+    /// Zero is [`unlimited`](Self::unlimited) rather than an error or a divide
+    /// by zero: "no frames per second" is not a rate anyone means, and the only
+    /// other reading of it — a loop that never runs — is not something a caller
+    /// would ask for by accident.
+    #[must_use]
+    pub fn fps(fps: u32) -> Self {
+        if fps == 0 {
+            return Self::unlimited();
+        }
+        Self {
+            period: Some(Duration::from_secs(1) / fps),
+        }
+    }
+
+    /// No limit: run as fast as the loop can.
+    #[must_use]
+    pub const fn unlimited() -> Self {
+        Self { period: None }
+    }
+
+    /// The least time one frame may take, if there is a limit.
+    #[must_use]
+    pub const fn period(self) -> Option<Duration> {
+        self.period
+    }
+
+    /// How long to wait before starting a frame, given when the last one
+    /// started and what the clock reads now.
+    ///
+    /// Separated from the sleep so the arithmetic is testable without spending
+    /// the time: a test can ask what a limiter *would* wait and get an answer
+    /// in nanoseconds rather than in seconds of test runtime.
+    ///
+    /// `None` when there is no limit, when no frame has started yet, or when
+    /// the deadline has already passed — a late frame is never "caught up" by
+    /// running the next one early, because that would turn one slow frame into
+    /// a burst.
+    #[must_use]
+    pub fn wait_from(self, last_start: Option<Duration>, now: Duration) -> Option<Duration> {
+        let period = self.period?;
+        let deadline = last_start?.checked_add(period)?;
+        deadline.checked_sub(now).filter(|wait| !wait.is_zero())
+    }
+}
+
+impl Default for FrameLimit {
+    fn default() -> Self {
+        Self::fps(Self::DEFAULT_FPS)
+    }
+}
+
+/// Blocks the calling thread for `wait`.
+///
+/// Split out for the browser, where it does **nothing**. A wasm module runs on
+/// the page's only thread, so sleeping there does not pace a frame — it freezes
+/// the tab, input and all, until the sleep ends. The browser paces frames with
+/// `requestAnimationFrame` and the shim drives the loop from it, which is why
+/// every wasm entry point builds a [`Clock::Manual`] and never reaches this.
+/// The no-op is a backstop for a caller that constructs a real clock anyway.
+#[cfg(not(target_arch = "wasm32"))]
+fn sleep(wait: Duration) {
+    std::thread::sleep(wait);
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::needless_pass_by_value)]
+fn sleep(_wait: Duration) {}
+
+/// The real clock, plus the frame limiter that paces it.
+///
+/// A struct behind [`Clock::Real`] rather than more fields on the variant, so
+/// the `Clock::Real(_)` patterns the samples already match on keep compiling.
+#[derive(Debug)]
+pub struct RealClock {
+    time: MonotonicTime,
+    limit: FrameLimit,
+    /// When the last frame started, so the next one can be held off until a
+    /// whole period has passed. `None` before the first frame.
+    last_start: Option<Duration>,
+}
+
+impl RealClock {
+    /// A real clock limited to [`FrameLimit::DEFAULT_FPS`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            time: MonotonicTime::new(),
+            limit: FrameLimit::default(),
+            last_start: None,
+        }
+    }
+
+    /// The limit in force.
+    #[must_use]
+    pub const fn limit(&self) -> FrameLimit {
+        self.limit
+    }
+
+    /// Changes the limit. Takes effect on the next frame.
+    pub const fn set_limit(&mut self, limit: FrameLimit) {
+        self.limit = limit;
+    }
+}
+
+impl Default for RealClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A time source a loop can drive, whichever kind it is.
 ///
 /// The variants exist so the *loop* stays free of `if headless`: it calls
@@ -911,10 +1140,15 @@ impl GpuContext {
 /// between "read the real clock" and "step the fake one" lives here. A headless
 /// run therefore produces the same frame and tick counts on every machine,
 /// which is the whole reason CI can assert them.
+///
+/// The frame limiter lives on [`Real`](Self::Real) alone, which is what makes a
+/// headless run unpaced **by construction** rather than by a check somebody has
+/// to remember: there is no wall clock to sleep against, and a manual clock's
+/// frames are supposed to be as fast as the machine can produce them.
 #[derive(Debug)]
 pub enum Clock {
-    /// The real monotonic clock.
-    Real(MonotonicTime),
+    /// The real monotonic clock, paced by a [`FrameLimit`].
+    Real(RealClock),
     /// A fake clock stepped by a fixed amount each frame.
     Manual {
         /// The current reading.
@@ -931,7 +1165,30 @@ impl Clock {
         if headless {
             Self::manual(HEADLESS_FRAME_STEP)
         } else {
-            Self::Real(MonotonicTime::new())
+            Self::Real(RealClock::new())
+        }
+    }
+
+    /// The frame limit in force, if this is a real clock.
+    ///
+    /// `None` for a manual clock — not "unlimited", because the question does
+    /// not apply: a manual clock is stepped by its caller and never waits.
+    #[must_use]
+    pub const fn limit(&self) -> Option<FrameLimit> {
+        match self {
+            Self::Real(real) => Some(real.limit()),
+            Self::Manual { .. } => None,
+        }
+    }
+
+    /// Sets the frame limit, if this is a real clock.
+    ///
+    /// A no-op on a manual clock rather than an error: a game that sets a limit
+    /// during setup should not have to ask whether it is running headless, and
+    /// a headless run that silently obeyed one would stop being deterministic.
+    pub const fn set_limit(&mut self, limit: FrameLimit) {
+        if let Self::Real(real) = self {
+            real.set_limit(limit);
         }
     }
 
@@ -949,15 +1206,30 @@ impl Clock {
     #[must_use]
     pub fn elapsed(&self) -> Duration {
         match self {
-            Self::Real(time) => time.elapsed(),
+            Self::Real(real) => real.time.elapsed(),
             Self::Manual { time, .. } => time.elapsed(),
         }
     }
 
     /// Moves to the next frame's timestamp and returns it.
+    ///
+    /// **On a real clock this may sleep**, for as long as the [`FrameLimit`]
+    /// says the frame is early. It is the one call every loop already makes
+    /// once per frame, which is why the limiter lives here rather than in five
+    /// copies of a loop — and why a game gets it without asking.
+    ///
+    /// A manual clock never waits: there is no wall clock to wait against, and
+    /// a headless run's frames are meant to arrive as fast as they can.
     pub fn advance(&mut self) -> Duration {
         match self {
-            Self::Real(time) => time.elapsed(),
+            Self::Real(real) => {
+                if let Some(wait) = real.limit.wait_from(real.last_start, real.time.elapsed()) {
+                    sleep(wait);
+                }
+                let now = real.time.elapsed();
+                real.last_start = Some(now);
+                now
+            }
             Self::Manual { time, step } => {
                 time.advance(*step);
                 time.elapsed()
@@ -1114,6 +1386,201 @@ pub fn accept_close<S: Shell + ?Sized>(shell: &mut S, window: WindowId) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A thousand a second is a millisecond a frame.
+    #[test]
+    fn the_default_limit_is_a_millisecond_a_frame() {
+        assert_eq!(FrameLimit::DEFAULT_FPS, 1000);
+        assert_eq!(
+            FrameLimit::default().period(),
+            Some(Duration::from_millis(1))
+        );
+        assert_eq!(
+            FrameLimit::fps(60).period(),
+            Some(Duration::from_nanos(16_666_666))
+        );
+        assert_eq!(FrameLimit::unlimited().period(), None);
+    }
+
+    /// Zero frames a second is "no limit", not a divide by zero.
+    #[test]
+    fn a_limit_of_zero_is_no_limit() {
+        assert_eq!(FrameLimit::fps(0), FrameLimit::unlimited());
+        assert_eq!(FrameLimit::fps(0).period(), None);
+        assert_eq!(
+            FrameLimit::fps(0).wait_from(Some(Duration::ZERO), Duration::ZERO),
+            None,
+            "and it waits for nothing"
+        );
+    }
+
+    /// An early frame waits exactly the remainder of its period.
+    #[test]
+    fn an_early_frame_waits_out_the_rest_of_its_period() {
+        let limit = FrameLimit::fps(100); // 10ms
+        let started = Duration::from_millis(50);
+
+        assert_eq!(
+            limit.wait_from(Some(started), started + Duration::from_millis(4)),
+            Some(Duration::from_millis(6)),
+            "4ms into a 10ms period leaves 6"
+        );
+        assert_eq!(
+            limit.wait_from(Some(started), started),
+            Some(Duration::from_millis(10)),
+            "no time spent yet leaves the whole period"
+        );
+    }
+
+    /// A late frame does not make the next one early.
+    ///
+    /// The failure this guards is a burst: if a limiter tried to average out to
+    /// the target rate, one slow frame would be repaid by running the following
+    /// frames back to back, which is the opposite of what a limiter is for.
+    #[test]
+    fn a_late_frame_is_never_caught_up() {
+        let limit = FrameLimit::fps(100);
+        let started = Duration::from_millis(50);
+
+        assert_eq!(
+            limit.wait_from(Some(started), started + Duration::from_millis(10)),
+            None,
+            "exactly on the deadline is not early"
+        );
+        assert_eq!(
+            limit.wait_from(Some(started), started + Duration::from_millis(500)),
+            None,
+            "fifty periods late, and the answer is still 'do not wait', not a \
+             negative wait and not a credit against the next frame"
+        );
+    }
+
+    /// The first frame of a run does not wait.
+    #[test]
+    fn the_first_frame_never_waits() {
+        assert_eq!(
+            FrameLimit::fps(100).wait_from(None, Duration::from_secs(9)),
+            None
+        );
+    }
+
+    /// A headless clock has no limit, and cannot be given one.
+    ///
+    /// Not a policy the loop has to remember — a manual clock has no wall clock
+    /// to wait against, so the limiter is absent by construction. A headless
+    /// run that quietly obeyed a limit would stop being deterministic, and CI
+    /// would take a thousand times longer to say so.
+    #[test]
+    fn a_headless_clock_cannot_be_paced() {
+        let mut clock = Clock::new(true);
+        assert_eq!(clock.limit(), None);
+
+        clock.set_limit(FrameLimit::fps(1));
+        assert_eq!(clock.limit(), None, "still none: the call did nothing");
+
+        let first = clock.advance();
+        let second = clock.advance();
+        assert_eq!(
+            second - first,
+            HEADLESS_FRAME_STEP,
+            "and it still steps by exactly one frame, at once"
+        );
+    }
+
+    /// A real clock starts at the default limit and takes a new one.
+    #[test]
+    fn a_real_clock_starts_limited_and_can_be_changed() {
+        let mut clock = Clock::new(false);
+        assert_eq!(clock.limit(), Some(FrameLimit::default()));
+
+        clock.set_limit(FrameLimit::unlimited());
+        assert_eq!(clock.limit(), Some(FrameLimit::unlimited()));
+
+        clock.set_limit(FrameLimit::fps(30));
+        assert_eq!(clock.limit(), Some(FrameLimit::fps(30)));
+    }
+
+    /// The limiter actually holds a real clock back.
+    ///
+    /// The only test here that spends wall time, and the only one that observes
+    /// the *mechanism* rather than the arithmetic: every other limiter test
+    /// asks `wait_from` what it would do, which passes identically whether
+    /// [`Clock::advance`] consults it or ignores it.
+    ///
+    /// Asserts a lower bound only. A limiter can slow a loop and can never
+    /// speed one up, so "at least the period" is the whole promise — an upper
+    /// bound would be a test of this machine's scheduler.
+    #[test]
+    fn a_limited_real_clock_holds_the_next_frame_back() {
+        /// Long enough to be unmistakable against scheduler noise, short
+        /// enough that the suite does not notice: two frames of it.
+        const PERIOD: Duration = Duration::from_millis(20);
+
+        let mut clock = Clock::new(false);
+        clock.set_limit(FrameLimit::fps(50)); // 20ms
+
+        let first = clock.advance();
+        let second = clock.advance();
+        assert!(
+            second - first >= PERIOD,
+            "the second frame started {:?} after the first, which is less than \
+             the {PERIOD:?} the limit asks for — advance() is not waiting",
+            second - first
+        );
+
+        let mut unlimited = Clock::new(false);
+        unlimited.set_limit(FrameLimit::unlimited());
+        let first = unlimited.advance();
+        let second = unlimited.advance();
+        assert!(
+            second - first < PERIOD,
+            "an unlimited clock waited {:?}, so something is pacing it that \
+             should not be",
+            second - first
+        );
+    }
+
+    /// Every pacing choice ends in a mode the surface must support.
+    ///
+    /// `choose_present_mode` walks the list and falls back to `Fifo` if nothing
+    /// matches, so a list that omitted it would still work — but only by
+    /// accident, and a caller reading the list would not know the last entry
+    /// was the guaranteed one. Fifo is the only mode Vulkan requires and the
+    /// only one WebGPU has.
+    #[test]
+    fn every_pacing_ends_in_the_mode_that_always_exists() {
+        for pacing in [Pacing::Vsync, Pacing::Adaptive, Pacing::Off] {
+            let modes = pacing.preferences();
+            assert!(!modes.is_empty(), "{pacing:?} offers no mode at all");
+            assert_eq!(
+                modes.last(),
+                Some(&PresentMode::Fifo),
+                "{pacing:?} does not end in Fifo, so a surface offering only \
+                 Fifo would be matched by luck rather than by the list"
+            );
+        }
+    }
+
+    /// The three pacings are three different requests.
+    ///
+    /// Vsync asks for exactly one mode — it is the one case where a fallback
+    /// would silently give the caller the opposite of what they asked for.
+    #[test]
+    fn vsync_asks_for_vsync_and_nothing_else() {
+        assert_eq!(Pacing::Vsync.preferences(), &[PresentMode::Fifo]);
+        assert_eq!(Pacing::default(), Pacing::Vsync);
+
+        assert_eq!(
+            Pacing::Adaptive.preferences().first(),
+            Some(&PresentMode::FifoRelaxed),
+            "adaptive prefers the mode that tears only when late"
+        );
+        assert_eq!(
+            Pacing::Off.preferences().first(),
+            Some(&PresentMode::Mailbox),
+            "off prefers the untorn uncapped mode before the torn one"
+        );
+    }
 
     #[test]
     fn a_headless_clock_advances_by_exactly_one_frame_step() {
@@ -1315,6 +1782,7 @@ mod tests {
             "device error test",
             Features::empty(),
             Features::empty(),
+            Pacing::default(),
         )
         .expect("the null backend opens everywhere");
         let mut pending = PendingGpuContext {
@@ -1324,6 +1792,7 @@ mod tests {
             label: "device error test".to_string(),
             required_features: Features::empty(),
             optional_features: Features::empty(),
+            pacing: Pacing::default(),
         };
         let mut gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {

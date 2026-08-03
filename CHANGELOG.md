@@ -16,6 +16,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl** (`crcbl::engine`): frame pacing. `FrameLimit` caps how fast a
+  real-time loop runs — a thousand frames a second by default, which is a
+  runaway guard rather than a pacing policy, and `Clock::set_limit` changes it.
+  The limiter lives on the clock rather than in the loop because every sample
+  already calls `Clock::advance` once a frame, so a game gets it without asking;
+  and because a manual clock has no wall clock to wait against, a headless run
+  is unpaced **by construction** rather than by a check somebody has to
+  remember.
+
+  `Pacing` — `Vsync`, `Adaptive` or `Off` — replaces the hard-coded present-mode
+  preference and is set through `GpuContextDesc::pacing`. One value rather than
+  two flags, so "vsync on, adaptive sync on" is a state that cannot be written
+  down instead of one the engine rejects at run time.
+
+  **Nothing here turns adaptive sync on**, and that is not an omission: VRR is
+  negotiated between display, driver and compositor, and an application never
+  enables it. What changes is what presenting means — on a VRR panel the present
+  does not wait for a fixed vblank, the panel follows the presents — so the
+  engine's job is choosing a present mode and then staying inside the panel's
+  range, which is what the limiter is for. Whether a panel is _actually_ running
+  variable-refresh needs `VK_EXT_present_timing`, which is provisional and has
+  no bindings in the pinned `ash`; until then `Adaptive` is a request rather
+  than an observation.
+
+### Changed
+
+- **crcbl** (`crcbl::engine`): the default present mode is now `Fifo` rather
+  than `Mailbox`. A windowed native run vsyncs unless it asks not to, where it
+  previously ran uncapped. The browser is unchanged: its swapchain already
+  logged `Fifo` before this and logs it after, because the WebGPU surface does
+  not offer `Mailbox` for the old preference to have found.
+
 - **horde** (`apps/horde`): the engine's fourth game and its scale sample — the
   core loop. One arena, one player with WASD movement and an auto-aiming weapon,
   three enemy kinds that seek and push off each other, contact damage, hit
