@@ -191,7 +191,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `WebLoop` and `WebPending` traits. It is deliberately not gated to `wasm32`,
   because gating it would put its tests on the one target the suite never runs.
 
-  Measured: the four `app.rs` files lost 551 lines, and the four `web.rs` files
+  `PointerCapture` holds what the loop remembers about the pointer between
+  frames — where it was left and whether its button is down — and resolves a
+  batch into a `PointerInput`. `ModeRequest` holds the fullscreen request and
+  whether the window system agreed, reporting what the window actually is rather
+  than what was asked for.
+
+  Measured: the four `app.rs` files lost 818 lines, and the four `web.rs` files
   went from 2642 to 1466. What the samples keep is what genuinely differs — each
   game's `assemble`, its `MenuAction` handler, its HUD, and the one log line
   reporting what a finished run was worth.

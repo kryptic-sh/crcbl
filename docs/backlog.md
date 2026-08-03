@@ -659,14 +659,30 @@ The modular panel is built and all three samples switch it on with F3 (or
   `run`. The genuinely per-game parts are `assemble`, `apply` (the `MenuAction`
   handler), `draw_hud`/`HudStrings`, `menu_kind`, and the game constants.
 
-  **Why this last piece is harder than the ones before it.** Every slice so far
-  had a seam that was already a type: an error, a window, a boot state machine,
-  a menu batch. `frame` has none — it interleaves loop state and game state line
-  by line, so extracting it means a trait carrying the game's `Gpu`, `Game`,
-  `MenuKind`, `MenuAction`, `RenderState` and HUD, which is six associated types
-  to save roughly 480 lines. That may still be worth it; it is not obviously so,
-  and it is the first slice in this sequence where the answer is not clear
-  before starting. Decide that before writing it.
+  **Why this last piece is not another slice.** Every extraction so far had a
+  seam that was already a type: an error, a window, a boot state machine, a menu
+  batch, a pointer, a mode request. `frame` has none. It mutates `gpu`, `game`,
+  `menus`, `hud`, `draw_list` and `debug` — six fields of the sample's own
+  `Loop` — line by line, so an engine that ran it would have to _own_ those
+  fields. That is not a refactor, it is the decision to make **the engine own
+  the loop and the game a module plugged into it**, which is a different
+  architecture from the one the samples demonstrate today.
+
+  That may well be the right destination — it is what `GameModule` already
+  implies on the simulation side — but it is a design call, not a tidy-up, and
+  it wants its own plan rather than being arrived at by continuing to extract.
+  Measured before stopping: breakout and flappy are 461 and 458 code lines with
+  **430 identical**, and what is in them is `frame`, `finish` (whose `Summary`
+  is per-game), `run` and `assemble`.
+
+- **asteroids and horde never report a refused fullscreen.** Found while
+  extracting `ModeRequest`: breakout, flappy and sandbox all call
+  `check_mode_request` once a frame, and those two have no such call and no
+  equivalent. A player on a tiling window manager presses F11 in asteroids and
+  gets no window change and no log line saying why. **Not fixed there**, because
+  adding a call that starts emitting warnings is a behaviour change and the
+  commit it was found in was an extraction. The fix is one line in each of the
+  two `frame` bodies, now that `ModeRequest::check` exists.
 
   **The error half has landed** — `crcbl::engine::LoopError<G>` — and it cost
   far less than this entry predicted, so the prediction is worth correcting
