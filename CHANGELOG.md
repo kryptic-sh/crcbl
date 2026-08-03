@@ -16,6 +16,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl-phys**: `PhysicsSystem::body_mut(entity) -> Option<&mut RigidBody>`,
+  for a game that chooses a velocity rather than having one integrated onto it.
+  `set_body` was the only writer and it costs two hash operations — an insert
+  into the body map and a touch of the transform map — to change one `DVec3`,
+  which a crowd pays once per agent per tick; `apply_force` is not an
+  alternative, because a kinematic body's zero inverse mass makes a force a
+  no-op. It cannot move a collider: position lives in the transform, and
+  `set_transform` is still what tells the broadphase.
+
 - **crcbl-render** (`sprite_pass`): `batch_count(&[Sprite]) -> usize` answers
   how many draw calls a sprite list will cost, without a device. The batching
   rule — a run of consecutive sprites naming one sheet is one draw, so `A A B A`

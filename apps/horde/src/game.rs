@@ -1671,13 +1671,14 @@ fn thaw_field(logic: &mut GameLogic, world: &mut World) {
 ///   biggest thing standing between this pass and the plan's 10k, and it is a
 ///   finding against the crate rather than against the sample. Recorded in
 ///   `docs/backlog.md`.
-/// * plus `N` `HashMap` inserts, because `PhysicsSystem` has no `body_mut` and
-///   writing a velocity means `set_body`, which is a full map insert. Also a
-///   finding, also recorded.
+/// * plus `N` hash **lookups** to write the velocities, through
+///   `PhysicsSystem::body_mut`. This used to be `N` `set_body` calls, which is
+///   an insert into the body map plus a touch of the transform map — two hash
+///   operations per enemy per tick to change one `DVec3`.
 ///
 /// # It is order-independent, and that is a property rather than an accident
 ///
-/// Nothing in this pass moves a body. `set_body` writes a velocity, and a
+/// Nothing in this pass moves a body. `body_mut` writes a velocity, and a
 /// velocity is not read by the broadphase — so every enemy's query sees the same
 /// world whatever order the loop visits them in, and the result does not depend
 /// on the enemy list's ordering. That is why the positions can be cached once at
@@ -1723,9 +1724,8 @@ fn steer_enemies(logic: &mut GameLogic, world: &mut World) {
 
             let seek = (player - me.position).normalize_or_zero() * me.kind.speed();
             let velocity = seek + clamp_length(push, 1.0) * SEPARATION_STRENGTH;
-            if let Some(mut body) = phys.body(me.entity).copied() {
+            if let Some(body) = phys.body_mut(me.entity) {
                 body.velocity = velocity;
-                phys.set_body(me.entity, body);
             }
         }
     });

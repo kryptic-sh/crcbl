@@ -104,6 +104,24 @@ impl PhysicsSystem {
         self.bodies.get(&entity)
     }
 
+    /// Get a mutable reference to an entity's rigid body, for a game that
+    /// **chooses** a velocity rather than having one integrated onto it.
+    ///
+    /// [`set_body`](Self::set_body) is the wrong tool for that: it inserts into
+    /// the body map and then touches the transform map, two hash operations to
+    /// change one `DVec3`, and a crowd sample does it once per agent per tick.
+    /// [`apply_force`](Self::apply_force) is not the tool either — a kinematic
+    /// body has zero inverse mass, so a force on it is a no-op by construction,
+    /// and kinematic is exactly what a steered agent is.
+    ///
+    /// It hands back the body and nothing else, so it cannot move a collider:
+    /// position lives in the transform, and changing that still goes through
+    /// [`set_transform`](Self::set_transform), which repositions the broadphase.
+    #[must_use]
+    pub fn body_mut(&mut self, entity: Entity) -> Option<&mut RigidBody> {
+        self.bodies.get_mut(&entity)
+    }
+
     /// Get a reference to an entity's transform.
     #[must_use]
     pub fn transform(&self, entity: Entity) -> Option<&Transform> {
@@ -750,6 +768,93 @@ mod tests {
     }
 
     // ── Dynamics tests ──────────────────────────────────────────────────
+
+    /// A velocity written through `body_mut` is the one the integrator moves
+    /// the body with, and it does **not** move the collider by itself.
+    ///
+    /// Both halves matter to the caller this was added for: a crowd sample
+    /// steers kinematic agents, which no force can move (`inverse_mass` is
+    /// zero, so `acceleration = force * inverse_mass` is zero), and it must
+    /// still be true that repositioning a body goes through `set_transform` so
+    /// the broadphase hears about it.
+    #[test]
+    fn a_velocity_written_through_body_mut_is_the_one_that_integrates() {
+        let mut phys = PhysicsSystem::new();
+        let e = test_entity(0);
+        phys.set_body(e, RigidBody::new_kinematic());
+        phys.set_transform(e, Transform::from_position(DVec3::ZERO));
+        let comp = ColliderComponent::Sphere {
+            offset: DVec3::ZERO,
+            radius: 0.5,
+            is_trigger: false,
+        };
+        phys.set_collider(e, &comp, &Transform::from_position(DVec3::ZERO));
+
+        // A force cannot steer this body, which is why `body_mut` exists.
+        phys.apply_force(e, DVec3::new(1000.0, 0.0, 0.0));
+        phys.step(1.0 / 60.0);
+        assert_eq!(
+            phys.transform(e).expect("a transform").position,
+            DVec3::ZERO,
+            "a force moved a kinematic body",
+        );
+
+        phys.body_mut(e).expect("a body").velocity = DVec3::new(3.0, 0.0, 0.0);
+        let dt = 1.0 / 60.0;
+        phys.step(dt);
+        assert!(
+            (phys.transform(e).expect("a transform").position.x - 3.0 * dt).abs() < 1e-12,
+            "the written velocity did not reach the integrator: {:?}",
+            phys.transform(e).expect("a transform").position,
+        );
+        assert_eq!(
+            phys.body(e).expect("a body").velocity,
+            DVec3::new(3.0, 0.0, 0.0),
+            "the write did not survive the step",
+        );
+    }
+
+    /// Steering a body is not teleporting one: the write alone leaves the
+    /// collider where it was, and the **step** is what moves it and tells the
+    /// broadphase.
+    ///
+    /// Both halves are asserted against the same query, because either one
+    /// alone is satisfied by a system that does nothing.
+    #[test]
+    fn a_steered_body_reaches_the_broadphase_on_the_step_and_not_before() {
+        let mut phys = PhysicsSystem::new();
+        let e = test_entity(0);
+        phys.set_body(e, RigidBody::new_kinematic());
+        let at = Transform::from_position(DVec3::new(10.0, 0.0, 0.0));
+        phys.set_transform(e, at);
+        let comp = ColliderComponent::Sphere {
+            offset: DVec3::ZERO,
+            radius: 0.5,
+            is_trigger: false,
+        };
+        phys.set_collider(e, &comp, &at);
+
+        // Fast enough that one tick carries it clear of the query below.
+        phys.body_mut(e).expect("a body").velocity = DVec3::new(0.0, 600.0, 0.0);
+        assert_eq!(
+            phys.overlap_sphere(DVec3::new(10.0, 0.0, 0.0), 1.0).len(),
+            1,
+            "writing a velocity moved the collider before anything stepped",
+        );
+
+        phys.step(1.0 / 60.0);
+        assert!(
+            phys.overlap_sphere(DVec3::new(10.0, 0.0, 0.0), 1.0)
+                .is_empty(),
+            "the step moved the body and the broadphase did not hear about it",
+        );
+        assert_eq!(
+            phys.overlap_sphere(phys.transform(e).expect("a transform").position, 1.0)
+                .len(),
+            1,
+            "the collider is not where the body now is",
+        );
+    }
 
     #[test]
     fn body_falls_under_gravity() {

@@ -868,17 +868,14 @@ slice was the sample.
   alternative, because there is no alternative to measure yet; it is named here
   as the first thing to try rather than as a proven cause.
 
-- **`PhysicsSystem` has no `body_mut`, so writing a velocity is a `HashMap`
-  insert.** `body()` hands back `&RigidBody`, and the only writer is `set_body`,
-  which does `bodies.insert(entity, body)` and then
-  `transforms.entry(entity).or_insert(…)` — two hash operations to change one
-  `DVec3`. A game whose agents _choose_ their velocity rather than having one
-  integrated onto them (horde's enemies are all `RigidBody::new_kinematic`) does
-  that `N` times a tick. `apply_force` does not help: on a kinematic body it is
-  a no-op, because `inverse_mass` is zero. Wanted:
-  `body_mut(entity) -> Option<&mut RigidBody>`. It is three lines and was not
-  taken here only because it is a public-API addition to a crate this slice had
-  no other reason to open.
+- **The `body_mut` half is closed and the allocation half is not, so horde's
+  steering pass is now `N` queries and `N` hash lookups per tick.**
+  `PhysicsSystem::body_mut` landed; `overlap_sphere`'s owned `Vec` above did
+  not, and that is the one with the allocation in it. **No end-to-end number was
+  taken for the `body_mut` change**: the 10 000 fixture kills the player in
+  under a second (see the density entry under _What horde still owes_), so a
+  wall-clock run measures a simulation that has stopped, and a figure from one
+  would be worse than none.
 
 - **Steering is embarrassingly parallel and there is nothing to run it on.**
   Horde's separation pass reads positions, queries, and writes velocities —
