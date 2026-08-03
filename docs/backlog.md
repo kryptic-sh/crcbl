@@ -172,6 +172,40 @@ before P6–P8 build on it), then the worker backend behind it.
   for (`crossOriginIsolated` asserted by the browser gate) is the thing that
   cannot be met without it.
 
+## `crcbl new` scaffolds the engine as it was, and nobody updated it
+
+`crates/crcbl-cli/templates/main.rs.tmpl` is 276 lines that hand-roll what the
+samples stopped hand-rolling. It opens the shell, calls
+`unsafe { instance.create_surface(&target) }` itself, configures its own
+swapchain and runs its own `loop {}` — while all five crates under `apps/` now
+go through `crcbl::engine::GpuContext`, four of them through
+`crcbl::engine::Loop`, and **no crate under `apps/` contains an `unsafe` block
+at all**. `Cargo.toml.tmpl` names `log = "0.4"` beside `crcbl`, so a generated
+project starts with two dependencies where every sample now has one
+(`crcbl::log`).
+
+It does not rot silently: `crates/crcbl-cli/tests/run-cli-e2e.sh` scaffolds the
+project, compiles it against the engine in the checkout and runs it headless, so
+the template still builds. What has rotted is what it **teaches** — a new user's
+first Crucible file is the shape the engine spent four slices replacing.
+
+**The doc comment at the top of it is the part that is now false.** It says the
+loop is "deliberately yours rather than the engine's" because "the outer loop is
+a `loop {}` here and a `requestAnimationFrame` callback on the web, so an engine
+that owned it could not run in a browser". `crcbl::engine::Loop` is
+engine-owned, and `crates/crcbl/src/web.rs` drives it from
+`requestAnimationFrame` in four published demos. The argument was answered by
+building the thing it said could not exist.
+
+**This is a decision, not a chore**, which is why it is here rather than in a
+commit. Both shapes are real and both are supported on purpose — `apps/bare`
+exists to keep the library path working and `crates/crcbl/tests/library_seam.rs`
+guards it from outside the crate. So the question is what `crcbl new` should
+hand someone: the hosted loop (shortest path to a running game, and what four
+samples demonstrate), the library loop (what it does today, and what proves the
+public API is usable), or both behind a flag — which is a second template to
+keep working, and the e2e gate would have to run both.
+
 ## The rustdoc gate never documents the wasm target, so every `web.rs` is unchecked
 
 CI runs

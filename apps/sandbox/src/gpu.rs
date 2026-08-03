@@ -84,20 +84,19 @@
 //!    size, so a headless target went stale on resize** — *fixed by deleting
 //!    the size.* [`Gpu::resize`] therefore reconfigures the swapchain and
 //!    nothing else, on every backend.
-//! 3. **`unsafe` at the join is unavoidable and lands in application code.**
-//!    [`Instance::create_surface`] is `unsafe` because it dereferences platform
-//!    handles, and the safety obligation ("these outlive the surface") is one
-//!    only the code holding *both* the shell and the device can discharge.
-//!    Still open at P1.3: the seam's own TODO suggests "a shell-aware
-//!    constructor in `crcbl-render`", and P1.3 deliberately did not add one —
-//!    `crcbl-render` owning window handles would put a `SurfaceTarget` in the
-//!    renderer's constructor and make the render graph's crate the place
-//!    windowing lives. The right home is an engine-setup helper in the `crcbl`
-//!    umbrella, which is where both seams already meet.
+//! 3. **`unsafe` at the join is unavoidable and lands in application code** —
+//!    *fixed above the seam.* [`Instance::create_surface`] is `unsafe` because
+//!    it dereferences platform handles, and the safety obligation ("these
+//!    outlive the surface") is one only the code holding *both* the shell and
+//!    the device can discharge. P1.3 predicted the home — "an engine-setup
+//!    helper in the `crcbl` umbrella, where both seams already meet" — and
+//!    that is [`GpuContext`], which this file now opens. No crate under
+//!    `apps/` contains an `unsafe` block.
 //! 4. **Teardown order is stated in three places and enforced in none.** The
 //!    swapchain must die before the surface, the surface before the window, and
-//!    the device may outlive its instance. [`Gpu::destroy`] does it by hand;
-//!    at P1.1 a real driver with validation on agreed.
+//!    the device may outlive its instance. Still a convention rather than a
+//!    type, but it is now hand-written once — in `GpuContext::destroy` — rather
+//!    than once per sample.
 //! 5. **The swapchain's configured extent was unobservable** — *fixed in the
 //!    seam*, `AcquiredFrame::extent`.
 //! 6. **A render pass needed a view the seam would not give it** — *fixed in

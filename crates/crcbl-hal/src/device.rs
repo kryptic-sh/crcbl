@@ -305,20 +305,21 @@ pub trait Instance: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// because this is the only place the handles are dereferenced; see
     /// [`crcbl_core::surface`] for the full argument.
     ///
-    /// # TODO(P1): this `unsafe` currently lands in application code
+    /// # This `unsafe` no longer lands in application code
     ///
     /// P0.7 drove the first shell→HAL join (`apps/sandbox`) and found the
     /// ergonomic cost: obligation 2 above — "the window outlives the surface" —
     /// can only be discharged by code holding *both* the shell and the device,
-    /// which is a game's own startup path. The result is an `unsafe` block in
-    /// an application that otherwise contains none, repeated in every sample
-    /// and in the `crcbl new` template.
+    /// which was every game's own startup path, so every sample carried an
+    /// `unsafe` block in a crate that otherwise contained none.
     ///
-    /// The likely answer is a shell-aware constructor in `crcbl-render`, which
-    /// owns both objects anyway and can tie their lifetimes together once. That
-    /// crate does not exist yet, so this is a note rather than a change; the
-    /// seam does not have to move for it, because a safe wrapper *above* the
-    /// seam is exactly what the obligation permits.
+    /// A safe wrapper *above* the seam is what the obligation permits, and it
+    /// was built: `crcbl::engine::GpuContext` holds the shell's window and the
+    /// device together and calls this from one place. No crate under `apps/`
+    /// contains an `unsafe` block now. The seam did not move for it.
+    ///
+    /// What still hand-rolls the join is `crcbl new`'s generated `main.rs` —
+    /// see `docs/backlog.md`.
     ///
     /// # Errors
     ///
