@@ -21,9 +21,10 @@
 
 use std::sync::Arc;
 
+use crcbl::audio::AudioStream;
 use crcbl::audio::mixer::{Mixer, SoundBank, VoiceMix};
 use crcbl::audio::spatial::{CueGrammar, compute_cue};
-use crcbl::audio::{AudioSample, AudioStream};
+use crcbl::audio::synth;
 
 pub const SOUND_BOUNCE: u32 = 1;
 pub const SOUND_BRICK: u32 = 2;
@@ -46,8 +47,8 @@ pub struct Audio {
 impl Audio {
     pub fn new(headless: bool) -> Self {
         let mut bank = SoundBank::new();
-        bank.insert(SOUND_BOUNCE, gen_sine(440.0, 0.06, 48000));
-        bank.insert(SOUND_BRICK, gen_sine(660.0, 0.09, 48000));
+        bank.insert(SOUND_BOUNCE, synth::sine(440.0, 0.06, 48000));
+        bank.insert(SOUND_BRICK, synth::sine(660.0, 0.09, 48000));
 
         // The mixer is the stream's source *and* the game's handle: the stream
         // moves its copy onto the audio thread and this one stays here.
@@ -90,63 +91,9 @@ impl Audio {
     }
 }
 
-/// Generate a mono sine wave and convert to interleaved stereo f32.
-fn gen_sine(freq_hz: f32, duration_secs: f32, sample_rate: u32) -> Vec<AudioSample> {
-    let num_frames = (sample_rate as f32 * duration_secs) as usize;
-    let mut out = Vec::with_capacity(num_frames * 2);
-    for i in 0..num_frames {
-        let t = i as f32 / sample_rate as f32;
-        let sample = 0.3 * (2.0 * std::f32::consts::PI * freq_hz * t).sin();
-        // Envelope to avoid clicks.
-        let env = fade_env(i, num_frames);
-        let val = sample * env;
-        out.push(val);
-        out.push(val);
-    }
-    out
-}
-
-/// A linear fade in and out over `FADE_FRAMES`, or over half the sound —
-/// whichever is shorter.
-///
-/// The previous version compared `i > total.saturating_sub(fade)` and then
-/// computed `total - i`, which is fine only while `total >= fade`. For a sound
-/// shorter than 1.25 ms at 48 kHz the saturating subtraction clamped to zero,
-/// every index took the second branch, and `total - i` underflowed on the last
-/// sample.
-const FADE_FRAMES: usize = 60;
-
-fn fade_env(i: usize, total: usize) -> f32 {
-    debug_assert!(i < total, "fade_env is only defined inside the sound");
-    let fade = FADE_FRAMES.min(total / 2).max(1);
-    let from_start = i;
-    let from_end = total - i;
-    if from_start < fade {
-        from_start as f32 / fade as f32
-    } else if from_end <= fade {
-        from_end as f32 / fade as f32
-    } else {
-        1.0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The generator produces **interleaved stereo**, which is what the mixer's
-    /// playhead assumes: a mono buffer would be played at half speed over twice
-    /// the length. This sample shipped that bug once, in its own playhead.
-    #[test]
-    fn a_cue_is_interleaved_stereo_of_the_length_it_asked_for() {
-        let frames = 100;
-        let data = gen_sine(440.0, frames as f32 / 48_000.0, 48_000);
-        assert_eq!(data.len(), frames * 2, "not stereo pairs");
-        for frame in data.chunks_exact(2) {
-            assert_eq!(frame[0], frame[1], "not the same in both ears");
-        }
-        assert!(data.iter().any(|s| s.abs() > 1e-3), "the cue is silent");
-    }
 
     /// An id nothing answers to is ignored rather than playing something else.
     #[test]
@@ -191,20 +138,5 @@ mod tests {
             left.volume,
             near.volume,
         );
-    }
-
-    /// A sound shorter than the fade window still has a defined envelope.
-    #[test]
-    fn a_very_short_sound_does_not_underflow_the_fade() {
-        for total in 1..=8usize {
-            for i in 0..total {
-                let env = fade_env(i, total);
-                assert!((0.0..=1.0).contains(&env), "fade_env({i}, {total}) = {env}",);
-            }
-        }
-        // And a 10-frame sound really is under the 60-frame fade window.
-        let short = gen_sine(440.0, 10.0 / 48_000.0, 48_000);
-        assert_eq!(short.len(), 20);
-        assert!(short.iter().all(|s| s.is_finite()));
     }
 }

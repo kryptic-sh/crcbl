@@ -48,9 +48,10 @@
 
 use std::sync::Arc;
 
+use crcbl::audio::AudioStream;
 use crcbl::audio::mixer::{Mixer, SoundBank, VoiceId, VoiceMix};
 use crcbl::audio::spatial::{CueGrammar, compute_cue};
-use crcbl::audio::{AudioSample, AudioStream};
+use crcbl::audio::synth;
 
 /// The engine, while thrust is held. One looping voice; see the module docs.
 pub const SOUND_THRUST: u32 = 1;
@@ -131,10 +132,13 @@ impl Audio {
         let mut bank = SoundBank::new();
         bank.insert(
             SOUND_THRUST,
-            looped_sine(ENGINE_HZ, ENGINE_CYCLES, SAMPLE_RATE),
+            synth::looped_sine(ENGINE_HZ, ENGINE_CYCLES, SAMPLE_RATE),
         );
-        bank.insert(SOUND_SHOT, sine(900.0, 0.05, SAMPLE_RATE));
-        bank.insert(SOUND_EXPLOSION, noise(0.32, SAMPLE_RATE));
+        bank.insert(SOUND_SHOT, synth::sine(900.0, 0.05, SAMPLE_RATE));
+        bank.insert(
+            SOUND_EXPLOSION,
+            synth::noise_burst(0.32, EXPLOSION_DECAY, EXPLOSION_SEED, SAMPLE_RATE),
+        );
         debug_assert_eq!(bank.len(), SOUND_COUNT, "a cue id is missing from the bank");
 
         // The stream takes a handle, not the mixer: this copy is what stays
@@ -309,131 +313,23 @@ impl Audio {
     }
 }
 
-/// A mono sine wave, faded at both ends, as interleaved stereo.
-fn sine(freq_hz: f32, seconds: f32, sample_rate: u32) -> Vec<AudioSample> {
-    let frames = (sample_rate as f32 * seconds) as usize;
-    let mut out = Vec::with_capacity(frames * 2);
-    for i in 0..frames {
-        let t = i as f32 / sample_rate as f32;
-        let value = 0.3 * (2.0 * std::f32::consts::PI * freq_hz * t).sin() * fade(i, frames);
-        out.push(value);
-        out.push(value);
-    }
-    out
-}
-
-/// A sine that can be played end-to-end forever without a click.
+/// How fast the explosion decays, in nepers per second.
 ///
-/// The generator this sample adds, and the one that only a *looping* voice
-/// needs. Two things make the seam inaudible and both are the opposite of what
-/// [`sine`] does:
+/// `e^-9t` is down to a twentieth of its peak by a fifth of a second, which is
+/// what makes a rock coming apart a *burst* rather than a wash. Horde passes a
+/// different one per cue; asteroids has a single explosion and one value.
+const EXPLOSION_DECAY: f32 = 9.0;
+
+/// The seed the explosion's noise is drawn from. Spells "Asteroid".
 ///
-/// * **A whole number of cycles**, so the waveform arrives back at phase zero
-///   exactly as the buffer runs out. The phase is stepped as
-///   `2π · cycles · i / frames` rather than as `2π · f · t`, which makes that
-///   exact by construction however `frames` rounds — the effective frequency
-///   moves by a fraction of a hertz instead of the phase jumping.
-/// * **No fade.** A fade to zero at each end is what stops a *one-shot*
-///   clicking; on a loop it is a hole punched in the tone ten times a second.
-fn looped_sine(freq_hz: f32, cycles: u32, sample_rate: u32) -> Vec<AudioSample> {
-    let frames = ((cycles as f32 * sample_rate as f32) / freq_hz).round() as usize;
-    let mut out = Vec::with_capacity(frames * 2);
-    for i in 0..frames {
-        let phase = 2.0 * std::f32::consts::PI * cycles as f32 * (i as f32 / frames as f32);
-        let value = 0.3 * phase.sin();
-        out.push(value);
-        out.push(value);
-    }
-    out
-}
-
-/// A burst of low-passed noise that decays, as interleaved stereo.
-///
-/// The one generator the other two samples do not have, and the reason this file
-/// is not *byte* identical to `apps/flappy/src/audio.rs`: a rock coming apart is
-/// the one cue in three games that a sine cannot stand in for — a tone reads as
-/// a beep, and a beep reads as scoring rather than as destruction.
-///
-/// Deterministic, from a fixed seed through the same splitmix64 mix the
-/// simulation uses, so the sound a build ships is the sound every build ships
-/// and a golden buffer would be possible later. The one-pole low pass takes the
-/// hiss off the top; the exponential decay is what makes it a *burst*.
-fn noise(seconds: f32, sample_rate: u32) -> Vec<AudioSample> {
-    /// How fast the burst decays, in nepers per second. `e^-9t` is down to a
-    /// twentieth of its peak by a fifth of a second.
-    const DECAY: f32 = 9.0;
-    /// The one-pole coefficient: `y += ALPHA * (x - y)`. Lower is duller.
-    const ALPHA: f32 = 0.16;
-
-    let frames = (sample_rate as f32 * seconds) as usize;
-    let mut out = Vec::with_capacity(frames * 2);
-    /// Spells "Asteroid" — the noise is this game's, and a different seed here
-    /// is a different-sounding explosion, not a wrong one.
-    const SEED: u64 = 0x4173_7465_726F_6964;
-
-    let mut low = 0.0f32;
-    for i in 0..frames {
-        // The engine's hash, walked as a sequence: stepping splitmix64's state
-        // by its gamma is the same thing as hashing successive indices, which
-        // `crcbl::core::rand`'s `stepping_the_state_is_hashing_the_index` pins.
-        // The top 24 bits are the ones it mixes best, and 24 is exactly an
-        // `f32`'s mantissa, so every value here is representable rather than
-        // rounded.
-        let z = crcbl::core::rand::hash_u64(SEED, i as u64 + 1);
-        let white = (z >> 40) as f32 / 8_388_608.0 - 1.0;
-
-        low += ALPHA * (white - low);
-        let t = i as f32 / sample_rate as f32;
-        let value = 0.45 * low * (-DECAY * t).exp() * fade(i, frames);
-        out.push(value);
-        out.push(value);
-    }
-    out
-}
-
-/// How many frames the fade in and out take, unless the sound is shorter.
-const FADE_FRAMES: usize = 60;
-
-/// A linear fade in and out, so a cue starts and stops without a click.
-fn fade(i: usize, total: usize) -> f32 {
-    debug_assert!(i < total, "fade is only defined inside the sound");
-    // `min(total / 2)` because a sound shorter than two fades has no middle;
-    // `max(1)` because a zero-length fade divides by zero.
-    let fade = FADE_FRAMES.min(total / 2).max(1);
-    let from_end = total - i;
-    if i < fade {
-        i as f32 / fade as f32
-    } else if from_end <= fade {
-        from_end as f32 / fade as f32
-    } else {
-        1.0
-    }
-}
+/// A different seed here is a different-sounding explosion, not a wrong one —
+/// [`synth::noise_burst`] is deterministic from it, so the sound this build
+/// ships is the sound every build ships.
+const EXPLOSION_SEED: u64 = 0x4173_7465_726F_6964;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Every generator here produces **interleaved stereo**, which is what the
-    /// mixer's playhead assumes: an odd-length or mono buffer would be played at
-    /// half speed over twice the length. Breakout shipped that bug once.
-    #[test]
-    fn every_cue_is_interleaved_stereo_of_the_length_it_asked_for() {
-        for (name, data, frames) in [
-            ("sine", sine(900.0, 0.05, SAMPLE_RATE), 2_400usize),
-            ("noise", noise(0.32, SAMPLE_RATE), 15_360),
-            (
-                "looped_sine",
-                looped_sine(ENGINE_HZ, ENGINE_CYCLES, SAMPLE_RATE),
-                4_800,
-            ),
-        ] {
-            assert_eq!(data.len(), frames * 2, "{name} is not stereo pairs");
-            for frame in data.chunks_exact(2) {
-                assert_eq!(frame[0], frame[1], "{name} is not the same in both ears");
-            }
-        }
-    }
 
     /// **The engine's buffer is a bare tone: a whole number of cycles, and no
     /// envelope on it.** Read out of the bank, so it is the buffer the game will
@@ -650,25 +546,17 @@ mod tests {
         );
     }
 
-    /// A sound shorter than the fade window still has a defined envelope.
-    #[test]
-    fn a_very_short_sound_does_not_underflow_the_fade() {
-        for total in 1..=8usize {
-            for i in 0..total {
-                let env = fade(i, total);
-                assert!((0.0..=1.0).contains(&env), "fade({i}, {total}) = {env}");
-            }
-        }
-    }
-
-    /// The explosion is noise rather than a tone, decays, and is finite.
+    /// This game's explosion is noise rather than a tone, and decays.
     ///
-    /// The generator this sample added, so it gets its own check rather than
-    /// riding on the sine's. "Decays" is measured as the second half being
-    /// quieter than the first, which a sine would fail.
+    /// The engine proves `noise_burst` is reproducible and that a faster decay
+    /// is quieter later; what is asteroids' own is that **the explosion cue is
+    /// built from it at all**, with this decay and this seed. "Decays" is
+    /// measured as the second half being quieter than the first, and "is noise"
+    /// as consecutive frames mostly differing — both of which a sine fails, so
+    /// swapping the generator back reddens this.
     #[test]
     fn the_explosion_is_a_decaying_burst_of_noise() {
-        let data = noise(0.32, 48_000);
+        let data = synth::noise_burst(0.32, EXPLOSION_DECAY, EXPLOSION_SEED, 48_000);
         assert!(!data.is_empty());
         assert!(data.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
 

@@ -9,10 +9,24 @@ repository.workspace = true
 [lints]
 workspace = true
 
-# No unconditional dependencies: the DSP core (mixer, voices, spatial cue
-# grammar, WAV/QOA decoders) is pure `f32` block processing with nothing under
-# it, which is what `docs/plan/13-audio.md` means by "pure-DSP core, platform
-# seam at the device edge".
+# One unconditional dependency, and it is the workspace's own. The DSP core
+# (mixer, voices, spatial cue grammar, WAV/QOA decoders) is pure `f32` block
+# processing with nothing under it, which is what `docs/plan/13-audio.md` means
+# by "pure-DSP core, platform seam at the device edge", and it stays that way.
+#
+# `src/synth.rs`'s noise generator is the exception: it needs a *deterministic*
+# white-noise sequence, and `crcbl_core::rand` is where this engine's splitmix64
+# lives. Transcribing five lines of it here instead would be the same
+# duplicated-knowledge bug the synth module exists to remove — two copies of one
+# mixing function, drifting silently, with nothing to say which sound is right.
+#
+# **This crate's wasm graph is no longer third-party-free**: `crcbl-core` brings
+# `bitflags`, `glam` and `log`. Every one of those is already in the graph of
+# every binary that links this crate — a game links `crcbl-render` and
+# `crcbl-phys` too — so the cost is paid only by a standalone consumer, of which
+# there are none. The earlier comment claimed zero, and it was true when written.
+[dependencies]
+crcbl-core = { workspace = true }
 
 # The native device backend. Target-gated rather than unconditional because the
 # browser's output is `src/web.rs` and cpal has no place in it: cpal 0.18 *does*

@@ -35,6 +35,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the one dependency a sample continues to spell out, and is what keeps a PNG
   encoder out of a shipped binary.
 
+- **crcbl-audio** (`crcbl::audio::synth`): waveform generators. `sine` for a
+  one-shot beep, `looped_sine` for a tone that joins to itself, `noise_burst`
+  for a decaying impact, and `fade_gain` for the click-free envelope under the
+  first and last. Deterministic: `noise_burst` draws from a caller-supplied seed
+  through `crcbl_core::rand`, so the sound a build ships is the sound every
+  build ships.
+
+  The crate had a mixer, a sound bank, an output stream and a spatial cue
+  grammar, and no way to make a _sound_ — so all four samples wrote one. `sine`
+  and its fade helper were byte-identical in flappy, asteroids and horde;
+  breakout had the same pair under the names `gen_sine` and `fade_env`.
+
+  Three functions, not a synthesiser: no envelope generator, no filter bank, no
+  configurable oscillator type. Three is what the four samples between them
+  actually use. Horde's swept `rise` has one caller and stays in horde, now
+  built on `synth::fade_gain` and `synth::TONE_AMPLITUDE` so its level cannot
+  drift from the engine's.
+
+  **Nothing about the shipped audio changed** — the generators were adopted
+  verbatim, and the sample buffers were compared to the engine's element by
+  element before the copies were deleted.
+
 - **crcbl** (`crcbl::engine`): frame pacing. `FrameLimit` caps how fast a
   real-time loop runs — a thousand frames a second by default, which is a
   runaway guard rather than a pacing policy, and `Clock::set_limit` changes it.

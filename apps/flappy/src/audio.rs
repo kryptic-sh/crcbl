@@ -31,9 +31,10 @@
 
 use std::sync::Arc;
 
+use crcbl::audio::AudioStream;
 use crcbl::audio::mixer::{Mixer, SoundBank, VoiceMix};
 use crcbl::audio::spatial::{CueGrammar, compute_cue};
-use crcbl::audio::{AudioSample, AudioStream};
+use crcbl::audio::synth;
 
 /// The wing-beat.
 pub const SOUND_FLAP: u32 = 1;
@@ -64,8 +65,8 @@ impl Audio {
         // are short enough that a player flapping four times a second never
         // hears two of the same overlap.
         let mut bank = SoundBank::new();
-        bank.insert(SOUND_FLAP, sine(760.0, 0.05, 48_000));
-        bank.insert(SOUND_DEATH, sine(180.0, 0.30, 48_000));
+        bank.insert(SOUND_FLAP, synth::sine(760.0, 0.05, 48_000));
+        bank.insert(SOUND_DEATH, synth::sine(180.0, 0.30, 48_000));
 
         // The stream takes a handle, not the mixer: this copy is what stays
         // behind to play voices through.
@@ -145,55 +146,9 @@ impl Audio {
     }
 }
 
-/// A mono sine wave, faded at both ends, as interleaved stereo.
-fn sine(freq_hz: f32, seconds: f32, sample_rate: u32) -> Vec<AudioSample> {
-    let frames = (sample_rate as f32 * seconds) as usize;
-    let mut out = Vec::with_capacity(frames * 2);
-    for i in 0..frames {
-        let t = i as f32 / sample_rate as f32;
-        let value = 0.3 * (2.0 * std::f32::consts::PI * freq_hz * t).sin() * fade(i, frames);
-        out.push(value);
-        out.push(value);
-    }
-    out
-}
-
-/// How many frames the fade in and out take, unless the sound is shorter.
-const FADE_FRAMES: usize = 60;
-
-/// A linear fade in and out, so a cue starts and stops without a click.
-fn fade(i: usize, total: usize) -> f32 {
-    debug_assert!(i < total, "fade is only defined inside the sound");
-    // `min(total / 2)` because a sound shorter than two fades has no middle;
-    // `max(1)` because a zero-length fade divides by zero.
-    let fade = FADE_FRAMES.min(total / 2).max(1);
-    let from_end = total - i;
-    if i < fade {
-        i as f32 / fade as f32
-    } else if from_end <= fade {
-        from_end as f32 / fade as f32
-    } else {
-        1.0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The generator produces **interleaved stereo**, which is what the mixer's
-    /// playhead assumes: a mono buffer would be played at half speed over twice
-    /// the length. Breakout shipped that bug once, in its own playhead.
-    #[test]
-    fn a_cue_is_interleaved_stereo_of_the_length_it_asked_for() {
-        let frames = 100;
-        let data = sine(440.0, frames as f32 / 48_000.0, 48_000);
-        assert_eq!(data.len(), frames * 2, "not stereo pairs");
-        for frame in data.chunks_exact(2) {
-            assert_eq!(frame[0], frame[1], "not the same in both ears");
-        }
-        assert!(data.iter().any(|s| s.abs() > 1e-3), "the cue is silent");
-    }
 
     /// An id nothing answers to is ignored rather than underflowing or panicking.
     #[test]
@@ -267,16 +222,5 @@ mod tests {
             far.volume,
             near.volume
         );
-    }
-
-    /// A sound shorter than the fade window still has a defined envelope.
-    #[test]
-    fn a_very_short_sound_does_not_underflow_the_fade() {
-        for total in 1..=8usize {
-            for i in 0..total {
-                let env = fade(i, total);
-                assert!((0.0..=1.0).contains(&env), "fade({i}, {total}) = {env}");
-            }
-        }
     }
 }

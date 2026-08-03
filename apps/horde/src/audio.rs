@@ -55,6 +55,7 @@ use std::sync::Arc;
 
 use crcbl::audio::mixer::{Mixer, SoundBank, VoiceMix};
 use crcbl::audio::spatial::{CueGrammar, compute_cue};
+use crcbl::audio::synth;
 use crcbl::audio::{AudioSample, AudioStream};
 use crcbl::math::DVec3;
 
@@ -135,11 +136,17 @@ impl Audio {
         // copying it, which at this game's cue rate is the difference between a
         // playhead and an allocation the size of the sound per kill.
         let mut bank = SoundBank::new();
-        bank.insert(SOUND_SHOT, sine(760.0, 0.045, SAMPLE_RATE));
-        bank.insert(SOUND_KILL, noise(0.14, 12.0, SAMPLE_RATE));
-        bank.insert(SOUND_PICKUP, sine(1_320.0, 0.05, SAMPLE_RATE));
+        bank.insert(SOUND_SHOT, synth::sine(760.0, 0.045, SAMPLE_RATE));
+        bank.insert(
+            SOUND_KILL,
+            synth::noise_burst(0.14, 12.0, NOISE_SEED, SAMPLE_RATE),
+        );
+        bank.insert(SOUND_PICKUP, synth::sine(1_320.0, 0.05, SAMPLE_RATE));
         bank.insert(SOUND_LEVEL, rise(440.0, 880.0, 0.30, SAMPLE_RATE));
-        bank.insert(SOUND_DEATH, noise(0.55, 4.0, SAMPLE_RATE));
+        bank.insert(
+            SOUND_DEATH,
+            synth::noise_burst(0.55, 4.0, NOISE_SEED, SAMPLE_RATE),
+        );
         debug_assert_eq!(bank.len(), SOUND_COUNT, "a cue id is missing from the bank");
 
         // The stream takes a handle, not the mixer: this copy is what stays
@@ -258,18 +265,13 @@ impl Audio {
     }
 }
 
-/// A mono sine wave, faded at both ends, as interleaved stereo.
-fn sine(freq_hz: f32, seconds: f32, sample_rate: u32) -> Vec<AudioSample> {
-    let frames = (sample_rate as f32 * seconds) as usize;
-    let mut out = Vec::with_capacity(frames * 2);
-    for i in 0..frames {
-        let t = i as f32 / sample_rate as f32;
-        let value = 0.3 * (2.0 * std::f32::consts::PI * freq_hz * t).sin() * fade(i, frames);
-        out.push(value);
-        out.push(value);
-    }
-    out
-}
+/// The seed the kill and death bursts are drawn from. Spells "HORDESEE", and is
+/// the value this game's `DEFAULT_SEED` uses.
+///
+/// A different seed here is a different-sounding burst, not a wrong one —
+/// [`synth::noise_burst`] is deterministic from it, so the sound this build
+/// ships is the sound every build ships.
+const NOISE_SEED: u64 = 0x484F_5244_4553_4545;
 
 /// A tone that sweeps from `from_hz` to `to_hz`, as interleaved stereo.
 ///
@@ -290,92 +292,31 @@ fn rise(from_hz: f32, to_hz: f32, seconds: f32, sample_rate: u32) -> Vec<AudioSa
         };
         let freq = from_hz + (to_hz - from_hz) * t;
         phase += 2.0 * std::f32::consts::PI * freq / sample_rate as f32;
-        let value = 0.3 * phase.sin() * fade(i, frames);
+        let value = synth::TONE_AMPLITUDE * phase.sin() * synth::fade_gain(i, frames);
         out.push(value);
         out.push(value);
     }
     out
-}
-
-/// A burst of low-passed noise that decays, as interleaved stereo.
-///
-/// `decay` is in nepers per second: `e^-9t` is down to a twentieth of its peak
-/// by a fifth of a second. A kill wants a fast one and the player's own end
-/// wants a slow one, which is why it is an argument here and a constant in
-/// `apps/asteroids/src/audio.rs`.
-///
-/// Deterministic, from a fixed seed through the same splitmix64 mix the
-/// simulation uses, so the sound a build ships is the sound every build ships
-/// and a golden buffer would be possible later. The one-pole low pass takes the
-/// hiss off the top; the exponential decay is what makes it a *burst*.
-fn noise(seconds: f32, decay: f32, sample_rate: u32) -> Vec<AudioSample> {
-    /// The one-pole coefficient: `y += ALPHA * (x - y)`. Lower is duller.
-    const ALPHA: f32 = 0.16;
-
-    let frames = (sample_rate as f32 * seconds) as usize;
-    let mut out = Vec::with_capacity(frames * 2);
-    /// Spells "HORDESEE" — this game's noise, and the same value its
-    /// `DEFAULT_SEED` uses.
-    const SEED: u64 = 0x484F_5244_4553_4545;
-
-    let mut low = 0.0f32;
-    for i in 0..frames {
-        // The engine's hash, walked as a sequence: stepping splitmix64's state
-        // by its gamma is the same thing as hashing successive indices, which
-        // `crcbl::core::rand`'s `stepping_the_state_is_hashing_the_index` pins.
-        // The top 24 bits are the ones it mixes best, and 24 is exactly an
-        // `f32`'s mantissa, so every value here is representable rather than
-        // rounded.
-        let z = crcbl::core::rand::hash_u64(SEED, i as u64 + 1);
-        let white = (z >> 40) as f32 / 8_388_608.0 - 1.0;
-
-        low += ALPHA * (white - low);
-        let t = i as f32 / sample_rate as f32;
-        let value = 0.45 * low * (-decay * t).exp() * fade(i, frames);
-        out.push(value);
-        out.push(value);
-    }
-    out
-}
-
-/// How many frames the fade in and out take, unless the sound is shorter.
-const FADE_FRAMES: usize = 60;
-
-/// A linear fade in and out, so a cue starts and stops without a click.
-fn fade(i: usize, total: usize) -> f32 {
-    debug_assert!(i < total, "fade is only defined inside the sound");
-    // `min(total / 2)` because a sound shorter than two fades has no middle;
-    // `max(1)` because a zero-length fade divides by zero.
-    let fade = FADE_FRAMES.min(total / 2).max(1);
-    let from_end = total - i;
-    if i < fade {
-        i as f32 / fade as f32
-    } else if from_end <= fade {
-        from_end as f32 / fade as f32
-    } else {
-        1.0
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Every generator here produces **interleaved stereo**, which is what the
-    /// mixer's playhead assumes: an odd-length or mono buffer would be played at
-    /// half speed over twice the length. Breakout shipped that bug once.
+    /// `rise` produces **interleaved stereo**, which is what the mixer's
+    /// playhead assumes: an odd-length or mono buffer would be played at half
+    /// speed over twice the length. Breakout shipped that bug once.
+    ///
+    /// Only `rise` is checked here. The engine's generators carry the same
+    /// assertion in `crcbl_audio::synth`, and this is the one horde wrote.
     #[test]
-    fn every_cue_is_interleaved_stereo_of_the_length_it_asked_for() {
-        for (name, data, seconds) in [
-            ("sine", sine(760.0, 0.045, SAMPLE_RATE), 0.045f32),
-            ("noise", noise(0.14, 12.0, SAMPLE_RATE), 0.14),
-            ("rise", rise(440.0, 880.0, 0.30, SAMPLE_RATE), 0.30),
-        ] {
-            let frames = (SAMPLE_RATE as f32 * seconds) as usize;
-            assert_eq!(data.len(), frames * 2, "{name} is not stereo pairs");
-            for frame in data.chunks_exact(2) {
-                assert_eq!(frame[0], frame[1], "{name} is not the same in both ears");
-            }
+    fn the_swept_cue_is_interleaved_stereo_of_the_length_it_asked_for() {
+        let seconds = 0.30f32;
+        let data = rise(440.0, 880.0, seconds, SAMPLE_RATE);
+        let frames = (SAMPLE_RATE as f32 * seconds) as usize;
+        assert_eq!(data.len(), frames * 2, "rise is not stereo pairs");
+        for frame in data.chunks_exact(2) {
+            assert_eq!(frame[0], frame[1], "rise is not the same in both ears");
         }
     }
 
@@ -513,23 +454,12 @@ mod tests {
         );
     }
 
-    /// A sound shorter than the fade window still has a defined envelope.
-    #[test]
-    fn a_very_short_sound_does_not_underflow_the_fade() {
-        for total in 1..=8usize {
-            for i in 0..total {
-                let env = fade(i, total);
-                assert!((0.0..=1.0).contains(&env), "fade({i}, {total}) = {env}");
-            }
-        }
-    }
-
     /// The kill is noise rather than a tone, decays, and is finite — and the
     /// decay argument is actually used, which a constant-decay copy would not
     /// show.
     #[test]
     fn the_kill_is_a_decaying_burst_of_noise_and_the_decay_is_a_knob() {
-        let data = noise(0.14, 12.0, 48_000);
+        let data = synth::noise_burst(0.14, 12.0, NOISE_SEED, 48_000);
         assert!(!data.is_empty());
         assert!(data.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
 
@@ -556,7 +486,7 @@ mod tests {
 
         // The same length at a tenth of the decay is still ringing where the
         // fast one has gone. Without this the argument could be ignored.
-        let slow = noise(0.14, 1.2, 48_000);
+        let slow = synth::noise_burst(0.14, 1.2, NOISE_SEED, 48_000);
         let slow_late = peak(&slow, frames * 3 / 4..frames);
         assert!(
             slow_late > late,
