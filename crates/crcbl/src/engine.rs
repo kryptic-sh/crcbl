@@ -207,6 +207,89 @@ impl From<crcbl_render::GraphError> for GpuError {
     }
 }
 
+/// Anything that can stop a loop, plus whatever the game itself refuses.
+///
+/// Every sample had its own copy of this enum with the same five loop variants
+/// and the same `Display` arms, differing only in the name and in one variant
+/// carrying that game's error type. That is duplicated *knowledge*, not
+/// duplicated shape: "the swapchain never presented" reads the same however the
+/// game above it is spelled, and five copies is five places for the hint text
+/// to drift.
+///
+/// `G` is the game's own error. A game that cannot fail on its own leaves it at
+/// the default [`Infallible`](core::convert::Infallible), which makes
+/// [`Self::Game`] uninhabited and costs the enum nothing.
+///
+/// # Why there is no `From<G>`
+///
+/// The three engine error types convert with `?`, so the bring-up path reads as
+/// it did. A blanket `impl<G> From<G> for LoopError<G>` cannot join them —
+/// `G` may itself be [`ShellError`], so the compiler rejects the overlap — and
+/// dropping the concrete impls to buy it would cost every `?` in the loop to
+/// save one at the game's constructor. Game errors are wrapped by name:
+/// `.map_err(LoopError::Game)`.
+#[derive(Debug)]
+pub enum LoopError<G = core::convert::Infallible> {
+    /// No shell backend could be opened: nothing is listening, or this platform
+    /// has none yet.
+    NoWindowSystem(ShellError),
+    /// The window system refused something.
+    Shell(ShellError),
+    /// The window was never configured, so there was never a size to create a
+    /// swapchain at.
+    Configure(ConfigureError),
+    /// The swapchain reconfigured over and over and never presented a frame.
+    /// See [`MAX_CONSECUTIVE_RECONFIGURES`].
+    NeverPresented,
+    /// The GPU seam failed.
+    Gpu(GpuError),
+    /// The game refused to start or to step.
+    Game(G),
+}
+
+impl<G: std::fmt::Display> std::fmt::Display for LoopError<G> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoWindowSystem(error) => write!(
+                f,
+                "no window system: {error}\n\
+                 hint: either nothing is listening (no compositor, no DISPLAY), \
+                 or this platform has no shell backend yet. `--headless` runs \
+                 the same loop with no window and works everywhere."
+            ),
+            Self::Shell(error) => write!(f, "shell error: {error}"),
+            Self::Configure(error) => write!(f, "{error}"),
+            Self::NeverPresented => write!(
+                f,
+                "the swapchain reconfigured {MAX_CONSECUTIVE_RECONFIGURES} times \
+                 in a row without presenting a frame"
+            ),
+            Self::Gpu(error) => write!(f, "gpu error: {error}"),
+            Self::Game(error) => write!(f, "game error: {error}"),
+        }
+    }
+}
+
+impl<G: std::error::Error> std::error::Error for LoopError<G> {}
+
+impl<G> From<ShellError> for LoopError<G> {
+    fn from(error: ShellError) -> Self {
+        Self::Shell(error)
+    }
+}
+
+impl<G> From<ConfigureError> for LoopError<G> {
+    fn from(error: ConfigureError) -> Self {
+        Self::Configure(error)
+    }
+}
+
+impl<G> From<GpuError> for LoopError<G> {
+    fn from(error: GpuError) -> Self {
+        Self::Gpu(error)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Frame outcome
 // ---------------------------------------------------------------------------
@@ -1526,6 +1609,75 @@ mod tests {
             .create_window(&crcbl_shell::WindowDesc::default())
             .expect("headless always creates a window");
         (shell, window)
+    }
+
+    /// Stands in for a game's own error type.
+    #[derive(Debug)]
+    struct GameError;
+
+    impl std::fmt::Display for GameError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "the server would not bind")
+        }
+    }
+
+    impl std::error::Error for GameError {}
+
+    /// **A game's error reaches the report, it is not swallowed by the wrapper.**
+    ///
+    /// The whole point of the type parameter: five samples each had a `Game`
+    /// variant, and a `Display` that printed only "game error" — with no
+    /// `{error}` — would look right in every one of them and tell an operator
+    /// nothing about why the run died.
+    #[test]
+    fn a_wrapped_game_error_still_says_what_the_game_refused() {
+        let error: LoopError<GameError> = LoopError::Game(GameError);
+        let text = error.to_string();
+        assert!(text.contains("game error"), "{text}");
+        assert!(
+            text.contains("the server would not bind"),
+            "the game's own message must survive the wrapper: {text}"
+        );
+    }
+
+    /// **The reconfigure cap is quoted from the constant, not written out.**
+    ///
+    /// A message naming a different number than the loop actually enforces
+    /// sends whoever reads it looking for a bug at the wrong count.
+    #[test]
+    fn the_never_presented_message_names_the_cap_the_loop_enforces() {
+        let error: LoopError = LoopError::NeverPresented;
+        assert!(
+            error
+                .to_string()
+                .contains(&MAX_CONSECUTIVE_RECONFIGURES.to_string()),
+            "{error}"
+        );
+    }
+
+    /// **The three engine error types convert with `?`; the game's does not.**
+    ///
+    /// Asserted here rather than left to the samples' call sites, because a
+    /// missing `From` is a compile error *there* and this is the crate that
+    /// owes it. The absent `From<G>` is the deliberate half — see
+    /// [`LoopError`]'s docs — and is not testable, only compilable.
+    #[test]
+    fn the_engines_own_errors_convert_into_the_wrapper() {
+        let (mut shell, window) = shell();
+        shell.destroy_window(window).expect("the window goes away");
+        // A window that is gone: a real ShellError, not a hand-built one.
+        let shell_error = shell
+            .destroy_window(window)
+            .expect_err("destroying it twice is refused");
+
+        let wrapped: LoopError<GameError> = shell_error.into();
+        assert!(matches!(wrapped, LoopError::Shell(_)));
+
+        let wrapped: LoopError<GameError> = ConfigureError::TimedOut.into();
+        assert!(matches!(wrapped, LoopError::Configure(_)));
+
+        let wrapped: LoopError<GameError> = GpuError::Unusable("no queue").into();
+        assert!(matches!(wrapped, LoopError::Gpu(_)));
     }
 
     /// Drains the shell into a `Pending`, and reports what each event was

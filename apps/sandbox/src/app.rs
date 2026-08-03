@@ -55,8 +55,8 @@ use crcbl::backend::GpuBackend;
 // swapchain never becomes presentable — a budget of *presented* frames cannot.
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Clock, ConfigureError, ExitReason, Flow, MAX_CONSECUTIVE_RECONFIGURES, Pending, WINDOWED_IDLE,
-    accept_close, wait_for_configure,
+    Clock, ExitReason, Flow, MAX_CONSECUTIVE_RECONFIGURES, Pending, WINDOWED_IDLE, accept_close,
+    wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{
@@ -67,7 +67,7 @@ use crcbl::ui::{DebugOverlay, PointerInput};
 
 use crate::menu::{self, MenuAction, Menus};
 
-use crate::gpu::{FrameOutcome, Gpu, GpuError};
+use crate::gpu::{FrameOutcome, Gpu};
 
 /// The key that shows and hides the debug overlay.
 ///
@@ -235,63 +235,12 @@ pub struct Summary {
 }
 
 /// Anything that can stop the sandbox before it starts.
-#[derive(Debug)]
-pub enum SandboxError {
-    /// No shell backend could be opened. On macOS and Windows this is the
-    /// expected outcome until P14 and the message says so.
-    NoWindowSystem(ShellError),
-    /// The window system refused something.
-    Shell(ShellError),
-    /// The window was never configured, so there was never a size to create a
-    /// swapchain at.
-    Configure(ConfigureError),
-    /// The swapchain reconfigured over and over and never presented a frame.
-    NeverPresented,
-    /// The GPU seam failed.
-    Gpu(GpuError),
-}
-
-impl std::fmt::Display for SandboxError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoWindowSystem(error) => write!(
-                f,
-                "no window system: {error}\n\
-                 hint: either nothing is listening (no compositor, no \
-                 DISPLAY), or this platform has no shell backend yet — Win32 \
-                 and AppKit land at P14. `--headless` runs the same loop with \
-                 no window and works everywhere."
-            ),
-            Self::Shell(error) => write!(f, "shell error: {error}"),
-            Self::Configure(error) => write!(f, "{error}"),
-            Self::NeverPresented => write!(
-                f,
-                "the swapchain reconfigured {MAX_CONSECUTIVE_RECONFIGURES} times in a row                  without presenting a frame"
-            ),
-            Self::Gpu(error) => write!(f, "gpu error: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for SandboxError {}
-
-impl From<ShellError> for SandboxError {
-    fn from(error: ShellError) -> Self {
-        Self::Shell(error)
-    }
-}
-
-impl From<ConfigureError> for SandboxError {
-    fn from(error: ConfigureError) -> Self {
-        Self::Configure(error)
-    }
-}
-
-impl From<GpuError> for SandboxError {
-    fn from(error: GpuError) -> Self {
-        Self::Gpu(error)
-    }
-}
+///
+/// An alias rather than an enum: [`crcbl::engine::LoopError`] owns these
+/// variants for every sample. The sandbox has no simulation of its own to
+/// fail, so it takes the default type parameter and its `Game` variant is
+/// [`Infallible`](core::convert::Infallible) — uninhabited, and free.
+pub type SandboxError = crcbl::engine::LoopError;
 
 /// Everything one turn of the loop needs.
 ///

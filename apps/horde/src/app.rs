@@ -56,8 +56,8 @@ use core::time::Duration;
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Clock, ConfigureError, ExitReason, Flow, FrameOutcome, GpuError, Handled,
-    MAX_CONSECUTIVE_RECONFIGURES, Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
+    Clock, ExitReason, Flow, FrameOutcome, GpuError, Handled, MAX_CONSECUTIVE_RECONFIGURES,
+    Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
 };
 use crcbl::math::Vec2;
 use crcbl::prelude::*;
@@ -100,63 +100,14 @@ pub struct Summary {
 
 // ---- errors -----------------------------------------------------------------
 
-#[derive(Debug)]
-pub enum HordeError {
-    NoWindowSystem(ShellError),
-    Shell(ShellError),
-    Configure(ConfigureError),
-    NeverPresented,
-    Gpu(GpuError),
-    Game(game::GameError),
-}
-
-impl std::fmt::Display for HordeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoWindowSystem(error) => write!(
-                f,
-                "no window system: {error}\n\
-                 hint: `--headless` runs the same loop with no window \
-                 and works everywhere."
-            ),
-            Self::Shell(error) => write!(f, "shell error: {error}"),
-            Self::Configure(error) => write!(f, "{error}"),
-            Self::NeverPresented => write!(
-                f,
-                "the swapchain reconfigured {MAX_CONSECUTIVE_RECONFIGURES} times \
-                 in a row without presenting a frame"
-            ),
-            Self::Gpu(error) => write!(f, "gpu error: {error}"),
-            Self::Game(error) => write!(f, "game error: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for HordeError {}
-
-impl From<ShellError> for HordeError {
-    fn from(error: ShellError) -> Self {
-        Self::Shell(error)
-    }
-}
-
-impl From<GpuError> for HordeError {
-    fn from(error: GpuError) -> Self {
-        Self::Gpu(error)
-    }
-}
-
-impl From<game::GameError> for HordeError {
-    fn from(error: game::GameError) -> Self {
-        Self::Game(error)
-    }
-}
-
-impl From<ConfigureError> for HordeError {
-    fn from(error: ConfigureError) -> Self {
-        Self::Configure(error)
-    }
-}
+/// What can stop horde: the loop's own failures, plus this game's.
+///
+/// An alias rather than an enum. Every sample had the same five loop
+/// variants written out with the same `Display` arms, so they live in
+/// [`crcbl::engine::LoopError`] now and this names the game error that
+/// goes in the sixth. Its docs say why a game error is wrapped by name —
+/// `.map_err(HordeError::Game)` — while the engine's three convert with `?`.
+pub type HordeError = crcbl::engine::LoopError<game::GameError>;
 
 // ---- the loop ---------------------------------------------------------------
 
@@ -338,7 +289,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         clock_source: Clock,
         events: u64,
     ) -> Result<Self, HordeError> {
-        let mut game = Game::with_setup(&options.setup())?;
+        let mut game = Game::with_setup(&options.setup()).map_err(HordeError::Game)?;
         if options.prefill > 0 {
             let staged = game.stage_field(options.prefill);
             if staged < options.prefill {

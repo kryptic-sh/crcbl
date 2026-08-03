@@ -165,6 +165,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **crcbl** (`crcbl::engine`): `LoopError<G>` replaces the error enum each
+  sample wrote out for itself. The five loop failures — `NoWindowSystem`,
+  `Shell`, `Configure`, `NeverPresented` and `Gpu` — belong to the loop however
+  the game above them is spelled, and `G` names whatever the game itself
+  refuses. A game with nothing of its own to refuse leaves it at the default
+  `Infallible`, which makes the `Game` variant uninhabited and costs nothing.
+
+  `BreakoutError`, `FlappyError`, `AsteroidsError`, `HordeError` and
+  `SandboxError` are now aliases for it, so they keep their names and every
+  `Err(FlappyError::Gpu(…))` still reads the same. `ShellError`,
+  `ConfigureError` and `GpuError` still convert with `?`; a game error is
+  wrapped by name, `.map_err(FlappyError::Game)`, because a blanket `From<G>`
+  cannot coexist with the three concrete ones — `G` may itself be `ShellError`.
+
+  Two messages change as a result. The sandbox's `NoWindowSystem` hint no longer
+  names a roadmap phase for the missing Win32 and AppKit backends, since the
+  engine has no business quoting one; it still says a platform may have no shell
+  backend and still points at `--headless`. And its `NeverPresented` message
+  loses a run of eighteen spaces that a missing line continuation had baked into
+  the string literal.
+
 - **samples**: `apps/{breakout,flappy,asteroids,horde}` drop eleven dependencies
   apiece and `apps/sandbox` drops its last one. `glam::` is `crcbl::math::` and
   `log::` is `crcbl::log::` at every call site — the same crates through the

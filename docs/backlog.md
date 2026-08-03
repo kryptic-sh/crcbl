@@ -647,14 +647,27 @@ The modular panel is built and all three samples switch it on with F3 (or
   `game`, `glam::` stripped): breakout and flappy share **1708 identical lines**
   of 2318 and 2271, with runs of 141, 108, 102 and 99 lines; asteroids and horde
   share 1124 of 1700 and 1969; breakout and asteroids 1101, with runs of 74
-  and 67. The error type is **byte-identical in all four** after that
-  normalisation — 52 lines covering the enum, `Display`, `Error` and the four
-  `From` impls — which is the piece to be most careful with, because
-  `pub fn frame(&mut self) -> Result<Flow, BreakoutError>` is each bin crate's
-  public signature and the `From` impls name each crate's own `gpu::GpuError`
-  and `game::GameError`. A shared error therefore needs generics or boxing, and
-  touches every signature in five binaries; it is the reason this is not a
-  one-sitting change rather than an incidental detail.
+  and 67.
+
+  **The error half has landed** — `crcbl::engine::LoopError<G>` — and it cost
+  far less than this entry predicted, so the prediction is worth correcting
+  rather than deleting. It said a shared error "needs generics or boxing, and
+  touches every signature in five binaries", because the `From` impls name each
+  crate's own `gpu::GpuError`. There is no such type. The four games import
+  `GpuError` straight from `crcbl::engine`, and `apps/sandbox/src/gpu.rs`
+  `pub use`s the same one — so only `game::GameError` was ever per-crate, and
+  one type parameter carried it. No signature changed — `BreakoutError` and its
+  four siblings are aliases, so
+  `fn frame(&mut self) -> Result<Flow, BreakoutError>` reads as it did and
+  `Err(BreakoutError::Gpu(…))` still constructs. The one call site that changed
+  per game is the game's own constructor, from `?` to
+  `.map_err(BreakoutError::Game)`, because a blanket `From<G>` overlaps the
+  three concrete ones. 244 lines out of the five `app.rs` files against 84 of
+  shared type and 68 of tests in the engine.
+
+  The lesson for the rest of this slice: the "five binaries with different
+  types" framing was itself the overestimate. Check what a sample's local name
+  actually resolves to before pricing an extraction around it.
 
   What the extraction has to carry, found while doing the menu half:
   - The pump's menu branches call `select_previous` / `select_next` / `press` /
