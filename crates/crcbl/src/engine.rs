@@ -1515,6 +1515,44 @@ pub const MENU_DOWN_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode
 /// Commits the selection. See [`MENU_UP_KEY`].
 pub const MENU_ACTIVATE_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::Enter;
 
+/// Drains the fixed-step accumulator, and returns how many ticks ran.
+///
+/// The loop body every sample wrote out, with the game's own tick as the
+/// closure. Zero when `paused`, because a paused frame **keeps the clock and
+/// throws the ticks away**.
+///
+/// # Why a paused frame still drains
+///
+/// The three candidates differ only after a long pause, and only one resumes
+/// without a lurch:
+///
+/// * *Stop calling `update`.* [`crcbl_core::FrameClock::update`] measures
+///   `now - last_update`, so the first update after the pause covers the whole
+///   of it. The catch-up cap discards the rest, so resuming spends one frame
+///   running the cap's worth of simulation and the dropped-tick count climbs by
+///   however long the player was away.
+/// * *Update but do not drain.* The accumulator saturates at the same cap, so
+///   resuming runs the same burst in one frame. No better.
+/// * *Update and drain.* The accumulator holds only the sub-tick remainder when
+///   the game resumes, so the first live frame runs the one tick it is owed.
+///   This one.
+///
+/// Draining also keeps `render_dt` real while paused, which is what the debug
+/// overlay records — a pause that froze the clock would show the frame graph
+/// flatlining at whatever it read when Escape was pressed.
+pub fn run_ticks(clock: &mut crcbl_core::FrameClock, paused: bool, mut tick: impl FnMut()) -> u64 {
+    if paused {
+        while clock.consume_tick() {}
+        return 0;
+    }
+    let mut ran = 0;
+    while clock.consume_tick() {
+        ran += 1;
+        tick();
+    }
+    ran
+}
+
 /// The loop's fullscreen request, and whether the window system agreed.
 ///
 /// All five samples carried a `mode_honoured` bool and the same three methods
@@ -2464,6 +2502,56 @@ mod tests {
             1,
             "a failed start-up asked for another device",
         );
+    }
+
+    /// **A pause drains the accumulator instead of letting it fill.**
+    ///
+    /// The whole reason `run_ticks` takes `paused` rather than the caller
+    /// skipping the call: a paused frame that stopped draining would bank the
+    /// pause and spend it in one burst on the frame the player resumes. Measured
+    /// as "the frame after a long pause runs the one tick it is owed, not a
+    /// catch-up storm".
+    #[test]
+    fn a_long_pause_costs_one_tick_on_resume_rather_than_a_burst() {
+        let mut clock = crcbl_core::FrameClock::new(60);
+        let step = Duration::from_nanos(1_000_000_000 / 60);
+        let mut elapsed = Duration::ZERO;
+        clock.update(elapsed);
+
+        // Ten seconds of paused frames.
+        for _ in 0..600 {
+            elapsed += step;
+            clock.update(elapsed);
+            assert_eq!(run_ticks(&mut clock, true, || unreachable!()), 0);
+        }
+
+        // The first live frame.
+        elapsed += step;
+        clock.update(elapsed);
+        let mut ran = 0;
+        let count = run_ticks(&mut clock, false, || ran += 1);
+        assert_eq!(count, 1, "resuming ran a catch-up burst of {count} ticks");
+        assert_eq!(ran, 1, "the closure and the count disagree");
+    }
+
+    /// **The count is what actually ran, and the closure runs exactly that many
+    /// times.**
+    ///
+    /// A frame long enough for several ticks must run several: anything stepped
+    /// once per frame instead has a speed proportional to the frame rate, which
+    /// a headless run — where a frame is pinned to exactly one tick — cannot
+    /// see.
+    #[test]
+    fn a_slow_frame_runs_every_tick_it_owes() {
+        let mut clock = crcbl_core::FrameClock::new(60);
+        clock.update(Duration::ZERO);
+        // Four ticks' worth of wall time in one frame.
+        clock.update(Duration::from_nanos(4 * 1_000_000_000 / 60));
+
+        let mut ran = 0;
+        let count = run_ticks(&mut clock, false, || ran += 1);
+        assert_eq!(count, 4, "a four-tick frame ran {count}");
+        assert_eq!(ran, 4);
     }
 
     /// **Toggling reads the window's mode back rather than remembering it.**

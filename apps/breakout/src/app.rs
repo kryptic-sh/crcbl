@@ -24,7 +24,8 @@ use core::time::Duration;
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Clock, ExitReason, Flow, FrameOutcome, Handled, MAX_CONSECUTIVE_RECONFIGURES, MAX_FRAME_STEP,
-    MenuPump, ModeRequest, PointerCapture, WINDOWED_IDLE, accept_close, wait_for_configure,
+    MenuPump, ModeRequest, PointerCapture, WINDOWED_IDLE, accept_close, run_ticks,
+    wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{
@@ -395,14 +396,8 @@ impl<S: Shell + ?Sized> Loop<S> {
         // debug overlay above is recording — a pause that froze the clock would
         // show the frame graph flatlining at whatever it read when Escape was
         // pressed.
-        if self.paused {
-            while self.frame_clock.consume_tick() {}
-        } else {
-            while self.frame_clock.consume_tick() {
-                self.ticks += 1;
-                self.game.tick();
-            }
-        }
+        let game = &mut self.game;
+        self.ticks += run_ticks(&mut self.frame_clock, self.paused, || game.tick());
 
         self.game.render_state(&mut self.render_state);
         self.gpu.set_board(&self.render_state);

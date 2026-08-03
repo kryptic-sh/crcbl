@@ -38,7 +38,8 @@ use core::time::Duration;
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Clock, ExitReason, Flow, FrameOutcome, Handled, MAX_CONSECUTIVE_RECONFIGURES, MAX_FRAME_STEP,
-    MenuPump, ModeRequest, PointerCapture, WINDOWED_IDLE, accept_close, wait_for_configure,
+    MenuPump, ModeRequest, PointerCapture, WINDOWED_IDLE, accept_close, run_ticks,
+    wait_for_configure,
 };
 use crcbl::math::Vec2;
 use crcbl::prelude::*;
@@ -387,14 +388,8 @@ impl<S: Shell + ?Sized> Loop<S> {
         // resuming runs the one tick it is owed rather than the eight the
         // accumulator saturated at. `apps/flappy/src/app.rs` carries the full
         // argument.
-        if self.paused {
-            while self.frame_clock.consume_tick() {}
-        } else {
-            while self.frame_clock.consume_tick() {
-                self.ticks += 1;
-                self.game.tick();
-            }
-        }
+        let game = &mut self.game;
+        self.ticks += run_ticks(&mut self.frame_clock, self.paused, || game.tick());
 
         self.game.render_state(&mut self.render_state);
         // **After the accumulator has been drained**, which is what

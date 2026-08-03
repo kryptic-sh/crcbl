@@ -56,7 +56,7 @@ use crcbl::backend::GpuBackend;
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Clock, ExitReason, Flow, MAX_CONSECUTIVE_RECONFIGURES, ModeRequest, Pending, WINDOWED_IDLE,
-    accept_close, wait_for_configure,
+    accept_close, run_ticks, wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{
@@ -606,21 +606,17 @@ impl<S: Shell + ?Sized> Loop<S> {
         // leaves only the sub-tick remainder, so the cube picks up exactly
         // where it stopped. The same choice, and the same reasoning, as
         // `apps/breakout` and `apps/flappy`.
-        if self.paused {
-            while self.frame_clock.consume_tick() {}
-        } else {
-            while self.frame_clock.consume_tick() {
-                self.ticks += 1;
-                tick(self.frame_clock.tick_dt_secs());
-                // The cube spins on the **fixed** timestep, not on the frame
-                // rate. That is what makes `--headless --frames N` render a
-                // bit-reproducible picture on every machine, and therefore what
-                // makes a golden image of it evidence rather than a
-                // coincidence.
-                #[allow(clippy::cast_possible_truncation)]
-                self.gpu.advance(self.frame_clock.tick_dt_secs() as f32);
-            }
-        }
+        let dt = self.frame_clock.tick_dt_secs();
+        let gpu = &mut self.gpu;
+        self.ticks += run_ticks(&mut self.frame_clock, self.paused, || {
+            tick(dt);
+            // The cube spins on the **fixed** timestep, not on the frame rate.
+            // That is what makes `--headless --frames N` render a
+            // bit-reproducible picture on every machine, and therefore what
+            // makes a golden image of it evidence rather than a coincidence.
+            #[allow(clippy::cast_possible_truncation)]
+            gpu.advance(dt as f32);
+        });
 
         // `alpha` is read after the tick loop, never before: before, the
         // accumulator may still hold whole ticks.
