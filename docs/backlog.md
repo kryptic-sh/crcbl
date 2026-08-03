@@ -172,20 +172,27 @@ before P6–P8 build on it), then the worker backend behind it.
   for (`crossOriginIsolated` asserted by the browser gate) is the thing that
   cannot be met without it.
 
-## The scaffold's windowed path has never been run
+## What the scaffold's gate does not cover
 
 `crcbl new`'s template now hosts `crcbl::engine::Loop`, and the scaffold e2e
-compiles it, lints it, runs its unit tests and runs it against `HeadlessShell`.
-Nothing has opened its window: the machine that developed it had no compositor
-reachable, so `open()` fell through to the "no shell backend available" error
-every time.
+compiles it, lints it, runs its three unit tests and runs it headless — against
+the null backend by default and against lavapipe in CI
+(`CRCBL_CLI_E2E_BACKEND=vk`). Two gaps, both deliberate:
 
-What that leaves unobserved is the template's own share of the windowed path —
-whether the pause menu, the fullscreen toggle and the resize actually look right
-— rather than the machinery behind them, which is `crcbl::engine::Loop`'s and is
-the same code four samples run windowed every day. The check is to run
-`cargo run` in a scaffolded project on a desktop and press `ESC`, `F11` and
-`F3`.
+- **The windowed path has never been run.** The machine that developed it had no
+  compositor reachable, so `open()` returned "no shell backend available" every
+  time. What that leaves unobserved is the template's own share — whether the
+  pause menu, the fullscreen toggle and the resize look right — rather than the
+  machinery behind them, which is `crcbl::engine::Loop`'s and is the same code
+  four samples run windowed daily. The check is `cargo run` in a scaffolded
+  project on a desktop, then `ESC`, `F11`, `F3`.
+- **Vulkan validation is not gated on it.** Run by hand against lavapipe with
+  `CRCBL_VK_VALIDATION=1 CRCBL_VK_SYNC_VALIDATION=1`, the template's graph is
+  clean — 30 frames, no layer messages. It is not in CI because a validation
+  error only _logs_: `crcbl run` still exits zero, so the step would be a check
+  that cannot fail. Gating it needs the scaffold e2e to read the child's stderr
+  for layer messages, or `crcbl-vk` to grow a "fail on validation error" mode
+  the sample harnesses could share.
 
 ## Five sample `gpu.rs` files, two of them identical
 

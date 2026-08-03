@@ -13,7 +13,11 @@
 # the script fails when the suite reports zero tests run.
 #
 # It needs no display, no GPU and no compositor: the scaffolded game runs
-# against `HeadlessShell`, which is the entire point of the CLI/headless pillar.
+# against `HeadlessShell` and, by default, the null GPU backend — which is the
+# entire point of the CLI/headless pillar. Set `CRCBL_CLI_E2E_BACKEND=vk` (with
+# a driver installed) to put the template's render graph in front of a real one
+# instead; CI does exactly that against lavapipe.
+#
 # It does need `rustfmt` and `clippy`, which `rust-toolchain.toml` installs.
 
 set -euo pipefail
@@ -74,4 +78,4 @@ if [ -z "$RAN" ] || [ "$RAN" -eq 0 ]; then
     echo "crcbl e2e: the suite reported no tests run — the gate is not gating" >&2
     exit 1
 fi
-echo "crcbl e2e: $RAN CLI scaffold tests ran"
+echo "crcbl e2e: $RAN CLI scaffold tests ran on the ${CRCBL_CLI_E2E_BACKEND:-null} GPU backend"

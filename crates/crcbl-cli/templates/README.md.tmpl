@@ -3,15 +3,17 @@
 A game built on [Crucible](https://github.com/kryptic-sh/crcbl).
 
 ```sh
-crcbl run                  # open a window
-crcbl run --headless       # no window; what CI runs
+crcbl run                                  # open a window
+crcbl run --headless -- --backend null     # no window, no driver; what CI runs
 crcbl build --release
 ```
 
-`crcbl run --headless` is not a lesser mode: it is the same loop with
-`HeadlessShell` in place of a window system, so a determinism check or a
-regression test needs no display and no GPU. `.github/workflows/ci.yml` runs it
-on every push.
+`--headless` is not a lesser mode: it is the same loop with `HeadlessShell` in
+place of a window system, so a determinism check or a regression test needs no
+display. `--backend null` drops the driver requirement too — the engine never
+falls back to it on its own, because a game that silently rendered nothing
+because a driver was missing would look like a black screen rather than an
+error. `.github/workflows/ci.yml` runs that pair on every push.
 
 ## Layout
 

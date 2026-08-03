@@ -438,14 +438,32 @@ jobs:
       # and every project it scaffolds — links cpal and ALSA. This job did not
       # compile `crcbl-audio` before and does now. See the `clippy (linux)` job
       # for the `-dev`-versus-runtime argument.
-      - name: Install the ALSA headers cpal links against
+      #
+      # The Vulkan loader and lavapipe are here so the scaffolded game runs
+      # against a *driver* rather than the null backend: the template now hosts
+      # `crcbl::engine::Loop` and declares a real render graph, and a run that
+      # recorded calls instead of executing them would not notice a pass that
+      # cannot compile. See `CRCBL_CLI_E2E_BACKEND` below.
+      - name: Install the ALSA headers, the Vulkan loader and lavapipe
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev \
+            libvulkan1 \
+            mesa-vulkan-drivers
       # Scaffolds into a temporary directory, builds it with its own
       # `CARGO_TARGET_DIR`, checks `rustfmt` and `clippy` on the generated
-      # source, and runs `crcbl run --headless`.
+      # source, runs the template's own unit tests, and runs
+      # `crcbl run --headless`.
+      #
+      # No ICD pin, unlike the `vk e2e` job. That job pins lavapipe because the
+      # *software path* is what it is there to test; this one asks a weaker
+      # question — does the template's render graph run against a driver at all
+      # — which any driver answers. `mesa-vulkan-drivers` is the only one
+      # installed above, so today that is lavapipe either way.
       - name: Run the scaffold suite
+        env:
+          CRCBL_CLI_E2E_BACKEND: vk
         run: crates/crcbl-cli/tests/run-cli-e2e.sh
 
   # `docs/plan/12-testing.md` schedules "lavapipe render e2e + golden-image

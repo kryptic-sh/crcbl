@@ -65,6 +65,21 @@ fn run(what: &str, command: &mut Command) -> Output {
     output
 }
 
+/// The GPU backend the scaffolded game is run against.
+///
+/// `null` by default, which keeps the property `run-cli-e2e.sh` documents: this
+/// suite needs no display, no compositor and **no driver**. A generated project
+/// goes through `crcbl::backend`'s real registry, and that registry deliberately
+/// never falls back to null — so on a machine with no driver at all, which is
+/// every stock CI runner, the scaffold has to be told.
+///
+/// CI sets `CRCBL_CLI_E2E_BACKEND=vk` with lavapipe installed, which is what
+/// puts the template's render graph in front of an actual driver rather than a
+/// recorder. Set it locally to do the same.
+fn gpu_backend() -> String {
+    std::env::var("CRCBL_CLI_E2E_BACKEND").unwrap_or_else(|_| "null".to_string())
+}
+
 /// A `cargo` invocation for the *scaffolded* project.
 ///
 /// `CARGO_TARGET_DIR` is set explicitly rather than inherited: a CI job that
@@ -136,20 +151,22 @@ fn a_scaffolded_project_builds_lints_and_runs_headless() {
     );
 
     // 5. `crcbl run --headless` — the loop, with no display anywhere.
+    let backend = gpu_backend();
     let ran = run(
         "crcbl run --headless",
         Command::new(crcbl)
             .current_dir(&project)
             .env("CARGO_TARGET_DIR", &target)
-            .args(["run", "--headless", "--", "--frames", "30"]),
+            .args(["run", "--headless", "--"])
+            .args(["--frames", "30", "--backend", &backend]),
     );
     let output = String::from_utf8_lossy(&ran.stdout).into_owned();
     assert!(
         output.contains("mygame: 30 frames"),
-        "the game ran its frame budget:\n{output}"
+        "the game ran its frame budget on the {backend} backend:\n{output}"
     );
 
-    // 5. `crcbl build`, machine-readable.
+    // 6. `crcbl build`, machine-readable.
     let built = run(
         "crcbl build --json",
         Command::new(crcbl)

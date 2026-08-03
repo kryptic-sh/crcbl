@@ -28,4 +28,11 @@ jobs:
       # The headless loop is the point of Crucible's CLI/headless pillar: the
       # game runs in CI with no display, no GPU and no window, so a crash is a
       # failed job rather than something nobody sees until release day.
-      - run: cargo run -- --headless --frames 120
+      #
+      # `--backend null` because a stock runner has no Vulkan driver, and the
+      # engine deliberately never falls back to null on its own — a game that
+      # silently rendered nothing because a driver was missing would look like a
+      # black screen instead of an error. To exercise the real pipeline here,
+      # `apt-get install libvulkan1 mesa-vulkan-drivers` and swap this for
+      # `--backend vk`; that is what Crucible's own CI does.
+      - run: cargo run -- --headless --frames 120 --backend null

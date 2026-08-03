@@ -260,6 +260,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   same single dependency the samples have. The template ships three unit tests
   and `crcbl-cli`'s scaffold e2e now runs them.
 
+  One consequence to know about: a generated project goes through
+  `crcbl::backend`'s real registry, where the old template hardcoded
+  `NullInstance`. That registry never falls back to null on its own, so the
+  generated `.github/workflows/ci.yml` names `--backend null` — a stock CI
+  runner has no driver, and without it the first push fails with
+  `ERROR_INCOMPATIBLE_DRIVER`. Drop the flag once that job installs one.
+
   The library-style loop is still supported and is still `apps/bare`, guarded
   from outside the crate by `crates/crcbl/tests/library_seam.rs`. What changed
   is which of the two a new project starts from.
