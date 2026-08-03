@@ -147,7 +147,8 @@ const EXPECTATIONS = {
   // says the demo booted a fresh run rather than a restarted one.
   horde: {
     key: 'Space',
-    waiting: (line) => line.includes('WaitingToStart') && line.includes('run: 1'),
+    waiting: (line) =>
+      line.includes('WaitingToStart') && line.includes('run: 1'),
     started: (line) => line.includes('Playing'),
     startedLabel: 'Space starts the run',
     startedFailure: 'the state never left WaitingToStart',
@@ -1088,25 +1089,37 @@ try {
   // and the click lands on nothing — which presents identically to the shim
   // having no pointer listener at all. A page redesign that moves the canvas
   // down the document is not a regression in the thing this checks.
+  //
+  // **The corner, not the centre**, for the reason group E already clicks a
+  // corner: a start screen is laid out centred, so the middle of the canvas is
+  // its first button. Here that button is horde's `PLAY`, which is bound to the
+  // same edge as `Space` — so a centred click started the run and the `Space`
+  // below then *restarted* it, leaving the demo on the title screen of run 2
+  // with a clock frozen at 0.0 for the rest of the session. That is what check
+  // C and check D were reporting, correctly, about two Pages runs in three.
+  //
+  // Group E learned this against the pause menu and `RESUME`; the same fix
+  // never reached here, and only horde made it visible, because only horde's
+  // centre button destroys the run rather than being idempotent.
   const rect = await evaluate(
     page,
     `(() => { const c = document.getElementById('canvas');
               c.scrollIntoView({ block: 'center', behavior: 'instant' });
               const r = c.getBoundingClientRect();
-              return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2),
+              return { x: Math.round(r.x + ${FOCUS_CLICK_INSET}), y: Math.round(r.y + ${FOCUS_CLICK_INSET}),
                        left: r.x, top: r.y }; })()`
   );
   const inViewport = await evaluate(
     page,
     `(() => { const r = document.getElementById('canvas').getBoundingClientRect();
-              const cy = r.y + r.height / 2, cx = r.x + r.width / 2;
+              const cy = r.y + ${FOCUS_CLICK_INSET}, cx = r.x + ${FOCUS_CLICK_INSET};
               return cy >= 0 && cy <= innerHeight && cx >= 0 && cx <= innerWidth; })()`
   );
   check(
     'C',
-    'the canvas centre is inside the viewport to be clicked',
+    'the point that will be clicked for focus is inside the viewport',
     inViewport === true,
-    `centre (${rect.x}, ${rect.y}) is outside the window`
+    `(${rect.x}, ${rect.y}) is ${inViewport === true ? 'inside' : 'outside'} the window`
   );
   for (const type of ['mousePressed', 'mouseReleased']) {
     await page.send('Input.dispatchMouseEvent', {
@@ -1124,6 +1137,21 @@ try {
     'a click gives the canvas keyboard focus',
     focused === 'canvas',
     `activeElement is "${focused}"`
+  );
+
+  // **The focusing click must not also press a button**, which is the check
+  // whose absence let the centred click above survive. Without it, a click that
+  // starts the game reads as a pass here and then poisons the `Space` below —
+  // the key starts a run that is already running, and in horde that is a
+  // restart. Read after the click and before any key, so the only thing it can
+  // be reporting on is the click.
+  await until(async () => hud().length > beforeLaunch || null);
+  const afterFocusClick = hud().at(-1) ?? '';
+  check(
+    'C',
+    'the focusing click pressed no button',
+    EXPECTED.waiting(afterFocusClick),
+    afterFocusClick.trim() || 'no HUD line after the click'
   );
 
   // The key the demo's own instructions name. `code` is what the engine binds
@@ -1366,7 +1394,7 @@ try {
     beforeEscape === 6
       ? `status ${await evaluate(page, `crcbl.status()`)}`
       : `the demo was not paused going in (status ${beforeEscape}), so Escape ` +
-        `pausing and Escape resuming are indistinguishable here`
+          `pausing and Escape resuming are indistinguishable here`
   );
   const afterResume = await heartbeats();
   check(

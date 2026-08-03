@@ -1869,4 +1869,53 @@ mod tests {
         click(&mut engine, (target.min + target.max) * 0.5);
         assert!(!engine.is_paused(), "RESUME did not resume");
     }
+
+    /// **The same rule on the title screen, where the centre button is `PLAY`.**
+    ///
+    /// A separate test from the paused one because the menu is a different
+    /// layout with a different first item, and because the consequence is worse:
+    /// `PLAY` is bound to [`RESTART_KEY`], the one edge that both starts a
+    /// waiting run and restarts a live one. A harness that clicked the centre to
+    /// hand over keyboard focus therefore *started* the run, and the `Space` it
+    /// pressed next restarted it — which is what
+    /// `web/tools/browser-e2e.mjs` did, and why the Pages gate failed on horde
+    /// about two runs in three while the other three demos passed.
+    ///
+    /// This is the fast half of that fix. The gate now clicks a corner like its
+    /// own group E always did; this goes red in seconds if the title menu ever
+    /// grows into the corner and makes that corner a button again.
+    #[test]
+    fn a_focusing_click_off_every_button_leaves_the_title_screen_up() {
+        // `at_the_title_screen`, not `scripted` — the latter queues the start
+        // edge, so its first tick starts the run and a click that changed
+        // nothing would still read as one that started it.
+        let mut engine = at_the_title_screen(&headless(64));
+        engine.frame().expect("a frame");
+        assert_eq!(engine.game_mut().state, GameState::WaitingToStart);
+
+        let layout = engine.menu_layout().expect("the title menu").clone();
+        assert!(
+            !layout
+                .items()
+                .iter()
+                .any(|item| item.min.x <= 3.0 && item.min.y <= 3.0),
+            "the title menu reaches the corner of the screen",
+        );
+        click(&mut engine, Vec2::new(3.0, 3.0));
+        assert_eq!(
+            engine.game_mut().state,
+            GameState::WaitingToStart,
+            "a click in the corner started the run",
+        );
+
+        // …and the centre of `PLAY` really does start it, or the check above
+        // passes on a menu nothing can click.
+        let target = layout.items()[0];
+        click(&mut engine, (target.min + target.max) * 0.5);
+        assert_eq!(
+            engine.game_mut().state,
+            GameState::Playing,
+            "PLAY did not start the run",
+        );
+    }
 }

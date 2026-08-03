@@ -1615,7 +1615,7 @@ uncertainty.
   tested. _Changes it_: a second sample growing a rebuilt panel, at which point
   the guard is a shape and not horde's alone.
 
-## The Pages gate fails on horde about two runs in three, and it is not the code
+## The Pages gate failed on horde about two runs in three (fixed 2026-08-03)
 
 `Render horde in a real browser` fails two checks, both in group C/D of
 `web/tools/browser-e2e.mjs`:
@@ -1636,29 +1636,59 @@ identical in the last three (`65e470b` differs from `e190e05` only in
 | `e190e05` | failure | 24/26 |
 | `65e470b` | success | 26/26 |
 | `658c779` | failure | 24/26 |
+| `588e1a6` | failure | 24/26 |
 
-One pass and two failures on the same tree, so this is variance rather than a
-regression — but it was not failing at all before, so something moved the
-margin. The other three demos pass every time; horde is the heaviest.
+**Diagnosed and fixed on 2026-08-03 — and the heading above is wrong, which is
+why it is still here.** It _was_ the code: the harness's, not the game's. The
+run's uploaded page log settled it in three lines, where every theory about
+timing margins had failed to:
 
-**The margin was always zero.** On the green runs the check reports
-`x took 2 values: 0.0, 1.0` — exactly the minimum it accepts. Horde's HUD logs
-its clock once every sixty ticks, which is one _simulated_ second, and under
-SwiftShader the accumulator's 64 ms clamp already makes simulated time run
-behind wall time. Two distinct values is what a passing run has ever produced.
+```
+[HUD] WaitingToStart  run: 1  time: 0.0
+[HUD] Playing         run: 1  time: 0.0
+[HUD] WaitingToStart  run: 2  time: 0.0     ← and 100 identical lines after it
+```
 
-**What does not add up, and is the thing to chase first.** Check C polls for
-`TIMEOUT_MS`, which is 90 seconds — so a failure means horde produced one
-`time:` value in a minute and a half. Yet group E, later in the same run, passes
-`a running demo logs its HUD from inside the tick — 4 HUD line(s) in 4000 ms`.
-Four HUD lines in four seconds and one distinct clock value in ninety is a
-contradiction, and whichever half is wrong is the bug. Do not widen the window
-before understanding it: a fixed 800 ms sampling window in check D is a
-plausible thing to make patient, but check C's ninety seconds is not.
+`run: 2` is the tell. `restart` in `apps/horde/src/game.rs` is the only thing
+that sets `WaitingToStart` after boot and the only thing that bumps the counter,
+so the run was started and then destroyed. The cause is that check C clicked the
+**centre** of the canvas to hand the page its keyboard, and `MenuKind::Start`'s
+first item — `apps/horde/src/menu.rs` — is `item(Restart, "PLAY", "SPACE")`,
+laid out centred. So the click pressed `PLAY`, starting the run; the `Space` the
+check sent next reached a run already `Playing`, and horde binds one edge to
+both "start" and "restart". The demo then sat on the title screen of run 2 with
+a clock frozen at 0.0, which is exactly what checks C and D reported.
 
-Not investigated further because it sits outside the slice that surfaced it, and
-because `deploy to GitHub Pages` only skips — the demo site keeps serving its
-last good deploy, so this is a blocked deploy rather than a broken one.
+**Group E was never evidence of anything.** The "contradiction" recorded here —
+four HUD lines in four seconds against one clock value in ninety — was not a
+contradiction at all. `heartbeats()` counts _any_ `[HUD]` line, and horde logs
+one every sixty ticks in every state including `WaitingToStart`;
+`crcbl.status()` pauses and resumes a title screen as readily as a live run.
+Every check in group E passes on a game sitting on its start screen. The lesson
+is the general one: a check that passes in the failure mode is not a control,
+and two of them agreeing is not corroboration.
+
+**Fixed in two places.** The gate now clicks `FOCUS_CLICK_INSET` from the corner
+in group C, which is what group E has always done — its comment describes
+finding this same bug against the pause menu and `RESUME`, and the fix never
+reached the group above it. A new check, `the focusing click pressed no button`,
+asserts the game is still waiting after that click, so a harness that goes back
+to pressing something fails loudly instead of poisoning the key that follows.
+And `a_focusing_click_off_every_button_leaves_the_title_screen_up` in
+`apps/horde/src/app.rs` is the fast half: it pins the inset against the _title_
+menu the way the existing test pins it against the paused one.
+
+**Why only horde, and why it looked like variance.** All four demos were clicked
+on their centre button. The other three start screens are idempotent — clicking
+`PLAY` and then pressing `Space` launches an already-launched ball — so only
+horde's centre button destroys the run. Whether it failed depended on whether
+both edges landed in the same tick, where `logic.intent.restart |= …` collapses
+them into one, which is why an unchanged tree passed about one run in three.
+
+**Coverage gap this leaves.** The paused-menu inset test exists in all four
+samples; the title-screen one is horde's alone, because horde is where the
+consequence bites. The other three would need it only if a start screen grew a
+destructive first item.
 
 ## Considered and declined
 
