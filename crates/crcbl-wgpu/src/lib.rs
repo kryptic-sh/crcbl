@@ -149,13 +149,13 @@
 //! resolves the promise, so the poll after it lands observes the device — the
 //! rAF loop is the executor and no thread is ever parked. On native the same
 //! future is `core::future::ready`, so the first poll completes and
-//! [`Instance::create_device`](crcbl_hal::Instance::create_device) — the seam's
+//! `Instance::create_device` — the seam's
 //! blocking wrapper, which does not exist on `wasm32` — behaves as it always
 //! did.
 //!
 //! What remains wasm32-specific: surfaces come from
 //! [`SurfaceTarget::Web`](crcbl_core::SurfaceTarget::Web), and
-//! [`create_native`] is absent because *adapter enumeration* still blocks in it.
+//! `create_native` is absent because *adapter enumeration* still blocks in it.
 //! Instance creation itself has no polled seam — it is not a `crcbl-hal` trait
 //! method — so a browser caller must `await` [`WgpuInstance::new_async`]; the
 //! `crcbl` umbrella's backend registry is where that shows up, and it is

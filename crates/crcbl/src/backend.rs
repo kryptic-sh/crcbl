@@ -25,7 +25,7 @@
 //!
 //! # Selection is explicit, never a silent fallback
 //!
-//! [`open`] tries the auto-selectable backends in order and **does not fall
+//! `open` tries the auto-selectable backends in order and **does not fall
 //! back to [`GpuBackend::Null`]**, for the same reason `crcbl-shell` refuses to
 //! auto-select `HeadlessShell`: a game that silently rendered nothing because a
 //! driver was missing would look like a black screen, and
@@ -40,7 +40,7 @@
 //! and for the same reason. `wgpu`'s adapter enumeration is
 //! `GPUAdapter`-shaped: on the web it is a `Promise` and the main thread cannot
 //! block on it, so the registry stores a *future factory* rather than a
-//! function that returns an instance. [`open`] and [`open_backend`] are the
+//! function that returns an instance. `open` and `open_backend` are the
 //! blocking wrappers over it, unchanged for every native caller.
 //!
 //! Fallback belongs to the pending object, not to the caller: a poll that
@@ -64,8 +64,8 @@
 //! Native selection order is therefore unchanged — Vulkan, and nothing else
 //! automatically.
 //!
-//! The blocking wrappers [`open`] and [`open_backend`] do not exist on `wasm32`
-//! either, for the reason [`Instance::create_device`] does not: the browser's
+//! The blocking wrappers `open` and `open_backend` do not exist on `wasm32`
+//! either, for the reason `Instance::create_device` does not: the browser's
 //! main thread may not block, so reaching for one there is a *compile* error
 //! pointing at [`request_open`] rather than a hang on the first frame.
 
@@ -251,7 +251,7 @@ fn registry_names(entries: impl Iterator<Item = GpuBackend>) -> String {
 
 /// A backend open in flight.
 ///
-/// The non-blocking half of [`open`] / [`open_backend`], for a caller that must
+/// The non-blocking half of `open` / `open_backend`, for a caller that must
 /// not block — the browser's rAF loop. Poll it until it hands over the instance;
 /// see the module docs for why it exists in this shape.
 pub struct PendingInstance {
@@ -359,7 +359,7 @@ impl PendingInstance {
 
 /// Starts opening the best available GPU backend, without blocking.
 ///
-/// The non-blocking form of [`open`], with the same [`BACKEND_ENV_VAR`]
+/// The non-blocking form of `open`, with the same [`BACKEND_ENV_VAR`]
 /// handling. Drive the returned [`PendingInstance`] until it yields.
 ///
 /// # Errors

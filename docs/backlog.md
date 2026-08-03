@@ -206,44 +206,35 @@ samples demonstrate), the library loop (what it does today, and what proves the
 public API is usable), or both behind a flag — which is a second template to
 keep working, and the e2e gate would have to run both.
 
-## The wasm rustdoc gate covers the samples; the engine crates are still unread
+## The wasm rustdoc gate covers everything that builds for wasm
 
 CI ran `cargo doc` on the host target only, so `apps/*/src/web.rs` — behind
 `#[cfg(target_arch = "wasm32")]`, and the one module in each game that is
 _entirely_ documentation — had never been read by a docs gate. Four samples were
-carrying broken intra-doc links when the gate was added: `WebLogger` and `Stage`
-(both private inside `crcbl::web` now), `crate::high_score` in two games whose
-save module is `best`, two redundant explicit link targets, and — in
-`apps/sandbox/src/app.rs`, which has no browser build at all — a link to
-`crcbl::backend::open`, which is `#[cfg(not(target_arch = "wasm32"))]`. All
-fixed, and the `wasm32` CI job now runs
-`cargo doc --target wasm32-unknown-unknown` over the six app crates with
-`RUSTDOCFLAGS: -D warnings`. Falsified before committing: turning one of the
-fixed links back into a link fails the gate by name.
+carrying broken intra-doc links, and widening the line to the engine crates
+turned up 24 more.
 
-**What is not covered: the engine crates.** Widening that line to the workspace
-reports **24 errors**, all the same shape as the sandbox one — public
-documentation linking to items that do not exist on `wasm32`, invisible to a
-host-target gate. By file, from
-`cargo doc --locked --all-features --workspace --exclude crcbl-vk --exclude crcbl-cli --no-deps --target wasm32-unknown-unknown`:
+Both halves are fixed and the `wasm32` job now runs
+`cargo doc --workspace --exclude crcbl-vk --exclude crcbl-cli --target wasm32-unknown-unknown`
+under `RUSTDOCFLAGS: -D warnings`, so the class is closed rather than sampled.
+Falsified before committing: restoring one fixed link fails the gate by name.
 
-| file                                  | errors |
-| ------------------------------------- | -----: |
-| `crates/crcbl/src/backend.rs`         |      9 |
-| `crates/crcbl/src/engine.rs`          |      4 |
-| `crates/crcbl-hal/src/lib.rs`         |      3 |
-| `crates/crcbl-wgpu/src/lib.rs`        |      2 |
-| `crates/crcbl-hal/src/device.rs`      |      2 |
-| `crates/crcbl-store/src/record.rs`    |      1 |
-| `crates/crcbl/src/lib.rs`             |      1 |
-| `crates/crcbl-hal/src/null/record.rs` |      1 |
-| `crates/crcbl-hal/src/caps.rs`        |      1 |
+**What the engine half turned out to be**, because it decides how the next one
+should be fixed: almost every error was a link to something deliberately absent
+on `wasm32` — `Instance::create_device` (a browser build must fail to _compile_
+rather than get a run-time `HalError::Unsupported`), and `crcbl::backend::open`
+/ `open_backend` (same rule, one layer up). Those are not broken links; they are
+correct prose about a native-only API, read on a target where the item does not
+exist. They became code spans, which costs the native reader a hyperlink and is
+the cheapest honest fix — `#[cfg_attr]`-ing two versions of each sentence would
+put the same prose in two places and guarantee they drift.
 
-Not fixed in the same change as the samples, because 24 doc edits made to
-satisfy a linter is exactly where a doc quietly becomes vaguer than it was —
-`Instance::create_device` is named in `crcbl-hal`'s module header as part of an
-argument about object safety, and the honest fix there is a sentence, not a
-de-linking. It wants its own pass. Widening the CI line is what closes it.
+One was a real defect the host gate could not see:
+`crates/crcbl-store/src/record.rs` had
+`[`StorageSource`](crate::StorageSource)`, which rustdoc calls a _redundant_
+explicit target on wasm (where the bare name resolves) and an _unresolved_ link
+on the host (where it does not). Writing the path as the display text satisfies
+both.
 
 ## The Windows `crcbl-cli` fixtures are fixed but nothing has run them on Windows
 

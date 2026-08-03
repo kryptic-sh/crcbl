@@ -35,7 +35,7 @@
 //!
 //! # Decision: dynamic dispatch is the primary form
 //!
-//! Every trait in this crate is **object-safe**, and [`Instance::create_device`]
+//! Every trait in this crate is **object-safe**, and `Instance::create_device`
 //! returns `Box<dyn Device>`. Generic use (`fn frame<D: Device + ?Sized>(d: &D)`)
 //! still works and monomorphises normally — the bounds are unchanged — but
 //! `dyn` is the form the engine is built around and the one the tests exercise.
@@ -123,13 +123,13 @@
 //! promise and the browser main thread cannot block on it. `crcbl-vk` completes
 //! on its first poll, `crcbl-wgpu` drives the real future, and [`null`] can be
 //! told to take N polls so a caller's loop is testable with no GPU.
-//! [`Instance::create_device`] remains as the blocking wrapper **on native
+//! `Instance::create_device` remains as the blocking wrapper **on native
 //! only** — it is `#[cfg]`-ed out of `wasm32` builds so a browser caller gets a
 //! compile error instead of a run-time refusal. See [`device`] for the argument.
 //!
 //! # Object lifetimes are a stated contract, not an inference
 //!
-//! [`Instance::create_device`] returns `Box<dyn Device>`, which is `'static`,
+//! `Instance::create_device` returns `Box<dyn Device>`, which is `'static`,
 //! and in Vulkan a `VkDevice` genuinely must not outlive its `VkInstance`. The
 //! seam resolves that rather than leaving it to the backend author: a `Device`
 //! **does** outlive its `Instance` and backends must keep the instance's state

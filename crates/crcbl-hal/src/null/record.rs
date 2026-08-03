@@ -844,7 +844,7 @@ impl Recorder {
     /// with no browser and no GPU.
     ///
     /// Applies to devices requested after this call. Default `0`, which is what
-    /// [`Instance::create_device`](crate::Instance::create_device) sees: it
+    /// `Instance::create_device` sees: it
     /// completes on the first poll.
     pub fn set_device_latency(&self, polls: u32) {
         self.lock().device_latency = polls;

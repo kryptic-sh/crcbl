@@ -424,7 +424,8 @@ impl SwapchainConfig {
 pub struct GpuContextDesc<'a> {
     /// Debug label for the device and the swapchain.
     pub label: &'a str,
-    /// Which backend to open, or `None` to let [`crate::backend::open`] choose.
+    /// Which backend to open, or `None` to let `crcbl::backend`'s own table
+    /// choose.
     pub backend: Option<GpuBackend>,
     /// Features the device must have. A device without them is an error.
     pub required_features: Features,
@@ -462,7 +463,7 @@ impl Default for GpuContextDesc<'_> {
 /// The engine's GPU side, driven entirely through the `crcbl-hal` seam.
 ///
 /// Nothing in this struct names a backend. [`GpuContext::open`] asks
-/// [`crate::backend::open_backend`] for one **by value** and everything after
+/// `crcbl::backend::open_backend` for one **by value** and everything after
 /// it is `dyn Instance` / `dyn Device` — which is what made P1.1's swap from
 /// the null backend to `crcbl-vk` a change to one argument.
 #[derive(Debug)]
@@ -601,8 +602,8 @@ impl GpuContext {
     /// It spins on [`request_open`](Self::request_open) until the device
     /// arrives. In a browser the promise behind that device is resolved by the
     /// event loop this call is *inside*, so it would never complete — which is
-    /// why [`crate::backend::open`] and
-    /// [`Instance::create_device`] do not
+    /// why `crcbl::backend::open` and
+    /// `Instance::create_device` do not
     /// exist on `wasm32` at all.
     ///
     /// This one still does, deliberately and temporarily: `apps/breakout`'s

@@ -369,7 +369,7 @@ impl DeviceCaps {
 
     /// Which of `required` this device is missing — empty if it satisfies them.
     ///
-    /// The shape [`Instance::create_device`](crate::Instance::create_device)
+    /// The shape `Instance::create_device`
     /// uses to build [`HalError::UnsupportedFeatures`](crate::HalError::UnsupportedFeatures),
     /// so the error names the gap instead of saying "unsupported".
     #[must_use]

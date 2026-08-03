@@ -44,7 +44,7 @@
 //! # What is deliberately not here
 //!
 //! * **No backend *type*.** `crcbl-vk` is a dependency as of P1.1 — something
-//!   has to be, or [`backend::open`] could not exist — but it is **not**
+//!   has to be, or `backend::open` could not exist — but it is **not**
 //!   re-exported, and no `VkInstance` is reachable from this crate's public
 //!   API. `docs/plan/11-cli-headless.md` names "a sample linking `crcbl-vk`
 //!   directly" as an architecture regression; the registry is what stops a

@@ -202,13 +202,17 @@ jobs:
       # one module no docs gate had ever read. Four samples were carrying
       # broken intra-doc links when this was added.
       #
-      # The samples only, deliberately: the engine crates have their own
-      # wasm-only rustdoc failures — links to items that are
-      # `#[cfg(not(target_arch = "wasm32"))]` — and `docs/backlog.md` carries
-      # the itemised list. Widening this line is what closes them.
+      # The whole wasm-capable workspace, not just the samples: the engine
+      # crates had 24 of the same failures — public documentation linking to
+      # items that are `#[cfg(not(target_arch = "wasm32"))]`, chiefly
+      # `Instance::create_device` and `crcbl::backend::open`, both of which are
+      # absent on wasm *on purpose* so a browser build fails to compile rather
+      # than failing at run time. The exclusions match the `cargo clippy` line
+      # above: neither crate builds for this target at all.
       - run: >-
-          cargo doc --locked --no-deps --target wasm32-unknown-unknown
-          -p breakout -p flappy -p asteroids -p horde -p sandbox -p bare
+          cargo doc --locked --all-features --no-deps
+          --workspace --exclude crcbl-vk --exclude crcbl-cli
+          --target wasm32-unknown-unknown
         env:
           RUSTDOCFLAGS: -D warnings
 

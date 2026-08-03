@@ -8,7 +8,7 @@
 //!
 //! # Why this is the engine's and not a game's
 //!
-//! The rest of this crate hands out a [`StorageSource`](crate::StorageSource),
+//! The rest of this crate hands out a [`crate::StorageSource`],
 //! an atomic write and a
 //! platform-standard root, and stops there — so a game wanting a high score
 //! wrote the platform arms, the encode, the corrupt-file case and the

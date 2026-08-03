@@ -56,7 +56,7 @@
 //!
 //! ## `create_device` survives as a native-only convenience
 //!
-//! [`Instance::create_device`] is a **provided** method that requests and then
+//! `Instance::create_device` is a **provided** method that requests and then
 //! polls to completion, so every existing native caller — `crcbl screenshot`,
 //! the golden-image tests, `crcbl-render`'s fixtures — is unchanged. It does not
 //! exist on `wasm32` at all: it is `#[cfg(not(target_arch = "wasm32"))]`, so a
@@ -103,7 +103,7 @@
 //!
 //! # Object lifetimes — implementation obligations on backends
 //!
-//! [`Instance::create_device`] returns `Box<dyn Device>`, which is `'static`, so
+//! `Instance::create_device` returns `Box<dyn Device>`, which is `'static`, so
 //! the type system permits a `Device` to outlive the `Instance` that made it.
 //! In Vulkan that relationship is real and inverted: a `VkDevice` must not
 //! outlive its `VkInstance`, and a `VkSurfaceKHR` is instance-owned while the
