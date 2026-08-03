@@ -128,6 +128,19 @@ pub const WINDOWED_IDLE: Duration = Duration::from_millis(4);
 /// The simulated step a headless frame advances by: a 60 Hz wall clock.
 pub const HEADLESS_FRAME_STEP: Duration = Duration::from_nanos(1_000_000_000 / 60);
 
+/// The largest step a driven clock will accept for one frame.
+///
+/// A tab that was backgrounded for a minute reports a one-minute
+/// `requestAnimationFrame` delta on the frame it comes back. Handing that to a
+/// fixed-timestep accumulator asks for thousands of ticks in one frame, which is
+/// a freeze the user reads as a crash. Four frames' worth of catch-up is the
+/// budget; anything beyond it is time the simulation simply did not experience.
+///
+/// The engine's rather than each game's: the browser behaviour it defends
+/// against is the shell's, and a sample that picked a different number would be
+/// deciding how the *platform* behaves.
+pub const MAX_FRAME_STEP: Duration = Duration::from_millis(64);
+
 /// How many consecutive frames may fail to present before a loop gives up.
 ///
 /// A frame budget counts *presented* frames, so a swapchain that is permanently
@@ -1550,6 +1563,36 @@ impl From<ShellError> for ConfigureError {
     }
 }
 
+/// Logs the backend, puts the shell's event clock on the engine's, and creates
+/// the window.
+///
+/// The three lines every sample runs before the native and browser paths
+/// diverge over *how they wait* for the first configure. `desc` stays the
+/// caller's, because a title, an app id and a preferred size are the game's to
+/// choose and nothing here could guess them.
+///
+/// **The clock alignment is the load-bearing line**, and it is the one a game
+/// writing this by hand would omit: shell events carry their own timestamps, and
+/// a shell whose clock never met the engine's reports every event at an origin
+/// the loop cannot compare against its own.
+///
+/// # Errors
+///
+/// [`ShellError`] if the shell refused the window.
+pub fn open_window<S: Shell + ?Sized>(
+    shell: &mut S,
+    clock_source: &Clock,
+    desc: &crcbl_shell::WindowDesc<'_>,
+) -> Result<WindowId, ShellError> {
+    log::info!(
+        "shell: {} backend, caps {:?}",
+        shell.backend(),
+        shell.caps()
+    );
+    shell.align_event_clock(clock_source.elapsed());
+    shell.create_window(desc)
+}
+
 /// Pumps until `window` reports a size, and returns it.
 ///
 /// A swapchain needs a size and an unconfigured window does not have one, so
@@ -1678,6 +1721,49 @@ mod tests {
 
         let wrapped: LoopError<GameError> = GpuError::Unusable("no queue").into();
         assert!(matches!(wrapped, LoopError::Gpu(_)));
+    }
+
+    /// **`open_window` puts the shell's event clock on the engine's.**
+    ///
+    /// The line a game writing this by hand omits, because the window still
+    /// opens without it and nothing fails until something compares an event's
+    /// timestamp against the loop's own clock. Asserted through an event's
+    /// `time` rather than by reading the shell's clock back: the timestamp is
+    /// what every consumer actually sees.
+    #[test]
+    fn opening_the_window_aligns_the_shells_event_clock_with_the_engines() {
+        let mut shell = crcbl_shell::HeadlessShell::new();
+        let mut clock = Clock::new(true);
+        // Somewhere other than zero, or an unaligned shell would pass by
+        // agreeing with a clock that had never moved.
+        let elapsed = clock.advance();
+        assert!(elapsed > Duration::ZERO, "the clock must have moved");
+
+        let window = open_window(
+            &mut shell,
+            &clock,
+            &crcbl_shell::WindowDesc {
+                title: "alignment",
+                ..crcbl_shell::WindowDesc::default()
+            },
+        )
+        .expect("headless always creates a window");
+        shell
+            .key_press(window, crcbl_core::input::KeyCode::Space)
+            .expect("the window is live");
+
+        let mut times = Vec::new();
+        shell.pump(&mut |event| {
+            if let ShellEvent::Key { time, .. } = event {
+                times.push(time);
+            }
+        });
+        let time = *times.first().expect("the key press is reported");
+        assert_eq!(
+            time,
+            crcbl_core::EventTime::from_duration(elapsed),
+            "the shell timestamped its event on an epoch the loop cannot compare against",
+        );
     }
 
     /// Drains the shell into a `Pending`, and reports what each event was

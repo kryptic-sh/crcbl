@@ -41,7 +41,7 @@ mod menu;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 
-pub use app::{FlappyError, Loop, MAX_FRAME_STEP, PendingLoop, Summary, run};
+pub use app::{FlappyError, Loop, PendingLoop, Summary, run};
 pub use args::{Invocation, Options, USAGE, parse};
 pub use game::{
     BIRD_RADIUS, BIRD_START, DEFAULT_SEED, DEFAULT_TICK_HZ, Death, FIRST_PIPE_X, FLAP_SPEED,

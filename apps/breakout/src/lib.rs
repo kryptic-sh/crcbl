@@ -43,5 +43,5 @@ mod menu;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 
-pub use app::{BreakoutError, Loop, MAX_FRAME_STEP, PendingLoop, Summary, run};
+pub use app::{BreakoutError, Loop, PendingLoop, Summary, run};
 pub use args::{Invocation, Options, USAGE, parse};

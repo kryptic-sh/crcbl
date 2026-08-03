@@ -66,8 +66,7 @@ mod menu;
 pub mod web;
 
 pub use app::{
-    HordeError, Loop, MAX_FRAME_STEP, MENU_ACTIVATE_KEY, MENU_DOWN_KEY, MENU_UP_KEY, PendingLoop,
-    Summary, run,
+    HordeError, Loop, MENU_ACTIVATE_KEY, MENU_DOWN_KEY, MENU_UP_KEY, PendingLoop, Summary, run,
 };
 pub use args::{Invocation, Options, USAGE, parse};
 pub use art::{ACTOR_HALF_EXTENT, BOLT_HALF_EXTENT, GROUND, Scene, SceneStats, TEXELS_PER_UNIT};

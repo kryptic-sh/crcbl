@@ -57,7 +57,7 @@ mod menu;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 
-pub use app::{AsteroidsError, Loop, MAX_FRAME_STEP, PendingLoop, Summary, run};
+pub use app::{AsteroidsError, Loop, PendingLoop, Summary, run};
 pub use args::{Invocation, Options, USAGE, parse};
 pub use game::{
     BULLET_LIFE, BULLET_RADIUS, BULLET_SPEED, BulletView, DEFAULT_SEED, DEFAULT_TICK_HZ,

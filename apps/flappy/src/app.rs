@@ -25,7 +25,7 @@ use core::time::Duration;
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Clock, ExitReason, Flow, FrameOutcome, GpuError, Handled, MAX_CONSECUTIVE_RECONFIGURES,
-    Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
+    MAX_FRAME_STEP, Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{
@@ -750,31 +750,23 @@ impl<S: Shell + ?Sized> Loop<S> {
 
 // ---- polled start-up --------------------------------------------------------
 
-/// The largest step [`Loop::set_frame_step`] will accept.
+/// Creates the one window this game has: its title, its app id, its size.
 ///
-/// A tab backgrounded for a minute reports a one-minute `requestAnimationFrame`
-/// delta on the frame it comes back. Handing that to a fixed-timestep
-/// accumulator asks for 3600 ticks in one frame, which the user reads as a
-/// crash.
-pub const MAX_FRAME_STEP: Duration = Duration::from_millis(64);
-
-/// Creates the one window, and puts the shell's event clock on the engine's.
+/// Everything else is [`crcbl::engine::open_window`]'s.
 fn open_the_window<S: Shell + ?Sized>(
     shell: &mut S,
     clock_source: &Clock,
 ) -> Result<WindowId, FlappyError> {
-    crcbl::log::info!(
-        "shell: {} backend, caps {:?}",
-        shell.backend(),
-        shell.caps()
-    );
-    shell.align_event_clock(clock_source.elapsed());
-    Ok(shell.create_window(&WindowDesc {
-        title: "Flappy",
-        app_id: "sh.kryptic.crcbl.flappy",
-        size: LogicalSize::new(960.0, 720.0),
-        ..WindowDesc::default()
-    })?)
+    Ok(crcbl::engine::open_window(
+        shell,
+        clock_source,
+        &WindowDesc {
+            title: "Flappy",
+            app_id: "sh.kryptic.crcbl.flappy",
+            size: LogicalSize::new(960.0, 720.0),
+            ..WindowDesc::default()
+        },
+    )?)
 }
 
 /// How far [`PendingLoop`] has got.
