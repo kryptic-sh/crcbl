@@ -1,9 +1,27 @@
 //! Argument parsing for the breakout sample.
 //!
 //! ```text
-//! breakout [--headless] [--frames N] [--tick-hz N]
+//! breakout [--headless] [--frames N] [--tick-hz N] [--backend B]
 //! ```
+//!
+//! # What is left here after the engine took the shared half
+//!
+//! [`crcbl::args::Common`] owns every flag breakout has, because breakout has
+//! none of its own — its board is fixed, so there is no `--seed` to take. That
+//! makes this the smallest of the four parsers and the one that shows the seam
+//! most plainly: `Options` wraps `Common`, and `parse` rejects anything the
+//! engine did not claim.
+//!
+//! Still a wrapper rather than a bare alias for `Common`, because the *next*
+//! flag breakout grows goes here without changing its callers' types.
 
+use crcbl::args::{Common, Consumed};
+
+/// The `--help` text.
+///
+/// Cannot drift from [`crcbl::args::COMMON_OPTIONS_HELP`] silently:
+/// `the_shared_half_of_the_usage_text_is_the_engines_verbatim` asserts
+/// this string contains both shared blocks byte for byte.
 pub const USAGE: &str = "\
 breakout — the first playable Crucible sample
 
@@ -23,54 +41,20 @@ OPTIONS:
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
-    pub headless: bool,
-    pub frames: Option<u64>,
-    pub tick_hz: u32,
-    pub backend: Option<crcbl::backend::GpuBackend>,
-    /// Whether the debug overlay starts visible, or `None` for the default.
-    ///
-    /// Three-valued because the default is not a constant:
-    /// `docs/plan/sample/00-samples-overview.md` rule 4 is "on by default in dev
-    /// builds", so `None` means [`Options::debug_overlay_visible`]'s
-    /// `cfg!(debug_assertions)` and either flag overrides it.
-    pub debug_overlay: Option<bool>,
+    /// The flags every sample has, which for breakout is all of them.
+    pub common: Common,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
-            headless: false,
-            frames: None,
-            tick_hz: crate::game::DEFAULT_TICK_HZ,
-            backend: None,
-            debug_overlay: None,
+            common: Common::new(crate::game::DEFAULT_TICK_HZ),
         }
     }
 }
 
-impl Options {
-    #[must_use]
-    pub fn frame_budget(&self) -> Option<u64> {
-        match (self.frames, self.headless) {
-            (Some(frames), _) => Some(frames),
-            (None, true) => Some(120),
-            (None, false) => None,
-        }
-    }
-
-    /// Whether the debug overlay starts visible.
-    #[must_use]
-    pub fn debug_overlay_visible(&self) -> bool {
-        self.debug_overlay.unwrap_or(cfg!(debug_assertions))
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Invocation {
-    Run(Options),
-    Help,
-    BadUsage(String),
-}
+/// What the command line asked for.
+pub type Invocation = crcbl::args::Invocation<Options>;
 
 /// Parses a flat `["--flag", "value", "--flag2"]` iterator.
 pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
@@ -78,46 +62,13 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
     let mut args = args.peekable();
 
     while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--headless" => options.headless = true,
-            "--debug-overlay" => options.debug_overlay = Some(true),
-            "--no-debug-overlay" => options.debug_overlay = Some(false),
-            "-h" | "--help" => return Invocation::Help,
-            "--frames" => {
-                let Some(val) = args.next() else {
-                    return Invocation::BadUsage("--frames needs a number".into());
-                };
-                match val.parse::<u64>() {
-                    Ok(n) if n > 0 => options.frames = Some(n),
-                    _ => return Invocation::BadUsage(format!("not a positive frame count: {val}")),
-                }
-            }
-            "--tick-hz" => {
-                let Some(val) = args.next() else {
-                    return Invocation::BadUsage("--tick-hz needs a number".into());
-                };
-                match val.parse::<u32>() {
-                    Ok(n) if n > 0 => options.tick_hz = n,
-                    _ => return Invocation::BadUsage(format!("not a positive tick rate: {val}")),
-                }
-            }
-            // `GpuBackend::from_name`, not a hand-written match: the sandbox
-            // and every CI harness script pass `--backend vk`, which a
-            // `"vulkan" | "null"` match rejects.
-            "--backend" => {
-                let Some(val) = args.next() else {
-                    return Invocation::BadUsage("--backend needs a value".into());
-                };
-                match crcbl::backend::GpuBackend::from_name(&val) {
-                    Some(backend) => options.backend = Some(backend),
-                    None => {
-                        return Invocation::BadUsage(format!(
-                            "unknown backend '{val}' — try `vk`, `null` or `wgpu`"
-                        ));
-                    }
-                }
-            }
-            other => return Invocation::BadUsage(format!("unknown argument: {other}")),
+        match options.common.consume(&arg, &mut args) {
+            Consumed::Yes => continue,
+            Consumed::Help => return Invocation::Help,
+            Consumed::Bad(message) => return Invocation::BadUsage(message),
+            // Breakout claims nothing of its own, so anything the engine hands
+            // back is an unknown argument.
+            Consumed::No => return Invocation::BadUsage(format!("unknown argument: {arg}")),
         }
     }
 
@@ -127,7 +78,6 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl::backend::GpuBackend;
 
     fn parsed(argv: &[&str]) -> Options {
         match parse(argv.iter().map(|s| (*s).to_string())) {
@@ -144,84 +94,66 @@ mod tests {
         }
     }
 
+    /// What is breakout's to assert is that this game's tick rate reaches the
+    /// shared set; the flags themselves are tested in `crcbl::args`.
     #[test]
     fn the_defaults_are_a_windowed_sixty_hertz_run() {
         let options = parsed(&[]);
-        assert!(!options.headless);
-        assert_eq!(options.tick_hz, crate::game::DEFAULT_TICK_HZ);
-        assert_eq!(options.frames, None);
-        assert_eq!(options.backend, None);
-        assert_eq!(options.frame_budget(), None);
+        assert!(!options.common.headless);
+        assert_eq!(options.common.tick_hz, crate::game::DEFAULT_TICK_HZ);
+        assert_eq!(options.common.frame_budget(), None);
+        assert_eq!(options.common.backend, None);
     }
 
-    /// Every spelling the sandbox and the CI harness scripts use. `vk` in
-    /// particular was rejected by a hand-written `"vulkan" | "null"` match
-    /// while every `run-*-e2e.sh` passes exactly that.
+    /// The join the engine's own tests cannot make: a game that forgot to call
+    /// `consume` would pass every test in `crcbl::args` and reject `--headless`
+    /// here.
     #[test]
-    fn the_backend_flag_accepts_every_name_the_registry_knows() {
-        for name in ["vk", "vulkan"] {
-            assert_eq!(
-                parsed(&["--backend", name]).backend,
-                Some(GpuBackend::Vulkan),
-                "--backend {name}",
-            );
-        }
-        for name in ["null", "none"] {
-            assert_eq!(parsed(&["--backend", name]).backend, Some(GpuBackend::Null));
-        }
+    fn the_shared_flags_reach_the_common_set_through_this_parser() {
+        assert!(parsed(&["--headless"]).common.headless);
+        assert_eq!(parsed(&["--frames", "7"]).common.frames, Some(7));
+        assert_eq!(parsed(&["--tick-hz", "30"]).common.tick_hz, 30);
         assert_eq!(
-            parsed(&["--backend", "wgpu"]).backend,
-            Some(GpuBackend::Wgpu)
+            parsed(&["--backend", "vk"]).common.backend,
+            Some(crcbl::backend::GpuBackend::Vulkan)
         );
-        assert!(rejected(&["--backend", "metal"]).contains("metal"));
-        assert!(rejected(&["--backend"]).contains("--backend"));
-    }
-
-    #[test]
-    fn a_zero_tick_rate_and_a_zero_frame_count_are_rejected() {
+        assert!(parsed(&["--debug-overlay"]).common.debug_overlay_visible());
+        assert!(
+            !parsed(&["--no-debug-overlay"])
+                .common
+                .debug_overlay_visible()
+        );
+        assert_eq!(
+            parsed(&["--headless"]).common.frame_budget(),
+            Some(crcbl::args::HEADLESS_FRAME_BUDGET)
+        );
         assert!(rejected(&["--tick-hz", "0"]).contains("tick rate"));
-        assert!(rejected(&["--tick-hz", "-1"]).contains("tick rate"));
         assert!(rejected(&["--frames", "0"]).contains("frame count"));
-        assert!(rejected(&["--nonsense"]).contains("nonsense"));
-    }
-
-    #[test]
-    fn a_headless_run_gets_a_default_budget_and_a_windowed_one_does_not() {
-        assert_eq!(parsed(&["--headless"]).frame_budget(), Some(120));
-        assert_eq!(
-            parsed(&["--headless", "--frames", "7"]).frame_budget(),
-            Some(7)
-        );
-        assert_eq!(parsed(&["--frames", "7"]).frame_budget(), Some(7));
-    }
-
-    /// Switching the debug overlay on is one flag, and the default follows the
-    /// build profile rather than a constant.
-    #[test]
-    fn the_debug_overlay_flags_override_the_build_profile_default() {
-        assert_eq!(parsed(&[]).debug_overlay, None);
-        assert_eq!(
-            parsed(&[]).debug_overlay_visible(),
-            cfg!(debug_assertions),
-            "the default is 'on in a dev build'",
-        );
-        assert!(parsed(&["--debug-overlay"]).debug_overlay_visible());
-        assert!(!parsed(&["--no-debug-overlay"]).debug_overlay_visible());
-        // Last flag wins, so a wrapper script can append an override.
-        assert!(!parsed(&["--debug-overlay", "--no-debug-overlay"]).debug_overlay_visible());
-        assert!(USAGE.contains("--debug-overlay"));
-    }
-
-    #[test]
-    fn help_is_help() {
-        assert!(matches!(
-            parse(["-h".to_string()].into_iter()),
-            Invocation::Help
-        ));
         assert!(matches!(
             parse(["--help".to_string()].into_iter()),
             Invocation::Help
         ));
-        assert!(USAGE.contains("--tick-hz"));
+    }
+
+    /// Breakout claims no flags of its own, so **every** unknown argument is a
+    /// rejection — including one another sample takes. A `--seed` silently
+    /// ignored here would be a run the caller believed was seeded.
+    #[test]
+    fn an_argument_this_game_does_not_claim_is_refused_including_another_games() {
+        assert!(rejected(&["--nonsense"]).contains("nonsense"));
+        assert!(rejected(&["--seed", "17"]).contains("--seed"));
+    }
+
+    #[test]
+    fn the_shared_half_of_the_usage_text_is_the_engines_verbatim() {
+        assert!(
+            USAGE.contains(crcbl::args::COMMON_OPTIONS_HELP),
+            "the shared OPTIONS block has drifted from crcbl::args"
+        );
+        assert!(
+            USAGE.contains(crcbl::args::COMMON_TAIL_HELP),
+            "the shared tail has drifted from crcbl::args"
+        );
+        assert!(USAGE.contains("breakout — the first playable Crucible sample"));
     }
 }

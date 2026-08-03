@@ -269,7 +269,7 @@ impl Loop<dyn Shell> {
     ///
     /// [`FlappyError`] if any of them refused.
     pub fn start(options: &Options) -> Result<Self, FlappyError> {
-        let shell = if options.headless {
+        let shell = if options.common.headless {
             open_backend(Backend::Headless).map_err(FlappyError::Shell)?
         } else {
             open().map_err(FlappyError::NoWindowSystem)?
@@ -286,14 +286,14 @@ impl<S: Shell + ?Sized> Loop<S> {
     /// [`FlappyError`] if the window never configured, the GPU would not open,
     /// or the game could not be built.
     pub fn with_shell(mut shell: Box<S>, options: &Options) -> Result<Self, FlappyError> {
-        let clock_source = Clock::new(options.headless);
+        let clock_source = Clock::new(options.common.headless);
         let window = open_the_window(shell.as_mut(), &clock_source)?;
 
         let mut events = 0;
         let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
         crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
 
-        let gpu = Gpu::open(shell.as_ref(), window, extent, options.backend)?;
+        let gpu = Gpu::open(shell.as_ref(), window, extent, options.common.backend)?;
         Self::assemble(shell, window, gpu, options, clock_source, events)
     }
 
@@ -310,29 +310,33 @@ impl<S: Shell + ?Sized> Loop<S> {
         clock_source: Clock,
         events: u64,
     ) -> Result<Self, FlappyError> {
-        let game = Game::with_seed(options.headless, options.tick_hz, options.seed)?;
+        let game = Game::with_seed(
+            options.common.headless,
+            options.common.tick_hz,
+            options.seed,
+        )?;
         Ok(Self {
-            windowed: !options.headless,
+            windowed: !options.common.headless,
             shell,
             window,
             gpu,
             game,
             clock_source,
-            frame_clock: FrameClock::new(options.tick_hz),
+            frame_clock: FrameClock::new(options.common.tick_hz),
             draw_list: crcbl::ui::draw_list::DrawList::new(),
             render_state: RenderState::default(),
             hud: HudStrings::default(),
             menus: menu::menus(),
             pointer: None,
             pointer_held: false,
-            debug: DebugOverlay::with_visible(options.debug_overlay_visible()),
+            debug: DebugOverlay::with_visible(options.common.debug_overlay_visible()),
             paused: false,
             held_keys: Vec::new(),
             mode_honoured: true,
             frames: 0,
             ticks: 0,
             events,
-            budget: options.frame_budget(),
+            budget: options.common.frame_budget(),
             reconfigures_in_a_row: 0,
         })
     }
@@ -988,7 +992,7 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
                         shell.as_ref(),
                         self.window,
                         extent,
-                        self.options.backend,
+                        self.options.common.backend,
                     )?,
                 };
                 Ok(None)
@@ -1115,6 +1119,8 @@ fn draw_hud(dl: &mut crcbl::ui::draw_list::DrawList, hud: &HudStrings) {
 
 #[cfg(test)]
 mod tests {
+    use crcbl::args::Common;
+
     use super::*;
     use crcbl::core::input::KeyCode;
     use crcbl::shell::HeadlessShell;
@@ -1145,11 +1151,25 @@ mod tests {
 
     fn headless(frames: u64) -> Options {
         Options {
-            headless: true,
-            backend: Some(GpuBackend::Null),
-            frames: Some(frames),
+            common: Common {
+                headless: true,
+                backend: Some(GpuBackend::Null),
+                frames: Some(frames),
+                ..Common::new(crate::game::DEFAULT_TICK_HZ)
+            },
             ..Options::default()
         }
+    }
+
+    /// [`headless`] with one shared field changed.
+    ///
+    /// Struct-update syntax cannot reach through `Options::common` — `..` fills
+    /// whole fields, and `common` is one field — so an override is a closure
+    /// rather than another literal.
+    fn headless_with(frames: u64, edit: impl FnOnce(&mut Common)) -> Options {
+        let mut options = headless(frames);
+        edit(&mut options.common);
+        options
     }
 
     /// The value drawn immediately after the row labelled `label`.
@@ -1185,10 +1205,9 @@ mod tests {
     /// game's HUD is untouched either way.
     #[test]
     fn f3_toggles_the_debug_overlay_in_the_frames_draw_list() {
-        let mut engine = scripted(&Options {
-            debug_overlay: Some(false),
-            ..headless(16)
-        });
+        let mut engine = scripted(&headless_with(16, |common| {
+            common.debug_overlay = Some(false)
+        }));
         let window = engine.window();
 
         // Two frames so the frame clock has a non-zero interval to report.
@@ -1238,10 +1257,9 @@ mod tests {
     /// queries. Nothing else, and no configuration decided that.
     #[test]
     fn the_overlay_is_composed_of_exactly_the_modules_flappy_has() {
-        let mut engine = scripted(&Options {
-            debug_overlay: Some(true),
-            ..headless(8)
-        });
+        let mut engine = scripted(&headless_with(8, |common| {
+            common.debug_overlay = Some(true)
+        }));
         engine.frame().expect("a frame");
         engine.frame().expect("a frame");
 
@@ -1294,11 +1312,8 @@ mod tests {
     #[test]
     fn ticks_are_paced_by_the_clock_not_the_frame_rate() {
         let sixty = run(&headless(62)).expect("headless runs everywhere");
-        let thirty = run(&Options {
-            tick_hz: 30,
-            ..headless(62)
-        })
-        .expect("headless runs everywhere");
+        let thirty = run(&headless_with(62, |common| common.tick_hz = 30))
+            .expect("headless runs everywhere");
         assert_eq!(sixty.frames, thirty.frames);
         // 62 frames, the first update establishing the baseline: 61 ticks at
         // 60 Hz.
@@ -1309,11 +1324,8 @@ mod tests {
         // `if`: a headless frame is pinned to 1/60 s, so at 120 Hz every frame
         // owes the simulation two ticks. A loop that ran one per frame would
         // report 61 here and look right at 60 Hz forever.
-        let fast = run(&Options {
-            tick_hz: 120,
-            ..headless(62)
-        })
-        .expect("headless runs everywhere");
+        let fast = run(&headless_with(62, |common| common.tick_hz = 120))
+            .expect("headless runs everywhere");
         assert_eq!(fast.ticks, 122, "a frame owing two ticks must run both");
     }
 
@@ -1526,11 +1538,8 @@ mod tests {
     /// factor of two.
     #[test]
     fn the_flap_advances_by_the_ticks_the_frame_ran_and_not_by_the_frames() {
-        let mut engine = Loop::start(&Options {
-            tick_hz: 120,
-            ..headless(40)
-        })
-        .expect("headless runs everywhere");
+        let mut engine = Loop::start(&headless_with(40, |common| common.tick_hz = 120))
+            .expect("headless runs everywhere");
         let mut frames = 0u64;
         while let Ok(Flow::Continue) = engine.frame() {
             frames += 1;

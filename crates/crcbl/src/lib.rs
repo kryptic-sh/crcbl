@@ -150,6 +150,8 @@ pub use log;
 /// HUD skeleton, and widgets.
 pub use crcbl_ui as ui;
 
+pub mod args;
+
 pub mod backend;
 
 pub mod engine;

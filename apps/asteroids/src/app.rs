@@ -283,7 +283,7 @@ impl Loop<dyn Shell> {
     ///
     /// [`AsteroidsError`] if any of them refused.
     pub fn start(options: &Options) -> Result<Self, AsteroidsError> {
-        let shell = if options.headless {
+        let shell = if options.common.headless {
             open_backend(Backend::Headless).map_err(AsteroidsError::Shell)?
         } else {
             open().map_err(AsteroidsError::NoWindowSystem)?
@@ -300,14 +300,14 @@ impl<S: Shell + ?Sized> Loop<S> {
     /// [`AsteroidsError`] if the window never configured, the GPU would not
     /// open, or the game could not be built.
     pub fn with_shell(mut shell: Box<S>, options: &Options) -> Result<Self, AsteroidsError> {
-        let clock_source = Clock::new(options.headless);
+        let clock_source = Clock::new(options.common.headless);
         let window = open_the_window(shell.as_mut(), &clock_source)?;
 
         let mut events = 0;
         let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
         crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
 
-        let gpu = Gpu::open(shell.as_ref(), window, extent, options.backend)?;
+        let gpu = Gpu::open(shell.as_ref(), window, extent, options.common.backend)?;
         Self::assemble(shell, window, gpu, options, clock_source, events)
     }
 
@@ -324,15 +324,19 @@ impl<S: Shell + ?Sized> Loop<S> {
         clock_source: Clock,
         events: u64,
     ) -> Result<Self, AsteroidsError> {
-        let game = Game::with_seed(options.headless, options.tick_hz, options.seed)?;
+        let game = Game::with_seed(
+            options.common.headless,
+            options.common.tick_hz,
+            options.seed,
+        )?;
         Ok(Self {
-            windowed: !options.headless,
+            windowed: !options.common.headless,
             shell,
             window,
             gpu,
             game,
             clock_source,
-            frame_clock: FrameClock::new(options.tick_hz),
+            frame_clock: FrameClock::new(options.common.tick_hz),
             draw_list: DrawList::new(),
             render_state: RenderState::default(),
             hud: HudStrings::default(),
@@ -340,13 +344,13 @@ impl<S: Shell + ?Sized> Loop<S> {
             menu_layout: None,
             pointer: None,
             pointer_held: false,
-            debug: DebugOverlay::with_visible(options.debug_overlay_visible()),
+            debug: DebugOverlay::with_visible(options.common.debug_overlay_visible()),
             paused: false,
             held_keys: Vec::new(),
             frames: 0,
             ticks: 0,
             events,
-            budget: options.frame_budget(),
+            budget: options.common.frame_budget(),
             reconfigures_in_a_row: 0,
         })
     }
@@ -924,7 +928,7 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
                         shell.as_ref(),
                         self.window,
                         extent,
-                        self.options.backend,
+                        self.options.common.backend,
                     )?,
                 };
                 Ok(None)
@@ -1037,6 +1041,8 @@ fn draw_hud(dl: &mut DrawList, hud: &HudStrings) {
 
 #[cfg(test)]
 mod tests {
+    use crcbl::args::Common;
+
     use super::*;
     use crcbl::core::input::PointerButton;
     use crcbl::shell::{ButtonState as PointerState, HeadlessShell, PhysicalPoint, ShellBackend};
@@ -1050,11 +1056,26 @@ mod tests {
     /// and flappy pin it for the same reason.
     fn headless(frames: u64) -> Options {
         Options {
-            headless: true,
-            backend: Some(GpuBackend::Null),
-            frames: Some(frames),
+            common: Common {
+                headless: true,
+                backend: Some(GpuBackend::Null),
+                frames: Some(frames),
+                ..Common::new(crate::game::DEFAULT_TICK_HZ)
+            },
             ..Options::default()
         }
+    }
+
+    /// [`headless`] with one shared field changed.
+    ///
+    /// Struct-update syntax cannot reach through `Options::common` — `..` fills
+    /// whole fields, and `common` is one field — so an override is a closure
+    /// rather than another literal.
+    #[allow(dead_code)]
+    fn headless_with(frames: u64, edit: impl FnOnce(&mut Common)) -> Options {
+        let mut options = headless(frames);
+        edit(&mut options.common);
+        options
     }
 
     fn headless_loop() -> Loop<dyn Shell> {

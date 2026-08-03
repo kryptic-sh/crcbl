@@ -35,6 +35,33 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the one dependency a sample continues to spell out, and is what keeps a PNG
   encoder out of a shipped binary.
 
+- **crcbl** (`crcbl::args`): the flags every sample has. `Common` holds
+  `--headless`, `--frames`, `--tick-hz`, `--backend` and the debug-overlay pair,
+  with `frame_budget` and `debug_overlay_visible` on it; `Common::consume`
+  offers one argument to that set and answers `Yes`, `Help`, `Bad(message)` or
+  `No`. `Invocation<T>` wraps a game's own options, `COMMON_OPTIONS_HELP` and
+  `COMMON_TAIL_HELP` are the shared `--help` blocks, and `positive`/`number`
+  parse a flag's value with the rejection wording the samples already used.
+
+  **Offered, not imposed.** A game keeps its parse loop and its `Options`
+  struct, and claims what `consume` hands back — which is how `--seed`,
+  `--max-enemies`, `--prefill` and `--wall-clock` stay per-game, and how
+  `apps/sandbox` goes on taking `--camera` and `--title` while not being a
+  consumer of this at all.
+
+  The four game parsers were the same file: flappy's and asteroids' differed in
+  **eight lines**, six of them usage prose. 894 code lines across the four
+  became 599 against 270 in the engine, and the flags themselves are now tested
+  once rather than four times. Each sample keeps one test that the engine's
+  cannot make — that its parser actually _calls_ `consume`, since one that
+  forgot would pass every test in `crcbl::args` and still reject `--headless`.
+
+  The drift this closes was real: three of the four parsers had dropped
+  breakout's assertion that the default backend stays `None`, which is what
+  stranded CI on a machine with no driver. Each sample's `USAGE` now asserts it
+  contains both shared help blocks byte for byte, so a reworded flag description
+  reddens the build instead of shipping.
+
 - **crcbl-store** (`crcbl::store::record`): `Record`, one `u32` kept between
   sessions. `Backing` picks where — `None` for a headless run that must leave no
   trace, `Backing::config(app)` for the platform's config directory, and

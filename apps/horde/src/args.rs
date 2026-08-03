@@ -5,12 +5,21 @@
 //!       [--max-enemies N] [--prefill N] [--wall-clock]
 //! ```
 //!
-//! The last two are the scale measurement's, and both exist because a headless
-//! run is otherwise unable to answer the plan's questions: nothing reaches ten
-//! thousand enemies by playing, and a headless run's clock is a fake one
-//! stepping exactly 1/60 s, so the debug panel's frame-timing module reports the
-//! step it was handed rather than the frame it measured.
+//! # What is left here after the engine took the shared half
+//!
+//! [`crcbl::args::Common`] owns `--headless`, `--frames`, `--tick-hz`,
+//! `--backend` and the debug-overlay pair. This file is horde's own, and it is
+//! the largest of the four remainders because horde is the sample with the most
+//! to say: a seed, an enemy cap, a prefill for the scale measurement, and the
+//! `--wall-clock` escape hatch that lets a headless run read the real clock.
 
+use crcbl::args::{Common, Consumed};
+
+/// The `--help` text.
+///
+/// Cannot drift from [`crcbl::args::COMMON_OPTIONS_HELP`] silently:
+/// `the_shared_half_of_the_usage_text_is_the_engines_verbatim` asserts
+/// this string contains both shared blocks byte for byte.
 pub const USAGE: &str = "\
 horde — the engine's fourth game, and its scale sample
 
@@ -21,7 +30,7 @@ OPTIONS:
     --headless           Run without a window (for CI / determinism tests)
     --frames <N>         Stop after N presented frames
     --tick-hz <N>        Simulation rate in Hz (default 60). Sets the server's
-                         clock, the ECS timestep and the integrator.
+                         clock, the ECS timestep and every integrator.
     --backend <B>        GPU backend: vk, vulkan, null, none or wgpu
     --seed <N>           Run seed. The same seed is the same horde.
     --max-enemies <N>    Ceiling on live enemies (default 1500). The plan's
@@ -43,10 +52,9 @@ OPTIONS:
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
-    pub headless: bool,
-    pub frames: Option<u64>,
-    pub tick_hz: u32,
-    pub backend: Option<crcbl::backend::GpuBackend>,
+    /// The flags every sample has.
+    pub common: Common,
+    /// The run seed. The same seed is the same horde.
     pub seed: u64,
     /// The ceiling on live enemies. See [`crate::game::DEFAULT_MAX_ENEMIES`].
     pub max_enemies: usize,
@@ -55,47 +63,21 @@ pub struct Options {
     pub prefill: usize,
     /// Whether a headless run reads the real clock. See [`USAGE`].
     pub wall_clock: bool,
-    /// Whether the debug overlay starts visible, or `None` for the default.
-    ///
-    /// Three-valued because the default is not a constant:
-    /// `docs/plan/sample/00-samples-overview.md` rule 4 is "on by default in dev
-    /// builds", so `None` means [`Options::debug_overlay_visible`]'s
-    /// `cfg!(debug_assertions)` and either flag overrides it.
-    pub debug_overlay: Option<bool>,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
-            headless: false,
-            frames: None,
-            tick_hz: crate::game::DEFAULT_TICK_HZ,
-            backend: None,
+            common: Common::new(crate::game::DEFAULT_TICK_HZ),
             seed: crate::game::DEFAULT_SEED,
             max_enemies: crate::game::DEFAULT_MAX_ENEMIES,
             prefill: 0,
             wall_clock: false,
-            debug_overlay: None,
         }
     }
 }
 
 impl Options {
-    #[must_use]
-    pub fn frame_budget(&self) -> Option<u64> {
-        match (self.frames, self.headless) {
-            (Some(frames), _) => Some(frames),
-            (None, true) => Some(120),
-            (None, false) => None,
-        }
-    }
-
-    /// Whether the debug overlay starts visible.
-    #[must_use]
-    pub fn debug_overlay_visible(&self) -> bool {
-        self.debug_overlay.unwrap_or(cfg!(debug_assertions))
-    }
-
     /// Whether the loop reads the real monotonic clock.
     ///
     /// Windowed runs always do. A headless one does only when `--wall-clock`
@@ -104,7 +86,7 @@ impl Options {
     /// timing to every headless run except the one taking a measurement.
     #[must_use]
     pub const fn real_clock(&self) -> bool {
-        !self.headless || self.wall_clock
+        !self.common.headless || self.wall_clock
     }
 
     /// The simulation setup these options describe.
@@ -116,93 +98,62 @@ impl Options {
     #[must_use]
     pub fn setup(&self) -> crate::game::Setup {
         crate::game::Setup {
-            headless: self.headless,
-            tick_hz: self.tick_hz,
+            headless: self.common.headless,
+            tick_hz: self.common.tick_hz,
             seed: self.seed,
             max_enemies: self.max_enemies.max(self.prefill),
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Invocation {
-    Run(Options),
-    Help,
-    BadUsage(String),
-}
+/// What the command line asked for.
+pub type Invocation = crcbl::args::Invocation<Options>;
 
 /// Parses a flat `["--flag", "value", "--flag2"]` iterator.
+///
+/// Every argument is offered to the shared set first; what comes back as
+/// [`Consumed::No`] is horde's to claim, and what horde does not claim either
+/// is the unknown-argument rejection.
 pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
     let mut options = Options::default();
     let mut args = args.peekable();
 
     while let Some(arg) = args.next() {
+        match options.common.consume(&arg, &mut args) {
+            Consumed::Yes => continue,
+            Consumed::Help => return Invocation::Help,
+            Consumed::Bad(message) => return Invocation::BadUsage(message),
+            Consumed::No => {}
+        }
+
         match arg.as_str() {
-            "--headless" => options.headless = true,
             "--wall-clock" => options.wall_clock = true,
-            "--debug-overlay" => options.debug_overlay = Some(true),
-            "--no-debug-overlay" => options.debug_overlay = Some(false),
-            "-h" | "--help" => return Invocation::Help,
-            "--frames" => {
-                let Some(val) = args.next() else {
-                    return Invocation::BadUsage("--frames needs a number".into());
-                };
-                match val.parse::<u64>() {
-                    Ok(n) if n > 0 => options.frames = Some(n),
-                    _ => return Invocation::BadUsage(format!("not a positive frame count: {val}")),
-                }
-            }
-            "--tick-hz" => {
-                let Some(val) = args.next() else {
-                    return Invocation::BadUsage("--tick-hz needs a number".into());
-                };
-                match val.parse::<u32>() {
-                    Ok(n) if n > 0 => options.tick_hz = n,
-                    _ => return Invocation::BadUsage(format!("not a positive tick rate: {val}")),
-                }
-            }
+            "--seed" => match crcbl::args::number("--seed", &mut args, "seed") {
+                Ok(seed) => options.seed = seed,
+                Err(message) => return Invocation::BadUsage(message),
+            },
             "--max-enemies" => {
-                let Some(val) = args.next() else {
-                    return Invocation::BadUsage("--max-enemies needs a number".into());
-                };
-                match val.parse::<usize>() {
-                    Ok(n) if n > 0 => options.max_enemies = n,
-                    _ => return Invocation::BadUsage(format!("not a positive enemy cap: {val}")),
+                match crcbl::args::positive("--max-enemies", &mut args, "enemy cap") {
+                    Ok(cap) => match usize::try_from(cap) {
+                        Ok(cap) => options.max_enemies = cap,
+                        Err(_) => {
+                            return Invocation::BadUsage(format!(
+                                "not a positive enemy cap: {cap}"
+                            ));
+                        }
+                    },
+                    Err(message) => return Invocation::BadUsage(message),
                 }
             }
-            "--prefill" => {
-                let Some(val) = args.next() else {
-                    return Invocation::BadUsage("--prefill needs a number".into());
-                };
-                match val.parse::<usize>() {
-                    Ok(n) => options.prefill = n,
+            "--prefill" => match crcbl::args::number("--prefill", &mut args, "enemy count") {
+                Ok(count) => match usize::try_from(count) {
+                    Ok(count) => options.prefill = count,
                     Err(_) => {
-                        return Invocation::BadUsage(format!("not an enemy count: {val}"));
+                        return Invocation::BadUsage(format!("not an enemy count: {count}"));
                     }
-                }
-            }
-            "--seed" => {
-                let Some(val) = args.next() else {
-                    return Invocation::BadUsage("--seed needs a number".into());
-                };
-                match val.parse::<u64>() {
-                    Ok(n) => options.seed = n,
-                    Err(_) => return Invocation::BadUsage(format!("not a seed: {val}")),
-                }
-            }
-            "--backend" => {
-                let Some(val) = args.next() else {
-                    return Invocation::BadUsage("--backend needs a value".into());
-                };
-                match crcbl::backend::GpuBackend::from_name(&val) {
-                    Some(backend) => options.backend = Some(backend),
-                    None => {
-                        return Invocation::BadUsage(format!(
-                            "unknown backend '{val}' — try `vk`, `null` or `wgpu`"
-                        ));
-                    }
-                }
-            }
+                },
+                Err(message) => return Invocation::BadUsage(message),
+            },
             other => return Invocation::BadUsage(format!("unknown argument: {other}")),
         }
     }
@@ -233,40 +184,57 @@ mod tests {
     #[test]
     fn the_defaults_are_a_windowed_sixty_hertz_run_on_the_published_seed() {
         let options = parsed(&[]);
-        assert!(!options.headless);
-        assert_eq!(options.tick_hz, crate::game::DEFAULT_TICK_HZ);
+        assert!(!options.common.headless);
+        assert_eq!(options.common.tick_hz, crate::game::DEFAULT_TICK_HZ);
         assert_eq!(options.seed, crate::game::DEFAULT_SEED);
         assert_eq!(options.max_enemies, crate::game::DEFAULT_MAX_ENEMIES);
-        assert_eq!(options.frames, None);
-        assert_eq!(options.frame_budget(), None);
+        assert_eq!(options.common.frames, None);
+        assert_eq!(options.common.frame_budget(), None);
         // Breakout has asserted this since it was the only sample and the three
         // parsers copied from it dropped it. `None` is "let the registry
         // choose", and a default that quietly became `Some(Vk)` would strand
         // every machine without a driver — which is what it did to CI.
-        assert_eq!(options.backend, None);
+        assert_eq!(options.common.backend, None);
     }
 
-    /// Every spelling the CI harness scripts use — the same list breakout's
-    /// parser was fixed to accept after `--backend vk` was rejected by a
-    /// hand-written match.
+    /// The join the engine's own tests cannot make: a game that forgot to call
+    /// `consume` would pass every test in `crcbl::args` and reject `--headless`
+    /// here. The flag *set* is tested there; that it is reached is tested here.
     #[test]
-    fn the_backend_flag_accepts_every_name_the_registry_knows() {
-        for name in ["vk", "vulkan"] {
-            assert_eq!(
-                parsed(&["--backend", name]).backend,
-                Some(GpuBackend::Vulkan),
-                "--backend {name}",
-            );
-        }
-        for name in ["null", "none"] {
-            assert_eq!(parsed(&["--backend", name]).backend, Some(GpuBackend::Null));
-        }
+    fn the_shared_flags_reach_the_common_set_through_this_parser() {
+        assert!(parsed(&["--headless"]).common.headless);
+        assert_eq!(parsed(&["--frames", "7"]).common.frames, Some(7));
+        assert_eq!(parsed(&["--tick-hz", "30"]).common.tick_hz, 30);
         assert_eq!(
-            parsed(&["--backend", "wgpu"]).backend,
-            Some(GpuBackend::Wgpu)
+            parsed(&["--backend", "vk"]).common.backend,
+            Some(GpuBackend::Vulkan)
         );
         assert!(rejected(&["--backend", "metal"]).contains("metal"));
-        assert!(rejected(&["--backend"]).contains("--backend"));
+        assert!(matches!(
+            parse(["--help".to_string()].into_iter()),
+            Invocation::Help
+        ));
+    }
+
+    /// The shared flags are documented in two places — here and in
+    /// `crcbl::args` — and this is what stops them disagreeing.
+    ///
+    /// A containment check on the whole block, not a flag-by-flag one: a
+    /// reworded description or a changed indent is exactly the drift that would
+    /// otherwise ship, and a test looking only for `"--headless"` would miss
+    /// both. This module's header promised this test before it existed, which
+    /// is the defect it now closes.
+    #[test]
+    fn the_shared_half_of_the_usage_text_is_the_engines_verbatim() {
+        assert!(
+            USAGE.contains(crcbl::args::COMMON_OPTIONS_HELP),
+            "the shared OPTIONS block has drifted from crcbl::args"
+        );
+        assert!(
+            USAGE.contains(crcbl::args::COMMON_TAIL_HELP),
+            "the shared tail has drifted from crcbl::args"
+        );
+        assert!(USAGE.contains("horde — the engine's fourth game"));
     }
 
     #[test]
@@ -345,12 +313,14 @@ mod tests {
 
     #[test]
     fn a_headless_run_gets_a_default_budget_and_a_windowed_one_does_not() {
-        assert_eq!(parsed(&["--headless"]).frame_budget(), Some(120));
+        assert_eq!(parsed(&["--headless"]).common.frame_budget(), Some(120));
         assert_eq!(
-            parsed(&["--headless", "--frames", "7"]).frame_budget(),
+            parsed(&["--headless", "--frames", "7"])
+                .common
+                .frame_budget(),
             Some(7)
         );
-        assert_eq!(parsed(&["--frames", "7"]).frame_budget(), Some(7));
+        assert_eq!(parsed(&["--frames", "7"]).common.frame_budget(), Some(7));
         assert!(parsed(&["--headless"]).setup().headless);
     }
 
@@ -358,16 +328,24 @@ mod tests {
     /// build profile rather than a constant.
     #[test]
     fn the_debug_overlay_flags_override_the_build_profile_default() {
-        assert_eq!(parsed(&[]).debug_overlay, None);
+        assert_eq!(parsed(&[]).common.debug_overlay, None);
         assert_eq!(
-            parsed(&[]).debug_overlay_visible(),
+            parsed(&[]).common.debug_overlay_visible(),
             cfg!(debug_assertions),
             "the default is 'on in a dev build'",
         );
-        assert!(parsed(&["--debug-overlay"]).debug_overlay_visible());
-        assert!(!parsed(&["--no-debug-overlay"]).debug_overlay_visible());
+        assert!(parsed(&["--debug-overlay"]).common.debug_overlay_visible());
+        assert!(
+            !parsed(&["--no-debug-overlay"])
+                .common
+                .debug_overlay_visible()
+        );
         // Last flag wins, so a wrapper script can append an override.
-        assert!(!parsed(&["--debug-overlay", "--no-debug-overlay"]).debug_overlay_visible());
+        assert!(
+            !parsed(&["--debug-overlay", "--no-debug-overlay"])
+                .common
+                .debug_overlay_visible()
+        );
         assert!(USAGE.contains("--debug-overlay"));
     }
 
