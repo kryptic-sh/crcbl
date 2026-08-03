@@ -1515,6 +1515,63 @@ pub const MENU_DOWN_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode
 /// Commits the selection. See [`MENU_UP_KEY`].
 pub const MENU_ACTIVATE_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::Enter;
 
+/// A loop that can be stepped and torn down.
+///
+/// The two things a driver needs and the only two both drivers agree on: the
+/// native [`drive`] below, and the browser's `crcbl::web::App`, which cannot
+/// use `drive` because a browser main thread may not sit in a `loop {}`.
+/// Declaring them once is what keeps the two paths stepping the same loop.
+pub trait GameLoop: Sized {
+    /// The game's error.
+    type Error: core::fmt::Display;
+    /// What a finished run reports.
+    type Summary;
+
+    /// One frame.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::Error`] if the frame failed.
+    fn frame(&mut self) -> Result<Flow, Self::Error>;
+
+    /// Tears the loop down: the GPU, then the window.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::Error`] if teardown failed.
+    fn finish(self, exit: ExitReason) -> Result<Self::Summary, Self::Error>;
+}
+
+/// Steps `engine` until it stops, then tears it down.
+///
+/// The native driver. Every sample's `run` was this, and the part worth having
+/// once is the error path: **a frame error is the one worth reporting**, so a
+/// teardown failure on top of it is logged rather than allowed to replace it.
+/// Teardown still runs — a loop that failed mid-frame still holds a device and a
+/// window.
+///
+/// # Errors
+///
+/// The game's error, from the frame that failed or from teardown.
+pub fn drive<L: GameLoop>(mut engine: L) -> Result<L::Summary, L::Error> {
+    let outcome = loop {
+        match engine.frame() {
+            Ok(Flow::Continue) => {}
+            Ok(Flow::Stop(reason)) => break Ok(reason),
+            Err(error) => break Err(error),
+        }
+    };
+    match outcome {
+        Ok(reason) => engine.finish(reason),
+        Err(error) => {
+            if let Err(teardown) = engine.finish(ExitReason::Failed) {
+                log::error!("teardown after a failed frame also failed: {teardown}");
+            }
+            Err(error)
+        }
+    }
+}
+
 /// Presented frames, the budget they are counted against, and the guard that
 /// makes the budget reachable.
 ///
@@ -2592,6 +2649,94 @@ mod tests {
             1,
             "a failed start-up asked for another device",
         );
+    }
+
+    /// A loop that stops or fails after a set number of frames, and can also
+    /// fail its teardown.
+    struct DrivenLoop {
+        frames_left: u32,
+        fail_frame: bool,
+        fail_teardown: bool,
+        torn_down: std::rc::Rc<std::cell::Cell<Option<ExitReason>>>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum DrivenError {
+        Frame,
+        Teardown,
+    }
+
+    impl core::fmt::Display for DrivenError {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "{self:?}")
+        }
+    }
+
+    impl GameLoop for DrivenLoop {
+        type Error = DrivenError;
+        type Summary = u32;
+
+        fn frame(&mut self) -> Result<Flow, Self::Error> {
+            if self.frames_left == 0 {
+                return if self.fail_frame {
+                    Err(DrivenError::Frame)
+                } else {
+                    Ok(Flow::Stop(ExitReason::CloseRequested))
+                };
+            }
+            self.frames_left -= 1;
+            Ok(Flow::Continue)
+        }
+
+        fn finish(self, exit: ExitReason) -> Result<Self::Summary, Self::Error> {
+            self.torn_down.set(Some(exit));
+            if self.fail_teardown {
+                return Err(DrivenError::Teardown);
+            }
+            Ok(0)
+        }
+    }
+
+    /// **A frame error is what comes back, and teardown still runs.**
+    ///
+    /// Both halves fail silently on their own. A driver that returned the
+    /// teardown error would replace the real cause with a consequence; one that
+    /// skipped teardown would leak a device and a window on every failed run.
+    #[test]
+    fn a_failed_frame_is_reported_and_the_loop_is_still_torn_down() {
+        let torn_down = std::rc::Rc::new(std::cell::Cell::new(None));
+        let error = drive(DrivenLoop {
+            frames_left: 2,
+            fail_frame: true,
+            fail_teardown: true,
+            torn_down: std::rc::Rc::clone(&torn_down),
+        })
+        .expect_err("the frame failed");
+
+        assert_eq!(
+            error,
+            DrivenError::Frame,
+            "the teardown error replaced the cause",
+        );
+        assert_eq!(
+            torn_down.get(),
+            Some(ExitReason::Failed),
+            "a failed run must still release its device and window",
+        );
+    }
+
+    /// **A clean stop tears down with the reason it stopped for.**
+    #[test]
+    fn a_loop_that_stops_cleanly_tears_down_with_its_own_reason() {
+        let torn_down = std::rc::Rc::new(std::cell::Cell::new(None));
+        drive(DrivenLoop {
+            frames_left: 3,
+            fail_frame: false,
+            fail_teardown: false,
+            torn_down: std::rc::Rc::clone(&torn_down),
+        })
+        .expect("a clean stop");
+        assert_eq!(torn_down.get(), Some(ExitReason::CloseRequested));
     }
 
     /// **A swapchain that never presents fails the run instead of hanging it.**

@@ -24,6 +24,8 @@
 
 use core::cell::RefCell;
 
+use crate::engine::GameLoop;
+
 // ---------------------------------------------------------------------------
 // Status
 // ---------------------------------------------------------------------------
@@ -223,12 +225,7 @@ pub fn log_ptr() -> *const u8 {
 /// Every method is one a sample's `Loop` already has; the trait exists so this
 /// module can own the state machine that was written out in all four `web.rs`
 /// files, which past the naming were the same file.
-pub trait WebLoop: Sized {
-    /// The game's error.
-    type Error: core::fmt::Display;
-    /// What a finished run reports.
-    type Summary;
-
+pub trait WebLoop: crate::engine::GameLoop {
     /// The demo's own name, for this module's log lines.
     const NAME: &'static str;
 
@@ -240,20 +237,6 @@ pub trait WebLoop: Sized {
 
     /// How far the clock advances for this frame.
     fn set_frame_step(&mut self, dt: core::time::Duration);
-
-    /// One frame.
-    ///
-    /// # Errors
-    ///
-    /// [`Self::Error`] if the frame failed.
-    fn frame(&mut self) -> Result<crate::engine::Flow, Self::Error>;
-
-    /// Tears the loop down.
-    ///
-    /// # Errors
-    ///
-    /// [`Self::Error`] if teardown failed.
-    fn finish(self, exit: crate::engine::ExitReason) -> Result<Self::Summary, Self::Error>;
 
     /// Logs the one line that is genuinely per-game.
     ///
@@ -280,14 +263,16 @@ pub trait WebPending: Sized {
     fn request(
         shell: Box<dyn crate::shell::Shell>,
         clock: crate::engine::Clock,
-    ) -> Result<Self, <Self::Loop as WebLoop>::Error>;
+    ) -> Result<Self, <Self::Loop as crate::engine::GameLoop>::Error>;
 
     /// `Ok(None)` means "not yet, poll again next frame".
     ///
     /// # Errors
     ///
     /// The game's error if start-up failed.
-    fn poll(&mut self) -> Result<Option<Self::Loop>, <Self::Loop as WebLoop>::Error>;
+    fn poll(
+        &mut self,
+    ) -> Result<Option<Self::Loop>, <Self::Loop as crate::engine::GameLoop>::Error>;
 }
 
 /// Where the demo has got to. One value, so no two of these can be true at once.
@@ -669,21 +654,9 @@ mod tests {
         }
     }
 
-    impl WebLoop for FakeLoop {
+    impl crate::engine::GameLoop for FakeLoop {
         type Error = FakeError;
         type Summary = u32;
-
-        const NAME: &'static str = "fake";
-
-        fn extent(&self) -> (u32, u32) {
-            (320, 240)
-        }
-
-        fn is_paused(&self) -> bool {
-            self.paused
-        }
-
-        fn set_frame_step(&mut self, _dt: core::time::Duration) {}
 
         fn frame(&mut self) -> Result<crate::engine::Flow, Self::Error> {
             if self.fail_frame {
@@ -701,6 +674,20 @@ mod tests {
         fn finish(self, _exit: crate::engine::ExitReason) -> Result<Self::Summary, Self::Error> {
             Ok(self.frames_left)
         }
+    }
+
+    impl WebLoop for FakeLoop {
+        const NAME: &'static str = "fake";
+
+        fn extent(&self) -> (u32, u32) {
+            (320, 240)
+        }
+
+        fn is_paused(&self) -> bool {
+            self.paused
+        }
+
+        fn set_frame_step(&mut self, _dt: core::time::Duration) {}
 
         fn log_summary(summary: &Self::Summary) {
             log::info!("fake: {summary} frames left");

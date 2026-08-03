@@ -304,25 +304,7 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
 /// reclaim the objects, but they log "N object(s) still alive at device
 /// teardown" while doing it, which is the diagnostic for a real leak.
 pub fn run(options: &Options) -> Result<Summary, SandboxError> {
-    let mut engine = Loop::start(options)?;
-    let outcome = loop {
-        match engine.frame() {
-            Ok(Flow::Continue) => {}
-            Ok(Flow::Stop(reason)) => break Ok(reason),
-            Err(error) => break Err(error),
-        }
-    };
-    match outcome {
-        Ok(reason) => engine.finish(reason),
-        Err(error) => {
-            // The frame error is the one worth reporting; a teardown failure on
-            // top of it is logged rather than allowed to replace it.
-            if let Err(teardown) = engine.finish(ExitReason::Failed) {
-                crcbl::log::error!("teardown after a failed frame also failed: {teardown}");
-            }
-            Err(error)
-        }
-    }
+    crcbl::engine::drive(Loop::start(options)?)
 }
 
 impl Loop<dyn Shell> {
@@ -822,6 +804,25 @@ fn tick(dt: f64) {
 /// loop — is the ordering P1's renderer inherits.
 fn render(alpha: f32) {
     let _ = alpha;
+}
+
+/// Lets [`crcbl::engine::drive`] step this loop, and the browser's `App` step
+/// the same one.
+///
+/// Two forwards to the inherent methods, which stay because they are this
+/// crate's public surface: a test drives `frame` directly, and so does
+/// `crate::web`.
+impl<S: Shell + ?Sized> crcbl::engine::GameLoop for Loop<S> {
+    type Error = SandboxError;
+    type Summary = Summary;
+
+    fn frame(&mut self) -> Result<Flow, Self::Error> {
+        Self::frame(self)
+    }
+
+    fn finish(self, exit: ExitReason) -> Result<Self::Summary, Self::Error> {
+        Self::finish(self, exit)
+    }
 }
 
 #[cfg(test)]

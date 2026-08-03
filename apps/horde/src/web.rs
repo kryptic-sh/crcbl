@@ -123,12 +123,12 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crcbl::engine::{Clock, ExitReason, Flow};
+use crcbl::engine::Clock;
 use crcbl::log;
 use crcbl::store::web::{FetchSource, OpfsStorage};
 use crcbl::web::{App, WebLoop, WebPending};
 
-use crate::app::{Loop, PendingLoop, Summary};
+use crate::app::{Loop, PendingLoop};
 use crate::args::Options;
 
 // The status codes and the asset base are the shim's wire format, so they have
@@ -150,9 +150,6 @@ pub use crcbl::web::{
 /// reporting. Everything above it — the stage machine, the status codes, the
 /// clock step, the failure handling — is [`crcbl::web::App`]'s.
 impl WebLoop for Loop<dyn crcbl::shell::Shell> {
-    type Error = crate::app::HordeError;
-    type Summary = Summary;
-
     const NAME: &'static str = "horde";
 
     fn extent(&self) -> (u32, u32) {
@@ -165,14 +162,6 @@ impl WebLoop for Loop<dyn crcbl::shell::Shell> {
 
     fn set_frame_step(&mut self, dt: core::time::Duration) {
         Self::set_frame_step(self, dt);
-    }
-
-    fn frame(&mut self) -> Result<Flow, Self::Error> {
-        Self::frame(self)
-    }
-
-    fn finish(self, exit: ExitReason) -> Result<Self::Summary, Self::Error> {
-        Self::finish(self, exit)
     }
 
     fn log_summary(summary: &Self::Summary) {

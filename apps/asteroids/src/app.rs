@@ -169,23 +169,7 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
 /// every path: a failing frame must still release the swapchain, the surface and
 /// the window.
 pub fn run(options: &Options) -> Result<Summary, AsteroidsError> {
-    let mut engine = Loop::start(options)?;
-    let outcome = loop {
-        match engine.frame() {
-            Ok(Flow::Continue) => {}
-            Ok(Flow::Stop(reason)) => break Ok(reason),
-            Err(error) => break Err(error),
-        }
-    };
-    match outcome {
-        Ok(reason) => engine.finish(reason),
-        Err(error) => {
-            if let Err(teardown) = engine.finish(ExitReason::Failed) {
-                crcbl::log::error!("teardown after a failed frame also failed: {teardown}");
-            }
-            Err(error)
-        }
-    }
+    crcbl::engine::drive(Loop::start(options)?)
 }
 
 impl Loop<dyn Shell> {
@@ -565,6 +549,25 @@ impl<S: Shell + ?Sized> Loop<S> {
         gpu_result?;
         shell_result?;
         Ok(summary)
+    }
+}
+
+/// Lets [`crcbl::engine::drive`] step this loop, and the browser's `App` step
+/// the same one.
+///
+/// Two forwards to the inherent methods, which stay because they are this
+/// crate's public surface: a test drives `frame` directly, and so does
+/// `crate::web`.
+impl<S: Shell + ?Sized> crcbl::engine::GameLoop for Loop<S> {
+    type Error = AsteroidsError;
+    type Summary = Summary;
+
+    fn frame(&mut self) -> Result<Flow, Self::Error> {
+        Self::frame(self)
+    }
+
+    fn finish(self, exit: ExitReason) -> Result<Self::Summary, Self::Error> {
+        Self::finish(self, exit)
     }
 }
 
