@@ -443,6 +443,19 @@ The modular panel is built and all three samples switch it on with F3 (or
 
 ## Coverage gaps
 
+- **No sample test pins the _values_ its RNG produces — only that two runs
+  agree.** Found by falsifying `crcbl_core::rand::hash_u64`: dropping its final
+  xor-shift left asteroids, flappy, horde and `crcbl-phys` **entirely green**,
+  and only `crcbl-core`'s own tests went red. The determinism suites compare one
+  run against another, and both runs move together when the hash changes, so a
+  rewrite would silently redraw every course, board and horde in the project
+  with nothing failing. `it_matches_the_reference_vectors` now pins the shared
+  implementation against the published splitmix64 outputs, which covers all four
+  games because they all call it — but each game's own mapping from a hash to a
+  gap centre or a spawn ring is still unpinned, so a change to `gap_centre`'s
+  arithmetic has the same free hand the hash used to. What would close it: one
+  test per game asserting a couple of literal positions for a fixed seed.
+
 - **The mixer adoption was not verified by ear, and two of its choices are
   audible-only.** See the entry under _Owed_ above. Structurally everything is
   pinned; nothing has been listened to.
