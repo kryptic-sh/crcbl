@@ -48,6 +48,10 @@ pub struct PhysicsSystem {
 
     /// Force providers applied in order each substep before integration.
     force_providers: Vec<Box<dyn ForceProvider>>,
+
+    /// The collider ids an overlap query returns, kept between calls so
+    /// [`PhysicsSystem::overlap_sphere_into`] allocates nothing.
+    scratch_ids: Vec<ColliderId>,
 }
 
 impl PhysicsSystem {
@@ -64,6 +68,7 @@ impl PhysicsSystem {
             transforms: HashMap::new(),
             collider_comps: HashMap::new(),
             force_providers: Vec::new(),
+            scratch_ids: Vec::new(),
         }
     }
 
@@ -274,23 +279,46 @@ impl PhysicsSystem {
     /// Overlap query: return all entities whose collider overlaps the sphere.
     #[must_use]
     pub fn overlap_sphere(&mut self, centre: DVec3, radius: f64) -> Vec<(Entity, ShapeHit)> {
-        self.world
-            .overlap_sphere(centre, radius)
-            .into_iter()
-            .filter_map(|id| {
-                let slot = id.index() as usize;
-                let entity = self.collider_to_entity.get(slot).and_then(|e| *e)?;
-                Some((
-                    entity,
-                    ShapeHit {
-                        t: 0.0,
-                        point: centre,
-                        normal: DVec3::Y,
-                        started_inside: true,
-                    },
-                ))
-            })
-            .collect()
+        let mut out = Vec::new();
+        self.overlap_sphere_into(centre, radius, &mut out);
+        out
+    }
+
+    /// [`overlap_sphere`](Self::overlap_sphere) writing into a buffer the
+    /// caller owns, for a game that queries once per body per tick.
+    ///
+    /// `out` is cleared and then filled, so the buffer is hoisted out of the
+    /// loop and reused. Nothing below this allocates either: the collider ids
+    /// land in a scratch buffer of this system's, and the BVH's descent stack
+    /// and candidate list are the world's own. A crowd of ten thousand
+    /// therefore steers without a single allocation, where the owned form is
+    /// three per agent per tick.
+    pub fn overlap_sphere_into(
+        &mut self,
+        centre: DVec3,
+        radius: f64,
+        out: &mut Vec<(Entity, ShapeHit)>,
+    ) {
+        out.clear();
+        let mut ids = std::mem::take(&mut self.scratch_ids);
+        self.world.overlap_sphere_into(centre, radius, &mut ids);
+        for id in ids.iter() {
+            let slot = id.index() as usize;
+            let Some(entity) = self.collider_to_entity.get(slot).and_then(|e| *e) else {
+                continue;
+            };
+            out.push((
+                entity,
+                ShapeHit {
+                    t: 0.0,
+                    point: centre,
+                    normal: DVec3::Y,
+                    started_inside: true,
+                },
+            ));
+        }
+        // Back where it came from, keeping the capacity for the next call.
+        self.scratch_ids = ids;
     }
 
     /// Overlap query: return all entities whose AABB intersects `aabb`.
@@ -765,6 +793,77 @@ mod tests {
         assert!(result.is_some());
         let (hit_entity, _) = result.unwrap();
         assert_eq!(hit_entity, e);
+    }
+
+    /// The `_into` form answers exactly what the owned one does, and reuses
+    /// the caller's buffer rather than appending to it.
+    ///
+    /// The capacity check is the half that matters to the caller it was written
+    /// for: a crowd sample runs one query per body per tick, and a buffer that
+    /// grew on every call would be the allocation the `_into` form exists to
+    /// remove, moved rather than deleted. What it cannot observe from here is
+    /// the *inner* buffers — the system's collider-id scratch and the world's
+    /// BVH stack and candidate list — which are fields rather than locals now;
+    /// that part is structural.
+    #[test]
+    fn overlap_sphere_into_answers_the_owned_form_and_reuses_the_buffer() {
+        let mut phys = PhysicsSystem::new();
+        for (index, x) in [0.0, 1.0, 2.0, 40.0].into_iter().enumerate() {
+            let e = test_entity(index as u32);
+            let at = Transform::from_position(DVec3::new(x, 0.0, 0.0));
+            phys.set_collider(
+                e,
+                &ColliderComponent::Sphere {
+                    offset: DVec3::ZERO,
+                    radius: 0.5,
+                    is_trigger: false,
+                },
+                &at,
+            );
+        }
+
+        let owned = phys.overlap_sphere(DVec3::ZERO, 2.0);
+        assert!(
+            owned.len() > 1 && owned.len() < 4,
+            "the fixture must include some colliders and exclude some: {}",
+            owned.len(),
+        );
+
+        let mut out = Vec::new();
+        phys.overlap_sphere_into(DVec3::ZERO, 2.0, &mut out);
+        assert_eq!(
+            out.iter().map(|(e, _)| *e).collect::<Vec<_>>(),
+            owned.iter().map(|(e, _)| *e).collect::<Vec<_>>(),
+            "the two forms disagree",
+        );
+
+        // A buffer arriving with something in it comes back with only the
+        // answer in it.
+        out.push((
+            test_entity(99),
+            ShapeHit {
+                t: 0.0,
+                point: DVec3::ZERO,
+                normal: DVec3::Y,
+                started_inside: true,
+            },
+        ));
+        phys.overlap_sphere_into(DVec3::ZERO, 2.0, &mut out);
+        assert_eq!(
+            out.iter().map(|(e, _)| *e).collect::<Vec<_>>(),
+            owned.iter().map(|(e, _)| *e).collect::<Vec<_>>(),
+            "the buffer was appended to rather than refilled",
+        );
+
+        let capacity = out.capacity();
+        for _ in 0..64 {
+            phys.overlap_sphere_into(DVec3::ZERO, 2.0, &mut out);
+        }
+        assert_eq!(
+            out.capacity(),
+            capacity,
+            "the buffer grew on a repeat query, so the loop still allocates",
+        );
     }
 
     // ── Dynamics tests ──────────────────────────────────────────────────

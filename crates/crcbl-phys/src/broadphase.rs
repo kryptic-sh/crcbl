@@ -358,11 +358,25 @@ impl Bvh {
     /// Results are unsorted (tree order).
     #[must_use]
     pub fn traverse_aabb(&self, query: &Aabb) -> Vec<u32> {
+        let mut out = Vec::new();
+        self.traverse_aabb_into(query, &mut Vec::with_capacity(64), &mut out);
+        out
+    }
+
+    /// [`traverse_aabb`](Self::traverse_aabb) writing into buffers the caller
+    /// owns, for a consumer that runs one query per body per tick.
+    ///
+    /// Both `out` and the descent `stack` are **cleared** and then filled, so a
+    /// caller hoists one of each out of its loop and the whole pass allocates
+    /// nothing in the steady state. The owned form allocates two `Vec`s per
+    /// call, which at a crowd sample's ten thousand agents is 1.2 million
+    /// allocations a second doing nothing.
+    pub fn traverse_aabb_into(&self, query: &Aabb, stack: &mut Vec<u32>, out: &mut Vec<u32>) {
+        out.clear();
+        stack.clear();
         if self.root == NIL {
-            return Vec::new();
+            return;
         }
-        let mut result = Vec::new();
-        let mut stack = Vec::with_capacity(64);
         stack.push(self.root);
 
         while let Some(node_idx) = stack.pop() {
@@ -373,14 +387,13 @@ impl Bvh {
             if node.leaf_count > 0 {
                 let end = (node.child_left + node.leaf_count) as usize;
                 for i in node.child_left as usize..end {
-                    result.push(self.element_indices[i]);
+                    out.push(self.element_indices[i]);
                 }
             } else {
                 stack.push(node.child_right);
                 stack.push(node.child_left);
             }
         }
-        result
     }
 
     /// Walk the BVH with a ray, returning all intersected element ids and

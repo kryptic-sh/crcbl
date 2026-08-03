@@ -103,6 +103,16 @@ pub struct PhysicsWorld {
     /// with no element). Populated during [`PhysicsWorld::rebuild`]. Used by
     /// update methods for O(log n) refit.
     bvh_slot_to_elem: Vec<u32>,
+    /// The BVH descent stack and its candidate list, kept between queries.
+    ///
+    /// Every overlap query needs both and neither outlives the call, so
+    /// allocating them per call is a cost a caller running one query per body
+    /// per tick pays for nothing. They live here rather than being passed in
+    /// because every query method already takes `&mut self` for
+    /// [`ensure_bvh`](Self::ensure_bvh), so keeping them costs the caller no
+    /// API at all.
+    scratch_stack: Vec<u32>,
+    scratch_candidates: Vec<u32>,
 }
 
 impl PhysicsWorld {
@@ -116,6 +126,8 @@ impl PhysicsWorld {
             live_count: 0,
             bvh: None,
             bvh_slot_to_elem: Vec::new(),
+            scratch_stack: Vec::new(),
+            scratch_candidates: Vec::new(),
         }
     }
 
@@ -264,31 +276,51 @@ impl PhysicsWorld {
     /// included — overlap is the query they exist for.
     #[must_use]
     pub fn overlap_sphere(&mut self, centre: DVec3, radius: f64) -> Vec<ColliderId> {
+        let mut out = Vec::new();
+        self.overlap_sphere_into(centre, radius, &mut out);
+        out
+    }
+
+    /// [`overlap_sphere`](Self::overlap_sphere) writing into a buffer the
+    /// caller owns.
+    ///
+    /// `out` is cleared and then filled. The intermediate buffers — the BVH
+    /// descent stack and its candidate list — are the world's own and are
+    /// reused between calls, so a caller that hoists one `out` out of its loop
+    /// runs the whole pass without allocating.
+    pub fn overlap_sphere_into(&mut self, centre: DVec3, radius: f64, out: &mut Vec<ColliderId>) {
+        out.clear();
         self.ensure_bvh();
-        let bvh = self.bvh.as_ref().unwrap();
         let query_aabb = Aabb::from_centre_half(centre, DVec3::splat(radius));
-        let candidates = bvh.traverse_aabb(&query_aabb);
         let query_sphere = Sphere::new(centre, radius);
 
-        candidates
-            .into_iter()
-            .filter(|&idx| {
-                let idx = idx as usize;
-                self.colliders
-                    .get(idx)
-                    .and_then(|s| s.as_ref())
-                    .is_some_and(|slot| match &slot.entry {
-                        ColliderEntry::Sphere(s) => query::sphere_overlaps_sphere(&query_sphere, s),
-                        ColliderEntry::Box(b) => {
-                            query::sphere_overlaps_aabb(&query_sphere, &b.aabb())
-                        }
-                        ColliderEntry::Capsule(c) => {
-                            query::sphere_overlaps_capsule(&query_sphere, c)
-                        }
-                    })
-            })
-            .map(|slot| self.id_for_slot(slot))
-            .collect()
+        // Split borrows: the traversal reads the tree while writing the two
+        // scratch buffers, which are different fields of the same struct.
+        let Self {
+            bvh,
+            colliders,
+            generations,
+            scratch_stack,
+            scratch_candidates,
+            ..
+        } = self;
+        let bvh = bvh.as_ref().expect("ensure_bvh built it");
+        bvh.traverse_aabb_into(&query_aabb, scratch_stack, scratch_candidates);
+
+        for &idx in scratch_candidates.iter() {
+            let slot = idx as usize;
+            let hit = colliders
+                .get(slot)
+                .and_then(|s| s.as_ref())
+                .is_some_and(|slot| match &slot.entry {
+                    ColliderEntry::Sphere(s) => query::sphere_overlaps_sphere(&query_sphere, s),
+                    ColliderEntry::Box(b) => query::sphere_overlaps_aabb(&query_sphere, &b.aabb()),
+                    ColliderEntry::Capsule(c) => query::sphere_overlaps_capsule(&query_sphere, c),
+                });
+            if hit {
+                out.push(ColliderId::new(idx, generations[slot]));
+            }
+        }
     }
 
     /// Return all collider ids whose AABB intersects the query AABB.

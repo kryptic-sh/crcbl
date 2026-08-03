@@ -16,6 +16,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl-phys**: `overlap_sphere_into` on both `PhysicsSystem` and
+  `PhysicsWorld`, and `Bvh::traverse_aabb_into`, so a game that queries once per
+  body per tick can hoist one buffer out of its loop. The owned forms cost three
+  `Vec`s per call — the result, the collider ids, and the BVH's candidate list —
+  and the descent stack a fourth; the `_into` path clears and refills the
+  caller's buffer and keeps the rest as fields, so a crowd steers without
+  allocating. The owned forms remain, unchanged for every existing caller, and
+  now delegate.
+
 - **crcbl-phys**: `PhysicsSystem::body_mut(entity) -> Option<&mut RigidBody>`,
   for a game that chooses a velocity rather than having one integrated onto it.
   `set_body` was the only writer and it costs two hash operations — an insert

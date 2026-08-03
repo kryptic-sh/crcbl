@@ -1666,11 +1666,13 @@ fn thaw_field(logic: &mut GameLogic, world: &mut World) {
 ///   up, so the total is `O(N log N + Σk)` where `k` is a neighbourhood size —
 ///   which [`SEPARATION_SLACK`] is the tuning knob for, and which is bounded by
 ///   how densely bodies of a given radius can be packed rather than by `N`;
-/// * plus `N` `Vec` allocations, because `overlap_sphere` returns an owned
-///   `Vec` and there is no `_into`/callback form of it. That is the single
-///   biggest thing standing between this pass and the plan's 10k, and it is a
-///   finding against the crate rather than against the sample. Recorded in
-///   `docs/backlog.md`.
+/// * and **no allocations at all**, once the one `neighbours` buffer below has
+///   grown. `PhysicsSystem::overlap_sphere_into` clears and refills a buffer
+///   the caller owns, the collider ids land in a scratch buffer of the
+///   system's, and the BVH's descent stack and candidate list are the world's
+///   own. The owned `overlap_sphere` this used to call cost three `Vec`s per
+///   enemy per tick — 1.8 million a second at the plan's ten thousand, every
+///   one of them dropped immediately.
 /// * plus `N` hash **lookups** to write the velocities, through
 ///   `PhysicsSystem::body_mut`. This used to be `N` `set_body` calls, which is
 ///   an insert into the body map plus a touch of the transform map — two hash
@@ -1709,10 +1711,18 @@ fn steer_enemies(logic: &mut GameLogic, world: &mut World) {
             }
         }
 
+        // One buffer for the whole pass: `overlap_sphere_into` clears and
+        // refills it, and nothing below it allocates either, so `N` queries a
+        // tick cost no allocations at all once it has grown.
+        let mut neighbours = Vec::new();
         for me in &enemies {
             let mut push = DVec3::ZERO;
-            for (other, _hit) in phys.overlap_sphere(me.position, separation_query_radius(me.kind))
-            {
+            phys.overlap_sphere_into(
+                me.position,
+                separation_query_radius(me.kind),
+                &mut neighbours,
+            );
+            for &(other, _hit) in neighbours.iter() {
                 if other == me.entity {
                     continue;
                 }

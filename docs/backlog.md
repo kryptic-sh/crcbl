@@ -869,26 +869,22 @@ cost. Provisional numbers and their conditions are in
 neither was taken, because either is an API change to `crcbl-phys` and this
 slice was the sample.
 
-- **`overlap_sphere` returns an owned `Vec`, so a game that queries per body
-  allocates per body per tick.** `PhysicsSystem::overlap_sphere` and
-  `PhysicsWorld::overlap_sphere` both build and return a `Vec`, and
-  `Bvh::traverse_aabb` builds another one underneath, so horde's `steer_enemies`
-  does **two** heap allocations per enemy per tick and drops them immediately.
-  At the plan's 10 000 that is 1.2 million allocations a second doing nothing.
-  Wanted: a callback or `&mut Vec` form —
-  `overlap_sphere_into(centre, radius, &mut out)` — through all three layers, so
-  a caller can hoist one buffer out of the loop. Not measured against the
-  alternative, because there is no alternative to measure yet; it is named here
-  as the first thing to try rather than as a proven cause.
+- **The allocations are gone and nobody has measured what they cost.**
+  `overlap_sphere_into` runs through all three layers now, so horde's
+  `steer_enemies` hoists one `neighbours` buffer out of its loop and the pass
+  allocates nothing once it has grown: the collider ids land in a scratch buffer
+  on `PhysicsSystem`, and the BVH's descent stack and candidate list are
+  `PhysicsWorld`'s own fields. It used to be **three** `Vec`s per enemy per tick
+  — `overlap_sphere`'s own, `PhysicsWorld::overlap_sphere`'s, and
+  `Bvh::traverse_aabb`'s — which at the plan's ten thousand is 1.8 million
+  allocations a second, every one dropped immediately.
 
-- **The `body_mut` half is closed and the allocation half is not, so horde's
-  steering pass is now `N` queries and `N` hash lookups per tick.**
-  `PhysicsSystem::body_mut` landed; `overlap_sphere`'s owned `Vec` above did
-  not, and that is the one with the allocation in it. **No end-to-end number was
-  taken for the `body_mut` change**: the 10 000 fixture kills the player in
-  under a second (see the density entry under _What horde still owes_), so a
-  wall-clock run measures a simulation that has stopped, and a figure from one
-  would be worse than none.
+  **What is not known is whether it mattered.** No before/after number exists,
+  for the reason under _What horde still owes_: ten thousand enemies kill the
+  player in under a second, so a wall-clock run measures a simulation that has
+  stopped, and this repository has no allocation counter and no benchmark
+  harness. The change is justified by the count, not by a measurement, and
+  anybody quoting it as a speed-up is quoting something nobody ran.
 
 - **Steering is embarrassingly parallel and there is nothing to run it on.**
   Horde's separation pass reads positions, queries, and writes velocities —
