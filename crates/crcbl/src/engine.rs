@@ -1498,6 +1498,125 @@ pub const PAUSE_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::Es
 /// Toggles fullscreen.
 pub const FULLSCREEN_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::F11;
 
+/// Moves the selection up, while a menu is showing.
+///
+/// The three menu keys, like the three reserved ones above, are the engine's
+/// because the widget they drive is: [`crcbl_ui::menu::MenuSet`] owns the
+/// selection, and a sample that bound a different key would be describing the
+/// engine's list box. All five samples had spelled out the same three.
+///
+/// They are consumed **only while a menu is showing**, so a frame with no menu
+/// on it forwards them to the game like any other key.
+pub const MENU_UP_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::ArrowUp;
+
+/// Moves the selection down. See [`MENU_UP_KEY`].
+pub const MENU_DOWN_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::ArrowDown;
+
+/// Commits the selection. See [`MENU_UP_KEY`].
+pub const MENU_ACTIVATE_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::Enter;
+
+/// The menu's half of a pump batch, and the held-key bookkeeping beside it.
+///
+/// Built for one pump and read after it. What [`Pending`] is to the window, this
+/// is to the menu: the sample's closure asks it about each event, and what comes
+/// back is the key the *game* should see — `None` for one the menu took.
+///
+/// # Why the widget id and not the game's action
+///
+/// [`Self::activated`] is a [`crcbl_ui::WidgetId`], because mapping one to a game's own
+/// `MenuAction` is the game's business and is the only part of this that ever
+/// differed. The engine does not learn what `RESUME` means.
+#[derive(Debug)]
+pub struct MenuPump<'a, K> {
+    menus: &'a mut crcbl_ui::menu::MenuSet<K>,
+    held: &'a mut Vec<crcbl_core::input::KeyCode>,
+    showing: bool,
+    /// The widget the commit key released over, if any.
+    ///
+    /// Set on **release**, not press, so the pressed frame of the skin is on
+    /// screen for as long as the key is held.
+    pub activated: Option<crcbl_ui::WidgetId>,
+}
+
+impl<'a, K: Copy + Eq> MenuPump<'a, K> {
+    /// Starts a batch.
+    ///
+    /// `showing` is whether a menu was on screen **before** this pump — last
+    /// frame's, deliberately. The pump runs before this frame's state is known,
+    /// and the menu the player is pressing keys at is the one that was on screen
+    /// when they pressed them.
+    pub fn new(
+        menus: &'a mut crcbl_ui::menu::MenuSet<K>,
+        held: &'a mut Vec<crcbl_core::input::KeyCode>,
+        showing: bool,
+    ) -> Self {
+        Self {
+            menus,
+            held,
+            showing,
+            activated: None,
+        }
+    }
+
+    /// Offers one event, and returns the key the game should be told about.
+    ///
+    /// `None` for anything that was not a key, or that the menu claimed. Held
+    /// keys are tracked either way, because a key released while a menu ate it
+    /// still has to come off the list.
+    pub fn observe(
+        &mut self,
+        event: &crcbl_shell::ShellEvent,
+    ) -> Option<(crcbl_core::input::KeyCode, bool)> {
+        let crcbl_shell::ShellEvent::Key {
+            key_code: Some(code),
+            state,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        let code = *code;
+        let pressed = matches!(state, crcbl_shell::ButtonState::Pressed);
+
+        if self.showing {
+            match code {
+                MENU_UP_KEY => {
+                    // Repeats move the selection, because holding Down to walk a
+                    // list is what a player expects.
+                    if pressed {
+                        self.menus.select_previous();
+                    }
+                    return None;
+                }
+                MENU_DOWN_KEY => {
+                    if pressed {
+                        self.menus.select_next();
+                    }
+                    return None;
+                }
+                MENU_ACTIVATE_KEY => {
+                    if pressed {
+                        self.menus.press(true);
+                    } else {
+                        self.activated = self.menus.activate();
+                    }
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
+        if pressed {
+            if !self.held.contains(&code) {
+                self.held.push(code);
+            }
+        } else {
+            self.held.retain(|key| *key != code);
+        }
+        Some((code, pressed))
+    }
+}
+
 /// Why a loop stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExitReason {
@@ -2176,6 +2295,152 @@ mod tests {
             1,
             "a failed start-up asked for another device",
         );
+    }
+
+    /// The two states a `MenuPump` is tested in.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Panel {
+        None,
+        Shown,
+    }
+
+    /// A set with the panel **shown**, which is what makes `activate` and the
+    /// selection moves real — a `MenuSet` with nothing shown answers `None` to
+    /// everything, and a test built on one passes without the menu doing a thing.
+    fn menus() -> crcbl_ui::menu::MenuSet<Panel> {
+        let mut set = crcbl_ui::menu::MenuSet::new(
+            Panel::None,
+            vec![(
+                Panel::Shown,
+                crcbl_ui::menu::Menu::new(
+                    "PAUSED",
+                    vec![
+                        crcbl_ui::menu::MenuItem::new(1, "RESUME", "ESC"),
+                        crcbl_ui::menu::MenuItem::new(2, "QUIT", "Q"),
+                    ],
+                ),
+            )],
+        );
+        set.show(Panel::Shown);
+        set
+    }
+
+    /// **A menu key reaches the menu and NOT the game; every other key reaches
+    /// the game.**
+    ///
+    /// The half that matters is the second: the menu takes Up, Down and Enter
+    /// only while it is showing, so a game that binds Up to something keeps it
+    /// on every frame with no menu on screen. A pump that swallowed them
+    /// unconditionally would be a control that silently stopped working.
+    #[test]
+    fn the_menu_keys_are_taken_only_while_a_menu_is_showing() {
+        let (mut shell, window) = shell();
+        let mut set = menus();
+        let mut held = Vec::new();
+
+        for showing in [true, false] {
+            shell.key_press(window, MENU_DOWN_KEY).expect("live");
+            shell.key_release(window, MENU_DOWN_KEY).expect("live");
+            shell
+                .key_press(window, crcbl_core::input::KeyCode::KeyW)
+                .expect("live");
+            shell
+                .key_release(window, crcbl_core::input::KeyCode::KeyW)
+                .expect("live");
+
+            let selected = |set: &crcbl_ui::menu::MenuSet<Panel>| {
+                set.current()
+                    .and_then(crcbl_ui::menu::Menu::selected_item)
+                    .map(|item| item.id)
+            };
+            let before = selected(&set);
+
+            let mut forwarded = Vec::new();
+            let mut pump = MenuPump::new(&mut set, &mut held, showing);
+            shell.pump(&mut |event| {
+                if let Some(key) = pump.observe(&event) {
+                    forwarded.push(key);
+                }
+            });
+
+            let seen: Vec<_> = forwarded.iter().map(|(code, _)| *code).collect();
+            assert!(
+                seen.contains(&crcbl_core::input::KeyCode::KeyW),
+                "a game key must always reach the game (showing={showing})",
+            );
+            assert_eq!(
+                seen.contains(&MENU_DOWN_KEY),
+                !showing,
+                "the menu key must reach the game only when no menu is up",
+            );
+            // …and it must have *done* something, or a pump that dropped the key
+            // on the floor would pass the check above. Compared against the
+            // selection before this pass, because it persists between them.
+            assert_eq!(
+                selected(&set) != before,
+                showing,
+                "Down moved the selection only when the menu had the key",
+            );
+        }
+    }
+
+    /// **The commit key fires on release, not on press.**
+    ///
+    /// So the pressed frame of the skin is on screen for as long as the key is
+    /// held. A pump that activated on press would light the button and act in
+    /// the same frame, which reads as a missed press.
+    #[test]
+    fn the_commit_key_activates_on_release() {
+        let (mut shell, window) = shell();
+        let mut set = menus();
+        let mut held = Vec::new();
+
+        shell.key_press(window, MENU_ACTIVATE_KEY).expect("live");
+        let mut pump = MenuPump::new(&mut set, &mut held, true);
+        shell.pump(&mut |event| {
+            pump.observe(&event);
+        });
+        assert_eq!(pump.activated, None, "pressing must not commit");
+
+        shell.key_release(window, MENU_ACTIVATE_KEY).expect("live");
+        let mut pump = MenuPump::new(&mut set, &mut held, true);
+        shell.pump(&mut |event| {
+            pump.observe(&event);
+        });
+        assert_eq!(
+            pump.activated,
+            Some(1),
+            "releasing must commit the selected item",
+        );
+    }
+
+    /// **A key released while a menu ate it still comes off the held list.**
+    ///
+    /// The bookkeeping runs for menu keys too, or a key held as a menu opened
+    /// would stay "held" forever and the game would read it as stuck down.
+    #[test]
+    fn a_key_is_tracked_as_held_between_its_press_and_its_release() {
+        let (mut shell, window) = shell();
+        let mut set = menus();
+        let mut held = Vec::new();
+
+        shell
+            .key_press(window, crcbl_core::input::KeyCode::KeyW)
+            .expect("live");
+        let mut pump = MenuPump::new(&mut set, &mut held, false);
+        shell.pump(&mut |event| {
+            pump.observe(&event);
+        });
+        assert_eq!(held, vec![crcbl_core::input::KeyCode::KeyW]);
+
+        shell
+            .key_release(window, crcbl_core::input::KeyCode::KeyW)
+            .expect("live");
+        let mut pump = MenuPump::new(&mut set, &mut held, false);
+        shell.pump(&mut |event| {
+            pump.observe(&event);
+        });
+        assert!(held.is_empty(), "the release did not clear it: {held:?}");
     }
 
     /// Drains the shell into a `Pending`, and reports what each event was

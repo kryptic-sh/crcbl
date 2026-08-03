@@ -38,7 +38,7 @@ use core::time::Duration;
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Clock, ExitReason, Flow, FrameOutcome, Handled, MAX_CONSECUTIVE_RECONFIGURES, MAX_FRAME_STEP,
-    Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
+    MenuPump, Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
 };
 use crcbl::math::Vec2;
 use crcbl::prelude::*;
@@ -90,22 +90,6 @@ pub struct Summary {
 pub type AsteroidsError = crcbl::engine::LoopError<game::GameError>;
 
 // ---- the loop ---------------------------------------------------------------
-
-/// The keys a menu takes for itself while one is on screen.
-///
-/// The same three in every sample, for the reason F3, Escape and F11 are the
-/// same in every sample. Two of them are free here; **ArrowUp is not** — it is
-/// the second binding of `game.rs`'s thrust action, beside `KeyW`, and a panel
-/// on screen shadows it. `crate::menu`'s header carries the argument; the short
-/// version is that `KeyW` still thrusts and that a menu is only ever up on a
-/// frame the game is not being flown on.
-///
-/// They are consumed **only while a menu is showing**.
-pub const MENU_UP_KEY: KeyCode = KeyCode::ArrowUp;
-/// See [`MENU_UP_KEY`].
-pub const MENU_DOWN_KEY: KeyCode = KeyCode::ArrowDown;
-/// See [`MENU_UP_KEY`].
-pub const MENU_ACTIVATE_KEY: KeyCode = KeyCode::Enter;
 
 /// The key a menu's `FLY` and `TRY AGAIN` buttons stand for.
 ///
@@ -344,69 +328,27 @@ impl<S: Shell + ?Sized> Loop<S> {
         // event in it has not moved the cursor, and a menu whose hover state
         // reset every still frame would flicker.
         let mut pending = Pending::carrying(self.pointer);
-        let mut keyboard_action: Option<MenuAction> = None;
         let game = &mut self.game;
-        let held = &mut self.held_keys;
-        let menus = &mut self.menus;
-        // **Last frame's menu, deliberately.** The pump runs before this frame's
-        // state is known, and the menu the player is pressing keys at is the one
-        // that was on screen when they pressed them.
-        let menu_showing = menus.kind() != MenuKind::None;
+        // **Last frame's menu, deliberately.** The pump runs before this
+        // frame's state is known, and the menu the player is pressing keys at
+        // is the one that was on screen when they pressed them.
+        let showing = self.menus.kind() != MenuKind::None;
+        let mut menu = MenuPump::new(&mut self.menus, &mut self.held_keys, showing);
         self.shell.pump(&mut |event| {
             // The window's business, the pointer, focus loss and the loop's
-            // three reserved keys are all folded by `observe`. What comes back
-            // as `Handled::Game` is what is left, which for every sample here
-            // is the keyboard.
+            // three reserved keys are all folded by `Pending::observe`; the
+            // menu's three and the held-key list are `MenuPump`'s. What comes
+            // back from that is the key the *game* should see.
             if pending.observe(&event) == Handled::Loop {
                 return;
             }
-            if let ShellEvent::Key {
-                key_code: Some(code),
-                state,
-                ..
-            } = event
-            {
-                let pressed = matches!(state, crcbl::shell::ButtonState::Pressed);
-                // The menu's three keys, taken only while one is on screen —
-                // see `MENU_UP_KEY`. Repeats move the selection, because
-                // holding Down to walk a list is what a player expects; the
-                // commit key fires on **release**, so the pressed frame of
-                // the skin is on screen for as long as the key is held.
-                if menu_showing {
-                    match code {
-                        MENU_UP_KEY => {
-                            if pressed {
-                                menus.select_previous();
-                            }
-                            return;
-                        }
-                        MENU_DOWN_KEY => {
-                            if pressed {
-                                menus.select_next();
-                            }
-                            return;
-                        }
-                        MENU_ACTIVATE_KEY => {
-                            if pressed {
-                                menus.press(true);
-                            } else {
-                                keyboard_action = menus.activate().and_then(MenuAction::from_id);
-                            }
-                            return;
-                        }
-                        _ => {}
-                    }
-                }
-                if pressed {
-                    if !held.contains(&code) {
-                        held.push(code);
-                    }
-                } else {
-                    held.retain(|key| *key != code);
-                }
+            // Forwarded to the game, which replays it at the start of the next
+            // tick. A frame that runs no ticks loses nothing.
+            if let Some((code, pressed)) = menu.observe(&event) {
                 game.key_event(code, pressed);
             }
         });
+        let keyboard_action = menu.activated.and_then(MenuAction::from_id);
         self.events += pending.count;
         self.pointer = pending.pointer;
         if pending.pointer_pressed {
@@ -864,7 +806,7 @@ fn draw_hud(dl: &mut DrawList, hud: &HudStrings) {
 #[cfg(test)]
 mod tests {
     use crcbl::args::Common;
-    use crcbl::engine::PAUSE_KEY;
+    use crcbl::engine::{MENU_ACTIVATE_KEY, PAUSE_KEY};
 
     use super::*;
     use crcbl::core::input::PointerButton;
