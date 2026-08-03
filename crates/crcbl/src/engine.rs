@@ -1869,6 +1869,97 @@ impl PointerCapture {
     }
 }
 
+/// What firing a menu button asks the loop to do.
+///
+/// An action rather than a key: a button that "pressed Space" would be a menu
+/// re-entering its own input path, and the loop would have to tell a synthesised
+/// key from a real one.
+///
+/// Three of them are the **loop's** and mean the same thing in every game —
+/// un-pause, toggle fullscreen, toggle the debug panel, which are the three
+/// reserved keys' menu equivalents. `G` is whatever else this game's menus
+/// offer, and is where "serve the ball", "flap" or "take the second upgrade"
+/// live. Same shape as [`LoopError`], for the same reason: the shared part is
+/// genuinely shared and the rest genuinely is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuAction<G> {
+    /// Un-pause. See [`PAUSE_KEY`].
+    Resume,
+    /// Toggle borderless fullscreen. See [`FULLSCREEN_KEY`].
+    Fullscreen,
+    /// Toggle the debug panel. See [`DEBUG_OVERLAY_KEY`].
+    DebugOverlay,
+    /// Something only this game's menus do.
+    Game(G),
+}
+
+/// The [`WidgetId`](crcbl_ui::WidgetId) carrying [`MenuAction::Resume`].
+///
+/// The loop's three actions have **fixed** ids, because the loop has to
+/// recognise them in a layout it did not build. Written out rather than derived
+/// from a discriminant, so that inserting a variant cannot silently re-point
+/// every button in every sample.
+pub const RESUME_ID: crcbl_ui::WidgetId = 1;
+
+/// The id carrying [`MenuAction::Fullscreen`]. See [`RESUME_ID`].
+pub const FULLSCREEN_ID: crcbl_ui::WidgetId = 2;
+
+/// The id carrying [`MenuAction::DebugOverlay`]. See [`RESUME_ID`].
+pub const DEBUG_OVERLAY_ID: crcbl_ui::WidgetId = 3;
+
+/// The first id a game may use for an action of its own.
+///
+/// Everything below it is reserved. A game that numbered its own buttons from
+/// one would collide with [`RESUME_ID`], and the symptom would be a button that
+/// un-pauses instead of doing what its label says — which is why
+/// [`MenuAction::from_id`] refuses a reserved id it was not given by the engine
+/// rather than trusting the caller.
+pub const FIRST_GAME_ID: crcbl_ui::WidgetId = 16;
+
+impl<G> MenuAction<G> {
+    /// The id this action is carried by, given the game's own numbering.
+    ///
+    /// # Panics
+    ///
+    /// If `game_id` returns a reserved id — below [`FIRST_GAME_ID`] — because
+    /// that is a numbering bug that would otherwise show up as the wrong button
+    /// firing.
+    pub fn id(&self, game_id: impl FnOnce(&G) -> crcbl_ui::WidgetId) -> crcbl_ui::WidgetId {
+        match self {
+            Self::Resume => RESUME_ID,
+            Self::Fullscreen => FULLSCREEN_ID,
+            Self::DebugOverlay => DEBUG_OVERLAY_ID,
+            Self::Game(game) => {
+                let id = game_id(game);
+                assert!(
+                    id >= FIRST_GAME_ID,
+                    "a game action claimed the reserved id {id}; \
+                     game ids start at {FIRST_GAME_ID}",
+                );
+                id
+            }
+        }
+    }
+
+    /// The action an id names, asking `game` only about ids the loop does not
+    /// own.
+    ///
+    /// `None` for an id from another menu system entirely, which is what makes
+    /// it safe to point at a layout the loop did not build.
+    pub fn from_id(
+        id: crcbl_ui::WidgetId,
+        game: impl FnOnce(crcbl_ui::WidgetId) -> Option<G>,
+    ) -> Option<Self> {
+        match id {
+            RESUME_ID => Some(Self::Resume),
+            FULLSCREEN_ID => Some(Self::Fullscreen),
+            DEBUG_OVERLAY_ID => Some(Self::DebugOverlay),
+            _ if id < FIRST_GAME_ID => None,
+            _ => game(id).map(Self::Game),
+        }
+    }
+}
+
 /// The menu's half of a pump batch, and the held-key bookkeeping beside it.
 ///
 /// Built for one pump and read after it. What [`Pending`] is to the window, this
@@ -3022,6 +3113,79 @@ mod tests {
         let idle = capture.pending();
         let input = capture.resolve(&idle);
         assert_eq!(input.pos, glam::Vec2::new(12.0, 34.0));
+    }
+
+    /// A game action, for the menu-action tests.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Serve {
+        Launch,
+    }
+
+    /// **The loop's three actions round-trip, and a game's own do too.**
+    ///
+    /// `from_id` has to work on a layout the loop did not build, so the ids it
+    /// owns are fixed and everything else is asked of the game.
+    #[test]
+    fn a_menu_action_round_trips_through_its_widget_id() {
+        let game_id = |_: &Serve| FIRST_GAME_ID;
+        let from_game = |id| (id == FIRST_GAME_ID).then_some(Serve::Launch);
+
+        for action in [
+            MenuAction::Resume,
+            MenuAction::Fullscreen,
+            MenuAction::DebugOverlay,
+            MenuAction::Game(Serve::Launch),
+        ] {
+            let id = action.id(game_id);
+            assert_eq!(
+                MenuAction::from_id(id, from_game),
+                Some(action),
+                "id {id} did not come back as the action that produced it",
+            );
+        }
+
+        // The loop's three ids are distinct from each other and from the game's.
+        let ids: Vec<_> = [
+            MenuAction::Resume,
+            MenuAction::Fullscreen,
+            MenuAction::DebugOverlay,
+            MenuAction::Game(Serve::Launch),
+        ]
+        .iter()
+        .map(|action| action.id(game_id))
+        .collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "two actions share an id: {ids:?}");
+    }
+
+    /// **An id from another menu system is not an action.**
+    ///
+    /// The property that lets a loop point at a layout it did not build without
+    /// firing something at random.
+    #[test]
+    fn an_unknown_id_names_no_action() {
+        let from_game = |_| None::<Serve>;
+        assert_eq!(MenuAction::from_id(9_999, from_game), None);
+        // …and a reserved id the loop does not own is refused without the game
+        // ever being asked, so a game cannot claim one by accident.
+        assert_eq!(
+            MenuAction::from_id(FIRST_GAME_ID - 1, |_| Some(Serve::Launch)),
+            None,
+            "a reserved id reached the game's mapping",
+        );
+    }
+
+    /// **A game that numbers a button into the reserved range is caught.**
+    ///
+    /// Silently, this is a button that un-pauses instead of doing what its label
+    /// says — the symptom is in the wrong place entirely, so it is worth a
+    /// panic at the point the id is produced.
+    #[test]
+    #[should_panic(expected = "claimed the reserved id")]
+    fn a_game_action_numbered_into_the_reserved_range_panics() {
+        let _ = MenuAction::Game(Serve::Launch).id(|_: &Serve| RESUME_ID);
     }
 
     /// The two states a `MenuPump` is tested in.
