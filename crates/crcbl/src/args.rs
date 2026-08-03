@@ -45,7 +45,10 @@ pub const COMMON_OPTIONS_HELP: &str = "\
     --frames <N>         Stop after N presented frames
     --tick-hz <N>        Simulation rate in Hz (default 60). Sets the server's
                          clock, the ECS timestep and every integrator.
-    --backend <B>        GPU backend: vk, vulkan, null, none or wgpu";
+    --backend <B>        GPU backend: vk, vulkan, null, none or wgpu
+    --fullscreen         Open borderless instead of windowed. F11 still toggles.
+                         A window system may refuse; the summary reports what
+                         it actually did, not what was asked for.";
 
 /// The tail of the shared block: the debug overlay pair and `--help`.
 ///
@@ -108,6 +111,11 @@ pub struct Common {
     /// default. A default of `Some(Vulkan)` strands every machine without a
     /// driver, which is what it did to CI once already.
     pub backend: Option<GpuBackend>,
+    /// Whether to open the window borderless rather than windowed.
+    ///
+    /// A *request*. `F11` toggles from either starting point, and a window
+    /// system is free to refuse both — see [`Common::display_mode`].
+    pub fullscreen: bool,
     /// Whether the debug overlay starts visible, or `None` for the default.
     ///
     /// Three-valued because the default is not a constant:
@@ -130,7 +138,27 @@ impl Common {
             frames: None,
             tick_hz,
             backend: None,
+            fullscreen: false,
             debug_overlay: None,
+        }
+    }
+
+    /// The mode to create the window in.
+    ///
+    /// Belongs to [`crcbl_shell::WindowDesc::mode`] rather than to a `set_mode`
+    /// after start-up: asking at creation is what stops a fullscreen game from
+    /// showing a decorated window for the frames it takes the request to land.
+    ///
+    /// **A request, and the summary reports the answer.** No window system owes
+    /// it: an X11 session with no window manager sends
+    /// `_NET_WM_STATE_FULLSCREEN` into the void, and `RunSummary::mode` is what
+    /// says so afterwards.
+    #[must_use]
+    pub const fn display_mode(&self) -> crcbl_shell::DisplayMode {
+        if self.fullscreen {
+            crcbl_shell::DisplayMode::Borderless { monitor: None }
+        } else {
+            crcbl_shell::DisplayMode::Windowed
         }
     }
 
@@ -161,6 +189,7 @@ impl Common {
     pub fn consume(&mut self, arg: &str, rest: &mut impl Iterator<Item = String>) -> Consumed {
         match arg {
             "--headless" => self.headless = true,
+            "--fullscreen" => self.fullscreen = true,
             "--debug-overlay" => self.debug_overlay = Some(true),
             "--no-debug-overlay" => self.debug_overlay = Some(false),
             "-h" | "--help" => return Consumed::Help,
@@ -284,7 +313,26 @@ mod tests {
         // "let the registry choose", and a default that quietly became
         // `Some(Vulkan)` strands every machine without a driver.
         assert_eq!(common.backend, None);
+        assert!(!common.fullscreen);
+        assert_eq!(
+            common.display_mode(),
+            crcbl_shell::DisplayMode::Windowed,
+            "a run nobody asked to be fullscreen opens windowed",
+        );
         assert_eq!(Common::new(120).tick_hz, 120, "the rate is the game's");
+    }
+
+    /// `--fullscreen` reaches [`crcbl_shell::WindowDesc::mode`], which is what
+    /// makes it a creation-time request rather than a switch afterwards.
+    #[test]
+    fn the_fullscreen_flag_is_the_mode_the_window_is_created_in() {
+        let common = parsed(&["--fullscreen"]);
+        assert!(common.fullscreen);
+        assert_eq!(
+            common.display_mode(),
+            crcbl_shell::DisplayMode::Borderless { monitor: None },
+            "None is the only monitor a Wayland client can ask for",
+        );
     }
 
     /// Every spelling the CI harness scripts use.

@@ -21,13 +21,16 @@ fn main() -> ExitCode {
         Invocation::Run(options) => match run(&options) {
             Ok(summary) => {
                 println!(
-                    "asteroids: {} frames, {} ticks on the {} shell at {}x{} \
+                    "asteroids: {} frames, {} ticks on the {} shell at {}x{}, {} \
                      (score {}, wave {}, lives {}, {:?}, {:?})",
                     summary.frames,
                     summary.ticks,
                     summary.backend,
                     summary.extent.0,
                     summary.extent.1,
+                    // What the window system actually did, not what
+                    // `--fullscreen` asked for. It is free to refuse.
+                    summary.mode,
                     summary.score,
                     summary.wave + 1,
                     summary.lives,

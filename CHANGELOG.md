@@ -36,6 +36,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl** (`args::Common`): `--fullscreen`, and `Common::display_mode()` that
+  turns it into a `DisplayMode` for `WindowDesc::mode`. Asked for at window
+  creation rather than switched to afterwards, so a fullscreen game does not
+  show a decorated window for the frames a `set_mode` would take to land. `F11`
+  still toggles from either starting point. Every sample honours it —
+  `apps/sandbox` through its own parser, which predates the shared one.
+
+- **samples**: the summary line each binary prints now names the display mode
+  the window system actually settled on, beside the extent. `RunSummary::mode`
+  already carried it and nothing reported it, which left a refused fullscreen
+  indistinguishable from an honoured one from outside the process. `apps/bare`
+  gained a `Summary::mode` field to do the same from a hand-written loop, via
+  the public `engine::ModeRequest::mode`.
+
 - **crcbl-sprite** (`bake::bake_dir`): the generated table now declares
   `ART_TICK_HZ`, the rate the holds were baked at. A `.crpix` counts holds in
   simulation ticks and an Aseprite sidecar counts milliseconds, so the

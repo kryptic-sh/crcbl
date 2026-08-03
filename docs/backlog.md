@@ -183,9 +183,17 @@ the null backend by default and against lavapipe in CI
   compositor reachable, so `open()` returned "no shell backend available" every
   time. What that leaves unobserved is the template's own share — whether the
   pause menu, the fullscreen toggle and the resize look right — rather than the
-  machinery behind them, which is `crcbl::engine::Loop`'s and is the same code
-  four samples run windowed daily. The check is `cargo run` in a scaffolded
-  project on a desktop, then `ESC`, `F11`, `F3`.
+  machinery behind them, which is `crcbl::engine::Loop`'s and is now driven
+  windowed _and_ borderless against headless sway by `run-wayland-e2e.sh`. The
+  remaining check is `cargo run` in a scaffolded project on a desktop, then
+  `ESC`, `F11`, `F3`.
+
+  The scaffold could join the harness the way the sandbox has: `run-cli-e2e.sh`
+  would have to start sway itself, which today only `run-wayland-e2e.sh` knows
+  how to do. Extracting that start-up — the private `XDG_RUNTIME_DIR`, the
+  socket poll, the log tail — into something both scripts source is the piece of
+  work, and it is worth doing only if a second caller actually wants it.
+
 - **Vulkan validation is not gated on it.** Run by hand against lavapipe with
   `CRCBL_VK_VALIDATION=1 CRCBL_VK_SYNC_VALIDATION=1`, the template's graph is
   clean — 30 frames, no layer messages. It is not in CI because a validation
@@ -193,6 +201,33 @@ the null backend by default and against lavapipe in CI
   that cannot fail. Gating it needs the scaffold e2e to read the child's stderr
   for layer messages, or `crcbl-vk` to grow a "fail on validation error" mode
   the sample harnesses could share.
+
+## Display-mode coverage: what is gated and what is not
+
+The two window systems now answer a game-level `--fullscreen` from both sides —
+sway honours it (`run-wayland-e2e.sh`, borderless at the output size) and a
+WM-less Xvfb refuses it (`run-x11-e2e.sh`, reported as `windowed`). What is
+still uncovered:
+
+- **The `F11` toggle mid-run, at the game level.** The shell suites cover
+  `set_mode` in both directions and `run-wayland-e2e.sh` covers a compositor
+  imposing a mode, but nothing presses `F11` at a running sample. It needs
+  synthesised keyboard input into another process: the shell tests build a
+  `zwlr_virtual_keyboard_v1` from inside the test process, and a harness driving
+  a separate binary would need a small helper that does the same. Worth it only
+  if the toggle path ever breaks in a way `ModeRequest`'s unit tests miss.
+- **The null GPU backend is excluded from every mode assertion, and correctly.**
+  It presents by doing nothing, so no `wl_buffer` is attached, so the surface
+  never maps: `swaymsg -t get_tree` lists no `app_id` for a null-backend run
+  where a Vulkan one lists `sh.kryptic.crcbl.sandbox` — observed, not inferred.
+  An unmapped surface gets no fullscreen configure, so any mode assertion there
+  would be checking a window the compositor does not have.
+- **X11 with a window manager.** `CRCBL_E2E_X11_WM` starts one and the suite
+  adapts, but CI does not set it, so the honoured-on-X11 branch of both the
+  shell test and the sandbox pass is never taken. Picking a WM to depend on is
+  the open question.
+- **macOS and Windows have no shell backend at all**, so display modes there are
+  not late — they do not exist. See the platform sections of `crcbl-shell`.
 
 ## Five sample `gpu.rs` files, two of them identical
 

@@ -38,6 +38,9 @@ OPTIONS:
     --tick-hz <N>        Simulation rate in Hz (default 60). Sets the server's
                          clock, the ECS timestep and every integrator.
     --backend <B>        GPU backend: vk, vulkan, null, none or wgpu
+    --fullscreen         Open borderless instead of windowed. F11 still toggles.
+                         A window system may refuse; the summary reports what
+                         it actually did, not what was asked for.
     --seed <N>           Course seed. The same seed is the same pipes.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a

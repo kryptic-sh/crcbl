@@ -28,6 +28,9 @@ OPTIONS:
                           Default: unlimited windowed, 120 headless.
         --tick-hz <N>     Simulation rate. Default: 60.
         --title <TITLE>   Window title. Default: \"Crucible sandbox\".
+        --fullscreen      Open borderless instead of windowed. F11 still
+                          toggles, and a window system may refuse both; the
+                          summary reports what it actually did.
         --debug-overlay   Start with the debug panel visible. F3 toggles it.
         --no-debug-overlay
                           Start with it hidden. The default is `visible in a
@@ -61,6 +64,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--headless" => options.headless = true,
+            "--fullscreen" => options.fullscreen = true,
             "--debug-overlay" => options.debug_overlay = Some(true),
             "--no-debug-overlay" => options.debug_overlay = Some(false),
             "-h" | "--help" => return Invocation::Help,
@@ -175,10 +179,16 @@ mod tests {
             "a b",
             "--backend",
             "null",
+            "--fullscreen",
         ]);
         assert!(options.headless);
         assert_eq!(options.frames, Some(12));
         assert_eq!(options.tick_hz, 30);
+        assert!(options.fullscreen);
+        assert_eq!(
+            options.display_mode(),
+            crcbl::shell::DisplayMode::Borderless { monitor: None },
+        );
         assert_eq!(options.title, "a b");
         assert_eq!(options.backend, Some(GpuBackend::Null));
         assert_eq!(options.camera, CameraMode::Perspective);

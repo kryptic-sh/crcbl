@@ -21,13 +21,16 @@ fn main() -> ExitCode {
         Invocation::Run(options) => match run(&options) {
             Ok(summary) => {
                 println!(
-                    "flappy: {} frames, {} ticks on the {} shell at {}x{} \
+                    "flappy: {} frames, {} ticks on the {} shell at {}x{}, {} \
                      (score {}, {:?}, {:?})",
                     summary.frames,
                     summary.ticks,
                     summary.backend,
                     summary.extent.0,
                     summary.extent.1,
+                    // What the window system actually did, not what
+                    // `--fullscreen` asked for. It is free to refuse.
+                    summary.mode,
                     summary.score,
                     summary.state,
                     summary.exit,

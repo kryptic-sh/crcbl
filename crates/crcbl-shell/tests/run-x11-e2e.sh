@@ -222,16 +222,35 @@ echo "crcbl e2e: $RAN tests ran against Xvfb on ${DISPLAY}"
 # `minImageExtent == maxImageExtent == currentExtent`, which is the case that
 # tests the seam's extent obligations hardest — the shell's size is
 # authoritative, and Vulkan may still refuse to configure at it.
+# It also runs **with `--fullscreen`**, and the interesting part is that the
+# request is refused. This harness starts no window manager by default (see the
+# header), so `_NET_WM_STATE_FULLSCREEN` is a client message to a root window
+# nobody is listening at: `requested_mode` becomes borderless and the effective
+# mode never does. The summary line reports the *effective* one, so a refused
+# fullscreen has to read `windowed` — and a game that echoed its own request
+# would say `borderless` here and be wrong on every WM-less X session, every
+# kiosk and every tiling setup that ignores the hint.
+#
+# That is the same distinction `run-wayland-e2e.sh` checks from the other side,
+# where sway honours it. Between them the two harnesses cover both answers a
+# window system can give.
 SANDBOX_LOG="${RUNTIME_DIR}/sandbox.log"
+SANDBOX_FRAMES=120
+
+# `run_sandbox <backend> [windowed|fullscreen]`
 run_sandbox() {
     local backend="$1"
-    echo "crcbl e2e: running the sandbox against Xvfb on the $backend GPU backend"
+    local mode="${2:-windowed}"
+    local flags=(--backend "$backend" --frames "$SANDBOX_FRAMES" --title "crcbl e2e sandbox")
+    [ "$mode" = "fullscreen" ] && flags+=(--fullscreen)
+
+    echo "crcbl e2e: running the sandbox $mode against Xvfb on the $backend GPU backend"
     set +e
     CRCBL_SHELL=x11 \
     CRCBL_VK_VALIDATION=1 \
     CRCBL_LOG="${CRCBL_E2E_SANDBOX_LOG:-info}" \
         cargo run --locked --quiet --package sandbox -- \
-        --backend "$backend" --frames 30 --title "crcbl e2e sandbox" 2>&1 | tee "$SANDBOX_LOG"
+        "${flags[@]}" 2>&1 | tee "$SANDBOX_LOG"
     local status=${PIPESTATUS[0]}
     set -e
     if [ "$status" -ne 0 ]; then
@@ -239,20 +258,37 @@ run_sandbox() {
         log_tail
         exit "$status"
     fi
-    if ! grep -q "30 frames" "$SANDBOX_LOG" || ! grep -q "x11 shell" "$SANDBOX_LOG"; then
-        echo "crcbl e2e: the sandbox did not report 30 frames on the x11 shell" >&2
+    if ! grep -q "$SANDBOX_FRAMES frames" "$SANDBOX_LOG" \
+        || ! grep -q "x11 shell" "$SANDBOX_LOG"; then
+        echo "crcbl e2e: the sandbox did not report $SANDBOX_FRAMES frames on the x11 shell" >&2
         cat "$SANDBOX_LOG" >&2
         log_tail
         exit 1
     fi
-    echo "crcbl e2e: the sandbox presented 30 frames on x11/$backend"
+
+    # With a window manager running — `CRCBL_E2E_X11_WM` — the request may well
+    # be honoured, and asserting the refusal would then be asserting that the WM
+    # is broken.
+    if [ "$mode" = "fullscreen" ] && [ -z "${CRCBL_E2E_X11_WM:-}" ]; then
+        if ! grep -q ", windowed (" "$SANDBOX_LOG"; then
+            echo "crcbl e2e: --fullscreen with no window manager must report 'windowed'; \
+a run that echoed its own request would pass a check it should fail" >&2
+            cat "$SANDBOX_LOG" >&2
+            log_tail
+            exit 1
+        fi
+        echo "crcbl e2e: --fullscreen was refused and reported as refused on x11/$backend"
+        return
+    fi
+    echo "crcbl e2e: the sandbox presented $SANDBOX_FRAMES frames on x11/$backend"
 }
 
 # See the equivalent block in `run-wayland-e2e.sh` for why the loader probe is a
 # skip on a developer machine and a hard failure in CI.
 if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so.1 ] \
     || ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1'; then
-    run_sandbox vk
+    run_sandbox vk windowed
+    run_sandbox vk fullscreen
 else
     echo "crcbl e2e: no Vulkan loader; skipping the vk sandbox pass" >&2
     if [ -n "${CI:-}" ]; then
@@ -260,4 +296,4 @@ else
         exit 1
     fi
 fi
-run_sandbox null
+run_sandbox null windowed

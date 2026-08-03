@@ -32,6 +32,9 @@ OPTIONS:
     --tick-hz <N>        Simulation rate in Hz (default 60). Sets the server's
                          clock, the ECS timestep and every integrator.
     --backend <B>        GPU backend: vk, vulkan, null, none or wgpu
+    --fullscreen         Open borderless instead of windowed. F11 still toggles.
+                         A window system may refuse; the summary reports what
+                         it actually did, not what was asked for.
     --seed <N>           Run seed. The same seed is the same horde.
     --max-enemies <N>    Ceiling on live enemies (default 1500). The plan's
                          target is 10000; raising it is what the scale

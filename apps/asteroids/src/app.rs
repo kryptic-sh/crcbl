@@ -156,7 +156,7 @@ pub fn with_shell<S: Shell + ?Sized>(
     options: &Options,
 ) -> Result<Loop<S>, AsteroidsError> {
     let clock_source = Clock::new(options.common.headless);
-    let window = open_the_window(shell.as_mut(), &clock_source)?;
+    let window = open_the_window(shell.as_mut(), &clock_source, options.common.display_mode())?;
 
     let mut events = 0;
     let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
@@ -342,6 +342,7 @@ impl HostedGame for Asteroids {
 fn open_the_window<S: Shell + ?Sized>(
     shell: &mut S,
     clock_source: &Clock,
+    mode: DisplayMode,
 ) -> Result<WindowId, AsteroidsError> {
     Ok(crcbl::engine::open_window(
         shell,
@@ -350,6 +351,9 @@ fn open_the_window<S: Shell + ?Sized>(
             title: "Asteroids",
             app_id: "sh.kryptic.crcbl.asteroids",
             size: LogicalSize::new(960.0, 720.0),
+            // Asked for at creation rather than switched to afterwards, so
+            // `--fullscreen` does not show a decorated window first.
+            mode,
             ..WindowDesc::default()
         },
     )?)
@@ -382,7 +386,7 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
         options: &Options,
         clock_source: Clock,
     ) -> Result<Self, AsteroidsError> {
-        let window = open_the_window(shell.as_mut(), &clock_source)?;
+        let window = open_the_window(shell.as_mut(), &clock_source, options.common.display_mode())?;
         Ok(Self {
             boot: crcbl::engine::PolledBoot::request(
                 shell,

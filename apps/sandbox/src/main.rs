@@ -32,13 +32,17 @@ fn main() -> ExitCode {
         Invocation::Run(options) => match app::run(&options) {
             Ok(summary) => {
                 println!(
-                    "sandbox: {} frames, {} ticks, {} events on the {} shell at {}x{} ({:?})",
+                    "sandbox: {} frames, {} ticks, {} events on the {} shell at {}x{}, \
+                     {} ({:?})",
                     summary.frames,
                     summary.ticks,
                     summary.events,
                     summary.backend,
                     summary.extent.0,
                     summary.extent.1,
+                    // What the window system actually did, not what
+                    // `--fullscreen` asked for. It is free to refuse.
+                    summary.mode,
                     summary.exit,
                 );
                 ExitCode::SUCCESS

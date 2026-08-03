@@ -21,7 +21,7 @@ fn main() -> ExitCode {
         Invocation::Run(options) => match run(&options) {
             Ok(summary) => {
                 println!(
-                    "horde: {} frames, {} ticks on the {} shell at {}x{} \
+                    "horde: {} frames, {} ticks on the {} shell at {}x{}, {} \
                      (survived {:.1}s, {} kills, level {}, {} enemies left, \
                      scene {:?}, {:?}, {:?})",
                     summary.frames,
@@ -29,6 +29,9 @@ fn main() -> ExitCode {
                     summary.backend,
                     summary.extent.0,
                     summary.extent.1,
+                    // What the window system actually did, not what
+                    // `--fullscreen` asked for. It is free to refuse.
+                    summary.mode,
                     summary.elapsed,
                     summary.kills,
                     summary.level,

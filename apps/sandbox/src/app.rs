@@ -140,6 +140,11 @@ pub struct Options {
     pub title: String,
     /// Which projection the camera uses — milestone 5.
     pub camera: CameraMode,
+    /// Whether to open the window borderless rather than windowed.
+    ///
+    /// A *request*. `F11` toggles from either starting point, and a window
+    /// system is free to refuse both — see [`Options::display_mode`].
+    pub fullscreen: bool,
     /// Whether the debug overlay starts visible, or `None` for the default.
     ///
     /// Three-valued because the default is not a constant:
@@ -158,6 +163,7 @@ impl Default for Options {
             tick_hz: 60,
             title: "Crucible sandbox".to_string(),
             camera: CameraMode::default(),
+            fullscreen: false,
             debug_overlay: None,
         }
     }
@@ -179,6 +185,19 @@ impl Options {
     #[must_use]
     pub fn debug_overlay_visible(&self) -> bool {
         self.debug_overlay.unwrap_or(cfg!(debug_assertions))
+    }
+
+    /// The mode to create the window in.
+    ///
+    /// The same answer [`crcbl::args::Common::display_mode`] gives the four
+    /// games; the sandbox predates that shared parser and still has its own.
+    #[must_use]
+    pub const fn display_mode(&self) -> DisplayMode {
+        if self.fullscreen {
+            DisplayMode::Borderless { monitor: None }
+        } else {
+            DisplayMode::Windowed
+        }
     }
 }
 
@@ -296,6 +315,9 @@ pub fn with_shell<S: Shell + ?Sized>(
         title: &options.title,
         app_id: "sh.kryptic.crcbl.sandbox",
         size: LogicalSize::new(1280.0, 720.0),
+        // Asked for at creation rather than switched to afterwards, so
+        // `--fullscreen` does not show a decorated window first.
+        mode: options.display_mode(),
         ..WindowDesc::default()
     })?;
 
@@ -468,6 +490,7 @@ mod tests {
             tick_hz: 60,
             title: "test".to_string(),
             camera: CameraMode::Perspective,
+            fullscreen: false,
             debug_overlay: None,
         }
     }

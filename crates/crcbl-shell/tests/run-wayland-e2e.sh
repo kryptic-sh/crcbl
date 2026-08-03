@@ -168,16 +168,59 @@ echo "crcbl e2e: $RAN tests ran against headless sway"
 # `CRCBL_SHELL=wayland` rather than letting the registry choose: this job exists
 # to test *this* backend, and a silent fallback would report success for the
 # other one.
+# On Vulkan it also runs in **both display modes**, which is the only place in
+# CI where a game-level fullscreen is asked for and actually granted. The shell
+# suite above covers `DisplayMode` at the seam; this covers what a player gets —
+# a window system that honours the request, a swapchain rebuilt at the size it
+# hands back, and a summary line reporting the mode the compositor settled on
+# rather than the one that was asked for.
+#
+# The sway config floats this `app_id` on purpose. Tiled, a lone window fills the
+# output, and "windowed" and "borderless" would report the same extent — an
+# assertion that cannot fail.
+#
+# **The null backend is excluded from the mode assertions, and not out of
+# caution.** It presents by doing nothing, so no `wl_buffer` is ever attached to
+# the surface, so the surface never maps: `swaymsg -t get_tree` lists no
+# `app_id` at all for a null-backend run, where a Vulkan one lists
+# `sh.kryptic.crcbl.sandbox`. An unmapped surface gets no fullscreen configure —
+# the same fact `an_unmapped_surface_gets_no_fullscreen_configure` asserts in
+# the suite above — so the window it reports is the size it asked for and the
+# mode it asked for, whatever the compositor thinks. Asserting a mode there
+# would be asserting against a window the compositor does not have.
 SANDBOX_LOG="${RUNTIME_DIR}/sandbox.log"
+
+# The size the sandbox asks for, which a floating window gets.
+SANDBOX_WINDOWED="1280x720"
+# The output declared in `wayland-e2e-sway.conf`, which is what fullscreen means.
+SANDBOX_BORDERLESS="1920x1080"
+# Long enough that the fullscreen configure has certainly arrived and been acted
+# on: bring-up waits for the *first* configure, and the compositor's answer to
+# the fullscreen request can be the second. The null backend presents a frame in
+# well under a millisecond, so a small budget here would be a race rather than a
+# test.
+SANDBOX_FRAMES=120
+
+# `run_sandbox <backend> [windowed|fullscreen]`
 run_sandbox() {
     local backend="$1"
-    echo "crcbl e2e: running the sandbox against sway on the $backend GPU backend"
+    local mode="${2:-windowed}"
+    local flags=(--backend "$backend" --frames "$SANDBOX_FRAMES" --title "crcbl e2e sandbox")
+    local want_mode="windowed"
+    local want_extent="$SANDBOX_WINDOWED"
+    if [ "$mode" = "fullscreen" ]; then
+        flags+=(--fullscreen)
+        want_mode="borderless"
+        want_extent="$SANDBOX_BORDERLESS"
+    fi
+
+    echo "crcbl e2e: running the sandbox $mode against sway on the $backend GPU backend"
     set +e
     CRCBL_SHELL=wayland \
     CRCBL_VK_VALIDATION=1 \
     CRCBL_LOG="${CRCBL_E2E_SANDBOX_LOG:-info}" \
         cargo run --locked --quiet --package sandbox -- \
-        --backend "$backend" --frames 30 --title "crcbl e2e sandbox" 2>&1 | tee "$SANDBOX_LOG"
+        "${flags[@]}" 2>&1 | tee "$SANDBOX_LOG"
     local status=${PIPESTATUS[0]}
     set -e
     if [ "$status" -ne 0 ]; then
@@ -185,13 +228,32 @@ run_sandbox() {
         log_tail
         exit "$status"
     fi
-    if ! grep -q "30 frames" "$SANDBOX_LOG" || ! grep -q "wayland shell" "$SANDBOX_LOG"; then
-        echo "crcbl e2e: the sandbox did not report 30 frames on the wayland shell" >&2
+    if ! grep -q "$SANDBOX_FRAMES frames" "$SANDBOX_LOG" \
+        || ! grep -q "wayland shell" "$SANDBOX_LOG"; then
+        echo "crcbl e2e: the sandbox did not report $SANDBOX_FRAMES frames on the wayland shell" >&2
         cat "$SANDBOX_LOG" >&2
         log_tail
         exit 1
     fi
-    echo "crcbl e2e: the sandbox presented 30 frames on wayland/$backend"
+    # Only a backend that attaches buffers has a window the compositor can have
+    # an opinion about — see the header above.
+    if [ "$backend" = "null" ]; then
+        echo "crcbl e2e: the sandbox presented $SANDBOX_FRAMES frames on wayland/null \
+(no mode assertion: nothing is mapped)"
+        return
+    fi
+
+    # The mode the compositor settled on, and the extent that goes with it. Both
+    # come off one line, so a run that reported borderless at the windowed size
+    # — a swapchain that never caught up with the configure — fails here.
+    if ! grep -q "at ${want_extent}, ${want_mode} " "$SANDBOX_LOG"; then
+        echo "crcbl e2e: asked for $mode and did not get '${want_extent}, ${want_mode}'" >&2
+        cat "$SANDBOX_LOG" >&2
+        log_tail
+        exit 1
+    fi
+    echo "crcbl e2e: the sandbox presented $SANDBOX_FRAMES frames \
+$want_mode at $want_extent on wayland/$backend"
 }
 
 # Vulkan first, and only when there is a loader to run it on: this harness is
@@ -200,7 +262,11 @@ run_sandbox() {
 # that never claimed to have Vulkan. CI installs the drivers, so CI runs it.
 if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so.1 ] \
     || ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1'; then
-    run_sandbox vk
+    run_sandbox vk windowed
+    # Both modes on the backend that builds a real `VkSwapchainKHR`, because
+    # a fullscreen configure is a swapchain recreation and that is the half a
+    # recording backend cannot get wrong.
+    run_sandbox vk fullscreen
 else
     echo "crcbl e2e: no Vulkan loader; skipping the vk sandbox pass" >&2
     if [ -n "${CI:-}" ]; then
@@ -208,4 +274,4 @@ else
         exit 1
     fi
 fi
-run_sandbox null
+run_sandbox null windowed

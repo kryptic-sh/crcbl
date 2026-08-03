@@ -36,7 +36,8 @@ use core::time::Duration;
 use crcbl::args::{Common, Consumed};
 use crcbl::engine::{
     Clock, ExitReason, Flow, FrameBudget, FrameOutcome, GpuContext, GpuContextDesc, GpuError,
-    LoopError, Pending, WINDOWED_IDLE, accept_close, open_window, run_ticks, wait_for_configure,
+    LoopError, ModeRequest, Pending, WINDOWED_IDLE, accept_close, open_window, run_ticks,
+    wait_for_configure,
 };
 use crcbl::hal::{CommandEncoderDesc, Format, ResourceState};
 use crcbl::prelude::*;
@@ -58,6 +59,14 @@ pub struct Summary {
     pub events: u64,
     /// The swapchain's size when the loop stopped.
     pub extent: (u32, u32),
+    /// The mode the window system actually had the window in.
+    ///
+    /// **Not the one `--fullscreen` asked for.** A library consumer has to read
+    /// this back the same way the engine's own loop does, which is the point of
+    /// carrying it here: `crcbl::engine::ModeRequest::mode` is public, and a
+    /// hand-written loop that reported its request instead would say
+    /// "borderless" for every window system that refused.
+    pub mode: DisplayMode,
     /// Why it stopped.
     pub exit: ExitReason,
 }
@@ -121,6 +130,9 @@ impl<S: Shell + ?Sized> Bare<S> {
                 title: "crcbl — bare",
                 app_id: "sh.kryptic.crcbl.bare",
                 size: LogicalSize::new(640.0, 480.0),
+                // Asked for at creation rather than switched to afterwards, so
+                // `--fullscreen` does not show a decorated window first.
+                mode: options.display_mode(),
                 ..WindowDesc::default()
             },
         )?;
@@ -275,6 +287,7 @@ impl<S: Shell + ?Sized> Bare<S> {
             ticks: self.ticks,
             events: self.events,
             extent: self.gpu.extent(),
+            mode: ModeRequest::mode(&*self.shell, self.window),
             exit,
         };
         let gpu_result = self.gpu.destroy();
@@ -331,6 +344,9 @@ OPTIONS:
     --tick-hz <N>        Simulation rate in Hz (default 60). Sets the server's
                          clock, the ECS timestep and every integrator.
     --backend <B>        GPU backend: vk, vulkan, null, none or wgpu
+    --fullscreen         Open borderless instead of windowed. F11 still toggles.
+                         A window system may refuse; the summary reports what
+                         it actually did, not what was asked for.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'

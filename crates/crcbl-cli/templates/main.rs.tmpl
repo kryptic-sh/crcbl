@@ -508,6 +508,9 @@ fn start(options: &Common) -> Result<crcbl::engine::Loop<dyn Shell, Game>, Error
             title: NAME,
             app_id: APP_ID,
             size: WINDOW_SIZE,
+            // Asked for at creation rather than switched to afterwards, so
+            // `--fullscreen` does not show a decorated window first.
+            mode: options.display_mode(),
             ..WindowDesc::default()
         },
     )?;
@@ -579,13 +582,17 @@ fn main() -> ExitCode {
     match parse(std::env::args().skip(1)) {
         Invocation::Run(options) => match start(&options).and_then(drive) {
             Ok(summary) => {
+                // `summary.mode` is what the window system actually did, not
+                // what `--fullscreen` asked for. A compositor is free to
+                // refuse, and a line that echoed the request would hide it.
                 println!(
-                    "{NAME}: {} frames, {} ticks on the {} shell at {}x{} ({:?})",
+                    "{NAME}: {} frames, {} ticks on the {} shell at {}x{}, {} ({:?})",
                     summary.frames,
                     summary.ticks,
                     summary.backend,
                     summary.extent.0,
                     summary.extent.1,
+                    summary.mode,
                     summary.exit,
                 );
                 ExitCode::SUCCESS
