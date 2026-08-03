@@ -722,7 +722,7 @@ fn open_the_window<S: Shell + ?Sized>(
 ///
 /// The state machine, the pump and the resize-during-start-up race are
 /// [`crcbl::engine::PolledBoot`]'s; all that is left here is this game's
-/// `Options` and the [`Loop::assemble`] call the engine deliberately stops
+/// `Options` and the `Loop::assemble` call the engine deliberately stops
 /// short of.
 #[derive(Debug)]
 pub struct PendingLoop<S: Shell + ?Sized = dyn Shell> {
