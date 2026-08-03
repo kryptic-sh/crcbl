@@ -1,41 +1,45 @@
-//! The flappy engine loop: window, scrolling orthographic camera, render graph.
+//! Flappy's start-up, and the seven methods the engine's loop calls.
 //!
-//! Shape matches `apps/breakout/src/app.rs` — same clock, same event loop, same
-//! fixed-timestep accumulator. What differs is the camera, which moves, and the
-//! draw, which places everything against where the camera is rather than against
-//! the origin.
+//! # There is no loop in this file
 //!
-//! # The loop
+//! There was, and it was the same four hundred lines as breakout's: pump the
+//! shell, route the input, run the ticks the clock owes, lay out the menu, draw
+//! the panel, present, count the frame, tear it all down. All of that is
+//! [`crcbl::engine::Loop`]'s now and this crate reaches it through
+//! [`HostedGame`].
 //!
 //! ```text
-//! loop {
-//!     shell.pump(&mut |event| …);
-//!     clock.update(time.elapsed());
-//!     while clock.consume_tick() { game.tick(); }
-//!     render();
-//! }
+//! Loop::frame()                     ← the engine's
+//!   pump, input, menu, pause, resize
+//!   run_ticks  ─────────────────────→ Flappy::tick
+//!   draw_list.clear()
+//!     ─────────────────────────────→ Flappy::draw     (course + bird + HUD)
+//!     menu, debug overlay             ← the engine's
+//!   gpu.frame()
 //! ```
 //!
-//! **The simulation is in the `while`, not after it.** Anything stepped once per
-//! frame has a speed proportional to the frame rate, which a headless run —
-//! where a frame is pinned to exactly 1/60 s — cannot see.
-
-use core::time::Duration;
+//! **The simulation is still inside `run_ticks`'s `while`, not after it.**
+//! Anything stepped once per frame has a speed proportional to the frame rate,
+//! which a headless run — where a frame is pinned to exactly 1/60 s — cannot
+//! see. The same rule governs the bird's wing: [`Flappy::draw`] advances the
+//! animation by [`FrameInfo::ticks`], so a paused frame holds it still.
+//!
+//! What is left here is start-up ([`start`], [`with_shell`], [`PendingLoop`]),
+//! because a window's title and a game's seed are this game's, and the seven
+//! [`HostedGame`] methods, because they are what a game is.
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Clock, ExitReason, Flow, FrameBudget, Handled, MAX_FRAME_STEP, MenuPump, ModeRequest,
-    PointerCapture, WINDOWED_IDLE, accept_close, lose_focus, run_ticks, wait_for_configure,
+    Booted, Clock, ExitReason, FrameInfo, HostedGame, LoopConfig, RunSummary, wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{
     DisplayMode, LogicalSize, ShellBackend as Backend, WindowId, open, open_backend,
 };
-use crcbl::ui::DebugOverlay;
 
 use crate::game::{self, Game, GameState, RenderState};
 use crate::gpu::Gpu;
-use crate::menu::{self, MenuAction, MenuKind, Menus};
+use crate::menu::{self, Flap, MenuKind, Menus};
 
 pub use crate::args::Options;
 
@@ -55,7 +59,7 @@ pub struct Summary {
     ///
     /// Beside `state` rather than inside it: pause is the loop declining to
     /// advance the simulation, not a state the simulation is in. See
-    /// [`Loop::is_paused`].
+    /// [`crcbl::engine::Loop::is_paused`].
     pub paused: bool,
     /// The mode the window system actually had the window in, **not** the one
     /// the run last asked for. A summary that reported the request would say
@@ -74,7 +78,7 @@ pub struct Summary {
 /// `.map_err(FlappyError::Game)` — while the engine's three convert with `?`.
 pub type FlappyError = crcbl::engine::LoopError<game::GameError>;
 
-// ---- the loop ---------------------------------------------------------------
+// ---- the game ---------------------------------------------------------------
 
 /// The key a menu's `FLY` and `TRY AGAIN` buttons stand for.
 ///
@@ -83,56 +87,28 @@ pub type FlappyError = crcbl::engine::LoopError<game::GameError>;
 /// is driven by its action map.
 const FLAP_KEY: KeyCode = KeyCode::Space;
 
+/// Flappy, as the engine's loop hosts it.
+///
+/// **The loop is not here any more.** The pump, the input routing, the
+/// fixed-step accumulator, the menu, the debug panel, the budget and teardown
+/// are [`crcbl::engine::Loop`]'s, and were the same in all five samples. What is
+/// left is what was always flappy's: the simulation, the state it renders from,
+/// and its HUD.
 #[derive(Debug)]
-pub struct Loop<S: Shell + ?Sized = dyn Shell> {
-    shell: Box<S>,
-    window: WindowId,
-    gpu: Gpu,
+pub struct Flappy {
     game: Game,
-    clock_source: Clock,
-    frame_clock: FrameClock,
-    /// Reused every frame, so a steady-state frame does not allocate a fresh
-    /// draw list or pipe vector.
-    draw_list: crcbl::ui::draw_list::DrawList,
+    /// Refilled from the simulation every frame, so a steady-state frame does
+    /// not allocate a fresh pipe vector.
     render_state: RenderState,
     hud: HudStrings,
-    /// The start, pause and game-over menus, and which is on screen.
-    menus: Menus,
-    /// Where the pointer was last seen and whether its button is down.
-    ///
-    /// Both are needed across frames — see [`PointerCapture`].
-    pointer: PointerCapture,
-    /// The modular debug panel: frame timing always, GPU pass timings when the
-    /// device has timestamp queries, and nothing else — flappy runs over
-    /// `InMemoryTransport`, so it has no network module to add.
-    debug: DebugOverlay,
-    /// Whether the simulation is stopped.
-    ///
-    /// **The loop owns this, not [`GameState`].** `GameState` lives inside
-    /// `GameLogic`, which the authoritative server's module mutates from inside
-    /// a tick and which the client replicates; a `Paused` variant there would
-    /// make the server's state depend on which window a player's compositor has
-    /// focused, and would put a value in `Summary::state` that a seeded,
-    /// scripted run could reach. Pause is not something the simulation does —
-    /// it is the loop declining to advance it.
-    paused: bool,
-    /// Keys forwarded to the game as pressed and not yet released.
-    ///
-    /// [`ShellEvent::Focus`] documents the obligation this discharges: no
-    /// platform delivers releases for keys held when focus leaves, so a
-    /// consumer that keeps its own key state must clear it. A `Vec` because a
-    /// hand holds three keys, not three hundred.
-    held_keys: Vec<KeyCode>,
-    /// The fullscreen request, and whether the window system agreed — see
-    /// [`ModeRequest`].
-    mode: ModeRequest,
-    /// Presented frames, the budget they count against, and the guard that
-    /// makes the budget reachable — see [`FrameBudget`].
-    budget: FrameBudget,
-    ticks: u64,
-    events: u64,
-    windowed: bool,
 }
+
+/// The loop flappy runs in.
+///
+/// A type alias, because the loop is the engine's. `S` is the shell type: the
+/// native and browser paths both build `Loop<dyn Shell>`, and the tests build
+/// `Loop<HeadlessShell>` so they can inject the events a compositor would send.
+pub type Loop<S = dyn Shell> = crcbl::engine::Loop<S, Flappy>;
 
 /// Runs the full loop.
 ///
@@ -142,460 +118,191 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
 /// every path: a failing frame must still release the swapchain, the surface and
 /// the window, or `crcbl-vk`'s device teardown logs objects still alive.
 pub fn run(options: &Options) -> Result<Summary, FlappyError> {
-    crcbl::engine::drive(Loop::start(options)?)
+    crcbl::engine::drive(start(options)?)
 }
 
-impl Loop<dyn Shell> {
-    /// Opens a shell, a window, a GPU and the game.
-    ///
-    /// # Errors
-    ///
-    /// [`FlappyError`] if any of them refused.
-    pub fn start(options: &Options) -> Result<Self, FlappyError> {
-        let shell = if options.common.headless {
-            open_backend(Backend::Headless).map_err(FlappyError::Shell)?
-        } else {
-            open().map_err(FlappyError::NoWindowSystem)?
-        };
-        Self::with_shell(shell, options)
-    }
+/// Opens a shell, a window, a GPU and the game.
+///
+/// # Errors
+///
+/// [`FlappyError`] if any of them refused.
+pub fn start(options: &Options) -> Result<Loop, FlappyError> {
+    let shell = if options.common.headless {
+        open_backend(Backend::Headless).map_err(FlappyError::Shell)?
+    } else {
+        open().map_err(FlappyError::NoWindowSystem)?
+    };
+    with_shell(shell, options)
 }
 
-impl<S: Shell + ?Sized> Loop<S> {
-    /// Builds the loop on an already-open shell.
-    ///
-    /// # Errors
-    ///
-    /// [`FlappyError`] if the window never configured, the GPU would not open,
-    /// or the game could not be built.
-    pub fn with_shell(mut shell: Box<S>, options: &Options) -> Result<Self, FlappyError> {
-        let clock_source = Clock::new(options.common.headless);
-        let window = open_the_window(shell.as_mut(), &clock_source)?;
+/// Builds the loop on an already-open shell, blocking on both waits.
+///
+/// The browser cannot use this — a main thread may not sit in
+/// [`wait_for_configure`] — and takes [`PendingLoop`] instead. What the two
+/// share is everything after the waiting, which is [`assemble`].
+///
+/// # Errors
+///
+/// [`FlappyError`] if the window never configured, the GPU would not open, or
+/// the game could not be built.
+pub fn with_shell<S: Shell + ?Sized>(
+    mut shell: Box<S>,
+    options: &Options,
+) -> Result<Loop<S>, FlappyError> {
+    let clock_source = Clock::new(options.common.headless);
+    let window = open_the_window(shell.as_mut(), &clock_source)?;
 
-        let mut events = 0;
-        let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
-        crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+    let mut events = 0;
+    let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
+    crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
 
-        let gpu = Gpu::open(shell.as_ref(), window, extent, options.common.backend)?;
-        Self::assemble(shell, window, gpu, options, clock_source, events)
-    }
-
-    /// The half of start-up that is the same however the GPU arrived.
-    ///
-    /// Shared with [`PendingLoop::poll`], which reaches this point several rAF
-    /// frames later. A second copy of this struct literal is how the browser
-    /// build would come to run a subtly different game from the native one.
-    fn assemble(
-        shell: Box<S>,
-        window: WindowId,
-        gpu: Gpu,
-        options: &Options,
-        clock_source: Clock,
-        events: u64,
-    ) -> Result<Self, FlappyError> {
-        let game = Game::with_seed(
-            options.common.headless,
-            options.common.tick_hz,
-            options.seed,
-        )
-        .map_err(FlappyError::Game)?;
-        Ok(Self {
-            windowed: !options.common.headless,
+    let gpu = Gpu::open(shell.as_ref(), window, extent, options.common.backend)?;
+    assemble(
+        Booted {
             shell,
             window,
             gpu,
-            game,
             clock_source,
-            frame_clock: FrameClock::new(options.common.tick_hz),
-            draw_list: crcbl::ui::draw_list::DrawList::new(),
+            events,
+        },
+        options,
+    )
+}
+
+/// The half of start-up that is the same however the GPU arrived.
+///
+/// [`Booted`] is what both bring-up paths hand over, so the game is built and
+/// the loop assembled in one place rather than one per path — a second copy is
+/// how the browser build would come to run a subtly different game.
+///
+/// # Errors
+///
+/// [`FlappyError`] if the game could not be built.
+fn assemble<S: Shell + ?Sized>(
+    booted: Booted<S, Gpu>,
+    options: &Options,
+) -> Result<Loop<S>, FlappyError> {
+    let game = Game::with_seed(
+        options.common.headless,
+        options.common.tick_hz,
+        options.seed,
+    )
+    .map_err(FlappyError::Game)?;
+    Ok(Loop::new(
+        booted,
+        Flappy {
+            game,
             render_state: RenderState::default(),
             hud: HudStrings::default(),
-            menus: menu::menus(),
-            pointer: PointerCapture::new(),
-            debug: DebugOverlay::with_visible(options.common.debug_overlay_visible()),
-            paused: false,
-            held_keys: Vec::new(),
-            mode: ModeRequest::new(),
-            ticks: 0,
-            events,
-            budget: FrameBudget::new(options.common.frame_budget()),
-        })
+        },
+        LoopConfig {
+            tick_hz: options.common.tick_hz,
+            frames: options.common.frame_budget(),
+            debug_overlay: options.common.debug_overlay_visible(),
+            windowed: !options.common.headless,
+        },
+    ))
+}
+
+impl Flappy {
+    /// The simulation, for scripted tests and for an embedder that drives it.
+    pub const fn game(&self) -> &Game {
+        &self.game
     }
 
-    /// Sets how far one [`frame`](Self::frame) advances a manual clock.
-    ///
-    /// **The browser's clock is the browser's.** `Clock::Real` reads
-    /// [`std::time::Instant`], which on `wasm32-unknown-unknown` has no
-    /// implementation at all and panics on the first `now()`. `dt` is clamped to
-    /// [`MAX_FRAME_STEP`]: a backgrounded tab resumes with a multi-second gap,
-    /// and feeding that to the accumulator spends the next frame running
-    /// thousands of ticks.
-    pub fn set_frame_step(&mut self, dt: Duration) {
-        if let Clock::Manual { step, .. } = &mut self.clock_source {
-            *step = dt.min(MAX_FRAME_STEP);
-        }
-    }
-
-    /// The game, for scripted tests and for an embedder that wants to drive it.
-    #[cfg(test)]
-    pub fn game_mut(&mut self) -> &mut Game {
+    /// The simulation, mutably. See [`Flappy::game`].
+    pub const fn game_mut(&mut self) -> &mut Game {
         &mut self.game
     }
+}
 
-    /// The shell, at whatever type this loop was built with — so a test can
-    /// inject the key events a compositor would deliver.
-    #[cfg(test)]
-    fn shell_mut(&mut self) -> &mut S {
-        self.shell.as_mut()
+/// Flappy's half of the frame, and nothing else.
+impl HostedGame for Flappy {
+    type Error = game::GameError;
+    type Gpu = Gpu;
+    type MenuKind = MenuKind;
+    type MenuAction = Flap;
+    type Summary = Summary;
+
+    const NAME: &'static str = "flappy";
+
+    fn menus() -> Menus {
+        menu::menus()
     }
 
-    /// The window this loop is driving.
-    #[cfg(test)]
-    const fn window(&self) -> WindowId {
-        self.window
+    fn tick(&mut self, _gpu: &mut Gpu, _tick_dt: f32) {
+        self.game.tick();
     }
 
-    /// The swapchain's current extent, in pixels.
-    #[must_use]
-    pub const fn extent(&self) -> (u32, u32) {
-        self.gpu.extent()
+    fn key_event(&mut self, key: KeyCode, pressed: bool) {
+        // Forwarded to the game, which replays it at the start of the next
+        // tick. A frame that runs no ticks loses nothing.
+        self.game.key_event(key, pressed);
     }
 
-    /// One frame: pump, tick the simulation to catch up with the clock, draw.
-    ///
-    /// # Errors
-    ///
-    /// [`FlappyError`] if the shell or the GPU failed.
-    pub fn frame(&mut self) -> Result<Flow, FlappyError> {
-        if self.budget.is_spent() {
-            return Ok(Flow::Stop(ExitReason::FrameBudget));
-        }
-
-        if self.windowed {
-            self.shell.wait_events(Some(WINDOWED_IDLE));
-        }
-
-        // **Carrying the pointer, not defaulting it.** A batch with no pointer
-        // event in it has not moved the cursor, and a menu whose hover state
-        // reset every still frame would flicker.
-        let mut pending = self.pointer.pending();
-        let game = &mut self.game;
-        // **Last frame's menu, deliberately.** The pump runs before this
-        // frame's state is known, and the menu the player is pressing keys at
-        // is the one that was on screen when they pressed them.
-        let showing = self.menus.kind() != MenuKind::None;
-        let mut menu = MenuPump::new(&mut self.menus, &mut self.held_keys, showing);
-        self.shell.pump(&mut |event| {
-            // The window's business, the pointer, focus loss and the loop's
-            // three reserved keys are all folded by `Pending::observe`; the
-            // menu's three and the held-key list are `MenuPump`'s. What comes
-            // back from that is the key the *game* should see.
-            if pending.observe(&event) == Handled::Loop {
-                return;
-            }
-            // Forwarded to the game, which replays it at the start of the next
-            // tick. A frame that runs no ticks loses nothing.
-            if let Some((code, pressed)) = menu.observe(&event) {
-                game.key_event(code, pressed);
-            }
-        });
-        let keyboard_action = menu.activated.and_then(MenuAction::from_id);
-        self.events += pending.count;
-        // Hit-tested against **this** frame's layout, which is why the pointer
-        // is resolved here and not inside the pump: the rectangles depend on the
-        // framebuffer's size, and a click checked against last frame's would miss
-        // on the frame a resize lands. The press-capture rule under `resolve` is
-        // the engine's.
-        let pointer_input = self.pointer.resolve(&pending);
-        let pointer_action = self
-            .menus
-            .point(self.gpu.extent(), self.gpu.atlas(), pointer_input)
-            .and_then(MenuAction::from_id);
-        for action in [keyboard_action, pointer_action].into_iter().flatten() {
-            self.apply(action)?;
-        }
-        if pending.toggle_debug_overlay {
-            self.debug.toggle();
-        }
-        // Before the pause toggle, so a batch carrying both a focus loss and an
-        // Escape resolves as "paused, then the player unpaused" rather than the
-        // reverse.
-        if pending.focus_lost {
-            self.lose_focus();
-        }
-        if pending.toggle_pause {
-            self.paused = !self.paused;
-            crcbl::log::info!("game {}", if self.paused { "paused" } else { "resumed" });
-        }
-        if pending.toggle_fullscreen {
-            self.toggle_fullscreen()?;
-        }
-        self.check_mode_request();
-
-        if pending.destroyed {
-            return Ok(Flow::Stop(ExitReason::WindowDestroyed));
-        }
-        if pending.close_requested {
-            accept_close(self.shell.as_mut(), self.window)?;
-            return Ok(Flow::Stop(ExitReason::CloseRequested));
-        }
-        if let Some(size) = pending.resized {
-            self.gpu.resize((size.width, size.height))?;
-        }
-
-        let now = self.clock_source.advance();
-        self.frame_clock.update(now);
-        // The frame interval the clock just measured, recorded whether or not
-        // the panel is visible — a window that only fills while you are looking
-        // at it shows two seconds of nothing every time you press F3.
-        self.debug.record(self.frame_clock.render_dt());
-        // **A paused frame keeps the clock and throws the ticks away.** The
-        // three candidates differ only after a long pause, and only one of them
-        // resumes without a lurch:
-        //
-        // * *Stop calling `update`.* `FrameClock::update` measures `now -
-        //   last_update`, so the first update after the pause covers the whole
-        //   of it. `DEFAULT_MAX_CATCH_UP_TICKS` caps that at 8 ticks and
-        //   discards the rest, so resuming spends one frame running 133 ms of
-        //   simulation and the bird teleports through a pipe.
-        // * *Update but do not drain.* The accumulator saturates at the same
-        //   cap, so resuming runs the same 8 ticks in one frame. No better.
-        // * *Update and drain.* The accumulator holds only the sub-tick
-        //   remainder when the game resumes, so the first live frame runs the
-        //   one tick it is owed. This one.
-        //
-        // Draining also keeps `render_dt` real while paused, which is what the
-        // debug overlay above is recording.
-        let game = &mut self.game;
-        let ticks_this_frame = run_ticks(&mut self.frame_clock, self.paused, || game.tick());
-        self.ticks += ticks_this_frame;
-
-        self.game.render_state(&mut self.render_state);
-        self.gpu.set_world(&self.render_state);
-        // The bird's flap is on the simulation's clock, not the frame's — see
-        // `crate::art::Scene::advance`. A frame that ran no ticks advances it by
-        // nothing, which is what makes a paused game's bird hold still.
-        self.gpu.advance_animation(ticks_this_frame);
-
-        self.draw_list.clear();
-        self.hud.refresh(&self.render_state, self.paused);
-        draw_hud(&mut self.draw_list, &self.hud);
-        self.draw_menu();
-        self.draw_debug_overlay();
-        self.gpu.take_draw_list(&mut self.draw_list);
-
-        self.budget.record(self.gpu.frame()?)?;
-        Ok(Flow::Continue)
+    fn menu_action(id: crcbl::ui::WidgetId) -> Option<Flap> {
+        menu::flap_from_id(id)
     }
 
-    /// Whether the simulation is stopped.
-    #[must_use]
-    pub const fn is_paused(&self) -> bool {
-        self.paused
-    }
-
-    /// The mode the window system actually has this window in.
-    ///
-    /// Read back rather than remembered. There is deliberately no
-    /// `self.fullscreen` field to disagree with the compositor: a tiling window
-    /// manager makes the question moot, a browser page whose shim never calls
-    /// `requestFullscreen` never grants it, and both are cases where a
-    /// remembered flag would have the sample telling the player it is
-    /// fullscreen while it plainly is not.
-    ///
-    /// Falls back to the request while the window is unconfigured.
-    #[must_use]
-    pub fn display_mode(&self) -> DisplayMode {
-        ModeRequest::mode(self.shell.as_ref(), self.window)
-    }
-
-    /// What a fired menu button does.
-    ///
-    /// The one place a button becomes an effect, so a menu that grows a fourth
-    /// item cannot quietly do a fifth thing. Both input devices arrive here:
-    /// [`MENU_ACTIVATE_KEY`] and a click produce the same [`MenuAction`] and this
-    /// cannot tell them apart, which is what makes "the keyboard still works" and
-    /// "the mouse works too" the same sentence.
-    ///
-    /// # Errors
-    ///
-    /// [`FlappyError`] if the shell refused a display-mode change.
-    fn apply(&mut self, action: MenuAction) -> Result<(), FlappyError> {
+    fn apply(&mut self, action: Flap) {
         match action {
-            MenuAction::Resume => {
-                if self.paused {
-                    self.paused = false;
-                    crcbl::log::info!("game resumed");
-                }
-            }
             // A real key event rather than a call into `Game`: starting a run is
             // the simulation's business and the simulation is driven by its
             // action map, so a button that reached past it would be a second way
             // to start a game with its own bugs. The release is queued straight
             // after the press because a flap is an *edge* — a press with no
             // release leaves the action held for the rest of the run.
-            MenuAction::Flap => {
+            Flap::Wing => {
                 self.game.key_event(FLAP_KEY, true);
                 self.game.key_event(FLAP_KEY, false);
             }
-            MenuAction::Fullscreen => self.toggle_fullscreen()?,
-            MenuAction::DebugOverlay => self.debug.toggle(),
-        }
-        Ok(())
-    }
-
-    /// Picks this frame's menu, lays it out, and emits both halves of it.
-    ///
-    /// **Two halves, two passes.** The window frame and the buttons are
-    /// nine-sliced sprites and go to [`crcbl::render::MenuRenderer`]; the title
-    /// and the labels are text and go to the UI pass through the draw list.
-    /// `gpu.rs` declares the menu pass between the course and the UI for exactly
-    /// this reason.
-    ///
-    /// Called after the HUD and before the debug overlay: the scrim dims the
-    /// game *including its HUD*, and the overlay is a developer tool that must
-    /// stay legible on top of everything.
-    fn draw_menu(&mut self) {
-        self.menus
-            .show(MenuKind::of(self.paused, &self.render_state));
-        let layout = self
-            .menus
-            .current()
-            .map(|menu| menu.layout(self.gpu.extent(), self.gpu.atlas()));
-        match &layout {
-            Some(layout) => {
-                let menu = self.menus.current().expect("a layout implies a menu");
-                menu.render(&mut self.draw_list, layout);
-                self.gpu.set_menu(Some((menu, layout)));
-            }
-            None => self.gpu.set_menu(None),
         }
     }
 
-    /// Which menu this frame is showing, for the loop's own tests.
-    #[cfg(test)]
-    const fn menu_kind(&self) -> MenuKind {
-        self.menus.kind()
+    fn menu_kind(&self, paused: bool) -> MenuKind {
+        MenuKind::of(paused, &self.render_state)
     }
 
-    /// Where this frame's menu was laid out, for the loop's own tests — so a
-    /// scripted click lands on the button the player would have seen.
-    #[cfg(test)]
-    fn menu_layout(&self) -> Option<crcbl::ui::menu::MenuLayout> {
-        self.menus
-            .current()
-            .map(|menu| menu.layout(self.gpu.extent(), self.gpu.atlas()))
+    fn draw(
+        &mut self,
+        gpu: &mut Gpu,
+        draw_list: &mut crcbl::ui::draw_list::DrawList,
+        frame: FrameInfo,
+    ) {
+        self.game.render_state(&mut self.render_state);
+        gpu.set_world(&self.render_state);
+        // The bird's flap is on the simulation's clock, not the frame's — see
+        // `crate::art::Scene::advance`. A frame that ran no ticks advances it by
+        // nothing, which is what makes a paused game's bird hold still.
+        gpu.advance_animation(frame.ticks);
+        self.hud.refresh(&self.render_state, frame.paused);
+        draw_hud(draw_list, &self.hud);
     }
 
-    /// Every key the game thinks is held comes up, and the game pauses.
-    ///
-    /// Both halves, because they answer different problems. The releases are
-    /// [`ShellEvent::Focus`]'s documented obligation. The pause is the reported
-    /// bug: an unfocused window still gets frames on every desktop, so the bird
-    /// flies into a pipe while nobody is looking and the status still reads
-    /// "Playing".
-    ///
-    /// Regaining focus deliberately does **not** resume.
-    fn lose_focus(&mut self) {
-        let game = &mut self.game;
-        lose_focus(&mut self.held_keys, &mut self.paused, |key| {
-            game.key_event(key, false);
-        });
-    }
-
-    /// Asks for the mode the window is not in.
-    ///
-    /// The target comes from [`display_mode`](Self::display_mode) — the mode in
-    /// effect — rather than from what was last requested, so a fullscreen the
-    /// player left by some other route (Escape in a browser, a compositor
-    /// keybinding) leaves F11 meaning "go fullscreen" again.
-    fn toggle_fullscreen(&mut self) -> Result<(), FlappyError> {
-        Ok(ModeRequest::toggle(self.shell.as_mut(), self.window)?)
-    }
-
-    /// Logs the moment the window system stops agreeing with the request.
-    ///
-    /// Once per transition, not once per frame: a backend that cannot do
-    /// fullscreen at all would otherwise print a line every frame forever.
-    fn check_mode_request(&mut self) {
-        self.mode.check(self.shell.as_ref(), self.window);
-    }
-
-    /// Gathers this frame's debug sections and draws the panel.
-    ///
-    /// **This is the whole of "switching it on".** Frame timing comes with the
-    /// overlay; the only sample-specific line is the one that offers the GPU
-    /// timings, and it is a `Some` check because a device without timestamp
-    /// queries has no timers at all. Flappy adds nothing else — it runs over
-    /// `InMemoryTransport`, so there is no network module, and the panel renders
-    /// exactly the same way without one.
-    fn draw_debug_overlay(&mut self) {
-        self.debug.begin_frame();
-        if let Some(timings) = self.gpu.timings() {
-            self.debug.panel.add(timings);
-        }
-        let (width, height) = self.gpu.extent();
-        self.debug.render(
-            &mut self.draw_list,
-            crcbl::math::Vec2::new(width as f32, height as f32),
-            self.gpu.atlas(),
-        );
-    }
-
-    /// Tears the frame down and reports what the run did.
-    ///
-    /// # Errors
-    ///
-    /// [`FlappyError`] if the GPU or the shell failed to release something. Both
-    /// are attempted regardless: the window is destroyed even when the GPU
-    /// teardown failed, because leaving it mapped is strictly worse.
-    pub fn finish(mut self, exit: ExitReason) -> Result<Summary, FlappyError> {
-        if let Some(timings) = self.gpu.timings()
-            && !timings.is_empty()
-        {
-            crcbl::log::info!("{}", timings.report().trim_end());
-        }
-        let summary = Summary {
-            backend: self.shell.backend(),
-            frames: self.budget.presented(),
-            ticks: self.ticks,
-            events: self.events,
-            extent: self.gpu.extent(),
-            exit,
+    fn summary(&self, run: RunSummary) -> Summary {
+        Summary {
+            backend: run.backend,
+            frames: run.frames,
+            ticks: run.ticks,
+            events: run.events,
+            extent: run.extent,
+            exit: run.exit,
             score: self.game.score,
             state: self.game.state,
-            paused: self.paused,
-            mode: self.display_mode(),
-        };
-
-        let gpu_result = self.gpu.destroy();
-        let shell_result = if exit.window_survives() {
-            self.shell.destroy_window(self.window)
-        } else {
-            Ok(())
-        };
-        gpu_result?;
-        shell_result?;
-        Ok(summary)
-    }
-}
-
-/// Lets [`crcbl::engine::drive`] step this loop, and the browser's `App` step
-/// the same one.
-///
-/// Two forwards to the inherent methods, which stay because they are this
-/// crate's public surface: a test drives `frame` directly, and so does
-/// `crate::web`.
-impl<S: Shell + ?Sized> crcbl::engine::GameLoop for Loop<S> {
-    type Error = FlappyError;
-    type Summary = Summary;
-
-    fn frame(&mut self) -> Result<Flow, Self::Error> {
-        Self::frame(self)
+            paused: run.paused,
+            mode: run.mode,
+        }
     }
 
-    fn finish(self, exit: ExitReason) -> Result<Self::Summary, Self::Error> {
-        Self::finish(self, exit)
+    fn log_summary(summary: &Summary) {
+        crcbl::log::info!(
+            "flappy: {} frames, {} ticks, score {} ({:?}, {:?})",
+            summary.frames,
+            summary.ticks,
+            summary.score,
+            summary.state,
+            summary.exit,
+        );
     }
 }
 
@@ -669,15 +376,7 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
         let Some(booted) = self.boot.poll::<FlappyError>()? else {
             return Ok(None);
         };
-        Loop::assemble(
-            booted.shell,
-            booted.window,
-            booted.gpu,
-            &self.options,
-            booted.clock_source,
-            booted.events,
-        )
-        .map(Some)
+        assemble(booted, &self.options).map(Some)
     }
 }
 
@@ -786,11 +485,14 @@ mod tests {
     };
 
     use super::*;
+    use core::time::Duration;
+
     use crcbl::core::input::KeyCode;
+    use crcbl::engine::Flow;
     use crcbl::shell::HeadlessShell;
 
     fn scripted(options: &Options) -> Loop<HeadlessShell> {
-        Loop::with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
+        with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
     }
 
     /// Drives [`PendingLoop`] to completion on the headless shell.
@@ -852,7 +554,7 @@ mod tests {
     fn ui_text(engine: &Loop<HeadlessShell>) -> Vec<String> {
         use crcbl::ui::draw_list::DrawCommand;
         engine
-            .gpu
+            .gpu()
             .draw_list()
             .commands()
             .iter()
@@ -928,13 +630,13 @@ mod tests {
         engine.frame().expect("a frame");
 
         let titles: Vec<&str> = engine
-            .debug
+            .debug()
             .panel
             .sections()
             .iter()
             .map(crcbl::ui::DebugSection::title)
             .collect();
-        let expected: &[&str] = if engine.gpu.timings().is_some() {
+        let expected: &[&str] = if engine.gpu().timings().is_some() {
             &["frame", "gpu"]
         } else {
             &["frame"]
@@ -951,9 +653,9 @@ mod tests {
         // them, which is the failure a "the rows are present" assertion misses.
         // The first frame's interval is the clock's zero-length sentinel and is
         // dropped, so two frames leave exactly one sample: the headless step.
-        assert_eq!(engine.debug.frame.len(), 1, "one real interval so far");
+        assert_eq!(engine.debug().frame.len(), 1, "one real interval so far");
         assert_eq!(
-            engine.debug.frame.mean(),
+            engine.debug().frame.mean(),
             crcbl::engine::HEADLESS_FRAME_STEP,
             "the window holds the clock's own step",
         );
@@ -1009,9 +711,12 @@ mod tests {
     /// loop's tick placement observable end to end.
     #[test]
     fn the_loop_plays_the_game() {
-        let mut engine = Loop::start(&headless(200)).expect("headless runs everywhere");
-        engine.game_mut().key_event(KeyCode::Space, true);
-        engine.game_mut().key_event(KeyCode::Space, false);
+        let mut engine = start(&headless(200)).expect("headless runs everywhere");
+        engine.game_mut().game_mut().key_event(KeyCode::Space, true);
+        engine
+            .game_mut()
+            .game_mut()
+            .key_event(KeyCode::Space, false);
         while let Ok(Flow::Continue) = engine.frame() {}
         let summary = engine.finish(ExitReason::FrameBudget).expect("teardown");
         assert_ne!(
@@ -1034,7 +739,7 @@ mod tests {
                 seed,
                 ..headless(2)
             });
-            let pipes = engine.game.pipes();
+            let pipes = engine.game().game().pipes();
             engine.finish(ExitReason::FrameBudget).expect("teardown");
             pipes
         };
@@ -1052,9 +757,9 @@ mod tests {
     #[test]
     fn a_key_the_shell_reports_reaches_the_simulation() {
         let mut engine = scripted(&headless(30));
-        let window = engine.window;
+        let window = engine.window();
         engine
-            .shell
+            .shell_mut()
             .key_press(window, KeyCode::Space)
             .expect("the headless shell takes a key");
 
@@ -1065,7 +770,7 @@ mod tests {
         engine.frame().expect("a frame");
         engine.frame().expect("a second frame");
         assert_eq!(
-            engine.game.state,
+            engine.game().game().state,
             GameState::Playing,
             "the flap never got from the shell to the game"
         );
@@ -1099,14 +804,14 @@ mod tests {
     fn the_frame_hands_the_course_to_the_sprite_pass_and_the_hud_to_the_ui_pass() {
         use crcbl::ui::draw_list::{DrawCommand, DrawList};
 
-        let mut engine = Loop::start(&headless(4)).expect("headless runs everywhere");
+        let mut engine = start(&headless(4)).expect("headless runs everywhere");
         engine.frame().expect("a frame");
 
         let mut render = RenderState::default();
-        engine.game.render_state(&mut render);
+        engine.game().game().render_state(&mut render);
         assert!(!render.pipes.is_empty(), "the course is empty");
         assert_eq!(
-            engine.gpu.pipes(),
+            engine.gpu().pipes(),
             render.pipes.as_slice(),
             "the course never reached the renderer"
         );
@@ -1149,35 +854,38 @@ mod tests {
     /// simulation's goes forwards.
     #[test]
     fn a_flap_through_the_loop_restarts_the_wing_beat() {
-        let mut engine = Loop::start(&headless(40)).expect("headless runs everywhere");
+        let mut engine = start(&headless(40)).expect("headless runs everywhere");
 
         // Let the clip run on. The bird is parked and not flapping, so the only
         // thing moving is the animation.
         for _ in 0..8 {
             engine.frame().expect("a frame");
         }
-        let before = engine.gpu.animation_ticks();
+        let before = engine.gpu().animation_ticks();
         assert!(
             before > 0,
             "the clip has not advanced, so a restart would prove nothing"
         );
         assert_eq!(
-            engine.gpu.animation_ticks(),
+            engine.gpu().animation_ticks(),
             before,
             "an idle frame flapped"
         );
 
-        engine.game_mut().key_event(KeyCode::Space, true);
-        engine.game_mut().key_event(KeyCode::Space, false);
+        engine.game_mut().game_mut().key_event(KeyCode::Space, true);
+        engine
+            .game_mut()
+            .game_mut()
+            .key_event(KeyCode::Space, false);
         engine.frame().expect("a frame");
-        let after = engine.gpu.animation_ticks();
+        let after = engine.gpu().animation_ticks();
         assert!(
             after < before,
             "the flap left the wing at {after} ticks, having been at {before} \
              — the beat did not start over"
         );
         assert!(
-            engine.ticks > 0 && after <= engine.ticks,
+            engine.ticks() > 0 && after <= engine.ticks(),
             "the clip cannot be ahead of the simulation"
         );
 
@@ -1185,7 +893,7 @@ mod tests {
         // rather than restarting it every frame the bird is still climbing.
         engine.frame().expect("a frame");
         assert!(
-            engine.gpu.animation_ticks() > after,
+            engine.gpu().animation_ticks() > after,
             "the beat restarts every frame while the bird climbs"
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
@@ -1202,14 +910,14 @@ mod tests {
     /// factor of two.
     #[test]
     fn the_flap_advances_by_the_ticks_the_frame_ran_and_not_by_the_frames() {
-        let mut engine = Loop::start(&headless_with(40, |common| common.tick_hz = 120))
+        let mut engine = start(&headless_with(40, |common| common.tick_hz = 120))
             .expect("headless runs everywhere");
         let mut frames = 0u64;
         while let Ok(Flow::Continue) = engine.frame() {
             frames += 1;
         }
-        let ticks = engine.ticks;
-        let elapsed = engine.gpu.animation_ticks();
+        let ticks = engine.ticks();
+        let elapsed = engine.gpu().animation_ticks();
         assert!(ticks > 0, "a run with no ticks proves nothing");
         assert!(
             ticks > frames,
@@ -1259,9 +967,13 @@ mod tests {
             .key_press(window, KeyCode::Space)
             .expect("the window is live");
         run_frames(&mut engine, 20);
-        assert_eq!(engine.game.state, GameState::Playing, "the bird is flying");
-        assert!(engine.game.flap_is_down(), "Space is down");
-        assert_eq!(engine.held_keys, vec![KeyCode::Space]);
+        assert_eq!(
+            engine.game().game().state,
+            GameState::Playing,
+            "the bird is flying"
+        );
+        assert!(engine.game().game().flap_is_down(), "Space is down");
+        assert_eq!(engine.held_keys(), vec![KeyCode::Space]);
 
         engine
             .shell_mut()
@@ -1269,7 +981,7 @@ mod tests {
             .expect("the window is live");
         engine.frame().expect("a frame");
         assert!(engine.is_paused(), "an unfocused window is not playing");
-        assert!(engine.held_keys.is_empty());
+        assert!(engine.held_keys().is_empty());
 
         // Resume, and let the bird fall for a while so a flap is unmistakable.
         engine
@@ -1279,11 +991,11 @@ mod tests {
         run_frames(&mut engine, 20);
         assert!(!engine.is_paused());
         assert!(
-            !engine.game.flap_is_down(),
+            !engine.game().game().flap_is_down(),
             "the action map still holds a key focus loss should have released",
         );
         let mut falling = RenderState::default();
-        engine.game.render_state(&mut falling);
+        engine.game().game().render_state(&mut falling);
         assert!(
             falling.bird_velocity.y < 0.0,
             "the bird has to be falling for a flap to be visible, got {}",
@@ -1298,7 +1010,7 @@ mod tests {
             .expect("the window is live");
         run_frames(&mut engine, 2);
         let mut flapped = RenderState::default();
-        engine.game.render_state(&mut flapped);
+        engine.game().game().render_state(&mut flapped);
         assert!(
             flapped.bird_velocity.y > 0.0,
             "the bird never flapped again: velocity {} after a fresh Space",
@@ -1449,7 +1161,7 @@ mod tests {
             .key_release(window, KeyCode::Space)
             .expect("the window is live");
         run_frames(&mut engine, 30);
-        assert_eq!(engine.game.state, GameState::Playing);
+        assert_eq!(engine.game().game().state, GameState::Playing);
 
         engine
             .shell_mut()
@@ -1458,18 +1170,18 @@ mod tests {
         engine.frame().expect("a frame");
         assert!(engine.is_paused());
 
-        let ticks = engine.ticks;
+        let ticks = engine.ticks();
         let mut paused = RenderState::default();
-        engine.game.render_state(&mut paused);
+        engine.game().game().render_state(&mut paused);
         run_frames(&mut engine, 120);
         let mut after = RenderState::default();
-        engine.game.render_state(&mut after);
+        engine.game().game().render_state(&mut after);
 
         assert_eq!(after, paused, "120 paused frames moved the world");
-        assert_eq!(engine.ticks, ticks, "a paused frame ran a tick");
+        assert_eq!(engine.ticks(), ticks, "a paused frame ran a tick");
         assert_eq!(
-            engine.gpu.animation_ticks(),
-            engine.ticks,
+            engine.gpu().animation_ticks(),
+            engine.ticks(),
             "the wing beat is on the simulation's clock, so a pause holds it too",
         );
 
@@ -1479,7 +1191,7 @@ mod tests {
             .expect("the window is live");
         run_frames(&mut engine, 20);
         let mut resumed = RenderState::default();
-        engine.game.render_state(&mut resumed);
+        engine.game().game().render_state(&mut resumed);
         assert_ne!(resumed, after, "resuming did not restart the simulation");
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
@@ -1504,7 +1216,7 @@ mod tests {
             "the start menu's text is not in the draw list: {drawn:?}",
         );
 
-        let sprites = engine.gpu.menu_sprites();
+        let sprites = engine.gpu().menu_sprites();
         assert_eq!(sprites.len(), 1 + 9 + 9 * 3, "{}", sprites.len());
         let extent = engine.extent();
         let scale = engine
@@ -1538,9 +1250,9 @@ mod tests {
         run_frames(&mut engine, 10);
         assert_eq!(engine.menu_kind(), MenuKind::None);
         assert!(
-            engine.gpu.menu_sprites().is_empty(),
+            engine.gpu().menu_sprites().is_empty(),
             "a flying frame submitted {} menu sprites",
-            engine.gpu.menu_sprites().len(),
+            engine.gpu().menu_sprites().len(),
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
@@ -1777,20 +1489,20 @@ mod tests {
         step_frame(&mut engine);
         assert!(engine.is_paused());
 
-        let ticks_at_pause = engine.ticks;
+        let ticks_at_pause = engine.ticks();
         for _ in 0..300 {
             step_frame(&mut engine);
         }
-        assert_eq!(engine.ticks, ticks_at_pause, "a paused frame ran a tick");
+        assert_eq!(engine.ticks(), ticks_at_pause, "a paused frame ran a tick");
 
         engine
             .shell_mut()
             .key_press(window, PAUSE_KEY)
             .expect("the window is live");
-        let before = engine.ticks;
+        let before = engine.ticks();
         step_frame(&mut engine);
         assert!(!engine.is_paused());
-        let burst = engine.ticks - before;
+        let burst = engine.ticks() - before;
         assert!(
             burst <= 1,
             "the first frame after a five-second pause ran {burst} ticks",
@@ -1915,7 +1627,7 @@ mod tests {
             DisplayMode::Windowed,
             "the loop must report what it got, not what it asked for",
         );
-        assert!(!engine.mode.honoured(), "the refusal has to be noticed");
+        assert!(!engine.mode_honoured(), "the refusal has to be noticed");
 
         let summary = engine.finish(ExitReason::FrameBudget).expect("teardown");
         assert_eq!(summary.mode, DisplayMode::Windowed);

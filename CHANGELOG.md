@@ -218,7 +218,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `app.rs` lost 309 lines and `web.rs` 27, against 30 of `GameGpu` forwards in
   `gpu.rs`.
 
-  The other four samples are unconverted and still drive their own `frame()`.
+- **flappy**: hosted by `crcbl::engine::Loop` too, on the same shape as breakout
+  — `Flappy` is seven `HostedGame` methods over the simulation, its render state
+  and its HUD; `Flap` on `FLAP_ID = FIRST_GAME_ID` is all its menu vocabulary
+  still declares; `web.rs` lost its `WebLoop` impl.
+
+  It needed nothing the seam did not already have, which is the useful result:
+  the bird's wing animation is stepped by `FrameInfo::ticks`, the field added
+  for exactly this. Its own 86 tests pass and its browser gate ran 27/27.
+  `app.rs` lost 288 lines and `web.rs` 28, against 30 of `GameGpu` forwards.
+
+  asteroids, horde and sandbox are unconverted and still drive their own
+  `frame()`.
 
 - **crcbl** (`crcbl::engine`, `crcbl::web`): the sample loops' shared machinery
   moves into the engine, in four further slices.

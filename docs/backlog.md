@@ -697,14 +697,19 @@ The modular panel is built and all three samples switch it on with F3 (or
   `Loop::{debug, ticks, held_keys, mode_honoured, clock_source}`, each because a
   breakout test read the field directly.
 
-  `apps/flappy` should be next and should be cheap: it is the sample breakout
-  was measured against, and the only thing it does that breakout does not is
-  `gpu.advance_animation(ticks_this_frame)`, which `FrameInfo::ticks` carries.
-  `apps/sandbox` is the one to watch: it has no `MenuKind`, its tick body
-  touches its GPU (`gpu.advance(dt)`, which is why `HostedGame::tick` takes
-  `&mut Self::Gpu`), and it reads `alpha` after the tick loop (which is why
-  `FrameInfo` carries it). None of that is verified against sandbox — it was
-  read out of `apps/sandbox/src/app.rs` while designing the trait, not compiled.
+  **Flappy followed and cost the seam nothing** — no new trait item, no new
+  accessor; its only unusual need, `gpu.advance_animation(ticks_this_frame)`,
+  was already carried by `FrameInfo::ticks`. `app.rs` lost 288 lines, `web.rs`
+  28, its 86 tests pass and its browser gate ran 27/27.
+
+  asteroids and horde should be next and should be the same shape; horde's menu
+  has two game actions (`Restart` and `Choose(n)`), so it is the first to
+  exercise more than one `WidgetId` above `FIRST_GAME_ID`. `apps/sandbox` is the
+  one to watch: it has no `MenuKind`, its tick body touches its GPU
+  (`gpu.advance(dt)`, which is why `HostedGame::tick` takes `&mut Self::Gpu`),
+  and it reads `alpha` after the tick loop (which is why `FrameInfo` carries
+  it). None of that is verified against sandbox — it was read out of
+  `apps/sandbox/src/app.rs` while designing the trait, not compiled.
 
 - **asteroids and horde never report a refused fullscreen.** Found while
   extracting `ModeRequest`: breakout, flappy and sandbox all call
