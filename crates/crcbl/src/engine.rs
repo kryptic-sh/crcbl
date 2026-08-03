@@ -2552,6 +2552,9 @@ pub trait HostedGame: Sized {
     /// What a finished run reports, built from [`RunSummary`].
     type Summary;
 
+    /// This game's name, for the engine's own log lines.
+    const NAME: &'static str;
+
     /// This game's menus, with nothing shown.
     ///
     /// Their widget ids must start at [`FIRST_GAME_ID`] for anything the loop
@@ -2595,6 +2598,14 @@ pub trait HostedGame: Sized {
 
     /// Adds this game's own fields to the run's shared ones.
     fn summary(&self, run: RunSummary) -> Self::Summary;
+
+    /// Logs the one line a finished run is worth.
+    ///
+    /// Which numbers those are is the only thing that ever differed between the
+    /// samples' browser entry points: breakout has a score, horde a time
+    /// survived and a kill count, and no shared shape covers both without
+    /// inventing a summary type neither wanted.
+    fn log_summary(summary: &Self::Summary);
 }
 
 /// The parts of a loop that come from the command line rather than the game.
@@ -2976,6 +2987,45 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     #[must_use]
     pub const fn gpu(&self) -> &G::Gpu {
         &self.gpu
+    }
+
+    /// The debug panel, for a test that asks which sections a frame gathered.
+    #[must_use]
+    pub const fn debug(&self) -> &crcbl_ui::DebugOverlay {
+        &self.debug
+    }
+
+    /// Simulation ticks run so far.
+    #[must_use]
+    pub const fn ticks(&self) -> u64 {
+        self.ticks
+    }
+
+    /// Whether the window system agreed with the last display-mode request.
+    ///
+    /// Distinct from [`display_mode`](Self::display_mode), which says what the
+    /// window *is*: a tiling window manager leaves this `false` while the mode
+    /// reads `Windowed`, and the pair is what "asked and was refused" looks
+    /// like.
+    #[must_use]
+    pub const fn mode_honoured(&self) -> bool {
+        self.mode.honoured()
+    }
+
+    /// The clock this loop advances, so a caller can see whether it is the
+    /// steerable one — see [`set_frame_step`](Self::set_frame_step).
+    #[must_use]
+    pub const fn clock_source(&self) -> &Clock {
+        &self.clock_source
+    }
+
+    /// Keys forwarded to the game as pressed and not yet released.
+    ///
+    /// Public because the obligation it discharges is testable and worth
+    /// testing: focus loss must release every one of them — see [`lose_focus`].
+    #[must_use]
+    pub fn held_keys(&self) -> &[crcbl_core::input::KeyCode] {
+        &self.held_keys
     }
 
     /// The shell, at whatever type this loop was built with — so a test can
@@ -4595,6 +4645,8 @@ mod tests {
         type MenuAction = Serve;
         type Summary = FakeSummary;
 
+        const NAME: &'static str = "fake";
+
         fn menus() -> crcbl_ui::menu::MenuSet<FakeMenu> {
             use crcbl_ui::menu::{Menu, MenuItem, MenuSet};
             MenuSet::new(
@@ -4676,6 +4728,10 @@ mod tests {
                 run,
                 ticks_the_game_counted: self.ticks,
             }
+        }
+
+        fn log_summary(summary: &FakeSummary) {
+            log::info!("fake: {} frames", summary.run.frames);
         }
     }
 

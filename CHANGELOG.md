@@ -187,11 +187,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   how the two answers drift apart. The four samples with a browser build split
   their existing `impl` accordingly; nothing else changes for them.
 
-  **Nothing adopts this yet.** The samples still drive their own `frame()`, and
-  converting them is the next slice. `apps/bare` never will: it is the guard
-  that the library path — assembling `GpuContext`, `Pending` and `FrameBudget`
-  by hand — keeps working, and `crates/crcbl/tests/library_seam.rs` is what
-  proves it from outside the crate.
+  `apps/bare` never adopts it: it is the guard that the library path —
+  assembling `GpuContext`, `Pending` and `FrameBudget` by hand — keeps working,
+  and `crates/crcbl/tests/library_seam.rs` is what proves it from outside the
+  crate.
 
   585 lines of engine and 343 of fixture and tests, against a `FakeGpu` that
   counts presents and a `FakeGame` that records what the loop asked of it —
@@ -199,6 +198,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `WidgetId`, which is what would silently re-point a resume button.
 
 ### Changed
+
+- **breakout**: the first game hosted by `crcbl::engine::Loop`. `Breakout` is
+  seven `HostedGame` methods and three fields — the simulation, the state it
+  renders from, and its HUD — where `app.rs` used to carry the whole frame.
+  `Loop<S>` is now a type alias for the engine's, so `run`, `start` and
+  `with_shell` are free functions rather than inherent methods on it.
+
+  Its menu vocabulary shrank to the part that was ever breakout's: `Launch`, on
+  `LAUNCH_ID = FIRST_GAME_ID`. `MenuAction::{Resume, Fullscreen, DebugOverlay}`
+  and the ids that carry them are the engine's, and `web.rs` lost its whole
+  `WebLoop` impl — `crcbl::web` blanket-implements it for every engine loop,
+  taking the name and the summary line from `HostedGame::NAME` and
+  `HostedGame::log_summary`.
+
+  **Nothing about the game changed**, and its own tests are the evidence: all 79
+  pass unmodified except where they reached a field that is now behind an
+  accessor, and the browser gate ran 27/27 checks against a real WebGPU device.
+  `app.rs` lost 309 lines and `web.rs` 27, against 30 of `GameGpu` forwards in
+  `gpu.rs`.
+
+  The other four samples are unconverted and still drive their own `frame()`.
 
 - **crcbl** (`crcbl::engine`, `crcbl::web`): the sample loops' shared machinery
   moves into the engine, in four further slices.

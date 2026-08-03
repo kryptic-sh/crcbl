@@ -684,13 +684,24 @@ The modular panel is built and all three samples switch it on with F3 (or
   runner stays swappable — `drive` natively, `crcbl::web::App` in the browser,
   both over `GameLoop`.
 
-  **What is still open is the conversion.** No sample uses `Loop` yet; all five
-  still drive their own `frame()`, so the 399 identical lines above are still
-  there. The order to do it in is breakout first, because it is the game the
-  seam was designed against and the one whose test suite most directly exercises
-  the frame; whatever the other four then need that breakout did not is the real
-  finding. `apps/sandbox` is the one to watch: it has no `MenuKind`, its tick
-  body touches its GPU (`gpu.advance(dt)`, which is why `HostedGame::tick` takes
+  **Breakout is converted; four samples are not.** `apps/breakout` was the first
+  consumer and cost `app.rs` 309 lines and `web.rs` 27, with its own 79 tests
+  passing unmodified except where they reached a field now behind an accessor,
+  and the browser gate green at 27/27 against a real WebGPU device.
+
+  What breakout needed that the seam did not have, found by converting it: a
+  `HostedGame::NAME` and `HostedGame::log_summary`, so `crcbl::web` could
+  blanket-implement `WebLoop` — a sample cannot implement a foreign trait for
+  the engine's foreign `Loop`, and without the blanket impl every sample would
+  keep a five-forward `WebLoop` block. Also
+  `Loop::{debug, ticks, held_keys, mode_honoured, clock_source}`, each because a
+  breakout test read the field directly.
+
+  `apps/flappy` should be next and should be cheap: it is the sample breakout
+  was measured against, and the only thing it does that breakout does not is
+  `gpu.advance_animation(ticks_this_frame)`, which `FrameInfo::ticks` carries.
+  `apps/sandbox` is the one to watch: it has no `MenuKind`, its tick body
+  touches its GPU (`gpu.advance(dt)`, which is why `HostedGame::tick` takes
   `&mut Self::Gpu`), and it reads `alpha` after the tick loop (which is why
   `FrameInfo` carries it). None of that is verified against sandbox — it was
   read out of `apps/sandbox/src/app.rs` while designing the trait, not compiled.

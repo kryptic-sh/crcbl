@@ -247,6 +247,35 @@ pub trait WebLoop: crate::engine::GameLoop {
     fn log_summary(summary: &Self::Summary);
 }
 
+/// An engine-owned loop is a browser loop, with nothing to forward.
+///
+/// Both halves that are genuinely per-game — the name and the summary line —
+/// are already [`HostedGame`](crate::engine::HostedGame)'s, so a game that lets
+/// the engine own its frame gets the browser lifecycle for free. A game that
+/// keeps its own frame implements [`WebLoop`] itself, which is what the trait
+/// is for.
+impl<S: crate::shell::Shell + ?Sized, G: crate::engine::HostedGame> WebLoop
+    for crate::engine::Loop<S, G>
+{
+    const NAME: &'static str = G::NAME;
+
+    fn extent(&self) -> (u32, u32) {
+        Self::extent(self)
+    }
+
+    fn is_paused(&self) -> bool {
+        Self::is_paused(self)
+    }
+
+    fn set_frame_step(&mut self, dt: core::time::Duration) {
+        Self::set_frame_step(self, dt);
+    }
+
+    fn log_summary(summary: &Self::Summary) {
+        G::log_summary(summary);
+    }
+}
+
 /// A game's start-up, as the browser lifecycle needs to see it.
 pub trait WebPending: Sized {
     /// The loop this becomes.
