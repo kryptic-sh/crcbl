@@ -37,9 +37,15 @@
 #     keyboard tests would assert against nothing.
 #
 # Setting `CRCBL_E2E_X11_WM` to a window manager command starts it after the
-# display comes up, which flips the first two bullets. It is off by default
-# because no window manager is guaranteed on a CI runner and a job that quietly
-# skipped the harder assertions would be worse than one that never made them.
+# display comes up, which flips the first two bullets — and flips the sandbox's
+# `--fullscreen` pass from "the request is refused" to "the request is granted",
+# which is the only branch on this platform that resembles what a player gets.
+#
+# It is off by default because no window manager is on a stock machine, and a
+# harness that failed on a developer's laptop for want of an apt package would
+# stop being run. **CI sets it**, to `openbox`, and runs this script twice — see
+# `.github/workflows/ci.yml`. Both answers a window system can give are covered
+# because both are exercised, not because one was assumed from the other.
 
 set -euo pipefail
 
@@ -151,6 +157,15 @@ done
 export DISPLAY=":${DISPLAY_NUM}"
 
 if [ -n "${CRCBL_E2E_X11_WM:-}" ]; then
+    # Named up front, because the alternative failure is quiet: an unstartable
+    # command leaves a display with no window manager on it, and every
+    # assertion below would then be testing the branch this variable exists to
+    # get away from. `CRCBL_E2E_EXPECT_WM` catches it a minute later; this
+    # catches it now, and says which word was wrong.
+    if ! command -v "${CRCBL_E2E_X11_WM%% *}" >/dev/null 2>&1; then
+        echo "crcbl e2e: CRCBL_E2E_X11_WM names ${CRCBL_E2E_X11_WM%% *}, which is not installed" >&2
+        exit 1
+    fi
     echo "crcbl e2e: starting window manager: ${CRCBL_E2E_X11_WM}"
     # shellcheck disable=SC2086
     ${CRCBL_E2E_X11_WM} >"$WM_LOG" 2>&1 &
@@ -222,20 +237,34 @@ echo "crcbl e2e: $RAN tests ran against Xvfb on ${DISPLAY}"
 # `minImageExtent == maxImageExtent == currentExtent`, which is the case that
 # tests the seam's extent obligations hardest — the shell's size is
 # authoritative, and Vulkan may still refuse to configure at it.
-# It also runs **with `--fullscreen`**, and the interesting part is that the
-# request is refused. This harness starts no window manager by default (see the
-# header), so `_NET_WM_STATE_FULLSCREEN` is a client message to a root window
-# nobody is listening at: `requested_mode` becomes borderless and the effective
-# mode never does. The summary line reports the *effective* one, so a refused
-# fullscreen has to read `windowed` — and a game that echoed its own request
-# would say `borderless` here and be wrong on every WM-less X session, every
-# kiosk and every tiling setup that ignores the hint.
+# It also runs **with `--fullscreen`**, and X11 is where both answers live.
 #
-# That is the same distinction `run-wayland-e2e.sh` checks from the other side,
-# where sway honours it. Between them the two harnesses cover both answers a
-# window system can give.
+# With **no window manager** — this script's default — `_NET_WM_STATE_FULLSCREEN`
+# is a client message to a root window nobody is listening at:
+# `requested_mode` becomes borderless and the effective mode never does. The
+# summary line reports the *effective* one, so a refused fullscreen has to read
+# `windowed` — and a game that echoed its own request would say `borderless`
+# here and be wrong on every WM-less X session, every kiosk and every tiling
+# setup that ignores the hint.
+#
+# With **`CRCBL_E2E_X11_WM` set** the same request is granted, and the summary
+# has to read `borderless` at the screen size instead. That branch is not a
+# variant of the first one: it goes through a different mechanism end to end —
+# a window manager takes ownership of `_NET_WM_STATE`, resizes the window, and
+# the resize comes back as a `ConfigureNotify` the swapchain has to be rebuilt
+# for. CI runs this script both ways.
+#
+# Together with `run-wayland-e2e.sh` that is every combination of {honoured,
+# refused} × {Wayland, X11} actually executed.
 SANDBOX_LOG="${RUNTIME_DIR}/sandbox.log"
 SANDBOX_FRAMES=120
+
+# The size the sandbox asks for. A window manager honours it — it decorates
+# *around* the client area rather than shrinking it — and without one nothing
+# resizes the window at all, so this is the windowed extent either way.
+SANDBOX_WINDOWED="1280x720"
+# What fullscreen means here: the Xvfb screen, minus the depth `$SCREEN` carries.
+SANDBOX_BORDERLESS="${SCREEN%x*}"
 
 # `run_sandbox <backend> [windowed|fullscreen]`
 run_sandbox() {
@@ -266,21 +295,33 @@ run_sandbox() {
         exit 1
     fi
 
-    # With a window manager running — `CRCBL_E2E_X11_WM` — the request may well
-    # be honoured, and asserting the refusal would then be asserting that the WM
-    # is broken.
-    if [ "$mode" = "fullscreen" ] && [ -z "${CRCBL_E2E_X11_WM:-}" ]; then
-        if ! grep -q ", windowed (" "$SANDBOX_LOG"; then
-            echo "crcbl e2e: --fullscreen with no window manager must report 'windowed'; \
-a run that echoed its own request would pass a check it should fail" >&2
-            cat "$SANDBOX_LOG" >&2
-            log_tail
-            exit 1
+    # What the run must have reported, which is the *effective* mode and the
+    # extent that goes with it — both off one line, so a run that said
+    # borderless at the windowed size fails here.
+    local want_mode="windowed"
+    local want_extent="$SANDBOX_WINDOWED"
+    local how="the sandbox presented $SANDBOX_FRAMES frames"
+    if [ "$mode" = "fullscreen" ]; then
+        if [ -n "${CRCBL_E2E_X11_WM:-}" ]; then
+            # A window manager owns `_NET_WM_STATE`, so it can grant this.
+            want_mode="borderless"
+            want_extent="$SANDBOX_BORDERLESS"
+            how="--fullscreen was granted and the swapchain followed"
+        else
+            # Nobody is listening at the root window, so it cannot be. The
+            # summary reports the effective mode, and a run that echoed its own
+            # request would say "borderless" and pass a check it should fail.
+            how="--fullscreen was refused and reported as refused"
         fi
-        echo "crcbl e2e: --fullscreen was refused and reported as refused on x11/$backend"
-        return
     fi
-    echo "crcbl e2e: the sandbox presented $SANDBOX_FRAMES frames on x11/$backend"
+
+    if ! grep -q "at ${want_extent}, ${want_mode} " "$SANDBOX_LOG"; then
+        echo "crcbl e2e: asked for $mode and did not get '${want_extent}, ${want_mode}'" >&2
+        cat "$SANDBOX_LOG" >&2
+        log_tail
+        exit 1
+    fi
+    echo "crcbl e2e: $how on x11/$backend"
 }
 
 # See the equivalent block in `run-wayland-e2e.sh` for why the loader probe is a

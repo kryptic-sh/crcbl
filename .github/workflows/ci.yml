@@ -384,11 +384,20 @@ jobs:
       # the umbrella now links cpal and ALSA — this job did not compile
       # `crcbl-audio` before and does now. See the `clippy (linux)` job for the
       # `-dev`-versus-runtime argument.
-      - name: Install Xvfb, the X client libraries and the ALSA headers
+      #
+      # `openbox` is the second pass below. It is a *stacking* window manager,
+      # which is the load-bearing property: the suite and the sandbox assert on
+      # the geometry a window asked for, and a tiling manager would resize
+      # every window to fill the screen and make "windowed" and "borderless"
+      # the same size. It is also the smallest EWMH-complete option packaged —
+      # `--no-install-recommends` keeps it to a handful of X libraries, where
+      # `marco` or `xfwm4` would drag in half a desktop.
+      - name: Install Xvfb, openbox, the X client libraries and the ALSA headers
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             xvfb \
+            openbox \
             libasound2-dev \
             libxcb1 \
             libxcb-randr0 \
@@ -402,9 +411,23 @@ jobs:
       # Starts Xvfb on a private display number, polls for its socket with a
       # deadline and a liveness check on the child, runs the `#[ignore]`d suite
       # with `--features x11-e2e`, and dumps the server log tail on any
-      # failure. Deliberately *without* a window manager — see the script's
-      # header for which behaviours that pins down and which it cannot.
-      - name: Run the suite under Xvfb
+      # failure.
+      #
+      # **Twice, because a window manager is not a detail on this platform** —
+      # it is a separate program that owns decorations, size hints and
+      # `_NET_WM_STATE`, and the backend has a different code path for each
+      # answer. The bare pass asserts the honest refusal (`ShellCaps` without
+      # `SERVER_DECORATIONS`, a `--fullscreen` that comes back `windowed`); the
+      # openbox pass asserts the grant. Neither one implies the other, so
+      # running only one of them would leave half the platform ungated.
+      #
+      # The second pass is cheap: the first has already compiled everything,
+      # and both share `Swatinem/rust-cache`'s target directory.
+      - name: Run the suite under Xvfb, with no window manager
+        run: crates/crcbl-shell/tests/run-x11-e2e.sh
+      - name: Run the suite under Xvfb, with openbox managing it
+        env:
+          CRCBL_E2E_X11_WM: openbox
         run: crates/crcbl-shell/tests/run-x11-e2e.sh
 
   # The CLI/headless pillar's own end-to-end check: `crcbl new` scaffolds a
