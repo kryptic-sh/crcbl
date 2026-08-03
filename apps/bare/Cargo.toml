@@ -1,0 +1,18 @@
+[package]
+name = "bare"
+description = "Crucible used as a plain library — the loop is hand-written here"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# One engine dependency, like every sample. This one matters more than most:
+# `bare` exists to prove the public surface is usable without adopting the
+# engine's loop, so a second path dependency here would be the sample admitting
+# it cannot.
+[dependencies]
+crcbl = { workspace = true }
+
+[lints]
+workspace = true

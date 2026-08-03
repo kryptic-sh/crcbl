@@ -496,6 +496,19 @@ jobs:
         run: >-
           cargo run --locked --quiet --package breakout --
           --headless --frames 60 --backend vk
+      # The library seam, against a real driver. `apps/bare` writes its own
+      # loop against the public API instead of plugging into the engine's, and
+      # it exists so that "crcbl is usable as a plain library" stays a property
+      # somebody checks. Compiling it proves the types are public; running it on
+      # Vulkan proves the sequence a consumer would write actually presents.
+      - name: Run bare headless against lavapipe
+        env:
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: "1"
+          CRCBL_VK_SYNC_VALIDATION: "1"
+        run: >-
+          cargo run --locked --quiet --package bare --
+          --headless --frames 30 --backend vk
       # `docs/plan/12-testing.md`: "diffs uploaded as CI artifacts on failure".
       # The reference, what lavapipe actually rendered, and a red-marked diff of
       # the two — enough to tell "the tolerance is too tight" from "the triangle
