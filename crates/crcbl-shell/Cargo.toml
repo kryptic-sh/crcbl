@@ -30,6 +30,16 @@ thiserror = { workspace = true }
 [build-dependencies]
 crcbl-wl-scanner = { workspace = true }
 
+# Types a key into another process's window under the same compositor, which is
+# the only way to reach a running sample's `F11` handler. `required-features`
+# keeps it out of every ordinary build, and `tests/bin/` keeps it out of Cargo's
+# auto-discovery — a `tests/*.rs` file would also become an integration test
+# target with nothing in it.
+[[bin]]
+name = "crcbl-e2e-key"
+path = "tests/bin/send_key.rs"
+required-features = ["wayland-e2e"]
+
 [features]
 # The nested-compositor end-to-end suite. Off by default so a plain
 # `cargo nextest run` on a machine with no compositor stays green; CI enables it

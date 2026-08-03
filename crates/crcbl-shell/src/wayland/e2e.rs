@@ -611,6 +611,21 @@ impl VirtualInput {
         self.key(evdev, false);
     }
 
+    /// Blocks until the compositor has **processed** everything sent so far.
+    ///
+    /// The rest of this type only flushes, because the in-process tests pump
+    /// the shell afterwards and would see the answer arrive either way. A
+    /// sender that is about to *exit* has no such second chance: a flush means
+    /// the bytes left this process, not that the compositor acted on them, and
+    /// the client under test may be another program entirely. `tests/bin/`'s
+    /// key sender is the caller that needs it.
+    pub fn sync(&self) {
+        // SAFETY: the display is live for as long as the shell that owns it.
+        // A roundtrip dispatches this connection's own queue, which carries
+        // nothing but the `ignore` dispatcher installed on every proxy here.
+        unsafe { (self.lib.display_roundtrip)(self.display) };
+    }
+
     /// Moves the pointer to an absolute position within an extent.
     ///
     /// The extent is the output's size, because that is the space

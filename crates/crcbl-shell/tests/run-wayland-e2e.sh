@@ -260,6 +260,133 @@ $want_mode at $want_extent on wayland/$backend"
 # also used on developer machines, and `docs/plan/12-testing.md`'s "no silently
 # skipped gate" rule is served by the message rather than by failing a machine
 # that never claimed to have Vulkan. CI installs the drivers, so CI runs it.
+# `--fullscreen` covers the mode a window is *born* in. `F11` covers the mode it
+# is switched to while running, which is a different path end to end: a key has
+# to arrive from the compositor, survive the loop's repeat filter, become a
+# `set_mode`, come back as a configure, and rebuild the swapchain — none of
+# which a creation-time flag touches.
+#
+# Nothing in-process can drive it. The sample is a separate program, so the key
+# has to be a real one: `tests/bin/send_key.rs` builds a
+# `zwp_virtual_keyboard_v1` on this compositor's seat and taps it, and the
+# keystroke then goes through sway's whole input path — focus, serials, XKB —
+# before reaching the sandbox, which cannot tell it from a physical keyboard.
+# The sender never presents to its own window, so sway never maps it and it
+# cannot take the focus it is trying to type into.
+#
+# Both ends are checked, because either alone would be half a test: sway's tree
+# says the *compositor* has the window, and the game's own log and summary line
+# say it saw the answer and rebuilt its swapchain at the new size.
+KEY_F11=87
+SANDBOX_APP_ID="sh.kryptic.crcbl.sandbox"
+BIN_DIR="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}/debug"
+
+# Polls a file for a line, or fails naming what never appeared. A deadline and
+# a poll, never a fixed sleep — `docs/plan/12-testing.md` makes that the rule
+# for anything asynchronous, and it is the same one the Rust suite's
+# `pump_until` follows.
+wait_for_line() {
+    local what="$1" file="$2" pattern="$3"
+    local deadline=$(( $(date +%s) + SOCKET_TIMEOUT_S ))
+    while ! grep -q "$pattern" "$file" 2>/dev/null; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "crcbl e2e: timed out after ${SOCKET_TIMEOUT_S}s waiting for $what" >&2
+            cat "$file" >&2 || true
+            log_tail
+            exit 1
+        fi
+        sleep "$POLL_INTERVAL_S"
+    done
+}
+
+# `run_sandbox_toggle <backend>`
+run_sandbox_toggle() {
+    local backend="$1"
+    local keys_in="${RUNTIME_DIR}/keys.fifo"
+    local keys_log="${RUNTIME_DIR}/keys.log"
+    echo "crcbl e2e: running the sandbox windowed on $backend and pressing F11 at it"
+
+    # The binaries directly rather than `cargo run`: these have to be killed
+    # from the outside, and killing a `cargo run` leaves the child orphaned
+    # holding the window the next step is waiting on. The sandbox gets no frame
+    # budget either — it runs until the window closes, which is what a player's
+    # session is.
+    for binary in sandbox crcbl-e2e-key; do
+        if [ ! -x "${BIN_DIR}/${binary}" ]; then
+            echo "crcbl e2e: ${BIN_DIR}/${binary} was not built" >&2
+            exit 1
+        fi
+    done
+
+    # The keyboard is plugged in *before* the game starts — see the sender's own
+    # docs for why typing straight after the hotplug loses the key.
+    rm -f "$keys_in"
+    mkfifo "$keys_in"
+    "${BIN_DIR}/crcbl-e2e-key" <"$keys_in" >"$keys_log" 2>&1 &
+    local keys_pid=$!
+    # Holds the write end open, so the sender blocks on an empty stream instead
+    # of seeing EOF from the first writer that finishes.
+    exec 9>"$keys_in"
+    wait_for_line "the key sender to plug in a keyboard" "$keys_log" "crcbl-e2e-key: ready"
+
+    CRCBL_SHELL=wayland \
+    CRCBL_VK_VALIDATION=1 \
+    CRCBL_LOG="${CRCBL_E2E_SANDBOX_LOG:-info}" \
+        "${BIN_DIR}/sandbox" --backend "$backend" --title "crcbl e2e sandbox" \
+        >"$SANDBOX_LOG" 2>&1 &
+    local sandbox_pid=$!
+
+    # Mapped, and therefore focused: sway focuses a window when it appears, and
+    # a window appears when a buffer is attached. Nothing else in this session
+    # is mapped to take it away — the sender never presents.
+    local deadline=$(( $(date +%s) + SOCKET_TIMEOUT_S ))
+    while ! swaymsg -t get_tree | grep -q "\"app_id\": \"${SANDBOX_APP_ID}\""; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "crcbl e2e: the sandbox never mapped a window sway could see" >&2
+            cat "$SANDBOX_LOG" >&2
+            log_tail
+            exit 1
+        fi
+        sleep "$POLL_INTERVAL_S"
+    done
+    # It starts windowed, and reading that back is what stops the wait below
+    # from being satisfied by a state that was already true before F11.
+    wait_for_line "the sandbox to report itself windowed" \
+        "$SANDBOX_LOG" "shell: the window is windowed"
+
+    echo "$KEY_F11" >&9
+
+    # The game's own account of the compositor's answer: `mode_request_honoured`
+    # went true for a mode it did not start in, which is the whole F11 path —
+    # key, repeat filter, `set_mode`, configure — in one line.
+    wait_for_line "F11 to reach the sandbox and be honoured" \
+        "$SANDBOX_LOG" "shell: the window is borderless"
+
+    # Closing it is how the run ends, so the summary is written and the exit
+    # reason says the close arrived rather than a budget running out.
+    swaymsg "[app_id=\"${SANDBOX_APP_ID}\"]" kill >/dev/null
+    local status=0
+    wait "$sandbox_pid" || status=$?
+    exec 9>&-
+    wait "$keys_pid" || true
+    rm -f "$keys_in"
+    if [ "$status" -ne 0 ]; then
+        echo "crcbl e2e: the sandbox failed after F11 on $backend (exit $status)" >&2
+        cat "$SANDBOX_LOG" >&2
+        log_tail
+        exit "$status"
+    fi
+    # And the swapchain followed: the summary's extent is the surface's, not the
+    # window's, so a mode change that never reached the GPU fails here.
+    if ! grep -q "at ${SANDBOX_BORDERLESS}, borderless (CloseRequested)" "$SANDBOX_LOG"; then
+        echo "crcbl e2e: F11 did not leave the sandbox borderless at ${SANDBOX_BORDERLESS}" >&2
+        cat "$SANDBOX_LOG" >&2
+        log_tail
+        exit 1
+    fi
+    echo "crcbl e2e: F11 took the sandbox to $SANDBOX_BORDERLESS borderless on wayland/$backend"
+}
+
 if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so.1 ] \
     || ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1'; then
     run_sandbox vk windowed
@@ -267,6 +394,11 @@ if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so
     # a fullscreen configure is a swapchain recreation and that is the half a
     # recording backend cannot get wrong.
     run_sandbox vk fullscreen
+    # And the switch between them, which neither of those two makes.
+    cargo build --locked --quiet --package sandbox
+    cargo build --locked --quiet --package crcbl-shell \
+        --features wayland-e2e --bin crcbl-e2e-key
+    run_sandbox_toggle vk
 else
     echo "crcbl e2e: no Vulkan loader; skipping the vk sandbox pass" >&2
     if [ -n "${CI:-}" ]; then
