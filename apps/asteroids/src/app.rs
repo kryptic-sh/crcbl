@@ -37,9 +37,8 @@ use core::time::Duration;
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Clock, ExitReason, Flow, FrameOutcome, Handled, MAX_CONSECUTIVE_RECONFIGURES, MAX_FRAME_STEP,
-    MenuPump, ModeRequest, PointerCapture, WINDOWED_IDLE, accept_close, run_ticks,
-    wait_for_configure,
+    Clock, ExitReason, Flow, FrameBudget, Handled, MAX_FRAME_STEP, MenuPump, ModeRequest,
+    PointerCapture, WINDOWED_IDLE, accept_close, lose_focus, run_ticks, wait_for_configure,
 };
 use crcbl::math::Vec2;
 use crcbl::prelude::*;
@@ -154,12 +153,12 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
     /// more here than in either earlier sample, because this game's turn and
     /// thrust are *held* actions — a lost release leaves the ship spinning.
     held_keys: Vec<KeyCode>,
-    frames: u64,
+    /// Presented frames, the budget they count against, and the guard that
+    /// makes the budget reachable — see [`FrameBudget`].
+    budget: FrameBudget,
     ticks: u64,
     events: u64,
-    budget: Option<u64>,
     windowed: bool,
-    reconfigures_in_a_row: u32,
 }
 
 /// Runs the full loop.
@@ -260,11 +259,9 @@ impl<S: Shell + ?Sized> Loop<S> {
             debug: DebugOverlay::with_visible(options.common.debug_overlay_visible()),
             paused: false,
             held_keys: Vec::new(),
-            frames: 0,
             ticks: 0,
             events,
-            budget: options.common.frame_budget(),
-            reconfigures_in_a_row: 0,
+            budget: FrameBudget::new(options.common.frame_budget()),
         })
     }
 
@@ -306,7 +303,7 @@ impl<S: Shell + ?Sized> Loop<S> {
     ///
     /// [`AsteroidsError`] if the shell or the GPU failed.
     pub fn frame(&mut self) -> Result<Flow, AsteroidsError> {
-        if self.budget.is_some_and(|budget| self.frames >= budget) {
+        if self.budget.is_spent() {
             return Ok(Flow::Stop(ExitReason::FrameBudget));
         }
 
@@ -405,18 +402,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         self.draw_debug_overlay();
         self.gpu.take_draw_list(&mut self.draw_list);
 
-        match self.gpu.frame()? {
-            FrameOutcome::Presented => {
-                self.frames += 1;
-                self.reconfigures_in_a_row = 0;
-            }
-            FrameOutcome::Reconfigured => {
-                self.reconfigures_in_a_row += 1;
-                if self.reconfigures_in_a_row >= MAX_CONSECUTIVE_RECONFIGURES {
-                    return Err(AsteroidsError::NeverPresented);
-                }
-            }
-        }
+        self.budget.record(self.gpu.frame()?)?;
         Ok(Flow::Continue)
     }
 
@@ -511,13 +497,10 @@ impl<S: Shell + ?Sized> Loop<S> {
 
     /// Every key the game thinks is held comes up, and the game pauses.
     fn lose_focus(&mut self) {
-        for key in self.held_keys.drain(..) {
-            self.game.key_event(key, false);
-        }
-        if !self.paused {
-            self.paused = true;
-            crcbl::log::info!("game paused: the window lost focus");
-        }
+        let game = &mut self.game;
+        lose_focus(&mut self.held_keys, &mut self.paused, |key| {
+            game.key_event(key, false);
+        });
     }
 
     /// Asks for the mode the window is not in.
@@ -560,7 +543,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         }
         let summary = Summary {
             backend: self.shell.backend(),
-            frames: self.frames,
+            frames: self.budget.presented(),
             ticks: self.ticks,
             events: self.events,
             extent: self.gpu.extent(),

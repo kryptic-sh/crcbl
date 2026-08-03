@@ -55,8 +55,8 @@ use crcbl::backend::GpuBackend;
 // swapchain never becomes presentable — a budget of *presented* frames cannot.
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Clock, ExitReason, Flow, MAX_CONSECUTIVE_RECONFIGURES, ModeRequest, Pending, WINDOWED_IDLE,
-    accept_close, run_ticks, wait_for_configure,
+    Clock, ExitReason, Flow, FrameBudget, ModeRequest, Pending, WINDOWED_IDLE, accept_close,
+    run_ticks, wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{
@@ -67,7 +67,7 @@ use crcbl::ui::{DebugOverlay, PointerInput};
 
 use crate::menu::{self, MenuAction, Menus};
 
-use crate::gpu::{FrameOutcome, Gpu};
+use crate::gpu::Gpu;
 
 /// The key that shows and hides the debug overlay.
 ///
@@ -283,12 +283,12 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
     /// The fullscreen request, and whether the window system agreed — see
     /// [`ModeRequest`].
     mode: ModeRequest,
-    frames: u64,
+    /// Presented frames, the budget they count against, and the guard that
+    /// makes the budget reachable — see [`FrameBudget`].
+    budget: FrameBudget,
     ticks: u64,
     events: u64,
-    budget: Option<u64>,
     windowed: bool,
-    reconfigures_in_a_row: u32,
 }
 
 /// Opens a window (or does not), runs the loop, and tears everything down.
@@ -398,11 +398,9 @@ impl<S: Shell + ?Sized> Loop<S> {
             pointer: None,
             pointer_held: false,
             mode: ModeRequest::new(),
-            frames: 0,
             ticks: 0,
             events,
-            budget: options.frame_budget(),
-            reconfigures_in_a_row: 0,
+            budget: FrameBudget::new(options.frame_budget()),
         })
     }
 
@@ -417,7 +415,7 @@ impl<S: Shell + ?Sized> Loop<S> {
     /// [`SandboxError`] if the shell or the HAL failed. A swapchain that has
     /// merely gone out of date is not a failure.
     pub fn frame(&mut self) -> Result<Flow, SandboxError> {
-        if self.budget.is_some_and(|budget| self.frames >= budget) {
+        if self.budget.is_spent() {
             return Ok(Flow::Stop(ExitReason::FrameBudget));
         }
 
@@ -622,24 +620,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         // accumulator may still hold whole ticks.
         render(self.frame_clock.alpha());
         self.draw_debug_overlay();
-        match self.gpu.frame()? {
-            FrameOutcome::Presented => {
-                self.frames += 1;
-                self.reconfigures_in_a_row = 0;
-            }
-            // The budget counts *presented* frames, so a swapchain that is
-            // permanently suboptimal (or permanently out of date) would
-            // reconfigure forever and never reach it — and `--frames N` would
-            // never terminate. Four seconds of 60 Hz reconfiguring is far past
-            // "a resize storm" and squarely in "this surface will never
-            // present".
-            FrameOutcome::Reconfigured => {
-                self.reconfigures_in_a_row += 1;
-                if self.reconfigures_in_a_row >= MAX_CONSECUTIVE_RECONFIGURES {
-                    return Err(SandboxError::NeverPresented);
-                }
-            }
-        }
+        self.budget.record(self.gpu.frame()?)?;
         Ok(Flow::Continue)
     }
 
@@ -776,7 +757,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         }
         let summary = Summary {
             backend: self.shell.backend(),
-            frames: self.frames,
+            frames: self.budget.presented(),
             ticks: self.ticks,
             events: self.events,
             extent: self.gpu.extent(),

@@ -1515,6 +1515,96 @@ pub const MENU_DOWN_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode
 /// Commits the selection. See [`MENU_UP_KEY`].
 pub const MENU_ACTIVATE_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::Enter;
 
+/// Presented frames, the budget they are counted against, and the guard that
+/// makes the budget reachable.
+///
+/// The three belong together because the third exists only for the first two. A
+/// budget counts **presented** frames, so a swapchain that is permanently
+/// suboptimal — or permanently out of date — would reconfigure forever, never
+/// present, and `--frames N` would never terminate. See
+/// [`MAX_CONSECUTIVE_RECONFIGURES`].
+#[derive(Clone, Copy, Debug)]
+pub struct FrameBudget {
+    presented: u64,
+    budget: Option<u64>,
+    reconfigures_in_a_row: u32,
+}
+
+impl FrameBudget {
+    /// A budget of `Some(n)` frames, or `None` to run until something else
+    /// stops the loop.
+    #[must_use]
+    pub const fn new(budget: Option<u64>) -> Self {
+        Self {
+            presented: 0,
+            budget,
+            reconfigures_in_a_row: 0,
+        }
+    }
+
+    /// Whether the loop should stop before doing any more work this frame.
+    #[must_use]
+    pub const fn is_spent(&self) -> bool {
+        match self.budget {
+            Some(budget) => self.presented >= budget,
+            None => false,
+        }
+    }
+
+    /// Records what one frame did.
+    ///
+    /// # Errors
+    ///
+    /// [`LoopError::NeverPresented`] once [`MAX_CONSECUTIVE_RECONFIGURES`]
+    /// frames in a row have failed to present. Four seconds of 60 Hz
+    /// reconfiguring is far past "a resize storm" and squarely in "this surface
+    /// will never present".
+    pub fn record<G>(&mut self, outcome: FrameOutcome) -> Result<(), LoopError<G>> {
+        match outcome {
+            FrameOutcome::Presented => {
+                self.presented += 1;
+                self.reconfigures_in_a_row = 0;
+            }
+            FrameOutcome::Reconfigured => {
+                self.reconfigures_in_a_row += 1;
+                if self.reconfigures_in_a_row >= MAX_CONSECUTIVE_RECONFIGURES {
+                    return Err(LoopError::NeverPresented);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// How many frames have actually reached the screen.
+    #[must_use]
+    pub const fn presented(&self) -> u64 {
+        self.presented
+    }
+}
+
+/// Releases every held key, then pauses.
+///
+/// **The release is the load-bearing half.** A window that loses focus mid-input
+/// leaves the game holding whatever was down — and a game that resumes still
+/// believing the key is held flies into the wall until the player taps it again.
+/// The keys go out as real release events, through the same path a player's
+/// would take, so the action map's edges resolve exactly as they always do.
+///
+/// Idempotent on the pause: a batch carrying two focus losses logs once.
+pub fn lose_focus(
+    held: &mut Vec<crcbl_core::input::KeyCode>,
+    paused: &mut bool,
+    mut release: impl FnMut(crcbl_core::input::KeyCode),
+) {
+    for key in held.drain(..) {
+        release(key);
+    }
+    if !*paused {
+        *paused = true;
+        log::info!("paused: the window lost focus");
+    }
+}
+
 /// Drains the fixed-step accumulator, and returns how many ticks ran.
 ///
 /// The loop body every sample wrote out, with the game's own tick as the
@@ -2502,6 +2592,93 @@ mod tests {
             1,
             "a failed start-up asked for another device",
         );
+    }
+
+    /// **A swapchain that never presents fails the run instead of hanging it.**
+    ///
+    /// The reason the reconfigure cap exists: `--frames N` counts *presented*
+    /// frames, so a surface that reconfigures forever would leave the budget
+    /// unreachable and the loop spinning with no error and no exit.
+    #[test]
+    fn a_surface_that_never_presents_gives_up_rather_than_spinning() {
+        let mut budget = FrameBudget::new(Some(1));
+        for i in 1..MAX_CONSECUTIVE_RECONFIGURES {
+            budget
+                .record::<core::convert::Infallible>(FrameOutcome::Reconfigured)
+                .unwrap_or_else(|_| panic!("gave up after {i}, before the cap"));
+        }
+        let error = budget
+            .record::<core::convert::Infallible>(FrameOutcome::Reconfigured)
+            .expect_err("the cap was never reached");
+        assert!(matches!(error, LoopError::NeverPresented), "{error}");
+        assert!(
+            !budget.is_spent(),
+            "no frame ever presented, so none counted"
+        );
+    }
+
+    /// **One presented frame clears the run**, so a resize storm that recovers
+    /// is not a failure.
+    #[test]
+    fn a_reconfigure_run_broken_by_a_present_starts_over() {
+        let mut budget = FrameBudget::new(None);
+        for _ in 0..MAX_CONSECUTIVE_RECONFIGURES - 1 {
+            budget
+                .record::<core::convert::Infallible>(FrameOutcome::Reconfigured)
+                .expect("under the cap");
+        }
+        budget
+            .record::<core::convert::Infallible>(FrameOutcome::Presented)
+            .expect("a present is never a failure");
+        assert_eq!(budget.presented(), 1);
+
+        // The counter reset, so another near-full run is still fine.
+        for _ in 0..MAX_CONSECUTIVE_RECONFIGURES - 1 {
+            budget
+                .record::<core::convert::Infallible>(FrameOutcome::Reconfigured)
+                .expect("the run did not reset");
+        }
+    }
+
+    /// **The budget counts presented frames, not attempts.**
+    #[test]
+    fn the_budget_is_spent_by_presented_frames_only() {
+        let mut budget = FrameBudget::new(Some(2));
+        assert!(!budget.is_spent());
+        budget
+            .record::<core::convert::Infallible>(FrameOutcome::Reconfigured)
+            .expect("under the cap");
+        assert!(!budget.is_spent(), "a reconfigure spent budget");
+        for _ in 0..2 {
+            budget
+                .record::<core::convert::Infallible>(FrameOutcome::Presented)
+                .expect("presenting never fails");
+        }
+        assert!(budget.is_spent());
+    }
+
+    /// **A focus loss releases every held key before it pauses.**
+    ///
+    /// The half that matters: a game resuming while it still believes a key is
+    /// held flies into the wall until the player taps it again. Pausing without
+    /// releasing looks identical until someone actually holds a key over a
+    /// window switch.
+    #[test]
+    fn losing_focus_releases_what_was_held_before_pausing() {
+        use crcbl_core::input::KeyCode;
+        let mut held = vec![KeyCode::KeyA, KeyCode::KeyD];
+        let mut paused = false;
+        let mut released = Vec::new();
+
+        lose_focus(&mut held, &mut paused, |key| released.push(key));
+
+        assert_eq!(released, vec![KeyCode::KeyA, KeyCode::KeyD]);
+        assert!(held.is_empty(), "the held list survived the focus loss");
+        assert!(paused);
+
+        // A second focus loss with nothing held changes nothing.
+        lose_focus(&mut held, &mut paused, |_| panic!("nothing was held"));
+        assert!(paused);
     }
 
     /// **A pause drains the accumulator instead of letting it fill.**
