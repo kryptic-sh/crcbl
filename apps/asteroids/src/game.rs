@@ -1731,11 +1731,11 @@ impl Game {
         }
 
         let intent = Intent {
-            left: action_held(&self.action_map, ACTION_LEFT),
-            right: action_held(&self.action_map, ACTION_RIGHT),
-            thrust: action_held(&self.action_map, ACTION_THRUST),
-            fire: action_just_pressed(&self.action_map, ACTION_FIRE),
-            restart: action_just_pressed(&self.action_map, ACTION_RESTART),
+            left: self.action_map.button_held(ACTION_LEFT),
+            right: self.action_map.button_held(ACTION_RIGHT),
+            thrust: self.action_map.button_held(ACTION_THRUST),
+            fire: self.action_map.just_pressed(ACTION_FIRE),
+            restart: self.action_map.just_pressed(ACTION_RESTART),
         };
 
         let ticks_before = {
@@ -1981,27 +1981,8 @@ impl Game {
     #[cfg(test)]
     #[must_use]
     pub fn fire_is_down(&self) -> bool {
-        action_held(&self.action_map, ACTION_FIRE)
+        self.action_map.button_held(ACTION_FIRE)
     }
-}
-
-// ---- input helpers ----------------------------------------------------------
-
-fn action_held(map: &ActionMap, name: &str) -> bool {
-    map.action(name).is_some_and(|v| match v {
-        crcbl_input::ActionValue::Button(b) => matches!(
-            b.state,
-            crcbl_input::ButtonState::Pressed | crcbl_input::ButtonState::Held { .. }
-        ),
-        _ => false,
-    })
-}
-
-fn action_just_pressed(map: &ActionMap, name: &str) -> bool {
-    map.action(name).is_some_and(|v| match v {
-        crcbl_input::ActionValue::Button(b) => b.just_pressed,
-        _ => false,
-    })
 }
 
 // ---- tests ------------------------------------------------------------------

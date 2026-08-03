@@ -2284,14 +2284,14 @@ impl Game {
         // else here.
         let choose = ACTION_CHOOSE
             .iter()
-            .position(|name| action_just_pressed(&self.action_map, name))
+            .position(|name| self.action_map.just_pressed(name))
             .map_or(0, |index| index as u8 + 1);
         let intent = Intent {
-            up: action_held(&self.action_map, ACTION_UP),
-            down: action_held(&self.action_map, ACTION_DOWN),
-            left: action_held(&self.action_map, ACTION_LEFT),
-            right: action_held(&self.action_map, ACTION_RIGHT),
-            restart: action_just_pressed(&self.action_map, ACTION_RESTART),
+            up: self.action_map.button_held(ACTION_UP),
+            down: self.action_map.button_held(ACTION_DOWN),
+            left: self.action_map.button_held(ACTION_LEFT),
+            right: self.action_map.button_held(ACTION_RIGHT),
+            restart: self.action_map.just_pressed(ACTION_RESTART),
             choose,
         };
 
@@ -2767,25 +2767,6 @@ impl Game {
         let index = *logic.by_entity.get(&entity)?;
         logic.enemies.get(index).map(|enemy| enemy.position)
     }
-}
-
-// ---- input helpers ----------------------------------------------------------
-
-fn action_held(map: &ActionMap, name: &str) -> bool {
-    map.action(name).is_some_and(|v| match v {
-        crcbl_input::ActionValue::Button(b) => matches!(
-            b.state,
-            crcbl_input::ButtonState::Pressed | crcbl_input::ButtonState::Held { .. }
-        ),
-        _ => false,
-    })
-}
-
-fn action_just_pressed(map: &ActionMap, name: &str) -> bool {
-    map.action(name).is_some_and(|v| match v {
-        crcbl_input::ActionValue::Button(b) => b.just_pressed,
-        _ => false,
-    })
 }
 
 // ---- tests ------------------------------------------------------------------

@@ -488,6 +488,74 @@ impl ActionMap {
         self.slots.iter().map(|s| s.decl.name.as_str())
     }
 
+    /// Whether a button action is down — pressed this tick or still held.
+    ///
+    /// An action that was never declared, or that is not a button, is `false`
+    /// rather than an error: a caller asking whether a button is down has no
+    /// better answer to give, and every game was already collapsing both cases
+    /// that way.
+    ///
+    /// The state is matched positively rather than as "not
+    /// [`Released`](ButtonState::Released)". The two agree while
+    /// [`ButtonState`] has three variants, and would stop agreeing the day it
+    /// gains a fourth — silently, and only for whoever wrote the negation.
+    #[must_use]
+    pub fn button_held(&self, name: &str) -> bool {
+        self.button(name).is_some_and(|button| {
+            matches!(
+                button.state,
+                ButtonState::Pressed | ButtonState::Held { .. }
+            )
+        })
+    }
+
+    /// Whether a button action went down on this tick.
+    ///
+    /// The edge, not the level: true only for the tick of the transition, and
+    /// cleared by [`ActionMap::begin_tick`]. This is what a jump or a flap
+    /// reads, so that holding the key does not repeat it.
+    #[must_use]
+    pub fn just_pressed(&self, name: &str) -> bool {
+        self.button(name).is_some_and(|button| button.just_pressed)
+    }
+
+    /// Whether a button action came up on this tick.
+    #[must_use]
+    pub fn just_released(&self, name: &str) -> bool {
+        self.button(name).is_some_and(|button| button.just_released)
+    }
+
+    /// A 1-D axis action's value, or `0.0` if it is absent or another kind.
+    #[must_use]
+    pub fn axis1(&self, name: &str) -> f32 {
+        match self.action(name) {
+            Some(ActionValue::Axis1(axis)) => axis.value,
+            _ => 0.0,
+        }
+    }
+
+    /// A 2-D axis action's value, or `(0.0, 0.0)` if it is absent or another
+    /// kind.
+    ///
+    /// Key-driven composites arrive normalised to at most unit length, so a
+    /// diagonal is not faster than a cardinal; mouse motion is a raw pixel
+    /// delta and is not normalised.
+    #[must_use]
+    pub fn axis2(&self, name: &str) -> (f32, f32) {
+        match self.action(name) {
+            Some(ActionValue::Axis2(axis)) => (axis.x, axis.y),
+            _ => (0.0, 0.0),
+        }
+    }
+
+    /// The button behind `name`, if it is declared and is one.
+    fn button(&self, name: &str) -> Option<&ButtonAction> {
+        match self.action(name)? {
+            ActionValue::Button(button) => Some(button),
+            _ => None,
+        }
+    }
+
     // -- internal resolution -------------------------------------------------
 
     /// Re-resolve every enabled action with a binding `matches` accepts.
@@ -769,6 +837,135 @@ mod tests {
             kind: ActionKind::Axis1,
             bindings: vec![Binding::MouseScroll],
         }
+    }
+
+    // -- typed accessors ----------------------------------------------------
+
+    /// One tick at sixty hertz, which is what `begin_tick` wants — a delta,
+    /// not a timestamp.
+    const TICK: f32 = 1.0 / 60.0;
+
+    /// Held is down, and so is the tick the key went down on.
+    ///
+    /// Both, not just the second: a game reading "is the thrust on" during the
+    /// very tick the key arrived would otherwise see it off for one tick and
+    /// stutter.
+    #[test]
+    fn a_button_is_held_while_it_is_down_and_not_after() {
+        let mut map = ActionMap::new();
+        map.declare(decl_button("thrust", Binding::Key(KeyCode::KeyW)));
+
+        assert!(!map.button_held("thrust"), "nothing is down yet");
+
+        map.begin_tick(TICK);
+        map.key_event(KeyCode::KeyW, true);
+        assert!(map.button_held("thrust"), "the tick the key arrives counts");
+
+        map.begin_tick(TICK);
+        assert!(
+            matches!(
+                map.action("thrust"),
+                Some(ActionValue::Button(ButtonAction {
+                    state: ButtonState::Held { .. },
+                    ..
+                }))
+            ),
+            "a second tick with the key still down is Held, which is the other \
+             state that must read as down"
+        );
+        assert!(map.button_held("thrust"));
+
+        map.key_event(KeyCode::KeyW, false);
+        assert!(!map.button_held("thrust"), "released is not down");
+    }
+
+    /// The edges are one tick wide, and they are not the level.
+    #[test]
+    fn the_edges_fire_once_each() {
+        let mut map = ActionMap::new();
+        map.declare(decl_button("flap", Binding::Key(KeyCode::Space)));
+
+        map.begin_tick(TICK);
+        map.key_event(KeyCode::Space, true);
+        assert!(map.just_pressed("flap"));
+        assert!(!map.just_released("flap"));
+
+        map.begin_tick(TICK);
+        assert!(
+            !map.just_pressed("flap"),
+            "holding the key does not press it again — this is the whole \
+             reason a flap reads the edge and not the level"
+        );
+        assert!(map.button_held("flap"), "still down, though");
+
+        map.key_event(KeyCode::Space, false);
+        assert!(map.just_released("flap"));
+        map.begin_tick(TICK);
+        assert!(
+            !map.just_released("flap"),
+            "the release edge is one tick too"
+        );
+    }
+
+    /// An axis answers with its value, and a composite is not longer than one.
+    #[test]
+    fn the_axis_accessors_read_the_value() {
+        let mut map = ActionMap::new();
+        map.declare(decl_axis2_wasd(
+            "move",
+            KeyCode::KeyW,
+            KeyCode::KeyS,
+            KeyCode::KeyA,
+            KeyCode::KeyD,
+        ));
+        map.declare(decl_axis1_scroll("zoom"));
+
+        assert_eq!(map.axis2("move"), (0.0, 0.0));
+        assert_eq!(map.axis1("zoom"), 0.0);
+
+        map.begin_tick(TICK);
+        map.key_event(KeyCode::KeyD, true);
+        let (x, y) = map.axis2("move");
+        assert!((x - 1.0).abs() < 1e-6, "right alone is +1 on x, got {x}");
+        assert!(y.abs() < 1e-6, "and nothing on y, got {y}");
+
+        map.key_event(KeyCode::KeyW, true);
+        let (x, y) = map.axis2("move");
+        let length = x.hypot(y);
+        assert!(
+            (length - 1.0).abs() < 1e-6,
+            "a diagonal is normalised, or it is 41% faster than a cardinal: \
+             got length {length}"
+        );
+
+        map.mouse_scroll(0.0, 3.0);
+        assert_ne!(map.axis1("zoom"), 0.0, "the scroll reached the axis");
+    }
+
+    /// Asking the wrong kind, or a name nobody declared, is the idle value.
+    ///
+    /// Every game collapsed both cases this way already. Worth pinning because
+    /// the alternative — a panic, or `true` — would turn a typo into a stuck
+    /// input rather than a dead one.
+    #[test]
+    fn the_wrong_kind_and_the_wrong_name_are_idle() {
+        let mut map = ActionMap::new();
+        map.declare(decl_button("fire", Binding::Key(KeyCode::Space)));
+        map.declare(decl_axis1_scroll("zoom"));
+
+        map.begin_tick(TICK);
+        map.key_event(KeyCode::Space, true);
+
+        assert!(!map.button_held("zoom"), "an axis is not a held button");
+        assert!(!map.just_pressed("zoom"));
+        assert!(!map.just_released("zoom"));
+        assert_eq!(map.axis1("fire"), 0.0, "a button is not an axis");
+        assert_eq!(map.axis2("fire"), (0.0, 0.0));
+
+        assert!(!map.button_held("nonesuch"));
+        assert!(!map.just_pressed("nonesuch"));
+        assert_eq!(map.axis1("nonesuch"), 0.0);
+        assert_eq!(map.axis2("nonesuch"), (0.0, 0.0));
     }
 
     // -- ButtonState / ButtonAction -----------------------------------------

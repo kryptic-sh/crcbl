@@ -949,8 +949,8 @@ impl Game {
         }
 
         let intent = Intent {
-            flap: action_just_pressed(&self.action_map, ACTION_FLAP),
-            restart: action_just_pressed(&self.action_map, ACTION_RESTART),
+            flap: self.action_map.just_pressed(ACTION_FLAP),
+            restart: self.action_map.just_pressed(ACTION_RESTART),
         };
 
         let ticks_before = {
@@ -1049,7 +1049,7 @@ impl Game {
     #[cfg(test)]
     #[must_use]
     pub fn flap_is_down(&self) -> bool {
-        action_is_down(&self.action_map, ACTION_FLAP)
+        self.action_map.button_held(ACTION_FLAP)
     }
 
     /// The course in play, for a caller that wants to name a pipe — a bug
@@ -1074,31 +1074,6 @@ impl Game {
     pub fn entity_count(&mut self) -> usize {
         self.server.world_mut().entity_count()
     }
-}
-
-// ---- input helpers ----------------------------------------------------------
-
-/// Whether the action map still counts `name` as physically down.
-///
-/// Distinct from [`action_just_pressed`], which is the *edge* and is what the
-/// game reads: a key the map thinks is still down produces no further edges
-/// however many times it is pressed again, which is precisely what a focus loss
-/// with no releases leaves behind.
-#[cfg(test)]
-fn action_is_down(map: &ActionMap, name: &str) -> bool {
-    map.action(name).is_some_and(|v| match v {
-        crcbl_input::ActionValue::Button(b) => {
-            !matches!(b.state, crcbl_input::ButtonState::Released)
-        }
-        _ => false,
-    })
-}
-
-fn action_just_pressed(map: &ActionMap, name: &str) -> bool {
-    map.action(name).is_some_and(|v| match v {
-        crcbl_input::ActionValue::Button(b) => b.just_pressed,
-        _ => false,
-    })
 }
 
 // ---- tests ------------------------------------------------------------------

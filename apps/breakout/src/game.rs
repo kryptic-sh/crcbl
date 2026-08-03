@@ -918,7 +918,7 @@ impl Game {
     #[cfg(test)]
     #[must_use]
     pub fn move_left_is_held(&self) -> bool {
-        action_held(&self.action_map, ACTION_LEFT)
+        self.action_map.button_held(ACTION_LEFT)
     }
 
     /// Advances the simulation by exactly one fixed tick.
@@ -933,10 +933,10 @@ impl Game {
         }
 
         let intent = Intent {
-            left: action_held(&self.action_map, ACTION_LEFT),
-            right: action_held(&self.action_map, ACTION_RIGHT),
-            launch: action_just_pressed(&self.action_map, ACTION_LAUNCH),
-            restart: action_just_pressed(&self.action_map, ACTION_RESTART),
+            left: self.action_map.button_held(ACTION_LEFT),
+            right: self.action_map.button_held(ACTION_RIGHT),
+            launch: self.action_map.just_pressed(ACTION_LAUNCH),
+            restart: self.action_map.just_pressed(ACTION_RESTART),
         };
 
         let ticks_before = {
@@ -1085,25 +1085,6 @@ fn log_hud(
         "[HUD] Score: {score} (best: {high})  Lives: {lives}  Bricks: {bricks}  \
          Ball x: {ball_x:.1}  {state_str}{sound_str}"
     );
-}
-
-// ---- input helpers ----------------------------------------------------------
-
-fn action_held(map: &ActionMap, name: &str) -> bool {
-    map.action(name).is_some_and(|v| match v {
-        crcbl_input::ActionValue::Button(b) => matches!(
-            b.state,
-            crcbl_input::ButtonState::Pressed | crcbl_input::ButtonState::Held { .. }
-        ),
-        _ => false,
-    })
-}
-
-fn action_just_pressed(map: &ActionMap, name: &str) -> bool {
-    map.action(name).is_some_and(|v| match v {
-        crcbl_input::ActionValue::Button(b) => b.just_pressed,
-        _ => false,
-    })
 }
 
 // ---- tests ------------------------------------------------------------------
