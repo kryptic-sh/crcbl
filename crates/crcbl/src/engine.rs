@@ -111,7 +111,7 @@ use crcbl_hal::{
     SwapchainHandle,
 };
 use crcbl_hal::{Device, Instance};
-use crcbl_shell::{CloseReply, PhysicalSize, Shell, ShellError, ShellEvent, WindowId};
+use crcbl_shell::{CloseReply, DisplayMode, PhysicalSize, Shell, ShellError, ShellEvent, WindowId};
 
 use crate::backend::GpuBackend;
 
@@ -1515,6 +1515,104 @@ pub const MENU_DOWN_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode
 /// Commits the selection. See [`MENU_UP_KEY`].
 pub const MENU_ACTIVATE_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::Enter;
 
+/// The loop's fullscreen request, and whether the window system agreed.
+///
+/// All five samples carried a `mode_honoured` bool and the same three methods
+/// beside it. Every one of them talks only to the shell, which is what makes
+/// this the last piece of the loop that extracts without a game type anywhere
+/// near it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ModeRequest {
+    honoured: bool,
+}
+
+impl ModeRequest {
+    /// A loop that has asked for nothing yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { honoured: false }
+    }
+
+    /// The mode the window system actually has the window in.
+    ///
+    /// **Not the one that was last asked for.** A summary that reported the
+    /// request would say "borderless" for every compositor that refused, which
+    /// is the difference this whole type exists to keep visible.
+    pub fn mode<S: Shell + ?Sized>(shell: &S, window: WindowId) -> DisplayMode {
+        shell
+            .window_state(window)
+            .map_or(DisplayMode::Windowed, |state| {
+                state.effective_mode().unwrap_or(state.requested_mode)
+            })
+    }
+
+    /// Asks for the opposite of whatever the window is in now.
+    ///
+    /// Read back rather than remembered: a loop that tracked its own idea of
+    /// fullscreen would invert a state the compositor never entered, and the
+    /// key would then do nothing every other press.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError`] if the shell refused the request outright. A shell that
+    /// accepts it and then does not honour it is not an error — see
+    /// [`Self::check`].
+    pub fn toggle<S: Shell + ?Sized>(shell: &mut S, window: WindowId) -> Result<(), ShellError> {
+        let target = if Self::mode(shell, window).is_borderless() {
+            DisplayMode::Windowed
+        } else {
+            DisplayMode::Borderless { monitor: None }
+        };
+        shell.set_mode(window, target)?;
+        log::info!("shell: asked for {target}");
+        Ok(())
+    }
+
+    /// Whether the window system was last seen honouring what was asked for.
+    ///
+    /// Updated by [`Self::check`], so it is a *report* rather than a request —
+    /// which is the distinction each sample's
+    /// `fullscreen_is_requested_and_the_refusal_is_reported` asserts.
+    #[must_use]
+    pub const fn honoured(self) -> bool {
+        self.honoured
+    }
+
+    /// Logs the moment the window system stops agreeing with the request.
+    ///
+    /// Once per transition, not once per frame: a backend that cannot do
+    /// fullscreen at all — the browser without a shim that calls
+    /// `requestFullscreen`, a tiling window manager — would otherwise print a
+    /// line every frame forever.
+    pub fn check<S: Shell + ?Sized>(&mut self, shell: &S, window: WindowId) {
+        let Ok(state) = shell.window_state(window) else {
+            return;
+        };
+        // Defensive, and currently untested because it makes no difference:
+        // an unconfigured window has no effective mode, so
+        // `mode_request_honoured` is already false and matches the initial
+        // state. It is here for a backend that unconfigures a window that was
+        // configured, which none of ours does.
+        if !state.is_configured() {
+            return;
+        }
+        let honoured = state.mode_request_honoured();
+        if honoured == self.honoured {
+            return;
+        }
+        self.honoured = honoured;
+        if honoured {
+            log::info!("shell: the window is {}", state.requested_mode);
+        } else {
+            log::warn!(
+                "shell: asked for {} and got {}",
+                state.requested_mode,
+                Self::mode(shell, window),
+            );
+        }
+    }
+}
+
 /// Everything the loop remembers about the pointer between frames.
 ///
 /// Two fields that every sample carried separately and resolved by hand: where
@@ -2366,6 +2464,77 @@ mod tests {
             1,
             "a failed start-up asked for another device",
         );
+    }
+
+    /// **Toggling reads the window's mode back rather than remembering it.**
+    ///
+    /// A loop that tracked its own idea of fullscreen would invert a state the
+    /// compositor never entered, and the key would then work every other press.
+    /// Asserted by toggling twice and requiring the request to come back to
+    /// where it started — which a remembered flag also does, so the third
+    /// toggle is the one that matters: it must ask for borderless again.
+    #[test]
+    fn toggling_the_mode_asks_for_the_opposite_of_what_the_window_is_in() {
+        let (mut shell, window) = shell();
+        assert_eq!(ModeRequest::mode(&shell, window), DisplayMode::Windowed);
+
+        ModeRequest::toggle(&mut shell, window).expect("the window is live");
+        assert!(
+            ModeRequest::mode(&shell, window).is_borderless(),
+            "the first toggle must ask for borderless",
+        );
+
+        ModeRequest::toggle(&mut shell, window).expect("the window is live");
+        assert_eq!(
+            ModeRequest::mode(&shell, window),
+            DisplayMode::Windowed,
+            "the second must come back",
+        );
+
+        ModeRequest::toggle(&mut shell, window).expect("the window is live");
+        assert!(
+            ModeRequest::mode(&shell, window).is_borderless(),
+            "the third must ask for borderless again",
+        );
+    }
+
+    /// **A refused request is reported, and `mode` keeps saying what the window
+    /// system actually did.**
+    ///
+    /// The property the whole type exists for. `HeadlessShell` accepts
+    /// `set_mode(Borderless)` and then stays `Windowed`, which is exactly what a
+    /// tiling window manager or a browser with no `requestFullscreen` shim does
+    /// — so a loop that reported its *request* would tell the player it went
+    /// fullscreen when nothing happened.
+    #[test]
+    fn a_refused_mode_request_is_noticed_and_the_reported_mode_stays_honest() {
+        let (mut shell, window) = shell();
+        shell
+            .resize(window, crcbl_shell::PhysicalSize::new(320, 240))
+            .expect("the window is live");
+        shell.pump(&mut |_| {});
+
+        let mut request = ModeRequest::new();
+        request.check(&shell, window);
+        assert!(request.honoured, "a configured window starts out agreeing");
+
+        ModeRequest::toggle(&mut shell, window).expect("the shell accepts the request");
+        shell.pump(&mut |_| {});
+        request.check(&shell, window);
+        assert!(
+            !request.honoured,
+            "the refusal went unnoticed, so it would never be logged",
+        );
+        assert_eq!(
+            ModeRequest::mode(&shell, window),
+            DisplayMode::Windowed,
+            "mode() reported the request rather than what the window actually is",
+        );
+
+        // Latched: checking again must not flip it back, or the loop logs the
+        // same refusal on every frame forever.
+        request.check(&shell, window);
+        assert!(!request.honoured);
     }
 
     /// **A click faster than one frame still latches and fires.**

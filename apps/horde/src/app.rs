@@ -57,7 +57,7 @@ use core::time::Duration;
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Clock, ExitReason, Flow, FrameOutcome, Handled, MAX_CONSECUTIVE_RECONFIGURES, MAX_FRAME_STEP,
-    MenuPump, PointerCapture, WINDOWED_IDLE, accept_close, wait_for_configure,
+    MenuPump, ModeRequest, PointerCapture, WINDOWED_IDLE, accept_close, wait_for_configure,
 };
 use crcbl::math::Vec2;
 use crcbl::prelude::*;
@@ -475,11 +475,7 @@ impl<S: Shell + ?Sized> Loop<S> {
     /// `self.fullscreen` field to disagree with the compositor.
     #[must_use]
     pub fn display_mode(&self) -> DisplayMode {
-        self.shell
-            .window_state(self.window)
-            .map_or(DisplayMode::Windowed, |state| {
-                state.effective_mode().unwrap_or(state.requested_mode)
-            })
+        ModeRequest::mode(self.shell.as_ref(), self.window)
     }
 
     /// What a fired menu button does.
@@ -588,14 +584,7 @@ impl<S: Shell + ?Sized> Loop<S> {
 
     /// Asks for the mode the window is not in.
     fn toggle_fullscreen(&mut self) -> Result<(), HordeError> {
-        let target = if self.display_mode().is_borderless() {
-            DisplayMode::Windowed
-        } else {
-            DisplayMode::Borderless { monitor: None }
-        };
-        self.shell.set_mode(self.window, target)?;
-        crcbl::log::info!("shell: asked for {target}");
-        Ok(())
+        Ok(ModeRequest::toggle(self.shell.as_mut(), self.window)?)
     }
 
     /// Gathers this frame's debug sections and draws the panel.

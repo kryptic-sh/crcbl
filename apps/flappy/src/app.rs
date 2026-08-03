@@ -25,7 +25,7 @@ use core::time::Duration;
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Clock, ExitReason, Flow, FrameOutcome, Handled, MAX_CONSECUTIVE_RECONFIGURES, MAX_FRAME_STEP,
-    MenuPump, PointerCapture, WINDOWED_IDLE, accept_close, wait_for_configure,
+    MenuPump, ModeRequest, PointerCapture, WINDOWED_IDLE, accept_close, wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{
@@ -123,10 +123,9 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
     /// consumer that keeps its own key state must clear it. A `Vec` because a
     /// hand holds three keys, not three hundred.
     held_keys: Vec<KeyCode>,
-    /// Whether the window system was last seen honouring the display mode this
-    /// loop asked for, so a refusal is logged when it happens rather than every
-    /// frame afterwards.
-    mode_honoured: bool,
+    /// The fullscreen request, and whether the window system agreed — see
+    /// [`ModeRequest`].
+    mode: ModeRequest,
     frames: u64,
     ticks: u64,
     events: u64,
@@ -232,7 +231,7 @@ impl<S: Shell + ?Sized> Loop<S> {
             debug: DebugOverlay::with_visible(options.common.debug_overlay_visible()),
             paused: false,
             held_keys: Vec::new(),
-            mode_honoured: true,
+            mode: ModeRequest::new(),
             frames: 0,
             ticks: 0,
             events,
@@ -443,11 +442,7 @@ impl<S: Shell + ?Sized> Loop<S> {
     /// Falls back to the request while the window is unconfigured.
     #[must_use]
     pub fn display_mode(&self) -> DisplayMode {
-        self.shell
-            .window_state(self.window)
-            .map_or(DisplayMode::Windowed, |state| {
-                state.effective_mode().unwrap_or(state.requested_mode)
-            })
+        ModeRequest::mode(self.shell.as_ref(), self.window)
     }
 
     /// What a fired menu button does.
@@ -554,14 +549,7 @@ impl<S: Shell + ?Sized> Loop<S> {
     /// player left by some other route (Escape in a browser, a compositor
     /// keybinding) leaves F11 meaning "go fullscreen" again.
     fn toggle_fullscreen(&mut self) -> Result<(), FlappyError> {
-        let target = if self.display_mode().is_borderless() {
-            DisplayMode::Windowed
-        } else {
-            DisplayMode::Borderless { monitor: None }
-        };
-        self.shell.set_mode(self.window, target)?;
-        crcbl::log::info!("shell: asked for {target}");
-        Ok(())
+        Ok(ModeRequest::toggle(self.shell.as_mut(), self.window)?)
     }
 
     /// Logs the moment the window system stops agreeing with the request.
@@ -569,26 +557,7 @@ impl<S: Shell + ?Sized> Loop<S> {
     /// Once per transition, not once per frame: a backend that cannot do
     /// fullscreen at all would otherwise print a line every frame forever.
     fn check_mode_request(&mut self) {
-        let Ok(state) = self.shell.window_state(self.window) else {
-            return;
-        };
-        if !state.is_configured() {
-            return;
-        }
-        let honoured = state.mode_request_honoured();
-        if honoured == self.mode_honoured {
-            return;
-        }
-        self.mode_honoured = honoured;
-        if honoured {
-            crcbl::log::info!("shell: the window is {}", state.requested_mode);
-        } else {
-            crcbl::log::warn!(
-                "shell: asked for {} and got {}",
-                state.requested_mode,
-                self.display_mode(),
-            );
-        }
+        self.mode.check(self.shell.as_ref(), self.window);
     }
 
     /// Gathers this frame's debug sections and draws the panel.
@@ -1966,7 +1935,7 @@ mod tests {
             DisplayMode::Windowed,
             "the loop must report what it got, not what it asked for",
         );
-        assert!(!engine.mode_honoured, "the refusal has to be noticed");
+        assert!(!engine.mode.honoured(), "the refusal has to be noticed");
 
         let summary = engine.finish(ExitReason::FrameBudget).expect("teardown");
         assert_eq!(summary.mode, DisplayMode::Windowed);
