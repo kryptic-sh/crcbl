@@ -3,13 +3,17 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## Owed, with a phase attached
+## Owed
 
-The S1B findings in `docs/plan/ROADMAP.md` are the substantive list — six places
-two unrelated games were pushed into the same workaround, each with the phase
-that owes the fix. **Finding 1 is closed** (P4B bought `SpriteRenderer` and both
-samples now draw through it); five stand. They are not repeated here; this file
-carries what has no phase yet.
+The S1B findings in `docs/plan/ROADMAP.md` were the substantive list — six
+places two unrelated games were pushed into the same workaround. **All six are
+now closed**: 1 by `SpriteRenderer` (P4B), 2 by `crates/crcbl/src/web.rs`, 3
+inside the phase that found it, 4 by `crcbl::store::record::Record`, 5 by
+`crcbl_audio::mixer` reached through the blanket `impl AudioSource for Arc<T>`,
+and 6 by the umbrella's re-exports — verified by reading each sample's manifest
+and the crates named above, not by trusting the roadmap's own status column,
+which still carries the pre-closure narrative for 2. What is left below has no
+phase attached to it.
 
 - **`Sprite` is a public-field struct, so every new field is a breaking
   change.** Adding `rotation` broke five literals in `apps/*/src/art.rs` and
@@ -61,126 +65,112 @@ carries what has no phase yet.
   property, but nobody has heard whether ten joins a second is inaudible in
   practice. Both want a person with headphones.
 
-- **The browser entry point was to be written once before S2, then before S3.
-  THE DEADLINE HAS NOW BEEN MISSED TWICE.** Finding 2 in that list said so in as
-  many words — "owed before S2, which will otherwise write it a third time" — S2
-  wrote it a third time and re-owed it before S3, and S3 wrote a fourth.
-  `apps/breakout/src/web.rs`, `apps/flappy/src/web.rs`,
-  `apps/asteroids/src/web.rs` and `apps/horde/src/web.rs` are now the same file
-  with four different symbol prefixes.
+## The goal: a sample depends on `crcbl` and `std`, and it is met bar one line
 
-  **What it costs now, which is the part that changed.** The fix used to be
-  "write it once, adopt it in two places". It is now one new shared
-  implementation plus **four** call sites to migrate, four sets of `STATUS_*`
-  constants to delete, four prefixes to thread through the macro, and four
-  browser gates (`CRCBL_WEB_E2E_DEMO=…`) to re-run before it can be believed.
-  Every sample after this adds one more of each. The four copies have still
-  barely drifted — horde's was produced from asteroids' by substituting the
-  sample name, and the executable difference is one `log::info!` line reporting
-  a different summary — which is the one piece of good news. The `web.rs` four
-  are now the _worst_ remaining copy of this shape:
-  `apps/*/src/{best,high_score}.rs` still diverge in their public API, their
-  type names, their file names and, as of horde, in **what they store** (three
-  keep a score; horde keeps a time in whole seconds), and `apps/*/src/audio.rs`
-  has been migrated onto `crcbl_audio::mixer` — what is left in each is the
-  waveforms, the cue ids, the listener convention and horde's voice cap, all of
-  which are genuinely per-game.
+Stated as a target for the samples on 2026-08-03, and reached on 2026-08-03.
+Every one of `apps/{bare,breakout,flappy,asteroids,horde,sandbox}/Cargo.toml`
+now names `crcbl` and nothing else under `[dependencies]` — the nine simulation
+crates are re-exported, `glam` is `crcbl::math` and `log` is `crcbl::log`. What
+is left is one build-dependency and one file.
 
-  What it would take: a crate (or a `crcbl` module) owning the `Stage` state
-  machine, the log queue and the `prepare`/`boot`/`frame`/`status`/`shutdown`
-  protocol, with the sample supplying only its prefix and its two loop types.
-  The prefix has to stay per-sample — two demos can be open in one browser and
-  the symbols must not collide — and `concat_idents!` is not stable, so the
-  shape is a `macro_rules!` taking the ten symbol names as arguments over a
-  generic core. **The JS half of this is done** — `web/engine/demo.js` is one
-  boot sequence for every demo and `web/demos/<name>/main.js` is 33 lines — and
-  it settles the shape question in the affirmative: the sample-specific part
-  turned out to be ten literal symbol names and two strings, and nothing else.
+- **The `crcbl-sprite`/`bake` build-dependency is the one exception, and it was
+  taken rather than decided.** The four game manifests carry
+  `crcbl-sprite = { features = ["bake"] }` under `[build-dependencies]`, with
+  the reason written in each: `crcbl` re-exports the `.crpix` _reader_ and not
+  the PNG _encoder_, and cargo's `resolver = "3"` keeps the bake feature out of
+  the shipped binary because build-dependency features resolve separately. The
+  alternative — making the umbrella's heavy re-exports optional so a build
+  script can take `default-features = false, features = ["bake"]` — buys a
+  literal zero-exception rule at the price of a feature matrix on the umbrella's
+  public surface. **Still a decision nobody has made**; the exception is
+  defensible and is what ships today.
 
-  Why S2 and S3 both declined: it is an engine-API change to `crates/` plus
-  edits to samples the slice was not otherwise touching, landing in the same
-  commit as that game's audio, save file, demo page and — for S3 — its scale
-  measurement. The JS half was done as its own piece of work for that reason and
-  the Rust half should be too. **Do not attach it to the next sample slice.** It
-  has now been attached to two of them and slipped both times; it wants a slice
-  of its own, with the four browser gates as its exit criterion.
+- **`main.rs` is four near-identical copies.** Measured with comments and blanks
+  stripped: 37 code lines in breakout and flappy, 39 in asteroids, 42 in horde,
+  and `breakout` against `flappy` differs in 8 of the 37 — the crate name, the
+  summary fields printed, the exit code's message. It is what the extraction of
+  `crcbl::args` left behind: the parser is shared, the front end that calls it
+  is not. Smallest remaining copy in the tree and nothing about it is urgent;
+  the count is here so it is not measured a third time.
 
-## The goal: a sample depends on `crcbl` and `std`, and on nothing else
+**Everything else on this list shipped.** `web.rs` is `crates/crcbl/src/web.rs`
+(the per-sample file is down to 112 code lines from 333, and 26 of them differ
+between breakout and flappy — the `__crcbl_<sample>_` symbols, which
+`web/tools/check-exports.mjs` requires to be literal, see _Considered and
+declined_); `app.rs`'s loop is `crcbl::engine::Loop`; `args.rs` is
+`crcbl::args`; `best.rs`/`high_score.rs` is `crcbl::store::record::Record`; the
+oscillator is `crcbl_audio::synth`; the loopback session is `crcbl::session`;
+`build.rs` is `crcbl_sprite::bake::bake_dir`. Adopting `crcbl_ui::hud` was
+declined on its merits — see that section.
 
-Stated as a target for the samples on 2026-08-03. `apps/sandbox` already meets
-it bar `log`; the four games do not, and the gap has two halves that want
-separate work.
+## Frame pacing sleeps on the monotonic clock, which is not what a display does
 
-### Half one: twelve dependencies that are re-exports, not engine gaps
+`crcbl::engine::Pacing` chooses a present mode (`Vsync` → `Fifo`, `Adaptive` →
+`FifoRelaxed`/`Mailbox`, `Off` → `Mailbox`/`Immediate`) and `FrameLimit` paces
+the loop by sleeping the difference between the last frame's length and a
+period, on `std::time` — `Clock::Real` in `crates/crcbl/src/engine.rs`, where
+the `wasm32` arm of `sleep` is deliberately a no-op because the browser paces
+frames itself. That is the whole mechanism, and it is open loop: it never learns
+when a frame was actually shown.
 
-Each of `apps/{breakout,flappy,asteroids,horde}/Cargo.toml` names the umbrella
-plus **eleven** more crates, and a build-dependency. None of it needs an engine
-feature — it needs `crates/crcbl/src/lib.rs` to re-export what it already
-depends on, or what nothing stops it depending on.
+Two pieces are named and neither is started. No code under `crates/` requests
+either extension; the only mention of one anywhere is the doc comment on
+`Pacing` saying why the engine cannot answer which mode is running.
 
-- **The nine engine crates with no re-export**: `crcbl-ecs`, `crcbl-net`,
-  `crcbl-phys`, `crcbl-input`, `crcbl-server`, `crcbl-client`, `crcbl-audio`,
-  `crcbl-store`, `crcbl-sprite`. **Cycle-free**: none of the nine depends on
-  `crcbl`, checked by reading all nine manifests, so the re-export is nine
-  `pub use` lines and nine manifest entries. `crcbl-scene` exists and no sample
-  uses it.
-- **`crcbl-core` is already `crcbl::core`** and the samples still write
-  `crcbl_core::` — import churn, no engine change.
-- **`glam` is already `crcbl::math`.** Twenty-one sample files import `glam::`
-  directly. It is the same crate, so the types are identical and the change is
-  mechanical.
-- **`log`.** Verified rather than assumed: a scratch crate that does
-  `pub use log;` and a consumer calling `logtest::log::info!` compiles, so
-  `crcbl::log::info!` will work at all 143 sample call sites without a wrapper
-  macro.
-- **The `crcbl-sprite`/`bake` build-dependency is the one with a real
-  trade-off.** Naming `crcbl` there instead means the build script links the
-  whole engine — `crcbl-vk`, `crcbl-wgpu`, the renderer — to encode a PNG. The
-  fix is to make the umbrella's heavy re-exports optional so a build script can
-  take `default-features = false, features = ["bake"]`; the workspace is on
-  `resolver = "3"`, which resolves build-dependency features separately from
-  normal ones, so the game half keeps the full default set. **This is a
-  decision, not a refactor**: a feature matrix on the umbrella is a public
-  surface, and the alternative — leaving `crcbl-sprite` as the one permitted
-  exception — is defensible.
+- **Pace on `VK_KHR_present_wait`.** `vkWaitForPresentKHR` blocks until a
+  numbered present is on screen, which is the closed-loop version of the sleep
+  above and the way to cut a frame of latency without spinning.
+  `ash 0.38.0+1.3.281` — the pin — **already binds it**:
+  `ash::khr::present_wait::Device::wait_for_present(swapchain, present_id, timeout)`,
+  and `vk::PresentIdKHR` is in `definitions.rs`, so the swapchain can number its
+  presents. No hand-written FFI needed, contrary to what this was assumed to
+  cost. What it needs is the extension pair requested at device creation, an id
+  per present, and a wait the loop can skip when the extension is absent. **The
+  seam must be named for the capability, never the extension** — v2 of
+  `present_wait` is a different contract and should drop in behind the same
+  name.
 
-### Half two: what is genuinely hand-rolled
+- **Read the real present mode with `VK_EXT_present_timing`.** Today
+  `Pacing::Adaptive` is a _request_ with no observation behind it, which the
+  enum documents. `present_timing` is **not** in the pinned `ash` (checked: no
+  `present_timing` anywhere in its source) and is still provisional, so this
+  half is genuine hand-written FFI. It is what would let the engine say which
+  mode is running and what the panel's range is; nothing depends on it yet.
 
-Measured with comments and blank lines stripped, so these are shared _code_
-lines rather than shared prose. Ranked by what the extraction buys.
+## P5B — the job system, and the two decisions in front of it
 
-1. **`web.rs`** — four copies, `breakout` vs `flappy` is 333 shared code lines
-   against 32 that differ. Already the file's own section above; this is the
-   number that section lacked.
-2. **`app.rs`** — the loop. `breakout` vs `flappy` is ~1225 shared of ~1600.
-3. **`args.rs` and `main.rs`** — `flappy` vs `asteroids` args is 200 shared
-   against 8 differing; `main.rs` is 33 of 37. Four copies each.
-4. **`best.rs` / `high_score.rs`** — 152 shared against 18. Four copies.
-5. **The waveform synthesis in `audio.rs` is the newest find and the cleanest
-   case.** `fn sine` is **byte-identical** across flappy, asteroids and horde
-   (11 lines, confirmed with `cmp`, not with a diff tool), and so is its `fade`
-   helper (14 lines). Breakout has the same two functions under the older names
-   `gen_sine` and `fade_env`. `crcbl-audio` has a mixer, a sound bank and a
-   spatial grammar but **no oscillator and no envelope**, so every sample that
-   wants a beep writes one. An engine `synth` module — a sine, a noise source
-   and a linear fade — closes it; asteroids' `looped_sine` and horde's decaying
-   `noise` say what the shape has to cover.
-6. **The loopback session.** All four games build `InMemoryTransport::pair()` →
-   `Server::try_new_with_compatibility` → `Client::new_with_compatibility` with
-   a per-game `ProtocolCompatibility` const. Single-player-is-a-loopback-server
-   is the engine's architectural decision, not each game's, and nothing in
-   `crcbl` expresses it.
-7. **`crcbl_ui::hud` exists and no sample uses it.** `Hud`, `HudPanel` and
-   `Anchor` are in `crates/crcbl-ui/src/hud.rs`; every sample instead has a
-   private `HudStrings` in its `app.rs`. This is adoption, not extraction — the
-   engine feature was already bought.
+`crates/crcbl-jobs` does not exist. `docs/plan/21-jobs.md` and the roadmap's
+2026-08-03 correction carry the design and the measurements; what belongs here
+is the ordering and the two questions that are not ours to answer.
 
-**`gpu.rs` and `menu.rs` are NOT on this list, and that is the good news.** Both
-were extracted already — `crcbl::engine::GpuContext` and
-`crcbl::ui::menu::MenuSet` — and what is left measures as genuinely per-game:
-`gpu.rs` is 232 shared against 152 differing, `menu.rs` 266 against 131, where
-the differences are cameras, pass order, menu kinds and button labels. They are
-the shape the other seven should end up in.
+The order is forced: **the spawn seam and its single-threaded fallback come
+first**, because `docs/plan/21-jobs.md` records that `std::thread::spawn`
+_compiles_ on `wasm32-unknown-unknown` and returns `UNSUPPORTED_PLATFORM` at run
+time — so a pool built on `std::thread` is a pool that silently has no browser
+story. Then the samples adopt the seam (four consumers is what proves a seam
+before P6–P8 build on it), then the worker backend behind it.
+
+- **Decision, unanswered: pin a nightly toolchain for the wasm worker target.**
+  A threaded wasm artifact needs
+  `-C target-feature=+atomics,+bulk-memory,+mutable-globals` and `-Z build-std`,
+  which is nightly-only; `rust-toolchain.toml` pins an **exact stable**
+  (`1.97.0`) on purpose, with the reasoning written in the file. The shape that
+  would not disturb every contributor is a nightly pinned by date for that one
+  target, the way the `decoder-fuzz` job already pins one. `21-jobs.md` records
+  that the build is clean on `nightly-2026-07-02`. **This is a toolchain policy
+  call and it hits everybody**, which is why it is a question rather than a
+  task.
+
+- **Decision, unanswered: adopt `coi-serviceworker` for the demos.** GitHub
+  Pages cannot set COOP/COEP headers, so `crossOriginIsolated` is false, so
+  there is no `SharedArrayBuffer` and no shared-memory input ring in the
+  published demos. The shim is the only way to get isolation on Pages; it is
+  third-party JavaScript in a `web/` directory that deliberately has no npm
+  dependencies. **If the answer is no, nothing is blocked** — the demos run
+  single-threaded through the fallback and native keeps the full topology, which
+  is what the seam-first ordering exists to survive. The gate the roadmap asks
+  for (`crossOriginIsolated` asserted by the browser gate) is the thing that
+  cannot be met without it.
 
 ## The rustdoc gate never documents the wasm target, so every `web.rs` is unchecked
 
@@ -351,12 +341,15 @@ It needs a decision rather than a patch, and it would have to be decided for
 native and web together, since `Loop` cannot tell the two apart.
 
 What holds the line meanwhile:
-`a_focusing_click_off_every_button_leaves_the_game_paused` in all three samples'
+`a_focusing_click_off_every_button_leaves_the_game_paused` in all four games'
 `app.rs` asserts the corner is over no button and the centre is over `RESUME`,
 so a menu that grew until it reached the corner fails a fast Rust test rather
-than the slow browser one. Three copies of it, because the menu geometry is
-per-sample even though `FOCUS_CLICK_INSET` is not — the same shape as everything
-else in `apps/*/src/app.rs`.
+than the slow browser one. Four copies of it, plus horde's
+`a_focusing_click_off_every_button_leaves_the_title_screen_up`, because the menu
+geometry is per-sample even though `FOCUS_CLICK_INSET` — 8 pixels, in
+`web/tools/browser-e2e.mjs` — is not. The loop around them is
+`crcbl::engine::Loop` now, so this is one of the few things still written out
+per sample, and it is per sample for a reason rather than by omission.
 
 ## The sprite system, and what is left of the retrofit
 
@@ -395,22 +388,6 @@ left:
   divides by the style's scale instead, exactly as the two samples scale theirs.
   It comes out with the other two when `expand` learns a scale.
 
-- **The bake half of `build.rs` is written five times, and it got worse again.**
-  `apps/flappy/build.rs`, `apps/breakout/build.rs`,
-  `crates/crcbl-render/build.rs`, `apps/asteroids/build.rs` and now
-  `apps/horde/build.rs` differ in their `ASSETS` array and in nothing else: the
-  same parse → bake → write → generate-a-table loop, the same `ART_TICK_HZ`, the
-  same `cargo::error` reporting. `docs/plan/ROADMAP.md` says this was owed
-  **before the third sample**; the third and the fourth both shipped with a copy
-  instead, because closing it is a change to `crcbl-sprite` and to four other
-  build scripts and the slice that would have paid for it was, both times, the
-  art slice. The fix is unchanged: a real entry point in `crcbl-sprite` —
-  something like `bake::bake_dir(manifest_dir, out_dir, &stems, tick_hz)`
-  returning the table text — because a build script can depend on a workspace
-  library and that is the only shape that removes the copy rather than moving
-  it. It is now the cheapest of the five duplications to close and the one with
-  the most copies.
-
 - **The tick rate the art is baked at is written twice per game** —
   `ART_TICK_HZ` in `apps/*/build.rs` and again in `apps/*/src/art.rs`. A build
   script cannot `use` the crate it builds, and the sidecar's durations are
@@ -421,8 +398,12 @@ left:
   both can only assert the default hold of 1 tick, which survives a fairly wide
   range of wrong rates. Asteroids' ship and rocks _turn_, which is a rotation
   applied to a still frame and not a clip, so it does not help. Either gets real
-  the moment that game has a clip. Folding it into the `bake_dir` entry point
-  above would close it outright.
+  the moment that game has a clip. `crcbl_sprite::bake::bake_dir` closed the
+  five-copy build script and did **not** close this: `bake_dir` takes `tick_hz`
+  as a parameter, so each `build.rs` still declares its own `ART_TICK_HZ` beside
+  the `art.rs` constant it has to agree with. Closing it means the rate coming
+  from somewhere both halves read — a generated constant in the table `bake_dir`
+  already writes is the obvious shape, since `art.rs` includes it.
 
 - **Breakout's paddle is a plain frame, not a nine-slice.**
   `game::PADDLE_HALF_WIDTH` is a `const` and nothing shadows it, so the paddle
@@ -491,14 +472,6 @@ The modular panel is built and all three samples switch it on with F3 (or
   worth making deliberately rather than in passing. **What it would take**: the
   transport growing byte and timing counters, then a `DebugModule` impl beside
   them, then one `add` line in each sample that has a connection.
-- **The wiring is four lines, repeated three times.** Every sample's
-  `draw_debug_overlay` is the same: `begin_frame`, offer the GPU timings, render
-  into the draw list at the swapchain's extent. It is short enough not to hurt
-  at three copies and it is exactly the shape `web.rs` took before it became a
-  finding. The right home is `crcbl::engine`, next to `GpuContext` — the place
-  the shell and the HAL already meet — but that crate was out of scope for the
-  slice that built this. Fold it in when the fourth sample arrives, at the
-  latest.
 - **The panel's own cost is measured at 960 × 720 and still not at 1080p.**
   Horde's scale runs took it: with ten thousand enemies on the field and the
   panel showing three sections, switching it on moves the `ui-composite` GPU
@@ -954,13 +927,13 @@ annotated.
   — it is recorded so it is not re-derived, not so it can be re-applied.
 
 - **`--prefill` starts its own run, and that coupling is not obvious.**
-  `Loop::assemble` queues a start edge when `options.prefill > 0`, because the
-  scale fixture would otherwise measure a `run_tick` that returns on its second
-  line. It is one call beside `Game::stage_field` and
-  `a_prefilled_run_does_not_wait_at_the_title_screen` holds it. Anything else
-  that stages a board before the first frame — a replay header, a future demo
-  mode — has to do the same or it will measure nothing and say it measured
-  everything.
+  `assemble` in `apps/horde/src/app.rs` queues a start edge when
+  `options.prefill > 0`, because the scale fixture would otherwise measure a
+  `run_tick` that returns on its second line. It is one call beside
+  `Game::stage_field` and `a_prefilled_run_does_not_wait_at_the_title_screen`
+  holds it. Anything else that stages a board before the first frame — a replay
+  header, a future demo mode — has to do the same or it will measure nothing and
+  say it measured everything.
 
 - **The plan's exit criteria are internally inconsistent and need rewriting, not
   answering.** "10 000 enemies at 60 Hz tick" is true of a crowd spread over the
@@ -1480,10 +1453,11 @@ uncertainty.
   which window a player's compositor has focused, and would put a value in
   `Summary::state` that a headless scripted run could reach. Pause is not
   something the simulation does — it is the loop declining to advance it — so it
-  is `Loop::paused`, reported through `Loop::is_paused` and `Summary::paused`.
-  _Changes it_: a pause the _simulation_ has to know about, which in a
-  multiplayer build it would: pausing a shared world is a server decision and
-  would be a state on the server, not a client's window losing focus.
+  is the loop's — `crcbl::engine::Loop::is_paused`, reported out through
+  `RunSummary::paused` and from there into each game's own `Summary`. _Changes
+  it_: a pause the _simulation_ has to know about, which in a multiplayer build
+  it would: pausing a shared world is a server decision and would be a state on
+  the server, not a client's window losing focus.
 
 - **Does regaining focus resume?** Taken: **no.** A player who clicks back into
   the window would otherwise arrive mid-ball with no warning, and the pause menu
@@ -1553,89 +1527,39 @@ uncertainty.
 
 - **Where does horde's "has the offer changed?" guard live now that the
   container is the engine's?** _In a `LevelUpOffer` type in
-  `apps/horde/src/menu.rs`, and horde's `Loop` gained a field for it._
-  `MenuSet::replace` rebuilds unconditionally and drops the capture; deciding
-  _when_ a panel is stale needs `built_from: Option<(u32, [Upgrade; 3])>`, which
-  the engine cannot hold because it knows nothing about upgrades. The
-  alternative was putting that field on `Loop` and inlining the comparison in
-  `draw_menu`, which is the same state in a place where it could not be unit
-  tested. _Changes it_: a second sample growing a rebuilt panel, at which point
-  the guard is a shape and not horde's alone.
+  `apps/horde/src/menu.rs`, held by the game itself — the `Horde` struct's
+  `offer` field, rebuilt from `HostedGame::menu_kind`._ `MenuSet::replace`
+  rebuilds unconditionally and drops the capture; deciding _when_ a panel is
+  stale needs `built_from: Option<(u32, [Upgrade; 3])>`, which the engine cannot
+  hold because it knows nothing about upgrades. The alternative was putting that
+  field on the loop and inlining the comparison in `draw_menu`, which is the
+  same state in a place where it could not be unit tested — and which is no
+  longer even available, since the loop is `crcbl::engine::Loop` and a sample
+  cannot add a field to it. _Changes it_: a second sample growing a rebuilt
+  panel, at which point the guard is a shape and not horde's alone.
 
-## The Pages gate failed on horde about two runs in three (fixed 2026-08-03)
+## What the horde Pages flake left behind
 
-`Render horde in a real browser` fails two checks, both in group C/D of
-`web/tools/browser-e2e.mjs`:
+The flake itself is fixed and deleted from this file (2026-08-03, diagnosed from
+the run's uploaded page log: the gate clicked the canvas **centre** to hand the
+page its keyboard, which pressed `PLAY` — horde's centred first item — and
+destroyed the run the `Space` after it was meant to start). Two things outlive
+it.
 
-```
-FAIL the clock advances under its own steam — x never changed
-FAIL the canvas changes between frames while the simulation runs — 1 distinct frame(s) across 16 samples
-```
+- **A check that passes in the failure mode is not a control, and two of them
+  agreeing is not corroboration.** Group E of `web/tools/browser-e2e.mjs` was
+  read as evidence for ninety seconds of a contradiction that did not exist:
+  `heartbeats()` counts any `[HUD]` line and horde logs one in every state
+  including `WaitingToStart`, so every check in that group passes on a game
+  sitting on its start screen. The theory that survived was the one nothing in
+  the harness could refute.
 
-**Measured across four Pages runs on 2026-08-03**, with the sample code
-identical in the last three (`65e470b` differs from `e190e05` only in
-`.github/workflows/ci.yml`, and `658c779` only in `docs/backlog.md`):
-
-| commit    | Pages   | horde |
-| --------- | ------- | ----- |
-| `cd1ea54` | success | 26/26 |
-| `9515b23` | failure | 24/26 |
-| `e190e05` | failure | 24/26 |
-| `65e470b` | success | 26/26 |
-| `658c779` | failure | 24/26 |
-| `588e1a6` | failure | 24/26 |
-
-**Diagnosed and fixed on 2026-08-03 — and the heading above is wrong, which is
-why it is still here.** It _was_ the code: the harness's, not the game's. The
-run's uploaded page log settled it in three lines, where every theory about
-timing margins had failed to:
-
-```
-[HUD] WaitingToStart  run: 1  time: 0.0
-[HUD] Playing         run: 1  time: 0.0
-[HUD] WaitingToStart  run: 2  time: 0.0     ← and 100 identical lines after it
-```
-
-`run: 2` is the tell. `restart` in `apps/horde/src/game.rs` is the only thing
-that sets `WaitingToStart` after boot and the only thing that bumps the counter,
-so the run was started and then destroyed. The cause is that check C clicked the
-**centre** of the canvas to hand the page its keyboard, and `MenuKind::Start`'s
-first item — `apps/horde/src/menu.rs` — is `item(Restart, "PLAY", "SPACE")`,
-laid out centred. So the click pressed `PLAY`, starting the run; the `Space` the
-check sent next reached a run already `Playing`, and horde binds one edge to
-both "start" and "restart". The demo then sat on the title screen of run 2 with
-a clock frozen at 0.0, which is exactly what checks C and D reported.
-
-**Group E was never evidence of anything.** The "contradiction" recorded here —
-four HUD lines in four seconds against one clock value in ninety — was not a
-contradiction at all. `heartbeats()` counts _any_ `[HUD]` line, and horde logs
-one every sixty ticks in every state including `WaitingToStart`;
-`crcbl.status()` pauses and resumes a title screen as readily as a live run.
-Every check in group E passes on a game sitting on its start screen. The lesson
-is the general one: a check that passes in the failure mode is not a control,
-and two of them agreeing is not corroboration.
-
-**Fixed in two places.** The gate now clicks `FOCUS_CLICK_INSET` from the corner
-in group C, which is what group E has always done — its comment describes
-finding this same bug against the pause menu and `RESUME`, and the fix never
-reached the group above it. A new check, `the focusing click pressed no button`,
-asserts the game is still waiting after that click, so a harness that goes back
-to pressing something fails loudly instead of poisoning the key that follows.
-And `a_focusing_click_off_every_button_leaves_the_title_screen_up` in
-`apps/horde/src/app.rs` is the fast half: it pins the inset against the _title_
-menu the way the existing test pins it against the paused one.
-
-**Why only horde, and why it looked like variance.** All four demos were clicked
-on their centre button. The other three start screens are idempotent — clicking
-`PLAY` and then pressing `Space` launches an already-launched ball — so only
-horde's centre button destroys the run. Whether it failed depended on whether
-both edges landed in the same tick, where `logic.intent.restart |= …` collapses
-them into one, which is why an unchanged tree passed about one run in three.
-
-**Coverage gap this leaves.** The paused-menu inset test exists in all four
-samples; the title-screen one is horde's alone, because horde is where the
-consequence bites. The other three would need it only if a start screen grew a
-destructive first item.
+- **Coverage gap: the title-screen inset test is horde's alone.**
+  `a_focusing_click_off_every_button_leaves_the_game_paused` exists in all four
+  games; `a_focusing_click_off_every_button_leaves_the_title_screen_up` is in
+  `apps/horde/src/app.rs` only, because horde is the one game whose start-screen
+  first item is destructive. The other three would need it if a start screen
+  grew one.
 
 ## Considered and declined
 
@@ -1725,7 +1649,9 @@ destructive first item.
   in the engine, not in a crate the samples share between themselves: a
   `flappy-and-breakout-utils` would be a third place for the same code to rot,
   and it would hide the evidence that `crcbl-audio` and `crcbl-store` are
-  missing a layer.
+  missing a layer. **Vindicated**: both layers were built where the evidence
+  said they belonged — `crcbl_audio::synth` and `crcbl::store::record::Record` —
+  and the samples adopted them.
 - **A `visible` check inside `DebugPanel::layout`.** It was written, and it
   could not be made to fail: `add` refuses to gather while hidden and
   `set_visible` drops what was gathered, so a hidden panel has no sections and
