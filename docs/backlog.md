@@ -105,6 +105,83 @@ carries what has no phase yet.
   has now been attached to two of them and slipped both times; it wants a slice
   of its own, with the four browser gates as its exit criterion.
 
+## The goal: a sample depends on `crcbl` and `std`, and on nothing else
+
+Stated as a target for the samples on 2026-08-03. `apps/sandbox` already meets
+it bar `log`; the four games do not, and the gap has two halves that want
+separate work.
+
+### Half one: twelve dependencies that are re-exports, not engine gaps
+
+Each of `apps/{breakout,flappy,asteroids,horde}/Cargo.toml` names the umbrella
+plus **eleven** more crates, and a build-dependency. None of it needs an engine
+feature — it needs `crates/crcbl/src/lib.rs` to re-export what it already
+depends on, or what nothing stops it depending on.
+
+- **The nine engine crates with no re-export**: `crcbl-ecs`, `crcbl-net`,
+  `crcbl-phys`, `crcbl-input`, `crcbl-server`, `crcbl-client`, `crcbl-audio`,
+  `crcbl-store`, `crcbl-sprite`. **Cycle-free**: none of the nine depends on
+  `crcbl`, checked by reading all nine manifests, so the re-export is nine
+  `pub use` lines and nine manifest entries. `crcbl-scene` exists and no sample
+  uses it.
+- **`crcbl-core` is already `crcbl::core`** and the samples still write
+  `crcbl_core::` — import churn, no engine change.
+- **`glam` is already `crcbl::math`.** Twenty-one sample files import `glam::`
+  directly. It is the same crate, so the types are identical and the change is
+  mechanical.
+- **`log`.** Verified rather than assumed: a scratch crate that does
+  `pub use log;` and a consumer calling `logtest::log::info!` compiles, so
+  `crcbl::log::info!` will work at all 143 sample call sites without a wrapper
+  macro.
+- **The `crcbl-sprite`/`bake` build-dependency is the one with a real
+  trade-off.** Naming `crcbl` there instead means the build script links the
+  whole engine — `crcbl-vk`, `crcbl-wgpu`, the renderer — to encode a PNG. The
+  fix is to make the umbrella's heavy re-exports optional so a build script can
+  take `default-features = false, features = ["bake"]`; the workspace is on
+  `resolver = "3"`, which resolves build-dependency features separately from
+  normal ones, so the game half keeps the full default set. **This is a
+  decision, not a refactor**: a feature matrix on the umbrella is a public
+  surface, and the alternative — leaving `crcbl-sprite` as the one permitted
+  exception — is defensible.
+
+### Half two: what is genuinely hand-rolled
+
+Measured with comments and blank lines stripped, so these are shared _code_
+lines rather than shared prose. Ranked by what the extraction buys.
+
+1. **`web.rs`** — four copies, `breakout` vs `flappy` is 333 shared code lines
+   against 32 that differ. Already the file's own section above; this is the
+   number that section lacked.
+2. **`app.rs`** — the loop. `breakout` vs `flappy` is ~1225 shared of ~1600.
+3. **`args.rs` and `main.rs`** — `flappy` vs `asteroids` args is 200 shared
+   against 8 differing; `main.rs` is 33 of 37. Four copies each.
+4. **`best.rs` / `high_score.rs`** — 152 shared against 18. Four copies.
+5. **The waveform synthesis in `audio.rs` is the newest find and the cleanest
+   case.** `fn sine` is **byte-identical** across flappy, asteroids and horde
+   (11 lines, confirmed with `cmp`, not with a diff tool), and so is its `fade`
+   helper (14 lines). Breakout has the same two functions under the older names
+   `gen_sine` and `fade_env`. `crcbl-audio` has a mixer, a sound bank and a
+   spatial grammar but **no oscillator and no envelope**, so every sample that
+   wants a beep writes one. An engine `synth` module — a sine, a noise source
+   and a linear fade — closes it; asteroids' `looped_sine` and horde's decaying
+   `noise` say what the shape has to cover.
+6. **The loopback session.** All four games build `InMemoryTransport::pair()` →
+   `Server::try_new_with_compatibility` → `Client::new_with_compatibility` with
+   a per-game `ProtocolCompatibility` const. Single-player-is-a-loopback-server
+   is the engine's architectural decision, not each game's, and nothing in
+   `crcbl` expresses it.
+7. **`crcbl_ui::hud` exists and no sample uses it.** `Hud`, `HudPanel` and
+   `Anchor` are in `crates/crcbl-ui/src/hud.rs`; every sample instead has a
+   private `HudStrings` in its `app.rs`. This is adoption, not extraction — the
+   engine feature was already bought.
+
+**`gpu.rs` and `menu.rs` are NOT on this list, and that is the good news.** Both
+were extracted already — `crcbl::engine::GpuContext` and
+`crcbl::ui::menu::MenuSet` — and what is left measures as genuinely per-game:
+`gpu.rs` is 232 shared against 152 differing, `menu.rs` 266 against 131, where
+the differences are cameras, pass order, menu kinds and button labels. They are
+the shape the other seven should end up in.
+
 ## The rustdoc gate never documents the wasm target, so every `web.rs` is unchecked
 
 CI runs
@@ -580,7 +657,6 @@ The modular panel is built and all three samples switch it on with F3 (or
   one-sitting change rather than an incidental detail.
 
   What the extraction has to carry, found while doing the menu half:
-
   - The pump's menu branches call `select_previous` / `select_next` / `press` /
     `activate` on a `MenuSet<K>` whose `K` is the sample's own enum, so an
     extracted pump is generic over `K` or takes buffered menu commands and lets
