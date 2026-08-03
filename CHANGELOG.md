@@ -163,6 +163,41 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   no bindings in the pinned `ash`; until then `Adaptive` is a request rather
   than an observation.
 
+- **crcbl** (`crcbl::engine`): `Loop`, the frame owned by the engine, and
+  `HostedGame`, the seam a game reaches it through. `Loop::frame` pumps the
+  shell, routes the input, runs the ticks the clock owes, draws and presents;
+  `HostedGame` is the six things that genuinely differed between five samples —
+  `menus`, `tick`, `key_event`, `menu_action`/`apply`, `menu_kind`, `draw` — and
+  `summary`, which adds a game's own fields to the shared `RunSummary`.
+  `FrameInfo` tells a `draw` what its frame did, and `LoopConfig` carries the
+  three values that come from the command line rather than the game. `Loop`
+  implements `GameLoop`, so `drive` and `crcbl::web::App` step it unchanged.
+
+  `GameGpu` is the frame's half of a game's GPU bundle — `atlas`, `set_menu`,
+  `take_draw_list`, `timings`, `frame`, `destroy` — and all five samples already
+  had every one of them, with these signatures, as inherent methods.
+
+  **`HostedGame` is not `crcbl::ecs::GameModule`.** That one is the simulation
+  the server hosts and a wasm binding will have to reproduce bit for bit; this
+  one is the presentation the loop hosts. A game implements both.
+
+  `PolledGpu`'s `extent` and `resize` move to a new `GpuSurface` supertrait,
+  which `PolledGpu` and `GameGpu` both require — the same two questions, asked
+  by start-up and by the running frame, and declaring them twice on one type is
+  how the two answers drift apart. The four samples with a browser build split
+  their existing `impl` accordingly; nothing else changes for them.
+
+  **Nothing adopts this yet.** The samples still drive their own `frame()`, and
+  converting them is the next slice. `apps/bare` never will: it is the guard
+  that the library path — assembling `GpuContext`, `Pending` and `FrameBudget`
+  by hand — keeps working, and `crates/crcbl/tests/library_seam.rs` is what
+  proves it from outside the crate.
+
+  585 lines of engine and 343 of fixture and tests, against a `FakeGpu` that
+  counts presents and a `FakeGame` that records what the loop asked of it —
+  including an assertion that the loop never asks a game about a reserved
+  `WidgetId`, which is what would silently re-point a resume button.
+
 ### Changed
 
 - **crcbl** (`crcbl::engine`, `crcbl::web`): the sample loops' shared machinery

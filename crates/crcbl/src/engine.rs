@@ -2204,17 +2204,36 @@ pub fn accept_close<S: Shell + ?Sized>(shell: &mut S, window: WindowId) -> Resul
 // Polled bring-up
 // ---------------------------------------------------------------------------
 
+/// The two questions anything holding a swapchain has to answer.
+///
+/// Split out because both halves of the engine ask them and neither is about
+/// the other: [`PolledBoot`] resizes a swapchain that arrived at a stale extent,
+/// and [`Loop`] resizes one the compositor just moved. Declaring them twice
+/// would be two copies of the same contract on one type, which is where the two
+/// drift apart.
+pub trait GpuSurface {
+    /// The extent the swapchain was actually created at.
+    fn extent(&self) -> (u32, u32);
+
+    /// Rebuilds the swapchain at a new size.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the swapchain could not be recreated.
+    fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError>;
+}
+
 /// A game's GPU bundle, opened without blocking on the device.
 ///
 /// [`PolledBoot`] drives start-up for a caller that may not block —
 /// a browser main thread resolves both of the things a blocking bring-up waits
 /// for from inside the very event loop the wait would be sitting in — and this
-/// is the four methods it needs from whatever a game calls its `Gpu`.
+/// plus [`GpuSurface`] is what it needs from whatever a game calls its `Gpu`.
 ///
 /// Deliberately **not** implemented for [`GpuContext`]. A sample's `Gpu` is its
 /// renderers and its atlas as well as the context, and the thing that has to
 /// arrive before a loop can be assembled is the whole bundle.
-pub trait PolledGpu: Sized {
+pub trait PolledGpu: GpuSurface + Sized {
     /// The in-flight device request.
     type Pending;
 
@@ -2236,16 +2255,6 @@ pub trait PolledGpu: Sized {
     ///
     /// [`GpuError`] if the device request failed.
     fn poll_pending(pending: &mut Self::Pending) -> Result<Option<Self>, GpuError>;
-
-    /// The extent the swapchain was actually created at.
-    fn extent(&self) -> (u32, u32);
-
-    /// Rebuilds the swapchain at a new size.
-    ///
-    /// # Errors
-    ///
-    /// [`GpuError`] if the swapchain could not be recreated.
-    fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError>;
 }
 
 /// How far a [`PolledBoot`] has got.
@@ -2420,6 +2429,592 @@ impl<S: Shell + ?Sized, G: PolledGpu> PolledBoot<S, G> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The engine-owned loop
+// ---------------------------------------------------------------------------
+
+/// The rest of what a hosted game's GPU bundle does, once per frame.
+///
+/// [`GpuSurface`] is the half [`PolledBoot`] shares; this is the half only a
+/// running [`Loop`] needs. Every sample's `Gpu` already had all six of these as
+/// inherent methods with these exact signatures — the trait is what lets the
+/// loop above call them.
+pub trait GameGpu: GpuSurface + Sized {
+    /// The glyph atlas the UI pass renders text from.
+    ///
+    /// The menu lays itself out with it and the debug overlay measures its own
+    /// panel with it, and both must use the *same* atlas the pass draws with or
+    /// the background rect is the wrong size for the text inside it.
+    fn atlas(&self) -> &crcbl_ui::FontAtlas;
+
+    /// Takes this frame's menu, or `None` on a frame that shows none.
+    fn set_menu(&mut self, menu: Option<(&crcbl_ui::menu::Menu, &crcbl_ui::menu::MenuLayout)>);
+
+    /// Takes this frame's UI geometry, handing the previous frame's allocation
+    /// back so the loop can refill it instead of building a new one.
+    fn take_draw_list(&mut self, list: &mut crcbl_ui::draw_list::DrawList);
+
+    /// The most recent pass timings, or `None` on a device without timestamp
+    /// queries.
+    fn timings(&self) -> Option<&crcbl_render::FrameTimings>;
+
+    /// Records, submits and presents one frame.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the frame could not be recorded or presented.
+    fn frame(&mut self) -> Result<FrameOutcome, GpuError>;
+
+    /// Releases everything, in dependency order.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if waiting for outstanding work failed.
+    fn destroy(self) -> Result<(), GpuError>;
+}
+
+/// What one frame tells the game about the frame around it.
+///
+/// Passed rather than queried because all four are the loop's own bookkeeping:
+/// a game that read them back would be reading its host's fields.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameInfo {
+    /// Whether the simulation is stopped — see [`Loop::is_paused`].
+    pub paused: bool,
+    /// How many ticks **this** frame ran, which is zero while paused and can be
+    /// more than one after a long frame. An animation stepped on the simulation
+    /// clock advances by this, not by one.
+    pub ticks: u64,
+    /// How far the render sits between the last tick and the next, in `0..1`.
+    pub alpha: f32,
+    /// One tick's duration, in seconds.
+    pub tick_dt: f32,
+}
+
+/// The shared half of what a run reports.
+///
+/// Every sample's `Summary` carried these eight fields with the same meaning,
+/// and then its own two or three. [`HostedGame::summary`] receives this and
+/// returns the whole thing, so the game keeps a summary type of its own rather
+/// than the engine growing a `score: Option<u32>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunSummary {
+    /// Which shell backend the run actually opened.
+    pub backend: crcbl_shell::ShellBackend,
+    /// Presented frames.
+    pub frames: u64,
+    /// Simulation ticks.
+    pub ticks: u64,
+    /// Shell events observed, start-up included.
+    pub events: u64,
+    /// The swapchain's extent when the run ended.
+    pub extent: (u32, u32),
+    /// Why the loop stopped.
+    pub exit: ExitReason,
+    /// Whether the simulation was stopped when the run ended.
+    pub paused: bool,
+    /// The mode the window system actually had the window in, **not** the one
+    /// the run last asked for. A summary that reported the request would say
+    /// "borderless" for every compositor that refused.
+    pub mode: DisplayMode,
+}
+
+/// The game a [`Loop`] hosts.
+///
+/// The engine owns the frame; this is everything in one that was ever a
+/// particular game's. It is deliberately small — a tick, a key, a menu, a draw
+/// — because everything a sample's `frame()` did *around* those turned out to
+/// be the same in all five.
+///
+/// # Not [`crcbl_ecs::GameModule`]
+///
+/// That one is the **simulation** the server hosts: systems on a `World`,
+/// stepped on the tick, and the thing a wasm binding will one day have to
+/// reproduce bit for bit. This one is the **presentation** the loop hosts:
+/// which menu is on screen, what a button does, what goes in the draw list. A
+/// game implements both, and they are hosted by different things for different
+/// reasons.
+///
+/// # A hosted game never owns engine resources
+///
+/// Every method that needs the GPU is handed `&mut Self::Gpu` for the call.
+/// There is no field here holding a device, a window or a shell, so "who tears
+/// this down" has one answer: the loop, in [`Loop::finish`].
+pub trait HostedGame: Sized {
+    /// This game's own failures. The loop's are [`LoopError`]'s other variants.
+    type Error: core::fmt::Display;
+    /// This game's GPU bundle.
+    type Gpu: GameGpu;
+    /// The key naming which menu a frame shows.
+    type MenuKind: Copy + Eq;
+    /// The `G` in [`MenuAction`] — what only this game's menus do.
+    type MenuAction;
+    /// What a finished run reports, built from [`RunSummary`].
+    type Summary;
+
+    /// This game's menus, with nothing shown.
+    ///
+    /// Their widget ids must start at [`FIRST_GAME_ID`] for anything the loop
+    /// does not own; [`MenuAction::id`] is what enforces that.
+    fn menus() -> crcbl_ui::menu::MenuSet<Self::MenuKind>;
+
+    /// One fixed-timestep step. Called zero or more times per frame, never
+    /// while paused.
+    fn tick(&mut self, gpu: &mut Self::Gpu, tick_dt: f32);
+
+    /// A key the menu did not claim.
+    fn key_event(&mut self, key: crcbl_core::input::KeyCode, pressed: bool);
+
+    /// The game action a widget id names, or `None` for an id this game's menus
+    /// do not use. Never asked about a reserved id — see [`FIRST_GAME_ID`].
+    fn menu_action(id: crcbl_ui::WidgetId) -> Option<Self::MenuAction>;
+
+    /// Does what a fired menu button of this game's asks for.
+    ///
+    /// Infallible on purpose: the three actions that can fail — resume,
+    /// fullscreen, the debug panel — are the loop's, and a game that reported
+    /// an error here would be reporting one for a button press.
+    fn apply(&mut self, action: Self::MenuAction);
+
+    /// Which menu this frame shows. Called after [`Self::draw`], so it may read
+    /// whatever that refreshed.
+    fn menu_kind(&self, paused: bool) -> Self::MenuKind;
+
+    /// Hands this frame's state to the GPU and appends this game's UI geometry.
+    ///
+    /// Called with a cleared `draw_list`, before the menu and the debug overlay
+    /// are appended to the same list: the scrim dims the game *including its
+    /// HUD*, and the overlay is a developer tool that stays legible on top of
+    /// everything.
+    fn draw(
+        &mut self,
+        gpu: &mut Self::Gpu,
+        draw_list: &mut crcbl_ui::draw_list::DrawList,
+        frame: FrameInfo,
+    );
+
+    /// Adds this game's own fields to the run's shared ones.
+    fn summary(&self, run: RunSummary) -> Self::Summary;
+}
+
+/// The parts of a loop that come from the command line rather than the game.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoopConfig {
+    /// The fixed timestep, in hertz.
+    pub tick_hz: u32,
+    /// Stop after this many **presented** frames — see [`FrameBudget`].
+    pub frames: Option<u64>,
+    /// Whether the debug panel starts visible.
+    pub debug_overlay: bool,
+    /// Whether to idle between frames. False for a headless run, which has no
+    /// compositor to wait on and would otherwise sleep through its budget.
+    pub windowed: bool,
+}
+
+/// The frame, owned by the engine.
+///
+/// What five samples' `app.rs` each spelled out: pump the shell, route the
+/// input, run the ticks the clock owes, draw, present. The parts that genuinely
+/// differed are [`HostedGame`] and [`GameGpu`].
+///
+/// # This is not the only way in
+///
+/// `apps/bare` drives the same public pieces — [`GpuContext`], [`Pending`],
+/// [`FrameBudget`] — with a loop it writes itself, and
+/// `crates/crcbl/tests/library_seam.rs` guards that path. A game that wants the
+/// frame back takes it; this type is the default, not the toll gate.
+pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
+    shell: Box<S>,
+    window: WindowId,
+    gpu: G::Gpu,
+    game: G,
+    clock_source: Clock,
+    frame_clock: crcbl_core::FrameClock,
+    /// Reused every frame, so a steady-state frame does not allocate a fresh
+    /// draw list.
+    draw_list: crcbl_ui::draw_list::DrawList,
+    menus: crcbl_ui::menu::MenuSet<G::MenuKind>,
+    /// Where the pointer was last seen and whether its button is down — both
+    /// are needed across frames, see [`PointerCapture`].
+    pointer: PointerCapture,
+    debug: crcbl_ui::DebugOverlay,
+    /// Whether the simulation is stopped. **The loop owns this, not the game.**
+    /// Pause is not something a simulation does — it is the loop declining to
+    /// advance it — and a `Paused` state inside the game would put a value in
+    /// the summary that a headless scripted run could reach.
+    paused: bool,
+    /// Keys forwarded to the game as pressed and not yet released, so focus
+    /// loss can release them — see [`lose_focus`].
+    held_keys: Vec<crcbl_core::input::KeyCode>,
+    mode: ModeRequest,
+    budget: FrameBudget,
+    ticks: u64,
+    events: u64,
+    windowed: bool,
+}
+
+impl<S: Shell + ?Sized, G: HostedGame> std::fmt::Debug for Loop<S, G> {
+    /// Hand-written because the game's associated types are the game's and need
+    /// not be `Debug`; what a reader wants from this is where the run has got
+    /// to.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Loop")
+            .field("window", &self.window)
+            .field("paused", &self.paused)
+            .field("ticks", &self.ticks)
+            .field("events", &self.events)
+            .field("budget", &self.budget)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
+    /// Assembles a loop around a game, on parts start-up already produced.
+    ///
+    /// [`Booted`] is what both bring-up paths hand over — the blocking one
+    /// builds it from [`wait_for_configure`] and its own `Gpu::open`, the
+    /// browser's from [`PolledBoot::poll`] — so there is one struct literal for
+    /// the loop rather than one per path per game.
+    pub fn new(booted: Booted<S, G::Gpu>, game: G, config: LoopConfig) -> Self {
+        Self {
+            shell: booted.shell,
+            window: booted.window,
+            gpu: booted.gpu,
+            game,
+            clock_source: booted.clock_source,
+            frame_clock: crcbl_core::FrameClock::new(config.tick_hz),
+            draw_list: crcbl_ui::draw_list::DrawList::new(),
+            menus: G::menus(),
+            pointer: PointerCapture::new(),
+            debug: crcbl_ui::DebugOverlay::with_visible(config.debug_overlay),
+            paused: false,
+            held_keys: Vec::new(),
+            mode: ModeRequest::new(),
+            budget: FrameBudget::new(config.frames),
+            ticks: 0,
+            events: booted.events,
+            windowed: config.windowed,
+        }
+    }
+
+    /// One frame: pump, route, tick the simulation to catch up with the clock,
+    /// draw, present.
+    ///
+    /// # Errors
+    ///
+    /// [`LoopError`] if the shell or the GPU failed.
+    pub fn frame(&mut self) -> Result<Flow, LoopError<G::Error>> {
+        if self.budget.is_spent() {
+            return Ok(Flow::Stop(ExitReason::FrameBudget));
+        }
+
+        if self.windowed {
+            self.shell.wait_events(Some(WINDOWED_IDLE));
+        }
+
+        // **Carrying the pointer, not defaulting it.** A batch with no pointer
+        // event in it has not moved the cursor, and a menu whose hover state
+        // reset every still frame would flicker.
+        let mut pending = self.pointer.pending();
+        let game = &mut self.game;
+        // **Last frame's menu, deliberately.** The pump runs before this
+        // frame's state is known, and the menu the player is pressing keys at
+        // is the one that was on screen when they pressed them.
+        let showing = self.menus.current().is_some();
+        let mut menu = MenuPump::new(&mut self.menus, &mut self.held_keys, showing);
+        self.shell.pump(&mut |event| {
+            // The window's business, the pointer, focus loss and the loop's
+            // three reserved keys are all folded by `Pending::observe`; the
+            // menu's three and the held-key list are `MenuPump`'s. What comes
+            // back from that is the key the *game* should see.
+            if pending.observe(&event) == Handled::Loop {
+                return;
+            }
+            if let Some((code, pressed)) = menu.observe(&event) {
+                game.key_event(code, pressed);
+            }
+        });
+        let from_keyboard = menu.activated;
+        self.events += pending.count;
+        // Hit-tested against **this** frame's layout, which is why the pointer
+        // is resolved here and not inside the pump: the rectangles depend on the
+        // framebuffer's size, and a click checked against last frame's would
+        // miss on the frame a resize lands.
+        let pointer_input = self.pointer.resolve(&pending);
+        let from_pointer = self
+            .menus
+            .point(self.gpu.extent(), self.gpu.atlas(), pointer_input);
+        for id in [from_keyboard, from_pointer].into_iter().flatten() {
+            if let Some(action) = MenuAction::from_id(id, G::menu_action) {
+                self.apply(action)?;
+            }
+        }
+
+        if pending.toggle_debug_overlay {
+            self.debug.toggle();
+        }
+        // Before the pause toggle, so a batch carrying both a focus loss and an
+        // Escape resolves as "paused, then the player unpaused" rather than the
+        // reverse.
+        if pending.focus_lost {
+            let game = &mut self.game;
+            lose_focus(&mut self.held_keys, &mut self.paused, |key| {
+                game.key_event(key, false);
+            });
+        }
+        if pending.toggle_pause {
+            self.paused = !self.paused;
+            log::info!("game {}", if self.paused { "paused" } else { "resumed" });
+        }
+        if pending.toggle_fullscreen {
+            ModeRequest::toggle(self.shell.as_mut(), self.window)?;
+        }
+        // Once per transition, not once per frame: a backend that cannot do
+        // fullscreen at all would otherwise print a line every frame forever.
+        self.mode.check(self.shell.as_ref(), self.window);
+
+        if pending.destroyed {
+            return Ok(Flow::Stop(ExitReason::WindowDestroyed));
+        }
+        if pending.close_requested {
+            accept_close(self.shell.as_mut(), self.window)?;
+            return Ok(Flow::Stop(ExitReason::CloseRequested));
+        }
+        if let Some(size) = pending.resized {
+            self.gpu.resize((size.width, size.height))?;
+        }
+
+        let now = self.clock_source.advance();
+        self.frame_clock.update(now);
+        // Recorded whether or not the panel is visible — a window that only
+        // fills while you are looking at it shows two seconds of nothing every
+        // time you press F3.
+        self.debug.record(self.frame_clock.render_dt());
+        // A paused frame keeps the clock and throws the ticks away, which is
+        // `run_ticks`'s whole job; its docs carry the argument for why.
+        #[allow(clippy::cast_possible_truncation)]
+        let tick_dt = self.frame_clock.tick_dt_secs() as f32;
+        let game = &mut self.game;
+        let gpu = &mut self.gpu;
+        let ran = run_ticks(&mut self.frame_clock, self.paused, || {
+            game.tick(gpu, tick_dt)
+        });
+        self.ticks += ran;
+
+        // `alpha` is read after the tick loop, never before: before, the
+        // accumulator may still hold whole ticks.
+        let info = FrameInfo {
+            paused: self.paused,
+            ticks: ran,
+            alpha: self.frame_clock.alpha(),
+            tick_dt,
+        };
+        self.draw_list.clear();
+        self.game.draw(&mut self.gpu, &mut self.draw_list, info);
+        self.draw_menu();
+        self.draw_debug_overlay();
+        self.gpu.take_draw_list(&mut self.draw_list);
+
+        self.budget.record(self.gpu.frame()?)?;
+        Ok(Flow::Continue)
+    }
+
+    /// What a fired menu button does.
+    ///
+    /// The one place a button becomes an effect. Both input devices arrive
+    /// here: [`MENU_ACTIVATE_KEY`] and a click produce the same [`MenuAction`]
+    /// and this cannot tell them apart, which is what makes "the keyboard still
+    /// works" and "the mouse works too" the same sentence.
+    fn apply(&mut self, action: MenuAction<G::MenuAction>) -> Result<(), LoopError<G::Error>> {
+        match action {
+            MenuAction::Resume => {
+                if self.paused {
+                    self.paused = false;
+                    log::info!("game resumed");
+                }
+            }
+            MenuAction::Fullscreen => ModeRequest::toggle(self.shell.as_mut(), self.window)?,
+            MenuAction::DebugOverlay => self.debug.toggle(),
+            MenuAction::Game(action) => self.game.apply(action),
+        }
+        Ok(())
+    }
+
+    /// Picks this frame's menu, lays it out, and emits both halves of it.
+    ///
+    /// **Two halves, two passes.** The window frame and the buttons are
+    /// nine-sliced sprites and go to the menu pass through
+    /// [`GameGpu::set_menu`]; the title and the labels are text and go to the
+    /// UI pass through the draw list.
+    fn draw_menu(&mut self) {
+        self.menus.show(self.game.menu_kind(self.paused));
+        let layout = self
+            .menus
+            .current()
+            .map(|menu| menu.layout(self.gpu.extent(), self.gpu.atlas()));
+        match &layout {
+            Some(layout) => {
+                let menu = self.menus.current().expect("a layout implies a menu");
+                menu.render(&mut self.draw_list, layout);
+                self.gpu.set_menu(Some((menu, layout)));
+            }
+            None => self.gpu.set_menu(None),
+        }
+    }
+
+    /// Gathers this frame's debug sections and draws the panel.
+    ///
+    /// The GPU timings are a `Some` check because a device without timestamp
+    /// queries has no timers at all.
+    fn draw_debug_overlay(&mut self) {
+        self.debug.begin_frame();
+        if let Some(timings) = self.gpu.timings() {
+            self.debug.panel.add(timings);
+        }
+        let (width, height) = self.gpu.extent();
+        #[allow(clippy::cast_precision_loss)]
+        self.debug.render(
+            &mut self.draw_list,
+            glam::Vec2::new(width as f32, height as f32),
+            self.gpu.atlas(),
+        );
+    }
+
+    /// Tears the frame down and reports what the run did.
+    ///
+    /// # Errors
+    ///
+    /// [`LoopError`] if the GPU or the shell failed to release something. Both
+    /// are attempted regardless: the window is destroyed even when the GPU
+    /// teardown failed, because leaving it mapped is strictly worse.
+    pub fn finish(mut self, exit: ExitReason) -> Result<G::Summary, LoopError<G::Error>> {
+        if let Some(timings) = self.gpu.timings()
+            && !timings.is_empty()
+        {
+            log::info!("{}", timings.report().trim_end());
+        }
+        let summary = self.game.summary(RunSummary {
+            backend: self.shell.backend(),
+            frames: self.budget.presented(),
+            ticks: self.ticks,
+            events: self.events,
+            extent: self.gpu.extent(),
+            exit,
+            paused: self.paused,
+            mode: ModeRequest::mode(self.shell.as_ref(), self.window),
+        });
+
+        let gpu_result = self.gpu.destroy();
+        let shell_result = if exit.window_survives() {
+            self.shell.destroy_window(self.window)
+        } else {
+            Ok(())
+        };
+        gpu_result?;
+        shell_result?;
+        Ok(summary)
+    }
+
+    /// Sets how far one [`frame`](Self::frame) advances a manual clock.
+    ///
+    /// **The browser's clock is the browser's.** `Clock::Real` reads
+    /// [`std::time::Instant`], which on `wasm32-unknown-unknown` has no
+    /// implementation at all and panics on the first `now()`. A web entry point
+    /// therefore builds the loop on [`Clock::manual`] and calls this once per
+    /// `requestAnimationFrame` with the delta the browser reported. A real
+    /// clock ignores this — a loop that *can* read the time must not be steered
+    /// by its caller.
+    ///
+    /// `dt` is clamped to [`MAX_FRAME_STEP`]: a backgrounded tab resumes with a
+    /// multi-second gap, and feeding that to the accumulator spends the next
+    /// frame running thousands of ticks.
+    pub fn set_frame_step(&mut self, dt: Duration) {
+        if let Clock::Manual { step, .. } = &mut self.clock_source {
+            *step = dt.min(MAX_FRAME_STEP);
+        }
+    }
+
+    /// Whether the simulation is stopped.
+    #[must_use]
+    pub const fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// The swapchain's current extent, in pixels.
+    #[must_use]
+    pub fn extent(&self) -> (u32, u32) {
+        self.gpu.extent()
+    }
+
+    /// The mode the window system actually has this window in.
+    ///
+    /// Read back rather than remembered. There is deliberately no
+    /// `self.fullscreen` field to disagree with the compositor.
+    #[must_use]
+    pub fn display_mode(&self) -> DisplayMode {
+        ModeRequest::mode(self.shell.as_ref(), self.window)
+    }
+
+    /// The window this loop is driving.
+    #[must_use]
+    pub const fn window(&self) -> WindowId {
+        self.window
+    }
+
+    /// The hosted game.
+    #[must_use]
+    pub const fn game(&self) -> &G {
+        &self.game
+    }
+
+    /// The hosted game, for a test or an embedder that drives it directly.
+    pub const fn game_mut(&mut self) -> &mut G {
+        &mut self.game
+    }
+
+    /// The GPU bundle, for a test that reads back what a frame handed over.
+    #[must_use]
+    pub const fn gpu(&self) -> &G::Gpu {
+        &self.gpu
+    }
+
+    /// The shell, at whatever type this loop was built with — so a test can
+    /// inject the events a compositor would deliver.
+    pub fn shell_mut(&mut self) -> &mut S {
+        self.shell.as_mut()
+    }
+
+    /// Which menu this frame is showing.
+    #[must_use]
+    pub fn menu_kind(&self) -> G::MenuKind {
+        self.menus.kind()
+    }
+
+    /// Where this frame's menu was laid out, so a scripted click lands on the
+    /// button the player would have seen.
+    #[must_use]
+    pub fn menu_layout(&self) -> Option<crcbl_ui::menu::MenuLayout> {
+        self.menus
+            .current()
+            .map(|menu| menu.layout(self.gpu.extent(), self.gpu.atlas()))
+    }
+}
+
+/// Lets [`drive`] step an engine-owned loop, and the browser's `App` step the
+/// same one.
+impl<S: Shell + ?Sized, G: HostedGame> GameLoop for Loop<S, G> {
+    type Error = LoopError<G::Error>;
+    type Summary = G::Summary;
+
+    fn frame(&mut self) -> Result<Flow, Self::Error> {
+        Self::frame(self)
+    }
+
+    fn finish(self, exit: ExitReason) -> Result<Self::Summary, Self::Error> {
+        Self::finish(self, exit)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2565,6 +3160,25 @@ mod tests {
     #[derive(Debug)]
     struct FakeGpu {
         extent: (u32, u32),
+        atlas: crcbl_ui::FontAtlas,
+        /// The UI geometry the last frame handed over.
+        draw_list: crcbl_ui::draw_list::DrawList,
+        /// Whether the last frame handed over a menu.
+        had_menu: bool,
+        /// Frames recorded and presented.
+        frames: u32,
+    }
+
+    impl FakeGpu {
+        fn at(extent: (u32, u32)) -> Self {
+            Self {
+                extent,
+                atlas: crcbl_ui::FontAtlas::built_in(),
+                draw_list: crcbl_ui::draw_list::DrawList::new(),
+                had_menu: false,
+                frames: 0,
+            }
+        }
     }
 
     struct FakePending {
@@ -2596,17 +3210,50 @@ mod tests {
                 pending.polls_left -= 1;
                 return Ok(None);
             }
-            Ok(Some(FakeGpu {
-                extent: pending.extent,
-            }))
+            Ok(Some(FakeGpu::at(pending.extent)))
         }
+    }
 
+    impl GpuSurface for FakeGpu {
         fn extent(&self) -> (u32, u32) {
             self.extent
         }
 
         fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError> {
             self.extent = extent;
+            Ok(())
+        }
+    }
+
+    /// The frame half, so the same fake can be booted *and* hosted.
+    ///
+    /// A device would answer none of what the loop's tests ask — whether a menu
+    /// was handed over, what geometry the frame ended with — and would refuse to
+    /// open at all on a machine with no GPU, which is every CI runner the
+    /// headless jobs use.
+    impl GameGpu for FakeGpu {
+        fn atlas(&self) -> &crcbl_ui::FontAtlas {
+            &self.atlas
+        }
+
+        fn set_menu(&mut self, menu: Option<(&crcbl_ui::menu::Menu, &crcbl_ui::menu::MenuLayout)>) {
+            self.had_menu = menu.is_some();
+        }
+
+        fn take_draw_list(&mut self, list: &mut crcbl_ui::draw_list::DrawList) {
+            std::mem::swap(&mut self.draw_list, list);
+        }
+
+        fn timings(&self) -> Option<&crcbl_render::FrameTimings> {
+            None
+        }
+
+        fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
+            self.frames += 1;
+            Ok(FrameOutcome::Presented)
+        }
+
+        fn destroy(self) -> Result<(), GpuError> {
             Ok(())
         }
     }
@@ -3898,5 +4545,349 @@ mod tests {
 
         gpu.destroy().expect("teardown");
         shell.destroy_window(window).expect("the window goes away");
+    }
+
+    // ---- the engine-owned loop ---------------------------------------------
+
+    /// Which menu the fixture game shows.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    enum FakeMenu {
+        /// Being played: no menu at all, and so no entry in the set.
+        #[default]
+        None,
+        /// Not served yet.
+        Start,
+        /// The loop has stopped advancing the simulation.
+        Paused,
+    }
+
+    /// The widget carrying [`Serve::Launch`], numbered where a game's ids start.
+    const SERVE_ID: crcbl_ui::WidgetId = FIRST_GAME_ID;
+
+    /// The key `Serve::Launch` fires, so the button reaches the simulation the
+    /// same way the keyboard does rather than reaching past it.
+    const SERVE_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::Space;
+
+    /// A game with no simulation in it, which records what the loop asked of it.
+    #[derive(Debug, Default)]
+    struct FakeGame {
+        ticks: u64,
+        /// Every key the loop forwarded, in order.
+        keys: Vec<(crcbl_core::input::KeyCode, bool)>,
+        /// What each `draw` was told about its frame.
+        draws: Vec<FrameInfo>,
+        /// Whether the ball has been served.
+        served: bool,
+    }
+
+    /// This game's own summary: the shared half, plus a count only it kept.
+    #[derive(Debug, PartialEq, Eq)]
+    struct FakeSummary {
+        run: RunSummary,
+        /// The game's own tally, which must agree with `run.ticks`.
+        ticks_the_game_counted: u64,
+    }
+
+    impl HostedGame for FakeGame {
+        type Error = core::convert::Infallible;
+        type Gpu = FakeGpu;
+        type MenuKind = FakeMenu;
+        type MenuAction = Serve;
+        type Summary = FakeSummary;
+
+        fn menus() -> crcbl_ui::menu::MenuSet<FakeMenu> {
+            use crcbl_ui::menu::{Menu, MenuItem, MenuSet};
+            MenuSet::new(
+                FakeMenu::None,
+                vec![
+                    (
+                        FakeMenu::Start,
+                        Menu::new("FAKE", vec![MenuItem::new(SERVE_ID, "PLAY", "SPACE")]),
+                    ),
+                    (
+                        FakeMenu::Paused,
+                        Menu::new("PAUSED", vec![MenuItem::new(RESUME_ID, "RESUME", "ESC")]),
+                    ),
+                ],
+            )
+        }
+
+        fn tick(&mut self, _gpu: &mut FakeGpu, _tick_dt: f32) {
+            self.ticks += 1;
+        }
+
+        fn key_event(&mut self, key: crcbl_core::input::KeyCode, pressed: bool) {
+            if key == SERVE_KEY && pressed {
+                self.served = true;
+            }
+            self.keys.push((key, pressed));
+        }
+
+        /// Asserts rather than ignores: the loop promises never to ask about an
+        /// id it owns, and a game that answered one would be re-pointing the
+        /// resume button at itself.
+        fn menu_action(id: crcbl_ui::WidgetId) -> Option<Serve> {
+            assert!(
+                id >= FIRST_GAME_ID,
+                "the loop asked the game about the reserved id {id}",
+            );
+            (id == SERVE_ID).then_some(Serve::Launch)
+        }
+
+        fn apply(&mut self, action: Serve) {
+            match action {
+                // Press and release together, because serving is an *edge*: a
+                // press with no release leaves the action held for the run.
+                Serve::Launch => {
+                    self.key_event(SERVE_KEY, true);
+                    self.key_event(SERVE_KEY, false);
+                }
+            }
+        }
+
+        fn menu_kind(&self, paused: bool) -> FakeMenu {
+            if paused {
+                FakeMenu::Paused
+            } else if self.served {
+                FakeMenu::None
+            } else {
+                FakeMenu::Start
+            }
+        }
+
+        fn draw(
+            &mut self,
+            _gpu: &mut FakeGpu,
+            draw_list: &mut crcbl_ui::draw_list::DrawList,
+            frame: FrameInfo,
+        ) {
+            self.draws.push(frame);
+            // Stands in for a HUD, so a test can tell the game's geometry from
+            // the menu's.
+            draw_list.rect(
+                glam::Vec2::ZERO,
+                glam::Vec2::new(8.0, 8.0),
+                [1.0, 1.0, 1.0, 1.0],
+            );
+        }
+
+        fn summary(&self, run: RunSummary) -> FakeSummary {
+            FakeSummary {
+                run,
+                ticks_the_game_counted: self.ticks,
+            }
+        }
+    }
+
+    /// What a headless test wants: no idling, and a budget only when asked for.
+    const fn hosted_config(frames: Option<u64>) -> LoopConfig {
+        LoopConfig {
+            tick_hz: 60,
+            frames,
+            debug_overlay: false,
+            windowed: false,
+        }
+    }
+
+    /// A loop hosting [`FakeGame`] on a headless shell.
+    ///
+    /// [`Booted`] is built by hand rather than through [`PolledBoot`] because
+    /// what these tests are about is the frame, not the handshake — the boot
+    /// tests above own that.
+    fn hosted(frames: Option<u64>) -> Loop<crcbl_shell::HeadlessShell, FakeGame> {
+        let mut shell = crcbl_shell::HeadlessShell::new();
+        let window = shell
+            .create_window(&crcbl_shell::WindowDesc::default())
+            .expect("headless always creates a window");
+        Loop::new(
+            Booted {
+                shell: Box::new(shell),
+                window,
+                gpu: FakeGpu::at((640, 480)),
+                clock_source: Clock::new(true),
+                events: 0,
+            },
+            FakeGame::default(),
+            hosted_config(frames),
+        )
+    }
+
+    /// **Every frame draws once, and draws after the ticks it reports.**
+    ///
+    /// The sum is the part worth pinning. A `draw` called *before* `run_ticks`
+    /// would still be called once a frame and would still see plausible
+    /// numbers — it would just be one frame's worth of ticks behind, which is
+    /// how an animation stepped on `FrameInfo::ticks` ends up a frame stale
+    /// forever.
+    #[test]
+    fn a_hosted_frame_ticks_the_game_then_draws_it() {
+        let mut engine = hosted(None);
+        for _ in 0..4 {
+            assert_eq!(
+                engine.frame().expect("the fake never fails"),
+                Flow::Continue
+            );
+        }
+
+        assert_eq!(engine.gpu().frames, 4, "one present per frame");
+        assert_eq!(engine.game().draws.len(), 4, "one draw per frame");
+        assert!(engine.game().ticks > 0, "the simulation never ran");
+        assert_eq!(
+            engine.game().draws.iter().map(|d| d.ticks).sum::<u64>(),
+            engine.game().ticks,
+            "a frame reported ticks it had not run yet",
+        );
+    }
+
+    /// **Pause stops the simulation and nothing else.**
+    ///
+    /// Frames keep presenting — an unfocused or paused window still has to
+    /// redraw — and the menu the loop switches to is the game's `Paused` one.
+    #[test]
+    fn a_paused_loop_keeps_presenting_and_stops_ticking() {
+        let mut engine = hosted(None);
+        let window = engine.window();
+        engine.frame().expect("the fake never fails");
+        let ticks_before = engine.game().ticks;
+        let frames_before = engine.gpu().frames;
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+        engine.frame().expect("the fake never fails");
+
+        assert!(engine.is_paused(), "Escape did not stop the simulation");
+        assert_eq!(
+            engine.game().ticks,
+            ticks_before,
+            "a paused frame ran the simulation",
+        );
+        assert_eq!(
+            engine.gpu().frames,
+            frames_before + 2,
+            "a paused frame stopped presenting",
+        );
+        assert_eq!(engine.menu_kind(), FakeMenu::Paused);
+    }
+
+    /// **A menu button of the game's reaches the game as its own action.**
+    ///
+    /// And the key that fired it does *not*: the menu's three keys are consumed
+    /// while a menu is showing, so a game that also bound Enter would not see a
+    /// press it never meant to receive.
+    #[test]
+    fn a_game_menu_button_reaches_the_game_as_a_key() {
+        let mut engine = hosted(None);
+        let window = engine.window();
+        // The first frame is what puts the start menu on screen; the pump reads
+        // the menu that was showing when the key was pressed.
+        engine.frame().expect("the fake never fails");
+        assert_eq!(engine.menu_kind(), FakeMenu::Start);
+
+        engine
+            .shell_mut()
+            .key_press(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+
+        assert!(engine.game().served, "the PLAY button did not serve");
+        assert!(
+            engine.game().keys.contains(&(SERVE_KEY, true))
+                && engine.game().keys.contains(&(SERVE_KEY, false)),
+            "the button did not arrive as a press *and* a release: {:?}",
+            engine.game().keys,
+        );
+        assert!(
+            !engine
+                .game()
+                .keys
+                .iter()
+                .any(|(key, _)| *key == MENU_ACTIVATE_KEY),
+            "the menu's commit key was forwarded to the game as well",
+        );
+    }
+
+    /// **The loop answers its own widget ids without asking the game.**
+    ///
+    /// `FakeGame::menu_action` asserts on a reserved id, so a `from_id` that
+    /// forwarded everything would panic here rather than quietly re-pointing
+    /// the resume button.
+    #[test]
+    fn a_reserved_menu_button_is_the_loops_and_resumes_without_the_game() {
+        let mut engine = hosted(None);
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+        assert!(engine.is_paused(), "the fixture never paused");
+        let keys_before = engine.game().keys.len();
+
+        engine
+            .shell_mut()
+            .key_press(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+
+        assert!(!engine.is_paused(), "RESUME did not un-pause the loop");
+        assert_eq!(
+            engine.game().keys.len(),
+            keys_before,
+            "the loop's own button reached the game: {:?}",
+            engine.game().keys,
+        );
+    }
+
+    /// **A resize the compositor delivered reaches the swapchain.**
+    #[test]
+    fn a_resize_observed_by_the_loop_reaches_the_swapchain() {
+        let mut engine = hosted(None);
+        let window = engine.window();
+        engine.frame().expect("the fake never fails");
+
+        engine
+            .shell_mut()
+            .resize(window, PhysicalSize::new(320, 200))
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+
+        assert_eq!(engine.extent(), (320, 200));
+    }
+
+    /// **The budget stops the run, and both halves of the summary agree.**
+    ///
+    /// `run.ticks` is the loop's tally and `ticks_the_game_counted` is the
+    /// game's; they are counted in different places and a loop that dropped a
+    /// tick — or double-counted one — is what makes them disagree.
+    #[test]
+    fn the_frame_budget_stops_the_run_and_the_summary_reports_it() {
+        let summary = drive(hosted(Some(3))).expect("the fake never fails");
+
+        assert_eq!(summary.run.frames, 3, "the budget was not what stopped it");
+        assert_eq!(summary.run.exit, ExitReason::FrameBudget);
+        assert_eq!(
+            summary.run.ticks, summary.ticks_the_game_counted,
+            "the loop and the game disagree about how much simulation ran",
+        );
+        assert_eq!(summary.run.backend, crcbl_shell::ShellBackend::Headless);
     }
 }

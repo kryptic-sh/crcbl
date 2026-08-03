@@ -444,9 +444,10 @@ impl Gpu {
 
 /// Lets [`crcbl::engine::PolledBoot`] drive this bundle's arrival.
 ///
-/// Four one-line forwards: the methods below already existed for the blocking
+/// Two one-line forwards: the methods below already existed for the blocking
 /// path, and the trait is what lets the engine own the state machine that used
-/// to be written out in every sample's `app.rs`.
+/// to be written out in every sample's `app.rs`. The extent and the resize are
+/// [`crcbl::engine::GpuSurface`]'s, because a running loop asks the same two.
 impl crcbl::engine::PolledGpu for Gpu {
     type Pending = PendingGpu;
 
@@ -462,7 +463,10 @@ impl crcbl::engine::PolledGpu for Gpu {
     fn poll_pending(pending: &mut Self::Pending) -> Result<Option<Self>, GpuError> {
         pending.poll()
     }
+}
 
+/// The two questions both halves of the engine ask a swapchain's owner.
+impl crcbl::engine::GpuSurface for Gpu {
     fn extent(&self) -> (u32, u32) {
         Self::extent(self)
     }

@@ -659,12 +659,12 @@ The modular panel is built and all three samples switch it on with F3 (or
   `run`. The genuinely per-game parts are `assemble`, `apply` (the `MenuAction`
   handler), `draw_hud`/`HudStrings`, `menu_kind`, and the game constants.
 
-  **Why what is left is not another slice.** Every extraction had a seam that
-  was already a type: an error, a window, a boot state machine, a menu batch, a
-  pointer, a mode request, a frame budget, a driver. What remains has none, and
-  the longest shared runs say why. Measured on breakout against flappy, names
-  normalised, comments and tests stripped — 431 and 427 code lines with **399
-  identical**, in runs of:
+  **Why what was left needed a decision first.** Every extraction had a seam
+  that was already a type: an error, a window, a boot state machine, a menu
+  batch, a pointer, a mode request, a frame budget, a driver. What remained had
+  none, and the longest shared runs said why. Measured on breakout against
+  flappy, names normalised, comments and tests stripped — 431 and 427 code lines
+  with **399 identical**, in runs of:
 
   | lines | what it is                                              |
   | ----- | ------------------------------------------------------- |
@@ -674,17 +674,26 @@ The modular panel is built and all three samples switch it on with F3 (or
   | 29    | the `use` block                                         |
   | 25    | `frame`'s draw-and-present tail                         |
 
-  A struct's field list cannot be extracted without owning the struct, and the
-  150-line run is per-game _dispatch_ that happens to be structurally identical
-  — `apply` maps this game's `MenuAction`, `draw_menu` draws this game's menu.
-  Both point the same way: the rest goes only if **the engine owns the loop and
-  the game becomes a module plugged into it**.
+  A struct's field list cannot be extracted without owning the struct, so the
+  rest goes only if the engine owns the loop and the game plugs into it.
 
-  That may well be the right destination — `GameModule` already implies it on
-  the simulation side — but it is a design call rather than a tidy-up, and a
-  sample's job is to _demonstrate_ the loop a game author writes. An
-  engine-owned loop changes what the samples are for, which is worth deciding
-  deliberately rather than arriving at by continuing to extract.
+  **Decided, and the engine half has landed.** `crcbl::engine::Loop` owns the
+  frame, `HostedGame` is the seam, `GameGpu` is the frame's half of a game's GPU
+  bundle, and `apps/bare` plus `crates/crcbl/tests/library_seam.rs` are the
+  guard that a game can still decline all of it and write its own loop. The
+  runner stays swappable — `drive` natively, `crcbl::web::App` in the browser,
+  both over `GameLoop`.
+
+  **What is still open is the conversion.** No sample uses `Loop` yet; all five
+  still drive their own `frame()`, so the 399 identical lines above are still
+  there. The order to do it in is breakout first, because it is the game the
+  seam was designed against and the one whose test suite most directly exercises
+  the frame; whatever the other four then need that breakout did not is the real
+  finding. `apps/sandbox` is the one to watch: it has no `MenuKind`, its tick
+  body touches its GPU (`gpu.advance(dt)`, which is why `HostedGame::tick` takes
+  `&mut Self::Gpu`), and it reads `alpha` after the tick loop (which is why
+  `FrameInfo` carries it). None of that is verified against sandbox — it was
+  read out of `apps/sandbox/src/app.rs` while designing the trait, not compiled.
 
 - **asteroids and horde never report a refused fullscreen.** Found while
   extracting `ModeRequest`: breakout, flappy and sandbox all call
