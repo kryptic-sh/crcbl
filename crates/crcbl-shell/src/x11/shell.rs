@@ -103,10 +103,20 @@ impl X11Shell {
             return;
         };
         let xid = state.id;
-        let states = self
-            .conn
-            .get_property_words(xid, self.conn.atoms.net_wm_state);
-        let fullscreen = states.contains(&self.conn.atoms.net_wm_state_fullscreen);
+        // **`_NET_WM_STATE` is only an answer when somebody else writes it.**
+        // Before a window is first mapped, EWMH has the *client* write the
+        // property to request an initial state — see `apply_fullscreen` — and a
+        // window manager then takes ownership and rewrites it. With no window
+        // manager there is nobody to take ownership, so reading the property
+        // back returns this process's own request, and reporting that as the
+        // effective mode would make `mode_request_honoured` true for a request
+        // nothing honoured. A bare X session, a kiosk and every `Xvfb` in CI are
+        // all that case.
+        let fullscreen = self.has_window_manager
+            && self
+                .conn
+                .get_property_words(xid, self.conn.atoms.net_wm_state)
+                .contains(&self.conn.atoms.net_wm_state_fullscreen);
         let monitor = if fullscreen {
             self.origin_now(xid).and_then(|(x, y)| {
                 self.monitors

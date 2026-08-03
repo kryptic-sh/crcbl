@@ -704,6 +704,64 @@ fn a_mode_request_is_a_request_and_the_effective_mode_is_the_answer() {
     }
 }
 
+/// The same question asked of [`WindowDesc::mode`], which used to answer it
+/// differently — and wrongly.
+///
+/// EWMH has the *client* write `_NET_WM_STATE` to request an initial state,
+/// because before a window is mapped there is no window manager conversation to
+/// have; a window manager then takes ownership of the property and rewrites it.
+/// The backend worked out the effective mode by reading that property back, so
+/// with **no** window manager it read back this process's own request and
+/// reported it as the answer: `effective_mode()` said borderless, and
+/// `mode_request_honoured()` said true, for a window still at its windowed size
+/// that nothing had touched.
+///
+/// A game's `--fullscreen` flag takes exactly this path, so the summary line of
+/// every WM-less run — every kiosk, every bare X session, this harness — claimed
+/// a fullscreen it did not have.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_window_created_borderless_does_not_report_its_own_request_as_the_answer() {
+    let mut session = Session::open();
+    let borderless = DisplayMode::Borderless { monitor: None };
+    let requested = LogicalSize::new(640.0, 360.0);
+    let window = session.window(&WindowDesc {
+        mode: borderless,
+        size: requested,
+        ..desc("born borderless")
+    });
+    session.pump();
+    session.pump();
+
+    let state = session.shell.window_state(window).expect("state");
+    assert_eq!(
+        state.requested_mode, borderless,
+        "the request is recorded immediately, because we said it"
+    );
+    if session.has_window_manager() {
+        session.pump_until("the window manager's answer", |session| {
+            session
+                .shell
+                .window_state(window)
+                .is_ok_and(|state| state.mode_request_honoured())
+        });
+    } else {
+        assert_eq!(
+            state.effective_mode(),
+            Some(DisplayMode::Windowed),
+            "nothing is running that could have honoured this",
+        );
+        assert!(!state.mode_request_honoured());
+        // And the size agrees with the mode, which is what made the old answer
+        // detectable from outside: a borderless window is the monitor's size.
+        assert_eq!(
+            state.size(),
+            Some(requested.to_physical(state.scale_factor().expect("configured"))),
+            "the window is still exactly as big as it asked to be",
+        );
+    }
+}
+
 /// A borderless request naming a monitor that is gone is a clean error.
 #[test]
 #[ignore = "needs an X server; run tests/run-x11-e2e.sh"]

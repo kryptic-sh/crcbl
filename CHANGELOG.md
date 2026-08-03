@@ -14,6 +14,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Fixed
+
+- **crcbl-shell** (X11): a window created with
+  `WindowDesc { mode: Borderless, .. }` reported its own request back as the
+  effective mode when no window manager was running. EWMH has the _client_ write
+  `_NET_WM_STATE` to request an initial state — before a window is mapped there
+  is no window manager conversation to have — and a window manager then takes
+  ownership of the property. The backend worked out the effective mode by
+  reading that property back, so with nobody to take ownership it read its own
+  write: `effective_mode()` said borderless and `mode_request_honoured()` said
+  true, for a window still at its windowed size that nothing had touched. It now
+  trusts `_NET_WM_STATE` only when `_NET_SUPPORTING_WM_CHECK` says something is
+  there to have written it.
+
+  `set_mode` after mapping was never affected — that path sends a client message
+  to the root window and never writes the property — so the bug was reachable
+  only through the creation path, which is exactly the path the new
+  `--fullscreen` flag takes. Every WM-less X session, kiosk and CI runner would
+  have had a summary line claiming a fullscreen it did not have.
+
 ### Added
 
 - **crcbl-sprite** (`bake::bake_dir`): the generated table now declares

@@ -459,6 +459,168 @@ fn switching_to_borderless_and_back_reconfigures_the_window() {
     session.shell.destroy_window(window).expect("destroy");
 }
 
+/// [`WindowDesc::mode`] is honoured at creation, with no `set_mode` call
+/// anywhere.
+///
+/// The X11 suite covers the same field; Wayland did not, and this is the path a
+/// game's `--fullscreen` flag takes.
+///
+/// # Which configures the flash claim is about
+///
+/// `WindowDesc::mode`'s doc says setting it at creation "avoids a visible flash
+/// of a decorated window". On Wayland that can only ever be a claim about
+/// configures **after the surface is mapped**: xdg-shell requires an initial
+/// commit with no buffer, the compositor answers that one with `0x0` — "you
+/// choose" — and the backend reports the requested size for it. Nothing is on
+/// screen for any of that, because nothing has been painted yet. So this walks
+/// the configures one at a time rather than going through
+/// [`Session::create_mapped`], and asserts the part a user could actually see:
+/// once mapped, no configure reports the windowed size.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_window_created_borderless_is_never_mapped_at_its_windowed_size() {
+    let mut session = Session::open();
+    // Deliberately not the output size, so "it came up borderless" and "it came
+    // up at the size we asked for" cannot be the same observation.
+    let windowed = LogicalSize::new(640.0, 360.0);
+    let window = session.create(&WindowDesc {
+        mode: DisplayMode::Borderless { monitor: None },
+        ..desc("crcbl e2e born borderless", windowed)
+    });
+    assert_eq!(
+        session
+            .shell
+            .window_state(window)
+            .expect("live")
+            .requested_mode,
+        DisplayMode::Borderless { monitor: None },
+        "the desc's mode is what was asked for",
+    );
+
+    session.pump_until("the first configure", |session| {
+        session.size(window).is_some()
+    });
+    let scale = session
+        .shell
+        .window_state(window)
+        .expect("live")
+        .scale_factor()
+        .expect("configured");
+
+    // Everything after this is a configure about a surface with a buffer on it,
+    // which is to say one somebody could see.
+    session.take_names();
+    crcbl_shell::wayland_test_support::map_window(&*session.shell, window).expect("map");
+    session.pump_until("the fullscreen configure", |session| {
+        session
+            .shell
+            .window_state(window)
+            .expect("live")
+            .effective_mode()
+            == Some(DisplayMode::Borderless { monitor: None })
+    });
+
+    // The headline, and asserted first: the flash this field exists to prevent
+    // is a `Resized` carrying the size the window would have had if it had been
+    // created windowed and switched afterwards.
+    let flash = windowed.to_physical(scale);
+    for event in &session.events {
+        if let ShellEvent::Resized { size, .. } = event {
+            assert_ne!(
+                *size,
+                flash,
+                "a mapped window was configured at its windowed size, which is \
+                 the flash WindowDesc::mode exists to avoid: {:?}",
+                session.names()
+            );
+        }
+    }
+
+    let state = session.shell.window_state(window).expect("live");
+    assert!(state.mode_request_honoured());
+    assert_eq!(
+        state.size(),
+        Some(OUTPUT_SIZE),
+        "borderless covers the whole output declared in the sway config",
+    );
+
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// A fullscreen the client never asked for.
+///
+/// Every other mode test here drives [`Shell::set_mode`] and then watches for
+/// the answer. A compositor does not need to be asked: sway will fullscreen a
+/// window on a keybinding, a rule, or an IPC message, and the client's first
+/// news of it is a configure. The seam's requested/effective split is what has
+/// to survive that — `requested_mode` must still say what *we* asked for, so
+/// `mode_request_honoured` cannot start reporting true for a request nobody
+/// made.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_fullscreen_the_client_never_asked_for_arrives_as_a_resize() {
+    let mut session = Session::open();
+    let window = session.create_mapped(&desc("crcbl e2e imposed", LogicalSize::new(640.0, 360.0)));
+    let before = session.size(window).expect("configured");
+    assert_ne!(
+        before, OUTPUT_SIZE,
+        "the sway config floats this app_id; a tiled window already fills the \
+         output and this test could not fail",
+    );
+    session.take_names();
+
+    let matcher = format!("[app_id=\"{APP_ID}\"]");
+    assert!(
+        swaymsg(&[&matcher, "fullscreen", "enable"]),
+        "swaymsg ships with sway; without it there is no way to make the \
+         compositor impose a mode",
+    );
+    session.pump_until("the imposed fullscreen configure", |session| {
+        session.size(window) == Some(OUTPUT_SIZE)
+    });
+
+    let state = session.shell.window_state(window).expect("live");
+    assert_eq!(
+        state.effective_mode(),
+        Some(DisplayMode::Borderless { monitor: None }),
+        "the compositor's answer is what effective_mode reports",
+    );
+    assert_eq!(
+        state.requested_mode,
+        DisplayMode::Windowed,
+        "nothing asked for this, so the request is still the one we made",
+    );
+    assert!(
+        !state.mode_request_honoured(),
+        "an imposed mode is not a request being honoured",
+    );
+    assert!(
+        session.names().contains(&"Resized"),
+        "the imposed mode arrived as a Resized: {:?}",
+        session.names()
+    );
+
+    // And it comes back off the same way, so a game that reconfigured its
+    // swapchain for the imposed size gets told to undo it.
+    session.take_names();
+    assert!(swaymsg(&[&matcher, "fullscreen", "disable"]));
+    session.pump_until("the windowed configure", |session| {
+        session
+            .shell
+            .window_state(window)
+            .expect("live")
+            .effective_mode()
+            == Some(DisplayMode::Windowed)
+    });
+    assert_eq!(
+        session.size(window),
+        Some(before),
+        "leaving an imposed fullscreen restores the pre-fullscreen geometry",
+    );
+
+    session.shell.destroy_window(window).expect("destroy");
+}
+
 /// A compositor-driven resize, produced by driving sway itself.
 #[test]
 #[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
