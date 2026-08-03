@@ -120,130 +120,134 @@
 //! engine turns into a failed check rather than a `LinkError` in someone's
 //! browser.
 
-use core::time::Duration;
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use crcbl::engine::{Clock, ExitReason, Flow};
-use crcbl::shell::{ShellBackend, open_backend};
+use crcbl::log;
 use crcbl::store::web::{FetchSource, OpfsStorage};
+use crcbl::web::{App, WebLoop, WebPending};
 
-use crate::app::{Loop, PendingLoop};
+use crate::app::{Loop, PendingLoop, Summary};
 use crate::args::Options;
 
-// The status codes and the asset base are the shim's wire format, so they
-// have exactly one definition; see [`crcbl::web`]. Re-exported rather than
-// referenced through the path, because the page's own docs name them.
+// The status codes and the asset base are the shim's wire format, so they have
+// exactly one definition; see [`crcbl::web`]. Re-exported rather than reached
+// through the path, because this module's own docs name them.
 pub use crcbl::web::{
     ASSET_BASE, STATUS_BOOTING, STATUS_FAILED, STATUS_IDLE, STATUS_PAUSED, STATUS_PREPARED,
     STATUS_RUNNING, STATUS_STOPPED,
 };
 
 // ---------------------------------------------------------------------------
-// State
+// This game's half of the lifecycle
 // ---------------------------------------------------------------------------
 
-/// Where the demo has got to. One value, so no two of these can be true at once.
+/// Five forwards and one log line.
 ///
-/// Both live variants are boxed. `Loop` is the whole engine — swapchain ring,
-/// render graph pool, ECS world — and an unboxed variant would make every
-/// `Stage` assignment in [`__crcbl_horde_frame`] a multi-kilobyte move, once
-/// per frame, for no reason.
-enum Stage {
-    Idle,
-    Prepared,
-    Booting(Box<PendingLoop<dyn crcbl::shell::Shell>>),
-    Running(Box<Loop<dyn crcbl::shell::Shell>>),
-    Stopped,
-    Failed,
-}
+/// The log line is the whole of what makes this game's browser lifecycle
+/// different from the other three's: which numbers a finished run is worth
+/// reporting. Everything above it — the stage machine, the status codes, the
+/// clock step, the failure handling — is [`crcbl::web::App`]'s.
+impl WebLoop for Loop<dyn crcbl::shell::Shell> {
+    type Error = crate::app::HordeError;
+    type Summary = Summary;
 
-impl Stage {
-    fn status(&self) -> u32 {
-        match self {
-            Self::Idle => STATUS_IDLE,
-            Self::Prepared => STATUS_PREPARED,
-            Self::Booting(_) => STATUS_BOOTING,
-            Self::Running(engine) => running_status(engine),
-            Self::Stopped => STATUS_STOPPED,
-            Self::Failed => STATUS_FAILED,
-        }
+    const NAME: &'static str = "horde";
+
+    fn extent(&self) -> (u32, u32) {
+        Self::extent(self)
+    }
+
+    fn is_paused(&self) -> bool {
+        Self::is_paused(self)
+    }
+
+    fn set_frame_step(&mut self, dt: core::time::Duration) {
+        Self::set_frame_step(self, dt);
+    }
+
+    fn frame(&mut self) -> Result<Flow, Self::Error> {
+        Self::frame(self)
+    }
+
+    fn finish(self, exit: ExitReason) -> Result<Self::Summary, Self::Error> {
+        Self::finish(self, exit)
+    }
+
+    fn log_summary(summary: &Self::Summary) {
+        log::info!(
+            "horde: {} frames, {} ticks, survived {:.1}s with {} kills at level {} \
+             ({} enemies left, {:?}, {:?})",
+            summary.frames,
+            summary.ticks,
+            summary.elapsed,
+            summary.kills,
+            summary.level,
+            summary.enemies,
+            summary.state,
+            summary.exit,
+        );
     }
 }
 
-/// Everything this module owns for the life of the page.
-///
-/// The storage handles are held here because both crates' `install` keeps only
-/// a [`std::rc::Weak`]: dropping the `Rc` would silently turn every
-/// `__crcbl_web_opfs_*` call into a `0`, and the first symptom would be a best
-/// score that never saves.
-struct App {
-    stage: Stage,
-    assets: Option<Rc<FetchSource>>,
-    saves: Option<Rc<OpfsStorage>>,
-    /// `performance.now()` at the last frame, for the delta the clock is
-    /// stepped by. `None` until the loop starts running.
-    last_ms: Option<f64>,
-    error: String,
-}
+impl WebPending for PendingLoop<dyn crcbl::shell::Shell> {
+    type Loop = Loop<dyn crcbl::shell::Shell>;
 
-impl App {
-    const fn new() -> Self {
-        Self {
-            stage: Stage::Idle,
-            assets: None,
-            saves: None,
-            last_ms: None,
-            error: String::new(),
-        }
+    fn request(
+        shell: Box<dyn crcbl::shell::Shell>,
+        clock: Clock,
+    ) -> Result<Self, crate::app::HordeError> {
+        Self::request(shell, &Options::default(), clock)
     }
 
-    /// Records `error`, fails the stage, and returns [`STATUS_FAILED`].
-    ///
-    /// A failure is terminal: nothing here retries, because every failure this
-    /// can see (no WebGPU adapter, a device that refused the features the UI
-    /// pass needs) is a property of the browser rather than a transient.
-    fn fail(&mut self, error: impl core::fmt::Display) -> u32 {
-        use core::fmt::Write as _;
-        self.error.clear();
-        let _ = write!(self.error, "{error}");
-        crcbl::log::error!("horde: {}", self.error);
-        self.stage = Stage::Failed;
-        STATUS_FAILED
+    fn poll(&mut self) -> Result<Option<Self::Loop>, crate::app::HordeError> {
+        Self::poll(self)
     }
 }
 
 thread_local! {
-    static APP: RefCell<App> = const { RefCell::new(App::new()) };
+    static APP: RefCell<App<PendingLoop<dyn crcbl::shell::Shell>>> =
+        const { RefCell::new(App::new()) };
+
+    /// The storage handles, held for the life of the page.
+    ///
+    /// Both crates' `install` keeps only a [`std::rc::Weak`]: dropping the `Rc`
+    /// would silently turn every `__crcbl_web_opfs_*` call into a `0`, and the
+    /// first symptom would be a high score that never saves.
+    static STORAGE: RefCell<Option<(Rc<OpfsStorage>, Rc<FetchSource>)>> =
+        const { RefCell::new(None) };
 }
 
 /// Runs `f` against the page's state.
 ///
-/// `absent` is returned when the cell is already borrowed, which can only
-/// happen if an export were called re-entrantly from another export — the shim
-/// never does, and answering rather than panicking keeps a shim bug from
-/// aborting the wasm instance.
-fn with_app<R>(absent: R, f: impl FnOnce(&mut App) -> R) -> R {
+/// `absent` is returned when the cell is already borrowed, which can only happen
+/// if an export were called re-entrantly from another export — the shim never
+/// does, and answering rather than panicking keeps a shim bug from aborting the
+/// wasm instance.
+fn with_app<R>(
+    absent: R,
+    f: impl FnOnce(&mut App<PendingLoop<dyn crcbl::shell::Shell>>) -> R,
+) -> R {
     APP.with(|slot| match slot.try_borrow_mut() {
         Ok(mut app) => f(&mut app),
         Err(_) => absent,
     })
 }
 
-/// The OPFS store the shim restored into, if [`__crcbl_horde_prepare`] ran.
+/// The OPFS store the shim restored into, if `prepare` ran.
 ///
-/// `crate::best`'s browser arm. Returns `None` on a page that never prepared,
-/// which is a shim that started the game before the storage existed.
+/// [`crate::high_score`]'s browser arm. Returns `None` on a page that never
+/// prepared, which is a shim that started the game before the storage existed.
 #[must_use]
 pub fn opfs_store() -> Option<Rc<OpfsStorage>> {
-    with_app(None, |app| app.saves.clone())
+    STORAGE.with(|slot| slot.borrow().as_ref().map(|(saves, _)| Rc::clone(saves)))
 }
 
-/// The asset source the shim pre-loads into, if [`__crcbl_horde_prepare`]
-/// ran.
+/// The asset source the shim pre-loads into, if `prepare` ran.
 #[must_use]
 pub fn asset_source() -> Option<Rc<FetchSource>> {
-    with_app(None, |app| app.assets.clone())
+    STORAGE.with(|slot| slot.borrow().as_ref().map(|(_, assets)| Rc::clone(assets)))
 }
 
 // ---------------------------------------------------------------------------
@@ -253,16 +257,16 @@ pub fn asset_source() -> Option<Rc<FetchSource>> {
 /// Install the log sink and the browser storage backends.
 ///
 /// The first call the shim makes, and the one that has to happen before any
-/// `__crcbl_web_fetch_*` or `__crcbl_web_opfs_*` call — both of those answer
-/// `0` until something is installed, which is the documented "a shim that
-/// started before the engine did" case rather than a failure.
+/// `__crcbl_web_fetch_*` or `__crcbl_web_opfs_*` call — both of those answer `0`
+/// until something is installed, which is the documented "a shim that started
+/// before the engine did" case rather than a failure.
 ///
 /// Returns `1`, or `0` if it had already run.
 #[unsafe(no_mangle)]
 pub extern "C" fn __crcbl_horde_prepare() -> u32 {
     crcbl::web::install_logger();
     with_app(0, |app| {
-        if !matches!(app.stage, Stage::Idle) {
+        if !app.is_idle() {
             return 0;
         }
 
@@ -271,25 +275,22 @@ pub extern "C" fn __crcbl_horde_prepare() -> u32 {
             app.fail("an OPFS store was already installed");
             return 0;
         }
-        app.saves = Some(saves);
 
-        match FetchSource::new(ASSET_BASE) {
-            Ok(source) => {
-                let source = Rc::new(source);
-                if !crcbl::store::web::fetch::install(&source) {
-                    app.fail("a fetch source was already installed");
-                    return 0;
-                }
-                app.assets = Some(source);
-            }
+        let assets = match FetchSource::new(ASSET_BASE) {
+            Ok(source) => Rc::new(source),
             Err(error) => {
                 app.fail(error);
                 return 0;
             }
+        };
+        if !crcbl::store::web::fetch::install(&assets) {
+            app.fail("a fetch source was already installed");
+            return 0;
         }
+        STORAGE.with(|slot| *slot.borrow_mut() = Some((saves, assets)));
 
-        crcbl::log::info!("horde: prepared; assets from {ASSET_BASE}");
-        app.stage = Stage::Prepared;
+        log::info!("horde: prepared; assets from {ASSET_BASE}");
+        app.prepared();
         1
     })
 }
@@ -313,32 +314,7 @@ pub extern "C" fn __crcbl_horde_log_level(level: u32) -> u32 {
 /// Returns `1`, or `0` if the page had not prepared or the shell refused.
 #[unsafe(no_mangle)]
 pub extern "C" fn __crcbl_horde_boot() -> u32 {
-    with_app(0, |app| {
-        if !matches!(app.stage, Stage::Prepared) {
-            return 0;
-        }
-        let shell = match open_backend(ShellBackend::Web) {
-            Ok(shell) => shell,
-            Err(error) => {
-                app.fail(error);
-                return 0;
-            }
-        };
-        let options = Options::default();
-        // `Clock::manual` rather than `Clock::new(false)`: see the module docs.
-        // The step is replaced every frame with what the browser reported.
-        match PendingLoop::request(shell, &options, Clock::manual(Duration::ZERO)) {
-            Ok(pending) => {
-                app.stage = Stage::Booting(Box::new(pending));
-                crcbl::log::info!("horde: booting; waiting for the canvas to report a size");
-                1
-            }
-            Err(error) => {
-                app.fail(error);
-                0
-            }
-        }
-    })
+    with_app(0, App::boot)
 }
 
 /// One `requestAnimationFrame`.
@@ -347,114 +323,16 @@ pub extern "C" fn __crcbl_horde_boot() -> u32 {
 /// the shell's event-clock reference is this frame's and not the previous one's.
 ///
 /// Returns the status afterwards; the shim keeps scheduling frames while it is
-/// [`STATUS_BOOTING`], [`STATUS_RUNNING`] or [`STATUS_PAUSED`].
+/// [`STATUS_BOOTING`] or [`STATUS_RUNNING`].
 #[unsafe(no_mangle)]
 pub extern "C" fn __crcbl_horde_frame(now_ms: f64) -> u32 {
-    with_app(STATUS_FAILED, |app| {
-        match core::mem::replace(&mut app.stage, Stage::Failed) {
-            Stage::Booting(mut pending) => match pending.poll() {
-                Ok(Some(engine)) => {
-                    crcbl::log::info!("horde: running at {:?}", engine.extent());
-                    let status = running_status(&engine);
-                    app.stage = Stage::Running(Box::new(engine));
-                    app.last_ms = Some(now_ms);
-                    status
-                }
-                Ok(None) => {
-                    app.stage = Stage::Booting(pending);
-                    STATUS_BOOTING
-                }
-                Err(error) => app.fail(error),
-            },
-            Stage::Running(mut engine) => {
-                engine.set_frame_step(step_from(app.last_ms.replace(now_ms), now_ms));
-                match engine.frame() {
-                    Ok(Flow::Continue) => {
-                        let status = running_status(&engine);
-                        app.stage = Stage::Running(engine);
-                        status
-                    }
-                    Ok(Flow::Stop(reason)) => finish(app, engine, reason),
-                    Err(error) => {
-                        // The frame error is the one worth reporting; a
-                        // teardown failure on top of it is logged, exactly as
-                        // the native `run` does.
-                        if let Err(teardown) = engine.finish(ExitReason::Failed) {
-                            crcbl::log::error!(
-                                "teardown after a failed frame also failed: {teardown}"
-                            );
-                        }
-                        app.fail(error)
-                    }
-                }
-            }
-            other => {
-                let status = other.status();
-                app.stage = other;
-                status
-            }
-        }
-    })
-}
-
-/// [`STATUS_PAUSED`] or [`STATUS_RUNNING`], from the loop itself.
-///
-/// Asked of the loop rather than tracked here: the page has no way to know that
-/// a `blur` paused the game, and a second copy of the answer would be the thing
-/// that drifts.
-fn running_status(engine: &Loop<dyn crcbl::shell::Shell>) -> u32 {
-    if engine.is_paused() {
-        STATUS_PAUSED
-    } else {
-        STATUS_RUNNING
-    }
-}
-
-/// Tears `engine` down and records how it ended.
-fn finish(app: &mut App, engine: Box<Loop<dyn crcbl::shell::Shell>>, reason: ExitReason) -> u32 {
-    match engine.finish(reason) {
-        Ok(summary) => {
-            crcbl::log::info!(
-                "horde: {} frames, {} ticks, survived {:.1}s with {} kills at level {} \
-                 ({} enemies left, {:?}, {:?})",
-                summary.frames,
-                summary.ticks,
-                summary.elapsed,
-                summary.kills,
-                summary.level,
-                summary.enemies,
-                summary.state,
-                summary.exit,
-            );
-            app.stage = Stage::Stopped;
-            STATUS_STOPPED
-        }
-        Err(error) => app.fail(error),
-    }
-}
-
-/// How far the clock should step for a frame that arrived at `now_ms`.
-///
-/// `performance.now()` is monotonic, but a shim that passed the wrong number —
-/// or a first frame with no predecessor — must not produce a negative or
-/// non-finite `Duration`, which would panic in `from_secs_f64`. The upper bound
-/// is `Loop::set_frame_step`'s job, because a native manual clock needs it too.
-fn step_from(previous: Option<f64>, now_ms: f64) -> Duration {
-    let Some(previous) = previous else {
-        return Duration::ZERO;
-    };
-    let delta = now_ms - previous;
-    if delta.is_finite() && delta > 0.0 {
-        Duration::from_secs_f64(delta / 1000.0)
-    } else {
-        Duration::ZERO
-    }
+    with_app(STATUS_FAILED, |app| app.frame(now_ms))
 }
 
 /// The status, without advancing anything.
 #[unsafe(no_mangle)]
 pub extern "C" fn __crcbl_horde_status() -> u32 {
-    with_app(STATUS_FAILED, |app| app.stage.status())
+    with_app(STATUS_FAILED, |app| app.status())
 }
 
 /// Tear the loop down: release the swapchain, the device and the window.
@@ -464,47 +342,29 @@ pub extern "C" fn __crcbl_horde_status() -> u32 {
 /// game's last write is queued during its last frame.
 #[unsafe(no_mangle)]
 pub extern "C" fn __crcbl_horde_shutdown() -> u32 {
-    with_app(0, |app| {
-        match core::mem::replace(&mut app.stage, Stage::Stopped) {
-            Stage::Running(engine) => {
-                finish(app, engine, ExitReason::CloseRequested);
-                1
-            }
-            Stage::Booting(_) => 1,
-            other => {
-                app.stage = other;
-                0
-            }
-        }
-    })
+    with_app(0, App::shutdown)
 }
 
 /// Address of the last error message (UTF-8, not NUL-terminated), or `0`.
 ///
-/// Valid until the next export call. Read [`__crcbl_horde_error_len`] first
-/// and decode immediately.
+/// Valid until the next export call. Read [`__crcbl_horde_error_len`] first and
+/// decode immediately.
 #[unsafe(no_mangle)]
 pub extern "C" fn __crcbl_horde_error_ptr() -> *const u8 {
-    with_app(core::ptr::null(), |app| {
-        if app.error.is_empty() {
-            core::ptr::null()
-        } else {
-            app.error.as_ptr()
-        }
-    })
+    with_app(core::ptr::null(), |app| app.error_ptr())
 }
 
 /// The length of that message in bytes.
 #[unsafe(no_mangle)]
 pub extern "C" fn __crcbl_horde_error_len() -> u32 {
-    with_app(0, |app| u32::try_from(app.error.len()).unwrap_or(u32::MAX))
+    with_app(0, |app| app.error_len())
 }
 
 /// Pop one log line into the scratch buffer and return its length in bytes.
 ///
-/// `0` means the queue is empty. Call [`__crcbl_horde_log_ptr`] **after**
-/// this, not before: the two together are one read, and the buffer's contents
-/// belong to the most recent `take`.
+/// `0` means the queue is empty. Call [`__crcbl_horde_log_ptr`] **after** this,
+/// not before: the two together are one read, and the buffer's contents belong
+/// to the most recent `take`.
 #[unsafe(no_mangle)]
 pub extern "C" fn __crcbl_horde_log_take() -> u32 {
     crcbl::web::log_take()

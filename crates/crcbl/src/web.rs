@@ -214,6 +214,343 @@ pub fn log_ptr() -> *const u8 {
     })
 }
 
+// ---------------------------------------------------------------------------
+// The demo's lifecycle
+// ---------------------------------------------------------------------------
+
+/// A game's assembled loop, as the browser lifecycle needs to see it.
+///
+/// Every method is one a sample's `Loop` already has; the trait exists so this
+/// module can own the state machine that was written out in all four `web.rs`
+/// files, which past the naming were the same file.
+pub trait WebLoop: Sized {
+    /// The game's error.
+    type Error: core::fmt::Display;
+    /// What a finished run reports.
+    type Summary;
+
+    /// The demo's own name, for this module's log lines.
+    const NAME: &'static str;
+
+    /// The swapchain's current size, for the "running at" line.
+    fn extent(&self) -> (u32, u32);
+
+    /// Whether the simulation is stopped — see [`STATUS_PAUSED`].
+    fn is_paused(&self) -> bool;
+
+    /// How far the clock advances for this frame.
+    fn set_frame_step(&mut self, dt: core::time::Duration);
+
+    /// One frame.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::Error`] if the frame failed.
+    fn frame(&mut self) -> Result<crate::engine::Flow, Self::Error>;
+
+    /// Tears the loop down.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::Error`] if teardown failed.
+    fn finish(self, exit: crate::engine::ExitReason) -> Result<Self::Summary, Self::Error>;
+
+    /// Logs the one line that is genuinely per-game.
+    ///
+    /// The **only** thing that differed between the four samples' copies of this
+    /// whole file: which numbers a run is worth reporting. Breakout has a score,
+    /// horde has a time survived and a kill count, and no shared shape covers
+    /// both without inventing a summary type that neither wanted.
+    fn log_summary(summary: &Self::Summary);
+}
+
+/// A game's start-up, as the browser lifecycle needs to see it.
+pub trait WebPending: Sized {
+    /// The loop this becomes.
+    type Loop: WebLoop;
+
+    /// Opens the window and starts the device request, without blocking.
+    ///
+    /// The game supplies its own options; the shell and the clock are the
+    /// page's.
+    ///
+    /// # Errors
+    ///
+    /// The game's error if the shell refused the window.
+    fn request(
+        shell: Box<dyn crate::shell::Shell>,
+        clock: crate::engine::Clock,
+    ) -> Result<Self, <Self::Loop as WebLoop>::Error>;
+
+    /// `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// The game's error if start-up failed.
+    fn poll(&mut self) -> Result<Option<Self::Loop>, <Self::Loop as WebLoop>::Error>;
+}
+
+/// Where the demo has got to. One value, so no two of these can be true at once.
+///
+/// Both live variants are boxed. A `Loop` is the whole engine — swapchain ring,
+/// render graph pool, ECS world — and an unboxed variant would make every
+/// assignment in [`App::frame`] a multi-kilobyte move, once per frame, for no
+/// reason.
+enum Stage<P: WebPending> {
+    Idle,
+    Prepared,
+    Booting(Box<P>),
+    Running(Box<P::Loop>),
+    Stopped,
+    Failed,
+}
+
+impl<P: WebPending> Stage<P> {
+    fn status(&self) -> u32 {
+        match self {
+            Self::Idle => STATUS_IDLE,
+            Self::Prepared => STATUS_PREPARED,
+            Self::Booting(_) => STATUS_BOOTING,
+            Self::Running(engine) => running_status(engine.as_ref()),
+            Self::Stopped => STATUS_STOPPED,
+            Self::Failed => STATUS_FAILED,
+        }
+    }
+}
+
+/// [`STATUS_PAUSED`] or [`STATUS_RUNNING`], from the loop itself.
+///
+/// Asked of the loop rather than tracked here: the page has no way to know that
+/// a `blur` paused the game, and a second copy of the answer would be the thing
+/// that drifts.
+fn running_status<L: WebLoop>(engine: &L) -> u32 {
+    if engine.is_paused() {
+        STATUS_PAUSED
+    } else {
+        STATUS_RUNNING
+    }
+}
+
+/// Everything a demo owns for the life of the page.
+///
+/// A sample holds one of these in its own `thread_local!` — which is why this is
+/// a type with methods rather than free functions over a static here: a
+/// `thread_local!` cannot hold a generic.
+pub struct App<P: WebPending> {
+    stage: Stage<P>,
+    /// `performance.now()` at the last frame, for the delta the clock is stepped
+    /// by. `None` until the loop starts running.
+    last_ms: Option<f64>,
+    error: String,
+}
+
+impl<P: WebPending> core::fmt::Debug for App<P> {
+    /// Hand-written because a game's `Loop` need not be `Debug`; what a reader
+    /// wants from this is which stage the page is in.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("App")
+            .field("status", &self.stage.status())
+            .field("last_ms", &self.last_ms)
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
+impl<P: WebPending> Default for App<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<P: WebPending> App<P> {
+    /// A page that has not prepared yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            stage: Stage::Idle,
+            last_ms: None,
+            error: String::new(),
+        }
+    }
+
+    /// Records `error`, fails the stage, and returns [`STATUS_FAILED`].
+    ///
+    /// A failure is terminal: nothing here retries, because every failure this
+    /// can see (no WebGPU adapter, a device that refused the features the UI
+    /// pass needs) is a property of the browser rather than a transient.
+    pub fn fail(&mut self, error: impl core::fmt::Display) -> u32 {
+        use core::fmt::Write as _;
+        self.error.clear();
+        let _ = write!(self.error, "{error}");
+        log::error!("{}: {}", P::Loop::NAME, self.error);
+        self.stage = Stage::Failed;
+        STATUS_FAILED
+    }
+
+    /// Whether the page is still [`STATUS_IDLE`], for the `prepare` export.
+    #[must_use]
+    pub const fn is_idle(&self) -> bool {
+        matches!(self.stage, Stage::Idle)
+    }
+
+    /// Moves to [`STATUS_PREPARED`]. The caller has installed its storage.
+    pub fn prepared(&mut self) {
+        self.stage = Stage::Prepared;
+    }
+
+    /// Opens the shell and starts the polled device request.
+    ///
+    /// Returns `1`, or `0` if the page had not prepared or the shell refused.
+    pub fn boot(&mut self) -> u32 {
+        if !matches!(self.stage, Stage::Prepared) {
+            return 0;
+        }
+        let shell = match crate::shell::open_backend(crate::shell::ShellBackend::Web) {
+            Ok(shell) => shell,
+            Err(error) => return self.fail(error),
+        };
+        // `Clock::manual` rather than `Clock::new(false)`: `Instant::now` panics
+        // on this target, so the rAF delta is the only clock there is. The step
+        // is replaced every frame with what the browser reported.
+        match P::request(
+            shell,
+            crate::engine::Clock::manual(core::time::Duration::ZERO),
+        ) {
+            Ok(pending) => {
+                self.stage = Stage::Booting(Box::new(pending));
+                log::info!(
+                    "{}: booting; waiting for the canvas to report a size",
+                    P::Loop::NAME
+                );
+                1
+            }
+            Err(error) => {
+                self.fail(error);
+                0
+            }
+        }
+    }
+
+    /// One `requestAnimationFrame`, and the status afterwards.
+    ///
+    /// `now_ms` is `performance.now()`.
+    pub fn frame(&mut self, now_ms: f64) -> u32 {
+        match core::mem::replace(&mut self.stage, Stage::Failed) {
+            Stage::Booting(mut pending) => match pending.poll() {
+                Ok(Some(engine)) => {
+                    log::info!("{}: running at {:?}", P::Loop::NAME, engine.extent());
+                    let status = running_status(&engine);
+                    self.stage = Stage::Running(Box::new(engine));
+                    self.last_ms = Some(now_ms);
+                    status
+                }
+                Ok(None) => {
+                    self.stage = Stage::Booting(pending);
+                    STATUS_BOOTING
+                }
+                Err(error) => self.fail(error),
+            },
+            Stage::Running(mut engine) => {
+                engine.set_frame_step(step_from(self.last_ms.replace(now_ms), now_ms));
+                match engine.frame() {
+                    Ok(crate::engine::Flow::Continue) => {
+                        let status = running_status(engine.as_ref());
+                        self.stage = Stage::Running(engine);
+                        status
+                    }
+                    Ok(crate::engine::Flow::Stop(reason)) => self.teardown(*engine, reason),
+                    Err(error) => {
+                        // The frame error is the one worth reporting; a teardown
+                        // failure on top of it is logged, exactly as the native
+                        // `run` does.
+                        if let Err(teardown) = engine.finish(crate::engine::ExitReason::Failed) {
+                            log::error!("teardown after a failed frame also failed: {teardown}");
+                        }
+                        self.fail(error)
+                    }
+                }
+            }
+            other => {
+                let status = other.status();
+                self.stage = other;
+                status
+            }
+        }
+    }
+
+    /// Tears the loop down and records how it ended.
+    fn teardown(&mut self, engine: P::Loop, reason: crate::engine::ExitReason) -> u32 {
+        match engine.finish(reason) {
+            Ok(summary) => {
+                P::Loop::log_summary(&summary);
+                self.stage = Stage::Stopped;
+                STATUS_STOPPED
+            }
+            Err(error) => self.fail(error),
+        }
+    }
+
+    /// The status, without advancing anything.
+    #[must_use]
+    pub fn status(&self) -> u32 {
+        self.stage.status()
+    }
+
+    /// Releases the swapchain, the device and the window.
+    ///
+    /// Returns `1` if there was something to tear down.
+    pub fn shutdown(&mut self) -> u32 {
+        match core::mem::replace(&mut self.stage, Stage::Stopped) {
+            Stage::Running(engine) => {
+                self.teardown(*engine, crate::engine::ExitReason::CloseRequested);
+                1
+            }
+            Stage::Booting(_) => 1,
+            other => {
+                self.stage = other;
+                0
+            }
+        }
+    }
+
+    /// Address of the last error message (UTF-8, not NUL-terminated), or null.
+    ///
+    /// Valid until the next export call.
+    #[must_use]
+    pub fn error_ptr(&self) -> *const u8 {
+        if self.error.is_empty() {
+            core::ptr::null()
+        } else {
+            self.error.as_ptr()
+        }
+    }
+
+    /// The length of that message in bytes.
+    #[must_use]
+    pub fn error_len(&self) -> u32 {
+        u32::try_from(self.error.len()).unwrap_or(u32::MAX)
+    }
+}
+
+/// How far the clock should step for a frame that arrived at `now_ms`.
+///
+/// `performance.now()` is monotonic, but a shim that passed the wrong number —
+/// or a first frame with no predecessor — must not produce a negative or
+/// non-finite `Duration`, which would panic in `from_secs_f64`. The upper bound
+/// is [`crate::engine::MAX_FRAME_STEP`]'s job, applied by `set_frame_step`,
+/// because a native manual clock needs it too.
+fn step_from(previous: Option<f64>, now_ms: f64) -> core::time::Duration {
+    let Some(previous) = previous else {
+        return core::time::Duration::ZERO;
+    };
+    let delta = now_ms - previous;
+    if delta.is_finite() && delta > 0.0 {
+        core::time::Duration::from_secs_f64(delta / 1000.0)
+    } else {
+        core::time::Duration::ZERO
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use log::Log as _;
@@ -311,6 +648,210 @@ mod tests {
         assert!(
             line.chars().last().is_some_and(|c| c == 'é'),
             "the cut landed inside a character",
+        );
+    }
+
+    // ---- the lifecycle ------------------------------------------------------
+
+    /// A loop that runs for a set number of frames and then stops.
+    struct FakeLoop {
+        frames_left: u32,
+        paused: bool,
+        fail_frame: bool,
+    }
+
+    #[derive(Debug)]
+    struct FakeError;
+
+    impl core::fmt::Display for FakeError {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "the fixture refused")
+        }
+    }
+
+    impl WebLoop for FakeLoop {
+        type Error = FakeError;
+        type Summary = u32;
+
+        const NAME: &'static str = "fake";
+
+        fn extent(&self) -> (u32, u32) {
+            (320, 240)
+        }
+
+        fn is_paused(&self) -> bool {
+            self.paused
+        }
+
+        fn set_frame_step(&mut self, _dt: core::time::Duration) {}
+
+        fn frame(&mut self) -> Result<crate::engine::Flow, Self::Error> {
+            if self.fail_frame {
+                return Err(FakeError);
+            }
+            if self.frames_left == 0 {
+                return Ok(crate::engine::Flow::Stop(
+                    crate::engine::ExitReason::FrameBudget,
+                ));
+            }
+            self.frames_left -= 1;
+            Ok(crate::engine::Flow::Continue)
+        }
+
+        fn finish(self, _exit: crate::engine::ExitReason) -> Result<Self::Summary, Self::Error> {
+            Ok(self.frames_left)
+        }
+
+        fn log_summary(summary: &Self::Summary) {
+            log::info!("fake: {summary} frames left");
+        }
+    }
+
+    struct FakePending {
+        polls_left: u32,
+        frames: u32,
+        paused: bool,
+        fail_frame: bool,
+    }
+
+    impl WebPending for FakePending {
+        type Loop = FakeLoop;
+
+        fn request(
+            _shell: Box<dyn crate::shell::Shell>,
+            _clock: crate::engine::Clock,
+        ) -> Result<Self, FakeError> {
+            unreachable!("boot() opens a Web shell, which only exists on wasm32")
+        }
+
+        fn poll(&mut self) -> Result<Option<Self::Loop>, FakeError> {
+            if self.polls_left > 0 {
+                self.polls_left -= 1;
+                return Ok(None);
+            }
+            Ok(Some(FakeLoop {
+                frames_left: self.frames,
+                paused: self.paused,
+                fail_frame: self.fail_frame,
+            }))
+        }
+    }
+
+    fn booting(pending: FakePending) -> App<FakePending> {
+        let mut app = App::new();
+        app.stage = Stage::Booting(Box::new(pending));
+        app
+    }
+
+    /// **The status the page polls tracks the stage, including pause.**
+    ///
+    /// The shim drives everything off this number, and the paused case is the
+    /// one a second copy of the answer would get wrong — which is why
+    /// [`running_status`] asks the loop instead of tracking a flag.
+    #[test]
+    fn the_status_reports_booting_then_running_then_paused() {
+        let mut app = booting(FakePending {
+            polls_left: 2,
+            frames: 10,
+            paused: false,
+            fail_frame: false,
+        });
+        assert_eq!(app.status(), STATUS_BOOTING);
+        assert_eq!(app.frame(0.0), STATUS_BOOTING);
+        assert_eq!(app.frame(16.0), STATUS_BOOTING);
+        assert_eq!(app.frame(32.0), STATUS_RUNNING, "the device had arrived");
+        assert_eq!(app.status(), STATUS_RUNNING);
+
+        let mut app = booting(FakePending {
+            polls_left: 0,
+            frames: 10,
+            paused: true,
+            fail_frame: false,
+        });
+        assert_eq!(app.frame(0.0), STATUS_PAUSED);
+        assert_eq!(app.status(), STATUS_PAUSED, "a paused demo is not RUNNING");
+    }
+
+    /// **A loop that stops on its own terms is torn down, not failed.**
+    ///
+    /// `Flow::Stop` is the window closing or the frame budget running out. A
+    /// page that reported those as `STATUS_FAILED` would show an error for a
+    /// demo that ended correctly.
+    #[test]
+    fn a_loop_that_stops_reaches_stopped_and_stays_there() {
+        let mut app = booting(FakePending {
+            polls_left: 0,
+            frames: 1,
+            paused: false,
+            fail_frame: false,
+        });
+        assert_eq!(app.frame(0.0), STATUS_RUNNING);
+        assert_eq!(app.frame(16.0), STATUS_RUNNING, "one frame of budget");
+        assert_eq!(app.frame(32.0), STATUS_STOPPED);
+        assert_eq!(app.frame(48.0), STATUS_STOPPED, "a stopped demo stays put");
+        assert_eq!(app.error_len(), 0, "stopping is not an error");
+    }
+
+    /// **A failed frame is terminal, and says why.**
+    ///
+    /// Nothing retries: every failure this can see is a property of the browser
+    /// rather than a transient, so a page that kept scheduling frames would spin
+    /// against a device that has already refused.
+    #[test]
+    fn a_failed_frame_is_terminal_and_reports_its_reason() {
+        let mut app = booting(FakePending {
+            polls_left: 0,
+            frames: 10,
+            paused: false,
+            fail_frame: true,
+        });
+        assert_eq!(app.frame(0.0), STATUS_RUNNING);
+        assert_eq!(app.frame(16.0), STATUS_FAILED);
+        assert!(app.error_len() > 0, "a failure with no message");
+        assert!(!app.error_ptr().is_null());
+        assert_eq!(app.frame(32.0), STATUS_FAILED, "a failure is not retried");
+    }
+
+    /// **Shutting down a running demo tears it down; shutting down twice does
+    /// not.**
+    ///
+    /// The page calls this from `beforeunload`, which can fire after the loop
+    /// already stopped.
+    #[test]
+    fn shutdown_tears_down_once() {
+        let mut app = booting(FakePending {
+            polls_left: 0,
+            frames: 10,
+            paused: false,
+            fail_frame: false,
+        });
+        assert_eq!(app.frame(0.0), STATUS_RUNNING);
+        assert_eq!(app.shutdown(), 1);
+        assert_eq!(app.status(), STATUS_STOPPED);
+        assert_eq!(app.shutdown(), 0, "there was nothing left to tear down");
+    }
+
+    // ---- the frame step -----------------------------------------------------
+
+    /// **A nonsense `performance.now()` produces no step rather than a panic.**
+    ///
+    /// `Duration::from_secs_f64` panics on a negative or non-finite value, and a
+    /// panic here takes the whole wasm instance with it. The shim controls this
+    /// number, so the guard is against a caller bug rather than against physics.
+    #[test]
+    fn a_frame_step_from_nonsense_is_zero_rather_than_a_panic() {
+        assert_eq!(step_from(None, 16.0), core::time::Duration::ZERO);
+        assert_eq!(step_from(Some(32.0), 16.0), core::time::Duration::ZERO);
+        assert_eq!(step_from(Some(16.0), 16.0), core::time::Duration::ZERO);
+        assert_eq!(step_from(Some(f64::NAN), 16.0), core::time::Duration::ZERO);
+        assert_eq!(
+            step_from(Some(0.0), f64::INFINITY),
+            core::time::Duration::ZERO
+        );
+        // …and a sane delta is carried through in seconds.
+        assert_eq!(
+            step_from(Some(1_000.0), 1_016.0),
+            core::time::Duration::from_secs_f64(0.016),
         );
     }
 }
