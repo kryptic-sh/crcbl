@@ -158,6 +158,12 @@ pub mod engine;
 
 pub mod session;
 
+// Deliberately **not** gated to `wasm32`, even though only a browser build calls
+// it: the log queue is plain Rust with no web dependency, and gating it would
+// put its tests on the one target the test suite never runs. Each sample's
+// `web.rs` is gated, which is where the wasm-only parts live.
+pub mod web;
+
 // Native only, and the module's own docs say why: every step of the screenshot
 // path blocks, and the browser's main thread may not. P5.6 gated it rather than
 // letting a wasm build compile a hang.

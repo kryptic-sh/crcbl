@@ -131,48 +131,13 @@ use crcbl::store::web::{FetchSource, OpfsStorage};
 use crate::app::{Loop, PendingLoop};
 use crate::args::Options;
 
-// ---------------------------------------------------------------------------
-// Status
-// ---------------------------------------------------------------------------
-
-/// Nothing has been prepared; [`__crcbl_horde_prepare`] has not run.
-pub const STATUS_IDLE: u32 = 0;
-/// Storage is installed and the shim may pre-load; no shell yet.
-pub const STATUS_PREPARED: u32 = 1;
-/// Waiting for the canvas's first size, or for the device promise.
-pub const STATUS_BOOTING: u32 = 2;
-/// Playing. Every [`__crcbl_horde_frame`] draws.
-pub const STATUS_RUNNING: u32 = 3;
-/// The loop ended on its own terms — the page asked it to close, or the window
-/// went away. Not an error.
-pub const STATUS_STOPPED: u32 = 4;
-/// Something failed; [`__crcbl_horde_error_ptr`] says what.
-pub const STATUS_FAILED: u32 = 5;
-/// Running, but the simulation is stopped: the player pressed Escape, or the
-/// canvas lost focus.
-///
-/// A separate code rather than a flag beside `RUNNING`, because the page's
-/// status line is a *status*: it must not read "Playing." while the canvas sits
-/// unfocused behind something else. Numbered after `FAILED` so the codes already
-/// published to the shim keep their values.
-pub const STATUS_PAUSED: u32 = 6;
-
-/// The base URL the [`FetchSource`] resolves asset keys against.
-///
-/// Relative to the *document*, so a demo served from `/demos/horde/`
-/// fetches `/demos/horde/assets/<key>`. The trailing slash is required by
-/// [`FetchSource::new`], which refuses a base without one so that a key can
-/// never be read as a scheme.
-pub const ASSET_BASE: &str = "assets/";
-
-/// The most log lines held for the shim before the oldest is dropped.
-///
-/// A page that never drains must not grow wasm memory without bound; a page
-/// that drains once per frame will never see this.
-const MAX_LOG_LINES: usize = 512;
-
-/// The longest log line handed to the shim, in bytes.
-const MAX_LOG_LINE: usize = 1024;
+// The status codes and the asset base are the shim's wire format, so they
+// have exactly one definition; see [`crcbl::web`]. Re-exported rather than
+// referenced through the path, because the page's own docs name them.
+pub use crcbl::web::{
+    ASSET_BASE, STATUS_BOOTING, STATUS_FAILED, STATUS_IDLE, STATUS_PAUSED, STATUS_PREPARED,
+    STATUS_RUNNING, STATUS_STOPPED,
+};
 
 // ---------------------------------------------------------------------------
 // State
@@ -282,88 +247,6 @@ pub fn asset_source() -> Option<Rc<FetchSource>> {
 }
 
 // ---------------------------------------------------------------------------
-// Logging
-// ---------------------------------------------------------------------------
-
-/// The queue [`__crcbl_horde_log_take`] drains.
-#[derive(Default)]
-struct LogQueue {
-    lines: std::collections::VecDeque<String>,
-    /// The line the shim is currently reading. Kept at a fixed capacity so its
-    /// address does not move between a `take` and the `log_ptr` that follows.
-    current: String,
-    /// Lines dropped because the shim was not draining. Reported once, on the
-    /// next line that fits, rather than silently.
-    dropped: u64,
-}
-
-thread_local! {
-    static LOG: RefCell<LogQueue> = RefCell::new(LogQueue::default());
-}
-
-/// A [`crcbl::log::Log`] that queues lines for the shim instead of writing them.
-///
-/// There is no `console.log` import and no timestamp: an import would be the
-/// only one in the module (see the module docs) and a timestamp would need
-/// [`std::time::Instant`], which this target does not have. The browser's
-/// console stamps the line when the shim prints it, which is within a frame of
-/// when it was written.
-struct WebLogger;
-
-impl crcbl::log::Log for WebLogger {
-    fn enabled(&self, metadata: &crcbl::log::Metadata<'_>) -> bool {
-        metadata.level() <= crcbl::log::max_level()
-    }
-
-    fn log(&self, record: &crcbl::log::Record<'_>) {
-        if !self.enabled(record.metadata()) {
-            return;
-        }
-        LOG.with(|slot| {
-            // `try_borrow_mut` because a `Drop` running inside `log_take` could
-            // in principle log; dropping the line is better than a panic in a
-            // logger.
-            let Ok(mut queue) = slot.try_borrow_mut() else {
-                return;
-            };
-            if queue.lines.len() >= MAX_LOG_LINES {
-                queue.lines.pop_front();
-                queue.dropped = queue.dropped.saturating_add(1);
-            }
-            let mut line = format!(
-                "[{}] {}: {}",
-                record.level(),
-                record.target(),
-                record.args()
-            );
-            // Byte truncation would split a UTF-8 sequence; `char_indices`
-            // finds the last boundary at or before the limit.
-            if line.len() > MAX_LOG_LINE {
-                let end = line
-                    .char_indices()
-                    .map(|(i, _)| i)
-                    .take_while(|i| *i <= MAX_LOG_LINE)
-                    .last()
-                    .unwrap_or(0);
-                line.truncate(end);
-            }
-            queue.lines.push_back(line);
-        });
-    }
-
-    fn flush(&self) {}
-}
-
-static LOGGER: WebLogger = WebLogger;
-
-/// Installs the queueing logger, unless one is already installed.
-fn install_logger() {
-    if crcbl::log::set_logger(&LOGGER).is_ok() {
-        crcbl::log::set_max_level(crcbl::log::LevelFilter::Info);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -377,7 +260,7 @@ fn install_logger() {
 /// Returns `1`, or `0` if it had already run.
 #[unsafe(no_mangle)]
 pub extern "C" fn __crcbl_horde_prepare() -> u32 {
-    install_logger();
+    crcbl::web::install_logger();
     with_app(0, |app| {
         if !matches!(app.stage, Stage::Idle) {
             return 0;
@@ -417,17 +300,7 @@ pub extern "C" fn __crcbl_horde_prepare() -> u32 {
 /// Returns `1`, or `0` for a level outside that range.
 #[unsafe(no_mangle)]
 pub extern "C" fn __crcbl_horde_log_level(level: u32) -> u32 {
-    let filter = match level {
-        0 => crcbl::log::LevelFilter::Off,
-        1 => crcbl::log::LevelFilter::Error,
-        2 => crcbl::log::LevelFilter::Warn,
-        3 => crcbl::log::LevelFilter::Info,
-        4 => crcbl::log::LevelFilter::Debug,
-        5 => crcbl::log::LevelFilter::Trace,
-        _ => return 0,
-    };
-    crcbl::log::set_max_level(filter);
-    1
+    crcbl::web::set_log_level(level)
 }
 
 /// Open the shell and the window, and start the polled device request.
@@ -634,38 +507,11 @@ pub extern "C" fn __crcbl_horde_error_len() -> u32 {
 /// belong to the most recent `take`.
 #[unsafe(no_mangle)]
 pub extern "C" fn __crcbl_horde_log_take() -> u32 {
-    LOG.with(|slot| {
-        let Ok(mut queue) = slot.try_borrow_mut() else {
-            return 0;
-        };
-        queue.current.clear();
-        match queue.lines.pop_front() {
-            Some(line) => queue.current.push_str(&line),
-            // The overflow notice is emitted only once the queue has actually
-            // drained — synthesising it while lines are still queued would
-            // itself be a line, and the counter is cleared as it is reported so
-            // a page that keeps up never sees it twice.
-            None => {
-                let dropped = core::mem::take(&mut queue.dropped);
-                if dropped == 0 {
-                    return 0;
-                }
-                use core::fmt::Write as _;
-                let _ = write!(
-                    queue.current,
-                    "[WARN] horde::web: {dropped} log lines dropped; the shim is not draining"
-                );
-            }
-        }
-        u32::try_from(queue.current.len()).unwrap_or(u32::MAX)
-    })
+    crcbl::web::log_take()
 }
 
 /// Address of the log scratch buffer, or `0` when nothing has been taken.
 #[unsafe(no_mangle)]
 pub extern "C" fn __crcbl_horde_log_ptr() -> *const u8 {
-    LOG.with(|slot| match slot.try_borrow() {
-        Ok(queue) if !queue.current.is_empty() => queue.current.as_ptr(),
-        _ => core::ptr::null(),
-    })
+    crcbl::web::log_ptr()
 }
