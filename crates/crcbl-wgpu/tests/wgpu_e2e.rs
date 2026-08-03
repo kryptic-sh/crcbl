@@ -52,6 +52,14 @@ const EXTENT: (u32, u32) = (64, 48);
 /// channel swap or an sRGB round-trip bug shows up in the bytes.
 const CLEAR: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
 
+/// [`CLEAR`] with its colour channels reversed, for the one test that has to
+/// tell two frames apart in the same buffer.
+///
+/// Reversed rather than merely different so the check needs no knowledge of the
+/// sRGB transfer function: whatever the encoding does to the values, `CLEAR`
+/// lands with red < green < blue and this one with red > green > blue.
+const CLEAR_REVERSED: [f32; 4] = [0.75, 0.5, 0.25, 1.0];
+
 /// How long a readback may take before the test calls it a failure.
 const READBACK_DEADLINE: Duration = Duration::from_secs(20);
 
@@ -369,6 +377,174 @@ fn a_render_pass_clear_reaches_host_memory_with_the_colour_it_was_given() {
     device.destroy_readback(readback);
     device.destroy_buffer(staging);
     device.destroy_command_buffer(commands);
+    headless.finish();
+}
+
+/// The hazard `crcbl-vk` had, asked of this backend: a ring image written again
+/// while the previous trip's copy is still reading it.
+///
+/// `crates/crcbl-vk/tests/vk_e2e.rs` has
+/// `reusing_an_offscreen_ring_image_is_ordered_against_the_frame_that_had_it`,
+/// which records the same two trips and asserts the **validation layer** saw no
+/// write-after-read. That test exists because the Vulkan backend genuinely had
+/// the bug: an offscreen ring hands its image back with no acquire semaphore,
+/// so nothing ordered the next trip's `ResourceState::Undefined` transition —
+/// which discards the image's contents — against the copy that read it.
+///
+/// **This backend cannot spell that transition.** `WgpuCommandEncoder::
+/// pipeline_barrier` is a no-op, so the `Undefined` above never reaches wgpu;
+/// wgpu-core tracks each texture's usage itself and emits the transition, at
+/// `command/transfer.rs`'s `transition_textures(&src_barrier)` before a
+/// texture→buffer copy and at `device/queue.rs`'s
+/// `insert_barriers_from_device_tracker` in front of each submitted command
+/// buffer, which is what carries a texture's state from one submission to the
+/// next. So the ordering this test wants should be inserted for us.
+///
+/// What is asserted is the **observable**, not the absence of a layer message:
+/// the staging buffer must still hold trip one's colour after trip two has
+/// cleared the same image to a different one. Unlike the `crcbl-vk` test there
+/// is no synchronisation-validation confirmation available here — wgpu-hal does
+/// not request that validation feature — so the honest report is in
+/// `docs/backlog.md`: this is a functional check plus the two call sites above,
+/// not a layer verdict.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn reusing_an_offscreen_ring_image_is_ordered_against_the_frame_that_had_it() {
+    // One image, so the second acquire is genuinely the first image again
+    // rather than the other half of a ring.
+    let headless = Headless::open_with(EXTENT, 1);
+    let device = headless.device.as_ref();
+
+    let pixels = u64::from(EXTENT.0 * EXTENT.1 * 4);
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("ring reuse readback"),
+            size: pixels,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a readback buffer");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("ring reuse"),
+        queue: headless.queue,
+    });
+    let clear_into = |encoder: &mut Box<dyn crcbl_hal::CommandEncoder>,
+                      frame: &crcbl_hal::AcquiredFrame,
+                      colour: [f32; 4]| {
+        encoder.begin_render_pass(&RenderPassDesc {
+            label: Some("ring reuse clear"),
+            color_attachments: &[ColorAttachment {
+                view: frame.view,
+                resolve: None,
+                load: LoadOp::Clear,
+                store: StoreOp::Store,
+                clear: ClearValue::color(colour),
+            }],
+            depth_stencil_attachment: None,
+            render_area: Rect2d::from_size(frame.extent.0, frame.extent.1),
+        });
+        encoder.end_render_pass();
+    };
+
+    // Trip one: draw into the image, then read it back out. The copy is the
+    // read the next trip must not run over.
+    let first = device
+        .acquire_next_frame(headless.swapchain)
+        .expect("the ring always has an image");
+    clear_into(&mut encoder, &first, CLEAR);
+    encoder.copy_image_to_buffer(&BufferImageCopy {
+        buffer: staging,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: first.image,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d::default(),
+        image_extent: Extent3d::d2(EXTENT.0, EXTENT.1),
+    });
+    device
+        .present(
+            headless.queue,
+            &PresentInfo {
+                swapchain: headless.swapchain,
+                waits: first.present_semaphore.as_slice(),
+            },
+        )
+        .expect("present");
+
+    let second = device
+        .acquire_next_frame(headless.swapchain)
+        .expect("the ring always has an image");
+    assert_eq!(
+        second.index, first.index,
+        "a one-image ring must hand the same image back, which is the whole \
+         premise of this test"
+    );
+
+    // Trip two: the write. Same image, a colour trip one's copy must not see.
+    clear_into(&mut encoder, &second, CLEAR_REVERSED);
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device
+        .present(
+            headless.queue,
+            &PresentInfo {
+                swapchain: headless.swapchain,
+                waits: second.present_semaphore.as_slice(),
+            },
+        )
+        .expect("present");
+
+    let readback = device
+        .request_readback(&ReadbackDesc {
+            label: Some("ring reuse pixels"),
+            buffer: staging,
+            offset: 0,
+            size: pixels,
+            after: None,
+        })
+        .expect("a readback request");
+    let mut bytes = vec![0u8; pixels as usize];
+    drain(device, readback, &mut bytes);
+
+    let first_pixel: [u8; 4] = bytes[0..4].try_into().expect("four bytes");
+    assert!(
+        bytes.chunks_exact(4).all(|pixel| pixel == first_pixel),
+        "half a frame in the buffer is the hazard itself: the copy read the \
+         image while the next trip was clearing it. Got {first_pixel:?} then {:?}",
+        &bytes[4..8]
+    );
+    assert_ne!(
+        first_pixel,
+        [0, 0, 0, 0],
+        "an all-zero result means the copy never ran, so this test observed nothing"
+    );
+    let (r, g, b) = match headless.format {
+        Format::Bgra8Unorm | Format::Bgra8UnormSrgb => {
+            (first_pixel[2], first_pixel[1], first_pixel[0])
+        }
+        _ => (first_pixel[0], first_pixel[1], first_pixel[2]),
+    };
+    assert!(
+        r < g && g < b,
+        "the buffer must hold trip one's {CLEAR:?} (red < green < blue). \
+         Red > blue is trip two's {CLEAR_REVERSED:?}, which would mean the \
+         second clear overwrote the image before the copy read it. Got r={r} \
+         g={g} b={b} in {:?}",
+        headless.format
+    );
+
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(commands);
+    device.destroy_buffer(staging);
     headless.finish();
 }
 

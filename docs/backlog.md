@@ -312,10 +312,41 @@ but is not a queue dependency, and syncval reasons about submitted commands. It
 also costs exactly the frame overlap the ring exists to provide. It was removed
 rather than kept alongside the barrier.
 
-Still **not** checked: whether `crcbl-wgpu`'s offscreen path has the same gap.
-Its acquire also reports `acquire_semaphore: None`, but wgpu owns the
-synchronisation behind it and `wgpu e2e (lavapipe, Xvfb)` is green — no evidence
-either way, only an untested assumption.
+**`crcbl-wgpu`'s offscreen path does not have this gap** — checked 2026-08-04,
+and the untested assumption that used to sit here is deleted. Its acquire does
+report `acquire_semaphore: None`, but the hazard needs the discarding transition
+and that transition cannot reach wgpu: `WgpuCommandEncoder::pipeline_barrier` is
+a no-op, so the `ResourceState::Undefined` the seam records is dropped at the
+backend boundary, and wgpu-core inserts its own transitions from its usage
+tracker — `command/transfer.rs`'s `transition_textures(&src_barrier)` before a
+texture→buffer copy, and `device/queue.rs`'s
+`insert_barriers_from_device_tracker` in front of each submitted command buffer,
+which is what carries a texture's state across submissions (read in wgpu-core
+30.0.0, the resolved version).
+
+`reusing_an_offscreen_ring_image_is_ordered_against_the_frame_that_had_it` in
+`crates/crcbl-wgpu/tests/wgpu_e2e.rs` is the check: a one-image ring, trip one
+clears and copies out, trip two clears the same image to the reversed colour,
+and the staging buffer must still hold trip one's. Green on radv, on lavapipe
+and on the GL backend. Falsified both ways — writing trip two's colour in trip
+one, and deleting the copy — each red, and each for its own reason.
+
+**And the layer agrees, with a control that proves the layer was listening.**
+Sync validation is not something wgpu-hal requests, so it was forced at layer
+level: a settings file with `khronos_validation.validate_sync = true` reached
+through `VK_LAYER_SETTINGS_PATH`, which makes the layer print
+`Current Validation Enabled: … Synchronization` at `vkCreateInstance`. Under it
+the wgpu test reports no hazard. The control is the same file and the same ICD
+against `crcbl-vk` with the widening in `pipeline_barrier` disabled: red, with
+`SYNC-HAZARD-WRITE-AFTER-READ … previously read by vkCmdCopyImageToBuffer`. So
+the silence on the wgpu side is a verdict rather than an absence.
+
+**Worth knowing before the next investigation**: `CRCBL_VK_SYNC_VALIDATION` is
+what turns sync validation on for `crcbl-vk`, and with it unset the vk test
+above stays green with the fix removed — the suite says
+`CRCBL_VK_SYNC_VALIDATION is not set; skipping the sync-hazard probe`, which is
+easy to run past. `run-vk-e2e.sh` defaults it to `1`; a raw
+`cargo test`/test-binary invocation does not.
 
 ## The demo site's social preview is blank
 
