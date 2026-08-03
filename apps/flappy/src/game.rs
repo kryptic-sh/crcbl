@@ -33,15 +33,15 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crcbl_client::Client;
-use crcbl_core::FrameClock;
-use crcbl_core::input::KeyCode;
-use crcbl_ecs::{Entity, GameModule, World};
-use crcbl_input::{ActionDecl, ActionKind, ActionMap, Binding};
-use crcbl_net::{InMemoryTransport, ProtocolCompatibility};
-use crcbl_phys::{ColliderComponent, GravityForce, PhysicsSystem, RigidBody, Transform};
-use crcbl_server::Server;
-use glam::DVec3;
+use crcbl::client::Client;
+use crcbl::core::FrameClock;
+use crcbl::core::input::KeyCode;
+use crcbl::ecs::{Entity, GameModule, World};
+use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
+use crcbl::math::DVec3;
+use crcbl::net::{InMemoryTransport, ProtocolCompatibility};
+use crcbl::phys::{ColliderComponent, GravityForce, PhysicsSystem, RigidBody, Transform};
+use crcbl::server::Server;
 
 /// Distinct from breakout's, because they are distinct protocols: a client
 /// built for one must not hand-shake with a server running the other.
@@ -159,7 +159,7 @@ pub fn pipe_x(index: u32) -> f64 {
 /// to pack and nothing to collide with.
 #[must_use]
 pub fn gap_centre(seed: u64, index: u32) -> f64 {
-    let unit = crcbl_core::rand::hash_unit(seed, u64::from(index));
+    let unit = crcbl::core::rand::hash_unit(seed, u64::from(index));
     (unit * 2.0 - 1.0) * GAP_CENTRE_RANGE
 }
 
@@ -171,7 +171,7 @@ pub fn gap_centre(seed: u64, index: u32) -> f64 {
 /// replayed from a fresh game still meets the same pipes in the same places.
 #[must_use]
 fn course_seed(seed: u64, runs: u32) -> u64 {
-    crcbl_core::rand::salt(seed, u64::from(runs))
+    crcbl::core::rand::salt(seed, u64::from(runs))
 }
 
 const ACTION_FLAP: &str = "flap";
@@ -451,7 +451,7 @@ fn fatal(logic: &GameLogic, world: &mut World, dt: f64) -> Option<Death> {
             .body(bird)
             .copied()
             .zip(phys.transform(bird).copied())?;
-        let segment = crcbl_phys::Segment {
+        let segment = crcbl::phys::Segment {
             start: transform.position - body.velocity * dt,
             end: transform.position,
         };
@@ -492,7 +492,7 @@ fn die(logic: &mut GameLogic, world: &mut World, cause: Death) {
         logic.bird_pos.x,
         logic.bird_pos.y,
     ));
-    log::info!(
+    crcbl::log::info!(
         "run over after {} pipes ({cause:?}) at x = {:.1}",
         logic.score,
         logic.bird_pos.x
@@ -902,7 +902,7 @@ impl Game {
             bird_velocity: DVec3::ZERO,
             prev_log_state: GameState::WaitingToStart,
         };
-        log::info!(
+        crcbl::log::info!(
             "sim: {tick_hz} Hz, {:.3} ms per tick",
             game.tick_dt_secs() * 1e3,
         );
@@ -1006,7 +1006,7 @@ impl Game {
         let state_changed = self.state != self.prev_log_state;
         self.prev_log_state = self.state;
         if state_changed || self.ticks_run.is_multiple_of(60) {
-            log::info!(
+            crcbl::log::info!(
                 "[HUD] {:?}  score: {}  x: {:.1}  y: {:.1}  vy: {:+.1}",
                 self.state,
                 self.score,
@@ -1075,7 +1075,7 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl_core::time::{ManualTime, TimeSource as _};
+    use crcbl::core::time::{ManualTime, TimeSource as _};
 
     /// One entry of a script: `(tick index, key, pressed)`.
     type Script = [(u64, KeyCode, bool)];

@@ -21,9 +21,9 @@
 
 use std::sync::Arc;
 
-use crcbl_audio::mixer::{Mixer, SoundBank, VoiceMix};
-use crcbl_audio::spatial::{CueGrammar, compute_cue};
-use crcbl_audio::{AudioSample, AudioStream};
+use crcbl::audio::mixer::{Mixer, SoundBank, VoiceMix};
+use crcbl::audio::spatial::{CueGrammar, compute_cue};
+use crcbl::audio::{AudioSample, AudioStream};
 
 pub const SOUND_BOUNCE: u32 = 1;
 pub const SOUND_BRICK: u32 = 2;
@@ -59,7 +59,7 @@ impl Audio {
         };
 
         if stream.is_none() && !headless {
-            log::info!("audio: no output device available; sounds will be silent");
+            crcbl::log::info!("audio: no output device available; sounds will be silent");
         }
 
         Self {
@@ -75,7 +75,7 @@ impl Audio {
         // An id the bank does not know is simply absent — no `id - 1` index to
         // underflow, which is what this used to have to guard.
         let Some(voice) = self.bank.create_voice(id) else {
-            log::debug!("audio: no sound registered at id {id}");
+            crcbl::log::debug!("audio: no sound registered at id {id}");
             return;
         };
         let cue = compute_cue(

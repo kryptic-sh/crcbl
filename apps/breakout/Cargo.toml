@@ -27,40 +27,22 @@ publish = false
 name = "crcbl_breakout"
 crate-type = ["cdylib", "rlib"]
 
-# **Eleven engine dependencies, not one.** `apps/sandbox` names `crcbl` and
-# nothing else; breakout cannot, because the umbrella re-exports only the
-# graphics stack (`core`, `shell`, `hal`, `render`, `shaders`, `ui`) and the
-# simulation half — ECS, physics, input, net, server, client, audio, store — has
-# no re-export. `docs/plan/ROADMAP.md` puts samples on the consumer side of that
-# line deliberately, so the paths are named here rather than hidden; the comment
-# that used to claim "one engine dependency" was counting the first line only.
-#
-# The umbrella growing `crcbl::ecs`/`::phys`/`::net`/… is what would collapse
-# this list, and is the change to make when the simulation crates stabilise.
-# `glam` is here for the `DVec3` the physics seam speaks; `log` for per-event
-# debug logging.
+# **One engine dependency, which is what this crate always claimed and did not
+# have.** The umbrella used to re-export the graphics stack alone, so the
+# simulation half — ECS, physics, input, net, server, client, audio, store,
+# sprite — was eleven workspace paths named right here. All nine are
+# `crcbl::ecs`, `crcbl::phys`, … now, `glam` is `crcbl::math` and `log` is
+# `crcbl::log`, so a sample depends on `crcbl` and the standard library and on
+# nothing else. `apps/sandbox` was the only consumer that ever looked like this;
+# all five do now.
 [dependencies]
 crcbl = { workspace = true }
-crcbl-ecs = { workspace = true }
-crcbl-net = { workspace = true }
-crcbl-phys = { workspace = true }
-crcbl-input = { workspace = true }
-crcbl-server = { workspace = true }
-crcbl-client = { workspace = true }
-crcbl-core = { workspace = true }
-crcbl-audio = { workspace = true }
-crcbl-store = { workspace = true }
-# The sheet description the sprite pass draws from, and the reader for the pair
-# `build.rs` bakes. `load`, not `bake`: this half never sees a `.crpix`, and a
-# shipped binary that linked the PNG *encoder* would be linking it to encode
-# nothing.
-crcbl-sprite = { workspace = true, features = ["load"] }
-glam = { workspace = true }
-log = { workspace = true }
 
-# The other half, and the other feature. Cargo resolves build-dependency
-# features separately from normal ones, so `bake`'s PNG encoder reaches the
-# build script and not the game.
+# The build script's half, and the other feature. `crcbl` re-exports
+# `crcbl-sprite`'s reader; it does not re-export the PNG *encoder*, and it
+# should not. Cargo resolves build-dependency features separately from normal
+# ones, so naming the crate here is what keeps `bake` out of the shipped
+# binary — and is the one dependency a sample still spells for itself.
 [build-dependencies]
 crcbl-sprite = { workspace = true, features = ["bake"] }
 

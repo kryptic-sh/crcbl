@@ -19,7 +19,7 @@
 //! the ground. That is rules 1 and 3 of the grammar doing what they are for,
 //! and it is audible without being a gimmick.
 //!
-//! [`compute_cue`]: crcbl_audio::spatial::compute_cue
+//! [`compute_cue`]: crcbl::audio::spatial::compute_cue
 //!
 //! # What this file used to be
 //!
@@ -31,9 +31,9 @@
 
 use std::sync::Arc;
 
-use crcbl_audio::mixer::{Mixer, SoundBank, VoiceMix};
-use crcbl_audio::spatial::{CueGrammar, compute_cue};
-use crcbl_audio::{AudioSample, AudioStream};
+use crcbl::audio::mixer::{Mixer, SoundBank, VoiceMix};
+use crcbl::audio::spatial::{CueGrammar, compute_cue};
+use crcbl::audio::{AudioSample, AudioStream};
 
 /// The wing-beat.
 pub const SOUND_FLAP: u32 = 1;
@@ -76,7 +76,7 @@ impl Audio {
             AudioStream::open(Arc::clone(&mixer))
         };
         if stream.is_none() && !headless {
-            log::info!("audio: no output device available; the game will be silent");
+            crcbl::log::info!("audio: no output device available; the game will be silent");
         }
 
         Self {
@@ -95,7 +95,7 @@ impl Audio {
         // to underflow on the lookup — only on the counter below, which is
         // reached solely for an id the bank *did* answer to.
         let Some(voice) = self.bank.create_voice(id) else {
-            log::debug!("audio: no sound registered at id {id}");
+            crcbl::log::debug!("audio: no sound registered at id {id}");
             return;
         };
         let cue = compute_cue(
@@ -233,7 +233,7 @@ mod tests {
                 "the flap voice never finished"
             );
             block.fill(0.0);
-            crcbl_audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
+            crcbl::audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
         }
         assert_eq!(
             audio.plays(SOUND_FLAP),

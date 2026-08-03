@@ -27,6 +27,21 @@ crcbl-shaders = { workspace = true }
 crcbl-shell = { workspace = true }
 crcbl-ui = { workspace = true }
 crcbl-wgpu = { workspace = true }
+# The simulation half, added so a sample can stop naming them. Every one is a
+# crate the four games already depended on by path; none of them depends on
+# this crate, so the re-export introduces no cycle.
+crcbl-audio = { workspace = true }
+crcbl-client = { workspace = true }
+crcbl-ecs = { workspace = true }
+crcbl-input = { workspace = true }
+crcbl-net = { workspace = true }
+crcbl-phys = { workspace = true }
+crcbl-server = { workspace = true }
+crcbl-store = { workspace = true }
+# `load`, not `bake`: this is the half a shipped game links, and it reads the
+# baked pair rather than producing it. A build script wanting the encoder names
+# `crcbl-sprite` itself — see `src/lib.rs`'s `sprite` re-export.
+crcbl-sprite = { workspace = true, features = ["load"] }
 # Re-exported alongside `crcbl-render` so a game writes camera and light maths
 # in the same types the renderer takes, without a second workspace path.
 glam = { workspace = true }

@@ -56,15 +56,15 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crcbl_client::Client;
-use crcbl_core::FrameClock;
-use crcbl_core::input::KeyCode;
-use crcbl_ecs::{Entity, GameModule, World};
-use crcbl_input::{ActionDecl, ActionKind, ActionMap, Binding};
-use crcbl_net::{InMemoryTransport, ProtocolCompatibility};
-use crcbl_phys::{ColliderComponent, PhysicsSystem, RigidBody, Transform};
-use crcbl_server::Server;
-use glam::DVec3;
+use crcbl::client::Client;
+use crcbl::core::FrameClock;
+use crcbl::core::input::KeyCode;
+use crcbl::ecs::{Entity, GameModule, World};
+use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
+use crcbl::math::DVec3;
+use crcbl::net::{InMemoryTransport, ProtocolCompatibility};
+use crcbl::phys::{ColliderComponent, PhysicsSystem, RigidBody, Transform};
+use crcbl::server::Server;
 
 const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
     protocol_version: 3,
@@ -375,7 +375,7 @@ fn resolve_collisions(logic: &mut GameLogic, world: &mut World, dt: f64, paddle_
         // exactly that covers the path the ball took during this tick — which
         // is only true because this runs once per physics tick, with the same
         // `dt` the schedule used.
-        let segment = crcbl_phys::Segment {
+        let segment = crcbl::phys::Segment {
             start: pos - vel * dt,
             end: pos,
         };
@@ -786,7 +786,7 @@ impl Game {
 
         let bricks = spawn_brick_grid(&mut world);
 
-        log::info!(
+        crcbl::log::info!(
             "physics: {} colliders, {} bodies (ball + paddle + 3 walls + {BRICK_COUNT} bricks)",
             5 + BRICK_COUNT,
             5 + BRICK_COUNT,
@@ -879,7 +879,7 @@ impl Game {
             sound_played_this_tick: false,
             prev_log_state: GameState::WaitingForLaunch,
         };
-        log::info!(
+        crcbl::log::info!(
             "sim: {tick_hz} Hz, {:.3} ms per tick",
             game.tick_dt_secs() * 1e3,
         );
@@ -1000,7 +1000,7 @@ impl Game {
                 .map(|(_, t)| t)
             && (transform.position.x - ball_pos.x).abs() > 1.0
         {
-            log::warn!(
+            crcbl::log::warn!(
                 "replication drift: server ball_x={:.2}, client ball_x={:.2}",
                 ball_pos.x,
                 transform.position.x,
@@ -1081,7 +1081,7 @@ fn log_hud(
         GameState::Lost => "GAME OVER — press Space to restart",
     };
     let sound_str = if sound { " 🔊" } else { "" };
-    log::info!(
+    crcbl::log::info!(
         "[HUD] Score: {score} (best: {high})  Lives: {lives}  Bricks: {bricks}  \
          Ball x: {ball_x:.1}  {state_str}{sound_str}"
     );
@@ -1092,7 +1092,7 @@ fn log_hud(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl_core::time::{ManualTime, TimeSource as _};
+    use crcbl::core::time::{ManualTime, TimeSource as _};
 
     /// One entry of a script: `(tick index, key, pressed)`.
     type Script = [(u64, KeyCode, bool)];

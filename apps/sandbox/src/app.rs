@@ -370,7 +370,7 @@ pub fn run(options: &Options) -> Result<Summary, SandboxError> {
             // The frame error is the one worth reporting; a teardown failure on
             // top of it is logged rather than allowed to replace it.
             if let Err(teardown) = engine.finish(ExitReason::Failed) {
-                log::error!("teardown after a failed frame also failed: {teardown}");
+                crcbl::log::error!("teardown after a failed frame also failed: {teardown}");
             }
             Err(error)
         }
@@ -406,7 +406,7 @@ impl<S: Shell + ?Sized> Loop<S> {
     /// fails.
     pub fn with_shell(mut shell: Box<S>, options: &Options) -> Result<Self, SandboxError> {
         let clock_source = Clock::new(options.headless);
-        log::info!(
+        crcbl::log::info!(
             "shell: {} backend, caps {:?}",
             shell.backend(),
             shell.caps()
@@ -426,7 +426,7 @@ impl<S: Shell + ?Sized> Loop<S> {
 
         let mut events = 0;
         let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
-        log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+        crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
 
         let gpu = Gpu::open(
             shell.as_ref(),
@@ -621,11 +621,11 @@ impl<S: Shell + ?Sized> Loop<S> {
         // in `apps/breakout`.
         if focus_lost && !self.paused {
             self.paused = true;
-            log::info!("sandbox paused: the window lost focus");
+            crcbl::log::info!("sandbox paused: the window lost focus");
         }
         if toggle_pause {
             self.paused = !self.paused;
-            log::info!("sandbox {}", if self.paused { "paused" } else { "resumed" });
+            crcbl::log::info!("sandbox {}", if self.paused { "paused" } else { "resumed" });
         }
         if toggle_fullscreen {
             self.toggle_fullscreen()?;
@@ -736,7 +736,7 @@ impl<S: Shell + ?Sized> Loop<S> {
             DisplayMode::Borderless { monitor: None }
         };
         self.shell.set_mode(self.window, target)?;
-        log::info!("shell: asked for {target}");
+        crcbl::log::info!("shell: asked for {target}");
         Ok(())
     }
 
@@ -756,9 +756,9 @@ impl<S: Shell + ?Sized> Loop<S> {
         }
         self.mode_honoured = honoured;
         if honoured {
-            log::info!("shell: the window is {}", state.requested_mode);
+            crcbl::log::info!("shell: the window is {}", state.requested_mode);
         } else {
-            log::warn!(
+            crcbl::log::warn!(
                 "shell: asked for {} and got {}",
                 state.requested_mode,
                 self.display_mode(),
@@ -780,7 +780,7 @@ impl<S: Shell + ?Sized> Loop<S> {
             MenuAction::Resume => {
                 if self.paused {
                     self.paused = false;
-                    log::info!("sandbox resumed");
+                    crcbl::log::info!("sandbox resumed");
                 }
             }
             MenuAction::Fullscreen => self.toggle_fullscreen()?,
@@ -858,7 +858,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         if let Some(timings) = self.gpu.timings()
             && !timings.is_empty()
         {
-            log::info!("{}", timings.report().trim_end());
+            crcbl::log::info!("{}", timings.report().trim_end());
         }
         let summary = Summary {
             backend: self.shell.backend(),

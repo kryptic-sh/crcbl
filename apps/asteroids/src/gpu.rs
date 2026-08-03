@@ -25,7 +25,7 @@
 //!
 //! `space` (clear) → `sprites` (the game) → `menu` → `ui` (the HUD and the debug
 //! panel). The last three load rather than clear. The menu is **between** the
-//! game and the text for the reason `crcbl_render::menu` gives: its scrim dims
+//! game and the text for the reason `crcbl::render::menu` gives: its scrim dims
 //! what is already in the target, so it must come after the game, and its panel
 //! is opaque while its labels are UI-pass text, so it must come before the UI.
 
@@ -380,7 +380,7 @@ impl Gpu {
         };
 
         if !self.dumped {
-            log::debug!("render graph for asteroids:\n{}", compiled.dump());
+            crcbl::log::debug!("render graph for asteroids:\n{}", compiled.dump());
             self.dumped = true;
         }
 
@@ -464,14 +464,14 @@ mod tests {
                 (WORLD_HALF_WIDTH, -WORLD_HALF_HEIGHT),
                 (-WORLD_HALF_WIDTH, WORLD_HALF_HEIGHT),
             ] {
-                let world = glam::Vec4::new(
+                let world = crcbl::math::Vec4::new(
                     x as f32 * TEXELS_PER_UNIT,
                     y as f32 * TEXELS_PER_UNIT,
                     0.0,
                     1.0,
                 );
                 let clip = view_projection * world;
-                let ndc = glam::Vec2::new(clip.x / clip.w, clip.y / clip.w);
+                let ndc = crcbl::math::Vec2::new(clip.x / clip.w, clip.y / clip.w);
                 assert!(
                     (-1.0..=1.0).contains(&ndc.x) && (-1.0..=1.0).contains(&ndc.y),
                     "{extent:?} put the corner ({x}, {y}) at {ndc:?} in NDC",
@@ -487,11 +487,11 @@ mod tests {
         let aspect = extent.0 as f32 / extent.1 as f32;
         let view_projection = camera(extent).view_projection(aspect);
 
-        let centre = view_projection * glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
+        let centre = view_projection * crcbl::math::Vec4::new(0.0, 0.0, 0.0, 1.0);
         assert!((centre.x / centre.w).abs() < 1e-5);
         assert!((centre.y / centre.w).abs() < 1e-5);
 
-        let above = view_projection * glam::Vec4::new(0.0, TEXELS_PER_UNIT, 0.0, 1.0);
+        let above = view_projection * crcbl::math::Vec4::new(0.0, TEXELS_PER_UNIT, 0.0, 1.0);
         assert!(
             above.y / above.w > 0.0,
             "world +Y must be the top of the NDC cube",

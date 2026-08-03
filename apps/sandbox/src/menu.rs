@@ -8,7 +8,7 @@
 //! one state a menu belongs to.
 //!
 //! Everything else is shared: the window frame, the button skin, the layout and
-//! the keyboard model are `crcbl_ui::menu` and `crcbl_render::menu`, the same
+//! the keyboard model are `crcbl::ui::menu` and `crcbl::render::menu`, the same
 //! three keys navigate it, and the same [`MenuAction`] shape turns a button into
 //! an effect. `docs/plan/sample/00-samples-overview.md`'s rule 4 is why the
 //! sandbox has a debug overlay at all, and it is the same reason it has this: a

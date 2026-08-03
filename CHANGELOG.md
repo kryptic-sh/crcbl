@@ -16,6 +16,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl**: the simulation half of the engine is re-exported, so a game names
+  `crcbl` and the standard library and nothing else. `crcbl::ecs`,
+  `crcbl::phys`, `crcbl::net`, `crcbl::server`, `crcbl::client`, `crcbl::input`,
+  `crcbl::audio`, `crcbl::store` and `crcbl::sprite` join the graphics stack
+  that was already there, and `crcbl::log` re-exports the logging facade — its
+  macros resolve through `$crate`, so `crcbl::log::info!` expands exactly as
+  `log::info!` does and no wrapper macro exists.
+
+  The umbrella's headline claim has been "one dependency for a game" since it
+  was written, and until now only `apps/sandbox` could keep it: the other four
+  samples each named eleven workspace paths beside it. None of the nine crates
+  depends on `crcbl`, so this is nine `pub use` lines rather than a
+  restructuring — the arrows already pointed this way and nobody had drawn them.
+
+  `crcbl::sprite` is the reader (`load`), never the encoder. A build script that
+  bakes art still names `crcbl-sprite` itself with its `bake` feature, which is
+  the one dependency a sample continues to spell out, and is what keeps a PNG
+  encoder out of a shipped binary.
+
 - **crcbl** (`crcbl::engine`): frame pacing. `FrameLimit` caps how fast a
   real-time loop runs — a thousand frames a second by default, which is a
   runaway guard rather than a pacing policy, and `Clock::set_limit` changes it.
@@ -41,6 +60,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   than an observation.
 
 ### Changed
+
+- **samples**: `apps/{breakout,flappy,asteroids,horde}` drop eleven dependencies
+  apiece and `apps/sandbox` drops its last one. `glam::` is `crcbl::math::` and
+  `log::` is `crcbl::log::` at every call site — the same crates through the
+  umbrella, so no version can drift and no two copies of a `Mat4` can meet.
 
 - **crcbl** (`crcbl::engine`): the default present mode is now `Fifo` rather
   than `Mailbox`. A windowed native run vsyncs unless it asks not to, where it

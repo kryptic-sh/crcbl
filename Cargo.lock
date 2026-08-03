@@ -65,18 +65,7 @@ name = "asteroids"
 version = "0.1.0"
 dependencies = [
  "crcbl",
- "crcbl-audio",
- "crcbl-client",
- "crcbl-core",
- "crcbl-ecs",
- "crcbl-input",
- "crcbl-net",
- "crcbl-phys",
- "crcbl-server",
  "crcbl-sprite",
- "crcbl-store",
- "glam",
- "log",
 ]
 
 [[package]]
@@ -135,18 +124,7 @@ name = "breakout"
 version = "0.1.0"
 dependencies = [
  "crcbl",
- "crcbl-audio",
- "crcbl-client",
- "crcbl-core",
- "crcbl-ecs",
- "crcbl-input",
- "crcbl-net",
- "crcbl-phys",
- "crcbl-server",
  "crcbl-sprite",
- "crcbl-store",
- "glam",
- "log",
 ]
 
 [[package]]
@@ -271,12 +249,21 @@ dependencies = [
 name = "crcbl"
 version = "0.1.0"
 dependencies = [
+ "crcbl-audio",
+ "crcbl-client",
  "crcbl-core",
+ "crcbl-ecs",
  "crcbl-golden",
  "crcbl-hal",
+ "crcbl-input",
+ "crcbl-net",
+ "crcbl-phys",
  "crcbl-render",
+ "crcbl-server",
  "crcbl-shaders",
  "crcbl-shell",
+ "crcbl-sprite",
+ "crcbl-store",
  "crcbl-ui",
  "crcbl-vk",
  "crcbl-wgpu",
@@ -590,18 +577,7 @@ name = "flappy"
 version = "0.1.0"
 dependencies = [
  "crcbl",
- "crcbl-audio",
- "crcbl-client",
- "crcbl-core",
- "crcbl-ecs",
- "crcbl-input",
- "crcbl-net",
- "crcbl-phys",
- "crcbl-server",
  "crcbl-sprite",
- "crcbl-store",
- "glam",
- "log",
 ]
 
 [[package]]
@@ -790,18 +766,7 @@ name = "horde"
 version = "0.1.0"
 dependencies = [
  "crcbl",
- "crcbl-audio",
- "crcbl-client",
- "crcbl-core",
- "crcbl-ecs",
- "crcbl-input",
- "crcbl-net",
- "crcbl-phys",
- "crcbl-server",
  "crcbl-sprite",
- "crcbl-store",
- "glam",
- "log",
 ]
 
 [[package]]
@@ -1570,7 +1535,6 @@ name = "sandbox"
 version = "0.1.0"
 dependencies = [
  "crcbl",
- "log",
 ]
 
 [[package]]

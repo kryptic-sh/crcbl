@@ -38,12 +38,12 @@
 //! arithmetic below, and nothing here reads [`crate::gpu::camera_x`] itself.
 
 use crcbl::hal::{Device, HalError};
+use crcbl::math::DVec3;
 use crcbl::render::{
     Layer, LayerStack, NineSliceSource, Parallax, SheetDesc, SheetId, Sprite, SpriteRenderer,
 };
-use crcbl_sprite::load::{Loaded, load};
-use crcbl_sprite::{Playback, Sheet};
-use glam::DVec3;
+use crcbl::sprite::load::{Loaded, load};
+use crcbl::sprite::{Playback, Sheet};
 
 use crate::game::{GAP_HALF_HEIGHT, PIPE_HALF_WIDTH, PipeView, WORLD_CEILING, WORLD_FLOOR};
 
@@ -246,7 +246,7 @@ impl Scene {
 
     /// Moves the bird's flap on by whole simulation ticks.
     ///
-    /// Ticks, and not the frame's `dt`: `crcbl_sprite::Playback`'s own docs make
+    /// Ticks, and not the frame's `dt`: `crcbl::sprite::Playback`'s own docs make
     /// the argument, and it is the same one the simulation makes — an animation
     /// on a float clock lands on a different frame at 20 fps than at 240.
     pub const fn advance(&mut self, ticks: u64) {
@@ -467,7 +467,7 @@ mod tests {
     use super::*;
     use crcbl::hal::null::NullInstance;
     use crcbl::hal::{DeviceDesc, Format, Instance, QueueKind};
-    use crcbl_sprite::{Direction, NineSlice};
+    use crcbl::sprite::{Direction, NineSlice};
 
     use crate::game::{GAP_CENTRE_RANGE, gap_centre};
 
@@ -532,7 +532,7 @@ mod tests {
         for (index, frame) in bird.sheet.frames.iter().enumerate() {
             assert_eq!(
                 frame.rect,
-                crcbl_sprite::Rect::new(index as u32 * 16, 0, 16, 16),
+                crcbl::sprite::Rect::new(index as u32 * 16, 0, 16, 16),
                 "frame {index} is not a 16x16 cell of the strip"
             );
             assert_eq!(

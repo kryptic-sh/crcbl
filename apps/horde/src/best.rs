@@ -2,9 +2,9 @@
 //!
 //! | Target | Where | How |
 //! | --- | --- | --- |
-//! | native, windowed | `~/.config/horde/best.bin` | [`crcbl_store::write_atomic`] |
+//! | native, windowed | `~/.config/horde/best.bin` | [`crcbl::store::write_atomic`] |
 //! | native, `--headless` | nowhere | in memory, so a CI run leaves no trace |
-//! | `wasm32` | the Origin Private File System | `crcbl_store::web::OpfsStorage` |
+//! | `wasm32` | the Origin Private File System | `crcbl::store::web::OpfsStorage` |
 //!
 //! # The number is a *time*, and that is this sample's own choice
 //!
@@ -51,7 +51,7 @@ enum Backing {
     Native(PathBuf),
     /// The page's Origin Private File System, drained by the JS shim.
     #[cfg(target_arch = "wasm32")]
-    Opfs(std::rc::Rc<crcbl_store::web::OpfsStorage>),
+    Opfs(std::rc::Rc<crcbl::store::web::OpfsStorage>),
 }
 
 /// The longest run this player has survived, in whole seconds.
@@ -76,10 +76,10 @@ impl Best {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn platform_backing() -> Backing {
-        match crcbl_store::NativeStorage::config("horde") {
+        match crcbl::store::NativeStorage::config("horde") {
             Ok(store) => Backing::Native(store.root().to_path_buf()),
             Err(_) => {
-                log::warn!("best: no config dir; the record will not persist");
+                crcbl::log::warn!("best: no config dir; the record will not persist");
                 Backing::None
             }
         }
@@ -90,7 +90,7 @@ impl Best {
         match crate::web::opfs_store() {
             Some(store) => Backing::Opfs(store),
             None => {
-                log::warn!("best: no OPFS store installed; the record will not persist");
+                crcbl::log::warn!("best: no OPFS store installed; the record will not persist");
                 Backing::None
             }
         }
@@ -109,17 +109,17 @@ impl Best {
                 Ok(data) => data,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
                 Err(e) => {
-                    log::warn!("best: read error ({e})");
+                    crcbl::log::warn!("best: read error ({e})");
                     return None;
                 }
             },
             #[cfg(target_arch = "wasm32")]
             Backing::Opfs(store) => {
-                use crcbl_store::StorageSource as _;
+                use crcbl::store::StorageSource as _;
                 match store.read(std::path::Path::new(BEST_FILE)) {
                     Ok(data) => data,
                     Err(e) => {
-                        log::info!("best: no previous save ({e})");
+                        crcbl::log::info!("best: no previous save ({e})");
                         return None;
                     }
                 }
@@ -128,7 +128,7 @@ impl Best {
         match <[u8; 4]>::try_from(data.as_slice()) {
             Ok(bytes) => Some(u32::from_le_bytes(bytes)),
             Err(_) => {
-                log::warn!("best: corrupt file ({} bytes)", data.len());
+                crcbl::log::warn!("best: corrupt file ({} bytes)", data.len());
                 None
             }
         }
@@ -169,7 +169,7 @@ impl Best {
         }
         self.seconds = seconds;
         self.save();
-        log::info!("best: new best run = {}s", self.seconds);
+        crcbl::log::info!("best: new best run = {}s", self.seconds);
         true
     }
 
@@ -185,17 +185,17 @@ impl Best {
             #[cfg(not(target_arch = "wasm32"))]
             Backing::Native(root) => {
                 let path = root.join(BEST_FILE);
-                if let Err(e) = crcbl_store::write_atomic(&path, &self.seconds.to_le_bytes()) {
-                    log::warn!("best: save failed ({e})");
+                if let Err(e) = crcbl::store::write_atomic(&path, &self.seconds.to_le_bytes()) {
+                    crcbl::log::warn!("best: save failed ({e})");
                 }
             }
             #[cfg(target_arch = "wasm32")]
             Backing::Opfs(store) => {
-                use crcbl_store::StorageSource as _;
+                use crcbl::store::StorageSource as _;
                 if let Err(e) =
                     store.write(std::path::Path::new(BEST_FILE), &self.seconds.to_le_bytes())
                 {
-                    log::warn!("best: save failed ({e})");
+                    crcbl::log::warn!("best: save failed ({e})");
                 }
             }
         }

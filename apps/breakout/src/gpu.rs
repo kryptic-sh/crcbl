@@ -38,6 +38,7 @@
 use crcbl::backend::GpuBackend;
 use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError, PendingGpuContext};
 use crcbl::hal::{CommandEncoderDesc, Features};
+use crcbl::math::DVec3;
 use crcbl::math::Vec3;
 use crcbl::prelude::*;
 use crcbl::render::{
@@ -48,7 +49,6 @@ use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::menu::{Menu, MenuLayout};
 use crcbl::ui::text::FontAtlas;
-use glam::DVec3;
 
 use crate::art::{SURROUND, Scene, TEXELS_PER_UNIT};
 use crate::game::RenderState;
@@ -428,7 +428,7 @@ impl Gpu {
         };
 
         if !self.dumped {
-            log::debug!("render graph for breakout:\n{}", compiled.dump());
+            crcbl::log::debug!("render graph for breakout:\n{}", compiled.dump());
             self.dumped = true;
         }
 
@@ -526,14 +526,14 @@ mod tests {
             for x in [WORLD_LEFT, WORLD_RIGHT] {
                 for y in [-WORLD_TOP, WORLD_TOP] {
                     // Through the same scale the sprites are submitted at.
-                    let world = glam::Vec4::new(
+                    let world = crcbl::math::Vec4::new(
                         x as f32 * TEXELS_PER_UNIT,
                         y as f32 * TEXELS_PER_UNIT,
                         0.0,
                         1.0,
                     );
                     let clip = view_projection * world;
-                    let ndc = glam::Vec2::new(clip.x / clip.w, clip.y / clip.w);
+                    let ndc = crcbl::math::Vec2::new(clip.x / clip.w, clip.y / clip.w);
                     assert!(
                         (-1.0..=1.0).contains(&ndc.x) && (-1.0..=1.0).contains(&ndc.y),
                         "{extent:?} put the corner ({x}, {y}) at {ndc:?} in NDC"
@@ -550,7 +550,8 @@ mod tests {
     fn the_camera_is_centred_on_the_field() {
         let extent = (960, 720);
         let aspect = extent.0 as f32 / extent.1 as f32;
-        let clip = camera(extent).view_projection(aspect) * glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
+        let clip =
+            camera(extent).view_projection(aspect) * crcbl::math::Vec4::new(0.0, 0.0, 0.0, 1.0);
         assert!((clip.x / clip.w).abs() < 1e-5, "{clip:?}");
         assert!((clip.y / clip.w).abs() < 1e-5, "{clip:?}");
     }

@@ -18,7 +18,7 @@
 //! convention in four games. See the S3 findings note in
 //! `docs/plan/ROADMAP.md`.
 //!
-//! [`compute_cue`]: crcbl_audio::spatial::compute_cue
+//! [`compute_cue`]: crcbl::audio::spatial::compute_cue
 //!
 //! # This game emits cues faster than any earlier one, so it caps its voices
 //!
@@ -27,7 +27,7 @@
 //! is [`crate::game::FIRE_COOLDOWN_FLOOR`] — a twentieth of a second — so a
 //! late run raises up to about forty a second and every one of them is a voice
 //! that lives until it runs out. [`Mixer`] has **no voice limit, no priority and
-//! no stealing**: [`crcbl_audio::AudioSource::fill`] walks whatever is in the
+//! no stealing**: [`crcbl::audio::AudioSource::fill`] walks whatever is in the
 //! list, so a game that plays faster than its sounds finish pays for all of it
 //! on the audio thread.
 //!
@@ -53,10 +53,10 @@
 
 use std::sync::Arc;
 
-use crcbl_audio::mixer::{Mixer, SoundBank, VoiceMix};
-use crcbl_audio::spatial::{CueGrammar, compute_cue};
-use crcbl_audio::{AudioSample, AudioStream};
-use glam::DVec3;
+use crcbl::audio::mixer::{Mixer, SoundBank, VoiceMix};
+use crcbl::audio::spatial::{CueGrammar, compute_cue};
+use crcbl::audio::{AudioSample, AudioStream};
+use crcbl::math::DVec3;
 
 /// A bolt leaving the gun.
 pub const SOUND_SHOT: u32 = 1;
@@ -151,7 +151,7 @@ impl Audio {
             AudioStream::open(Arc::clone(&mixer))
         };
         if stream.is_none() && !headless {
-            log::info!("audio: no output device available; the game will be silent");
+            crcbl::log::info!("audio: no output device available; the game will be silent");
         }
 
         Self {
@@ -175,7 +175,7 @@ impl Audio {
         // to underflow on the lookup — only on the counter below, which is
         // reached solely for an id the bank *did* answer to.
         let Some(voice) = self.bank.create_voice(id) else {
-            log::debug!("audio: no sound registered at id {id}");
+            crcbl::log::debug!("audio: no sound registered at id {id}");
             return;
         };
         // Counted before the cap, not after: the cue happened either way, and a
@@ -322,11 +322,11 @@ fn noise(seconds: f32, decay: f32, sample_rate: u32) -> Vec<AudioSample> {
     for i in 0..frames {
         // The engine's hash, walked as a sequence: stepping splitmix64's state
         // by its gamma is the same thing as hashing successive indices, which
-        // `crcbl_core::rand`'s `stepping_the_state_is_hashing_the_index` pins.
+        // `crcbl::core::rand`'s `stepping_the_state_is_hashing_the_index` pins.
         // The top 24 bits are the ones it mixes best, and 24 is exactly an
         // `f32`'s mantissa, so every value here is representable rather than
         // rounded.
-        let z = crcbl_core::rand::hash_u64(SEED, i as u64 + 1);
+        let z = crcbl::core::rand::hash_u64(SEED, i as u64 + 1);
         let white = (z >> 40) as f32 / 8_388_608.0 - 1.0;
 
         low += ALPHA * (white - low);
@@ -419,7 +419,7 @@ mod tests {
                 "the shot voice never finished"
             );
             block.fill(0.0);
-            crcbl_audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
+            crcbl::audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
         }
         assert_eq!(
             audio.plays(SOUND_SHOT),
@@ -457,7 +457,7 @@ mod tests {
         // …and a voice that finishes makes room again, or the cap is a mute
         // button rather than a limit.
         let mut block = vec![0.0f32; 48_000 * 2];
-        crcbl_audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
+        crcbl::audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
         assert_eq!(audio.voices(), 0, "a whole second did not drain the queue");
         audio.play_at(SOUND_KILL, DVec3::ZERO, DVec3::ZERO);
         assert_eq!(audio.voices(), 1);

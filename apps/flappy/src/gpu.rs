@@ -128,7 +128,7 @@ pub struct Gpu {
     camera: Camera,
     /// Where the bird is this frame, from the game. Drives the camera and the
     /// bird sprite.
-    bird: glam::DVec3,
+    bird: crcbl::math::DVec3,
     /// The course this frame, refilled rather than reallocated.
     pipes: Vec<PipeView>,
     /// The sprite pass, and the art it draws.
@@ -424,7 +424,7 @@ impl Gpu {
         };
 
         if !self.dumped {
-            log::debug!("render graph for flappy:\n{}", compiled.dump());
+            crcbl::log::debug!("render graph for flappy:\n{}", compiled.dump());
             self.dumped = true;
         }
 
@@ -535,7 +535,7 @@ mod tests {
                 // The bird's own column — `camera_x` was asked where the view
                 // goes when the bird is at 0 — so the horizontal assertion below
                 // is about the bird and not about the middle of the screen.
-                let world = glam::Vec4::new(0.0, y as f32 * TEXELS_PER_UNIT, 0.0, 1.0);
+                let world = crcbl::math::Vec4::new(0.0, y as f32 * TEXELS_PER_UNIT, 0.0, 1.0);
                 let clip = view_projection * world;
                 let ndc = clip.y / clip.w;
                 assert!(

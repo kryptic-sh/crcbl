@@ -40,12 +40,12 @@
 //! for a reason the player cannot see.
 
 use crcbl::hal::{Device, HalError};
+use crcbl::math::DVec3;
 use crcbl::render::{
     Layer, LayerStack, NineSliceSource, Parallax, SheetDesc, SheetId, Sprite, SpriteRenderer,
 };
-use crcbl_sprite::Sheet;
-use crcbl_sprite::load::{Loaded, load};
-use glam::DVec3;
+use crcbl::sprite::Sheet;
+use crcbl::sprite::load::{Loaded, load};
 
 use crate::game::{
     BALL_RADIUS, BRICK_GAP, BRICK_HEIGHT, BRICK_ROWS, BRICK_TOP, BRICK_WIDTH, PADDLE_HALF_HEIGHT,
@@ -385,7 +385,7 @@ mod tests {
     use super::*;
     use crcbl::hal::null::NullInstance;
     use crcbl::hal::{DeviceDesc, Format, Instance, QueueKind};
-    use crcbl_sprite::NineSlice;
+    use crcbl::sprite::NineSlice;
 
     use crate::game::{BRICK_COLS, BRICK_COUNT, brick_position};
 
@@ -455,7 +455,7 @@ mod tests {
         for (index, frame) in bricks.sheet.frames.iter().enumerate() {
             assert_eq!(
                 frame.rect,
-                crcbl_sprite::Rect::new(index as u32 * 24, 0, 24, 8),
+                crcbl::sprite::Rect::new(index as u32 * 24, 0, 24, 8),
                 "frame {index} is not a 24x8 cell of the strip"
             );
             assert_eq!(

@@ -21,7 +21,7 @@
 //! and 3 of the grammar are doing their full range of work for the first time,
 //! and it is audible without being a gimmick.
 //!
-//! [`compute_cue`]: crcbl_audio::spatial::compute_cue
+//! [`compute_cue`]: crcbl::audio::spatial::compute_cue
 //!
 //! # The engine is a *held* sound, and it is now held rather than faked
 //!
@@ -31,7 +31,7 @@
 //! implementation detail inside the deterministic tick: the pulse counter was
 //! tick state, so an audio decision was part of what a replay had to reproduce.
 //!
-//! It is one looping [`Voice`](crcbl_audio::mixer::Voice) now.
+//! It is one looping [`Voice`](crcbl::audio::mixer::Voice) now.
 //! [`Audio::set_thrust`] starts it on the first burning tick, re-aims it with
 //! [`Mixer::set_mix`] on every tick after that — the ship crosses the field, so
 //! a pan frozen at ignition would be wrong within a second — and
@@ -48,9 +48,9 @@
 
 use std::sync::Arc;
 
-use crcbl_audio::mixer::{Mixer, SoundBank, VoiceId, VoiceMix};
-use crcbl_audio::spatial::{CueGrammar, compute_cue};
-use crcbl_audio::{AudioSample, AudioStream};
+use crcbl::audio::mixer::{Mixer, SoundBank, VoiceId, VoiceMix};
+use crcbl::audio::spatial::{CueGrammar, compute_cue};
+use crcbl::audio::{AudioSample, AudioStream};
 
 /// The engine, while thrust is held. One looping voice; see the module docs.
 pub const SOUND_THRUST: u32 = 1;
@@ -146,7 +146,7 @@ impl Audio {
             AudioStream::open(Arc::clone(&mixer))
         };
         if stream.is_none() && !headless {
-            log::info!("audio: no output device available; the game will be silent");
+            crcbl::log::info!("audio: no output device available; the game will be silent");
         }
 
         Self {
@@ -172,7 +172,7 @@ impl Audio {
         // to underflow on the lookup — only on the counter below, which is
         // reached solely for an id the bank *did* answer to.
         let Some(voice) = self.bank.create_voice(id) else {
-            log::debug!("audio: no sound registered at id {id}");
+            crcbl::log::debug!("audio: no sound registered at id {id}");
             return;
         };
         self.mixer
@@ -236,7 +236,7 @@ impl Audio {
     #[must_use]
     pub fn voices_after_a_second(&self) -> usize {
         let mut block = vec![0.0f32; SAMPLE_RATE as usize * 2];
-        crcbl_audio::AudioSource::fill(self.mixer.as_ref(), &mut block, SAMPLE_RATE);
+        crcbl::audio::AudioSource::fill(self.mixer.as_ref(), &mut block, SAMPLE_RATE);
         self.mixer.voice_count()
     }
 
@@ -375,11 +375,11 @@ fn noise(seconds: f32, sample_rate: u32) -> Vec<AudioSample> {
     for i in 0..frames {
         // The engine's hash, walked as a sequence: stepping splitmix64's state
         // by its gamma is the same thing as hashing successive indices, which
-        // `crcbl_core::rand`'s `stepping_the_state_is_hashing_the_index` pins.
+        // `crcbl::core::rand`'s `stepping_the_state_is_hashing_the_index` pins.
         // The top 24 bits are the ones it mixes best, and 24 is exactly an
         // `f32`'s mantissa, so every value here is representable rather than
         // rounded.
-        let z = crcbl_core::rand::hash_u64(SEED, i as u64 + 1);
+        let z = crcbl::core::rand::hash_u64(SEED, i as u64 + 1);
         let white = (z >> 40) as f32 / 8_388_608.0 - 1.0;
 
         low += ALPHA * (white - low);
@@ -523,7 +523,7 @@ mod tests {
                 "the shot voice never finished"
             );
             block.fill(0.0);
-            crcbl_audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
+            crcbl::audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
         }
         assert_eq!(
             audio.plays(SOUND_SHOT),
@@ -552,7 +552,7 @@ mod tests {
         let mut block = vec![0.0f32; 4_800 * 2]; // a tenth of a second
         for tenth in 0..100 {
             block.fill(0.0);
-            crcbl_audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
+            crcbl::audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
             assert!(
                 audio.thrust_playing(),
                 "the engine stopped after {tenth} tenths of a second",
@@ -574,7 +574,7 @@ mod tests {
         );
         assert_eq!(audio.voices(), 0);
         block.fill(0.0);
-        crcbl_audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
+        crcbl::audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
         assert!(
             block.iter().all(|s| *s == 0.0),
             "the stopped engine is still audible",

@@ -59,13 +59,13 @@ use crcbl::engine::{
     Clock, ConfigureError, ExitReason, Flow, FrameOutcome, GpuError, MAX_CONSECUTIVE_RECONFIGURES,
     Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
 };
+use crcbl::math::Vec2;
 use crcbl::prelude::*;
 use crcbl::shell::{
     DisplayMode, LogicalSize, ShellBackend as Backend, WindowId, open, open_backend,
 };
 use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::{DebugOverlay, PointerInput};
-use glam::Vec2;
 
 use crate::game::{self, Game, GameState, RenderState, UPGRADE_CHOICES};
 use crate::gpu::{Gpu, PendingGpu};
@@ -290,7 +290,7 @@ pub fn run(options: &Options) -> Result<Summary, HordeError> {
         Ok(reason) => engine.finish(reason),
         Err(error) => {
             if let Err(teardown) = engine.finish(ExitReason::Failed) {
-                log::error!("teardown after a failed frame also failed: {teardown}");
+                crcbl::log::error!("teardown after a failed frame also failed: {teardown}");
             }
             Err(error)
         }
@@ -332,7 +332,7 @@ impl<S: Shell + ?Sized> Loop<S> {
 
         let mut events = 0;
         let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
-        log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+        crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
 
         let gpu = Gpu::open(shell.as_ref(), window, extent, options.backend)?;
         Self::assemble(shell, window, gpu, options, clock_source, events)
@@ -355,7 +355,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         if options.prefill > 0 {
             let staged = game.stage_field(options.prefill);
             if staged < options.prefill {
-                log::warn!(
+                crcbl::log::warn!(
                     "prefill: asked for {} enemies and the cap left room for {staged}",
                     options.prefill,
                 );
@@ -369,7 +369,7 @@ impl<S: Shell + ?Sized> Loop<S> {
             // player's key does.
             game.key_event(RESTART_KEY, true);
             game.key_event(RESTART_KEY, false);
-            log::info!("prefill: started the run without waiting for the title screen");
+            crcbl::log::info!("prefill: started the run without waiting for the title screen");
         }
         Ok(Self {
             windowed: !options.headless,
@@ -616,7 +616,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         }
         if toggle_pause {
             self.paused = !self.paused;
-            log::info!("game {}", if self.paused { "paused" } else { "resumed" });
+            crcbl::log::info!("game {}", if self.paused { "paused" } else { "resumed" });
         }
         if toggle_fullscreen {
             self.toggle_fullscreen()?;
@@ -708,7 +708,7 @@ impl<S: Shell + ?Sized> Loop<S> {
             MenuAction::Resume => {
                 if self.paused {
                     self.paused = false;
-                    log::info!("game resumed");
+                    crcbl::log::info!("game resumed");
                 }
             }
             // Real key events rather than calls into `Game`: restarting a run
@@ -792,7 +792,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         }
         if !self.paused {
             self.paused = true;
-            log::info!("game paused: the window lost focus");
+            crcbl::log::info!("game paused: the window lost focus");
         }
     }
 
@@ -804,7 +804,7 @@ impl<S: Shell + ?Sized> Loop<S> {
             DisplayMode::Borderless { monitor: None }
         };
         self.shell.set_mode(self.window, target)?;
-        log::info!("shell: asked for {target}");
+        crcbl::log::info!("shell: asked for {target}");
         Ok(())
     }
 
@@ -845,7 +845,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         if let Some(timings) = self.gpu.timings()
             && !timings.is_empty()
         {
-            log::info!("{}", timings.report().trim_end());
+            crcbl::log::info!("{}", timings.report().trim_end());
         }
         // **The CPU half of the same report, and the reason `--wall-clock`
         // exists.** `FrameTimings` is GPU timestamps; this is the monotonic
@@ -855,7 +855,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         // are not stated is not a measurement.
         let frame = &self.debug.frame;
         if let (Some(best), Some(worst)) = (frame.best(), frame.worst()) {
-            log::info!(
+            crcbl::log::info!(
                 "frame cpu ({} clock, last {} frames): mean {:.3} ms ({:.1} fps), \
                  best {:.3} ms, worst {:.3} ms; scene {:?}",
                 if matches!(self.clock_source, Clock::Real(_)) {
@@ -915,7 +915,7 @@ fn open_the_window<S: Shell + ?Sized>(
     shell: &mut S,
     clock_source: &Clock,
 ) -> Result<WindowId, HordeError> {
-    log::info!(
+    crcbl::log::info!(
         "shell: {} backend, caps {:?}",
         shell.backend(),
         shell.caps()
@@ -1009,7 +1009,7 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
                     self.stage = BootStage::Configure;
                     return Ok(None);
                 };
-                log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+                crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
                 self.stage = BootStage::Device {
                     pending: Gpu::request_open(
                         shell.as_ref(),
@@ -1138,7 +1138,7 @@ impl HudStrings {
 /// Draws the HUD, and nothing else.
 ///
 /// **No scrim here any more.** The placeholder renderer dimmed the field behind
-/// its death screen by hand; `crcbl_render::MenuRenderer` draws one behind every
+/// its death screen by hand; `crcbl::render::MenuRenderer` draws one behind every
 /// menu, so a second would dim the field twice on exactly the frames a menu is
 /// up.
 fn draw_hud(dl: &mut DrawList, hud: &HudStrings) {
@@ -1189,9 +1189,9 @@ const HUD_STATE_SIZE: f32 = 14.0;
 mod tests {
     use super::*;
     use crcbl::core::input::PointerButton;
+    use crcbl::math::DVec3;
     use crcbl::shell::{ButtonState as PointerState, HeadlessShell, PhysicalPoint, ShellBackend};
     use crcbl::ui::draw_list::DrawCommand;
-    use glam::DVec3;
 
     /// Options every test in this module builds its loop from.
     ///
@@ -1456,7 +1456,7 @@ mod tests {
             best: 359,
             enemies: vec![
                 game::EnemyView {
-                    position: glam::DVec3::ZERO,
+                    position: crcbl::math::DVec3::ZERO,
                     kind: game::EnemyKind::Grunt,
                     health: 1.0,
                 };

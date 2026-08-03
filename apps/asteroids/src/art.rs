@@ -44,10 +44,10 @@
 //! the only correct answer for an angle.
 
 use crcbl::hal::{Device, HalError};
+use crcbl::math::DVec3;
 use crcbl::render::{Layer, LayerStack, Parallax, SheetDesc, SheetId, Sprite, SpriteRenderer};
-use crcbl_sprite::Sheet;
-use crcbl_sprite::load::{Loaded, load};
-use glam::DVec3;
+use crcbl::sprite::Sheet;
+use crcbl::sprite::load::{Loaded, load};
 
 use crate::game::{BulletView, RenderState, RockSize, RockView, lerp_angle};
 

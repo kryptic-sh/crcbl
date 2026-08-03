@@ -38,9 +38,9 @@
 //! | Prefix | Owner | What it is |
 //! | --- | --- | --- |
 //! | `__crcbl_web_` (input/frame) | [`crcbl::shell`]'s `web` backend | canvas size, focus, keys, pointer |
-//! | `__crcbl_web_audio_` | [`crcbl_audio::web`] | the AudioWorklet pull |
-//! | `__crcbl_web_fetch_` | [`crcbl_store::web::fetch`] | assets over `fetch()` |
-//! | `__crcbl_web_opfs_` | [`crcbl_store::web::opfs`] | saves in the Origin Private File System |
+//! | `__crcbl_web_audio_` | [`crcbl::audio::web`] | the AudioWorklet pull |
+//! | `__crcbl_web_fetch_` | [`crcbl::store::web::fetch`] | assets over `fetch()` |
+//! | `__crcbl_web_opfs_` | [`crcbl::store::web::opfs`] | saves in the Origin Private File System |
 //! | `__crcbl_asteroids_` | this module | boot, one rAF frame, teardown, logs |
 //!
 //! ## Exports
@@ -102,7 +102,7 @@
 //!
 //! `std::time::Instant::now()` **panics** on `wasm32-unknown-unknown`, so
 //! `Clock::Real` cannot be used here and neither can
-//! `crcbl_core::log::init_logging`, which stamps its logger with an `Instant`.
+//! `crcbl::core::log::init_logging`, which stamps its logger with an `Instant`.
 //! The loop is built on `Clock::manual` and told how far to step from the
 //! `performance.now()` the shim passes in; the logger is `WebLogger` below,
 //! which has no clock at all.
@@ -123,7 +123,7 @@ use std::rc::Rc;
 
 use crcbl::engine::{Clock, ExitReason, Flow};
 use crcbl::shell::{ShellBackend, open_backend};
-use crcbl_store::web::{FetchSource, OpfsStorage};
+use crcbl::store::web::{FetchSource, OpfsStorage};
 
 use crate::app::{Loop, PendingLoop};
 use crate::args::Options;
@@ -239,7 +239,7 @@ impl App {
         use core::fmt::Write as _;
         self.error.clear();
         let _ = write!(self.error, "{error}");
-        log::error!("asteroids: {}", self.error);
+        crcbl::log::error!("asteroids: {}", self.error);
         self.stage = Stage::Failed;
         STATUS_FAILED
     }
@@ -298,7 +298,7 @@ thread_local! {
     static LOG: RefCell<LogQueue> = RefCell::new(LogQueue::default());
 }
 
-/// A [`log::Log`] that queues lines for the shim instead of writing them.
+/// A [`crcbl::log::Log`] that queues lines for the shim instead of writing them.
 ///
 /// There is no `console.log` import and no timestamp: an import would be the
 /// only one in the module (see the module docs) and a timestamp would need
@@ -307,12 +307,12 @@ thread_local! {
 /// when it was written.
 struct WebLogger;
 
-impl log::Log for WebLogger {
-    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        metadata.level() <= log::max_level()
+impl crcbl::log::Log for WebLogger {
+    fn enabled(&self, metadata: &crcbl::log::Metadata<'_>) -> bool {
+        metadata.level() <= crcbl::log::max_level()
     }
 
-    fn log(&self, record: &log::Record<'_>) {
+    fn log(&self, record: &crcbl::log::Record<'_>) {
         if !self.enabled(record.metadata()) {
             return;
         }
@@ -355,8 +355,8 @@ static LOGGER: WebLogger = WebLogger;
 
 /// Installs the queueing logger, unless one is already installed.
 fn install_logger() {
-    if log::set_logger(&LOGGER).is_ok() {
-        log::set_max_level(log::LevelFilter::Info);
+    if crcbl::log::set_logger(&LOGGER).is_ok() {
+        crcbl::log::set_max_level(crcbl::log::LevelFilter::Info);
     }
 }
 
@@ -381,7 +381,7 @@ pub extern "C" fn __crcbl_asteroids_prepare() -> u32 {
         }
 
         let saves = Rc::new(OpfsStorage::new());
-        if !crcbl_store::web::opfs::install(&saves) {
+        if !crcbl::store::web::opfs::install(&saves) {
             app.fail("an OPFS store was already installed");
             return 0;
         }
@@ -390,7 +390,7 @@ pub extern "C" fn __crcbl_asteroids_prepare() -> u32 {
         match FetchSource::new(ASSET_BASE) {
             Ok(source) => {
                 let source = Rc::new(source);
-                if !crcbl_store::web::fetch::install(&source) {
+                if !crcbl::store::web::fetch::install(&source) {
                     app.fail("a fetch source was already installed");
                     return 0;
                 }
@@ -402,7 +402,7 @@ pub extern "C" fn __crcbl_asteroids_prepare() -> u32 {
             }
         }
 
-        log::info!("asteroids: prepared; assets from {ASSET_BASE}");
+        crcbl::log::info!("asteroids: prepared; assets from {ASSET_BASE}");
         app.stage = Stage::Prepared;
         1
     })
@@ -415,15 +415,15 @@ pub extern "C" fn __crcbl_asteroids_prepare() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn __crcbl_asteroids_log_level(level: u32) -> u32 {
     let filter = match level {
-        0 => log::LevelFilter::Off,
-        1 => log::LevelFilter::Error,
-        2 => log::LevelFilter::Warn,
-        3 => log::LevelFilter::Info,
-        4 => log::LevelFilter::Debug,
-        5 => log::LevelFilter::Trace,
+        0 => crcbl::log::LevelFilter::Off,
+        1 => crcbl::log::LevelFilter::Error,
+        2 => crcbl::log::LevelFilter::Warn,
+        3 => crcbl::log::LevelFilter::Info,
+        4 => crcbl::log::LevelFilter::Debug,
+        5 => crcbl::log::LevelFilter::Trace,
         _ => return 0,
     };
-    log::set_max_level(filter);
+    crcbl::log::set_max_level(filter);
     1
 }
 
@@ -454,7 +454,7 @@ pub extern "C" fn __crcbl_asteroids_boot() -> u32 {
         match PendingLoop::request(shell, &options, Clock::manual(Duration::ZERO)) {
             Ok(pending) => {
                 app.stage = Stage::Booting(Box::new(pending));
-                log::info!("asteroids: booting; waiting for the canvas to report a size");
+                crcbl::log::info!("asteroids: booting; waiting for the canvas to report a size");
                 1
             }
             Err(error) => {
@@ -478,7 +478,7 @@ pub extern "C" fn __crcbl_asteroids_frame(now_ms: f64) -> u32 {
         match core::mem::replace(&mut app.stage, Stage::Failed) {
             Stage::Booting(mut pending) => match pending.poll() {
                 Ok(Some(engine)) => {
-                    log::info!("asteroids: running at {:?}", engine.extent());
+                    crcbl::log::info!("asteroids: running at {:?}", engine.extent());
                     let status = running_status(&engine);
                     app.stage = Stage::Running(Box::new(engine));
                     app.last_ms = Some(now_ms);
@@ -504,7 +504,9 @@ pub extern "C" fn __crcbl_asteroids_frame(now_ms: f64) -> u32 {
                         // teardown failure on top of it is logged, exactly as
                         // the native `run` does.
                         if let Err(teardown) = engine.finish(ExitReason::Failed) {
-                            log::error!("teardown after a failed frame also failed: {teardown}");
+                            crcbl::log::error!(
+                                "teardown after a failed frame also failed: {teardown}"
+                            );
                         }
                         app.fail(error)
                     }
@@ -536,7 +538,7 @@ fn running_status(engine: &Loop<dyn crcbl::shell::Shell>) -> u32 {
 fn finish(app: &mut App, engine: Box<Loop<dyn crcbl::shell::Shell>>, reason: ExitReason) -> u32 {
     match engine.finish(reason) {
         Ok(summary) => {
-            log::info!(
+            crcbl::log::info!(
                 "asteroids: {} frames, {} ticks, score {} on wave {} ({:?}, {:?})",
                 summary.frames,
                 summary.ticks,

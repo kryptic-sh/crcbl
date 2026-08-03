@@ -54,10 +54,10 @@
 //! is not.
 
 use crcbl::hal::{Device, HalError};
+use crcbl::math::DVec3;
 use crcbl::render::{Layer, LayerStack, Parallax, SheetDesc, SheetId, Sprite, SpriteRenderer};
-use crcbl_sprite::Sheet;
-use crcbl_sprite::load::{Loaded, load};
-use glam::DVec3;
+use crcbl::sprite::Sheet;
+use crcbl::sprite::load::{Loaded, load};
 
 use crate::game::{EnemyKind, RenderState};
 use crate::gpu::{camera_centre, view_half_width};
@@ -484,7 +484,7 @@ mod tests {
     use super::*;
     use crcbl::hal::null::NullInstance;
     use crcbl::hal::{DeviceDesc, Format, Instance, QueueKind};
-    use crcbl_sprite::SampleMode;
+    use crcbl::sprite::SampleMode;
 
     use crate::game::{
         BOLT_RADIUS, EnemyView, PLAYER_RADIUS, PickupView, VIEW_HALF_HEIGHT, XP_RADIUS,

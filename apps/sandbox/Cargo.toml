@@ -10,11 +10,9 @@ publish = false
 # One engine dependency, exactly like a game scaffolded by `crcbl new`: the
 # sandbox is the reference consumer, so anything it needs that the umbrella does
 # not re-export is a gap in the umbrella, not a reason to add a second path
-# dependency here. `log` is the only other entry, and only because the loop
-# reports input events at debug level.
+# dependency here. `log` was the last exception and is now `crcbl::log`.
 [dependencies]
 crcbl = { workspace = true }
-log = { workspace = true }
 
 [lints]
 workspace = true

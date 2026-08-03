@@ -40,13 +40,13 @@ use crcbl::engine::{
     Clock, ConfigureError, ExitReason, Flow, FrameOutcome, GpuError, MAX_CONSECUTIVE_RECONFIGURES,
     Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
 };
+use crcbl::math::Vec2;
 use crcbl::prelude::*;
 use crcbl::shell::{
     DisplayMode, LogicalSize, ShellBackend as Backend, WindowId, open, open_backend,
 };
 use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::{DebugOverlay, PointerInput};
-use glam::Vec2;
 
 use crate::game::{self, Game, GameState, RenderState};
 use crate::gpu::{Gpu, PendingGpu};
@@ -269,7 +269,7 @@ pub fn run(options: &Options) -> Result<Summary, AsteroidsError> {
         Ok(reason) => engine.finish(reason),
         Err(error) => {
             if let Err(teardown) = engine.finish(ExitReason::Failed) {
-                log::error!("teardown after a failed frame also failed: {teardown}");
+                crcbl::log::error!("teardown after a failed frame also failed: {teardown}");
             }
             Err(error)
         }
@@ -305,7 +305,7 @@ impl<S: Shell + ?Sized> Loop<S> {
 
         let mut events = 0;
         let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
-        log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+        crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
 
         let gpu = Gpu::open(shell.as_ref(), window, extent, options.backend)?;
         Self::assemble(shell, window, gpu, options, clock_source, events)
@@ -568,7 +568,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         }
         if toggle_pause {
             self.paused = !self.paused;
-            log::info!("game {}", if self.paused { "paused" } else { "resumed" });
+            crcbl::log::info!("game {}", if self.paused { "paused" } else { "resumed" });
         }
         if toggle_fullscreen {
             self.toggle_fullscreen()?;
@@ -659,7 +659,7 @@ impl<S: Shell + ?Sized> Loop<S> {
             MenuAction::Resume => {
                 if self.paused {
                     self.paused = false;
-                    log::info!("game resumed");
+                    crcbl::log::info!("game resumed");
                 }
             }
             // A real key event rather than a call into `Game`: starting a game is
@@ -730,7 +730,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         }
         if !self.paused {
             self.paused = true;
-            log::info!("game paused: the window lost focus");
+            crcbl::log::info!("game paused: the window lost focus");
         }
     }
 
@@ -742,7 +742,7 @@ impl<S: Shell + ?Sized> Loop<S> {
             DisplayMode::Borderless { monitor: None }
         };
         self.shell.set_mode(self.window, target)?;
-        log::info!("shell: asked for {target}");
+        crcbl::log::info!("shell: asked for {target}");
         Ok(())
     }
 
@@ -777,7 +777,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         if let Some(timings) = self.gpu.timings()
             && !timings.is_empty()
         {
-            log::info!("{}", timings.report().trim_end());
+            crcbl::log::info!("{}", timings.report().trim_end());
         }
         let summary = Summary {
             backend: self.shell.backend(),
@@ -822,7 +822,7 @@ fn open_the_window<S: Shell + ?Sized>(
     shell: &mut S,
     clock_source: &Clock,
 ) -> Result<WindowId, AsteroidsError> {
-    log::info!(
+    crcbl::log::info!(
         "shell: {} backend, caps {:?}",
         shell.backend(),
         shell.caps()
@@ -918,7 +918,7 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
                     self.stage = BootStage::Configure;
                     return Ok(None);
                 };
-                log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+                crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
                 self.stage = BootStage::Device {
                     pending: Gpu::request_open(
                         shell.as_ref(),
@@ -1303,7 +1303,7 @@ mod tests {
         assert_eq!(sprites.len(), 1 + 9 + 9 * 3, "{}", sprites.len());
 
         // **Centred, measured on what the menu pass was actually handed** rather
-        // than on a layout the test recomputes. `crcbl_render::menu_camera` puts
+        // than on a layout the test recomputes. `crcbl::render::menu_camera` puts
         // the origin at the middle of the framebuffer, so the window frame's
         // nine quads have to straddle it.
         let panel = &sprites[1..10];
@@ -1450,7 +1450,7 @@ mod tests {
         engine.frame().expect("a frame");
         assert!(engine.is_paused());
 
-        let corner = glam::Vec2::new(3.0, 3.0);
+        let corner = crcbl::math::Vec2::new(3.0, 3.0);
         let item = engine.menu_layout().expect("a menu is showing").items()[0];
         assert!(
             corner.x < item.min.x || corner.y < item.min.y,
@@ -1458,7 +1458,7 @@ mod tests {
         );
         let at = (item.min + item.max) * 0.5;
 
-        let click = |engine: &mut Loop<HeadlessShell>, pos: glam::Vec2| {
+        let click = |engine: &mut Loop<HeadlessShell>, pos: crcbl::math::Vec2| {
             let point = PhysicalPoint::new(f64::from(pos.x), f64::from(pos.y));
             engine
                 .shell

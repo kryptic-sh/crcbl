@@ -26,7 +26,7 @@
 //!
 //! `arena` (clear) → `sprites` (the field) → `menu` → `ui` (the HUD and the
 //! debug panel). The last three load rather than clear. The menu is **between**
-//! the game and the text for the reason `crcbl_render::menu` gives: its scrim
+//! the game and the text for the reason `crcbl::render::menu` gives: its scrim
 //! dims what is already in the target, so it must come after the game, and its
 //! panel is opaque while its labels are UI-pass text, so it must come before the
 //! UI.
@@ -34,6 +34,7 @@
 use crcbl::backend::GpuBackend;
 use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError, PendingGpuContext};
 use crcbl::hal::{CommandEncoderDesc, Features};
+use crcbl::math::DVec3;
 use crcbl::math::Vec3;
 use crcbl::prelude::*;
 use crcbl::render::{
@@ -44,7 +45,6 @@ use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::menu::{Menu, MenuLayout};
 use crcbl::ui::text::FontAtlas;
-use glam::DVec3;
 
 use crate::art::{GROUND, Scene, SceneStats, TEXELS_PER_UNIT};
 use crate::game::{ARENA_HALF_HEIGHT, ARENA_HALF_WIDTH, RenderState, VIEW_HALF_HEIGHT, clamp_axis};
@@ -386,7 +386,7 @@ impl Gpu {
         };
 
         if !self.dumped {
-            log::debug!("render graph for horde:\n{}", compiled.dump());
+            crcbl::log::debug!("render graph for horde:\n{}", compiled.dump());
             self.dumped = true;
         }
 
@@ -477,17 +477,17 @@ mod tests {
 
     /// Where a world point lands in normalised device coordinates, through the
     /// real projection.
-    fn ndc(world: DVec3, player: DVec3, extent: (u32, u32)) -> glam::Vec2 {
+    fn ndc(world: DVec3, player: DVec3, extent: (u32, u32)) -> crcbl::math::Vec2 {
         let aspect = extent.0.max(1) as f32 / extent.1.max(1) as f32;
         let view_projection = camera(player, extent).view_projection(aspect);
         let clip = view_projection
-            * glam::Vec4::new(
+            * crcbl::math::Vec4::new(
                 world.x as f32 * TEXELS_PER_UNIT,
                 world.y as f32 * TEXELS_PER_UNIT,
                 0.0,
                 1.0,
             );
-        glam::Vec2::new(clip.x / clip.w, clip.y / clip.w)
+        crcbl::math::Vec2::new(clip.x / clip.w, clip.y / clip.w)
     }
 
     /// **The camera never shows ground outside the arena.**

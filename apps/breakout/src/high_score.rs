@@ -2,23 +2,23 @@
 //!
 //! | Target | Where | How |
 //! | --- | --- | --- |
-//! | native, windowed | `~/.config/breakout/high_score.bin` | [`crcbl_store::write_atomic`] |
+//! | native, windowed | `~/.config/breakout/high_score.bin` | [`crcbl::store::write_atomic`] |
 //! | native, `--headless` | nowhere | in memory, so a CI run leaves no trace |
-//! | `wasm32` | the Origin Private File System | [`crcbl_store::web::OpfsStorage`] |
+//! | `wasm32` | the Origin Private File System | [`crcbl::store::web::OpfsStorage`] |
 //!
 //! # Why the browser needed its own arm
 //!
-//! This file used to name [`crcbl_store::NativeStorage`] unconditionally. That
+//! This file used to name [`crcbl::store::NativeStorage`] unconditionally. That
 //! *compiles* for `wasm32-unknown-unknown` — `dirs` has a wasm build — and then
 //! answers `None` for every path it is asked for, so the browser build reached
 //! run time with persistence that could only ever fail, silently, once per
-//! game over. P5.7 built [`OpfsStorage`](crcbl_store::web::OpfsStorage) for
+//! game over. P5.7 built [`OpfsStorage`](crcbl::store::web::OpfsStorage) for
 //! exactly this and left the wiring here.
 //!
 //! The OPFS store is created and installed by [`crate::web`] before the shim's
 //! restore pass runs, so by the time [`HighScore::load`] asks for it the value
 //! is already resident and the read is a map lookup. A page whose shim never
-//! restored answers [`StorageError::Pending`](crcbl_store::StorageError::Pending)
+//! restored answers [`StorageError::Pending`](crcbl::store::StorageError::Pending)
 //! instead, which is treated as "no previous save" for reading — and *not* as a
 //! reason to skip writing, because the write path is what makes the next
 //! session's read succeed.
@@ -39,7 +39,7 @@ enum Backing {
     Native(PathBuf),
     /// The page's Origin Private File System, drained by the JS shim.
     #[cfg(target_arch = "wasm32")]
-    Opfs(std::rc::Rc<crcbl_store::web::OpfsStorage>),
+    Opfs(std::rc::Rc<crcbl::store::web::OpfsStorage>),
 }
 
 /// Manages a single persistent high score value.
@@ -63,10 +63,10 @@ impl HighScore {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn platform_backing() -> Backing {
-        match crcbl_store::NativeStorage::config("breakout") {
+        match crcbl::store::NativeStorage::config("breakout") {
             Ok(store) => Backing::Native(store.root().to_path_buf()),
             Err(_) => {
-                log::warn!("high_score: no config dir; scores will not persist");
+                crcbl::log::warn!("high_score: no config dir; scores will not persist");
                 Backing::None
             }
         }
@@ -77,7 +77,7 @@ impl HighScore {
         match crate::web::opfs_store() {
             Some(store) => Backing::Opfs(store),
             None => {
-                log::warn!("high_score: no OPFS store installed; scores will not persist");
+                crcbl::log::warn!("high_score: no OPFS store installed; scores will not persist");
                 Backing::None
             }
         }
@@ -95,21 +95,21 @@ impl HighScore {
             Backing::Native(root) => match std::fs::read(root.join(HIGH_SCORE_FILE)) {
                 Ok(data) => data,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    log::info!("high_score: no previous save");
+                    crcbl::log::info!("high_score: no previous save");
                     return None;
                 }
                 Err(e) => {
-                    log::warn!("high_score: read error ({e})");
+                    crcbl::log::warn!("high_score: read error ({e})");
                     return None;
                 }
             },
             #[cfg(target_arch = "wasm32")]
             Backing::Opfs(store) => {
-                use crcbl_store::StorageSource as _;
+                use crcbl::store::StorageSource as _;
                 match store.read(std::path::Path::new(HIGH_SCORE_FILE)) {
                     Ok(data) => data,
                     Err(e) => {
-                        log::info!("high_score: no previous save ({e})");
+                        crcbl::log::info!("high_score: no previous save ({e})");
                         return None;
                     }
                 }
@@ -118,7 +118,7 @@ impl HighScore {
         match <[u8; 4]>::try_from(data.as_slice()) {
             Ok(bytes) => Some(u32::from_le_bytes(bytes)),
             Err(_) => {
-                log::warn!("high_score: corrupt file ({} bytes)", data.len());
+                crcbl::log::warn!("high_score: corrupt file ({} bytes)", data.len());
                 None
             }
         }
@@ -144,7 +144,7 @@ impl HighScore {
         }
         self.value = score;
         self.save();
-        log::info!("high_score: new best = {}", self.value);
+        crcbl::log::info!("high_score: new best = {}", self.value);
         true
     }
 
@@ -161,16 +161,16 @@ impl HighScore {
             #[cfg(not(target_arch = "wasm32"))]
             Backing::Native(root) => {
                 let path = root.join(HIGH_SCORE_FILE);
-                if let Err(e) = crcbl_store::write_atomic(&path, &self.value.to_le_bytes()) {
-                    log::warn!("high_score: save failed ({e})");
+                if let Err(e) = crcbl::store::write_atomic(&path, &self.value.to_le_bytes()) {
+                    crcbl::log::warn!("high_score: save failed ({e})");
                 }
             }
             #[cfg(target_arch = "wasm32")]
             Backing::Opfs(store) => {
-                use crcbl_store::StorageSource as _;
+                use crcbl::store::StorageSource as _;
                 let path = std::path::Path::new(HIGH_SCORE_FILE);
                 if let Err(e) = store.write(path, &self.value.to_le_bytes()) {
-                    log::warn!("high_score: save failed ({e})");
+                    crcbl::log::warn!("high_score: save failed ({e})");
                 }
             }
         }

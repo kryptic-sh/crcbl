@@ -198,7 +198,7 @@ impl Gpu {
         let renderer = ForwardRenderer::new(ctx.device(), ctx.queue(), ctx.format())?;
         let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
         if timers.is_none() {
-            log::info!("hal: no timestamp queries on this device; per-pass timing is off");
+            crcbl::log::info!("hal: no timestamp queries on this device; per-pass timing is off");
         }
         // Rolled back by hand: `Gpu` has no `Drop`, so a `?` here would leak the
         // forward renderer's pipelines rather than release them.
@@ -382,7 +382,7 @@ impl Gpu {
             self.last_dump = compiled.dump();
         }
         if !self.dumped {
-            log::debug!("render graph for the sandbox frame:\n{}", compiled.dump());
+            crcbl::log::debug!("render graph for the sandbox frame:\n{}", compiled.dump());
             self.dumped = true;
         }
 

@@ -44,15 +44,15 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crcbl_client::Client;
-use crcbl_core::FrameClock;
-use crcbl_core::input::KeyCode;
-use crcbl_ecs::{Entity, GameModule, World};
-use crcbl_input::{ActionDecl, ActionKind, ActionMap, Binding};
-use crcbl_net::{InMemoryTransport, ProtocolCompatibility};
-use crcbl_phys::{ColliderComponent, PhysicsSystem, RigidBody, Segment, ThrustForce, Transform};
-use crcbl_server::Server;
-use glam::{DQuat, DVec3};
+use crcbl::client::Client;
+use crcbl::core::FrameClock;
+use crcbl::core::input::KeyCode;
+use crcbl::ecs::{Entity, GameModule, World};
+use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
+use crcbl::math::{DQuat, DVec3};
+use crcbl::net::{InMemoryTransport, ProtocolCompatibility};
+use crcbl::phys::{ColliderComponent, PhysicsSystem, RigidBody, Segment, ThrustForce, Transform};
+use crcbl::server::Server;
 
 /// Distinct from breakout's and flappy's, because they are distinct protocols:
 /// a client built for one must not hand-shake with a server running another.
@@ -318,10 +318,10 @@ pub const DEFAULT_SEED: u64 = 0x4153_5452_4F49_4453;
 /// A uniform value in `[0, 1)` from `seed` and `index`.
 ///
 /// The engine's, re-exported so this game's three index spaces stay beside the
-/// draws that use them. [`crcbl_core::rand`] is where the argument for hashing
+/// draws that use them. [`crcbl::core::rand`] is where the argument for hashing
 /// an index rather than stepping a generator is written down — every sample
 /// reached it independently, which is why it is the engine's shape now.
-pub use crcbl_core::rand::hash_unit;
+pub use crcbl::core::rand::hash_unit;
 
 /// The seed the `runs`-th board of a game seeded with `seed` is dealt from.
 ///
@@ -331,7 +331,7 @@ pub use crcbl_core::rand::hash_unit;
 /// a recorded script replayed from a fresh game meets the same rocks.
 #[must_use]
 fn board_seed(seed: u64, runs: u32) -> u64 {
-    crcbl_core::rand::salt(seed, u64::from(runs))
+    crcbl::core::rand::salt(seed, u64::from(runs))
 }
 
 /// Index space for wave spawns. Disjoint from the split space below, so a wave
@@ -789,7 +789,7 @@ fn turn_ship(logic: &mut GameLogic, world: &mut World, intent: Intent, dt: f64) 
 /// equivalent**, so the `-k·v` below is a hand copy of [`DampingForce`]'s model,
 /// clamp and all. That asymmetry is a finding, recorded in `docs/backlog.md`.
 ///
-/// [`DampingForce`]: crcbl_phys::DampingForce
+/// [`DampingForce`]: crcbl::phys::DampingForce
 fn drive_ship(logic: &mut GameLogic, world: &mut World, intent: Intent, dt: f64) {
     let ship = logic.ship;
     let thrust = logic.thrust;
@@ -809,7 +809,7 @@ fn drive_ship(logic: &mut GameLogic, world: &mut World, intent: Intent, dt: f64)
     logic.thrusting = intent.thrust;
 }
 
-/// The damping force `crcbl_phys::DampingForce` would apply to a body of `mass`
+/// The damping force `crcbl::phys::DampingForce` would apply to a body of `mass`
 /// moving at `velocity` over a step of `dt`.
 ///
 /// Copied rather than reused because the provider pipeline is global — see
@@ -922,7 +922,7 @@ pub fn lerp_angle(from: f64, to: f64, alpha: f64) -> f64 {
 /// Whether the ship is touching a rock, and what happens if it is.
 ///
 /// A sphere overlap against the broadphase, which is what the plan asks for.
-/// The [`crcbl_phys::ShapeHit`] each result carries is **discarded**: it is
+/// The [`crcbl::phys::ShapeHit`] each result carries is **discarded**: it is
 /// fabricated (`t: 0.0`, normal `+Y`, `started_inside: true` for every result,
 /// recorded in `docs/backlog.md`), and all this query is asked is *whether*
 /// anything is there. `PhysicsWorld::overlap_sphere` underneath is honest but
@@ -978,7 +978,7 @@ fn destroy_ship(logic: &mut GameLogic, world: &mut World) {
     ));
     if logic.lives == 0 {
         logic.state = GameState::GameOver;
-        log::info!(
+        crcbl::log::info!(
             "game over on wave {} with {} points",
             logic.wave + 1,
             logic.score
@@ -1225,7 +1225,7 @@ fn advance_wave(logic: &mut GameLogic, world: &mut World) {
     }
     logic.wave += 1;
     deal_wave(logic, world);
-    log::info!(
+    crcbl::log::info!(
         "wave {} — {} rocks, {} points",
         logic.wave + 1,
         logic.rocks.len(),
@@ -1682,7 +1682,7 @@ impl Game {
             thrusting: false,
             prev_log_state: GameState::WaitingToStart,
         };
-        log::info!(
+        crcbl::log::info!(
             "sim: {tick_hz} Hz, {:.3} ms per tick, wave 1 of {} rocks",
             game.tick_dt_secs() * 1e3,
             wave_rocks(0),
@@ -1815,7 +1815,7 @@ impl Game {
                 .rocks()
                 .first()
                 .map_or(f64::NAN, |rock| rock.position.x);
-            log::info!(
+            crcbl::log::info!(
                 "[HUD] {:?}  score: {}  best: {}  lives: {}  wave: {}  rocks: {}  rock x: {:.2}",
                 self.state,
                 self.score,
@@ -1911,7 +1911,7 @@ impl Game {
     /// How many entities are queued for destruction and not yet swept.
     ///
     /// **Not an implementation detail — a number the counts above cannot be
-    /// read without.** `crcbl_ecs::World::sweep` runs at the end of
+    /// read without.** `crcbl::ecs::World::sweep` runs at the end of
     /// `World::tick`, and `crcbl-server` calls `GameModule::tick` *after* that,
     /// so everything this game destroys — and it destroys a great deal — waits
     /// one tick before the pool lets go of it. A caller comparing
@@ -1978,7 +1978,7 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl_core::time::{ManualTime, TimeSource as _};
+    use crcbl::core::time::{ManualTime, TimeSource as _};
 
     /// One entry of a script: `(tick index, key, pressed)`.
     type Script = [(u64, KeyCode, bool)];
@@ -2400,7 +2400,7 @@ mod tests {
         );
     }
 
-    /// The hand-rolled damping is [`crcbl_phys::DampingForce`]'s model, not a
+    /// The hand-rolled damping is [`crcbl::phys::DampingForce`]'s model, not a
     /// lookalike.
     ///
     /// It is copied because the force pipeline is global and this game damps
@@ -2411,7 +2411,7 @@ mod tests {
     /// enough to reach it.
     #[test]
     fn the_hand_rolled_damping_is_the_engines_own() {
-        use crcbl_phys::{DampingForce, ForceProvider as _};
+        use crcbl::phys::{DampingForce, ForceProvider as _};
 
         let provider = DampingForce::new(SHIP_DAMPING);
         for dt in [1.0 / 240.0, 1.0 / 60.0, 0.5, 1.0, 4.0] {
@@ -3557,7 +3557,7 @@ mod tests {
         );
         // And the final state is accounted for exactly, entity for entity.
         harness.assert_nothing_leaked();
-        log::info!(
+        crcbl::log::info!(
             "soak: {spawned} rocks, {fired} bullets, {restarts} restarts, \
              peak {peak_entities} entities"
         );

@@ -7,8 +7,8 @@
 //!   Playing ─────────────────────────────────────────────► none
 //! ```
 //!
-//! The art, the layout and the keyboard model are `crcbl_ui::menu` and
-//! `crcbl_render::menu` — shared with breakout and the sandbox, because a window
+//! The art, the layout and the keyboard model are `crcbl::ui::menu` and
+//! `crcbl::render::menu` — shared with breakout and the sandbox, because a window
 //! frame is not something a game should own. What is here is the part that
 //! genuinely is flappy's: **which menu a frame of this game shows, and what
 //! happens when a button is fired.**
@@ -199,9 +199,9 @@ pub fn menus() -> Menus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crcbl::math::Vec2;
     use crcbl::ui::text::FontAtlas;
     use crcbl::ui::{ButtonState, PointerInput};
-    use glam::Vec2;
 
     /// The action the highlighted button carries, which is what the loop reads.
     ///

@@ -194,7 +194,7 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
     /// and a click carries a position only on some backends. `None` until the
     /// pointer has been inside the window, so a menu does not open with a
     /// phantom cursor at the origin.
-    pointer: Option<glam::Vec2>,
+    pointer: Option<crcbl::math::Vec2>,
     /// Whether the primary pointer button is down.
     ///
     /// Kept here rather than derived per frame because press capture spans
@@ -255,7 +255,7 @@ pub fn run(options: &Options) -> Result<Summary, FlappyError> {
         Ok(reason) => engine.finish(reason),
         Err(error) => {
             if let Err(teardown) = engine.finish(ExitReason::Failed) {
-                log::error!("teardown after a failed frame also failed: {teardown}");
+                crcbl::log::error!("teardown after a failed frame also failed: {teardown}");
             }
             Err(error)
         }
@@ -291,7 +291,7 @@ impl<S: Shell + ?Sized> Loop<S> {
 
         let mut events = 0;
         let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
-        log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+        crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
 
         let gpu = Gpu::open(shell.as_ref(), window, extent, options.backend)?;
         Self::assemble(shell, window, gpu, options, clock_source, events)
@@ -417,14 +417,14 @@ impl<S: Shell + ?Sized> Loop<S> {
                 ShellEvent::Focus { focused: false, .. } => focus_lost = true,
                 ShellEvent::PointerMotion {
                     abs: Some(point), ..
-                } => pointer_pos = Some(glam::Vec2::new(point.x as f32, point.y as f32)),
+                } => pointer_pos = Some(crcbl::math::Vec2::new(point.x as f32, point.y as f32)),
                 // A pointer that left the window is not hovering anything, and
                 // must not leave the last button it crossed lit up.
                 ShellEvent::PointerFocus {
                     entered, position, ..
                 } => {
                     pointer_pos = if entered {
-                        position.map(|point| glam::Vec2::new(point.x as f32, point.y as f32))
+                        position.map(|point| crcbl::math::Vec2::new(point.x as f32, point.y as f32))
                     } else {
                         None
                     };
@@ -436,7 +436,7 @@ impl<S: Shell + ?Sized> Loop<S> {
                     ..
                 } => {
                     if let Some(point) = position {
-                        pointer_pos = Some(glam::Vec2::new(point.x as f32, point.y as f32));
+                        pointer_pos = Some(crcbl::math::Vec2::new(point.x as f32, point.y as f32));
                     }
                     if matches!(state, crcbl::shell::ButtonState::Pressed) {
                         pointer_pressed = true;
@@ -542,7 +542,9 @@ impl<S: Shell + ?Sized> Loop<S> {
                 PointerInput {
                     // A pointer that has never been in the window is nowhere, not at
                     // the origin — which is a real pixel, inside the HUD.
-                    pos: self.pointer.unwrap_or(glam::Vec2::splat(f32::NEG_INFINITY)),
+                    pos: self
+                        .pointer
+                        .unwrap_or(crcbl::math::Vec2::splat(f32::NEG_INFINITY)),
                     down: pointer_down,
                     released: pointer_released,
                 },
@@ -565,7 +567,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         }
         if toggle_pause {
             self.paused = !self.paused;
-            log::info!("game {}", if self.paused { "paused" } else { "resumed" });
+            crcbl::log::info!("game {}", if self.paused { "paused" } else { "resumed" });
         }
         if toggle_fullscreen {
             self.toggle_fullscreen()?;
@@ -687,7 +689,7 @@ impl<S: Shell + ?Sized> Loop<S> {
             MenuAction::Resume => {
                 if self.paused {
                     self.paused = false;
-                    log::info!("game resumed");
+                    crcbl::log::info!("game resumed");
                 }
             }
             // A real key event rather than a call into `Game`: starting a run is
@@ -764,7 +766,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         }
         if !self.paused {
             self.paused = true;
-            log::info!("game paused: the window lost focus");
+            crcbl::log::info!("game paused: the window lost focus");
         }
     }
 
@@ -781,7 +783,7 @@ impl<S: Shell + ?Sized> Loop<S> {
             DisplayMode::Borderless { monitor: None }
         };
         self.shell.set_mode(self.window, target)?;
-        log::info!("shell: asked for {target}");
+        crcbl::log::info!("shell: asked for {target}");
         Ok(())
     }
 
@@ -802,9 +804,9 @@ impl<S: Shell + ?Sized> Loop<S> {
         }
         self.mode_honoured = honoured;
         if honoured {
-            log::info!("shell: the window is {}", state.requested_mode);
+            crcbl::log::info!("shell: the window is {}", state.requested_mode);
         } else {
-            log::warn!(
+            crcbl::log::warn!(
                 "shell: asked for {} and got {}",
                 state.requested_mode,
                 self.display_mode(),
@@ -828,7 +830,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         let (width, height) = self.gpu.extent();
         self.debug.render(
             &mut self.draw_list,
-            glam::Vec2::new(width as f32, height as f32),
+            crcbl::math::Vec2::new(width as f32, height as f32),
             self.gpu.atlas(),
         );
     }
@@ -844,7 +846,7 @@ impl<S: Shell + ?Sized> Loop<S> {
         if let Some(timings) = self.gpu.timings()
             && !timings.is_empty()
         {
-            log::info!("{}", timings.report().trim_end());
+            crcbl::log::info!("{}", timings.report().trim_end());
         }
         let summary = Summary {
             backend: self.shell.backend(),
@@ -886,7 +888,7 @@ fn open_the_window<S: Shell + ?Sized>(
     shell: &mut S,
     clock_source: &Clock,
 ) -> Result<WindowId, FlappyError> {
-    log::info!(
+    crcbl::log::info!(
         "shell: {} backend, caps {:?}",
         shell.backend(),
         shell.caps()
@@ -980,7 +982,7 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
                     self.stage = BootStage::Configure;
                     return Ok(None);
                 };
-                log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+                crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
                 self.stage = BootStage::Device {
                     pending: Gpu::request_open(
                         shell.as_ref(),
@@ -1087,7 +1089,7 @@ impl HudStrings {
 /// that could disagree with it. The HUD is measured in pixels because a HUD is,
 /// which is what the UI pass has always been for.
 fn draw_hud(dl: &mut crcbl::ui::draw_list::DrawList, hud: &HudStrings) {
-    use glam::Vec2;
+    use crcbl::math::Vec2;
 
     // HUD panel.
     dl.rect(
@@ -1696,7 +1698,7 @@ mod tests {
         assert!(engine.is_paused(), "a blurred window is paused");
 
         let layout = engine.menu_layout().expect("the pause menu is showing");
-        let over = |point: glam::Vec2| {
+        let over = |point: crcbl::math::Vec2| {
             layout
                 .items()
                 .iter()
@@ -1709,7 +1711,7 @@ mod tests {
                 .map(|item| item.id)
         };
 
-        let corner = glam::Vec2::splat(INSET);
+        let corner = crcbl::math::Vec2::splat(INSET);
         assert_eq!(
             over(corner),
             None,

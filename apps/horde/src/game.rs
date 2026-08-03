@@ -47,7 +47,7 @@
 //!
 //! # Both query radii are exact, and that is a property of the shape query
 //!
-//! [`crcbl_phys::PhysicsWorld::overlap_sphere`] tests the query sphere against
+//! [`crcbl::phys::PhysicsWorld::overlap_sphere`] tests the query sphere against
 //! the collider's *shape*, so a query of radius `R` centred on `a` returns every
 //! collider `b` whose centre is within `R + r_b`. Both of this game's overlap
 //! queries exploit that rather than working around it:
@@ -83,15 +83,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crcbl_client::Client;
-use crcbl_core::FrameClock;
-use crcbl_core::input::KeyCode;
-use crcbl_ecs::{Entity, GameModule, World};
-use crcbl_input::{ActionDecl, ActionKind, ActionMap, Binding};
-use crcbl_net::{InMemoryTransport, ProtocolCompatibility};
-use crcbl_phys::{ColliderComponent, PhysicsSystem, RigidBody, Segment, Transform};
-use crcbl_server::Server;
-use glam::DVec3;
+use crcbl::client::Client;
+use crcbl::core::FrameClock;
+use crcbl::core::input::KeyCode;
+use crcbl::ecs::{Entity, GameModule, World};
+use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
+use crcbl::math::DVec3;
+use crcbl::net::{InMemoryTransport, ProtocolCompatibility};
+use crcbl::phys::{ColliderComponent, PhysicsSystem, RigidBody, Segment, Transform};
+use crcbl::server::Server;
 
 /// Distinct from breakout's, flappy's and asteroids', because they are distinct
 /// protocols: a client built for one must not hand-shake with a server running
@@ -336,7 +336,7 @@ pub fn max_enemy_radius() -> f64 {
 /// a little larger than a runner — a gem the player cannot see is a gem the
 /// player does not walk to.
 ///
-/// **A trigger, not a solid.** `crcbl_phys` skips triggers in
+/// **A trigger, not a solid.** `crcbl::phys` skips triggers in
 /// [`PhysicsSystem::sweep_sphere`], so a bolt flies through a gem instead of
 /// being spent on it; `overlap_sphere` does *not* skip them, which is exactly
 /// what `collect_pickups` wants and what the separation and aiming queries have
@@ -521,7 +521,7 @@ pub const SEPARATION_STRENGTH: f64 = 6.0;
 /// The radius the separation query for an enemy of `kind` is run at.
 ///
 /// **`r_self + slack`, and the omission of the neighbour's radius is the whole
-/// trick.** [`crcbl_phys::PhysicsWorld::overlap_sphere`] tests the query sphere
+/// trick.** [`crcbl::phys::PhysicsWorld::overlap_sphere`] tests the query sphere
 /// against each collider's *shape*, so this returns every `b` with
 /// `d <= r_self + slack + r_b` — which is exactly the neighbourhood
 /// `separation_push` wants, with nothing over-fetched and nothing filtered.
@@ -602,10 +602,10 @@ pub const DEFAULT_SEED: u64 = 0x484F_5244_4553_4545;
 /// A uniform value in `[0, 1)` from `seed` and `index`.
 ///
 /// The engine's, re-exported so this game's own index spaces stay beside the
-/// draws that use them. [`crcbl_core::rand`] is where the argument for hashing
+/// draws that use them. [`crcbl::core::rand`] is where the argument for hashing
 /// an index rather than stepping a generator is written down — every sample
 /// reached it independently.
-pub use crcbl_core::rand::hash_unit;
+pub use crcbl::core::rand::hash_unit;
 
 /// The seed the `runs`-th run of a game seeded with `seed` is dealt from.
 ///
@@ -615,7 +615,7 @@ pub use crcbl_core::rand::hash_unit;
 /// replayed from a fresh game meets the same horde.
 #[must_use]
 fn run_seed(seed: u64, runs: u32) -> u64 {
-    crcbl_core::rand::salt(seed, u64::from(runs))
+    crcbl::core::rand::salt(seed, u64::from(runs))
 }
 
 /// The index space for one spawn's draws.
@@ -1220,7 +1220,7 @@ fn drive_player(logic: &mut GameLogic, world: &mut World, intent: Intent) {
 /// arena. One [`PhysicsSystem::overlap_sphere`] at [`WEAPON_RANGE`] hands back
 /// only what is in that circle.
 ///
-/// The [`crcbl_phys::ShapeHit`] each result carries is **discarded**: it is
+/// The [`crcbl::phys::ShapeHit`] each result carries is **discarded**: it is
 /// fabricated (`t: 0.0`, normal `+Y`, `started_inside: true` for every result,
 /// recorded in `docs/backlog.md`), and all this query is asked is *what* is
 /// there.
@@ -1300,7 +1300,7 @@ fn fire(logic: &mut GameLogic, world: &mut World, dt: f64) {
 ///
 /// # One query, and every result is a hit
 ///
-/// [`crcbl_phys::PhysicsWorld::overlap_sphere`] tests the query sphere against
+/// [`crcbl::phys::PhysicsWorld::overlap_sphere`] tests the query sphere against
 /// each collider's *shape*, so a query of [`PLAYER_RADIUS`] returns exactly the
 /// enemies whose centres are within `PLAYER_RADIUS + r_enemy` — which is the
 /// definition of touching. There is no second distance test here because there
@@ -1345,7 +1345,7 @@ fn contact_damage(logic: &mut GameLogic, world: &mut World, dt: f64) {
         logic
             .cues
             .push((crate::audio::SOUND_DEATH, logic.player_pos));
-        log::info!(
+        crcbl::log::info!(
             "died after {:.1}s with {} kills, {} enemies on the field",
             logic.elapsed,
             logic.kills,
@@ -1469,7 +1469,7 @@ fn damage_enemy(logic: &mut GameLogic, world: &mut World, index: usize, amount: 
 /// Leaves a gem where an enemy died, if the field has room for one.
 ///
 /// The collider is a **trigger**, which is the whole of how a gem stays out of
-/// the game's other three queries: `crcbl_phys` skips triggers in the sweep, so
+/// the game's other three queries: `crcbl::phys` skips triggers in the sweep, so
 /// a bolt flies through it; `fire` and `steer_enemies` filter theirs back out
 /// through the enemy index they already consult. See [`XP_RADIUS`].
 fn drop_pickup(logic: &mut GameLogic, world: &mut World, position: DVec3, xp: u64) {
@@ -1558,7 +1558,7 @@ fn maybe_level_up(logic: &mut GameLogic, world: &mut World) {
         .cues
         .push((crate::audio::SOUND_LEVEL, logic.player_pos));
     freeze_field(logic, world);
-    log::info!(
+    crcbl::log::info!(
         "level {} at {:.1}s, offering {:?}",
         logic.level,
         logic.elapsed,
@@ -1580,7 +1580,7 @@ fn apply_choice(logic: &mut GameLogic, world: &mut World, index: usize) {
         return;
     };
     apply_upgrade(logic, upgrade);
-    log::info!("took {} at level {}", upgrade.label(), logic.level);
+    crcbl::log::info!("took {} at level {}", upgrade.label(), logic.level);
     logic.offer = None;
     logic.state = GameState::Playing;
     thaw_field(logic, world);
@@ -2230,7 +2230,7 @@ impl Game {
             prev_log_state: GameState::WaitingToStart,
             prev_elapsed: 0.0,
         };
-        log::info!(
+        crcbl::log::info!(
             "sim: {} Hz, {:.3} ms per tick, up to {} enemies",
             setup.tick_hz,
             game.tick_dt_secs() * 1e3,
@@ -2371,7 +2371,7 @@ impl Game {
         // is beside it for a bug report, and because it is what tells a restart
         // from a start — only a real restart edge advances it.
         if state_changed || self.ticks_run.is_multiple_of(60) {
-            log::info!(
+            crcbl::log::info!(
                 "[HUD] {:?}  run: {}  time: {:.1}  best: {}  kills: {}  hp: {:.0}  lvl: {}  \
                  enemies: {}  bolts: {}  gems: {}",
                 self.state,
@@ -2507,7 +2507,7 @@ impl Game {
     /// How many entities are queued for destruction and not yet swept.
     ///
     /// **Not an implementation detail — a number the counts above cannot be read
-    /// without.** `crcbl_ecs::World::sweep` runs at the end of `World::tick`,
+    /// without.** `crcbl::ecs::World::sweep` runs at the end of `World::tick`,
     /// and `crcbl-server` calls `GameModule::tick` *after* that, so everything
     /// this game destroys — and it destroys a great deal — waits one tick before
     /// the pool lets go of it. Recorded in `docs/backlog.md` as a finding
@@ -2593,7 +2593,7 @@ impl Game {
         // field was empty; without this the first frame draws nothing and the
         // measurement's first frame is the wrong one.
         refresh_views(&mut logic, world);
-        log::info!(
+        crcbl::log::info!(
             "prefill: staged {wanted} enemies on a {cols}x{rows} grid, \
              {:.2} x {:.2} units apart",
             step_x,
@@ -2762,7 +2762,7 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl_core::time::{ManualTime, TimeSource as _};
+    use crcbl::core::time::{ManualTime, TimeSource as _};
 
     /// One entry of a script: `(tick index, key, pressed)`.
     type Script = [(u64, KeyCode, bool)];
@@ -4332,7 +4332,7 @@ mod tests {
             "the destruction queue never emptied",
         );
         harness.assert_nothing_leaked();
-        log::info!(
+        crcbl::log::info!(
             "soak: {spawned} spawned, {fired} bolts, {} kills, {} restarts, \
              peak {peak} entities",
             harness.game.kills,
