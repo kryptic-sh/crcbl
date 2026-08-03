@@ -270,6 +270,28 @@ timestamp instead of `CurrentTime` (`Peer::server_time`, kept — it is correct
 EWMH), and asking `openbox` less often or clicking the frame instead. The click
 made it measurably _worse_: five runs, 3-5 failures each.
 
+## Windows and macOS have no windowing coverage because they have no backend
+
+Raised as "get the X11, Windows and macOS tests up to Wayland parity". The X11
+half is done; the other two cannot be done as tests. `crcbl-shell` compiles
+`ShellBackend::Win32` and `ShellBackend::AppKit` as _names_ — the registry has
+no entry for either, `open()` on those platforms returns
+`ShellError::NoBackend`, and `crates/crcbl-shell/src/` has no `windows` or
+`macos` module. Reaching Wayland's coverage there means **writing the two
+backends**, which `docs/plan/15-windowing.md` schedules for P14: hand-written
+Win32 FFI and `objc_msgSend` AppKit FFI, landing with Metal/DX12, "with
+real-hardware time budgeted". The plan's own reason for not doing it sooner is
+the relevant one here — before that "they'd be compile-verified-only anyway
+(gpur lesson: that's not support)", and a CI runner has no display on either
+platform, so an e2e suite would have nothing to run against.
+
+What the cross-platform CI job does cover today, and it is not nothing: the
+whole workspace builds, lints and runs its unit and integration suites on
+`macos-latest` and `windows-latest`, including `HeadlessShell` and the
+`seam_from_outside` suite. The backend-selection tests assert the honest answer
+on those platforms — `NoBackend` naming what was tried, `UnknownBackend` for
+`win32` — so the _absence_ is tested even though the backend is not.
+
 ## Not covered on either backend
 
 - **A window manager that does not respect the requested size.** `openbox` with
