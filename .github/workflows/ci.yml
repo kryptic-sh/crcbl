@@ -298,11 +298,17 @@ jobs:
       # `CRCBL_VK_VALIDATION=1`, and `docs/plan/02-vulkan-backend.md`'s "zero
       # validation errors" gate cannot be met by a job that never loaded the
       # layer.
-      - name: Install sway
+      # `libasound2-dev`, and the reason is new: `crcbl` re-exports
+      # `crcbl-audio` as of the umbrella slice, so **every** binary that links
+      # the umbrella now links cpal and ALSA — this job did not compile
+      # `crcbl-audio` before and does now. See the `clippy (linux)` job for the
+      # `-dev`-versus-runtime argument.
+      - name: Install sway and the ALSA headers cpal links against
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             sway \
+            libasound2-dev \
             libwayland-client0 \
             libxkbcommon0 \
             libvulkan1 \
@@ -353,11 +359,17 @@ jobs:
       # half of the seam's extent rule — `currentExtent` is a real size and
       # `minImageExtent == maxImageExtent == currentExtent`, so the shell and
       # the server disagreeing has no legal swapchain at all.
-      - name: Install Xvfb and the X client libraries
+      # `libasound2-dev`, and the reason is new: `crcbl` re-exports
+      # `crcbl-audio` as of the umbrella slice, so **every** binary that links
+      # the umbrella now links cpal and ALSA — this job did not compile
+      # `crcbl-audio` before and does now. See the `clippy (linux)` job for the
+      # `-dev`-versus-runtime argument.
+      - name: Install Xvfb, the X client libraries and the ALSA headers
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             xvfb \
+            libasound2-dev \
             libxcb1 \
             libxcb-randr0 \
             libxcb-xinput0 \
@@ -402,6 +414,14 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.140
+      # `crcbl` re-exports `crcbl-audio` as of the umbrella slice, so the CLI —
+      # and every project it scaffolds — links cpal and ALSA. This job did not
+      # compile `crcbl-audio` before and does now. See the `clippy (linux)` job
+      # for the `-dev`-versus-runtime argument.
+      - name: Install the ALSA headers cpal links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev
       # Scaffolds into a temporary directory, builds it with its own
       # `CARGO_TARGET_DIR`, checks `rustfmt` and `clippy` on the generated
       # source, and runs `crcbl run --headless`.
@@ -578,10 +598,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - name: Install the Vulkan loader and lavapipe
+      # `libasound2-dev`, and the reason is new: `crcbl` re-exports
+      # `crcbl-audio` as of the umbrella slice, so **every** binary that links
+      # the umbrella now links cpal and ALSA — this job did not compile
+      # `crcbl-audio` before and does now. See the `clippy (linux)` job for the
+      # `-dev`-versus-runtime argument.
+      - name: Install the Vulkan loader, lavapipe and the ALSA headers
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
+            libasound2-dev \
             libvulkan1 \
             mesa-vulkan-drivers
       # Both backends are pinned to lavapipe because it is the only driver a
