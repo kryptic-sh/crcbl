@@ -16,6 +16,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl-phys**: `DampingForce::world_force(velocity, mass, dt)` and
+  `DragForce::world_force(velocity)`, beside the `ThrustForce::world_force` that
+  already existed. A force provider applies to **every** dynamic body, so a game
+  damping one entity among a field of others could not use the pipeline;
+  `apps/asteroids` wrote `-k·v` and the `mass/dt` cap out by hand instead, and
+  that copy is now deleted. The cap travels with the route — it is what stops a
+  coarse tick rate from over-damping past zero and flying the body backwards.
+
 - **crcbl-phys**: `overlap_sphere_into` on both `PhysicsSystem` and
   `PhysicsWorld`, and `Bvh::traverse_aabb_into`, so a game that queries once per
   body per tick can hoist one buffer out of its loop. The owned forms cost three

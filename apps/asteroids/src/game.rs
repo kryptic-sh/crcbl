@@ -49,7 +49,9 @@ use crcbl::ecs::{Entity, GameModule, World};
 use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
 use crcbl::math::{DQuat, DVec3};
 use crcbl::net::ProtocolCompatibility;
-use crcbl::phys::{ColliderComponent, PhysicsSystem, RigidBody, Segment, ThrustForce, Transform};
+use crcbl::phys::{
+    ColliderComponent, DampingForce, PhysicsSystem, RigidBody, Segment, ThrustForce, Transform,
+};
 use crcbl::session::Loopback;
 
 /// Distinct from breakout's and flappy's, because they are distinct protocols:
@@ -625,6 +627,14 @@ struct GameLogic {
     /// provider, because a provider applies to every body.
     thrust: ThrustForce,
 
+    /// The coast, likewise. [`DampingForce::world_force`] carries the `mass/dt`
+    /// cap with it — the thing that stops a coarse tick rate from over-damping
+    /// past zero and flying the ship backwards — so this game no longer keeps
+    /// its own copy of that arithmetic.
+    ///
+    /// [`DampingForce::world_force`]: crcbl::phys::DampingForce::world_force
+    damping: DampingForce,
+
     /// Ticks the module has actually run. The facade asserts this advances by
     /// exactly one per [`Game::tick`].
     ticks: u64,
@@ -803,6 +813,7 @@ fn turn_ship(logic: &mut GameLogic, world: &mut World, intent: Intent, dt: f64) 
 fn drive_ship(logic: &mut GameLogic, world: &mut World, intent: Intent, dt: f64) {
     let ship = logic.ship;
     let thrust = logic.thrust;
+    let damping = logic.damping;
     with_physics(world, |phys| {
         let Some(transform) = phys.transform(ship).copied() else {
             return;
@@ -811,31 +822,12 @@ fn drive_ship(logic: &mut GameLogic, world: &mut World, intent: Intent, dt: f64)
             phys.apply_force(ship, thrust.world_force(&transform));
         }
         if let Some(body) = phys.body(ship).copied() {
-            phys.apply_force(ship, damping_force(body.velocity, body.mass, dt));
+            phys.apply_force(ship, damping.world_force(body.velocity, body.mass, dt));
         }
     });
     // Recorded, not sounded. The engine is a held cue and the facade owns it;
     // see `GameLogic::thrusting`.
     logic.thrusting = intent.thrust;
-}
-
-/// The damping force `crcbl::phys::DampingForce` would apply to a body of `mass`
-/// moving at `velocity` over a step of `dt`.
-///
-/// Copied rather than reused because the provider pipeline is global — see
-/// [`drive_ship`]. The `mass / dt` clamp is copied with it: it is what stops a
-/// coarse tick rate from over-damping past zero and reversing the ship, and at
-/// `--tick-hz 1` it is the difference between coasting to a halt and flying
-/// backwards.
-#[must_use]
-fn damping_force(velocity: DVec3, mass: f64, dt: f64) -> DVec3 {
-    let critical = mass / dt;
-    let effective = if SHIP_DAMPING < critical {
-        SHIP_DAMPING
-    } else {
-        critical
-    };
-    -velocity * effective
 }
 
 /// Fires, if the trigger went down, the magazine has room and the cooldown has
@@ -1636,6 +1628,7 @@ impl Game {
             scratch_entities: Vec::new(),
             cues: Vec::new(),
             thrust: ThrustForce::new(SHIP_THRUST, DVec3::Y),
+            damping: DampingForce::new(SHIP_DAMPING),
             ticks: 0,
         }));
 
@@ -2425,47 +2418,33 @@ mod tests {
         );
     }
 
-    /// The hand-rolled damping is [`crcbl::phys::DampingForce`]'s model, not a
-    /// lookalike.
+    /// The ship's coast is the engine's damping model, reached through the
+    /// per-entity route rather than copied.
     ///
-    /// It is copied because the force pipeline is global and this game damps
-    /// exactly one of its bodies (see `drive_ship`). A copy that drifted from
-    /// the original would be a second physics model in the process, and nothing
-    /// else in this file would notice — so the copy is checked against the
-    /// original directly, including the `mass / dt` clamp at tick rates coarse
-    /// enough to reach it.
+    /// This test used to compare a hand-rolled `damping_force` in this file
+    /// against `DampingForce::apply`, because the force pipeline is global and
+    /// this game damps exactly one of its bodies.
+    /// [`DampingForce::world_force`] is that route now and the copy is gone, so
+    /// what is left to check here is that the game reaches it with **its own**
+    /// constants — a ship built with a different mass or coefficient than
+    /// `drive_ship` uses would coast differently and nothing else would say so.
+    ///
+    /// [`DampingForce::world_force`]: crcbl::phys::DampingForce::world_force
     #[test]
-    fn the_hand_rolled_damping_is_the_engines_own() {
-        use crcbl::phys::{DampingForce, ForceProvider as _};
-
-        let provider = DampingForce::new(SHIP_DAMPING);
-        for dt in [1.0 / 240.0, 1.0 / 60.0, 0.5, 1.0, 4.0] {
-            for velocity in [
-                DVec3::ZERO,
-                DVec3::new(3.0, -4.0, 0.0),
-                DVec3::new(-14.0, 0.0, 0.0),
-            ] {
-                let mut body = RigidBody::new_dynamic(SHIP_MASS);
-                body.velocity = velocity;
-                provider.apply(&mut body, &Transform::IDENTITY, dt);
-                assert_eq!(
-                    body.force_accum,
-                    damping_force(velocity, SHIP_MASS, dt),
-                    "dt {dt} at {velocity:?}"
-                );
-            }
-        }
-        // And the clamp is genuinely reached rather than being decoration: at
-        // this step the raw coefficient would be stronger than critical.
-        let coarse = 4.0;
-        assert!(
-            SHIP_DAMPING > SHIP_MASS / coarse,
-            "the clamp case is unreachable"
-        );
-        let velocity = DVec3::new(10.0, 0.0, 0.0);
+    fn the_ships_coast_is_the_engines_damping_with_this_games_constants() {
+        let harness = Harness::new(60, 60);
+        let logic = lock(&harness.game.shared);
+        let dt = 1.0 / 60.0;
+        let velocity = DVec3::new(-14.0, 3.0, 0.0);
         assert_eq!(
-            damping_force(velocity, SHIP_MASS, coarse),
-            -velocity * (SHIP_MASS / coarse),
+            logic.damping.world_force(velocity, SHIP_MASS, dt),
+            DampingForce::new(SHIP_DAMPING).world_force(velocity, SHIP_MASS, dt),
+            "the ship is damped by something other than SHIP_DAMPING",
+        );
+        assert_eq!(
+            logic.damping.world_force(velocity, SHIP_MASS, dt),
+            -velocity * SHIP_DAMPING,
+            "at 60 Hz the cap is far away, so this is plain -k·v",
         );
     }
 

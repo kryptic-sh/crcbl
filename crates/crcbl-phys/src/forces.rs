@@ -89,10 +89,24 @@ impl DragForce {
     }
 }
 
+impl DragForce {
+    /// The world-space force this provider would apply to a body moving at
+    /// `velocity`.
+    ///
+    /// Public for the same reason [`ThrustForce::world_force`] is: a provider
+    /// is **global**, so a game that drags one entity among a field of others
+    /// cannot use the pipeline and would otherwise write `-k·v` out again.
+    #[inline]
+    #[must_use]
+    pub fn world_force(&self, velocity: DVec3) -> DVec3 {
+        -velocity * self.coefficient
+    }
+}
+
 impl ForceProvider for DragForce {
     fn apply(&self, body: &mut RigidBody, _transform: &Transform, _dt: f64) {
         if body.is_dynamic() {
-            body.apply_force(-body.velocity * self.coefficient);
+            body.apply_force(self.world_force(body.velocity));
         }
     }
 }
@@ -153,19 +167,40 @@ impl DampingForce {
     }
 }
 
-impl ForceProvider for DampingForce {
-    fn apply(&self, body: &mut RigidBody, _transform: &Transform, dt: f64) {
-        if !body.is_dynamic() {
-            return;
-        }
+impl DampingForce {
+    /// The world-space force this provider would apply to a body of `mass`
+    /// moving at `velocity` over a step of `dt`, **including the cap**.
+    ///
+    /// Public for the same reason [`ThrustForce::world_force`] is: a provider
+    /// is global, so a game damping one entity — a ship coasting to a halt
+    /// among a field of rocks — cannot use the pipeline. `apps/asteroids` wrote
+    /// this out by hand rather than go without, and the copy it kept was the
+    /// arithmetic *and* the cap: the second is the part that is easy to leave
+    /// out and impossible to notice until someone runs at a coarse tick rate
+    /// and the ship flies backwards.
+    ///
+    /// `dt` is the step the force will be integrated over, which is what the
+    /// cap is a function of; passing a different one silently changes the model.
+    #[inline]
+    #[must_use]
+    pub fn world_force(&self, velocity: DVec3, mass: f64, dt: f64) -> DVec3 {
         // `m/dt` zeroes the velocity exactly; anything stronger reverses it.
-        let critical = body.mass / dt;
+        let critical = mass / dt;
         let effective = if self.coefficient < critical {
             self.coefficient
         } else {
             critical
         };
-        body.apply_force(-body.velocity * effective);
+        -velocity * effective
+    }
+}
+
+impl ForceProvider for DampingForce {
+    fn apply(&self, body: &mut RigidBody, _transform: &Transform, dt: f64) {
+        if !body.is_dynamic() {
+            return;
+        }
+        body.apply_force(self.world_force(body.velocity, body.mass, dt));
     }
 }
 
@@ -343,6 +378,74 @@ mod tests {
         let mut transform = Transform::IDENTITY;
         SemiImplicitEuler.step(&mut body, &mut transform, dt);
         assert_eq!(body.velocity, DVec3::ZERO);
+    }
+
+    /// The per-entity route is the pipeline's own model, cap included.
+    ///
+    /// `world_force` exists so a game damping one body among many does not have
+    /// to write `-k·v` and the `m/dt` cap out again — `apps/asteroids` did, and
+    /// its copy is deleted. A route that agreed with the provider everywhere
+    /// except the capped regime would be worse than the copy was: the game
+    /// would look like it was using the engine's model and would not be.
+    #[test]
+    fn the_per_entity_damping_is_the_pipelines_own_including_the_cap() {
+        let provider = DampingForce::new(3.0);
+        let mass = 2.0;
+        let mut capped = 0;
+        for dt in [1.0 / 240.0, 1.0 / 60.0, 0.5, 1.0, 4.0] {
+            for velocity in [
+                DVec3::ZERO,
+                DVec3::new(3.0, -4.0, 0.0),
+                DVec3::new(-14.0, 0.0, 0.0),
+            ] {
+                let mut body = RigidBody::new_dynamic(mass);
+                body.velocity = velocity;
+                provider.apply(&mut body, &Transform::IDENTITY, dt);
+                // Against the model written out, **not** against the
+                // provider: `apply` delegates to `world_force`, so comparing
+                // the two would be comparing a value with itself and would
+                // stay green with the cap deleted. Measured: it does.
+                let effective = provider.coefficient.min(mass / dt);
+                let expected = -velocity * effective;
+                assert_eq!(
+                    provider.world_force(velocity, mass, dt),
+                    expected,
+                    "the per-entity route at dt {dt}, {velocity:?}",
+                );
+                assert_eq!(
+                    body.force_accum, expected,
+                    "the pipeline at dt {dt}, {velocity:?}",
+                );
+                if provider.coefficient > mass / dt {
+                    capped += 1;
+                    // The cap's whole claim: this force zeroes the velocity in
+                    // one step and does not reverse it.
+                    let mut transform = Transform::IDENTITY;
+                    SemiImplicitEuler.step(&mut body, &mut transform, dt);
+                    assert_eq!(
+                        body.velocity,
+                        DVec3::ZERO,
+                        "the capped force did not stop the body at dt {dt}",
+                    );
+                }
+            }
+        }
+        assert!(
+            capped > 0,
+            "no `dt` in this grid reaches the cap, so the case that matters is untested",
+        );
+    }
+
+    /// `DragForce`'s route likewise, which has no cap to get wrong and is here
+    /// so the pair cannot drift apart.
+    #[test]
+    fn the_per_entity_drag_is_the_pipelines_own() {
+        let provider = DragForce::new(0.75);
+        let velocity = DVec3::new(3.0, -4.0, 12.0);
+        let mut body = RigidBody::new_dynamic(2.0);
+        body.velocity = velocity;
+        provider.apply(&mut body, &Transform::IDENTITY, 1.0 / 60.0);
+        assert_eq!(body.force_accum, provider.world_force(velocity));
     }
 
     #[test]

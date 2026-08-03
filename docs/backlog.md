@@ -773,17 +773,22 @@ it costs is **tree quality**, not answers.
   `PhysicsWorld::broadphase_stats()` or accept that the claim stays unverified.
   Ties into the missing benchmark below.
 
-- **`DampingForce` has no per-entity route and `ThrustForce` does.**
-  `ThrustForce::world_force` is public precisely so a game can thrust one entity
-  among a field of rocks through `PhysicsSystem::apply_force`, because a force
-  _provider_ is global. `DampingForce` and `DragForce` have no equivalent, so
-  asteroids re-implements `-k·v` and the `mass/dt` clamp by hand in
-  `damping_force`. It is a faithful copy —
-  `the_hand_rolled_damping_is_the_engines_own` checks it against
-  `DampingForce::apply` directly, including at tick rates coarse enough to reach
-  the clamp — but it is a second copy of a physics model in the workspace. Fix:
-  give both a `world_force`-shaped method, or give `PhysicsSystem` per-entity
-  providers.
+- **The per-entity routes exist now, and `PhysicsSystem` still has no per-entity
+  providers.** `DampingForce::world_force(velocity, mass, dt)` and
+  `DragForce::world_force(velocity)` joined `ThrustForce::world_force`, and
+  asteroids' hand-rolled `damping_force` — `-k·v` plus the `mass/dt` clamp,
+  written out because a provider is global — is deleted. What was **not** taken
+  is the other option that entry named: letting `PhysicsSystem` hold providers
+  that apply to one entity rather than to every body. Three `world_force`
+  methods is the cheaper shape and it stops being so the moment a fourth force
+  wants one, or a game wants several forces on one entity and has to call each
+  by hand every tick.
+
+  A trap worth keeping, found while testing it: `apply` **delegates** to
+  `world_force`, so a test asserting the two agree cannot fail — deleting the
+  cap from `world_force` left it green. The test asserts the model written out
+  (`-velocity * min(k, m/dt)`) and, in the capped regime, that one step lands
+  the velocity exactly on zero. Measured: that version goes red.
 
 - **There is no "what does entity E overlap" query.**
   `PhysicsSystem::overlap_sphere` takes a free centre and radius. An entity that
