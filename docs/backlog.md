@@ -1602,6 +1602,51 @@ uncertainty.
   tested. _Changes it_: a second sample growing a rebuilt panel, at which point
   the guard is a shape and not horde's alone.
 
+## The Pages gate fails on horde about two runs in three, and it is not the code
+
+`Render horde in a real browser` fails two checks, both in group C/D of
+`web/tools/browser-e2e.mjs`:
+
+```
+FAIL the clock advances under its own steam — x never changed
+FAIL the canvas changes between frames while the simulation runs — 1 distinct frame(s) across 16 samples
+```
+
+**Measured across four Pages runs on 2026-08-03**, with the sample code
+identical in the last three (`65e470b` differs from `e190e05` only in
+`.github/workflows/ci.yml`, and `658c779` only in `docs/backlog.md`):
+
+| commit    | Pages   | horde |
+| --------- | ------- | ----- |
+| `cd1ea54` | success | 26/26 |
+| `9515b23` | failure | 24/26 |
+| `e190e05` | failure | 24/26 |
+| `65e470b` | success | 26/26 |
+| `658c779` | failure | 24/26 |
+
+One pass and two failures on the same tree, so this is variance rather than a
+regression — but it was not failing at all before, so something moved the
+margin. The other three demos pass every time; horde is the heaviest.
+
+**The margin was always zero.** On the green runs the check reports
+`x took 2 values: 0.0, 1.0` — exactly the minimum it accepts. Horde's HUD logs
+its clock once every sixty ticks, which is one _simulated_ second, and under
+SwiftShader the accumulator's 64 ms clamp already makes simulated time run
+behind wall time. Two distinct values is what a passing run has ever produced.
+
+**What does not add up, and is the thing to chase first.** Check C polls for
+`TIMEOUT_MS`, which is 90 seconds — so a failure means horde produced one
+`time:` value in a minute and a half. Yet group E, later in the same run, passes
+`a running demo logs its HUD from inside the tick — 4 HUD line(s) in 4000 ms`.
+Four HUD lines in four seconds and one distinct clock value in ninety is a
+contradiction, and whichever half is wrong is the bug. Do not widen the window
+before understanding it: a fixed 800 ms sampling window in check D is a
+plausible thing to make patient, but check C's ninety seconds is not.
+
+Not investigated further because it sits outside the slice that surfaced it, and
+because `deploy to GitHub Pages` only skips — the demo site keeps serving its
+last good deploy, so this is a blocked deploy rather than a broken one.
+
 ## Considered and declined
 
 - **Adopting `crcbl_ui::hud`'s `Hud`/`HudPanel` in the four samples.** It was on
