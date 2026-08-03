@@ -20,102 +20,24 @@ CRATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "${CRATE_DIR}/../.." && pwd)"
 CONF="${CRATE_DIR}/tests/wayland-e2e-sway.conf"
 
-# How long to wait for sway to publish its socket. Generous, because a cold CI
-# runner starting a compositor for the first time is slow — and bounded, because
-# `docs/plan/12-testing.md` requires a deadline rather than a sleep.
-SOCKET_TIMEOUT_S="${CRCBL_E2E_SOCKET_TIMEOUT_S:-20}"
-POLL_INTERVAL_S=0.1
-
-if ! command -v sway >/dev/null 2>&1; then
-    echo "crcbl e2e: sway is not installed; install it or run the harness elsewhere" >&2
-    exit 1
-fi
-
-# A private XDG_RUNTIME_DIR so this never collides with a real session when a
-# developer runs it on a live desktop, and so the socket poll below cannot
-# accidentally find someone else's compositor.
-RUNTIME_DIR="$(mktemp -d -t crcbl-e2e.XXXXXX)"
-chmod 700 "$RUNTIME_DIR"
-export XDG_RUNTIME_DIR="$RUNTIME_DIR"
-SWAY_LOG="${RUNTIME_DIR}/sway.log"
-
-# wlroots: no real outputs, no real input devices, no GPU required.
-export WLR_BACKENDS=headless
-export WLR_LIBINPUT_NO_DEVICES=1
-export WLR_RENDERER_ALLOW_SOFTWARE=1
-# Inherit nothing from an outer session.
-unset WAYLAND_DISPLAY
-unset DISPLAY
-
-log_tail() {
-    echo "--- sway log tail ---" >&2
-    tail -n 40 "$SWAY_LOG" >&2 || true
-    echo "--- end sway log ---" >&2
-}
+# Starting a compositor is `sway-session.sh`'s job, because the CLI's scaffold
+# suite needs the same thing and two copies of a socket poll is where the two
+# drift apart. It sets `SWAY_RUNTIME_DIR`, `WAYLAND_DISPLAY`, `SWAYSOCK`,
+# `SWAY_LOG` and `SWAY_PID`, and defines `sway_log_tail`.
+# shellcheck source=crates/crcbl-shell/tests/sway-session.sh
+source "${CRATE_DIR}/tests/sway-session.sh"
 
 cleanup() {
     local status=$?
-    if [ -n "${SWAY_PID:-}" ]; then
-        kill "$SWAY_PID" 2>/dev/null || true
-        wait "$SWAY_PID" 2>/dev/null || true
-    fi
-    rm -rf "$RUNTIME_DIR"
+    sway_session_stop
     exit "$status"
 }
 trap cleanup EXIT INT TERM
 
-echo "crcbl e2e: starting headless sway (XDG_RUNTIME_DIR=$RUNTIME_DIR)"
-sway --config "$CONF" >"$SWAY_LOG" 2>&1 &
-SWAY_PID=$!
-
-# Poll for the socket with a deadline and a liveness check on the child. Never a
-# fixed sleep: a sleep long enough for the slowest runner wastes time on every
-# other one, and a sleep short enough to be cheap is a flake.
-SOCKET_NAME=""
-DEADLINE=$(( $(date +%s) + SOCKET_TIMEOUT_S ))
-while [ -z "$SOCKET_NAME" ]; do
-    SOCKET_NAME="$(find "$RUNTIME_DIR" -maxdepth 1 -name 'wayland-[0-9]*' ! -name '*.lock' \
-        -printf '%f\n' 2>/dev/null | sort | head -1 || true)"
-    [ -n "$SOCKET_NAME" ] && break
-    if ! kill -0 "$SWAY_PID" 2>/dev/null; then
-        echo "crcbl e2e: sway exited before opening a socket" >&2
-        log_tail
-        exit 1
-    fi
-    if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-        echo "crcbl e2e: no wayland socket in $RUNTIME_DIR after ${SOCKET_TIMEOUT_S}s" >&2
-        log_tail
-        exit 1
-    fi
-    sleep "$POLL_INTERVAL_S"
-done
-
-export WAYLAND_DISPLAY="$SOCKET_NAME"
-# The IPC socket can appear a moment after the display socket, and the close
-# and resize tests are driven through it, so poll for it under the same
-# deadline rather than racing.
-SWAYSOCK=""
-while [ -z "$SWAYSOCK" ]; do
-    SWAYSOCK="$(find "$RUNTIME_DIR" -maxdepth 1 -name 'sway-ipc.*' -print -quit 2>/dev/null || true)"
-    [ -n "$SWAYSOCK" ] && break
-    if ! kill -0 "$SWAY_PID" 2>/dev/null; then
-        echo "crcbl e2e: sway exited before opening its IPC socket" >&2
-        log_tail
-        exit 1
-    fi
-    if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-        echo "crcbl e2e: no sway IPC socket after ${SOCKET_TIMEOUT_S}s" >&2
-        log_tail
-        exit 1
-    fi
-    sleep "$POLL_INTERVAL_S"
-done
-export SWAYSOCK
-echo "crcbl e2e: socket up at \$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY (sway pid $SWAY_PID)"
-echo "crcbl e2e: sway IPC at $SWAYSOCK"
+sway_session_start "$CONF"
 
 cd "$REPO_ROOT"
-OUTPUT="${RUNTIME_DIR}/nextest.log"
+OUTPUT="${SWAY_RUNTIME_DIR}/nextest.log"
 set +e
 cargo nextest run \
     --locked \
@@ -130,7 +52,7 @@ set -e
 
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl e2e: the suite failed" >&2
-    log_tail
+    sway_log_tail
     exit "$STATUS"
 fi
 
@@ -141,12 +63,12 @@ fi
 # emits the count as `\e[1m10\e[0m tests run` and a plain-text match sees no
 # digits next to "tests run". That is how this guard first fired — on a run
 # where all ten tests had in fact passed.
-PLAIN="${RUNTIME_DIR}/nextest.plain.log"
+PLAIN="${SWAY_RUNTIME_DIR}/nextest.plain.log"
 sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$OUTPUT" >"$PLAIN"
 RAN="$(grep -Eo '[0-9]+ tests? run' "$PLAIN" | tail -1 | grep -Eo '^[0-9]+' || true)"
 if [ -z "$RAN" ] || [ "$RAN" -eq 0 ]; then
     echo "crcbl e2e: the suite reported no tests run — the gate is not gating" >&2
-    log_tail
+    sway_log_tail
     exit 1
 fi
 echo "crcbl e2e: $RAN tests ran against headless sway"
@@ -188,7 +110,7 @@ echo "crcbl e2e: $RAN tests ran against headless sway"
 # the suite above — so the window it reports is the size it asked for and the
 # mode it asked for, whatever the compositor thinks. Asserting a mode there
 # would be asserting against a window the compositor does not have.
-SANDBOX_LOG="${RUNTIME_DIR}/sandbox.log"
+SANDBOX_LOG="${SWAY_RUNTIME_DIR}/sandbox.log"
 
 # The size the sandbox asks for, which a floating window gets.
 SANDBOX_WINDOWED="1280x720"
@@ -225,14 +147,14 @@ run_sandbox() {
     set -e
     if [ "$status" -ne 0 ]; then
         echo "crcbl e2e: the sandbox failed against sway on $backend (exit $status)" >&2
-        log_tail
+        sway_log_tail
         exit "$status"
     fi
     if ! grep -q "$SANDBOX_FRAMES frames" "$SANDBOX_LOG" \
         || ! grep -q "wayland shell" "$SANDBOX_LOG"; then
         echo "crcbl e2e: the sandbox did not report $SANDBOX_FRAMES frames on the wayland shell" >&2
         cat "$SANDBOX_LOG" >&2
-        log_tail
+        sway_log_tail
         exit 1
     fi
     # Only a backend that attaches buffers has a window the compositor can have
@@ -249,7 +171,7 @@ run_sandbox() {
     if ! grep -q "at ${want_extent}, ${want_mode} " "$SANDBOX_LOG"; then
         echo "crcbl e2e: asked for $mode and did not get '${want_extent}, ${want_mode}'" >&2
         cat "$SANDBOX_LOG" >&2
-        log_tail
+        sway_log_tail
         exit 1
     fi
     echo "crcbl e2e: the sandbox presented $SANDBOX_FRAMES frames \
@@ -287,23 +209,23 @@ BIN_DIR="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}/debug"
 # `pump_until` follows.
 wait_for_line() {
     local what="$1" file="$2" pattern="$3"
-    local deadline=$(( $(date +%s) + SOCKET_TIMEOUT_S ))
+    local deadline=$(( $(date +%s) + SWAY_SESSION_TIMEOUT_S ))
     while ! grep -q "$pattern" "$file" 2>/dev/null; do
         if [ "$(date +%s)" -ge "$deadline" ]; then
-            echo "crcbl e2e: timed out after ${SOCKET_TIMEOUT_S}s waiting for $what" >&2
+            echo "crcbl e2e: timed out after ${SWAY_SESSION_TIMEOUT_S}s waiting for $what" >&2
             cat "$file" >&2 || true
-            log_tail
+            sway_log_tail
             exit 1
         fi
-        sleep "$POLL_INTERVAL_S"
+        sleep "$SWAY_SESSION_POLL_S"
     done
 }
 
 # `run_sandbox_toggle <backend>`
 run_sandbox_toggle() {
     local backend="$1"
-    local keys_in="${RUNTIME_DIR}/keys.fifo"
-    local keys_log="${RUNTIME_DIR}/keys.log"
+    local keys_in="${SWAY_RUNTIME_DIR}/keys.fifo"
+    local keys_log="${SWAY_RUNTIME_DIR}/keys.log"
     echo "crcbl e2e: running the sandbox windowed on $backend and pressing F11 at it"
 
     # The binaries directly rather than `cargo run`: these have to be killed
@@ -339,15 +261,15 @@ run_sandbox_toggle() {
     # Mapped, and therefore focused: sway focuses a window when it appears, and
     # a window appears when a buffer is attached. Nothing else in this session
     # is mapped to take it away — the sender never presents.
-    local deadline=$(( $(date +%s) + SOCKET_TIMEOUT_S ))
+    local deadline=$(( $(date +%s) + SWAY_SESSION_TIMEOUT_S ))
     while ! swaymsg -t get_tree | grep -q "\"app_id\": \"${SANDBOX_APP_ID}\""; do
         if [ "$(date +%s)" -ge "$deadline" ]; then
             echo "crcbl e2e: the sandbox never mapped a window sway could see" >&2
             cat "$SANDBOX_LOG" >&2
-            log_tail
+            sway_log_tail
             exit 1
         fi
-        sleep "$POLL_INTERVAL_S"
+        sleep "$SWAY_SESSION_POLL_S"
     done
     # It starts windowed, and reading that back is what stops the wait below
     # from being satisfied by a state that was already true before F11.
@@ -373,7 +295,7 @@ run_sandbox_toggle() {
     if [ "$status" -ne 0 ]; then
         echo "crcbl e2e: the sandbox failed after F11 on $backend (exit $status)" >&2
         cat "$SANDBOX_LOG" >&2
-        log_tail
+        sway_log_tail
         exit "$status"
     fi
     # And the swapchain followed: the summary's extent is the surface's, not the
@@ -381,7 +303,7 @@ run_sandbox_toggle() {
     if ! grep -q "at ${SANDBOX_BORDERLESS}, borderless (CloseRequested)" "$SANDBOX_LOG"; then
         echo "crcbl e2e: F11 did not leave the sandbox borderless at ${SANDBOX_BORDERLESS}" >&2
         cat "$SANDBOX_LOG" >&2
-        log_tail
+        sway_log_tail
         exit 1
     fi
     echo "crcbl e2e: F11 took the sandbox to $SANDBOX_BORDERLESS borderless on wayland/$backend"
