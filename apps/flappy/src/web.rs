@@ -11,7 +11,7 @@
 //! `requestAnimationFrame`, status, shutdown, a log queue the page drains — is
 //! not breakout's protocol. It is *the engine's* browser protocol, and every
 //! wasm sample will need exactly it. The only genuinely per-game parts are the
-//! symbol prefix and the two types named in [`Stage`].
+//! symbol prefix and the two types named in `crcbl::web`'s `Stage`.
 //!
 //! Nothing in the engine offers it: `crcbl-shell`, `crcbl-audio` and
 //! `crcbl-store` each export their own `__crcbl_web_*` ABI, and the sixth —
@@ -82,7 +82,7 @@
 //! behind `requestDevice` is resolved by the page's event loop — the very loop a
 //! blocking wait would be sitting inside. [`__crcbl_flappy_frame`] therefore
 //! does one of two different things depending on the status: while `BOOTING` it
-//! polls [`PendingLoop`](crate::app::PendingLoop), and once that yields it runs
+//! polls [`PendingLoop`], and once that yields it runs
 //! frames.
 //!
 //! # The clock is the browser's
@@ -91,7 +91,7 @@
 //! `Clock::Real` cannot be used here and neither can
 //! `crcbl::core::log::init_logging`, which stamps its logger with an `Instant`.
 //! The loop is built on `Clock::manual` and told how far to step from the
-//! `performance.now()` the shim passes in; the logger is [`WebLogger`], which
+//! `performance.now()` the shim passes in; the logger is `crcbl::web`'s, which
 //! has no clock at all.
 //!
 //! # The module imports nothing of its own
@@ -178,7 +178,7 @@ fn with_app<R>(
 
 /// The OPFS store the shim restored into, if `prepare` ran.
 ///
-/// [`crate::high_score`]'s browser arm. Returns `None` on a page that never
+/// `crate::best`'s browser arm. Returns `None` on a page that never
 /// prepared, which is a shim that started the game before the storage existed.
 #[must_use]
 pub fn opfs_store() -> Option<Rc<OpfsStorage>> {

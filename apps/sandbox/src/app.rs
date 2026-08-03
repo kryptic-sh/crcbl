@@ -124,8 +124,8 @@ pub struct Options {
     /// Run against [`HeadlessShell`](crcbl::shell::HeadlessShell) with a
     /// hand-driven clock instead of opening a window.
     pub headless: bool,
-    /// GPU backend to force, or `None` to let
-    /// [`crcbl::backend::open`] choose.
+    /// GPU backend to force, or `None` to let [`crcbl::backend`]'s own table
+    /// choose.
     ///
     /// `None` deliberately does **not** mean "null": see that module's docs for
     /// why a silent fallback to a backend that renders nothing is the wrong

@@ -195,6 +195,22 @@ jobs:
           cargo clippy --locked --all-features --workspace
           --exclude crcbl-vk --exclude crcbl-cli
           --target wasm32-unknown-unknown -- -D warnings
+      # The `docs` job runs rustdoc on the host only, and every sample's
+      # `web.rs` is behind `#[cfg(target_arch = "wasm32")]` — so the one module
+      # in each game that is *entirely* documentation (a symbol table, a
+      # call-ordering diagram, the ABI the JS shim is written against) was the
+      # one module no docs gate had ever read. Four samples were carrying
+      # broken intra-doc links when this was added.
+      #
+      # The samples only, deliberately: the engine crates have their own
+      # wasm-only rustdoc failures — links to items that are
+      # `#[cfg(not(target_arch = "wasm32"))]` — and `docs/backlog.md` carries
+      # the itemised list. Widening this line is what closes them.
+      - run: >-
+          cargo doc --locked --no-deps --target wasm32-unknown-unknown
+          -p breakout -p flappy -p asteroids -p horde -p sandbox -p bare
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   # Linux is the developer's daily driver, so it carries the full gate.
   test-linux:

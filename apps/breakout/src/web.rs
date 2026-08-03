@@ -78,7 +78,7 @@
 //!
 //! [`__crcbl_breakout_frame`] therefore does one of two different things
 //! depending on the status: while `BOOTING` it polls
-//! [`PendingLoop`](crate::app::PendingLoop), and once that yields it runs
+//! [`PendingLoop`], and once that yields it runs
 //! frames. Several rAF ticks pass before the first frame is drawn, and that is
 //! the design rather than a delay to be optimised away.
 //!
@@ -89,7 +89,7 @@
 //! here, and neither can `crcbl::core::log::init_logging`, which stamps its
 //! logger with an `Instant`. The loop is built on `Clock::manual` and told how
 //! far to step from the `performance.now()` the shim passes in; the logger is
-//! [`WebLogger`], which has no clock at all and lets the browser's console
+//! `crcbl::web`'s own logger, which has no clock at all and lets the console
 //! timestamp the line.
 //!
 //! # The module imports nothing of its own
@@ -183,7 +183,7 @@ fn with_app<R>(
 
 /// The OPFS store the shim restored into, if `prepare` ran.
 ///
-/// [`crate::high_score`]'s browser arm. Returns `None` on a page that never
+/// `crate::high_score`'s browser arm. Returns `None` on a page that never
 /// prepared, which is a shim that started the game before the storage existed.
 #[must_use]
 pub fn opfs_store() -> Option<Rc<OpfsStorage>> {

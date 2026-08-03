@@ -104,7 +104,7 @@
 //! `Clock::Real` cannot be used here and neither can
 //! `crcbl::core::log::init_logging`, which stamps its logger with an `Instant`.
 //! The loop is built on `Clock::manual` and told how far to step from the
-//! `performance.now()` the shim passes in; the logger is `WebLogger` below,
+//! `performance.now()` the shim passes in; the logger is `crcbl::web`'s own,
 //! which has no clock at all.
 //!
 //! # The module imports nothing of its own
@@ -191,7 +191,7 @@ fn with_app<R>(
 
 /// The OPFS store the shim restored into, if `prepare` ran.
 ///
-/// [`crate::high_score`]'s browser arm. Returns `None` on a page that never
+/// `crate::best`'s browser arm. Returns `None` on a page that never
 /// prepared, which is a shim that started the game before the storage existed.
 #[must_use]
 pub fn opfs_store() -> Option<Rc<OpfsStorage>> {

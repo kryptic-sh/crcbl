@@ -206,31 +206,44 @@ samples demonstrate), the library loop (what it does today, and what proves the
 public API is usable), or both behind a flag — which is a second template to
 keep working, and the e2e gate would have to run both.
 
-## The rustdoc gate never documents the wasm target, so every `web.rs` is unchecked
+## The wasm rustdoc gate covers the samples; the engine crates are still unread
 
-CI runs
-`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` on
-the host target only, and `apps/*/src/web.rs` is behind
-`#[cfg(target_arch = "wasm32")]`. So the one module in each sample that is pure
-documentation — a symbol table, a call-ordering diagram and the ABI contract the
-JS shim is written against — is the one module the docs gate has never read.
+CI ran `cargo doc` on the host target only, so `apps/*/src/web.rs` — behind
+`#[cfg(target_arch = "wasm32")]`, and the one module in each game that is
+_entirely_ documentation — had never been read by a docs gate. Four samples were
+carrying broken intra-doc links when the gate was added: `WebLogger` and `Stage`
+(both private inside `crcbl::web` now), `crate::high_score` in two games whose
+save module is `best`, two redundant explicit link targets, and — in
+`apps/sandbox/src/app.rs`, which has no browser build at all — a link to
+`crcbl::backend::open`, which is `#[cfg(not(target_arch = "wasm32"))]`. All
+fixed, and the `wasm32` CI job now runs
+`cargo doc --target wasm32-unknown-unknown` over the six app crates with
+`RUSTDOCFLAGS: -D warnings`. Falsified before committing: turning one of the
+fixed links back into a link fails the gate by name.
 
-Measured, not assumed.
-`cargo doc -p <sample> --no-deps --target wasm32-unknown-unknown` with the same
-`RUSTDOCFLAGS` reports **4 errors for breakout and 5 for flappy** today:
-`unresolved link to crcbl_shell` (the crate is reachable only as
-`crcbl::shell`), public docs linking to the private `WebLogger`, `Stage` and
-`crate::best`, and a redundant explicit link target. `apps/asteroids/src/web.rs`
-had the same set and was fixed as it was written, so it passes;
-`apps/horde/src/web.rs` inherited the fixed version and was checked the same way
-(`cargo doc -p horde --no-deps --target wasm32-unknown-unknown` with
-`RUSTDOCFLAGS="-D warnings"` is clean). The other two are untouched because
-neither slice's write scope included them.
+**What is not covered: the engine crates.** Widening that line to the workspace
+reports **24 errors**, all the same shape as the sandbox one — public
+documentation linking to items that do not exist on `wasm32`, invisible to a
+host-target gate. By file, from
+`cargo doc --locked --all-features --workspace --exclude crcbl-vk --exclude crcbl-cli --no-deps --target wasm32-unknown-unknown`:
 
-The fix is one line in `.github/workflows/ci.yml` — a second `cargo doc` step
-with `--target wasm32-unknown-unknown` over the four sample crates — plus the
-nine link fixes it would then demand. Not done here because adding a required CI
-job that fails on two crates this slice may not edit would land the tree red.
+| file                                  | errors |
+| ------------------------------------- | -----: |
+| `crates/crcbl/src/backend.rs`         |      9 |
+| `crates/crcbl/src/engine.rs`          |      4 |
+| `crates/crcbl-hal/src/lib.rs`         |      3 |
+| `crates/crcbl-wgpu/src/lib.rs`        |      2 |
+| `crates/crcbl-hal/src/device.rs`      |      2 |
+| `crates/crcbl-store/src/record.rs`    |      1 |
+| `crates/crcbl/src/lib.rs`             |      1 |
+| `crates/crcbl-hal/src/null/record.rs` |      1 |
+| `crates/crcbl-hal/src/caps.rs`        |      1 |
+
+Not fixed in the same change as the samples, because 24 doc edits made to
+satisfy a linter is exactly where a doc quietly becomes vaguer than it was —
+`Instance::create_device` is named in `crcbl-hal`'s module header as part of an
+argument about object safety, and the honest fix there is a sentence, not a
+de-linking. It wants its own pass. Widening the CI line is what closes it.
 
 ## The Windows `crcbl-cli` fixtures are fixed but nothing has run them on Windows
 
