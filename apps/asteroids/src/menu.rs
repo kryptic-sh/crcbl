@@ -412,8 +412,19 @@ mod tests {
         let extent = (960, 720);
         let mut menus = menus();
         menus.show(MenuKind::Paused);
-        let layout = menus.current().expect("a menu").layout(extent, &atlas);
-        let over = (layout.items()[0].min + layout.items()[0].max) * 0.5;
+
+        // **Slot 1, not slot 0.** `UiState::interact` fires on release only
+        // when the capture names the id the cursor is over, and these two menus
+        // agree on no id at slot 0 — one opens with `RESUME`, the other with
+        // this game's own action — so a press there could not have fired
+        // whatever the container did with the capture. Written that way the
+        // test passed with `MenuSet::show`'s `self.ui.clear()` deleted
+        // outright. `FULLSCREEN_ID` sits at slot 1 in both, which is what gives
+        // the release something to fire.
+        const SHARED: usize = 1;
+        let shared_id = menus.current().expect("a menu").items()[SHARED].id;
+        let paused = menus.current().expect("a menu").layout(extent, &atlas);
+        let over = (paused.items()[SHARED].min + paused.items()[SHARED].max) * 0.5;
         point(
             &mut menus,
             extent,
@@ -424,16 +435,23 @@ mod tests {
             },
         );
         assert_eq!(
-            menus.current().expect("a menu").state(0),
+            menus.current().expect("a menu").state(SHARED),
             ButtonState::Pressed,
         );
 
         menus.show(MenuKind::Start);
         assert_eq!(
+            menus.current().expect("a menu").items()[SHARED].id,
+            shared_id,
+            "the two menus stopped sharing a button, so this test guards nothing",
+        );
+        assert_eq!(
             menus.current().expect("a menu").state(0),
             ButtonState::Hovered,
             "the new menu inherited a press nobody is making",
         );
+        let start = menus.current().expect("a menu").layout(extent, &atlas);
+        let over = (start.items()[SHARED].min + start.items()[SHARED].max) * 0.5;
         assert_eq!(
             point(
                 &mut menus,

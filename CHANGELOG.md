@@ -16,6 +16,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl-render** (`sprite_pass`): `batch_count(&[Sprite]) -> usize` answers
+  how many draw calls a sprite list will cost, without a device. The batching
+  rule — a run of consecutive sprites naming one sheet is one draw, so `A A B A`
+  is three and not two — was previously readable only by writing it out again,
+  which `apps/horde` did to put the number on its debug panel. It delegates to
+  the batcher the pass itself uses, so it cannot drift from it.
+
 - **crcbl**: the simulation half of the engine is re-exported, so a game names
   `crcbl` and the standard library and nothing else. `crcbl::ecs`,
   `crcbl::phys`, `crcbl::net`, `crcbl::server`, `crcbl::client`, `crcbl::input`,

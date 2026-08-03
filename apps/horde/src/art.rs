@@ -197,12 +197,11 @@ pub struct Scene {
 /// `docs/plan/sample/03-horde.md` is that the CPU cost of a frame is flat from
 /// one thousand enemies to ten thousand. Neither can be read off a frame rate.
 ///
-/// [`SceneStats::batches`] is counted here rather than asked of
-/// [`SpriteRenderer`], which has no public batch count — so it is this module's
-/// **mirror** of `sprite_pass`'s rule (a batch is a run of consecutive sprites
-/// naming one sheet) rather than the pass's own answer. That is a real
-/// weakness and `docs/backlog.md` records it: a change to the engine's batching
-/// rule would leave this number right and the picture wrong.
+/// [`SceneStats::batches`] is
+/// [`crcbl::render::sprite_pass::batch_count`], the pass's own answer, and it
+/// used to be a mirror of the rule written out here — which would have left
+/// this number right and the picture wrong the day the engine's batching
+/// changed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SceneStats {
     /// Enemies, gems and bolts the simulation handed over, before the cull.
@@ -368,26 +367,10 @@ impl Scene {
             field,
             culled: field + 1 - drawn,
             drawn,
-            batches: batches(frame),
+            batches: crcbl::render::sprite_pass::batch_count(frame),
         };
         frame
     }
-}
-
-/// How many draw calls a resolved frame will cost.
-///
-/// `SpriteRenderer` starts a new batch whenever consecutive sprites name a
-/// different sheet — `A A B A` is three, not two — so this is a run count and
-/// not a distinct-sheet count. See [`SceneStats`] for why it is a copy of that
-/// rule rather than a call into it.
-fn batches(frame: &[Sprite]) -> usize {
-    if frame.is_empty() {
-        return 0;
-    }
-    1 + frame
-        .windows(2)
-        .filter(|w| w[0].sheet != w[1].sheet)
-        .count()
 }
 
 // ---------------------------------------------------------------------------
@@ -939,8 +922,7 @@ mod tests {
         });
     }
 
-    /// **A batch is a run, not a sheet**, which is `sprite_pass`'s rule and the
-    /// one [`batches`] has to mirror exactly.
+    /// **A batch is a run, not a sheet**, asked of the engine that decides it.
     ///
     /// Written because the ten-thousand test below **cannot** tell the two
     /// apart: this game emits its two sheets in one order, so a run count and a
@@ -948,6 +930,11 @@ mod tests {
     /// where they differ, and it is the shape a future layer order would
     /// produce — so the rule is pinned here rather than left to be discovered
     /// by a frame that draws in the wrong order and reports the wrong number.
+    ///
+    /// This used to call a copy of the rule kept in this module. It calls
+    /// [`crcbl::render::sprite_pass::batch_count`] now, so the sample's central
+    /// claim is checked against the pass rather than against horde's memory of
+    /// what the pass does.
     #[test]
     fn a_batch_is_a_run_of_one_sheet_and_not_a_distinct_sheet_count() {
         with_scene(|scene| {
@@ -961,6 +948,7 @@ mod tests {
             let (a, b) = (sprite(scene.player), sprite(scene.bolt));
             assert_ne!(a.sheet, b.sheet, "the fixture needs two sheets");
 
+            let batches = crcbl::render::sprite_pass::batch_count;
             assert_eq!(batches(&[]), 0);
             assert_eq!(batches(&[a]), 1);
             assert_eq!(batches(&[a, a, a]), 1);

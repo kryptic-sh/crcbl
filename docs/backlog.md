@@ -644,30 +644,6 @@ The modular panel is built and all three samples switch it on with F3 (or
   picture of either game. What it would take: a `--capture <path>` on the sample
   front ends, reading the swapchain image back the way `vk_e2e.rs`'s
   `render_sprites` does.
-- **Four samples' `switching_menus_drops_the_press` asserts nothing.**
-  `apps/breakout/src/menu.rs`, `apps/flappy/src/menu.rs`,
-  `apps/asteroids/src/menu.rs` and `apps/horde/src/menu.rs` each press the
-  **first** button of one menu and then release over the first button of
-  another. `UiState::interact` fires on release only when the capture names the
-  same `WidgetId` the cursor is over, and no two of those samples' menus share
-  an id in slot 0 — breakout's pause menu opens with `Resume`, its start menu
-  with `Launch` — so the release could not have fired whatever the container
-  did, and the test passes with the capture never cleared at all. Its other
-  assertion is vacuous the same way: the menu being switched _to_ was never
-  pressed, so "the new menu inherited a press" cannot be observed on it.
-
-  Verified by falsification, not by reading: deleting `self.ui.clear()` from
-  `MenuSet::show` leaves all four green. This predates the extraction — the
-  tests are the originals, unchanged in shape — and `crcbl-ui`'s own
-  `switching_menus_drops_the_press` now covers the behaviour with teeth (it goes
-  red, because it presses the `FULLSCREEN` button both menus carry under one
-  id). **Not fixed here** because the behaviour is entirely the engine's now and
-  a per-sample copy of it is redundant; what would make the four bite is
-  pressing slot 1 rather than slot 0, except in horde, whose pause and level-up
-  menus share no id at all and which would have to switch pause → start instead.
-  `apps/sandbox/src/menu.rs`'s `hiding_the_menu_drops_the_press` does bite, and
-  horde's `a_new_offer_drops_the_press` does too — both confirmed red.
-
 - **Flappy's swept-sphere collision is exercised, not demonstrated.**
   `game::fatal` sweeps the bird's path with `PhysicsSystem::sweep_sphere`
   because that is the correct query, but at this game's speeds a point test at
@@ -1019,19 +995,6 @@ annotated.
   changes what the game _is_ — the walls are what makes kiting finite), or
   **admit the count is a benchmark target** and let the exit criterion carry two
   numbers, one for the budget and one for the game. Nobody has decided.
-
-- **`SpriteRenderer` has no batch count, so the sample's central claim is
-  checked against a copy of the rule.** `art::batches` counts runs of
-  consecutive sprites naming one sheet, which is exactly what
-  `crcbl_render::sprite_pass::batch` does; `SpriteRenderer` exposes
-  `sheet_count()` and nothing else.
-  `a_batch_is_a_run_of_one_sheet_and_not_a_distinct_sheet_count` pins the mirror
-  at `A A B A` = 3 — the case a distinct-sheet count gets wrong, and one this
-  game's own frames cannot produce, so it had to be written synthetically — but
-  nothing would notice the engine's rule changing underneath. Wanted: a
-  `batch_count()` beside `sheet_count()`, returning
-  `self.batches[self.frame].len()`. Three lines; not taken because `crates/` was
-  outside the slice's write scope.
 
 - **The CPU cull is still per-sprite and still `N` per frame**, and it is now
   measured: 28 µs at ten thousand, of a 16.67 ms budget. That is the work P7's

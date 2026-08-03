@@ -1061,6 +1061,26 @@ const fn frame_entries(constants: BufferHandle, instances: BufferHandle) -> [Bin
     ]
 }
 
+/// How many draw calls `sprites` will cost this pass.
+///
+/// The batching rule without the batches: a run of consecutive sprites naming
+/// one sheet is one draw, so `A A B A` is **three** and a distinct-sheet count
+/// would say two. Pure, so a caller can ask before there is a device — which is
+/// the point, because the alternative is what `apps/horde` used to do: restate
+/// the rule in its own module and count with that. A second copy of a rule is
+/// where the number stays right while the picture goes wrong.
+///
+/// It delegates to the pass's own batcher rather than walking the slice again,
+/// so there is one implementation and this cannot drift from it. The
+/// `Vec` it allocates is why this is a diagnostic and a test's question rather
+/// than something to call every frame; the pass itself uses `batch` directly.
+#[must_use]
+pub fn batch_count(sprites: &[Sprite]) -> usize {
+    // Stride zero: it only sets each batch's constant offset, which no count
+    // depends on.
+    batch(sprites, 0).len()
+}
+
 /// Splits `sprites` into runs of consecutive sprites sharing a sheet, giving
 /// each run the byte offset of its constant block.
 ///
@@ -1728,6 +1748,41 @@ mod tests {
             }]
         );
         assert!(batch(&[], 256).is_empty());
+    }
+
+    /// The public count answers what the pass records, at every shape the rule
+    /// distinguishes.
+    ///
+    /// [`batch_count`] exists so a consumer can stop keeping its own copy of the
+    /// batching rule — `apps/horde` did, to put a number on its debug panel —
+    /// and a count that could disagree with the batcher would be the same
+    /// defect in a new place. It delegates, so this is a guard against someone
+    /// later deciding the delegation is wasteful and walking the slice twice.
+    #[test]
+    fn the_public_batch_count_is_the_batchers_own_answer() {
+        let (a, b) = (SheetId(0), SheetId(1));
+        for sprites in [
+            vec![],
+            vec![sprite(a)],
+            vec![sprite(a), sprite(a), sprite(a)],
+            vec![sprite(a), sprite(b)],
+            vec![sprite(a), sprite(a), sprite(b), sprite(a)],
+            vec![sprite(a), sprite(b), sprite(a), sprite(b)],
+        ] {
+            assert_eq!(
+                batch_count(&sprites),
+                batch(&sprites, 256).len(),
+                "{} sprites",
+                sprites.len(),
+            );
+        }
+        // And the value itself, so this is not two wrongs agreeing: `A A B A`
+        // is the case a distinct-sheet count gets wrong.
+        assert_eq!(
+            batch_count(&[sprite(a), sprite(a), sprite(b), sprite(a)]),
+            3
+        );
+        assert_eq!(batch_count(&[]), 0);
     }
 
     /// **Batch `n` gets batch `n`'s first sprite, and every block gets the same
