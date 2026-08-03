@@ -1604,6 +1604,36 @@ uncertainty.
 
 ## Considered and declined
 
+- **Adopting `crcbl_ui::hud`'s `Hud`/`HudPanel` in the four samples.** It was on
+  the audit's list as "the engine feature was already bought", and it is not:
+  the type does not do what any of the four HUDs needs.
+
+  **`Label` has no colour.** Colour lives on `Style`, one per panel, so a
+  panel's labels are all one colour. Every sample draws its stat line yellow,
+  its state line pale blue and — breakout — its lives line green, which is three
+  colours in one panel and is not expressible. That alone ends it.
+
+  Two smaller mismatches behind it. `HudPanel` sizes itself from its content,
+  where horde's backdrop width is a **measured** constant with a test putting a
+  stated worst-case run through the real `FontAtlas` and requiring it to fit;
+  auto-sizing throws that guard away. And `Hud::render` routes button clicks,
+  which a read-only stat panel has no use for.
+
+  **What is actually shared between the four is not the drawing.** Each has a
+  private `HudStrings` that rebuilds its strings only when the numbers behind
+  them change — the caching is what keeps a steady-state frame from allocating.
+  But the structs differ in their fields and their cache keys, because each game
+  shows different numbers: that is duplicated _shape_, not duplicated knowledge,
+  and the logic under it is three lines. Extracting it would be an abstraction
+  over a coincidence.
+
+  **The finding this leaves is about the engine, not the samples**:
+  `crcbl_ui::hud` has no consumer anywhere in the workspace. It is either owed a
+  `color` on `Label` and an optional explicit panel size — at which point the
+  samples could adopt it — or it should be deleted. Not decided here, because
+  adding a field nothing uses is the speculative-machinery mistake and deleting
+  a module is not a call to make inside an adoption task.
+
 - **Building the demos' export names in `web/engine/demo.js` from the sample's
   slug.**
   `exports[\`**crcbl\_${sample}\_frame\`]`would delete the thirty-line`bind`block from each`web/demos/<name>/main.js`and is the obvious way to write it. Declined because it defeats the gate:`web/tools/check-exports.mjs`learns which exports the JS depends on by scanning for a literal`.**crcbl\_…`and fails when one is missing from the artifact. Verified both directions — with the names spelled out, renaming`\_\_crcbl_breakout_frame`to`…\_framee`in`main.js`fails the check with that symbol named; behind a template literal the scan sees nothing and a typo becomes a`TypeError`
