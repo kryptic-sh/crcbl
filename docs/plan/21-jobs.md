@@ -223,3 +223,79 @@ is hybrid. Corrected policy: **slew below a threshold (~50 ms), step above it**,
 with a defined sim-side policy for the stepped interval (drop or fast-forward
 the skipped ticks, logged and surfaced in the netgraph). Absolutism replaced by
 a documented threshold.
+
+## Correction (priority, 2026-08-03)
+
+**This topic is moved up: the wasm target is to reach thread-topology parity
+with native, rather than staying single-threaded as a post-MVP note.** What
+follows is what was measured before committing, because two of the three
+findings change the shape of the work rather than its schedule.
+
+### Finding 1 — a threaded wasm artifact builds today
+
+`RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals" cargo +nightly build --target wasm32-unknown-unknown -Z build-std=std,panic_abort`
+compiles clean on `nightly-2026-07-02`, with one warning:
+`unstable feature specified for -Ctarget-feature: atomics`.
+
+**Cost: it is nightly, and `rust-toolchain.toml` pins an exact stable on
+purpose** — its own comment calls a floating channel a broken promise, because
+every clippy job runs `-D warnings` and a new release turns CI red on an
+untouched repository. A threaded wasm build therefore needs a _second_, pinned
+nightly for that target only, in the shape the `decoder-fuzz` job already uses.
+
+### Finding 2 — `std::thread::spawn` compiles on wasm and fails at run time
+
+This is the one that matters. In `library/std/src/sys/thread/mod.rs`, the arm
+`all(target_family = "wasm", target_feature = "atomics")` takes **only `sleep`**
+from `thread/wasm.rs`; `Thread`, `available_parallelism`, `yield_now` and
+`set_name` all come from `thread/unsupported.rs`, where `Thread::new` returns
+`Err(io::Error::UNSUPPORTED_PLATFORM)` and `available_parallelism` returns
+`Err`.
+
+So enabling atomics buys shared memory and working atomic primitives — and no
+way to start a thread. A wasm module cannot create its own worker: only the host
+can instantiate the module again against the shared `WebAssembly.Memory`.
+
+**Consequence for the engine's shape.** `crcbl-jobs` must not spawn through
+`std::thread`. It needs a spawn seam — native behind `std::thread`, wasm behind
+a JS worker shim the `web/` half owns — and every subsystem thread in the
+topology above starts through that seam. Designing it in from the start is
+cheap; retrofitting it after `std::thread::spawn` is written through the crate
+is not, which is the whole reason this was measured before any code.
+
+### Finding 3 — the ceiling, which parity cannot reach
+
+Three gaps stay open however much work is done, and they are properties of the
+platform:
+
+1. **The main thread cannot block.** `Atomics.wait` throws on the browser's main
+   thread. The native topology's converge thread waits on mailboxes; the
+   browser's main thread may not, so converge has to live in a worker and the
+   main thread becomes a pure event forwarder.
+2. **A dedicated worker has no `requestAnimationFrame`.** Moving render to a
+   worker (which `OffscreenCanvas` allows) gives up rAF's vsync alignment,
+   because rAF is a `Window` API. Presenting from a worker is timer- or
+   message-driven, which is not the same clock native gets.
+3. **`SharedArrayBuffer` still needs COOP/COEP**, which GitHub Pages cannot set
+   — see topic 10's 2026-07-27 correction. The `coi-serviceworker` shim is the
+   only route, and it costs a reload on first load plus CORP on every
+   cross-origin subresource.
+
+**So "parity" is precise rather than total**: the _thread topology_ — sim,
+audio, io, net and a work-stealing pool, each publishing through latest-wins
+mailboxes — can match native. _Loop ownership and presentation timing_ cannot,
+and no amount of threading changes that: the browser owns the outer loop, which
+is the constraint that already forbids a `crcbl::run(game)`.
+
+### Order
+
+1. The spawn seam in `crcbl-jobs`, with the native backend and a single-thread
+   fallback. Everything else depends on its shape.
+2. Cross-origin isolation on the Pages deploy, proved by the browser gate
+   asserting `crossOriginIsolated === true` before anything relies on it.
+3. The wasm worker backend behind the seam, and the pinned nightly for it.
+4. Subsystem threads, in the order topic 21 already lists.
+
+Step 2 is a gate rather than a step: if isolation cannot be had on Pages, the
+demos stay single-threaded through the fallback and native keeps the topology —
+which is exactly what the seam in step 1 exists to make survivable.
