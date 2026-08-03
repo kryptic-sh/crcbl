@@ -2951,6 +2951,16 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         self.paused
     }
 
+    /// Stops or resumes the simulation, without a key event.
+    ///
+    /// For an embedder with a reason of its own — a tab going invisible, a
+    /// modal opening over the canvas — and for a test that wants a paused loop
+    /// without scripting the keystroke that gets there. [`PAUSE_KEY`] is the
+    /// player's way in and goes through the same field.
+    pub const fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+    }
+
     /// The swapchain's current extent, in pixels.
     #[must_use]
     pub fn extent(&self) -> (u32, u32) {
@@ -2987,6 +2997,12 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     #[must_use]
     pub const fn gpu(&self) -> &G::Gpu {
         &self.gpu
+    }
+
+    /// The GPU bundle, mutably — for a game whose read-back builds something,
+    /// and for an embedder that has its own use for the device between frames.
+    pub const fn gpu_mut(&mut self) -> &mut G::Gpu {
+        &mut self.gpu
     }
 
     /// The debug panel, for a test that asks which sections a frame gathered.

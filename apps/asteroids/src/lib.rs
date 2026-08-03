@@ -57,7 +57,7 @@ mod menu;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 
-pub use app::{AsteroidsError, Loop, PendingLoop, Summary, run};
+pub use app::{Asteroids, AsteroidsError, Loop, PendingLoop, Summary, run};
 pub use args::{Invocation, Options, USAGE, parse};
 pub use game::{
     BULLET_LIFE, BULLET_RADIUS, BULLET_SPEED, BulletView, DEFAULT_SEED, DEFAULT_TICK_HZ,
@@ -67,4 +67,4 @@ pub use game::{
     WORLD_HALF_HEIGHT, WORLD_HALF_WIDTH, hash_unit, heading_vector, lerp_angle, wave_rock_position,
     wave_rock_velocity, wave_rocks, wrap_axis, wrap_position, wrap_to_pi,
 };
-pub use menu::{MenuAction, MenuKind, Menus};
+pub use menu::{FIRE_ID, Fire, MenuKind, Menus, fire_from_id};

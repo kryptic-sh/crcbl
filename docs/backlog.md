@@ -702,23 +702,29 @@ The modular panel is built and all three samples switch it on with F3 (or
   was already carried by `FrameInfo::ticks`. `app.rs` lost 288 lines, `web.rs`
   28, its 86 tests pass and its browser gate ran 27/27.
 
-  asteroids and horde should be next and should be the same shape; horde's menu
-  has two game actions (`Restart` and `Choose(n)`), so it is the first to
-  exercise more than one `WidgetId` above `FIRST_GAME_ID`. `apps/sandbox` is the
-  one to watch: it has no `MenuKind`, its tick body touches its GPU
-  (`gpu.advance(dt)`, which is why `HostedGame::tick` takes `&mut Self::Gpu`),
-  and it reads `alpha` after the tick loop (which is why `FrameInfo` carries
-  it). None of that is verified against sandbox — it was read out of
-  `apps/sandbox/src/app.rs` while designing the trait, not compiled.
+  **Asteroids followed** and cost `app.rs` 234 lines and `web.rs` 29, with its
+  93 tests passing and its browser gate at 27/27. It needed `Loop::set_paused`
+  and `Loop::gpu_mut` — one test paused by assignment, and `Gpu::scene_sprites`
+  takes `&mut self` because it consumes the frame's render state.
 
-- **asteroids and horde never report a refused fullscreen.** Found while
-  extracting `ModeRequest`: breakout, flappy and sandbox all call
-  `check_mode_request` once a frame, and those two have no such call and no
-  equivalent. A player on a tiling window manager presses F11 in asteroids and
-  gets no window change and no log line saying why. **Not fixed there**, because
-  adding a call that starts emitting warnings is a behaviour change and the
-  commit it was found in was an extraction. The fix is one line in each of the
-  two `frame` bodies, now that `ModeRequest::check` exists.
+  horde should be next and should be the same shape, except that its menu has
+  two game actions (`Restart` and `Choose(n)`), so it is the first to need more
+  than one `WidgetId` above `FIRST_GAME_ID`. `apps/sandbox` is the one to watch:
+  it has no `MenuKind`, its tick body touches its GPU (`gpu.advance(dt)`, which
+  is why `HostedGame::tick` takes `&mut Self::Gpu`), and it reads `alpha` after
+  the tick loop (which is why `FrameInfo` carries it). None of that is verified
+  against sandbox — it was read out of `apps/sandbox/src/app.rs` while designing
+  the trait, not compiled.
+
+- **horde never reports a refused fullscreen.** Found while extracting
+  `ModeRequest`: breakout, flappy and sandbox all called `check_mode_request`
+  once a frame, and asteroids and horde had no such call and no equivalent. A
+  player on a tiling window manager pressed F11 and got no window change and no
+  log line saying why.
+
+  **Fixed for asteroids** by hosting it in `crcbl::engine::Loop`, which checks
+  once a frame for every game it hosts — so this closes for horde too the moment
+  horde converts, and no per-game line is needed.
 
   **The error half has landed** — `crcbl::engine::LoopError<G>` — and it cost
   far less than this entry predicted, so the prediction is worth correcting

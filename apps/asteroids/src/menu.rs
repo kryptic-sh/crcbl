@@ -50,58 +50,40 @@ use crcbl::ui::menu::{Menu, MenuItem, MenuSet};
 
 use crate::game::{GameState, RenderState};
 
-/// What firing a menu button asks the loop to do.
+/// What only asteroids's menus do.
 ///
-/// An action rather than a key: a button that "presses Space" would be a menu
-/// re-entering its own input path, and the loop would have to tell a synthesised
-/// key from a real one. The loop matches on this and does the thing directly —
-/// except [`MenuAction::Fire`], which really is a key, because starting and
-/// restarting a game is the *simulation's* business and the simulation is driven
-/// by its action map.
+/// Resume, fullscreen and the debug panel are the *loop's* — they are the menu
+/// equivalents of its three reserved keys — and live in
+/// [`crcbl::engine::MenuAction`]. This is what is left, and it is an action
+/// rather than a key because a button that "presses Space" would be a menu
+/// re-entering its own input path.
+///
+/// It is nonetheless delivered to the simulation *as* a key, in
+/// `crate::app::Asteroids`'s `HostedGame::apply`: starting and restarting a game is the simulation's business and the
+/// simulation is driven by its action map.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MenuAction {
-    /// Un-pause.
-    Resume,
-    /// Pull the trigger — which starts a waiting game and restarts a finished
-    /// one, exactly as `run_tick` reads it.
-    Fire,
-    /// Toggle borderless fullscreen.
-    Fullscreen,
-    /// Toggle the debug panel.
-    DebugOverlay,
+pub enum Fire {
+    /// Pull the trigger — which starts a waiting game and restarts a finished one.
+    Now,
 }
 
-impl MenuAction {
-    /// The [`WidgetId`] this action is carried by.
-    ///
-    /// The discriminant, written out rather than derived, because a `WidgetId`
-    /// that changed when a variant was inserted would silently re-point every
-    /// button.
-    const fn id(self) -> WidgetId {
-        match self {
-            Self::Resume => 1,
-            Self::Fire => 2,
-            Self::Fullscreen => 3,
-            Self::DebugOverlay => 4,
-        }
-    }
+/// The [`WidgetId`] carrying [`Fire::Now`].
+///
+/// Numbered from [`crcbl::engine::FIRST_GAME_ID`], not from one: everything
+/// below that is the loop's, and a button that claimed
+/// [`crcbl::engine::RESUME_ID`] would un-pause instead.
+pub const FIRE_ID: WidgetId = crcbl::engine::FIRST_GAME_ID;
 
-    /// The action an id names, or `None` for an id from another menu system.
-    #[must_use]
-    pub const fn from_id(id: WidgetId) -> Option<Self> {
-        match id {
-            1 => Some(Self::Resume),
-            2 => Some(Self::Fire),
-            3 => Some(Self::Fullscreen),
-            4 => Some(Self::DebugOverlay),
-            _ => None,
-        }
-    }
+/// The half of the id mapping that is asteroids's, for
+/// [`crcbl::engine::MenuAction::from_id`]. Never asked about a reserved id.
+#[must_use]
+pub const fn fire_from_id(id: WidgetId) -> Option<Fire> {
+    if id == FIRE_ID { Some(Fire::Now) } else { None }
 }
 
-/// An item for `action`, labelled and with its key printed beside it.
-fn item(action: MenuAction, label: &str, hint: &str) -> MenuItem {
-    MenuItem::new(action.id(), label, hint)
+/// An item on `id`, labelled and with its key printed beside it.
+fn item(id: WidgetId, label: &str, hint: &str) -> MenuItem {
+    MenuItem::new(id, label, hint)
 }
 
 /// Which menu a frame shows.
@@ -150,7 +132,7 @@ pub type Menus = MenuSet<MenuKind>;
 /// The three menus, with nothing shown.
 #[must_use]
 pub fn menus() -> Menus {
-    use MenuAction::{DebugOverlay, Fire, Fullscreen, Resume};
+    use crcbl::engine::{DEBUG_OVERLAY_ID, FULLSCREEN_ID, RESUME_ID};
     MenuSet::new(
         MenuKind::None,
         vec![
@@ -159,9 +141,9 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "ASTEROIDS",
                     vec![
-                        item(Fire, "FLY", "SPACE"),
-                        item(Fullscreen, "FULLSCREEN", "F11"),
-                        item(DebugOverlay, "DEBUG PANEL", "F3"),
+                        item(FIRE_ID, "FLY", "SPACE"),
+                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        item(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
                     ],
                 ),
             ),
@@ -170,9 +152,9 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "PAUSED",
                     vec![
-                        item(Resume, "RESUME", "ESC"),
-                        item(Fullscreen, "FULLSCREEN", "F11"),
-                        item(DebugOverlay, "DEBUG PANEL", "F3"),
+                        item(RESUME_ID, "RESUME", "ESC"),
+                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        item(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
                     ],
                 ),
             ),
@@ -181,8 +163,8 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "GAME OVER",
                     vec![
-                        item(Fire, "TRY AGAIN", "SPACE"),
-                        item(Fullscreen, "FULLSCREEN", "F11"),
+                        item(FIRE_ID, "TRY AGAIN", "SPACE"),
+                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
                     ],
                 ),
             ),
@@ -194,6 +176,13 @@ pub fn menus() -> Menus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Asteroids' whole menu vocabulary: the loop's three, plus [`Fire`].
+    ///
+    /// Only the tests name it. `app.rs` never sees a whole `MenuAction` — the
+    /// loop keeps its own three and hands `Asteroids::apply` the [`Fire`] it
+    /// could not answer itself.
+    type MenuAction = crcbl::engine::MenuAction<Fire>;
     use crcbl::math::Vec2;
     use crcbl::ui::text::FontAtlas;
     use crcbl::ui::{ButtonState, PointerInput};
@@ -204,14 +193,16 @@ mod tests {
     /// has no idea what an id means here — so this is the one translation, in
     /// one place, the way `app.rs` does it.
     fn activate(menus: &mut Menus) -> Option<MenuAction> {
-        menus.activate().and_then(MenuAction::from_id)
+        menus
+            .activate()
+            .and_then(|id| MenuAction::from_id(id, fire_from_id))
     }
 
     /// The action a frame of pointer input fired, if any.
     fn point(menus: &mut Menus, extent: (u32, u32), pointer: PointerInput) -> Option<MenuAction> {
         menus
             .point(extent, &FontAtlas::built_in(), pointer)
-            .and_then(MenuAction::from_id)
+            .and_then(|id| MenuAction::from_id(id, fire_from_id))
     }
 
     fn render(state: Option<GameState>) -> RenderState {
@@ -293,7 +284,7 @@ mod tests {
                 .items()
                 .iter()
                 .map(|item| {
-                    MenuAction::from_id(item.id)
+                    MenuAction::from_id(item.id, fire_from_id)
                         .unwrap_or_else(|| panic!("{kind:?}: {} names no action", item.label))
                 })
                 .collect();
@@ -319,7 +310,7 @@ mod tests {
         for kind in [MenuKind::Start, MenuKind::GameOver] {
             menus.show(kind);
             for item in menus.current().expect("a menu").items() {
-                if MenuAction::from_id(item.id) == Some(MenuAction::Fire) {
+                if MenuAction::from_id(item.id, fire_from_id) == Some(MenuAction::Game(Fire::Now)) {
                     assert_eq!(item.hint, "SPACE", "{kind:?}: {}", item.label);
                 }
             }
@@ -393,7 +384,10 @@ mod tests {
             down: false,
             released: true,
         };
-        assert_eq!(point(&mut menus, extent, up), Some(MenuAction::Fire));
+        assert_eq!(
+            point(&mut menus, extent, up),
+            Some(MenuAction::Game(Fire::Now))
+        );
 
         let corner = PointerInput {
             pos: Vec2::new(3.0, 3.0),

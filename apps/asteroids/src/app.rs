@@ -1,56 +1,51 @@
-//! The asteroids engine loop: window, fixed-timestep accumulator, one draw.
+//! Asteroids' start-up, and the seven methods the engine's loop calls.
 //!
-//! Shape matches `apps/flappy/src/app.rs` and `apps/breakout/src/app.rs` — same
-//! clock, same event loop, same accumulator, same three menus, same pause,
-//! fullscreen and focus handling. **This is the third copy of each of those**,
-//! and `docs/backlog.md` says so: the pump's key branch, `lose_focus`, the F11
-//! toggle, `Loop::paused` and the pointer's press-capture bookkeeping are the
-//! same code in three files. So, now, are [`PendingLoop`] and
-//! [`Loop::set_frame_step`] — the polled browser start-up below — and
-//! `crate::web`, which is S1B finding 2 written out a third time. See the S2
-//! findings note in `docs/plan/ROADMAP.md`.
+//! # There is no loop in this file
+//!
+//! There was, and `docs/backlog.md` called it the third copy: the pump's key
+//! branch, `lose_focus`, the F11 toggle, `Loop::paused` and the pointer's
+//! press-capture bookkeeping were the same code in three files. All of it is
+//! [`crcbl::engine::Loop`]'s now and this crate reaches it through
+//! [`HostedGame`].
+//!
+//! ```text
+//! Loop::frame()                     ← the engine's
+//!   pump, input, menu, pause, resize
+//!   run_ticks  ─────────────────────→ Asteroids::tick
+//!   draw_list.clear()
+//!     ─────────────────────────────→ Asteroids::draw  (field + HUD)
+//!     menu, debug overlay             ← the engine's
+//!   gpu.frame()
+//! ```
 //!
 //! # What is this sample's own
 //!
 //! **The alpha.** Every other sample draws the last tick's state and is right to
 //! — a pipe and a paddle are the same picture at 60 Hz and at 144. This one
 //! turns things, so the frame is asked how far through a tick it sits and the
-//! rotations are interpolated across it. See [`render_alpha`] and
-//! `game::lerp_angle`.
+//! rotations are interpolated across it. [`FrameInfo::alpha`] is that number,
+//! read after the accumulator has drained; [`render_alpha`] is what a paused
+//! frame does with it, and `game::lerp_angle` is what the renderer does.
 //!
-//! # The loop
-//!
-//! ```text
-//! loop {
-//!     shell.pump(&mut |event| …);
-//!     clock.update(time.elapsed());
-//!     while clock.consume_tick() { game.tick(); }
-//!     render();
-//! }
-//! ```
-//!
-//! **The simulation is in the `while`, not after it.** Anything stepped once per
-//! frame has a speed proportional to the frame rate, which a headless run —
-//! where a frame is pinned to exactly 1/60 s — cannot see.
-
-use core::time::Duration;
+//! **The simulation is still inside `run_ticks`'s `while`, not after it.**
+//! Anything stepped once per frame has a speed proportional to the frame rate,
+//! which a headless run — where a frame is pinned to exactly 1/60 s — cannot
+//! see.
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Clock, ExitReason, Flow, FrameBudget, Handled, MAX_FRAME_STEP, MenuPump, ModeRequest,
-    PointerCapture, WINDOWED_IDLE, accept_close, lose_focus, run_ticks, wait_for_configure,
+    Booted, Clock, ExitReason, FrameInfo, HostedGame, LoopConfig, RunSummary, wait_for_configure,
 };
 use crcbl::math::Vec2;
 use crcbl::prelude::*;
 use crcbl::shell::{
     DisplayMode, LogicalSize, ShellBackend as Backend, WindowId, open, open_backend,
 };
-use crcbl::ui::DebugOverlay;
 use crcbl::ui::draw_list::DrawList;
 
 use crate::game::{self, Game, GameState, RenderState};
 use crate::gpu::Gpu;
-use crate::menu::{self, MenuAction, MenuKind, Menus};
+use crate::menu::{self, Fire, MenuKind, Menus};
 
 pub use crate::args::Options;
 
@@ -89,77 +84,37 @@ pub struct Summary {
 /// `.map_err(AsteroidsError::Game)` — while the engine's three convert with `?`.
 pub type AsteroidsError = crcbl::engine::LoopError<game::GameError>;
 
-// ---- the loop ---------------------------------------------------------------
+// ---- the game ---------------------------------------------------------------
 
 /// The key a menu's `FLY` and `TRY AGAIN` buttons stand for.
 ///
-/// Fired as a real key event rather than by calling into [`Game`], because
+/// Fired as a real key event rather than by calling into `Game`, because
 /// starting and restarting a game is the simulation's business and the
 /// simulation is driven by its action map.
 const FIRE_KEY: KeyCode = KeyCode::Space;
 
-/// How far through a tick this frame sits, for the renderer's interpolation.
+/// Asteroids, as the engine's loop hosts it.
 ///
-/// **One is not the clock's answer while the game is paused, and that is the
-/// whole of this function.** A paused frame drains the accumulator without
-/// simulating, so the clock's alpha keeps moving while the two angles it would
-/// interpolate between stand still — and every rock on a paused field would
-/// rock back and forth between the last two ticks it ran. One means "the newest
-/// state", which is what a stopped game should show.
-#[must_use]
-pub fn render_alpha(paused: bool, clock_alpha: f32) -> f32 {
-    if paused { 1.0 } else { clock_alpha }
-}
-
+/// **The loop is not here any more.** The pump, the input routing, the
+/// fixed-step accumulator, the menu, the debug panel, the budget and teardown
+/// are [`crcbl::engine::Loop`]'s, and were the same in all five samples. What is
+/// left is what was always this game's: the simulation, the state it renders
+/// from, and its HUD.
 #[derive(Debug)]
-pub struct Loop<S: Shell + ?Sized = dyn Shell> {
-    shell: Box<S>,
-    window: WindowId,
-    gpu: Gpu,
+pub struct Asteroids {
     game: Game,
-    clock_source: Clock,
-    frame_clock: FrameClock,
-    /// Reused every frame, so a steady-state frame does not allocate a fresh
-    /// draw list or entity vector.
-    draw_list: DrawList,
+    /// Refilled from the simulation every frame, so a steady-state frame does
+    /// not allocate a fresh rock list.
     render_state: RenderState,
     hud: HudStrings,
-    /// The start, pause and game-over menus, and which is on screen.
-    menus: Menus,
-    /// Where [`Loop::draw_menu`] last laid the menu out, or `None` on a frame
-    /// that showed none.
-    ///
-    /// Kept rather than recomputed because it is wanted **twice** in the same
-    /// frame — the UI pass's text and the menu pass's sprites are two halves of
-    /// one layout — and a second call is a second chance to measure it against a
-    /// different extent.
-    menu_layout: Option<crcbl::ui::menu::MenuLayout>,
-    /// Where the pointer was last seen and whether its button is down.
-    ///
-    /// Both are needed across frames — see [`PointerCapture`].
-    pointer: PointerCapture,
-    /// The modular debug panel: frame timing always, GPU pass timings when the
-    /// device has them.
-    debug: DebugOverlay,
-    /// Whether the simulation is stopped. **The loop owns this, not
-    /// [`GameState`]**: a `Paused` variant in the simulation would make the
-    /// authoritative server's state depend on which window a compositor has
-    /// focused.
-    paused: bool,
-    /// Keys forwarded to the game as pressed and not yet released.
-    ///
-    /// [`ShellEvent::Focus`] documents the obligation this discharges: no
-    /// platform delivers releases for keys held when focus leaves. It matters
-    /// more here than in either earlier sample, because this game's turn and
-    /// thrust are *held* actions — a lost release leaves the ship spinning.
-    held_keys: Vec<KeyCode>,
-    /// Presented frames, the budget they count against, and the guard that
-    /// makes the budget reachable — see [`FrameBudget`].
-    budget: FrameBudget,
-    ticks: u64,
-    events: u64,
-    windowed: bool,
 }
+
+/// The loop asteroids runs in.
+///
+/// A type alias, because the loop is the engine's. `S` is the shell type: the
+/// native and browser paths both build `Loop<dyn Shell>`, and the tests build
+/// `Loop<HeadlessShell>` so they can inject the events a compositor would send.
+pub type Loop<S = dyn Shell> = crcbl::engine::Loop<S, Asteroids>;
 
 /// Runs the full loop.
 ///
@@ -167,407 +122,211 @@ pub struct Loop<S: Shell + ?Sized = dyn Shell> {
 ///
 /// [`AsteroidsError`] if the shell, the GPU or the game failed. Teardown runs on
 /// every path: a failing frame must still release the swapchain, the surface and
-/// the window.
+/// the window, or `crcbl-vk`'s device teardown logs objects still alive.
 pub fn run(options: &Options) -> Result<Summary, AsteroidsError> {
-    crcbl::engine::drive(Loop::start(options)?)
+    crcbl::engine::drive(start(options)?)
 }
 
-impl Loop<dyn Shell> {
-    /// Opens a shell, a window, a GPU and the game.
-    ///
-    /// # Errors
-    ///
-    /// [`AsteroidsError`] if any of them refused.
-    pub fn start(options: &Options) -> Result<Self, AsteroidsError> {
-        let shell = if options.common.headless {
-            open_backend(Backend::Headless).map_err(AsteroidsError::Shell)?
-        } else {
-            open().map_err(AsteroidsError::NoWindowSystem)?
-        };
-        Self::with_shell(shell, options)
-    }
+/// Opens a shell, a window, a GPU and the game.
+///
+/// # Errors
+///
+/// [`AsteroidsError`] if any of them refused.
+pub fn start(options: &Options) -> Result<Loop, AsteroidsError> {
+    let shell = if options.common.headless {
+        open_backend(Backend::Headless).map_err(AsteroidsError::Shell)?
+    } else {
+        open().map_err(AsteroidsError::NoWindowSystem)?
+    };
+    with_shell(shell, options)
 }
 
-impl<S: Shell + ?Sized> Loop<S> {
-    /// Builds the loop on an already-open shell.
-    ///
-    /// # Errors
-    ///
-    /// [`AsteroidsError`] if the window never configured, the GPU would not
-    /// open, or the game could not be built.
-    pub fn with_shell(mut shell: Box<S>, options: &Options) -> Result<Self, AsteroidsError> {
-        let clock_source = Clock::new(options.common.headless);
-        let window = open_the_window(shell.as_mut(), &clock_source)?;
+/// Builds the loop on an already-open shell, blocking on both waits.
+///
+/// The browser cannot use this — a main thread may not sit in
+/// [`wait_for_configure`] — and takes [`PendingLoop`] instead. What the two
+/// share is everything after the waiting, which is [`assemble`].
+///
+/// # Errors
+///
+/// [`AsteroidsError`] if the window never configured, the GPU would not open, or
+/// the game could not be built.
+pub fn with_shell<S: Shell + ?Sized>(
+    mut shell: Box<S>,
+    options: &Options,
+) -> Result<Loop<S>, AsteroidsError> {
+    let clock_source = Clock::new(options.common.headless);
+    let window = open_the_window(shell.as_mut(), &clock_source)?;
 
-        let mut events = 0;
-        let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
-        crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+    let mut events = 0;
+    let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
+    crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
 
-        let gpu = Gpu::open(shell.as_ref(), window, extent, options.common.backend)?;
-        Self::assemble(shell, window, gpu, options, clock_source, events)
-    }
-
-    /// The half of start-up that is the same however the GPU arrived.
-    ///
-    /// Shared with [`PendingLoop::poll`], which reaches this point several rAF
-    /// frames later. A second copy of this struct literal is how the browser
-    /// build would come to run a subtly different game from the native one.
-    fn assemble(
-        shell: Box<S>,
-        window: WindowId,
-        gpu: Gpu,
-        options: &Options,
-        clock_source: Clock,
-        events: u64,
-    ) -> Result<Self, AsteroidsError> {
-        let game = Game::with_seed(
-            options.common.headless,
-            options.common.tick_hz,
-            options.seed,
-        )
-        .map_err(AsteroidsError::Game)?;
-        Ok(Self {
-            windowed: !options.common.headless,
+    let gpu = Gpu::open(shell.as_ref(), window, extent, options.common.backend)?;
+    assemble(
+        Booted {
             shell,
             window,
             gpu,
-            game,
             clock_source,
-            frame_clock: FrameClock::new(options.common.tick_hz),
-            draw_list: DrawList::new(),
+            events,
+        },
+        options,
+    )
+}
+
+/// The half of start-up that is the same however the GPU arrived.
+///
+/// [`Booted`] is what both bring-up paths hand over, so the game is built and
+/// the loop assembled in one place rather than one per path — a second copy is
+/// how the browser build would come to run a subtly different game.
+///
+/// # Errors
+///
+/// [`AsteroidsError`] if the game could not be built.
+fn assemble<S: Shell + ?Sized>(
+    booted: Booted<S, Gpu>,
+    options: &Options,
+) -> Result<Loop<S>, AsteroidsError> {
+    let game = Game::with_seed(
+        options.common.headless,
+        options.common.tick_hz,
+        options.seed,
+    )
+    .map_err(AsteroidsError::Game)?;
+    Ok(Loop::new(
+        booted,
+        Asteroids {
+            game,
             render_state: RenderState::default(),
             hud: HudStrings::default(),
-            menus: menu::menus(),
-            menu_layout: None,
-            pointer: PointerCapture::new(),
-            debug: DebugOverlay::with_visible(options.common.debug_overlay_visible()),
-            paused: false,
-            held_keys: Vec::new(),
-            ticks: 0,
-            events,
-            budget: FrameBudget::new(options.common.frame_budget()),
-        })
+        },
+        LoopConfig {
+            tick_hz: options.common.tick_hz,
+            frames: options.common.frame_budget(),
+            debug_overlay: options.common.debug_overlay_visible(),
+            windowed: !options.common.headless,
+        },
+    ))
+}
+
+impl Asteroids {
+    /// The simulation, for scripted tests and for an embedder that drives it.
+    pub const fn game(&self) -> &Game {
+        &self.game
     }
 
-    /// Sets how far one [`frame`](Self::frame) advances a manual clock.
-    ///
-    /// **The browser's clock is the browser's.** `Clock::Real` reads
-    /// [`std::time::Instant`], which on `wasm32-unknown-unknown` has no
-    /// implementation at all and panics on the first `now()`. `dt` is clamped to
-    /// [`MAX_FRAME_STEP`]: a backgrounded tab resumes with a multi-second gap,
-    /// and feeding that to the accumulator spends the next frame running
-    /// thousands of ticks.
-    pub fn set_frame_step(&mut self, dt: Duration) {
-        if let Clock::Manual { step, .. } = &mut self.clock_source {
-            *step = dt.min(MAX_FRAME_STEP);
-        }
-    }
-
-    /// The game, for scripted tests and for an embedder that wants to drive it.
-    #[cfg(test)]
-    pub fn game_mut(&mut self) -> &mut Game {
+    /// The simulation, mutably. See [`Asteroids::game`].
+    pub const fn game_mut(&mut self) -> &mut Game {
         &mut self.game
     }
 
-    /// The swapchain's current extent, in pixels.
-    #[must_use]
-    pub const fn extent(&self) -> (u32, u32) {
-        self.gpu.extent()
+    /// What the last [`draw`](HostedGame::draw) read out of the simulation.
+    ///
+    /// The frame's own copy, not a fresh one: a test that re-read the game
+    /// would be asking a different question from the one the renderer was
+    /// answered with.
+    pub const fn render_state(&self) -> &RenderState {
+        &self.render_state
+    }
+}
+
+/// How far through a tick the frame should draw, given whether it is paused.
+///
+/// **A paused frame draws the last tick, not part way past one of them.** The
+/// clock keeps running while the simulation does not, so the accumulator's
+/// fraction goes on climbing and interpolating against it would have the rocks
+/// creep on a stopped game. One is "all the way to the tick that did happen".
+#[must_use]
+pub fn render_alpha(paused: bool, clock_alpha: f32) -> f32 {
+    if paused { 1.0 } else { clock_alpha }
+}
+
+/// Asteroids' half of the frame, and nothing else.
+impl HostedGame for Asteroids {
+    type Error = game::GameError;
+    type Gpu = Gpu;
+    type MenuKind = MenuKind;
+    type MenuAction = Fire;
+    type Summary = Summary;
+
+    const NAME: &'static str = "asteroids";
+
+    fn menus() -> Menus {
+        menu::menus()
     }
 
-    /// Whether the simulation is stopped.
-    #[must_use]
-    pub const fn is_paused(&self) -> bool {
-        self.paused
+    fn tick(&mut self, _gpu: &mut Gpu, _tick_dt: f32) {
+        self.game.tick();
     }
 
-    /// One frame: pump, tick the simulation to catch up with the clock, draw.
-    ///
-    /// # Errors
-    ///
-    /// [`AsteroidsError`] if the shell or the GPU failed.
-    pub fn frame(&mut self) -> Result<Flow, AsteroidsError> {
-        if self.budget.is_spent() {
-            return Ok(Flow::Stop(ExitReason::FrameBudget));
-        }
-
-        if self.windowed {
-            self.shell.wait_events(Some(WINDOWED_IDLE));
-        }
-
-        // **Carrying the pointer, not defaulting it.** A batch with no pointer
-        // event in it has not moved the cursor, and a menu whose hover state
-        // reset every still frame would flicker.
-        let mut pending = self.pointer.pending();
-        let game = &mut self.game;
-        // **Last frame's menu, deliberately.** The pump runs before this
-        // frame's state is known, and the menu the player is pressing keys at
-        // is the one that was on screen when they pressed them.
-        let showing = self.menus.kind() != MenuKind::None;
-        let mut menu = MenuPump::new(&mut self.menus, &mut self.held_keys, showing);
-        self.shell.pump(&mut |event| {
-            // The window's business, the pointer, focus loss and the loop's
-            // three reserved keys are all folded by `Pending::observe`; the
-            // menu's three and the held-key list are `MenuPump`'s. What comes
-            // back from that is the key the *game* should see.
-            if pending.observe(&event) == Handled::Loop {
-                return;
-            }
-            // Forwarded to the game, which replays it at the start of the next
-            // tick. A frame that runs no ticks loses nothing.
-            if let Some((code, pressed)) = menu.observe(&event) {
-                game.key_event(code, pressed);
-            }
-        });
-        let keyboard_action = menu.activated.and_then(MenuAction::from_id);
-        self.events += pending.count;
-        // Hit-tested against **this** frame's layout, which is why the pointer
-        // is resolved here and not inside the pump: the rectangles depend on the
-        // framebuffer's size, and a click checked against last frame's would miss
-        // on the frame a resize lands. The press-capture rule under `resolve` is
-        // the engine's.
-        let pointer_input = self.pointer.resolve(&pending);
-        let pointer_action = self
-            .menus
-            .point(self.gpu.extent(), self.gpu.atlas(), pointer_input)
-            .and_then(MenuAction::from_id);
-        for action in [keyboard_action, pointer_action].into_iter().flatten() {
-            self.apply(action)?;
-        }
-
-        if pending.toggle_debug_overlay {
-            self.debug.toggle();
-        }
-        // Before the pause toggle, so a batch carrying both a focus loss and an
-        // Escape resolves as "paused, then the player unpaused".
-        if pending.focus_lost {
-            self.lose_focus();
-        }
-        if pending.toggle_pause {
-            self.paused = !self.paused;
-            crcbl::log::info!("game {}", if self.paused { "paused" } else { "resumed" });
-        }
-        if pending.toggle_fullscreen {
-            self.toggle_fullscreen()?;
-        }
-
-        if pending.destroyed {
-            return Ok(Flow::Stop(ExitReason::WindowDestroyed));
-        }
-        if pending.close_requested {
-            accept_close(self.shell.as_mut(), self.window)?;
-            return Ok(Flow::Stop(ExitReason::CloseRequested));
-        }
-        if let Some(size) = pending.resized {
-            self.gpu.resize((size.width, size.height))?;
-        }
-
-        let now = self.clock_source.advance();
-        self.frame_clock.update(now);
-        self.debug.record(self.frame_clock.render_dt());
-        // **A paused frame keeps the clock and throws the ticks away**, so
-        // resuming runs the one tick it is owed rather than the eight the
-        // accumulator saturated at. `apps/flappy/src/app.rs` carries the full
-        // argument.
-        let game = &mut self.game;
-        self.ticks += run_ticks(&mut self.frame_clock, self.paused, || game.tick());
-
-        self.game.render_state(&mut self.render_state);
-        // **After the accumulator has been drained**, which is what
-        // `FrameClock::alpha` asks for: called before, it saturates just under
-        // one rather than reporting the fraction of a tick that is left.
-        let alpha = render_alpha(self.paused, self.frame_clock.alpha());
-        self.gpu.set_world(&self.render_state, alpha);
-
-        self.draw_list.clear();
-        self.hud.refresh(&self.render_state, self.paused);
-        draw_hud(&mut self.draw_list, &self.hud);
-        self.draw_menu();
-        self.draw_debug_overlay();
-        self.gpu.take_draw_list(&mut self.draw_list);
-
-        self.budget.record(self.gpu.frame()?)?;
-        Ok(Flow::Continue)
+    fn key_event(&mut self, key: KeyCode, pressed: bool) {
+        // Forwarded to the game, which replays it at the start of the next
+        // tick. A frame that runs no ticks loses nothing.
+        self.game.key_event(key, pressed);
     }
 
-    /// The mode the window system actually has this window in.
-    ///
-    /// Read back rather than remembered: there is deliberately no
-    /// `self.fullscreen` field to disagree with the compositor.
-    #[must_use]
-    pub fn display_mode(&self) -> DisplayMode {
-        ModeRequest::mode(self.shell.as_ref(), self.window)
+    fn menu_action(id: crcbl::ui::WidgetId) -> Option<Fire> {
+        menu::fire_from_id(id)
     }
 
-    /// What a fired menu button does.
-    ///
-    /// The one place a button becomes an effect, so a menu that grows a fourth
-    /// item cannot quietly do a fifth thing. Both input devices arrive here:
-    /// [`MENU_ACTIVATE_KEY`] and a click produce the same [`MenuAction`] and this
-    /// cannot tell them apart, which is what makes "the keyboard still works" and
-    /// "the mouse works too" the same sentence.
-    ///
-    /// # Errors
-    ///
-    /// [`AsteroidsError`] if the shell refused a display-mode change.
-    fn apply(&mut self, action: MenuAction) -> Result<(), AsteroidsError> {
+    fn apply(&mut self, action: Fire) {
         match action {
-            MenuAction::Resume => {
-                if self.paused {
-                    self.paused = false;
-                    crcbl::log::info!("game resumed");
-                }
-            }
-            // A real key event rather than a call into `Game`: starting a game is
-            // the simulation's business and the simulation is driven by its
+            // A real key event rather than a call into `Game`: starting a game
+            // is the simulation's business and the simulation is driven by its
             // action map. The release is queued straight after the press because
             // the trigger is an *edge* — a press with no release leaves the
-            // action held, which in this game is a magazine emptied into whatever
-            // the ship happens to be pointing at.
-            MenuAction::Fire => {
+            // action held, which in this game is a magazine emptied into
+            // whatever the ship happens to be pointing at.
+            Fire::Now => {
                 self.game.key_event(FIRE_KEY, true);
                 self.game.key_event(FIRE_KEY, false);
             }
-            MenuAction::Fullscreen => self.toggle_fullscreen()?,
-            MenuAction::DebugOverlay => self.debug.toggle(),
-        }
-        Ok(())
-    }
-
-    /// Picks this frame's menu, lays it out, and emits both halves of it.
-    ///
-    /// **Two halves, two passes.** The window frame and the buttons are
-    /// nine-sliced sprites and go to [`crcbl::render::MenuRenderer`]; the title
-    /// and the labels are text and go to the UI pass through the draw list.
-    /// `gpu.rs` declares the menu pass between the game and the UI for exactly
-    /// this reason.
-    ///
-    /// Called after the HUD and before the debug overlay: the scrim dims the
-    /// game *including its HUD*, and the overlay is a developer tool that must
-    /// stay legible on top of everything.
-    fn draw_menu(&mut self) {
-        self.menus
-            .show(MenuKind::of(self.paused, &self.render_state));
-        self.menu_layout = self
-            .menus
-            .current()
-            .map(|menu| menu.layout(self.gpu.extent(), self.gpu.atlas()));
-        match (&self.menu_layout, self.menus.current()) {
-            (Some(layout), Some(menu)) => {
-                menu.render(&mut self.draw_list, layout);
-                self.gpu.set_menu(Some((menu, layout)));
-            }
-            _ => self.gpu.set_menu(None),
         }
     }
 
-    /// Which menu this frame is showing, for the loop's own tests.
-    #[cfg(test)]
-    const fn menu_kind(&self) -> MenuKind {
-        self.menus.kind()
+    fn menu_kind(&self, paused: bool) -> MenuKind {
+        MenuKind::of(paused, &self.render_state)
     }
 
-    /// Where this frame's menu was laid out, for the loop's own tests — so a
-    /// scripted click lands on the button the player would have seen.
-    ///
-    /// **The layout the frame actually used**, not a fresh one measured the same
-    /// way: a test that recomputed it would agree with a `draw_menu` that
-    /// measured against the wrong framebuffer, which is the one mistake there is
-    /// to make here.
-    #[cfg(test)]
-    const fn menu_layout(&self) -> Option<&crcbl::ui::menu::MenuLayout> {
-        self.menu_layout.as_ref()
+    fn draw(&mut self, gpu: &mut Gpu, draw_list: &mut DrawList, frame: FrameInfo) {
+        self.game.render_state(&mut self.render_state);
+        // **After the accumulator has been drained**, which is what
+        // `FrameClock::alpha` asks for and what `FrameInfo::alpha` carries:
+        // read before, it saturates just under one rather than reporting the
+        // fraction of a tick that is left.
+        gpu.set_world(&self.render_state, render_alpha(frame.paused, frame.alpha));
+        self.hud.refresh(&self.render_state, frame.paused);
+        draw_hud(draw_list, &self.hud);
     }
 
-    /// Every key the game thinks is held comes up, and the game pauses.
-    fn lose_focus(&mut self) {
-        let game = &mut self.game;
-        lose_focus(&mut self.held_keys, &mut self.paused, |key| {
-            game.key_event(key, false);
-        });
-    }
-
-    /// Asks for the mode the window is not in.
-    fn toggle_fullscreen(&mut self) -> Result<(), AsteroidsError> {
-        Ok(ModeRequest::toggle(self.shell.as_mut(), self.window)?)
-    }
-
-    /// Gathers this frame's debug sections and draws the panel.
-    ///
-    /// **This is the whole of "switching it on", and the plan asked for it from
-    /// the first slice rather than at the end.** Frame timing comes with the
-    /// overlay; the only sample-specific line is the one that offers the GPU
-    /// timings, and it is a `Some` check because a device without timestamp
-    /// queries has no timers at all.
-    fn draw_debug_overlay(&mut self) {
-        self.debug.begin_frame();
-        if let Some(timings) = self.gpu.timings() {
-            self.debug.panel.add(timings);
-        }
-        let (width, height) = self.gpu.extent();
-        self.debug.render(
-            &mut self.draw_list,
-            Vec2::new(width as f32, height as f32),
-            self.gpu.atlas(),
-        );
-    }
-
-    /// Tears the frame down and reports what the run did.
-    ///
-    /// # Errors
-    ///
-    /// [`AsteroidsError`] if the GPU or the shell failed to release something.
-    /// Both are attempted regardless: the window is destroyed even when the GPU
-    /// teardown failed, because leaving it mapped is strictly worse.
-    pub fn finish(mut self, exit: ExitReason) -> Result<Summary, AsteroidsError> {
-        if let Some(timings) = self.gpu.timings()
-            && !timings.is_empty()
-        {
-            crcbl::log::info!("{}", timings.report().trim_end());
-        }
-        let summary = Summary {
-            backend: self.shell.backend(),
-            frames: self.budget.presented(),
-            ticks: self.ticks,
-            events: self.events,
-            extent: self.gpu.extent(),
-            exit,
+    fn summary(&self, run: RunSummary) -> Summary {
+        Summary {
+            backend: run.backend,
+            frames: run.frames,
+            ticks: run.ticks,
+            events: run.events,
+            extent: run.extent,
+            exit: run.exit,
             score: self.game.score,
             lives: self.game.lives,
             wave: self.game.wave,
             state: self.game.state,
-            paused: self.paused,
-            mode: self.display_mode(),
-        };
-
-        let gpu_result = self.gpu.destroy();
-        let shell_result = if exit.window_survives() {
-            self.shell.destroy_window(self.window)
-        } else {
-            Ok(())
-        };
-        gpu_result?;
-        shell_result?;
-        Ok(summary)
-    }
-}
-
-/// Lets [`crcbl::engine::drive`] step this loop, and the browser's `App` step
-/// the same one.
-///
-/// Two forwards to the inherent methods, which stay because they are this
-/// crate's public surface: a test drives `frame` directly, and so does
-/// `crate::web`.
-impl<S: Shell + ?Sized> crcbl::engine::GameLoop for Loop<S> {
-    type Error = AsteroidsError;
-    type Summary = Summary;
-
-    fn frame(&mut self) -> Result<Flow, Self::Error> {
-        Self::frame(self)
+            paused: run.paused,
+            mode: run.mode,
+        }
     }
 
-    fn finish(self, exit: ExitReason) -> Result<Self::Summary, Self::Error> {
-        Self::finish(self, exit)
+    fn log_summary(summary: &Summary) {
+        crcbl::log::info!(
+            "asteroids: {} frames, {} ticks, score {}, wave {} ({:?}, {:?})",
+            summary.frames,
+            summary.ticks,
+            summary.score,
+            summary.wave + 1,
+            summary.state,
+            summary.exit,
+        );
     }
 }
 
@@ -641,15 +400,7 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
         let Some(booted) = self.boot.poll::<AsteroidsError>()? else {
             return Ok(None);
         };
-        Loop::assemble(
-            booted.shell,
-            booted.window,
-            booted.gpu,
-            &self.options,
-            booted.clock_source,
-            booted.events,
-        )
-        .map(Some)
+        assemble(booted, &self.options).map(Some)
     }
 }
 
@@ -739,7 +490,7 @@ fn draw_hud(dl: &mut DrawList, hud: &HudStrings) {
 #[cfg(test)]
 mod tests {
     use crcbl::args::Common;
-    use crcbl::engine::{MENU_ACTIVATE_KEY, PAUSE_KEY};
+    use crcbl::engine::{Flow, MENU_ACTIVATE_KEY, PAUSE_KEY};
 
     use super::*;
     use crcbl::core::input::PointerButton;
@@ -777,12 +528,12 @@ mod tests {
     }
 
     fn headless_loop() -> Loop<dyn Shell> {
-        Loop::start(&headless(8)).expect("a headless loop always starts")
+        start(&headless(8)).expect("a headless loop always starts")
     }
 
     /// A loop on a shell the test can post events to.
     fn scripted(options: &Options) -> Loop<HeadlessShell> {
-        Loop::with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
+        with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
     }
 
     fn run_frames(engine: &mut Loop<HeadlessShell>, frames: u32) {
@@ -798,7 +549,7 @@ mod tests {
     /// Every string the UI pass will draw this frame.
     fn ui_text(engine: &Loop<HeadlessShell>) -> Vec<String> {
         engine
-            .gpu
+            .gpu()
             .draw_list()
             .commands()
             .iter()
@@ -839,12 +590,12 @@ mod tests {
     fn escape_pauses_the_simulation_and_never_reaches_the_game() {
         let mut engine = headless_loop();
         engine.frame().expect("a frame");
-        engine.paused = true;
-        let before = engine.ticks;
+        engine.set_paused(true);
+        let before = engine.ticks();
         for _ in 0..3 {
             engine.frame().expect("a frame");
         }
-        assert_eq!(engine.ticks, before, "a paused frame ran a tick");
+        assert_eq!(engine.ticks(), before, "a paused frame ran a tick");
         assert!(engine.is_paused());
     }
 
@@ -878,14 +629,14 @@ mod tests {
         let mut engine = scripted(&headless(4));
         run_frames(&mut engine, 1);
 
-        let rocks = engine.render_state.rocks.len();
+        let rocks = engine.game().render_state().rocks.len();
         assert_eq!(
             rocks,
             game::wave_rocks(0) as usize,
             "the first wave should be on the field",
         );
-        assert!(engine.render_state.ship_alive);
-        let sprites = engine.gpu.scene_sprites();
+        assert!(engine.game().render_state().ship_alive);
+        let sprites = engine.gpu_mut().scene_sprites();
         assert_eq!(
             sprites.len(),
             rocks + 1,
@@ -895,7 +646,7 @@ mod tests {
         // Nothing the game draws is a UI rectangle any more: the HUD panel is,
         // and the menu's own geometry, and that is all.
         let outlines = engine
-            .gpu
+            .gpu()
             .draw_list()
             .commands()
             .iter()
@@ -924,15 +675,15 @@ mod tests {
         // And the loop really uses it: a paused loop hands the renderer 1.0
         // however far through a tick the frame clock happens to be.
         let mut engine = scripted(&headless(60));
-        let window = engine.window;
+        let window = engine.window();
         run_frames(&mut engine, 2);
         engine
-            .shell
+            .shell_mut()
             .key_press(window, PAUSE_KEY)
             .expect("the window is live");
         run_frames(&mut engine, 2);
         assert!(engine.is_paused());
-        assert_eq!(engine.gpu.alpha_for_test(), 1.0);
+        assert_eq!(engine.gpu().alpha_for_test(), 1.0);
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
@@ -945,28 +696,28 @@ mod tests {
     #[test]
     fn turning_the_ship_turns_the_sprite() {
         let mut engine = scripted(&headless(200));
-        let window = engine.window;
+        let window = engine.window();
         // Start the game, then hold left.
         engine
-            .shell
+            .shell_mut()
             .key_press(window, KeyCode::Space)
             .expect("the window is live");
         run_frames(&mut engine, 2);
         engine
-            .shell
+            .shell_mut()
             .key_release(window, KeyCode::Space)
             .expect("the window is live");
         run_frames(&mut engine, 2);
-        assert_eq!(engine.game.state, GameState::Playing);
+        assert_eq!(engine.game().game().state, GameState::Playing);
 
         let ship_rotation = |engine: &mut Loop<HeadlessShell>| -> f32 {
-            let sprites = engine.gpu.scene_sprites();
+            let sprites = engine.gpu_mut().scene_sprites();
             sprites.last().expect("the ship is drawn last").rotation
         };
         let before = ship_rotation(&mut engine);
 
         engine
-            .shell
+            .shell_mut()
             .key_press(window, KeyCode::ArrowLeft)
             .expect("the window is live");
         run_frames(&mut engine, 20);
@@ -976,9 +727,9 @@ mod tests {
             "twenty ticks of a held turn moved the sprite from {before} to {after}",
         );
         assert!(
-            (f64::from(after) - engine.game.ship_heading).abs() < 0.2,
+            (f64::from(after) - engine.game().game().ship_heading).abs() < 0.2,
             "the sprite is at {after} and the ship is flying {}",
-            engine.game.ship_heading,
+            engine.game().game().ship_heading,
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
@@ -1017,7 +768,7 @@ mod tests {
             "the panel is centred at {centre:?} in a {extent:?} framebuffer",
         );
 
-        let sprites = engine.gpu.menu_sprites();
+        let sprites = engine.gpu().menu_sprites();
         // The scrim, the window frame's nine quads, and nine per button.
         assert_eq!(sprites.len(), 1 + 9 + 9 * 3, "{}", sprites.len());
 
@@ -1062,18 +813,18 @@ mod tests {
     #[test]
     fn a_game_in_play_draws_no_menu() {
         let mut engine = scripted(&headless(60));
-        let window = engine.window;
+        let window = engine.window();
         engine
-            .shell
+            .shell_mut()
             .key_press(window, KeyCode::Space)
             .expect("the window is live");
         run_frames(&mut engine, 10);
-        assert_eq!(engine.game.state, GameState::Playing);
+        assert_eq!(engine.game().game().state, GameState::Playing);
         assert_eq!(engine.menu_kind(), MenuKind::None);
         assert!(
-            engine.gpu.menu_sprites().is_empty(),
+            engine.gpu().menu_sprites().is_empty(),
             "a playing frame submitted {} menu sprites",
-            engine.gpu.menu_sprites().len(),
+            engine.gpu().menu_sprites().len(),
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
@@ -1084,13 +835,13 @@ mod tests {
     #[test]
     fn each_state_draws_its_own_menu_and_no_other() {
         let mut engine = scripted(&headless(60));
-        let window = engine.window;
+        let window = engine.window();
         run_frames(&mut engine, 2);
         assert_eq!(engine.menu_kind(), MenuKind::Start);
         assert!(!ui_text(&engine).iter().any(|t| t == "PAUSED"));
 
         engine
-            .shell
+            .shell_mut()
             .key_press(window, KeyCode::Space)
             .expect("the window is live");
         run_frames(&mut engine, 6);
@@ -1102,7 +853,7 @@ mod tests {
         );
 
         engine
-            .shell
+            .shell_mut()
             .key_press(window, PAUSE_KEY)
             .expect("the window is live");
         engine.frame().expect("a frame");
@@ -1125,11 +876,11 @@ mod tests {
     #[test]
     fn enter_on_the_pause_menu_resumes_the_game() {
         let mut engine = scripted(&headless(60));
-        let window = engine.window;
+        let window = engine.window();
         run_frames(&mut engine, 2);
 
         engine
-            .shell
+            .shell_mut()
             .key_press(window, PAUSE_KEY)
             .expect("the window is live");
         engine.frame().expect("a frame");
@@ -1139,14 +890,14 @@ mod tests {
         // Press and release, because the commit fires on the *release* — the
         // pressed frame of the skin has to be on screen while the key is down.
         engine
-            .shell
+            .shell_mut()
             .key_press(window, MENU_ACTIVATE_KEY)
             .expect("the window is live");
         engine.frame().expect("a frame");
         assert!(engine.is_paused(), "the press alone must not fire it");
 
         engine
-            .shell
+            .shell_mut()
             .key_release(window, MENU_ACTIVATE_KEY)
             .expect("the window is live");
         engine.frame().expect("a frame");
@@ -1160,10 +911,10 @@ mod tests {
     #[test]
     fn a_click_on_resume_resumes_and_a_click_off_every_button_does_not() {
         let mut engine = scripted(&headless(60));
-        let window = engine.window;
+        let window = engine.window();
         run_frames(&mut engine, 2);
         engine
-            .shell
+            .shell_mut()
             .key_press(window, PAUSE_KEY)
             .expect("the window is live");
         engine.frame().expect("a frame");
@@ -1180,7 +931,7 @@ mod tests {
         let click = |engine: &mut Loop<HeadlessShell>, pos: crcbl::math::Vec2| {
             let point = PhysicalPoint::new(f64::from(pos.x), f64::from(pos.y));
             engine
-                .shell
+                .shell_mut()
                 .button(
                     window,
                     PointerButton::Left,
@@ -1190,7 +941,7 @@ mod tests {
                 .expect("the window is live");
             engine.frame().expect("a frame");
             engine
-                .shell
+                .shell_mut()
                 .button(
                     window,
                     PointerButton::Left,
@@ -1215,16 +966,16 @@ mod tests {
     #[test]
     fn space_still_fires_with_the_start_menu_showing() {
         let mut engine = scripted(&headless(60));
-        let window = engine.window;
+        let window = engine.window();
         run_frames(&mut engine, 2);
         assert_eq!(engine.menu_kind(), MenuKind::Start);
 
         engine
-            .shell
+            .shell_mut()
             .key_press(window, KeyCode::Space)
             .expect("the window is live");
         engine
-            .shell
+            .shell_mut()
             .key_release(window, KeyCode::Space)
             .expect("the window is live");
         run_frames(&mut engine, 10);
@@ -1241,16 +992,16 @@ mod tests {
     #[test]
     fn the_fly_button_starts_the_game() {
         let mut engine = scripted(&headless(60));
-        let window = engine.window;
+        let window = engine.window();
         run_frames(&mut engine, 2);
         assert_eq!(engine.menu_kind(), MenuKind::Start);
 
         engine
-            .shell
+            .shell_mut()
             .key_press(window, MENU_ACTIVATE_KEY)
             .expect("the window is live");
         engine
-            .shell
+            .shell_mut()
             .key_release(window, MENU_ACTIVATE_KEY)
             .expect("the window is live");
         run_frames(&mut engine, 10);
@@ -1273,15 +1024,30 @@ mod tests {
     /// of the session.
     #[test]
     fn losing_focus_releases_the_keys_the_game_still_thinks_are_down() {
-        let mut engine = headless_loop();
+        let mut engine = scripted(&headless(8));
+        let window = engine.window();
         engine.frame().expect("a frame");
-        engine.game_mut().key_event(KeyCode::ArrowLeft, true);
-        engine.held_keys.push(KeyCode::ArrowLeft);
-        engine.game_mut().tick();
 
-        engine.lose_focus();
-        engine.game_mut().tick();
-        assert!(engine.held_keys.is_empty(), "the held list survived");
+        // Through the shell, not by poking the list: the loop only knows a key
+        // is held because it saw the press go by, and a test that filled the
+        // list itself would pass with the pump's key branch deleted.
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::ArrowLeft)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert_eq!(
+            engine.held_keys(),
+            [KeyCode::ArrowLeft],
+            "the loop never noticed the key go down",
+        );
+
+        engine
+            .shell_mut()
+            .set_focus(window, false)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.held_keys().is_empty(), "the held list survived");
         assert!(engine.is_paused(), "focus loss must pause");
     }
 
@@ -1301,11 +1067,11 @@ mod tests {
         const INSET: f32 = 8.0;
 
         let mut engine = scripted(&headless(60));
-        let window = engine.window;
+        let window = engine.window();
         run_frames(&mut engine, 2);
 
         engine
-            .shell
+            .shell_mut()
             .set_focus(window, false)
             .expect("the window is live");
         engine.frame().expect("a frame");
@@ -1344,13 +1110,13 @@ mod tests {
         // Focus comes back the way a browser gives it back: a press and release
         // at a real position, which here is over nothing.
         engine
-            .shell
+            .shell_mut()
             .set_focus(window, true)
             .expect("the window is live");
         let at = PhysicalPoint::new(f64::from(corner.x), f64::from(corner.y));
         for state in [PointerState::Pressed, PointerState::Released] {
             engine
-                .shell
+                .shell_mut()
                 .button(window, PointerButton::Left, state, Some(at))
                 .expect("the window is live");
             engine.frame().expect("a frame");
@@ -1373,46 +1139,46 @@ mod tests {
     #[test]
     fn a_window_that_loses_focus_stops_the_ship_turning() {
         let mut engine = scripted(&headless(400));
-        let window = engine.window;
+        let window = engine.window();
         engine
-            .shell
+            .shell_mut()
             .key_press(window, KeyCode::Space)
             .expect("the window is live");
         run_frames(&mut engine, 4);
-        assert_eq!(engine.game.state, GameState::Playing);
+        assert_eq!(engine.game().game().state, GameState::Playing);
 
         engine
-            .shell
+            .shell_mut()
             .key_press(window, KeyCode::ArrowLeft)
             .expect("the window is live");
         run_frames(&mut engine, 10);
         assert!(
-            engine.held_keys.contains(&KeyCode::ArrowLeft),
+            engine.held_keys().contains(&KeyCode::ArrowLeft),
             "the pump did not record the held key, so the test below is vacuous",
         );
-        let turning = engine.game.ship_heading;
+        let turning = engine.game().game().ship_heading;
 
         // Focus goes away, and no release for ArrowLeft ever arrives — which is
         // exactly what every platform does.
         engine
-            .shell
+            .shell_mut()
             .set_focus(window, false)
             .expect("the window is live");
         engine.frame().expect("a frame");
         assert!(engine.is_paused(), "focus loss must pause");
-        assert!(engine.held_keys.is_empty(), "the held list survived");
+        assert!(engine.held_keys().is_empty(), "the held list survived");
 
         // Un-pause without ever releasing the key, and the ship must be still.
         engine
-            .shell
+            .shell_mut()
             .key_press(window, PAUSE_KEY)
             .expect("the window is live");
         run_frames(&mut engine, 30);
         assert!(!engine.is_paused());
         assert!(
-            (engine.game.ship_heading - turning).abs() < 1e-9,
+            (engine.game().game().ship_heading - turning).abs() < 1e-9,
             "the ship kept turning after focus was lost: {turning} → {}",
-            engine.game.ship_heading,
+            engine.game().game().ship_heading,
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }

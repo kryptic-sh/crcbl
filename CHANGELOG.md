@@ -228,8 +228,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   for exactly this. Its own 86 tests pass and its browser gate ran 27/27.
   `app.rs` lost 288 lines and `web.rs` 28, against 30 of `GameGpu` forwards.
 
-  asteroids, horde and sandbox are unconverted and still drive their own
-  `frame()`.
+- **asteroids**: hosted by `crcbl::engine::Loop` as well, and it gained a fix on
+  the way: **a refused fullscreen is now reported.** The sample never called
+  `check_mode_request`, so a player on a tiling window manager pressed F11 and
+  got no window change and no log line saying why; the engine's loop checks once
+  a frame for every game it hosts.
+
+  `Fire` on `FIRE_ID = FIRST_GAME_ID` is what its menu vocabulary still
+  declares. `render_alpha` stays — this is the sample that interpolates
+  rotations across a tick, and `FrameInfo::alpha` is where the number now comes
+  from. `app.rs` lost 234 lines and `web.rs` 29; its 93 tests pass and its
+  browser gate ran 27/27.
+
+  The seam grew `Loop::{set_paused, gpu_mut}` for it: a test paused the loop by
+  assignment, and its sprite read-back takes `&mut self`.
+
+  horde and sandbox are unconverted and still drive their own `frame()`.
 
 - **crcbl** (`crcbl::engine`, `crcbl::web`): the sample loops' shared machinery
   moves into the engine, in four further slices.
