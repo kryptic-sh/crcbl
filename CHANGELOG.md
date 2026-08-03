@@ -165,6 +165,37 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **crcbl** (`crcbl::engine`, `crcbl::web`): the sample loops' shared machinery
+  moves into the engine, in four further slices.
+
+  `open_window` logs the backend, aligns the shell's event clock with the
+  engine's and creates the window, taking the caller's `WindowDesc` because a
+  title and a size are the game's. `MAX_FRAME_STEP` joins it as an engine
+  constant: the browser behaviour it guards against is the shell's.
+
+  `PolledBoot`, with the `PolledGpu` trait, owns browser start-up — the pump,
+  the configure/device state machine, the fix for a canvas resized while the
+  device request is in flight, and the refusal to restart a boot that already
+  finished or failed. It hands back `Booted` rather than a loop, because
+  assembling one is the game's.
+
+  `MenuPump` owns the menu's half of a pump batch: the three menu keys
+  (`MENU_UP_KEY`, `MENU_DOWN_KEY` and `MENU_ACTIVATE_KEY`, now the engine's
+  alongside the three reserved ones), the select/press/activate routing, and the
+  held-key list. It answers with a `WidgetId`, leaving the mapping to a game's
+  own action enum where it belongs.
+
+  `crcbl::web` takes the browser entry point's shared half: the status codes — a
+  wire format the JS shim switches on, so one definition is the only way they
+  stay in step — the bounded log queue, and the whole `App` lifecycle behind the
+  `WebLoop` and `WebPending` traits. It is deliberately not gated to `wasm32`,
+  because gating it would put its tests on the one target the suite never runs.
+
+  Measured: the four `app.rs` files lost 551 lines, and the four `web.rs` files
+  went from 2642 to 1466. What the samples keep is what genuinely differs — each
+  game's `assemble`, its `MenuAction` handler, its HUD, and the one log line
+  reporting what a finished run was worth.
+
 - **crcbl** (`crcbl::engine`): `LoopError<G>` replaces the error enum each
   sample wrote out for itself. The five loop failures — `NoWindowSystem`,
   `Shell`, `Configure`, `NeverPresented` and `Gpu` — belong to the loop however

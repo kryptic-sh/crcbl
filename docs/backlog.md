@@ -641,13 +641,32 @@ The modular panel is built and all three samples switch it on with F3 (or
   branches, with the sample supplying its own key bindings and its own
   `MenuAction` handler.
 
-  **The menu half of that slice has landed** — `crcbl_ui::menu::MenuSet` — and
-  the loop half deliberately has not. Measured on the current tree, with the
-  game names normalised away (`BreakoutError` → `GameError`, `breakout` →
-  `game`, `glam::` stripped): breakout and flappy share **1708 identical lines**
-  of 2318 and 2271, with runs of 141, 108, 102 and 99 lines; asteroids and horde
-  share 1124 of 1700 and 1969; breakout and asteroids 1101, with runs of 74
-  and 67.
+  **Most of that slice has now landed**, in pieces, each with its own commit:
+  `crcbl_ui::menu::MenuSet`, then `crcbl::engine::LoopError<G>`, `open_window`
+  and `MAX_FRAME_STEP`, `PolledBoot`/`PolledGpu`, and `MenuPump` with the three
+  menu keys. `web.rs` went the same way — `crcbl::web` took the status codes,
+  the log queue and the whole `App` lifecycle.
+
+  **What is left is the body of `Loop::frame` itself.** Measured on the current
+  tree with the game names normalised away and comments and tests stripped:
+  breakout and flappy are 511 and 508 code lines with **480 identical**, which
+  past rustfmt's wrapping is still the same file.
+
+  The remaining shared parts are the fixed-step accumulator with its
+  drain-while-paused rule, the pointer press-capture bookkeeping, the post-pump
+  batch resolution (debug overlay, focus loss, pause, fullscreen, mode request,
+  destroyed, close, resize), the present/reconfigure counting, `finish`, and
+  `run`. The genuinely per-game parts are `assemble`, `apply` (the `MenuAction`
+  handler), `draw_hud`/`HudStrings`, `menu_kind`, and the game constants.
+
+  **Why this last piece is harder than the ones before it.** Every slice so far
+  had a seam that was already a type: an error, a window, a boot state machine,
+  a menu batch. `frame` has none — it interleaves loop state and game state line
+  by line, so extracting it means a trait carrying the game's `Gpu`, `Game`,
+  `MenuKind`, `MenuAction`, `RenderState` and HUD, which is six associated types
+  to save roughly 480 lines. That may still be worth it; it is not obviously so,
+  and it is the first slice in this sequence where the answer is not clear
+  before starting. Decide that before writing it.
 
   **The error half has landed** — `crcbl::engine::LoopError<G>` — and it cost
   far less than this entry predicted, so the prediction is worth correcting
