@@ -38,7 +38,7 @@ thiserror = "2.0"
 # Storage and persistence: serde for settings/save schemas, toml for settings
 # files, dirs for platform-standard config/data paths.
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 dirs = "6.0"
 
 # Internal crates are pinned here too, so a member never spells out a path more
