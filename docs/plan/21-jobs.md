@@ -299,3 +299,51 @@ is the constraint that already forbids a `crcbl::run(game)`.
 Step 2 is a gate rather than a step: if isolation cannot be had on Pages, the
 demos stay single-threaded through the fallback and native keeps the topology —
 which is exactly what the seam in step 1 exists to make survivable.
+
+## Topology on the web, settled (2026-08-03)
+
+The browser's split, decided rather than discovered, and it maps onto the
+topology above with **one** substitution:
+
+```
+[OS main]   DOM/canvas/input events  ─┐  raw events → input ring (accumulate-then-swap)
+            rAF + render submit       │
+              ▲ latest-wins snapshot  │
+              │                       ▼
+[game]      the whole simulation topology: spawns and owns sim, io, net and the
+   worker   pool workers; blocks freely on `Atomics.wait`; publishes snapshots
+```
+
+**Main is the converge thread, not merely an event forwarder.** The table above
+already allows this — `[converge] … (may == OS main; target: wait≈0)` — and in
+the browser it is the right half of the choice, because the alternative is
+moving the canvas to a worker with `OffscreenCanvas` and thereby **giving up
+`requestAnimationFrame`**, which is a `Window` API a dedicated worker does not
+have. Presenting from a worker means presenting on a timer, which is not the
+clock native gets.
+
+Main blocking is forbidden; **main reading is not.** `Atomics.wait` throws on
+the main thread, but `load`, `store`, `compareExchange` and `notify` are all
+allowed there, so a latest-wins triple-buffered read — grab the newest complete
+snapshot, never wait — is legal on main by construction. The mailbox discipline
+this topic already specifies is exactly what makes the browser case work; it was
+not chosen for that reason, and it pays for itself anyway.
+
+**The game thread owns the topology, not main.** Nested workers are permitted,
+so the game worker spawns sim, io, net and the pool itself. Main therefore knows
+nothing about the thread graph: it forwards events and it presents. That is what
+keeps the browser's main thread from becoming a second scheduler that has to be
+kept in step with the real one.
+
+**Two directions, two disciplines, and they are not interchangeable:**
+
+- **main → game (input)**: the raw event ring is **accumulate-then-swap**, never
+  latest-wins, because edges must not be droppable — a 3 ms tap must survive a
+  16 ms tick. Main writes without blocking; the game thread waits when idle.
+- **game → main (snapshots)**: **latest-wins**, because a stale frame is better
+  than a stalled one and the consumer must never block.
+
+**Without cross-origin isolation there is no ring**, and the fallback is
+`postMessage` — which is what `crcbl-audio`'s worklet feed already does, and
+which changes the shape rather than only the speed. That is why the isolation
+gate is a gate.
