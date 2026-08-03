@@ -317,23 +317,11 @@ pub const DEFAULT_SEED: u64 = 0x4153_5452_4F49_4453;
 
 /// A uniform value in `[0, 1)` from `seed` and `index`.
 ///
-/// **A pure function, not a running generator**, for the reason
-/// `apps/flappy/src/game.rs`'s `gap_centre` gives at length: an RNG whose
-/// position depends on how many rocks have been spawned so far is hidden state,
-/// and hidden state is what makes two runs of the same script diverge. Hashing
-/// the index instead means the third rock of wave 5 is in the same place however
-/// the run reached it.
-///
-/// splitmix64's finaliser, taken as 53 bits of mantissa — an f64 has exactly 53,
-/// so this is uniform with nothing thrown away twice.
-#[must_use]
-pub fn hash_unit(seed: u64, index: u64) -> f64 {
-    let mut z = seed.wrapping_add(index.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
-    (z >> 11) as f64 / (1u64 << 53) as f64
-}
+/// The engine's, re-exported so this game's three index spaces stay beside the
+/// draws that use them. [`crcbl_core::rand`] is where the argument for hashing
+/// an index rather than stepping a generator is written down — every sample
+/// reached it independently, which is why it is the engine's shape now.
+pub use crcbl_core::rand::hash_unit;
 
 /// The seed the `runs`-th board of a game seeded with `seed` is dealt from.
 ///
@@ -343,7 +331,7 @@ pub fn hash_unit(seed: u64, index: u64) -> f64 {
 /// a recorded script replayed from a fresh game meets the same rocks.
 #[must_use]
 fn board_seed(seed: u64, runs: u32) -> u64 {
-    seed ^ u64::from(runs).wrapping_mul(0xD1B5_4A32_D192_ED03)
+    crcbl_core::rand::salt(seed, u64::from(runs))
 }
 
 /// Index space for wave spawns. Disjoint from the split space below, so a wave

@@ -19,6 +19,9 @@
 //!   in `crcbl-shell`, which is the only crate that produces one.
 //! * [`log`] — stderr logging behind the [`log`](::log) facade, filtered by
 //!   `CRCBL_LOG`.
+//! * [`rand`] — deterministic values from an index, for simulations that
+//!   replay. Deliberately not a generator; see the module docs for why every
+//!   sample independently arrived at the same shape.
 //! * [`surface`] — [`SurfaceTarget`], the native window handles the shell
 //!   produces and a HAL backend consumes. It lives here, and not in either of
 //!   those crates, because neither may depend on the other; see the module docs
@@ -28,6 +31,7 @@ pub mod alloc;
 pub mod handle;
 pub mod input;
 pub mod log;
+pub mod rand;
 pub mod surface;
 pub mod time;
 pub mod world;

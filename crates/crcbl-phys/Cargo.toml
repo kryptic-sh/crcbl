@@ -10,5 +10,11 @@ repository.workspace = true
 crcbl-ecs = { workspace = true }
 glam = { workspace = true }
 
+# Tests only: the churn suite drives its operations from an index hash, which is
+# `crcbl-core`'s. The crate itself does not need it — it reaches the ECS, and the
+# ECS reaches core.
+[dev-dependencies]
+crcbl-core = { workspace = true }
+
 [lints]
 workspace = true

@@ -314,17 +314,19 @@ fn noise(seconds: f32, decay: f32, sample_rate: u32) -> Vec<AudioSample> {
 
     let frames = (sample_rate as f32 * seconds) as usize;
     let mut out = Vec::with_capacity(frames * 2);
-    let mut state = 0x484F_5244_4553_4545_u64;
+    /// Spells "HORDESEE" — this game's noise, and the same value its
+    /// `DEFAULT_SEED` uses.
+    const SEED: u64 = 0x484F_5244_4553_4545;
+
     let mut low = 0.0f32;
     for i in 0..frames {
-        // splitmix64, as `game::hash_unit` uses it. The top 24 bits are the ones
-        // it mixes best, and 24 is exactly an `f32`'s mantissa, so every value
-        // this produces is representable rather than rounded.
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^= z >> 31;
+        // The engine's hash, walked as a sequence: stepping splitmix64's state
+        // by its gamma is the same thing as hashing successive indices, which
+        // `crcbl_core::rand`'s `stepping_the_state_is_hashing_the_index` pins.
+        // The top 24 bits are the ones it mixes best, and 24 is exactly an
+        // `f32`'s mantissa, so every value here is representable rather than
+        // rounded.
+        let z = crcbl_core::rand::hash_u64(SEED, i as u64 + 1);
         let white = (z >> 40) as f32 / 8_388_608.0 - 1.0;
 
         low += ALPHA * (white - low);

@@ -155,17 +155,11 @@ pub fn pipe_x(index: u32) -> f64 {
 /// whether it was the fortieth spawned or the first — and it is why the client
 /// and the server agree about the course without a byte of it being sent.
 ///
-/// splitmix64's finaliser over `seed` and `index`, taken as 53 bits of mantissa.
+/// The pipe index *is* the index space — one draw per pipe, so there is nothing
+/// to pack and nothing to collide with.
 #[must_use]
 pub fn gap_centre(seed: u64, index: u32) -> f64 {
-    let mut z = seed.wrapping_add(u64::from(index).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
-    // The top 53 bits are the ones splitmix64 mixes best, and 53 is exactly an
-    // f64's mantissa, so this is a uniform value in [0, 1) with nothing thrown
-    // away twice.
-    let unit = (z >> 11) as f64 / (1u64 << 53) as f64;
+    let unit = crcbl_core::rand::hash_unit(seed, u64::from(index));
     (unit * 2.0 - 1.0) * GAP_CENTRE_RANGE
 }
 
@@ -177,7 +171,7 @@ pub fn gap_centre(seed: u64, index: u32) -> f64 {
 /// replayed from a fresh game still meets the same pipes in the same places.
 #[must_use]
 fn course_seed(seed: u64, runs: u32) -> u64 {
-    seed ^ u64::from(runs).wrapping_mul(0xD1B5_4A32_D192_ED03)
+    crcbl_core::rand::salt(seed, u64::from(runs))
 }
 
 const ACTION_FLAP: &str = "flap";

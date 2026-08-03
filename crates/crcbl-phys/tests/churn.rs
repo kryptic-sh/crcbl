@@ -21,24 +21,13 @@ use glam::DVec3;
 // Deterministic randomness
 // ---------------------------------------------------------------------------
 
-/// splitmix64's finaliser over `seed` and `index`.
+/// The engine's index hash, under this file's shorter names.
 ///
-/// Same construction as `apps/flappy/src/game.rs::gap_centre`, and for the same
-/// reason: the value depends only on the index, never on how much of the test
-/// has run so far, so a failure at operation 431 is reproducible by replaying
-/// the same seed rather than by having kept the whole history.
-fn mix(seed: u64, index: u64) -> u64 {
-    let mut z = seed.wrapping_add(index.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
-
-/// A uniform value in `[0, 1)` — the top 53 bits, which is exactly an f64's
-/// mantissa.
-fn unit(seed: u64, index: u64) -> f64 {
-    (mix(seed, index) >> 11) as f64 / (1u64 << 53) as f64
-}
+/// The reason it is an index hash rather than a generator matters as much to a
+/// churn test as to a game: the value depends only on the index, never on how
+/// much of the test has run, so a failure at operation 431 is reproducible by
+/// replaying the seed rather than by having kept the whole history.
+use crcbl_core::rand::{hash_u64 as mix, hash_unit as unit};
 
 /// A box of half-extent `half` somewhere in a cube `span` across.
 fn random_box(seed: u64, index: u64, span: f64, half: f64) -> Aabb {
