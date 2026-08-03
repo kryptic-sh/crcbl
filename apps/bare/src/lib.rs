@@ -92,6 +92,13 @@ pub struct Bare<S: Shell + ?Sized = dyn Shell> {
     ticks: u64,
     events: u64,
     windowed: bool,
+    /// What the window system was last seen doing with the display mode.
+    ///
+    /// A hand-rolled loop has to carry this, and that is worth a sample
+    /// showing: accepting a close request destroys the window, so a summary
+    /// built afterwards has nothing left to read the mode off. See
+    /// [`ModeRequest::mode_at_exit`].
+    mode: ModeRequest,
 }
 
 impl Bare<dyn Shell> {
@@ -161,6 +168,7 @@ impl<S: Shell + ?Sized> Bare<S> {
             budget: FrameBudget::new(options.frame_budget()),
             ticks: 0,
             events,
+            mode: ModeRequest::new(),
         })
     }
 
@@ -197,6 +205,9 @@ impl<S: Shell + ?Sized> Bare<S> {
             let _ = pending.observe(&event);
         });
         self.events += pending.count;
+        // Before the close below, which destroys the window: this is the only
+        // place the mode can still be read.
+        self.mode.check(&*self.shell, self.window);
 
         if pending.destroyed {
             return Ok(Flow::Stop(ExitReason::WindowDestroyed));
@@ -287,7 +298,7 @@ impl<S: Shell + ?Sized> Bare<S> {
             ticks: self.ticks,
             events: self.events,
             extent: self.gpu.extent(),
-            mode: ModeRequest::mode(&*self.shell, self.window),
+            mode: self.mode.mode_at_exit(&*self.shell, self.window),
             exit,
         };
         let gpu_result = self.gpu.destroy();

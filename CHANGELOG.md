@@ -16,6 +16,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl** (`engine`): a run that ended because the player closed the window
+  reported `DisplayMode::Windowed` whatever mode it had been in. Accepting a
+  close request destroys the window, and the summary is built afterwards, so
+  `ModeRequest::mode` had nothing left to read and fell back to its default — in
+  the same words a genuinely windowed run uses, so nothing downstream could tell
+  the two apart. `ModeRequest` now records the mode it last saw and the new
+  `ModeRequest::mode_at_exit` prefers the live answer, falling back to that.
+  `Loop::finish` and `apps/bare` both use it.
+
 - **crcbl-shell** (X11): a window created with
   `WindowDesc { mode: Borderless, .. }` reported its own request back as the
   effective mode when no window manager was running. EWMH has the _client_ write

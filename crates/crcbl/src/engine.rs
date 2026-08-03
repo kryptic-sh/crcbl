@@ -1710,13 +1710,22 @@ pub fn run_ticks(clock: &mut crcbl_core::FrameClock, paused: bool, mut tick: imp
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ModeRequest {
     honoured: bool,
+    /// The last mode [`check`](Self::check) saw the window actually in.
+    ///
+    /// Kept for one reason: [`mode_at_exit`](Self::mode_at_exit), because by
+    /// the time a run that ended in a close request builds its summary the
+    /// window is gone and there is nothing left to read.
+    seen: DisplayMode,
 }
 
 impl ModeRequest {
     /// A loop that has asked for nothing yet.
     #[must_use]
     pub const fn new() -> Self {
-        Self { honoured: false }
+        Self {
+            honoured: false,
+            seen: DisplayMode::Windowed,
+        }
     }
 
     /// The mode the window system actually has the window in.
@@ -1754,6 +1763,25 @@ impl ModeRequest {
         Ok(())
     }
 
+    /// The mode to report for a run that has **ended**.
+    ///
+    /// [`mode`](Self::mode) reads the window, and answers `Windowed` when there
+    /// is no window to read — which is every run a player ended by closing the
+    /// window, because accepting a close destroys it before teardown gets to
+    /// ask. A summary built that way says "windowed" for a session that spent
+    /// all of itself fullscreen, and says it in the same words a genuinely
+    /// windowed run uses, so nothing downstream can tell the two apart.
+    ///
+    /// So this prefers the live answer and falls back to the last one
+    /// [`check`](Self::check) saw. A loop that never called `check` reports
+    /// `Windowed`, which is what it started in and all it ever knew.
+    #[must_use]
+    pub fn mode_at_exit<S: Shell + ?Sized>(&self, shell: &S, window: WindowId) -> DisplayMode {
+        shell.window_state(window).map_or(self.seen, |state| {
+            state.effective_mode().unwrap_or(state.requested_mode)
+        })
+    }
+
     /// Whether the window system was last seen honouring what was asked for.
     ///
     /// Updated by [`Self::check`], so it is a *report* rather than a request —
@@ -1782,6 +1810,10 @@ impl ModeRequest {
         if !state.is_configured() {
             return;
         }
+        // Recorded on every call, not only on a transition: the mode can change
+        // while `honoured` stays true — borderless back to windowed is two
+        // honoured states — and the early return below would skip it.
+        self.seen = state.effective_mode().unwrap_or(state.requested_mode);
         let honoured = state.mode_request_honoured();
         if honoured == self.honoured {
             return;
@@ -2970,7 +3002,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             extent: self.gpu.extent(),
             exit,
             paused: self.paused,
-            mode: ModeRequest::mode(self.shell.as_ref(), self.window),
+            // Not `ModeRequest::mode`: a close request has already destroyed
+            // the window by the time this runs.
+            mode: self.mode.mode_at_exit(self.shell.as_ref(), self.window),
         });
 
         let gpu_result = self.gpu.destroy();
@@ -3813,6 +3847,44 @@ mod tests {
         // same refusal on every frame forever.
         request.check(&shell, window);
         assert!(!request.honoured);
+    }
+
+    /// **A run that ended fullscreen says so, even though closing the window is
+    /// what ended it.**
+    ///
+    /// Accepting a close request destroys the window, and the summary is built
+    /// afterwards — so [`ModeRequest::mode`] has nothing left to read and
+    /// answers `Windowed`, in the same words a genuinely windowed run uses.
+    /// That is every session a player ended the ordinary way: the whole run
+    /// borderless, the summary line saying windowed, and nothing downstream
+    /// able to tell it from the truth.
+    #[test]
+    fn the_mode_a_finished_run_reports_survives_the_window_it_was_read_from() {
+        let (mut shell, window) = shell();
+        shell
+            .resize(window, crcbl_shell::PhysicalSize::new(320, 240))
+            .expect("the window is live");
+
+        let mut request = ModeRequest::new();
+        ModeRequest::toggle(&mut shell, window).expect("the shell accepts the request");
+        // `HeadlessShell` delivers the fullscreen configure a few pumps later,
+        // exactly as a compositor does.
+        for _ in 0..8 {
+            shell.pump(&mut |_| {});
+            request.check(&shell, window);
+        }
+        assert!(
+            request.honoured(),
+            "the window never went borderless, so the rest of this proves nothing"
+        );
+        assert!(ModeRequest::mode(&shell, window).is_borderless());
+
+        // What accepting a close request does, one layer down.
+        shell.destroy_window(window).expect("the window is live");
+        assert!(
+            request.mode_at_exit(&shell, window).is_borderless(),
+            "the summary would have called a fullscreen session windowed"
+        );
     }
 
     /// **A click faster than one frame still latches and fires.**
