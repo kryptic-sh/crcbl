@@ -35,6 +35,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the one dependency a sample continues to spell out, and is what keeps a PNG
   encoder out of a shipped binary.
 
+- **crcbl-store** (`crcbl::store::record`): `Record`, one `u32` kept between
+  sessions. `Backing` picks where — `None` for a headless run that must leave no
+  trace, `Backing::config(app)` for the platform's config directory, and
+  `Backing::Browser` for a store the page's shim installed. `raise` writes only
+  when the new value is larger; `set` is for the game whose better is smaller.
+
+  The crate handed out a `StorageSource`, an atomic write and a
+  platform-standard root and stopped there, so every sample that wanted a high
+  score wrote the platform arms, the little-endian encode, the corrupt-file case
+  and the headless rule itself. Four did, and the bodies matched line for line
+  under names that agreed about nothing — `HighScore` in `high_score.bin`,
+  `Best` in `best.bin`, and horde's `Best` whose number is a run length rather
+  than a score. 987 lines of sample code became 389, and what is left is the
+  part the engine could not have guessed: which directory, which file name, and
+  which browser store.
+
 - **crcbl** (`crcbl::session`): `Loopback`, the single-player session. Pairs an
   in-memory transport, builds the `Server` on one end and the `Client` on the
   other with the same tick rate and the same `ProtocolCompatibility`, hands the

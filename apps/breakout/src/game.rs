@@ -683,7 +683,7 @@ pub struct Game {
     sim_time: Duration,
     ticks_run: u64,
     pub audio: crate::audio::Audio,
-    pub high_score: crate::high_score::HighScore,
+    pub high_score: crcbl::store::record::Record,
     /// Queued key events from the shell pump, replayed after `begin_tick`.
     pending_keys: Vec<(KeyCode, bool)>,
     /// Mirrors of the shared state, refreshed after each tick so the render and
@@ -865,7 +865,7 @@ impl Game {
             sim_time: Duration::ZERO,
             ticks_run: 0,
             audio: crate::audio::Audio::new(headless),
-            high_score: crate::high_score::HighScore::load(headless),
+            high_score: crate::high_score::open(headless),
             pending_keys: Vec::new(),
             score: 0,
             lives: STARTING_LIVES,
@@ -1017,7 +1017,7 @@ impl Game {
         }
 
         if matches!(self.state, GameState::Won | GameState::Lost) {
-            self.high_score.update(self.score);
+            self.high_score.raise(self.score);
         }
     }
 

@@ -24,6 +24,7 @@
 //! [`write_atomic`]'s guarantee becomes when there is no `rename`.
 
 pub mod crash_ring;
+pub mod record;
 pub mod replay;
 pub mod save;
 pub mod settings;

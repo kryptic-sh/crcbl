@@ -735,7 +735,7 @@ pub struct Game {
     /// Queued key events from the shell pump, replayed after `begin_tick`.
     pending_keys: Vec<(KeyCode, bool)>,
     pub audio: crate::audio::Audio,
-    pub best: crate::best::Best,
+    pub best: crcbl::store::record::Record,
     /// Mirrors of the shared state, refreshed after each tick so the render and
     /// HUD paths never take the lock.
     pub state: GameState,
@@ -888,7 +888,7 @@ impl Game {
             ticks_run: 0,
             pending_keys: Vec::new(),
             audio: crate::audio::Audio::new(headless),
-            best: crate::best::Best::load(headless),
+            best: crate::best::open(headless),
             state: GameState::WaitingToStart,
             score: 0,
             death: None,
@@ -989,7 +989,7 @@ impl Game {
         );
 
         if state == GameState::Dead && self.state != GameState::Dead {
-            self.best.update(score);
+            self.best.raise(score);
         }
         self.state = state;
         self.score = score;

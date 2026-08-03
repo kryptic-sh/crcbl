@@ -1,220 +1,78 @@
-//! Best-score persistence — one `u32`, wherever the platform keeps such things.
+//! Where flappy's best score is kept.
 //!
-//! | Target | Where | How |
-//! | --- | --- | --- |
-//! | native, windowed | `~/.config/flappy/best.bin` | [`crcbl::store::write_atomic`] |
-//! | native, `--headless` | nowhere | in memory, so a CI run leaves no trace |
-//! | `wasm32` | the Origin Private File System | `crcbl::store::web::OpfsStorage` |
+//! | Target | Where |
+//! | --- | --- |
+//! | native, windowed | `~/.config/flappy/best.bin` |
+//! | native, `--headless` | nowhere, so a CI run leaves no trace |
+//! | `wasm32` | the Origin Private File System |
 //!
-//! # This file is nearly `apps/breakout/src/high_score.rs`
+//! # This file used to be two hundred lines
 //!
-//! Which is the point of having written it twice. Two games with nothing else in
-//! common both need "one number, kept between sessions, on three platforms", and
-//! `crcbl-store` gives each of them a `StorageSource` and an atomic write and
-//! leaves the platform arms, the encode, the corrupt-file case and the
-//! headless-means-nowhere rule to be written out again. Recorded as a finding in
-//! `docs/plan/ROADMAP.md` rather than fixed here: growing the engine is what
-//! this sample is meant to *reveal* the need for, not do on its own authority.
+//! It held a `Backing` enum, three platform arms, the little-endian encode, the
+//! corrupt-file case and the headless rule — and so did the same file in the
+//! other three samples, line for line, under different type names. All of it is
+//! [`crcbl::store::record::Record`] now.
+//!
+//! What is left is what genuinely is this game's, and it is what the engine
+//! could not have guessed: **which application directory, which file name, and
+//! — in the browser — which store**. The OPFS handle is installed by this
+//! sample's own shim before the restore pass runs, and nothing in `crcbl-store`
+//! can reach for it.
 
+use crcbl::store::record::{Backing, Record};
+
+/// The application directory. `~/.config/flappy/` on Linux.
+///
+/// Native only: the browser has no directory to name, and its store arrives
+/// from the shim already open.
 #[cfg(not(target_arch = "wasm32"))]
-use std::path::PathBuf;
+const APP: &str = "flappy";
 
+/// The file inside it.
 const BEST_FILE: &str = "best.bin";
 
-/// Where the score is kept, or [`Backing::None`] for a run that keeps it
-/// nowhere.
-#[derive(Debug)]
-enum Backing {
-    /// Headless, or a platform that would not say where to write.
-    None,
-    /// A directory on a real filesystem.
-    #[cfg(not(target_arch = "wasm32"))]
-    Native(PathBuf),
-    /// The page's Origin Private File System, drained by the JS shim.
-    #[cfg(target_arch = "wasm32")]
-    Opfs(std::rc::Rc<crcbl::store::web::OpfsStorage>),
+/// Opens the best score, or an in-memory one for a headless run.
+#[must_use]
+pub fn open(headless: bool) -> Record {
+    let backing = if headless {
+        Backing::None
+    } else {
+        platform_backing()
+    };
+    Record::open(backing, BEST_FILE)
 }
 
-/// The best score this player has reached.
-#[derive(Debug)]
-pub struct Best {
-    backing: Backing,
-    value: u32,
+#[cfg(not(target_arch = "wasm32"))]
+fn platform_backing() -> Backing {
+    Backing::config(APP)
 }
 
-impl Best {
-    /// Loads the best score. Headless runs are in-memory only.
-    #[must_use]
-    pub fn load(headless: bool) -> Self {
-        let backing = if headless {
+#[cfg(target_arch = "wasm32")]
+fn platform_backing() -> Backing {
+    match crate::web::opfs_store() {
+        Some(store) => Backing::Browser(store),
+        None => {
+            crcbl::log::warn!("best: no OPFS store installed; scores will not persist");
             Backing::None
-        } else {
-            Self::platform_backing()
-        };
-        let value = Self::read(&backing).unwrap_or(0);
-        Self { backing, value }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn platform_backing() -> Backing {
-        match crcbl::store::NativeStorage::config("flappy") {
-            Ok(store) => Backing::Native(store.root().to_path_buf()),
-            Err(_) => {
-                crcbl::log::warn!("best: no config dir; scores will not persist");
-                Backing::None
-            }
-        }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn platform_backing() -> Backing {
-        match crate::web::opfs_store() {
-            Some(store) => Backing::Opfs(store),
-            None => {
-                crcbl::log::warn!("best: no OPFS store installed; scores will not persist");
-                Backing::None
-            }
-        }
-    }
-
-    /// Decodes the stored value, or `None` when there is not one to decode.
-    ///
-    /// A wrong length is corruption and is reported; every other absence — no
-    /// file, no store, a browser whose restore has not finished — is the
-    /// ordinary first-run case.
-    fn read(backing: &Backing) -> Option<u32> {
-        let data = match backing {
-            Backing::None => return None,
-            #[cfg(not(target_arch = "wasm32"))]
-            Backing::Native(root) => match std::fs::read(root.join(BEST_FILE)) {
-                Ok(data) => data,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-                Err(e) => {
-                    crcbl::log::warn!("best: read error ({e})");
-                    return None;
-                }
-            },
-            #[cfg(target_arch = "wasm32")]
-            Backing::Opfs(store) => {
-                use crcbl::store::StorageSource as _;
-                match store.read(std::path::Path::new(BEST_FILE)) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        crcbl::log::info!("best: no previous save ({e})");
-                        return None;
-                    }
-                }
-            }
-        };
-        match <[u8; 4]>::try_from(data.as_slice()) {
-            Ok(bytes) => Some(u32::from_le_bytes(bytes)),
-            Err(_) => {
-                crcbl::log::warn!("best: corrupt file ({} bytes)", data.len());
-                None
-            }
-        }
-    }
-
-    /// Loads with a specific root directory, for tests.
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    fn with_root(root: PathBuf) -> Self {
-        let backing = Backing::Native(root);
-        let value = Self::read(&backing).unwrap_or(0);
-        Self { backing, value }
-    }
-
-    /// The best score so far.
-    #[must_use]
-    pub const fn get(&self) -> u32 {
-        self.value
-    }
-
-    /// Records `score` if it beats the best. Reports whether it did.
-    pub fn update(&mut self, score: u32) -> bool {
-        if score <= self.value {
-            return false;
-        }
-        self.value = score;
-        self.save();
-        crcbl::log::info!("best: new best = {}", self.value);
-        true
-    }
-
-    /// Writes the current value out, if there is anywhere to write it.
-    ///
-    /// The browser arm returns as soon as the record is *queued*: OPFS has no
-    /// synchronous path to the disk and the shim performs the write later, on
-    /// `visibilitychange` and `beforeunload`, so a player who closes the tab on
-    /// a new best still keeps it.
-    fn save(&self) {
-        match &self.backing {
-            Backing::None => {}
-            #[cfg(not(target_arch = "wasm32"))]
-            Backing::Native(root) => {
-                let path = root.join(BEST_FILE);
-                if let Err(e) = crcbl::store::write_atomic(&path, &self.value.to_le_bytes()) {
-                    crcbl::log::warn!("best: save failed ({e})");
-                }
-            }
-            #[cfg(target_arch = "wasm32")]
-            Backing::Opfs(store) => {
-                use crcbl::store::StorageSource as _;
-                if let Err(e) =
-                    store.write(std::path::Path::new(BEST_FILE), &self.value.to_le_bytes())
-                {
-                    crcbl::log::warn!("best: save failed ({e})");
-                }
-            }
         }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        dir
-    }
-
-    /// A best score survives the process that set it.
+    /// The headless rule is this module's own — `Record` writes to whatever
+    /// backing it is handed, and choosing `None` here is what stops the test
+    /// suite writing into a developer's real config directory.
     #[test]
-    fn a_best_score_is_written_and_read_back() {
-        let dir = scratch("crcbl_flappy_best");
-
-        let mut best = Best::with_root(dir.clone());
+    fn a_headless_run_keeps_its_best_in_memory_and_writes_nothing() {
+        let mut best = open(true);
         assert_eq!(best.get(), 0);
-        assert!(best.update(9));
-        assert!(!best.update(4), "a worse run must not overwrite the best");
-        assert!(!best.update(9), "and neither must an equal one");
-        assert!(best.update(21));
+        assert!(best.raise(500), "it still tracks the best in memory");
+        assert_eq!(best.get(), 500);
 
-        assert_eq!(
-            Best::with_root(dir.clone()).get(),
-            21,
-            "the next session did not see the best"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A file that is not four bytes is corruption, not a score.
-    #[test]
-    fn a_wrong_length_file_reads_as_no_score() {
-        let dir = scratch("crcbl_flappy_best_corrupt");
-        std::fs::write(dir.join(BEST_FILE), [1, 2, 3]).expect("write");
-        assert_eq!(Best::with_root(dir.clone()).get(), 0);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A headless run keeps the score in memory and touches nothing.
-    #[test]
-    fn a_headless_run_persists_nothing() {
-        let mut best = Best::load(true);
-        assert!(matches!(best.backing, Backing::None));
-        assert!(best.update(7));
-        assert_eq!(best.get(), 7);
+        // Nothing was written, so a second headless open starts over.
+        assert_eq!(open(true).get(), 0, "a headless run left a file behind");
     }
 }

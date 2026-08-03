@@ -1492,7 +1492,7 @@ pub struct Game {
     /// function of its inputs, and an audio device is neither.
     pub audio: crate::audio::Audio,
     /// The best score, and where it is kept.
-    pub best: crate::best::Best,
+    pub best: crcbl::store::record::Record,
     /// Mirrors of the shared state, refreshed after each tick so the render and
     /// HUD paths never take the lock.
     pub state: GameState,
@@ -1663,7 +1663,7 @@ impl Game {
             ticks_run: 0,
             pending_keys: Vec::new(),
             audio: crate::audio::Audio::new(headless),
-            best: crate::best::Best::load(headless),
+            best: crate::best::open(headless),
             state: GameState::WaitingToStart,
             score: 0,
             lives: STARTING_LIVES,
@@ -1789,7 +1789,7 @@ impl Game {
         // already been counted — and an `update` per tick would write the file
         // sixty times a second for as long as the panel is up.
         if self.state == GameState::GameOver && was != GameState::GameOver {
-            self.best.update(self.score);
+            self.best.raise(self.score);
         }
 
         let state_changed = self.state != self.prev_log_state;
@@ -3474,7 +3474,7 @@ mod tests {
     #[test]
     fn the_best_score_reaches_the_render_state() {
         let mut harness = Harness::new(60, 60);
-        harness.game.best.update(1_234);
+        harness.game.best.raise(1_234);
         let mut render = RenderState::default();
         harness.game.render_state(&mut render);
         assert_eq!(render.best, 1_234);

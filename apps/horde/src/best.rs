@@ -1,10 +1,10 @@
-//! Best-run persistence — one `u32`, wherever the platform keeps such things.
+//! Where horde's best run is kept.
 //!
-//! | Target | Where | How |
-//! | --- | --- | --- |
-//! | native, windowed | `~/.config/horde/best.bin` | [`crcbl::store::write_atomic`] |
-//! | native, `--headless` | nowhere | in memory, so a CI run leaves no trace |
-//! | `wasm32` | the Origin Private File System | `crcbl::store::web::OpfsStorage` |
+//! | Target | Where |
+//! | --- | --- |
+//! | native, windowed | `~/.config/horde/best.bin` |
+//! | native, `--headless` | nowhere, so a CI run leaves no trace |
+//! | `wasm32` | the Origin Private File System |
 //!
 //! # The number is a *time*, and that is this sample's own choice
 //!
@@ -12,140 +12,53 @@
 //! how long it lasted. It is stored in **whole seconds** because that is what
 //! the HUD's `m:ss` clock shows — a best that read `2:13` and compared as
 //! `133.4187` would be a number the player could beat without the display
-//! changing. `Best::update` therefore truncates before it compares, and a run
+//! changing. [`Best::update`] therefore truncates before it compares, and a run
 //! that beats the record by a tenth of a second correctly does not.
 //!
-//! # This is the *fourth* copy of this file
-//!
-//! S1B finding 4 in `docs/plan/ROADMAP.md` says `crcbl-store` has no "one
-//! number, kept between sessions": it gives a `StorageSource` and an atomic
-//! write and leaves the platform arms, the encode, the corrupt-file case and the
-//! headless-means-nowhere rule to be written out again. Two games with nothing
-//! else in common made that a gap rather than a preference; the third confirmed
-//! it; the fourth is where the *names* stopped agreeing about anything but the
-//! bodies.
-//!
-//! `apps/breakout/src/high_score.rs` holds `HighScore` and writes
-//! `high_score.bin`; `apps/flappy/src/best.rs` and `apps/asteroids/src/best.rs`
-//! hold `Best` and write `best.bin`; this holds `Best`, writes `best.bin`, and
-//! is the first whose stored number is not a score at all. The bodies still
-//! match line for line — the same `Backing` enum, the same three arms, the same
-//! `<[u8; 4]>::try_from`, the same "queued, not written" note on the OPFS arm —
-//! so the one thing four copies prove is that the *policy* differs per game and
-//! the *plumbing* never does, which is exactly the shape of the missing engine
-//! API. Owed by P10, where the settings UI wants the same thing a fifth time.
+//! **That rule is why this sample still has a type where the other three do
+//! not.** The plumbing — the platform arms, the encode, the corrupt-file case,
+//! the headless rule — is [`crcbl::store::record::Record`], the same as
+//! breakout's, flappy's and asteroids'. What is wrapped around it here is the
+//! policy the engine has no business knowing: that the stored `u32` is a
+//! duration, that the caller measures it as an `f64`, and that the conversion
+//! happens on the near side of the comparison.
 
+use crcbl::store::record::{Backing, Record};
+
+/// The application directory. `~/.config/horde/` on Linux.
+///
+/// Native only: the browser has no directory to name, and its store arrives
+/// from the shim already open.
 #[cfg(not(target_arch = "wasm32"))]
-use std::path::PathBuf;
+const APP: &str = "horde";
 
+/// The file inside it.
 const BEST_FILE: &str = "best.bin";
-
-/// Where the record is kept, or [`Backing::None`] for a run that keeps it
-/// nowhere.
-#[derive(Debug)]
-enum Backing {
-    /// Headless, or a platform that would not say where to write.
-    None,
-    /// A directory on a real filesystem.
-    #[cfg(not(target_arch = "wasm32"))]
-    Native(PathBuf),
-    /// The page's Origin Private File System, drained by the JS shim.
-    #[cfg(target_arch = "wasm32")]
-    Opfs(std::rc::Rc<crcbl::store::web::OpfsStorage>),
-}
 
 /// The longest run this player has survived, in whole seconds.
 #[derive(Debug)]
 pub struct Best {
-    backing: Backing,
-    seconds: u32,
+    record: Record,
 }
 
 impl Best {
-    /// Loads the record. Headless runs are in-memory only.
+    /// Loads the best run. Headless runs are in-memory only.
     #[must_use]
     pub fn load(headless: bool) -> Self {
         let backing = if headless {
             Backing::None
         } else {
-            Self::platform_backing()
+            platform_backing()
         };
-        let seconds = Self::read(&backing).unwrap_or(0);
-        Self { backing, seconds }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn platform_backing() -> Backing {
-        match crcbl::store::NativeStorage::config("horde") {
-            Ok(store) => Backing::Native(store.root().to_path_buf()),
-            Err(_) => {
-                crcbl::log::warn!("best: no config dir; the record will not persist");
-                Backing::None
-            }
+        Self {
+            record: Record::open(backing, BEST_FILE),
         }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn platform_backing() -> Backing {
-        match crate::web::opfs_store() {
-            Some(store) => Backing::Opfs(store),
-            None => {
-                crcbl::log::warn!("best: no OPFS store installed; the record will not persist");
-                Backing::None
-            }
-        }
-    }
-
-    /// Decodes the stored value, or `None` when there is not one to decode.
-    ///
-    /// A wrong length is corruption and is reported; every other absence — no
-    /// file, no store, a browser whose restore has not finished — is the
-    /// ordinary first-run case.
-    fn read(backing: &Backing) -> Option<u32> {
-        let data = match backing {
-            Backing::None => return None,
-            #[cfg(not(target_arch = "wasm32"))]
-            Backing::Native(root) => match std::fs::read(root.join(BEST_FILE)) {
-                Ok(data) => data,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-                Err(e) => {
-                    crcbl::log::warn!("best: read error ({e})");
-                    return None;
-                }
-            },
-            #[cfg(target_arch = "wasm32")]
-            Backing::Opfs(store) => {
-                use crcbl::store::StorageSource as _;
-                match store.read(std::path::Path::new(BEST_FILE)) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        crcbl::log::info!("best: no previous save ({e})");
-                        return None;
-                    }
-                }
-            }
-        };
-        match <[u8; 4]>::try_from(data.as_slice()) {
-            Ok(bytes) => Some(u32::from_le_bytes(bytes)),
-            Err(_) => {
-                crcbl::log::warn!("best: corrupt file ({} bytes)", data.len());
-                None
-            }
-        }
-    }
-
-    /// Loads with a specific root directory, for tests.
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    fn with_root(root: PathBuf) -> Self {
-        let backing = Backing::Native(root);
-        let seconds = Self::read(&backing).unwrap_or(0);
-        Self { backing, seconds }
     }
 
     /// The longest run so far, in whole seconds.
     #[must_use]
-    pub const fn get(&self) -> u32 {
-        self.seconds
+    pub fn get(&self) -> u32 {
+        self.record.get()
     }
 
     /// Records a run of `elapsed` simulated seconds if it beats the record.
@@ -164,133 +77,73 @@ impl Best {
         // Saturating, as every float-to-integer cast in Rust is since 1.45, so
         // a run longer than 136 years reports 136 years rather than wrapping.
         let seconds = elapsed as u32;
-        if seconds <= self.seconds {
-            return false;
+        if self.record.raise(seconds) {
+            crcbl::log::info!("best: new best run = {}s", self.get());
+            return true;
         }
-        self.seconds = seconds;
-        self.save();
-        crcbl::log::info!("best: new best run = {}s", self.seconds);
-        true
+        false
     }
+}
 
-    /// Writes the current value out, if there is anywhere to write it.
-    ///
-    /// The browser arm returns as soon as the record is *queued*: OPFS has no
-    /// synchronous path to the disk and the shim performs the write later, on
-    /// `visibilitychange` and `beforeunload`, so a player who closes the tab on
-    /// a new record still keeps it.
-    fn save(&self) {
-        match &self.backing {
-            Backing::None => {}
-            #[cfg(not(target_arch = "wasm32"))]
-            Backing::Native(root) => {
-                let path = root.join(BEST_FILE);
-                if let Err(e) = crcbl::store::write_atomic(&path, &self.seconds.to_le_bytes()) {
-                    crcbl::log::warn!("best: save failed ({e})");
-                }
-            }
-            #[cfg(target_arch = "wasm32")]
-            Backing::Opfs(store) => {
-                use crcbl::store::StorageSource as _;
-                if let Err(e) =
-                    store.write(std::path::Path::new(BEST_FILE), &self.seconds.to_le_bytes())
-                {
-                    crcbl::log::warn!("best: save failed ({e})");
-                }
-            }
+#[cfg(not(target_arch = "wasm32"))]
+fn platform_backing() -> Backing {
+    Backing::config(APP)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn platform_backing() -> Backing {
+    match crate::web::opfs_store() {
+        Some(store) => Backing::Browser(store),
+        None => {
+            crcbl::log::warn!("best: no OPFS store installed; runs will not persist");
+            Backing::None
         }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        dir
-    }
-
-    /// A record survives the process that set it.
+    /// The truncation is this module's whole reason for existing, so it is what
+    /// is asserted: a run that beats the record by less than a second must not
+    /// count, because the clock the player reads would not have changed.
     #[test]
-    fn a_best_run_is_written_and_read_back() {
-        let dir = scratch("crcbl_horde_best");
-
-        let mut best = Best::with_root(dir.clone());
-        assert_eq!(best.get(), 0);
-        assert!(best.update(150.0));
-        assert!(
-            !best.update(90.0),
-            "a worse run must not overwrite the best"
-        );
-        assert!(!best.update(150.0), "and neither must an equal one");
-        assert!(best.update(1_020.4));
-
-        assert_eq!(
-            Best::with_root(dir.clone()).get(),
-            1_020,
-            "the next session did not see the record"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// **Whole seconds, compared as whole seconds.**
-    ///
-    /// The one behaviour that is this sample's rather than the shared body's: a
-    /// run that beats the record by a tenth of a second does not beat the
-    /// number the HUD is showing, so it is not a record. A `update(f64)` that
-    /// stored the raw value would report `true` here and change nothing on
-    /// screen.
-    #[test]
-    fn a_tenth_of_a_second_is_not_a_new_record() {
-        let dir = scratch("crcbl_horde_best_tenths");
-        let mut best = Best::with_root(dir.clone());
-        assert!(best.update(133.9));
-        assert_eq!(best.get(), 133);
-        assert!(!best.update(133.999), "a tenth of a second beat the record");
-        assert!(best.update(134.0));
-        assert_eq!(best.get(), 134);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Nothing the simulation cannot produce gets stored as a record.
-    ///
-    /// An infinity is the one that matters: `f64::INFINITY as u32` saturates to
-    /// `u32::MAX`, so a version that cast first would store a record of 136
-    /// years and no run would ever beat it again.
-    #[test]
-    fn a_nonsense_elapsed_is_not_a_record() {
+    fn a_run_that_does_not_gain_a_whole_second_is_not_a_new_best() {
         let mut best = Best::load(true);
-        for bad in [f64::NAN, -1.0, 0.0, f64::NEG_INFINITY, f64::INFINITY] {
-            assert!(!best.update(bad), "{bad} was taken as a record");
+        assert!(best.update(130.9), "the first run is always a best");
+        assert_eq!(best.get(), 130, "the stored value is whole seconds");
+
+        assert!(!best.update(130.99), "a tenth of a second is not a second");
+        assert!(!best.update(130.0), "and neither is nothing");
+        assert!(best.update(131.0), "a whole second is");
+        assert_eq!(best.get(), 131);
+    }
+
+    /// A cast is what makes these dangerous: `f64::NAN as u32` is 0 and
+    /// `f64::INFINITY as u32` is `u32::MAX`, and writing the latter would set a
+    /// record no run could ever beat.
+    #[test]
+    fn a_run_that_is_not_a_real_duration_is_refused_rather_than_cast() {
+        let mut best = Best::load(true);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.0] {
+            assert!(!best.update(bad), "{bad} was accepted as a run length");
         }
-        assert_eq!(best.get(), 0);
-        // …and a finite run still is, or the guard above is a mute button.
-        assert!(best.update(12.0));
-        assert_eq!(best.get(), 12);
+        assert_eq!(best.get(), 0, "one of them reached the record");
     }
 
-    /// A file that is not four bytes is corruption, not a record.
+    /// The headless rule is this module's own — `Record` writes to whatever
+    /// backing it is handed, and choosing `None` here is what stops the test
+    /// suite writing into a developer's real config directory.
     #[test]
-    fn a_wrong_length_file_reads_as_no_record() {
-        let dir = scratch("crcbl_horde_best_corrupt");
-        std::fs::write(dir.join(BEST_FILE), [1, 2, 3]).expect("write");
-        assert_eq!(Best::with_root(dir.clone()).get(), 0);
-        // And a longer file is corruption too, not a value with a tail: a
-        // `try_from` on the first four bytes would read one and be wrong.
-        std::fs::write(dir.join(BEST_FILE), [1, 2, 3, 4, 5]).expect("write");
-        assert_eq!(Best::with_root(dir.clone()).get(), 0);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A headless run keeps the record in memory and touches nothing.
-    #[test]
-    fn a_headless_run_persists_nothing() {
+    fn a_headless_run_keeps_its_best_in_memory_and_writes_nothing() {
         let mut best = Best::load(true);
-        assert!(matches!(best.backing, Backing::None));
-        assert!(best.update(7.0));
-        assert_eq!(best.get(), 7);
+        assert!(best.update(42.0));
+        assert_eq!(best.get(), 42);
+        assert_eq!(
+            Best::load(true).get(),
+            0,
+            "a headless run left a file behind"
+        );
     }
 }
