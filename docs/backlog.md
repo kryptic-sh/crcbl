@@ -215,6 +215,25 @@ sample from outside its process. What is still uncovered:
 - **macOS and Windows have no shell backend at all**, so display modes there are
   not late — they do not exist. See the platform sections of `crcbl-shell`.
 
+## The docs gate reads more files than any other, and it reads them on wasm32
+
+CI runs `cargo doc --workspace --all-features` on the host **and**
+`--target wasm32-unknown-unknown`, both under `RUSTDOCFLAGS: -D warnings`. Two
+consequences that cost a round trip each if you do not know them, and both are
+about `--all-features` rather than about docs:
+
+- **An intra-doc link to an item that is `cfg`-ed out on the other target is an
+  error there.** Write it as a code span instead. `#[cfg_attr]`-ing two versions
+  of the sentence puts the same prose in two places and guarantees they drift.
+- **`--all-features` builds Linux-only targets on every platform.** A
+  feature-gated helper whose `use` resolves only on Linux compiles nowhere else.
+  Give it a `#[cfg(not(target_os = "linux"))] fn main` that fails and says why,
+  rather than a `cfg` that quietly compiles it to nothing —
+  `crates/crcbl-shell/tests/bin/send_key.rs` is the worked example.
+
+Neither is reachable from a local `cargo clippy --all-targets`, which is what
+makes them worth writing down rather than rediscovering.
+
 ## X11 under a window manager
 
 **The whole point of the X11 backend is a platform where a window manager is a

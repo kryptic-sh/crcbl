@@ -12,10 +12,14 @@
 //!
 //! # Why a whole process, and why it does not steal focus
 //!
-//! [`VirtualInput`] needs a Wayland connection, and it takes one the only way
-//! the seam allows: out of a window's
+//! `crcbl_shell::wayland_test_support::VirtualInput` needs a Wayland
+//! connection, and it takes one the only way the seam allows: out of a window's
 //! [`SurfaceTarget`](crcbl_shell::SurfaceTarget). So this creates a window —
 //! and then deliberately never presents to it.
+//!
+//! (A code span rather than a link, because the item does not exist on
+//! `wasm32`, where the `use` below is `cfg`-ed out and the docs gate still
+//! reads this file. Same rule as the engine's native-only APIs.)
 //!
 //! That is not a shortcut, it is the mechanism. A Wayland surface is mapped
 //! exactly while it has a buffer, and nothing here attaches one, so sway never
