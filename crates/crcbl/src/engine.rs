@@ -1636,6 +1636,226 @@ pub fn accept_close<S: Shell + ?Sized>(shell: &mut S, window: WindowId) -> Resul
     shell.reply_close_request(window, CloseReply::Close)
 }
 
+// ---------------------------------------------------------------------------
+// Polled bring-up
+// ---------------------------------------------------------------------------
+
+/// A game's GPU bundle, opened without blocking on the device.
+///
+/// [`PolledBoot`] drives start-up for a caller that may not block —
+/// a browser main thread resolves both of the things a blocking bring-up waits
+/// for from inside the very event loop the wait would be sitting in — and this
+/// is the four methods it needs from whatever a game calls its `Gpu`.
+///
+/// Deliberately **not** implemented for [`GpuContext`]. A sample's `Gpu` is its
+/// renderers and its atlas as well as the context, and the thing that has to
+/// arrive before a loop can be assembled is the whole bundle.
+pub trait PolledGpu: Sized {
+    /// The in-flight device request.
+    type Pending;
+
+    /// Asks for a device and returns immediately.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if no backend could be opened at the requested extent.
+    fn request<S: Shell + ?Sized>(
+        shell: &S,
+        window: WindowId,
+        extent: (u32, u32),
+        backend: Option<GpuBackend>,
+    ) -> Result<Self::Pending, GpuError>;
+
+    /// `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the device request failed.
+    fn poll_pending(pending: &mut Self::Pending) -> Result<Option<Self>, GpuError>;
+
+    /// The extent the swapchain was actually created at.
+    fn extent(&self) -> (u32, u32);
+
+    /// Rebuilds the swapchain at a new size.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the swapchain could not be recreated.
+    fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError>;
+}
+
+/// How far a [`PolledBoot`] has got.
+enum BootStage<G: PolledGpu> {
+    /// The window has no size yet. On every platform this is the compositor's
+    /// answer to `create_window`; in a browser it is the shim's first resize,
+    /// from initial layout.
+    Configure,
+    /// A device has been requested and has not arrived.
+    Device { pending: G::Pending },
+    /// The parts have been handed over, or a step failed.
+    Done,
+}
+
+/// Everything a loop needs, once start-up has finished.
+///
+/// The engine stops here rather than building the loop itself: assembling one is
+/// the game's, and a `Loop` type parameter would drag its `Options` and its
+/// error type in behind it for no gain.
+#[derive(Debug)]
+pub struct Booted<S: Shell + ?Sized, G> {
+    /// The shell the window belongs to.
+    pub shell: Box<S>,
+    /// The one window.
+    pub window: WindowId,
+    /// The opened GPU bundle.
+    pub gpu: G,
+    /// The clock the caller handed to [`PolledBoot::request`].
+    pub clock_source: Clock,
+    /// Shell events observed during start-up, to be added to the loop's count.
+    pub events: u64,
+}
+
+/// Start-up with the waits turned inside out, one poll per frame.
+///
+/// A blocking bring-up waits twice — once in [`wait_for_configure`] and once
+/// inside the device request — and a browser main thread may do neither. This is
+/// the same sequence driven by an outer loop that can be
+/// `requestAnimationFrame`.
+///
+/// It is deliberately **not** the native path's implementation. A native loop
+/// keeps its blocking waits because there they are the honest shape and their
+/// timeouts are real diagnostics; what the two share is everything after the
+/// waiting, which is the game's `assemble`.
+pub struct PolledBoot<S: Shell + ?Sized, G: PolledGpu> {
+    shell: Option<Box<S>>,
+    window: WindowId,
+    clock_source: Option<Clock>,
+    backend: Option<GpuBackend>,
+    stage: BootStage<G>,
+    /// The most recent size the shell reported, which is not necessarily the one
+    /// the swapchain was requested at: the canvas can be resized while the
+    /// device request is still in flight.
+    extent: Option<(u32, u32)>,
+    events: u64,
+}
+
+impl<S: Shell + ?Sized, G: PolledGpu> std::fmt::Debug for PolledBoot<S, G> {
+    /// Hand-written because `G::Pending` is the game's and need not be `Debug`;
+    /// what a reader wants from this is which stage it is in.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PolledBoot")
+            .field("window", &self.window)
+            .field(
+                "stage",
+                &match self.stage {
+                    BootStage::Configure => "Configure",
+                    BootStage::Device { .. } => "Device",
+                    BootStage::Done => "Done",
+                },
+            )
+            .field("extent", &self.extent)
+            .field("events", &self.events)
+            .finish()
+    }
+}
+
+impl<S: Shell + ?Sized, G: PolledGpu> PolledBoot<S, G> {
+    /// Starts the wait on an already-created window.
+    ///
+    /// The window is the caller's because its title and size are the game's;
+    /// [`open_window`] is what makes one.
+    #[must_use]
+    pub fn request(
+        shell: Box<S>,
+        window: WindowId,
+        clock_source: Clock,
+        backend: Option<GpuBackend>,
+    ) -> Self {
+        Self {
+            shell: Some(shell),
+            window,
+            clock_source: Some(clock_source),
+            backend,
+            stage: BootStage::Configure,
+            extent: None,
+            events: 0,
+        }
+    }
+
+    /// Advances start-up. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// Events are pumped on every poll, including while the device request is
+    /// outstanding — a queue nobody drains is how a resize during start-up
+    /// becomes a swapchain at the wrong size, and how a shim's own diagnostic
+    /// ("the canvas never gets input") goes unexplained.
+    ///
+    /// `E` is the caller's error type, so a game's own error is what comes back
+    /// out; both conversions it needs are on [`LoopError`].
+    ///
+    /// # Errors
+    ///
+    /// `E` if the window went away before it had a size, or if the device
+    /// request failed. Polling after the parts were handed over is a caller bug
+    /// and reports [`GpuError::Unusable`].
+    pub fn poll<E>(&mut self) -> Result<Option<Booted<S, G>>, E>
+    where
+        E: From<ShellError> + From<GpuError>,
+    {
+        let Some(shell) = self.shell.as_mut() else {
+            return Err(E::from(GpuError::Unusable("this loop was already started")));
+        };
+
+        let mut pending = Pending::default();
+        shell.pump(&mut |event| {
+            pending.observe(&event);
+        });
+        self.events += pending.count;
+        if pending.destroyed {
+            return Err(E::from(ShellError::invalid_window(self.window)));
+        }
+        if let Some(size) = pending.resized {
+            self.extent = Some((size.width, size.height));
+        }
+
+        match core::mem::replace(&mut self.stage, BootStage::Done) {
+            BootStage::Configure => {
+                let Some(extent) = self.extent else {
+                    self.stage = BootStage::Configure;
+                    return Ok(None);
+                };
+                log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+                // Left `Done` if this fails, so a failed start-up stays failed
+                // rather than requesting a second device next frame.
+                self.stage = BootStage::Device {
+                    pending: G::request(shell.as_ref(), self.window, extent, self.backend)?,
+                };
+                Ok(None)
+            }
+            BootStage::Device { mut pending } => {
+                let Some(mut gpu) = G::poll_pending(&mut pending)? else {
+                    self.stage = BootStage::Device { pending };
+                    return Ok(None);
+                };
+                // The canvas may have been resized while the request was in
+                // flight; the swapchain was created at the older size.
+                if let Some(extent) = self.extent
+                    && extent != gpu.extent()
+                {
+                    gpu.resize(extent)?;
+                }
+                Ok(Some(Booted {
+                    shell: self.shell.take().expect("checked at the top"),
+                    window: self.window,
+                    gpu,
+                    clock_source: self.clock_source.take().expect("taken with the shell"),
+                    events: self.events,
+                }))
+            }
+            BootStage::Done => Err(E::from(GpuError::Unusable("this loop was already started"))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1763,6 +1983,198 @@ mod tests {
             time,
             crcbl_core::EventTime::from_duration(elapsed),
             "the shell timestamped its event on an epoch the loop cannot compare against",
+        );
+    }
+
+    thread_local! {
+        /// How many device requests [`FakeGpu`] has been asked for.
+        static REQUESTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        /// Whether the next [`FakeGpu`] request should fail.
+        static REQUESTS_FAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// A [`PolledGpu`] that arrives after a set number of polls.
+    ///
+    /// A real bundle needs a driver; what these tests are about is the order the
+    /// engine does things in, which a fake observes better than a device can —
+    /// it can count the requests.
+    #[derive(Debug)]
+    struct FakeGpu {
+        extent: (u32, u32),
+    }
+
+    struct FakePending {
+        polls_left: u32,
+        extent: (u32, u32),
+    }
+
+    impl PolledGpu for FakeGpu {
+        type Pending = FakePending;
+
+        fn request<S: Shell + ?Sized>(
+            _shell: &S,
+            _window: WindowId,
+            extent: (u32, u32),
+            _backend: Option<GpuBackend>,
+        ) -> Result<Self::Pending, GpuError> {
+            REQUESTS.with(|n| n.set(n.get() + 1));
+            if REQUESTS_FAIL.with(std::cell::Cell::get) {
+                return Err(GpuError::Unusable("the fixture refused"));
+            }
+            Ok(FakePending {
+                polls_left: 1,
+                extent,
+            })
+        }
+
+        fn poll_pending(pending: &mut Self::Pending) -> Result<Option<Self>, GpuError> {
+            if pending.polls_left > 0 {
+                pending.polls_left -= 1;
+                return Ok(None);
+            }
+            Ok(Some(FakeGpu {
+                extent: pending.extent,
+            }))
+        }
+
+        fn extent(&self) -> (u32, u32) {
+            self.extent
+        }
+
+        fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError> {
+            self.extent = extent;
+            Ok(())
+        }
+    }
+
+    /// **The device is asked for once, on the poll that first learns the size.**
+    ///
+    /// The browser's configure handshake: a `<canvas>` has no size until the
+    /// document lays it out, and a swapchain cannot be created without one, so a
+    /// shell that has not reported a size must leave start-up parked rather than
+    /// request one at a guessed extent. Counted rather than inferred from the
+    /// stage, because "parked" and "asked twice" are different bugs and only the
+    /// count tells them apart.
+    #[test]
+    fn start_up_parks_until_the_window_reports_a_size_then_asks_once() {
+        REQUESTS.with(|n| n.set(0));
+        let mut shell = crcbl_shell::HeadlessShell::new();
+        let window = shell
+            .create_window(&crcbl_shell::WindowDesc::default())
+            .expect("headless always creates a window");
+
+        let mut boot: PolledBoot<crcbl_shell::HeadlessShell, FakeGpu> =
+            PolledBoot::request(Box::new(shell), window, Clock::new(true), None);
+
+        // `HeadlessShell` delays the first configure by a pump or two, exactly
+        // as a compositor does.
+        let mut polls = 0;
+        let booted = loop {
+            polls += 1;
+            assert!(polls < 64, "the configure never arrived");
+            if let Some(booted) = boot.poll::<LoopError>().expect("no failure") {
+                break booted;
+            }
+        };
+
+        assert!(polls > 1, "the fixture handed over a size immediately");
+        assert_eq!(
+            REQUESTS.with(std::cell::Cell::get),
+            1,
+            "the device must be asked for exactly once",
+        );
+        assert_eq!(
+            booted.gpu.extent(),
+            booted
+                .shell
+                .window_state(window)
+                .expect("the window is live")
+                .size()
+                .map(|size| (size.width, size.height))
+                .expect("the window has a size by now"),
+            "the swapchain was left at a size the window no longer has",
+        );
+    }
+
+    /// **Polling after the parts were handed over is refused, not repeated.**
+    ///
+    /// A caller that keeps polling would otherwise request a second device and
+    /// leak the first.
+    #[test]
+    fn a_boot_that_already_finished_refuses_to_start_again() {
+        REQUESTS.with(|n| n.set(0));
+        let mut shell = crcbl_shell::HeadlessShell::new();
+        let window = shell
+            .create_window(&crcbl_shell::WindowDesc::default())
+            .expect("headless always creates a window");
+        let mut boot: PolledBoot<crcbl_shell::HeadlessShell, FakeGpu> =
+            PolledBoot::request(Box::new(shell), window, Clock::new(true), None);
+
+        let mut polls = 0;
+        while boot.poll::<LoopError>().expect("no failure").is_none() {
+            polls += 1;
+            assert!(polls < 64, "start-up never finished");
+        }
+
+        let error = boot
+            .poll::<LoopError>()
+            .expect_err("a second hand-over is a caller bug");
+        assert!(
+            matches!(error, LoopError::Gpu(GpuError::Unusable(_))),
+            "{error}"
+        );
+        assert_eq!(
+            REQUESTS.with(std::cell::Cell::get),
+            1,
+            "polling again asked for another device",
+        );
+    }
+
+    /// **A start-up that failed stays failed.**
+    ///
+    /// The subtle half of the state machine, and the one the success path cannot
+    /// reach: when the device request errors, the stage was already moved to
+    /// `Done` by the `mem::replace` above it, and the shell is still here. A
+    /// machine that put itself back would request a second device on the very
+    /// next frame — once per frame, forever, against a backend that has already
+    /// said no.
+    #[test]
+    fn a_start_up_that_failed_does_not_ask_for_another_device_next_frame() {
+        REQUESTS.with(|n| n.set(0));
+        REQUESTS_FAIL.with(|f| f.set(true));
+        let mut shell = crcbl_shell::HeadlessShell::new();
+        let window = shell
+            .create_window(&crcbl_shell::WindowDesc::default())
+            .expect("headless always creates a window");
+        let mut boot: PolledBoot<crcbl_shell::HeadlessShell, FakeGpu> =
+            PolledBoot::request(Box::new(shell), window, Clock::new(true), None);
+
+        let mut polls = 0;
+        let failure = loop {
+            polls += 1;
+            assert!(polls < 64, "the configure never arrived");
+            if let Err(error) = boot.poll::<LoopError>() {
+                break error;
+            }
+        };
+        assert!(matches!(failure, LoopError::Gpu(_)), "{failure}");
+        assert_eq!(REQUESTS.with(std::cell::Cell::get), 1);
+
+        // Three more frames of an outer loop that did not notice.
+        REQUESTS_FAIL.with(|f| f.set(false));
+        for _ in 0..3 {
+            let error = boot
+                .poll::<LoopError>()
+                .expect_err("a failed start-up must stay failed");
+            assert!(
+                matches!(error, LoopError::Gpu(GpuError::Unusable(_))),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            REQUESTS.with(std::cell::Cell::get),
+            1,
+            "a failed start-up asked for another device",
         );
     }
 

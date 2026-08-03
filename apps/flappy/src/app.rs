@@ -24,8 +24,8 @@ use core::time::Duration;
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Clock, ExitReason, Flow, FrameOutcome, GpuError, Handled, MAX_CONSECUTIVE_RECONFIGURES,
-    MAX_FRAME_STEP, Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
+    Clock, ExitReason, Flow, FrameOutcome, Handled, MAX_CONSECUTIVE_RECONFIGURES, MAX_FRAME_STEP,
+    Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{
@@ -34,7 +34,7 @@ use crcbl::shell::{
 use crcbl::ui::{DebugOverlay, PointerInput};
 
 use crate::game::{self, Game, GameState, RenderState};
-use crate::gpu::{Gpu, PendingGpu};
+use crate::gpu::Gpu;
 use crate::menu::{self, MenuAction, MenuKind, Menus};
 
 pub use crate::args::Options;
@@ -769,36 +769,24 @@ fn open_the_window<S: Shell + ?Sized>(
     )?)
 }
 
-/// How far [`PendingLoop`] has got.
-#[derive(Debug)]
-enum BootStage {
-    /// The window has no size yet.
-    Configure,
-    /// A device has been requested and has not arrived.
-    Device { pending: PendingGpu },
-    /// The loop has been handed over, or a step failed.
-    Done,
-}
-
-/// A [`Loop`] being started one poll at a time.
+/// A [`Loop`] being started one poll at a time, for a caller that may not
+/// block — which on a browser main thread is every caller.
 ///
-/// [`Loop::with_shell`] blocks twice — once waiting for a configure and once
-/// inside `Gpu::open` — and a browser main thread may do neither: both of the
-/// things being waited for are resolved by the very event loop the wait would be
-/// sitting inside.
+/// The state machine, the pump and the resize-during-start-up race are
+/// [`crcbl::engine::PolledBoot`]'s; all that is left here is this game's
+/// `Options` and the [`Loop::assemble`] call the engine deliberately stops
+/// short of.
 #[derive(Debug)]
 pub struct PendingLoop<S: Shell + ?Sized = dyn Shell> {
-    shell: Option<Box<S>>,
-    window: WindowId,
+    boot: crcbl::engine::PolledBoot<S, Gpu>,
     options: Options,
-    clock_source: Option<Clock>,
-    stage: BootStage,
-    extent: Option<(u32, u32)>,
-    events: u64,
 }
 
 impl<S: Shell + ?Sized> PendingLoop<S> {
     /// Creates the window and starts the wait, without blocking on either half.
+    ///
+    /// `clock_source` is the caller's because the browser's cannot be
+    /// [`Clock::new`]'s — see [`Loop::set_frame_step`].
     ///
     /// # Errors
     ///
@@ -810,13 +798,13 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
     ) -> Result<Self, FlappyError> {
         let window = open_the_window(shell.as_mut(), &clock_source)?;
         Ok(Self {
-            shell: Some(shell),
-            window,
+            boot: crcbl::engine::PolledBoot::request(
+                shell,
+                window,
+                clock_source,
+                options.common.backend,
+            ),
             options: options.clone(),
-            clock_source: Some(clock_source),
-            stage: BootStage::Configure,
-            extent: None,
-            events: 0,
         })
     }
 
@@ -824,64 +812,21 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
     ///
     /// # Errors
     ///
-    /// [`FlappyError`] if the window went away before it had a size, if the
-    /// device request failed, or if the game could not be built.
+    /// [`FlappyError`] if the window went away before it had a size, if the device
+    /// request failed, or if the game could not be built.
     pub fn poll(&mut self) -> Result<Option<Loop<S>>, FlappyError> {
-        let Some(shell) = self.shell.as_mut() else {
-            return Err(FlappyError::Gpu(GpuError::Unusable(
-                "this flappy loop was already started",
-            )));
+        let Some(booted) = self.boot.poll::<FlappyError>()? else {
+            return Ok(None);
         };
-
-        let mut pending = Pending::default();
-        shell.pump(&mut |event| {
-            pending.observe(&event);
-        });
-        self.events += pending.count;
-        if pending.destroyed {
-            return Err(FlappyError::Shell(ShellError::invalid_window(self.window)));
-        }
-        if let Some(size) = pending.resized {
-            self.extent = Some((size.width, size.height));
-        }
-
-        match core::mem::replace(&mut self.stage, BootStage::Done) {
-            BootStage::Configure => {
-                let Some(extent) = self.extent else {
-                    self.stage = BootStage::Configure;
-                    return Ok(None);
-                };
-                crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
-                self.stage = BootStage::Device {
-                    pending: Gpu::request_open(
-                        shell.as_ref(),
-                        self.window,
-                        extent,
-                        self.options.common.backend,
-                    )?,
-                };
-                Ok(None)
-            }
-            BootStage::Device { mut pending } => {
-                let Some(mut gpu) = pending.poll()? else {
-                    self.stage = BootStage::Device { pending };
-                    return Ok(None);
-                };
-                // The canvas may have been resized while the promise was in
-                // flight; the swapchain was requested at the older size.
-                if let Some(extent) = self.extent
-                    && extent != gpu.extent()
-                {
-                    gpu.resize(extent)?;
-                }
-                let shell = self.shell.take().expect("checked at the top");
-                let clock = self.clock_source.take().expect("taken with the shell");
-                Loop::assemble(shell, self.window, gpu, &self.options, clock, self.events).map(Some)
-            }
-            BootStage::Done => Err(FlappyError::Gpu(GpuError::Unusable(
-                "this flappy loop was already started",
-            ))),
-        }
+        Loop::assemble(
+            booted.shell,
+            booted.window,
+            booted.gpu,
+            &self.options,
+            booted.clock_source,
+            booted.events,
+        )
+        .map(Some)
     }
 }
 

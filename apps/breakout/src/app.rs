@@ -23,8 +23,8 @@ use core::time::Duration;
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Clock, ExitReason, Flow, FrameOutcome, GpuError, Handled, MAX_CONSECUTIVE_RECONFIGURES,
-    MAX_FRAME_STEP, Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
+    Clock, ExitReason, Flow, FrameOutcome, Handled, MAX_CONSECUTIVE_RECONFIGURES, MAX_FRAME_STEP,
+    Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{
@@ -33,7 +33,7 @@ use crcbl::shell::{
 use crcbl::ui::{DebugOverlay, PointerInput};
 
 use crate::game::{self, Game, GameState, RenderState};
-use crate::gpu::{Gpu, PendingGpu};
+use crate::gpu::Gpu;
 use crate::menu::{self, MenuAction, MenuKind, Menus};
 
 pub use crate::args::Options;
@@ -784,44 +784,17 @@ fn open_the_window<S: Shell + ?Sized>(
     )?)
 }
 
-/// How far [`PendingLoop`] has got.
-#[derive(Debug)]
-enum BootStage {
-    /// The window has no size yet. On every platform this is the compositor's
-    /// answer to `create_window`; in a browser it is the shim's first
-    /// `__crcbl_web_resize`, from initial layout.
-    Configure,
-    /// A device has been requested and has not arrived.
-    Device { pending: PendingGpu },
-    /// The loop has been handed over, or a step failed.
-    Done,
-}
-
-/// A [`Loop`] being started one poll at a time.
+/// A [`Loop`] being started one poll at a time, for a caller that may not
+/// block — which on a browser main thread is every caller.
 ///
-/// [`Loop::with_shell`] blocks twice — once in
-/// [`wait_for_configure`](crcbl::engine::wait_for_configure) and once inside
-/// `Gpu::open` — and a browser main thread may do neither: both of the things
-/// being waited for are resolved by the very event loop the wait would be
-/// sitting inside. This is the same start-up with the waits turned inside out,
-/// so the outer loop can be `requestAnimationFrame`.
-///
-/// It is deliberately **not** the native path's implementation. `with_shell`
-/// keeps its blocking waits because on a native platform they are the honest
-/// shape and their timeouts are real diagnostics; what the two share is
-/// `Loop::assemble`, which is everything after the waiting.
+/// The state machine, the pump and the resize-during-start-up race are
+/// [`crcbl::engine::PolledBoot`]'s; all that is left here is this game's
+/// `Options` and the [`Loop::assemble`] call the engine deliberately stops
+/// short of.
 #[derive(Debug)]
 pub struct PendingLoop<S: Shell + ?Sized = dyn Shell> {
-    shell: Option<Box<S>>,
-    window: WindowId,
+    boot: crcbl::engine::PolledBoot<S, Gpu>,
     options: Options,
-    clock_source: Option<Clock>,
-    stage: BootStage,
-    /// The most recent size the shell reported, which is not necessarily the
-    /// one the swapchain was requested at: the canvas can be resized while the
-    /// device request is still in flight.
-    extent: Option<(u32, u32)>,
-    events: u64,
 }
 
 impl<S: Shell + ?Sized> PendingLoop<S> {
@@ -840,89 +813,35 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
     ) -> Result<Self, BreakoutError> {
         let window = open_the_window(shell.as_mut(), &clock_source)?;
         Ok(Self {
-            shell: Some(shell),
-            window,
+            boot: crcbl::engine::PolledBoot::request(
+                shell,
+                window,
+                clock_source,
+                options.common.backend,
+            ),
             options: options.clone(),
-            clock_source: Some(clock_source),
-            stage: BootStage::Configure,
-            extent: None,
-            events: 0,
         })
     }
 
     /// Advances start-up. `Ok(None)` means "not yet, poll again next frame".
     ///
-    /// Events are pumped on every poll, including while the device request is
-    /// outstanding — a queue nobody drains is how a resize during start-up
-    /// becomes a swapchain at the wrong size, and how the shim's own diagnostic
-    /// ("the canvas never gets input") goes unexplained.
-    ///
     /// # Errors
     ///
-    /// [`BreakoutError`] if the window went away before it had a size, if the
-    /// device request failed, or if the game could not be built. Polling after
-    /// the loop was handed over is a caller bug and reports the same
-    /// [`GpuError::Unusable`] the engine does.
+    /// [`BreakoutError`] if the window went away before it had a size, if the device
+    /// request failed, or if the game could not be built.
     pub fn poll(&mut self) -> Result<Option<Loop<S>>, BreakoutError> {
-        let Some(shell) = self.shell.as_mut() else {
-            return Err(BreakoutError::Gpu(GpuError::Unusable(
-                "this breakout loop was already started",
-            )));
+        let Some(booted) = self.boot.poll::<BreakoutError>()? else {
+            return Ok(None);
         };
-
-        let mut pending = Pending::default();
-        shell.pump(&mut |event| {
-            pending.observe(&event);
-        });
-        self.events += pending.count;
-        if pending.destroyed {
-            return Err(BreakoutError::Shell(ShellError::invalid_window(
-                self.window,
-            )));
-        }
-        if let Some(size) = pending.resized {
-            self.extent = Some((size.width, size.height));
-        }
-
-        match core::mem::replace(&mut self.stage, BootStage::Done) {
-            BootStage::Configure => {
-                let Some(extent) = self.extent else {
-                    self.stage = BootStage::Configure;
-                    return Ok(None);
-                };
-                crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
-                // Left `Done` if this fails, so a failed start-up stays failed
-                // rather than requesting a second device next frame.
-                self.stage = BootStage::Device {
-                    pending: Gpu::request_open(
-                        shell.as_ref(),
-                        self.window,
-                        extent,
-                        self.options.common.backend,
-                    )?,
-                };
-                Ok(None)
-            }
-            BootStage::Device { mut pending } => {
-                let Some(mut gpu) = pending.poll()? else {
-                    self.stage = BootStage::Device { pending };
-                    return Ok(None);
-                };
-                // The canvas may have been resized while the promise was in
-                // flight; the swapchain was requested at the older size.
-                if let Some(extent) = self.extent
-                    && extent != gpu.extent()
-                {
-                    gpu.resize(extent)?;
-                }
-                let shell = self.shell.take().expect("checked at the top");
-                let clock = self.clock_source.take().expect("taken with the shell");
-                Loop::assemble(shell, self.window, gpu, &self.options, clock, self.events).map(Some)
-            }
-            BootStage::Done => Err(BreakoutError::Gpu(GpuError::Unusable(
-                "this breakout loop was already started",
-            ))),
-        }
+        Loop::assemble(
+            booted.shell,
+            booted.window,
+            booted.gpu,
+            &self.options,
+            booted.clock_source,
+            booted.events,
+        )
+        .map(Some)
     }
 }
 
@@ -1345,40 +1264,6 @@ mod tests {
         assert_eq!(polled.frames, blocking.frames);
         assert_eq!(polled.ticks, blocking.ticks);
         assert_eq!(polled.extent, blocking.extent);
-    }
-
-    /// A polled loop asks for the device only once it knows the canvas size.
-    ///
-    /// The browser's configure handshake: a `<canvas>` has no size until the
-    /// document lays it out, and a swapchain cannot be created without one. A
-    /// shell that never reports a size must leave start-up parked rather than
-    /// request a swapchain at a guessed extent.
-    #[test]
-    fn start_up_parks_until_the_window_reports_a_size() {
-        let options = headless(1);
-        let mut pending =
-            PendingLoop::request(Box::new(HeadlessShell::new()), &options, Clock::new(true))
-                .expect("headless always creates a window");
-        assert!(pending.extent.is_none(), "no size before the first pump");
-        assert!(matches!(pending.stage, BootStage::Configure));
-
-        // `HeadlessShell` delays the first configure by a pump or two, exactly
-        // as a compositor does. Every poll before it arrives must stay parked
-        // in `Configure` rather than guess an extent.
-        let mut polls = 0;
-        while matches!(pending.stage, BootStage::Configure) {
-            polls += 1;
-            assert!(polls < 64, "the configure never arrived");
-            assert!(
-                pending.poll().expect("no failure").is_none(),
-                "a loop cannot exist before the window has a size",
-            );
-            assert_eq!(
-                pending.extent.is_some(),
-                matches!(pending.stage, BootStage::Device { .. }),
-                "the device is requested on exactly the poll that learns the size",
-            );
-        }
     }
 
     /// The browser's clock drives the simulation, and a stalled tab does not

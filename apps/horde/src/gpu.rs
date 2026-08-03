@@ -442,6 +442,36 @@ impl Gpu {
     }
 }
 
+/// Lets [`crcbl::engine::PolledBoot`] drive this bundle's arrival.
+///
+/// Four one-line forwards: the methods below already existed for the blocking
+/// path, and the trait is what lets the engine own the state machine that used
+/// to be written out in every sample's `app.rs`.
+impl crcbl::engine::PolledGpu for Gpu {
+    type Pending = PendingGpu;
+
+    fn request<S: Shell + ?Sized>(
+        shell: &S,
+        window: WindowId,
+        extent: (u32, u32),
+        backend: Option<GpuBackend>,
+    ) -> Result<Self::Pending, GpuError> {
+        Self::request_open(shell, window, extent, backend)
+    }
+
+    fn poll_pending(pending: &mut Self::Pending) -> Result<Option<Self>, GpuError> {
+        pending.poll()
+    }
+
+    fn extent(&self) -> (u32, u32) {
+        Self::extent(self)
+    }
+
+    fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError> {
+        Self::resize(self, extent)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
