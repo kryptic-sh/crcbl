@@ -191,13 +191,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `WebLoop` and `WebPending` traits. It is deliberately not gated to `wasm32`,
   because gating it would put its tests on the one target the suite never runs.
 
+  `run_ticks` is the fixed-step accumulator, with the rule that a **paused**
+  frame still drains — the alternative banks the pause and spends it in one
+  catch-up burst on the frame the player resumes. `FrameBudget` replaces the
+  three fields every sample carried separately, because the reconfigure cap
+  exists only so that a budget counting _presented_ frames stays reachable.
+  `lose_focus` releases every held key before pausing, so a game does not resume
+  believing a key is still down. `drive` is the native driver, behind a
+  `GameLoop` trait that `crcbl::web::WebLoop` now requires — so the native and
+  browser paths provably step the same loop.
+
   `PointerCapture` holds what the loop remembers about the pointer between
   frames — where it was left and whether its button is down — and resolves a
   batch into a `PointerInput`. `ModeRequest` holds the fullscreen request and
   whether the window system agreed, reporting what the window actually is rather
   than what was asked for.
 
-  Measured: the four `app.rs` files lost 818 lines, and the four `web.rs` files
+  Measured: the four `app.rs` files lost 919 lines, and the four `web.rs` files
   went from 2642 to 1466. What the samples keep is what genuinely differs — each
   game's `assemble`, its `MenuAction` handler, its HUD, and the one log line
   reporting what a finished run was worth.

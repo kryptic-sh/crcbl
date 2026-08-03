@@ -659,21 +659,32 @@ The modular panel is built and all three samples switch it on with F3 (or
   `run`. The genuinely per-game parts are `assemble`, `apply` (the `MenuAction`
   handler), `draw_hud`/`HudStrings`, `menu_kind`, and the game constants.
 
-  **Why this last piece is not another slice.** Every extraction so far had a
-  seam that was already a type: an error, a window, a boot state machine, a menu
-  batch, a pointer, a mode request. `frame` has none. It mutates `gpu`, `game`,
-  `menus`, `hud`, `draw_list` and `debug` — six fields of the sample's own
-  `Loop` — line by line, so an engine that ran it would have to _own_ those
-  fields. That is not a refactor, it is the decision to make **the engine own
-  the loop and the game a module plugged into it**, which is a different
-  architecture from the one the samples demonstrate today.
+  **Why what is left is not another slice.** Every extraction had a seam that
+  was already a type: an error, a window, a boot state machine, a menu batch, a
+  pointer, a mode request, a frame budget, a driver. What remains has none, and
+  the longest shared runs say why. Measured on breakout against flappy, names
+  normalised, comments and tests stripped — 431 and 427 code lines with **399
+  identical**, in runs of:
 
-  That may well be the right destination — it is what `GameModule` already
-  implies on the simulation side — but it is a design call, not a tidy-up, and
-  it wants its own plan rather than being arrived at by continuing to extract.
-  Measured before stopping: breakout and flappy are 461 and 458 code lines with
-  **430 identical**, and what is in them is `frame`, `finish` (whose `Summary`
-  is per-game), `run` and `assemble`.
+  | lines | what it is                                              |
+  | ----- | ------------------------------------------------------- |
+  | 150   | `apply`, `draw_menu`, `menu_kind`, `draw_debug_overlay` |
+  | 100   | `assemble`'s struct literal and `frame`'s prologue      |
+  | 53    | the `Loop` **struct definition** itself                 |
+  | 29    | the `use` block                                         |
+  | 25    | `frame`'s draw-and-present tail                         |
+
+  A struct's field list cannot be extracted without owning the struct, and the
+  150-line run is per-game _dispatch_ that happens to be structurally identical
+  — `apply` maps this game's `MenuAction`, `draw_menu` draws this game's menu.
+  Both point the same way: the rest goes only if **the engine owns the loop and
+  the game becomes a module plugged into it**.
+
+  That may well be the right destination — `GameModule` already implies it on
+  the simulation side — but it is a design call rather than a tidy-up, and a
+  sample's job is to _demonstrate_ the loop a game author writes. An
+  engine-owned loop changes what the samples are for, which is worth deciding
+  deliberately rather than arriving at by continuing to extract.
 
 - **asteroids and horde never report a refused fullscreen.** Found while
   extracting `ModeRequest`: breakout, flappy and sandbox all call
