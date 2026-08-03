@@ -172,39 +172,36 @@ before P6–P8 build on it), then the worker backend behind it.
   for (`crossOriginIsolated` asserted by the browser gate) is the thing that
   cannot be met without it.
 
-## `crcbl new` scaffolds the engine as it was, and nobody updated it
+## The scaffold's windowed path has never been run
 
-`crates/crcbl-cli/templates/main.rs.tmpl` is 276 lines that hand-roll what the
-samples stopped hand-rolling. It opens the shell, calls
-`unsafe { instance.create_surface(&target) }` itself, configures its own
-swapchain and runs its own `loop {}` — while all five crates under `apps/` now
-go through `crcbl::engine::GpuContext`, four of them through
-`crcbl::engine::Loop`, and **no crate under `apps/` contains an `unsafe` block
-at all**. `Cargo.toml.tmpl` names `log = "0.4"` beside `crcbl`, so a generated
-project starts with two dependencies where every sample now has one
-(`crcbl::log`).
+`crcbl new`'s template now hosts `crcbl::engine::Loop`, and the scaffold e2e
+compiles it, lints it, runs its unit tests and runs it against `HeadlessShell`.
+Nothing has opened its window: the machine that developed it had no compositor
+reachable, so `open()` fell through to the "no shell backend available" error
+every time.
 
-It does not rot silently: `crates/crcbl-cli/tests/run-cli-e2e.sh` scaffolds the
-project, compiles it against the engine in the checkout and runs it headless, so
-the template still builds. What has rotted is what it **teaches** — a new user's
-first Crucible file is the shape the engine spent four slices replacing.
+What that leaves unobserved is the template's own share of the windowed path —
+whether the pause menu, the fullscreen toggle and the resize actually look right
+— rather than the machinery behind them, which is `crcbl::engine::Loop`'s and is
+the same code four samples run windowed every day. The check is to run
+`cargo run` in a scaffolded project on a desktop and press `ESC`, `F11` and
+`F3`.
 
-**The doc comment at the top of it is the part that is now false.** It says the
-loop is "deliberately yours rather than the engine's" because "the outer loop is
-a `loop {}` here and a `requestAnimationFrame` callback on the web, so an engine
-that owned it could not run in a browser". `crcbl::engine::Loop` is
-engine-owned, and `crates/crcbl/src/web.rs` drives it from
-`requestAnimationFrame` in four published demos. The argument was answered by
-building the thing it said could not exist.
+## Five sample `gpu.rs` files, two of them identical
 
-**This is a decision, not a chore**, which is why it is here rather than in a
-commit. Both shapes are real and both are supported on purpose — `apps/bare`
-exists to keep the library path working and `crates/crcbl/tests/library_seam.rs`
-guards it from outside the crate. So the question is what `crcbl new` should
-hand someone: the hosted loop (shortest path to a running game, and what four
-samples demonstrate), the library loop (what it does today, and what proves the
-public API is usable), or both behind a flag — which is a second template to
-keep working, and the e2e gate would have to run both.
+`apps/breakout/src/gpu.rs` and `apps/flappy/src/gpu.rs` differ in **nothing**
+but the game's name: rename `breakout`/`Breakout` to match and `diff` reports
+zero lines. Both are 622 and 619 lines. `apps/asteroids` and `apps/horde` differ
+substantially (352 and 487 lines against breakout's) and `apps/sandbox` almost
+entirely, so this is a two-file duplication rather than a five-file one.
+
+Not acted on because the seam is not obvious. The shared shape is "orthographic
+camera + sprite pass + menu pass + UI pass over `GpuContext`", which is a
+plausible `crcbl-render` bundle — but breakout's camera is fixed and flappy's
+scrolls, and the two files agreeing today may be the coincidence of two 2D games
+at the same stage rather than one piece of knowledge written twice. Revisit when
+a third game wants the same bundle; a helper with two callers that then needs a
+flag per caller is the failure mode.
 
 ## The wasm rustdoc gate covers everything that builds for wasm
 

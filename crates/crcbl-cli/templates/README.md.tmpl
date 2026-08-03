@@ -15,10 +15,15 @@ on every push.
 
 ## Layout
 
-| Path | What |
-| --- | --- |
-| `src/main.rs` | The engine loop: pump events, tick at a fixed rate, present. |
-| `scenes/` | Scene files. The format lands with `crcbl-scene`; the directory is here so the path is stable. |
+| Path          | What                                                                                           |
+| ------------- | ---------------------------------------------------------------------------------------------- |
+| `src/main.rs` | The game: a `HostedGame` (simulation, input, HUD) and a `GameGpu` (renderers, render graph).   |
+| `scenes/`     | Scene files. The format lands with `crcbl-scene`; the directory is here so the path is stable. |
+
+The frame itself — pumping the shell, the fixed-timestep accumulator, the pause
+menu, the debug overlay, presenting, teardown — is `crcbl::engine::Loop`. `ESC`,
+`F11` and `F3` already work. `apps/bare` in the engine checkout is the other
+shape, where the game writes the outer loop itself.
 
 ## The engine dependency
 

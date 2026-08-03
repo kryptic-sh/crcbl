@@ -5,272 +5,675 @@
 //! cargo run -- --headless --frames 60   # no window, terminates, CI-friendly
 //! ```
 //!
-//! This is the whole engine loop, and it is deliberately yours rather than the
-//! engine's: the outer loop is a `loop {}` here and a `requestAnimationFrame`
-//! callback on the web, so an engine that owned it could not run in a browser.
-//! Everything inside the `pump` / `tick` / `render` skeleton is where your game
-//! goes.
+//! # The engine owns the frame
+//!
+//! Pumping the shell, routing input, running the fixed-timestep ticks the clock
+//! owes, laying out the pause menu, drawing the debug overlay, presenting, and
+//! tearing all of it down in the right order is [`crcbl::engine::Loop`]. What is
+//! left for a game is the two halves below:
+//!
+//! * [`Game`] — the simulation, the input it cares about, and its HUD. Ten
+//!   methods, most of them one line.
+//! * [`Gpu`] — this game's renderers and the render graph that joins them, on
+//!   top of [`crcbl::engine::GpuContext`], which owns the instance, the adapter,
+//!   the device, the surface, the swapchain and the frames-in-flight ring.
+//!
+//! Every sample in the engine checkout is these same two halves, larger:
+//! `apps/breakout`, `apps/flappy`, `apps/asteroids`, `apps/horde`. Read one of
+//! them next — a sprite sheet, a physics world and a score are all additions to
+//! this shape, not departures from it.
+//!
+//! What arrives already working: `ESC` pauses and opens the menu, `F11` toggles
+//! borderless fullscreen, `F3` toggles the debug panel, the mouse and the
+//! keyboard both drive the menu, a resize reconfigures the swapchain, and
+//! `--headless` runs the identical loop against a shell with no window system
+//! behind it.
+//!
+//! # Taking the frame back is supported
+//!
+//! `apps/bare` in the engine checkout drives the same public pieces —
+//! [`crcbl::engine::GpuContext`], `Pending`, `FrameBudget` — from a `loop {}` it
+//! writes itself, and `crates/crcbl/tests/library_seam.rs` guards that path from
+//! outside the crate. The hosted loop is the default, not the toll gate.
 
+use core::convert::Infallible;
 use std::process::ExitCode;
-use std::time::Duration;
 
-use crcbl::core::time::{ManualTime, MonotonicTime};
-use crcbl::hal::{
-    Barriers, CommandEncoderDesc, CompositeAlpha, DeviceDesc, Features, ImageBarrier,
-    ImageSubresourceRange, PresentInfo, PresentMode, QueueKind, ResourceState, SemaphoreSignal,
-    SemaphoreWait, SubmitInfo, SwapchainDesc,
+use crcbl::args::{COMMON_OPTIONS_HELP, COMMON_TAIL_HELP, Common, Consumed, Invocation};
+use crcbl::core::input::KeyCode;
+use crcbl::engine::{
+    Booted, Clock, DEBUG_OVERLAY_ID, FRAMES_IN_FLIGHT, FULLSCREEN_ID, FrameInfo, FrameOutcome,
+    GameGpu, GpuContext, GpuContextDesc, GpuError, GpuSurface, HostedGame, LoopConfig, LoopError,
+    RESUME_ID, RunSummary, drive, open_window, wait_for_configure,
 };
+use crcbl::hal::{CommandEncoderDesc, Features};
+use crcbl::math::Vec2;
 use crcbl::prelude::*;
-use crcbl::shell::{ShellBackend, open, open_backend};
+use crcbl::render::{FrameTimings, MenuRenderer, PassTimers, TransientPool, UiRenderer};
+use crcbl::shell::{LogicalSize, open, open_backend};
+use crcbl::ui::WidgetId;
+use crcbl::ui::draw_list::DrawList;
+use crcbl::ui::menu::{Menu, MenuItem, MenuLayout, MenuSet};
+use crcbl::ui::text::FontAtlas;
 
-/// This game's name: window title, app id, log prefix.
-///
-/// One constant rather than the name repeated in eight string literals, so
-/// `cargo fmt --check` — which this project's CI runs — cannot start failing
-/// because a longer name pushed a line over the width limit.
+/// This game's name: window title, log prefix, and the line a finished run
+/// prints.
 const NAME: &str = "{{name}}";
 
+/// The id a window system keys this game's icon, its rules and its taskbar entry
+/// on.
+///
+/// Compositors expect reverse-DNS and match it against a `.desktop` file, so a
+/// real project replaces this with a domain it owns — the samples use
+/// `sh.kryptic.crcbl.breakout` and the like. A bare name is legal and works;
+/// what it costs is the icon.
+const APP_ID: &str = "{{name}}";
+
 /// The simulation rate. Fixed, and independent of the frame rate.
+///
+/// The default the command line starts from — `--tick-hz` overrides it, and
+/// [`LoopConfig::tick_hz`] is what actually drives the accumulator.
 const TICK_HZ: u32 = 60;
 
+/// What the window asks the compositor for. A window system is free to refuse.
+const WINDOW_SIZE: LogicalSize = LogicalSize::new(960.0, 720.0);
+
+/// The colour the frame starts from, linear RGBA.
+const BACKGROUND: [f32; 4] = [0.05, 0.06, 0.09, 1.0];
+
+/// The colour of the one thing this game draws.
+const ACCENT: [f32; 4] = [0.35, 0.75, 1.0, 1.0];
+
+/// HUD text.
+const TEXT: [f32; 4] = [0.85, 0.85, 0.9, 1.0];
+
+/// The side of the box, in pixels.
+const BOX_SIZE: f32 = 64.0;
+
+/// How fast the box travels, in pixels per second of *simulated* time.
+const BOX_SPEED: f64 = 240.0;
+
+/// How many passes get timestamped when the device has timestamp queries.
+///
+/// This game declares three — the clear, the menu and the UI — and the spare is
+/// for the fourth you add.
+const MAX_TIMED_PASSES: u32 = 4;
+
+/// What can stop this game: the loop's own failures, plus the game's.
+///
+/// [`Infallible`] is the game half here because nothing in [`Game`] can fail
+/// yet. Give it a real error type and this alias is the only line that changes.
+type Error = LoopError<Infallible>;
+
+// ---- the game ---------------------------------------------------------------
+
+/// The game, as the engine's loop hosts it.
+#[derive(Debug, Default)]
+struct Game {
+    /// Simulated seconds. Advanced by [`HostedGame::tick`] and by nothing else,
+    /// so it stops while the loop is paused and is identical on every machine in
+    /// a headless run.
+    elapsed: f64,
+    /// The last key the menu did not claim.
+    last_key: Option<KeyCode>,
+    /// The status line, rebuilt only when what it says changes.
+    ///
+    /// `format!` in [`HostedGame::draw`] would allocate at whatever rate the
+    /// window runs at — 144 times a second on a fast display, to print a number
+    /// that changes once. [`Game::status_key`] is what it was last built for.
+    status: String,
+    status_key: Option<(u64, bool, Option<KeyCode>)>,
+}
+
+impl HostedGame for Game {
+    type Error = Infallible;
+    type Gpu = Gpu;
+    /// Keyed by whether the loop is paused, because this game has exactly one
+    /// menu. A game with a start screen and a game-over panel keys its set by an
+    /// enum naming them instead.
+    type MenuKind = bool;
+    type MenuAction = Infallible;
+    type Summary = RunSummary;
+
+    const NAME: &'static str = NAME;
+
+    fn menus() -> MenuSet<bool> {
+        // `false` — the running game — has no entry, which is how the set is
+        // told that a running frame draws no menu at all.
+        MenuSet::new(
+            false,
+            vec![(
+                true,
+                Menu::new(
+                    "PAUSED",
+                    vec![
+                        MenuItem::new(RESUME_ID, "RESUME", "ESC"),
+                        MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        MenuItem::new(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
+                    ],
+                ),
+            )],
+        )
+    }
+
+    /// One fixed simulation step. Your game goes here.
+    ///
+    /// Called zero or more times per frame — zero on a frame that arrived early,
+    /// more than one after a long frame — and never while paused. Anything
+    /// stepped once per *frame* instead has a speed proportional to the frame
+    /// rate, which is the bug this whole shape exists to prevent.
+    fn tick(&mut self, _gpu: &mut Gpu, tick_dt: f64) {
+        self.elapsed += tick_dt;
+    }
+
+    /// A key the menu did not claim.
+    ///
+    /// `ESC`, `F11`, `F3` and the menu's own navigation never reach here: the
+    /// loop acts on those itself. Everything else does.
+    fn key_event(&mut self, key: KeyCode, pressed: bool) {
+        if pressed {
+            self.last_key = Some(key);
+        }
+    }
+
+    /// The game action a widget id names.
+    ///
+    /// This game's menu is the loop's three buttons and nothing else, so there
+    /// is no id left to answer about. Add a button whose id is at or above
+    /// [`crcbl::engine::FIRST_GAME_ID`] and this is where it becomes an action.
+    fn menu_action(_id: WidgetId) -> Option<Infallible> {
+        None
+    }
+
+    /// Does what a fired menu button of this game's asks for.
+    ///
+    /// [`Infallible`] is uninhabited, so [`Self::menu_action`] can never hand
+    /// one over and there is nothing to match — which is the type system saying
+    /// "this game's menus do nothing only this game can do". A real action type
+    /// turns this into an ordinary `match`.
+    fn apply(&mut self, action: Infallible) {
+        match action {}
+    }
+
+    fn menu_kind(&mut self, _menus: &mut MenuSet<bool>, paused: bool) -> bool {
+        paused
+    }
+
+    /// Hands this frame's state to the GPU and appends this game's UI geometry.
+    ///
+    /// The draw list is in pixels and is cleared before this is called; the menu
+    /// and the debug overlay are appended to the same list afterwards, which is
+    /// why the scrim dims the HUD and the overlay stays legible on top of both.
+    fn draw(&mut self, gpu: &mut Gpu, draw_list: &mut DrawList, frame: FrameInfo) {
+        let (width, height) = gpu.extent();
+
+        // A box tracking back and forth across the window: a triangle wave, so
+        // there is no direction to store. `span` is zero on a surface narrower
+        // than the box, and `rem_euclid(0.0)` is NaN — hence the branch.
+        let span = f64::from(width) - f64::from(BOX_SIZE);
+        let x = if span > 0.0 {
+            let phase = (self.elapsed * BOX_SPEED).rem_euclid(2.0 * span);
+            let along = if phase > span {
+                2.0 * span - phase
+            } else {
+                phase
+            };
+            along as f32
+        } else {
+            0.0
+        };
+        let y = (height as f32 - BOX_SIZE) * 0.5;
+        draw_list.rect(
+            Vec2::new(x, y),
+            Vec2::new(x + BOX_SIZE, y + BOX_SIZE),
+            ACCENT,
+        );
+
+        self.refresh_status(frame.paused);
+        draw_list.text(Vec2::new(12.0, 12.0), self.status.as_str(), TEXT, 16.0);
+        draw_list.text(
+            Vec2::new(12.0, 34.0),
+            "ESC menu   F11 fullscreen   F3 debug panel",
+            TEXT,
+            14.0,
+        );
+    }
+
+    /// Adds this game's own fields to the run's shared ones.
+    ///
+    /// [`RunSummary`] unchanged, because this game has no score, no level and no
+    /// time survived to add. A game that does declares a struct of its own and
+    /// builds it from `run` here.
+    fn summary(&self, run: RunSummary) -> RunSummary {
+        run
+    }
+
+    fn log_summary(summary: &RunSummary) {
+        crcbl::log::info!(
+            "{NAME}: {} frames, {} ticks ({:?})",
+            summary.frames,
+            summary.ticks,
+            summary.exit,
+        );
+    }
+}
+
+impl Game {
+    /// Rebuilds [`Game::status`] when, and only when, what it would say has
+    /// changed.
+    fn refresh_status(&mut self, paused: bool) {
+        let key = (self.elapsed as u64, paused, self.last_key);
+        if self.status_key == Some(key) {
+            return;
+        }
+        self.status_key = Some(key);
+
+        use std::fmt::Write as _;
+        self.status.clear();
+        let _ = write!(
+            self.status,
+            "{}s  {}  last key: {}",
+            key.0,
+            if paused { "PAUSED" } else { "running" },
+            match self.last_key {
+                Some(code) => format!("{code:?}"),
+                None => "none".to_string(),
+            },
+        );
+    }
+}
+
+// ---- the gpu ----------------------------------------------------------------
+
+/// This game's renderers, and the context they draw through.
+///
+/// Everything that is not this game's — opening a backend, choosing an adapter
+/// that can actually present, the swapchain, the frames-in-flight ring, resize
+/// and teardown — is [`GpuContext`]. What is left here is which passes run and
+/// in what order.
+#[derive(Debug)]
+struct Gpu {
+    ctx: GpuContext,
+    /// Images and buffers the render graph asks for, reused across frames.
+    pool: TransientPool,
+    /// `None` on a device without timestamp queries, which is not an error:
+    /// the debug panel simply reports no per-pass times.
+    timers: Option<PassTimers>,
+    /// The pause menu's own pass: its skin, its own screen-space camera, and a
+    /// pass that declares nothing on a frame with no menu on it.
+    menu: MenuRenderer,
+    /// The 2D compositor every draw list goes through.
+    ui: UiRenderer,
+    atlas: FontAtlas,
+    draw_list: DrawList,
+}
+
+impl Gpu {
+    /// Opens a backend, a surface, a device and a swapchain, and builds the
+    /// renderers on top of them.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if no backend opened or a renderer refused the device.
+    fn open<S: Shell + ?Sized>(
+        shell: &S,
+        window: WindowId,
+        extent: (u32, u32),
+        backend: Option<GpuBackend>,
+    ) -> Result<Self, GpuError> {
+        let ctx = GpuContext::open(
+            shell,
+            window,
+            extent,
+            &GpuContextDesc {
+                label: NAME,
+                backend,
+                // Optional, never required: the UI pass hands its shader the
+                // viewport size through a push constant where there are any and
+                // through a uniform buffer where there are none. A browser is
+                // always the second case — WebGPU has no push constants at all.
+                optional_features: Features::TIER_A
+                    | Features::TIMESTAMP_QUERY
+                    | Features::DEBUG_MARKERS
+                    | Features::PUSH_CONSTANTS,
+                ..GpuContextDesc::default()
+            },
+        )?;
+
+        let format = ctx.format();
+        let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
+        let menu = MenuRenderer::new(ctx.device(), ctx.queue(), format).map_err(GpuError::Hal)?;
+        // Hand-unwound rather than `?`: a renderer that failed after an earlier
+        // one succeeded leaves that one holding device objects, and dropping it
+        // does not release them.
+        let ui = match UiRenderer::new(ctx.device(), ctx.queue(), format) {
+            Ok(ui) => ui,
+            Err(error) => {
+                menu.destroy(ctx.device());
+                return Err(GpuError::Hal(error));
+            }
+        };
+
+        Ok(Self {
+            ctx,
+            pool: TransientPool::new(),
+            timers,
+            menu,
+            ui,
+            atlas: FontAtlas::built_in(),
+            draw_list: DrawList::new(),
+        })
+    }
+
+    /// Records, submits and presents one frame.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] for anything except a swapchain that has merely gone out of
+    /// date, which is reported as [`FrameOutcome::Reconfigured`].
+    fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
+        let Some(acquired) = self.ctx.acquire()? else {
+            return Ok(FrameOutcome::Reconfigured);
+        };
+        // The swapchain's extent, not the one the resize event reported: on the
+        // frame a reconfigure lands the two can differ, and every pass has to
+        // agree with the surface actually being drawn into.
+        let extent = acquired.extent;
+
+        self.menu
+            .begin_frame(self.ctx.device(), extent)
+            .map_err(GpuError::Hal)?;
+        self.ui
+            .begin_frame(self.ctx.device(), &self.draw_list, &self.atlas, 1.0)
+            .map_err(GpuError::Hal)?;
+
+        let format = self.ctx.format();
+        let compiled = {
+            // **Pass order is declaration order.** The clear is the only pass
+            // that does not load what is already in the target, so it goes
+            // first; the menu's scrim dims what the game drew, so it goes after
+            // it; the UI's text is drawn last or the frame paints over its own
+            // words.
+            let mut graph = RenderGraph::new(self.ctx.queue());
+            let target = graph.import_image(
+                "swapchain",
+                ForwardRenderer::present_target(acquired.image, acquired.view, format, extent),
+            );
+            graph
+                .add_render_pass("background")
+                .clear_color(target, BACKGROUND)
+                .execute(|_| {});
+            self.menu.add_pass(&mut graph, target);
+            self.ui.add_pass(&mut graph, target, extent);
+            graph.compile(&self.pool)?
+        };
+
+        let mut encoder = self
+            .ctx
+            .device()
+            .create_command_encoder(&CommandEncoderDesc {
+                label: Some("{{name}} frame"),
+                queue: self.ctx.queue(),
+            });
+        compiled.execute(
+            self.ctx.device(),
+            &mut self.pool,
+            encoder.as_mut(),
+            self.timers.as_mut(),
+        )?;
+        let command_buffer = encoder.finish()?;
+
+        let outcome = self.ctx.submit_and_present(&acquired, command_buffer)?;
+        // Only after the submit has retired, so nothing the pool releases can
+        // still be referenced by a submission that has not completed.
+        self.pool.retire_unused(self.ctx.device());
+        Ok(outcome)
+    }
+}
+
+/// The frame's half of this bundle, for [`crcbl::engine::Loop`].
+impl GameGpu for Gpu {
+    fn atlas(&self) -> &FontAtlas {
+        &self.atlas
+    }
+
+    fn set_menu(&mut self, menu: Option<(&Menu, &MenuLayout)>) {
+        self.menu.set_menu(menu);
+    }
+
+    /// Takes this frame's UI geometry, handing the previous frame's allocation
+    /// back so the loop refills it instead of building a new one.
+    fn take_draw_list(&mut self, list: &mut DrawList) {
+        std::mem::swap(&mut self.draw_list, list);
+    }
+
+    fn timings(&self) -> Option<&FrameTimings> {
+        self.timers.as_ref().map(PassTimers::latest)
+    }
+
+    fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
+        Self::frame(self)
+    }
+
+    /// Releases everything, in dependency order.
+    ///
+    /// Nothing may be destroyed while the device might still be using it, which
+    /// is what [`GpuContext::drain`] waits for.
+    fn destroy(mut self) -> Result<(), GpuError> {
+        self.ctx.drain()?;
+        self.ui.destroy(self.ctx.device());
+        self.menu.destroy(self.ctx.device());
+        self.pool.destroy(self.ctx.device());
+        if let Some(timers) = self.timers.as_mut() {
+            timers.destroy(self.ctx.device());
+        }
+        self.ctx.destroy()
+    }
+}
+
+/// The two questions both halves of the engine ask a swapchain's owner.
+impl GpuSurface for Gpu {
+    fn extent(&self) -> (u32, u32) {
+        self.ctx.extent()
+    }
+
+    fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError> {
+        self.ctx.resize(extent)
+    }
+}
+
+// ---- start-up ---------------------------------------------------------------
+
+/// Opens a shell, a window, a GPU and the game, and assembles the loop.
+///
+/// # Errors
+///
+/// [`Error`] if any of them refused.
+fn start(options: &Common) -> Result<crcbl::engine::Loop<dyn Shell, Game>, Error> {
+    // Headless is never selected automatically: a game that silently ran with no
+    // window would look like a hang.
+    let mut shell = if options.headless {
+        open_backend(ShellBackend::Headless).map_err(Error::Shell)?
+    } else {
+        open().map_err(Error::NoWindowSystem)?
+    };
+
+    // A manual clock in a headless run, so its tick count is identical on every
+    // machine — which is what makes it assertable in CI.
+    let clock_source = Clock::new(options.headless);
+    let window = open_window(
+        shell.as_mut(),
+        &clock_source,
+        &WindowDesc {
+            title: NAME,
+            app_id: APP_ID,
+            size: WINDOW_SIZE,
+            ..WindowDesc::default()
+        },
+    )?;
+
+    // A window has no size until the window system says so, and a swapchain
+    // needs one. This wait is mandatory, not defensive.
+    let mut events = 0;
+    let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
+    let gpu = Gpu::open(shell.as_ref(), window, extent, options.backend)?;
+
+    Ok(crcbl::engine::Loop::new(
+        Booted {
+            shell,
+            window,
+            gpu,
+            clock_source,
+            events,
+        },
+        Game::default(),
+        LoopConfig {
+            tick_hz: options.tick_hz,
+            frames: options.frame_budget(),
+            debug_overlay: options.debug_overlay_visible(),
+            // A headless run has no compositor to idle against and would
+            // otherwise sleep its way through its frame budget.
+            windowed: !options.headless,
+        },
+    ))
+}
+
+/// The help text.
+///
+/// Assembled from the engine's own two blocks rather than written out, so it
+/// cannot drift from what the flags actually do. A flag of this game's own is
+/// described between them, which is where all four samples put theirs.
+fn usage() -> String {
+    format!(
+        "{NAME} — a Crucible game\n\nUSAGE:\n    {NAME} [OPTIONS]\n\nOPTIONS:\n\
+         {COMMON_OPTIONS_HELP}\n{COMMON_TAIL_HELP}"
+    )
+}
+
+/// Parses argv into the shared options, and nothing else yet.
+///
+/// [`Common`] carries every flag the engine defines. A flag of this game's own
+/// goes in the [`Consumed::No`] arm, which is where an unrecognised argument
+/// currently ends up.
+fn parse(args: impl Iterator<Item = String>) -> Invocation<Common> {
+    let mut options = Common::new(TICK_HZ);
+    let mut rest = args;
+    while let Some(arg) = rest.next() {
+        match options.consume(&arg, &mut rest) {
+            Consumed::Yes => {}
+            Consumed::Help => return Invocation::Help,
+            Consumed::Bad(message) => return Invocation::BadUsage(message),
+            Consumed::No => {
+                return Invocation::BadUsage(format!("unrecognized argument `{arg}`"));
+            }
+        }
+    }
+    Invocation::Run(options)
+}
+
+/// Exit codes: 0 ran, 1 it failed, 2 bad arguments.
 fn main() -> ExitCode {
     // `CRCBL_LOG=debug` turns on per-event logging.
     crcbl::core::log::init_logging();
 
-    let mut headless = false;
-    let mut frames: Option<u64> = None;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--headless" => headless = true,
-            "--frames" => frames = args.next().and_then(|value| value.parse().ok()),
-            other => {
-                eprintln!("{NAME}: unrecognized argument `{other}`");
-                return ExitCode::from(2);
+    match parse(std::env::args().skip(1)) {
+        Invocation::Run(options) => match start(&options).and_then(drive) {
+            Ok(summary) => {
+                println!(
+                    "{NAME}: {} frames, {} ticks on the {} shell at {}x{} ({:?})",
+                    summary.frames,
+                    summary.ticks,
+                    summary.backend,
+                    summary.extent.0,
+                    summary.extent.1,
+                    summary.exit,
+                );
+                ExitCode::SUCCESS
             }
-        }
-    }
-    // A headless run has to terminate on its own: nothing will ever close its
-    // window, because it does not have one.
-    let budget = frames.or(if headless { Some(120) } else { None });
-
-    match game(headless, budget) {
-        Ok(frames) => {
-            println!("{NAME}: {frames} frames");
+            Err(error) => {
+                eprintln!("{NAME}: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Invocation::Help => {
+            println!("{}", usage());
             ExitCode::SUCCESS
         }
-        Err(error) => {
-            eprintln!("{NAME}: {error}");
-            ExitCode::FAILURE
+        Invocation::BadUsage(message) => {
+            eprintln!("{NAME}: {message}");
+            eprintln!("{}", usage());
+            ExitCode::from(2)
         }
     }
 }
 
-fn game(headless: bool, budget: Option<u64>) -> Result<u64, Box<dyn std::error::Error>> {
-    // A headless run steps a hand-driven clock, so its tick count comes out the
-    // same on every machine — which is what makes it assertable in CI.
-    let real = MonotonicTime::new();
-    let mut fake = ManualTime::new();
-    let mut now = || {
-        if headless {
-            fake.advance(Duration::from_nanos(1_000_000_000 / 60));
-            fake.elapsed()
-        } else {
-            real.elapsed()
-        }
-    };
+// ---- tests ------------------------------------------------------------------
 
-    // Headless is never selected automatically: a game that silently ran with
-    // no window would look like a hang.
-    let mut shell = if headless {
-        open_backend(ShellBackend::Headless)?
-    } else {
-        open()?
-    };
-    shell.align_event_clock(now());
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let window = shell.create_window(&WindowDesc {
-        title: NAME,
-        app_id: NAME,
-        ..WindowDesc::default()
-    })?;
+    /// This game's whole menu vocabulary, which is the loop's three actions and
+    /// nothing else — [`Infallible`] as the game half makes
+    /// [`crcbl::engine::MenuAction::Game`] uninhabited, which is the type system
+    /// saying "this game's menus do nothing only this game can do".
+    type Action = crcbl::engine::MenuAction<Infallible>;
 
-    // A window has no size until the window system says so, and a swapchain
-    // needs one. This loop is mandatory, not defensive.
-    let mut extent = loop {
-        shell.pump(&mut |event| log::debug!("{event:?}"));
-        if let Some(size) = shell.window_state(window)?.size() {
-            break (size.width, size.height);
-        }
-        shell.wait_events(Some(Duration::from_millis(8)));
-    };
-
-    // The GPU. `NullInstance` records every call and draws nothing; `crcbl-vk`
-    // replaces this one line at P1 and nothing else here changes.
-    let instance: Box<dyn Instance> = Box::new(NullInstance::tier_a());
-    let adapters = instance.adapters();
-    let adapter = adapters.first().ok_or("no adapter")?.id;
-    let target = shell.surface_target(window)?;
-    // SAFETY: the target names a window that stays live for the rest of this
-    // function, and the surface built from it is destroyed at the bottom of it.
-    let surface = unsafe { instance.create_surface(&target) }?;
-    let caps = instance.surface_caps(surface, adapter)?;
-    let format = caps
-        .preferred_format()
-        .ok_or("the surface offers no format")?;
-    let present_mode = caps.choose_present_mode(&[PresentMode::Mailbox, PresentMode::Fifo]);
-    let device = instance.create_device(&DeviceDesc {
-        label: Some(NAME),
-        adapter,
-        required_features: Features::empty(),
-        optional_features: Features::TIER_A,
-        compatible_surface: Some(surface),
-    })?;
-    let queue = device
-        .queue(QueueKind::Graphics)
-        .ok_or("no graphics queue")?;
-    let configure = |extent: (u32, u32)| SwapchainDesc {
-        label: Some(NAME),
-        surface,
-        format,
-        extent,
-        image_count: caps.min_image_count,
-        present_mode,
-        composite_alpha: CompositeAlpha::Opaque,
-    };
-    let swapchain = device.create_swapchain(&configure(extent))?;
-
-    let mut clock = FrameClock::new(TICK_HZ);
-    let mut frames = 0;
-    loop {
-        if budget.is_some_and(|budget| frames >= budget) {
-            break;
-        }
-        if !headless {
-            // Advisory: sleep until something happens, if the backend can.
-            shell.wait_events(Some(Duration::from_millis(4)));
-        }
-
-        // 1. Drain what arrived. Replies happen after the pump, because the
-        //    sink cannot borrow the shell it is being called from.
-        let mut resized = None;
-        let mut closing = false;
-        shell.pump(&mut |event| {
-            log::debug!("{event:?}");
-            match event {
-                ShellEvent::Resized { size, .. } => resized = Some((size.width, size.height)),
-                ShellEvent::CloseRequested { .. } | ShellEvent::WindowDestroyed { .. } => {
-                    closing = true;
-                }
-                _ => {}
-            }
-        });
-        if closing {
-            // A close request is a question — answer it, or the window stays.
-            let _ = shell.reply_close_request(window, CloseReply::Close);
-            break;
-        }
-        if let Some(size) = resized
-            && size != extent
-            && size.0 > 0
-            && size.1 > 0
-        {
-            extent = size;
-            device.reconfigure_swapchain(swapchain, &configure(extent))?;
-        }
-
-        // 2. Simulate. Fixed steps, however long the frame took.
-        clock.update(now());
-        while clock.consume_tick() {
-            tick(clock.tick_dt_secs());
-        }
-
-        // 3. Render. `alpha` is how far this frame sits between the last two
-        //    ticks; read it *after* the tick loop.
-        render(clock.alpha());
-        let acquired = match device.acquire_next_frame(swapchain) {
-            Ok(acquired) => acquired,
-            // Expected traffic after a resize, not an error.
-            Err(SurfaceError::OutOfDate) => {
-                device.reconfigure_swapchain(swapchain, &configure(extent))?;
-                continue;
-            }
-            Err(error) => return Err(error.into()),
-        };
-        // Nothing draws yet, and a frame still owes this: an acquired image's
-        // contents are undefined, and the compositor may only be handed one in
-        // `Present`.
-        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-            label: Some("frame"),
-            queue,
-        });
-        encoder.pipeline_barrier(&Barriers {
-            images: &[ImageBarrier::new(
-                acquired.image,
-                ImageSubresourceRange::all(format),
-                ResourceState::Undefined,
-                ResourceState::Present,
-            )],
-            ..Barriers::default()
-        });
-        let commands = encoder.finish()?;
-        // Empty on a backend with an implicit acquire, which is why the splice
-        // is written once and never branched on.
-        let waits: Vec<SemaphoreWait> = acquired
-            .acquire_semaphore
-            .map(|semaphore| SemaphoreWait {
-                semaphore,
-                value: 0,
+    /// Every button carries an action the loop can act on, and no two carry the
+    /// same one.
+    ///
+    /// The failure this guards is a numbering bug: a button given an id below
+    /// [`crcbl::engine::FIRST_GAME_ID`] would fire one of the loop's actions
+    /// instead of its own, and the symptom is a button that un-pauses rather
+    /// than doing what its label says.
+    #[test]
+    fn every_button_names_an_action_the_loop_handles() {
+        let mut menus = Game::menus();
+        menus.show(true);
+        let menu = menus.current().expect("the pause menu");
+        let actions: Vec<Action> = menu
+            .items()
+            .iter()
+            .map(|item| {
+                Action::from_id(item.id, Game::menu_action)
+                    .unwrap_or_else(|| panic!("{} names no action", item.label))
             })
-            .into_iter()
             .collect();
-        let signals: Vec<SemaphoreSignal> = acquired
-            .present_semaphore
-            .map(|semaphore| SemaphoreSignal {
-                semaphore,
-                value: 0,
-            })
-            .into_iter()
-            .collect();
-        device.submit(
-            queue,
-            &SubmitInfo {
-                command_buffers: &[commands],
-                waits: &waits,
-                signals: &signals,
-            },
-        )?;
-        device.present(
-            queue,
-            &PresentInfo {
-                swapchain,
-                waits: acquired.present_semaphore.as_slice(),
-            },
-        )?;
-        // A command buffer may not be destroyed until its submission has
-        // finished. Waiting for the whole device is the simple answer and it
-        // costs all pipelining; a real game keeps a ring of command buffers
-        // keyed on a timeline semaphore instead — `apps/sandbox` in the engine
-        // checkout is that version.
-        device.wait_idle()?;
-        device.destroy_command_buffer(commands);
-        frames += 1;
+        assert_eq!(actions.len(), 3);
+        for (index, action) in actions.iter().enumerate() {
+            assert!(
+                !actions[..index].contains(action),
+                "the menu carries {action:?} twice",
+            );
+        }
     }
 
-    // Teardown order is not negotiable: swapchain, then surface, then window.
-    device.wait_idle()?;
-    device.destroy_swapchain(swapchain);
-    instance.destroy_surface(surface);
-    shell.destroy_window(window)?;
-    Ok(frames)
-}
+    /// A running frame shows no menu, and a paused one shows the pause menu.
+    #[test]
+    fn the_menu_is_shown_only_while_paused() {
+        let mut game = Game::default();
+        let mut menus = Game::menus();
 
-/// One fixed simulation step. Your game goes here.
-fn tick(dt: f64) {
-    let _ = dt;
-}
+        assert!(!game.menu_kind(&mut menus, false));
+        menus.show(false);
+        assert!(menus.current().is_none(), "a running frame drew a menu");
 
-/// One rendered frame. `alpha` interpolates between the last two ticks.
-fn render(alpha: f32) {
-    let _ = alpha;
+        assert!(game.menu_kind(&mut menus, true));
+        menus.show(true);
+        assert_eq!(menus.current().expect("the pause menu").title, "PAUSED");
+    }
+
+    /// A key press records the key and moves nothing else.
+    ///
+    /// [`HostedGame::tick`] is the only thing that may advance the simulation:
+    /// input applied outside it runs at the frame rate rather than the tick
+    /// rate. Calling `tick` here would need a real device, so this asserts the
+    /// half a unit test can reach — that `key_event` took no shortcut.
+    #[test]
+    fn a_key_press_records_the_key_and_advances_nothing() {
+        let mut game = Game::default();
+        game.key_event(KeyCode::Space, true);
+        assert_eq!(game.elapsed, 0.0, "a key press advanced the simulation");
+        assert_eq!(game.last_key, Some(KeyCode::Space));
+    }
 }

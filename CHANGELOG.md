@@ -240,6 +240,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **crcbl-cli** (`crcbl new`): the scaffold now hands you the engine-owned loop.
+  `src/main.rs` was 276 lines that opened the shell, called
+  `unsafe { instance.create_surface(&target) }` itself, configured its own
+  swapchain and ran its own `loop {}` — while every sample had stopped doing any
+  of that and no crate under `apps/` contains an `unsafe` block at all. Its doc
+  comment argued the loop was "deliberately yours rather than the engine's"
+  because "an engine that owned it could not run in a browser", which
+  `crcbl::web` had already disproved in four published demos.
+
+  A generated project is now a `HostedGame` and a `GameGpu` over
+  `crcbl::engine::GpuContext`, and arrives with a pause menu on `ESC`,
+  fullscreen on `F11`, the debug panel with per-pass GPU timings on `F3`, mouse
+  and keyboard menu navigation, and resize handling — none of which the old
+  template had. It parses its flags with `crcbl::args::Common` and builds its
+  help text from the engine's own two blocks, so `--tick-hz`, `--backend` and
+  the debug-overlay pair work and cannot drift. `log = "0.4"` is gone from the
+  generated manifest: `crcbl::log` covers it, so a new project starts with the
+  same single dependency the samples have. The template ships three unit tests
+  and `crcbl-cli`'s scaffold e2e now runs them.
+
+  The library-style loop is still supported and is still `apps/bare`, guarded
+  from outside the crate by `crates/crcbl/tests/library_seam.rs`. What changed
+  is which of the two a new project starts from.
+
 - **breakout**: the first game hosted by `crcbl::engine::Loop`. `Breakout` is
   seven `HostedGame` methods and three fields — the simulation, the state it
   renders from, and its HUD — where `app.rs` used to carry the whole frame.

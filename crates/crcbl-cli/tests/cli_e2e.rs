@@ -121,7 +121,21 @@ fn a_scaffolded_project_builds_lints_and_runs_headless() {
         scaffold_cargo(&project, &target).args(["clippy", "--all-targets", "--", "-D", "warnings"]),
     );
 
-    // 4. `crcbl run --headless` — the loop, with no display anywhere.
+    // 4. Its own tests pass, so a scaffold whose menu ids collided or whose
+    //    input took a shortcut fails here rather than in the first game
+    //    somebody builds on it.
+    //
+    //    `running 0 tests` is checked for by name: `run` already fails on a
+    //    non-zero exit, and a suite with nothing in it exits zero. That is the
+    //    same trap `run-cli-e2e.sh` guards this file against, one level down.
+    let tested = run("cargo test", scaffold_cargo(&project, &target).arg("test"));
+    let tests = String::from_utf8_lossy(&tested.stdout).into_owned();
+    assert!(
+        tests.contains("test result: ok.") && !tests.contains("running 0 tests"),
+        "the scaffold's own tests did not run:\n{tests}"
+    );
+
+    // 5. `crcbl run --headless` — the loop, with no display anywhere.
     let ran = run(
         "crcbl run --headless",
         Command::new(crcbl)
