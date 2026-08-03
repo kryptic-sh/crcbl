@@ -16,6 +16,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-shell** (X11): a `set_mode` issued after a window was configured but
+  before its `MapNotify` arrived was silently dropped. `apply_fullscreen` chose
+  between writing `_NET_WM_STATE` and sending a `ClientMessage` on whether the
+  window was mapped — which follows `MapNotify` — but a window manager begins
+  managing a window at the map _request_, and on X11 the first configure also
+  arrives before `MapNotify`. A game that opened a window, waited for its size
+  and asked for fullscreen landed in that gap every time: it wrote a property
+  the window manager then overwrote with its own view. It now branches on
+  `XWindow::map_requested`. **Verified only as far as "the client message is now
+  the one sent"** — see `docs/backlog.md`, "X11 under a window manager", for
+  what is still failing under a real one.
+
 - **crcbl** (`engine`): a run that ended because the player closed the window
   reported `DisplayMode::Windowed` whatever mode it had been in. Accepting a
   close request destroys the window, and the summary is built afterwards, so

@@ -193,14 +193,11 @@ is left:
   for layer messages, or `crcbl-vk` to grow a "fail on validation error" mode
   the sample harnesses could share.
 
-## Display-mode coverage: what is gated and what is not
-
 Every combination of {born borderless, toggled with `F11`, imposed by the window
-system} × {honoured, refused} is now executed by a harness. sway honours
-(`run-wayland-e2e.sh`), a WM-less Xvfb refuses and openbox honours
-(`run-x11-e2e.sh`, run twice in CI). `crates/crcbl-shell/tests/bin/send_key.rs`
-is what drives `F11` at a running sample from outside its process. What is still
-uncovered:
+system} × {honoured, refused} is now executed by a harness on Wayland
+(`run-wayland-e2e.sh`); on X11 only the refusing half is.
+`crates/crcbl-shell/tests/bin/send_key.rs` is what drives `F11` at a running
+sample from outside its process. What is still uncovered:
 
 - **The null GPU backend is excluded from every mode assertion, and correctly.**
   It presents by doing nothing, so no `wl_buffer` is attached, so the surface
@@ -208,14 +205,8 @@ uncovered:
   where a Vulkan one lists `sh.kryptic.crcbl.sandbox` — observed, not inferred.
   An unmapped surface gets no fullscreen configure, so any mode assertion there
   would be checking a window the compositor does not have.
-- **The X11 window-manager branch was never verified on the machine that wrote
-  it.** No X11 window manager is installed here and sway's Xwayland would not
-  bind a socket (`Failed to bind socket @/tmp/.X11-unix/X0`), so the openbox
-  pass was written blind and its verdict comes from reading the CI job log.
-  Everything it asserts is red-on-failure by construction —
-  `CRCBL_E2E_EXPECT_WM` fails `Session::open` if no window manager appears, and
-  the sandbox pass greps for the granted extent — but nobody has falsified it by
-  mutation the way the Wayland side was.
+- **X11 under a window manager: the pass exists, the backend does not survive
+  it.** Its own section is below, and it is the largest hole on this list.
 - **`F11` is only pressed at the sandbox, and only under Wayland.** The four
   games take the same engine-owned path (`crcbl::engine::FULLSCREEN_KEY`), and
   `run-x11-e2e.sh` starts no key sender: the equivalent there is XTEST through
@@ -223,6 +214,54 @@ uncovered:
   out-of-process treatment.
 - **macOS and Windows have no shell backend at all**, so display modes there are
   not late — they do not exist. See the platform sections of `crcbl-shell`.
+
+## X11 under a window manager
+
+**The whole point of the X11 backend is a platform where a window manager is a
+separate program, and the suite has only ever run without one.** Turning that
+around is one environment variable — `CRCBL_E2E_X11_WM=openbox`, which
+`run-x11-e2e.sh` supports and CI installs openbox for — and the backend does not
+survive it. A second CI pass was written, run, and taken back out rather than
+left red; the one line that turns it on again is in `.github/workflows/ci.yml`
+next to the comment saying so.
+
+**How to reproduce without an X11 window manager installed.** sway is an EWMH
+window manager for its own Xwayland clients, so headless sway with
+`xwayland force` in its config gives a real reparenting WM on a machine that has
+no openbox. Wait for `Starting Xwayland on :N` in sway's log (it is only printed
+with `sway -d`; grepping for `xwayland` matches a `sockets.c:47` error line
+first and gives a bogus display number), then run the suite with that `DISPLAY`
+and `CRCBL_E2E_EXPECT_WM=1`. **26–27 of 30 pass.** The failures:
+
+- `a_mode_request_is_a_request_and_the_effective_mode_is_the_answer` and
+  `a_window_created_borderless_does_not_report_its_own_request_as_the_answer` —
+  `mode_request_honoured()` never goes true. `_NET_WM_STATE` is observed going
+  `[]` → `[256]` (`_NET_WM_STATE_FOCUSED`) and never gaining `258`
+  (`_NET_WM_STATE_FULLSCREEN`).
+- `a_control_key_is_a_key_and_not_committed_text` — the synthesised key never
+  arrives. Under sway-as-WM it gets as far as focus and then loses the key;
+  under openbox in CI it never got focus at all. Not diagnosed.
+- `pointer_motion_buttons_and_the_wheel_all_arrive` failed on one run of four
+  and passed on the others, so treat it as a flake until it is seen again.
+
+**One defect was found and fixed on the way, and it is in `CHANGELOG.md`**:
+`apply_fullscreen` chose between writing `_NET_WM_STATE` and sending a client
+message on `XWindow::mapped`, which follows `MapNotify` — but a window manager
+starts managing a window at the map _request_, and on X11 the first configure
+also arrives before `MapNotify`. So a game that opened a window, waited for its
+size and asked for fullscreen wrote a property the window manager then
+overwrote, and the request vanished. Observed directly: the property held our
+`[258]` before the map and `[]` after it. `XWindow::map_requested` is the
+predicate now.
+
+**That fix is not what makes the two mode tests pass, and they still fail.** The
+client message is now sent — instrumented and confirmed — and sway's Xwayland
+still does not grant fullscreen. What is not known: whether the message is
+malformed in a way wlroots' `xwm` rejects (`Conn::send_event`'s propagate flag
+and the 32-byte event buffer are the two places to look), or whether sway's
+Xwayland is simply a poor stand-in for openbox here. **Trying it under openbox
+is the next step**, because CI's failure was at a different point (keyboard
+focus, not the mode) and the two may not be the same problem at all.
 
 ## Two display-mode defects, and the shape they shared
 

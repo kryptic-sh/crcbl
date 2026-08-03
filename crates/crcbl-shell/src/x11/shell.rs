@@ -284,6 +284,7 @@ impl Shell for X11Shell {
             focused: false,
             visible: desc.visible,
             mapped: false,
+            map_requested: false,
             close_pending: false,
         };
 
@@ -301,6 +302,9 @@ impl Shell for X11Shell {
         if desc.visible {
             // SAFETY: the connection and window are live.
             unsafe { (self.conn.lib.map_window)(self.conn.raw(), xid) };
+            // From here the window manager is managing it, whatever `MapNotify`
+            // has or has not arrived — see `apply_fullscreen`.
+            window.map_requested = true;
         }
         self.conn.flush();
 
@@ -372,6 +376,10 @@ impl Shell for X11Shell {
                 (self.conn.lib.unmap_window)(self.conn.raw(), xid);
             }
         }
+        // Which side of `apply_fullscreen`'s split the next request takes. Set
+        // from the request rather than from the notify, and deliberately —
+        // `visible` below is the one that reports what the server did.
+        self.window_mut(window)?.map_requested = visible;
         self.conn.flush();
         Ok(())
     }

@@ -134,8 +134,26 @@ impl X11Shell {
     ///
     /// A backend that only writes the property gets a fullscreen toggle that
     /// works exactly once, at startup, and appears to do nothing afterwards.
+    ///
+    /// # The boundary is the map *request*, not `MapNotify`
+    ///
+    /// [`XWindow::mapped`] follows the server's `MapNotify`, because
+    /// [`WindowState::visible`](crate::WindowState::visible) is meant to report
+    /// what happened rather than what was asked. That is the wrong question
+    /// here: a window manager starts managing a window when the `MapWindow`
+    /// request reaches it, and `MapNotify` comes back afterwards. Between the
+    /// two, `mapped` is false and the window is already managed — so a
+    /// `set_mode` in that window took the property branch, wrote a request the
+    /// window manager then overwrote with its own view, and vanished.
+    ///
+    /// That window is not narrow. On X11 the *first configure* also arrives
+    /// before `MapNotify` — the server knew the geometry before `create_window`
+    /// returned — so a game that opens a window, waits for its size, and asks
+    /// for fullscreen lands in it every time. [`XWindow::map_requested`] is the
+    /// honest predicate, and it is separate from `mapped` rather than replacing
+    /// it because the two answer different questions.
     pub(super) fn apply_fullscreen(&self, window: &XWindow, fullscreen: bool) {
-        if window.mapped {
+        if window.map_requested {
             let message = ffi::ClientMessageEvent {
                 response_type: ffi::event::CLIENT_MESSAGE,
                 format: 32,

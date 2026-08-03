@@ -12,10 +12,10 @@
 //!
 //! # Why a whole process, and why it does not steal focus
 //!
-//! [`VirtualInput`](crcbl_shell::wayland_test_support::VirtualInput) needs a
-//! Wayland connection, and it takes one the only way the seam allows: out of a
-//! window's [`SurfaceTarget`](crcbl_shell::SurfaceTarget). So this creates a
-//! window — and then deliberately never presents to it.
+//! [`VirtualInput`] needs a Wayland connection, and it takes one the only way
+//! the seam allows: out of a window's
+//! [`SurfaceTarget`](crcbl_shell::SurfaceTarget). So this creates a window —
+//! and then deliberately never presents to it.
 //!
 //! That is not a shortcut, it is the mechanism. A Wayland surface is mapped
 //! exactly while it has a buffer, and nothing here attaches one, so sway never
@@ -42,13 +42,37 @@
 //! Keys are **evdev** codes, the numbering `wl_keyboard.key` reports and
 //! `crcbl-shell`'s own `linux/keymap.rs` translates: `KEY_F11` is 87. Naming
 //! them here would mean a second table to keep in step with that one.
+//!
+//! # Linux only, and it says so out loud
+//!
+//! `wayland_test_support` is `#[cfg(target_os = "linux")]`, and `--all-features`
+//! turns `wayland-e2e` on everywhere — so this target is built on macOS,
+//! Windows and `wasm32` by CI's `--all-targets --all-features` lint jobs, which
+//! is how it first went red on three of them at once. The other platforms get a
+//! `main` that fails and names the reason rather than a `cfg` that quietly
+//! compiles to nothing: a helper that reports success on a platform where it
+//! cannot possibly have typed anything is the failure this whole harness is
+//! trying to avoid.
 
+#[cfg(target_os = "linux")]
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
+#[cfg(target_os = "linux")]
 use crcbl_shell::wayland_test_support::VirtualInput;
+#[cfg(target_os = "linux")]
 use crcbl_shell::{LogicalSize, ShellBackend, WindowDesc, open_backend};
 
+#[cfg(not(target_os = "linux"))]
+fn main() -> ExitCode {
+    eprintln!(
+        "crcbl-e2e-key: Wayland is a Linux window system; there is no seat here to plug \
+         a keyboard into"
+    );
+    ExitCode::FAILURE
+}
+
+#[cfg(target_os = "linux")]
 fn main() -> ExitCode {
     crcbl_core::log::init_logging();
 
@@ -120,6 +144,7 @@ fn main() -> ExitCode {
 }
 
 /// Says something the harness may be blocked waiting to read.
+#[cfg(target_os = "linux")]
 fn say(what: &str) {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "crcbl-e2e-key: {what}");

@@ -651,6 +651,15 @@ struct XWindow {
     focused: bool,
     visible: bool,
     mapped: bool,
+    /// Whether a `MapWindow` request has been sent and not yet undone.
+    ///
+    /// Distinct from [`mapped`](Self::mapped), which follows `MapNotify`: a
+    /// window manager begins managing a window when the map *request* reaches
+    /// it, so between the request and the notify a window is managed and
+    /// `mapped` is still false. `apply_fullscreen` needs the earlier boundary —
+    /// see its docs for the fullscreen request that used to disappear into that
+    /// gap.
+    map_requested: bool,
     close_pending: bool,
 }
 
