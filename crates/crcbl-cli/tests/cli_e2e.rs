@@ -80,6 +80,27 @@ fn gpu_backend() -> String {
     std::env::var("CRCBL_CLI_E2E_BACKEND").unwrap_or_else(|_| "null".to_string())
 }
 
+/// The size `templates/main.rs.tmpl` asks its window to open at.
+///
+/// Named here rather than read out of the template: the point of the windowed
+/// pass is that the *generated project* opens at the size its own source says,
+/// so a check that took the number from the same file the code takes it from
+/// would agree with itself no matter what either did.
+const SCAFFOLD_WINDOW: &str = "960x720";
+
+/// Whether to run the scaffolded game **windowed**, against a real compositor.
+///
+/// Off unless `run-cli-e2e.sh` says otherwise, because the rest of this suite
+/// deliberately needs no display: `crcbl new` has to keep working on a machine
+/// with no window system, and a test that silently required one would be a
+/// worse scaffold gate than no test.
+///
+/// The harness sets it after starting headless sway and exporting
+/// `WAYLAND_DISPLAY`, which this process inherits.
+fn windowed_pass() -> bool {
+    std::env::var("CRCBL_CLI_E2E_WINDOWED").is_ok_and(|value| value == "1")
+}
+
 /// A `cargo` invocation for the *scaffolded* project.
 ///
 /// `CARGO_TARGET_DIR` is set explicitly rather than inherited: a CI job that
@@ -166,7 +187,45 @@ fn a_scaffolded_project_builds_lints_and_runs_headless() {
         "the game ran its frame budget on the {backend} backend:\n{output}"
     );
 
-    // 6. `crcbl build`, machine-readable.
+    // 6. And the same loop with a window on it, when there is a compositor to
+    //    put one on. This is the half `--headless` cannot reach: opening a
+    //    real surface, joining it to the device, and getting a swapchain at the
+    //    size the window system configured rather than the size we asked for.
+    //
+    //    A generated project is the first thing anyone runs, and until now
+    //    nothing had ever run one windowed.
+    if windowed_pass() {
+        let ran = run(
+            "crcbl run (windowed)",
+            Command::new(crcbl)
+                .current_dir(&project)
+                .env("CARGO_TARGET_DIR", &target)
+                // The compositor the harness started, not whatever the
+                // developer is logged into: a silent fallback to another
+                // backend would report success for a window nobody asserted on.
+                .env("CRCBL_SHELL", "wayland")
+                .args(["run", "--"])
+                .args(["--frames", "60", "--backend", &backend]),
+        );
+        let output = String::from_utf8_lossy(&ran.stdout).into_owned();
+        assert!(
+            output.contains("mygame: 60 frames"),
+            "the scaffold did not present its frame budget:\n{output}"
+        );
+        // The window is the size the template asked for, in the mode it asked
+        // for, and it got there through the Wayland backend. A *tiled* window
+        // would report the output's size instead, which is why the harness's
+        // sway config floats this `app_id`. The tick count is deliberately not
+        // asserted: a windowed run reads the real clock, so it is a property of
+        // how fast the machine is.
+        let expected = format!("on the wayland shell at {SCAFFOLD_WINDOW}, windowed");
+        assert!(
+            output.contains(&expected),
+            "the scaffold did not open the window it asked for; wanted {expected:?}:\n{output}"
+        );
+    }
+
+    // 7. `crcbl build`, machine-readable.
     let built = run(
         "crcbl build --json",
         Command::new(crcbl)

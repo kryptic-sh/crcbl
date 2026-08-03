@@ -467,17 +467,27 @@ jobs:
       # `crcbl::engine::Loop` and declares a real render graph, and a run that
       # recorded calls instead of executing them would not notice a pass that
       # cannot compile. See `CRCBL_CLI_E2E_BACKEND` below.
-      - name: Install the ALSA headers, the Vulkan loader and lavapipe
+      #
+      # `sway` and `libwayland-client0` are what let the harness run the
+      # generated project **windowed** as well as headless — the half
+      # `--headless` cannot reach, and the first thing anybody does with a
+      # scaffold. The harness starts its own headless compositor through
+      # `crcbl-shell`'s `sway-session.sh`; without sway installed it says so and
+      # fails, because in CI a skipped pass is the trap
+      # `docs/plan/12-testing.md` names.
+      - name: Install sway, the ALSA headers, the Vulkan loader and lavapipe
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
+            sway \
             libasound2-dev \
+            libwayland-client0 \
             libvulkan1 \
             mesa-vulkan-drivers
       # Scaffolds into a temporary directory, builds it with its own
       # `CARGO_TARGET_DIR`, checks `rustfmt` and `clippy` on the generated
-      # source, runs the template's own unit tests, and runs
-      # `crcbl run --headless`.
+      # source, runs the template's own unit tests, runs
+      # `crcbl run --headless`, and runs it once more with a window on it.
       #
       # No ICD pin, unlike the `vk e2e` job. That job pins lavapipe because the
       # *software path* is what it is there to test; this one asks a weaker

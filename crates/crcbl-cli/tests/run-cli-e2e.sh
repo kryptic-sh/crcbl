@@ -18,6 +18,14 @@
 # a driver installed) to put the template's render graph in front of a real one
 # instead; CI does exactly that against lavapipe.
 #
+# **When sway is installed it also runs the generated project windowed**, on a
+# private headless compositor started by `crcbl-shell`'s `sway-session.sh`. That
+# is the half `--headless` cannot reach — a real surface, joined to the device,
+# with a swapchain at the size the window system configured — and it is the
+# first thing anybody does with a scaffold, which until now had never been run.
+# The pass is skipped, loudly, on a machine with no sway; in CI, where sway is
+# installed on purpose, a skip is a failure.
+#
 # It does need `rustfmt` and `clippy`, which `rust-toolchain.toml` installs.
 
 set -euo pipefail
@@ -39,12 +47,35 @@ for tool in rustfmt cargo-clippy; do
 done
 
 RUNTIME_DIR="$(mktemp -d -t crcbl-cli-e2e.XXXXXX)"
+
+# Starting a compositor is `crcbl-shell`'s knowledge, and it is sourced rather
+# than copied: two hand-rolled socket polls is where the two drift apart. It
+# sets `SWAY_RUNTIME_DIR`, `WAYLAND_DISPLAY`, `SWAYSOCK`, `SWAY_LOG` and
+# `SWAY_PID`, and defines `sway_log_tail` and `sway_session_stop` — the last of
+# which does nothing when the session never started.
+# shellcheck source=crates/crcbl-shell/tests/sway-session.sh
+source "${REPO_ROOT}/crates/crcbl-shell/tests/sway-session.sh"
+
 cleanup() {
     local status=$?
+    sway_session_stop
     rm -rf "$RUNTIME_DIR"
     exit "$status"
 }
 trap cleanup EXIT INT TERM
+
+# The windowed pass, when there is something to be windowed on. The suite reads
+# `CRCBL_CLI_E2E_WINDOWED` and inherits `WAYLAND_DISPLAY` from here.
+if command -v sway >/dev/null 2>&1; then
+    sway_session_start "${CRATE_DIR}/tests/cli-e2e-sway.conf"
+    export CRCBL_CLI_E2E_WINDOWED=1
+else
+    echo "crcbl e2e: no sway; the scaffold will only be run headless" >&2
+    if [ -n "${CI:-}" ]; then
+        echo "crcbl e2e: ...and this is CI, where sway is installed on purpose" >&2
+        exit 1
+    fi
+fi
 
 cd "$REPO_ROOT"
 OUTPUT="${RUNTIME_DIR}/nextest.log"
@@ -79,3 +110,11 @@ if [ -z "$RAN" ] || [ "$RAN" -eq 0 ]; then
     exit 1
 fi
 echo "crcbl e2e: $RAN CLI scaffold tests ran on the ${CRCBL_CLI_E2E_BACKEND:-null} GPU backend"
+
+# Said out loud, because "the tests passed" does not distinguish a run that
+# opened a window from one that skipped that step — which is the whole reason
+# the suite reads an environment variable rather than probing for a compositor
+# itself.
+if [ -n "${CRCBL_CLI_E2E_WINDOWED:-}" ]; then
+    echo "crcbl e2e: the scaffold was also run windowed against headless sway"
+fi
