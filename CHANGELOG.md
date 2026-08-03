@@ -35,6 +35,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the one dependency a sample continues to spell out, and is what keeps a PNG
   encoder out of a shipped binary.
 
+- **crcbl** (`crcbl::engine`): `Pending` folds the whole of a pump batch that
+  belongs to the loop rather than the game — the pointer, focus loss, and the
+  three reserved keys `DEBUG_OVERLAY_KEY` (F3), `PAUSE_KEY` (Escape) and
+  `FULLSCREEN_KEY` (F11), which are now the engine's constants. `observe`
+  returns `Handled::Loop` or `Handled::Game`, so a sample's pump closure is a
+  guard and its own key handling; `Pending::carrying` starts a batch from where
+  the last frame left the cursor.
+
+  The pointer half was **byte-identical in all four samples**, and it is not
+  trivial code: it carries the last position across frames because motion and
+  buttons arrive as separate events and a click carries a position only on some
+  backends. The reserved keys were three constants spelled out five times, and
+  they are the engine's because the thing F3 opens is the engine's.
+
+  196 code lines out of the four `app.rs` files. What is left there is the loop
+  — the fixed-step accumulator, teardown, the summary — which is still four
+  copies.
+
 - **crcbl** (`crcbl::args`): the flags every sample has. `Common` holds
   `--headless`, `--frames`, `--tick-hz`, `--backend` and the debug-overlay pair,
   with `frame_budget` and `debug_overlay_visible` on it; `Common::consume`

@@ -1247,7 +1247,18 @@ impl Clock {
 /// Recorded rather than acted on inline because the sink borrows this mutably
 /// while `shell` is borrowed mutably too — which is exactly why replies
 /// (`reply_close_request`, `resize`) happen after the pump returns.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// # What it folds, and what it leaves
+///
+/// Everything the *loop* acts on rather than the game: the window's own
+/// business, the pointer, focus loss, and the three keys below that are the
+/// engine's. Whatever is left — the game's keys — the caller matches on itself,
+/// which is why [`observe`](Self::observe) reports whether it took the event.
+///
+/// The pointer half was byte-for-byte identical in all four samples before it
+/// moved here, and it is not trivial code: it carries the last position across
+/// frames because motion and buttons arrive as separate events and a click
+/// carries a position only on some backends.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Pending {
     /// Events observed, of every kind.
     pub count: u64,
@@ -1257,23 +1268,139 @@ pub struct Pending {
     pub close_requested: bool,
     /// The window went away without asking.
     pub destroyed: bool,
+    /// The window lost focus during this batch.
+    ///
+    /// Not a key event and never will be: the releases for whatever was held
+    /// are exactly what no platform sends, which is the obligation
+    /// [`ShellEvent::Focus`] documents and a loop discharges by releasing every
+    /// key it forwarded.
+    pub focus_lost: bool,
+    /// Where the pointer is, in framebuffer pixels, or `None` if it is outside
+    /// the window.
+    ///
+    /// Starts at whatever [`Pending::carrying`] was given, because a batch with
+    /// no motion event in it has not moved the pointer.
+    pub pointer: Option<glam::Vec2>,
+    /// The primary pointer button went down during this batch.
+    pub pointer_pressed: bool,
+    /// …and came up.
+    ///
+    /// Both can be true for one batch — a click that begins and ends inside a
+    /// single pump — which is why they are two flags and not one state.
+    pub pointer_released: bool,
+    /// [`DEBUG_OVERLAY_KEY`] was pressed, and it was a real press.
+    pub toggle_debug_overlay: bool,
+    /// [`PAUSE_KEY`] was pressed.
+    pub toggle_pause: bool,
+    /// [`FULLSCREEN_KEY`] was pressed.
+    pub toggle_fullscreen: bool,
+}
+
+/// Whether [`Pending::observe`] took an event, or left it for the game.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Handled {
+    /// The loop's own. The game must not see it.
+    ///
+    /// A reserved key recorded into a tick's input would change what a seeded,
+    /// scripted run replays.
+    Loop,
+    /// Not the loop's. The caller decides what it means.
+    Game,
 }
 
 impl Pending {
-    /// Folds one event in.
-    pub fn observe(&mut self, event: &ShellEvent) {
+    /// An empty batch that remembers where the pointer was left.
+    ///
+    /// A frame whose pump delivers no pointer event must not forget the cursor:
+    /// starting from [`Default`] would put every menu's hover state at "no
+    /// pointer" on any frame the mouse did not move.
+    #[must_use]
+    pub fn carrying(pointer: Option<glam::Vec2>) -> Self {
+        Self {
+            pointer,
+            ..Self::default()
+        }
+    }
+
+    /// Folds one event in, and says whether the loop claimed it.
+    pub fn observe(&mut self, event: &ShellEvent) -> Handled {
         self.count += 1;
+        log::debug!("shell event: {event:?}");
+
+        let position = |point: Option<crcbl_shell::PhysicalPoint>| {
+            point.map(|point| glam::Vec2::new(point.x as f32, point.y as f32))
+        };
+
         match event {
             ShellEvent::Resized { size, .. } | ShellEvent::ScaleFactorChanged { size, .. } => {
                 self.resized = Some(*size);
             }
             ShellEvent::CloseRequested { .. } => self.close_requested = true,
             ShellEvent::WindowDestroyed { .. } => self.destroyed = true,
-            _ => {}
+            ShellEvent::Focus { focused: false, .. } => self.focus_lost = true,
+            ShellEvent::PointerMotion {
+                abs: Some(point), ..
+            } => {
+                self.pointer = position(Some(*point));
+            }
+            // A pointer that left the window is not hovering anything, and must
+            // not leave the last button it crossed lit up.
+            ShellEvent::PointerFocus {
+                entered,
+                position: at,
+                ..
+            } => {
+                self.pointer = if *entered { position(*at) } else { None };
+            }
+            ShellEvent::Button {
+                button: crcbl_core::input::PointerButton::Left,
+                state,
+                position: at,
+                ..
+            } => {
+                if let Some(point) = position(*at) {
+                    self.pointer = Some(point);
+                }
+                if matches!(state, crcbl_shell::ButtonState::Pressed) {
+                    self.pointer_pressed = true;
+                } else {
+                    self.pointer_released = true;
+                }
+            }
+            ShellEvent::Key {
+                key_code: Some(code),
+                state,
+                repeat,
+                ..
+            } => {
+                // `!repeat` because holding F11 down would otherwise toggle the
+                // display mode at the keyboard's repeat rate.
+                let edge = matches!(state, crcbl_shell::ButtonState::Pressed) && !repeat;
+                match *code {
+                    DEBUG_OVERLAY_KEY => self.toggle_debug_overlay |= edge,
+                    PAUSE_KEY => self.toggle_pause |= edge,
+                    FULLSCREEN_KEY => self.toggle_fullscreen |= edge,
+                    _ => return Handled::Game,
+                }
+            }
+            _ => return Handled::Game,
         }
-        log::debug!("shell event: {event:?}");
+        Handled::Loop
     }
 }
+
+/// Shows and hides the engine's debug overlay.
+///
+/// One of three keys the loop keeps for itself, and they are the engine's
+/// rather than each game's because the thing F3 opens is the engine's. All five
+/// samples had spelled out the same three constants.
+pub const DEBUG_OVERLAY_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::F3;
+
+/// Stops and resumes the simulation.
+pub const PAUSE_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::Escape;
+
+/// Toggles fullscreen.
+pub const FULLSCREEN_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::F11;
 
 /// Why a loop stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1386,6 +1513,145 @@ pub fn accept_close<S: Shell + ?Sized>(shell: &mut S, window: WindowId) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A headless shell with one window, so the tests below drive `observe`
+    /// through the **real** event path rather than through hand-built structs.
+    ///
+    /// `ShellEvent::Key` carries a device id, an event time, a scancode and a
+    /// keysym that only a backend can supply; a test that filled them in by
+    /// hand would be asserting against its own idea of an event.
+    fn shell() -> (crcbl_shell::HeadlessShell, WindowId) {
+        let mut shell = crcbl_shell::HeadlessShell::new();
+        let window = shell
+            .create_window(&crcbl_shell::WindowDesc::default())
+            .expect("headless always creates a window");
+        (shell, window)
+    }
+
+    /// Drains the shell into a `Pending`, and reports what each event was
+    /// judged to be.
+    fn drain(shell: &mut crcbl_shell::HeadlessShell, pending: &mut Pending) -> Vec<Handled> {
+        let mut verdicts = Vec::new();
+        shell.pump(&mut |event| verdicts.push(pending.observe(&event)));
+        verdicts
+    }
+
+    /// **A batch with no pointer event has not moved the pointer.**
+    ///
+    /// The reason [`Pending::carrying`] exists at all, and the reason it is not
+    /// `Default::default()`: a menu's hover state is resolved from
+    /// `pending.pointer` every frame, so a loop that forgot the cursor between
+    /// frames would light a button under the mouse and drop it again on the
+    /// first frame the mouse held still.
+    #[test]
+    fn a_batch_with_no_pointer_event_keeps_the_pointer_it_started_with() {
+        let (mut shell, window) = shell();
+        let last = Some(glam::Vec2::new(120.0, 40.0));
+
+        shell
+            .key(
+                window,
+                crcbl_core::input::KeyCode::KeyA,
+                crcbl_shell::ButtonState::Pressed,
+            )
+            .expect("the window is live");
+        let mut quiet = Pending::carrying(last);
+        assert!(drain(&mut shell, &mut quiet).contains(&Handled::Game));
+        assert_eq!(
+            quiet.pointer, last,
+            "a frame of keyboard events forgot where the cursor was"
+        );
+
+        // …and a batch that *does* carry motion takes the new position.
+        shell
+            .move_pointer(
+                window,
+                crcbl_shell::PhysicalPoint { x: 7.0, y: 9.0 },
+                (0.0, 0.0),
+            )
+            .expect("the window is live");
+        let mut moved = Pending::carrying(last);
+        drain(&mut shell, &mut moved);
+        assert_eq!(moved.pointer, Some(glam::Vec2::new(7.0, 9.0)));
+    }
+
+    /// The three reserved keys are the loop's and must not reach the game: one
+    /// recorded into a tick's input would change what a seeded, scripted run
+    /// replays.
+    #[test]
+    fn the_reserved_keys_are_claimed_and_every_other_key_is_not() {
+        let (mut shell, window) = shell();
+        for code in [DEBUG_OVERLAY_KEY, PAUSE_KEY, FULLSCREEN_KEY] {
+            shell
+                .key(window, code, crcbl_shell::ButtonState::Pressed)
+                .expect("the window is live");
+        }
+        let mut pending = Pending::default();
+        assert!(
+            drain(&mut shell, &mut pending)
+                .iter()
+                .all(|verdict| *verdict == Handled::Loop),
+            "a reserved key was handed to the game"
+        );
+        assert!(pending.toggle_debug_overlay);
+        assert!(pending.toggle_pause);
+        assert!(pending.toggle_fullscreen);
+
+        for code in [
+            crcbl_core::input::KeyCode::Space,
+            crcbl_core::input::KeyCode::KeyW,
+            crcbl_core::input::KeyCode::Enter,
+        ] {
+            shell
+                .key(window, code, crcbl_shell::ButtonState::Pressed)
+                .expect("the window is live");
+        }
+        // Only the key events are the claim here: a pump batch can carry other
+        // events the loop legitimately owns, and asserting over all of them
+        // would be asserting about the shell rather than about `observe`.
+        let mut game_keys = Pending::default();
+        let mut verdicts = Vec::new();
+        shell.pump(&mut |event| {
+            if matches!(event, ShellEvent::Key { .. }) {
+                verdicts.push(game_keys.observe(&event));
+            } else {
+                game_keys.observe(&event);
+            }
+        });
+        assert_eq!(verdicts.len(), 3, "the three game keys did not arrive");
+        assert!(
+            verdicts.iter().all(|verdict| *verdict == Handled::Game),
+            "the loop swallowed a game key: {verdicts:?}"
+        );
+        assert!(!game_keys.toggle_pause, "a game key moved a reserved flag");
+    }
+
+    /// A held key repeats, and a display-mode toggle driven at the keyboard's
+    /// repeat rate is a window flickering between modes. A release must not
+    /// toggle either, or every press would fire twice.
+    #[test]
+    fn only_a_real_press_of_a_reserved_key_toggles() {
+        let (mut shell, window) = shell();
+
+        shell
+            .key_repeat(window, FULLSCREEN_KEY)
+            .expect("the window is live");
+        shell
+            .key(window, FULLSCREEN_KEY, crcbl_shell::ButtonState::Released)
+            .expect("the window is live");
+        let mut pending = Pending::default();
+        drain(&mut shell, &mut pending);
+        assert!(
+            !pending.toggle_fullscreen,
+            "a repeat or a release toggled the display mode"
+        );
+
+        shell
+            .key(window, FULLSCREEN_KEY, crcbl_shell::ButtonState::Pressed)
+            .expect("the window is live");
+        drain(&mut shell, &mut pending);
+        assert!(pending.toggle_fullscreen, "a real press did not toggle");
+    }
 
     /// A thousand a second is a millisecond a frame.
     #[test]

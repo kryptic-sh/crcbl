@@ -24,8 +24,8 @@ use core::time::Duration;
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Clock, ConfigureError, ExitReason, Flow, FrameOutcome, GpuError, MAX_CONSECUTIVE_RECONFIGURES,
-    Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
+    Clock, ConfigureError, ExitReason, Flow, FrameOutcome, GpuError, Handled,
+    MAX_CONSECUTIVE_RECONFIGURES, Pending, WINDOWED_IDLE, accept_close, wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{
@@ -124,30 +124,6 @@ impl From<ConfigureError> for FlappyError {
 }
 
 // ---- the loop ---------------------------------------------------------------
-
-/// The key that shows and hides the debug overlay.
-///
-/// F3, the same key breakout uses: "switching it on is one thing" is only true
-/// if it is the *same* thing in every sample.
-pub const DEBUG_OVERLAY_KEY: KeyCode = KeyCode::F3;
-
-/// The key that pauses and resumes.
-///
-/// Escape, the same key breakout uses, and free in both: flappy's action map
-/// declares Space, Up and R.
-///
-/// **In a browser it is also the key that leaves fullscreen**, which the
-/// browser reserves and no page can decline — so a fullscreen demo's Escape
-/// both drops out of fullscreen and pauses.
-pub const PAUSE_KEY: KeyCode = KeyCode::Escape;
-
-/// The key that asks for fullscreen, and asks to leave it.
-///
-/// F11, the desktop convention, and the key `web/engine/shell.js` binds on its
-/// side: a browser grants fullscreen only from inside a user-gesture handler,
-/// so the shim makes the call and this loop records the request and reads back
-/// what happened.
-pub const FULLSCREEN_KEY: KeyCode = KeyCode::F11;
 
 /// The keys a menu takes for itself while one is on screen.
 ///
@@ -394,16 +370,10 @@ impl<S: Shell + ?Sized> Loop<S> {
             self.shell.wait_events(Some(WINDOWED_IDLE));
         }
 
-        let mut pending = Pending::default();
-        // The three keys the loop keeps for itself, and the one event that is
-        // not a key at all.
-        let (mut toggle_debug, mut toggle_pause, mut toggle_fullscreen) = (false, false, false);
-        let mut focus_lost = false;
-        // The pointer's three facts for this frame. `pointer_pos` starts at what
-        // the last frame left, because motion and buttons are separate events
-        // and a click carries a position only on some backends.
-        let mut pointer_pos = self.pointer;
-        let (mut pointer_pressed, mut pointer_released) = (false, false);
+        // **Carrying the pointer, not defaulting it.** A batch with no pointer
+        // event in it has not moved the cursor, and a menu whose hover state
+        // reset every still frame would flicker.
+        let mut pending = Pending::carrying(self.pointer);
         let mut keyboard_action: Option<MenuAction> = None;
         let game = &mut self.game;
         let held = &mut self.held_keys;
@@ -413,115 +383,63 @@ impl<S: Shell + ?Sized> Loop<S> {
         // that was on screen when they pressed them.
         let menu_showing = menus.kind() != MenuKind::None;
         self.shell.pump(&mut |event| {
-            pending.observe(&event);
-            match event {
-                // Losing focus is not a key event and never will be: the
-                // releases for whatever was held are exactly what no platform
-                // sends. See `ShellEvent::Focus`.
-                ShellEvent::Focus { focused: false, .. } => focus_lost = true,
-                ShellEvent::PointerMotion {
-                    abs: Some(point), ..
-                } => pointer_pos = Some(crcbl::math::Vec2::new(point.x as f32, point.y as f32)),
-                // A pointer that left the window is not hovering anything, and
-                // must not leave the last button it crossed lit up.
-                ShellEvent::PointerFocus {
-                    entered, position, ..
-                } => {
-                    pointer_pos = if entered {
-                        position.map(|point| crcbl::math::Vec2::new(point.x as f32, point.y as f32))
-                    } else {
-                        None
-                    };
-                }
-                ShellEvent::Button {
-                    button: crcbl::core::input::PointerButton::Left,
-                    state,
-                    position,
-                    ..
-                } => {
-                    if let Some(point) = position {
-                        pointer_pos = Some(crcbl::math::Vec2::new(point.x as f32, point.y as f32));
-                    }
-                    if matches!(state, crcbl::shell::ButtonState::Pressed) {
-                        pointer_pressed = true;
-                    } else {
-                        pointer_released = true;
-                    }
-                }
-                ShellEvent::Key {
-                    key_code: Some(code),
-                    state,
-                    repeat,
-                    ..
-                } => {
-                    let pressed = matches!(state, crcbl::shell::ButtonState::Pressed);
-                    // The loop's own keys never reach the game: a toggle
-                    // recorded into the tick's input would change what a
-                    // seeded, scripted run replays. `!repeat` because holding
-                    // F11 down would otherwise toggle the mode at the
-                    // keyboard's repeat rate.
-                    let edge = pressed && !repeat;
+            // The window's business, the pointer, focus loss and the loop's
+            // three reserved keys are all folded by `observe`. What comes back
+            // as `Handled::Game` is what is left, which for every sample here
+            // is the keyboard.
+            if pending.observe(&event) == Handled::Loop {
+                return;
+            }
+            if let ShellEvent::Key {
+                key_code: Some(code),
+                state,
+                ..
+            } = event
+            {
+                let pressed = matches!(state, crcbl::shell::ButtonState::Pressed);
+                // The menu's three keys, taken only while one is on screen —
+                // see `MENU_UP_KEY`. Repeats move the selection, because
+                // holding Down to walk a list is what a player expects; the
+                // commit key fires on **release**, so the pressed frame of
+                // the skin is on screen for as long as the key is held.
+                if menu_showing {
                     match code {
-                        DEBUG_OVERLAY_KEY => {
-                            toggle_debug |= edge;
+                        MENU_UP_KEY => {
+                            if pressed {
+                                menus.select_previous();
+                            }
                             return;
                         }
-                        PAUSE_KEY => {
-                            toggle_pause |= edge;
+                        MENU_DOWN_KEY => {
+                            if pressed {
+                                menus.select_next();
+                            }
                             return;
                         }
-                        FULLSCREEN_KEY => {
-                            toggle_fullscreen |= edge;
+                        MENU_ACTIVATE_KEY => {
+                            if pressed {
+                                menus.press(true);
+                            } else {
+                                keyboard_action = menus.activate().and_then(MenuAction::from_id);
+                            }
                             return;
                         }
                         _ => {}
                     }
-                    // The menu's three keys, taken only while one is on screen —
-                    // see `MENU_UP_KEY`. Repeats move the selection, because
-                    // holding Down to walk a list is what a player expects; the
-                    // commit key fires on **release**, so the pressed frame of
-                    // the skin is on screen for as long as the key is held.
-                    if menu_showing {
-                        match code {
-                            MENU_UP_KEY => {
-                                if pressed {
-                                    menus.select_previous();
-                                }
-                                return;
-                            }
-                            MENU_DOWN_KEY => {
-                                if pressed {
-                                    menus.select_next();
-                                }
-                                return;
-                            }
-                            MENU_ACTIVATE_KEY => {
-                                if pressed {
-                                    menus.press(true);
-                                } else {
-                                    keyboard_action =
-                                        menus.activate().and_then(MenuAction::from_id);
-                                }
-                                return;
-                            }
-                            _ => {}
-                        }
-                    }
-                    if pressed {
-                        if !held.contains(&code) {
-                            held.push(code);
-                        }
-                    } else {
-                        held.retain(|key| *key != code);
-                    }
-                    game.key_event(code, pressed);
                 }
-                _ => {}
+                if pressed {
+                    if !held.contains(&code) {
+                        held.push(code);
+                    }
+                } else {
+                    held.retain(|key| *key != code);
+                }
+                game.key_event(code, pressed);
             }
         });
         self.events += pending.count;
-        self.pointer = pointer_pos;
-        if pointer_pressed {
+        self.pointer = pending.pointer;
+        if pending.pointer_pressed {
             self.pointer_held = true;
         }
         // **`down` must be false on the frame the button came up**, or
@@ -533,7 +451,8 @@ impl<S: Shell + ?Sized> Loop<S> {
         // Except when the press *also* arrived this frame: a click faster than a
         // frame is one event pair, and it must latch and fire together or a quick
         // tap does nothing.
-        let pointer_down = pointer_pressed || (self.pointer_held && !pointer_released);
+        let pointer_down =
+            pending.pointer_pressed || (self.pointer_held && !pending.pointer_released);
         // Hit-tested against **this** frame's layout, which is why the pointer
         // is resolved here and not inside the pump: the rectangles depend on the
         // framebuffer's size, and a click checked against last frame's would
@@ -550,30 +469,30 @@ impl<S: Shell + ?Sized> Loop<S> {
                         .pointer
                         .unwrap_or(crcbl::math::Vec2::splat(f32::NEG_INFINITY)),
                     down: pointer_down,
-                    released: pointer_released,
+                    released: pending.pointer_released,
                 },
             )
             .and_then(MenuAction::from_id);
-        if pointer_released {
+        if pending.pointer_released {
             self.pointer_held = false;
         }
         for action in [keyboard_action, pointer_action].into_iter().flatten() {
             self.apply(action)?;
         }
-        if toggle_debug {
+        if pending.toggle_debug_overlay {
             self.debug.toggle();
         }
         // Before the pause toggle, so a batch carrying both a focus loss and an
         // Escape resolves as "paused, then the player unpaused" rather than the
         // reverse.
-        if focus_lost {
+        if pending.focus_lost {
             self.lose_focus();
         }
-        if toggle_pause {
+        if pending.toggle_pause {
             self.paused = !self.paused;
             crcbl::log::info!("game {}", if self.paused { "paused" } else { "resumed" });
         }
-        if toggle_fullscreen {
+        if pending.toggle_fullscreen {
             self.toggle_fullscreen()?;
         }
         self.check_mode_request();
@@ -971,7 +890,9 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
         };
 
         let mut pending = Pending::default();
-        shell.pump(&mut |event| pending.observe(&event));
+        shell.pump(&mut |event| {
+            pending.observe(&event);
+        });
         self.events += pending.count;
         if pending.destroyed {
             return Err(FlappyError::Shell(ShellError::invalid_window(self.window)));
@@ -1120,6 +1041,7 @@ fn draw_hud(dl: &mut crcbl::ui::draw_list::DrawList, hud: &HudStrings) {
 #[cfg(test)]
 mod tests {
     use crcbl::args::Common;
+    use crcbl::engine::{DEBUG_OVERLAY_KEY, FULLSCREEN_KEY, PAUSE_KEY};
 
     use super::*;
     use crcbl::core::input::KeyCode;
