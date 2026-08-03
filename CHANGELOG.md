@@ -925,6 +925,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **asteroids**: a bullet could hit a rock sitting **behind** the ship on the
+  tick it left the gun. Segment CCD reconstructs where a projectile was as
+  `position - velocity * dt`, so one created this tick was swept from a point a
+  whole step behind the muzzle — through the hull and out the other side. The
+  gun fires after the sweep now, as `apps/horde` already did, so a bullet's
+  first sweep is its first real step. 0.4 of a unit at 60 Hz and six units at
+  `--tick-hz 4`, which is where the new test looks.
+
 - **crcbl-vk**: reusing an image from the **offscreen ring** was ordered against
   nothing, so the frame that took the image back could write it while the
   previous frame was still reading it. A headless frame ends in

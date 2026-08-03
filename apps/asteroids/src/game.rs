@@ -717,7 +717,6 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
     if logic.state == GameState::Playing && logic.ship_alive {
         turn_ship(logic, world, intent, dt);
         drive_ship(logic, world, intent, dt);
-        fire(logic, world, intent, dt);
     } else {
         // The cooldown still runs down while the ship is gone, so a respawned
         // ship can shoot immediately rather than inheriting a stale timer.
@@ -734,6 +733,19 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
     tumble_rocks(logic, dt);
 
     sweep_bullets(logic, world, dt);
+
+    // **After the sweep, which is the whole point.** A sweep reconstructs where
+    // a bullet was as `position - velocity * dt`, and for one created *this*
+    // tick that point is a whole step behind the muzzle — through the ship's own
+    // hull and out the other side, so a shot could hit a rock sitting behind the
+    // ship on the tick it left the gun. Firing here makes a bullet's first sweep
+    // its first real step, with `start` exactly at the muzzle. `apps/horde`
+    // already did it this way round; this game did not, and
+    // `a_bullet_is_never_swept_over_ground_it_did_not_travel` is what holds it.
+    if logic.state == GameState::Playing && logic.ship_alive {
+        fire(logic, world, intent, dt);
+    }
+
     wrap_everything(logic, world);
     // Again, because the wrap is a teleport: a ship that just crossed an edge is
     // a whole field away from where it was three lines ago, and `check_ship`
@@ -1943,6 +1955,20 @@ impl Game {
         spawn_rock(&mut logic, world, size, position, velocity)
     }
 
+    /// Adds a rock to the board [`stage_rock`](Self::stage_rock) laid out,
+    /// without clearing it — for a test that needs two rocks in known places.
+    #[cfg(test)]
+    pub fn stage_another_rock(
+        &mut self,
+        position: DVec3,
+        velocity: DVec3,
+        size: RockSize,
+    ) -> Entity {
+        let mut logic = lock(&self.shared);
+        let world = self.session.server_mut().world_mut();
+        spawn_rock(&mut logic, world, size, position, velocity)
+    }
+
     /// Puts the ship somewhere specific, for the same reason.
     #[cfg(test)]
     pub fn stage_ship(&mut self, position: DVec3, heading: f64, velocity: DVec3) {
@@ -2706,6 +2732,70 @@ mod tests {
             "the bullet stepped over the rock: it went from {before:?} to {after:?}"
         );
         assert_eq!(harness.game.bullet_count(), 0, "the bullet was not spent");
+    }
+
+    /// **A bullet is never swept over ground it did not travel.**
+    ///
+    /// The reason the gun fires *after* the sweep — see `run_tick`. A sweep
+    /// reconstructs `prev` as `position - velocity * dt`, so a bullet swept on
+    /// the tick it was created is swept from a point one whole step *behind the
+    /// muzzle*, through the ship that fired it, to the muzzle. At 60 Hz that
+    /// segment is 0.4 of a unit and hides inside the hull; at 4 Hz it is six
+    /// units of field behind the ship.
+    ///
+    /// The decoy below sits in exactly that stretch, **behind** the ship, where
+    /// nothing the bullet actually does can reach it.
+    #[test]
+    fn a_bullet_is_never_swept_over_ground_it_did_not_travel() {
+        let mut harness = Harness::new(4, 4);
+        harness.game.begin();
+        harness.game.stage_ship(DVec3::ZERO, 0.0, DVec3::ZERO);
+        let dt = harness.game.tick_dt_secs();
+        let step = BULLET_SPEED * dt;
+
+        // Halfway along the phantom segment, which runs from the muzzle back to
+        // `muzzle - step`.
+        let behind = MUZZLE_OFFSET - step / 2.0;
+        assert!(
+            behind < -RockSize::Small.radius() - SHIP_RADIUS,
+            "the decoy at {behind} is not clear of the ship, so a hit on it \
+             would be ambiguous",
+        );
+        harness
+            .game
+            .stage_rock(DVec3::new(0.0, behind, 0.0), DVec3::ZERO, RockSize::Small);
+        // In front, near enough that one real step reaches it.
+        harness.game.stage_another_rock(
+            DVec3::new(0.0, step / 2.0, 0.0),
+            DVec3::ZERO,
+            RockSize::Small,
+        );
+
+        harness.tap(KeyCode::Space);
+        assert_eq!(
+            harness.game.bullet_count(),
+            1,
+            "nothing was fired — or the shot was spent on the tick it left the \
+             gun, which is this bug reported one assertion early",
+        );
+        harness.run_ticks(harness.ticks + 2, &[]);
+
+        // A `Small` rock shatters into nothing, so the survivors are the whole
+        // answer: exactly one rock, and it is the one behind the ship.
+        let alive = harness.game.rocks();
+        assert_eq!(
+            alive.len(),
+            1,
+            "expected the rock in front destroyed and the one behind untouched; \
+             got {alive:?}",
+        );
+        assert!(
+            (alive[0].position.y - behind).abs() < 1e-9,
+            "the survivor is the rock in *front* of the ship, so the bullet was \
+             swept backwards through the hull and killed the decoy at {behind}: \
+             {alive:?}",
+        );
+        harness.assert_nothing_leaked();
     }
 
     /// A bullet fired at a rock at the ordinary tick rate hits it too — the

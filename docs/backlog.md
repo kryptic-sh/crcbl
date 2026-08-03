@@ -923,26 +923,6 @@ slice was the sample.
   `the_separation_query_radius_is_exactly_the_neighbourhood` is the guard, in
   the consumer, where it does not belong.
 
-## A projectile swept on the tick it is fired is swept backwards through its own muzzle
-
-Segment CCD reconstructs `prev` as `position - velocity * dt`. For a projectile
-created _this_ tick that point is one whole step behind the muzzle — through the
-body that fired it and out the other side — so the sweep covers ground the
-projectile never travelled.
-
-`apps/asteroids/src/game.rs` fires before it sweeps, so it has this: a bullet
-can hit a rock sitting behind the ship on the tick it leaves the gun. It is 0.4
-of a unit at 60 Hz on a 32-unit field, hidden inside the ship's own hull, and no
-asteroids test looks for it — which is why it is a note here rather than a bug
-report. It scales with `1/tick_rate`: at `--tick-hz 4` it is six units.
-
-`apps/horde` fires **after** the sweep instead, so a bolt's first sweep is its
-first real step and `start` is exactly the muzzle;
-`a_bolt_is_never_swept_over_ground_it_did_not_travel` pins it, at 4 Hz where the
-phantom segment is 7.5 units long. Asteroids was not changed to match: the fix
-is a three-line reorder in a sample this slice was not otherwise touching, and
-it wants its own before/after on asteroids' own suite.
-
 ## What horde still owes
 
 S3 is done — the core loop, the art and progression, and now audio, the longest
