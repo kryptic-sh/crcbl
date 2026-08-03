@@ -56,15 +56,13 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crcbl::client::Client;
-use crcbl::core::FrameClock;
 use crcbl::core::input::KeyCode;
 use crcbl::ecs::{Entity, GameModule, World};
 use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
 use crcbl::math::DVec3;
-use crcbl::net::{InMemoryTransport, ProtocolCompatibility};
+use crcbl::net::ProtocolCompatibility;
 use crcbl::phys::{ColliderComponent, PhysicsSystem, RigidBody, Transform};
-use crcbl::server::Server;
+use crcbl::session::Loopback;
 
 const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
     protocol_version: 3,
@@ -669,8 +667,13 @@ pub struct Game {
     pub ball_entity: Entity,
     _walls: [Entity; 3],
     action_map: ActionMap,
-    server: Server<InMemoryTransport>,
-    client: Client<InMemoryTransport>,
+    /// The server, its client and the transport between them.
+    ///
+    /// One field rather than two, because the three things the halves must
+    /// agree on — the tick rate, the compatibility and the transport pair —
+    /// are what [`Loopback::new`] takes, and a game that holds them separately
+    /// is a game that can be built with them disagreeing.
+    session: Loopback,
     shared: Arc<Mutex<GameLogic>>,
     /// Exactly one tick period per [`Game::tick`], so the server's accumulator
     /// yields exactly one tick per call. Taken from a `FrameClock` built the
@@ -831,31 +834,24 @@ impl Game {
             ticks: 0,
         }));
 
-        let (server_transport, client_transport) = InMemoryTransport::pair();
-        let mut server =
-            Server::try_new_with_compatibility(world, server_transport, tick_hz, COMPATIBILITY)
-                .map_err(|e| GameError::Server(e.to_string()))?;
-        server.set_module(Box::new(BreakoutModule {
-            shared: Arc::clone(&shared),
-        }));
+        let mut session = Loopback::new(
+            world,
+            Box::new(BreakoutModule {
+                shared: Arc::clone(&shared),
+            }),
+            tick_hz,
+            COMPATIBILITY,
+        )
+        .map_err(|e| GameError::Server(e.to_string()))?;
 
-        let mut client =
-            Client::new_with_compatibility(World::new(), client_transport, tick_hz, COMPATIBILITY);
-
-        let tick_period = FrameClock::new(tick_hz).tick_dt();
-
-        // Both clocks establish their baseline from the first `update`, which
-        // therefore runs no ticks. Spending it here, at time zero, is what lets
-        // `tick` promise that every later call runs exactly one.
-        server.update(Duration::ZERO);
-        client.update(Duration::ZERO);
+        let tick_period = session.tick_period();
 
         // Fill the render buffers before the first tick: the loop's very first
         // frame runs no ticks (the clock spends it establishing its baseline)
         // and still has to draw a board.
         {
             let mut logic = lock(&shared);
-            refresh_render_state(&mut logic, server.world_mut());
+            refresh_render_state(&mut logic, session.server_mut().world_mut());
         }
 
         let game = Self {
@@ -863,8 +859,7 @@ impl Game {
             ball_entity,
             _walls: walls,
             action_map,
-            server,
-            client,
+            session,
             shared,
             tick_period,
             sim_time: Duration::ZERO,
@@ -952,15 +947,15 @@ impl Game {
         // takes the *input bytes*, and wraps them in `ClientToServer::Input`
         // itself, so encoding a whole message here and passing it as the data
         // field nested one inside the other.
-        self.client.set_input(vec![intent.to_wire()]);
+        self.session.client_mut().set_input(vec![intent.to_wire()]);
 
         self.sim_time += self.tick_period;
-        let server_ticks = self.server.update(self.sim_time);
+        let server_ticks = self.session.server_mut().update(self.sim_time);
         debug_assert_eq!(
             server_ticks, 1,
             "one tick period in must be exactly one server tick out",
         );
-        let alpha = self.client.update(self.sim_time);
+        let alpha = self.session.client_mut().update(self.sim_time);
         self.ticks_run += 1;
 
         let (score, lives, state, ball_pos, ticks_after) = {
@@ -990,7 +985,7 @@ impl Game {
 
         // The client's interpolated copy of the ball is the only evidence the
         // replication path is alive; a divergence is a bug in it, not here.
-        let replicated = self.client.interpolate(alpha);
+        let replicated = self.session.client().interpolate(alpha);
         let ball_bits = self.ball_entity.to_bits();
         if self.state == GameState::Playing
             && let Some(transform) = replicated
@@ -1091,6 +1086,8 @@ fn log_hud(
 
 #[cfg(test)]
 mod tests {
+    use crcbl::core::FrameClock;
+
     use super::*;
     use crcbl::core::time::{ManualTime, TimeSource as _};
 
@@ -1356,7 +1353,7 @@ mod tests {
         // A world unit above the paddle: several ticks of ordinary free flight
         // and then the ordinary collision path, rather than a contact staged
         // inside the tick it is resolved in.
-        with_physics(h.game.server.world_mut(), |phys| {
+        with_physics(h.game.session.server_mut().world_mut(), |phys| {
             phys.set_transform(
                 ball,
                 Transform::from_position(DVec3::new(paddle_x, PADDLE_Y + 1.0, 0.0)),
@@ -1374,7 +1371,7 @@ mod tests {
             if let Some(key) = steer {
                 h.game.key_event(key, true);
             }
-            let velocity = with_physics(h.game.server.world_mut(), |phys| {
+            let velocity = with_physics(h.game.session.server_mut().world_mut(), |phys| {
                 phys.body(ball).expect("the ball has a body").velocity
             })
             .expect("the world has physics");
@@ -1388,7 +1385,7 @@ mod tests {
     /// The ball this harness is playing with, and how fast it is going.
     fn ball_speed(h: &mut Harness) -> f64 {
         let ball = lock(&h.game.shared).ball;
-        with_physics(h.game.server.world_mut(), |phys| {
+        with_physics(h.game.session.server_mut().world_mut(), |phys| {
             phys.body(ball)
                 .expect("the ball has a body")
                 .velocity

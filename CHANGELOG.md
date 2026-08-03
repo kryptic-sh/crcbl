@@ -35,6 +35,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the one dependency a sample continues to spell out, and is what keeps a PNG
   encoder out of a shipped binary.
 
+- **crcbl** (`crcbl::session`): `Loopback`, the single-player session. Pairs an
+  in-memory transport, builds the `Server` on one end and the `Client` on the
+  other with the same tick rate and the same `ProtocolCompatibility`, hands the
+  server its `GameModule`, and spends both clocks' first update at time zero.
+  `tick_period`, `server`/`server_mut`, `client`/`client_mut` and `both_mut`
+  reach the halves.
+
+  "Single-player is a loopback server" is the engine's architectural decision —
+  it is why `crcbl-server` and `crcbl-client` exist at all — and until now
+  nothing in `crcbl` expressed it, so all four games implemented it from
+  scratch. What stays the game's is what genuinely is: its
+  `ProtocolCompatibility`, whose `schema_hash` is what stops one game's client
+  hand-shaking with another's server, and its `GameModule`. Neither has a
+  default, because a default for either is the wrong answer quietly.
+
+  The baseline update at time zero is the subtle half. A `FrameClock`
+  establishes itself on its first update and runs no ticks for it; doing that at
+  construction is what lets a game's `tick` promise that every later call runs
+  exactly one. Left to the caller, the first frame of the game silently
+  simulates nothing.
+
 - **crcbl-audio** (`crcbl::audio::synth`): waveform generators. `sine` for a
   one-shot beep, `looped_sine` for a tone that joins to itself, `noise_burst`
   for a decaying impact, and `fade_gain` for the click-free envelope under the

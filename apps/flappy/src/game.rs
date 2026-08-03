@@ -33,15 +33,13 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crcbl::client::Client;
-use crcbl::core::FrameClock;
 use crcbl::core::input::KeyCode;
 use crcbl::ecs::{Entity, GameModule, World};
 use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
 use crcbl::math::DVec3;
-use crcbl::net::{InMemoryTransport, ProtocolCompatibility};
+use crcbl::net::ProtocolCompatibility;
 use crcbl::phys::{ColliderComponent, GravityForce, PhysicsSystem, RigidBody, Transform};
-use crcbl::server::Server;
+use crcbl::session::Loopback;
 
 /// Distinct from breakout's, because they are distinct protocols: a client
 /// built for one must not hand-shake with a server running the other.
@@ -722,8 +720,12 @@ pub struct RenderState {
 pub struct Game {
     pub bird_entity: Entity,
     action_map: ActionMap,
-    server: Server<InMemoryTransport>,
-    client: Client<InMemoryTransport>,
+    /// The server, its client and the transport between them.
+    ///
+    /// One field rather than two: the tick rate, the compatibility and the
+    /// transport pair are what both halves must agree on, and
+    /// [`Loopback::new`] is where they are made to.
+    session: Loopback,
     shared: Arc<Mutex<GameLogic>>,
     /// Exactly one tick period per [`Game::tick`], so the server's accumulator
     /// yields exactly one tick per call.
@@ -859,35 +861,27 @@ impl Game {
             advance_course(&mut logic, &mut world);
         }
 
-        let (server_transport, client_transport) = InMemoryTransport::pair();
-        let mut server =
-            Server::try_new_with_compatibility(world, server_transport, tick_hz, COMPATIBILITY)
-                .map_err(|e| GameError::Server(e.to_string()))?;
-        server.set_module(Box::new(FlappyModule {
-            shared: Arc::clone(&shared),
-        }));
+        let mut session = Loopback::new(
+            world,
+            Box::new(FlappyModule {
+                shared: Arc::clone(&shared),
+            }),
+            tick_hz,
+            COMPATIBILITY,
+        )
+        .map_err(|e| GameError::Server(e.to_string()))?;
 
-        let mut client =
-            Client::new_with_compatibility(World::new(), client_transport, tick_hz, COMPATIBILITY);
-
-        let tick_period = FrameClock::new(tick_hz).tick_dt();
-
-        // Both clocks establish their baseline from the first `update`, which
-        // therefore runs no ticks. Spending it here, at time zero, is what lets
-        // `tick` promise that every later call runs exactly one.
-        server.update(Duration::ZERO);
-        client.update(Duration::ZERO);
+        let tick_period = session.tick_period();
 
         {
             let mut logic = lock(&shared);
-            refresh_render_state(&mut logic, server.world_mut());
+            refresh_render_state(&mut logic, session.server_mut().world_mut());
         }
 
         let game = Self {
             bird_entity,
             action_map,
-            server,
-            client,
+            session,
             shared,
             tick_period,
             sim_time: Duration::ZERO,
@@ -956,15 +950,15 @@ impl Game {
             logic.ticks
         };
 
-        self.client.set_input(vec![intent.to_wire()]);
+        self.session.client_mut().set_input(vec![intent.to_wire()]);
 
         self.sim_time += self.tick_period;
-        let server_ticks = self.server.update(self.sim_time);
+        let server_ticks = self.session.server_mut().update(self.sim_time);
         debug_assert_eq!(
             server_ticks, 1,
             "one tick period in must be exactly one server tick out",
         );
-        let _alpha = self.client.update(self.sim_time);
+        let _alpha = self.session.client_mut().update(self.sim_time);
         self.ticks_run += 1;
 
         let (state, score, death, bird, velocity, ticks_after) = {
@@ -1066,7 +1060,7 @@ impl Game {
     /// the treadmill has to avoid.
     #[must_use]
     pub fn entity_count(&mut self) -> usize {
-        self.server.world_mut().entity_count()
+        self.session.server_mut().world_mut().entity_count()
     }
 }
 
@@ -1074,6 +1068,8 @@ impl Game {
 
 #[cfg(test)]
 mod tests {
+    use crcbl::core::FrameClock;
+
     use super::*;
     use crcbl::core::time::{ManualTime, TimeSource as _};
 

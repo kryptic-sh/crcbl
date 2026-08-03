@@ -83,15 +83,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crcbl::client::Client;
-use crcbl::core::FrameClock;
 use crcbl::core::input::KeyCode;
 use crcbl::ecs::{Entity, GameModule, World};
 use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
 use crcbl::math::DVec3;
-use crcbl::net::{InMemoryTransport, ProtocolCompatibility};
+use crcbl::net::ProtocolCompatibility;
 use crcbl::phys::{ColliderComponent, PhysicsSystem, RigidBody, Segment, Transform};
-use crcbl::server::Server;
+use crcbl::session::Loopback;
 
 /// Distinct from breakout's, flappy's and asteroids', because they are distinct
 /// protocols: a client built for one must not hand-shake with a server running
@@ -2012,8 +2010,12 @@ impl Default for Setup {
 pub struct Game {
     pub player_entity: Entity,
     action_map: ActionMap,
-    server: Server<InMemoryTransport>,
-    client: Client<InMemoryTransport>,
+    /// The server, its client and the transport between them.
+    ///
+    /// One field rather than two: the tick rate, the compatibility and the
+    /// transport pair are what both halves must agree on, and
+    /// [`Loopback::new`] is where they are made to.
+    session: Loopback,
     shared: Arc<Mutex<GameLogic>>,
     /// Exactly one tick period per [`Game::tick`], so the server's accumulator
     /// yields exactly one tick per call.
@@ -2176,43 +2178,27 @@ impl Game {
             place_player(&mut logic, &mut world, DVec3::ZERO);
         }
 
-        let (server_transport, client_transport) = InMemoryTransport::pair();
-        let mut server = Server::try_new_with_compatibility(
+        let mut session = Loopback::new(
             world,
-            server_transport,
+            Box::new(HordeModule {
+                shared: Arc::clone(&shared),
+            }),
             setup.tick_hz,
             COMPATIBILITY,
         )
         .map_err(|e| GameError::Server(e.to_string()))?;
-        server.set_module(Box::new(HordeModule {
-            shared: Arc::clone(&shared),
-        }));
 
-        let mut client = Client::new_with_compatibility(
-            World::new(),
-            client_transport,
-            setup.tick_hz,
-            COMPATIBILITY,
-        );
-
-        let tick_period = FrameClock::new(setup.tick_hz).tick_dt();
-
-        // Both clocks establish their baseline from the first `update`, which
-        // therefore runs no ticks. Spending it here, at time zero, is what lets
-        // `tick` promise that every later call runs exactly one.
-        server.update(Duration::ZERO);
-        client.update(Duration::ZERO);
+        let tick_period = session.tick_period();
 
         {
             let mut logic = lock(&shared);
-            refresh_views(&mut logic, server.world_mut());
+            refresh_views(&mut logic, session.server_mut().world_mut());
         }
 
         let game = Self {
             player_entity,
             action_map,
-            server,
-            client,
+            session,
             shared,
             tick_period,
             sim_time: Duration::ZERO,
@@ -2299,15 +2285,15 @@ impl Game {
             logic.ticks
         };
 
-        self.client.set_input(vec![intent.to_wire()]);
+        self.session.client_mut().set_input(vec![intent.to_wire()]);
 
         self.sim_time += self.tick_period;
-        let server_ticks = self.server.update(self.sim_time);
+        let server_ticks = self.session.server_mut().update(self.sim_time);
         debug_assert_eq!(
             server_ticks, 1,
             "one tick period in must be exactly one server tick out",
         );
-        let _alpha = self.client.update(self.sim_time);
+        let _alpha = self.session.client_mut().update(self.sim_time);
         self.ticks_run += 1;
 
         // Drained under the same lock the tick filled it under, and *before* the
@@ -2501,7 +2487,7 @@ impl Game {
     /// How many entities the simulation is holding.
     #[must_use]
     pub fn entity_count(&mut self) -> usize {
-        self.server.world_mut().entity_count()
+        self.session.server_mut().world_mut().entity_count()
     }
 
     /// How many entities are queued for destruction and not yet swept.
@@ -2514,7 +2500,7 @@ impl Game {
     /// against the module hook's placement.
     #[must_use]
     pub fn pending_despawns(&mut self) -> usize {
-        self.server.world_mut().dead_queue_len()
+        self.session.server_mut().world_mut().dead_queue_len()
     }
 
     /// How many colliders the physics world is holding.
@@ -2524,7 +2510,10 @@ impl Game {
     /// the entity count would notice.
     #[must_use]
     pub fn collider_count(&mut self) -> usize {
-        with_physics(self.server.world_mut(), |phys| phys.collider_count()).unwrap_or(0)
+        with_physics(self.session.server_mut().world_mut(), |phys| {
+            phys.collider_count()
+        })
+        .unwrap_or(0)
     }
 
     /// Fills the arena with `count` enemies before the first tick.
@@ -2554,7 +2543,7 @@ impl Game {
     /// staged.
     pub fn stage_field(&mut self, count: usize) -> usize {
         let mut logic = lock(&self.shared);
-        let world = self.server.world_mut();
+        let world = self.session.server_mut().world_mut();
         let room = logic.max_enemies.saturating_sub(logic.enemies.len());
         let wanted = count.min(room);
         if wanted == 0 {
@@ -2606,7 +2595,7 @@ impl Game {
     #[cfg(test)]
     pub fn stage_player(&mut self, position: DVec3) {
         let mut logic = lock(&self.shared);
-        let world = self.server.world_mut();
+        let world = self.session.server_mut().world_mut();
         place_player(&mut logic, world, position);
     }
 
@@ -2614,7 +2603,7 @@ impl Game {
     #[cfg(test)]
     pub fn clear_enemies(&mut self) {
         let mut logic = lock(&self.shared);
-        let world = self.server.world_mut();
+        let world = self.session.server_mut().world_mut();
         for enemy in std::mem::take(&mut logic.enemies) {
             with_physics(world, |phys| phys.remove_entity(enemy.entity));
             world.despawn(enemy.entity);
@@ -2626,7 +2615,7 @@ impl Game {
     #[cfg(test)]
     pub fn stage_enemy(&mut self, kind: EnemyKind, position: DVec3) -> Entity {
         let mut logic = lock(&self.shared);
-        let world = self.server.world_mut();
+        let world = self.session.server_mut().world_mut();
         let jitter = spawn_jitter(logic.run(), logic.spawn_counter);
         logic.spawn_counter += 1;
         spawn_enemy(&mut logic, world, kind, position, jitter)
@@ -2668,7 +2657,7 @@ impl Game {
     #[cfg(test)]
     pub fn stage_pickup(&mut self, position: DVec3, xp: u64) -> Entity {
         let mut logic = lock(&self.shared);
-        let world = self.server.world_mut();
+        let world = self.session.server_mut().world_mut();
         drop_pickup(&mut logic, world, position, xp);
         logic.pickups.last().expect("just dropped one").entity
     }
@@ -2689,7 +2678,7 @@ impl Game {
     #[must_use]
     pub fn bolt_positions(&mut self) -> Vec<DVec3> {
         let bolts: Vec<Entity> = lock(&self.shared).bolts.iter().map(|b| b.entity).collect();
-        with_physics(self.server.world_mut(), |phys| {
+        with_physics(self.session.server_mut().world_mut(), |phys| {
             bolts
                 .into_iter()
                 .filter_map(|entity| phys.transform(entity).map(|t| t.position))
@@ -2719,7 +2708,7 @@ impl Game {
         let Some((position, kind)) = found else {
             return Vec::new();
         };
-        let mut found = with_physics(self.server.world_mut(), |phys| {
+        let mut found = with_physics(self.session.server_mut().world_mut(), |phys| {
             phys.overlap_sphere(position, separation_query_radius(kind))
                 .into_iter()
                 .map(|(entity, _hit)| entity)
@@ -2761,6 +2750,8 @@ impl Game {
 
 #[cfg(test)]
 mod tests {
+    use crcbl::core::FrameClock;
+
     use super::*;
     use crcbl::core::time::{ManualTime, TimeSource as _};
 
