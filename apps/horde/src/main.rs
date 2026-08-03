@@ -23,7 +23,7 @@ fn main() -> ExitCode {
                 println!(
                     "horde: {} frames, {} ticks on the {} shell at {}x{} \
                      (survived {:.1}s, {} kills, level {}, {} enemies left, \
-                     {:?}, {:?})",
+                     scene {:?}, {:?}, {:?})",
                     summary.frames,
                     summary.ticks,
                     summary.backend,
@@ -33,6 +33,7 @@ fn main() -> ExitCode {
                     summary.kills,
                     summary.level,
                     summary.enemies,
+                    summary.scene,
                     summary.state,
                     summary.exit,
                 );

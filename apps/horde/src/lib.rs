@@ -79,4 +79,4 @@ pub use game::{
     spawn_jitter, spawn_kind, spawn_offset, upgrade_offer, xp_for_next_level,
 };
 pub use gpu::{camera_centre, view_half_width};
-pub use menu::{MenuAction, MenuKind, Menus};
+pub use menu::{HordeAction, MenuKind, Menus, RESTART_ID, action_from_id, choose_id};

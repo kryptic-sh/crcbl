@@ -707,26 +707,23 @@ The modular panel is built and all three samples switch it on with F3 (or
   and `Loop::gpu_mut` — one test paused by assignment, and `Gpu::scene_sprites`
   takes `&mut self` because it consumes the frame's render state.
 
-  horde should be next and should be the same shape, except that its menu has
-  two game actions (`Restart` and `Choose(n)`), so it is the first to need more
-  than one `WidgetId` above `FIRST_GAME_ID`. `apps/sandbox` is the one to watch:
-  it has no `MenuKind`, its tick body touches its GPU (`gpu.advance(dt)`, which
-  is why `HostedGame::tick` takes `&mut Self::Gpu`), and it reads `alpha` after
-  the tick loop (which is why `FrameInfo` carries it). None of that is verified
+  **Horde followed and stretched the seam twice.** `HostedGame::menu_kind` now
+  takes the loop's `MenuSet`, because horde's level-up panel is three upgrades
+  the run's seed picked and has to be rebuilt when the offer changes;
+  `HostedGame::debug_sections` exists because horde is the only sample with a
+  debug section of its own. It is also the first game with two menu actions.
+  `app.rs` lost 205 lines and `web.rs` 32, its 124 tests pass and its browser
+  gate ran 27/27. The CPU frame report it wrote by hand is `Loop::finish`'s now,
+  for every hosted game.
+
+  `apps/sandbox` is the last one, and the one to watch: it has no `MenuKind`,
+  its tick body touches its GPU (`gpu.advance(dt)`, which is why
+  `HostedGame::tick` takes `&mut Self::Gpu`), and it reads `alpha` after the
+  tick loop (which is why `FrameInfo` carries it). None of that is verified
   against sandbox — it was read out of `apps/sandbox/src/app.rs` while designing
   the trait, not compiled.
 
-- **horde never reports a refused fullscreen.** Found while extracting
-  `ModeRequest`: breakout, flappy and sandbox all called `check_mode_request`
-  once a frame, and asteroids and horde had no such call and no equivalent. A
-  player on a tiling window manager pressed F11 and got no window change and no
-  log line saying why.
-
-  **Fixed for asteroids** by hosting it in `crcbl::engine::Loop`, which checks
-  once a frame for every game it hosts — so this closes for horde too the moment
-  horde converts, and no per-game line is needed.
-
-  **The error half has landed** — `crcbl::engine::LoopError<G>` — and it cost
+- **The error half has landed** — `crcbl::engine::LoopError<G>` — and it cost
   far less than this entry predicted, so the prediction is worth correcting
   rather than deleting. It said a shared error "needs generics or boxing, and
   touches every signature in five binaries", because the `From` impls name each

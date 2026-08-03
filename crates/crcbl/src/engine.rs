@@ -2579,9 +2579,19 @@ pub trait HostedGame: Sized {
     /// an error here would be reporting one for a button press.
     fn apply(&mut self, action: Self::MenuAction);
 
-    /// Which menu this frame shows. Called after [`Self::draw`], so it may read
-    /// whatever that refreshed.
-    fn menu_kind(&self, paused: bool) -> Self::MenuKind;
+    /// Which menu this frame shows — and a chance to rebuild one first.
+    ///
+    /// Called after [`Self::draw`], so it may read whatever that refreshed.
+    ///
+    /// `menus` is the set [`Self::menus`] built. A game whose panel depends on
+    /// live state — horde's level-up offer names three upgrades the simulation
+    /// picked this level — replaces that entry here, before the kind it returns
+    /// is shown. A game whose menus are fixed ignores the argument.
+    fn menu_kind(
+        &mut self,
+        menus: &mut crcbl_ui::menu::MenuSet<Self::MenuKind>,
+        paused: bool,
+    ) -> Self::MenuKind;
 
     /// Hands this frame's state to the GPU and appends this game's UI geometry.
     ///
@@ -2595,6 +2605,23 @@ pub trait HostedGame: Sized {
         draw_list: &mut crcbl_ui::draw_list::DrawList,
         frame: FrameInfo,
     );
+
+    /// Adds this game's own sections to the debug panel.
+    ///
+    /// Called once a frame between the loop's own section — frame timing, and
+    /// the GPU's pass timings where the device has timestamp queries — and the
+    /// panel being drawn, so a game's numbers appear below the engine's.
+    ///
+    /// **The empty default is the honest answer for most games**, and it is not
+    /// the "opt-in hook that reports success by doing nothing" shape: nothing is
+    /// being verified here, and a game that adds no section renders a panel with
+    /// no section of its own, which is exactly what four of the five samples
+    /// want. `apps/horde` is the one that does not — it reports how much of its
+    /// field survived the cull, which is the number its whole design argument
+    /// rests on.
+    fn debug_sections(&self, panel: &mut crcbl_ui::DebugPanel) {
+        let _ = panel;
+    }
 
     /// Adds this game's own fields to the run's shared ones.
     fn summary(&self, run: RunSummary) -> Self::Summary;
@@ -2858,7 +2885,8 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     /// [`GameGpu::set_menu`]; the title and the labels are text and go to the
     /// UI pass through the draw list.
     fn draw_menu(&mut self) {
-        self.menus.show(self.game.menu_kind(self.paused));
+        let kind = self.game.menu_kind(&mut self.menus, self.paused);
+        self.menus.show(kind);
         let layout = self
             .menus
             .current()
@@ -2882,6 +2910,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         if let Some(timings) = self.gpu.timings() {
             self.debug.panel.add(timings);
         }
+        self.game.debug_sections(&mut self.debug.panel);
         let (width, height) = self.gpu.extent();
         #[allow(clippy::cast_precision_loss)]
         self.debug.render(
@@ -2903,6 +2932,31 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             && !timings.is_empty()
         {
             log::info!("{}", timings.report().trim_end());
+        }
+        // **The CPU half of the same report.** `FrameTimings` above is GPU
+        // timestamps; this is the monotonic clock the loop was actually driven
+        // from, which on a headless run is the fixed step and therefore says
+        // nothing about the machine. Printed either way, **with the clock
+        // named**, because a number whose conditions are not stated is not a
+        // measurement — `apps/horde`'s `--wall-clock` exists to make this line
+        // mean something and every figure in `docs/plan/sample/03-horde.md` was
+        // taken through it.
+        let frame = &self.debug.frame;
+        if let (Some(best), Some(worst)) = (frame.best(), frame.worst()) {
+            log::info!(
+                "frame cpu ({} clock, last {} frames): mean {:.3} ms ({:.1} fps), \
+                 best {:.3} ms, worst {:.3} ms",
+                if matches!(self.clock_source, Clock::Real(_)) {
+                    "real"
+                } else {
+                    "fixed-step"
+                },
+                frame.len(),
+                frame.mean().as_secs_f64() * 1e3,
+                frame.fps(),
+                best.as_secs_f64() * 1e3,
+                worst.as_secs_f64() * 1e3,
+            );
         }
         let summary = self.game.summary(RunSummary {
             backend: self.shell.backend(),
@@ -4713,7 +4767,11 @@ mod tests {
             }
         }
 
-        fn menu_kind(&self, paused: bool) -> FakeMenu {
+        fn menu_kind(
+            &mut self,
+            _menus: &mut crcbl_ui::menu::MenuSet<FakeMenu>,
+            paused: bool,
+        ) -> FakeMenu {
             if paused {
                 FakeMenu::Paused
             } else if self.served {

@@ -243,7 +243,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   The seam grew `Loop::{set_paused, gpu_mut}` for it: a test paused the loop by
   assignment, and its sprite read-back takes `&mut self`.
 
-  horde and sandbox are unconverted and still drive their own `frame()`.
+  sandbox is unconverted and still drives its own `frame()`.
+
+- **horde**: hosted by `crcbl::engine::Loop`, and the sample that stretched the
+  seam. Its level-up panel is three upgrades the run's seed picked, so
+  `HostedGame::menu_kind` now takes the loop's own `MenuSet` and a game may
+  rebuild a panel before the kind it returns is shown. Its debug panel carries a
+  section no other sample has, so `HostedGame::debug_sections` exists — empty by
+  default, because "this game adds no section" is the honest answer for the
+  other four. And it is the first game with **two** menu actions, `Restart` on
+  `RESTART_ID` and `Choose(n)` on a reserved block above it.
+
+  It also gains the refused-fullscreen report, for the same reason asteroids
+  did. `app.rs` lost 205 lines and `web.rs` 32; its 124 tests pass and its
+  browser gate ran 27/27.
+
+  **The CPU frame report moved into the engine.** `Loop::finish` logs the clock
+  it was driven from, the frame count, and mean/fps/best/worst — `apps/horde`
+  wrote that itself and `--wall-clock` exists to make it mean something; every
+  hosted game gets it now. The scene stats it used to carry are on horde's own
+  `Summary` instead, so `main.rs` prints them natively and `log_summary` does in
+  the browser.
 
 - **crcbl** (`crcbl::engine`, `crcbl::web`): the sample loops' shared machinery
   moves into the engine, in four further slices.

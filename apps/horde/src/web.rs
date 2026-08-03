@@ -126,7 +126,7 @@ use std::rc::Rc;
 use crcbl::engine::Clock;
 use crcbl::log;
 use crcbl::store::web::{FetchSource, OpfsStorage};
-use crcbl::web::{App, WebLoop, WebPending};
+use crcbl::web::{App, WebPending};
 
 use crate::app::{Loop, PendingLoop};
 use crate::args::Options;
@@ -143,43 +143,11 @@ pub use crcbl::web::{
 // This game's half of the lifecycle
 // ---------------------------------------------------------------------------
 
-/// Five forwards and one log line.
-///
-/// The log line is the whole of what makes this game's browser lifecycle
-/// different from the other three's: which numbers a finished run is worth
-/// reporting. Everything above it — the stage machine, the status codes, the
-/// clock step, the failure handling — is [`crcbl::web::App`]'s.
-impl WebLoop for Loop<dyn crcbl::shell::Shell> {
-    const NAME: &'static str = "horde";
-
-    fn extent(&self) -> (u32, u32) {
-        Self::extent(self)
-    }
-
-    fn is_paused(&self) -> bool {
-        Self::is_paused(self)
-    }
-
-    fn set_frame_step(&mut self, dt: core::time::Duration) {
-        Self::set_frame_step(self, dt);
-    }
-
-    fn log_summary(summary: &Self::Summary) {
-        log::info!(
-            "horde: {} frames, {} ticks, survived {:.1}s with {} kills at level {} \
-             ({} enemies left, {:?}, {:?})",
-            summary.frames,
-            summary.ticks,
-            summary.elapsed,
-            summary.kills,
-            summary.level,
-            summary.enemies,
-            summary.state,
-            summary.exit,
-        );
-    }
-}
-
+/// **There is no `WebLoop` impl here.** `crcbl::web` blanket-implements it for
+/// every `crcbl::engine::Loop`, and the two halves that were ever this game's —
+/// its name and the log line a finished run is worth — are `HostedGame::NAME`
+/// and `HostedGame::log_summary` in `app.rs`. What is left below is start-up,
+/// which stays here because the options it opens with are horde's.
 impl WebPending for PendingLoop<dyn crcbl::shell::Shell> {
     type Loop = Loop<dyn crcbl::shell::Shell>;
 

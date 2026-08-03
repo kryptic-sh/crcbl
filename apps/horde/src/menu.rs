@@ -30,7 +30,7 @@
 //! is a blank arena with a prompt on it. The user played it and asked for the
 //! screen; `game::GameState`'s docs carry the whole of the reversal. What it
 //! costs is the odd shape of the button — `PLAY` and `TRY AGAIN` are the same
-//! [`MenuAction::Restart`], because the simulation has one edge for "begin a
+//! [`HordeAction::Restart`], because the simulation has one edge for "begin a
 //! run" and the death screen's button lands on the start screen rather than in
 //! play.
 //!
@@ -64,65 +64,68 @@ use crcbl::ui::menu::{Menu, MenuItem, MenuSet};
 
 use crate::game::{GameState, RenderState, UPGRADE_CHOICES, Upgrade};
 
-/// What firing a menu button asks the loop to do.
+/// What only horde's menus do.
 ///
-/// An action rather than a key: a button that "presses Escape" would be a menu
-/// re-entering its own input path, and the loop would have to tell a synthesised
-/// key from a real one. The loop matches on this and does the thing directly —
-/// except [`MenuAction::Restart`] and the three [`MenuAction::Choose`]s, which
-/// really are keys, because restarting a run and taking an upgrade are the
-/// *simulation's* business and the simulation is driven by its action map.
+/// Resume, fullscreen and the debug panel are the *loop's* — they are the menu
+/// equivalents of its three reserved keys — and live in
+/// [`crcbl::engine::MenuAction`]. These two are what is left, and they are
+/// actions rather than keys because a button that "presses Space" would be a
+/// menu re-entering its own input path.
+///
+/// Both are nonetheless delivered to the simulation *as* keys, in
+/// `crate::app::Horde`'s `HostedGame::apply`: starting a run and taking an
+/// upgrade are the simulation's business and the simulation is driven by its
+/// action map.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MenuAction {
-    /// Un-pause.
-    Resume,
+pub enum HordeAction {
     /// Begin a run — the one edge `run_tick` reads for both `PLAY` on the start
     /// screen and `TRY AGAIN` on the death screen.
     Restart,
     /// Take the `n`-th upgrade of the current offer, zero-based.
     Choose(usize),
-    /// Toggle borderless fullscreen.
-    Fullscreen,
-    /// Toggle the debug panel.
-    DebugOverlay,
 }
 
-impl MenuAction {
-    /// The [`WidgetId`] this action is carried by.
-    ///
-    /// Written out rather than derived, because a `WidgetId` that changed when a
-    /// variant was inserted would silently re-point every button. The choices
-    /// take a block of three from 10, so a fourth non-choice action can be added
-    /// without moving them.
-    const fn id(self) -> WidgetId {
-        match self {
-            Self::Resume => 1,
-            Self::Restart => 2,
-            Self::Fullscreen => 3,
-            Self::DebugOverlay => 4,
-            Self::Choose(index) => 10 + index as WidgetId,
-        }
-    }
+/// The [`WidgetId`] carrying [`HordeAction::Restart`].
+///
+/// Numbered from [`crcbl::engine::FIRST_GAME_ID`], not from one: everything
+/// below that is the loop's, and a button that claimed
+/// [`crcbl::engine::RESUME_ID`] would un-pause instead of starting a run.
+pub const RESTART_ID: WidgetId = crcbl::engine::FIRST_GAME_ID;
 
-    /// The action an id names, or `None` for an id from another menu system.
-    #[must_use]
-    pub const fn from_id(id: WidgetId) -> Option<Self> {
-        match id {
-            1 => Some(Self::Resume),
-            2 => Some(Self::Restart),
-            3 => Some(Self::Fullscreen),
-            4 => Some(Self::DebugOverlay),
-            10 => Some(Self::Choose(0)),
-            11 => Some(Self::Choose(1)),
-            12 => Some(Self::Choose(2)),
-            _ => None,
-        }
-    }
+/// The first of the three ids [`HordeAction::Choose`] uses.
+///
+/// A block of its own above [`RESTART_ID`], so a second non-choice action can
+/// be added without moving the choices — which is the same reason the old
+/// hand-numbered set started them at 10.
+pub const FIRST_CHOOSE_ID: WidgetId = crcbl::engine::FIRST_GAME_ID + 8;
+
+/// The [`WidgetId`] carrying the `index`-th choice.
+///
+/// # Panics
+///
+/// If `index` is past [`UPGRADE_CHOICES`], because that is a menu built with
+/// more slots than the id block reserves and the symptom would be two buttons
+/// sharing an id.
+#[must_use]
+pub fn choose_id(index: usize) -> WidgetId {
+    assert!(index < UPGRADE_CHOICES, "no id for upgrade slot {index}");
+    FIRST_CHOOSE_ID + index as WidgetId
 }
 
-/// An item for `action`, labelled and with its key printed beside it.
-fn item(action: MenuAction, label: &str, hint: &str) -> MenuItem {
-    MenuItem::new(action.id(), label, hint)
+/// The half of the id mapping that is horde's, for
+/// [`crcbl::engine::MenuAction::from_id`]. Never asked about a reserved id.
+#[must_use]
+pub fn action_from_id(id: WidgetId) -> Option<HordeAction> {
+    if id == RESTART_ID {
+        return Some(HordeAction::Restart);
+    }
+    let index = id.checked_sub(FIRST_CHOOSE_ID)? as usize;
+    (index < UPGRADE_CHOICES).then_some(HordeAction::Choose(index))
+}
+
+/// An item on `id`, labelled and with its key printed beside it.
+fn item(id: WidgetId, label: &str, hint: &str) -> MenuItem {
+    MenuItem::new(id, label, hint)
 }
 
 /// Which menu a frame shows.
@@ -182,7 +185,7 @@ pub type Menus = MenuSet<MenuKind>;
 /// a total function and a menu is never missing from a frame that maps to it.
 #[must_use]
 pub fn menus() -> Menus {
-    use MenuAction::{DebugOverlay, Fullscreen, Restart, Resume};
+    use crcbl::engine::{DEBUG_OVERLAY_ID, FULLSCREEN_ID, RESUME_ID};
     MenuSet::new(
         MenuKind::None,
         vec![
@@ -195,9 +198,9 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "HORDE",
                     vec![
-                        item(Restart, "PLAY", "SPACE"),
-                        item(Fullscreen, "FULLSCREEN", "F11"),
-                        item(DebugOverlay, "DEBUG PANEL", "F3"),
+                        item(RESTART_ID, "PLAY", "SPACE"),
+                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        item(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
                     ],
                 ),
             ),
@@ -206,9 +209,9 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "PAUSED",
                     vec![
-                        item(Resume, "RESUME", "ESC"),
-                        item(Fullscreen, "FULLSCREEN", "F11"),
-                        item(DebugOverlay, "DEBUG PANEL", "F3"),
+                        item(RESUME_ID, "RESUME", "ESC"),
+                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+                        item(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
                     ],
                 ),
             ),
@@ -221,8 +224,8 @@ pub fn menus() -> Menus {
                 Menu::new(
                     "YOU DIED",
                     vec![
-                        item(Restart, "TRY AGAIN", "R"),
-                        item(Fullscreen, "FULLSCREEN", "F11"),
+                        item(RESTART_ID, "TRY AGAIN", "R"),
+                        item(FULLSCREEN_ID, "FULLSCREEN", "F11"),
                     ],
                 ),
             ),
@@ -239,7 +242,7 @@ fn offer_menu(level: u32, offer: &[Upgrade; UPGRADE_CHOICES]) -> Menu {
             .enumerate()
             .map(|(index, upgrade)| {
                 item(
-                    MenuAction::Choose(index),
+                    choose_id(index),
                     upgrade.label(),
                     // One-based, because it is the digit key the player
                     // presses and `ACTION_CHOOSE` binds.
@@ -294,6 +297,13 @@ impl LevelUpOffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Horde's whole menu vocabulary: the loop's three, plus [`HordeAction`].
+    ///
+    /// Only the tests name it. `app.rs` never sees a whole `MenuAction` — the
+    /// loop keeps its own three and hands `Horde::apply` the [`HordeAction`] it
+    /// could not answer itself.
+    type MenuAction = crcbl::engine::MenuAction<HordeAction>;
     use crcbl::math::Vec2;
     use crcbl::ui::text::FontAtlas;
     use crcbl::ui::{ButtonState, PointerInput};
@@ -304,14 +314,16 @@ mod tests {
     /// has no idea what an id means here — so this is the one translation, in
     /// one place, the way `app.rs` does it.
     fn activate(menus: &mut Menus) -> Option<MenuAction> {
-        menus.activate().and_then(MenuAction::from_id)
+        menus
+            .activate()
+            .and_then(|id| MenuAction::from_id(id, action_from_id))
     }
 
     /// The action a frame of pointer input fired, if any.
     fn point(menus: &mut Menus, extent: (u32, u32), pointer: PointerInput) -> Option<MenuAction> {
         menus
             .point(extent, &FontAtlas::built_in(), pointer)
-            .and_then(MenuAction::from_id)
+            .and_then(|id| MenuAction::from_id(id, action_from_id))
     }
 
     fn render(state: Option<GameState>) -> RenderState {
@@ -415,7 +427,7 @@ mod tests {
                 .items()
                 .iter()
                 .map(|item| {
-                    MenuAction::from_id(item.id)
+                    MenuAction::from_id(item.id, action_from_id)
                         .unwrap_or_else(|| panic!("{kind:?}: {} names no action", item.label))
                 })
                 .collect();
@@ -447,8 +459,8 @@ mod tests {
             assert_eq!(menu.items()[index].label, upgrade.label());
             assert_eq!(menu.items()[index].hint, (index + 1).to_string());
             assert_eq!(
-                MenuAction::from_id(menu.items()[index].id),
-                Some(MenuAction::Choose(index)),
+                MenuAction::from_id(menu.items()[index].id, action_from_id),
+                Some(MenuAction::Game(HordeAction::Choose(index))),
             );
         }
 
@@ -477,7 +489,10 @@ mod tests {
         offer.refresh(&mut menus, 3, Some(OFFER));
         menus.show(MenuKind::LevelUp);
         menus.select_next();
-        assert_eq!(activate(&mut menus), Some(MenuAction::Choose(1)));
+        assert_eq!(
+            activate(&mut menus),
+            Some(MenuAction::Game(HordeAction::Choose(1)))
+        );
 
         // The frames after it: the same offer, then the frames where the screen
         // is not up at all and `RenderState::offer` is `None`.
@@ -487,7 +502,7 @@ mod tests {
         offer.refresh(&mut menus, 3, None);
         assert_eq!(
             activate(&mut menus),
-            Some(MenuAction::Choose(1)),
+            Some(MenuAction::Game(HordeAction::Choose(1))),
             "a redundant refresh threw the selection away",
         );
         assert_eq!(
@@ -516,10 +531,16 @@ mod tests {
         assert_eq!(activate(&mut menus), Some(MenuAction::DebugOverlay));
 
         menus.show(MenuKind::LevelUp);
-        assert_eq!(activate(&mut menus), Some(MenuAction::Choose(0)));
+        assert_eq!(
+            activate(&mut menus),
+            Some(MenuAction::Game(HordeAction::Choose(0)))
+        );
         menus.select_next();
         menus.select_next();
-        assert_eq!(activate(&mut menus), Some(MenuAction::Choose(2)));
+        assert_eq!(
+            activate(&mut menus),
+            Some(MenuAction::Game(HordeAction::Choose(2)))
+        );
 
         menus.show(MenuKind::None);
         assert_eq!(activate(&mut menus), None, "there is no menu to activate");
@@ -576,7 +597,7 @@ mod tests {
         };
         assert_eq!(
             point(&mut menus, extent, up),
-            Some(MenuAction::Choose(1)),
+            Some(MenuAction::Game(HordeAction::Choose(1))),
             "the pointer took the wrong upgrade",
         );
 

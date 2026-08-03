@@ -285,7 +285,11 @@ impl HostedGame for Asteroids {
         }
     }
 
-    fn menu_kind(&self, paused: bool) -> MenuKind {
+    fn menu_kind(
+        &mut self,
+        _menus: &mut crcbl::ui::menu::MenuSet<MenuKind>,
+        paused: bool,
+    ) -> MenuKind {
         MenuKind::of(paused, &self.render_state)
     }
 
