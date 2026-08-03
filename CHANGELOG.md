@@ -14,7 +14,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **crcbl-shell**: `DisplayMode::satisfied_by`, the request-versus-answer
+  comparison `WindowState::mode_request_honoured` now uses.
+
 ### Fixed
+
+- **crcbl-shell**: `WindowState::mode_request_honoured` compared the requested
+  and effective modes with `==`, which is wrong whenever the backend can name
+  the monitor. `Borderless { monitor: None }` means "wherever the window already
+  is" as a _request_, so an answer of `Borderless { monitor: Some(..) }`
+  satisfies it — but the two are not equal, so every granted fullscreen on X11
+  read as refused and a UI toggle over a fullscreen window would have shown
+  "off". The comparison is now `DisplayMode::satisfied_by`, which keeps the
+  asymmetry: a request naming a monitor is still not answered by one that cannot
+  say which.
 
 - **crcbl-shell** (X11): the backend never wrote `WM_HINTS`, so it never told a
   window manager that its window wants the keyboard. ICCCM 4.1.7 lets a window
@@ -33,9 +48,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   arrives before `MapNotify`. A game that opened a window, waited for its size
   and asked for fullscreen landed in that gap every time: it wrote a property
   the window manager then overwrote with its own view. It now branches on
-  `XWindow::map_requested`. **Verified only as far as "the client message is now
-  the one sent"** — see `docs/backlog.md`, "X11 under a window manager", for
-  what is still failing under a real one.
+  `XWindow::map_requested`, and the whole X11 suite runs under `openbox` in CI
+  as well as under bare Xvfb.
 
 - **crcbl** (`engine`): a run that ended because the player closed the window
   reported `DisplayMode::Windowed` whatever mode it had been in. Accepting a

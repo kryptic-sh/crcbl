@@ -97,6 +97,36 @@ impl DisplayMode {
     pub const fn is_borderless(self) -> bool {
         matches!(self, Self::Borderless { .. })
     }
+
+    /// Whether `effective` is an acceptable answer to `self` as a request.
+    ///
+    /// Not equality, because [`Borderless::monitor`](Self::Borderless) is not
+    /// symmetric: `None` in a *request* means "wherever the window already is",
+    /// so any monitor answers it. `None` in an *answer* means the backend
+    /// cannot say which monitor — which answers a request that did not care,
+    /// and does not answer one that named a monitor, because nothing has
+    /// confirmed the window is on it.
+    ///
+    /// Comparing the two with `==` made every granted fullscreen on a backend
+    /// that *can* name the monitor read as refused: X11 fills in
+    /// `effective_monitor` from the window's origin, so a request for
+    /// `Borderless { monitor: None }` was answered `Borderless { monitor:
+    /// Some(..) }` and a UI toggle would have shown "off" over a fullscreen
+    /// window.
+    #[must_use]
+    pub const fn satisfied_by(self, effective: Self) -> bool {
+        match (self, effective) {
+            (Self::Windowed, Self::Windowed) => true,
+            (Self::Borderless { monitor: None }, Self::Borderless { .. }) => true,
+            (
+                Self::Borderless {
+                    monitor: Some(wanted),
+                },
+                Self::Borderless { monitor: Some(got) },
+            ) => wanted.0 == got.0,
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for DisplayMode {
@@ -403,9 +433,13 @@ impl WindowState {
     /// `false` while unconfigured (nothing has been honoured yet) and `false`
     /// when a compositor refused. A UI showing a fullscreen toggle reads this,
     /// not [`requested_mode`](Self::requested_mode), or the checkbox lies.
+    ///
+    /// The comparison is [`DisplayMode::satisfied_by`] rather than `==`; see
+    /// there for why a request naming no monitor is answered by one that does.
     #[must_use]
     pub fn mode_request_honoured(&self) -> bool {
-        self.effective_mode() == Some(self.requested_mode)
+        self.effective_mode()
+            .is_some_and(|effective| self.requested_mode.satisfied_by(effective))
     }
 }
 
@@ -550,6 +584,56 @@ mod tests {
             ..refused
         };
         assert!(honoured.mode_request_honoured());
+    }
+
+    #[test]
+    fn a_request_naming_no_monitor_is_answered_by_one_that_names_a_monitor() {
+        let anywhere = DisplayMode::Borderless { monitor: None };
+        let there = DisplayMode::Borderless {
+            monitor: Some(MonitorId(1)),
+        };
+        let elsewhere = DisplayMode::Borderless {
+            monitor: Some(MonitorId(2)),
+        };
+
+        // The asymmetry, in both directions. A request that did not care is
+        // answered by any monitor; a request that named one is not answered by
+        // a backend that cannot say which.
+        assert!(anywhere.satisfied_by(there));
+        assert!(anywhere.satisfied_by(anywhere));
+        assert!(there.satisfied_by(there));
+        assert!(!there.satisfied_by(anywhere));
+        assert!(!there.satisfied_by(elsewhere));
+
+        // And it is still a comparison, not a rubber stamp.
+        assert!(!anywhere.satisfied_by(DisplayMode::Windowed));
+        assert!(!DisplayMode::Windowed.satisfied_by(there));
+        assert!(DisplayMode::Windowed.satisfied_by(DisplayMode::Windowed));
+
+        // The case the X11 backend produces: fullscreen was granted, and the
+        // backend worked out the monitor from the window's origin.
+        let granted = WindowState {
+            configuration: Some(WindowConfiguration {
+                size: PhysicalSize::new(1920, 1080),
+                scale_factor: 1.0,
+                mode: there,
+            }),
+            requested_mode: anywhere,
+            requested_constraints: SizeConstraints::NONE,
+            focused: true,
+            visible: true,
+            pointer_mode: crate::PointerMode::Free,
+            close_pending: false,
+        };
+        assert!(granted.mode_request_honoured());
+        assert!(
+            !WindowState {
+                requested_mode: elsewhere,
+                ..granted
+            }
+            .mode_request_honoured(),
+            "asking for monitor 2 and being put on monitor 1 is a refusal"
+        );
     }
 
     #[test]

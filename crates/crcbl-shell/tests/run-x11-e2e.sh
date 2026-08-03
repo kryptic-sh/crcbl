@@ -202,6 +202,17 @@ cargo nextest run \
 STATUS=${PIPESTATUS[0]}
 set -e
 
+# **A window manager that died mid-run is not a test failure, it is a lost
+# gate.** Every assertion after it would have been measuring the branch this
+# variable exists to get away from, and the only symptom is a handful of tests
+# timing out for reasons that read like backend bugs. Checked before the suite's
+# own status, because "openbox is gone" is the more useful sentence.
+if [ -n "${WM_PID:-}" ] && ! kill -0 "$WM_PID" 2>/dev/null; then
+    echo "crcbl e2e: the window manager (${CRCBL_E2E_X11_WM}) exited during the suite" >&2
+    log_tail
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl e2e: the suite failed" >&2
     log_tail

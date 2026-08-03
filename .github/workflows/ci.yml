@@ -413,18 +413,15 @@ jobs:
       # with `--features x11-e2e`, and dumps the server log tail on any
       # failure.
       #
-      # Deliberately *without* a window manager — see the script's header for
-      # which behaviours that pins down and which it cannot.
-      #
-      # **A second pass under openbox was written, run, and taken back out.** It
-      # is not that the pass is wrong: it is that the backend does not survive
-      # it. Three of the thirty tests fail against a real window manager, and at
-      # least one is a defect rather than a harness artefact. `openbox` is still
-      # installed above so the next attempt does not need a CI round trip to get
-      # that far, and `CRCBL_E2E_X11_WM=openbox` is the one line that turns the
-      # pass back on. See `docs/backlog.md`, "X11 under a window manager".
+      # The suite runs **twice**, and neither pass is a variant of the other: a
+      # window manager is a separate program on this platform, and whether one
+      # is running changes the focus policy, the decorations, the size hints,
+      # the reparenting and whether a fullscreen request can be granted at all.
+      # Both answers are executed rather than one being assumed from the other.
       - name: Run the suite under Xvfb, with no window manager
         run: crates/crcbl-shell/tests/run-x11-e2e.sh
+      - name: Run the suite under Xvfb, with openbox managing
+        run: CRCBL_E2E_X11_WM=openbox crates/crcbl-shell/tests/run-x11-e2e.sh
 
   # The CLI/headless pillar's own end-to-end check: `crcbl new` scaffolds a
   # project, the project *compiles*, it lints clean, and it runs its loop

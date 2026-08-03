@@ -307,6 +307,53 @@ impl Peer {
         self.flush();
     }
 
+    /// PROBE
+    #[must_use]
+    pub fn probe_root(&self) -> u32 {
+        self.root
+    }
+
+    /// Asks the **window manager** to focus a window, as a pager does.
+    ///
+    /// The counterpart to [`focus`](Self::focus), and the one to use when a
+    /// window manager is running: it owns the input focus, so a client that
+    /// calls `SetInputFocus` itself is overruled the moment the manager sees
+    /// the `FocusIn` and applies its own policy. `_NET_ACTIVE_WINDOW` is the
+    /// EWMH request that *asks* rather than takes, so nothing has to be won.
+    ///
+    /// `data[0]` is the source indication: `2` means a pager, which is the
+    /// value a window manager honours unconditionally. `1` means an ordinary
+    /// application asking to raise itself, which is exactly what focus-stealing
+    /// prevention exists to refuse.
+    pub fn activate(&mut self, xid: u32) {
+        let active = self.atom("_NET_ACTIVE_WINDOW");
+        /// `SubstructureNotify | SubstructureRedirect`, the masks a window
+        /// manager selects on the root.
+        const SUBSTRUCTURE: u32 = (1 << 19) | (1 << 20);
+        /// EWMH source indication: a pager.
+        const SOURCE_PAGER: u32 = 2;
+        let message = ffi::ClientMessageEvent {
+            response_type: ffi::event::CLIENT_MESSAGE,
+            format: 32,
+            sequence: 0,
+            window: xid,
+            type_: active,
+            data: [SOURCE_PAGER, ffi::value::CURRENT_TIME, 0, 0, 0],
+        };
+        // SAFETY: the connection and root are live, and `SendEvent` reads
+        // exactly the 32 bytes a `ClientMessageEvent` is.
+        unsafe {
+            (self.lib.send_event)(
+                self.connection,
+                0,
+                self.root,
+                SUBSTRUCTURE,
+                ptr::from_ref(&message).cast::<c_char>(),
+            );
+        }
+        self.flush();
+    }
+
     /// Sends `WM_DELETE_WINDOW`, exactly as a window manager's close button
     /// does.
     pub fn request_close(&mut self, xid: u32) {
@@ -332,6 +379,37 @@ impl Peer {
             );
         }
         self.flush();
+    }
+
+    /// Where someone else's window sits on the screen.
+    ///
+    /// **A window is at the origin only when nothing is managing it.** With no
+    /// window manager the backend's window is placed at `0,0` and stays there,
+    /// so a test could aim `XTEST` at a screen coordinate and know it was
+    /// inside. A window manager places the window wherever its policy says —
+    /// `openbox` centres it — and the same coordinate then lands on the root,
+    /// where a click reaches nobody and the test waits out its deadline for
+    /// events that were delivered somewhere else.
+    ///
+    /// `None` if the window has gone away between the caller reading its XID
+    /// and this call.
+    #[must_use]
+    pub fn window_origin(&self, xid: u32) -> Option<(i16, i16)> {
+        // SAFETY: the connection is live, `xid` names a window on this display
+        // and the root always exists; a null error pointer discards the error
+        // and a null reply is handled below.
+        let reply = unsafe {
+            let cookie = (self.lib.translate_coordinates)(self.connection, xid, self.root, 0, 0);
+            (self.lib.translate_coordinates_reply)(self.connection, cookie, ptr::null_mut())
+        };
+        if reply.is_null() {
+            return None;
+        }
+        // SAFETY: `reply` is a live reply this call owns.
+        let origin = unsafe { ((*reply).dst_x, (*reply).dst_y) };
+        // SAFETY: freed exactly once.
+        unsafe { ffi::free_reply(reply) };
+        Some(origin)
     }
 
     /// Resizes someone else's window, as a window manager or a user drag would.

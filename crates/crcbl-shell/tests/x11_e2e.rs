@@ -137,13 +137,43 @@ impl Session {
             std::thread::sleep(Duration::from_millis(50));
         };
         assert_eq!(shell.backend(), ShellBackend::X11);
-        Self {
+        let session = Self {
             shell,
             peer: Peer::new().expect("libxcb-xtest and a second connection"),
             events: Vec::new(),
             slowest_pump: Duration::ZERO,
             pumps: 0,
-        }
+        };
+        // **The pointer is the one piece of state every test in this suite
+        // shares.** Each runs in its own process against one X server, and
+        // `XTEST` leaves the pointer wherever the last test put it — so a test
+        // that warped it to `(500, 500)` decides where the *next* test's window
+        // is placed, whether that window is under the pointer when it maps, and
+        // therefore what `openbox` does about focus. That is how this suite came
+        // to have a tail of tests that passed alone and failed in a full run,
+        // and which tests were in the tail moved whenever anything was
+        // reordered.
+        //
+        // Parking it at the centre makes each test start from the same display,
+        // whatever ran before. The screen is the harness's, so the centre is a
+        // point that exists.
+        session.peer.motion(
+            i16::try_from(SCREEN.width / 2).expect("half a screen fits in an i16"),
+            i16::try_from(SCREEN.height / 2).expect("half a screen fits in an i16"),
+        );
+        session
+    }
+
+    /// A point inside `window`, given in coordinates relative to its top-left.
+    ///
+    /// See [`Peer::window_origin`] for why a test cannot simply name a screen
+    /// coordinate: a managed window is not at the origin.
+    fn point_in(&self, window: WindowId, x: i16, y: i16) -> (i16, i16) {
+        let (origin_x, origin_y) = self
+            .peer
+            .window_origin(self.xid(window))
+            .expect("the window is still alive");
+        (origin_x + x, origin_y + y)
     }
 
     /// Whether a window manager was running when the shell connected.
@@ -205,6 +235,43 @@ impl Session {
         names
     }
 
+    /// Pumps until the display has stopped producing events.
+    ///
+    /// **A window manager keeps talking after the window is on screen**, and
+    /// none of it is the test's doing: `openbox` reparents, configures the
+    /// frame, focuses the new window and writes half a dozen properties, and
+    /// the last of those lands well after `MapNotify`. A test that started
+    /// measuring at the map counts that housekeeping as its own result — which
+    /// is how "one resize, one `Resized`" came to see two.
+    ///
+    /// There is no event that says "the manager has finished", so quiet is the
+    /// only available definition: [`QUIET_TURNS`] consecutive pumps that
+    /// produce nothing. Bounded by the same deadline as everything else, and it
+    /// fails rather than returning when the display never goes quiet — a
+    /// display that never stops talking is a finding, not something to wait out.
+    fn settle(&mut self) {
+        /// Consecutive silent pumps that count as quiet. Each is followed by a
+        /// 10 ms wait, so this is a tenth of a second of nothing.
+        const QUIET_TURNS: u32 = 10;
+        let deadline = Instant::now() + WAIT;
+        let mut quiet = 0;
+        while quiet < QUIET_TURNS {
+            let before = self.events.len();
+            self.pump();
+            if self.events.len() == before {
+                quiet += 1;
+            } else {
+                quiet = 0;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the display never went quiet; events so far: {:?}",
+                self.names()
+            );
+            self.shell.wait_events(Some(Duration::from_millis(10)));
+        }
+    }
+
     /// Creates a window and waits for the first configuration.
     ///
     /// The mandatory create-then-wait loop, in one place because every test
@@ -219,6 +286,27 @@ impl Session {
                 .window_state(window)
                 .is_ok_and(|state| state.is_configured())
         });
+        // **With a window manager, a configured window is not yet a settled
+        // one.** The manager reparents it into a frame and configures it again,
+        // and both of those land *before* `MapNotify` — so a test that started
+        // asserting at the first configure would see the manager's own
+        // housekeeping mixed into whatever it went on to do, and "one resize,
+        // one event" would count two. Waiting for the map is waiting for the
+        // manager to have finished.
+        //
+        // Only when one is running, and only when the window was asked to be
+        // visible: with no window manager the first configure really is the
+        // whole story, which is what `a_window_has_no_size_until_it_is_pumped`
+        // pins down separately.
+        if desc.visible && self.has_window_manager() {
+            self.pump_until("the window manager to map the window", |session| {
+                session
+                    .shell
+                    .window_state(window)
+                    .is_ok_and(|state| state.visible)
+            });
+            self.settle();
+        }
         window
     }
 
@@ -253,10 +341,36 @@ impl Session {
     ///
     /// Retrying inside the poll costs one request per turn against `Xvfb`,
     /// where the first one has already worked.
+    ///
+    /// # Which request depends on whether a window manager is running
+    ///
+    /// **A window manager owns the input focus**, and a client that sets it
+    /// behind the manager's back is not overruling it — it is starting a fight.
+    /// `openbox` watches `FocusIn` and puts the focus back where its own policy
+    /// says it belongs, so `SetInputFocus` in a loop ping-pongs: the peer wins
+    /// some turns, `openbox` wins others, and which of them holds it when the
+    /// deadline expires changed from run to run. That is what made five of this
+    /// suite's tests fail in a full pass and pass on their own.
+    ///
+    /// EWMH's `_NET_ACTIVE_WINDOW` client message is the request a pager or a
+    /// taskbar makes, and it *asks the window manager* to focus the window
+    /// instead of going around it — so there is nothing to fight. Source
+    /// indication `2` means "a pager", which is the value that asks a manager
+    /// to bypass its focus-stealing prevention; `1` (an application) is the one
+    /// a manager is entitled to refuse.
     fn focus(&mut self, window: WindowId) {
         let xid = self.xid(window);
+        let managed = self.has_window_manager();
         self.pump_until("keyboard focus", |session| {
-            session.peer.focus(xid);
+            let mapped = session
+                .shell
+                .window_state(window)
+                .is_ok_and(|state| state.visible);
+            if !managed {
+                session.peer.focus(xid);
+            } else if mapped {
+                session.peer.activate(xid);
+            }
             session
                 .shell
                 .window_state(window)
@@ -1126,7 +1240,10 @@ fn pointer_motion_buttons_and_the_wheel_all_arrive() {
     session.focus(window);
     session.take_names();
 
-    session.peer.motion(100, 100);
+    // Into the window, not to a screen coordinate that is only inside it when
+    // nothing has placed it — see `Session::point_in`.
+    let (x, y) = session.point_in(window, 100, 100);
+    session.peer.motion(x, y);
     session.pump_until("the pointer to enter", |session| {
         session.events.iter().any(|event| {
             matches!(

@@ -234,67 +234,31 @@ about `--all-features` rather than about docs:
 Neither is reachable from a local `cargo clippy --all-targets`, which is what
 makes them worth writing down rather than rediscovering.
 
-## X11 under a window manager
+## The X11 suite's cross-test state, found under a window manager
 
-**The whole point of the X11 backend is a platform where a window manager is a
-separate program, and the suite has only ever run without one.** Turning that
-around is `CRCBL_E2E_X11_WM=openbox`, which `run-x11-e2e.sh` supports and CI
-installs openbox for. A second CI pass was written, run, and taken back out
-rather than left red; the one line that turns it on again is in
-`.github/workflows/ci.yml` next to the comment saying so.
+**Every test in `x11_e2e.rs` runs in its own process against one shared X
+server, and the pointer is state that survives between them.** The suite ran
+without a window manager for its whole life, where that did not matter; under
+`openbox` it produced a _tail_ of tests that passed alone and failed in a full
+run, and which tests were in the tail moved whenever anything was reordered. The
+mechanism: a test that warped the pointer to `(500, 500)` decided where the next
+test's window was placed, whether it was under the pointer when it mapped, and
+therefore what `openbox` did about focus. `Session::open` now parks the pointer
+at the centre of the screen; the suite went from 24/30 to 30/30 and from 103
+seconds to 5.
 
-**The sample-level fullscreen already works**, which is the half a player would
-notice: the sandbox pass under openbox reports
-`--fullscreen was granted and the swapchain followed`, `borderless on monitor 1`
-at 1920x1080. What fails is four tests in the shell suite.
+Worth carrying because the shape is not X11's: **shared mutable state between
+processes that a harness never wrote down**. The pointer was the one here; the
+input focus, the clipboard owner and the active desktop are the same kind of
+thing on this platform. The rule that falls out is that anything a test moves
+and does not move back belongs in `Session::open`, not in the test.
 
-**Do not use sway's Xwayland as a stand-in.** sway is an EWMH window manager for
-its own X clients and is easy to reach (`xwayland force` in the config, then
-wait for `Starting Xwayland on :N` — only logged under `sway -d`, and grepping
-for `xwayland` matches a `sockets.c:47` error line first and yields a bogus
-display number). It was used before openbox was installed and it **disagrees
-with openbox**: it never grants fullscreen at all, which sent a whole
-investigation after a message-encoding theory openbox disproves. Install
-openbox; the real thing turns around in about two minutes.
-
-**Four failures, each reproduced in isolation** (`-E 'test(<name>)'`), so none
-is an ordering artefact:
-
-- `a_mode_request_is_a_request_and_the_effective_mode_is_the_answer` and
-  `a_window_created_borderless_does_not_report_its_own_request_as_the_answer` —
-  `mode_request_honoured()` never goes true. The events carry a trailing
-  `Resized`, so the geometry _did_ change; what did not is
-  `refresh_effective_mode`'s read of `_NET_WM_STATE`. The sandbox gets a granted
-  fullscreen through the same backend, so the difference to chase is
-  `set_mode`-after-creation (client message) against `WindowDesc::mode` (pre-map
-  property) — the sandbox uses the second.
-- `a_resize_from_outside_is_reported_exactly_once` — **two** `Resized` events
-  where the test wants one. A reparenting manager configures the frame and the
-  client, and the backend's "a move is not a resize" filter does not collapse
-  the pair. Either a real defect (one user resize rebuilding the swapchain
-  twice) or an artefact the test must tolerate; deciding which is the work.
-- `a_window_can_be_unmapped_and_mapped_again` — the `UnmapNotify` never arrives.
-  Reparenting is the suspect: ICCCM has its own withdrawal dance, and what a
-  client observes about its own unmap changes once a frame is in the way.
-
-**Everything else that failed in a full run is downstream of those four.** More
-tests failed on `waiting for keyboard focus` having seen only `["Resized"]`, and
-they pass on their own — a failed test leaves the display in a state the next
-one cannot get focus in. Fix the four and re-measure before believing any other
-count.
-
-**Two things were changed while chasing this and neither is the fix:**
-
-- `Session::focus` re-asks every poll turn instead of once. `SetInputFocus` on a
-  window that is not viewable is a `BadMatch`, the peer's request is unchecked,
-  and under a reparenting manager the window is not viewable until the frame is
-  mapped — which is after the first `ConfigureNotify` the harness waits on.
-  Correct on its own terms, worth about one test.
-- `write_identity` writes `WM_HINTS` with `input = True`. ICCCM 4.1.7 lets a
-  window manager assume what it likes when the property is absent, and "takes no
-  input" is a legal assumption, so its absence was a real conformance gap — but
-  it **changed nothing measurable** under openbox, which evidently defaults the
-  other way. Kept as conformance, not as a fix.
+Still not covered by either pass, and deliberately: **a reparenting window
+manager whose frame is larger than nothing.** `openbox` with the packaged
+default theme decorates around the client area, so the client keeps the size it
+asked for. A manager that shrinks the client, or a tiling one that ignores the
+requested size entirely, would break the sandbox passes' extent assertions —
+which is a real configuration and is not exercised.
 
 ## Two display-mode defects, and the shape they shared
 
