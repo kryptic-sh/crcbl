@@ -628,10 +628,15 @@ impl VirtualInput {
 
     /// Moves the pointer to an absolute position within an extent.
     ///
-    /// The extent is the output's size, because that is the space
-    /// `zwlr_virtual_pointer_v1.motion_absolute` is defined in — the compositor
-    /// then decides which surface the position lands on, exactly as it would
-    /// for a real device.
+    /// **The extent is the whole output layout, not one output.** The protocol
+    /// defines `motion_absolute` as a position within an extent the caller
+    /// states, and the compositor maps that onto the space the pointer moves
+    /// in — which is every output side by side. With a single output the two
+    /// are the same size and the distinction is invisible; add a second and a
+    /// caller passing one output's size lands the pointer at
+    /// `x * layout_width / output_width`, which is a different place and often
+    /// a different display. The compositor then decides which surface the
+    /// position falls on, exactly as it would for a real device.
     pub fn move_to(&self, x: u32, y: u32, extent: PhysicalSize) {
         // SAFETY: the virtual pointer is live; every argument is a plain
         // integer, and `frame` is what makes the compositor act on the batch.

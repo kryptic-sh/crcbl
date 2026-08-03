@@ -96,6 +96,17 @@ struct Session {
     shell: Box<dyn Shell>,
     peer: Peer,
     events: Vec<ShellEvent>,
+    /// Every window [`window`](Self::window) created, so [`Drop`] can withdraw
+    /// them.
+    ///
+    /// **A process that exits with a window still mapped is not what a game
+    /// does**, and `openbox` does not survive thirty of them: the connection
+    /// closing destroys the windows underneath it, and the manager was left
+    /// with `_NET_ACTIVE_WINDOW` naming an XID no longer in
+    /// `_NET_CLIENT_LIST`. From that point it focuses nothing new, so every
+    /// focus-needing test for the rest of the run times out — which is exactly
+    /// the tail of failures this suite had, and why each of them passed alone.
+    windows: Vec<WindowId>,
     /// The longest any single [`pump`](Self::pump) has taken.
     ///
     /// `Shell::pump` promises to be finite and non-blocking, and the clipboard
@@ -141,6 +152,7 @@ impl Session {
             shell,
             peer: Peer::new().expect("libxcb-xtest and a second connection"),
             events: Vec::new(),
+            windows: Vec::new(),
             slowest_pump: Duration::ZERO,
             pumps: 0,
         };
@@ -280,6 +292,7 @@ impl Session {
     /// [`a_window_has_no_size_until_it_is_pumped`] asserts separately.
     fn window(&mut self, desc: &WindowDesc<'_>) -> WindowId {
         let window = self.shell.create_window(desc).expect("create_window");
+        self.windows.push(window);
         self.pump_until("the first configuration", |session| {
             session
                 .shell
@@ -361,14 +374,23 @@ impl Session {
     fn focus(&mut self, window: WindowId) {
         let xid = self.xid(window);
         let managed = self.has_window_manager();
+        // The pointer has to be over the frame for the click below to land on
+        // it, and parking it there once is also what stops `openbox` taking the
+        // focus away again: it decides focus from where the pointer is when a
+        // window maps, and the previous test left it wherever it liked.
         self.pump_until("keyboard focus", |session| {
             let mapped = session
                 .shell
                 .window_state(window)
                 .is_ok_and(|state| state.visible);
             if !managed {
+                // Nothing else ever will — see above.
                 session.peer.focus(xid);
             } else if mapped {
+                // Only once the window is mapped: `_NET_ACTIVE_WINDOW` names a
+                // window the manager is managing, and one sent before the map
+                // request has been processed is addressed to a window `openbox`
+                // has never heard of.
                 session.peer.activate(xid);
             }
             session
@@ -403,6 +425,55 @@ impl Session {
             "obligation 4: exactly one answer per accepted request"
         );
         answer
+    }
+}
+
+impl Drop for Session {
+    /// Withdraws and destroys everything this session opened.
+    ///
+    /// See [`Session::windows`] for what a window manager does with a client
+    /// that just disappears. `set_visible(false)` is the ICCCM withdrawal —
+    /// the backend follows it with the synthetic `UnmapNotify` the spec asks
+    /// for — and `destroy_window` is the rest of it; a few pumps give the
+    /// manager the events before the connection goes.
+    ///
+    /// Failures are ignored on purpose: a test that already destroyed its
+    /// window, or one panicking its way out with a stale handle, must not turn
+    /// a real assertion failure into a confusing second panic while unwinding.
+    fn drop(&mut self) {
+        let mut xids = Vec::new();
+        for window in core::mem::take(&mut self.windows) {
+            if let Ok(SurfaceTarget::Xcb { window: xid, .. }) = self.shell.surface_target(window) {
+                xids.push(xid);
+            }
+            let _ = self.shell.set_visible(window, false);
+            let _ = self.shell.destroy_window(window);
+        }
+        if xids.is_empty() || !self.has_window_manager() {
+            return;
+        }
+        // Wait for the manager to have *acted* on the withdrawal, not merely to
+        // have been told: `_NET_CLIENT_LIST` losing the window is the manager
+        // saying it has stopped managing it. A fixed number of pumps would be
+        // a sleep by another name, and the whole point is that the next test's
+        // process starts against a manager that has finished with this one.
+        let deadline = Instant::now() + WAIT;
+        let root = self.peer.root();
+        loop {
+            self.shell.pump(&mut |_| {});
+            let listed = self
+                .peer
+                .window_property(root, "_NET_CLIENT_LIST")
+                .unwrap_or_default();
+            let still_there = xids.iter().any(|xid| {
+                listed
+                    .chunks_exact(4)
+                    .any(|word| u32::from_ne_bytes([word[0], word[1], word[2], word[3]]) == *xid)
+            });
+            if !still_there || Instant::now() >= deadline {
+                return;
+            }
+        }
     }
 }
 
@@ -579,10 +650,21 @@ fn a_resize_from_outside_is_reported_exactly_once() {
             .window_state(window)
             .is_ok_and(|state| state.size() == Some(PhysicalSize::new(800, 600)))
     });
+    // Counted by the size they carry, not by name. Under a window manager the
+    // manager's own configures land in this window too — it reparents, frames
+    // and focuses on its own schedule, and none of that is this resize — so a
+    // count of every `Resized` is a count of the manager's housekeeping as well.
+    // A backend that reported one configure twice still fails: both copies
+    // would carry 800x600.
     let resizes = session
-        .names()
+        .events
         .iter()
-        .filter(|name| **name == "Resized")
+        .filter(|event| {
+            matches!(
+                event,
+                ShellEvent::Resized { size, .. } if *size == PhysicalSize::new(800, 600)
+            )
+        })
         .count();
     assert_eq!(
         resizes,

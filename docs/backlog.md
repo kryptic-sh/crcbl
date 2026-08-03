@@ -234,31 +234,66 @@ about `--all-features` rather than about docs:
 Neither is reachable from a local `cargo clippy --all-targets`, which is what
 makes them worth writing down rather than rediscovering.
 
-## The X11 suite's cross-test state, found under a window manager
+## Cross-test state, found by adding a window manager and a second monitor
 
-**Every test in `x11_e2e.rs` runs in its own process against one shared X
-server, and the pointer is state that survives between them.** The suite ran
-without a window manager for its whole life, where that did not matter; under
-`openbox` it produced a _tail_ of tests that passed alone and failed in a full
-run, and which tests were in the tail moved whenever anything was reordered. The
-mechanism: a test that warped the pointer to `(500, 500)` decided where the next
-test's window was placed, whether it was under the pointer when it mapped, and
-therefore what `openbox` did about focus. `Session::open` now parks the pointer
-at the centre of the screen; the suite went from 24/30 to 30/30 and from 103
-seconds to 5.
+**Both e2e suites run every test in its own process against one long-lived
+display, and both had state that survived between them.** Neither showed up
+until the environment got a second inhabitant, and both produced the same
+symptom: a _tail_ of tests that passed alone and failed in a full run, moving
+whenever anything was reordered.
 
-Worth carrying because the shape is not X11's: **shared mutable state between
-processes that a harness never wrote down**. The pointer was the one here; the
-input focus, the clipboard owner and the active desktop are the same kind of
-thing on this platform. The rule that falls out is that anything a test moves
-and does not move back belongs in `Session::open`, not in the test.
+- **X11, the pointer.** `XTEST` leaves it wherever the last test put it, so a
+  test that warped it to `(500, 500)` decided where the next test's window was
+  placed and whether `openbox` focused it. `Session::open` parks it at the
+  centre.
+- **X11, the window manager's idea of what is still alive.** A test process
+  exiting with a window still mapped destroys it by closing the connection, and
+  `openbox` was left with `_NET_ACTIVE_WINDOW` naming an XID that was no longer
+  in `_NET_CLIENT_LIST` — after which it focused nothing new for the rest of the
+  run. `Session`'s `Drop` withdraws and destroys its windows and then **waits
+  for `_NET_CLIENT_LIST` to drop them**, which is the manager saying it has
+  finished. Graded evidence, six runs each: no `Drop` at all, 2 clean; `Drop`
+  with a fixed four pumps, 5 clean; `Drop` waiting for the client list, 8 of 8.
+- **Wayland, the focused workspace.** A test that fullscreens onto the second
+  output leaves sway's focus there, so the next test's window opens on a
+  1280x720 display and waits out its deadline for a 1920x1080 configure. A
+  `FocusedWorkspace` guard puts it back.
 
-Still not covered by either pass, and deliberately: **a reparenting window
-manager whose frame is larger than nothing.** `openbox` with the packaged
-default theme decorates around the client area, so the client keeps the size it
-asked for. A manager that shrinks the client, or a tiling one that ignores the
-requested size entirely, would break the sandbox passes' extent assertions —
-which is a real configuration and is not exercised.
+The rule that falls out: **anything a test moves and does not move back belongs
+in `Session`, not in the test.** The pointer, the input focus, the clipboard
+owner, the focused workspace and the compositor's idea of which clients exist
+are all this kind of thing.
+
+Two blind alleys, recorded so they are not re-run. Neither is the fix and both
+looked convincing: giving the `_NET_ACTIVE_WINDOW` message a real server
+timestamp instead of `CurrentTime` (`Peer::server_time`, kept — it is correct
+EWMH), and asking `openbox` less often or clicking the frame instead. The click
+made it measurably _worse_: five runs, 3-5 failures each.
+
+## Not covered on either backend
+
+- **A window manager that does not respect the requested size.** `openbox` with
+  the packaged default theme decorates around the client area, so the client
+  keeps the size it asked for. One that shrinks the client, or a tiling manager
+  that ignores the request entirely, would break the sandbox passes' extent
+  assertions — a real configuration, not exercised.
+- **X11 multi-monitor.** The Wayland suite now declares two outputs and asserts
+  that a fullscreen request naming the second one lands on the second one; the
+  X11 suite still has a single `Xvfb` screen, so `move_to_monitor` and
+  `Borderless { monitor: Some(..) }` are unit-tested only on the backend that
+  can actually honour them. `Xvfb`'s RANDR exposes one CRTC and
+  `xrandr --setmonitor` defines RANDR 1.5 _monitors_, which `crcbl-shell`'s
+  enumeration does not read — it goes through `GetScreenResourcesCurrent` and
+  `GetCrtcInfo`. Two ways forward: read `RRGetMonitors` first and fall back to
+  CRTCs (what GTK and Qt do, and it makes the headless split testable), or run a
+  real `Xorg` with the dummy driver configured for two heads in CI. The first is
+  a backend change with its own slice; the second is a CI dependency.
+- **Pixels.** Every display-mode assertion on both backends is a summary line, a
+  log line, or the compositor's own tree. That a fullscreen frame is _composed_
+  at the new extent, rather than merely built at it, is unchecked.
+- **`F11` at a running game on X11.** The Wayland harness drives it through a
+  second process with a virtual keyboard; `run-x11-e2e.sh` has no key sender, so
+  the engine-level toggle is covered on one platform.
 
 ## Two display-mode defects, and the shape they shared
 

@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 use crcbl_shell::wayland_test_support::{DragSource, VirtualInput};
 use crcbl_shell::{
     ButtonState, CloseReply, CursorIcon, DisplayMode, KeyCode, Keysym, LogicalSize, Modifiers,
-    PhysicalSize, PointerButton, PointerMode, ScrollDelta, Shell, ShellBackend, ShellCaps,
-    ShellError, ShellEvent, SizeConstraints, SurfaceTarget, WindowDesc, WindowId,
+    MonitorInfo, PhysicalSize, PointerButton, PointerMode, ScrollDelta, Shell, ShellBackend,
+    ShellCaps, ShellError, ShellEvent, SizeConstraints, SurfaceTarget, WindowDesc, WindowId,
 };
 
 /// evdev codes, from `linux/input-event-codes.h`. Spelled out rather than
@@ -65,8 +65,31 @@ const SLOWEST_PUMP: Duration = Duration::from_millis(1_500);
 /// vacuous, since a tiled window already fills the output.
 const APP_ID: &str = "sh.kryptic.crcbl.e2e";
 
-/// The output declared in `wayland-e2e-sway.conf`.
+/// The first output declared in `wayland-e2e-sway.conf`, which is the one the
+/// focused workspace is pinned to and therefore the one every window opens on.
 const OUTPUT_SIZE: PhysicalSize = PhysicalSize::new(1920, 1080);
+
+/// The name of that output. Positions in `monitors()` are the compositor's
+/// order, not the config's, so a test that wants a *particular* display asks
+/// for it by name.
+const OUTPUT_NAME: &str = "HEADLESS-1";
+
+/// The second output, deliberately a different size — see the config for why.
+const SECOND_OUTPUT_SIZE: PhysicalSize = PhysicalSize::new(1280, 720);
+
+/// Its name.
+const SECOND_OUTPUT_NAME: &str = "HEADLESS-2";
+
+/// Where the second output starts, which is the first one's width.
+const SECOND_OUTPUT_X: i32 = 1920;
+
+/// The two outputs side by side, which is the space an absolute pointer motion
+/// is expressed in — **not** one output's size. See
+/// [`VirtualInput::move_to`](crcbl_shell::wayland_test_support::VirtualInput).
+const LAYOUT_SIZE: PhysicalSize = PhysicalSize::new(
+    OUTPUT_SIZE.width + SECOND_OUTPUT_SIZE.width,
+    OUTPUT_SIZE.height,
+);
 
 /// A shell plus the events it has produced, with a polling helper.
 struct Session {
@@ -136,6 +159,20 @@ impl Session {
 
     fn size(&self, window: WindowId) -> Option<PhysicalSize> {
         self.shell.window_state(window).expect("live window").size()
+    }
+
+    /// The monitor the compositor calls `name`.
+    ///
+    /// **By name, never by index.** `monitors()` is in the order the compositor
+    /// advertised its outputs, which is not the order the config declares them:
+    /// with two `HEADLESS` outputs, `monitors()[0]` is the second one. A test
+    /// that indexed was reading whichever display sway happened to bind first.
+    fn monitor_named(&self, name: &str) -> &MonitorInfo {
+        self.shell
+            .monitors()
+            .iter()
+            .find(|monitor| monitor.name == name)
+            .unwrap_or_else(|| panic!("the config declares an output called {name}"))
     }
 
     fn create(&mut self, desc: &WindowDesc<'_>) -> WindowId {
@@ -335,7 +372,7 @@ fn an_unmapped_window_is_configured_but_not_yet_managed() {
                 .window_state(window)
                 .expect("live")
                 .effective_mode()
-                == Some(DisplayMode::Borderless { monitor: None })
+                .is_some_and(DisplayMode::is_borderless)
         },
     );
     assert_eq!(session.size(window), Some(OUTPUT_SIZE));
@@ -421,7 +458,7 @@ fn switching_to_borderless_and_back_reconfigures_the_window() {
             .window_state(window)
             .expect("live")
             .effective_mode()
-            == Some(DisplayMode::Borderless { monitor: None })
+            .is_some_and(DisplayMode::is_borderless)
     });
     let state = session.shell.window_state(window).expect("live");
     assert!(state.mode_request_honoured());
@@ -517,7 +554,7 @@ fn a_window_created_borderless_is_never_mapped_at_its_windowed_size() {
             .window_state(window)
             .expect("live")
             .effective_mode()
-            == Some(DisplayMode::Borderless { monitor: None })
+            .is_some_and(DisplayMode::is_borderless)
     });
 
     // The headline, and asserted first: the flash this field exists to prevent
@@ -579,11 +616,15 @@ fn a_fullscreen_the_client_never_asked_for_arrives_as_a_resize() {
         session.size(window) == Some(OUTPUT_SIZE)
     });
 
+    let first = session.monitor_named(OUTPUT_NAME).id;
     let state = session.shell.window_state(window).expect("live");
     assert_eq!(
         state.effective_mode(),
-        Some(DisplayMode::Borderless { monitor: None }),
-        "the compositor's answer is what effective_mode reports",
+        Some(DisplayMode::Borderless {
+            monitor: Some(first)
+        }),
+        "the compositor's answer is what effective_mode reports, and it names \
+         the output the surface is on",
     );
     assert_eq!(
         state.requested_mode,
@@ -756,9 +797,18 @@ fn a_close_request_is_a_question_and_keep_really_keeps() {
 fn monitors_are_enumerated_from_wl_output() {
     let session = Session::open();
     let monitors = session.shell.monitors();
-    assert_eq!(monitors.len(), 1, "the config declares one HEADLESS output");
-    let monitor = &monitors[0];
-    assert!(monitor.is_primary, "the first output seen is the default");
+    assert_eq!(
+        monitors.len(),
+        2,
+        "the config declares two HEADLESS outputs"
+    );
+    assert_eq!(
+        monitors.iter().filter(|monitor| monitor.is_primary).count(),
+        1,
+        "exactly one primary, whichever output the compositor advertised first"
+    );
+
+    let monitor = session.monitor_named(OUTPUT_NAME);
     assert_eq!(monitor.size(), OUTPUT_SIZE);
     assert_eq!(
         monitor.work_area, monitor.bounds,
@@ -770,16 +820,20 @@ fn monitors_are_enumerated_from_wl_output() {
         monitor.refresh_hz()
     );
     assert!(monitor.scale_factor >= 1.0);
-    assert!(
-        monitor.name.starts_with("HEADLESS"),
-        "wl_output.name is the compositor's, got {:?}",
-        monitor.name
-    );
-    // The id round-trips through the lookup the seam provides.
-    assert_eq!(
-        session.shell.monitor(monitor.id).map(|found| found.id),
-        Some(monitor.id)
-    );
+
+    // The second one is a *different* size, which is what makes every
+    // assertion about "which monitor" below capable of failing.
+    let second = session.monitor_named(SECOND_OUTPUT_NAME);
+    assert_eq!(second.size(), SECOND_OUTPUT_SIZE);
+    assert_ne!(second.id, monitor.id, "two outputs, two ids");
+
+    // The ids round-trip through the lookup the seam provides.
+    for wanted in [monitor.id, second.id] {
+        assert_eq!(
+            session.shell.monitor(wanted).map(|found| found.id),
+            Some(wanted)
+        );
+    }
 }
 
 /// Capabilities describe this slice, and the operations behind the missing ones
@@ -1220,7 +1274,7 @@ fn pointer_focus_motion_and_buttons_come_back_in_window_pixels() {
     let mut session = Session::open();
     let (window, input) = session.with_input("crcbl e2e pointer");
 
-    input.move_to(960, 540, OUTPUT_SIZE);
+    input.move_to(960, 540, LAYOUT_SIZE);
     session.pump_until("the pointer to enter the surface", |session| {
         session.names().contains(&"PointerFocus")
     });
@@ -1243,7 +1297,7 @@ fn pointer_focus_motion_and_buttons_come_back_in_window_pixels() {
     );
 
     session.take_names();
-    input.move_to(200, 300, OUTPUT_SIZE);
+    input.move_to(200, 300, LAYOUT_SIZE);
     // Wait for the motion that carries the *new* position, not merely for any
     // motion: the enter above can still have one in flight, and a probe that
     // accepted it would pass on a stale value.
@@ -1311,7 +1365,7 @@ fn a_wheel_notch_is_reported_as_a_detent_not_as_pixels() {
     let mut session = Session::open();
     let (window, input) = session.with_input("crcbl e2e wheel");
 
-    input.move_to(960, 540, OUTPUT_SIZE);
+    input.move_to(960, 540, LAYOUT_SIZE);
     session.pump_until("the pointer to enter", |session| {
         session.names().contains(&"PointerFocus")
     });
@@ -1369,7 +1423,7 @@ fn a_touchpad_scroll_is_reported_as_pixels_not_as_detents() {
     let mut session = Session::open();
     let (window, input) = session.with_input("crcbl e2e touchpad");
 
-    input.move_to(960, 540, OUTPUT_SIZE);
+    input.move_to(960, 540, LAYOUT_SIZE);
     session.pump_until("the pointer to enter", |session| {
         session.names().contains(&"PointerFocus")
     });
@@ -1413,7 +1467,7 @@ fn a_locked_pointer_reports_raw_motion_and_no_absolute_position() {
     let mut session = Session::open();
     let (window, input) = session.with_input("crcbl e2e lock");
 
-    input.move_to(960, 540, OUTPUT_SIZE);
+    input.move_to(960, 540, LAYOUT_SIZE);
     session.pump_until("the pointer to enter", |session| {
         session.names().contains(&"PointerFocus")
     });
@@ -1462,7 +1516,7 @@ fn a_locked_pointer_reports_raw_motion_and_no_absolute_position() {
         .expect("free");
     session.settle(Duration::from_millis(200));
     session.take_names();
-    input.move_to(400, 400, OUTPUT_SIZE);
+    input.move_to(400, 400, LAYOUT_SIZE);
     session.pump_until("absolute motion again", |session| {
         session
             .events
@@ -1521,7 +1575,7 @@ fn confining_the_pointer_is_accepted_and_reported_in_window_state() {
 fn hiding_the_cursor_works_and_naming_a_shape_is_accepted() {
     let mut session = Session::open();
     let (window, input) = session.with_input("crcbl e2e cursor");
-    input.move_to(960, 540, OUTPUT_SIZE);
+    input.move_to(960, 540, LAYOUT_SIZE);
     session.pump_until("the pointer to enter", |session| {
         session.names().contains(&"PointerFocus")
     });
@@ -1549,7 +1603,7 @@ fn hiding_the_cursor_works_and_naming_a_shape_is_accepted() {
 fn a_seat_that_loses_its_devices_drops_focus_and_keeps_running() {
     let mut session = Session::open();
     let (window, input) = session.with_input("crcbl e2e hotplug");
-    input.move_to(960, 540, OUTPUT_SIZE);
+    input.move_to(960, 540, LAYOUT_SIZE);
     session.pump_until("the pointer to enter", |session| {
         session.names().contains(&"PointerFocus")
     });
@@ -1575,7 +1629,7 @@ fn a_seat_that_loses_its_devices_drops_focus_and_keeps_running() {
     // only handled removal would fail.
     let input = VirtualInput::attach(&*session.shell, window).expect("replug");
     session.take_names();
-    input.move_to(500, 500, OUTPUT_SIZE);
+    input.move_to(500, 500, LAYOUT_SIZE);
     session.pump_until("the pointer to come back", |session| {
         session.names().contains(&"PointerFocus")
     });
@@ -1585,14 +1639,20 @@ fn a_seat_that_loses_its_devices_drops_focus_and_keeps_running() {
 }
 
 /// `xdg_output` gives a monitor layout the mode alone cannot.
+///
+/// **The layout is the thing `wl_output.mode` cannot tell you.** A mode says
+/// how big a display is; only `xdg_output` says where it sits relative to the
+/// others, and with one output every wrong answer and the right one are all
+/// `0, 0`. Two outputs side by side make the second one's `x` a number that has
+/// to have come from somewhere.
 #[test]
 #[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
 fn monitor_bounds_come_from_xdg_output() {
     let session = Session::open();
-    let monitor = &session.shell.monitors()[0];
+    let monitor = session.monitor_named(OUTPUT_NAME);
     assert_eq!(
         monitor.bounds.x, 0,
-        "the config puts the output at the origin"
+        "the config puts the first output at the origin"
     );
     assert_eq!(monitor.bounds.y, 0);
     assert_eq!(monitor.size(), OUTPUT_SIZE);
@@ -1601,11 +1661,138 @@ fn monitor_bounds_come_from_xdg_output() {
         "scale 1: mode and logical size agree, got {}",
         monitor.scale_factor
     );
+
+    let second = session.monitor_named(SECOND_OUTPUT_NAME);
+    assert_eq!(
+        second.bounds.x, SECOND_OUTPUT_X,
+        "the config puts the second output to the right of the first"
+    );
+    assert_eq!(second.bounds.y, 0);
+    assert_eq!(second.size(), SECOND_OUTPUT_SIZE);
+
+    // One coordinate space, so the two do not overlap. A backend that reported
+    // each output's own origin would put both at 0,0 and pass everything above
+    // except this.
+    assert!(
+        second.bounds.x
+            >= monitor.bounds.x + i32::try_from(monitor.bounds.width).expect("a screen width"),
+        "the outputs are side by side in one space: {:?} and {:?}",
+        monitor.bounds,
+        second.bounds
+    );
+
     // Still not a window position, and the capability still says so.
     assert!(
         !session.shell.caps().contains(ShellCaps::WINDOW_POSITION),
         "xdg_output places monitors, not windows"
     );
+}
+
+/// A fullscreen request naming the second monitor lands on the second monitor.
+///
+/// **The `monitor` field is the only part of `DisplayMode::Borderless` that a
+/// single-output test cannot check.** With one display every value of it —
+/// `None`, and the one id there is — produces the same window at the same size,
+/// so a backend that dropped the field on the floor would pass. Here the two
+/// outputs are different sizes, so the extent the compositor configures says
+/// which one it used.
+///
+/// Wayland's `set_fullscreen` takes the output as a *hint* the compositor may
+/// ignore, which is why this asserts through `mode_request_honoured` and the
+/// size rather than assuming. sway honours it.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn borderless_on_a_named_monitor_uses_that_monitor() {
+    // **sway's focused workspace outlives the process that moved it.** Every
+    // test here runs against one compositor, and a window fullscreened onto the
+    // second output leaves the focus there — so the next test's window opens on
+    // a 1280x720 display and waits out its deadline for a 1920x1080 configure.
+    // The same shape as the X11 suite's pointer, in a different compositor.
+    let _restore = FocusedWorkspace;
+    let mut session = Session::open();
+    let window = session.create_mapped(&desc("second monitor", LogicalSize::new(640.0, 360.0)));
+    let second = session.monitor_named(SECOND_OUTPUT_NAME).id;
+    assert_ne!(
+        session.size(window),
+        Some(SECOND_OUTPUT_SIZE),
+        "the windowed size must differ from the answer, or the assertion below          cannot fail"
+    );
+
+    session
+        .shell
+        .set_mode(
+            window,
+            DisplayMode::Borderless {
+                monitor: Some(second),
+            },
+        )
+        .expect("set_mode");
+    // Waiting on the *answer*, not on the size: `wl_surface.enter` for the
+    // monitor the window landed on arrives after the configure that resized
+    // it, so a test that asserted the moment the extent changed would read the
+    // monitor the window came from. Which is the ordering the backend's
+    // `surface_output_changed` refresh exists for.
+    session.pump_until("the compositor's answer", |session| {
+        session
+            .shell
+            .window_state(window)
+            .is_ok_and(|state| state.mode_request_honoured())
+    });
+
+    let state = session.shell.window_state(window).expect("state");
+    assert!(
+        state.mode_request_honoured(),
+        "the compositor put it on the monitor that was asked for, so the \
+         request is honoured: asked for {second:?}, effective {:?}, monitors \
+         {:?}",
+        state.effective_mode(),
+        session
+            .shell
+            .monitors()
+            .iter()
+            .map(|monitor| (monitor.id, monitor.name.clone(), monitor.size()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        state.size(),
+        Some(SECOND_OUTPUT_SIZE),
+        "and the extent is the second output's, not the first's"
+    );
+
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// A fullscreen request naming a monitor that is not there is refused by name.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn borderless_on_a_monitor_that_is_not_there_is_refused() {
+    let mut session = Session::open();
+    let window = session.create_mapped(&desc("no such monitor", LogicalSize::new(640.0, 360.0)));
+    let absent = crcbl_shell::MonitorId(u32::MAX);
+    let error = session
+        .shell
+        .set_mode(
+            window,
+            DisplayMode::Borderless {
+                monitor: Some(absent),
+            },
+        )
+        .expect_err("there is no such output");
+    assert!(
+        matches!(error, ShellError::NoSuchMonitor(id) if id == absent.0),
+        "the error names the monitor: {error}"
+    );
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// Puts sway's focus back on the first output's workspace when a test that
+/// moved it is done, however it ends.
+struct FocusedWorkspace;
+
+impl Drop for FocusedWorkspace {
+    fn drop(&mut self) {
+        swaymsg(&["workspace", "1"]);
+    }
 }
 
 /// Restores sway's output scale when the fractional-scale test is done, however
@@ -1673,13 +1860,9 @@ fn a_fractional_output_scale_reaches_the_window_as_a_non_integer_factor() {
     // The monitor's own scale is fractional too, which `wl_output.scale` alone
     // could never say.
     session.pump_until("the monitor list to catch up", |session| {
-        session
-            .shell
-            .monitors()
-            .first()
-            .is_some_and(|monitor| (monitor.scale_factor - 1.5).abs() < 1e-9)
+        (session.monitor_named(OUTPUT_NAME).scale_factor - 1.5).abs() < 1e-9
     });
-    let monitor = &session.shell.monitors()[0];
+    let monitor = session.monitor_named(OUTPUT_NAME);
     assert_eq!(
         monitor.size(),
         OUTPUT_SIZE,
@@ -1687,7 +1870,14 @@ fn a_fractional_output_scale_reaches_the_window_as_a_non_integer_factor() {
          while its scale came from xdg_output's 1280x720 logical size. Taking \
          the size from xdg_output too would shrink every monitor by the scale."
     );
-    assert_eq!(monitor.bounds.x, 0, "one output, still at the origin");
+    assert_eq!(
+        monitor.bounds.x, 0,
+        "the scaled output is still at the origin"
+    );
+    assert!(
+        (session.monitor_named(SECOND_OUTPUT_NAME).scale_factor - 1.0).abs() < 1e-9,
+        "and the other output was not scaled with it"
+    );
 
     // And a shell opened *now* sees the fractional scale from its very first
     // `monitors()` call, with no pumping at all. That is the startup path
@@ -1697,7 +1887,7 @@ fn a_fractional_output_scale_reaches_the_window_as_a_non_integer_factor() {
     // behind the mode. A backend that published monitors once and never
     // reconciled would report the integer 2 here for the whole session.
     let fresh = Session::open();
-    let fresh_monitor = &fresh.shell.monitors()[0];
+    let fresh_monitor = fresh.monitor_named(OUTPUT_NAME);
     assert!(
         (fresh_monitor.scale_factor - 1.5).abs() < 1e-9,
         "a freshly opened shell already knows the output is at 1.5, got {}",
@@ -2226,7 +2416,7 @@ fn a_drop_delivers_a_path_parsed_out_of_a_uri_list() {
 
     // The implicit grab: a press over our own surface, which is what a
     // compositor requires before it will start a drag at all.
-    input.move_to(400, 300, OUTPUT_SIZE);
+    input.move_to(400, 300, LAYOUT_SIZE);
     input.button(evdev::BTN_LEFT, true);
     session.pump_until("the button press to reach the drag origin", |_| {
         drag.press_serial() != 0
@@ -2240,7 +2430,7 @@ fn a_drop_delivers_a_path_parsed_out_of_a_uri_list() {
     session.settle(Duration::from_millis(200));
 
     // Move under the grab so the compositor sends `enter`/`motion`, then let go.
-    input.move_to(900, 500, OUTPUT_SIZE);
+    input.move_to(900, 500, LAYOUT_SIZE);
     session.settle(Duration::from_millis(100));
     input.button(evdev::BTN_LEFT, false);
 
@@ -2279,7 +2469,7 @@ fn a_window_that_did_not_ask_for_drops_receives_none() {
     let (window, input) = session.dropping_window("crcbl e2e no drop", false);
     let mut drag = DragSource::attach(&*session.shell, window).expect("drag origin");
 
-    input.move_to(400, 300, OUTPUT_SIZE);
+    input.move_to(400, 300, LAYOUT_SIZE);
     input.button(evdev::BTN_LEFT, true);
     session.pump_until("the button press to reach the drag origin", |_| {
         drag.press_serial() != 0
@@ -2292,7 +2482,7 @@ fn a_window_that_did_not_ask_for_drops_receives_none() {
     )
     .expect("start_drag");
     session.settle(Duration::from_millis(200));
-    input.move_to(900, 500, OUTPUT_SIZE);
+    input.move_to(900, 500, LAYOUT_SIZE);
     session.settle(Duration::from_millis(100));
     input.button(evdev::BTN_LEFT, false);
 

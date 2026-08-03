@@ -3126,6 +3126,26 @@ impl WaylandShell {
     // Scale, configure, cursor, constraints
     // -----------------------------------------------------------------------
 
+    /// The monitor a surface is on, when there is exactly one answer.
+    ///
+    /// `entered` is a list of `wl_output` **proxies** — what
+    /// `wl_surface.enter` carries — not indices into
+    /// [`outputs`](Self::outputs).
+    ///
+    /// `None` when the surface is on no output (not mapped yet) or on more
+    /// than one (straddling two displays): both are "the backend cannot say
+    /// which", which is a different statement from a *request* that did not
+    /// care. See [`DisplayMode::satisfied_by`].
+    fn monitor_of(&self, entered: &[usize]) -> Option<MonitorId> {
+        let [only] = entered else {
+            return None;
+        };
+        self.outputs
+            .iter()
+            .find(|output| output.proxy == *only)
+            .map(|output| output.id)
+    }
+
     fn surface_output_changed(&mut self, surface: usize, output: usize, entered: bool) {
         let Some(id) = self.window_by_proxy(surface, |w| w.surface as usize) else {
             return;
@@ -3147,6 +3167,24 @@ impl WaylandShell {
         } else {
             window.outputs.retain(|candidate| *candidate != output);
         }
+        // **A surface can change output without being reconfigured.** A window
+        // fullscreened onto another monitor is configured at the new size
+        // first; the `wl_surface.enter` for the monitor it landed on arrives
+        // afterwards, and no further configure follows it. So the effective
+        // mode's monitor is refreshed here as well as in `apply_configure`, or
+        // it would be whatever the surface was on at the last configure —
+        // which for the move that matters is the monitor it came *from*.
+        let entered = window.outputs.clone();
+        let monitor = self.monitor_of(&entered);
+        if let Ok(window) = self.window_mut(id)
+            && let Some(config) = window.configuration.as_mut()
+            && config.mode.is_borderless()
+        {
+            config.mode = DisplayMode::Borderless { monitor };
+        }
+        let Ok(window) = self.window_mut(id) else {
+            return;
+        };
         // Without `fractional-scale-v1` the only correct integer scale for a
         // surface spanning several outputs is the largest of them: anything
         // smaller is visibly blurry on the sharpest one.
@@ -3236,6 +3274,25 @@ impl WaylandShell {
         let Some(id) = self.window_by_proxy(xdg_surface_proxy, |w| w.xdg_surface as usize) else {
             return;
         };
+        // **Which monitor a fullscreen surface ended up on is observable, even
+        // though asking for one is only a hint.** `wl_surface.enter` names the
+        // outputs the surface is on, and a fullscreen surface is on exactly
+        // one — so the *answer* can name a monitor where the *request* could
+        // only suggest it. Without this a request for `Borderless { monitor:
+        // Some(second) }` was answered `Borderless { monitor: None }` and
+        // `mode_request_honoured` said no, for a window covering exactly the
+        // monitor that was asked for.
+        //
+        // Exactly one, deliberately: a surface straddling two outputs has no
+        // single answer, and `None` there means "the backend cannot say", which
+        // is what it is. See `DisplayMode::satisfied_by` for how the two
+        // meanings of `None` differ.
+        let on = {
+            let Ok(window) = self.window(id) else {
+                return;
+            };
+            self.monitor_of(window.outputs.as_slice())
+        };
         let Ok(window) = self.window_mut(id) else {
             return;
         };
@@ -3245,7 +3302,7 @@ impl WaylandShell {
             .states
             .contains(&xdg_toplevel::state::FULLSCREEN);
         let mode = if fullscreen {
-            DisplayMode::Borderless { monitor: None }
+            DisplayMode::Borderless { monitor: on }
         } else {
             DisplayMode::Windowed
         };

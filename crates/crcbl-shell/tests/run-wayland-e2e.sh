@@ -300,7 +300,13 @@ run_sandbox_toggle() {
     fi
     # And the swapchain followed: the summary's extent is the surface's, not the
     # window's, so a mode change that never reached the GPU fails here.
-    if ! grep -q "at ${SANDBOX_BORDERLESS}, borderless (CloseRequested)" "$SANDBOX_LOG"; then
+    # `borderless` may carry the monitor it landed on — `DisplayMode`'s
+    # `Display` prints "borderless on monitor 2" once the backend can say which
+    # output the surface is on — so the suffix is optional and the exit reason
+    # still has to be there. Anchoring on `(CloseRequested)` is what makes this
+    # a check that the run *ended* borderless rather than passed through it.
+    if ! grep -qE "at ${SANDBOX_BORDERLESS}, borderless( on monitor [0-9]+)? \(CloseRequested\)" \
+        "$SANDBOX_LOG"; then
         echo "crcbl e2e: F11 did not leave the sandbox borderless at ${SANDBOX_BORDERLESS}" >&2
         cat "$SANDBOX_LOG" >&2
         sway_log_tail

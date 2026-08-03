@@ -138,6 +138,43 @@ impl X11Shell {
     }
 }
 
+impl X11Shell {
+    /// Tells the window manager a window has been withdrawn, as ICCCM requires.
+    ///
+    /// **`XUnmapWindow` alone is not a withdrawal.** ICCCM 4.1.4 has a client
+    /// unmap the window *and* send a synthetic `UnmapNotify` to the root,
+    /// because a reparenting window manager watches the frame it created rather
+    /// than the client window inside it and may never see the real event. A
+    /// manager that misses the withdrawal keeps managing a window that is gone:
+    /// this suite's hide-and-show test saw the window unmapped and remapped
+    /// inside a single pump, so `visible` never read false and the test waited
+    /// out its deadline — intermittently, depending on what `openbox` was doing
+    /// at the time.
+    ///
+    /// With no window manager there is nobody selecting `SubstructureNotify` on
+    /// the root, and the event costs one request and reaches nobody.
+    fn announce_withdrawal(&self, xid: u32) {
+        let event = ffi::SyntheticWindowNotify {
+            event: ffi::WindowNotifyEvent {
+                response_type: ffi::event::UNMAP_NOTIFY,
+                pad0: 0,
+                sequence: 0,
+                event: self.conn.root,
+                window: xid,
+                // `from_configure`: false. This unmap was asked for, not the
+                // side effect of an ancestor being resized.
+                flag: 0,
+                pad1: [0; 3],
+            },
+            pad: [0; 16],
+        };
+        /// `SubstructureNotify | SubstructureRedirect`, the masks a window
+        /// manager selects on the root.
+        const SUBSTRUCTURE: u32 = (1 << 19) | (1 << 20);
+        self.conn.send_event(self.conn.root, SUBSTRUCTURE, &event);
+    }
+}
+
 impl XWindow {
     /// The mode the window manager has actually put this window in.
     pub(super) fn effective_mode(&self) -> DisplayMode {
@@ -375,6 +412,9 @@ impl Shell for X11Shell {
             } else {
                 (self.conn.lib.unmap_window)(self.conn.raw(), xid);
             }
+        }
+        if !visible {
+            self.announce_withdrawal(xid);
         }
         // Which side of `apply_fullscreen`'s split the next request takes. Set
         // from the request rather than from the notify, and deliberately —

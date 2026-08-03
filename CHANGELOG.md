@@ -19,7 +19,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **crcbl-shell**: `DisplayMode::satisfied_by`, the request-versus-answer
   comparison `WindowState::mode_request_honoured` now uses.
 
+### Changed
+
+- **crcbl-shell** (Wayland): the effective mode of a fullscreen window now names
+  the monitor it is on, taken from `wl_surface.enter`. Asking for a monitor is
+  only a hint on this platform, but which one the compositor used is observable,
+  and without it `mode_request_honoured` answered "no" to a request the
+  compositor had honoured exactly. A summary line that read `borderless` may now
+  read `borderless on monitor 2`. `None` still means the backend cannot say —
+  the surface is on no output or on two.
+
 ### Fixed
+
+- **crcbl-shell** (X11): hiding a window with `set_visible(false)` unmapped it
+  without telling the window manager. ICCCM 4.1.4 requires a synthetic
+  `UnmapNotify` to the root alongside the unmap, because a reparenting manager
+  watches the frame it created rather than the client window inside it and may
+  never see the real event. Under `openbox` the window was unmapped and remapped
+  before the application could observe it hidden.
 
 - **crcbl-shell**: `WindowState::mode_request_honoured` compared the requested
   and effective modes with `==`, which is wrong whenever the backend can name

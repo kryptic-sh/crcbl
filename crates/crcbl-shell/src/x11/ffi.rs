@@ -859,6 +859,23 @@ pub struct WindowNotifyEvent {
     pub pad1: [u8; 3],
 }
 
+/// [`WindowNotifyEvent`] padded to the 32 bytes `SendEvent` reads.
+///
+/// The same wire layout — a synthetic `UnmapNotify` is byte-identical to a real
+/// one — but `xcb_send_event` copies 32 bytes from whatever it is handed, so a
+/// 16-byte struct would send 16 bytes of this process's stack to the window
+/// manager. `Conn::send_event` refuses to compile for anything else, which is
+/// how that is prevented rather than remembered.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SyntheticWindowNotify {
+    /// The event proper.
+    pub event: WindowNotifyEvent,
+    /// The bytes past the event's end, which the protocol leaves unspecified
+    /// and this backend sends as zero.
+    pub pad: [u8; 16],
+}
+
 /// `xcb_property_notify_event_t`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -2091,6 +2108,11 @@ mod tests {
         assert_eq!(size_of::<ClientMessageEvent>(), 32, "SendEvent wants 32");
         assert_eq!(size_of::<FocusEvent>(), 12);
         assert_eq!(size_of::<WindowNotifyEvent>(), 16);
+        assert_eq!(
+            size_of::<SyntheticWindowNotify>(),
+            32,
+            "16 on the wire, padded because SendEvent reads 32"
+        );
         assert_eq!(size_of::<SelectionClearEvent>(), 16);
         assert_eq!(size_of::<MappingNotifyEvent>(), 8);
         assert_eq!(size_of::<Cookie>(), size_of::<c_uint>());

@@ -156,6 +156,12 @@ pub struct Peer {
     offers: Vec<Offer>,
     outgoing: Vec<Outgoing>,
     incoming: Incoming,
+    /// The most recent server timestamp any event has carried.
+    ///
+    /// X11 has no "what time is it" request, so the only way to hold a valid
+    /// timestamp is to keep the last one the server sent. See
+    /// [`server_time`](Self::server_time).
+    last_time: u32,
     /// Bytes per `INCR` chunk when the peer owns the clipboard.
     ///
     /// Deliberately settable and deliberately tiny by default when
@@ -250,6 +256,7 @@ impl Peer {
             offers: Vec::new(),
             outgoing: Vec::new(),
             incoming: Incoming::default(),
+            last_time: 0,
             chunk: None,
         })
     }
@@ -313,6 +320,56 @@ impl Peer {
         self.root
     }
 
+    /// The server's current time, as close as X11 lets a client get to it.
+    ///
+    /// **There is no request that asks.** The only timestamps a client holds
+    /// are the ones events carried, so the standard idiom — the one every
+    /// toolkit uses, and the one this backend's own selection code uses — is to
+    /// append *nothing* to a property and read the time off the
+    /// `PropertyNotify` that provokes. The append is a no-op on the property;
+    /// the event is the whole point.
+    ///
+    /// Why the harness needs one: `_NET_ACTIVE_WINDOW` carries the timestamp of
+    /// the user action that asked for the activation, and a window manager
+    /// compares it against the last input it saw. `CurrentTime` is zero, which
+    /// is *older than everything*, so once any test in this suite had synthesised
+    /// a keystroke `openbox` read every later activation request as stale and
+    /// refused it — and every focus-needing test from that point in the run
+    /// onwards timed out, while each passed on its own.
+    ///
+    /// Bounded: if the server never answers, the last time known is returned
+    /// and the request is merely as good as it was before.
+    fn server_time(&mut self) -> u32 {
+        /// Long enough for a loaded server, short enough not to be felt. A
+        /// local X socket answers in microseconds.
+        const TURNS: u32 = 500;
+
+        let stamp = self.atom("CRCBL_E2E_TIME");
+        let before = self.last_time;
+        // SAFETY: the connection and window are live. Appending zero elements
+        // is well-defined and leaves the property's value untouched.
+        unsafe {
+            (self.lib.change_property)(
+                self.connection,
+                ffi::value::PROP_MODE_APPEND,
+                self.window,
+                stamp,
+                ffi::value::ATOM_STRING,
+                8,
+                0,
+                ptr::null(),
+            );
+        }
+        self.flush();
+        for _ in 0..TURNS {
+            self.service();
+            if self.last_time != before {
+                break;
+            }
+        }
+        self.last_time
+    }
+
     /// Asks the **window manager** to focus a window, as a pager does.
     ///
     /// The counterpart to [`focus`](Self::focus), and the one to use when a
@@ -327,6 +384,7 @@ impl Peer {
     /// prevention exists to refuse.
     pub fn activate(&mut self, xid: u32) {
         let active = self.atom("_NET_ACTIVE_WINDOW");
+        let time = self.server_time();
         /// `SubstructureNotify | SubstructureRedirect`, the masks a window
         /// manager selects on the root.
         const SUBSTRUCTURE: u32 = (1 << 19) | (1 << 20);
@@ -338,7 +396,7 @@ impl Peer {
             sequence: 0,
             window: xid,
             type_: active,
-            data: [SOURCE_PAGER, ffi::value::CURRENT_TIME, 0, 0, 0],
+            data: [SOURCE_PAGER, time, 0, 0, 0],
         };
         // SAFETY: the connection and root are live, and `SendEvent` reads
         // exactly the 32 bytes a `ClientMessageEvent` is.
@@ -767,6 +825,7 @@ impl Peer {
         let Some(event) = read_wire::<ffi::PropertyNotifyEvent>(raw) else {
             return;
         };
+        self.last_time = event.time;
 
         if event.state == NEW_VALUE && self.incoming.active && self.incoming.incremental {
             let bytes = self
@@ -854,6 +913,13 @@ impl Peer {
                 values.as_ptr().cast::<c_void>(),
             );
         }
+    }
+
+    /// The screen's root window, which is where a desktop's own properties
+    /// live — `_NET_CLIENT_LIST`, `_NET_ACTIVE_WINDOW`, `_NET_SUPPORTING_WM_CHECK`.
+    #[must_use]
+    pub const fn root(&self) -> u32 {
+        self.root
     }
 
     /// Reads a property on **someone else's** window.

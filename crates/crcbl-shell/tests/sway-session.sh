@@ -56,6 +56,14 @@ sway_session_start() {
     export WLR_BACKENDS=headless
     export WLR_LIBINPUT_NO_DEVICES=1
     export WLR_RENDERER_ALLOW_SOFTWARE=1
+    # **How many virtual outputs exist is wlroots' decision, not the config
+    # file's.** The headless backend creates exactly one unless told otherwise,
+    # and an `output HEADLESS-2 { … }` block for an output that was never
+    # created is accepted in silence — sway keeps it as configuration for a
+    # display that might appear later. So a suite that declared a second output
+    # and asserted on one monitor would go on passing, having tested nothing.
+    # The count belongs here, next to the backend that honours it.
+    export WLR_HEADLESS_OUTPUTS="${CRCBL_E2E_OUTPUTS:-2}"
     # Inherit nothing from an outer session.
     unset WAYLAND_DISPLAY
     unset DISPLAY
