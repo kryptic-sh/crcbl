@@ -161,6 +161,11 @@ mod tests {
         assert_eq!(options.seed, crate::game::DEFAULT_SEED);
         assert_eq!(options.frames, None);
         assert_eq!(options.frame_budget(), None);
+        // Breakout has asserted this since it was the only sample and the three
+        // parsers copied from it dropped it. `None` is "let the registry
+        // choose", and a default that quietly became `Some(Vk)` would strand
+        // every machine without a driver — which is what it did to CI.
+        assert_eq!(options.backend, None);
     }
 
     /// Every spelling the CI harness scripts use — the same list breakout's
@@ -189,6 +194,10 @@ mod tests {
     #[test]
     fn nonsense_is_refused_rather_than_ignored() {
         assert!(rejected(&["--tick-hz", "0"]).contains("tick rate"));
+        // A *negative* rate parses as `u32` and fails, which is the same
+        // rejection by a different route — breakout tests it and the three
+        // copies of this parser stopped.
+        assert!(rejected(&["--tick-hz", "-1"]).contains("tick rate"));
         assert!(rejected(&["--frames", "0"]).contains("frame count"));
         assert!(rejected(&["--seed", "kittens"]).contains("seed"));
         assert!(rejected(&["--nonsense"]).contains("nonsense"));
@@ -231,6 +240,13 @@ mod tests {
     fn help_is_help() {
         assert!(matches!(
             parse(["-h".to_string()].into_iter()),
+            Invocation::Help
+        ));
+        // Both spellings. Only `-h` was checked here; a `--help` that fell
+        // through to "unknown argument" would exit 2 with a usage complaint
+        // instead of printing the usage.
+        assert!(matches!(
+            parse(["--help".to_string()].into_iter()),
             Invocation::Help
         ));
         assert!(USAGE.contains("--seed"));
