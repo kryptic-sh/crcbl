@@ -3346,254 +3346,66 @@ reviewed — `crates/*` and `apps/*`, ~216k lines of Rust. Correctness, security
 and performance passes were split per crate across read-only review passes;
 every finding below was re-verified against the code it cites (re-traced to the
 return path, guard chain checked, string/length arithmetic applied) before being
-published. **47 findings: 16 medium, 31 low, no critical or high.**
+published. **47 findings: 16 medium, 31 low, no critical or high.** All sixteen
+medium findings were closed on 2026-08-04 — see the list below, which replaced
+the per-finding entries; the Low section is what remains.
 
 ### Medium
 
-1. **A reconnect that arrives after the grace deadline expires the session
-   without setting `session_terminated`, so the next fresh join silently reuses
-   the dead session's token and id.** `crates/crcbl-server/src/lib.rs:350`.
-   `expire_if_timed_out` runs inside `handle_hello`'s `Reconnecting` branch,
-   i.e. inside `drain_inputs` (lib.rs:152), which runs _before_
-   `update_session_for_transport` (lib.rs:153) in the same tick; by the time the
-   transition check at lib.rs:167-171 runs, the state is already `Disconnected`,
-   so `was_reconnecting` is false and the flag is never set. The rotation gate
-   (lib.rs:280-288) then does not fire, and a fresh token-less join goes down
-   the `Disconnected` branch (lib.rs:298-310), which re-issues the old token and
-   the same `SessionId(1)` with the same MAC key. The departed client can still
-   reconnect with its old token against the new session (lib.rs:370-378) and
-   seal messages the server accepts. The test
-   `injected_time_expires_reconnect_without_sleep` (tests/integration.rs:439)
-   passes only because it queues no hello before the expiry update.
+Closed on 2026-08-04, one commit each (all pushed to `main`; `git log` is the
+record, and each fix shipped with a test that failed on the old code):
 
-   Repro: connect, receive token T; transport drops; `server.update(1s)` →
-   Reconnecting (deadline 2s); queue
-   `hello{generation:1, session_token:Some(T)}`; `server.update(3s)` (drain
-   processes the hello before the expiry check: `can_reconnect` false →
-   `expire_if_timed_out` → Disconnected, flag unset); fresh client sends
-   `hello{None}`. Expect: rotated session (new token, `SessionId(2)`). Actual:
-   Accept carries old token T and `SessionId(1)`; old client can rejoin.
-
-2. **A client holding a resume token the server no longer recognises can never
-   rejoin: nothing ever clears `resume_token`, so every retry re-sends the stale
-   token forever.** `crates/crcbl-client/src/lib.rs:508,622`; `reconnect()`
-   (lib.rs:388-397) resets handshake state but not `resume_token`/`session_id`.
-   After a server restart the server is `Disconnected` and rejects a
-   token-bearing hello with `INVALID_SESSION_TOKEN` ("fresh handshake must not
-   include a session token", server lib.rs:299-303) — a _transient_ code
-   (`is_permanent`, `crates/crcbl-net/src/handshake.rs:66-73`) — so the client
-   schedules a retry (lib.rs:638) with the same token, capped at 8s backoff,
-   forever.
-
-   Repro: connect (token stored) → server process restarts → client
-   `reconnect(transport)` → every hello carries the old token → transient reject
-   → retry with the same token, indefinitely. Expect: eventual fallback to a
-   fresh token-less join. Actual: permanently wedged at "connecting"; no fresh
-   hello ever sent.
-
-3. **The deletion queue frees an object after the _next_ submission; two
-   submissions referencing one destroyed object free it while the second still
-   runs.** `crates/crcbl-vk/src/device.rs:834-836` (`park` keys on
-   `submissions() + 1`), `deletion.rs:98-109` (`retire` frees at
-   `retire_at <= completed`). The seam explicitly permits record → destroy →
-   submit (hal `device.rs:95-102`; vk `device.rs:827-833`), but +1 only covers
-   one future submission: an object recorded into two command buffers is freed
-   when the timeline reaches N+1 while submission N+2 still executes. GPU-side
-   use-after-free. Unreachable by current in-tree consumers (single
-   submit-per-frame), reachable through the public `Device::submit` API, e.g.
-   the `ASYNC_COMPUTE_QUEUE` path.
-
-   Repro: record CB-A and CB-B both referencing buffer X; `destroy_buffer(X)`;
-   `submit([CB-A])`; `submit([CB-B])`. Expect: X freed no earlier than
-   submission 2 completing. Actual: X freed once the timeline reaches 1, while
-   CB-B still queued/running.
-
-4. **`set_mode(Borderless)` unconditionally shows a hidden window.**
-   `crates/crcbl-shell/src/appkit/window.rs:678` calls `makeKeyAndOrderFront:`
-   with no `isVisible` check anywhere between `apply_mode` entry (604) and that
-   call; `set_visible(false)` uses `orderOut:` (shell.rs:1062) and the Win32
-   sibling explicitly carries `WS_VISIBLE` across the style change
-   (`win32/window.rs:382-388`). A window hidden or created invisible pops on
-   screen and takes key focus on a mode change; `window_state().visible` reports
-   true without any `set_visible(true)`.
-
-   Repro: `create_window(visible:false)` then
-   `set_mode(Borderless { monitor: Some(m) })`. Expect: mode changes only;
-   visible stays false. Actual: window shown and key; `visible` reports true.
-
-5. **Minimizing a captured window re-applies the pointer clip from
-   `GetClientRect`'s 0×0 answer, risking a pinned cursor for the whole minimized
-   period.** `crates/crcbl-shell/src/win32/proc.rs:461-481` — the `WM_SIZE`
-   `SIZE_MINIMIZED` arm pushes `Minimized` without clearing the recorded clip
-   target and still calls `input::reclip` (proc.rs:480); `reclip` re-applies
-   because `shared.clipped() == window` (input.rs:283); `client_screen_rect` of
-   an iconic window maps both corners of a 0×0 rect to the same point
-   (input.rs:225-254) and `ClipCursor` gets a degenerate rectangle
-   (input.rs:263). The `KILLFOCUS` arm keeps the recorded target by design
-   (proc.rs:518-524), so the re-clip fires in either message order. Real
-   Windows' empty-rect behaviour is undocumented (pin vs release); either way
-   the clip is re-established from a bogus rect and the module's own "never
-   holds the desktop hostage" invariant is violated until restore. No test
-   covers minimize-with-capture.
-
-   Repro: capture a window (`PointerMode::Locked|Confined`), then minimize it.
-   Expect: desktop pointer stays usable. Actual: clip re-applied from a 0×0
-   client area — cursor confined to one point until restore/destroy (keyboard
-   restore works).
-
-6. **RandR `OutputChangeNotify` is selected at connect and never handled.**
-   `crates/crcbl-shell/src/x11/connect.rs:62-69` selects
-   `RANDR_OUTPUT_CHANGE_MASK`, but `handle_event` only matches `base..=base+1`
-   (input.rs:154-156) — `OutputChangeNotify` is base+2 and falls to `_ => {}`
-   (input.rs:186). An output-only change (monitor unplugged on a server that
-   does not disable the CRTC) never re-enumerates; the ghost monitor stays until
-   something else happens to trigger `handle_monitors_changed`.
-
-   Repro: server sends RandR `OutputChangeNotify` (response = randr_base+2).
-   Expect: monitors re-enumerated; `ShellEvent::MonitorsChanged`. Actual: event
-   matches no arm; stale monitor retained indefinitely.
-
-7. **The INCR write path clobbers our own window's event mask when the requestor
-   is one of our windows.** `crates/crcbl-shell/src/x11/xselection.rs:183` calls
-   `select_property_changes(requestor)` which
-   `ChangeWindowAttributes(EVENT_MASK=[PROPERTY_CHANGE])`
-   (xselection.rs:640-655) — a _replace_, not an OR — while `WINDOW_EVENT_MASK`
-   is documented "set at creation and never changed" (shell.rs:18-33).
-   `clipboard_request(window)` names the caller's window as the wire requestor
-   (shell.rs:867-874), so a self-paste (or one of our windows pasting our own
-   offer) of a payload larger than `max_property_bytes` strips
-   KEY_PRESS/BUTTON_PRESS/MOTION/FOCUS from that window, permanently (nothing
-   restores the mask). The e2e test `pasting_our_own_copy_does_not_deadlock`
-   uses an 11-byte payload and never takes the INCR branch.
-
-   Repro: window A owns a >16 KiB offer; window B (same process) calls
-   `clipboard_request` for it. Expect: B keeps delivering input events. Actual:
-   B's event mask becomes `{PROPERTY_CHANGE}`; all input on B stops.
-
-8. **No bound on offers a hostile compositor announces and never claims;
-   `incoming`, `Sink::objects` and libwayland proxies grow without limit.**
-   `crates/crcbl-shell/src/wayland/mod.rs:3711-3713` pushes every announced
-   `wl_data_device.data_offer` into `device.incoming` (data.rs:136), removed
-   only by `claim` (data.rs:180-189), which requires a matching
-   `selection`/`enter`; `Sink::watch` grows `objects` (mod.rs:708); mime strings
-   append uncapped (mod.rs:3720). `Offer` has no `Drop` that destroys the proxy
-   (data.rs:31-36) and `destroy_offer` (mod.rs:3685) runs only on explicit
-   paths. Registry-global floods grow `outputs`/`seats` the same way. The one
-   hostile-input quantity this backend does not cap.
-
-   Repro: compositor sends N × `data_offer` + M × `offer`, never `selection`/
-   `enter`/destroy. Expect: memory bounded (as transfers are: fd.rs:97,105).
-   Actual: proxies, `Sink::objects` entries and `incoming` offers accumulate for
-   the whole session.
-
-9. **The reference frame records a depth attachment with no
-   `Undefined → DepthStencilWrite` barrier, violating the seam's own attachment
-   contract.** `crates/crcbl-hal/tests/seam_from_outside.rs:148-168` creates the
-   depth image (state Undefined); `render()` (256-297) records one barrier, for
-   the colour image only (269-274), then `begin_render_pass` with
-   `depth_stencil_attachment { read_only: false }` (287-295). The seam requires
-   attachments "already in the right state" (`command.rs:619`, `170-171`,
-   `186-189`), `read_only: false` pairs with `DepthStencilWrite`
-   (`command.rs:202-203`), and a fresh image's only legal source state is
-   Undefined (resource.rs:258-263). A faithful Vulkan backend gets a VUID
-   violation; wgpu auto-transitions and the null backend checks handles, not
-   states — so the reference frame is valid on two tiers and invalid on the
-   third, and `assert_valid()` cannot see it. The frame is what the renderer is
-   expected to copy.
-
-   Repro: run the reference `render()` against a strict Vulkan backend. Expect:
-   a `Undefined → DepthStencilWrite` barrier recorded for the depth image before
-   the pass. Actual: depth image enters `vkCmdBeginRendering` in `UNDEFINED`
-   while the pass declares `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`.
-
-10. **Push-constant range addition overflows: debug panic, release silent
-    misconfiguration.** `crates/crcbl-wgpu/src/device.rs:878` is
-    `range.offset + range.size` — plain u32 arithmetic with no saturation and no
-    limit check, gated only by the `IMMEDIATES` feature check (device.rs:873).
-    The null backend documents this exact bug as already fixed there with
-    `saturating_add` and a limit check (null/mod.rs:1078-1087).
-
-    Repro:
-    `create_pipeline_layout(&PipelineLayoutDesc { push_constants: Some(PushConstantRange { offset: u32::MAX, size: 1 }), .. })`.
-    Expect: `HalError::InvalidDescriptor`. Actual: debug — panic "attempt to add
-    with overflow"; release — wraps to 0, a zero-size immediate block silently
-    created.
-
-11. **MSAA `resolve_target` is hardcoded `None`; `ColorAttachment::resolve` is
-    silently dropped.** `crates/crcbl-wgpu/src/command.rs:487` never reads
-    `att.resolve` (mapped at 478-494), while the seam documents the field as the
-    resolve destination (hal command.rs:173-174), the null backend records it
-    and crcbl-vk renders it. Silent wrong output — no error, no log. No in-tree
-    caller sets `resolve` today (latent).
-
-    Repro: `begin_render_pass` with a 4x MSAA view and `resolve: Some(view)`.
-    Expect: resolve view receives the resolved image. Actual: pass renders into
-    the MSAA target; nothing is ever resolved.
-
-12. **Native audio plays 48 kHz-authored voices at the device rate, detuning
-    everything on non-48 kHz hardware.** `crates/crcbl-audio/src/lib.rs:166,179`
-    pass the device rate into `fill` → `Mixer::fill` ignores it (`_sample_rate`,
-    mixer.rs:464), stepping every voice one frame per output frame; voices are
-    authored for `INTERNAL_SAMPLE_RATE` = 48 kHz (lib.rs:69). The web path
-    exists precisely to resample because passing the device rate down "would
-    detune every sound by 147 cents" (web.rs:68-77) — the native path does
-    exactly that. On a 44.1 kHz device all audio plays ~9% slow.
-
-    Repro: play any 48 kHz WAV/synth SFX on a device reporting 44.1 kHz. Expect:
-    pitch preserved (as on the web path). Actual: all audio ~147 cents flat;
-    looping tones off by nearly a semitone.
-
-13. **Allocation on the realtime audio thread for mono/multichannel devices.**
-    `crates/crcbl-audio/src/lib.rs:277-291` — the mono and >2-channel branches
-    of `fill_audio` allocate `vec![0.0f32; block * CHANNELS]` per callback
-    (lib.rs:97,104), called from the cpal callback on the OS audio thread every
-    block (~10 ms) regardless of whether anything is playing. The stereo fast
-    path is allocation-free.
-
-    Repro: open `AudioStream` on a mono or 6-channel device. Expect: no
-    allocation on the steady path. Actual: a per-block `Vec` allocation
-    (malloc + locks) on a realtime thread.
-
-14. **Unbounded PNG allocation from a hostile IHDR aborts the process.**
-    `crates/crcbl-sprite/src/load.rs:222` —
-    `vec![0u8; reader.output_buffer_size()]` where that size is computed from
-    IHDR width/height alone, capped only at `isize::MAX` (png 0.18.1,
-    decoder/mod.rs:668); the crate's `Limits` budget covers the decoder's
-    internal buffers, not this one. A ~100-byte PNG declaring 65536×65536
-    triggers a 4 GiB allocation; 2²⁰×2²⁰ requests 4 TiB and aborts.
-    `crates/crcbl-golden/src/image.rs:290-318` guards this exact attack
-    (`checked_byte_count`/`MAX_PIXELS` before allocating, comment at 297-301).
-
-    Repro: 100-byte PNG with IHDR
-    `{width: 65536, height: 65536, bit_depth: 8, color_type: 6}` fed to
-    `decode_png`. Expect: `LoadError` before any allocation. Actual: 4 GiB
-    allocation (4 TiB → process abort for 2²⁰×2²⁰).
-
-15. **`--tick-hz` values above 1e9 are accepted by the parsers and panic the
-    engine** (`exit 101` instead of the documented `exit 2`).
-    `crates/crcbl/src/args.rs:200-206` (Common — used by the four games and
-    bare) and `apps/sandbox/src/args.rs:97-108` check only zero and >u32::MAX;
-    `1_000_000_001..=u32::MAX` passes, then `FrameClock::new` computes
-    `1e9 / tick_hz = 0` ns (crcbl-core time.rs:331) and `with_period` asserts
-    (time.rs:342) after the GPU is already open. sim guards this correctly
-    (`apps/sim/src/main.rs:47-56`).
-
-    Repro: `crcbl run -- --tick-hz 1000000001` (or sandbox/bare with
-    2000000000). Expect: bad-usage refusal, exit 2. Actual: panic at
-    time.rs:342, exit 101.
-
-16. **`crcbl crpix` frame names that are clip-grammar keywords silently corrupt
-    the written `.crpix`.** `crates/crcbl-cli/src/args.rs:773-787`
-    (`check_sheet_name`) rejects empty/whitespace/`:`/`#` but not the tokens the
-    clip parser treats as flags — `loop`, `reverse`, `pingpong`, `@`
-    (crcpix.rs:587-600). A frame named `loop` writes `clip flap: loop loop`
-    (trace.rs:328-332), which parses as zero frames + the loop flag; the CLI
-    exits 0 and reports success. A stem of exactly `@` fails the parse-back and
-    reports a user error as the tool's own bug.
-
-    Repro: `crcbl crpix loop.png -o out.crpix --clip flap`. Expect: a clip that
-    plays the frame `loop`. Actual: `clip flap: loop loop` — zero frames,
-    exit 0.
+- **1 — server rotated the dead session's token on a late reconnect**
+  (`fix(net): rotate session on late reconnect; drop stale resume token`,
+  68cc444): `handle_hello` now sets `session_terminated` when its own expiry
+  check drops the session.
+- **2 — client retried a stale resume token forever** (same commit): two
+  consecutive `INVALID_SESSION_TOKEN` rejections drop the credential and fall
+  back to a fresh join.
+- **3 — deletion queue freed a destroyed object one submission early**
+  (`fix(vk): keep destroyed objects alive for every referencing submission`,
+  6b267f9): command buffers record the raw objects they use and a submission
+  extends each parked one's retirement to its own completion.
+- **4 — AppKit `set_mode(Borderless)` showed a hidden window**
+  (`fix(shell): keep a hidden AppKit window hidden across set_mode`, 3d55423).
+- **5 — Win32 minimize re-applied the pointer clip from a 0×0 client rect**
+  (`fix(shell): release the pointer clip when a captured window minimizes`,
+  32f90c8).
+- **6 — RandR `OutputChangeNotify` never handled: FALSE POSITIVE, verified
+  2026-08-04.** The xcb randr protocol defines exactly two events —
+  `ScreenChangeNotify` (base+0) and `Notify` (base+1, whose `subCode` carries
+  CrtcChange/OutputChange/etc.; `/usr/share/xcb/randr.xml` declares
+  `<event name="ScreenChangeNotify" number="0">` and
+  `<event name="Notify" number="1">` and nothing else) — so `handle_event`'s
+  `base..=base+1` range already routes output changes to
+  `handle_monitors_changed`. There is no base+2 event and nothing was unhandled.
+- **7 — INCR mask replace stripped input from our own windows**
+  (`fix(shell): never replace an own window's mask for INCR property changes`,
+  9b90ba8).
+- **8 — unbounded unclaimed wayland data offers**
+  (`fix(shell): bound unclaimed wayland data offers`, 1c834b3): pending offers
+  capped at 8 with oldest-first eviction, per-offer mimes capped at 32.
+- **9 — reference frame's depth image entered the pass in `Undefined`**
+  (`test(hal): transition the reference frame's depth image into the pass`,
+  b53c603).
+- **10 — wgpu push-constant range overflowed**
+  (`fix(wgpu): wire MSAA resolve targets; saturate push-constant range end`,
+  cd49486).
+- **11 — wgpu dropped `ColorAttachment::resolve`** (same commit): resolve views
+  resolved from the pool and wired into the pass; stale handles fail loudly.
+- **12 — native audio detuned at non-48 kHz device rates**
+  (`fix(audio): step voices at the internal rate; stop per-block allocation`,
+  4c59171).
+- **13 — per-block allocation on the audio thread** (same commit): the mono and
+  multichannel scratch is owned by the stream callback and reused.
+- **14 — hostile-IHDR PNG allocation bomb**
+  (`fix(sprite): bound the PNG output buffer before allocating from IHDR`,
+  0e6fcb7): declared pixels bounded against `1 << 28` before any allocation.
+- **15 — `--tick-hz` above 1e9 panicked the engine after the GPU was open**
+  (`fix(cli): refuse --tick-hz rates the frame clock cannot express`, 473702d):
+  both parsers refuse past `MAX_TICK_RATE`.
+- **16 — crpix frame names that are clip keywords silently corrupted the file**
+  (`fix(cli): refuse crpix frame names that are clip keywords`, 0f104a7).
 
 ### Low
 
