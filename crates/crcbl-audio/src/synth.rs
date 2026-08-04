@@ -69,6 +69,12 @@ const NOISE_LOWPASS_ALPHA: f32 = 0.16;
 /// not a click, short enough that it does not soften an attack.
 pub const FADE_FRAMES: usize = 60;
 
+/// The longest a generated sound may be: a hostile `seconds`/`cycles` must not
+/// overflow the frame count (f32 arithmetic saturates to `usize::MAX`, and
+/// `frames * CHANNELS` then wraps or aborts). A minute at the internal rate is
+/// far beyond anything a cue needs.
+const MAX_FRAMES: usize = 48_000 * 60;
+
 /// A linear fade in and out, so a cue starts and stops without a click.
 ///
 /// Returns the gain to apply at `frame` of a sound `total` frames long: it
@@ -103,7 +109,9 @@ pub fn fade_gain(frame: usize, total: usize) -> f32 {
 /// is exactly what a loop must not have.
 #[must_use]
 pub fn sine(freq_hz: f32, seconds: f32, sample_rate: u32) -> Vec<AudioSample> {
-    let frames = (sample_rate as f32 * seconds) as usize;
+    // f64 so the product cannot overflow f32; floored to whole frames; capped
+    // so a hostile `seconds` cannot overflow `frames * CHANNELS`.
+    let frames = ((sample_rate as f64 * f64::from(seconds)).floor() as usize).min(MAX_FRAMES);
     let mut out = Vec::with_capacity(frames * CHANNELS);
     for i in 0..frames {
         let t = i as f32 / sample_rate as f32;
@@ -130,7 +138,15 @@ pub fn sine(freq_hz: f32, seconds: f32, sample_rate: u32) -> Vec<AudioSample> {
 ///   clicking; on a loop it is a hole punched in the tone once per repeat.
 #[must_use]
 pub fn looped_sine(freq_hz: f32, cycles: u32, sample_rate: u32) -> Vec<AudioSample> {
-    let frames = ((cycles as f32 * sample_rate as f32) / freq_hz).round() as usize;
+    // A zero or non-finite frequency is a degenerate request (divide by zero
+    // below); an empty buffer is what the sound bank already refuses.
+    if !freq_hz.is_finite() || freq_hz <= 0.0 {
+        return Vec::new();
+    }
+    // f64 so the product cannot overflow f32; rounded to the nearest whole
+    // frame; capped so a hostile `cycles` cannot overflow `frames * CHANNELS`.
+    let frames = ((cycles as f64 * f64::from(sample_rate) / f64::from(freq_hz)).round() as usize)
+        .min(MAX_FRAMES);
     let mut out = Vec::with_capacity(frames * CHANNELS);
     for i in 0..frames {
         let phase = 2.0 * std::f32::consts::PI * cycles as f32 * (i as f32 / frames as f32);
@@ -156,7 +172,9 @@ pub fn looped_sine(freq_hz: f32, cycles: u32, sample_rate: u32) -> Vec<AudioSamp
 /// wrong one.
 #[must_use]
 pub fn noise_burst(seconds: f32, decay: f32, seed: u64, sample_rate: u32) -> Vec<AudioSample> {
-    let frames = (sample_rate as f32 * seconds) as usize;
+    // f64 so the product cannot overflow f32; floored to whole frames; capped
+    // so a hostile `seconds` cannot overflow `frames * CHANNELS`.
+    let frames = ((sample_rate as f64 * f64::from(seconds)).floor() as usize).min(MAX_FRAMES);
     let mut out = Vec::with_capacity(frames * CHANNELS);
 
     let mut low = 0.0f32;
@@ -326,5 +344,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A hostile `seconds` must not overflow the frame count and abort the
+    /// process; the generators cap at [`MAX_FRAMES`].
+    #[test]
+    fn hostile_parameters_are_capped_not_overflowed() {
+        let sine_buf = sine(f32::MAX, 1e30, RATE);
+        assert!(sine_buf.len() / CHANNELS <= MAX_FRAMES);
+
+        let noise = noise_burst(1e30, 1.0, 0, RATE);
+        assert!(noise.len() / CHANNELS <= MAX_FRAMES);
+    }
+
+    /// A zero frequency would divide by zero; the degenerate request is an
+    /// empty buffer rather than a panic.
+    #[test]
+    fn looped_sine_with_zero_frequency_is_empty() {
+        assert!(looped_sine(0.0, 10, RATE).is_empty());
+    }
+
+    /// The legitimate path is unchanged: a whole-second-asking request still
+    /// gets exactly the frames it asked for.
+    #[test]
+    fn sine_still_produces_exactly_the_frames_asked() {
+        assert_eq!(sine(440.0, 0.1, RATE).len(), 4800 * CHANNELS);
     }
 }

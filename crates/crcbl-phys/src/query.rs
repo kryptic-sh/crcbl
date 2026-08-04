@@ -23,6 +23,11 @@ pub fn sphere_overlaps_sphere(a: &Sphere, b: &Sphere) -> bool {
 #[inline]
 #[must_use]
 pub fn sphere_overlaps_aabb(sphere: &Sphere, aabb: &Aabb) -> bool {
+    // An inverted box (e.g. `Aabb::EMPTY`) overlaps nothing; clamping against
+    // it would assert on `min > max`.
+    if aabb.is_empty() {
+        return false;
+    }
     let closest = DVec3::new(
         sphere.centre.x.clamp(aabb.min.x, aabb.max.x),
         sphere.centre.y.clamp(aabb.min.y, aabb.max.y),
@@ -339,7 +344,11 @@ pub fn swept_sphere_vs_sphere(
     let combined_r = swept_radius + target.radius;
     let oc = segment.start - target.centre;
 
-    if dir.length_squared() <= 0.0 {
+    // A zero or near-stationary sweep (dir·dir at or below the quadratic
+    // floor) takes the overlap branch: `solve_quadratic` rejects `a <= EPSILON`
+    // outright, so anything shorter would be reported as a miss instead of the
+    // documented resting contact.
+    if dir.length_squared() <= f64::EPSILON {
         // Stationary sweep: just test sphere-sphere overlap.
         let dist = oc.length();
         if dist <= combined_r {
@@ -398,8 +407,15 @@ pub fn swept_sphere_vs_aabb(
     target: &Aabb,
 ) -> Option<ShapeHit> {
     let dir = segment.end - segment.start;
-    let len = dir.length();
-    if len <= 0.0 {
+    // An inverted box (e.g. `Aabb::EMPTY`) overlaps nothing; both the clamp in
+    // the stationary branch and the inflated slab would misbehave on it.
+    if target.is_empty() {
+        return None;
+    }
+    // A zero or near-stationary sweep (dir·dir at or below the quadratic
+    // floor) takes the overlap branch — with a tiny `dir` the slab t-values
+    // blow up, and the sphere sweep's quadratic rejects the same range.
+    if dir.length_squared() <= f64::EPSILON {
         // Stationary: test sphere vs AABB.
         let closest = DVec3::new(
             segment.start.x.clamp(target.min.x, target.max.x),
@@ -809,6 +825,41 @@ mod tests {
         // Nearest inflated face from (0.5, 0, 0) is +X (0.5 vs 1.5 elsewhere),
         // not the fabricated +Z the eps-chain used to fall through to.
         assert_eq!(hit.normal, DVec3::X);
+    }
+
+    #[test]
+    fn tiny_sweep_starting_inside_sphere_is_a_contact() {
+        // A sweep of length ~1e-10 m (dir·dir = 1e-20) is a real, non-stationary
+        // sweep but sits below `solve_quadratic`'s EPSILON floor. It must take
+        // the stationary branch and report a contact, not be rejected as a miss.
+        let seg = crate::broadphase::Segment::new(DVec3::ZERO, DVec3::new(1e-10, 0.0, 0.0));
+        let target = Sphere::new(DVec3::ZERO, 1.0);
+        let hit = swept_sphere_vs_sphere(&seg, 0.5, &target)
+            .expect("a sweep inside the target is a contact, not a miss");
+        assert_eq!(hit.t, 0.0);
+        assert!(hit.started_inside);
+    }
+
+    #[test]
+    fn tiny_sweep_starting_inside_aabb_is_a_contact() {
+        let seg = crate::broadphase::Segment::new(DVec3::ZERO, DVec3::new(1e-10, 0.0, 0.0));
+        let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
+        let hit = swept_sphere_vs_aabb(&seg, 0.5, &aabb)
+            .expect("a sweep inside the box is a contact, not a miss");
+        assert_eq!(hit.t, 0.0);
+        assert!(hit.started_inside);
+    }
+
+    #[test]
+    fn empty_aabb_overlaps_nothing() {
+        let sphere = Sphere::new(DVec3::ZERO, 1.0);
+        assert!(!sphere_overlaps_aabb(&sphere, &Aabb::EMPTY));
+    }
+
+    #[test]
+    fn swept_sphere_vs_empty_aabb_is_a_miss() {
+        let seg = crate::broadphase::Segment::new(DVec3::ZERO, DVec3::ZERO);
+        assert!(swept_sphere_vs_aabb(&seg, 1.0, &Aabb::EMPTY).is_none());
     }
 
     #[test]

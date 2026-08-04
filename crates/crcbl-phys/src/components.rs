@@ -36,11 +36,11 @@ impl RigidBody {
     ///
     /// # Panics
     ///
-    /// Panics in debug builds if `mass <= 0`.
+    /// Panics if `mass <= 0`.
     #[inline]
     #[must_use]
     pub fn new_dynamic(mass: f64) -> Self {
-        debug_assert!(mass > 0.0, "dynamic mass must be positive");
+        assert!(mass > 0.0, "dynamic mass must be positive");
         Self {
             mass,
             inverse_mass: 1.0 / mass,
@@ -313,6 +313,12 @@ mod tests {
         let body = RigidBody::new_kinematic();
         assert_eq!(body.inverse_mass, 0.0);
         assert!(!body.is_dynamic());
+    }
+
+    #[test]
+    #[should_panic(expected = "dynamic mass must be positive")]
+    fn new_dynamic_rejects_zero_mass() {
+        let _ = RigidBody::new_dynamic(0.0);
     }
 
     #[test]

@@ -1496,6 +1496,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-phys**: a sweep shorter than the quadratic solver's EPSILON floor
+  (below ~1.5e-8 m) was reported as a miss even when it started inside the
+  target — `solve_quadratic` rejects `a <= EPSILON` outright, so the swept
+  queries now treat anything at or below that floor as stationary and report the
+  resting contact. Overlap queries against an inverted box (`Aabb::EMPTY`) also
+  panicked on the clamp; they now answer "no overlap" instead.
+
+- **crcbl-phys**: `RigidBody::new_dynamic(0.0)` was a silent NaN cascade in
+  release builds — the only guard was a `debug_assert`, so `inverse_mass = +inf`
+  poisoned every query in the world. The contract now panics in every build.
+
+- **crcbl-audio**: the synth generators overflowed on hostile parameters —
+  `(sample_rate × seconds) as usize` saturates to `usize::MAX` and
+  `frames × CHANNELS` then wraps or aborts, and `looped_sine(0.0, …)` divided by
+  zero. Frame counts are now computed in f64, capped at a minute, and a zero
+  frequency returns an empty buffer.
+
 - **crcbl-input**: `begin_tick` accepted a negative `dt`, moving the clock
   backwards so a held button reported a negative `Held` duration. Only forward
   time is accepted now.
