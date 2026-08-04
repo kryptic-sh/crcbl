@@ -1162,6 +1162,79 @@ which is worth recording so a round trip is not spent finding out:
   real click looks like, and AppKit acting on that would be a harness defect
   reported as a backend one.
 
+### The readback layer earned itself: a borderless window at the wrong origin
+
+**The first defect `tests/appkit_session.rs`'s "AppKit as the judge" layer
+caught, and the kind only it can catch.** The run after the wheel fix reached
+the borderless flip and reported:
+
+```text
+borderless covers the screen AppKit says it is on, exactly
+  left:  [192.0, 160.0, 1024.0, 768.0]   -[NSWindow frame]
+ right:  [  0.0,   0.0, 1024.0, 768.0]   -[[NSWindow screen] frame]
+```
+
+The size is exactly right — the whole 1024×768 screen — and the origin is not.
+`(192, 160)` is precisely `geometry::centred` of the requested 640×480 on that
+screen's `visibleFrame`, which is to say **the window never moved from where it
+was created**. A screen-sized borderless window at a non-zero origin hangs off
+two edges of the display: visible, shipping-quality breakage in a game.
+
+**Nothing below AppKit could have seen it.** `WindowState` carries an extent and
+no position — there is no origin anywhere in the seam — so `set_mode` reported a
+perfectly correct `PhysicalSize { 1024, 768 }` and every run before this one
+printed it happily. It took asking `NSWindow` for its `frame` to see the origin
+at all. That is the entire argument for judging the window by AppKit's own
+accessors rather than by the backend's record of what it asked for, and it is
+now paid for.
+
+The cause is `-[NSWindow setFrame:display:]`, which does not simply apply the
+rectangle it is given: it passes it through `constrainFrameRect:toScreen:`
+first. That default keeps a title bar clear of the menu bar and the window on a
+screen — right for a document window someone dragged, wrong for every frame this
+backend sets, all of which come from an `NSScreen` rectangle and are on that
+screen by construction. And it fails in the worst available way: **silently,
+preserving the size it was given and moving the origin.** `CrcblWindow` now
+overrides it to answer the proposed rectangle unchanged, which is the documented
+way out and which the subclass already existed for.
+
+Three things checked while in there, because the fix is only worth as much as
+its neighbours:
+
+- **The way back did _not_ have the omission.** `apply_mode` saves the whole
+  `-[NSWindow frame]` before going borderless and restores the whole rectangle,
+  origin included — the same reason `win32/window.rs` saves a `WINDOWPLACEMENT`.
+  It was subject to the same silent constraint on the way in, so it gets the
+  same fix, and the session now asserts the restored frame equals the one
+  captured before the flip rather than only checking the style mask.
+- **`Borderless { monitor: Some(..) }` has no omission either**:
+  `borderless_frame` returns the named screen's `frame`, origin included. **It
+  is still unverified**, and cannot be verified on this runner — with one screen
+  attached, a backend that ignored the named monitor entirely would pass. It
+  needs a two-display machine.
+- **A window born borderless goes through the same constraint.**
+  `create_native_window` passes `screen.frame` to `initWithContentRect:` and
+  then `makeKeyAndOrderFront:`, both of which AppKit could constrain; the
+  override covers that path too. Nothing tests it — the session creates its
+  window windowed and flips — so it is fixed by construction rather than by
+  observation.
+
+`set_frame` now reads the frame back and `log::warn!`s if the window did not go
+where it was put, naming both rectangles. That is instrumentation rather than a
+workaround: the override should make them always agree, and a warning means it
+did not take. It is also worth having for a game developer, who has the same
+blind spot the seam does.
+
+**The guard for this is a host `#[test]`**, on the same terms as
+`appkit::view`'s class suite: `objc_allocateClassPair` and `class_addMethod` are
+runtime calls needing no `NSApplication`, so
+`the_window_class_installs_every_override_a_borderless_window_needs` asks
+`instancesRespondToSelector:` for all three overrides. It catches a refused
+`class_addMethod` and a misspelled selector, both of which leave the
+superclass's implementation in place and fail silently — confirmed offline that
+misspelling the selector in the registration still compiles. Like every macOS
+`#[test]` in this crate it is **compiled here and run only on CI**.
+
 ### `wheel1` is a named parameter, and declaring it variadic scrolled by zero
 
 The run after the delta fix reached the scroll and got
@@ -1265,12 +1338,18 @@ Decisions and limits worth keeping whatever the run says:
 Still uncovered after M5:
 
 - **The click is the last assertion in the session nothing has observed.** Two
-  `Button` events from one injected click, in order. Everything before it has
-  now been seen green on a runner, and everything after it is one assertion —
-  the wheel notch, whose value is unobserved only because the harness was
-  passing it wrongly until this slice (see the variadic entry above); the
-  `Lines`-against-`Pixels` branch it sits on was already reached, since the
-  event arrived and matched `ScrollDelta::Lines`.
+  `Button` events from one injected click, in order. Everything else in
+  `injected_input` has now been seen green on a runner, including the wheel
+  notch, and the session has since run past all of it to the borderless flip.
+- **`Borderless { monitor: Some(..) }` lands on the named screen's origin by
+  construction and not by observation.** The runner has one display, so a
+  backend that ignored the named monitor entirely would pass every assertion in
+  the suite. Needs a two-display machine; see the borderless-origin entry above.
+- **A window created borderless is untested.** The session creates its window
+  windowed and flips, so `create_native_window`'s borderless arm — which places
+  the window with `initWithContentRect:` rather than `setFrame:display:` — has
+  never run. It shares the `constrainFrameRect:toScreen:` fix, so it is correct
+  by construction.
 
 - **`injection_skipped` is written and unrun**, because the runner granted
   activation. It stays for the case that produced it, which a developer running

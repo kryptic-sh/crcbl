@@ -353,6 +353,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-shell** (AppKit): a borderless window covered the right **number of
+  pixels in the wrong place**. `-[NSWindow setFrame:display:]` passes the
+  rectangle it is given through `constrainFrameRect:toScreen:`, whose default
+  keeps a title bar clear of the menu bar — and which fails silently by
+  preserving the size and moving the origin. A window flipped to
+  `DisplayMode::Borderless` came out exactly screen-sized at its previous
+  windowed origin, hanging off two edges of the display. `CrcblWindow` now
+  overrides `constrainFrameRect:toScreen:` to answer the proposed rectangle
+  unchanged, so every frame this backend computes from an `NSScreen` is the
+  frame the window gets — the borderless flip, the restore on the way back, and
+  a window created borderless alike.
+
+  Nothing in the seam could report this: `WindowState` carries an extent and no
+  position, so `set_mode` answered a perfectly correct size throughout. It was
+  found by `tests/appkit_session.rs` asking `NSWindow` for its own `frame`,
+  which is the first defect that readback layer has caught.
+
 - **crcbl-shell** (X11): hiding a window with `set_visible(false)` unmapped it
   without telling the window manager. ICCCM 4.1.4 requires a synthetic
   `UnmapNotify` to the root alongside the unmap, because a reparenting manager

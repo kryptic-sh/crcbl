@@ -354,6 +354,14 @@ mod macos {
         clipboard_peer(&mut shell, window);
         resize(&mut shell, window, facts.backing_scale);
 
+        // **The whole placement before the flip**, so the way back can be judged
+        // on more than its style mask. Position is invisible to the seam —
+        // `WindowState` carries an extent and no origin — so AppKit is the only
+        // party that can say whether a restore put the window back where it was.
+        // `win32/window.rs` restores a whole `WINDOWPLACEMENT` for exactly this
+        // reason and the Win32 suite asserts it for exactly this reason.
+        let before_borderless = appkit_says("before going borderless").frame;
+
         let borderless = flip(
             &mut shell,
             window,
@@ -372,9 +380,21 @@ mod macos {
         let screen = covering
             .screen_frame
             .expect("a visible window is on a screen");
+        // **The origin is the half of this the seam cannot see, and the half that
+        // was wrong.** The first run to reach here reported the size exactly
+        // right and the origin at (192, 160) — the window's *creation* origin,
+        // `geometry::centred` of the requested size on the visible frame — which
+        // is a screen-sized window hanging off two edges of the display. Every
+        // earlier run printed `PhysicalSize { 1024, 768 }` and was happy, because
+        // that is all `WindowState` carries. Only asking AppKit for the frame
+        // shows it, which is the entire argument for this readback layer: **this
+        // is the first defect it caught, and it is the kind only it can catch.**
         assert_eq!(
             covering.frame, screen,
-            "borderless covers the screen AppKit says it is on, exactly"
+            "borderless covers the screen AppKit says it is on, exactly. A matching size with a \
+             different origin means the frame was constrained on its way in — CrcblWindow \
+             overrides constrainFrameRect:toScreen: to stop that, so a failure here means the \
+             override is not on the class the window turned out to be"
         );
         assert_eq!(
             borderless,
@@ -394,6 +414,15 @@ mod macos {
             restored.titled,
             "a windowed window has its title bar back; the style mask is {:#x}",
             restored.style_mask
+        );
+        // And the whole rectangle, not just the mask. The backend saves the frame
+        // before it goes borderless and puts it back, so a window that was
+        // somewhere before a mode round trip is in the same place after one —
+        // which is what a player alt-tabbing out of fullscreen expects and what
+        // nothing below AppKit could report.
+        assert_eq!(
+            restored.frame, before_borderless,
+            "the way back restores the whole placement, origin included, and not merely the size"
         );
 
         shell.destroy_window(window).expect("destroy_window");

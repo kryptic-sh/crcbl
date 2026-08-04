@@ -32,6 +32,31 @@
 //! titled window where a frameless one fitted. The desktop's display mode is
 //! never touched, which is the whole reason the mode exists.
 //!
+//! # Decision: `constrainFrameRect:toScreen:` is overridden, because a game says where its window goes
+//!
+//! `-[NSWindow setFrame:display:]` does not simply apply the rectangle it is
+//! given: it passes it through `constrainFrameRect:toScreen:` first, whose
+//! default implementation keeps a window's title bar clear of the menu bar and
+//! the window itself on a screen. That is right for a document window a person
+//! dragged and **wrong for every frame this backend sets**, all of which are
+//! computed from an `NSScreen` rectangle that is by construction on that screen:
+//! a borderless window is meant to cover the menu bar, and a restored windowed
+//! one is meant to land exactly where it was.
+//!
+//! The default is not merely unhelpful, it is silent — it preserves the size it
+//! was given and moves the origin, so the symptom is a window of exactly the
+//! right extent in the wrong place. **A borderless window that is screen-sized
+//! but offset hangs off two edges of the display**, and nothing in the seam can
+//! see it: [`WindowState`](crate::WindowState) carries a size and no position, so
+//! `set_mode` reported a perfectly correct 1024×768 while the window sat at
+//! (192, 160) — its creation origin, untouched.
+//!
+//! Overriding it to answer the proposed rectangle unchanged is the documented
+//! way out, and the subclass to do it in already exists for
+//! `canBecomeKeyWindow`. What that gives up is AppKit's safety net for a frame
+//! this backend computed wrongly; what it buys is that a frame this backend
+//! computed *correctly* is the frame the window gets.
+//!
 //! Unlike the Win32 backend there is no `WINDOWPLACEMENT` to save: AppKit's
 //! zoomed state is a property of the window rather than a rectangle to restore,
 //! and `-[NSWindow setFrame:display:]` on a zoomed window un-zooms it in the way
@@ -83,6 +108,25 @@ unsafe extern "C" fn can_become(_window: Id, _cmd: Sel) -> ObjcBool {
     YES
 }
 
+/// `constrainFrameRect:toScreen:` — **the rectangle it was handed, unchanged**.
+///
+/// See the [module docs](self) for the argument. In short: every frame this
+/// backend sets comes from an `NSScreen` rectangle, and AppKit's default
+/// implementation silently moves such a frame to keep a title bar below the menu
+/// bar — preserving the size and changing the origin, which is a borderless
+/// window of exactly the right extent hanging off two edges of the display.
+///
+/// `screen` is ignored rather than consulted: the caller has already chosen the
+/// screen, and this method exists to stop a second opinion being applied to that
+/// choice.
+///
+/// # Safety
+///
+/// Called only by AppKit, on an instance of the class built below.
+unsafe extern "C" fn constrain_frame(_window: Id, _cmd: Sel, frame: NSRect, _screen: Id) -> NSRect {
+    frame
+}
+
 /// Builds — or returns — the `NSWindow` subclass.
 ///
 /// Same shape and same reasoning as [`app`](super::app)'s delegate class,
@@ -113,7 +157,7 @@ fn window_class() -> Result<Class, ShellError> {
             return Ok(existing as usize);
         }
 
-        let encoding = std::ffi::CString::new(format!("{}@:", ffi::ENC_BOOL))
+        let predicate = std::ffi::CString::new(format!("{}@:", ffi::ENC_BOOL))
             .expect("the encoding characters contain no NUL");
         for name in [c"canBecomeKeyWindow", c"canBecomeMainWindow"] {
             // SAFETY: casting a correctly-typed `extern "C"` function to the
@@ -123,11 +167,40 @@ fn window_class() -> Result<Class, ShellError> {
                 core::mem::transmute::<unsafe extern "C" fn(Id, Sel) -> ObjcBool, Imp>(can_become)
             };
             // SAFETY: as above.
-            if unsafe { ffi::class_addMethod(class, ffi::sel(name), imp, encoding.as_ptr()) }
+            if unsafe { ffi::class_addMethod(class, ffi::sel(name), imp, predicate.as_ptr()) }
                 == ffi::NO
             {
                 return Err(format!("class_addMethod refused {name:?} on CrcblWindow"));
             }
+        }
+
+        // `NSRect constrainFrameRect:(NSRect)frame toScreen:(NSScreen *)screen`
+        // — a rectangle returned, a rectangle and an object taken. See the
+        // module docs for why this backend answers it unchanged.
+        let constrain = std::ffi::CString::new(format!("{rect}@:{rect}@", rect = ffi::ENC_RECT))
+            .expect("the encoding characters contain no NUL");
+        // SAFETY: as above. The `NSRect` return is what makes this a separate
+        // registration from the two predicates rather than another turn of that
+        // loop: it needs its own signature and its own type encoding, and the
+        // compiler emits whichever struct-return convention the target uses.
+        let imp = unsafe {
+            core::mem::transmute::<unsafe extern "C" fn(Id, Sel, NSRect, Id) -> NSRect, Imp>(
+                constrain_frame,
+            )
+        };
+        // SAFETY: as above.
+        if unsafe {
+            ffi::class_addMethod(
+                class,
+                ffi::sel(c"constrainFrameRect:toScreen:"),
+                imp,
+                constrain.as_ptr(),
+            )
+        } == ffi::NO
+        {
+            return Err(
+                "class_addMethod refused constrainFrameRect:toScreen: on CrcblWindow".to_string(),
+            );
         }
         // SAFETY: a complete class pair that has not been registered.
         unsafe { ffi::objc_registerClassPair(class) };
@@ -580,12 +653,27 @@ impl AppKitShell {
     }
 }
 
-/// `setFrame:display:` with `display: YES`.
+/// `setFrame:display:` with `display: YES`, and a warning if the window did not
+/// go there.
 ///
-/// A one-line helper because the signature is long enough to be worth writing
-/// once, and because `display: NO` — which is the tempting choice for something
-/// that is about to be redrawn anyway — leaves the old frame on screen until the
-/// next event, which reads as a laggy mode switch.
+/// A helper because the signature is long enough to be worth writing once, and
+/// because `display: NO` — which is the tempting choice for something that is
+/// about to be redrawn anyway — leaves the old frame on screen until the next
+/// event, which reads as a laggy mode switch.
+///
+/// # The readback is here because the seam cannot see a position
+///
+/// `setFrame:display:` is not obliged to apply what it is given, and when it
+/// declines it does so **silently and by moving the origin while keeping the
+/// size** — see the [module docs](self) on `constrainFrameRect:toScreen:`, which
+/// is the mechanism that shipped a screen-sized borderless window at the wrong
+/// place. Nothing downstream can notice: [`WindowState`](crate::WindowState)
+/// carries an extent and no origin, so every layer above this one would keep
+/// reporting a perfectly correct size.
+///
+/// So this asks the window where it actually ended up. The override above should
+/// make the two always agree; a warning here means it did not take, and it names
+/// both rectangles rather than leaving the next reader to infer one of them.
 ///
 /// # Safety
 ///
@@ -594,6 +682,16 @@ unsafe fn set_frame(window: Id, frame: NSRect) {
     // SAFETY: an `NSWindow` setter taking an `NSRect` and a `BOOL`.
     let send: unsafe extern "C" fn(Id, Sel, NSRect, ObjcBool) = unsafe { ffi::msg_send() };
     unsafe { send(window, ffi::sel(c"setFrame:display:"), frame, YES) };
+
+    // SAFETY: a live window; `frame` is an accessor returning an `NSRect`.
+    let applied = unsafe { ffi::msg_rect(window, ffi::sel(c"frame")) };
+    if applied != frame {
+        log::warn!(
+            "-[NSWindow setFrame:display:] was asked for {frame:?} and the window is at \
+             {applied:?}; a matching size with a different origin is AppKit constraining the \
+             rectangle, which CrcblWindow overrides constrainFrameRect:toScreen: to prevent"
+        );
+    }
 }
 
 /// The `AppWindow` fields a configuration is read out of, in one place so the
@@ -608,5 +706,52 @@ pub(super) unsafe fn configuration_of(state: &AppWindow) -> crate::WindowConfigu
         size: unsafe { backing_size(state.view) },
         scale_factor: state.scale,
         mode: state.effective_mode,
+    }
+}
+
+/// That `CrcblWindow` really carries the three overrides it is built for.
+///
+/// The same shape and the same argument as [`view`](super::view)'s class suite:
+/// `objc_allocateClassPair` and `class_addMethod` are Objective-C **runtime**
+/// calls, thread-safe and needing no `NSApplication`, so a spawned `#[test]`
+/// body may build this class and ask what it implements — see
+/// [`session_support`](crate::appkit::session_support) for the rule and for what
+/// it costs to get it wrong.
+///
+/// What it catches is a method the runtime **refused** and a selector spelled
+/// wrong, both of which leave the superclass's implementation in place and fail
+/// silently: a `canBecomeKeyWindow` that never runs is a borderless window that
+/// stops taking keystrokes, and a `constrainFrameRect:toScreen:` that never runs
+/// is a borderless window at the wrong origin — which is a defect that shipped
+/// and that only `tests/appkit_session.rs`'s AppKit readback found.
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_class_installs_every_override_a_borderless_window_needs() {
+        let class = window_class().expect("CrcblWindow is built from runtime calls alone");
+
+        for selector in [
+            // Without these two a borderless window cannot take the keyboard or
+            // the menu bar, because `NSWindowStyleMaskBorderless` is zero.
+            c"canBecomeKeyWindow",
+            c"canBecomeMainWindow",
+            // And without this one AppKit is entitled to move any frame this
+            // backend sets, keeping the size and changing the origin.
+            c"constrainFrameRect:toScreen:",
+        ] {
+            // SAFETY: a class is an object, and every object answers
+            // `instancesRespondToSelector:`.
+            let installed = unsafe {
+                let send: unsafe extern "C" fn(Id, Sel, Sel) -> ObjcBool = ffi::msg_send();
+                send(
+                    class,
+                    ffi::sel(c"instancesRespondToSelector:"),
+                    ffi::sel(selector),
+                ) != ffi::NO
+            };
+            assert!(installed, "CrcblWindow does not implement {selector:?}");
+        }
     }
 }
