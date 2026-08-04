@@ -369,6 +369,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the override installed and verified. `docs/backlog.md` carries the open
   investigation and what each remaining cause would look like.
 
+- **crcbl-shell** (AppKit): windows no longer take part in **macOS state
+  restoration**. `isRestorable` defaults to `YES`, which enrols a window in a
+  feature this backend cannot honour and should not want: restoration re-creates
+  windows at launch through a `restorationClass` or an application-delegate
+  callback, neither of which exists here — the backend deliberately never takes
+  the delegate slot — and it makes the operating system a second, invisible
+  source of truth for a placement the seam hands to `WindowDesc` and a game
+  hands to its settings screen. It also writes saved state to disk keyed by an
+  application identity an unbundled binary does not stably have.
+  `setRestorable:` is now `NO` at creation. Argued on its own merits; whether it
+  also accounts for the borderless-origin defect above is a separate question.
+
 - **crcbl-shell** (X11): hiding a window with `set_visible(false)` unmapped it
   without telling the window manager. ICCCM 4.1.4 requires a synthetic
   `UnmapNotify` to the root alongside the unmap, because a reparenting manager

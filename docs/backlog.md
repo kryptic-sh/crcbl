@@ -1251,34 +1251,57 @@ Two mechanisms are dead and neither should be tried again:
   HFA-in-`v0`–`v3` theory — the same class as the `wheel1` variadic that did
   bite — is ruled out for this call.
 
-**The origin is a centred rectangle, and the arithmetic does not quite close.**
-`geometry::centred` has exactly one caller, the creation path, and with the
-flip-time `visibleFrame` of `[0, 60, 1024, 677]` a 640×480 window centres at x =
-192 — matching — and y = 158.5, which does **not** match the observed 160. A
-1.5-point discrepancy is either rounding or a different formula, and which one
-decides where a fix goes, so it is not being called close enough. The likeliest
-reading is that the creation-time `visibleFrame` was not the flip-time one: the
-Dock and menu bar move when the application activates, and `[0, 64, 1024, 672]`
-would give exactly (192, 160). **That is now logged at creation** — the content
-rectangle, the screen frame and visible frame it was derived from, and the
-window frame that resulted — so the next run can settle it by subtraction
-instead of by inference.
+**The origin is exactly the creation rectangle — settled by subtraction, not by
+inference.** The creation log gave the geometry as it was _at creation_:
 
-Alongside it, the two AppKit properties that move a window with nobody asking:
-`isRestorable`, which defaults to `YES` and drives real macOS window
-restoration, and `frameAutosaveName`. Neither is set by this backend, which is
-not the same as neither being in force. If either is live, the origin is not
-this backend's arithmetic at all and the fix is to turn the feature off rather
-than to change a formula.
+```text
+create: content [192,160,640,480], mask 0xf; visible [0,63,1024,674];
+        window frame [192,160,640,512], isRestorable true, frameAutosaveName Some("")
+```
 
-**What the next run adds** is when and on which turn. `flip` in
-`tests/appkit_session.rs` now reads the frame and the first responder before the
-first pump and after every pump turn, and prints the transition together with
-the events delivered on the turn that caused it. A change on a turn carrying a
-`Resized` or `Focus` points at a delegate callback re-applying a frame — a
-backend bug; a change on a turn carrying nothing points at AppKit; no change at
-all, with the frame already wrong before the first pump, would mean the backend
-trail is lying about what it saw.
+`centred([0, 63, 1024, 674], 640x480)` gives `x = (1024 - 640) / 2 = 192` and
+`y = 63 + (674 - 480) / 2 = 160`. **Exact, both axes.** The earlier 158.5 came
+from using the _flip-time_ `visibleFrame` of `[0, 60, 1024, 677]`, which is not
+the same rectangle — the Dock and menu bar move when the application activates —
+and chasing that 1.5-point gap would have meant hunting a bug in
+`geometry::centred` that is not there. **So the creation arithmetic is right,
+there is no second formula and no rounding, and a borderless window is being put
+back to precisely the rectangle it was created at.**
+
+**The move happens with no pump in between.** `apply_mode`'s own trail ends with
+the frame at `[0,0,1024,768]` after `makeKeyAndOrderFront:`, and the session
+reads `[192,160,1024,768]` on the line it prints _before its first pump_. So the
+event loop is not involved and neither is any delegate callback: **"the pump did
+it" is dead**, along with the constraint and the corrupted-argument theories.
+Everything between those two readings is the tail of `set_mode`, which only
+reads.
+
+`set_mode` now logs the frame immediately after `apply_mode` returns, which
+brackets the remaining gap to a single statement: still `[0,0,...]` there and
+the move happens as the autorelease pool drops or asynchronously afterwards;
+already `[192,160,...]` and it happens inside `makeKeyAndOrderFront:`'s own
+run-loop pass.
+
+**`frameAutosaveName` is `Some("")`, so frame autosave was never in it.**
+`isRestorable` was `true`, and **this round turns it off** — argued in
+`window.rs` on its own merits and not as a fix: a game window has no business in
+macOS state restoration, which promises AppKit can re-create windows through a
+`restorationClass` this backend does not implement and never takes the
+application delegate for, makes the operating system a second invisible source
+of truth for a placement the seam hands to `WindowDesc`, and writes saved state
+to disk keyed by an identity an unbundled binary does not stably have. Whether
+it is also the mechanism here is what the next run says. **One change, one
+answer.**
+
+**A fact from the restore leg nobody had read yet.** Its `setFrame:` reports
+`from [192,160,1024,800]` — height **800**, not 768. Between the end of the
+borderless flip and the start of the restore the window gained exactly 32 points
+of title bar _and_ kept the moved origin, which is `setStyleMask:` back to
+titled keeping the content rectangle and growing the frame upward. The restore's
+own `setFrame:` then lands `[192,256,512,416]` exactly, so **the way back
+works**; what the 800 confirms is that the window was still at the wrong origin
+when the restore began, and that `setStyleMask:` resizes and repositions on both
+legs.
 
 **Both mode flips now run before either is asserted.** The borderless origin is
 a known open defect, so asserting it in place panicked before the restore ever
@@ -1377,26 +1400,31 @@ is precisely the failure `makeFirstResponder:` is on `appkit::view`'s list of
 five to prevent, it would arrive only after a player toggles fullscreen, and
 nothing in the seam would report it — the events simply stop.
 
-**The likely mechanism is `setStyleMask:`**, which rebuilds a window's frame
-view and may take the responder with it; `apply_mode` sets the mask on both legs
-of the round trip and never re-asserts the responder afterwards. That is a
-hypothesis and is deliberately **not** being acted on: the run before this one
-spent a round trip on a mechanism that turned out to be wrong, and the
-instrument to settle it is cheaper than the guess.
+**`setStyleMask:` is the mechanism, and that is now observed rather than
+supposed.** The instrumented run reports, on the borderless leg:
 
-What is now logged, as a pointer comparison against the window's own content
-view so it needs no new runtime entry point: whether the view holds the
-responder before `setStyleMask:`, after it, after `makeKeyAndOrderFront:`, and
-on both legs of the windowed restore. `flip` in the session tracks the
-responder's class alongside the frame on every pump turn, and the session prints
-the whole `CrcblView -> ? -> ?` trail across the round trip.
+```text
+borderless: first responder is the content view — before setStyleMask: true
+borderless: style mask asked 0x0, window carries 0x0, first responder is the content view false
+```
 
-**It is not yet asserted**, and that is deliberate for one round: the origin
-assertion fires first, so a responder assertion added now would never be reached
-and would teach nothing. Once the trail says where it changes, the fix is
-whichever of "re-assert `makeFirstResponder:` after every `setStyleMask:`" or
-"nothing, the reading was taken at a misleading moment" the evidence supports —
-and then it gets an assertion of its own.
+`true` before, `false` after, one statement apart — and the same on the windowed
+leg. Changing the style mask rebuilds the window's frame view and takes the
+first responder with it, and `apply_mode` never re-asserts it. So **every mode
+change silently costs the view the keyboard**, on both legs, and nothing in the
+seam reports it: the events simply stop arriving.
+
+The fix is to re-assert `makeFirstResponder:` after every `setStyleMask:` — the
+same call `create_native_window` already makes once, whose refusal it already
+logs. It is **deliberately not being made yet**: the origin defect is unresolved
+in the same two functions, this session has twice paid for changing a thing and
+a neighbouring thing in one round, and the origin's own fix may move the same
+statements. One change, one answer.
+
+**It is not asserted yet either**, for the same reason it was not last round:
+the origin assertion fires before it, so a responder assertion would never be
+reached and would teach nothing. It gets one — `first_responder` back to
+`CrcblView` after a full mode round trip — in the commit that fixes it.
 
 ### `wheel1` is a named parameter, and declaring it variadic scrolled by zero
 

@@ -393,21 +393,54 @@ impl AppKitShell {
         // SAFETY: a live window; the setter takes a `BOOL`.
         unsafe { ffi::msg_set_bool(window, ffi::sel(c"setReleasedWhenClosed:"), false) };
 
-        // **Evidence for the open borderless-origin defect**, and the creation
-        // half of it. A window flipped to borderless is landing back at what
-        // looks like a *centred* origin, and `geometry::centred` has exactly one
-        // caller — the line above this. Whether that is the same rectangle is
-        // arithmetic nobody can do without the screen geometry **as it was at
-        // creation**: the flip-time `visibleFrame` is not the creation-time one,
-        // because the Dock and the menu bar move when the application activates.
+        // **A game window has no business in macOS state restoration**, and this
+        // is a correctness decision rather than a workaround — it would be right
+        // with no bug anywhere near it, on the same footing as overriding
+        // `constrainFrameRect:toScreen:` above.
         //
-        // The two properties beside it are the other half. Neither is set by this
-        // backend, which is not the same as neither being in force: `isRestorable`
-        // defaults to `YES` and macOS window restoration genuinely does put
-        // windows back where it remembers them, and a non-empty
-        // `frameAutosaveName` does the same out of user defaults. If either is
-        // live, the origin is not this backend's arithmetic at all and the fix is
-        // to turn the feature off rather than to change a formula.
+        // `isRestorable` defaults to `YES`, which enrols the window in a feature
+        // this backend cannot honour and does not want:
+        //
+        // * **It promises something the process cannot deliver.** Restoration
+        //   works by AppKit re-creating windows at launch through a class named
+        //   in `restorationClass`, or by an application delegate answering
+        //   `restoreWindowWithIdentifier:state:completionHandler:`. This backend
+        //   implements neither, and deliberately does not take the application's
+        //   delegate slot at all — see [`app`](super::app). A restorable window
+        //   with nothing able to restore it is a flag set to no purpose.
+        // * **The placement is the game's, or the player's.** Where a window
+        //   opens is a decision the seam hands to
+        //   [`WindowDesc`](crate::WindowDesc) and, above that, to a settings
+        //   screen. An operating-system feature that silently reinstates a
+        //   position from a previous run is a second, invisible source of truth
+        //   for the same value, and the two disagree the moment a game remembers
+        //   its own.
+        // * **It writes saved state to disk**, keyed by the application's
+        //   identity, for a process that may be an unbundled binary with no
+        //   stable one. Neither the writing nor the identity is something an
+        //   engine should acquire as a side effect of opening a window.
+        //
+        // Whether it is also implicated in the borderless-origin defect is a
+        // separate question the next run answers; it is turned off here because
+        // it should be off, not because that answer is known.
+        //
+        // SAFETY: a live window; the setter takes a `BOOL`.
+        unsafe { ffi::msg_set_bool(window, ffi::sel(c"setRestorable:"), false) };
+
+        // **Evidence for the open borderless-origin defect**, and the creation
+        // half of it. It has already earned its place: with the creation-time
+        // `visibleFrame` of `[0, 63, 1024, 674]` in hand,
+        // `centred(visible, 640×480)` is x = 192 and y = 63 + (674 − 480)/2 =
+        // **160**, which is exactly where a borderless window keeps ending up. So
+        // the origin a flip reverts to is precisely this rectangle's, there is no
+        // second formula and no rounding, and the arithmetic here is right.
+        // Reading the flip-time visible frame instead gives 158.5 and would have
+        // sent the next reader looking for a bug in `centred` that is not there.
+        //
+        // The two properties beside it now **verify the setters above** rather
+        // than discovering a default: `isRestorable` should read `false`, and a
+        // `frameAutosaveName` of `Some("")` is autosave already off. A
+        // `isRestorable true` here would mean `setRestorable:` did not take.
         //
         // SAFETY: a live window; `frame` returns an `NSRect`, `isRestorable`
         // answers `BOOL`, and `frameAutosaveName` an `NSString` the window owns.

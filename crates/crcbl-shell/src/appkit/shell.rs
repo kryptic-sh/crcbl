@@ -1095,6 +1095,22 @@ impl Shell for AppKitShell {
         self.window_mut(handle)?.requested_mode = mode;
         self.apply_mode(handle, mode)?;
 
+        // **The bracket on the open borderless-origin defect**, and the only
+        // statement between two readings that disagree. `apply_mode` has been
+        // shown to leave the frame at the screen's rectangle — its own trail says
+        // so on the line after `makeKeyAndOrderFront:` — and the session reads it
+        // back at the *creation* origin with no pump in between. Everything left
+        // between those two points is this function, and this function only reads
+        // afterwards. So a correct frame here puts the move after `set_mode`
+        // returns, as the autorelease pool drops or asynchronously; a wrong one
+        // puts it inside `makeKeyAndOrderFront:`'s own run-loop pass.
+        let placed = {
+            let window = self.window(handle)?.window;
+            // SAFETY: a live `NSWindow` this shell owns, on the main thread.
+            unsafe { ffi::msg_rect(window, ffi::sel(c"frame")) }
+        };
+        log::debug!("set_mode: apply_mode returned with the frame {placed:?}");
+
         // The `windowDidResize:` the frame change produced is already in the raw
         // queue and `translate` would find nothing new in it, because
         // `refresh_configuration` has to be told the *mode* changed too. So the

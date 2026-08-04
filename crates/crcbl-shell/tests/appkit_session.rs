@@ -425,27 +425,36 @@ mod macos {
         //   landed [0,0,1024,768]` — the rectangle arrived intact and was
         //   applied, so the HFA-in-`v0`–`v3` theory is dead too.
         //
-        // **`apply_mode` is correct end to end**: it computes the screen
-        // rectangle, hands it over, gets it back, and still has it after
-        // `makeKeyAndOrderFront:`. Whatever moves the window does it *after*
-        // `set_mode` returns, which is what [`flip`]'s per-turn trace is for.
+        // * **The pump.** `apply_mode` ends with the frame at the screen's
+        //   rectangle, and [`flip`] reads it back already wrong on the line it
+        //   prints *before its first pump*. No event loop, no delegate callback.
+        //
+        // **`apply_mode` is correct end to end and the move happens inside
+        // `set_mode`'s own tail**, which does nothing but read. `set_mode` now
+        // logs the frame the instant `apply_mode` returns, and that brackets what
+        // is left to a single statement.
+        //
+        // The origin the window reverts to is *exactly* its creation rectangle:
+        // `centred([0, 63, 1024, 674], 640x480)` is (192, 160) on both axes, from
+        // the visible frame as it was at creation. So the arithmetic is right and
+        // something is restoring a remembered placement.
         assert_eq!(
             covering.frame, screen,
             "borderless covers the screen AppKit says it is on, exactly.\n\
              The window was at {before_borderless:?} before the flip, and everything AppKit says \
              about it while borderless is {covering:?}.\n\
-             `apply_mode` has already been shown correct end to end, so **read the \
-             `crcbl appkit session: borderless:` trace lines above**, which say which pump turn \
-             changed the frame and what was delivered on it:\n\
-             * a change on a turn carrying a `Resized` or a `Focus` points at a delegate \
-             callback re-applying a frame, which is a backend bug;\n\
-             * a change on a turn carrying nothing points at AppKit itself, and the \
-             `create: ... isRestorable <b>, frameAutosaveName <name>` line says whether window \
-             restoration is live — if it is, the fix is to turn that off rather than to change \
-             any arithmetic;\n\
-             * no change at all, with the frame already wrong on the line printed before the \
-             first pump, means `set_mode` returned with it wrong and the backend trail is \
-             lying about what it saw."
+             `apply_mode` is correct end to end and the move is known to happen inside \
+             `set_mode`'s tail with no pump involved, so **read the \
+             `crcbl_shell::appkit::shell` line in this test's stderr**:\n\
+             * `set_mode: apply_mode returned with the frame [0,0,...]` means the window was \
+             still right one statement after apply_mode, so the move happens as the autorelease \
+             pool drops or asynchronously afterwards;\n\
+             * `... returned with the frame [192,160,...]` means it happens inside \
+             makeKeyAndOrderFront:'s own run-loop pass, and re-asserting the frame *after* that \
+             call rather than before it is the next thing to try.\n\
+             This round's one change is setRestorable:NO at creation; the `create: ... \
+             isRestorable false` line confirms it took. If the origin is right now, macOS state \
+             restoration was the mechanism."
         );
         assert_eq!(
             borderless,
@@ -716,13 +725,18 @@ mod macos {
     ///
     /// `Filter::from_env` would leave the session's own diagnosis depending on
     /// whether a CI job happened to set `CRCBL_LOG`, and the job does not. The
-    /// backend's window module is turned up to `debug` and everything else left
-    /// at `info`, so the placement trail is complete and the event pump does not
-    /// bury it. `try_init_logging` rather than `init_logging` because its
-    /// `Result` says whether a logger was already installed, and ignoring that
-    /// silently is how this went wrong the first time.
+    /// backend's window and shell modules are turned up to `debug` and
+    /// everything else left at `info`, so the placement trail is complete and
+    /// nothing else buries it — `shell` is where `set_mode` brackets what
+    /// `window` reports, and it contains no other `debug!` at all, so widening
+    /// to it costs exactly one line of output. `try_init_logging` rather than
+    /// `init_logging` because its `Result` says whether a logger was already
+    /// installed, and ignoring that silently is how this went wrong the first
+    /// time.
     fn install_logger() {
-        let filter = Filter::parse("info,crcbl_shell::appkit::window=debug");
+        let filter = Filter::parse(
+            "info,crcbl_shell::appkit::window=debug,crcbl_shell::appkit::shell=debug",
+        );
         match crcbl_core::log::try_init_logging(filter) {
             Ok(()) => println!(
                 "crcbl appkit session: logging installed — backend warnings and the window \
