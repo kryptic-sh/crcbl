@@ -518,6 +518,7 @@ impl Win32Shell {
             | RawEvent::Focus { .. }
             | RawEvent::CloseRequested { .. }
             | RawEvent::Destroyed { .. }
+            | RawEvent::FilesDropped { .. }
             | RawEvent::MonitorsChanged => {}
         }
     }

@@ -87,6 +87,8 @@
 //! the count has one owner. See [`pointer::Visibility`](super::pointer::Visibility).
 
 use core::cell::{Cell, RefCell};
+use std::collections::VecDeque;
+use std::path::PathBuf;
 
 use crate::AspectRatio;
 
@@ -98,6 +100,8 @@ use super::geometry::{Frame, Track};
 // system, so everything above it — the shared queue, the cached limits and the
 // word arithmetic — compiles and is tested on every host. See
 // [`geometry`](super::geometry) for why that matters.
+#[cfg(target_os = "windows")]
+use super::dnd;
 #[cfg(target_os = "windows")]
 use super::ffi::{
     self, CreateStructW, Lparam, Lresult, MinMaxInfo, Point, Rect, Wparam, msg, value,
@@ -155,6 +159,26 @@ pub(super) struct Shape {
     pub cursor: Handle,
 }
 
+/// The paths one `WM_DROPFILES` carried.
+///
+/// Kept beside the event queue rather than in it, because a
+/// [`RawEvent`] is `Copy` and this is not — see
+/// [`dnd`](super::dnd) for why the reading cannot be deferred to the pump
+/// either. [`RawEvent::FilesDropped`] is the marker that keeps this in order
+/// relative to everything else the procedure saw.
+#[derive(Clone, Debug)]
+pub(super) struct FileDrop {
+    /// Which window, so a marker claims its own payload.
+    pub hwnd: isize,
+    /// The dropped paths, one [`DroppedFile`](crate::ShellEvent::DroppedFile)
+    /// each. May be empty for a drop of nothing this backend could decode.
+    pub paths: Vec<PathBuf>,
+    /// Client x of the drop point.
+    pub x: i32,
+    /// Client y.
+    pub y: i32,
+}
+
 /// What the shell and its window procedure share.
 ///
 /// Owned by the shell as an `Rc`, and reached by the procedure as a raw pointer
@@ -173,6 +197,9 @@ pub(super) struct Shared {
     events: RefCell<Vec<RawEvent>>,
     limits: RefCell<Vec<Limits>>,
     shapes: RefCell<Vec<Shape>>,
+    /// Drop payloads, oldest first, each claimed by the
+    /// [`FilesDropped`](RawEvent::FilesDropped) marker that was pushed with it.
+    drops: RefCell<VecDeque<FileDrop>>,
     /// The window `TrackMouseEvent` is currently armed for, or zero.
     ///
     /// Also the answer to "is the pointer inside?", which is the only way to
@@ -206,6 +233,24 @@ impl Shared {
         core::mem::take(&mut self.events.borrow_mut())
     }
 
+    /// Records the paths a `WM_DROPFILES` carried, for the marker pushed with
+    /// it to claim.
+    fn push_drop(&self, drop: FileDrop) {
+        self.drops.borrow_mut().push_back(drop);
+    }
+
+    /// Takes the oldest drop payload recorded for `hwnd`.
+    ///
+    /// Matched by window rather than taken from the front, so that a payload
+    /// discarded by [`forget`](Self::forget) — the window died before the pump
+    /// reached its marker — cannot hand the *next* window's paths to a marker
+    /// that is not theirs.
+    pub(super) fn take_drop(&self, hwnd: isize) -> Option<FileDrop> {
+        let mut drops = self.drops.borrow_mut();
+        let index = drops.iter().position(|drop| drop.hwnd == hwnd)?;
+        drops.remove(index)
+    }
+
     /// Publishes the numbers the procedure answers `WM_GETMINMAXINFO` and
     /// `WM_SIZING` from, replacing any earlier ones for the same window.
     pub(super) fn set_limits(&self, limits: Limits) {
@@ -225,6 +270,7 @@ impl Shared {
     pub(super) fn forget(&self, hwnd: isize) {
         self.limits.borrow_mut().retain(|known| known.hwnd != hwnd);
         self.shapes.borrow_mut().retain(|known| known.hwnd != hwnd);
+        self.drops.borrow_mut().retain(|drop| drop.hwnd != hwnd);
         if self.tracked.get() == hwnd {
             self.tracked.set(0);
         }
@@ -752,6 +798,29 @@ pub(super) unsafe extern "system" fn window_proc(
             1
         }
 
+        // The one message whose payload cannot wait for the pump: the `HDROP`
+        // is live for the length of this call and is owed a `DragFinish`. The
+        // paths therefore come out here and go on the shared drop queue, and
+        // the event pushed after them is the marker that claims them. See
+        // [`dnd`](super::dnd).
+        msg::DROP_FILES => {
+            // SAFETY: for `WM_DROPFILES` the system documents `w_param` as the
+            // `HDROP` for this drop, valid until it is finished — which
+            // `take_drop` does, exactly once, before returning.
+            let (paths, point) = unsafe { dnd::take_drop(w_param as Handle) };
+            shared.push_drop(FileDrop {
+                hwnd: window,
+                paths,
+                x: point.x,
+                y: point.y,
+            });
+            shared.push(RawEvent::FilesDropped {
+                hwnd: window,
+                millis,
+            });
+            0
+        }
+
         msg::DESTROY => {
             shared.push(RawEvent::Destroyed { hwnd: window });
             0
@@ -986,6 +1055,71 @@ mod tests {
         shared.forget(1);
         assert_eq!(shared.clipped(), 2);
         assert!(shared.shape_for(2).is_some());
+    }
+
+    #[test]
+    fn each_drop_marker_claims_its_own_payload_in_arrival_order() {
+        // The pairing the `FilesDropped` marker depends on. Getting it wrong
+        // hands one window's dropped files to another window's event, which is
+        // an asset imported into the wrong scene rather than an error.
+        let shared = Shared::default();
+        let drop = |hwnd: isize, name: &str| FileDrop {
+            hwnd,
+            paths: vec![PathBuf::from(name)],
+            x: 4,
+            y: 5,
+        };
+        shared.push_drop(drop(1, "first"));
+        shared.push_drop(drop(2, "other window"));
+        shared.push_drop(drop(1, "second"));
+
+        let first = shared.take_drop(1).expect("queued");
+        assert_eq!(
+            first.paths,
+            [PathBuf::from("first")],
+            "oldest first, per window"
+        );
+        assert_eq!(
+            (first.x, first.y),
+            (4, 5),
+            "the drop point travels with its paths — `DroppedFile` carries both"
+        );
+        assert_eq!(
+            shared.take_drop(1).expect("queued").paths,
+            [PathBuf::from("second")]
+        );
+        assert!(shared.take_drop(1).is_none(), "and no third");
+        assert_eq!(
+            shared.take_drop(2).expect("untouched").paths,
+            [PathBuf::from("other window")],
+            "another window's drop was never in the running"
+        );
+    }
+
+    #[test]
+    fn a_drop_whose_window_died_before_the_pump_is_discarded_with_it() {
+        // The reason `take_drop` matches on the window rather than popping the
+        // front: `forget` removes the payload, and a marker still in the raw
+        // queue must then find nothing — not the next window's files.
+        let shared = Shared::default();
+        shared.push_drop(FileDrop {
+            hwnd: 1,
+            paths: vec![PathBuf::from("doomed")],
+            x: 0,
+            y: 0,
+        });
+        shared.push_drop(FileDrop {
+            hwnd: 2,
+            paths: vec![PathBuf::from("survivor")],
+            x: 0,
+            y: 0,
+        });
+        shared.forget(1);
+        assert!(shared.take_drop(1).is_none());
+        assert_eq!(
+            shared.take_drop(2).expect("still there").paths,
+            [PathBuf::from("survivor")]
+        );
     }
 
     #[test]

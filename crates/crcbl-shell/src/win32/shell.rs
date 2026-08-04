@@ -10,13 +10,14 @@ use std::rc::Rc;
 use crcbl_core::{EventTime, Pool, SurfaceTarget};
 
 use crate::{
-    ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode, LogicalSize, MimeType,
-    MonitorId, MonitorInfo, PhysicalPoint, PhysicalSize, PointerMode, Shell, ShellBackend,
-    ShellCaps, ShellError, ShellEvent, SizeConstraints, WindowConfiguration, WindowDesc, WindowId,
-    WindowState,
+    ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
+    LogicalSize, MimeType, MonitorId, MonitorInfo, PhysicalPoint, PhysicalSize, PointerMode,
+    ReceivedMime, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints,
+    WindowConfiguration, WindowDesc, WindowId, WindowState,
 };
 
 use super::TimeBase;
+use super::clipboard::{self, Clipboard, Opened};
 use super::events::RawEvent;
 use super::ffi::{self, Handle, Msg, WindowPlacement, value};
 use super::geometry;
@@ -118,6 +119,12 @@ pub(super) struct WinWindow {
     pub(super) focused: bool,
     visible: bool,
     close_pending: bool,
+    /// Whether [`WindowDesc::accept_drops`] was set.
+    ///
+    /// The system already enforces this — no `WS_EX_ACCEPTFILES`, no
+    /// `WM_DROPFILES` — so this is the second half of the gate rather than the
+    /// gate, and [`dnd`](super::dnd) says why a second half is worth having.
+    accept_drops: bool,
 }
 
 impl WinWindow {
@@ -169,6 +176,13 @@ pub struct Win32Shell {
     pub(super) raw_motion: RawMotion,
     /// `ShowCursor`'s reference count, kept balanced.
     pub(super) visibility: Visibility,
+    /// The next [`ClipboardRequestId`], which is unique for the session.
+    ///
+    /// Every read is answered before
+    /// [`clipboard_request`](Shell::clipboard_request) returns, so nothing is
+    /// keyed by this — but the seam promises ids are unique within a shell, and
+    /// a consumer with two reads in flight tells them apart by nothing else.
+    next_request: u32,
     caps: ShellCaps,
 }
 
@@ -263,6 +277,7 @@ impl Win32Shell {
             text: Utf16::default(),
             raw_motion: RawMotion::default(),
             visibility: Visibility::default(),
+            next_request: 1,
             caps: Self::latch_caps(raw_motion),
         };
         shell.monitors = shell.enumerate_monitors();
@@ -287,7 +302,9 @@ impl Win32Shell {
             .union(ShellCaps::ASPECT_HINT_HONORED)
             .union(ShellCaps::POINTER_LOCK)
             .union(ShellCaps::POINTER_CONFINE)
-            .union(ShellCaps::POINTER_WARP);
+            .union(ShellCaps::POINTER_WARP)
+            .union(ShellCaps::CLIPBOARD)
+            .union(ShellCaps::DRAG_DROP);
         if raw_motion {
             caps.union(ShellCaps::RAW_POINTER_MOTION)
         } else {
@@ -353,6 +370,76 @@ impl Win32Shell {
         self.queue.push_back(event);
     }
 
+    /// Discards any clipboard answer queued for a window that has just died.
+    ///
+    /// [Obligation 4](Shell) is about *accepted* requests and
+    /// [obligation 1](Shell) forbids an event naming a stale handle; where they
+    /// meet, the stale handle wins, exactly as the X11 backend decides it. A
+    /// consumer can see a handle it destroyed; it cannot see an answer it will
+    /// never be given for a window it no longer has.
+    ///
+    /// The window here is narrow — this backend answers a read before
+    /// [`clipboard_request`](Shell::clipboard_request) returns, so the answer is
+    /// only ever queued for the length of one frame — but a consumer that reads
+    /// the clipboard and then closes the window in the same frame is an ordinary
+    /// "paste and dismiss the dialog", not a contrivance.
+    fn drop_clipboard_answers(&mut self, window: WindowId) {
+        self.queue.retain(|event| {
+            !matches!(event, ShellEvent::ClipboardData { window: asked, .. } if *asked == window)
+        });
+    }
+
+    /// The clipboard's content in `mime`, read now.
+    ///
+    /// The whole of the read, and it is synchronous because Win32's clipboard
+    /// is content rather than an owner to negotiate with — see
+    /// [`clipboard`](super::clipboard). The three outcomes are the three
+    /// [`ClipboardContent`] means:
+    ///
+    /// * **The format is not there** — [`Empty`](ClipboardContent::Empty),
+    ///   which the seam defines as merging "holds nothing" with "holds nothing
+    ///   in that format". Both are true here and neither is a failure.
+    /// * **The clipboard could not be opened or locked** —
+    ///   [`Unavailable`](ClipboardContent::Unavailable). There may well be
+    ///   something on it; we could not get at it.
+    /// * **Anything else** — [`Bytes`](ClipboardContent::Bytes), possibly
+    ///   empty, which is a successful transfer of nothing.
+    fn read_clipboard(&self, hwnd: Handle, mime: MimeType) -> ClipboardContent {
+        let Some(format) = clipboard::format_id(mime) else {
+            // The window station would not name the format, so nothing can have
+            // published anything under it. `format_id` has already logged.
+            return ClipboardContent::Unavailable;
+        };
+        let board = match Clipboard::open(hwnd) {
+            Ok(board) => board,
+            Err(refused) => {
+                log::warn!(
+                    "the clipboard was not readable within {:?}: {refused:?}",
+                    clipboard::OPEN_BUDGET
+                );
+                return ClipboardContent::Unavailable;
+            }
+        };
+        if let Opened::After { attempts } = board.opened() {
+            log::debug!("the clipboard was held by another process for {attempts} attempts");
+        }
+        let Some(bytes) = board.get(format) else {
+            // `GetClipboardData` answering null is "no such format on the
+            // clipboard", which is exactly `Empty`. A lock failure logs and
+            // lands here too — rare enough that distinguishing it would mean
+            // threading an outcome through for a case nobody has seen.
+            return ClipboardContent::Empty;
+        };
+        match clipboard::encoding_for(mime) {
+            clipboard::Encoding::UnicodeText => {
+                ClipboardContent::Bytes(clipboard::utf8_from_utf16_bytes(&bytes))
+            }
+            clipboard::Encoding::Registered(_) => {
+                ClipboardContent::Bytes(clipboard::trim_trailing_nuls(&bytes).to_vec())
+            }
+        }
+    }
+
     /// The [`WindowId`] owning an `HWND`, for routing a raw event.
     fn window_by_key(&self, key: isize) -> Option<WindowId> {
         self.windows
@@ -406,7 +493,35 @@ impl Win32Shell {
     /// wait that failed on a loaded runner. Nothing in the backend branches on
     /// it; the trait method still ignores it, because a caller has nothing to do
     /// differently either way.
+    ///
+    /// # Decision: drain first, and no `MWMO_INPUTAVAILABLE`
+    ///
+    /// **That diagnosis then named the cause, and this is the fix it pointed
+    /// at.** The second CI run reported `Wake::Message` after 14 ms with the
+    /// queue holding `0x0040` in both halves of `GetQueueStatus` — which is
+    /// `QS_SENDMESSAGE`, a message *sent* to a window of this thread rather than
+    /// posted to its queue.
+    ///
+    /// `PeekMessageW` **dispatches** a sent message but does not retrieve it, so
+    /// the `QS_SENDMESSAGE` bit is still set when the wait starts. Asking for
+    /// `MWMO_INPUTAVAILABLE` is asking to be woken by exactly that bit, so the
+    /// wait returned immediately, every time, forever — a shell that never
+    /// sleeps and says nothing about it.
+    ///
+    /// So this drains the queue itself and then sleeps with **no flags**.
+    /// Draining is what clears the state, because `PeekMessageW` returning
+    /// `FALSE` is what marks the queue as seen; sleeping with no flags waits for
+    /// something genuinely new, which `QS_ALLINPUT` still covers — sent messages
+    /// included. `MWMO_INPUTAVAILABLE` exists for a caller that does *not* drain
+    /// before sleeping, and draining ourselves is strictly better: it removes
+    /// the reason for the flag and the spurious wake in one move.
     fn wait(&mut self, timeout: Option<Duration>) -> Wake {
+        // Before the wait, not after: an undrained queue is what
+        // `MWMO_INPUTAVAILABLE` was there for, and this is the same guarantee
+        // without the bit that never clears. Whatever the window procedure
+        // records here is delivered by the next `pump`, exactly as if the
+        // messages had been drained there.
+        self.drain_messages();
         let milliseconds = timeout.map_or(value::INFINITE, |timeout| {
             // `INFINITE` is `u32::MAX`, so a timeout that saturates to it would
             // silently become "forever" — 49 days of sleep is close enough to
@@ -416,16 +531,10 @@ impl Win32Shell {
                 .min(value::INFINITE - 1)
         });
         // SAFETY: a count of zero makes the handle array unused, so a null
-        // pointer is correct for it; the flags are the documented pair for
-        // "wake for any message, including ones already queued".
+        // pointer is correct for it; zero flags is the documented "wait for a
+        // new message", which is what the drain above makes correct.
         let outcome = unsafe {
-            ffi::MsgWaitForMultipleObjectsEx(
-                0,
-                ptr::null(),
-                milliseconds,
-                value::QS_ALL_INPUT,
-                value::MWMO_INPUT_AVAILABLE,
-            )
+            ffi::MsgWaitForMultipleObjectsEx(0, ptr::null(), milliseconds, value::QS_ALL_INPUT, 0)
         };
         match outcome {
             value::WAIT_TIMEOUT => Wake::TimedOut,
@@ -569,7 +678,47 @@ impl Win32Shell {
                     let Some(window) = window else { continue };
                     if let Some(removed) = self.windows.remove(window.cast()) {
                         self.shared.forget(removed.key);
+                        self.drop_clipboard_answers(window);
                         self.queue.push_back(ShellEvent::WindowDestroyed { window });
+                    }
+                }
+
+                RawEvent::FilesDropped { hwnd, millis } => {
+                    // **Taken before anything can `continue`.** The payload and
+                    // its marker are one drop; leaving the payload behind when
+                    // the marker is discarded would hand it to the next marker
+                    // for that window, which is a scene importing the assets
+                    // dropped on the previous one.
+                    let Some(dropped) = self.shared.take_drop(hwnd) else {
+                        continue;
+                    };
+                    let Some(window) = window else { continue };
+                    if !self.window(window).is_ok_and(|state| state.accept_drops) {
+                        // The system does not send `WM_DROPFILES` to a window
+                        // without `WS_EX_ACCEPTFILES`, so this is the case
+                        // where something outside this backend set the bit. The
+                        // descriptor said no; that is the answer.
+                        log::debug!(
+                            "discarding a drop of {} file(s) on a window created without \
+                             accept_drops",
+                            dropped.paths.len()
+                        );
+                        continue;
+                    }
+                    let time = self.event_time(millis);
+                    let position = Some(PhysicalPoint::new(
+                        f64::from(dropped.x),
+                        f64::from(dropped.y),
+                    ));
+                    // One event per file, which is what `DroppedFile`
+                    // documents: a multi-file drop is several.
+                    for path in dropped.paths {
+                        self.queue.push_back(ShellEvent::DroppedFile {
+                            window,
+                            time,
+                            path,
+                            position,
+                        });
                     }
                 }
                 RawEvent::MonitorsChanged => {
@@ -672,6 +821,21 @@ impl Shell for Win32Shell {
     ///   absolute-reporting device (remote desktop, a tablet) is differenced
     ///   rather than misread, so the bit means the same thing on `mstsc` as it
     ///   does on a desk.
+    /// * [`CLIPBOARD`](ShellCaps::CLIPBOARD) — `OpenClipboard` in both
+    ///   directions, with `CF_UNICODETEXT` for text and a
+    ///   `RegisterClipboardFormatW` format named after the mime for everything
+    ///   else, so an engine-to-engine copy is lossless while Notepad still gets
+    ///   the text. A constant rather than a latch: the calls are `user32`'s and
+    ///   are present or the process did not start. See
+    ///   [`clipboard`](super::clipboard).
+    /// * [`DRAG_DROP`](ShellCaps::DRAG_DROP) — `DragAcceptFiles` plus
+    ///   `WM_DROPFILES`, honouring
+    ///   [`WindowDesc::accept_drops`](crate::WindowDesc::accept_drops). The bit
+    ///   is what [`DroppedFile`](ShellEvent::DroppedFile) documents it to be —
+    ///   *files, in* — and no more: there is no drop cursor and no hover
+    ///   feedback while a drag is in the air, because that is `IDropTarget` and
+    ///   `IDropTarget` is COM. [`dnd`](super::dnd) gives the argument, and it is
+    ///   a gap in *feedback* rather than in the capability the seam names.
     ///
     /// # `TEXT_IME` is clear, and that is a decision rather than a gap
     ///
@@ -691,8 +855,6 @@ impl Shell for Win32Shell {
     /// unverified claim about a code path nobody has watched. A capability that
     /// overstates itself is worse than one that is missing.
     ///
-    /// [`CLIPBOARD`](ShellCaps::CLIPBOARD) and
-    /// [`DRAG_DROP`](ShellCaps::DRAG_DROP) are clear because W3 has not landed.
     /// [`HW_UPSCALE`](ShellCaps::HW_UPSCALE) is clear for a reason rather than
     /// for want of work — a plain `HWND` presents at its own size, and the
     /// renderer does the upscale blit.
@@ -795,6 +957,7 @@ impl Shell for Win32Shell {
             focused: false,
             visible: Self::is_showing(created.hwnd),
             close_pending: false,
+            accept_drops: desc.accept_drops,
         };
         let window = self.windows.insert(window).cast();
         let state = self.window(window)?;
@@ -808,6 +971,7 @@ impl Shell for Win32Shell {
             .remove(window.cast())
             .ok_or_else(|| ShellError::invalid_window(window))?;
         self.shared.forget(removed.key);
+        self.drop_clipboard_answers(window);
         // The pool entry is gone **before** the system call, deliberately:
         // `DestroyWindow` dispatches `WM_DESTROY` into the window procedure
         // synchronously, and the `RawEvent::Destroyed` that produces must not
@@ -977,11 +1141,13 @@ impl Shell for Win32Shell {
 
     /// Blocks until a message arrives or `timeout` elapses.
     ///
-    /// `MWMO_INPUTAVAILABLE` is what makes this correct rather than merely
-    /// blocking: without it the wait only notices messages that arrive *after*
-    /// it starts, so an editor that called [`pump`](Shell::pump), was handed
-    /// something that queued another message, and then went to sleep would
-    /// sleep out the whole timeout with work already waiting.
+    /// The hazard is a wait that sleeps out its whole timeout with work already
+    /// queued — an editor that called [`pump`](Shell::pump), was handed
+    /// something that queued another message, and then went to sleep. What
+    /// closes it is that [`wait`](Self::wait) **drains the queue before it
+    /// sleeps**, so there is never work waiting when the sleep starts. See
+    /// there for why that is the drain rather than `MWMO_INPUTAVAILABLE`, and
+    /// for the CI run that decided it.
     fn wait_events(&mut self, timeout: Option<Duration>) {
         // A wait that cannot wait turns an editor idling at zero frames per
         // second into one spinning a core, and says nothing while it does it.
@@ -1182,38 +1348,161 @@ impl Shell for Win32Shell {
         }
     }
 
-    /// Not in this slice.
+    /// Publishes content, or empties the clipboard with an empty slice.
+    ///
+    /// Every offer is written under its own format — `CF_UNICODETEXT` for text
+    /// and a registered format named after the mime for everything else — so a
+    /// `[text, ron]` pair reaches Notepad *and* round-trips through another
+    /// Crucible losslessly. The reader picks; see
+    /// [`clipboard`](super::clipboard).
+    ///
+    /// # "Release" means "empty", because that is what Win32 has
+    ///
+    /// The seam says an empty slice "releases the clipboard, where the platform
+    /// can express that". X11 and Wayland can: both have an *owner*, and giving
+    /// it up leaves whatever the previous owner published in place. Windows has
+    /// no owner to give up — the clipboard is content, and the only thing a
+    /// process can do to content it put there is discard it. So an empty slice
+    /// is `EmptyClipboard`, and afterwards the clipboard holds nothing rather
+    /// than holding what it held before this shell wrote to it.
+    ///
+    /// # Win32 never returns `NeedsUserInteraction`, and that is complete
+    ///
+    /// [Obligation 6](Shell) says a backend on a platform with no
+    /// user-interaction rule never returns
+    /// [`ShellError::NeedsUserInteraction`]. Windows has no such rule: any
+    /// window of any process may open the clipboard at any time, with no serial,
+    /// no timestamp and no focus involved. A background process can take the
+    /// clipboard here, which Wayland forbids by design — a real difference in
+    /// what the two platforms permit, not a gap in this backend. The same
+    /// sentence the X11 backend writes, for the same reason.
     ///
     /// # Errors
     ///
     /// [`ShellError::InvalidWindow`] for a stale handle, or
-    /// [`ShellError::Unsupported`] — [`CLIPBOARD`](ShellCaps::CLIPBOARD) is
-    /// clear, and W3 is where `OpenClipboard`, `CF_UNICODETEXT` and the
-    /// registered `application/x-crcbl+ron` format land.
+    /// [`ShellError::Backend`] if the clipboard could not be opened within
+    /// [`clipboard::OPEN_BUDGET`](super::clipboard::OPEN_BUDGET) — another
+    /// process is holding it — or if the system refused every format.
     fn clipboard_offer(
         &mut self,
         window: WindowId,
         offers: &[ClipboardOffer<'_>],
     ) -> Result<(), ShellError> {
-        self.window(window)?;
-        let _ = offers;
-        Err(Self::unsupported("the clipboard"))
+        let hwnd = self.window(window)?.raw();
+        let board = Clipboard::open(hwnd).map_err(|refused| {
+            ShellError::Backend(format!(
+                "the clipboard could not be opened within {:?} ({refused:?}); another process is \
+                 holding it",
+                clipboard::OPEN_BUDGET
+            ))
+        })?;
+        if let Opened::After { attempts } = board.opened() {
+            log::debug!("the clipboard was held by another process for {attempts} attempts");
+        }
+        // Required before a write, and the whole of a release. It also makes
+        // this process the clipboard's owner, which is what lets the system
+        // synthesize `CF_TEXT` from the `CF_UNICODETEXT` written below.
+        if !board.empty() {
+            return Err(ShellError::Backend(
+                "EmptyClipboard was refused, so nothing could be published".to_string(),
+            ));
+        }
+        if offers.is_empty() {
+            return Ok(());
+        }
+
+        let mut published = 0usize;
+        for offer in offers {
+            let Some(format) = clipboard::format_id(offer.mime) else {
+                continue;
+            };
+            let encoding = clipboard::encoding_for(offer.mime);
+            if encoding == clipboard::Encoding::UnicodeText
+                && core::str::from_utf8(offer.bytes).is_err()
+            {
+                // `ClipboardOffer` is explicit that it does not validate, and
+                // `CF_UNICODETEXT` cannot carry a byte that is not a character.
+                // Said out loud, because the replacement characters are
+                // otherwise found by whoever pastes.
+                log::warn!(
+                    "a text/plain clipboard offer is not valid UTF-8; the invalid bytes will \
+                     paste as replacement characters"
+                );
+            }
+            if board.put(format, &clipboard::payload_bytes(encoding, offer.bytes)) {
+                published += 1;
+            }
+        }
+        if published == 0 {
+            // The clipboard has already been emptied, which is the honest state
+            // to leave it in: this process claimed it and then published
+            // nothing, rather than leaving somebody else's content under our
+            // ownership.
+            return Err(ShellError::Backend(
+                "no offered format could be published to the clipboard".to_string(),
+            ));
+        }
+        Ok(())
     }
 
-    /// Not in this slice; see [`clipboard_offer`](Shell::clipboard_offer).
+    /// Asks for the clipboard's content in `mime`.
+    ///
+    /// # Which obligations this satisfies, and how
+    ///
+    /// * **Exactly one answer** ([obligation 4](Shell)): the read happens inside
+    ///   this call and its [`ClipboardData`](ShellEvent::ClipboardData) is
+    ///   queued before it returns, so it is delivered by the next
+    ///   [`pump`](Shell::pump). There is no list of outstanding reads to lose
+    ///   one from. The single exception is the one the X11 backend names too —
+    ///   a window destroyed before that pump, where obligation 1 wins; see
+    ///   [`drop_clipboard_answers`](Self::drop_clipboard_answers).
+    /// * **Within a bounded time** (also 4): the only wait is
+    ///   `OpenClipboard` being refused by a process that has it open, and that
+    ///   is retried for [`clipboard::OPEN_BUDGET`](super::clipboard::OPEN_BUDGET)
+    ///   and then answered [`Unavailable`](ClipboardContent::Unavailable). There
+    ///   is no transfer to stall: `GetClipboardData` hands over memory rather
+    ///   than starting a conversation with another process, so this backend has
+    ///   no equivalent of X11's `INCR` deadline or Wayland's pipe timeout.
+    /// * **Held rather than answered empty** ([obligation 5](Shell)): there is
+    ///   nothing to hold. Any window may open the clipboard at any time —
+    ///   **Win32 has neither Wayland's focus gate nor its serial requirement** —
+    ///   so "hold until answerable" collapses to "answer", and the obligation is
+    ///   discharged by answering. [`clipboard_readable`](Shell::clipboard_readable)
+    ///   is therefore left at the trait's provided default, which that method's
+    ///   own documentation names this platform as being right for.
+    ///
+    /// # The answer names the format that was asked for
+    ///
+    /// [`ClipboardData::mime`](ShellEvent::ClipboardData) is "the format that
+    /// was delivered, spelled the way the *other* application spelled it". A
+    /// Win32 clipboard format is a **number**, not a string: there is no peer
+    /// spelling in existence to report, so the answer echoes the request. That
+    /// is not a shortcut — it is what `ReceivedMime` documents for the case
+    /// where there is nothing else to say.
     ///
     /// # Errors
     ///
-    /// [`ShellError::InvalidWindow`] for a stale handle, or
-    /// [`ShellError::Unsupported`].
+    /// [`ShellError::InvalidWindow`] for a stale handle. An empty clipboard is
+    /// an answer, not an error.
     fn clipboard_request(
         &mut self,
         window: WindowId,
         mime: MimeType,
     ) -> Result<ClipboardRequestId, ShellError> {
-        self.window(window)?;
-        let _ = mime;
-        Err(Self::unsupported("the clipboard"))
+        let hwnd = self.window(window)?.raw();
+        let request = ClipboardRequestId(self.next_request);
+        self.next_request = self.next_request.wrapping_add(1);
+        let content = self.read_clipboard(hwnd, mime);
+        // Queued rather than returned, even though it is known now: a consumer
+        // written against the asynchronous shape is one that also works on X11,
+        // where the answer is several round trips away.
+        self.queue_event(ShellEvent::ClipboardData {
+            window,
+            request,
+            mime: ReceivedMime::from(mime),
+            content,
+        });
+        Ok(request)
     }
 }
 
@@ -1272,12 +1561,13 @@ impl Drop for Win32Shell {
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::*;
-    use crate::{AspectRatio, ClipboardContent, LogicalSize, MimeType};
+    use crate::{AspectRatio, LogicalSize, MimeType};
     use crcbl_core::KeyCode;
     use crcbl_core::input::{ButtonState, Keysym, PointerButton, Scancode, ScrollDelta};
+    use std::path::PathBuf;
     use std::time::Instant;
 
-    use super::super::ffi::{Lparam, MinMaxInfo, Rect, msg};
+    use super::super::ffi::{DropFiles, Lparam, MinMaxInfo, Point, Rect, msg};
 
     /// `VK_W`, which is the letter's virtual key on every layout that has one.
     const VK_W: usize = 0x57;
@@ -1399,6 +1689,158 @@ mod tests {
         // SAFETY: `rect` is a live, initialised `RECT` the call writes into.
         unsafe { ffi::GetClipCursor(&raw mut rect) };
         rect
+    }
+
+    /// The whole desktop, as one rectangle.
+    ///
+    /// The origin is read rather than assumed to be zero: a monitor to the left
+    /// of the primary puts the virtual screen's left edge at a negative
+    /// coordinate, and a test that assumed the origin would pass on this
+    /// developer's desk and fail on somebody else's.
+    fn virtual_screen() -> Rect {
+        // SAFETY: four metric queries by value; each reads no memory of ours
+        // and answers zero for an index it does not know.
+        unsafe {
+            let left = ffi::GetSystemMetrics(value::SM_X_VIRTUAL_SCREEN);
+            let top = ffi::GetSystemMetrics(value::SM_Y_VIRTUAL_SCREEN);
+            Rect {
+                left,
+                top,
+                right: left + ffi::GetSystemMetrics(value::SM_CX_VIRTUAL_SCREEN),
+                bottom: top + ffi::GetSystemMetrics(value::SM_CY_VIRTUAL_SCREEN),
+            }
+        }
+    }
+
+    /// Whether any window of this process has the clipboard open.
+    ///
+    /// The observable behind "closed on every path out": the guard's `Drop` is
+    /// what has to have run, and this is the only thing that can see whether it
+    /// did.
+    fn clipboard_is_open() -> bool {
+        // SAFETY: the call takes no arguments and only reads window-station
+        // state.
+        !unsafe { ffi::GetOpenClipboardWindow() }.is_null()
+    }
+
+    /// A window that accepts file drops, which is off by default.
+    fn drop_window(shell: &mut Win32Shell) -> WindowId {
+        shell
+            .create_window(&WindowDesc {
+                title: "crcbl P5C W3 — drops",
+                accept_drops: true,
+                ..WindowDesc::default()
+            })
+            .expect("creating a drop target")
+    }
+
+    /// Builds the `HDROP` a file manager's drop would have handed over.
+    ///
+    /// CI has nobody to drag a file onto a window, so this is the drag: the
+    /// block is exactly what the shell puts behind an `HDROP`, and everything
+    /// downstream of it — `DragQueryFileW`, `DragQueryPoint`, `DragFinish`, the
+    /// window procedure, the shared drop queue and the translation — is the
+    /// real path. The handle is **not** freed here: `DragFinish` inside the
+    /// procedure owns it, and that is part of what this exercises.
+    fn make_hdrop(paths: &[&str], x: i32, y: i32) -> Handle {
+        let mut list: Vec<u16> = Vec::new();
+        for path in paths {
+            list.extend(path.encode_utf16());
+            list.push(0);
+        }
+        // The list itself is terminated by an empty entry, which is the second
+        // NUL after the last path — and the whole list when there are none.
+        list.push(0);
+
+        let header = size_of::<DropFiles>();
+        let bytes = header + list.len() * 2;
+        // SAFETY: an allocation request by value. `GMEM_MOVEABLE` is what an
+        // `HDROP` is, which is why `DragQueryFileW` can lock it.
+        let mem = unsafe { ffi::GlobalAlloc(value::GMEM_MOVEABLE, bytes) };
+        assert!(!mem.is_null(), "GlobalAlloc for a synthetic HDROP");
+        // SAFETY: `mem` is a live moveable block this function owns until the
+        // message is sent.
+        let locked = unsafe { ffi::GlobalLock(mem) };
+        assert!(!locked.is_null(), "GlobalLock of a synthetic HDROP");
+        // SAFETY: `locked` points at `bytes` writable bytes, which is
+        // `size_of::<DropFiles>()` followed by exactly `list.len()` code units;
+        // `GlobalAlloc` returns at least 8-byte alignment, so both the header
+        // write and the `u16` copy at the even offset `header` are aligned.
+        unsafe {
+            ptr::write_bytes(locked.cast::<u8>(), 0, bytes);
+            locked.cast::<DropFiles>().write(DropFiles {
+                p_files: header as u32,
+                pt: Point { x, y },
+                f_nc: 0,
+                f_wide: 1,
+            });
+            ptr::copy_nonoverlapping(
+                list.as_ptr(),
+                locked.cast::<u8>().add(header).cast::<u16>(),
+                list.len(),
+            );
+            ffi::GlobalUnlock(mem);
+        }
+        mem
+    }
+
+    /// Sends a `WM_DROPFILES` carrying a synthetic `HDROP`.
+    fn send_drop(hwnd: Handle, paths: &[&str], x: i32, y: i32) {
+        let hdrop = make_hdrop(paths, x, y);
+        // SAFETY: a drop message to this shell's own window, with the `wParam`
+        // `shell32` documents for it. The procedure finishes the handle.
+        unsafe { ffi::SendMessageW(hwnd, msg::DROP_FILES, hdrop as usize, 0) };
+    }
+
+    /// Every [`ShellEvent::DroppedFile`] one pump produced.
+    fn pump_drops(shell: &mut Win32Shell) -> Vec<(WindowId, PathBuf, Option<PhysicalPoint>)> {
+        let mut dropped = Vec::new();
+        shell.pump(&mut |event| {
+            if let ShellEvent::DroppedFile {
+                window,
+                path,
+                position,
+                ..
+            } = event
+            {
+                dropped.push((window, path, position));
+            }
+        });
+        dropped
+    }
+
+    /// Reads the clipboard and pumps until the answer arrives.
+    ///
+    /// One pump is always enough on this backend — the read happens inside
+    /// `clipboard_request` — and the loop is not a retry: it asserts that.
+    fn paste(shell: &mut Win32Shell, window: WindowId, requested: MimeType) -> ClipboardContent {
+        let request = shell
+            .clipboard_request(window, requested)
+            .expect("CLIPBOARD is claimed");
+        let mut answers = Vec::new();
+        shell.pump(&mut |event| {
+            if let ShellEvent::ClipboardData {
+                window: asked,
+                request: answered,
+                mime,
+                content,
+            } = event
+            {
+                assert_eq!(asked, window, "the answer names the window that asked");
+                assert_eq!(answered, request, "and the request it answers");
+                assert!(
+                    mime.matches(requested),
+                    "a Win32 format is a number, so the answer echoes the request: {mime}"
+                );
+                answers.push(content);
+            }
+        });
+        assert_eq!(
+            answers.len(),
+            1,
+            "exactly one answer per accepted request, on the first pump: {answers:?}"
+        );
+        answers.remove(0)
     }
 
     /// The cursor's display count, read without changing it.
@@ -1590,6 +2032,8 @@ mod tests {
             ShellCaps::POINTER_LOCK,
             ShellCaps::POINTER_CONFINE,
             ShellCaps::POINTER_WARP,
+            ShellCaps::CLIPBOARD,
+            ShellCaps::DRAG_DROP,
         ] {
             assert!(caps.contains(present), "{present:?} is implemented");
         }
@@ -1601,33 +2045,22 @@ mod tests {
         );
         assert!(caps.has_mouselook(), "both halves, which is the point");
 
-        // Clear, and each for a stated reason: the clipboard and drag-and-drop
-        // are W3; `TEXT_IME` is not earned by `WM_CHAR` alone; `HW_UPSCALE` is
-        // not something a plain `HWND` can do. A capability that overstates
-        // itself is worse than one that is missing.
-        for absent in [
-            ShellCaps::CLIPBOARD,
-            ShellCaps::DRAG_DROP,
-            ShellCaps::TEXT_IME,
-            ShellCaps::HW_UPSCALE,
-        ] {
+        // Clear, and each for a stated reason: `TEXT_IME` is not earned by
+        // `WM_CHAR` alone, and `HW_UPSCALE` is not something a plain `HWND` can
+        // do. A capability that overstates itself is worse than one that is
+        // missing.
+        for absent in [ShellCaps::TEXT_IME, ShellCaps::HW_UPSCALE] {
             assert!(!caps.contains(absent), "{absent:?} is not implemented");
         }
         assert_eq!(caps, shell.caps(), "latched for the shell's lifetime");
 
-        // And the refusals agree with the bits, which is what makes them
+        // And the methods agree with the bits, which is what makes them
         // checkable rather than decorative.
-        assert!(matches!(
-            shell.clipboard_offer(window, &[]),
-            Err(ShellError::Unsupported { .. })
-        ));
-        assert!(matches!(
-            shell.clipboard_request(window, MimeType::TextUtf8),
-            Err(ShellError::Unsupported { .. })
-        ));
+        assert!(shell.clipboard_offer(window, &[]).is_ok());
+        assert!(shell.clipboard_request(window, MimeType::TextUtf8).is_ok());
         assert!(
-            !shell.clipboard_readable(window),
-            "the trait's default answers from the capability"
+            shell.clipboard_readable(window),
+            "Win32 has no focus gate, so the trait's default is exactly right"
         );
         for mode in [
             PointerMode::Free,
@@ -1648,7 +2081,6 @@ mod tests {
                 .is_ok()
         );
         assert!(shell.set_cursor(window, None).is_ok());
-        let _ = ClipboardContent::Empty;
     }
 
     #[test]
@@ -1848,12 +2280,23 @@ mod tests {
         // cursor clipped after it stops being the foreground window has taken
         // the desktop hostage. The clip is read back from the *system*, because
         // that is the thing being claimed.
+        //
+        // What the clip is compared against is **not** the client rectangle,
+        // and the difference is the runner's answer rather than a loosening.
+        // `ClipCursor` intersects with the virtual screen before it applies: the
+        // Windows runner's display is 1024×768, which is smaller than the
+        // default 1280×720 window once the frame is added, so the clip came back
+        // 12 px narrower on the right and the right edge was exactly the screen
+        // width. Asserting the client rectangle asserts something the API does
+        // not promise; asserting the intersection asserts what it does, and it
+        // is the same clamp a game meets on a 1366×768 laptop.
         let mut shell = shell();
         let window = window(&mut shell);
         shell.pump(&mut |_| {});
         let hwnd = hwnd_of(&shell, window);
         let client = super::input::client_screen_rect(hwnd).expect("a live window has one");
-        assert_ne!(clip_rect(), client, "nothing is clipped to start with");
+        let clipped = client.intersect(virtual_screen());
+        assert_ne!(clip_rect(), clipped, "nothing is clipped to start with");
 
         // The clip follows the focus, so the window has to have it. CI cannot
         // click on a window; the message is what a click would have produced,
@@ -1866,17 +2309,17 @@ mod tests {
         shell
             .set_pointer_mode(window, PointerMode::Confined)
             .expect("POINTER_CONFINE is claimed");
-        assert_eq!(clip_rect(), client, "the pointer is bounded by the window");
+        assert_eq!(clip_rect(), clipped, "the pointer is bounded by the window");
 
         // **Released synchronously**, inside the window procedure, without a
         // pump — one frame of a hostage desktop is one frame too many.
         send_focus(hwnd, false);
-        assert_ne!(clip_rect(), client, "focus loss releases the clip");
+        assert_ne!(clip_rect(), clipped, "focus loss releases the clip");
 
         // And it comes back with the focus, because the request has not been
         // withdrawn.
         send_focus(hwnd, true);
-        assert_eq!(clip_rect(), client);
+        assert_eq!(clip_rect(), clipped);
         shell.pump(&mut |_| {});
 
         // The other order: a mode asked for while the window does **not** have
@@ -1893,20 +2336,24 @@ mod tests {
             .expect("asking is allowed whether or not it takes effect now");
         assert_ne!(
             clip_rect(),
-            client,
+            clipped,
             "an unfocused window does not get the pointer"
         );
         send_focus(hwnd, true);
-        assert_eq!(clip_rect(), client, "and gets it when the keyboard arrives");
+        assert_eq!(
+            clip_rect(),
+            clipped,
+            "and gets it when the keyboard arrives"
+        );
         shell.pump(&mut |_| {});
 
         // Going back to free withdraws it for good.
         shell
             .set_pointer_mode(window, PointerMode::Free)
             .expect("free always works");
-        assert_ne!(clip_rect(), client);
+        assert_ne!(clip_rect(), clipped);
         send_focus(hwnd, true);
-        assert_ne!(clip_rect(), client, "and focus does not resurrect it");
+        assert_ne!(clip_rect(), clipped, "and focus does not resurrect it");
     }
 
     #[test]
@@ -2189,6 +2636,336 @@ mod tests {
             shell.window_state(window),
             Err(ShellError::InvalidWindow { .. })
         ));
+    }
+
+    #[test]
+    fn both_offered_formats_round_trip_and_the_reader_picks() {
+        // What `CLIPBOARD` claims, against the real window station: text for
+        // everything else on the desktop, a registered format for the engine's
+        // own, and both on the clipboard at once so the reader chooses. The RON
+        // has to come back **byte for byte** — a blob carrying the heap's
+        // padding would not parse.
+        let mut shell = shell();
+        let window = window(&mut shell);
+        shell.pump(&mut |_| {});
+
+        const RON: &str = "(kind:\"node\",id:7,name:\"日本語 🎮\")";
+        shell
+            .clipboard_offer(
+                window,
+                &[ClipboardOffer::text("hello 🎮"), ClipboardOffer::ron(RON)],
+            )
+            .expect("claiming the clipboard needs no user interaction on Win32");
+        assert!(
+            !clipboard_is_open(),
+            "the guard closed the clipboard on the way out of the offer"
+        );
+
+        assert_eq!(
+            paste(&mut shell, window, MimeType::TextUtf8).text(),
+            Some("hello 🎮"),
+            "an astral codepoint survives the UTF-16 round trip"
+        );
+        assert_eq!(
+            paste(&mut shell, window, MimeType::CrcblRon),
+            ClipboardContent::Bytes(RON.as_bytes().to_vec()),
+            "the engine's own format is lossless, padding and all"
+        );
+        assert!(
+            !clipboard_is_open(),
+            "and on the way out of every read as well"
+        );
+
+        // A format that was not offered is `Empty` — "holds nothing in that
+        // format", which the seam merges with an empty clipboard on purpose —
+        // and emphatically not `Unavailable`, which would mean the read failed.
+        assert_eq!(
+            paste(&mut shell, window, MimeType::UriList),
+            ClipboardContent::Empty
+        );
+    }
+
+    #[test]
+    fn an_empty_offer_empties_the_clipboard_and_an_empty_payload_does_not() {
+        // The two cases `ClipboardContent` exists to keep apart, and the one
+        // place they are easy to conflate: releasing the clipboard and
+        // publishing nothing.
+        let mut shell = shell();
+        let window = window(&mut shell);
+        shell.pump(&mut |_| {});
+
+        // A successful transfer of zero bytes. `Bytes(vec![])`, not `Empty` —
+        // reporting `Empty` here tells an editor its paste failed when it did
+        // not.
+        shell
+            .clipboard_offer(window, &[ClipboardOffer::text("")])
+            .expect("an empty payload is a payload");
+        assert_eq!(
+            paste(&mut shell, window, MimeType::TextUtf8),
+            ClipboardContent::Bytes(Vec::new())
+        );
+
+        // An empty *slice* is the release. Windows has no owner to give up, so
+        // this is `EmptyClipboard` and afterwards there is nothing there.
+        shell
+            .clipboard_offer(window, &[])
+            .expect("an empty slice releases");
+        assert_eq!(
+            paste(&mut shell, window, MimeType::TextUtf8),
+            ClipboardContent::Empty
+        );
+        assert!(!clipboard_is_open());
+    }
+
+    #[test]
+    fn a_read_is_answered_exactly_once_and_needs_no_second_pump() {
+        // Obligation 4 in the form this backend takes: the read happens inside
+        // `clipboard_request`, so the answer is queued before it returns and
+        // there is no list of outstanding reads to lose one from. `paste`
+        // asserts the "exactly one, on the first pump" half; this asserts that
+        // nothing arrives afterwards, which is the half a duplicated answer
+        // would break.
+        let mut shell = shell();
+        let window = window(&mut shell);
+        shell.pump(&mut |_| {});
+        shell
+            .clipboard_offer(window, &[ClipboardOffer::text("once")])
+            .expect("publish");
+
+        let first = shell
+            .clipboard_request(window, MimeType::TextUtf8)
+            .expect("accepted");
+        let second = shell
+            .clipboard_request(window, MimeType::CrcblRon)
+            .expect("accepted");
+        assert_ne!(first, second, "ids are unique within a shell");
+
+        let mut answered = Vec::new();
+        shell.pump(&mut |event| {
+            if let ShellEvent::ClipboardData {
+                request, content, ..
+            } = event
+            {
+                answered.push((request, content));
+            }
+        });
+        assert_eq!(answered.len(), 2, "one each: {answered:?}");
+        assert_eq!(answered[0].0, first, "in the order they were asked");
+        assert_eq!(answered[1].0, second);
+        assert_eq!(answered[0].1.text(), Some("once"));
+        assert_eq!(
+            answered[1].1,
+            ClipboardContent::Empty,
+            "the RON format was not published"
+        );
+
+        let mut again = Vec::new();
+        shell.pump(&mut |event| {
+            if matches!(event, ShellEvent::ClipboardData { .. }) {
+                again.push(event.name());
+            }
+        });
+        assert!(
+            again.is_empty(),
+            "answered once, not once per pump: {again:?}"
+        );
+    }
+
+    #[test]
+    fn a_window_destroyed_before_the_pump_is_not_answered_at_all() {
+        // Where obligation 4 meets obligation 1, and the stronger of the two
+        // wins: an answer naming a handle the consumer has already been told is
+        // stale is worse than a request that ends without one, because the
+        // consumer can see the stale handle and cannot see the missing answer.
+        // The X11 backend decides this the same way.
+        let mut shell = shell();
+        let window = window(&mut shell);
+        let survivor = shell
+            .create_window(&WindowDesc {
+                title: "crcbl P5C W3 — survivor",
+                size: LogicalSize::new(640.0, 480.0),
+                ..WindowDesc::default()
+            })
+            .expect("a second window");
+        shell.pump(&mut |_| {});
+        shell
+            .clipboard_offer(window, &[ClipboardOffer::text("gone")])
+            .expect("publish");
+
+        let doomed = shell
+            .clipboard_request(window, MimeType::TextUtf8)
+            .expect("accepted while the window was live");
+        let kept = shell
+            .clipboard_request(survivor, MimeType::TextUtf8)
+            .expect("accepted");
+        shell.destroy_window(window).expect("destroy");
+
+        let mut answered = Vec::new();
+        shell.pump(&mut |event| {
+            if let ShellEvent::ClipboardData { request, .. } = event {
+                answered.push(request);
+            }
+        });
+        assert_eq!(
+            answered,
+            [kept],
+            "the dead window's answer went with it and the live one's did not"
+        );
+        assert_ne!(doomed, kept);
+    }
+
+    #[test]
+    fn a_drop_becomes_one_event_per_file_at_the_position_it_landed() {
+        // What `DRAG_DROP` claims, driven through the real `WM_DROPFILES` path:
+        // shell32's `DragQueryFileW` reads a real `HDROP`, the procedure
+        // finishes it, and the paths reach the pump through the side queue that
+        // keeps them out of a `Copy` event.
+        let mut shell = shell();
+        let window = drop_window(&mut shell);
+        shell.pump(&mut |_| {});
+        let hwnd = hwnd_of(&shell, window);
+
+        send_drop(
+            hwnd,
+            &[r"C:\assets\My Scene.ron", r"C:\assets\プロジェクト.png"],
+            12,
+            34,
+        );
+        let dropped = pump_drops(&mut shell);
+        assert_eq!(dropped.len(), 2, "one event per file: {dropped:?}");
+        assert_eq!(dropped[0].0, window);
+        assert_eq!(dropped[0].1, PathBuf::from(r"C:\assets\My Scene.ron"));
+        assert_eq!(
+            dropped[1].1,
+            PathBuf::from(r"C:\assets\プロジェクト.png"),
+            "a non-ASCII name survives UTF-16 without a lossy step"
+        );
+        assert_eq!(
+            dropped[0].2,
+            Some(PhysicalPoint::new(12.0, 34.0)),
+            "the drop point is in client pixels, which is what the seam means"
+        );
+
+        // Two drops in one pump stay two drops, and each marker claims its own
+        // payload — the pairing that hands one scene the other's assets when it
+        // is wrong.
+        send_drop(hwnd, &[r"C:\a.png"], 1, 2);
+        send_drop(hwnd, &[r"C:\b.png", r"C:\c.png"], 3, 4);
+        let batch = pump_drops(&mut shell);
+        let paths: Vec<PathBuf> = batch.iter().map(|(_, path, _)| path.clone()).collect();
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from(r"C:\a.png"),
+                PathBuf::from(r"C:\b.png"),
+                PathBuf::from(r"C:\c.png")
+            ],
+            "in order: {batch:?}"
+        );
+        assert_eq!(batch[0].2, Some(PhysicalPoint::new(1.0, 2.0)));
+        assert_eq!(
+            batch[1].2,
+            Some(PhysicalPoint::new(3.0, 4.0)),
+            "the second drop's point, not the first's"
+        );
+    }
+
+    #[test]
+    fn a_window_that_did_not_ask_for_drops_reports_none() {
+        // `accept_drops` is off by default and load-bearing rather than
+        // advisory. The system enforces it — no `WS_EX_ACCEPTFILES`, no
+        // message — so the message here is one the system would never send, and
+        // what is under test is the backend's own half of the gate.
+        let mut shell = shell();
+        let window = window(&mut shell);
+        shell.pump(&mut |_| {});
+        let hwnd = hwnd_of(&shell, window);
+
+        send_drop(hwnd, &[r"C:\unwanted.png"], 5, 5);
+        assert!(
+            pump_drops(&mut shell).is_empty(),
+            "the descriptor said no, and that is the answer"
+        );
+    }
+
+    #[test]
+    fn the_drop_registration_survives_a_trip_through_borderless() {
+        // `DragAcceptFiles` sets `WS_EX_ACCEPTFILES`, and a mode change
+        // *rewrites the extended style word*. Carrying the bit is what stops
+        // drops silently ceasing to arrive the first time a window goes
+        // fullscreen — with nothing anywhere reporting it.
+        let mut shell = shell();
+        let window = drop_window(&mut shell);
+        shell.pump(&mut |_| {});
+        let hwnd = hwnd_of(&shell, window);
+        let accepts = || {
+            // SAFETY: reading this shell's own window's extended style.
+            let ex_style = unsafe { ffi::GetWindowLongPtrW(hwnd, value::GWL_EX_STYLE) } as u32;
+            ex_style & super::super::ffi::style::EX_ACCEPT_FILES
+        };
+        assert_ne!(accepts(), 0, "created with drops accepted");
+
+        let primary = shell
+            .monitors()
+            .iter()
+            .find(|monitor| monitor.is_primary)
+            .expect("a primary monitor")
+            .id;
+        shell
+            .set_mode(
+                window,
+                DisplayMode::Borderless {
+                    monitor: Some(primary),
+                },
+            )
+            .expect("borderless");
+        assert_ne!(accepts(), 0, "the style rewrite carried the bit");
+        shell
+            .set_mode(window, DisplayMode::Windowed)
+            .expect("and back");
+        assert_ne!(accepts(), 0);
+        shell.pump(&mut |_| {});
+
+        // And it still works, which is the thing the bit is a proxy for.
+        send_drop(hwnd, &[r"C:\after.ron"], 7, 8);
+        let dropped = pump_drops(&mut shell);
+        assert_eq!(dropped.len(), 1, "{dropped:?}");
+        assert_eq!(dropped[0].1, PathBuf::from(r"C:\after.ron"));
+    }
+
+    #[test]
+    fn opening_the_clipboard_reports_how_it_went_and_always_closes_it() {
+        // The mechanism, not a wall clock: an open that took it first time and
+        // one that retried seven times take indistinguishable amounts of time on
+        // a loaded runner, and only `Opened` can say which happened. What is
+        // asserted is that it was not *refused* and that the guard's `Drop` ran
+        // — the second being what stops this process locking every other
+        // application out of the clipboard.
+        assert!(!clipboard_is_open(), "nothing is open before we start");
+        let mut shell = shell();
+        let window = window(&mut shell);
+        let hwnd = hwnd_of(&shell, window);
+
+        let opened = {
+            let board = super::super::clipboard::Clipboard::open(hwnd)
+                .expect("an idle desktop lets a process open the clipboard");
+            assert!(clipboard_is_open(), "held for the guard's lifetime");
+            board.opened()
+        };
+        assert!(
+            !clipboard_is_open(),
+            "and given back the moment the guard leaves scope"
+        );
+        assert!(
+            !matches!(opened, Opened::Refused { .. }),
+            "another process held the clipboard for the whole budget: {opened:?}"
+        );
+        if let Opened::After { attempts } = opened {
+            assert!(
+                attempts <= super::super::clipboard::OPEN_ATTEMPTS,
+                "the retry is bounded: {attempts}"
+            );
+        }
     }
 
     #[test]

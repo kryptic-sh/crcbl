@@ -224,6 +224,23 @@ pub enum RawEvent {
         /// `GetMessageTime` milliseconds.
         millis: u32,
     },
+    /// `WM_DROPFILES` — files were dropped on the window.
+    ///
+    /// **The paths are not here.** A drop carries a `Vec<PathBuf>`, which this
+    /// enum cannot hold without giving up `Copy` — see the [module docs](self)
+    /// — and the `HDROP` they come out of is live only for the length of the
+    /// message, so the procedure reads them and puts them on
+    /// [`Shared`](super::proc::Shared)'s own drop queue. This is the marker that
+    /// keeps the drop in its place in the stream, so that a drop still follows
+    /// the pointer motion which positioned it.
+    FilesDropped {
+        /// `HWND` as an integer. Also what the payload is matched by, so a
+        /// drop on a window that dies before the pump is discarded with it
+        /// rather than being handed to the next drop's marker.
+        hwnd: isize,
+        /// `GetMessageTime` milliseconds.
+        millis: u32,
+    },
     /// `WM_DISPLAYCHANGE` — a monitor was plugged, unplugged or reconfigured.
     MonitorsChanged,
 }
@@ -245,7 +262,8 @@ impl RawEvent {
             | Self::PointerFocus { hwnd, .. }
             | Self::Button { hwnd, .. }
             | Self::Wheel { hwnd, .. }
-            | Self::RawMotion { hwnd, .. } => Some(hwnd),
+            | Self::RawMotion { hwnd, .. }
+            | Self::FilesDropped { hwnd, .. } => Some(hwnd),
             Self::MonitorsChanged => None,
         }
     }
@@ -355,6 +373,17 @@ mod tests {
             RawEvent::CloseRequested { hwnd: A },
             RawEvent::DpiChanged { hwnd: A, dpi: 144 },
             RawEvent::DpiChanged { hwnd: A, dpi: 96 },
+            // Two drops in one pump are two drops, and collapsing them would
+            // leave the second one's paths on the shared queue with no marker
+            // to claim them.
+            RawEvent::FilesDropped {
+                hwnd: A,
+                millis: 1_000,
+            },
+            RawEvent::FilesDropped {
+                hwnd: A,
+                millis: 1_200,
+            },
             RawEvent::Minimized { hwnd: A },
             RawEvent::Destroyed { hwnd: A },
         ];
@@ -580,6 +609,12 @@ mod tests {
             }
             .hwnd(),
             Some(B)
+        );
+        assert_eq!(
+            RawEvent::FilesDropped { hwnd: B, millis: 0 }.hwnd(),
+            Some(B),
+            "a drop's marker has to name its window, because that is what the \
+             payload is matched by"
         );
         assert_eq!(RawEvent::MonitorsChanged.hwnd(), None);
     }

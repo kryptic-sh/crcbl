@@ -288,6 +288,13 @@ impl Win32Shell {
             )));
         }
 
+        if desc.accept_drops {
+            // Off by default and opt-in per window, and here the opt-in is
+            // literal: this sets `WS_EX_ACCEPTFILES`, and the system sends
+            // `WM_DROPFILES` to no window without it. See `dnd`.
+            super::dnd::accept_files(hwnd, true);
+        }
+
         let real_dpi = Self::dpi_of(hwnd);
         let real_frame = Self::frame_for(styles, real_dpi);
         if real_dpi != dpi && !desc.mode.is_borderless() {
@@ -560,15 +567,32 @@ impl Win32Shell {
         placement
     }
 
-    /// Writes both style words.
+    /// Writes both style words, carrying the extended bits that are *state*.
+    ///
+    /// `WS_EX_ACCEPTFILES` is what `DragAcceptFiles` sets, so it is a fact about
+    /// the window rather than a consequence of its display mode — exactly like
+    /// `WS_VISIBLE` in the word next door, which the callers carry across by
+    /// hand. Recomputing the extended style from
+    /// [`geometry::styles`](super::geometry::styles) and writing it back
+    /// without this bit stops a window receiving `WM_DROPFILES` the first time
+    /// it goes borderless, with nothing anywhere reporting that drops stopped
+    /// working.
     fn set_styles(hwnd: Handle, window_style: u32, ex_style: u32) {
+        // SAFETY: reading this shell's own window's extended style, only to
+        // carry the drop registration across the write below.
+        let accepts_drops = unsafe { ffi::GetWindowLongPtrW(hwnd, value::GWL_EX_STYLE) } as u32
+            & style::EX_ACCEPT_FILES;
         // SAFETY: setting this shell's own window's styles. The values are
         // widened through `u32` on purpose — the style words are 32 bits even
         // on 64-bit Windows, and sign-extending them through `isize` would set
         // every high bit for a style with `WS_POPUP` in it.
         unsafe {
             ffi::SetWindowLongPtrW(hwnd, value::GWL_STYLE, window_style as isize);
-            ffi::SetWindowLongPtrW(hwnd, value::GWL_EX_STYLE, ex_style as isize);
+            ffi::SetWindowLongPtrW(
+                hwnd,
+                value::GWL_EX_STYLE,
+                (ex_style | accepts_drops) as isize,
+            );
         }
     }
 

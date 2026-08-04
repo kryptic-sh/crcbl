@@ -272,7 +272,7 @@ made it measurably _worse_: five runs, 3-5 failures each.
 
 ## What the Win32 backend has and has not been run against
 
-P5C W1 and W2 wrote the whole of `crates/crcbl-shell/src/win32/` on a Linux
+P5C W1, W2 and W3 wrote the whole of `crates/crcbl-shell/src/win32/` on a Linux
 machine. It is cross-checked with
 `cargo check`/`cargo clippy --target x86_64-pc-windows-msvc`, which do not link
 and do not run — **a cross-check proves the code typechecks and nothing more**.
@@ -282,10 +282,28 @@ does give a process a usable window station.** 2248 tests passed and 1 failed;
 `Win32Shell::open`, `create_window`, the message pump, the borderless round
 trip, monitor enumeration and per-monitor DPI all executed against a real
 desktop, and `cargo build`/`cargo clippy` linked the hand-written declarations
-for real. The one failure was `wait_events_genuinely_blocks` (three 50 ms waits
-in 47 ms); the wait now reports a `Wake` and the test asserts that reason rather
-than a wall clock, and **whether that fixed the cause or only diagnosed it is
-the next CI run's answer, not something this note may claim in advance.**
+for real.
+
+**The W2 run then diagnosed both of its own failures**, which is what the
+`Wake`-and-`GetQueueStatus` reporting was added for. 2284 tests, 2282 passed:
+
+- `wait_events_genuinely_blocks` reported `Wake::Message` after 14 ms with the
+  queue holding `0x400040` — `QS_SENDMESSAGE` in both halves. A message _sent_
+  to a window is dispatched by `PeekMessage` but not retrieved, so the bit
+  survives the pump, and `MWMO_INPUTAVAILABLE` asks to be woken by exactly that
+  bit. `Win32Shell::wait` now drains the queue itself and sleeps with no flags.
+  **This is expected to fix the cause rather than known to: it cannot be run
+  here, and the next CI run is the check.**
+- `confining_the_pointer_clips_it_...` reported a clip 12 px narrower on the
+  right than the client rectangle, with the right edge at exactly 1024.
+  **`ClipCursor` intersects with the virtual screen**, and the runner's display
+  is 1024×768 — smaller than the default window. The backend was correct and the
+  assertion overstated what the API promises; it now compares against
+  `client.intersect(virtual_screen())`. Worth remembering for every later
+  Windows test: **the runner's desktop is 1024×768**, so anything that assumes a
+  default-sized window fits on screen is wrong there. The clamp is real
+  behaviour a game meets on a 1366×768 laptop, so the case is described rather
+  than avoided.
 
 What remains unverified:
 
@@ -293,7 +311,12 @@ What remains unverified:
   host, which catches a missing or wrong-width field but not a _reordering_ of
   two fields of the same width. `DEVMODEW` is the one with two unions in it and
   the one to re-read if a refresh rate ever looks implausible; `RAWMOUSE` is the
-  one to re-read if a raw delta does.
+  one to re-read if a raw delta does. W3 found a third hole while falsifying
+  that guard: **a field whose width shrinks into its own trailing padding moves
+  no offset and is not caught** — narrowing `DropFiles::p_files` from `u32` to
+  `u16` leaves every assertion green. Nothing depends on it today (that field is
+  written by a test and read by nothing), but the assertion is weaker than it
+  reads.
 - The pure arithmetic (`win32/geometry.rs`, `win32/events.rs`, `win32/keys.rs`,
   `win32/pointer.rs`, `TimeBase`, `win32/proc.rs`'s shared state) _is_ covered
   on Linux and each of its guards was falsified by mutation before this was
@@ -331,6 +354,71 @@ What W2 adds to that list, in the order it would hurt:
   (`cursor_display_count` reads it by moving it and putting it back). That test
   is the only thing standing between this backend and an invisible cursor for
   the rest of a session, so it is the one to keep rather than relax.
+
+What W3 adds:
+
+- **No file has ever been dragged onto a window.**
+  `a_drop_becomes_one_event_...` builds a `DROPFILES` block by hand and sends
+  `WM_DROPFILES`, which runs the real procedure, the real
+  `DragQueryFileW`/`DragQueryPoint`/`DragFinish` and the real translation — but
+  the block is this project's idea of what the shell sends, not the shell's. If
+  shell32 rejects it the test reports zero files and reads exactly like a
+  backend bug: `ffi::DropFiles`'s size assertion is the first thing to re-check,
+  and `f_wide` the second.
+- **`DragAcceptFiles` and the `WS_EX_ACCEPTFILES` round trip are asserted
+  through the style word.**
+  `the_drop_registration_survives_a_trip_through_borderless` reads the bit back
+  after a borderless flip and then sends a drop. What it cannot show is that a
+  _real_ drag would have been offered to the window, since that is a decision
+  the shell makes in another process.
+- **No other process has ever contended for the clipboard**, so `Opened::After`
+  and `Opened::Refused` have never been produced. The retry loop itself is
+  therefore unexercised; only the budget arithmetic is covered, on Linux. A
+  clipboard-manager utility on a developer machine is the cheapest way to reach
+  the retry path if it ever needs proving.
+- **`GlobalSize` returning more than was requested has not been observed**, so
+  the padding half of `Clipboard::put`'s zeroing is belt rather than a fix for
+  something seen. It is cheap and it makes the read-back trimming exact either
+  way.
+- **The clipboard tests share the desktop's clipboard.** They write to the real
+  window station, so two Windows suites running concurrently on one runner would
+  interfere. Nothing does that today; it is worth knowing before anything is
+  parallelised across processes.
+
+## Owed on the Win32 backend after W3
+
+- **There is no drag feedback, only drops.** While a file is over the window
+  nothing highlights and the cursor stays the system's default: `WM_DROPFILES`
+  is a notification, not a conversation. `DragEnter`/`DragOver`, a drop cursor,
+  non-file formats and copy-versus-move all need `RegisterDragDrop` and an
+  `IDropTarget`, which is **COM** — `OleInitialize` on the pumping thread, a
+  hand-written vtable with `IUnknown` reference counting, and an apartment this
+  crate does not own and cannot uninitialise without knowing what the host
+  process put in it. Considered and declined for W3: it buys feedback rather
+  than drops, and `ShellEvent::DroppedFile` is what the seam actually names.
+  Owed before the editor's asset browser wants a drop target that looks like one
+  (P12), the same milestone XDND on X11 is owed for.
+- **`MimeType::UriList` is a registered format, not `CF_HDROP`.** A "copy file"
+  from Explorer puts `CF_HDROP` on the clipboard, and this backend does not read
+  it: a request for `text/uri-list` finds whatever was published under that
+  registered name and is otherwise `Empty`. Rendering `CF_HDROP` as a
+  `text/uri-list` blob means _encoding_ URIs, and the shared decoder
+  `clipboard::parse_uri_list` cannot round-trip a Windows path — `file:///C:/a`
+  decodes to the path `/C:/a`, which is not a file. Closing this means either a
+  Windows-aware `file:` encoder plus a matching decoder, or delivering
+  `CF_HDROP` as paths through a different route. Not attempted; named so the gap
+  is not rediscovered as a bug.
+- **A clipboard payload whose last bytes are NUL loses them.** Payloads are
+  written NUL-terminated and read back with trailing NULs trimmed, which is what
+  makes a `GlobalSize` larger than the request harmless and is what other
+  applications do for registered text formats. Neither of the engine's two
+  formats is binary; an `Other("image/png")` offer ending in NUL would be
+  truncated. Recorded in `win32::clipboard`'s module docs as well.
+- **`SetCurrentProcessExplicitAppUserModelID` is now one library closer.** W3
+  links `shell32` for the drop calls, so the "it needs a third system library"
+  half of the `app_id` entry below is no longer a cost — what is left is the
+  decision about _where_ a process-wide property is set when a host application
+  embedded the engine.
 
 ## Owed on the Win32 backend after W2
 

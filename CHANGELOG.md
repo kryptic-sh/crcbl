@@ -43,19 +43,60 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   applied from `WM_SETCURSOR`, and hiding goes through a balanced `ShowCursor`
   count.
 
+  A confined pointer's clip is the client rectangle **intersected with the
+  virtual screen**: `ClipCursor` clamps, so a window larger than the desktop is
+  confined to the part of itself that is on screen.
+
   `POINTER_LOCK`, `POINTER_CONFINE`, `POINTER_WARP` and `RAW_POINTER_MOTION` are
   now set on this backend — the last of them latched on whether
   `RegisterRawInputDevices` was accepted — and `set_cursor` applies rather than
   records. **`TEXT_IME` stays clear**: nothing here touches `WM_IME_*`, so there
   is no composition string and no candidate-window placement, and typing working
-  through `WM_CHAR` is not the same claim. `CLIPBOARD` and `DRAG_DROP` stay
-  clear and their methods still return `Unsupported`.
+  through `WM_CHAR` is not the same claim.
 
   Three Windows facts worth knowing before building on it: a window frozen
   during a user drag-resize is the system's modal message loop and not a hang; a
   monitor's refresh rate is a whole hertz here, so 59.94 Hz reports as 60; and a
   `DeviceId` names a device _kind_ rather than a device, so two mice cannot be
   told apart yet.
+
+- **crcbl-shell** (Win32): **the clipboard and file drops**, so `CLIPBOARD` and
+  `DRAG_DROP` are now set and `clipboard_offer`/`clipboard_request` work instead
+  of returning `Unsupported`.
+
+  A write publishes each offered format at once — `CF_UNICODETEXT` for
+  `text/plain;charset=utf-8`, and a `RegisterClipboardFormatW` format named
+  after the mime for everything else — so one copy reaches Notepad as text _and_
+  round-trips through another Crucible as `application/x-crcbl+ron` without
+  loss. The reader picks. Windows synthesizes `CF_TEXT` and `CF_OEMTEXT` from
+  the Unicode text in both directions, so there is no `TARGETS`-style format
+  negotiation to do. An empty `offers` slice empties the clipboard: Win32 has no
+  selection _owner_ to relinquish, so that is what "release" can mean here.
+
+  Reads are answered inside `clipboard_request` and delivered on the next
+  `pump`, exactly once. `Win32` has neither Wayland's focus gate nor its serial
+  requirement — any window may open the clipboard at any time — so a read is
+  never _held_ and `clipboard_offer` never returns `NeedsUserInteraction`. The
+  one real wait is `OpenClipboard` being refused while another process has the
+  clipboard open, which is routine; it is retried for a bounded 70 ms and then
+  reported `Unavailable` rather than failing a paste over a refusal that was
+  over before the user noticed.
+
+  Files dropped on a window created with `WindowDesc::accept_drops` arrive as
+  one `ShellEvent::DroppedFile` per file, with the drop point in client pixels,
+  through `DragAcceptFiles` and `WM_DROPFILES`. The gate is enforced by the
+  system as well as by this backend: without `WS_EX_ACCEPTFILES` no drop message
+  is ever sent. **There is no drag feedback** — no drop cursor and no hover
+  highlight while a file is still in the air — because that is `IDropTarget`,
+  which is COM; the drop itself works.
+
+- **crcbl-shell** (Win32): `wait_events` now drains the message queue before it
+  sleeps and no longer passes `MWMO_INPUTAVAILABLE`. A message _sent_ to a
+  window (rather than posted) leaves `QS_SENDMESSAGE` set after `PeekMessage`
+  has dispatched it, and that flag asks to be woken by exactly that bit — so the
+  wait returned immediately, forever, and an application idling at zero frames
+  per second span a core instead. Draining first is the stronger form of what
+  the flag was there for.
 
 - **crcbl-shell**: `DisplayMode::satisfied_by`, the request-versus-answer
   comparison `WindowState::mode_request_honoured` now uses.

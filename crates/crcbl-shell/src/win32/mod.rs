@@ -9,9 +9,9 @@
 //!
 //! # What is here, and what is not
 //!
-//! **P5C W1** was the window lifecycle; **W2** added input. The clipboard and
-//! drag-and-drop are W3, and [`ShellCaps`](crate::ShellCaps) says so rather than
-//! promising them:
+//! **P5C W1** was the window lifecycle, **W2** added input, and **W3** added
+//! the clipboard and file drops. What is left is stated here rather than
+//! implied, and [`ShellCaps`](crate::ShellCaps) agrees with it bit for bit:
 //!
 //! | Area | State |
 //! | --- | --- |
@@ -28,7 +28,9 @@
 //! | Raw relative motion, absolute devices included | complete — [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION), latched on the registration |
 //! | [`PointerMode`](crate::PointerMode) confine and lock, and [`warp_pointer`](crate::Shell::warp_pointer) | complete — [`POINTER_CONFINE`](crate::ShellCaps::POINTER_CONFINE), [`POINTER_LOCK`](crate::ShellCaps::POINTER_LOCK), [`POINTER_WARP`](crate::ShellCaps::POINTER_WARP) |
 //! | Cursor shapes and hiding | complete — stock `IDC_*` cursors through `WM_SETCURSOR`, hiding through a balanced `ShowCursor` |
-//! | **Clipboard and drag-and-drop** | **W3** — [`CLIPBOARD`](crate::ShellCaps::CLIPBOARD) and [`DRAG_DROP`](crate::ShellCaps::DRAG_DROP) are clear |
+//! | Clipboard, both directions: `CF_UNICODETEXT` plus a registered format per mime | complete — [`CLIPBOARD`](crate::ShellCaps::CLIPBOARD), see [`clipboard`] |
+//! | File drops in: `DragAcceptFiles`, `WM_DROPFILES`, the `accept_drops` gate | complete — [`DRAG_DROP`](crate::ShellCaps::DRAG_DROP), see [`dnd`] |
+//! | Drag *feedback* — a drop cursor, hover highlighting, non-file formats | **not implemented**: it is `IDropTarget`, which is COM. [`dnd`] gives the argument |
 //!
 //! Two things input needs that no other area of this backend does are worth
 //! finding here rather than in a call stack. [`ShellCaps::TEXT_IME`](crate::ShellCaps::TEXT_IME)
@@ -123,6 +125,22 @@
 //!     one number and ask XKB for the rest. Reading [`KeyCode`](crcbl_core::KeyCode)
 //!     out of the virtual key is the mistake that binds AZERTY's Z to
 //!     `KeyCode::KeyW`'s neighbour instead of to `KeyW`.
+//! 12. **The clipboard is content, not ownership.** X11 and Wayland both make
+//!     one client the *owner* of a selection and have it serve the bytes on
+//!     demand, which is why both backends carry a transfer state machine, a
+//!     timeout and a payload they hold for as long as they own it.
+//!     `SetClipboardData` takes the memory: the bytes live in the window
+//!     station, there is no later conversation, and this shell keeps nothing.
+//!     A read is `GetClipboardData` and is answered before
+//!     [`clipboard_request`](crate::Shell::clipboard_request) returns — so
+//!     [obligation 5](crate::Shell) has nothing to hold and
+//!     [obligation 6](crate::Shell) has no rule to name. See [`clipboard`].
+//! 13. **Opening the clipboard can fail because somebody else has it open**,
+//!     which is routine rather than exceptional and has no analogue on either
+//!     Linux backend — there, "another client owns the selection" is the normal
+//!     state and costs nothing. It is retried with a bound rather than being
+//!     reported as a failure the first time; [`clipboard`] argues that against
+//!     [obligation 4](crate::Shell).
 //!
 //! # Decision: the modal resize loop is accepted, and here is what that costs
 //!
@@ -179,6 +197,8 @@
 //! module, and every bit that is clear is clear for a reason the method's
 //! documentation gives.
 
+pub mod clipboard;
+pub mod dnd;
 pub mod events;
 pub mod geometry;
 pub mod keys;

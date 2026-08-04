@@ -1,5 +1,5 @@
-//! Hand-written FFI to `user32`, `gdi32`, `shcore` and `kernel32`, and the
-//! wire structures the Win32 backend passes across it.
+//! Hand-written FFI to `user32`, `gdi32`, `shcore`, `shell32` and `kernel32`,
+//! and the wire structures the Win32 backend passes across it.
 //!
 //! # Decision: `#[link]`, not `dlopen` — the opposite of the two Linux backends
 //!
@@ -12,13 +12,13 @@
 //! ordinary machine.
 //!
 //! **That premise does not hold here, and the asymmetry is deliberate rather
-//! than an oversight.** `user32.dll`, `gdi32.dll` and `kernel32.dll` are part of
-//! the operating system: a Windows that lacks them is not a Windows this engine
-//! failed to support, it is a Windows that cannot run any process at all.
-//! `shcore.dll` ships with every Windows since 8.1, which is below this
-//! backend's floor. There is nothing for a runtime probe to discover, and
-//! `LoadLibraryW` + `GetProcAddress` for four system libraries would buy exactly
-//! one thing: a fallible code path with no failure.
+//! than an oversight.** `user32.dll`, `gdi32.dll`, `shell32.dll` and
+//! `kernel32.dll` are part of the operating system: a Windows that lacks them is
+//! not a Windows this engine failed to support, it is a Windows that cannot run
+//! any process at all. `shcore.dll` ships with every Windows since 8.1, which is
+//! below this backend's floor. There is nothing for a runtime probe to discover,
+//! and `LoadLibraryW` + `GetProcAddress` for five system libraries would buy
+//! exactly one thing: a fallible code path with no failure.
 //!
 //! The registry consequence is the one that matters and it is satisfied:
 //! Windows has a single backend, so there is no fall-through to protect. If a
@@ -53,7 +53,9 @@
 //! | `ImmGetContext` and the `WM_IME_*` family | a real input method | W2 leaves [`TEXT_IME`](crate::ShellCaps::TEXT_IME) clear rather than claiming what `WM_CHAR` alone earns; see [`Win32Shell::caps`](super::Win32Shell) |
 //! | `ToUnicode` | the character a key produces | it **consumes** dead-key state, so calling it would eat the accent `WM_CHAR` was about to deliver. [`MapVirtualKeyW`] with `MAPVK_VK_TO_CHAR` answers the same question without side effects |
 //! | `GetAsyncKeyState` | modifier state | it reads the hardware *now*, not at the message's time. [`GetKeyboardState`] is the snapshot that belongs to the message being processed |
-//! | `OpenClipboard`, `RegisterDragDrop` | clipboard and drag-drop | W3, and the capability set says so today |
+//! | `RegisterDragDrop` and `IDropTarget` | drag *feedback* — a drop cursor, hover highlighting, non-file formats | it is COM: `OleInitialize`, a hand-written vtable, `IUnknown` reference counting and an apartment this crate does not own. `WM_DROPFILES` delivers the file paths the seam asks for; see `win32::dnd` for the whole comparison |
+//! | `SetClipboardData` with a null handle | delayed rendering — claim the format now, produce the bytes when asked | the owner must answer `WM_RENDERFORMAT` **synchronously, from the window procedure**, and this backend's procedure records rather than acts for the reason its own docs give. See `win32::clipboard` |
+//! | `AddClipboardFormatListener` | a "the clipboard changed" event | the seam has no such event, and a backend that invented one would be the only implementation of it |
 //! | `SetTimer` | a frame during a modal resize loop | see the `win32` module docs — it needs a callback the seam does not have |
 
 #![allow(non_snake_case)]
@@ -130,6 +132,47 @@ impl Rect {
             self.bottom - self.top
         } else {
             0
+        }
+    }
+
+    /// The overlap of two rectangles, degenerate when they do not touch.
+    ///
+    /// Here because **`ClipCursor` intersects with the virtual screen** before
+    /// applying: a window wider than the desktop gets a clip narrower than its
+    /// client area, and nothing reports that it happened. A test that asserts
+    /// the clip equals the client rectangle is therefore asserting something the
+    /// API does not promise; one that asserts it equals this is asserting what
+    /// it does.
+    ///
+    /// Test-only, because the backend never has to compute the clamp — the
+    /// system applies it — and only a test has to *predict* it.
+    #[cfg(test)]
+    pub const fn intersect(self, other: Self) -> Self {
+        let left = if self.left > other.left {
+            self.left
+        } else {
+            other.left
+        };
+        let top = if self.top > other.top {
+            self.top
+        } else {
+            other.top
+        };
+        let right = if self.right < other.right {
+            self.right
+        } else {
+            other.right
+        };
+        let bottom = if self.bottom < other.bottom {
+            self.bottom
+        } else {
+            other.bottom
+        };
+        Self {
+            left,
+            top,
+            right,
+            bottom,
         }
     }
 }
@@ -442,6 +485,34 @@ pub struct TrackMouse {
     pub dw_hover_time: u32,
 }
 
+/// `DROPFILES` — the header of the block an `HDROP` names.
+///
+/// **Test-only, and deliberately.** The backend never parses this: it reads a
+/// drop through `DragQueryFileW`, which is shell32's job precisely because the
+/// [`f_wide`](Self::f_wide) ANSI case and the file list's framing are shell32's
+/// to own. What a test needs is the other direction — CI has nobody to drag a
+/// file onto a window, so the only way to exercise `WM_DROPFILES` at all is to
+/// build the block the shell would have handed over and send the message.
+///
+/// The size assertion in this module's tests is what makes that synthesis
+/// trustworthy: a header of the wrong length puts the file list at an offset
+/// `DragQueryFileW` does not look at, and the test would then report zero files
+/// and read as a backend bug.
+#[cfg(test)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DropFiles {
+    /// Offset of the file list from the start of this structure, in bytes.
+    pub p_files: u32,
+    /// Where the drop happened, in the window's client coordinates.
+    pub pt: Point,
+    /// Whether the drop was on the non-client area.
+    pub f_nc: Bool32,
+    /// **`TRUE` for a `WCHAR` file list**, which is the only kind this engine
+    /// produces and the field an ANSI-era sender sets to `FALSE`.
+    pub f_wide: Bool32,
+}
+
 /// `RAWINPUTDEVICE` — one usage page/usage pair to receive `WM_INPUT` for.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -558,6 +629,15 @@ pub mod style {
     pub const EX_APP_WINDOW: u32 = 0x0004_0000;
     /// `WS_EX_WINDOWEDGE`.
     pub const EX_WINDOW_EDGE: u32 = 0x0000_0100;
+    /// `WS_EX_ACCEPTFILES` — **what `DragAcceptFiles` sets**, and therefore
+    /// state rather than style.
+    ///
+    /// Documented as the extended style that call toggles, which is the whole
+    /// reason it is named here: a mode change rewrites the extended style word
+    /// from [`geometry::styles`](super::super::geometry::styles), and a rewrite
+    /// that does not carry this bit across silently stops a window receiving
+    /// `WM_DROPFILES`. Exactly the hazard `WS_VISIBLE` has, one word over.
+    pub const EX_ACCEPT_FILES: u32 = 0x0000_0010;
 }
 
 /// The messages the window procedure recognizes.
@@ -625,6 +705,9 @@ pub mod msg {
     /// `WM_CAPTURECHANGED` — somebody else took the mouse capture, so ours is
     /// gone whether we released it or not.
     pub const CAPTURE_CHANGED: u32 = 0x0215;
+    /// `WM_DROPFILES` — files were dropped on a window that asked for them with
+    /// `DragAcceptFiles`. `wParam` is an `HDROP`; see [`dnd`](super::super::dnd).
+    pub const DROP_FILES: u32 = 0x0233;
     /// `WM_EXITSIZEMOVE` — the modal drag loop finished.
     pub const EXIT_SIZE_MOVE: u32 = 0x0232;
     /// `WM_MOUSELEAVE` — the one-shot `TrackMouseEvent` armed for.
@@ -735,11 +818,12 @@ pub mod value {
     pub const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 
     /// `QS_ALLINPUT` — every kind of message wakes the wait.
+    ///
+    /// `MWMO_INPUTAVAILABLE` is deliberately **not** declared beside it: the
+    /// shell's `wait` drains the queue itself and then sleeps with no flags,
+    /// which is the stronger form of what that flag was there for. The CI
+    /// evidence that took it out is written up on that function.
     pub const QS_ALL_INPUT: u32 = 0x04FF;
-    /// `MWMO_INPUTAVAILABLE` — also wake for messages already in the queue,
-    /// not only for ones that arrive after the call. Without it a wait entered
-    /// with a message pending sleeps out its whole timeout.
-    pub const MWMO_INPUT_AVAILABLE: u32 = 0x0004;
     /// `INFINITE`.
     pub const INFINITE: u32 = 0xFFFF_FFFF;
     /// `WAIT_OBJECT_0` — with a handle count of zero this means one thing only:
@@ -806,10 +890,44 @@ pub mod value {
     pub const SM_CX_SCREEN: i32 = 0;
     /// `SM_CYSCREEN`.
     pub const SM_CY_SCREEN: i32 = 1;
+    /// `SM_XVIRTUALSCREEN` — the virtual screen's left edge, which is
+    /// **negative** whenever a secondary monitor sits to the left of the
+    /// primary. A virtual screen assumed to start at the origin is the reason a
+    /// multi-monitor rectangle test passes on one desk and fails on another.
+    ///
+    /// Test-only, with the two extents below it: the backend never needs the
+    /// desktop's origin, because `ClipCursor` clamps to it without being asked.
+    /// A test that has to predict the clamp does.
+    #[cfg(test)]
+    pub const SM_X_VIRTUAL_SCREEN: i32 = 76;
+    /// `SM_YVIRTUALSCREEN`. See [`SM_X_VIRTUAL_SCREEN`].
+    #[cfg(test)]
+    pub const SM_Y_VIRTUAL_SCREEN: i32 = 77;
     /// `SM_CXVIRTUALSCREEN`.
     pub const SM_CX_VIRTUAL_SCREEN: i32 = 78;
     /// `SM_CYVIRTUALSCREEN`.
     pub const SM_CY_VIRTUAL_SCREEN: i32 = 79;
+
+    /// `CF_UNICODETEXT` — UTF-16, NUL-terminated, and the only text format
+    /// worth writing.
+    ///
+    /// The system **synthesizes** `CF_TEXT` and `CF_OEMTEXT` from it on demand
+    /// and synthesizes it back from them, which is why this backend has no
+    /// equivalent of X11's `TARGETS` negotiation for text: Windows does that
+    /// negotiation itself, in the window station, for the one format everybody
+    /// agrees on.
+    pub const CF_UNICODETEXT: u32 = 13;
+
+    /// `GMEM_MOVEABLE` — the allocation flag `SetClipboardData` requires.
+    ///
+    /// A clipboard payload is handed to the *system*, which may move or discard
+    /// it, so it is reached through `GlobalLock` rather than as a pointer.
+    pub const GMEM_MOVEABLE: u32 = 0x0002;
+
+    /// The `iFile` that asks `DragQueryFileW` for the file **count** rather
+    /// than for a path. `0xFFFFFFFF` in the SDK, where the parameter is a
+    /// `UINT`.
+    pub const DRAG_QUERY_COUNT: u32 = 0xFFFF_FFFF;
 
     /// `MAPVK_VK_TO_CHAR` — the unshifted character a virtual key produces in
     /// the current layout, with no dead-key side effect.
@@ -991,6 +1109,54 @@ unsafe extern "system" {
         header_size: u32,
     ) -> u32;
     pub fn GetSystemMetrics(index: i32) -> i32;
+    // The clipboard. `OpenClipboard` **fails while another process has it
+    // open**, which is routine rather than exceptional, so every one of these
+    // is reached through the guard in `win32::clipboard` and never directly.
+    // A registered format id is an atom in the window station's table, is the
+    // same number for the same name in every process, and is what carries a
+    // mime type Windows has no `CF_*` for.
+    pub fn RegisterClipboardFormatW(name: *const u16) -> u32;
+    pub fn OpenClipboard(hwnd: Handle) -> Bool32;
+    pub fn CloseClipboard() -> Bool32;
+    pub fn EmptyClipboard() -> Bool32;
+    // Ownership of the handle passes to the **system** on success, and stays
+    // ours on failure — the asymmetry the guard exists to get right.
+    pub fn SetClipboardData(format: u32, mem: Handle) -> Handle;
+    // The returned handle belongs to the clipboard: it must not be freed, and
+    // it is valid only until `CloseClipboard`.
+    pub fn GetClipboardData(format: u32) -> Handle;
+    // Test-only: "the clipboard was closed on every path out" is a claim about
+    // the *system's* state, not about a field this backend keeps, and this is
+    // the only thing that can see it. Null means nobody has it open.
+    #[cfg(test)]
+    pub fn GetOpenClipboardWindow() -> Handle;
+}
+
+// The `shell32` surface: file drops, and nothing else.
+//
+// The fifth system library, on the same terms as `shcore` above — `shell32.dll`
+// is present on every Windows this backend can run on, so there is nothing for
+// a runtime probe to discover. It is here because `WM_DROPFILES` hands over an
+// `HDROP`, which is a shell object rather than a window-manager one: only these
+// four calls can read it, and the alternative is parsing the `DROPFILES`
+// structure by hand, which means owning the `fWide` ANSI case that shell32
+// already owns. See `win32::dnd`.
+#[cfg(target_os = "windows")]
+#[link(name = "shell32")]
+unsafe extern "system" {
+    // Sets or clears `WS_EX_ACCEPTFILES`; see `style::EX_ACCEPT_FILES` for why
+    // that matters to anything that rewrites the extended style word.
+    pub fn DragAcceptFiles(hwnd: Handle, accept: Bool32);
+    // With `DRAG_QUERY_COUNT` it answers the number of files and writes
+    // nothing; with an index and a null buffer it answers the length in
+    // characters, excluding the terminator; with an index and a buffer it
+    // copies and answers how much it copied.
+    pub fn DragQueryFileW(hdrop: Handle, index: u32, buffer: *mut u16, size: u32) -> u32;
+    // Where in the window's **client** area the drop happened.
+    pub fn DragQueryPoint(hdrop: Handle, point: *mut Point) -> Bool32;
+    // Releases the `HDROP`. Not optional: the memory is the shell's and is
+    // leaked without it.
+    pub fn DragFinish(hdrop: Handle);
 }
 
 // The `gdi32` surface: one call, for the class background brush.
@@ -1022,6 +1188,18 @@ unsafe extern "system" {
 unsafe extern "system" {
     pub fn GetModuleHandleW(name: *const u16) -> Handle;
     pub fn GetLastError() -> u32;
+    // The clipboard's payloads. A `GMEM_MOVEABLE` block has no address until it
+    // is locked, and the lock count has to be balanced exactly as
+    // `ShowCursor`'s does — an unbalanced one pins a block the system wants to
+    // move for as long as the process lives.
+    pub fn GlobalAlloc(flags: u32, bytes: usize) -> Handle;
+    pub fn GlobalFree(mem: Handle) -> Handle;
+    pub fn GlobalLock(mem: Handle) -> *mut c_void;
+    pub fn GlobalUnlock(mem: Handle) -> Bool32;
+    // May answer **more** than was asked for: the documented contract is that a
+    // block is at least the requested size. See `win32::clipboard` for what
+    // that means for a payload read back.
+    pub fn GlobalSize(mem: Handle) -> usize;
     // Milliseconds since the system started, 64-bit: the clock `MSG::time` is
     // on. See `TimeBase` for why that makes Win32's timestamp rebasing the
     // easiest of the three native backends' and still not free.
@@ -1105,6 +1283,13 @@ mod tests {
         assert_eq!(size_of::<RawInputHeader>(), 24);
         assert_eq!(size_of::<RawInput>(), 48);
         assert_eq!(core::mem::offset_of!(RawInput, mouse), 24);
+
+        // The one a *test* writes rather than reads. A wrong length here puts
+        // the file list where `DragQueryFileW` does not look, and the drop test
+        // would then report zero files as though the backend had lost them.
+        assert_eq!(size_of::<DropFiles>(), 20);
+        assert_eq!(core::mem::offset_of!(DropFiles, pt), 4);
+        assert_eq!(core::mem::offset_of!(DropFiles, f_wide), 16);
     }
 
     #[test]
@@ -1143,6 +1328,69 @@ mod tests {
         };
         assert_eq!(inverted.width(), 0);
         assert_eq!(inverted.height(), 0);
+    }
+
+    #[test]
+    fn an_intersection_is_the_overlap_and_is_degenerate_when_there_is_none() {
+        // What `ClipCursor` does to a rectangle before applying it, and the
+        // reason this exists: the Windows runner's display is 1024×768, which
+        // is *smaller* than the default window, so the clip comes back clamped
+        // and a test that asserted the client rectangle failed on real, correct
+        // behaviour.
+        let client = Rect {
+            left: 8,
+            top: 31,
+            right: 1036,
+            bottom: 751,
+        };
+        let screen = Rect {
+            left: 0,
+            top: 0,
+            right: 1024,
+            bottom: 768,
+        };
+        assert_eq!(
+            client.intersect(screen),
+            Rect {
+                left: 8,
+                top: 31,
+                right: 1024,
+                bottom: 751
+            },
+            "only the edge that overhangs moves"
+        );
+        assert_eq!(
+            client.intersect(client),
+            client,
+            "a window that fits is not clamped at all"
+        );
+
+        // A virtual screen whose origin is negative — a second monitor to the
+        // left of the primary — must not be treated as starting at zero.
+        let left_monitor = Rect {
+            left: -1920,
+            top: 0,
+            right: -900,
+            bottom: 1080,
+        };
+        let virtual_screen = Rect {
+            left: -1920,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        assert_eq!(left_monitor.intersect(virtual_screen), left_monitor);
+
+        // Disjoint rectangles produce a degenerate one rather than a negative
+        // width, which `width`/`height` already clamp.
+        let elsewhere = Rect {
+            left: 4_000,
+            top: 4_000,
+            right: 5_000,
+            bottom: 5_000,
+        };
+        let empty = client.intersect(elsewhere);
+        assert_eq!((empty.width(), empty.height()), (0, 0));
     }
 
     #[test]
