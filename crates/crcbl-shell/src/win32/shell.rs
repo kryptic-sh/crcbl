@@ -1758,6 +1758,46 @@ mod tests {
         unsafe { ffi::SetForegroundWindow(hwnd) };
     }
 
+    /// Gives a window the keyboard and **confirms it kept it**.
+    ///
+    /// [`send_focus`] delivers `WM_SETFOCUS` synchronously, so the grant itself
+    /// never fails. Holding it is the part that can: the Windows runner is a
+    /// real, non-idle desktop — `docs/backlog.md` records the unbidden messages
+    /// that proved it — and anything on it may take the foreground straight
+    /// back. The theft arrives as a `WM_KILLFOCUS` that the *same* pump then
+    /// processes, so granting focus and pumping once can leave the window
+    /// unfocused with nothing said about why.
+    ///
+    /// That is worth a helper rather than an inline retry because of what it
+    /// costs when it is missing: the cursor is hidden only for a focused
+    /// window, so a silently lost focus turns
+    /// `hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for` into
+    /// `left: 0, right: -1` — a reference-count failure that is really a focus
+    /// failure, which is how it was read the first time it happened.
+    ///
+    /// # Panics
+    ///
+    /// If the window will not keep the keyboard for long enough to ask it a
+    /// question, which is a runner that cannot host this test rather than a
+    /// backend that is wrong.
+    fn focus_and_confirm(shell: &mut Win32Shell, window: WindowId, hwnd: Handle) {
+        // Enough to outlast a transient steal without turning a genuinely
+        // unfocusable window into a long hang.
+        const ATTEMPTS: usize = 8;
+        for _ in 0..ATTEMPTS {
+            make_foreground(hwnd);
+            send_focus(hwnd, true);
+            shell.pump(&mut |_| {});
+            if shell.window_state(window).expect("live").focused {
+                return;
+            }
+        }
+        panic!(
+            "the window would not keep the keyboard over {ATTEMPTS} attempts, so nothing \
+             below this can be asked about a focused window"
+        );
+    }
+
     /// Sends `WM_SETFOCUS` or `WM_KILLFOCUS`.
     ///
     /// The clip and the cursor both follow the focus, and CI cannot click on a
@@ -2656,11 +2696,15 @@ mod tests {
         let window = window(&mut shell);
         shell.pump(&mut |_| {});
         let hwnd = hwnd_of(&shell, window);
-        let baseline = cursor_display_count();
 
-        make_foreground(hwnd);
-        send_focus(hwnd, true);
-        shell.pump(&mut |_| {});
+        // **Focus first, and proved rather than assumed** — every count below
+        // is a consequence of it, because `refresh_cursor_visibility` hides
+        // only for a window that has the keyboard. See [`focus_and_confirm`].
+        focus_and_confirm(&mut shell, window, hwnd);
+        // **Read after the focus, not before it.** A count taken first is a
+        // count from a different focus state, and the difference would be
+        // charged to `set_cursor`.
+        let baseline = cursor_display_count();
 
         shell.set_cursor(window, None).expect("hide");
         assert_eq!(cursor_display_count(), baseline - 1, "one hide is owed");
