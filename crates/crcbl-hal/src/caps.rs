@@ -216,8 +216,7 @@ pub struct Limits {
     /// Bind groups (descriptor sets) bindable simultaneously.
     pub max_bind_groups: u32,
     /// Descriptors in one bindless array. `0` when
-    /// [`Features::DESCRIPTOR_INDEXING`] is absent; Tier B reads this as its
-    /// texture-array page size instead.
+    /// [`Features::DESCRIPTOR_INDEXING`] is absent.
     pub max_bindless_descriptors: u32,
     /// Push-constant bytes. `0` when [`Features::PUSH_CONSTANTS`] is absent.
     pub max_push_constant_size: u32,

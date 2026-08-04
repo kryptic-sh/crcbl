@@ -89,8 +89,10 @@
 //! engine-wide lock on the device just to create a buffer.
 //!
 //! Command *recording* is the exception, and it is expressed in the type: a
-//! [`CommandEncoder`] is `Send` but not `Sync`, matching Vulkan's
-//! external-synchronisation rule for command buffers.
+//! [`CommandEncoder`] is [`HalThreadSafe`](crate::threading::HalThreadSafe)
+//! (Send + Sync); two threads cannot record into one because every recording
+//! method takes `&mut self`, which is how Vulkan's external-synchronisation
+//! rule for command buffers is discharged.
 //!
 //! # Destruction is explicit and immediate-looking
 //!
@@ -845,6 +847,11 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     fn destroy_command_buffer(&self, buffer: CommandBufferHandle);
 
     /// Submits work to a queue.
+    ///
+    /// The queue must be the one named in the command buffer's
+    /// [`CommandEncoderDesc::queue`]: a command buffer is created against a
+    /// specific queue family, and submitting it to another is a validation
+    /// error on Vulkan. The null backend does not check the match.
     ///
     /// # Errors
     ///
