@@ -16,6 +16,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **horde**: a **tiled grass ground** under the field, from a new
+  `apps/horde/assets/terrain.crpix` — four 2-unit variants chosen per tile by
+  `crcbl::core::rand`'s index hash, so a tile draws the same grass whichever way
+  it is walked into and the ground has no visible lattice. Laid over the view
+  rather than the arena, so its cost is bounded by the window. The sample's art
+  is three sheets now instead of two; `SceneStats` gained a `ground` count and
+  reports three batches on a populated frame instead of two. The claim that
+  number exists to make visible is unchanged and is stated as what it always
+  was: the batch count is **flat in the size of the horde**, not any particular
+  value.
+
 - **crcbl-shell**: an **AppKit end-to-end pass**, so macOS is held to the
   standard the other three backends already were. It extends
   `crates/crcbl-shell/tests/appkit_session.rs` — the `harness = false` target

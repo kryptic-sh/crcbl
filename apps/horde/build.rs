@@ -47,13 +47,16 @@ const ART_TICK_HZ: u32 = 60;
 
 /// The sheets, by file stem. Each is `assets/<stem>.crpix`.
 ///
-/// **Two, and the split is a batching decision rather than an artistic one.**
-/// `assets/actors.crpix` carries the player, all three enemy kinds and the XP
-/// pickup in one 34-texel frame size, so the whole field is a single
+/// **Three, and every split is a batching decision rather than an artistic
+/// one.** `assets/actors.crpix` carries the player, all three enemy kinds and
+/// the XP pickup in one 34-texel frame size, so the whole field is a single
 /// `SpriteRenderer` batch whatever order it is emitted in; the shot is 8 texels
-/// and gets its own sheet rather than a twenty-times-oversized quad. Both files
-/// carry the argument at length.
-const ASSETS: [&str; 2] = ["actors", "bolt"];
+/// and gets its own sheet rather than a twenty-times-oversized quad; the ground
+/// is 40 and is a different subject entirely, drawn under everything on its own
+/// layer. Each of the three is one batch, and none of the three counts moves
+/// with the size of the horde — which is the property `art.rs` argues for and
+/// `SceneStats::batches` reports. All three files carry the argument at length.
+const ASSETS: [&str; 3] = ["actors", "bolt", "terrain"];
 
 fn main() {
     crcbl_sprite::bake::bake_dir(&crcbl_sprite::bake::BakeDir {

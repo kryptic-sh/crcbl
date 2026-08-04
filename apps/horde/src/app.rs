@@ -1401,7 +1401,11 @@ mod tests {
             stats.culled > 0 && stats.drawn > 1,
             "a field of 2000 over a 96x72 arena should be partly on screen: {stats:?}",
         );
-        assert_eq!(stats.batches, 1, "one sheet, one batch");
+        assert_eq!(
+            stats.batches, 2,
+            "the ground, then one sheet of actors — no bolt is in the air on \
+             the first frame",
+        );
 
         // A run with no prefill draws the handful of enemies a fifteenth of a
         // second produces, which is what says the assertion above is about the

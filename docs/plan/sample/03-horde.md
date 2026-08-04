@@ -47,6 +47,15 @@ Meta-progression, many weapons/characters, bosses, terrain, pathfinding,
 particles beyond reused debug-draw-style primitives. This is a benchmark wearing
 a game costume — keep the costume thin.
 
+**"Terrain" here means simulation terrain** — heightmaps, traversable geometry,
+anything the seek loop has to reason about. It was never meant to bar decoration
+drawn under a flat arena, and on 2026-08-04 an art overhaul was asked for that
+adds a tiled grass ground and scattered props. The line that matters is the one
+next to it: **pathfinding stays out**, so the props block the player and nothing
+else, and the horde still seeks in a straight line at a cost that does not move
+with the size of the field. A prop the enemies had to route around would be
+pathfinding wearing a tree costume, and that is the cap doing its job.
+
 ## Milestones
 
 1. 1k enemies seeking player, culling stats on HUD (stage 6-ish start, scene
@@ -74,8 +83,9 @@ separation, contact damage, hit points, death and restart; `.crpix` art through
 `SpriteRenderer` with `SampleMode::Pixel`; XP gems that drop where an enemy died
 and a "pick 1 of 3" level-up from a fixed pool of six upgrades; pause, level-up
 and death menus over the shared `crcbl_render::menu` art, with the debug panel
-on; five spatial cues, the longest run kept between sessions, and the browser
-demo at `https://crcbl.kryptic.sh/demos/horde/`. 124 tests.
+on; a tiled grass ground under all of it; five spatial cues, the longest run
+kept between sessions, and the browser demo at
+`https://crcbl.kryptic.sh/demos/horde/`. 129 tests.
 
 **And a start screen, which was argued against and then asked for.** The slice
 that built the menus deliberately shipped without one: this game's board is
@@ -89,19 +99,21 @@ lands on that screen rather than in play, as asteroids' and flappy's do. The
 reasoning is kept in `apps/horde/src/game.rs` so nobody re-derives it and
 re-implements the autostart; the reversal is the user's call and it is final.
 
-**The art is two sheets and that is the sample's own decision.** Everything
-numerous — the player, all three enemy kinds and the gems — is in one
+**The art is a sheet per subject and that is the sample's own decision.**
+Everything numerous — the player, all three enemy kinds and the gems — is in one
 `assets/actors.crpix` at one frame size (34 texels, which is the brute's
 collider box at 20 texels a unit), so the whole field is a single
 `SpriteRenderer` batch **whatever order it is emitted in** and `art::Scene`
 needs no grouping pass over the crowd. Asteroids has three rock sheets and has
 to emit largest-first to hold three batches; a field of ten thousand walked in
-the order the game holds it would be ten thousand. The shot is the only second
-sheet, because it is 8 texels and would otherwise be drawn in a quad twenty
-times its own area. The price is the transparent margin round the small kinds —
-a runner is 13 texels of art in a 34-texel quad — and it is bounded by the
-screen rather than by the horde. **18c measured both halves and both hold**; see
-"The batching claim, measured" below.
+the order the game holds it would be ten thousand. The shot is a second sheet,
+because it is 8 texels and would otherwise be drawn in a quad twenty times its
+own area, and `assets/terrain.crpix` — the tiled grass ground, added after these
+measurements — is a third. The price is the transparent margin round the small
+kinds — a runner is 13 texels of art in a 34-texel quad — and it is bounded by
+the screen rather than by the horde. **18c measured both halves and both hold**;
+see "The batching claim, measured" below, including what the ground did and did
+not change about it.
 
 **The level-up freezes the field**, and the freeze is simulation state rather
 than a loop pause: the choice changes what the simulation does, so a seeded
@@ -198,21 +210,32 @@ all.
 
 **It holds.** `batches` is 2 at every populated count in the table above and 1
 when no bolt happens to be in the air, and it does not move between one thousand
-and ten thousand. Pushed harder than the running game can:
-`ten_thousand_visible_enemies_are_still_two_batches` packs the whole ten
-thousand _inside_ the view so nothing is culled, interleaves the three kinds in
-the order `swap_remove` leaves behind, and asserts two batches over 10 009
-sprites. It goes red at three if the shots are moved onto the crowd's layer.
+and ten thousand. Pushed harder than the running game can: the
+ten-thousand-visible-enemies test packs the whole ten thousand _inside_ the view
+so nothing is culled, interleaves the three kinds in the order `swap_remove`
+leaves behind, and asserts the count over 10 009 sprites. It goes red one higher
+if the shots are moved onto the crowd's layer.
 
-**One caveat, and it is a real one.** The count is `art::batches`, this sample's
-**mirror** of `sprite_pass`'s rule (a batch is a run of consecutive sprites
-naming one sheet) rather than the pass's own answer: `SpriteRenderer` exposes no
-batch count, and `crates/` was out of this slice's write scope. So the number is
-right about the sprite list and would not notice the engine's batching rule
-changing underneath it.
-`a_batch_is_a_run_of_one_sheet_and_not_a_distinct_sheet_count` pins the mirror
-to `A A B A` = 3, which is the case a distinct-sheet count gets wrong and which
-this game's own frames cannot distinguish. Recorded in `docs/backlog.md`.
+**The number is 3 now, and that is not a regression.** `assets/terrain.crpix`
+landed after this table was taken and puts the ground on a sheet and a layer of
+its own, so a populated frame is terrain, then actors, then the bolt — the table
+above still reads 2 because it was measured before the grass existed, and it is
+left as measured. **The claim was never the number**: it is that the count is
+flat in the size of the horde, which is why `SceneStats::batches` is in the
+debug panel at all. A sheet added for a new subject adds a constant; what would
+break the claim is emitting one sheet more than once, which is what
+`an_interleaved_field_of_every_kind_is_three_batches` and
+`ten_thousand_visible_enemies_are_still_three_batches` are there to catch. Ten
+enemies and ten thousand are the same three draws.
+
+**The caveat this section used to carry is gone.** The count was `art::batches`,
+a **mirror** of `sprite_pass`'s rule kept in the sample, because
+`SpriteRenderer` exposed no batch count and `crates/` was out of that slice's
+write scope. It is `crcbl::render::sprite_pass::batch_count` now — the pass's
+own answer — so the number would notice the engine's batching rule changing
+underneath it. `a_batch_is_a_run_of_one_sheet_and_not_a_distinct_sheet_count`
+still pins `A A B A` = 3, which is the case a distinct-sheet count gets wrong
+and which this game's own frames cannot distinguish.
 
 ### The fill margin: visible in a pass timing, and irrelevant to the budget
 

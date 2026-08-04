@@ -27,12 +27,15 @@
 //! `SampleMode::Pixel`; pause, level-up and death menus, the debug panel,
 //! fullscreen and focus handling.
 //!
-//! **Two sheets, and that is the sample's own decision.** Everything numerous —
-//! the player, all three enemy kinds and the gems — shares one sheet at one
+//! **Three sheets, and that is the sample's own decision.** Everything numerous
+//! — the player, all three enemy kinds and the gems — shares one sheet at one
 //! frame size, so the whole field is a single `SpriteRenderer` batch whatever
-//! order it is emitted in; only the shot is separate. `src/art.rs` carries the
-//! argument, and [`SceneStats`] is where the game reports the number it
-//! produces.
+//! order it is emitted in; the shot and the tiled grass ground are the other
+//! two, each one run of its own. The claim is that the batch count is **flat in
+//! the size of the horde**, not that it is any particular number: a sheet added
+//! for a new subject adds a constant and ten enemies and ten thousand still come
+//! out as the same three draws. `src/art.rs` carries the argument, and
+//! [`SceneStats`] is where the game reports the number it produces.
 //!
 //! Five spatial cues — the gun, an enemy coming apart, a gem, a level and the
 //! player's own end — through `crcbl-audio`'s grammar with the listener on the

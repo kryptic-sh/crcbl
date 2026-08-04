@@ -1,0 +1,252 @@
+# The ground: one grass tile, in four variants, laid under everything else.
+#
+# **40 x 40 texels a frame, at `art::TEXELS_PER_UNIT` = 20**, which is 2.0 world
+# units — `art::GROUND_TILE`, and the number the rest of this file follows from.
+# A `.crpix` declares one frame size for the whole file, so the frame size *is*
+# the tile size; there is no second place it could disagree with the code.
+#
+# # Where 2.0 comes from
+#
+# It is bounded on both sides and neither bound is aesthetic.
+#
+# Downwards by the sprite count. The ground is emitted per tile, so halving the
+# tile roughly quadruples the quads for the same picture. At 2.0 a 960 x 720
+# window asks for 300 tiles — the same order as the few hundred enemies a view
+# holds, and a sixth of the 1 728 an arena-sized ground would be; halve it and
+# the ground becomes the largest thing in the frame and the horde the small one.
+# Both numbers are measured by
+# `art::tests::the_visible_ground_is_bounded_by_the_view_and_not_the_arena`,
+# which is also what keeps them honest when the view or the arena moves.
+#
+# Upwards by how much art a variant is. Every texel here is authored, and four
+# variants of a 40-row tile is already 160 rows — about what `actors.crpix`
+# spends on five actors. At 4.0 units it would be 320 rows, and the repeat unit
+# would be four times the player's own body across: a tile you can see all of at
+# once is a tile you can learn.
+#
+# 40 texels is also whole at 20 texels a unit, and 2.0 divides the arena exactly
+# — 48 tiles across and 36 up. Nothing depends on that second fact, because the
+# ground overruns the arena rather than stopping at it (see `art.rs`), but a
+# tile size that left a fractional tile at the wall would have been one more
+# thing to be careful about for no gain.
+#
+# # Four variants, and the tile has nothing in it bigger than a blade
+#
+# The failure to avoid is a ground that reads as a grid of one stamp, and
+# **variant count is the weaker half of avoiding it.** The stronger half is that
+# nothing drawn here has a shape: no blobs, no worn patches, no low-frequency
+# mottle, nothing with a recognisable position inside the frame. A tile-scale
+# feature is what lets an eye find the lattice — it recurs at exactly the tile
+# pitch, in exactly the same place in the frame — and four variants do not hide
+# one, they give it four places to be. So the whole tile is hollows, blades and
+# the odd dry stem, every one of them one to four texels, laid over the frame
+# including its edges so no border row reads as a seam.
+#
+# What is left for the variants to break is the *fine* repeat, and four is
+# enough for that: `art::ground_variant` chooses with the top two bits of
+# `crcbl::core::rand::hash_u64` over the tile's own coordinates, so a tile's
+# choice is independent of its neighbours' and the shortest repeat in the ground
+# is the hash's period rather than anything a player will stand next to.
+#
+# # It is darker and flatter than everything drawn on it, deliberately
+#
+# The whole palette lives between #19211a and #2f3f26 — five shades inside a
+# tenth of the luminance range, all of them far below any actor. `actors.crpix`
+# gives the player a bright rim specifically so it can be found in a crowd of
+# hundreds at the same size, and a ground with contrast of its own is what takes
+# that away. The green is also pulled towards olive rather than towards the XP
+# gem's #4fe08c, which is the other thing on the field the eye has to pick out
+# of a dark background.
+#
+# Neither half is left to the eye.
+# `art::tests::the_grass_is_dimmer_and_flatter_than_the_player_it_carries`
+# measures this file's luma against the baked player frame's, so a repalette
+# that brightened the grass fails there instead of leaving this paragraph
+# quietly wrong.
+#
+# # No `None`
+#
+# Nothing here is transparent. The ground is the bottom layer and covers the
+# whole view, so a transparent texel is the clear colour showing through a lawn
+# — `art::tests::the_ground_bakes_to_four_opaque_tiles` is what says there is
+# not one. That is also why this file declares no `. c None` entry at all: an
+# unused transparent key is one paste away from being used.
+
+crpix: 40 40 4 5 1
+
+palette:
+  b c #202a1b   # the base, and most of a tile
+  d c #19211a   # the hollow between two tufts
+  m c #27331f   # a blade
+  l c #2f3f26   # its lit tip, and the brightest thing on the ground
+  e c #2a2519   # a dry stem
+
+frame grass-a:
+  bbbbemdlbbbbbbmbblbbbmblbmbdblbbdmbblbbb
+  llbbbmblddbbbdlbbmblbbbmbblbbmbbbbbbmbbb
+  lmbbbmlmlbbbbdmbbmbmbddbbblbbmbbblbblbbb
+  mdlbbbmmlbbddllbbbbldlbbbbebbbbbbmbbebbb
+  mbmbbbblmbbbbmmdbbbmbmbbddmlbbbbbmbbbbbl
+  bbmbdbbmbbdbblmbbbbmlbbbbbbmbbblbmdlbbbm
+  bbbbbbbbbbbbbmbbbbbbmbbbbbbddbbmdlbmbbbd
+  bbbbbbbllbbbbmbbbbbbbldbbbbbbbbddmbdlbbb
+  bbblbbblmbbbdbbddbblbmbbbbbddlbbbmblmbdd
+  bbbmbbbmmbbbddbbbbbmbmbdbbblbmbddbdmmbbd
+  bbbbbbbmbbbdbblblbbbbbdbbdbmbmlddblmmddb
+  bbbbbddbbbbbbdmbmbbbelbbbebmbmmbbbmbbbbb
+  bbbbbbbldlbbdlmbmbbdlmbbbbddbbmbbdmbbbbb
+  bbbdlbbmbmbbbmddbbddmmlbblbbbbmbbbmbbbeb
+  bllbmdlmbmllbmdlbdbbemmbbmbbdbbbdbbdlbbb
+  bmmbmblmbmmmbbbmbblbblbblmbbbblbbbbbmbdd
+  bmmbbbmmbbmldlemdbmbbmbbmmbbbbmlbllbebbl
+  bmlbbbmlbbmmbmbbbbmbdmdbmmlbbbdmlmmblbbm
+  bbmblbbmlbmbbmdbebbbllbblmmddbbdmmmbmbbb
+  dlmbmbbmmbmbbmbdbbddmmblmmmlbbbbbdlbbbbd
+  bmlbbbbmbbbblbbbdblelmbmmbdlblbbbbmlddbb
+  bbmddbbmbbbbmlddbbmbmlddbbbmdmbbbbmmbbbb
+  bdmbbblbbbbbblbbbbbllmbbbbbmlmbblbbmdddb
+  bdmlldmebbbbdmbdbbbmmmbdbbbbmdbbmblbbbbb
+  bbdmmbbbbbdbbbbbblddmmbdlbbbmbbbbbmbbbbl
+  bbblmeedbbbbbbbbbmbbmblblbbbmlbbbbmbbebm
+  bbbmllbbbbbbbbbbbbblbbmbmbbebmbbldbbbmbb
+  bbdbmmbbbbbbbblbbblmbbbbmdldbbblmbbdlmbb
+  dbbbmllbbldlbbmbbbldllbbmlmbbbdmmbbbmbbb
+  bbbbdmmddmbmbbmbbbmbmmblbmmbblbmbbdblbbb
+  lblbbmmlbmbbbbmbldmbmmbmbmmlbmbdlbblmlbb
+  mbmbbmdmbmblbldlmbbbdbbmlmbmbbbbmbbmlmbb
+  bbmbbbbbdbbmemlmmbbbbbbbmlbddlbbbbbbmbbl
+  bbbbbbbblbbmbbmbdbbbbbblmmbbbmblbbbbmbem
+  bbblbbbbmbbmbddbbbbbbblmmelbbbbmbldembbm
+  bbbmbbbbddbbbllbbbdbbbmmbmebbbbmbmbbbbbm
+  lbbmbbdbbbbbdmlbbbbbbbmmbmmlbbbbdmbbblbb
+  mbbbbbbbbbbblmmbblblbbelbbmmbbbbblbbbmbb
+  mbbbblbbbbbbmbmbbmbmblmmblbmbddbbmbbdmbb
+  bddddlbbbdbdddmbbmbmbmmbbmdbbbbbbmbbbmeb
+
+frame grass-b:
+  mbbebmblbbbdbmmlmbbbbbblbblbmbmbbbbbbblb
+  mbbbbblmbllbbmdmmbbbbblmbbmbmbmlbbblbbmb
+  bbbbbbmmdmmbdmlmbllbblmbbbmdbblmllbmbdmb
+  bbblbblbbmmbbmmmbmmlbmbbblddbememmbmbbbb
+  bbbmbdmbdmbbbmbbbmmmbbdbbmbbblmmbmblbbbl
+  lbbmdddbbbbblbddbbmbbbbbbmbbbmmbbmbmebbm
+  mbbblbbbbbddmblblbbblbbbbblbbblblmbmmbbm
+  mblbmbbbbbbbmbmbmblblbbbbbmbbbmbmlbblblb
+  llmbmbblbbdlmbbdmllbmebbbbbbbbmbembbmbmb
+  mmmbbddmbblmbdbblmmbmbbbddbbbbmblmddmdmb
+  bblbbbbmbdmmbbbbmmmbdbbbbbbbbbldmbblbbmb
+  bdmbbbbbbbdmdbbbmmbbbbbdddbddbmdmbbmlbmb
+  bbmbbbblbbbdbbbbddbbbbdbbbbbbblbbbblmbmd
+  bbbddbbmbbbebbbblblblbbbbbbbbbmbbbbmmbbb
+  bbbbbbbmblbbbbbbmdmbmbblbbbbblmbblbmdbbb
+  blbbblbbblddbbldmbmbmbbmbbbbbmmbbmbmbbbl
+  bmbedmbbbmbblbmbbbllbbblblbbblbbdmbbblbm
+  bbdbbmbbbbbbmbldbbmmdbbmdmdbbmbbbbbbbmbm
+  bbbblblebblbmbmllemmbbbmembbbmbbbbelbbbb
+  bdbbmlmbdbmbbbblmbbbbblmbbbbdbbbbbmmbbbb
+  bbddmmmbbbmbbbblbbbdbbmbbbbbdbbbdbmmbbbb
+  bbbbbmbbbbmdbbdmbbbblbmdlddblbbblbbbbebb
+  bbbbbmbbbbmbllbmbblbmddbmbbbmbbbmlbeddbb
+  bddbbmddlbbbmmdlbdmbmbddmblbmbbbblbbbebb
+  blbbbbbbmllblbbmbbbbblbbmbmbmddblmbbbblb
+  bmbbbbbbmmmbmbbbbdblbmlblbmlbdddmmbbbbmb
+  bbbbblbbmmmbbbblbbbmbmmbmbbmbbbbblbbbdmb
+  bllblmbbbbblbbblbddbbbbbbbbbbbbbbmbbbblb
+  dmmdmbbbeddmblbmblbbbblldbbbddbbbbbbbbmb
+  bmmlmbdbbbbmbmbmdmbbbbmmbddblbbblbbbbbmb
+  bbmmbbbbebbbbmbbbmbbblmddbbbmeblmllbbbbb
+  ldlmbbbbbbbbbbbbbbbbembbbbbbbdlmbmmbbbbb
+  mdmmbleblbbbdbdbbdblbmbbbbbblbmbbmmebbbb
+  blbmbmbbmddbbbbbbdblbbbbbbblmbmlebbdbbbb
+  bmblbmbbbbbbbbbblbbmbdlblblmmbbmbbbbbbbb
+  bbbmbmbbbbbbbbbbmddmlbmbllmmmdbmbbbbdebb
+  lbbbbmdlbdbbbdddmlbmmbmbmmmbbbbmbbbbbbbb
+  mdbebddmbddbbbbbbmbbbbbbmmmbbbdmbbbbbblb
+  mdbbdlbmbdbbbbbblmblbbbbbmbdlbbdbblbbbmb
+  lbbbdmbbbbbbbllbmbbmbbbbbbbbmblbbbmbddmb
+
+frame grass-c:
+  bmlbbmmmbbbbbblbbbbbdmmdbbbbbbbbbmmmbbmm
+  dmmbbbbmebbebbmbbbddlmmlbbbbbdbbbmbbblbm
+  bbmblbbmbbbbbbmddbbbmbbmbbbbbbbdbbbblmdm
+  bbmbmbbmbbbblbbbblbbmdbbbbbddbbbbbbbmmbe
+  dbbbmbbmdllbmbbbbmbbmdbblbbbllblbbbdmdbe
+  bblbmddbbmmbmbbbbmbbbbblmdbbembmbbbbmblm
+  bbmbmbbbbbblbbblbmbbbbbmmbbdbmbmbbbbbbmm
+  bbbbbbbbbbbmbbbmddbddblmbbbbbmbmbbbbbbmb
+  bbbdblbbbbllbldmldbbbbmmbdbbebbbbblbblmd
+  llbblmbbbblmbmdmmlbldbbmllebbbdbblmbbmbd
+  lmddlbbbbbmdddbbmmbmlbbmmmddblbldmbddlbb
+  mmbbmbblldmbbbbembbmmblbmmbbbmbmbmbbbmbb
+  mmbbbbbmmdmbbbbbbbbbmbmbbbbdbmblbmbbbmbl
+  mlbbbbbmmdbbbldlllbbbbmbbbdbbbbmbbbbdebm
+  bmbbebbmmbbbbmlmmmbbbbebbbbbbbbmddbbbldb
+  bmbbbbbbmebbbmlmmmbbbdblbblbbbdbbbbbbmbb
+  bebbbbbbmbbbbbmbmbbblbbmbdmbbbbbdddbbmbb
+  bbbbbbbbbbbbbbmlbbbbmbdmddmbbddbbbblbbbb
+  bbbbbbbbbbblbbmmbbbldblbbbmeblbblbbmbbbb
+  blbbbbbebbblbbblbbbmblmbbbbmbmbbmbbmblbl
+  bmbbbbbbbbbmbbbmbbbbdlbbbbbmdmbbmbblbmbm
+  bmbbbbbbbbblbebbbbbbbmlbdblbbmbblbbmblbm
+  bdbbdbblbbblddebbblbdmmbblebembbmbbbbmbm
+  bbbbdbbmbbbmbbbbbdmbblmblmmbbmdddbbbdmbb
+  lbbbblbbblbmbbblbbmbbmbbmlmddblbbbblllbl
+  mbbbbmbbbmbbbbdmbbmblblbbmbbbbmbdbbmmmdm
+  mbbbbmdbbmbbbbbbbbbbmbmblbbbldmbbbbmlmbm
+  mbbbbmbbblbbbbdblbbbmbmbmdbblblebbblmmbm
+  mbbbbmdbbmbblblbmdbdbbblmbbbmdmbbbbmmblb
+  bbbbbblbbmllmbmbldbbbelmmblbdbmbbldmmlmb
+  dbbbddmbdlmmlbbbmbbbblmbbbmbbbddbmbmllml
+  bbbllbmlbllmmbblbbddlmbblbmbbbbblbbmmmdm
+  bbbmmbbmbmmbbldmbbbbmmbbmebbbbbbmbbbmmdm
+  bbbmlbbbbmmbbmbmbbblmbbblbllbblbmbbdmbbm
+  bllmmblbdbmbbmbmddbmmbblmblmbbmbmbbbbddm
+  bmmdmlmdbbbebmbbbbdmbbbmbbmmlbmbbbbddlbm
+  bmmbmmlbbbbbbbddbbbmbbbmddmlldbbbbddbmbb
+  bbmbblmbbbbblbddbbbbbbblbbmmmdbbbbdldmbb
+  blbbbmllbdldmbblbddbdllmbbmmdbdbbbbmbmbb
+  bmbbdmmmbbmdbddmbbbbbmmmbbbdbbbdbllmddll
+
+frame grass-d:
+  bbbbbbbmbddbmbbldbldbmmbmbbblmbbbmbbbmbb
+  blbbblbblbddmbbmbbmdblmbbbbbmmbdbblbbbbb
+  bmbbbmbbmbbbmbbmedmbbmbddlbbmmblbembbbbb
+  llbbbbbbbbblbbbmbldbbbbbbmbbmbbmbbbbbbbl
+  mmlbbbdbblblbbbmbmbblbbbbmbbbbbbbbdbbbbm
+  mmmbbbblbmbmebdldmbbmbbblmbbbdbbbddbdbdl
+  mbmdbbbmblebblbmbmbblbddmbbbbblbbbbbbbbm
+  mbmbbbbmbmmlbmdmblbblbbbmbbbblmbbbddbbbm
+  bbmbbbbbbmbmbmdbbmbbmbbbbbbbbmbbblbddbbb
+  bbbbbblbbmbmbmbbbmddlbdebbbeebbblmddbbbb
+  bdbbbbmddmbbbbbbbmbbmbbdbbbbbbbbmlbbbbbb
+  bbbdbbmbblblbbbbddbbmblbbbbbbblbmmblbbbb
+  bbbbbbbbbmbebldbbbbbmbmbbbblbbmbbmbmdbbb
+  bbbbdbbbbmbbbmbbdbllllmdbbbmbbmbbmbmbdlb
+  bbbbbbbbbmbbbbbbblmmmmmbbbbmbbmdlbbmbbmb
+  bbblbbbbbbbbbbblbmmmmmbbbbbbbbbbmbbbbbmb
+  bbbmbddlbbbbbdlmbmmlddbbdddbbbbbbbbbbbbb
+  bbbmbllmblbbbbmmblbmblblbbbbbbbbbddbbldb
+  bbbmbmmmbmbbdlmmdmbmbmbmlbbddebbdddbdlbe
+  bbbbbmmbbmbbbmmbbmbbllblmbbbbbbbbbbdbmlb
+  dbbbbmmbemlblmddbbblemdmbbblllbbbbbdbbmd
+  lbbbbbbbldmbmmddlbbmmbbbbbdmmmbbbbbbldmb
+  mdbblbbdmbdddbdbmbbbmbbblbbmbbbbbbbdmbmb
+  mbblmbbblbblbbbbbbbbbbdbmbbebbbbbbbbbbmb
+  bblmmblbmbbmelbbbbllbbbblbdbbblbdbbbbbbb
+  bbmmbbmlmddebmbblbmmdbbbmlblbbmbdblbbbbb
+  bblmlbmmmddmlmebmbmbdbblblbmbembbbmddbbb
+  lbmbmbbmbbddmbbbbbmbbbembmbdbbdddbmblbbb
+  mbmbmbbmbbbbmldbdbmbbllbdmbbbbbbbbmbmbbb
+  mbmbmblbbbbbbmeddlebbmmbdmbbbbbbbbbbmbbb
+  bbbblembbdbbdlmbbmllbmmbbbbllbbbblbbmbbb
+  dlblmbllbbbbblbdbmmmbbbblbbmebbbbmbbbbbb
+  bmbmmbmmbbbbbmbbbmlmblblmbblbddbbmbbbdbb
+  bmbddlbmbbbbbbdbbbmblmbmmdbmbbbbbmbdblbb
+  lbbbblbmbbbbbbbbbdbbmmbbbllmbbbbbbbbbmbb
+  ebblbmlbbbblbblbbdlbmbbbbmmbbldbbbbddmel
+  bbbmbmmbddbmblmlbbmbmdlbbbbblmdldblbbllm
+  bbbmbbmlbblmlmmmbbmbbbmbblbbmmbmbbmbbmmb
+  bbbbbbllllmbmbmmbbbbbdlblmbbblbmddmbdlmb
+  bbbbbbmmmmbblbbmbddbblmbmmbbblbbbldddmmb
+
+sample: pixel

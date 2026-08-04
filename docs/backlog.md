@@ -65,6 +65,20 @@ phase attached to it.
   property, but nobody has heard whether ten joins a second is inaudible in
   practice. Both want a person with headphones.
 
+- **Horde's render-side scale table has not been re-measured with the ground in
+  it.** `docs/plan/sample/03-horde.md`'s "The render side: flat, and not close
+  to a budget" was taken before `assets/terrain.crpix` existed, and the section
+  says so. Every frame now also carries the ground tiles — 300 of them at 960 ×
+  720, which
+  `art::tests::the_visible_ground_is_bounded_by_the_view_and_not_the_arena` pins
+  — as opaque, full-coverage quads under everything else. That is a constant
+  addition and does not touch the flat-in-the-horde claim the exit criterion is
+  about, but the `sprites` GPU column and the CPU column are both now
+  understated by whatever those quads cost. Re-running the same `--prefill`
+  series would settle it; the fixture and the conditions are written out in that
+  section. Nobody has, because the measurement needs the reference machine and a
+  release build, and H1 was an art slice.
+
 ## The goal: a sample depends on `crcbl` and `std`, and it is met bar one line
 
 Stated as a target for the samples on 2026-08-03, and reached on 2026-08-03.

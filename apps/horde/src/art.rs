@@ -1,4 +1,4 @@
-//! Horde's art: two baked sheets, the layers they are drawn on, and the one
+//! Horde's art: three baked sheets, the layers they are drawn on, and the one
 //! function that turns a frame of simulation into a list of sprites.
 //!
 //! ```text
@@ -6,7 +6,7 @@
 //!                                                                    │
 //!  RenderState + extent ───────────────── Scene::build ──────────────┤
 //!                                                                    ▼
-//!                LayerStack   gems ▸ crowd ▸ hero ▸ shots      ──▶ &[Sprite]
+//!          LayerStack   ground ▸ gems ▸ crowd ▸ hero ▸ shots   ──▶ &[Sprite]
 //!                                                                    │
 //!                                                     SpriteRenderer::begin_frame
 //! ```
@@ -21,9 +21,9 @@
 //! rectangle in this file read in texels and because a fourth sample using a
 //! different convention for no reason would be a fourth thing to learn.
 //!
-//! # Two sheets, two batches, and neither number moves with the horde
+//! # Three sheets, three batches, and the count is flat in the horde
 //!
-//! **This is the decision the scale sub-slice will measure.** [`SpriteRenderer`]
+//! **This is the decision the scale sub-slice measured.** [`SpriteRenderer`]
 //! starts a new batch — a bind and a draw — whenever consecutive sprites name a
 //! different sheet. Asteroids has three rock sheets and has to emit its field
 //! largest-first to hold that at three; a field of ten thousand walked in the
@@ -32,15 +32,49 @@
 //! So the player, all three enemy kinds and the XP gems share **one** sheet, at
 //! one frame size — [`ACTOR_HALF_EXTENT`], which is the largest collider in the
 //! game. There is no order to get wrong and no grouping pass over the crowd:
-//! whatever [`Scene::build`] pushes, the whole field is one run. The shot is the
-//! only second sheet, because it is 8 texels against 34 and putting it in the
-//! big frame would draw it in a quad twenty times its own area.
+//! whatever [`Scene::build`] pushes, the whole field is one run. The shot is a
+//! second sheet, because it is 8 texels against 34 and putting it in the big
+//! frame would draw it in a quad twenty times its own area. The ground is a
+//! third, because it is a 40-texel tile of a different subject and it is drawn
+//! *under* everything, which is a layer of its own however it is packed.
 //!
-//! What that costs is the transparent margin round the two small kinds. A runner
-//! is 13 texels of art in a 34-texel quad, so about seven times the fill — and
-//! it is bounded by the *screen* rather than by the horde, because a crowd
-//! settles about 1.25 units apart and a view holds a few hundred of them
-//! whatever the field size. `assets/actors.crpix` carries the arithmetic.
+//! **The claim that matters is not the number three — it is that the number
+//! does not move with the size of the horde**, which is what
+//! [`SceneStats::batches`] is there to show. Every sheet is one uninterrupted
+//! run, so ten enemies and ten thousand come out as the same three draws; the
+//! terrain sheet added a constant and constants are what this claim tolerates.
+//! What would break it is emitting a sheet more than once — putting the shots
+//! between the crowd and the player, say — and
+//! `tests::an_interleaved_field_of_every_kind_is_three_batches` and
+//! `tests::ten_thousand_visible_enemies_are_still_three_batches` are what say
+//! it has not happened. The measured table in `docs/plan/sample/03-horde.md`
+//! was taken before the ground existed and reads two; it says so.
+//!
+//! What the shared actors frame costs is the transparent margin round the two
+//! small kinds. A runner is 13 texels of art in a 34-texel quad, so about seven
+//! times the fill — and it is bounded by the *screen* rather than by the horde,
+//! because a crowd settles about 1.25 units apart and a view holds a few hundred
+//! of them whatever the field size. `assets/actors.crpix` carries the
+//! arithmetic.
+//!
+//! # The ground overruns the arena rather than stopping at it
+//!
+//! [`Scene::build`] lays [`GROUND_TILE`] tiles over the *view*, not over the
+//! arena: the tile lattice is unbounded, the variant comes from the tile's own
+//! coordinates, and there is no edge anywhere in it. So the clear colour is
+//! never visible and there is no void strip to explain.
+//!
+//! The alternative — stopping the grass at
+//! [`ARENA_HALF_WIDTH`](crate::game::ARENA_HALF_WIDTH) — would draw a boundary
+//! that is invisible at every ordinary window shape anyway, because
+//! [`camera_centre`] clamps the camera so the wall never comes into view. The
+//! one shape where it *would* show is a window wider than the arena, which
+//! `crate::gpu` handles by centring that axis and letting the margin be
+//! symmetric; a void strip there would advertise the fallback rather than hide
+//! it. And the wall the player actually collides with is
+//! [`clamp_to_arena`](crate::game::clamp_to_arena), which nothing on screen
+//! marks today — drawing an edge for it would be a gameplay change smuggled in
+//! by a texture.
 //!
 //! # The camera moves, so this culls
 //!
@@ -93,14 +127,48 @@ include!(concat!(env!("OUT_DIR"), "/art_data.rs"));
 /// three *enemy* boxes whole; `assets/actors.crpix` has the arithmetic.
 pub const TEXELS_PER_UNIT: f32 = 20.0;
 
-/// What the swapchain is cleared to — the arena's ground.
+/// What the swapchain is cleared to.
 ///
 /// **Linear, not sRGB.** The target is an sRGB format, so the clear is encoded
 /// on the way in; this is the placeholder renderer's `#1a1a20` put through the
 /// sRGB→linear transfer function once, here, rather than looking washed out on
 /// screen. Dark and slightly cool, so the warm crowd and the green gems both
 /// read against it.
+///
+/// It used to *be* the ground. It is a backstop now — the grass tiles cover the
+/// whole view, so nothing should ever see this colour, and
+/// `tests::the_ground_covers_the_view_with_no_gap` is what says so. Keeping it
+/// dark rather than making it something loud is deliberate: a magenta backstop
+/// finds a hole faster and would be a worse thing to ship if one survived.
 pub const GROUND: [f32; 4] = [0.00972, 0.00972, 0.01444, 1.0];
+
+/// The side of one ground tile, in world units.
+///
+/// **The frame size of `assets/terrain.crpix`**, which at [`TEXELS_PER_UNIT`] is
+/// 40 texels — that file carries the argument for the number, and this constant
+/// is the one place the code says what it means. A tile is drawn at exactly this
+/// size, so the art and the lattice cannot drift apart.
+pub const GROUND_TILE: f64 = 2.0;
+
+/// How many grass tiles `assets/terrain.crpix` holds.
+///
+/// A power of two so [`ground_variant`] can take the choice off the top of a
+/// hash with a shift instead of a modulo, which is both exact and unbiased.
+const GROUND_VARIANTS: usize = 4;
+
+/// The frames of `assets/terrain.crpix`, indexed by what [`ground_variant`]
+/// returns.
+const GROUND_FRAMES: [&str; GROUND_VARIANTS] = ["grass-a", "grass-b", "grass-c", "grass-d"];
+
+/// The seed the ground's variant hash is drawn from.
+///
+/// `"GRASS"` in ASCII, in the spirit of `game.rs`'s `COMPATIBILITY` — an
+/// arbitrary constant that is at least readable when it turns up in a hex dump.
+///
+/// **Fixed, and not the run's seed.** The ground is not simulation: it does not
+/// replicate, it does not affect play, and a field that redrew itself per run
+/// would make every screenshot of this game a different picture for no reason.
+const GROUND_SEED: u64 = 0x0000_0047_5241_5353;
 
 /// "The sheet as authored" — no tinting anywhere in this game.
 const UNTINTED: [f32; 4] = [1.0; 4];
@@ -161,7 +229,12 @@ pub struct Scene {
     player: FrameArt,
     gem: FrameArt,
     bolt: FrameArt,
-    /// The gems, on the ground and under everything.
+    /// The grass, indexed by [`ground_variant`]. One sheet, so the whole ground
+    /// is a run however the variants fall out.
+    grass: [FrameArt; GROUND_VARIANTS],
+    /// The grass, under everything including the gems.
+    ground: Layer,
+    /// The gems, on the ground and under everything that moves.
     gems: Layer,
     /// The horde.
     crowd: Layer,
@@ -200,8 +273,16 @@ pub struct SceneStats {
     /// How many of those the view box rejected. The work P7's GPU culling is
     /// there to delete, counted so it can be seen.
     pub culled: usize,
-    /// Sprites that survived it, which is what the pass uploads and draws.
-    /// Always at least one, because the player is never culled.
+    /// Ground tiles the view asked for.
+    ///
+    /// Not part of [`SceneStats::field`] and not subject to [`SceneStats::culled`]
+    /// — the ground is generated from the view rather than filtered against it,
+    /// so it has nothing to reject. It is reported separately because it is in
+    /// [`SceneStats::drawn`] and would otherwise look like a horde that stopped
+    /// being culled.
+    pub ground: usize,
+    /// Sprites the pass uploads and draws: the ground, plus whatever survived
+    /// the cull, plus the player — who is never culled.
     pub drawn: usize,
     /// Draw calls the sprite pass will make for them.
     pub batches: usize,
@@ -212,6 +293,7 @@ impl crcbl::ui::DebugModule for SceneStats {
         section.set_title("scene");
         section.row("field", format_args!("{}", self.field));
         section.row("culled", format_args!("{}", self.culled));
+        section.row("ground", format_args!("{}", self.ground));
         section.row("drawn", format_args!("{}", self.drawn));
         section.row("batches", format_args!("{}", self.batches));
     }
@@ -234,15 +316,19 @@ impl Scene {
     pub fn new(device: &dyn Device, sprites: &mut SpriteRenderer) -> Result<Self, HalError> {
         let actors = baked("actors", ACTORS_PNG, ACTORS_JSON);
         let bolt = baked("bolt", BOLT_PNG, BOLT_JSON);
+        let terrain = baked("terrain", TERRAIN_PNG, TERRAIN_JSON);
 
         let actors_sheet = register(device, sprites, "actors", &actors)?;
         let bolt_sheet = register(device, sprites, "bolt", &bolt)?;
+        let terrain_sheet = register(device, sprites, "terrain", &terrain)?;
 
         // Back to front, and this is the only place the depth order is written
-        // down: `LayerStack` has no depth field to disagree with it. All four
+        // down: `LayerStack` has no depth field to disagree with it. All five
         // take the world's rate — the camera follows the player and there is
-        // nothing behind the field to drift.
+        // nothing behind the field to drift. The ground least of all: a parallax
+        // factor on it would slide the grass under the player's feet.
         let mut stack = LayerStack::new();
+        let ground = stack.push_layer(Parallax::WORLD);
         let gems = stack.push_layer(Parallax::WORLD);
         let crowd = stack.push_layer(Parallax::WORLD);
         let hero = stack.push_layer(Parallax::WORLD);
@@ -261,6 +347,8 @@ impl Scene {
             // synthesised by `load` covering the whole image, and its name is
             // the loader's rather than the `.crpix`'s.
             bolt: still(bolt_sheet, &bolt.sheet),
+            grass: GROUND_FRAMES.map(|name| frame(terrain_sheet, &terrain.sheet, name)),
+            ground,
             gems,
             crowd,
             hero,
@@ -294,6 +382,37 @@ impl Scene {
         let half_y = crate::game::VIEW_HALF_HEIGHT + ACTOR_HALF_EXTENT;
         let visible =
             move |p: DVec3| (p.x - camera.x).abs() <= half_x && (p.y - camera.y).abs() <= half_y;
+
+        // The ground, first and under everything. **Generated, not culled**: the
+        // tile lattice is infinite, so the visible tiles are the answer to a
+        // range question rather than what is left after rejecting the rest. The
+        // range is taken against the *unpadded* view — a tile already covers up
+        // to a whole tile past each edge, so there is nothing to grow it by.
+        let grass = self.grass;
+        let (xs, ys) = ground_tiles(
+            camera,
+            view_half_width(extent),
+            crate::game::VIEW_HALF_HEIGHT,
+        );
+        let ground_count = xs.clone().count() * ys.clone().count();
+        self.stack.extend(
+            self.ground,
+            ys.flat_map(move |ty| {
+                xs.clone().map(move |tx| {
+                    let art = grass[ground_variant(tx, ty)];
+                    Sprite {
+                        sheet: art.sheet,
+                        rect: rect(tile_centre(tx, ty), GROUND_TILE / 2.0),
+                        // Square, and the same way up in every tile: rotating
+                        // the quad would be a fifth variant for free and a
+                        // rotated *blade*, which grows up.
+                        rotation: 0.0,
+                        uv: art.uv,
+                        tint: UNTINTED,
+                    }
+                })
+            }),
+        );
 
         let gem = self.gem;
         self.stack.extend(
@@ -352,11 +471,13 @@ impl Scene {
         // what batching depends on, so counting the pieces as they were pushed
         // would be counting a different list.
         let field = render.enemies.len() + render.pickups.len() + render.bolts.len();
-        // `- 1` for the player, which is in `frame` and not in `field`.
         let drawn = frame.len();
         self.stats = SceneStats {
             field,
-            culled: field + 1 - drawn,
+            // What is left of `frame` once the ground and the never-culled
+            // player are taken out of it is the part of `field` that survived.
+            culled: field + 1 + ground_count - drawn,
+            ground: ground_count,
             drawn,
             batches: crcbl::render::sprite_pass::batch_count(frame),
         };
@@ -367,6 +488,66 @@ impl Scene {
 // ---------------------------------------------------------------------------
 // Pure geometry — no device, no sheet ids
 // ---------------------------------------------------------------------------
+
+/// The tiles whose squares meet the view box, as a pair of inclusive ranges
+/// over the tile lattice.
+///
+/// Tile `(tx, ty)` owns `[tx, tx + 1) × [ty, ty + 1)` scaled by [`GROUND_TILE`],
+/// so `floor` of each edge is the first and last tile the box touches and the
+/// range covers the box with **no gap and at most one tile of overhang** on each
+/// side. That is the whole coverage argument: it is a property of `floor` over a
+/// uniform lattice rather than of a margin somebody tuned, which is why there is
+/// no `+ 1` here to be off by.
+fn ground_tiles(
+    camera: DVec3,
+    half_x: f64,
+    half_y: f64,
+) -> (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>) {
+    let first = |lo: f64| (lo / GROUND_TILE).floor() as i32;
+    (
+        first(camera.x - half_x)..=first(camera.x + half_x),
+        first(camera.y - half_y)..=first(camera.y + half_y),
+    )
+}
+
+/// The centre of tile `(tx, ty)`, in world units.
+fn tile_centre(tx: i32, ty: i32) -> DVec3 {
+    DVec3::new(
+        (f64::from(tx) + 0.5) * GROUND_TILE,
+        (f64::from(ty) + 0.5) * GROUND_TILE,
+        0.0,
+    )
+}
+
+/// Which grass variant tile `(tx, ty)` draws.
+///
+/// A pure function of the tile's own coordinates, through the workspace's index
+/// hash — the one in [`crcbl::core::rand`], which every sample that needed
+/// random numbers now shares and which exists precisely so nobody writes a fifth
+/// one. Being a function of the coordinates rather than of an emission counter
+/// is what makes a tile draw the same grass whichever direction the player walks
+/// into it from.
+///
+/// The two coordinates are packed into one index as a pair of `u32` halves.
+/// That is a bijection over every `i32` tile, so two distinct tiles never
+/// collide on one index — which `crcbl::core::rand`'s header says is the
+/// caller's job to arrange, because it cannot be arranged for callers in
+/// general.
+///
+/// The choice comes off the **top** bits: [`GROUND_VARIANTS`] is a power of two,
+/// so a shift is exact where a modulo would need the count to divide 2^64 to
+/// avoid bias, and the top of a splitmix64 word is its best-mixed end.
+fn ground_variant(tx: i32, ty: i32) -> usize {
+    const {
+        assert!(
+            GROUND_VARIANTS.is_power_of_two(),
+            "the variant is a shift off the top of the hash, which needs a power of two",
+        );
+    }
+    let index = (u64::from(tx as u32) << 32) | u64::from(ty as u32);
+    let bits = GROUND_VARIANTS.ilog2();
+    (crcbl::core::rand::hash_u64(GROUND_SEED, index) >> (u64::BITS - bits)) as usize
+}
 
 /// Which of [`Scene::enemies`] a kind draws from.
 const fn kind_index(kind: EnemyKind) -> usize {
@@ -461,7 +642,8 @@ mod tests {
     use crcbl::sprite::SampleMode;
 
     use crate::game::{
-        BOLT_RADIUS, EnemyView, PLAYER_RADIUS, PickupView, VIEW_HALF_HEIGHT, XP_RADIUS,
+        ARENA_HALF_HEIGHT, ARENA_HALF_WIDTH, BOLT_RADIUS, EnemyView, PLAYER_RADIUS, PickupView,
+        VIEW_HALF_HEIGHT, XP_RADIUS,
     };
 
     /// Runs `body` against a scene built on the null backend.
@@ -670,6 +852,153 @@ mod tests {
         );
     }
 
+    /// **The ground bakes to four opaque tiles of the size the code lays.**
+    ///
+    /// The frame size is the tile size — a `.crpix` has one for the whole file —
+    /// so this is what stops `assets/terrain.crpix` and [`GROUND_TILE`] drifting
+    /// apart into a lattice of stretched or squeezed grass. The opacity half is
+    /// the ground's own contract: it is the bottom layer, so a transparent texel
+    /// is [`GROUND`] showing through a lawn.
+    #[test]
+    fn the_ground_bakes_to_four_opaque_tiles() {
+        let terrain = baked("terrain", TERRAIN_PNG, TERRAIN_JSON);
+        let side = GROUND_TILE * f64::from(TEXELS_PER_UNIT);
+        assert_eq!(
+            side,
+            side.round(),
+            "the tile is not a whole number of texels at {TEXELS_PER_UNIT} a unit",
+        );
+        let side = side as u32;
+
+        assert_eq!(terrain.sheet.frames.len(), GROUND_VARIANTS);
+        assert_eq!(
+            (terrain.image.width, terrain.image.height),
+            (GROUND_VARIANTS as u32 * side, side),
+            "the sheet is not {GROUND_VARIANTS} {side}-texel frames in a strip",
+        );
+        for name in GROUND_FRAMES {
+            let index = terrain
+                .sheet
+                .frame_index(name)
+                .unwrap_or_else(|| panic!("the terrain sheet has no frame {name}"));
+            let rect = terrain.sheet.frames[index].rect;
+            assert_eq!((rect.w, rect.h), (side, side), "{name}");
+        }
+        assert!(
+            terrain.sheet.clips.is_empty(),
+            "the ground does not animate"
+        );
+        assert_eq!(terrain.sheet.nine, None);
+        assert_eq!(terrain.sheet.sample, SampleMode::Pixel);
+
+        let clear = terrain
+            .image
+            .pixels
+            .chunks_exact(4)
+            .filter(|p| p[3] != u8::MAX)
+            .count();
+        assert_eq!(
+            clear,
+            0,
+            "{clear} of {} ground texels are not fully opaque, so the clear \
+             colour shows through the grass",
+            terrain.image.pixels.len() / 4,
+        );
+
+        // Four *different* tiles. Four copies of one would tile, bake, load and
+        // draw exactly as four variants do, and every assertion above passes on
+        // them — which would make `ground_variant` a shuffle of one stamp.
+        let mut frames: Vec<Vec<u8>> = (0..GROUND_VARIANTS)
+            .map(|i| {
+                let rect = terrain.sheet.frames[i].rect;
+                (rect.y..rect.y + rect.h)
+                    .flat_map(|y| {
+                        let row = (y * terrain.image.width + rect.x) as usize * 4;
+                        terrain.image.pixels[row..row + rect.w as usize * 4].to_vec()
+                    })
+                    .collect()
+            })
+            .collect();
+        frames.sort_unstable();
+        frames.dedup();
+        assert_eq!(
+            frames.len(),
+            GROUND_VARIANTS,
+            "two tiles are the same picture"
+        );
+    }
+
+    /// **The grass is darker and flatter than what stands on it.**
+    ///
+    /// `assets/actors.crpix` gives the player a bright rim so it can be found in
+    /// a crowd of hundreds at the same size, and losing the player is the one
+    /// unplayable bug this genre has. A ground with brightness or contrast of
+    /// its own is what takes that away — so both are measured against the player
+    /// frame rather than against numbers written down here, and a repalette that
+    /// brightened the grass moves this rather than leaving the doc wrong.
+    #[test]
+    fn the_grass_is_dimmer_and_flatter_than_the_player_it_carries() {
+        let terrain = baked("terrain", TERRAIN_PNG, TERRAIN_JSON);
+        let actors = baked("actors", ACTORS_PNG, ACTORS_JSON);
+
+        // Rec. 601 luma, which is what "how bright does this look" means for
+        // eight-bit sRGB without a colour-management pass nothing here has.
+        let luma =
+            |p: &[u8]| 0.299 * f64::from(p[0]) + 0.587 * f64::from(p[1]) + 0.114 * f64::from(p[2]);
+        let lumas = |loaded: &Loaded, frame: Option<&str>| {
+            let rect = frame.map(|name| {
+                let index = loaded.sheet.frame_index(name).expect("a frame");
+                loaded.sheet.frames[index].rect
+            });
+            let width = loaded.image.width;
+            let mut out = Vec::new();
+            for y in 0..loaded.image.height {
+                for x in 0..width {
+                    if let Some(r) = rect
+                        && !(x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+                    {
+                        continue;
+                    }
+                    let at = ((y * width + x) * 4) as usize;
+                    if loaded.image.pixels[at + 3] == 0 {
+                        continue;
+                    }
+                    out.push(luma(&loaded.image.pixels[at..at + 4]));
+                }
+            }
+            out
+        };
+        let span = |v: &[f64]| {
+            let lo = v.iter().copied().fold(f64::MAX, f64::min);
+            let hi = v.iter().copied().fold(f64::MIN, f64::max);
+            (lo, hi, v.iter().sum::<f64>() / v.len() as f64)
+        };
+
+        let (grass_lo, grass_hi, grass_mean) = span(&lumas(&terrain, None));
+        let (player_lo, player_hi, player_mean) = span(&lumas(&actors, Some("player")));
+
+        assert!(
+            grass_hi < player_hi / 3.0,
+            "the brightest grass texel is {grass_hi:.1} against the player's \
+             {player_hi:.1}: a ground that bright competes with the rim",
+        );
+        assert!(
+            grass_hi - grass_lo < (player_hi - player_lo) / 3.0,
+            "the grass spans {:.1} of luma and the player {:.1}: a ground with \
+             that much contrast is busy under a crowd",
+            grass_hi - grass_lo,
+            player_hi - player_lo,
+        );
+        assert!(
+            grass_mean * 3.0 < player_mean,
+            "the average grass texel is {grass_mean:.1} against the player's \
+             {player_mean:.1}",
+        );
+        // …and it is not simply black, which would satisfy all three and would
+        // be a ground nobody can see is there.
+        assert!(grass_lo > 8.0, "the darkest grass texel is {grass_lo:.1}");
+    }
+
     /// **Every silhouette is the size of the collider it stands for.**
     ///
     /// The assertion that ties the art to the physics, and the one that has to
@@ -750,6 +1079,265 @@ mod tests {
     // -----------------------------------------------------------------------
     // The scene
     // -----------------------------------------------------------------------
+
+    /// **The ground covers the whole view, with no gap and no hole**, at every
+    /// window shape and wherever the player is standing.
+    ///
+    /// The failure this exists for is a strip of [`GROUND`] along an edge, which
+    /// is one `floor` away and looks like a rendering bug rather than an
+    /// off-by-one. Coverage is asserted two ways, because either alone is weak:
+    /// the tiles must reach past all four edges of the view box, *and* they must
+    /// form a complete rectangular lattice at exactly [`GROUND_TILE`] pitch —
+    /// a bounding box says nothing about a missing tile in the middle, and a
+    /// lattice says nothing about where it sits.
+    #[test]
+    fn the_ground_covers_the_view_with_no_gap() {
+        with_scene(|scene| {
+            let scale = f64::from(TEXELS_PER_UNIT);
+            let pitch = GROUND_TILE * scale;
+            for extent in [(960, 720), (1920, 1080), (600, 900), (4000, 400)] {
+                for player in [
+                    DVec3::ZERO,
+                    DVec3::new(0.37, -0.11, 0.0),
+                    DVec3::new(ARENA_HALF_WIDTH, ARENA_HALF_HEIGHT, 0.0),
+                    DVec3::new(-ARENA_HALF_WIDTH, -ARENA_HALF_HEIGHT, 0.0),
+                    DVec3::new(-13.5, 21.75, 0.0),
+                ] {
+                    let render = RenderState {
+                        player,
+                        ..RenderState::default()
+                    };
+                    scene.build(&render, extent);
+                    let tiles = scene.stack.sprites(scene.ground).to_vec();
+                    assert!(
+                        !tiles.is_empty(),
+                        "{extent:?} at {player:?}: the ground emitted nothing, so \
+                         everything below is vacuous",
+                    );
+
+                    // Every tile is a tile, or "the lattice covers the view" is
+                    // a claim about rectangles of some other size.
+                    for tile in &tiles {
+                        assert_eq!(
+                            (f64::from(tile.rect[2]), f64::from(tile.rect[3])),
+                            (pitch, pitch),
+                            "{extent:?} at {player:?}: a ground quad is not one tile",
+                        );
+                    }
+
+                    // A complete lattice: as many tiles as distinct columns
+                    // times distinct rows, and each axis a contiguous run.
+                    let axis = |i: usize| {
+                        let mut v: Vec<i64> = tiles
+                            .iter()
+                            .map(|t| (f64::from(t.rect[i]) / pitch).round() as i64)
+                            .collect();
+                        v.sort_unstable();
+                        v.dedup();
+                        v
+                    };
+                    let (cols, rows) = (axis(0), axis(1));
+                    assert_eq!(
+                        tiles.len(),
+                        cols.len() * rows.len(),
+                        "{extent:?} at {player:?}: {} tiles over {} x {} lattice \
+                         positions — one is missing or doubled",
+                        tiles.len(),
+                        cols.len(),
+                        rows.len(),
+                    );
+                    for run in [&cols, &rows] {
+                        assert!(
+                            run.windows(2).all(|w| w[1] - w[0] == 1),
+                            "{extent:?} at {player:?}: the lattice has a gap: {run:?}",
+                        );
+                    }
+
+                    // …and it is in the right place: the view box, in sprite
+                    // units, through the same two functions the projection uses.
+                    let camera = camera_centre(player, extent);
+                    let (half_x, half_y) = (view_half_width(extent), VIEW_HALF_HEIGHT);
+                    let covers = |lo: f64, hi: f64, want_lo: f64, want_hi: f64, what: &str| {
+                        assert!(
+                            lo <= want_lo && hi >= want_hi,
+                            "{extent:?} at {player:?}: the ground reaches \
+                             {lo}..{hi} on {what} and the view needs \
+                             {want_lo}..{want_hi}",
+                        );
+                    };
+                    let bound = |i: usize| {
+                        let lo = tiles
+                            .iter()
+                            .map(|t| f64::from(t.rect[i]))
+                            .fold(f64::MAX, f64::min);
+                        (
+                            lo,
+                            lo + (if i == 0 { cols.len() } else { rows.len() }) as f64 * pitch,
+                        )
+                    };
+                    let (lo, hi) = bound(0);
+                    covers(
+                        lo,
+                        hi,
+                        (camera.x - half_x) * scale,
+                        (camera.x + half_x) * scale,
+                        "x",
+                    );
+                    let (lo, hi) = bound(1);
+                    covers(
+                        lo,
+                        hi,
+                        (camera.y - half_y) * scale,
+                        (camera.y + half_y) * scale,
+                        "y",
+                    );
+
+                    assert_eq!(scene.stats().ground, tiles.len(), "the stat disagrees");
+                }
+            }
+        });
+    }
+
+    /// **A tile's grass is a function of the tile, not of the camera or the
+    /// frame count.**
+    ///
+    /// The property that makes the ground a *place*: walk away and back and the
+    /// same patch is there. A variant drawn from an emission counter — the
+    /// obvious way to write this — passes every coverage assertion above and
+    /// makes the whole field shimmer the moment the player moves.
+    ///
+    /// The last assertion is the anti-vacuous half: a constant function is
+    /// perfectly deterministic, so the tiles in one view have to actually differ.
+    #[test]
+    fn a_tiles_grass_is_a_function_of_the_tile_and_not_of_the_camera() {
+        with_scene(|scene| {
+            let pitch = GROUND_TILE * f64::from(TEXELS_PER_UNIT);
+            let key = |scene: &Scene| {
+                scene
+                    .stack
+                    .sprites(scene.ground)
+                    .iter()
+                    .map(|t| {
+                        (
+                            (f64::from(t.rect[0]) / pitch).round() as i64,
+                            (f64::from(t.rect[1]) / pitch).round() as i64,
+                            t.uv.map(f32::to_bits),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let at = |scene: &mut Scene, player: DVec3| {
+                scene.build(
+                    &RenderState {
+                        player,
+                        ..RenderState::default()
+                    },
+                    EXTENT,
+                );
+                key(scene)
+            };
+
+            let home = at(scene, DVec3::ZERO);
+            // Deliberately not a whole number of tiles, and back past the start,
+            // so the two views overlap in a phase a lattice-relative variant
+            // would get wrong.
+            let away = at(scene, DVec3::new(7.3, -5.9, 0.0));
+            let back = at(scene, DVec3::ZERO);
+            assert_eq!(home, back, "the same camera gave two different grounds");
+
+            let shared: Vec<_> = home
+                .iter()
+                .filter(|(x, y, _)| away.iter().any(|(ax, ay, _)| ax == x && ay == y))
+                .collect();
+            assert!(
+                shared.len() > 50,
+                "the two views only share {} tiles, which is not a test",
+                shared.len(),
+            );
+            for (x, y, uv) in shared {
+                let other = away
+                    .iter()
+                    .find(|(ax, ay, _)| ax == x && ay == y)
+                    .expect("just filtered on it");
+                assert_eq!(
+                    &other.2, uv,
+                    "tile ({x}, {y}) changed its grass when the camera moved",
+                );
+            }
+
+            // …and the ground is not one stamp: every variant the sheet holds
+            // turns up in a single view.
+            let mut seen: Vec<[u32; 4]> = home.iter().map(|(_, _, uv)| *uv).collect();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(
+                seen.len(),
+                GROUND_VARIANTS,
+                "one view of the ground uses {} of {GROUND_VARIANTS} variants",
+                seen.len(),
+            );
+        });
+    }
+
+    /// **The ground is bounded by the view, not by the arena** — the same claim
+    /// the cull makes for the horde, arrived at differently: the tiles are
+    /// *generated* from the view box rather than filtered against it.
+    ///
+    /// A ground laid over the whole arena would look identical on screen and
+    /// hand the pass the arena's worth of quads every frame, forever.
+    #[test]
+    fn the_visible_ground_is_bounded_by_the_view_and_not_the_arena() {
+        with_scene(|scene| {
+            let arena_tiles = ((2.0 * ARENA_HALF_WIDTH / GROUND_TILE).ceil()
+                * (2.0 * ARENA_HALF_HEIGHT / GROUND_TILE).ceil())
+                as usize;
+
+            let count = |scene: &mut Scene, player: DVec3, extent: (u32, u32)| {
+                scene.build(
+                    &RenderState {
+                        player,
+                        ..RenderState::default()
+                    },
+                    extent,
+                );
+                scene.stats().ground
+            };
+
+            let middle = count(scene, DVec3::ZERO, EXTENT);
+            let corner = count(
+                scene,
+                DVec3::new(ARENA_HALF_WIDTH, ARENA_HALF_HEIGHT, 0.0),
+                EXTENT,
+            );
+            assert!(middle > 0, "the ground emitted nothing");
+            assert!(
+                middle < arena_tiles / 4,
+                "{middle} tiles for a view of a {arena_tiles}-tile arena",
+            );
+            // The two numbers `assets/terrain.crpix` argues 2.0 units from,
+            // pinned rather than described — a change to the view, the arena or
+            // the tile takes that file's reasoning down with it here.
+            assert_eq!(middle, 300, "the tiles a {EXTENT:?} window asks for moved");
+            assert_eq!(arena_tiles, 1_728, "the arena is no longer 48 x 36 tiles");
+            // The lattice phase can add a row and a column, and no more: a
+            // ground that grew towards the wall is one laid over the arena.
+            assert!(
+                corner <= middle + (middle / 10),
+                "standing in a corner asked for {corner} tiles against {middle} \
+                 in the middle",
+            );
+
+            // …and it really does follow the *window*, or "bounded by the view"
+            // is satisfied by a constant. Wider, not taller: `gpu.rs` fixes the
+            // vertical extent and lets the horizontal one grow, so a taller
+            // window is a *narrower* view and would move this the wrong way.
+            let wide = count(scene, DVec3::ZERO, (EXTENT.0 * 2, EXTENT.1));
+            assert!(
+                wide > middle,
+                "a window twice as wide asked for {wide} tiles against {middle}",
+            );
+        });
+    }
 
     /// **The rectangle drawn covers the collider it stands for**, for every
     /// kind of thing on the field.
@@ -845,15 +1433,15 @@ mod tests {
         });
     }
 
-    /// **The whole field is two batches, whatever order it comes in.**
+    /// **The whole field is three batches, whatever order it comes in.**
     ///
     /// The claim this module's sheet split exists for, and the one the scale
-    /// sub-slice will measure: a `SpriteRenderer` batch is a run of consecutive
+    /// sub-slice measured: a `SpriteRenderer` batch is a run of consecutive
     /// sprites naming one sheet, so an interleaved field of every kind must
-    /// still resolve to the actors sheet followed by the bolt sheet — two runs,
-    /// not one per enemy.
+    /// still resolve to the terrain sheet, then the actors sheet, then the bolt
+    /// sheet — three runs, not one per enemy and not one per ground tile.
     #[test]
-    fn an_interleaved_field_of_every_kind_is_two_batches() {
+    fn an_interleaved_field_of_every_kind_is_three_batches() {
         with_scene(|scene| {
             let kinds = [EnemyKind::Brute, EnemyKind::Grunt, EnemyKind::Runner];
             let render = RenderState {
@@ -881,7 +1469,9 @@ mod tests {
                 ..RenderState::default()
             };
             let frame = scene.build(&render, EXTENT).to_vec();
-            assert_eq!(frame.len(), 6 + 24 + 1 + 3);
+            let ground = scene.stats().ground;
+            assert!(ground > 0, "the ground layer emitted nothing");
+            assert_eq!(frame.len(), ground + 6 + 24 + 1 + 3);
 
             let runs = 1 + frame
                 .windows(2)
@@ -889,16 +1479,17 @@ mod tests {
                 .count();
             assert_eq!(
                 runs,
-                2,
+                3,
                 "{} sprites in three kinds came out as {runs} batches",
                 frame.len(),
             );
-            // …and the two sheets really are two, or the count above is
+            // …and the three sheets really are three, or the count above is
             // satisfied by everything sharing one.
             let mut sheets: Vec<_> = frame.iter().map(|s| s.sheet).collect();
             sheets.dedup();
-            assert_eq!(sheets.len(), 2);
-            assert_eq!(sheets[1], scene.bolt.sheet, "the shots come last");
+            assert_eq!(sheets.len(), 3);
+            assert_eq!(sheets[0], scene.grass[0].sheet, "the ground comes first");
+            assert_eq!(sheets[2], scene.bolt.sheet, "the shots come last");
 
             // The three enemy kinds really are three different frames of that
             // one sheet, or "one batch" is one picture.
@@ -953,18 +1544,17 @@ mod tests {
         });
     }
 
-    /// **Ten thousand enemies are still two batches**, which is the number the
-    /// plan's exit criteria ask for and the one the 34-sprite test above cannot
-    /// give.
+    /// **Ten thousand enemies are still three batches**, which is what the
+    /// plan's exit criterion asks for — a count that does not move with the
+    /// horde — and what the 34-sprite test above cannot give.
     ///
     /// The whole field is packed *inside* the view so nothing is culled: a
-    /// version that let the cull do its job would assert two batches over the
-    /// fifteen hundred that survive, which is the same claim at a tenth of the
-    /// pressure. The counting rule is [`batches`], this module's mirror of
-    /// `sprite_pass`'s — see [`SceneStats`] and `docs/backlog.md` for why that
-    /// is weaker than asking the pass.
+    /// version that let the cull do its job would assert the batch count over
+    /// the fifteen hundred that survive, which is the same claim at a tenth of
+    /// the pressure. The counting rule is
+    /// [`crcbl::render::sprite_pass::batch_count`], the pass's own.
     #[test]
-    fn ten_thousand_visible_enemies_are_still_two_batches() {
+    fn ten_thousand_visible_enemies_are_still_three_batches() {
         const COUNT: usize = 10_000;
         with_scene(|scene| {
             // A grid inside the view box, which is 2 * view_half_width by
@@ -1008,19 +1598,25 @@ mod tests {
                 stats.culled,
             );
             assert_eq!(stats.field, COUNT + 8);
-            assert_eq!(stats.drawn, COUNT + 8 + 1, "the player is drawn too");
+            assert!(stats.ground > 0, "the ground layer emitted nothing");
+            assert_eq!(
+                stats.drawn,
+                stats.ground + COUNT + 8 + 1,
+                "the ground and the player are drawn too",
+            );
             assert_eq!(frame.len(), stats.drawn);
             assert_eq!(
-                stats.batches, 2,
+                stats.batches, 3,
                 "{} sprites came out as {} batches",
                 stats.drawn, stats.batches,
             );
-            // …and the two really are the actors sheet then the bolt sheet, or
-            // "two batches" is one sheet drawn twice.
+            // …and the three really are terrain, then actors, then the bolt
+            // sheet, or "three batches" is one sheet drawn three times.
             let mut sheets: Vec<_> = frame.iter().map(|s| s.sheet).collect();
             sheets.dedup();
-            assert_eq!(sheets.len(), 2);
-            assert_eq!(sheets[1], scene.bolt.sheet, "the shots come last");
+            assert_eq!(sheets.len(), 3);
+            assert_eq!(sheets[0], scene.grass[0].sheet, "the ground comes first");
+            assert_eq!(sheets[2], scene.bolt.sheet, "the shots come last");
         });
     }
 
@@ -1124,33 +1720,36 @@ mod tests {
             let stats = scene.stats();
             assert_eq!(stats.field, count);
             assert_eq!(
-                stats.field + 1,
+                stats.field + 1 + stats.ground,
                 stats.culled + stats.drawn,
                 "the cull's own arithmetic does not close",
             );
 
+            // The enemies alone: the ground is generated rather than culled and
+            // would otherwise pad the number this test is about.
+            let survivors = stats.drawn - stats.ground - 1;
             // The view is about 37 x 28 units of a 96 x 72 arena, so a little
             // over an eighth of it. The bound is loose on purpose — the exact
             // number depends on the grid — but a cull that rejected nothing, or
             // everything, fails it.
             assert!(
-                stats.drawn > 500 && stats.drawn < count / 4,
-                "{} of {count} survived the cull",
-                stats.drawn,
+                survivors > 500 && survivors < count / 4,
+                "{survivors} of {count} survived the cull",
             );
-            assert_eq!(stats.batches, 1, "one sheet, one batch");
+            assert_eq!(stats.batches, 2, "the ground, then one sheet of actors");
         });
     }
 
     /// Each kind of thing goes on the layer it belongs to, back to front.
     #[test]
-    fn the_gems_are_behind_the_crowd_and_the_shots_are_in_front() {
+    fn the_ground_is_behind_the_gems_and_the_shots_are_in_front() {
         with_scene(|scene| {
-            assert_eq!(scene.stack.layer_count(), 4);
-            assert_eq!(scene.gems.depth(), 0);
-            assert_eq!(scene.crowd.depth(), 1);
-            assert_eq!(scene.hero.depth(), 2);
-            assert_eq!(scene.shots.depth(), 3);
+            assert_eq!(scene.stack.layer_count(), 5);
+            assert_eq!(scene.ground.depth(), 0);
+            assert_eq!(scene.gems.depth(), 1);
+            assert_eq!(scene.crowd.depth(), 2);
+            assert_eq!(scene.hero.depth(), 3);
+            assert_eq!(scene.shots.depth(), 4);
         });
     }
 
