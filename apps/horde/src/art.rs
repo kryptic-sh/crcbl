@@ -6,7 +6,7 @@
 //!                                                                    │
 //!  RenderState + extent ───────────────── Scene::build ──────────────┤
 //!                                                                    ▼
-//!    LayerStack  ground ▸ props ▸ gems ▸ crowd ▸ hero ▸ shots  ──▶ &[Sprite]
+//!    LayerStack  ground ▸ props ▸ loot ▸ crowd ▸ hero ▸ shots  ──▶ &[Sprite]
 //!                                                                    │
 //!                                                     SpriteRenderer::begin_frame
 //! ```
@@ -29,7 +29,7 @@
 //! largest-first to hold that at three; a field of ten thousand walked in the
 //! order the game happens to hold it would be ten thousand batches.
 //!
-//! So the player, all three enemy kinds and the XP gems share **one** sheet, at
+//! So the player, all three enemy kinds and both pickups share **one** sheet, at
 //! one frame size — [`ACTOR_HALF_EXTENT`], which is the largest collider in the
 //! game. There is no order to get wrong and no grouping pass over the crowd:
 //! whatever [`Scene::build`] pushes, the whole field is one run. The shot is a
@@ -132,7 +132,7 @@ use crcbl::render::{Layer, LayerStack, Parallax, SheetDesc, SheetId, Sprite, Spr
 use crcbl::sprite::load::{Loaded, load};
 use crcbl::sprite::{Clip, Playback, Sheet};
 
-use crate::game::{EnemyKind, Facing, PropKind, RenderState};
+use crate::game::{EnemyKind, Facing, PickupKind, PropKind, RenderState};
 use crate::gpu::{camera_centre, view_half_width};
 
 // `build.rs` writes this: one `*_PNG` and one `*_JSON` per `assets/*.crpix`,
@@ -162,7 +162,7 @@ include!(concat!(env!("OUT_DIR"), "/art_data.rs"));
 /// twentieth of the view.
 ///
 /// At 20 the brute's box — the frame size every actor shares — is exactly 34
-/// texels, the player's exactly 20 and a gem's exactly 14. No scale makes all
+/// texels, the player's exactly 20 and a pickup's exactly 14. No scale makes all
 /// three *enemy* boxes whole; `assets/actors.crpix` has the arithmetic.
 pub const TEXELS_PER_UNIT: f32 = 20.0;
 
@@ -171,8 +171,8 @@ pub const TEXELS_PER_UNIT: f32 = 20.0;
 /// **Linear, not sRGB.** The target is an sRGB format, so the clear is encoded
 /// on the way in; this is the placeholder renderer's `#1a1a20` put through the
 /// sRGB→linear transfer function once, here, rather than looking washed out on
-/// screen. Dark and slightly cool, so the warm crowd and the green gems both
-/// read against it.
+/// screen. Dark and slightly cool, so the warm crowd and the loot both read
+/// against it.
 ///
 /// It used to *be* the ground. It is a backstop now — the grass tiles cover the
 /// whole view, so nothing should ever see this colour, and
@@ -295,6 +295,27 @@ const fn prop_index(kind: PropKind) -> usize {
     }
 }
 
+/// Which frame of `assets/actors.crpix` a pickup draws.
+///
+/// The same split [`enemy_frame`] makes, for the same reason: [`PickupKind`]
+/// names what walking over the thing *does* and the sheet names what it looks
+/// like. The experience payload is not read — a gem worth five is the same
+/// picture as a gem worth one — which is why the pattern discards it.
+const fn pickup_frame(kind: PickupKind) -> &'static str {
+    match kind {
+        PickupKind::Xp(_) => "gem",
+        PickupKind::Health => "potion",
+    }
+}
+
+/// Which of [`Scene::pickups`] a kind draws from.
+const fn pickup_index(kind: PickupKind) -> usize {
+    match kind {
+        PickupKind::Xp(_) => 0,
+        PickupKind::Health => 1,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The scene
 // ---------------------------------------------------------------------------
@@ -320,19 +341,22 @@ pub struct Scene {
     /// no second copy of it here to disagree.
     actors_desc: Sheet,
     walk: Clip,
-    gem: FrameArt,
+    /// One per [`PickupKind`], indexed by [`pickup_index`]. Two more frames of
+    /// the one actors sheet, so a field of loot is part of the same batch the
+    /// crowd is.
+    pickups: [FrameArt; 2],
     bolt: FrameArt,
     /// The grass, indexed by [`ground_variant`]. One sheet, so the whole ground
     /// is a run however the variants fall out.
     grass: [FrameArt; GROUND_VARIANTS],
     /// The trees and bushes, indexed by [`prop_index`].
     props: [FrameArt; 2],
-    /// The grass, under everything including the gems.
+    /// The grass, under everything including the loot.
     ground: Layer,
     /// The scenery, on the grass and under everything that moves.
     props_layer: Layer,
-    /// The gems, on the ground and under everything that moves.
-    gems: Layer,
+    /// The gems and the potions, on the ground and under everything that moves.
+    loot: Layer,
     /// The horde.
     crowd: Layer,
     /// The player, over the crowd.
@@ -367,7 +391,7 @@ pub struct Scene {
 /// changed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SceneStats {
-    /// Enemies, gems and bolts the simulation handed over, before the cull.
+    /// Enemies, pickups and bolts the simulation handed over, before the cull.
     pub field: usize,
     /// How many of those the view box rejected. The work P7's GPU culling is
     /// there to delete, counted so it can be seen.
@@ -442,7 +466,7 @@ impl Scene {
         let mut stack = LayerStack::new();
         let ground = stack.push_layer(Parallax::WORLD);
         let props_layer = stack.push_layer(Parallax::WORLD);
-        let gems = stack.push_layer(Parallax::WORLD);
+        let loot = stack.push_layer(Parallax::WORLD);
         let crowd = stack.push_layer(Parallax::WORLD);
         let hero = stack.push_layer(Parallax::WORLD);
         let shots = stack.push_layer(Parallax::WORLD);
@@ -461,7 +485,14 @@ impl Scene {
                 .unwrap_or_else(|| panic!("the baked sheet has no clip called {WALK_CLIP}"))
                 .clone(),
             actors_desc: actors.sheet.clone(),
-            gem: frame(actors_sheet, &actors.sheet, "gem"),
+            pickups: [
+                frame(actors_sheet, &actors.sheet, pickup_frame(PickupKind::Xp(0))),
+                frame(
+                    actors_sheet,
+                    &actors.sheet,
+                    pickup_frame(PickupKind::Health),
+                ),
+            ],
             // By index, not by name: a sheet with no sidecar has one frame
             // synthesised by `load` covering the whole image, and its name is
             // the loader's rather than the `.crpix`'s.
@@ -473,7 +504,7 @@ impl Scene {
             ],
             ground,
             props_layer,
-            gems,
+            loot,
             crowd,
             hero,
             shots,
@@ -566,14 +597,17 @@ impl Scene {
         );
         let prop_count = self.stack.sprites(self.props_layer).len();
 
-        let gem = self.gem;
+        // Two frames of the one sheet, so a ground covered in both kinds is
+        // still a single run and the order the simulation holds them in does
+        // not matter here either.
+        let loot = self.pickups;
         self.stack.extend(
-            self.gems,
+            self.loot,
             render
                 .pickups
                 .iter()
                 .filter(move |pickup| visible(pickup.position))
-                .map(move |pickup| actor(gem, pickup.position)),
+                .map(move |pickup| actor(loot[pickup_index(pickup.kind)], pickup.position)),
         );
 
         // **One pass, in the order the simulation holds them.** Nothing sorts
@@ -862,8 +896,8 @@ mod tests {
     use crcbl::sprite::{Direction, SampleMode};
 
     use crate::game::{
-        ARENA_HALF_HEIGHT, ARENA_HALF_WIDTH, BOLT_RADIUS, EnemyView, PLAYER_RADIUS, PickupView,
-        PropView, STAFF_MUZZLE, VIEW_HALF_HEIGHT, XP_RADIUS,
+        ARENA_HALF_HEIGHT, ARENA_HALF_WIDTH, BOLT_RADIUS, EnemyView, LOOT_RADIUS, PLAYER_RADIUS,
+        PickupView, PropView, STAFF_MUZZLE, VIEW_HALF_HEIGHT,
     };
 
     /// The wizard's frames: the standing frame, then the walk cycle in the order
@@ -996,6 +1030,46 @@ mod tests {
         })
     }
 
+    /// How wide the silhouette is at eight evenly spaced heights, as a fraction
+    /// of its own widest row.
+    ///
+    /// Scale free, like [`profile`], and it separates what [`profile`] cannot.
+    /// Eight rays from the centre measure how *far* a shape reaches in each
+    /// compass direction, and a rhombus and a flask drawn in the same box reach
+    /// very nearly the same distance along all eight — while being nothing alike
+    /// to look at. What differs is the width *down* the shape: a rhombus tapers
+    /// away from its middle in both directions and a flask does not.
+    ///
+    /// Both ends of the silhouette's own bounding box are sampled, and the
+    /// bands are its own rows rather than the frame's, so a picture drawn
+    /// smaller in the same frame gives the same eight numbers.
+    fn waist(loaded: &Loaded, name: &str) -> [f64; 8] {
+        let index = loaded.sheet.frame_index(name).expect("a frame");
+        let rect = loaded.sheet.frames[index].rect;
+        let width = loaded.image.width;
+        let opaque = |x: u32, y: u32| loaded.image.pixels[((y * width + x) * 4 + 3) as usize] != 0;
+        let row_width = |y: u32| (rect.x..rect.x + rect.w).filter(|x| opaque(*x, y)).count();
+
+        let rows: Vec<u32> = (rect.y..rect.y + rect.h)
+            .filter(|y| row_width(*y) > 0)
+            .collect();
+        assert!(!rows.is_empty(), "{name} is blank");
+        let widest = rows.iter().map(|y| row_width(*y)).max().expect("non-empty") as f64;
+
+        std::array::from_fn(|band| {
+            // The centre of the band, so the first and last samples land inside
+            // the shape rather than on the row past either end of it.
+            let at = (band as f64 + 0.5) / 8.0 * rows.len() as f64;
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "`at` is inside `0..rows.len()`, which is a texel count"
+            )]
+            let row = rows[(at as usize).min(rows.len() - 1)];
+            row_width(row) as f64 / widest
+        })
+    }
+
     /// One texel's Rec. 601 luma.
     ///
     /// What "how bright does this look" means for eight-bit sRGB without a
@@ -1032,6 +1106,31 @@ mod tests {
             }
         }
         out
+    }
+
+    /// The mean red and mean green of a frame's opaque texels.
+    ///
+    /// Transparent texels are dropped for [`lumas`]' reason: they are the margin
+    /// round the silhouette, and counting them as black would drag both channels
+    /// towards zero by however much of the frame the picture does not fill.
+    fn mean_rg(loaded: &Loaded, name: &str) -> (f64, f64) {
+        let index = loaded.sheet.frame_index(name).expect("a frame");
+        let rect = loaded.sheet.frames[index].rect;
+        let width = loaded.image.width;
+        let (mut red, mut green, mut count) = (0.0f64, 0.0f64, 0u32);
+        for y in rect.y..rect.y + rect.h {
+            for x in rect.x..rect.x + rect.w {
+                let at = ((y * width + x) * 4) as usize;
+                if loaded.image.pixels[at + 3] == 0 {
+                    continue;
+                }
+                red += f64::from(loaded.image.pixels[at]);
+                green += f64::from(loaded.image.pixels[at + 1]);
+                count += 1;
+            }
+        }
+        assert!(count > 0, "{name} is blank");
+        (red / f64::from(count), green / f64::from(count))
     }
 
     /// The mean luma of a frame's rim, and of everything that rim encloses.
@@ -1104,8 +1203,8 @@ mod tests {
             (f64::from(side) - 2.0 * ACTOR_HALF_EXTENT * scale).abs() < 1e-9,
             "the shared frame does not land on a whole texel",
         );
-        // The wizard's five frames, the three enemy kinds and the gem.
-        let frames = WIZARD_FRAMES.len() + EnemyKind::ALL.len() + 1;
+        // The wizard's five frames, the three enemy kinds and the two pickups.
+        let frames = WIZARD_FRAMES.len() + EnemyKind::ALL.len() + PickupKind::ALL.len();
         assert_eq!(actors.sheet.frames.len(), frames);
         assert_eq!(
             (actors.image.width, actors.image.height),
@@ -1570,10 +1669,17 @@ mod tests {
                 "{name} is not drawn to the player's collider",
             );
         }
-        assert_eq!(
-            silhouette(&actors, "gem"),
-            (want(XP_RADIUS), want(XP_RADIUS))
-        );
+        // Both pickups, and to the same box: they lie on the same ground at the
+        // same size, which is what makes telling them apart a job for the
+        // silhouette's *shape* rather than for its footprint.
+        for kind in PickupKind::ALL {
+            let name = pickup_frame(kind);
+            assert_eq!(
+                silhouette(&actors, name),
+                (want(LOOT_RADIUS), want(LOOT_RADIUS)),
+                "{name} is not drawn to the pickup collider",
+            );
+        }
     }
 
     /// **The walk's holds came back the length `assets/actors.crpix` authored.**
@@ -1892,6 +1998,128 @@ mod tests {
         }
     }
 
+    /// **A potion is not a gem**, in shape first and in colour second.
+    ///
+    /// The two lie on the same ground, in the same 14-texel box, on the same
+    /// layer, and a player deciding whether to break cover for one has to know
+    /// which it is without stopping to look. That makes "two frames" worth
+    /// nothing on its own — a recoloured gem parses, bakes, loads and draws
+    /// exactly as a second drawing does, and every other test in this file
+    /// passes on it.
+    ///
+    /// **Shape is the assertion that has to carry it**, because red against
+    /// green is the one colour pair a large minority of players cannot use.
+    /// [`profile`] is the wrong instrument here and that is worth saying: a
+    /// rhombus and a flask in one box reach almost the same distance along all
+    /// eight compass rays. [`waist`] measures the width *down* the shape, which
+    /// is where the two have nothing in common.
+    ///
+    /// Colour is asserted as a *reversal* rather than a difference — the gem is
+    /// greener than it is red and the potion the other way round — so a
+    /// repalette that kept both in one family fails rather than sliding past a
+    /// tolerance.
+    #[test]
+    fn a_potion_is_not_a_gem() {
+        let actors = baked("actors", ACTORS_PNG, ACTORS_JSON);
+        let [gem, potion] = PickupKind::ALL.map(pickup_frame);
+
+        let (a, b) = (waist(&actors, gem), waist(&actors, potion));
+        for (name, bands) in [(gem, a), (potion, b)] {
+            let thinnest = bands.iter().copied().fold(f64::MAX, f64::min);
+            assert!(thinnest > 0.0, "{name} is empty at one of its own heights");
+        }
+        let apart = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(f64::MIN, f64::max);
+        assert!(
+            apart > 0.25,
+            "the gem and the potion are one silhouette recoloured: their widths \
+             never differ by more than {apart:.3} of their own\n{a:?}\n{b:?}",
+        );
+
+        let (gem_r, gem_g) = mean_rg(&actors, gem);
+        let (potion_r, potion_g) = mean_rg(&actors, potion);
+        assert!(
+            gem_g > gem_r * 2.0,
+            "the gem averages {gem_r:.1} red against {gem_g:.1} green, so it has \
+             stopped reading as the green one",
+        );
+        assert!(
+            potion_r > potion_g * 2.0,
+            "the potion averages {potion_r:.1} red against {potion_g:.1} green, \
+             so it has stopped reading as the red one",
+        );
+    }
+
+    /// **Both pickups clear the ground they lie on, and both are rimmed dark.**
+    ///
+    /// The lower half of the band `the_monsters_sit_between_the_grass_and_the_player_in_luma`
+    /// puts the crowd in, and it applies to loot for a sharper reason than it
+    /// does to a monster: a gem the grass swallows is a gem nobody walks to, and
+    /// walking to it is the entire interaction.
+    ///
+    /// The **upper** half is where the two pickups differ, and the difference is
+    /// deliberate rather than an oversight. The potion is inside it — no texel of
+    /// it is as bright as the wizard's average — and the gem is not, because its
+    /// highlight is the wizard's own robe colour. That is the one thing on the
+    /// field allowed to compete with the player, and it is allowed because there
+    /// is no crowd of them in the sense the monsters are a crowd: a gem is a
+    /// thing to walk to, not a thing to avoid. Asserting the gem *fails* the
+    /// upper bound is what stops that being an accident nobody chose.
+    ///
+    /// The rim direction is the sheet's rule for everything that is not the
+    /// player, and it is asserted the same way the monsters' is: found from the
+    /// alpha, not read off a palette entry.
+    #[test]
+    fn the_pickups_read_against_the_ground_and_are_rimmed_dark() {
+        let actors = baked("actors", ACTORS_PNG, ACTORS_JSON);
+        let terrain = baked("terrain", TERRAIN_PNG, TERRAIN_JSON);
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+
+        let grass_hi = lumas(&terrain, None)
+            .iter()
+            .copied()
+            .fold(f64::MIN, f64::max);
+        let player = mean(&lumas(&actors, Some(IDLE_FRAME)));
+
+        for kind in PickupKind::ALL {
+            let name = pickup_frame(kind);
+            let average = mean(&lumas(&actors, Some(name)));
+            assert!(
+                average > grass_hi,
+                "{name} averages {average:.1} and the brightest grass texel is \
+                 {grass_hi:.1}, so the ground swallows the loot",
+            );
+            let (rim, body) = rim_and_body(&actors, name);
+            assert!(
+                rim < body,
+                "{name} is outlined at {rim:.1} against {body:.1} inside it, so \
+                 it is rimmed lighter than it is filled",
+            );
+        }
+
+        let brightest = |name: &str| {
+            lumas(&actors, Some(name))
+                .iter()
+                .copied()
+                .fold(f64::MIN, f64::max)
+        };
+        let potion = brightest(pickup_frame(PickupKind::Health));
+        assert!(
+            potion < player,
+            "the potion's brightest texel is {potion:.1} against the player's \
+             average {player:.1}, so it competes with the one figure that has to \
+             be found",
+        );
+        assert!(
+            brightest(pickup_frame(PickupKind::Xp(0))) > player,
+            "the gem no longer carries the highlight this test exists to say is \
+             deliberate, so the asymmetry above is measuring nothing",
+        );
+    }
+
     // -----------------------------------------------------------------------
     // The scene
     // -----------------------------------------------------------------------
@@ -2178,6 +2406,7 @@ mod tests {
                 }],
                 pickups: vec![PickupView {
                     position: DVec3::new(-1.0, -4.0, 0.0),
+                    kind: PickupKind::Xp(1),
                 }],
                 ..RenderState::default()
             };
@@ -2225,9 +2454,9 @@ mod tests {
                 "the player",
             );
             covers(
-                scene.stack.sprites(scene.gems)[0].rect,
+                scene.stack.sprites(scene.loot)[0].rect,
                 render.pickups[0].position,
-                XP_RADIUS,
+                LOOT_RADIUS,
                 "a gem",
             );
             covers(
@@ -2281,9 +2510,13 @@ mod tests {
                         )
                     })
                     .collect(),
+                // Interleaved kinds, like the props and the crowd: both pickups
+                // are frames of the actors sheet, so a ground with gems and
+                // potions mixed through it must not split the batch either.
                 pickups: (0..6)
                     .map(|i| PickupView {
                         position: DVec3::new(i as f64 * 0.5, 3.0, 0.0),
+                        kind: PickupKind::ALL[i % 2],
                     })
                     .collect(),
                 bolts: (0..3)
@@ -2597,10 +2830,62 @@ mod tests {
             assert_eq!(scene.stack.layer_count(), 6);
             assert_eq!(scene.ground.depth(), 0);
             assert_eq!(scene.props_layer.depth(), 1);
-            assert_eq!(scene.gems.depth(), 2);
+            assert_eq!(scene.loot.depth(), 2);
             assert_eq!(scene.crowd.depth(), 3);
             assert_eq!(scene.hero.depth(), 4);
             assert_eq!(scene.shots.depth(), 5);
+        });
+    }
+
+    /// **A potion on the field is drawn with the potion's frame**, and a gem
+    /// with the gem's.
+    ///
+    /// The one claim the art tests above cannot make: they measure the two
+    /// *frames* and say those are different pictures, which is true of a build
+    /// that then draws every pickup with the same one. [`pickup_index`] is where
+    /// that would go wrong, it is one line, and it goes wrong silently — the
+    /// batch count, the sprite count, the rectangles and the layer are all
+    /// identical either way, and only the picture on the screen changes.
+    ///
+    /// Asserted against the UVs the *sheet* gives each named frame, not against
+    /// `Scene::pickups`, which is indexed by the function under test.
+    #[test]
+    fn each_pickup_is_drawn_with_its_own_frame() {
+        let actors = baked("actors", ACTORS_PNG, ACTORS_JSON);
+        let uv_of = |name: &str| {
+            let index = actors.sheet.frame_index(name).expect("a frame");
+            actors.sheet.uv(index).expect("a frame has a rectangle")
+        };
+
+        with_scene(|scene| {
+            let render = RenderState {
+                player: DVec3::ZERO,
+                // The potion first, so a build that drew the list in order with
+                // one frame could not pass by coincidence of ordering.
+                pickups: vec![
+                    PickupView {
+                        position: DVec3::new(-2.0, 0.0, 0.0),
+                        kind: PickupKind::Health,
+                    },
+                    PickupView {
+                        position: DVec3::new(2.0, 0.0, 0.0),
+                        kind: PickupKind::Xp(1),
+                    },
+                ],
+                ..RenderState::default()
+            };
+            scene.build(&render, EXTENT);
+
+            let drawn = scene.stack.sprites(scene.loot);
+            assert_eq!(drawn.len(), 2, "both pickups were culled or merged");
+            assert_eq!(drawn[0].uv, uv_of("potion"), "the potion is not a flask");
+            assert_eq!(drawn[1].uv, uv_of("gem"), "the gem is not a gem");
+            assert_ne!(drawn[0].uv, drawn[1].uv, "both pickups drew the same frame",);
+            assert_eq!(
+                drawn[0].sheet, drawn[1].sheet,
+                "the two pickups came off different sheets, which is a second \
+                 batch on the field's own layer",
+            );
         });
     }
 

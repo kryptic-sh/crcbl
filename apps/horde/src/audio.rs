@@ -1,9 +1,9 @@
-//! Audio for horde: five procedural cues through `crcbl-audio`'s spatial
+//! Audio for horde: six procedural cues through `crcbl-audio`'s spatial
 //! grammar and its mixer, and the first voice cap any sample has needed.
 //!
-//! The gun, an enemy coming apart, a gem banked, a level gained and the player
-//! dying, all synthesised at start-up — this sample has no sound assets by
-//! design. The waveforms are banked in a [`SoundBank`]; the game thread plays
+//! The gun, an enemy coming apart, a gem banked, a potion drunk, a level gained
+//! and the player dying, all synthesised at start-up — this sample has no sound
+//! assets by design. The waveforms are banked in a [`SoundBank`]; the game thread plays
 //! voices into a [`Mixer`] the audio thread fills from.
 //!
 //! # Where the listener stands, and why this game moves it
@@ -69,9 +69,19 @@ pub const SOUND_PICKUP: u32 = 3;
 pub const SOUND_LEVEL: u32 = 4;
 /// The player running out of hit points.
 pub const SOUND_DEATH: u32 = 5;
+/// A potion drunk, and hit points back with it.
+///
+/// **A sixth cue rather than a second use of [`SOUND_PICKUP`].** A gem is the
+/// most common sound in the game — a player hears one for very nearly every
+/// kill — and a potion is among the rarest, by
+/// [`crate::game::POTION_DROP_CHANCE`]'s design. Playing the rarest event
+/// through the sound of the most common one is the same as not playing it: the
+/// blip would arrive in a stream of identical blips and the only notice of a
+/// heal would be a bar the player is not looking at while a brute is on them.
+pub const SOUND_HEAL: u32 = 6;
 
 /// How many cue ids this game has, and how long [`Audio::plays`] is.
-const SOUND_COUNT: usize = 5;
+const SOUND_COUNT: usize = 6;
 
 /// How loud a cue is against the volume the grammar asks for. See breakout's.
 const MASTER_GAIN: f32 = 0.5;
@@ -127,10 +137,16 @@ const SAMPLE_RATE: u32 = 48_000;
 impl Audio {
     pub fn new(headless: bool) -> Self {
         // Short high blip for the gun, a filtered noise burst for an enemy
-        // coming apart, a brighter and shorter blip for a gem, a two-tone rise
-        // for a level, and a long low burst for the player's own end. Every one
-        // of them is shorter than the last sample's equivalents, because this
-        // game raises far more of them: see `MAX_VOICES`.
+        // coming apart, a brighter and shorter blip for a gem, a short rise for
+        // a potion, a longer and lower two-tone rise for a level, and a long low
+        // burst for the player's own end. Every one of them is shorter than the
+        // last sample's equivalents, because this game raises far more of them:
+        // see `MAX_VOICES`.
+        //
+        // The potion and the level are the same *shape* — a sweep upwards, which
+        // is what "something got better" sounds like — and are told apart by
+        // being a fifth apart in register and a third of the length. Nothing
+        // else here sweeps, so neither can be confused with a blip or a burst.
         //
         // Banked once. `SoundBank::create_voice` shares the buffer rather than
         // copying it, which at this game's cue rate is the difference between a
@@ -142,6 +158,7 @@ impl Audio {
             synth::noise_burst(0.14, 12.0, NOISE_SEED, SAMPLE_RATE),
         );
         bank.insert(SOUND_PICKUP, synth::sine(1_320.0, 0.05, SAMPLE_RATE));
+        bank.insert(SOUND_HEAL, rise(660.0, 990.0, 0.10, SAMPLE_RATE));
         bank.insert(SOUND_LEVEL, rise(440.0, 880.0, 0.30, SAMPLE_RATE));
         bank.insert(
             SOUND_DEATH,
@@ -336,7 +353,13 @@ mod tests {
         audio.play_at(SOUND_SHOT, DVec3::ZERO, DVec3::ZERO);
         assert_eq!(audio.voices(), 1);
         assert_eq!(audio.plays(SOUND_SHOT), 1);
-        for other in [SOUND_KILL, SOUND_PICKUP, SOUND_LEVEL, SOUND_DEATH] {
+        for other in [
+            SOUND_KILL,
+            SOUND_PICKUP,
+            SOUND_HEAL,
+            SOUND_LEVEL,
+            SOUND_DEATH,
+        ] {
             assert_eq!(audio.plays(other), 0, "only the shot was played");
         }
     }

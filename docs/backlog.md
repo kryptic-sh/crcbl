@@ -2774,7 +2774,38 @@ annotated.
   refusals and nothing shows them. It is bounded and deterministic, which is
   what it was for, and a player kiting away from a heap of loot in a long run
   will not be told why their level-ups stopped. A HUD line, or dropping the
-  _oldest_ gem instead of refusing the newest, would both fix it.
+  _oldest_ gem instead of refusing the newest, would both fix it. **A potion is
+  refused by the same ceiling**, which is worse than losing a gem — the rarest
+  drop in the game can be eaten by a field of litter and the player is told
+  nothing. `drop_pickup` says why it is not special-cased: a kind that could
+  jump the queue is an unbounded population wearing a bound. Dropping the oldest
+  gem would fix this half too, and is the option to weigh first.
+
+- **Nothing on screen tells a potion from a gem before you reach it, except the
+  picture.** There is no minimap, no pickup outline and no HUD line;
+  `art::tests::a_potion_is_not_a_gem` is what says the two silhouettes are
+  distinguishable at all, and it measures the baked frames rather than what a
+  player at a distance can resolve. Nobody has looked at a field of both on a
+  real display. The claim being made is about shape, not colour, precisely
+  because red-against-green is the one pair a large minority of players cannot
+  use — but that reasoning has not been checked against a simulated deficiency
+  either.
+
+- **A potion always lands beside a gem, and both are taken together.** A brute
+  drops both, one pickup diameter apart, so a player who walks over one almost
+  always takes the other in the same tick — the collection radius is wider than
+  the gap. Nothing is lost by that (both pay out) and it does mean the potion is
+  never a separate decision to walk to, which is half of what a rare pickup is
+  for. Placing it further out would need a bound nobody has stated against
+  `clamp_to_arena` and against a brute dying in a corner.
+
+- **`POTION_DROP_CHANCE` was tuned against the autopilot, not against a
+  player.** The kiting `autopilot` in `game::tests` walks a fixed circle and
+  takes steady chip damage, which is not how a run is actually lost; the rate
+  was settled by finding where `a_long_run_leaks_nothing` stops reaching a death
+  (one brute in ten survives the whole soak on single-figure hit points, one in
+  twenty dies and restarts). That makes the number defensible and not the same
+  as playtested. Nobody has played a run with potions in it.
 
 - **The level-up screen has no way out but forwards.** There is no "skip", and a
   choice out of range is ignored, so a run that reached `LevelUp` stays there
@@ -2784,6 +2815,14 @@ annotated.
   browser demo left on the level-up screen looks stopped. `browser-e2e.mjs`
   watches the once-a-second `[HUD]` heartbeat, which keeps firing, so the gate
   itself is fine.
+
+  **It also caps what a headless run can reach**, which matters now that there
+  is a drop worth watching for: `horde --headless --frames 600 --prefill 200`
+  banks its first level at three seconds and parks, so no headless invocation
+  reaches a potion however many frames it is given. Every measurement of the
+  drop rate therefore comes from `game::tests`, which drives the level-up screen
+  through the autopilot. A `--choose <n>` flag, or an autopilot behind a flag,
+  would give the binary the same reach the tests have.
 
 - **The upgrade pool is repeatable without limit.** `RapidFire` has a floor
   (`FIRE_COOLDOWN_FLOOR`) and the other five do not, so a very long run has an

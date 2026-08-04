@@ -16,6 +16,50 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **horde**: **health potions, dropped by brutes and drunk by walking over
+  them.** A `potion` frame in `apps/horde/assets/actors.crpix` — a stoppered
+  flask in a crimson that appears nowhere else in the sheet, drawn to the same
+  14-texel collider the gem is — and a `game::PickupKind` that says what walking
+  over a thing pays out. A potion is a **variant of the existing pickup**, not a
+  second population: the same `Vec`, the same entity index, the same
+  `MAX_PICKUPS` ceiling, the same trigger collider and the same collection
+  query, so the soak test's two exact leak equalities and its entity growth
+  bound are unchanged rather than each gaining a term.
+
+  **Brutes only, and one brute in twenty.** The brute does more contact damage
+  than the other two kinds together and is the one slow enough to walk away
+  from, so the heal is paid out by the fight that cost the hit points — the same
+  argument `EnemyKind::xp` already makes for experience. The rate came off a
+  measurement rather than a feel: at one brute in three the kiting soak
+  (`a_long_run_leaks_nothing`) stopped reaching a death at all, which is contact
+  damage ceasing to be the pressure the genre is made of. Over the first hundred
+  seconds of the default seed it is now **2 potions from 219 kills**, and
+  `potions_drop_from_brutes_at_the_rate_the_constant_says` is where that is
+  measured.
+
+  **The roll is simulation state.** `game::drops_potion` hashes the run's kill
+  counter under a `LOOT_HAND` salt on the run seed — the same construction the
+  prop scatter uses, for the same reason — so a drop is identical in a replay,
+  on a server and on a client. `the_same_script_replays_bit_identically` now
+  compares the loot on the ground and the potion count as well.
+
+  Healing clamps to `Stats::max_hp` and **never to `PLAYER_MAX_HP`**, through a
+  new `heal_player` that `Upgrade::Vitality` now shares: the ceiling moves when
+  a run takes that upgrade, and a heal clamped to the constant would stop paying
+  out with nothing on screen to show it. A potion is worth a quarter of the
+  starting bar (`POTION_HEAL`), which is a couple of seconds inside the mass and
+  under one inside a brute.
+
+  A **sixth spatial cue**, `audio::SOUND_HEAL`, rather than a second use of the
+  gem's: a gem sounds for very nearly every kill and a potion for about one kill
+  in a hundred, and the rarest event in the game played through the most common
+  sound is the same as not playing it.
+
+  `game::XP_RADIUS` is renamed **`game::LOOT_RADIUS`**, since it is now the
+  collider of both pickups; `RenderState`'s `PickupView` carries a `kind`. The
+  batch count is unchanged — the potion is another frame of the one actors
+  sheet.
+
 - **horde**: **trees and bushes scattered over the arena, and the player cannot
   walk through them.** A new `apps/horde/assets/props.crpix` — one 36-texel
   frame size, a 0.9-unit tree and a 0.5-unit bush, each drawn to its own

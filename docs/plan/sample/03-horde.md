@@ -80,12 +80,23 @@ pathfinding wearing a tree costume, and that is the cap doing its job.
 **Slices 18a, 18b and 18c have landed** (`apps/horde`). One arena, one player
 with WASD movement and a gun that aims itself, three enemy kinds with seek plus
 separation, contact damage, hit points, death and restart; `.crpix` art through
-`SpriteRenderer` with `SampleMode::Pixel`; XP gems that drop where an enemy died
-and a "pick 1 of 3" level-up from a fixed pool of six upgrades; pause, level-up
-and death menus over the shared `crcbl_render::menu` art, with the debug panel
-on; a tiled grass ground under all of it with trees and bushes scattered over
-it; five spatial cues, the longest run kept between sessions, and the browser
-demo at `https://crcbl.kryptic.sh/demos/horde/`. 151 tests.
+`SpriteRenderer` with `SampleMode::Pixel`; XP gems that drop where an enemy
+died, health potions that a brute leaves behind now and then, and a "pick 1 of
+3" level-up from a fixed pool of six upgrades; pause, level-up and death menus
+over the shared `crcbl_render::menu` art, with the debug panel on; a tiled grass
+ground under all of it with trees and bushes scattered over it; six spatial
+cues, the longest run kept between sessions, and the browser demo at
+`https://crcbl.kryptic.sh/demos/horde/`. 161 tests.
+
+**The potion is a second `PickupKind`, not a second population.** Both pickups
+share one `Vec`, one entity index, one `MAX_PICKUPS` ceiling and one trigger
+collider, which is what leaves the leak test's two exact equalities and its
+entity growth bound saying exactly what they said before. `game::drops_potion`
+deals the drop from a `LOOT_HAND` salt on the run seed indexed by the kill
+counter, so a potion is the same event in a replay as in the run it replays. The
+rate — one brute in twenty, and a brute is a tenth of the spawn table — was
+settled by measurement: at one in three the kiting soak stopped reaching a death
+at all, which is contact damage no longer being what the run is about.
 
 **The props block the player and nothing else**, which is the hard cap above
 being enforced rather than an unfinished half of the feature.
@@ -111,8 +122,8 @@ reasoning is kept in `apps/horde/src/game.rs` so nobody re-derives it and
 re-implements the autostart; the reversal is the user's call and it is final.
 
 **The art is a sheet per subject and that is the sample's own decision.**
-Everything numerous — the player, all three enemy kinds and the gems — is in one
-`assets/actors.crpix` at one frame size (34 texels, which is the brute's
+Everything numerous — the player, all three enemy kinds and both pickups — is in
+one `assets/actors.crpix` at one frame size (34 texels, which is the brute's
 collider box at 20 texels a unit), so the whole field is a single
 `SpriteRenderer` batch **whatever order it is emitted in** and `art::Scene`
 needs no grouping pass over the crowd. Asteroids has three rock sheets and has

@@ -805,7 +805,7 @@ mod tests {
         engine
             .game_mut()
             .game_mut()
-            .stage_pickup(DVec3::new(-3.0, 0.0, 0.0), 1);
+            .stage_pickup(DVec3::new(-3.0, 0.0, 0.0), game::PickupKind::Xp(1));
         engine.frame().expect("a frame");
 
         // By position, not by count: the gun fires at the staged enemy, so the

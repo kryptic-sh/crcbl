@@ -74,12 +74,13 @@ pub use art::{ACTOR_HALF_EXTENT, BOLT_HALF_EXTENT, GROUND, Scene, SceneStats, TE
 pub use game::{
     ARENA_HALF_HEIGHT, ARENA_HALF_WIDTH, BOLT_DAMAGE, BOLT_LIFE, BOLT_RADIUS, BOLT_SPEED, BoltView,
     DEFAULT_MAX_ENEMIES, DEFAULT_SEED, DEFAULT_TICK_HZ, EnemyKind, EnemyView, FIRE_COOLDOWN,
-    FIRE_COOLDOWN_FLOOR, Game, GameError, GameState, MAX_PICKUPS, PLAYER_MAX_HP, PLAYER_RADIUS,
-    PLAYER_SPEED, PickupView, RenderState, SEPARATION_SLACK, SEPARATION_STRENGTH,
-    SPAWN_INTERVAL_MIN, SPAWN_INTERVAL_START, SPAWN_RAMP_SECONDS, SPAWN_RING, Setup, Stats,
-    UPGRADE_CHOICES, Upgrade, VIEW_HALF_HEIGHT, WEAPON_RANGE, XP_RADIUS, clamp_axis,
-    clamp_to_arena, hash_unit, max_enemy_radius, separation_query_radius, spawn_interval,
-    spawn_jitter, spawn_kind, spawn_offset, upgrade_offer, xp_for_next_level,
+    FIRE_COOLDOWN_FLOOR, Game, GameError, GameState, LOOT_RADIUS, MAX_PICKUPS, PLAYER_MAX_HP,
+    PLAYER_RADIUS, PLAYER_SPEED, POTION_HEAL, PickupKind, PickupView, RenderState,
+    SEPARATION_SLACK, SEPARATION_STRENGTH, SPAWN_INTERVAL_MIN, SPAWN_INTERVAL_START,
+    SPAWN_RAMP_SECONDS, SPAWN_RING, Setup, Stats, UPGRADE_CHOICES, Upgrade, VIEW_HALF_HEIGHT,
+    WEAPON_RANGE, clamp_axis, clamp_to_arena, drops_potion, hash_unit, max_enemy_radius,
+    separation_query_radius, spawn_interval, spawn_jitter, spawn_kind, spawn_offset, upgrade_offer,
+    xp_for_next_level,
 };
 pub use gpu::{camera_centre, view_half_width};
 pub use menu::{HordeAction, MenuKind, Menus, RESTART_ID, action_from_id, choose_id};

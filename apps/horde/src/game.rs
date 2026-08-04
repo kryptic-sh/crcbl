@@ -389,11 +389,44 @@ pub fn max_enemy_radius() -> f64 {
 // Experience, pickups and the level-up
 // ---------------------------------------------------------------------------
 
-/// The radius of a dropped gem's collider, in world units.
+/// What one thing lying on the ground is worth to the player who walks over it.
+///
+/// **One population, two payloads**, rather than a second list of entities
+/// beside the gems. Everything a pickup does is the same for both — it is
+/// dropped where something died, it is a trigger collider in the same
+/// broadphase, it is refused by the same [`MAX_PICKUPS`] ceiling, it is filtered
+/// back out of the same aiming and separation queries, and it is collected by
+/// the same overlap in `collect_pickups`. A second `Vec` and a second
+/// `HashMap` would be that whole apparatus written twice, and would put a second
+/// term into both of the leak test's exact equalities for a difference that is
+/// one `match` arm wide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PickupKind {
+    /// Experience, worth what the kind that dropped it is. See
+    /// [`EnemyKind::xp`].
+    ///
+    /// The amount rides on the variant because it genuinely varies with what
+    /// died; a potion's does not, which is why the other arm carries nothing.
+    Xp(u64),
+    /// Hit points, worth [`POTION_HEAL`].
+    Health,
+}
+
+impl PickupKind {
+    /// Every kind, in a fixed order, for the tests and the art.
+    ///
+    /// The experience arm carries the smallest payload there is, because this
+    /// list exists to enumerate the two *pictures* and nothing reads the value
+    /// off it.
+    pub const ALL: [Self; 2] = [Self::Xp(0), Self::Health];
+}
+
+/// The radius of a dropped pickup's collider, in world units.
 ///
 /// 0.7 units across, which at `art::TEXELS_PER_UNIT` is a whole 14 texels, and
-/// a little larger than a runner — a gem the player cannot see is a gem the
-/// player does not walk to.
+/// a little larger than a runner — loot the player cannot see is loot the
+/// player does not walk to. Both [`PickupKind`]s use it, so the two are drawn
+/// at one size and the collection query is one radius rather than two.
 ///
 /// **A trigger, not a solid.** `crcbl::phys` skips triggers in
 /// [`PhysicsSystem::sweep_sphere`], so a bolt flies through a gem instead of
@@ -401,16 +434,125 @@ pub fn max_enemy_radius() -> f64 {
 /// what `collect_pickups` wants and what the separation and aiming queries have
 /// to filter back out. Both filters are the `by_entity` lookups those passes
 /// already did.
-pub const XP_RADIUS: f64 = 0.35;
+pub const LOOT_RADIUS: f64 = 0.35;
 
-/// The most gems that may be lying on the field at once.
+/// The most pickups of every kind together that may be lying on the field at
+/// once.
 ///
-/// A ceiling rather than a lifetime: gems do not rot, so a player who never
+/// A ceiling rather than a lifetime: loot does not rot, so a player who never
 /// picks one up would otherwise accumulate one collider per kill forever, and
 /// the broadphase this sample exists to measure would be measuring litter. When
 /// it is full a kill drops nothing, which is a pressure to go and collect
 /// rather than a silent loss — `pickups_dropped` counts what was skipped.
+///
+/// It is one ceiling over both kinds because they are one list; that is also
+/// what keeps it the whole growth bound the soak test's entity ceiling needs.
 pub const MAX_PICKUPS: usize = 512;
+
+/// How many hit points a potion puts back.
+///
+/// A quarter of the bar a run starts with — enough to be worth crossing ground
+/// for, nowhere near enough to undo a mistake. Against [`EnemyKind`]'s
+/// `contact_dps` it buys a couple of seconds inside the mass and under a second
+/// inside a brute, which is the scale the whole genre's pressure is set at;
+/// `a_potion_is_worth_seconds_of_contact_and_not_a_run` states both bounds.
+///
+/// Derived from [`PLAYER_MAX_HP`] rather than spelled out, so the two cannot
+/// drift into a potion that is most of a bar or a rounding of it. What it is
+/// actually clamped against is [`Stats::max_hp`] — see [`heal_player`].
+///
+/// It happens to equal [`VITALITY_HP`] and is deliberately not defined in terms
+/// of it: a quarter of the bar is the natural unit of healing in this game, and
+/// tuning the drop is not a reason to re-tune an upgrade.
+pub const POTION_HEAL: f64 = PLAYER_MAX_HP / 4.0;
+
+/// The share of dead brutes that leave a potion.
+///
+/// # Brutes, and only some of them
+///
+/// [`EnemyKind::Brute`] is the kind that actually takes hit points off a run:
+/// its `contact_dps` is more than the other two kinds' put together, and it is
+/// the slowest thing on the field, so it is also the one a player can simply
+/// walk away from — killing it is a decision rather than something that happens
+/// while the player kites. Paying the heal out exactly there means a potion is
+/// earned by the fight that cost the hit points, and it follows a rule this game
+/// already has: [`EnemyKind::xp`] pays a brute five times a grunt for the same
+/// reason.
+///
+/// [`EnemyKind::from_roll`] deals a brute a tenth of the time, so gating on the
+/// kind alone would already make a potion an event. The roll on top of it is
+/// what stops a brute being a vending machine — a player who could count on the
+/// drop would plan the run around brutes, and a healing item that can be
+/// *farmed* is one that deletes contact damage from the game, which is the only
+/// pressure the genre has.
+///
+/// # The number came off a measurement, not off a feel
+///
+/// It was tried at a third of brutes first, and `a_long_run_leaks_nothing` — the
+/// soak, which plays a kiting autopilot and asserts the run *ends* — stopped
+/// reaching a death at all. That is the failure this constant has to avoid
+/// stated as a test: the healing had grown to most of the damage coming in, and
+/// contact damage had stopped being what the run is about. At a twentieth the
+/// same soak dies and restarts, and one rate above it — a tenth — survives the
+/// whole soak on single-figure hit points, which is the edge this sits under
+/// deliberately rather than near.
+///
+/// `potions_drop_from_brutes_at_the_rate_the_constant_says` is where the rate a
+/// player actually sees is read off a seeded run, because it is a property of
+/// this constant *and* the spawn table together and neither says it alone.
+const POTION_DROP_CHANCE: f64 = 1.0 / 20.0;
+
+/// The hand the loot is dealt from, as a salt on the run's seed.
+///
+/// `"LOOT"` in ASCII, in the spirit of [`PROP_HAND`] and for the same reason:
+/// [`spawn_index`] packs an unbounded counter into the whole of a `u64`, so
+/// there is no bit pattern left for a second index space in the run's own hand
+/// and the two have to be told apart by the seed instead.
+const LOOT_HAND: u64 = 0x0000_0000_4C4F_4F54;
+
+/// The index space for one kill's loot draws.
+///
+/// The same packing [`spawn_index`] and [`prop_index`] use, with the same three
+/// bits of headroom. The index is the run's kill counter, which is simulation
+/// state like any other: it advances once per death, it is reset by `restart`
+/// alongside the run seed, and it is the same on the server, on the client and
+/// in a replay.
+const fn loot_index(kill: u64, which: u64) -> u64 {
+    (kill << 3) | which
+}
+
+/// Which draw of a kill's loot is which.
+const DRAW_POTION_PRESENCE: u64 = 0;
+const DRAW_POTION_BEARING: u64 = 1;
+
+/// Whether the `kill`-th kill of run `seed` leaves a potion, given what died.
+///
+/// See [`POTION_DROP_CHANCE`] for the design and [`LOOT_HAND`] for why the
+/// draw is salted rather than packed into the spawner's index space.
+#[must_use]
+pub fn drops_potion(seed: u64, kill: u64, kind: EnemyKind) -> bool {
+    kind == EnemyKind::Brute
+        && hash_unit(
+            crcbl::core::rand::salt(seed, LOOT_HAND),
+            loot_index(kill, DRAW_POTION_PRESENCE),
+        ) < POTION_DROP_CHANCE
+}
+
+/// Where the `kill`-th kill's potion lands, relative to the gem beside it.
+///
+/// One pickup diameter, so the two discs touch and neither hides the other: a
+/// brute drops both, and a potion painted exactly over its own gem would leave
+/// the gem invisible every time the rare drop happened. The bearing is drawn
+/// from the same hand as the drop rather than fixed, so a field of loot does
+/// not grow a visible convention.
+#[must_use]
+fn potion_offset(seed: u64, kill: u64) -> DVec3 {
+    let angle = hash_unit(
+        crcbl::core::rand::salt(seed, LOOT_HAND),
+        loot_index(kill, DRAW_POTION_BEARING),
+    ) * std::f64::consts::TAU;
+    DVec3::new(angle.cos(), angle.sin(), 0.0) * (2.0 * LOOT_RADIUS)
+}
 
 /// How much experience the run needs to leave `level` for the next one.
 ///
@@ -480,6 +622,13 @@ pub const UPGRADE_CHOICES: usize = 3;
 /// ends up firing once a tick, which is not a weapon, it is a stress test of
 /// the bolt list wearing a weapon's name.
 pub const FIRE_COOLDOWN_FLOOR: f64 = 0.05;
+
+/// How much [`Upgrade::Vitality`] raises the ceiling by, and heals on the spot.
+///
+/// Named rather than written twice into `apply_upgrade`, because the two uses
+/// are the same decision: the upgrade is worth a quarter of the starting bar
+/// whether the run needs it now or later.
+pub const VITALITY_HP: f64 = PLAYER_MAX_HP / 4.0;
 
 /// Keeps the upgrade draws out of the spawn table's index space.
 ///
@@ -1186,13 +1335,13 @@ struct Bolt {
     velocity: DVec3,
 }
 
-/// One dropped gem.
+/// One dropped thing on the ground.
 #[derive(Clone, Copy, Debug)]
 struct Pickup {
     entity: Entity,
     position: DVec3,
-    /// How much experience collecting it is worth. See [`EnemyKind::xp`].
-    xp: u64,
+    /// What walking over it does. See [`PickupKind`].
+    kind: PickupKind,
 }
 
 /// What the renderer needs for one enemy.
@@ -1210,10 +1359,16 @@ pub struct BoltView {
     pub position: DVec3,
 }
 
-/// What the renderer needs for one gem.
+/// What the renderer needs for one pickup.
+///
+/// The kind is here because it chooses the frame — `art::pickup_frame` is the
+/// one place a payload becomes a picture. The experience payload rides along
+/// unread; splitting it out would be a second enum whose only job is to be the
+/// first one with its value removed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PickupView {
     pub position: DVec3,
+    pub kind: PickupKind,
 }
 
 /// The mutable game state the server-side module owns.
@@ -1251,9 +1406,10 @@ struct GameLogic {
     by_entity: HashMap<Entity, usize>,
     bolts: Vec<Bolt>,
 
-    /// The gems on the ground, and where each is in the list — the same pair
-    /// [`Self::enemies`] and [`Self::by_entity`] are, for the same reason: both
-    /// the collection query and the separation query hand back entity ids.
+    /// Everything lying on the ground, of either [`PickupKind`], and where each
+    /// is in the list — the same pair [`Self::enemies`] and [`Self::by_entity`]
+    /// are, for the same reason: both the collection query and the separation
+    /// query hand back entity ids.
     pickups: Vec<Pickup>,
     pickup_by_entity: HashMap<Entity, usize>,
 
@@ -1297,8 +1453,18 @@ struct GameLogic {
     /// second half is true of a game that did nothing at all.
     enemies_spawned: u64,
     bolts_fired: u64,
-    /// How many gems a full field refused to drop. See [`MAX_PICKUPS`].
+    /// How many pickups a full field refused to drop. See [`MAX_PICKUPS`].
     pickups_dropped: u64,
+    /// How many potions this game's kills have actually left on the ground.
+    ///
+    /// Instrumentation like the two above, and the only way the drop *rate* can
+    /// be read off a run at all: a potion is picked up and gone, so a count of
+    /// what is lying about says nothing, and
+    /// `potions_drop_from_brutes_at_the_rate_the_constant_says` is what turns
+    /// this into the measured figure [`POTION_DROP_CHANCE`] is justified
+    /// against. Never reset — it is a count of the whole game, like
+    /// [`Self::enemies_spawned`], so a restart does not hide the churn.
+    potions_dropped: u64,
 
     /// Live views for the renderer, refilled rather than rebuilt so a
     /// steady-state tick does not allocate.
@@ -1893,27 +2059,45 @@ fn damage_enemy(logic: &mut GameLogic, world: &mut World, index: usize, amount: 
     let dead = remove_enemy(logic, index);
     with_physics(world, |phys| phys.remove_entity(dead.entity));
     world.despawn(dead.entity);
+    // Read before it is advanced, so the kill that is being resolved is the one
+    // the loot is dealt for: `drops_potion` indexes on the kill's own number,
+    // and taking the counter after the increment would deal every kill the next
+    // one's hand.
+    let kill = logic.kills;
     logic.kills += 1;
     logic.cues.push((crate::audio::SOUND_KILL, dead.position));
-    drop_pickup(logic, world, dead.position, dead.kind.xp());
+    drop_pickup(logic, world, dead.position, PickupKind::Xp(dead.kind.xp()));
+    // **Beside the experience, not instead of it.** A brute's gem is what pays
+    // for the bolts it took; the potion is what pays for the hit points it cost,
+    // and the two are separate rewards for separate things.
+    let seed = logic.run();
+    if drops_potion(seed, kill, dead.kind) {
+        let at = dead.position + potion_offset(seed, kill);
+        drop_pickup(logic, world, at, PickupKind::Health);
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Experience
+// Experience and health
 // ---------------------------------------------------------------------------
 
-/// Leaves a gem where an enemy died, if the field has room for one.
+/// Leaves one pickup where something died, if the field has room for it.
 ///
-/// The collider is a **trigger**, which is the whole of how a gem stays out of
+/// The collider is a **trigger**, which is the whole of how loot stays out of
 /// the game's other three queries: `crcbl::phys` skips triggers in the sweep, so
 /// a bolt flies through it; `fire` and `steer_enemies` filter theirs back out
-/// through the enemy index they already consult. See [`XP_RADIUS`].
-fn drop_pickup(logic: &mut GameLogic, world: &mut World, position: DVec3, xp: u64) {
+/// through the enemy index they already consult. See [`LOOT_RADIUS`].
+///
+/// The [`MAX_PICKUPS`] refusal is over the whole list rather than per kind, so a
+/// field littered with gems can refuse a potion. That is the honest behaviour —
+/// the ceiling exists to bound the broadphase, and a kind that could jump the
+/// queue would be an unbounded population wearing a bound.
+fn drop_pickup(logic: &mut GameLogic, world: &mut World, position: DVec3, kind: PickupKind) {
     if logic.pickups.len() >= MAX_PICKUPS {
         logic.pickups_dropped += 1;
         return;
     }
-    let position = clamp_to_arena(position, XP_RADIUS);
+    let position = clamp_to_arena(position, LOOT_RADIUS);
     let entity = world.spawn();
     let transform = Transform::from_position(position);
     with_physics(world, |phys| {
@@ -1921,32 +2105,53 @@ fn drop_pickup(logic: &mut GameLogic, world: &mut World, position: DVec3, xp: u6
             entity,
             &ColliderComponent::Sphere {
                 offset: DVec3::ZERO,
-                radius: XP_RADIUS,
+                radius: LOOT_RADIUS,
                 is_trigger: true,
             },
             &transform,
         );
     });
+    if kind == PickupKind::Health {
+        logic.potions_dropped += 1;
+    }
     push_pickup(
         logic,
         Pickup {
             entity,
             position,
-            xp,
+            kind,
         },
     );
 }
 
-/// Banks every gem the player is standing on.
+/// Puts `amount` hit points back, up to the ceiling the run has reached.
+///
+/// **[`Stats::max_hp`], never [`PLAYER_MAX_HP`].** [`Upgrade::Vitality`] raises
+/// that ceiling, so a heal clamped to the constant would silently stop paying
+/// out the moment a run took the upgrade — a bug no screenshot shows, because
+/// the bar is drawn against the same moving maximum.
+///
+/// One function for both the potion and the upgrade, because both are the same
+/// piece of knowledge: what "full" means to this run.
+/// `a_potion_never_heals_past_the_ceiling_the_run_has_reached` is what holds it.
+fn heal_player(logic: &mut GameLogic, amount: f64) {
+    logic.player_hp = (logic.player_hp + amount).min(logic.stats.max_hp);
+}
+
+/// Takes every pickup the player is standing on.
 ///
 /// **One query, and the radius is exact for the same reason contact damage's
 /// is**: a shape-aware overlap of radius `R` returns every collider whose centre
 /// is within `R + r_b`, so querying at `stats.pickup_radius` picks up exactly
-/// the gems whose surface the player is touching. [`Upgrade::Magnet`] raises
+/// the loot whose surface the player is touching. [`Upgrade::Magnet`] raises
 /// that radius and nothing else changes.
 ///
 /// The query also returns enemies — they are colliders too — and the
 /// `pickup_by_entity` lookup is what rejects them.
+///
+/// **The kind decides only what is paid out**, and it is the last thing that
+/// happens: a potion and a gem are found, removed and destroyed by identical
+/// code, so neither can be the one that leaves a collider behind.
 fn collect_pickups(logic: &mut GameLogic, world: &mut World) {
     if logic.pickups.is_empty() {
         return;
@@ -1969,11 +2174,20 @@ fn collect_pickups(logic: &mut GameLogic, world: &mut World) {
         let Some(&index) = logic.pickup_by_entity.get(&entity) else {
             continue;
         };
-        let gem = remove_pickup(logic, index);
-        with_physics(world, |phys| phys.remove_entity(gem.entity));
-        world.despawn(gem.entity);
-        logic.xp += gem.xp;
-        logic.cues.push((crate::audio::SOUND_PICKUP, gem.position));
+        let taken = remove_pickup(logic, index);
+        with_physics(world, |phys| phys.remove_entity(taken.entity));
+        world.despawn(taken.entity);
+        let cue = match taken.kind {
+            PickupKind::Xp(xp) => {
+                logic.xp += xp;
+                crate::audio::SOUND_PICKUP
+            }
+            PickupKind::Health => {
+                heal_player(logic, POTION_HEAL);
+                crate::audio::SOUND_HEAL
+            }
+        };
+        logic.cues.push((cue, taken.position));
     }
     logic.scratch_entities = taken;
 }
@@ -2034,10 +2248,12 @@ fn apply_upgrade(logic: &mut GameLogic, upgrade: Upgrade) {
         Upgrade::SwiftBoots => stats.player_speed += 0.6,
         Upgrade::LongBarrel => stats.weapon_range += 2.0,
         Upgrade::Vitality => {
-            stats.max_hp += 25.0;
+            stats.max_hp += VITALITY_HP;
             // Healed on the spot as well, or the upgrade is a promise that only
-            // pays off after the next twenty-five points of damage.
-            logic.player_hp = (logic.player_hp + 25.0).min(stats.max_hp);
+            // pays off after the next `VITALITY_HP` points of damage. Through
+            // the same clamp a potion goes through, and against the ceiling this
+            // line has just raised.
+            heal_player(logic, VITALITY_HP);
         }
         Upgrade::Magnet => stats.pickup_radius += 1.0,
     }
@@ -2301,9 +2517,9 @@ fn restart(logic: &mut GameLogic, world: &mut World) {
     for bolt in std::mem::take(&mut logic.bolts) {
         despawn_bolt(world, bolt.entity);
     }
-    for gem in std::mem::take(&mut logic.pickups) {
-        with_physics(world, |phys| phys.remove_entity(gem.entity));
-        world.despawn(gem.entity);
+    for pickup in std::mem::take(&mut logic.pickups) {
+        with_physics(world, |phys| phys.remove_entity(pickup.entity));
+        world.despawn(pickup.entity);
     }
     logic.pickup_by_entity.clear();
     logic.runs = logic.runs.wrapping_add(1);
@@ -2356,12 +2572,13 @@ fn refresh_views(logic: &mut GameLogic, world: &mut World) {
     }));
     logic.enemy_views = enemy_views;
 
-    // Straight off `Pickup::position`, which never changes: a gem is dropped
+    // Straight off `Pickup::position`, which never changes: loot is dropped
     // where an enemy died and stays there until it is walked over.
     let mut pickup_views = std::mem::take(&mut logic.pickup_views);
     pickup_views.clear();
-    pickup_views.extend(logic.pickups.iter().map(|gem| PickupView {
-        position: gem.position,
+    pickup_views.extend(logic.pickups.iter().map(|pickup| PickupView {
+        position: pickup.position,
+        kind: pickup.kind,
     }));
     logic.pickup_views = pickup_views;
 
@@ -2491,7 +2708,7 @@ pub struct Game {
     ticks_run: u64,
     /// Queued key events from the shell pump, replayed after `begin_tick`.
     pending_keys: Vec<(KeyCode, bool)>,
-    /// The output stream and the five cues. On the facade rather than in the
+    /// The output stream and the six cues. On the facade rather than in the
     /// simulation: the module runs inside the server's tick and must stay a pure
     /// function of its inputs, and an audio device is neither.
     pub audio: crate::audio::Audio,
@@ -2635,6 +2852,7 @@ impl Game {
             enemies_spawned: 0,
             bolts_fired: 0,
             pickups_dropped: 0,
+            potions_dropped: 0,
             enemy_views: Vec::new(),
             bolt_views: Vec::new(),
             pickup_views: Vec::new(),
@@ -2907,7 +3125,7 @@ impl Game {
         lock(&self.shared).bolts.len()
     }
 
-    /// How many gems are on the ground.
+    /// How many pickups of both kinds are on the ground.
     #[must_use]
     pub fn pickup_count(&self) -> usize {
         lock(&self.shared).pickups.len()
@@ -2955,10 +3173,18 @@ impl Game {
         lock(&self.shared).bolts_fired
     }
 
-    /// How many gems a full field refused to drop. See [`MAX_PICKUPS`].
+    /// How many pickups a full field refused to drop. See [`MAX_PICKUPS`].
     #[must_use]
     pub fn pickups_dropped(&self) -> u64 {
         lock(&self.shared).pickups_dropped
+    }
+
+    /// How many potions this game's kills have left on the ground, over every
+    /// run. The numerator of the measured drop rate — see
+    /// [`POTION_DROP_CHANCE`].
+    #[must_use]
+    pub fn potions_dropped(&self) -> u64 {
+        lock(&self.shared).potions_dropped
     }
 
     /// The ceiling on live enemies this game was built with.
@@ -3136,23 +3362,34 @@ impl Game {
         lock(&self.shared).xp += xp;
     }
 
-    /// Drops a gem at a named place, and returns its entity.
+    /// Drops one pickup at a named place, and returns its entity.
     #[cfg(test)]
-    pub fn stage_pickup(&mut self, position: DVec3, xp: u64) -> Entity {
+    pub fn stage_pickup(&mut self, position: DVec3, kind: PickupKind) -> Entity {
         let mut logic = lock(&self.shared);
         let world = self.session.server_mut().world_mut();
-        drop_pickup(&mut logic, world, position, xp);
+        drop_pickup(&mut logic, world, position, kind);
         logic.pickups.last().expect("just dropped one").entity
     }
 
-    /// Where every gem on the ground is.
+    /// Where every pickup on the ground is, and what it is.
+    #[cfg(test)]
+    #[must_use]
+    pub fn pickups_on_the_ground(&self) -> Vec<(DVec3, PickupKind)> {
+        lock(&self.shared)
+            .pickups
+            .iter()
+            .map(|pickup| (pickup.position, pickup.kind))
+            .collect()
+    }
+
+    /// Where every pickup on the ground is.
     #[cfg(test)]
     #[must_use]
     pub fn pickup_positions(&self) -> Vec<DVec3> {
         lock(&self.shared)
             .pickups
             .iter()
-            .map(|gem| gem.position)
+            .map(|pickup| pickup.position)
             .collect()
     }
 
@@ -3449,11 +3686,18 @@ mod tests {
         }
 
         /// The invariant that has to hold on **every** tick of every test that
-        /// churns: the ECS holds exactly the player, the enemies and the bolts,
-        /// and the broadphase holds exactly the enemies.
+        /// churns: the ECS holds exactly the player, the enemies, the bolts and
+        /// the pickups, and the broadphase holds exactly the enemies and the
+        /// pickups.
         ///
         /// This is the leak detector. An entity or a collider that outlived what
         /// it belonged to shows up here on the tick it happened.
+        ///
+        /// **`pickups` is both kinds**, because a potion is a [`PickupKind`] of
+        /// the one pickup list rather than a population of its own — see that
+        /// enum. That is what leaves these two equalities exactly as tight as
+        /// they were, rather than gaining a term each and a second `Vec` for a
+        /// reader to convince themselves accounts for itself.
         ///
         /// `pending` is in the entity sum because destruction is *deferred*: the
         /// ECS sweeps at the end of `World::tick` and the game module runs after
@@ -3462,23 +3706,23 @@ mod tests {
         fn assert_nothing_leaked(&mut self) {
             let enemies = self.game.enemy_count();
             let bolts = self.game.bolt_count();
-            let gems = self.game.pickup_count();
+            let pickups = self.game.pickup_count();
             let pending = self.game.pending_despawns();
             assert_eq!(
                 self.game.entity_count(),
-                1 + enemies + bolts + gems + pending,
-                "tick {}: {enemies} enemies, {bolts} bolts, {gems} gems and {pending} \
-                 awaiting the sweep do not account for the world",
+                1 + enemies + bolts + pickups + pending,
+                "tick {}: {enemies} enemies, {bolts} bolts, {pickups} pickups and \
+                 {pending} awaiting the sweep do not account for the world",
                 self.ticks,
             );
             // An equality, not a bound: every collider in the world is an enemy
-            // or a gem. The player is not in the broadphase and neither is a
+            // or a pickup. The player is not in the broadphase and neither is a
             // bolt — see `contact_damage` and `sweep_bolts`.
             assert_eq!(
                 self.game.collider_count(),
-                enemies + gems,
-                "tick {}: {enemies} enemies and {gems} gems do not account for the \
-                 broadphase",
+                enemies + pickups,
+                "tick {}: {enemies} enemies and {pickups} pickups do not account \
+                 for the broadphase",
                 self.ticks,
             );
         }
@@ -5431,7 +5675,7 @@ mod tests {
              was never exercised",
         );
         // The most the world can legitimately hold: the player, the enemy cap,
-        // every bolt that can be in the air at once and every gem the ground
+        // every bolt that can be in the air at once and every pickup the ground
         // will keep — plus as many again waiting for the deferred sweep. Derived
         // rather than measured: a number taken from a passing run breaks on the
         // next tuning change for a reason that is not a leak.
@@ -5442,6 +5686,10 @@ mod tests {
         // margin, so leaving them out was a bound on the wrong thing; the
         // per-tick equality in `assert_nothing_leaked` is what carries the exact
         // claim, and this is the growth bound over it.
+        //
+        // Potions needed no term of their own here: they are the same list and
+        // the same ceiling, which is the whole reason `PickupKind` is a variant
+        // rather than a second population.
         let bolts_in_flight = (BOLT_LIFE / FIRE_COOLDOWN).ceil() as usize + 1;
         let ceiling = 2 * (1 + 120 + bolts_in_flight + MAX_PICKUPS);
         assert!(
@@ -5489,7 +5737,7 @@ mod tests {
                     ..Setup::default()
                 },
             );
-            harness.play_ticks(2_400);
+            harness.play_ticks(4_800);
             (
                 harness.game.elapsed,
                 harness.game.kills,
@@ -5499,6 +5747,11 @@ mod tests {
                 harness.game.bolts(),
                 harness.game.enemies_spawned(),
                 harness.game.bolts_fired(),
+                // The loot, which is where the potion roll shows up: a drop
+                // decided by anything but the seed and the kill counter would
+                // put a different flask on a different patch of ground here.
+                harness.game.pickups_on_the_ground(),
+                harness.game.potions_dropped(),
             )
         };
         let first = run();
@@ -5513,6 +5766,15 @@ mod tests {
         );
         assert!(first.7 > 0, "the reference run fired nothing");
         assert!(first.1 > 0, "the reference run killed nothing");
+        assert!(
+            first.9 > 0,
+            "the reference run dropped no potion, so the roll is compared but \
+             never exercised",
+        );
+        assert!(
+            !first.8.is_empty(),
+            "the reference run left no loot to compare"
+        );
         assert_eq!(first, run());
     }
 
@@ -5695,7 +5957,9 @@ mod tests {
     fn a_brutes_gem_is_worth_more_than_a_grunts() {
         assert!(EnemyKind::Brute.xp() > EnemyKind::Grunt.xp());
         let mut harness = Harness::staged(60, 60, DVec3::ZERO);
-        let entity = harness.game.stage_pickup(DVec3::new(0.2, 0.0, 0.0), 7);
+        let entity = harness
+            .game
+            .stage_pickup(DVec3::new(0.2, 0.0, 0.0), PickupKind::Xp(7));
         assert!(harness.game.pickup_positions().len() == 1, "{entity:?}");
         harness.run_ticks(harness.ticks + 2, &[]);
         assert_eq!(harness.game.xp(), 7, "the gem's own value was not banked");
@@ -5713,7 +5977,9 @@ mod tests {
             .game
             .stage_enemy(EnemyKind::Brute, DVec3::new(6.0, 0.0, 0.0));
         // Directly on the line of fire, and closer than the target.
-        harness.game.stage_pickup(DVec3::new(3.0, 0.0, 0.0), 1);
+        harness
+            .game
+            .stage_pickup(DVec3::new(3.0, 0.0, 0.0), PickupKind::Xp(1));
         let before = harness.game.enemy_hp(enemy).expect("a live brute");
         harness.run_ticks(harness.ticks + 60, &[]);
         let after = harness.game.enemy_hp(enemy).expect("still alive");
@@ -5732,7 +5998,9 @@ mod tests {
     #[test]
     fn the_gun_ignores_gems_when_there_is_nothing_to_shoot() {
         let mut harness = Harness::staged(60, 60, DVec3::ZERO);
-        harness.game.stage_pickup(DVec3::new(4.0, 3.0, 0.0), 1);
+        harness
+            .game
+            .stage_pickup(DVec3::new(4.0, 3.0, 0.0), PickupKind::Xp(1));
         harness.run_ticks(harness.ticks + 120, &[]);
         assert_eq!(
             harness.game.bolts_fired(),
@@ -5747,13 +6015,14 @@ mod tests {
     fn a_field_full_of_gems_drops_no_more() {
         let mut harness = Harness::staged(60, 60, DVec3::new(40.0, 30.0, 0.0));
         for i in 0..MAX_PICKUPS {
-            harness
-                .game
-                .stage_pickup(DVec3::new(-40.0 + (i % 60) as f64 * 0.1, -30.0, 0.0), 1);
+            harness.game.stage_pickup(
+                DVec3::new(-40.0 + (i % 60) as f64 * 0.1, -30.0, 0.0),
+                PickupKind::Xp(1),
+            );
         }
         assert_eq!(harness.game.pickup_count(), MAX_PICKUPS);
         assert_eq!(harness.game.pickups_dropped(), 0);
-        harness.game.stage_pickup(DVec3::ZERO, 1);
+        harness.game.stage_pickup(DVec3::ZERO, PickupKind::Xp(1));
         assert_eq!(
             harness.game.pickup_count(),
             MAX_PICKUPS,
@@ -5763,6 +6032,342 @@ mod tests {
             harness.game.pickups_dropped(),
             1,
             "the refusal was not counted"
+        );
+    }
+
+    // ---- potions -------------------------------------------------------------
+
+    /// **A potion is worth seconds of contact, not a run**, which is the whole
+    /// of what [`POTION_HEAL`] is tuned against.
+    ///
+    /// Stated as two relations rather than as the number itself: a potion has to
+    /// buy more than a moment inside the kind the player actually meets, and it
+    /// must not be a reset. Both are read off `contact_dps` and
+    /// [`PLAYER_MAX_HP`], so re-tuning either moves this instead of leaving the
+    /// argument on [`POTION_DROP_CHANCE`] quietly wrong.
+    #[test]
+    fn a_potion_is_worth_seconds_of_contact_and_not_a_run() {
+        // A `const` block, so this fails the *build* rather than a run: every
+        // term is a constant or a `const fn`, and a relation between constants
+        // that only breaks at test time is one a branch can be merged with.
+        const {
+            assert!(
+                POTION_HEAL > EnemyKind::Grunt.contact_dps(),
+                "a potion buys under a second inside the mass, which is a pickup \
+                 nobody would cross ground for",
+            );
+            assert!(
+                POTION_HEAL < PLAYER_MAX_HP / 2.0,
+                "a potion undoes half a run's damage, so contact stops mattering",
+            );
+            // …and the brute, which is what drops it, can take it back fastest.
+            assert!(
+                EnemyKind::Brute.contact_dps() > POTION_HEAL,
+                "a brute cannot spend a potion in a second, so the kind that pays \
+                 for the heal is not the kind the heal is priced against",
+            );
+        }
+    }
+
+    /// **Walking over a potion heals the player, by exactly what it is worth.**
+    ///
+    /// Three traps, all of them silent:
+    ///
+    /// * a heal tested at full health passes whether healing works or not, so
+    ///   the player is hurt first and the *amount* is asserted rather than "it
+    ///   went up";
+    /// * a pickup test where the player never reaches the potion passes whether
+    ///   collection works or not, so the closest approach is recorded and
+    ///   checked against the radius the query actually uses;
+    /// * a potion collected as a gem would bank experience instead, which the
+    ///   hit points alone would not notice — so the bank is asserted empty too.
+    #[test]
+    fn walking_over_a_potion_heals_the_player_by_what_it_is_worth() {
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        let at = DVec3::new(2.0, 0.0, 0.0);
+        harness.game.stage_pickup(at, PickupKind::Health);
+        // Hurt by more than a potion is worth, so nothing here can be a clamp.
+        let hurt = PLAYER_MAX_HP - POTION_HEAL - 10.0;
+        harness.game.set_player_hp(hurt);
+
+        let reach = harness.game.stats().pickup_radius + LOOT_RADIUS;
+        harness.game.key_event(KeyCode::KeyD, true);
+        let mut closest = f64::MAX;
+        let deadline = harness.ticks + 120;
+        while harness.game.pickup_count() > 0 && harness.ticks < deadline {
+            harness.run_ticks(harness.ticks + 1, &[]);
+            closest = closest.min((harness.game.player - at).length());
+        }
+
+        assert_eq!(harness.game.pickup_count(), 0, "the potion was never taken");
+        assert!(
+            closest <= reach,
+            "the player never got within {reach} of the potion — closest was \
+             {closest} — so nothing here is a test of collection",
+        );
+        assert!(
+            (harness.game.player_hp - (hurt + POTION_HEAL)).abs() < 1e-9,
+            "{hurt} hit points plus a potion came to {}",
+            harness.game.player_hp,
+        );
+        assert_eq!(harness.game.xp(), 0, "the potion was banked as experience");
+        harness.assert_nothing_leaked();
+    }
+
+    /// **A potion never heals past the ceiling the run has reached — and the
+    /// ceiling moves.**
+    ///
+    /// [`Upgrade::Vitality`] raises [`Stats::max_hp`], so a heal clamped to
+    /// [`PLAYER_MAX_HP`] would silently stop paying out the moment a run took
+    /// it, and the bar would look right the whole time.
+    ///
+    /// The overheal is arranged rather than hoped for: the player is left
+    /// missing less than a potion is worth, so a clamp that did nothing would
+    /// show up as hit points past the maximum. The assertion that the clamp
+    /// landed on the *right* maximum is the one against [`PLAYER_MAX_HP`] — the
+    /// run ends above it, which is impossible if the constant was the ceiling.
+    #[test]
+    fn a_potion_never_heals_past_the_ceiling_the_run_has_reached() {
+        let mut harness = with_upgrade(Some(Upgrade::Vitality));
+        let ceiling = harness.game.stats().max_hp;
+        assert!(
+            ceiling > PLAYER_MAX_HP,
+            "the fixture did not raise the ceiling, so the clamp below is \
+             against the constant either way",
+        );
+
+        let missing = POTION_HEAL / 2.0;
+        harness.game.set_player_hp(ceiling - missing);
+        harness
+            .game
+            .stage_pickup(harness.game.player, PickupKind::Health);
+        harness.run_ticks(harness.ticks + 2, &[]);
+
+        assert_eq!(harness.game.pickup_count(), 0, "the potion was never taken");
+        assert!(
+            (harness.game.player_hp - ceiling).abs() < 1e-9,
+            "an overheal left {} against a ceiling of {ceiling}",
+            harness.game.player_hp,
+        );
+        assert!(
+            harness.game.player_hp > PLAYER_MAX_HP,
+            "the heal clamped to the constant rather than to this run's own \
+             maximum: {} against {PLAYER_MAX_HP}",
+            harness.game.player_hp,
+        );
+    }
+
+    /// **A brute's death can leave a potion, the other two kinds' never can, and
+    /// not every brute's does.**
+    ///
+    /// All three halves, because each is vacuous alone: a rule that dropped
+    /// nothing satisfies "not every brute", a rule that dropped from everything
+    /// satisfies "brutes drop", and either would look like a working feature in
+    /// a screenshot of one kill.
+    ///
+    /// **How many kills to run is taken from [`drops_potion`] rather than
+    /// guessed**, because at [`POTION_DROP_CHANCE`] a dozen dead brutes usually
+    /// leave nothing — a fixture sized by intuition is exactly the drop-rate
+    /// test that proves nothing. The run is played out to the first kill the
+    /// roll pays on, and what is asserted is that the *simulation* agreed:
+    /// `damage_enemy` consulted the same hand at the same index, which a drop
+    /// wired to a fresh RNG or to the wrong counter would not.
+    ///
+    /// Killed by the gun, on a staged board, so the path measured is the one a
+    /// run takes. Each enemy is staged inside [`WEAPON_RANGE`] and far enough
+    /// out that it dies before it can touch the player, which the untouched hit
+    /// points at the end are what confirm.
+    #[test]
+    fn brutes_leave_potions_and_the_other_kinds_never_do() {
+        let seed = run_seed(DEFAULT_SEED, 0);
+        let paying = (0..256)
+            .find(|kill| drops_potion(seed, *kill, EnemyKind::Brute))
+            .expect("the hand pays out somewhere in its first two hundred kills");
+        assert!(
+            paying > 0,
+            "the very first kill of the run pays out, so nothing below can show \
+             that a brute may leave nothing",
+        );
+        let kills = paying + 1;
+
+        let killed = |kind: EnemyKind| {
+            let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+            for _ in 0..kills {
+                harness.game.stage_enemy(kind, DVec3::new(10.0, 0.0, 0.0));
+                harness.run_ticks(harness.ticks + 150, &[]);
+            }
+            assert_eq!(
+                harness.game.kills, kills,
+                "{kind:?} did not all die, so the kill indices below are not the \
+                 ones the roll was read at",
+            );
+            assert_eq!(
+                harness.game.player_hp, PLAYER_MAX_HP,
+                "{kind:?} reached the player",
+            );
+            harness.assert_nothing_leaked();
+            harness.game.potions_dropped()
+        };
+
+        assert_eq!(
+            killed(EnemyKind::Brute),
+            1,
+            "{kills} dead brutes left something other than the one potion the \
+             roll says is in them",
+        );
+        for kind in [EnemyKind::Grunt, EnemyKind::Runner] {
+            assert_eq!(killed(kind), 0, "a {kind:?} left a potion");
+        }
+    }
+
+    /// **A brute leaves its potion beside its gem, not on top of it.**
+    ///
+    /// Both drop from one death, so without the offset the gem would be painted
+    /// under the potion every time the rare drop happened. One pickup diameter
+    /// apart is the two discs touching — near enough to walk over together, far
+    /// enough that both are visible.
+    #[test]
+    fn a_brutes_potion_lands_beside_its_gem() {
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        // The first kill of this run that the roll actually pays out on, so the
+        // fixture is not at the mercy of which index the seed happens to favour.
+        let seed = harness.game.run_seed();
+        let paying = (0..64)
+            .find(|kill| drops_potion(seed, *kill, EnemyKind::Brute))
+            .expect("some kill in the first sixty-four pays out");
+        for _ in 0..=paying {
+            harness
+                .game
+                .stage_enemy(EnemyKind::Brute, DVec3::new(10.0, 0.0, 0.0));
+            harness.run_ticks(harness.ticks + 200, &[]);
+        }
+        assert_eq!(harness.game.kills, paying + 1);
+        assert_eq!(harness.game.potions_dropped(), {
+            (0..=paying)
+                .filter(|kill| drops_potion(seed, *kill, EnemyKind::Brute))
+                .count() as u64
+        });
+
+        let ground = harness.game.pickups_on_the_ground();
+        let potion = ground
+            .iter()
+            .rfind(|(_, kind)| *kind == PickupKind::Health)
+            .expect("the paying kill left one");
+        let gem = ground
+            .iter()
+            .filter(|(_, kind)| matches!(kind, PickupKind::Xp(_)))
+            .min_by(|a, b| {
+                (a.0 - potion.0)
+                    .length()
+                    .total_cmp(&(b.0 - potion.0).length())
+            })
+            .expect("every kill leaves one");
+        let apart = (gem.0 - potion.0).length();
+        assert!(
+            apart > LOOT_RADIUS,
+            "the potion is drawn over its own gem: {apart} apart",
+        );
+        assert!(
+            apart <= 2.0 * LOOT_RADIUS + 1e-9,
+            "the potion landed {apart} from its gem, which is further than the \
+             two discs touching",
+        );
+    }
+
+    /// **The drop roll is a pure function of the run**, which is what makes a
+    /// potion the same event in a replay, on a server and on a client.
+    ///
+    /// The three properties that matter, and the third is the one a hand-rolled
+    /// hash of a position would fail: the answer depends on the run's seed, on
+    /// which kill it is, and on nothing else at all.
+    #[test]
+    fn the_potion_roll_is_a_pure_function_of_the_run() {
+        let seed = run_seed(DEFAULT_SEED, 0);
+        let sequence = |seed: u64| -> Vec<bool> {
+            (0..512)
+                .map(|kill| drops_potion(seed, kill, EnemyKind::Brute))
+                .collect()
+        };
+        let first = sequence(seed);
+        assert_eq!(first, sequence(seed), "the same run dealt two hands");
+
+        // A restart is a different run, so it must deal a different hand — a
+        // roll that ignored the seed would make every run's potions identical.
+        let next = sequence(run_seed(DEFAULT_SEED, 1));
+        assert_ne!(first, next, "a restart dealt the same potions");
+
+        // …and the hand is neither empty nor everything, which both of the
+        // comparisons above would be satisfied by.
+        let dropped = first.iter().filter(|paid| **paid).count();
+        assert!(
+            dropped > 0 && dropped < first.len(),
+            "{dropped} of {} rolls paid out",
+            first.len(),
+        );
+    }
+
+    /// **The measured drop rate, over a seeded run of the real game.**
+    ///
+    /// [`POTION_DROP_CHANCE`] is an argument about how often a *player* sees a
+    /// potion, and that is a property of the drop rule and the spawn table
+    /// together — `EnemyKind::from_roll` decides what the player actually meets,
+    /// so a rate reasoned about from the constant alone is a rate nobody
+    /// measured. This kills a few hundred things under the autopilot and reads
+    /// the two counters off the run.
+    ///
+    /// The bounds are one-sided on purpose and both are load-bearing: too
+    /// generous and contact damage stops being the pressure this genre is made
+    /// of, too rare and the drop is a feature nobody sees. They are wide enough
+    /// that a tuning change moves the logged figure without failing, and tight
+    /// enough that dropping from every kind, or from none, fails.
+    #[test]
+    fn potions_drop_from_brutes_at_the_rate_the_constant_says() {
+        let mut harness = Harness::with_setup(
+            60,
+            &Setup {
+                headless: true,
+                max_enemies: 120,
+                ..Setup::default()
+            },
+        );
+        harness.play_ticks(6_000);
+
+        // One run, so the two counters cover the same kills: `potions_dropped`
+        // is a count of the whole game and `Game::kills` is reset by `restart`.
+        assert_eq!(
+            harness.restarts, 0,
+            "the run ended inside the window, so the ratio below is a count of \
+             potions from every run against the kills of the last one",
+        );
+        let kills = harness.game.kills;
+        let potions = harness.game.potions_dropped();
+        assert!(
+            kills > 150,
+            "only {kills} kills, which is too few to measure a rate against",
+        );
+        assert!(potions > 0, "{kills} kills left no potion at all");
+        assert!(
+            potions * 20 < kills,
+            "{potions} potions from {kills} kills is better than one kill in \
+             twenty, and `from_roll` only deals a brute one in ten — so the drop \
+             is no longer gated on the kind that earns it",
+        );
+        assert!(
+            potions * 500 > kills,
+            "{potions} potions from {kills} kills is rarer than one kill in five \
+             hundred, which is a feature a run never meets",
+        );
+        crcbl::log::info!(
+            "potions: {potions} from {kills} kills over {} ticks ({:.2}%), \
+             {} still on the ground",
+            harness.ticks,
+            100.0 * potions as f64 / kills as f64,
+            harness
+                .game
+                .pickups_on_the_ground()
+                .iter()
+                .filter(|(_, kind)| *kind == PickupKind::Health)
+                .count(),
         );
     }
 
@@ -5977,8 +6582,9 @@ mod tests {
                 Upgrade::Magnet => {
                     let collect = |h: &mut Harness| {
                         // Out of reach of a bare player — `PLAYER_RADIUS +
-                        // XP_RADIUS` is 0.85 — and inside a magnet's.
-                        h.game.stage_pickup(DVec3::new(1.1, 0.0, 0.0), 1);
+                        // LOOT_RADIUS` is 0.85 — and inside a magnet's.
+                        h.game
+                            .stage_pickup(DVec3::new(1.1, 0.0, 0.0), PickupKind::Xp(1));
                         h.run_ticks(h.ticks + 10, &[]);
                         h.game.xp()
                     };
@@ -6125,7 +6731,7 @@ mod tests {
     // Audio
     // -----------------------------------------------------------------------
 
-    /// **All five cues fire, and each one is heard where its event happened.**
+    /// **All six cues fire, and each one is heard where its event happened.**
     ///
     /// Counted with [`crate::audio::Audio::plays`] rather than `voices()`: a
     /// voice is reaped by the audio thread on a clock nothing here controls, and
@@ -6135,7 +6741,9 @@ mod tests {
     /// worse here.
     #[test]
     fn every_cue_fires_and_carries_the_position_of_what_raised_it() {
-        use crate::audio::{SOUND_DEATH, SOUND_KILL, SOUND_LEVEL, SOUND_PICKUP, SOUND_SHOT};
+        use crate::audio::{
+            SOUND_DEATH, SOUND_HEAL, SOUND_KILL, SOUND_LEVEL, SOUND_PICKUP, SOUND_SHOT,
+        };
 
         let mut harness = Harness::staged(60, 60, DVec3::ZERO);
         let plays = |h: &Harness, id| h.game.audio.plays(id);
@@ -6143,6 +6751,7 @@ mod tests {
             SOUND_SHOT,
             SOUND_KILL,
             SOUND_PICKUP,
+            SOUND_HEAL,
             SOUND_LEVEL,
             SOUND_DEATH,
         ] {
@@ -6163,6 +6772,20 @@ mod tests {
         // …and the gem it left, walked onto.
         harness.run_ticks(harness.ticks + 120, &[(harness.ticks, KeyCode::KeyD, true)]);
         assert_eq!(plays(&harness, SOUND_PICKUP), 1, "the gem was silent");
+        assert_eq!(plays(&harness, SOUND_HEAL), 0, "a gem played the heal");
+
+        // …and a potion further along the same walk, which is the sixth cue and
+        // the whole reason it is a sixth rather than a second use of the gem's.
+        harness
+            .game
+            .stage_pickup(harness.game.player + DVec3::X * 2.0, PickupKind::Health);
+        harness.run_ticks(harness.ticks + 60, &[]);
+        assert_eq!(plays(&harness, SOUND_HEAL), 1, "the potion was silent");
+        assert_eq!(
+            plays(&harness, SOUND_PICKUP),
+            1,
+            "the potion played the gem's cue as well",
+        );
 
         // A level, which is the one cue that is about the run rather than about
         // a place.
