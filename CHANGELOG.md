@@ -1496,6 +1496,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-input**: `begin_tick` accepted a negative `dt`, moving the clock
+  backwards so a held button reported a negative `Held` duration. Only forward
+  time is accepted now.
+
+- **crcbl-render**: `upload_texture` sized a compressed format's row as
+  `width × block_size` — for BC formats the block covers 4×4 texels, so a BC1
+  row is `ceil(width/4) × 8` bytes, and a compressed upload was silently wrong
+  by a factor of four. Compressed formats are now refused by name before any
+  device call; no caller uploads one.
+
 - **crcbl-render**: `UiRenderer::begin_frame` committed the new element counts
   before the buffer uploads that make them true — a failed `write_buffer` left
   the new counts over stale indices and the next draw read out of bounds. The

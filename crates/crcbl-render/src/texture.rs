@@ -96,6 +96,16 @@ pub fn upload_texture(
              colour-aspect copy"
         ))
     })?;
+    // A compressed format's `block_size` covers a 4×4 block, not one texel, so
+    // the per-texel sizing below would be wrong by a factor of four: a BC1 row
+    // is `ceil(width / 4) × 8` bytes, not `width × 8`. No caller uploads one
+    // today; refuse rather than corrupt.
+    if format.is_compressed() {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{label}: {format:?} is block-compressed and this path sizes per texel; \
+             it cannot be uploaded as a colour-aspect copy"
+        )));
+    }
     if width == 0 || height == 0 {
         return Err(HalError::InvalidDescriptor(format!(
             "{label}: texture extent {width}x{height} must be non-zero in both dimensions"
@@ -612,6 +622,34 @@ mod tests {
         )
         .expect_err("a depth/stencil upload needs one copy per plane");
         assert!(error.to_string().contains("colour plane"), "got: {error}");
+        assert_eq!(recorder.total_live_objects(), 0);
+    }
+
+    /// A compressed format's `block_size` covers a 4×4 block, not one texel, so
+    /// the per-texel sizing here would be wrong by a factor of four — and there
+    /// is no caller that needs one. Refused by name rather than silently
+    /// pitched against the block size, before any device call.
+    #[test]
+    fn a_compressed_format_is_rejected() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_a(&recorder);
+        // 8x8 BC1 is 2x2 blocks of 8 bytes: the *correct* compressed size, so a
+        // regression that accepted compressed uploads would pass the size check
+        // and fail only here.
+        let error = upload_texture(
+            device.as_ref(),
+            queue,
+            "compressed",
+            Format::Bc1RgbaUnorm,
+            8,
+            8,
+            &[0u8; 2 * 2 * 8],
+        )
+        .expect_err("a BC1 upload is sized per block, not per texel");
+        assert!(
+            error.to_string().contains("block-compressed"),
+            "got: {error}"
+        );
         assert_eq!(recorder.total_live_objects(), 0);
     }
 

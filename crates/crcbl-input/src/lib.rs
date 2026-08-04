@@ -438,7 +438,9 @@ impl ActionMap {
     /// - Advances the internal clock by `dt` seconds so that [`ButtonState::Held`]
     ///   durations are up-to-date next time a button action is resolved.
     pub fn begin_tick(&mut self, dt: f32) {
-        if dt.is_finite() {
+        // A negative dt would move the clock backwards and report negative
+        // `Held` durations; only forward time is meaningful here.
+        if dt.is_finite() && dt >= 0.0 {
             self.elapsed += f64::from(dt);
         }
         self.mouse_delta = (0.0, 0.0);
@@ -1588,6 +1590,42 @@ mod tests {
             panic!("expected Held, got {:?}", a.state);
         };
         assert!((duration - 2.0).abs() < 0.001, "got {duration}");
+    }
+
+    /// A negative `dt` used to move the clock backwards, so a key held across
+    /// it reported a negative `Held` duration — and the lost time then made the
+    /// next tick measure the hold as though it had never been held.
+    #[test]
+    fn a_negative_dt_does_not_report_a_negative_hold_duration() {
+        let mut map = ActionMap::new();
+        map.declare(decl_button("fire", Binding::Key(KeyCode::KeyF)));
+        map.key_event(KeyCode::KeyF, true);
+
+        map.begin_tick(-1.0);
+        let ActionValue::Button(a) = map.action("fire").unwrap() else {
+            panic!("expected Button");
+        };
+        let ButtonState::Held { duration } = a.state else {
+            panic!("expected Held, got {:?}", a.state);
+        };
+        assert!(
+            duration >= 0.0,
+            "a negative dt must not report a negative hold duration, got {duration}"
+        );
+
+        // The negative tick was dropped rather than absorbed: a real 1s tick
+        // measures a full second, not the second minus the backwards one.
+        map.begin_tick(1.0);
+        let ActionValue::Button(a) = map.action("fire").unwrap() else {
+            panic!("expected Button");
+        };
+        let ButtonState::Held { duration } = a.state else {
+            panic!("expected Held, got {:?}", a.state);
+        };
+        assert!(
+            (duration - 1.0).abs() < 0.001,
+            "with the negative tick dropped the hold measures normally, got {duration}"
+        );
     }
 
     // -- action_mut ---------------------------------------------------------
