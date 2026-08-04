@@ -1469,6 +1469,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-shell** (Wayland): announced-but-unclaimed `wl_data_offer`s grew
+  without bound — a hostile compositor that announces offers and never claims
+  them accumulated proxies, sink entries and per-offer mime strings for the
+  whole session. A `Device` now holds at most 8 pending offers, evicting (and
+  destroying) the oldest past the cap, and each offer's format list is capped at
+  32 — the same bound every transfer already carried.
+
 - **crcbl-shell** (X11): an `INCR` clipboard transfer **to one of our own
   windows** — a self-paste, or one of our windows pasting our own offer, of a
   payload over the server's request limit — replaced that window's event mask

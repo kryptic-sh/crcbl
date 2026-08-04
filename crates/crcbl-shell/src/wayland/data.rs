@@ -36,10 +36,24 @@ pub(super) struct Offer {
 }
 
 impl Offer {
+    /// The largest format list one offer will hold. Real offers carry fewer
+    /// than a dozen formats; a hostile compositor can send `wl_data_offer.offer`
+    /// without bound, and every mime is a `String` this client allocates.
+    pub(super) const MAX_OFFER_MIMES: usize = 32;
+
     pub(super) const fn new(proxy: *mut WlProxy) -> Self {
         Self {
             proxy,
             mimes: Vec::new(),
+        }
+    }
+
+    /// Records one announced format, dropping it once [`MAX_OFFER_MIMES`] is
+    /// reached. Dropping rather than destroying the offer keeps a real offer
+    /// claimable; it is only its format list that is capped.
+    pub(super) fn note_mime(&mut self, mime: String) {
+        if self.mimes.len() < Self::MAX_OFFER_MIMES {
+            self.mimes.push(mime);
         }
     }
 
@@ -161,6 +175,16 @@ pub(super) struct Device {
 }
 
 impl Device {
+    /// The largest number of announced-but-unclaimed offers one `Device` will
+    /// hold. The protocol permits several introductions before any is claimed,
+    /// and real compositors hold at most a couple — so this is generous — but a
+    /// hostile compositor can announce offers and never claim them, and
+    /// `incoming` is the one quantity in this backend with no other bound.
+    /// Beyond the cap the oldest pending offer is returned for the caller to
+    /// destroy, which also bounds `Sink::objects` (every announced offer is
+    /// watched there until destroyed).
+    pub(super) const MAX_PENDING_OFFERS: usize = 8;
+
     pub(super) const fn new(proxy: *mut WlProxy) -> Self {
         Self {
             proxy,
@@ -170,6 +194,22 @@ impl Device {
             source: None,
             selection_seen: false,
         }
+    }
+
+    /// Records an announced offer, returning the oldest pending one to destroy
+    /// when the list is already at [`MAX_PENDING_OFFERS`].
+    ///
+    /// FIFO eviction: a real compositor claims offers in the order it announced
+    /// them, so the oldest is the one most likely to have been superseded — and
+    /// evicting the newest would make the claimed offer the one we destroyed.
+    pub(super) fn push_incoming(&mut self, offer: Offer) -> Option<Offer> {
+        if self.incoming.len() >= Self::MAX_PENDING_OFFERS {
+            let evicted = self.incoming.remove(0);
+            self.incoming.push(offer);
+            return Some(evicted);
+        }
+        self.incoming.push(offer);
+        None
     }
 
     /// Takes the announced offer named by `proxy` out of the pending list.
@@ -419,5 +459,40 @@ mod tests {
         device.selection = Some(claimed);
         assert!(device.announced_mut(first as usize).is_some());
         assert!(device.announced_mut(0xdead).is_none());
+    }
+
+    #[test]
+    fn push_incoming_evicts_the_oldest_offer_at_the_cap() {
+        let mut device = Device::new(ptr::null_mut());
+        let proxies: Vec<*mut WlProxy> = (0..Device::MAX_PENDING_OFFERS)
+            .map(|i| ((i + 1) * 0x1000) as *mut WlProxy)
+            .collect();
+        for &proxy in &proxies {
+            device.push_incoming(Offer::new(proxy));
+        }
+        // The call past the cap returns the first offer pushed, for the caller
+        // to destroy.
+        let evicted = device
+            .push_incoming(Offer::new(0xdead as *mut WlProxy))
+            .expect("past the cap");
+        assert_eq!(evicted.proxy, proxies[0]);
+        assert_eq!(device.incoming.len(), Device::MAX_PENDING_OFFERS);
+        // The evicted offer is gone — claiming it would destroy one somebody
+        // else owns — while the next-oldest still claims.
+        assert!(device.claim(proxies[0] as usize).is_none());
+        assert!(device.claim(proxies[1] as usize).is_some());
+    }
+
+    #[test]
+    fn note_mime_caps_the_format_list() {
+        let mut offer = Offer::new(ptr::null_mut());
+        let mimes: Vec<String> = (0..Offer::MAX_OFFER_MIMES + 8)
+            .map(|i| format!("text/plain;charset=utf-8;part={i}"))
+            .collect();
+        for mime in &mimes {
+            offer.note_mime(mime.clone());
+        }
+        assert_eq!(offer.mimes.len(), Offer::MAX_OFFER_MIMES);
+        assert_eq!(offer.mimes, mimes[..Offer::MAX_OFFER_MIMES]);
     }
 }

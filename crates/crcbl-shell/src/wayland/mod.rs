@@ -3709,7 +3709,10 @@ impl WaylandShell {
                     return;
                 };
                 if let Some(device) = self.seats[index].data.as_mut() {
-                    device.incoming.push(data::Offer::new(proxy));
+                    let evicted = device.push_incoming(data::Offer::new(proxy));
+                    if let Some(evicted) = evicted {
+                        self.destroy_offer(&evicted);
+                    }
                 }
             }
             RawEvent::OfferMime { offer, mime } => {
@@ -3717,7 +3720,7 @@ impl WaylandShell {
                     if let Some(device) = seat.data.as_mut()
                         && let Some(offer) = device.announced_mut(offer)
                     {
-                        offer.mimes.push(mime);
+                        offer.note_mime(mime);
                         return;
                     }
                 }
