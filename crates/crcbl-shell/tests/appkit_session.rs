@@ -1156,7 +1156,16 @@ mod macos {
         match wheel {
             ScrollDelta::Lines { x, y } => {
                 assert_eq!(x, 0.0, "a vertical notch has no horizontal component");
-                assert!(y != 0.0, "a notch of one line is not zero lines");
+                assert!(
+                    y != 0.0,
+                    "a notch of one line is not zero lines, and a zero here is far more likely \
+                     to be this harness than the backend: it means the amount never reached \
+                     CGEventCreateScrollWheelEvent. `wheel1` is that function's last **named** \
+                     parameter and only `wheel2`/`wheel3` are variadic, so a declaration that \
+                     starts its `...` one parameter early passes the amount on the stack while \
+                     the callee reads register w3 — which is exactly how this assertion first \
+                     went red. Check the declaration before suspecting `appkit::events`."
+                );
             }
             other => panic!(
                 "a line-unit scroll wheel event is Lines and not {other:?}; a backend reading \
@@ -1824,22 +1833,43 @@ mod macos {
                 at: Point,
                 button: u32,
             ) -> EventRef;
-            /// **Variadic, and it has to be declared that way.**
+            /// **Partly variadic, and the boundary is the whole point.** The C
+            /// signature is:
             ///
-            /// The C signature is
-            /// `CGEventCreateScrollWheelEvent(source, units, wheelCount, ...)`,
-            /// so the per-axis amounts are variadic arguments. On
-            /// `aarch64-apple-darwin` — the architecture of the runner and of
-            /// every Mac sold since 2020 — variadic arguments are passed on the
-            /// **stack** while ordinary ones are passed in registers, so a
-            /// non-variadic declaration of this compiles, links, runs, and
-            /// scrolls by whatever was in the register it looked in. It is the
-            /// same hazard `appkit::ffi` documents at length for `objc_msgSend`,
-            /// arriving through a plain C function.
+            /// ```c
+            /// CGEventRef CGEventCreateScrollWheelEvent(CGEventSourceRef source,
+            ///                                          CGScrollEventUnit units,
+            ///                                          CGWheelCount wheelCount,
+            ///                                          int32_t wheel1, ...);
+            /// ```
+            ///
+            /// **`wheel1` is a named parameter.** Only `wheel2` and `wheel3` are
+            /// variadic, and getting that boundary wrong is not a diagnostic —
+            /// it is a wrong-register read at run time. On
+            /// `aarch64-apple-darwin` — the runner's architecture and every
+            /// Mac's since 2020 — variadic arguments go on the **stack** while
+            /// named ones go in registers, so declaring `wheel1` inside the
+            /// variadic list puts the amount on the stack while the callee reads
+            /// it from `w3`.
+            ///
+            /// That is not hypothetical: this was declared with `...` starting
+            /// one parameter too early, and the macOS run scrolled by whatever
+            /// happened to be in that register, which was **zero** —
+            /// `a notch of one line is not zero lines`. The previous comment here
+            /// described this exact hazard and then committed it, which is the
+            /// part worth remembering: `appkit::ffi` documents it at length for
+            /// `objc_msgSend` and everybody was watching the Objective-C
+            /// dispatch, while the defect arrived through a plain C function
+            /// nobody had counted the parameters of.
+            ///
+            /// Posting one axis means the variadic list is **empty**, which the
+            /// declaration still has to say correctly — an empty list is not the
+            /// same as no list.
             fn CGEventCreateScrollWheelEvent(
                 source: *mut c_void,
                 units: u32,
                 wheels: u32,
+                wheel1: i32,
                 ...
             ) -> EventRef;
             fn CGEventPost(tap: u32, event: EventRef);
@@ -1989,8 +2019,11 @@ mod macos {
         /// variadic argument below. Checked alongside the mouse delta, which did
         /// rest on one.
         pub fn scroll_lines(lines: i32) {
-            // SAFETY: as in `key`. One axis is declared and one variadic
-            // argument is passed, which is what `wheels: 1` promises the call.
+            // SAFETY: as in `key`. `wheels: 1` promises exactly one axis, so
+            // `lines` is `wheel1` — the last **named** parameter — and the
+            // variadic list is empty, which is what one axis means. Passing it
+            // as `i32` is the declaration's `int32_t` rather than a widened
+            // integer literal.
             unsafe {
                 let event =
                     CGEventCreateScrollWheelEvent(core::ptr::null_mut(), UNIT_LINE, 1, lines);

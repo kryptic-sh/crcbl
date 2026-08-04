@@ -1027,17 +1027,40 @@ not removed, and deprecation is a compiler diagnostic in Objective-C and nothing
 at all across `objc_msgSend` — so the harness reaches a lever the backend never
 takes, which is the whole shape of the harness/backend split here.
 
-**If the injection ever fails**, the TCC question above is the first suspect and
-`INJECTION_HINT` prints it beside every failed assertion. The fallback is still
-the one already chosen: `-[NSApplication postEvent:atStart:]` with an `NSEvent`
-built by `+[NSEvent keyEventWithType:…]`, which needs no permission and still
-goes through `nextEventMatchingMask:`, `sendEvent:`, the first responder and
-`interpretKeyEvents:` — everything but the window server's own leg. It was not
-written speculatively because it is a ten-argument `objc_msgSend` transmute with
-an `NSPoint` by value, which is exactly the class of FFI this crate says must
-not be written blind. It would also route around an activation refusal entirely,
-since it puts the event in this process's own queue rather than in the
-session's.
+### TCC does not gate `CGEventPost` back to the posting process — settled
+
+**This was the single largest open risk in the macOS half, and it is now closed
+by observation rather than by argument.** The whole M4 slice was written around
+the possibility that macOS 10.14+'s Accessibility gate would refuse synthesized
+keyboard events on a runner with nobody to grant the right, in which case none
+of the injected input could ever arrive. It does not, at least for events posted
+by a process and delivered back to that same process:
+
+- The posted `kVK_ANSI_A` came back as a `ShellEvent::Key` with the right
+  scancode, `KeyCode`, keysym and `Pressed`/`Released` pair.
+- **`TextCommit("a")` arrived with it.** That means `sendEvent:` routed the
+  event to the first responder, `keyDown:` handed it to `interpretKeyEvents:`,
+  the input method called `insertText:replacementRange:`, and `CrcblView`'s
+  `inputContext` was non-nil — which is true only because the class conforms to
+  `NSTextInputClient`. Every link in that chain was written on a Linux machine
+  and none of them had ever run.
+- The arrow key produced a `Key` and **no** `TextCommit`, so the backend is
+  asking the input method rather than reading `-[NSEvent characters]`.
+- The injected pointer motion arrived and its position was right.
+
+So **macOS is no longer where Windows was before its e2e suite found
+`TranslateMessage`**, and `ShellEvent::TextCommit` on this backend is executable
+coverage rather than a structural claim. `AXIsProcessTrusted()` stays uncalled
+and is now unlikely ever to be worth adding.
+
+The `postEvent:atStart:` fallback is therefore **not needed and should not be
+written.** It is recorded here only so nobody re-derives it: it would have been
+`-[NSApplication postEvent:atStart:]` with an `NSEvent` from
+`+[NSEvent keyEventWithType:…]`, needing no permission and reaching everything
+but the window server's own leg — at the cost of a ten-argument `objc_msgSend`
+transmute with an `NSPoint` by value, which is exactly the class of FFI this
+crate says must not be written blind. The real path works; this would be
+strictly less coverage for strictly more risk.
 
 ### A warp is not an event, and that is the M5 run's own finding
 
@@ -1127,8 +1150,8 @@ which is worth recording so a round trip is not spent finding out:
 
 - `CGEventCreateScrollWheelEvent` takes its unit as an **argument**, not a field
   left unset, and the unit is the whole of what decides
-  `hasPreciseScrollingDeltas` and therefore `Lines` against `Pixels`. The
-  per-axis amount is the variadic argument beside it.
+  `hasPreciseScrollingDeltas` and therefore `Lines` against `Pixels`. Its
+  _amount_ was wrong for a different reason — see the next entry.
 - `CGEventCreateKeyboardEvent` leaves `kCGKeyboardEventAutorepeat` at zero and
   `-[NSEvent isARepeat]` reads it — but the session asserts the first press is
   **not** a repeat, so there the default _is_ the value under test rather than
@@ -1138,6 +1161,56 @@ which is worth recording so a round trip is not spent finding out:
   it. It is set to one anyway: a press with a click state of zero is not what a
   real click looks like, and AppKit acting on that would be a harness defect
   reported as a backend one.
+
+### `wheel1` is a named parameter, and declaring it variadic scrolled by zero
+
+The run after the delta fix reached the scroll and got
+`a notch of one line is not zero lines`. The real C signature is:
+
+```c
+CGEventRef CGEventCreateScrollWheelEvent(CGEventSourceRef source,
+                                         CGScrollEventUnit units,
+                                         CGWheelCount wheelCount,
+                                         int32_t wheel1, ...);
+```
+
+**`wheel1` is named; only `wheel2` and `wheel3` are variadic.** The harness
+declared the `...` one parameter early, so on `aarch64-apple-darwin` — where
+Apple's ABI puts variadic arguments on the **stack** while named ones go in
+registers — the amount was written to the stack and the callee read `w3`. The
+event carried whatever was in that register, which was zero.
+
+Three things about this are worth keeping:
+
+- **It is the exact failure mode this crate warns about at length, and it did
+  not arrive where anyone was watching.** `appkit::ffi` devotes a section to it
+  for `objc_msgSend` and M1 built the whole `msg_send` transmute generic around
+  it, so every Objective-C dispatch in the backend writes its signature down and
+  is checked. This came through a plain C function in the test harness, whose
+  declaration was hand-written once and never re-read against the header. **A
+  wrong signature compiles cleanly, links, runs, and corrupts an argument at run
+  time** — the compiler cannot help, and neither can any amount of care applied
+  to a different call.
+- **The old declaration made the argument unchecked, which is why it survived.**
+  Falsified both ways offline: with `...` starting at `wheel1`, passing an `i64`
+  compiles silently, because a variadic argument is subject to default promotion
+  and is type-checked against nothing. With `wheel1: i32` named, the same call
+  is a hard `E0308`. The fix converts an unchecked argument into a checked one,
+  which is a stronger statement than "the numbers now line up".
+- **An empty variadic list still has to be declared.** One axis means `wheel1`
+  and nothing after it, and `fn(..., wheel1: i32, ...)` called with four
+  arguments is correct; dropping the `...` entirely would be a different
+  signature again.
+
+**Every other `extern` declaration in the harness was re-read against its header
+after this, and `CGEventCreateScrollWheelEvent` is the only variadic one.**
+`CGEventCreate`, `CGEventGetLocation`, `CGEventCreateKeyboardEvent`,
+`CGEventCreateMouseEvent`, `CGEventPost`, `CGEventSetIntegerValueField`,
+`CFRelease`, `objc_getClass`, `sel_registerName`, `objc_autoreleasePoolPush` and
+`objc_autoreleasePoolPop` are all fixed-arity and match. `objc_msgSend` is
+declared with no parameters and **never called through that declaration** — it
+is transmuted per call site, which is the same discipline `appkit::ffi` enforces
+and the reason the Objective-C side of the harness did not have this bug.
 
 Decisions and limits worth keeping whatever the run says:
 
@@ -1149,12 +1222,12 @@ Decisions and limits worth keeping whatever the run says:
   so it re-enters from outside whoever posted it. A second process would also
   make the TCC question unambiguous in the wrong direction — synthetic events
   aimed at _another_ application are gated for certain.
-- **`CGEventCreateScrollWheelEvent` is declared variadic, and it has to be.**
-  Its per-axis amounts are C variadic arguments; on `aarch64-apple-darwin`
-  variadic arguments go on the stack while ordinary ones go in registers, so a
-  non-variadic declaration compiles, links, runs and scrolls by whatever was in
-  the register it looked in. Same hazard `appkit::ffi` documents for
-  `objc_msgSend`, arriving through a plain C function.
+- **`CGEventCreateScrollWheelEvent` is _partly_ variadic**, and this bullet used
+  to say its per-axis amounts were all variadic arguments. That was wrong about
+  the first axis and is what produced a scroll of zero; the corrected account,
+  with the ABI reasoning and what was falsified, is in the `wheel1` section
+  above. Left here as a pointer rather than deleted, because the wrong version
+  is the kind of thing that gets re-derived from a half-memory of the C header.
 - **The scroll's _sign_ is not asserted, only its unit.** "Natural scrolling" is
   a per-user system preference that inverts it, so an assertion on the sign is
   an assertion about the runner's settings. What is pinned is `Lines` rather
@@ -1191,24 +1264,13 @@ Decisions and limits worth keeping whatever the run says:
 
 Still uncovered after M5:
 
-- **The injected-input assertions have not been seen green.** The M5 run got
-  _into_ `injected_input`, and the run after it got most of the way through.
-  **What that means is worth stating plainly, because it closes the risk this
-  whole slice was written around: TCC does not gate `CGEventPost` when the
-  events come back to the posting process.** The injected `kVK_ANSI_A` arrived
-  as a `Key`, and the `TextCommit` of `"a"` behind it arrived too — so
-  `sendEvent:` routed the event to the first responder, `keyDown:` handed it to
-  `interpretKeyEvents:`, and `CrcblView`'s `inputContext` was non-nil because it
-  conforms to `NSTextInputClient`. That chain was written on a Linux machine and
-  had never run; **macOS is no longer where Windows was before its e2e suite
-  found `TranslateMessage`.** The arrow key committing nothing passed beside it,
-  and so did the injected pointer's position.
-
-  What is still unobserved is only what comes after the delta assertion that
-  failed: **the click and the wheel notch** — the two `Button` events of one
-  click, and `hasPreciseScrollingDeltas` deciding `Lines` against `Pixels`.
-  Neither has a reason to fail that the keyboard's arrival did not already rule
-  out, but neither has been seen.
+- **The click is the last assertion in the session nothing has observed.** Two
+  `Button` events from one injected click, in order. Everything before it has
+  now been seen green on a runner, and everything after it is one assertion —
+  the wheel notch, whose value is unobserved only because the harness was
+  passing it wrongly until this slice (see the variadic entry above); the
+  `Lines`-against-`Pixels` branch it sits on was already reached, since the
+  event arrived and matched `ScrollDelta::Lines`.
 
 - **`injection_skipped` is written and unrun**, because the runner granted
   activation. It stays for the case that produced it, which a developer running

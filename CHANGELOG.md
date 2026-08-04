@@ -91,7 +91,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   on macOS.** The injected `kVK_ANSI_A` reaches `interpretKeyEvents:` through
   `sendEvent:` and the first responder, and commits `"a"` — the chain that was
   written blind and is the macOS counterpart of the `TranslateMessage` gap the
-  Win32 backend shipped with.
+  Win32 backend shipped with. That also settles the risk the slice was written
+  around: **TCC does not gate `CGEventPost` for events delivered back to the
+  posting process.**
+
+  **And the scroll notch reaches the event it is posted on.**
+  `CGEventCreateScrollWheelEvent`'s `wheel1` is a _named_ parameter — only
+  `wheel2` and `wheel3` are variadic — and the harness had declared the `...`
+  one parameter early, so on Apple silicon the amount went to the stack while
+  the callee read a register and the event scrolled by zero. The same class of
+  defect `appkit::ffi` guards against for `objc_msgSend`, arriving through a
+  hand-written C variadic instead.
 
   **The sample-level pass has no macOS equivalent**, on the same terms as
   Windows: it needs a renderer and macOS has no Vulkan until MoltenVK clears its
