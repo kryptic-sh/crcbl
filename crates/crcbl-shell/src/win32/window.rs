@@ -380,11 +380,12 @@ impl Win32Shell {
                 }
                 let styles = geometry::styles(mode, resizable);
                 // `WS_VISIBLE` is state, not style: dropping it here would hide
-                // a window that was on screen a moment ago.
-                let visible = self
-                    .window(window)?
-                    .saved
-                    .map_or(0, |saved| saved.style & style::VISIBLE);
+                // a window that was on screen a moment ago. Read it from the
+                // *live* style — the saved one was captured at the first
+                // borderless entry, and a window hidden since then must stay
+                // hidden across a second borderless request.
+                let visible = unsafe { ffi::GetWindowLongPtrW(hwnd, value::GWL_STYLE) } as u32
+                    & style::VISIBLE;
                 Self::set_styles(hwnd, styles.style | visible, styles.ex_style);
                 // SAFETY: moving and resizing this shell's own window.
                 // `SWP_FRAME_CHANGED` is required after a style change or the
@@ -405,8 +406,19 @@ impl Win32Shell {
                 }
             }
             DisplayMode::Windowed => {
+                // The saved style's `WS_VISIBLE` bit is as it was at the first
+                // borderless entry — a window hidden since then must stay
+                // hidden, so the restored style carries the *live* visibility,
+                // and so does the restored placement (`SetWindowPlacement`
+                // re-shows according to `showCmd`).
+                let live_visible = unsafe { ffi::GetWindowLongPtrW(hwnd, value::GWL_STYLE) } as u32
+                    & style::VISIBLE;
                 if let Some(saved) = self.window_mut(window)?.saved.take() {
-                    Self::set_styles(hwnd, saved.style, saved.ex_style);
+                    Self::set_styles(
+                        hwnd,
+                        (saved.style & !style::VISIBLE) | live_visible,
+                        saved.ex_style,
+                    );
                     // Frame first, placement second: `SetWindowPlacement`
                     // positions the window for the style it has, so restoring
                     // the rectangle before the style would put a captioned
@@ -432,7 +444,14 @@ impl Win32Shell {
                     }
                     // SAFETY: `placement` is a live, initialised
                     // `WINDOWPLACEMENT` whose `length` is its own size.
-                    unsafe { ffi::SetWindowPlacement(hwnd, &raw const saved.placement) };
+                    let mut placement = saved.placement;
+                    if live_visible == 0 {
+                        // A window hidden while borderless must not be re-shown
+                        // by the restore: `showCmd` decides whether the
+                        // placement call shows it.
+                        placement.show_cmd = value::SW_HIDE as u32;
+                    }
+                    unsafe { ffi::SetWindowPlacement(hwnd, &raw const placement) };
                 } else if self.window(window)?.effective_mode.is_borderless() {
                     // **A window created borderless has nothing saved**, and
                     // there is nothing dishonest to do about it: it has never

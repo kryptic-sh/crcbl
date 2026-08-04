@@ -1469,6 +1469,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-shell** (Win32): a window hidden while borderless was re-shown by a
+  second borderless request, and by the windowed restore. Both read the
+  `WS_VISIBLE` bit from the style snapshot captured at the first borderless
+  entry. They now use the live style, and the restore's `SetWindowPlacement`
+  gets `SW_HIDE` for a hidden window instead of the saved `showCmd`.
+
 - **crcbl-shell** (AppKit): a borderless window dragged to another display
   published nothing and kept naming the old monitor — `effective_mode.monitor`
   is written only by `apply_mode`, so a move that left size and scale unchanged

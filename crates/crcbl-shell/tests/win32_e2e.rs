@@ -1288,6 +1288,77 @@ fn borderless_covers_a_monitor_and_windowed_restores_the_exact_placement() {
     );
 }
 
+/// A window hidden while borderless stays hidden across a second borderless
+/// request and across the windowed restore.
+///
+/// `WS_VISIBLE` is live state, never the snapshot captured at the first
+/// borderless entry: the second request must not re-show the window, and the
+/// restore must not either — `SetWindowPlacement` re-shows according to
+/// `showCmd`.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn a_hidden_window_stays_hidden_across_a_second_borderless_request_and_back() {
+    let mut session = Session::open();
+    let window = session.window("hidden across modes");
+
+    session
+        .shell
+        .set_mode(window, DisplayMode::Borderless { monitor: None })
+        .expect("set_mode");
+    session.pump_until("the borderless configuration", |session| {
+        session
+            .shell
+            .window_state(window)
+            .is_ok_and(|state| state.mode_request_honoured())
+    });
+
+    session
+        .shell
+        .set_visible(window, false)
+        .expect("set_visible");
+    session.pump();
+    assert!(
+        !session.shell.window_state(window).expect("state").visible,
+        "hiding while borderless takes effect"
+    );
+
+    // **The regression:** a second borderless request read the `WS_VISIBLE`
+    // bit from the first entry's snapshot and showed the window again.
+    session
+        .shell
+        .set_mode(window, DisplayMode::Borderless { monitor: None })
+        .expect("set_mode");
+    session.pump();
+    assert!(
+        !session.shell.window_state(window).expect("state").visible,
+        "a second borderless request must not re-show a window hidden in between"
+    );
+
+    // And neither may the restore: the placement's `showCmd` re-shows what the
+    // window was at the first borderless entry.
+    session
+        .shell
+        .set_mode(window, DisplayMode::Windowed)
+        .expect("set_mode");
+    session.pump();
+    assert!(
+        !session.shell.window_state(window).expect("state").visible,
+        "the windowed restore must not re-show a window hidden while borderless"
+    );
+
+    // Put the window back, so the session's `Drop` hides and destroys a window
+    // in the state the other mode tests leave theirs.
+    session
+        .shell
+        .set_visible(window, true)
+        .expect("set_visible");
+    session.pump();
+    assert!(
+        session.shell.window_state(window).expect("state").visible,
+        "showing it again works"
+    );
+}
+
 /// A borderless request naming a monitor lands on that monitor, and one naming a
 /// monitor that is not there is a clean error.
 #[test]
