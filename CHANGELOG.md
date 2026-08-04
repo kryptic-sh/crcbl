@@ -32,16 +32,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   code with its `E0` prefix folded in, the `KeyCode` for that physical position,
   the layout's `Keysym`, the modifiers and the auto-repeat flag; `WM_CHAR`
   becomes `TextCommit`, with surrogate pairs reassembled so an astral codepoint
-  arrives whole and control characters dropped. Pointer motion, all five buttons
-  including the two thumb buttons, derived enter and real leave, mouse capture
-  so a button released outside the window is still reported, and both wheel axes
-  with high-resolution fractions of a detent preserved. `WM_INPUT` raw relative
-  motion, with an absolute-reporting device — a remote-desktop session, a tablet
-  — differenced into a delta instead of being read as one.
-  `PointerMode::Confined` and `PointerMode::Locked` through `ClipCursor`, and
-  `warp_pointer` through `SetCursorPos`. Cursor shapes are the stock `IDC_*` set
-  applied from `WM_SETCURSOR`, and hiding goes through a balanced `ShowCursor`
-  count.
+  arrives whole and control characters dropped. The pump calls
+  `TranslateMessage`, which is what makes a `WM_CHAR` exist at all — dead keys,
+  AltGr and an input method's commit all arrive through it, and without it
+  typing into a Crucible window produced no text whatever. Pointer motion, all
+  five buttons including the two thumb buttons, derived enter and real leave,
+  mouse capture so a button released outside the window is still reported, and
+  both wheel axes with high-resolution fractions of a detent preserved.
+  `WM_INPUT` raw relative motion, with an absolute-reporting device — a
+  remote-desktop session, a tablet — differenced into a delta instead of being
+  read as one. `PointerMode::Confined` and `PointerMode::Locked` through
+  `ClipCursor`, and `warp_pointer` through `SetCursorPos`. Cursor shapes are the
+  stock `IDC_*` set applied from `WM_SETCURSOR`, and hiding goes through a
+  balanced `ShowCursor` count.
 
   A confined pointer's clip is the client rectangle **intersected with the
   virtual screen**: `ClipCursor` clamps, so a window larger than the desktop is
@@ -96,10 +99,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   has dispatched it, and that flag asks to be woken by exactly that bit — so the
   wait returned immediately, forever, and an application idling at zero frames
   per second span a core instead. Draining first is the stronger form of what
-  the flag was there for.
+  the flag was there for. That removed `QS_SENDMESSAGE` from the picture and did
+  not make the wait sleep on a CI runner, where a _posted_ message still wakes
+  it; `docs/backlog.md` carries what is known and what is not.
 
 - **crcbl-shell**: `DisplayMode::satisfied_by`, the request-versus-answer
   comparison `WindowState::mode_request_honoured` now uses.
+
+- **crcbl-shell**: a **Win32 end-to-end suite** behind the new `win32-e2e`
+  feature (off by default), run by `crates/crcbl-shell/tests/run-win32-e2e.ps1`
+  and by a CI job of its own against a real Windows desktop — the treatment
+  Wayland and X11 got at P0.5/P0.6. It drives the backend through `open_backend`
+  and `dyn Shell` only, and covers what no in-process test can reach:
+  keystrokes, clicks and wheel notches **injected from another process** with
+  `SendInput`, so they arrive as posted, queued, translated and dispatched
+  messages; mode flips and resize storms judged by `GetWindowRect` rather than
+  by the backend's own bookkeeping; monitors, DPI and focus against the desktop
+  the machine actually has; and a clipboard round trip with a second process, in
+  both directions, with this shell's message loop stopped.
+
+  Two helper binaries come with it, `crcbl-e2e-win32-input` and
+  `crcbl-e2e-win32-clip`, on the same terms as the two Linux key senders:
+  `required-features`, and a `main` that fails loudly on any other platform.
+
+  **The sample-level pass has no Windows equivalent yet.** The Linux suites
+  press F11 at a running game, which needs a renderer, and no runner on this
+  platform has a Vulkan device — `docs/plan/ROADMAP.md` schedules it for P14.
 
 ### Changed
 

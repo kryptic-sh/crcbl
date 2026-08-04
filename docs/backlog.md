@@ -273,9 +273,30 @@ made it measurably _worse_: five runs, 3-5 failures each.
 ## What the Win32 backend has and has not been run against
 
 P5C W1, W2 and W3 wrote the whole of `crates/crcbl-shell/src/win32/` on a Linux
-machine. It is cross-checked with
+machine, and W4 wrote its end-to-end suite there too. It is cross-checked with
 `cargo check`/`cargo clippy --target x86_64-pc-windows-msvc`, which do not link
 and do not run — **a cross-check proves the code typechecks and nothing more**.
+
+### The runner is a real, non-idle desktop
+
+Three CI round trips established this one assertion at a time, so it is written
+down once here rather than rediscovered a fourth time. Every Windows test
+written from now on has to hold under all of it:
+
+- **The display is 1024×768.** Smaller than `WindowDesc::default`'s 1280×720, so
+  anything that assumes a default-sized window fits on screen is wrong there.
+  `ClipCursor` clamps to the virtual screen, which is how this was found.
+- **A cursor is over the window.** Showing a window under it delivers a genuine
+  `WM_MOUSEMOVE`, so the backend's derived pointer arrival happens before a test
+  sends anything. A test whose own event has to be the first must put the state
+  on a known edge itself — `the_pointer_enters_moves_clicks_scrolls_and_leaves`
+  sends a `WM_MOUSELEAVE` before it starts, and asserts the _rule_ ("the arrival
+  carries the first movement's position") rather than a literal coordinate.
+- **Messages arrive that this process did not cause.** `QS_POSTMESSAGE` is set
+  on a queue that was drained microseconds earlier, by something outside this
+  crate; see the `wait_events_genuinely_blocks` entry below.
+- **The foreground is somebody else's** until asked for. `SetForegroundWindow`
+  is asked for once per turn of a poll, never once.
 
 **W1's first CI run on `windows-latest` answered the open question: the runner
 does give a process a usable window station.** 2248 tests passed and 1 failed;
@@ -292,18 +313,54 @@ for real.
   to a window is dispatched by `PeekMessage` but not retrieved, so the bit
   survives the pump, and `MWMO_INPUTAVAILABLE` asks to be woken by exactly that
   bit. `Win32Shell::wait` now drains the queue itself and sleeps with no flags.
-  **This is expected to fix the cause rather than known to: it cannot be run
-  here, and the next CI run is the check.**
 - `confining_the_pointer_clips_it_...` reported a clip 12 px narrower on the
   right than the client rectangle, with the right edge at exactly 1024.
   **`ClipCursor` intersects with the virtual screen**, and the runner's display
   is 1024×768 — smaller than the default window. The backend was correct and the
   assertion overstated what the API promises; it now compares against
-  `client.intersect(virtual_screen())`. Worth remembering for every later
-  Windows test: **the runner's desktop is 1024×768**, so anything that assumes a
-  default-sized window fits on screen is wrong there. The clamp is real
-  behaviour a game meets on a 1366×768 laptop, so the case is described rather
-  than avoided.
+  `client.intersect(virtual_screen())`. The clamp is real behaviour a game meets
+  on a 1366×768 laptop, so the case is described rather than avoided.
+
+**The W3 run reported 2304 tests, 2302 passed, and both failures are addressed
+in this slice** — one in the backend, one in the assertion:
+
+- `wait_events_genuinely_blocks` reported `Wake::Message` after 573.9 µs with
+  the queue holding `0x80008`. The drain **did** remove `QS_SENDMESSAGE`; what
+  is left is `QS_POSTMESSAGE` in both halves — a posted message present now, and
+  one arrived since the last check. **This should be impossible.**
+  `drain_messages` peeks with `PM_REMOVE`, a null `hwnd` and a zero filter
+  range, which takes every window and thread message, and nothing in
+  `src/win32/` calls `PostMessageW`, `PostThreadMessageW` or `SetTimer` — so it
+  comes from outside this crate, in the sub-millisecond gap between the drain
+  and the wait.
+
+  **Not guessed at a third time.** Two rounds were spent on hypotheses and both
+  were settled only by making the failure carry data, so the test now prints the
+  `MSG` itself through `Win32Shell::peek_pending` (`PM_NOREMOVE`) — id, `hwnd`,
+  `wParam`, `lParam` — beside the `QS_` word, and additionally asserts that the
+  pre-drain loop _reached_ quiescence, so "this runner's queue never empties"
+  and "the wait woke spuriously" stop sharing one failure. **The wait is not
+  fixed and is not claimed to be.** The next run either names a message the
+  backend should be consuming (fix the backend) or names one no application can
+  drain, in which case a wait genuinely cannot sleep on that runner and the test
+  should say so and assert what is true. Do not decide which in advance.
+
+- `the_pointer_enters_moves_clicks_scrolls_and_leaves` saw two `PointerMotion`s
+  and no arrival, because the desktop's own cursor had already produced one. The
+  backend was right and the assertion assumed an empty desktop; see the runner
+  section above for the fix and the rule it now states.
+
+**W4 found a bug in the backend that only an out-of-process keystroke could
+reach: the pump never called `TranslateMessage`.** A `WM_CHAR` exists only
+because that call ran over a key message _in the queue_, so `WM_CHAR` was never
+generated for a real keystroke — the `Char` branch of the window procedure, the
+surrogate reassembly in `win32/keys.rs` and every `ShellEvent::TextCommit` were
+unreachable from a keyboard, and typing into a Crucible window on Windows
+produced no text at all. The in-crate suite could not see it: those tests send
+`WM_CHAR` with `SendMessageW`, which does not pass through the queue.
+`drain_messages` now calls it, and
+`a_key_typed_by_another_process_carries_its_position_its_symbol_and_its_text` is
+the guard — **unrun, like everything else here**.
 
 What remains unverified:
 
@@ -383,7 +440,59 @@ What W3 adds:
 - **The clipboard tests share the desktop's clipboard.** They write to the real
   window station, so two Windows suites running concurrently on one runner would
   interfere. Nothing does that today; it is worth knowing before anything is
-  parallelised across processes.
+  parallelised across processes. W4's suite is `--test-threads 1` for exactly
+  this reason, and for the foreground window and the cursor beside it.
+
+What W4 closes, and what it does not:
+
+- **Closed, subject to a runner confirming it.** Input now arrives as a real
+  message stream — posted, queued, translated, dispatched — from a separate
+  process (`tests/bin/send_input_win32.rs`, `SendInput`), which is what found
+  the missing `TranslateMessage`. The clipboard now round-trips with a second
+  process in both directions, and `another_process_reads_what_we_copied_...`
+  asserts it happens with **zero** pumps of this shell's loop, which is the
+  claim that separates Win32's content-transfer clipboard from X11's and
+  Wayland's ownership model. Focus arrives through a real foreground change
+  rather than a hand-sent `WM_SETFOCUS`, and mode flips and resize storms are
+  judged by `GetWindowRect`/`GetClientRect` rather than by the backend's own
+  bookkeeping.
+- **`WM_INPUT` is now attempted and may still not be reachable.**
+  `injected_motion_arrives_as_raw_relative_motion_for_mouselook` assumes
+  `SendInput` feeds the raw input stack on a `windows-latest` image. That is the
+  single assertion in the suite most likely to be answered by the runner rather
+  than by the backend; if it fails with the ordinary `PointerMotion` present and
+  `raw_delta` absent, the finding is about the image and the test should say so
+  rather than be deleted. The **absolute** raw path still needs a device that
+  reports absolutely — a remote-desktop session or a tablet — which no runner
+  has.
+- **Auto-repeat is not the driver's.** Windows typematic comes from the
+  keyboard, and an injected key does not repeat, so
+  `a_key_held_by_another_process_reports_its_second_press_as_a_repeat` sends two
+  presses and reads bit 30, which the _system_ sets. That is the same bit a real
+  hold sets, so the claim is sound; what is untested is the driver's timing.
+- **Drag and drop is still not end to end.** A `WM_DROPFILES` carries an `HDROP`
+  the shell allocated _in the target process's_ context, so no test process can
+  hand one over — the in-crate suite's synthetic block remains the only
+  coverage, with the caveat recorded above.
+- **No sample-level pass, and there cannot be one yet.** The Linux suites run
+  the sandbox and press F11 at it; that needs a renderer, and neither
+  `windows-latest` nor `macos-latest` has a Vulkan device
+  (`docs/plan/ROADMAP.md`, 2026-08-04 correction — MoltenVK is gated behind
+  P14). This is a coverage gap stated rather than approximated: nothing in
+  `tests/win32_e2e.rs` pretends to cover the `set_mode`-from-a-key path in a
+  running game.
+- **`tests/run-win32-e2e.ps1` has never been parsed by a PowerShell.** It was
+  written on a machine with no `pwsh`, so its syntax, its `$LASTEXITCODE`
+  handling through `Tee-Object`, and its ANSI-stripping regex are all unrun. The
+  CI job is the first execution. If it fails before the suite starts, the script
+  is the suspect and not the backend.
+- **Nothing in `tests/win32_e2e.rs` has ever executed.** It is a Windows suite
+  written on Linux; the cross-target check compiles it and does not link it. Its
+  failure messages are written on that assumption — they carry the queue word,
+  the foreground handle, the actual rectangle and the helper process's own
+  output, because the last two CI failures were solved by assertions that
+  printed data and the one before that wasted a round trip by printing a
+  duration.
 
 ## Owed on the Win32 backend after W3
 
@@ -482,10 +591,6 @@ What W3 adds:
   explain why, and wasm is the reason). Closing it needs a second seam, "render
   one frame now", which is a decision above `crcbl-shell`. Recorded here rather
   than attempted.
-- **No end-to-end suite.** Wayland has a nested compositor and X11 has `Xvfb`;
-  Windows has the unit suite in `win32/shell.rs` and nothing that drives a
-  running sample. `docs/plan/15-windowing.md` says the sample-level pass waits
-  for something to draw with, which is P14.
 
 ## macOS has no windowing coverage because it has no backend
 

@@ -423,6 +423,49 @@ jobs:
       - name: Run the suite under Xvfb, with openbox managing
         run: CRCBL_E2E_X11_WM=openbox crates/crcbl-shell/tests/run-x11-e2e.sh
 
+  # The only job that runs the Win32 backend end to end, and the P5C W4
+  # deliverable. `docs/plan/ROADMAP.md`'s 2026-08-04 correction is the reason it
+  # can exist at all: `windows-latest` is a desktop, so the shell is reachable
+  # from a test process that never draws anything, exactly as the X11 backend was
+  # from its first slice.
+  #
+  # **Its own job rather than a step in `build + test (windows-latest)`**, and
+  # not for tidiness. `docs/plan/12-testing.md` calls a silently-skipped e2e job
+  # a known trap, and the counter-measure is a harness that fails when the suite
+  # reports zero tests run — which needs the suite to be the only thing in the
+  # run whose count is being read. Folded into a job that also runs the whole
+  # workspace's unit tests, "did the e2e suite run?" is not a question the
+  # output can answer.
+  #
+  # There is nothing to install. The two Linux e2e jobs each install a window
+  # system and half a dozen client libraries because their harness has to start
+  # one; this runner boots with a window station, a desktop, a cursor sitting on
+  # it and a 1024×768 display, which is what the suite is written against.
+  win32-e2e:
+    name: win32 e2e (real desktop)
+    runs-on: windows-latest
+    # A Windows runner is roughly 2x slower than a Linux one, and this compiles
+    # the shell crate's test targets and both helper binaries from cold.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+      # Runs the `#[ignore]`d suite with `--features win32-e2e`, serialised
+      # because the foreground window, the cursor and the clipboard are one of
+      # each per session, and fails when the reported test count is zero or
+      # unreadable.
+      - name: Run the suite against the runner's desktop
+        shell: pwsh
+        run: crates/crcbl-shell/tests/run-win32-e2e.ps1
+
   # The CLI/headless pillar's own end-to-end check: `crcbl new` scaffolds a
   # project, the project *compiles*, it lints clean, and it runs its loop
   # headless. `docs/plan/11-cli-headless.md` makes the CLI the substrate every

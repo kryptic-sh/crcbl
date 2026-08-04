@@ -475,6 +475,27 @@ impl Win32Shell {
     /// around. It returns zero when the queue is empty, so this terminates:
     /// `WM_PAINT` is the one message that would repeat forever if it were left
     /// unhandled, and `DefWindowProc` validates it.
+    ///
+    /// # `TranslateMessage` is not optional, and leaving it out was silent
+    ///
+    /// A `WM_KEYDOWN` names a key; the **character** it produces is a separate
+    /// message that only exists because `TranslateMessage` ran, and it is where
+    /// dead keys, AltGr and an input method's commit all arrive. This loop did
+    /// not call it, so `WM_CHAR` was never generated for a real keystroke: the
+    /// `Char` branch of the window procedure, the surrogate reassembly in
+    /// [`keys`](super::keys) and every
+    /// [`TextCommit`](ShellEvent::TextCommit) were unreachable from a keyboard,
+    /// and typing into a Crucible window on Windows produced no text at all.
+    ///
+    /// **Nothing in the in-crate suite could see it.** Those tests send
+    /// `WM_CHAR` with `SendMessageW` — the real procedure, the real
+    /// reassembly — and a message sent directly does not pass through the queue
+    /// this call is part of. It took a keystroke injected from another process
+    /// to reach the gap, which is what `tests/win32_e2e.rs` is for.
+    ///
+    /// It is called on every message rather than on key messages only, which is
+    /// what `winuser.h` documents: it inspects the message itself and does
+    /// nothing for the ones it does not translate.
     /// [`wait_events`](Shell::wait_events), with the reason it came back.
     ///
     /// # Why the return value exists at all
@@ -515,6 +536,27 @@ impl Win32Shell {
     /// included. `MWMO_INPUTAVAILABLE` exists for a caller that does *not* drain
     /// before sleeping, and draining ourselves is strictly better: it removes
     /// the reason for the flag and the spurious wake in one move.
+    ///
+    /// # What the third run said, and what is still open
+    ///
+    /// **That change did what it was expected to do, and was not the whole
+    /// answer.** `QS_SENDMESSAGE` is gone from the reported queue word; what the
+    /// third CI run reported instead was `0x80008` — `QS_POSTMESSAGE` in both
+    /// halves, so a *posted* message is in the queue at the moment of the check
+    /// and one has arrived since the last one. Nothing in this backend calls
+    /// `PostMessageW`, `PostThreadMessageW` or `SetTimer`, and
+    /// [`drain_messages`](Self::drain_messages) removes with `PM_REMOVE` through
+    /// a null window and a zero filter range, which takes every window *and*
+    /// thread message. So it comes from outside this crate, in the
+    /// sub-millisecond gap between the drain and the wait.
+    ///
+    /// Two rounds have now been spent on hypotheses and both were settled only
+    /// by making the failure carry data, so **this one is instrumented rather
+    /// than guessed at**: `wait_events_genuinely_blocks` now prints the `MSG`
+    /// itself — id, `hwnd`, `wParam`, `lParam` — through
+    /// [`peek_pending`](Self::peek_pending), beside the `QS_` word. A message id
+    /// is a number that can be looked up. Until a runner prints one, this
+    /// section is a description of an open failure and not of a fix.
     fn wait(&mut self, timeout: Option<Duration>) -> Wake {
         // Before the wait, not after: an undrained queue is what
         // `MWMO_INPUTAVAILABLE` was there for, and this is the same guarantee
@@ -562,6 +604,28 @@ impl Win32Shell {
         unsafe { ffi::GetQueueStatus(value::QS_ALL_INPUT) }
     }
 
+    /// The message at the head of this thread's queue, without taking it.
+    ///
+    /// The other half of the same question [`queue_status`](Self::queue_status)
+    /// answers, and the half that ends an argument: a `QS_` word says a *posted
+    /// message* is there, and this says **which** one — an id to look up rather
+    /// than a bit to theorise about. `PM_NOREMOVE`, so asking changes nothing
+    /// the next wait will see.
+    ///
+    /// Test-only for the same reason: only a test knows what the queue was
+    /// supposed to hold, and nothing in the backend branches on the answer.
+    #[cfg(test)]
+    fn peek_pending() -> Option<Msg> {
+        let mut message = Msg::default();
+        // SAFETY: `message` is a live, initialised `MSG` the call writes into;
+        // a null window and a zero filter range ask for every window and thread
+        // message, and `PM_NOREMOVE` leaves the queue exactly as it was found.
+        let pending = unsafe {
+            ffi::PeekMessageW(&raw mut message, ptr::null_mut(), 0, 0, value::PM_NOREMOVE)
+        };
+        (pending != 0).then_some(message)
+    }
+
     fn drain_messages(&mut self) {
         let mut message = Msg::default();
         loop {
@@ -573,10 +637,16 @@ impl Win32Shell {
             if pending == 0 {
                 break;
             }
-            // SAFETY: dispatching a message this thread just took off its own
-            // queue. This calls the window procedure re-entrantly, which is
-            // why nothing here holds a borrow of `shared`.
-            unsafe { ffi::DispatchMessageW(&raw const message) };
+            // SAFETY: `message` is the message this thread just took off its own
+            // queue. `TranslateMessage` reads it and posts any `WM_CHAR` it
+            // produces to the front of the same queue, where the next turn of
+            // this loop picks it up; `DispatchMessageW` then calls the window
+            // procedure re-entrantly, which is why nothing here holds a borrow
+            // of `shared`.
+            unsafe {
+                ffi::TranslateMessage(&raw const message);
+                ffi::DispatchMessageW(&raw const message);
+            }
         }
     }
 
@@ -1635,6 +1705,18 @@ mod tests {
         unsafe { ffi::SendMessageW(hwnd, message, w_param, l_param) };
     }
 
+    /// Sends the `WM_MOUSELEAVE` a real pointer leaving would produce.
+    ///
+    /// The one-shot notification this backend arms with `TrackMouseEvent`, sent
+    /// by hand because CI has no mouse to move out — and, at the *start* of a
+    /// test, the only way to put the derived "is the pointer inside?" state on a
+    /// known edge when a real cursor may already be over the window.
+    fn send_leave(hwnd: Handle) {
+        // SAFETY: a pointer-crossing message to this shell's own window, with
+        // the `wParam`/`lParam` of zero `winuser.h` documents for it.
+        unsafe { ffi::SendMessageW(hwnd, msg::MOUSE_LEAVE, 0, 0) };
+    }
+
     /// Makes a window the foreground one.
     ///
     /// `ClipCursor` and `SetCursorPos` are both restricted to the process that
@@ -2163,8 +2245,23 @@ mod tests {
     fn the_pointer_enters_moves_clicks_scrolls_and_leaves() {
         let mut shell = shell();
         let window = window(&mut shell);
-        shell.pump(&mut |_| {});
         let hwnd = hwnd_of(&shell, window);
+
+        // **A Windows desktop has a real cursor on it, and it is somewhere.**
+        // Showing a window under it delivers a genuine `WM_MOUSEMOVE` that
+        // derives the arrival before this test sends anything, so the first
+        // synthetic movement below is then not the first movement at all. That
+        // is not a runner quirk — it is true of any machine where the pointer
+        // happens to be over the new window, this developer's included.
+        //
+        // The leave is what puts the derived state on a known edge: the backend
+        // ignores one for a pointer it already thinks is outside, so this is
+        // either a no-op or exactly the transition needed, and the pump that
+        // follows discards whatever the desktop did on its own. Nothing here
+        // moves the cursor, which would only trade one assumption about the
+        // environment for another.
+        send_leave(hwnd);
+        shell.pump(&mut |_| {});
         let frame = super::input::client_screen_rect(hwnd).expect("a live window has one");
 
         // A movement into a window nothing has been over is an arrival, and
@@ -2185,9 +2282,7 @@ mod tests {
             frame.left + 41,
             frame.top + 31,
         );
-        // SAFETY: the one-shot notification this backend arms with
-        // `TrackMouseEvent`, sent by hand because CI has no mouse to move out.
-        unsafe { ffi::SendMessageW(hwnd, msg::MOUSE_LEAVE, 0, 0) };
+        send_leave(hwnd);
 
         // Collected rather than compared position by position: a runner whose
         // physical cursor happens to sit over the window contributes real
@@ -2221,19 +2316,33 @@ mod tests {
             }
         });
 
+        // **The rule, not the coincidence.** The arrival is derived from the
+        // first movement after a leave and carries *that* movement's position —
+        // whichever movement turns out to be first. Naming (40, 30) here was an
+        // assertion that no other motion could reach the window, which is a
+        // claim about the desktop rather than about the backend.
+        //
+        // Exactly two crossings, because the second movement must not re-arm a
+        // second leave: `TrackMouseEvent` is one-shot and is re-armed only on
+        // the transition, so a backend that armed it per movement would show a
+        // third here.
         assert_eq!(
-            crossings.first(),
-            Some(&(true, Some(PhysicalPoint::new(40.0, 30.0)))),
-            "the entry is derived from the first movement: {names:?}"
+            crossings.len(),
+            2,
+            "one arrival and one leave: {crossings:?} out of {names:?}"
         );
-        assert!(
-            crossings.contains(&(false, None)),
+        let (entered, at) = crossings[0];
+        assert!(entered, "the first crossing is the arrival: {crossings:?}");
+        assert_eq!(
+            at,
+            motions.first().copied().flatten(),
+            "the arrival is derived from the first movement and carries its \
+             position: motions {motions:?}, events {names:?}"
+        );
+        assert_eq!(
+            crossings[1],
+            (false, None),
             "the leave carries no position: {crossings:?}"
-        );
-        assert_eq!(
-            crossings.iter().filter(|(entered, _)| !entered).count(),
-            1,
-            "the second movement must not re-arm a second leave: {crossings:?}"
         );
         assert!(
             motions.contains(&Some(PhysicalPoint::new(41.0, 31.0))),
@@ -3043,29 +3152,49 @@ mod tests {
         // clock cannot tell them apart. `Wake` can.
         //
         // A window that has just been created and shown has messages waiting,
-        // and `MWMO_INPUTAVAILABLE` reports them by design, so the queue is
-        // drained to quiescence first: `Wake::Message` before that point is
-        // correct behaviour and asserting against it would be asserting that
-        // the flag does not work.
+        // so the queue is drained to quiescence first: `Wake::Message` before
+        // that point is correct behaviour and asserting against it would be
+        // asserting that the drain does not work.
+        //
+        // That it *reached* quiescence is asserted rather than assumed. A loop
+        // that simply ran out of attempts left the two findings — "this runner's
+        // queue never empties" and "the wait woke spuriously" — reported by the
+        // same failure, and they call for opposite fixes.
         let mut shell = shell();
         let _window = window(&mut shell);
+        let mut settled = false;
         for _ in 0..16 {
             shell.pump(&mut |_| {});
             if shell.wait(Some(Duration::from_millis(0))) == Wake::TimedOut {
+                settled = true;
                 break;
             }
         }
+        assert!(
+            settled,
+            "the queue never went quiet in 16 drain-and-check rounds; it holds \
+             {:#06x} and the message at its head is {:?}",
+            Win32Shell::queue_status(),
+            Win32Shell::peek_pending()
+        );
 
         let start = Instant::now();
         let woke = shell.wait(Some(Duration::from_millis(50)));
         let waited = start.elapsed();
 
+        // **The failure has to name the culprit**, because two rounds of CI have
+        // now been spent on hypotheses about a `QS_` bit. The queue word says
+        // what kind of message woke this; the `MSG` beside it says which one —
+        // an id, an `hwnd` and two parameters, which is a thing that can be
+        // looked up rather than guessed at.
         assert_eq!(
             woke,
             Wake::TimedOut,
-            "an idle window with a drained queue must sleep out the timeout; \
-             it took {waited:?} and the queue holds {:#06x}",
-            Win32Shell::queue_status()
+            "an idle window with a drained queue must sleep out the timeout; it \
+             took {waited:?}, the queue holds {:#06x}, and the message still in \
+             it is {:?}",
+            Win32Shell::queue_status(),
+            Win32Shell::peek_pending()
         );
         // The reason and the clock have to agree: a `WAIT_TIMEOUT` that arrived
         // instantly would mean the timeout was not the one that was asked for.

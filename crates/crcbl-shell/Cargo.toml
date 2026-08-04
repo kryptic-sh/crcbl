@@ -49,6 +49,33 @@ name = "crcbl-e2e-x11-key"
 path = "tests/bin/send_key_x11.rs"
 required-features = ["x11-e2e"]
 
+# The Windows key and mouse sender, and it is a separate process for a reason
+# neither Linux one has: `SendInput` injects into the *session's* input stream
+# and the stream follows the foreground window. A test that called it would be
+# typing at its own window from its own thread, which is the one arrangement
+# that proves nothing about the message queue — the in-crate suite already
+# reaches the window procedure with `SendMessageW`, and the whole point of this
+# binary is to be somewhere else.
+[[bin]]
+name = "crcbl-e2e-win32-input"
+path = "tests/bin/send_input_win32.rs"
+required-features = ["win32-e2e"]
+
+# The other half of the same argument, for the clipboard. Win32's clipboard is
+# *content*, not ownership: `SetClipboardData` hands the bytes to the window
+# station and the shell keeps nothing. Only a second process can tell that claim
+# apart from a shell that answers its own reads out of a cache, so this one
+# writes and reads the real desktop clipboard with no `crcbl-shell` in it.
+#
+# Separate from the sender above rather than one binary with a subcommand, on
+# the same grounds as the two Linux senders: the two reach the desktop by
+# different mechanisms — an injected input stream, a window-station clipboard —
+# and a helper that did both would be linked into a test that needs one.
+[[bin]]
+name = "crcbl-e2e-win32-clip"
+path = "tests/bin/clipboard_peer_win32.rs"
+required-features = ["win32-e2e"]
+
 [features]
 # The nested-compositor end-to-end suite. Off by default so a plain
 # `cargo nextest run` on a machine with no compositor stays green; CI enables it
@@ -61,6 +88,17 @@ wayland-e2e = []
 # default so a plain `cargo nextest run` on a machine with no display stays
 # green, and `tests/run-x11-e2e.sh` is the only thing that turns it on.
 x11-e2e = []
+
+# The Win32 end-to-end suite (P5C W4), on exactly the same terms: off by
+# default, the tests additionally `#[ignore]`d, and `tests/run-win32-e2e.ps1`
+# the only thing that turns them on — which is also what asserts that a non-zero
+# number of them ran.
+#
+# What is different is that **there is nothing to start**. The two Linux
+# harnesses are shell scripts because a compositor or an X server has to be
+# launched, polled for and torn down; a `windows-latest` runner already has a
+# desktop, so the runner here is nextest plus the count check and nothing else.
+win32-e2e = []
 
 [lints]
 workspace = true

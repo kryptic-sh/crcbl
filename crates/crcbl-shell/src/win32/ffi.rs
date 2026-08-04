@@ -751,6 +751,17 @@ pub mod value {
     /// `PM_REMOVE`.
     pub const PM_REMOVE: u32 = 0x0001;
 
+    /// `PM_NOREMOVE` — read the message at the head of the queue and leave it
+    /// there.
+    ///
+    /// Test-only, and `#[cfg(test)]` rather than merely unused: the backend
+    /// itself always drains with [`PM_REMOVE`], and the one caller is the
+    /// diagnostic peek that explains a wait which came back before its timeout.
+    /// A `QS_*` word says what *kind* of message is in the queue; this is how a
+    /// test gets the id, the window and the parameters of the actual one.
+    #[cfg(test)]
+    pub const PM_NOREMOVE: u32 = 0x0000;
+
     /// `MONITORINFOF_PRIMARY`.
     pub const MONITOR_PRIMARY: u32 = 0x0000_0001;
     /// `MONITOR_DEFAULTTONEAREST`.
@@ -1033,6 +1044,16 @@ unsafe extern "system" {
         filter_max: u32,
         remove: u32,
     ) -> Bool32;
+    /// Turns a virtual-key message into the `WM_CHAR` the layout says it
+    /// produces, and posts it back to the front of this thread's queue.
+    ///
+    /// **The one call in the pump that is not about delivery.** A `WM_KEYDOWN`
+    /// says which key went down; the *character* it produces — dead keys
+    /// composed, AltGr applied, an IME's committed string — exists only because
+    /// this ran. Without it `WM_CHAR` is never generated for a real keystroke
+    /// and the whole [`Char`](super::events::RawEvent::Char) path is
+    /// unreachable, however well tested it is by hand.
+    pub fn TranslateMessage(message: *const Msg) -> Bool32;
     pub fn DispatchMessageW(message: *const Msg) -> Lresult;
     // Test-only: the two synchronous messages this backend answers —
     // `WM_GETMINMAXINFO` and `WM_SIZING` — are otherwise only sent by a user
