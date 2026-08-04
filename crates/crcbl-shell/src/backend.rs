@@ -24,20 +24,22 @@
 //!
 //! # What is registered today
 //!
-//! Wayland then X11 on Linux, and [`HeadlessShell`] everywhere — the latter
-//! only when asked for by name. **P0.6 confirmed the property this module was
-//! shaped to have**: adding a whole X11 backend touched
-//! [`REGISTRY`](self) and these tests, and no other file outside `src/x11/`
-//! (plus `src/linux/`, which is the evdev table and libxkbcommon moving up one
-//! level to be shared rather than copied). No consumer changed, no trait method
-//! was added, and no `#[cfg]` appeared anywhere above this crate.
+//! Wayland then X11 on Linux, Win32 on Windows, and [`HeadlessShell`]
+//! everywhere — the last only when asked for by name. **P0.6 confirmed the
+//! property this module was shaped to have and P5C confirmed it again**: adding
+//! a whole X11 backend touched [`REGISTRY`](self) and these tests, and no other
+//! file outside `src/x11/` (plus `src/linux/`, which is the evdev table and
+//! libxkbcommon moving up one level to be shared rather than copied); adding
+//! the Win32 backend touched this file, `src/lib.rs` and `src/win32/`. No
+//! consumer changed, no trait method was added, and no `#[cfg]` appeared
+//! anywhere above this crate.
 //!
 //! Headless is registered with `auto: false`, so [`open`] never selects it
 //! implicitly. A game that silently ran headless because a compositor was
 //! missing would look like a hang; failing with
 //! [`ShellError::NoBackend`] names the actual problem.
 //!
-//! # Why both Linux entries are `dlopen`-backed
+//! # Why both Linux entries are `dlopen`-backed, and the Windows one is not
 //!
 //! The registry is a fall-through list, so every entry has to be able to *fail*
 //! at runtime. A backend linked against `libwayland-client.so.0` — or
@@ -46,6 +48,12 @@
 //! `src/wayland/ffi.rs` has the full argument and `src/x11/ffi.rs` sharpens it,
 //! since X11 is the *fallback* and is reached only after Wayland has already
 //! failed.
+//!
+//! The Win32 entry links its libraries instead, and the difference is this
+//! list's shape rather than a change of mind: Windows has one backend, so
+//! nothing falls through to anything, and `user32.dll` cannot be missing from a
+//! Windows that is running a process at all. `src/win32/ffi.rs` states it in
+//! full.
 
 use crate::{HeadlessShell, Shell, ShellError};
 
@@ -61,9 +69,9 @@ pub enum ShellBackend {
     Wayland,
     /// X11, through libxcb and our own request/event layer (P0.6).
     X11,
-    /// Win32 (P14).
+    /// Win32, through hand-written `extern "system"` declarations (P5C).
     Win32,
-    /// AppKit (P14).
+    /// AppKit (P5C).
     AppKit,
     /// A browser canvas, through the hand-rolled JS shim (P5).
     Web,
@@ -143,6 +151,15 @@ static REGISTRY: &[Registration] = &[
         auto: true,
         open: || Ok(Box::new(crate::x11::X11Shell::open()?)),
     },
+    // Windows has exactly one backend, so nothing here falls through to
+    // anything — which is what lets `src/win32/ffi.rs` link its libraries
+    // instead of `dlopen`ing them. See that module for the asymmetry.
+    #[cfg(target_os = "windows")]
+    Registration {
+        backend: ShellBackend::Win32,
+        auto: true,
+        open: || Ok(Box::new(crate::win32::Win32Shell::open()?)),
+    },
     Registration {
         backend: ShellBackend::Headless,
         auto: false,
@@ -182,11 +199,12 @@ fn registry_names(entries: impl Iterator<Item = ShellBackend>) -> String {
 /// # Today
 ///
 /// On Linux, Wayland is tried and then X11; `CRCBL_SHELL=wayland` or
-/// `CRCBL_SHELL=x11` forces one of them. On macOS and
-/// Windows only [`HeadlessShell`] is compiled in and it is not auto-selected,
-/// so this returns [`ShellError::NoBackend`] unless `CRCBL_SHELL=headless` is
-/// set — the honest answer for a build with no window-system backend in it.
-/// P14 changes that by adding a registration and nothing else.
+/// `CRCBL_SHELL=x11` forces one of them. On Windows there is one backend and it
+/// is selected automatically. On macOS only [`HeadlessShell`] is compiled in
+/// and it is not auto-selected, so this returns [`ShellError::NoBackend`] there
+/// unless `CRCBL_SHELL=headless` is set — the honest answer for a build with no
+/// window-system backend in it. P5C's AppKit slice changes that by adding a
+/// registration and nothing else.
 pub fn open() -> Result<Box<dyn Shell>, ShellError> {
     match std::env::var(BACKEND_ENV_VAR) {
         Ok(value) if !value.trim().is_empty() => {
@@ -314,6 +332,15 @@ mod tests {
                     ShellBackend::Web,
                 ]
             );
+        } else if cfg!(target_os = "windows") {
+            assert_eq!(
+                backends,
+                [
+                    ShellBackend::Win32,
+                    ShellBackend::Headless,
+                    ShellBackend::Web,
+                ]
+            );
         } else {
             assert_eq!(backends, [ShellBackend::Headless, ShellBackend::Web]);
         }
@@ -335,9 +362,6 @@ mod tests {
         let shell = open_backend(ShellBackend::Headless).expect("headless is registered");
         assert_eq!(shell.backend(), ShellBackend::Headless);
 
-        // Win32 lands at P14, so it is the stable example of a backend this
-        // build does not have. (X11 was that example until P0.6 registered it,
-        // which is the point.)
         // Registered everywhere, but it only *works* in a browser — and off
         // wasm it says so rather than handing back a shell that can never
         // produce an event.
@@ -350,7 +374,10 @@ mod tests {
             assert!(what.contains("wasm32"), "{what}");
         }
 
-        let error = open_backend(ShellBackend::Win32).expect_err("not registered yet");
+        // AppKit is the stable example of a backend this build does not have.
+        // (X11 was that example until P0.6 registered it, and Win32 until P5C
+        // did — which is the point of the test.)
+        let error = open_backend(ShellBackend::AppKit).expect_err("not registered yet");
         let ShellError::UnknownBackend {
             requested,
             available,
@@ -358,8 +385,16 @@ mod tests {
         else {
             panic!("wrong variant");
         };
-        assert_eq!(requested, "win32");
+        assert_eq!(requested, "appkit");
         assert!(available.contains("headless"), "{available}");
+
+        // Win32 *is* registered on Windows, so asking for it by name gets a
+        // real shell or its own failure — never `UnknownBackend`.
+        #[cfg(target_os = "windows")]
+        {
+            let shell = open_backend(ShellBackend::Win32).expect("registered on Windows");
+            assert_eq!(shell.backend(), ShellBackend::Win32);
+        }
     }
 
     #[test]
@@ -369,14 +404,19 @@ mod tests {
         // the test is the failure path's message.
         match open_auto() {
             Ok(shell) => assert!(
-                matches!(shell.backend(), ShellBackend::Wayland | ShellBackend::X11),
-                "the auto-selectable backends are the two Linux ones, and \
-                 Wayland is tried first: {}",
+                matches!(
+                    shell.backend(),
+                    ShellBackend::Wayland | ShellBackend::X11 | ShellBackend::Win32
+                ),
+                "the auto-selectable backends are the two Linux ones — Wayland \
+                 first — and the single Windows one: {}",
                 shell.backend()
             ),
             Err(ShellError::NoBackend { tried }) => {
                 let expected = if cfg!(target_os = "linux") {
                     "wayland, x11"
+                } else if cfg!(target_os = "windows") {
+                    "win32"
                 } else {
                     "none"
                 };

@@ -445,10 +445,11 @@ fn the_factory_selects_a_backend_at_runtime() {
         crcbl_shell::open_backend(ShellBackend::Headless).expect("headless is registered");
     assert_eq!(shell.backend(), ShellBackend::Headless);
 
-    // Win32 lands at P14; asking for it today is an honest error rather than a
-    // silent fallback onto something else.
+    // AppKit lands later in P5C; asking for it today is an honest error rather
+    // than a silent fallback onto something else. (Win32 was this example
+    // until P5C registered it, which is the point.)
     assert!(matches!(
-        crcbl_shell::open_backend(ShellBackend::Win32),
+        crcbl_shell::open_backend(ShellBackend::AppKit),
         Err(ShellError::UnknownBackend { .. })
     ));
 
@@ -457,6 +458,13 @@ fn the_factory_selects_a_backend_at_runtime() {
     // `UnknownBackend`. This test runs on machines with a compositor, with an X
     // server, and with neither, and all three are correct answers; what must
     // not happen is a fallback to something else.
+    #[cfg(target_os = "windows")]
+    {
+        let shell = crcbl_shell::open_backend(ShellBackend::Win32)
+            .expect("the Win32 backend is registered on Windows");
+        assert_eq!(shell.backend(), ShellBackend::Win32);
+    }
+
     #[cfg(target_os = "linux")]
     for backend in [ShellBackend::Wayland, ShellBackend::X11] {
         match crcbl_shell::open_backend(backend) {

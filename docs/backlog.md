@@ -270,27 +270,88 @@ timestamp instead of `CurrentTime` (`Peer::server_time`, kept — it is correct
 EWMH), and asking `openbox` less often or clicking the frame instead. The click
 made it measurably _worse_: five runs, 3-5 failures each.
 
-## Windows and macOS have no windowing coverage because they have no backend
+## The Win32 backend has never been run on Windows
 
-Raised as "get the X11, Windows and macOS tests up to Wayland parity". The X11
-half is done; the other two cannot be done as tests. `crcbl-shell` compiles
-`ShellBackend::Win32` and `ShellBackend::AppKit` as _names_ — the registry has
-no entry for either, `open()` on those platforms returns
-`ShellError::NoBackend`, and `crates/crcbl-shell/src/` has no `windows` or
-`macos` module. Reaching Wayland's coverage there means **writing the two
-backends**, which `docs/plan/15-windowing.md` schedules for P14: hand-written
-Win32 FFI and `objc_msgSend` AppKit FFI, landing with Metal/DX12, "with
-real-hardware time budgeted". The plan's own reason for not doing it sooner is
-the relevant one here — before that "they'd be compile-verified-only anyway
-(gpur lesson: that's not support)", and a CI runner has no display on either
-platform, so an e2e suite would have nothing to run against.
+P5C W1 wrote the whole window-lifecycle half of `crates/crcbl-shell/src/win32/`
+on a Linux machine. It was cross-checked with
+`cargo check`/`cargo clippy --target x86_64-pc-windows-msvc`, which do not link
+and do not run — **a cross-check proves the code typechecks and nothing more**.
+Every claim below that is not about arithmetic is unverified until the
+`build + test (windows-latest)` job reports:
 
-What the cross-platform CI job does cover today, and it is not nothing: the
-whole workspace builds, lints and runs its unit and integration suites on
+- `Win32Shell::open`, `create_window`, the message pump, the borderless round
+  trip, monitor enumeration and per-monitor DPI have never executed.
+- The `#[cfg(all(test, target_os = "windows"))]` suite in `win32/shell.rs` is
+  deliberately **not** `#[ignore]`d, so its first CI run is the answer to
+  whether a GitHub runner gives a process a usable window station. If
+  `register_class` fails there, every test in that module fails with the
+  `GetLastError` code, which is the finding.
+- The structure layouts in `win32/ffi.rs` are asserted by size and offset on the
+  host, which catches padding mistakes but not a _wrong_ field order that
+  happens to keep the size — `DEVMODEW` is the one with two unions in it and the
+  one to re-read if a refresh rate ever looks implausible.
+- The pure arithmetic (`win32/geometry.rs`, `win32/events.rs`, `TimeBase`,
+  `win32/proc.rs`'s shared state) _is_ covered on Linux and each of its guards
+  was falsified by mutation before this was written.
+
+## Owed on the Win32 backend after W1
+
+- **`WindowDesc::app_id` is validated and never applied.** Win32's equivalent of
+  `WM_CLASS` is the Application User Model ID, set process-wide with
+  `SetCurrentProcessExplicitAppUserModelID` from `shell32` — it decides taskbar
+  grouping and which shortcut a window matches. W1 rejects an id containing a
+  NUL and otherwise ignores it, so a Crucible window groups under whatever
+  Explorer infers. Wiring it means a third system library and a decision about
+  _where_ a process-wide property is set (opening a shell is the wrong place if
+  a host application embedded the engine).
+- **`set_cursor` records the request and does not apply it.** Both halves —
+  naming a shape and hiding the pointer — belong with W2's `WM_SETCURSOR`
+  handling and `ShowCursor` reference count. `WindowState` reports what was
+  asked for; nothing on screen changes. Documented on the method and in the
+  module, so it is a stated gap rather than a silent one.
+- **Refresh rate is a whole hertz, so 59.94 Hz reports as 60.**
+  `EnumDisplaySettingsW`'s `DEVMODEW::dmDisplayFrequency` is an integer, and
+  `MonitorInfo::refresh_millihertz` exists precisely because that rounding
+  matters to frame pacing. The exact figure is in `QueryDisplayConfig`'s
+  `DISPLAYCONFIG_RATIONAL` (60000/1001), which needs a second display API and
+  its own path-and-mode array walk. Windows is the only one of the five backends
+  with this gap; it is worth closing when frame pacing lands.
+- **A monitor's name is its device name (`\\.\DISPLAY1`), not its marketing
+  name.** `MonitorInfo::name` already documents itself as display-only and
+  unstable, and the alternatives are worse (`EnumDisplayDevicesW` usually
+  answers "Generic PnP Monitor") or bigger (`QueryDisplayConfig` again).
+  Considered and declined for W1.
+- **A window frozen during a user drag-resize is accepted, not fixed.** Windows
+  runs its own modal message loop between `WM_ENTERSIZEMOVE` and
+  `WM_EXITSIZEMOVE`, so `pump` does not return and no frame is rendered until
+  the mouse is released. The resize storm is coalesced so the delay is not also
+  an event flood, but the freeze is real. The usual fix — `SetTimer` plus a
+  frame rendered from `WM_TIMER` inside the modal loop — **cannot be built in
+  this crate**: rendering a frame means calling the engine, and the shell
+  deliberately has no `Shell::run(closure)` to call back into (the crate docs
+  explain why, and wasm is the reason). Closing it needs a second seam, "render
+  one frame now", which is a decision above `crcbl-shell`. Recorded here rather
+  than attempted.
+- **No end-to-end suite.** Wayland has a nested compositor and X11 has `Xvfb`;
+  Windows has the unit suite in `win32/shell.rs` and nothing that drives a
+  running sample. `docs/plan/15-windowing.md` says the sample-level pass waits
+  for something to draw with, which is P14.
+
+## macOS has no windowing coverage because it has no backend
+
+The X11 and Win32 halves are done; AppKit is not. `crcbl-shell` compiles
+`ShellBackend::AppKit` as a _name_ — the registry has no entry for it, `open()`
+on macOS returns `ShellError::NoBackend`, and `crates/crcbl-shell/src/` has no
+`macos` module. Reaching the other backends' coverage there means **writing the
+backend**: hand-written `objc_msgSend` FFI to AppKit, per
+`docs/plan/15-windowing.md`'s P5C row.
+
+What the cross-platform CI job covers today, and it is not nothing: the whole
+workspace builds, lints and runs its unit and integration suites on
 `macos-latest` and `windows-latest`, including `HeadlessShell` and the
 `seam_from_outside` suite. The backend-selection tests assert the honest answer
-on those platforms — `NoBackend` naming what was tried, `UnknownBackend` for
-`win32` — so the _absence_ is tested even though the backend is not.
+on macOS — `NoBackend` naming what was tried, `UnknownBackend` for `appkit` — so
+the _absence_ is tested even though the backend is not.
 
 ## Not covered on either backend
 

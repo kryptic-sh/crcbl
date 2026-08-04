@@ -3,11 +3,11 @@
 //!
 //! Everything above this crate — the engine loop, the renderer, the samples,
 //! the editor — talks to the window system exclusively through [`Shell`].
-//! Everything below it (the Wayland and X11 backends at P0.5/P0.6, Win32 and
-//! AppKit at P14, the canvas at P5) implements it. **No platform type ever
-//! appears in a signature here, and a `#[cfg(target_os = …)]` in a consumer is
-//! a regression** — the same discipline `crcbl-hal` applies to the GPU, applied
-//! to the window.
+//! Everything below it (the Wayland and X11 backends at P0.5/P0.6, Win32 at
+//! P5C, AppKit next to it, the canvas at P5) implements it. **No platform
+//! type ever appears in a signature here, and a `#[cfg(target_os = …)]` in a
+//! consumer is a regression** — the same discipline `crcbl-hal` applies to the
+//! GPU, applied to the window.
 //!
 //! The one sanctioned leak is [`SurfaceTarget`], produced by
 //! [`Shell::surface_target`] and destructured only by HAL backends. It lives in
@@ -40,6 +40,25 @@
 //! declarations — for libwayland-client, libxcb and libxkbcommon — with the
 //! Wayland protocol marshalling generated at build time from vendored XML by
 //! `crcbl-wl-scanner`. There is no `wayland-client`, no `x11rb` and no `winit`.
+//!
+//! P5C added the **Win32 backend**'s window lifecycle: the window class and its
+//! procedure, create/destroy, title, visibility, windowed ↔ borderless on a
+//! named monitor, `WM_GETMINMAXINFO` and `WM_SIZING` size constraints, monitor
+//! enumeration with per-monitor-v2 DPI, the message pump and a blocking
+//! `wait_events`. Input, the clipboard and drag-and-drop are the slices after
+//! it, and [`ShellCaps`] is clear on every bit they would set. It is
+//! hand-written `extern "system"` FFI to `user32`, `gdi32`, `shcore` and
+//! `kernel32` — **linked rather than `dlopen`ed**, which is the one place the
+//! three native backends deliberately disagree: a Linux box can genuinely lack
+//! libwayland, and a Windows cannot lack `user32.dll`. There is no
+//! `windows-rs`.
+//!
+//! Two Win32 facts the other backends do not have are worth knowing at this
+//! level rather than at that one. A window's contents freeze while the user
+//! drags its edge, because Windows runs a **modal message loop** of its own
+//! there and [`pump`](Shell::pump) does not return until the mouse is released.
+//! And a window belongs to the thread that created it, which is the concrete
+//! reason [`Shell`] is not `Send`.
 //!
 //! Two properties of the Wayland clipboard shaped the seam rather than being
 //! worked around in the backend, because they are properties of the *platform*:
@@ -252,6 +271,20 @@ pub(crate) mod wayland;
 /// X libraries and the Wayland entry above would never be tried.
 #[cfg(target_os = "linux")]
 pub(crate) mod x11;
+
+/// The Win32 backend (P5C).
+///
+/// Same terms as the two Linux backends: private, reached only through
+/// [`open`]. The `cfg` is not the same, and deliberately: **the parts of this
+/// backend that are pure arithmetic compile on every host under `cfg(test)`**,
+/// so the aspect-lock algebra, the resize-storm coalescing and the 32-bit
+/// tick-count wrap are exercised by `cargo test` on the Linux machine the
+/// engine is developed on rather than only by the Windows CI runner. Everything
+/// that calls `user32` is `#[cfg(target_os = "windows")]` inside the module,
+/// which is also why there is no `dlopen` here — see `win32::ffi` for that
+/// argument, which is the reverse of the one `src/x11/ffi.rs` makes.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod win32;
 
 /// The Web/canvas backend (P5).
 ///

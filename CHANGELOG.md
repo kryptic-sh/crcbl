@@ -16,6 +16,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl-shell**: a **Win32 backend**, registered and selected automatically on
+  Windows — so `crcbl_shell::open()` now returns a real window there instead of
+  `NoBackend`. This first slice is the window lifecycle: create, show, hide,
+  destroy, title, close-request interception, windowed ↔ borderless on a named
+  monitor with the windowed placement restored exactly, size constraints
+  (`WM_GETMINMAXINFO` limits and a live `WM_SIZING` aspect lock), monitor
+  enumeration with work area, refresh rate and per-monitor DPI, per-monitor-v2
+  DPI awareness with `WM_DPICHANGED` handled mid-session, a message pump, a
+  blocking `wait_events`, and `SurfaceTarget::Win32` for the HAL. Built on
+  hand-written `extern "system"` declarations for `user32`, `gdi32`, `shcore`
+  and `kernel32` — there is no `windows-rs` and no `winapi`.
+
+  **Input, the clipboard and drag-and-drop are not in it**, and `ShellCaps` says
+  so: `POINTER_LOCK`, `POINTER_CONFINE`, `POINTER_WARP`, `RAW_POINTER_MOTION`,
+  `TEXT_IME`, `CLIPBOARD` and `DRAG_DROP` are clear on this backend, the methods
+  behind them return `Unsupported`, and `set_cursor` records the request without
+  applying it. What is set — `MULTI_WINDOW`, `EVENT_WAIT`, `WINDOW_POSITION`,
+  `SERVER_DECORATIONS`, `FRACTIONAL_SCALE`, `ASPECT_HINT_HONORED` — is
+  implemented. Two Windows facts worth knowing before building on it: a window
+  frozen during a user drag-resize is the system's modal message loop and not a
+  hang, and a monitor's refresh rate is a whole hertz here, so 59.94 Hz reports
+  as 60.
+
 - **crcbl-shell**: `DisplayMode::satisfied_by`, the request-versus-answer
   comparison `WindowState::mode_request_honoured` now uses.
 
