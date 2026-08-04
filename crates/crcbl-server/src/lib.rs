@@ -348,6 +348,9 @@ impl<T: Transport> Server<T> {
                                     return;
                                 }
                                 self.session.expire_if_timed_out(self.now);
+                                if self.session.state() == SessionState::Disconnected {
+                                    self.session_terminated = true;
+                                }
                                 result = Self::invalid_session_token(
                                     hello.generation,
                                     "reconnect grace period expired",

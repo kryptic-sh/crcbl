@@ -497,6 +497,70 @@ fn injected_time_expires_reconnect_without_sleep() {
 }
 
 #[test]
+fn stale_reconnect_hello_after_grace_expiry_rotates_session_on_fresh_join() {
+    let (server_transport, mut peer) = InMemoryTransport::pair();
+    let mut server = server(world_with_entities(1), server_transport);
+    server.set_session_config(crcbl_net::SessionConfig {
+        reconnect_grace_period: std::time::Duration::from_secs(1),
+        baseline_ring_capacity: 64,
+    });
+    send_hello(&mut peer, None);
+    server.update(std::time::Duration::ZERO);
+    server.update(std::time::Duration::from_nanos(16_666_667));
+    let token = match recv_handshake(&mut peer) {
+        crcbl_net::HandshakeResult::Accept { resume_token, .. } => resume_token,
+        crcbl_net::HandshakeResult::Reject { reason, .. } => {
+            panic!("fresh handshake rejected: {reason:?}")
+        }
+    };
+
+    drop(peer);
+    let (replacement, mut replacement_peer) = InMemoryTransport::pair();
+    server.update(std::time::Duration::from_secs(1));
+    assert_eq!(
+        server.session_state(),
+        crcbl_net::SessionState::Reconnecting
+    );
+    server.reconnect(replacement);
+
+    // Queue the token-bearing hello before the expiry update, so the hello
+    // itself trips the grace deadline (the bug's shape): the session expires
+    // without `session_terminated` being set, and the fresh join that follows
+    // silently re-issues the dead session's credential.
+    send_hello(&mut replacement_peer, Some(token));
+    server.update(std::time::Duration::from_secs(3));
+    match recv_handshake(&mut replacement_peer) {
+        crcbl_net::HandshakeResult::Reject { reason, .. } => {
+            assert_eq!(reason.code, crcbl_net::RejectReason::INVALID_SESSION_TOKEN)
+        }
+        crcbl_net::HandshakeResult::Accept { .. } => panic!("expired reconnect accepted"),
+    }
+    assert_eq!(
+        server.session_state(),
+        crcbl_net::SessionState::Disconnected
+    );
+
+    // A fresh token-less join must rotate the session — new id, new token —
+    // never re-issue the expired session's credential.
+    send_hello(&mut replacement_peer, None);
+    server.update(std::time::Duration::from_secs(4));
+    match recv_handshake(&mut replacement_peer) {
+        crcbl_net::HandshakeResult::Accept {
+            session_id,
+            resume_token,
+            ..
+        } => {
+            assert_ne!(session_id, crcbl_net::SessionId(1));
+            assert_ne!(resume_token, token);
+        }
+        crcbl_net::HandshakeResult::Reject { reason, .. } => {
+            panic!("fresh session rejected: {reason:?}")
+        }
+    }
+    assert_eq!(server.session_state(), crcbl_net::SessionState::Connected);
+}
+
+#[test]
 fn server_and_client_survive_multiple_ticks() {
     let (server_transport, client_transport) = InMemoryTransport::pair();
 

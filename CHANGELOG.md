@@ -1458,6 +1458,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-server**: a reconnect hello that arrived **after** the grace deadline
+  expired the session without marking it terminated, so the next fresh join
+  silently re-issued the dead session's token and id — and the departed client
+  could still reconnect against the "new" session with its old credential. The
+  expiry inside `handle_hello` now sets `session_terminated`, so the fresh join
+  rotates to a new session and token.
+
+- **crcbl-client**: a client holding a resume token a restarted server no longer
+  recognised retried the stale token forever at capped backoff, wedged at
+  "connecting" with no fresh join ever sent. Two consecutive
+  `INVALID_SESSION_TOKEN` rejections now drop the token and session id and fall
+  back to a fresh token-less join (two rather than one, so a single forged
+  reject cannot throw away a still-valid credential).
+
 - **asteroids**: a bullet could hit a rock sitting **behind** the ship on the
   tick it left the gun. Segment CCD reconstructs where a projectile was as
   `position - velocity * dt`, so one created this tick was swept from a point a

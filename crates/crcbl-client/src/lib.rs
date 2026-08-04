@@ -19,7 +19,7 @@ use crcbl_net::auth::SessionCrypto;
 use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::{
     Baseline, DeltaCodec, HandshakeResult, Hello, Message, MessageKind, ProtocolCompatibility,
-    ResumeToken, SectorId, SessionId, Transport, TransportError, Trust,
+    RejectReason, ResumeToken, SectorId, SessionId, Transport, TransportError, Trust,
 };
 use crcbl_phys::Transform;
 
@@ -115,6 +115,10 @@ pub struct Client<T: Transport> {
     /// Earliest time the next hello may be sent, after a retryable rejection.
     handshake_retry_at: Option<Duration>,
     handshake_attempts: u32,
+    /// Consecutive `INVALID_SESSION_TOKEN` rejections while holding a resume
+    /// token; reaching two drops the stale credential so the client falls back
+    /// to a fresh join.
+    handshake_token_rejections: u32,
     handshake_complete: bool,
     /// Set only by a rejection this build can never satisfy.
     handshake_blocked: bool,
@@ -170,6 +174,7 @@ impl<T: Transport> Client<T> {
             handshake_deadline: None,
             handshake_retry_at: None,
             handshake_attempts: 0,
+            handshake_token_rejections: 0,
             handshake_complete: false,
             handshake_blocked: false,
             reliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
@@ -391,6 +396,7 @@ impl<T: Transport> Client<T> {
         self.handshake_deadline = None;
         self.handshake_retry_at = None;
         self.handshake_attempts = 0;
+        self.handshake_token_rejections = 0;
         self.handshake_complete = false;
         self.handshake_blocked = false;
         self.session_crypto = None;
@@ -625,6 +631,7 @@ impl<T: Transport> Client<T> {
                 self.session_crypto = Some(SessionCrypto::from_token(&resume_token));
                 self.handshake_complete = true;
                 self.handshake_attempts = 0;
+                self.handshake_token_rejections = 0;
                 self.handshake_retry_at = None;
                 // Start playback at the server's clock rather than zero, so
                 // the first snapshot pair does not have to drag it forwards.
@@ -634,7 +641,26 @@ impl<T: Transport> Client<T> {
                 self.processing_error_count += 1;
                 if reason.is_permanent() {
                     self.handshake_blocked = true;
+                } else if reason.code == RejectReason::INVALID_SESSION_TOKEN
+                    && self.resume_token.is_some()
+                {
+                    // The server no longer recognises this session's resume
+                    // token (a restart, or a rotation this client missed).
+                    // Re-sending it forever is the wedge this branch exists to
+                    // break: after two consecutive such rejections, drop the
+                    // token and let the next hello be a fresh join. Two rather
+                    // than one, so a single forged reject cannot throw away a
+                    // still-valid resume credential.
+                    self.handshake_token_rejections =
+                        self.handshake_token_rejections.saturating_add(1);
+                    if self.handshake_token_rejections >= 2 {
+                        self.resume_token = None;
+                        self.session_id = None;
+                        self.handshake_token_rejections = 0;
+                    }
+                    self.schedule_handshake_retry();
                 } else {
+                    self.handshake_token_rejections = 0;
                     self.schedule_handshake_retry();
                 }
             }
@@ -990,6 +1016,67 @@ mod tests {
         )
         .unwrap();
         assert!(retry.generation > generation);
+    }
+
+    #[test]
+    fn two_invalid_session_token_rejects_drop_the_stale_resume_token() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        let initial_token = ResumeToken::from_bytes([0xA5; 32]);
+        accept_hello(&mut client, &mut peer, Duration::ZERO, initial_token);
+
+        // A server restart leaves the client holding a resume token the
+        // server no longer recognises; every token-bearing hello is rejected
+        // as INVALID_SESSION_TOKEN.
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        client.reconnect(client_transport);
+        client.update(TICK);
+        let first = crcbl_net::decode_hello(&peer.recv().unwrap().unwrap().payload)
+            .expect("client sends a resume hello");
+        let first_generation = first.generation;
+        assert_eq!(first.session_token, Some(initial_token));
+
+        let reject = |peer: &mut InMemoryTransport, generation: u64| {
+            peer.send_reliable(Message::reliable(crcbl_net::encode_handshake_result(
+                &HandshakeResult::Reject {
+                    generation,
+                    reason: RejectReason {
+                        code: RejectReason::INVALID_SESSION_TOKEN,
+                        msg: "fresh handshake must not include a session token".into(),
+                    },
+                },
+            )))
+            .unwrap();
+        };
+        reject(&mut peer, first_generation);
+        client.update(Duration::from_secs(1));
+        // One rejection must not throw the still-valid credential away: the
+        // next hello, sent once the backoff elapses, still carries the token.
+        client.update(Duration::from_secs(2));
+        let second = crcbl_net::decode_hello(&peer.recv().unwrap().unwrap().payload)
+            .expect("client retries after a token rejection");
+        assert_eq!(second.session_token, Some(initial_token));
+        reject(&mut peer, second.generation);
+        client.update(Duration::from_secs(3));
+        // Two consecutive rejections drop the stale token and fall back to a
+        // fresh token-less join.
+        client.update(Duration::from_secs(4));
+        let third = crcbl_net::decode_hello(&peer.recv().unwrap().unwrap().payload)
+            .expect("client falls back to a fresh join");
+        assert_eq!(third.session_token, None);
+
+        // The fresh join is accepted under a new session.
+        peer.send_reliable(Message::reliable(crcbl_net::encode_handshake_result(
+            &HandshakeResult::Accept {
+                generation: third.generation,
+                session_id: SessionId(2),
+                resume_token: ResumeToken::from_bytes([0xB5; 32]),
+                server_tick: TickId::ZERO,
+            },
+        )))
+        .unwrap();
+        client.update(Duration::from_secs(5));
+        assert_eq!(client.session_id(), Some(SessionId(2)));
     }
 
     #[test]
