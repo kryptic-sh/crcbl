@@ -16,6 +16,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **horde**: the three enemy kinds are **Diablo II monsters**. The frames in
+  `apps/horde/assets/actors.crpix` are renamed and redrawn — `grunt` → `fallen`
+  (a horned, hunched imp with a crude bone blade), `runner` → `quill-rat` (a low
+  wide body under a fan of spines, on four thin legs) and `brute` → `overlord`
+  (a head sunk between two shoulder masses, lit brow, tusks) — and
+  `art::enemy_frame` is where a kind is mapped to one. **`EnemyKind`'s variants
+  are unchanged**: `Grunt`, `Runner` and `Brute` name the roles the spawn table
+  and `EnemyKind::from_roll` reason about, and nothing in `game.rs` moved. Each
+  silhouette is still drawn to its own collider to the texel, which is why the
+  runner became a quadruped: thirteen texels does not carry a humanoid.
+
+  The palette that came with them is muted earth and blood — three shades of
+  blood, three of hide, three of dead skin and one bone — and two new tests say
+  where it has to sit.
+  `art::tests::the_monsters_sit_between_the_grass_and_the_player_in_luma` puts
+  every kind's average texel above the brightest texel of `assets/terrain.crpix`
+  and every monster texel below the player's average, and
+  `art::tests::the_monsters_have_a_dark_rim_and_the_player_a_bright_one` finds
+  the boundary of each silhouette and asserts the dark-rim/bright-rim asymmetry
+  in both directions rather than leaving it a sentence in the sheet.
+
 - **horde**: the player is a **wizard**, and it moves like one. Five new frames
   in `apps/horde/assets/actors.crpix` — a standing pose and a four-frame walk
   cycle held four ticks a frame, played from `RenderState::elapsed` so a replay
@@ -1495,6 +1516,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   has no expectations for rather than passing on a game that never started.
 
 ### Fixed
+
+- **crcbl-ui**: a drag from one menu item onto a neighbour drew the neighbour
+  `Pressed` — the drawn state came from a menu-global "something is down" flag
+  plus whatever was hovered, not from `UiState`'s capture. The item the press
+  belongs to is now tracked, so a drag-off leaves both items `Idle`.
+
+- **crcbl-store**: `ReplayWriter::encode` wrote a `>4 GiB` entry's length as a
+  truncated `u32` — a corrupt file with no error. It now refuses with the
+  format's u32 length named, exactly as `save.rs` does.
+
+- **crcbl-sprite**: crpix bake-time pixel math overflowed `u32` on a
+  large-but-parseable file — a 32768×32768 frame's `width × height × 4` wrapped
+  to zero, and the strip's `sheet_w × fh × 4` wrapped too, producing a truncated
+  sheet or an OOB index panic. Frame and strip sizes are now checked in `u64` at
+  parse time and refused with a named `TooLarge` error.
+
+- **crcbl-wl-scanner**: an attribute value ending in `/` was mistaken for the
+  self-closing marker — `<arg summary="foo/">` had its slash stripped from the
+  value and the tag flagged empty. The trailing-slash test is now quote-aware.
+
+- **crcbl** (`engine`): a menu key pressed before a menu opened stayed in
+  `held_keys` forever when released while the menu was showing — the menu-key
+  arms dropped the release before the held-key bookkeeping ran. The bookkeeping
+  now runs for every key, matching its own documentation.
 
 - **crcbl-phys**: a sweep shorter than the quadratic solver's EPSILON floor
   (below ~1.5e-8 m) was reported as a miss even when it started inside the

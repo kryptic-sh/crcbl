@@ -240,6 +240,11 @@ pub struct Menu {
     selected: usize,
     /// Whether the selected item is being held down.
     pressed: bool,
+    /// The item the current press belongs to — the pointer's captured item or
+    /// the keyboard's selection. What decides who draws [`ButtonState::Pressed`]:
+    /// `pressed` alone cannot, because a drag onto a neighbour leaves the
+    /// capture (and the drawn press) with the item it started on.
+    pressed_index: Option<usize>,
     /// Which item the pointer is over, if any. Takes over the highlight from
     /// [`Menu::selected`] while it is `Some`.
     hovered: Option<usize>,
@@ -254,6 +259,7 @@ impl Menu {
             items,
             selected: 0,
             pressed: false,
+            pressed_index: None,
             hovered: None,
         }
     }
@@ -298,6 +304,7 @@ impl Menu {
         // cursor left resting over an item makes the arrow keys look dead.
         self.hovered = None;
         self.pressed = false;
+        self.pressed_index = None;
     }
 
     /// Selects the item with this id, if it is in the menu.
@@ -322,6 +329,9 @@ impl Menu {
     /// this only changes what is drawn.
     pub const fn press(&mut self, down: bool) {
         self.pressed = down;
+        // A keyboard press belongs to the highlighted item, which is the
+        // selected one until the pointer takes over.
+        self.pressed_index = if down { Some(self.selected) } else { None };
     }
 
     /// Fires the highlighted item and returns its id.
@@ -331,6 +341,7 @@ impl Menu {
     /// see is about to happen, whichever device put the highlight there.
     pub fn activate(&mut self) -> Option<WidgetId> {
         self.pressed = false;
+        self.pressed_index = None;
         let index = self.hovered.unwrap_or(self.selected);
         self.items.get(index).map(|item| item.id)
     }
@@ -342,11 +353,13 @@ impl Menu {
     pub const fn clear_input(&mut self) {
         self.hovered = None;
         self.pressed = false;
+        self.pressed_index = None;
     }
 
     /// How item `index` is drawn.
     ///
-    /// [`ButtonState::Pressed`] for the highlighted item while it is held,
+    /// [`ButtonState::Pressed`] for the item the current press belongs to —
+    /// the pointer's captured item, or the selected one under the keyboard —
     /// [`ButtonState::Hovered`] for the highlighted item otherwise, and
     /// [`ButtonState::Idle`] for everything else — which is what makes a
     /// keyboard-only player see the same three frames of art a mouse would light
@@ -356,8 +369,12 @@ impl Menu {
         if index >= self.items.len() || index != self.hovered.unwrap_or(self.selected) {
             return ButtonState::Idle;
         }
-        if self.pressed {
+        if self.pressed_index == Some(index) {
             ButtonState::Pressed
+        } else if self.pressed {
+            // The press belongs to another item (a drag-off): this one must
+            // stay Idle, exactly as `interact` reports it.
+            ButtonState::Idle
         } else {
             ButtonState::Hovered
         }
@@ -390,6 +407,7 @@ impl Menu {
             }
             if state == ButtonState::Pressed && inside {
                 self.pressed = true;
+                self.pressed_index = Some(index);
             }
             if fired {
                 clicked = Some(item.id);
@@ -399,6 +417,7 @@ impl Menu {
         self.hovered = hovered;
         if !pointer.down {
             self.pressed = false;
+            self.pressed_index = None;
         }
         clicked
     }
@@ -1279,6 +1298,50 @@ mod tests {
         );
         assert_eq!(menu.state(0), ButtonState::Hovered, "back to the selection");
         assert_eq!(menu.state(2), ButtonState::Idle);
+    }
+
+    /// **A drag from one item onto a neighbour draws neither of them
+    /// pressed.** [`UiState`]'s capture belongs to the item the press started
+    /// on, so the neighbour reports `Idle` even while the cursor is over it —
+    /// and the drawn state must say the same, not the `Pressed` a menu-global
+    /// "something is down" bool painted onto whatever was hovered.
+    #[test]
+    fn a_drag_onto_a_neighbour_does_not_press_it() {
+        let atlas = atlas();
+        let mut menu = pause_menu();
+        let layout = menu.layout((960, 720), &atlas);
+        let mut ui = UiState::new();
+        let first = layout.items()[0];
+        let second = layout.items()[1];
+
+        // Press on the first item: it draws Pressed.
+        let down = PointerInput {
+            pos: (first.min + first.max) * 0.5,
+            down: true,
+            released: false,
+        };
+        assert_eq!(menu.point(&layout, &mut ui, down), None);
+        assert_eq!(menu.state(0), ButtonState::Pressed);
+
+        // Drag onto the second: the capture still belongs to the first, so the
+        // second must draw Idle — and once the cursor leaves it, so must the
+        // first, exactly as `interact` reports both.
+        let dragged = PointerInput {
+            pos: (second.min + second.max) * 0.5,
+            down: true,
+            released: false,
+        };
+        assert_eq!(menu.point(&layout, &mut ui, dragged), None);
+        assert_eq!(
+            menu.state(1),
+            ButtonState::Idle,
+            "the neighbour drew Pressed while the capture belongs to the first item",
+        );
+        assert_eq!(
+            menu.state(0),
+            ButtonState::Idle,
+            "the cursor left the captured item"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -184,9 +184,23 @@ impl<'a> Reader<'a> {
         let inner = &self.source[start..index];
         self.pos = index + 1;
 
-        let (inner, empty) = match inner.strip_suffix('/') {
-            Some(stripped) => (stripped, true),
-            None => (inner, false),
+        // A trailing `/` is the self-closing marker only outside a quoted
+        // attribute value: in `<arg summary="foo/">` the slash is data inside
+        // the value, whose closing quote comes after it. The same two quote
+        // characters the scan above honours, and — as there — a quote inside
+        // a differently-quoted value is data, not a delimiter.
+        let mut quote: Option<u8> = None;
+        for &byte in inner.as_bytes() {
+            match (quote, byte) {
+                (Some(open), byte) if byte == open => quote = None,
+                (None, b'"' | b'\'') => quote = Some(byte),
+                _ => {}
+            }
+        }
+        let (inner, empty) = if quote.is_none() && inner.ends_with('/') {
+            (&inner[..inner.len() - 1], true)
+        } else {
+            (inner, false)
         };
         let inner = inner.trim();
         let name_end = inner
@@ -358,6 +372,32 @@ mod tests {
         };
         assert_eq!(attrs[1].1, "x > y & z");
         assert_eq!(attrs[2].1, "A");
+    }
+
+    /// A trailing `/` inside an attribute value is data, not the self-closing
+    /// marker: `<arg summary="foo/">` has its slash inside the quotes, and a
+    /// reader that stripped the tag at it would report the element empty and
+    /// then trip over the real `</arg>`.
+    #[test]
+    fn a_slash_inside_an_attribute_value_is_not_self_closing() {
+        let doc = nodes(r#"<arg summary="foo/"></arg>"#);
+        let Node::Start { name, attrs, empty } = &doc[0] else {
+            panic!("expected a start tag");
+        };
+        assert_eq!(*name, "arg");
+        assert!(
+            !*empty,
+            "the slash is inside the value, not the self-closing marker"
+        );
+        assert_eq!(attrs[0].1, "foo/");
+        assert_eq!(doc.last(), Some(&Node::End { name: "arg" }));
+
+        // And a genuine self-closing tag still parses as empty.
+        let self_closing = nodes(r#"<tag/>"#);
+        let Node::Start { empty, .. } = &self_closing[0] else {
+            panic!("expected a start tag");
+        };
+        assert!(*empty, "a genuine self-closing tag still parses empty");
     }
 
     #[test]

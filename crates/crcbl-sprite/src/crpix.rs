@@ -112,6 +112,20 @@ pub struct CrpixArt {
     pub sample: SampleMode,
 }
 
+/// The RGBA byte size of `frames` frames of `width`×`height` art, or `None`
+/// when the strip cannot exist in memory on this platform.
+///
+/// The header is five `u32`s, so a large-but-parseable file can describe a
+/// sheet whose allocation size the u32 arithmetic would wrap; checking here
+/// is what turns that from a truncated buffer into a named error.
+fn sheet_bytes(width: u32, height: u32, frames: u64) -> Option<usize> {
+    let per_frame = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|area| area.checked_mul(4))?;
+    let total = per_frame.checked_mul(frames)?;
+    usize::try_from(total).ok()
+}
+
 impl CrpixArt {
     /// Lays the frames left to right into one image and returns the pixels
     /// alongside the [`Sheet`] that describes them.
@@ -123,18 +137,40 @@ impl CrpixArt {
     /// screen.
     ///
     /// Returns `(rgba, sheet)`, `rgba` being row-major over the whole strip.
+    ///
+    /// # Panics
+    ///
+    /// If the art describes a strip that cannot exist in memory — possible
+    /// only for a [`CrpixArt`] built by hand, since [`parse`] refuses one.
     #[must_use]
     pub fn to_sheet(&self) -> (Vec<u8>, Sheet) {
         let (fw, fh) = (self.header.width, self.header.height);
-        let sheet_w = fw * self.frames.len() as u32;
-        let mut rgba = vec![0u8; (sheet_w * fh * 4) as usize];
+        let frame_count = self.frames.len() as u64;
+        // Checked arithmetic throughout: `parse` bounds the header so a parsed
+        // art always fits, and a `CrpixArt` built by hand past that check gets
+        // a loud panic here instead of the truncated allocation the old u32
+        // math produced.
+        let bytes = u64::from(fw)
+            .checked_mul(u64::from(fh))
+            .and_then(|area| area.checked_mul(4))
+            .and_then(|per_frame| per_frame.checked_mul(frame_count))
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .expect("a parsed .crpix is bounded at parse time");
+        let sheet_w = u64::from(fw)
+            .checked_mul(frame_count)
+            .and_then(|w| u32::try_from(w).ok())
+            .expect("a parsed .crpix is bounded at parse time");
+        let mut rgba = vec![0u8; bytes];
 
         for (index, frame) in self.frames.iter().enumerate() {
-            let x0 = index as u32 * fw;
+            let x0 = u64::from(index as u32) * u64::from(fw);
             for y in 0..fh {
-                let src = (y * fw * 4) as usize;
-                let dst = ((y * sheet_w + x0) * 4) as usize;
-                let run = (fw * 4) as usize;
+                let src = usize::try_from(u64::from(y) * u64::from(fw) * 4)
+                    .expect("a parsed .crpix is bounded at parse time");
+                let dst = usize::try_from((u64::from(y) * u64::from(sheet_w) + x0) * 4)
+                    .expect("a parsed .crpix is bounded at parse time");
+                let run = usize::try_from(u64::from(fw) * 4)
+                    .expect("a parsed .crpix is bounded at parse time");
                 rgba[dst..dst + run].copy_from_slice(&frame.pixels[src..src + run]);
             }
         }
@@ -224,6 +260,18 @@ pub enum CrpixErrorKind {
     BadNine(String),
     /// A `sample:` that is not `pixel` or `smooth`.
     BadSample(String),
+    /// A sheet too large for this platform: `width × height × frames` RGBA
+    /// pixels cannot be addressed, or the strip's width cannot fit the
+    /// format's `u32`.
+    ///
+    /// The header is five `u32`s, so a large-but-parseable file can describe
+    /// a sheet the allocation arithmetic would wrap — refused where it was
+    /// declared rather than silently truncated.
+    TooLarge {
+        width: u32,
+        height: u32,
+        frames: u32,
+    },
     /// The sheet the file describes broke one of [`Sheet`]'s own rules.
     Sheet(crate::SheetError),
 }
@@ -303,6 +351,14 @@ impl fmt::Display for CrpixError {
             CrpixErrorKind::BadSample(text) => {
                 write!(f, "`sample:` is `pixel` or `smooth`, got `{text}`")
             }
+            CrpixErrorKind::TooLarge {
+                width,
+                height,
+                frames,
+            } => write!(
+                f,
+                "a {width}×{height} strip of {frames} frame(s) is too large for this platform"
+            ),
             CrpixErrorKind::Sheet(error) => write!(f, "{error}"),
         }
     }
@@ -622,7 +678,16 @@ impl<'a> Parser<'a> {
             });
         }
 
-        let mut pixels = Vec::with_capacity((header.width * header.height * 4) as usize);
+        let mut pixels = Vec::with_capacity(sheet_bytes(header.width, header.height, 1).ok_or(
+            CrpixError {
+                line: opened,
+                kind: CrpixErrorKind::TooLarge {
+                    width: header.width,
+                    height: header.height,
+                    frames: 1,
+                },
+            },
+        )?);
         for row in &rows {
             for colour in row {
                 pixels.extend_from_slice(colour);
@@ -705,6 +770,10 @@ impl<'a> Parser<'a> {
             });
         }
 
+        // The strip's frame count, captured before `self.frames` is moved into
+        // the art below: the size check that guards `to_sheet` needs it.
+        let frame_count = self.frames.len() as u64;
+
         let art = CrpixArt {
             header,
             frames: self.frames,
@@ -712,6 +781,26 @@ impl<'a> Parser<'a> {
             nine: self.nine,
             sample: self.sample,
         };
+
+        // Refuse a strip that cannot exist in memory before building it: the
+        // sheet's width is a `u32` and its pixels a `Vec`, and the header is
+        // five `u32`s, so a large-but-parseable file would otherwise wrap the
+        // allocation arithmetic and produce a truncated sheet.
+        let fits = sheet_bytes(header.width, header.height, frame_count).is_some()
+            && u64::from(header.width)
+                .checked_mul(frame_count)
+                .and_then(|w| u32::try_from(w).ok())
+                .is_some();
+        if !fits {
+            return Err(CrpixError {
+                line,
+                kind: CrpixErrorKind::TooLarge {
+                    width: header.width,
+                    height: header.height,
+                    frames: u32::try_from(frame_count).unwrap_or(u32::MAX),
+                },
+            });
+        }
 
         // The sheet's own rules, so a `.crpix` that parses cannot still produce
         // a sheet its consumer would reject.
@@ -902,6 +991,31 @@ clip flap: up down @ 6 loop
         };
         assert_eq!(at(1, 2), [0, 0, 0, 0xff], "frame `up` has a bottom edge");
         assert_eq!(at(6, 2), [0, 0, 0, 0], "frame `down` does not");
+    }
+
+    /// The checked arithmetic behind the parse-time size bounds: a header's
+    /// `width × height × frames × 4` never wraps, so a large-but-parseable
+    /// header becomes an error instead of a truncated allocation.
+    ///
+    /// A real 32768×32768 fixture is four gigabytes of text, so the numbers
+    /// are exercised directly: the review's canonical case is reported
+    /// exactly where the platform can address it and refused where it cannot,
+    /// and everything past that comes back `None` rather than a wrapped small
+    /// size — at every step of the multiplication.
+    #[test]
+    fn sheet_bytes_is_exact_for_large_but_parseable_headers() {
+        // 32768×32768×4 is exactly 2³², which the old u32 math wrapped to 0.
+        let exact = u64::from(32768u32) * 32768 * 4;
+        assert_eq!(
+            sheet_bytes(32768, 32768, 1),
+            usize::try_from(exact).ok(),
+            "a 32768×32768 frame must be reported exactly, never wrapped",
+        );
+        assert_eq!(sheet_bytes(5, 3, 2), Some(5 * 3 * 2 * 4));
+        // Products no platform can address: `None`, not a truncated size.
+        assert_eq!(sheet_bytes(u32::MAX, u32::MAX, 1), None);
+        assert_eq!(sheet_bytes(u32::MAX, u32::MAX, u64::from(u32::MAX)), None);
+        assert_eq!(sheet_bytes(u32::MAX, 1, u64::from(u32::MAX)), None);
     }
 
     /// **The rule the declared header buys.** A row one character short renders

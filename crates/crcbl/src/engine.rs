@@ -2056,6 +2056,17 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
         let code = *code;
         let pressed = matches!(state, crcbl_shell::ButtonState::Pressed);
 
+        // Held keys are tracked before the menu branch, so a menu key pressed
+        // while the menu was off and released while it is on still comes off
+        // the list — the doc below promises the bookkeeping runs either way.
+        if pressed {
+            if !self.held.contains(&code) {
+                self.held.push(code);
+            }
+        } else {
+            self.held.retain(|key| *key != code);
+        }
+
         if self.showing {
             match code {
                 MENU_UP_KEY => {
@@ -2084,13 +2095,6 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
             }
         }
 
-        if pressed {
-            if !self.held.contains(&code) {
-                self.held.push(code);
-            }
-        } else {
-            self.held.retain(|key| *key != code);
-        }
         Some((code, pressed))
     }
 }
@@ -4181,6 +4185,41 @@ mod tests {
             pump.observe(&event);
         });
         assert!(held.is_empty(), "the release did not clear it: {held:?}");
+    }
+
+    /// **A menu key pressed before a menu opened is still released from the
+    /// held list while the menu eats its release.**
+    ///
+    /// The held-key bookkeeping must run for *every* key, whether or not the
+    /// menu claimed it: a menu key held as the menu opened would otherwise
+    /// stay on the list forever — the game would read it as stuck down — and
+    /// the release that ought to clear it was being dropped by the menu's
+    /// early return.
+    #[test]
+    fn a_menu_key_is_released_from_the_held_list_while_the_menu_shows() {
+        let (mut shell, window) = shell();
+        let mut set = menus();
+        let mut held = Vec::new();
+
+        // Pressed while no menu is up: tracked as held.
+        shell.key_press(window, MENU_UP_KEY).expect("live");
+        let mut pump = MenuPump::new(&mut set, &mut held, false);
+        shell.pump(&mut |event| {
+            pump.observe(&event);
+        });
+        assert_eq!(held, vec![MENU_UP_KEY]);
+
+        // Released while the menu is up: the menu consumes the event, but the
+        // release must still take the key off the held list.
+        shell.key_release(window, MENU_UP_KEY).expect("live");
+        let mut pump = MenuPump::new(&mut set, &mut held, true);
+        shell.pump(&mut |event| {
+            pump.observe(&event);
+        });
+        assert!(
+            !held.contains(&MENU_UP_KEY),
+            "the menu key is still held: {held:?}",
+        );
     }
 
     /// Drains the shell into a `Pending`, and reports what each event was

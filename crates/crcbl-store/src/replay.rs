@@ -95,7 +95,10 @@ impl ReplayWriter {
     }
 
     /// Encode the replay into a byte buffer.
-    fn encode(&self) -> Vec<u8> {
+    ///
+    /// Fails rather than truncating when an entry's data length does not fit
+    /// the `u32` the format reserves for it.
+    fn encode(&self) -> Result<Vec<u8>, StorageError> {
         let total_entries = self.entries.len() as u64;
         let mut buf = Vec::with_capacity(
             REPLAY_MIN_SIZE + self.entries.iter().map(|(_, d)| d.len()).sum::<usize>(),
@@ -111,17 +114,23 @@ impl ReplayWriter {
 
         for (tick, data) in &self.entries {
             buf.extend_from_slice(&tick.get().to_le_bytes());
-            let len = data.len() as u32;
+            let len = u32::try_from(data.len()).map_err(|_| {
+                StorageError::Other(format!(
+                    "entry at tick {} is {} bytes, more than the format's u32 length",
+                    tick.get(),
+                    data.len()
+                ))
+            })?;
             buf.extend_from_slice(&len.to_le_bytes());
             buf.extend_from_slice(data);
         }
 
-        buf
+        Ok(buf)
     }
 
     /// Write the replay file atomically through `storage` at `path`.
     pub fn write(&self, storage: &dyn StorageSource, path: &Path) -> Result<(), StorageError> {
-        let data = self.encode();
+        let data = self.encode()?;
         storage.write(path, &data)
     }
 }
