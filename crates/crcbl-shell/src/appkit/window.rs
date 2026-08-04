@@ -62,6 +62,7 @@ use super::ffi::{self, Class, Id, Imp, NSRect, NSSize, ObjcBool, Sel, YES};
 use super::geometry;
 use super::monitors::Screen;
 use super::shell::{AppKitShell, AppWindow};
+use super::view;
 
 /// The name of the `NSWindow` subclass this module builds at runtime.
 const WINDOW_CLASS: &CStr = c"CrcblWindow";
@@ -255,12 +256,12 @@ impl AppKitShell {
         target: Option<&Screen>,
     ) -> Result<Created, ShellError> {
         let class = window_class()?;
-        let Some(view_class) = ffi::class(c"NSView") else {
-            return Err(ShellError::Connect {
-                backend: ShellBackend::AppKit,
-                detail: "the Objective-C runtime has no NSView".to_string(),
-            });
-        };
+        // **`CrcblView`, not `NSView`.** A plain view answers `NO` to
+        // `acceptsFirstResponder`, implements none of the responder methods
+        // input arrives through, and conforms to no text-input protocol — so a
+        // window built on one is a window that receives nothing. See
+        // [`view`](super::view).
+        let view_class = view::view_class()?;
         let Some(layer_class) = ffi::class(c"CAMetalLayer") else {
             return Err(ShellError::Connect {
                 backend: ShellBackend::AppKit,
@@ -367,6 +368,32 @@ impl AppKitShell {
             // The window retains the content view, so this shell's own
             // reference from `alloc` is handed over.
             ffi::msg_void(view, ffi::sel(c"release"));
+        }
+
+        // **The three switches without which input does not exist**, and none of
+        // them is visible to a test that calls a responder method itself — see
+        // [`view`](super::view), which is where all four gaps are written out.
+        //
+        // SAFETY: a live window and its live content view.
+        unsafe {
+            // Nothing generates `NSEventTypeMouseMoved` for a window that has
+            // not asked. Without this, pointer motion with no button held simply
+            // does not happen, and `mouseDragged:` covers up the absence for
+            // exactly as long as somebody is holding a button.
+            ffi::msg_set_bool(window, ffi::sel(c"setAcceptsMouseMovedEvents:"), true);
+            // `sendEvent:` delivers key events to the first responder, which is
+            // the *window* until something else claims it. `CrcblView` answers
+            // `YES` to `acceptsFirstResponder:` precisely so this can succeed.
+            let make: unsafe extern "C" fn(Id, Sel, Id) -> ObjcBool = ffi::msg_send();
+            if make(window, ffi::sel(c"makeFirstResponder:"), view) == ffi::NO {
+                log::warn!(
+                    "-[NSWindow makeFirstResponder:] refused the content view; this window \
+                     will receive no key events"
+                );
+            }
+            // Enter, exit and cursor updates, none of which any other mechanism
+            // produces.
+            view::add_tracking_area(view);
         }
 
         // SAFETY: an autoreleased `NSString`, valid for this pool.

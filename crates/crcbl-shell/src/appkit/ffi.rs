@@ -63,7 +63,9 @@
 //! | Not used | What it would buy | Why not |
 //! | --- | --- | --- |
 //! | `toggleFullScreen:` and `NSWindowStyleMaskFullScreen` | Spaces fullscreen | `docs/plan/15-windowing.md` drops exclusive fullscreen and keeps two modes; Spaces fullscreen is a third, with its own animation, its own space and its own failure modes. Borderless here is a frameless window at screen size — see [`window`](super::window) |
-//! | `NSTrackingArea`, `NSTextInputClient`, `NSPasteboard`, `registerForDraggedTypes:` | pointer tracking, IME, clipboard, drops | M2 and M3. [`ShellCaps`](crate::ShellCaps) is clear on every bit they would set |
+//! | `NSPasteboard`, `registerForDraggedTypes:` | clipboard, drops | M3. [`ShellCaps`](crate::ShellCaps) is clear on every bit they would set |
+//! | `IOHIDManager`, `IOHIDGetAccelerationWithKey` | genuinely unaccelerated pointer deltas | `NSEvent`'s `deltaX`/`deltaY` carry the system's pointer acceleration and macOS exposes no public way to take it off. Reaching past AppKit into IOKit for it is a slice of its own; [`caps`](super::AppKitShell::caps) states exactly what [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION) does and does not mean here |
+//! | any `_windowResize*Cursor` and `busyButClickableCursor` | diagonal-resize and busy cursors | **private selectors.** `NSCursor`'s public set has no diagonal resize and no wait cursor; [`pointer::cursor_selector`](super::pointer::cursor_selector) names each approximation rather than calling a method Apple does not publish |
 //! | `NSAutoreleasePool` as an object | a scope for autoreleased returns | [`objc_autoreleasePoolPush`]/[`objc_autoreleasePoolPop`] are the same thing without a message send, and are the form that works under ARC and non-ARC alike |
 //! | `CGDisplayModeGetRefreshRate`'s `CGDisplayModeGetRefreshRateRational` twin | an exact 60000/1001 | it does not exist; the `double` this one returns already expresses 59.94, which is more than Win32's integer hertz can do |
 //! | `NSApplication`'s delegate slot | screen-parameter changes | taking it would displace a host application's own delegate. `NSNotificationCenter` is the polite form and is what [`app`](super::app) uses |
@@ -205,6 +207,56 @@ pub struct NSRect {
     pub size: NSSize,
 }
 
+/// `NSRange` — the location and length `NSTextInputClient` speaks in.
+///
+/// **UTF-16 code units, not bytes and not characters**, because that is what an
+/// `NSString` is indexed by. Sixteen bytes of two integers, so both target ABIs
+/// return it in registers and it never needs [`msg_send_stret`] — unlike
+/// [`NSRect`], which is the only shape here that does.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NSRange {
+    /// Index of the first unit.
+    pub location: NSUInteger,
+    /// How many units.
+    pub length: NSUInteger,
+}
+
+impl NSRange {
+    /// `NSNotFound`, which is `NSIntegerMax` and **not** `NSUIntegerMax`.
+    ///
+    /// Getting that wrong matters: an input method compares against the
+    /// documented constant, and a range at `NSUIntegerMax` is simply a very
+    /// large index it will try to use.
+    pub const NOT_FOUND: NSUInteger = NSInteger::MAX as NSUInteger;
+
+    /// The empty range an input method reads as "there is none".
+    pub const NONE: Self = Self {
+        location: Self::NOT_FOUND,
+        length: 0,
+    };
+
+    /// A range of `length` units starting at `location`.
+    #[must_use]
+    pub const fn new(location: NSUInteger, length: NSUInteger) -> Self {
+        Self { location, length }
+    }
+}
+
+/// The Objective-C type encoding of an `NSRange` on a 64-bit target.
+///
+/// Two `NSUInteger`s, which encode as `Q`. Passed to [`class_addMethod`] for
+/// every `NSTextInputClient` method that takes or returns one; a wrong encoding
+/// is a wrong-width read in the forwarding path nothing here exercises and an
+/// input method might.
+pub const ENC_RANGE: &str = "{_NSRange=QQ}";
+
+/// The type encoding of an `NSRect`, which is a `CGRect`.
+pub const ENC_RECT: &str = "{CGRect={CGPoint=dd}{CGSize=dd}}";
+
+/// The type encoding of an `NSPoint`, which is a `CGPoint`.
+pub const ENC_POINT: &str = "{CGPoint=dd}";
+
 impl NSRect {
     /// A rectangle at `(x, y)` of `width` × `height`.
     #[must_use]
@@ -279,6 +331,96 @@ pub mod value {
     /// in the combination the API accepts.
     pub const PRESENTATION_BORDERLESS: NSUInteger =
         PRESENTATION_AUTO_HIDE_DOCK | PRESENTATION_AUTO_HIDE_MENU_BAR;
+
+    /// `NSEventTypeKeyUp`.
+    ///
+    /// The one event type this backend inspects by number rather than by which
+    /// responder method AppKit called, and it is there for a defect: **while
+    /// Command is held, AppKit does not deliver `keyUp:` to a view at all.** The
+    /// pump routes such an event to the key window itself; see
+    /// [`AppKitShell::drain_events`](super::AppKitShell).
+    pub const EVENT_TYPE_KEY_UP: NSUInteger = 11;
+}
+
+/// `NSEventModifierFlags`, and the device-dependent bits underneath them.
+///
+/// # Two layers, and only the lower one says *which* Shift
+///
+/// The documented flags in the high half (`1 << 16` upwards) say that *a* Shift
+/// is held. `flagsChanged:` is the only notification a modifier key produces on
+/// this platform — there is no `keyDown:` for Shift — so a backend that wants to
+/// report [`ShiftLeft`](crcbl_core::KeyCode::ShiftLeft) going down has to know
+/// which one changed and whether it is now down. The **device-dependent** bits in
+/// the low half carry exactly that, one per physical key, and they are what
+/// [`keys::modifier_is_down`](super::keys::modifier_is_down) reads.
+///
+/// They come from `IOKit/hidsystem/IOLLEvent.h`'s `NX_DEVICE*KEYMASK` rather
+/// than from AppKit's own header, which is why they are spelled out here with
+/// their IOKit names beside them.
+pub mod modifier {
+    use super::NSUInteger;
+
+    /// `NSEventModifierFlagCapsLock` — **latched**, not held.
+    pub const CAPS_LOCK: NSUInteger = 1 << 16;
+    /// `NSEventModifierFlagShift`.
+    pub const SHIFT: NSUInteger = 1 << 17;
+    /// `NSEventModifierFlagControl`.
+    pub const CONTROL: NSUInteger = 1 << 18;
+    /// `NSEventModifierFlagOption` — the key labelled Option or Alt.
+    pub const OPTION: NSUInteger = 1 << 19;
+    /// `NSEventModifierFlagCommand`.
+    pub const COMMAND: NSUInteger = 1 << 20;
+
+    // `NSEventModifierFlagNumericPad` (`1 << 21`) and
+    // `NSEventModifierFlagFunction` (`1 << 23`) are deliberately **not** here.
+    // Nothing reads them — the first is a key-class marker rather than the Num
+    // Lock it is mistaken for, and the second is a key the seam has no name for
+    // — and this module is audited by use, so a constant nobody reads would be a
+    // declaration nobody had checked. [`keys::modifiers`](super::keys::modifiers)
+    // is where the argument for dropping both lives, and its tests spell the two
+    // bits out to assert that dropping them is what happens.
+
+    /// `NX_DEVICELCTLKEYMASK`.
+    pub const DEVICE_LEFT_CONTROL: NSUInteger = 0x0000_0001;
+    /// `NX_DEVICELSHIFTKEYMASK`.
+    pub const DEVICE_LEFT_SHIFT: NSUInteger = 0x0000_0002;
+    /// `NX_DEVICERSHIFTKEYMASK`.
+    pub const DEVICE_RIGHT_SHIFT: NSUInteger = 0x0000_0004;
+    /// `NX_DEVICELCMDKEYMASK`.
+    pub const DEVICE_LEFT_COMMAND: NSUInteger = 0x0000_0008;
+    /// `NX_DEVICERCMDKEYMASK`.
+    pub const DEVICE_RIGHT_COMMAND: NSUInteger = 0x0000_0010;
+    /// `NX_DEVICELALTKEYMASK`.
+    pub const DEVICE_LEFT_OPTION: NSUInteger = 0x0000_0020;
+    /// `NX_DEVICERALTKEYMASK`.
+    pub const DEVICE_RIGHT_OPTION: NSUInteger = 0x0000_0040;
+    /// `NX_DEVICERCTLKEYMASK`, which is **not** beside its left twin.
+    pub const DEVICE_RIGHT_CONTROL: NSUInteger = 0x0000_2000;
+}
+
+/// `NSTrackingAreaOptions`.
+pub mod tracking {
+    use super::NSUInteger;
+
+    /// `NSTrackingMouseEnteredAndExited` — the owner gets `mouseEntered:` and
+    /// `mouseExited:`.
+    pub const MOUSE_ENTERED_AND_EXITED: NSUInteger = 0x01;
+    /// `NSTrackingCursorUpdate` — the owner gets `cursorUpdate:`, which is where
+    /// a cursor shape has to be applied for it to survive the next movement.
+    pub const CURSOR_UPDATE: NSUInteger = 0x04;
+    /// `NSTrackingActiveAlways` — deliver even while another application is
+    /// frontmost, which is the behaviour X11's `EnterNotify` and Win32's
+    /// `WM_MOUSELEAVE` already have.
+    pub const ACTIVE_ALWAYS: NSUInteger = 0x80;
+    /// `NSTrackingInVisibleRect` — AppKit keeps the area glued to the view's
+    /// visible rectangle, so a resize needs no re-registration. The rectangle
+    /// passed to the initialiser is ignored.
+    pub const IN_VISIBLE_RECT: NSUInteger = 0x200;
+
+    /// What this backend asks for: enter, exit, cursor updates, always, and
+    /// self-maintaining.
+    pub const OPTIONS: NSUInteger =
+        MOUSE_ENTERED_AND_EXITED | CURSOR_UPDATE | ACTIVE_ALWAYS | IN_VISIBLE_RECT;
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +438,7 @@ pub mod value {
 // what lets those modules name them.
 #[cfg(target_os = "macos")]
 mod sys {
-    use super::{Class, Id, Imp, ObjcBool, Sel};
+    use super::{Class, Id, Imp, NSPoint, ObjcBool, Sel};
     use core::ffi::{c_char, c_void};
 
     // The Objective-C runtime itself: class and selector lookup, the dispatch
@@ -353,33 +495,90 @@ mod sys {
     }
 
     // QuartzCore: `CAMetalLayer`, which is the whole of
-    // [`SurfaceTarget::AppKit`](crcbl_core::SurfaceTarget::AppKit).
+    // [`SurfaceTarget::AppKit`](crcbl_core::SurfaceTarget::AppKit), and the
+    // clock `NSEvent.timestamp` is measured on.
     //
-    // **Deliberately empty.** Nothing in QuartzCore is called by name here —
-    // `CAMetalLayer` is reached through `objc_getClass`, like every other class
-    // — but the class only exists to be found if the framework is in the image,
-    // and a `#[link]` attribute is what puts it there. The block carries the
-    // link directive and no declarations, which is the idiom for exactly this.
+    // `CAMetalLayer` itself is reached through `objc_getClass`, like every other
+    // class — but the class only exists to be found if the framework is in the
+    // image, and a `#[link]` attribute is what puts it there.
     #[link(name = "QuartzCore", kind = "framework")]
-    unsafe extern "C" {}
+    unsafe extern "C" {
+        /// Seconds since the system booted, on the same `mach_absolute_time`
+        /// clock `-[NSEvent timestamp]` is measured against.
+        ///
+        /// That correspondence is the whole reason this is the function used
+        /// rather than `-[NSProcessInfo systemUptime]`: rebasing a timestamp
+        /// needs a reading of **the same** clock, and a second clock that is
+        /// merely also called "uptime" would put every event a constant offset
+        /// away from the truth. See [`TimeBase`](crate::appkit::TimeBase).
+        pub fn CACurrentMediaTime() -> f64;
+    }
 
     // CoreGraphics: the display-mode query, which is the only way to get a
-    // refresh rate that can express 59.94.
+    // refresh rate that can express 59.94 — and the pointer, which AppKit does
+    // not own. Warping and disconnecting the mouse from the cursor are both
+    // Quartz-level operations with no `NSCursor` equivalent.
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
         pub fn CGMainDisplayID() -> u32;
         pub fn CGDisplayCopyDisplayMode(display: u32) -> *mut c_void;
         pub fn CGDisplayModeGetRefreshRate(mode: *mut c_void) -> f64;
         pub fn CGDisplayModeRelease(mode: *mut c_void);
+
+        /// Moves the cursor, in **global display coordinates** — origin at the
+        /// top-left of the main display, Y **down**, which is the seam's
+        /// convention and the opposite of AppKit's.
+        ///
+        /// Returns a `CGError`; `kCGErrorSuccess` is zero.
+        pub fn CGWarpMouseCursorPosition(position: NSPoint) -> i32;
+
+        /// Connects or disconnects the hardware mouse from the cursor's
+        /// position.
+        ///
+        /// Disconnected, the cursor stops moving and the deltas keep arriving —
+        /// which is the whole of [`PointerMode::Locked`](crate::PointerMode) on
+        /// this platform. `boolean_t` is `int` on every Darwin target.
+        pub fn CGAssociateMouseAndMouseCursorPosition(connected: i32) -> i32;
+
+        /// A `CGEventRef` describing the current input state, or null.
+        ///
+        /// **Declared for the test suite and used by nothing else**, which is
+        /// why it carries a `cfg` no other declaration in this module needs:
+        /// with a null source it is the cheapest way to ask where the cursor
+        /// *is*, and it is Quartz rather than AppKit — so, unlike
+        /// `+[NSEvent mouseLocation]`, a spawned test body may call it. That is
+        /// what makes [`CGWarpMouseCursorPosition`] checkable as a mechanism
+        /// without a window; see [`input`](super::super::input).
+        #[cfg(test)]
+        pub fn CGEventCreate(source: *mut c_void) -> *mut c_void;
+
+        /// An event's location, in the same global display coordinates
+        /// [`CGWarpMouseCursorPosition`] takes. See [`CGEventCreate`].
+        #[cfg(test)]
+        pub fn CGEventGetLocation(event: *mut c_void) -> NSPoint;
+    }
+
+    // CoreFoundation: one function, and it is here because `CGEventCreate`
+    // returns a CF object and something has to give it back. Nothing else in
+    // this backend is CF-typed, and nothing outside the test suite is CF at all.
+    #[cfg(test)]
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        pub fn CFRelease(object: *mut c_void);
     }
 }
 
 #[cfg(target_os = "macos")]
 pub use sys::{
-    CGDisplayCopyDisplayMode, CGDisplayModeGetRefreshRate, CGDisplayModeRelease, CGMainDisplayID,
+    CACurrentMediaTime, CGAssociateMouseAndMouseCursorPosition, CGDisplayCopyDisplayMode,
+    CGDisplayModeGetRefreshRate, CGDisplayModeRelease, CGMainDisplayID, CGWarpMouseCursorPosition,
     NSApplicationDidChangeScreenParametersNotification, NSDefaultRunLoopMode, class_addMethod,
     class_addProtocol, objc_allocateClassPair, objc_getProtocol, objc_registerClassPair,
 };
+
+/// The three declarations that exist for the macOS test suite alone.
+#[cfg(all(target_os = "macos", test))]
+pub use sys::{CFRelease, CGEventCreate, CGEventGetLocation};
 
 // ---------------------------------------------------------------------------
 // Class and selector lookup

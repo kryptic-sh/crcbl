@@ -14,11 +14,14 @@ use crate::{
     ShellEvent, SizeConstraints, WindowConfiguration, WindowDesc, WindowId, WindowState,
 };
 
+use super::TimeBase;
 use super::app::{self, Delegate, Shared};
 use super::events::RawEvent;
 use super::ffi::{self, Id, NSRect, Pool as AutoreleasePool, Sel, value};
 use super::geometry;
+use super::input;
 use super::monitors::{self, Screen};
+use super::pointer::Visibility;
 use super::window;
 
 /// Why [`AppKitShell::wait`] came back.
@@ -95,11 +98,24 @@ pub(super) struct AppWindow {
     /// rather than assumed.
     pub effective_mode: DisplayMode,
     pub saved: Option<Saved>,
-    /// The cursor last asked for. **Recorded and not applied**; see
-    /// [`set_cursor`](AppKitShell::set_cursor).
+    /// The cursor last asked for, `None` for "never asked" and `Some(None)` for
+    /// "hide it". See [`set_cursor`](AppKitShell::set_cursor).
     cursor: Option<Option<CursorIcon>>,
-    focused: bool,
+    /// The pointer mode in effect for this window.
+    pub(super) pointer_mode: PointerMode,
+    pub(super) focused: bool,
     close_pending: bool,
+}
+
+impl AppWindow {
+    /// Whether this window has asked for the cursor to be hidden.
+    ///
+    /// Distinct from "has never asked", which is why the field is a nested
+    /// [`Option`]: a window that never called
+    /// [`set_cursor`](Shell::set_cursor) wants the arrow, not nothing.
+    pub(super) fn cursor_hidden(&self) -> bool {
+        self.cursor == Some(None)
+    }
 }
 
 /// A [`Shell`] backed by AppKit.
@@ -136,6 +152,17 @@ pub struct AppKitShell {
     /// The presentation options last written to `NSApplication`, so that the
     /// process-wide setting is touched only when it changes.
     presentation: usize,
+    /// Puts `-[NSEvent timestamp]` on the engine's clock. See
+    /// [`TimeBase`](super::TimeBase).
+    pub(super) time: TimeBase,
+    /// The `+[NSCursor hide]` count this shell holds, kept balanced.
+    pub(super) visibility: Visibility,
+    /// Whether this shell currently has the mouse disconnected from the cursor.
+    ///
+    /// Desktop-wide state, so it is tracked and handed back exactly as the
+    /// presentation options are — see [`input`](super::input), which argues why
+    /// losing focus releases it.
+    pub(super) pointer_frozen: bool,
     caps: ShellCaps,
 }
 
@@ -185,6 +212,9 @@ impl AppKitShell {
             next_monitor_id: 1,
             queue: VecDeque::new(),
             presentation: value::PRESENTATION_DEFAULT,
+            time: TimeBase::at(input::now_seconds()),
+            visibility: Visibility::default(),
+            pointer_frozen: false,
             caps: super::caps(),
         };
         // SAFETY: the main thread, with a pool in scope.
@@ -212,6 +242,32 @@ impl AppKitShell {
             .iter()
             .find(|(_, state)| state.key == key)
             .map(|(handle, _)| handle.cast())
+    }
+
+    /// Every live window, by the handle the seam names it with.
+    pub(super) fn windows_iter(&self) -> impl Iterator<Item = (WindowId, &AppWindow)> {
+        self.windows
+            .iter()
+            .map(|(handle, state)| (handle.cast(), state))
+    }
+
+    /// Queues an event for the current [`pump`](Shell::pump) to deliver.
+    pub(super) fn queue_event(&mut self, event: ShellEvent) {
+        self.queue.push_back(event);
+    }
+
+    /// Claims the oldest string the input method committed for a window.
+    ///
+    /// See [`events`](super::events): the marker keeps the commit's place in the
+    /// stream and the string itself is queued beside it, because a `String`
+    /// cannot live in a [`Copy`] enum.
+    pub(super) fn shared_text(&self, window: usize) -> Option<String> {
+        self.shared.take_text(window)
+    }
+
+    /// Records the `NSCursor` a window wants, for `cursorUpdate:` to apply.
+    pub(super) fn record_cursor(&self, window: usize, cursor: usize) {
+        self.shared.set_cursor(window, cursor);
     }
 
     /// Which of the enumerated screens a window is on.
@@ -327,6 +383,13 @@ impl AppKitShell {
                     if let Ok(state) = self.window_mut(handle) {
                         state.focused = focused;
                     }
+                    // **Before the event is queued**, not after: the pointer
+                    // freeze is desktop-wide, so a shell that let a background
+                    // window keep it would take the cursor away from every
+                    // other application for as long as the consumer took to
+                    // notice. See `input`.
+                    self.refresh_pointer_capture();
+                    self.refresh_cursor_visibility();
                     self.queue.push_back(ShellEvent::Focus {
                         window: handle,
                         focused,
@@ -354,6 +417,8 @@ impl AppKitShell {
                         self.queue
                             .push_back(ShellEvent::WindowDestroyed { window: handle });
                         self.refresh_presentation();
+                        self.refresh_pointer_capture();
+                        self.refresh_cursor_visibility();
                     }
                 }
                 RawEvent::ScreensChanged => {
@@ -365,6 +430,13 @@ impl AppKitShell {
                     self.monitors = monitors;
                     self.queue.push_back(ShellEvent::MonitorsChanged);
                 }
+                RawEvent::Key { .. }
+                | RawEvent::FlagsChanged { .. }
+                | RawEvent::TextCommitted { .. }
+                | RawEvent::PointerMotion { .. }
+                | RawEvent::PointerFocus { .. }
+                | RawEvent::Button { .. }
+                | RawEvent::Scroll { .. } => self.translate_input(event, handle),
             }
         }
     }
@@ -436,9 +508,9 @@ impl AppKitShell {
                 break;
             }
             // SAFETY: an event this call just dequeued. This dispatches into the
-            // delegate re-entrantly, which is why nothing here holds a borrow of
-            // `shared`.
-            unsafe { ffi::msg1_void(self.app, ffi::sel(c"sendEvent:"), event) };
+            // delegate and the view re-entrantly, which is why nothing here
+            // holds a borrow of `shared`.
+            unsafe { dispatch(self.app, event) };
         }
         // What `-[NSApplication run]` does at the bottom of its loop, and the
         // only part of it this backend has to reproduce: it is what gives
@@ -495,9 +567,58 @@ impl AppKitShell {
         }
         // SAFETY: an event just dequeued; dropping it would lose it, because
         // `dequeue: YES` already took it off the queue.
-        unsafe { ffi::msg1_void(self.app, ffi::sel(c"sendEvent:"), event) };
+        unsafe { dispatch(self.app, event) };
         Wake::Event
     }
+}
+
+/// `[NSApp sendEvent:]`, with the one event AppKit will not deliver routed by
+/// hand.
+///
+/// # `keyUp:` is not delivered while Command is held
+///
+/// This is documented AppKit behaviour rather than a bug in this backend, and it
+/// has been true for as long as anyone has been writing games on the platform:
+/// `-[NSApplication sendEvent:]` swallows a key-up whose `modifierFlags` carry
+/// Command instead of passing it to the key window's responder chain. A shell
+/// that does nothing about it leaves **every key released during a `⌘` chord
+/// stuck down** — the seam's own contract makes a consumer treat a missing
+/// release as a held key, so the next `⌘S` leaves `S` held forever.
+///
+/// Every engine on this platform works around it and each does it where its own
+/// loop is. GLFW subclasses `NSApplication`; that route needs the subclass to
+/// exist before `sharedApplication` is first called, which an embedded shell
+/// cannot promise. **This backend owns the dequeue**, so the cheapest correct
+/// place is here: the event goes straight to the key window, which routes it to
+/// the first responder exactly as `sendEvent:` would have.
+///
+/// # Safety
+///
+/// `app` must be the live `NSApplication` singleton and `event` a live `NSEvent`
+/// this pump has just dequeued, on the main thread with a pool in scope.
+unsafe fn dispatch(app: Id, event: Id) {
+    // SAFETY: `type` and `modifierFlags` are `NSEvent` accessors returning
+    // `NSUInteger`s.
+    let (kind, flags) = unsafe {
+        (
+            ffi::msg_usize(event, ffi::sel(c"type")),
+            ffi::msg_usize(event, ffi::sel(c"modifierFlags")),
+        )
+    };
+    if kind == value::EVENT_TYPE_KEY_UP && flags & ffi::modifier::COMMAND != 0 {
+        // SAFETY: `keyWindow` may answer nil — no window of ours is key — in
+        // which case there is nobody the release belongs to and dropping it is
+        // what `sendEvent:` would have done anyway.
+        let key_window = unsafe { ffi::msg(app, ffi::sel(c"keyWindow")) };
+        if !key_window.is_null() {
+            // SAFETY: a live window; `sendEvent:` routes to its first
+            // responder.
+            unsafe { ffi::msg1_void(key_window, ffi::sel(c"sendEvent:"), event) };
+            return;
+        }
+    }
+    // SAFETY: the live singleton and a live event.
+    unsafe { ffi::msg1_void(app, ffi::sel(c"sendEvent:"), event) };
 }
 
 /// `-[NSApplication nextEventMatchingMask:untilDate:inMode:dequeue:]`.
@@ -586,6 +707,41 @@ impl Shell for AppKitShell {
     ///   `setContentAspectRatio:`, which `docs/plan/15-windowing.md` names as
     ///   this platform's form of it, and which AppKit enforces during the drag
     ///   itself.
+    /// * [`POINTER_LOCK`](ShellCaps::POINTER_LOCK) —
+    ///   `CGAssociateMouseAndMouseCursorPosition(false)` plus `+[NSCursor hide]`.
+    ///   The cursor stops dead and the deltas keep arriving, so this is the one
+    ///   platform where the mode needs no clip and no recentring at all; see
+    ///   [`input`](super::input).
+    /// * [`POINTER_WARP`](ShellCaps::POINTER_WARP) —
+    ///   `CGWarpMouseCursorPosition`, across the two reflections
+    ///   [`warp_pointer`](Shell::warp_pointer) describes.
+    /// * [`RAW_POINTER_MOTION`](ShellCaps::RAW_POINTER_MOTION) — **set, with a
+    ///   caveat that belongs here rather than in a footnote.** `NSEvent`'s
+    ///   `deltaX`/`deltaY` are a relative stream that is genuinely separate from
+    ///   the absolute position and genuinely **unclamped by the screen edge**,
+    ///   which is the half that decides whether a first-person camera works at
+    ///   all: it keeps turning when a clipped `abs` would have stopped. What
+    ///   they are *not* is unaccelerated. macOS applies pointer acceleration in
+    ///   the HID system before the event is created and publishes no way to ask
+    ///   for the pre-acceleration value; reaching IOKit for it is a slice of its
+    ///   own. GLFW answers "not supported" on this platform for exactly that
+    ///   reason. This backend answers differently and says why: clearing the bit
+    ///   would oblige `raw_delta: None`, which — with `abs` also `None` under
+    ///   [`Locked`](PointerMode::Locked) — makes mouselook *impossible* on macOS
+    ///   rather than merely accelerated. `docs/backlog.md` carries the gap.
+    /// * [`TEXT_IME`](ShellCaps::TEXT_IME) — the view conforms to
+    ///   `NSTextInputClient` and every key event goes through
+    ///   `interpretKeyEvents:`, so commits arrive **from the input method**
+    ///   rather than from a translation this backend performs. That is the same
+    ///   structural standard the Wayland backend is held to, where the bit
+    ///   follows having *bound* `text-input-v3`, and it is a stronger claim than
+    ///   the Win32 backend can make — there, `WM_CHAR` arrives whether or not
+    ///   anything was wired to an IME, which is why that backend leaves the bit
+    ///   clear. What is **not** implemented is displaying a pre-edit: the seam
+    ///   has no event for one, so marked text is tracked (an input method cannot
+    ///   compose without the answers) and never surfaced, and the candidate
+    ///   window is placed at the window's origin rather than at a caret the seam
+    ///   does not model. See [`view`](super::view).
     ///
     /// # What is clear, and why each one is a decision
     ///
@@ -602,14 +758,16 @@ impl Shell for AppKitShell {
     ///   yet** — nothing in [`Shell`] says "present a smaller buffer" — so
     ///   setting the bit would be a claim with no mechanism behind it and no
     ///   test. `docs/backlog.md` carries it.
-    /// * [`POINTER_LOCK`](ShellCaps::POINTER_LOCK),
-    ///   [`POINTER_CONFINE`](ShellCaps::POINTER_CONFINE),
-    ///   [`POINTER_WARP`](ShellCaps::POINTER_WARP),
-    ///   [`RAW_POINTER_MOTION`](ShellCaps::RAW_POINTER_MOTION),
-    ///   [`TEXT_IME`](ShellCaps::TEXT_IME) — M2. There is no `NSTrackingArea`,
-    ///   no `NSEvent` translation and no `NSTextInputClient` in this slice, and
-    ///   [`set_pointer_mode`](Shell::set_pointer_mode) and
-    ///   [`warp_pointer`](Shell::warp_pointer) say so by refusing.
+    /// * [`POINTER_CONFINE`](ShellCaps::POINTER_CONFINE) — **macOS cannot
+    ///   confine a pointer.** There is no `ClipCursor`, no
+    ///   `XGrabPointer(confine_to)` and no `zwp_confined_pointer_v1`; the only
+    ///   technique available is warping the cursor back after it has already
+    ///   left, which runs a frame late, snaps visibly, and manufactures motion
+    ///   events a consumer cannot tell from real ones. That is not confinement
+    ///   and the bit is not set for it. This is the one desktop backend of the
+    ///   four where the two capture modes come apart, and
+    ///   [`set_pointer_mode`](Shell::set_pointer_mode) refuses
+    ///   [`Confined`](PointerMode::Confined) by name.
     /// * [`CLIPBOARD`](ShellCaps::CLIPBOARD),
     ///   [`DRAG_DROP`](ShellCaps::DRAG_DROP) — M3. No `NSPasteboard`, no
     ///   `registerForDraggedTypes:`.
@@ -698,6 +856,7 @@ impl Shell for AppKitShell {
             effective_mode,
             saved: None,
             cursor: None,
+            pointer_mode: PointerMode::Free,
             focused: false,
             close_pending: false,
         };
@@ -736,6 +895,11 @@ impl Shell for AppKitShell {
         self.queue
             .push_back(ShellEvent::WindowDestroyed { window: handle });
         self.refresh_presentation();
+        // The window that held the pointer freeze and the cursor's hide is
+        // gone, and both are desktop-wide: nothing else would ever give them
+        // back. Same argument as `refresh_presentation` above it.
+        self.refresh_pointer_capture();
+        self.refresh_cursor_visibility();
         Ok(())
     }
 
@@ -751,9 +915,7 @@ impl Shell for AppKitShell {
             //
             // SAFETY: a live window; `isVisible` is an accessor.
             visible: unsafe { ffi::msg_bool(state.window, ffi::sel(c"isVisible")) },
-            // M2 owns the pointer; until then the only honest answer is the
-            // mode nothing has changed.
-            pointer_mode: PointerMode::Free,
+            pointer_mode: state.pointer_mode,
             close_pending: state.close_pending,
         })
     }
@@ -957,40 +1119,97 @@ impl Shell for AppKitShell {
         Ok(SurfaceTarget::AppKit { layer })
     }
 
-    /// **Not implemented in this slice.**
+    /// Frees or locks the pointer. **[`Confined`](PointerMode::Confined) is
+    /// refused, permanently.**
     ///
-    /// The pointer is M2: there is no `NSTrackingArea`, no
-    /// `CGAssociateMouseAndMouseCursorPosition` and no `NSCursor` handling here
-    /// yet, so every mode except [`PointerMode::Free`] is refused and
-    /// [`caps`](Shell::caps) has none of the pointer bits set. A caller that
-    /// checked [`PointerMode::required_cap`] never reaches this.
+    /// # The two captured modes come apart here, and nowhere else
+    ///
+    /// Win32 and X11 both bound the pointer with one mechanism — a clip, a grab
+    /// — and differ between the modes only in what they *report*. macOS has no
+    /// such mechanism at all: nothing in Quartz or AppKit clips the cursor to a
+    /// rectangle, so [`Confined`](PointerMode::Confined) has no honest
+    /// implementation and [`POINTER_CONFINE`](ShellCaps::POINTER_CONFINE) is
+    /// clear. What it *does* have is a way to stop the cursor moving entirely,
+    /// which is what [`Locked`](PointerMode::Locked) wanted:
+    ///
+    /// 1. the cursor is warped to the middle of the window, so that unlocking
+    ///    leaves it somewhere the player can find;
+    /// 2. `CGAssociateMouseAndMouseCursorPosition(false)` disconnects the mouse
+    ///    from it — the cursor stops dead and the deltas keep arriving;
+    /// 3. `+[NSCursor hide]` takes it off the screen.
+    ///
+    /// There is no recentring, no margin and no fraction of the window, because
+    /// a frozen cursor cannot drift. That is the one place this backend is
+    /// simpler than both other desktop ones.
+    ///
+    /// The freeze is **desktop-wide**, so it follows the keyboard focus rather
+    /// than the request: a background window that kept it would take the cursor
+    /// away from every other application. See [`input`](super::input).
     ///
     /// # Errors
     ///
     /// [`ShellError::InvalidWindow`] for a stale handle, or
-    /// [`ShellError::Unsupported`] naming the mode.
+    /// [`ShellError::Unsupported`] naming the mode — which for
+    /// [`Confined`](PointerMode::Confined) is permanent, and which a caller that
+    /// checked [`PointerMode::required_cap`] against [`caps`](Shell::caps) never
+    /// sees.
     fn set_pointer_mode(&mut self, handle: WindowId, mode: PointerMode) -> Result<(), ShellError> {
+        let _pool = AutoreleasePool::push();
         self.window(handle)?;
-        if mode == PointerMode::Free {
-            return Ok(());
+        if !self.caps.contains(mode.required_cap()) {
+            return Err(ShellError::Unsupported {
+                backend: ShellBackend::AppKit,
+                what: mode.as_str(),
+            });
         }
-        Err(ShellError::Unsupported {
-            backend: ShellBackend::AppKit,
-            what: mode.as_str(),
-        })
+        // The freeze is per shell rather than per window — there is one cursor —
+        // so a second window taking it releases the first's, exactly as the
+        // Win32 clip and the X11 grab do.
+        let previous: Vec<WindowId> = self
+            .windows_iter()
+            .filter(|(other, state)| *other != handle && state.pointer_mode.is_captured())
+            .map(|(other, _)| other)
+            .collect();
+        for held in previous {
+            if let Ok(state) = self.window_mut(held) {
+                state.pointer_mode = PointerMode::Free;
+            }
+        }
+        // The warp goes **first**, while the mouse is still connected to the
+        // cursor: afterwards it would move something nothing is going to draw.
+        if mode == PointerMode::Locked {
+            self.centre_pointer(handle);
+        }
+        self.window_mut(handle)?.pointer_mode = mode;
+        self.refresh_pointer_capture();
+        self.refresh_cursor_visibility();
+        Ok(())
     }
 
-    /// Records the requested cursor. **It is not applied.**
+    /// Sets the cursor shape, or hides the cursor with `None`.
     ///
-    /// The same gap the X11 and Wayland backends document, and stated the same
-    /// way rather than hidden: applying a shape means `NSCursor` and a
-    /// `cursorUpdate:`/`resetCursorRects` path, which is pointer work and
-    /// belongs with the rest of it in M2. No capability bit claims cursor
-    /// shapes, so nothing here is overstated — but a caller that sets a
-    /// crosshair will see an arrow.
+    /// # Two mechanisms, because macOS asks two questions
     ///
-    /// The trait's contract is that this fails only for a stale handle, so
-    /// recording is what it does; refusing would be a different method.
+    /// A *shape* is answered from `cursorUpdate:`, and it has to be: AppKit
+    /// re-establishes the cursor from the tracking areas under the pointer on
+    /// every movement, so a `[cursor set]` issued from here alone would be
+    /// overwritten before the next frame. The chosen `NSCursor` is therefore
+    /// recorded for the view — see [`view`](super::view) — *and* set now, so the
+    /// change is visible in the frame it was asked for rather than in the frame
+    /// after the player next moves the mouse.
+    ///
+    /// *Hiding* is `+[NSCursor hide]`, whose count is the same classic bug
+    /// Win32's `ShowCursor` has and is kept balanced by
+    /// [`pointer::Visibility`](super::pointer::Visibility) rather than by
+    /// counting calls by hand. It applies while the **focused** window wants it
+    /// hidden, which is what makes alt-tabbing out of a game give the desktop
+    /// its pointer back.
+    ///
+    /// Unlike the X11 and Wayland backends a named shape really is applied here:
+    /// AppKit ships the cursors, so there is no theme to load and no dependency
+    /// to take on. Four of the seam's shapes have no public equivalent and are
+    /// approximated; [`pointer::cursor_selector`](super::pointer::cursor_selector)
+    /// names which and to what.
     ///
     /// # Errors
     ///
@@ -1000,31 +1219,61 @@ impl Shell for AppKitShell {
         handle: WindowId,
         cursor: Option<CursorIcon>,
     ) -> Result<(), ShellError> {
+        let _pool = AutoreleasePool::push();
         self.window_mut(handle)?.cursor = Some(cursor);
+        if let Some(icon) = cursor {
+            self.apply_cursor_shape(handle, icon);
+        }
+        self.refresh_cursor_visibility();
         Ok(())
     }
 
-    /// **Not implemented in this slice.**
+    /// Moves the pointer to a position in the window.
     ///
-    /// [`POINTER_WARP`](ShellCaps::POINTER_WARP) is clear, so this always
-    /// refuses — which is exactly what the trait documents for a backend without
-    /// the capability, and what the Wayland backend does permanently.
+    /// `CGWarpMouseCursorPosition`, which is the capability
+    /// [`POINTER_WARP`](ShellCaps::POINTER_WARP) names and which Wayland
+    /// deliberately does not have. The warning on the trait method applies here
+    /// as it does on Win32 and X11 and is worth repeating: a camera must not be
+    /// built on this. A warp produces motion indistinguishable from the user's
+    /// own, so a warp-based camera fights every real movement — which is why
+    /// [`PointerMode::Locked`] exists.
+    ///
+    /// # Two reflections, which is one more than anywhere else
+    ///
+    /// The seam speaks in the window's pixels from its top-left. AppKit's window
+    /// space is Y-**up**, its screen space is Y-**up** with the origin at the
+    /// bottom-left of the primary display, and CoreGraphics — which is what
+    /// actually moves the cursor — is Y-**down** from the top-left of the same
+    /// display. So the position crosses `warp_source`, then
+    /// `convertRectToScreen:`, then [`geometry::Flip::point`]. Skipping either
+    /// flip lands the cursor the same distance on the wrong side of the middle,
+    /// which is indistinguishable from a working warp until the target is not
+    /// centred.
+    ///
+    /// The position is **clamped by the system** to the display arrangement, so
+    /// a warp outside every screen lands on an edge rather than being refused.
     ///
     /// # Errors
     ///
-    /// [`ShellError::InvalidWindow`] for a stale handle, otherwise
-    /// [`ShellError::Unsupported`].
+    /// [`ShellError::InvalidWindow`] if the handle is stale, or
+    /// [`ShellError::Backend`] if there is no display to express a global
+    /// position on, or if CoreGraphics refused the move.
     fn warp_pointer(
         &mut self,
         handle: WindowId,
         position: PhysicalPoint,
     ) -> Result<(), ShellError> {
-        self.window(handle)?;
-        let _ = position;
-        Err(ShellError::Unsupported {
-            backend: ShellBackend::AppKit,
-            what: "pointer warp",
-        })
+        let _pool = AutoreleasePool::push();
+        self.warp_to_window(handle, position)
+    }
+
+    /// Puts input timestamps on the engine's clock.
+    ///
+    /// See [`TimeBase`](super::TimeBase), which is where the whole of this
+    /// platform's rebasing lives and why it is a `double` of seconds rather than
+    /// a millisecond counter.
+    fn align_event_clock(&mut self, elapsed: Duration) {
+        self.time.align_at(input::now_seconds(), elapsed);
     }
 
     fn reply_close_request(
@@ -1098,12 +1347,21 @@ impl Drop for AppKitShell {
     /// order puts `delegate` before `shared` because that is the order they are
     /// declared in.
     ///
-    /// The presentation options are process-wide and are handed back for the
-    /// reason the Win32 backend gives about the cursor clip: a shell dropped by
+    /// Three pieces of **desktop-wide** state are handed back first, for the
+    /// reason the Win32 backend gives about its cursor clip: a shell dropped by
     /// a host application that keeps running would otherwise leave that
-    /// application with no menu bar and nothing to point at.
+    /// application with no menu bar, no visible cursor, and a mouse disconnected
+    /// from the pointer for every process on the machine. The last of those
+    /// survives the process — nothing but a login would put it back — which is
+    /// why it is released here rather than left to the window teardown below.
     fn drop(&mut self) {
         let _pool = AutoreleasePool::push();
+        if self.pointer_frozen {
+            // SAFETY: takes an `int` by value; reconnecting is always legal.
+            unsafe { ffi::CGAssociateMouseAndMouseCursorPosition(1) };
+            self.pointer_frozen = false;
+        }
+        Self::show_cursor(self.visibility.want(false));
         if self.presentation != value::PRESENTATION_DEFAULT {
             // SAFETY: the live singleton; `PRESENTATION_DEFAULT` is always a
             // legal combination.

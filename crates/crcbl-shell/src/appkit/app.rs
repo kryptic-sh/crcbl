@@ -48,7 +48,7 @@
 
 use core::ffi::CStr;
 use core::ptr;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 
 use crate::{ShellBackend, ShellError};
@@ -56,19 +56,53 @@ use crate::{ShellBackend, ShellError};
 use super::events::{RawEvent, enqueue};
 use super::ffi::{self, Class, Id, Imp, ObjcBool, Pool, Sel, YES, value};
 
-/// Everything the delegate callbacks write into, and the pump reads out of.
+/// Everything the delegate and view callbacks write into, and the pump reads out
+/// of.
 ///
 /// The AppKit counterpart of the Win32 backend's `Shared`, and it exists for the
 /// same reason: a callback runs re-entrantly inside a shell method, so it may
 /// not touch the shell. A [`RefCell`] rather than a lock, because the whole of
 /// this backend is main-thread-only and a second thread cannot reach it.
+///
+/// The three fields beside the queue are all there because a callback needs a
+/// value the shell owns and cannot pass it one: an Objective-C object built by
+/// [`objc_allocateClassPair`](super::ffi::objc_allocateClassPair) has no
+/// instance storage here — see [`DELEGATES`] for why that is deliberate — so
+/// anything a method needs across calls lives on this side of the boundary.
 #[derive(Debug, Default)]
 pub(super) struct Shared {
     queue: RefCell<Vec<RawEvent>>,
+    /// Text the input method committed, waiting for its
+    /// [`TextCommitted`](RawEvent::TextCommitted) marker to claim it.
+    ///
+    /// Keyed by window and consumed in order, which is the same arrangement the
+    /// Win32 backend uses for a file drop's paths: the payload cannot live in a
+    /// [`Copy`] enum, and its *place in the stream* still has to be kept.
+    text: RefCell<Vec<(usize, String)>>,
+    /// The timestamp of the key event currently inside `interpretKeyEvents:`.
+    ///
+    /// `insertText:` is called synchronously from within that call and carries
+    /// no event of its own, so the commit would otherwise have to be stamped
+    /// with the moment the input method got round to it. This is the keystroke's
+    /// own timestamp, which is what the seam asks for.
+    keying: Cell<f64>,
+    /// How many UTF-16 units of pre-edit text the input method is holding.
+    ///
+    /// Not surfaced — the seam has no pre-edit event — but `hasMarkedText` and
+    /// `markedRange` are required reading for an input method to compose at all,
+    /// and both are answers about this number.
+    marked: Cell<usize>,
+    /// The `NSCursor` each window last asked for, as an integer.
+    ///
+    /// Read by `cursorUpdate:`, which is the only moment a cursor shape can be
+    /// applied so that it survives the next pointer movement. The objects are
+    /// AppKit's own shared singletons, so there is nothing to retain and nothing
+    /// that can dangle.
+    cursors: RefCell<Vec<(usize, usize)>>,
 }
 
 impl Shared {
-    /// Records one thing the delegate saw, collapsing it into a pending
+    /// Records one thing a callback saw, collapsing it into a pending
     /// equivalent where [`enqueue`] says that is sound.
     ///
     /// Never panics on a borrow: nothing else holds this across a call into
@@ -82,16 +116,75 @@ impl Shared {
         core::mem::take(&mut self.queue.borrow_mut())
     }
 
-    /// Discards anything queued for a window that has just been destroyed.
+    /// Queues a committed string for `window`.
+    pub(super) fn push_text(&self, window: usize, text: String) {
+        self.text.borrow_mut().push((window, text));
+    }
+
+    /// Takes the oldest string committed for `window`.
     ///
-    /// The Win32 backend's `forget`, for the same reason: a delegate callback
-    /// that fired during `close` must not produce an event naming a handle the
-    /// consumer has already been told is gone —
-    /// [obligation 1](crate::Shell) forbids it.
+    /// In order, so that two commits in one pump reach the consumer as two
+    /// [`TextCommit`](crate::ShellEvent::TextCommit)s in the order they were
+    /// typed.
+    pub(super) fn take_text(&self, window: usize) -> Option<String> {
+        let mut queued = self.text.borrow_mut();
+        let index = queued.iter().position(|(owner, _)| *owner == window)?;
+        Some(queued.remove(index).1)
+    }
+
+    /// The timestamp of the key event being interpreted.
+    pub(super) fn keying(&self) -> f64 {
+        self.keying.get()
+    }
+
+    /// Records the timestamp of the key event about to be interpreted.
+    pub(super) fn set_keying(&self, seconds: f64) {
+        self.keying.set(seconds);
+    }
+
+    /// How much pre-edit text the input method is holding.
+    pub(super) fn marked(&self) -> usize {
+        self.marked.get()
+    }
+
+    /// Records how much pre-edit text the input method is holding.
+    pub(super) fn set_marked(&self, units: usize) {
+        self.marked.set(units);
+    }
+
+    /// The `NSCursor` a window wants, if it has asked for one.
+    pub(super) fn cursor_of(&self, window: usize) -> Option<usize> {
+        self.cursors
+            .borrow()
+            .iter()
+            .find(|(owner, _)| *owner == window)
+            .map(|(_, cursor)| *cursor)
+    }
+
+    /// Records the `NSCursor` a window wants.
+    pub(super) fn set_cursor(&self, window: usize, cursor: usize) {
+        let mut cursors = self.cursors.borrow_mut();
+        match cursors.iter_mut().find(|(owner, _)| *owner == window) {
+            Some(entry) => entry.1 = cursor,
+            None => cursors.push((window, cursor)),
+        }
+    }
+
+    /// Discards everything held for a window that has just been destroyed.
+    ///
+    /// The Win32 backend's `forget`, for the same reason: a callback that fired
+    /// during `close` must not produce an event naming a handle the consumer has
+    /// already been told is gone — [obligation 1](crate::Shell) forbids it. The
+    /// text queue goes with it, or the next window to commit would be handed the
+    /// dead one's string.
     pub(super) fn forget(&self, window: usize) {
         self.queue
             .borrow_mut()
             .retain(|event| event.window() != Some(window));
+        self.text.borrow_mut().retain(|(owner, _)| *owner != window);
+        self.cursors
+            .borrow_mut()
+            .retain(|(owner, _)| *owner != window);
     }
 }
 
@@ -124,24 +217,33 @@ thread_local! {
     static DELEGATES: RefCell<Vec<(usize, *const Shared)>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Records `event` against whichever shell owns `delegate`.
+/// Runs `read` against whichever [`Shared`] owns `delegate`.
 ///
-/// A delegate this process does not know about is ignored rather than being an
-/// error: AppKit can deliver a notification queued before
-/// [`Delegate::drop`] removed the entry, and there is nothing left to tell.
-fn record(delegate: Id, event: RawEvent) {
+/// A delegate this process does not know about answers `None` rather than being
+/// an error: AppKit can deliver a notification queued before [`Delegate::drop`]
+/// removed the entry, and there is nothing left to tell. A `nil` delegate — a
+/// window whose delegate was cleared on the way out — is the same case and takes
+/// the same path.
+///
+/// The table lookup finishes **before** `read` runs, so a callback that reaches
+/// back into AppKit and re-enters this cannot deadlock on the borrow.
+pub(super) fn with_shared<R>(delegate: Id, read: impl FnOnce(&Shared) -> R) -> Option<R> {
     let shared = DELEGATES.with_borrow(|table| {
         table
             .iter()
             .find(|(known, _)| *known == delegate as usize)
             .map(|(_, shared)| *shared)
-    });
-    let Some(shared) = shared else { return };
+    })?;
     // SAFETY: the pointer was registered by `Delegate::new` from an `Rc` the
     // shell owns, and `Delegate::drop` removes it before that `Rc` is dropped —
     // so a pointer still in the table names a live `Shared`. The borrow above
     // has already been released, so this cannot re-enter the table.
-    unsafe { &*shared }.push(event);
+    Some(read(unsafe { &*shared }))
+}
+
+/// Records `event` against whichever shell owns `delegate`.
+pub(super) fn record(delegate: Id, event: RawEvent) {
+    with_shared(delegate, |shared| shared.push(event));
 }
 
 /// The `NSWindow *` a delegate notification is about, as the integer the queue

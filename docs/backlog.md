@@ -660,7 +660,9 @@ P5C M1 wrote the whole of `crates/crcbl-shell/src/appkit/` on a Linux machine.
 It is cross-checked with
 `cargo check`/`cargo clippy --target aarch64-apple-darwin`, which do not link
 and do not run — **a cross-check proves the code typechecks and nothing more.**
-No line of this backend has executed on a Mac.
+The window lifecycle has since executed on a `macos-latest` runner through
+`tests/appkit_session.rs`; everything below is written against what that pass
+does and does not reach.
 
 ### The window session cannot be a `#[test]`, and that is measured rather than assumed
 
@@ -695,10 +697,31 @@ than reporting a pass it did not earn. And it was falsified the way any other
 guard is: a `panic!` in its body fails both `cargo test` (exit 101) and
 `cargo nextest run`, so it is genuinely wired into the run and can go red.
 
-**Whether it passes is still unknown.** It has never executed on a Mac, and what
-it reports on its first run is the answer to whether a GitHub macOS runner gives
-a process a usable WindowServer session — a question the Windows half answered
-"yes" for its own runner, which transfers nothing.
+**A `harness = false` target owes libtest's list protocol, and forgetting it
+broke three CI jobs at once.** `cargo nextest` enumerates a binary by running it
+with `--list --format terse` and parsing `<name>: test` lines out of stdout; the
+first version of this target ignored argv, so the _listing_ step ran the whole
+window session and then failed to parse its prose — `test (linux)`,
+`coverage (linux)` and `build + test (macos-latest)` all died on
+`creating test list failed`. `main` now answers `--list` (and the empty
+`--ignored` listing) before anything else happens.
+
+The reason it was missed is the transferable part: the target **was** falsified,
+under `cargo test`, and `cargo test` does not enumerate. CI runs
+`cargo nextest`. A guard checked under one runner and shipped under another is a
+guard that was not checked — anything owning its own `main` has to be verified
+with `cargo nextest list` as well as `cargo nextest run`.
+
+**It has now run on a Mac, and every step passed.** On `macos-latest`: the
+backend opened on the main thread, reported
+`ASPECT_HINT_HONORED | MULTI_WINDOW | WINDOW_POSITION | SERVER_DECORATIONS | EVENT_WAIT`
+and one monitor, configured the window at the requested 640×480, took the whole
+1024×768 screen borderless, restored 640×480 exactly on the way back, and
+destroyed the window. So a GitHub macOS runner **does** give a process a usable
+WindowServer session, `NSApplication` bootstraps from a plain unbundled binary
+with `setActivationPolicy:`, and M1's lifecycle is executed rather than only
+typechecked. What is listed as uncovered below is what that pass does _not_
+reach.
 
 ### What the macOS suite does cover
 
@@ -717,23 +740,35 @@ Not nothing, and it covers the highest-risk item in the backend:
 - **That the runner has a graphics session at all**, through `CGMainDisplayID` —
   CoreGraphics is thread-safe, so this is the one thing about the runner's
   display a spawned test body may ask.
-- The pure modules — `appkit::geometry` and `appkit::events` — run on **every**
-  host including this Linux one, which is where the Y flip and the
-  points-to-backing-pixels conversion are falsifiable.
+- **The two CoreGraphics calls M2's pointer modes rest on**, for the same
+  reason: `CGWarpMouseCursorPosition` really moves the cursor and
+  `CGEventGetLocation` reports it back at the point named, and
+  `CGAssociateMouseAndMouseCursorPosition` is accepted in both directions. Both
+  tests restore what they changed before asserting, because the runner's desktop
+  is real.
+- **That every `NSCursor` selector `pointer::cursor_selector` names exists in
+  this AppKit** and answers with a non-nil cursor — the half a host test cannot
+  reach, since it has no `NSCursor` to ask.
+- **That `CrcblView` really installs every responder and `NSTextInputClient`
+  method and claims the protocol.** The class is built by the same
+  `view::view_class` the real path calls, and `objc_allocateClassPair` has no
+  AppKit in it, so a spawned test body may build and inspect it. That catches a
+  refused `class_addMethod` and a misspelled selector, which are otherwise
+  silent.
+- The pure modules — `appkit::geometry`, `appkit::events`, `appkit::keys`,
+  `appkit::pointer` and `appkit::TimeBase` — run on **every** host including
+  this Linux one, which is where the Y flip, the points-to-backing-pixels
+  conversion, the `kVK_*` table, the modifier reconstruction, the scroll units
+  and the timestamp rebasing are falsifiable. Every guard in them was falsified
+  by mutation before this was written.
 
 ### Uncovered, and why each one is uncovered
 
-- **Every capability bit's mechanism.** `appkit::caps()` is a `const fn` and its
-  set is asserted, but `EVENT_WAIT` actually sleeping, `WINDOW_POSITION` putting
-  a borderless window on a named display, `ASPECT_HINT_HONORED` reaching
-  `setContentAspectRatio:` and `SERVER_DECORATIONS` meaning a real title bar all
-  need a window. Blocked on the section above.
-- **The borderless round trip.** The style mask and frame are saved and restored
-  in `appkit::window::apply_mode`; nothing has watched it happen.
 - **`NSApplicationPresentationOptions`.** An invalid combination _raises_, and
   `geometry::presentation_options` never produces one — asserted as a pairing in
-  a host test. That the pair is accepted by a running `NSApplication` is
-  unverified.
+  a host test. The session pass flips to borderless and back, so the legal pair
+  _is_ now accepted by a running `NSApplication`; what is unverified is that no
+  path can produce the illegal one.
 - **Reference counting.** `releasedWhenClosed` is turned off at creation and
   `appkit::shell::release_window` is the single matching release for the window
   and the layer. Reasoned, not observed; there is no leak check anywhere in this
@@ -747,12 +782,101 @@ Not nothing, and it covers the highest-risk item in the backend:
 - **The `NSWindow` subclass.** `CrcblWindow` overrides `canBecomeKeyWindow` and
   `canBecomeMainWindow` so that a borderless window can take the keyboard. That
   it is needed is documented AppKit behaviour; that our override is reached has
-  not been seen.
-- **Activation without a bundle.** `setActivationPolicy:Regular` is asked for
-  and its answer kept in `Bootstrap::policy_accepted`, on the theory that an
-  unbundled binary otherwise cannot become frontmost. Whether a GitHub macOS
-  runner lets a process activate at all is exactly what the missing window
-  session would find out.
+  not been seen — the session pass goes borderless but sends no keystroke while
+  it is there.
+
+### What M2 could not verify, and what would verify it
+
+Input is the half of this backend with the least executable coverage, because
+the thing it needs is **injected input at the session level** — the macOS
+counterpart of `SendInput`, which is `CGEventCreateKeyboardEvent` plus
+`CGEventPost`. That is M4's job, and until it exists the following are
+structural claims rather than observed behaviour. Each is stated with what it
+would take, so M4 has a list rather than a rediscovery.
+
+- **The four switches that make input exist at all**, written out in
+  `appkit::view`'s module docs: `setAcceptsMouseMovedEvents:`,
+  `makeFirstResponder:`, the `NSTrackingArea`, and `interpretKeyEvents:`. These
+  are this platform's shape of the `TranslateMessage` gap the Windows half paid
+  a CI round trip for — **each of them is invisible to a test that calls the
+  responder method itself**, because each governs whether the event is generated
+  or routed rather than what the method does with it. The session pass exercises
+  two of them indirectly: it warps the pointer into the window and requires a
+  `PointerFocus` (the tracking area) or a `PointerMotion` (the accepts-moved
+  flag plus first responder) to come back. **Nothing exercises
+  `interpretKeyEvents:`**, so `TextCommit` is unreached from a real keystroke —
+  exactly the state the Win32 backend was in before its e2e suite found it.
+- **Every type encoding on `CrcblView`'s methods.** The runtime reads them only
+  when it forwards a method through an `NSInvocation`, which nothing in this
+  crate does and an input method might. A wrong one is a wrong-width read in a
+  path CI never enters. Checking it needs a forwarded invocation, which is its
+  own contrivance; the mitigation taken instead is that the encodings are
+  written from one place (`ffi::ENC_RANGE`, `ENC_RECT`, `ENC_POINT`) rather than
+  spelled out per method.
+- **IME composition.** `TEXT_IME` is set on the structural standard the Wayland
+  backend is held to — the view conforms to `NSTextInputClient` and every key
+  event goes through `interpretKeyEvents:`, which is strictly more than
+  Wayland's "bound `text-input-v3`". That a Japanese input method actually
+  commits through it is unverified: a GitHub runner has no IME installed, and
+  adding one is a runner-image change rather than a test.
+- **The horizontal scroll sign.** Vertical is settled — a wheel turned away from
+  the user is positive on macOS and in the seam — and horizontal is passed
+  through on the same reasoning without a trackpad to confirm it. If a
+  two-finger swipe right turns out to scroll left, the fix is one negation in
+  `pointer::scroll` and the test beside it.
+- **That `deltaY` is Y-down while `locationInWindow` is Y-up.** This is the
+  asymmetry `appkit::pointer` exists to make visible, and it rests on the deltas
+  being Quartz's `kCGMouseEventDelta*` — documented, and the convention GLFW and
+  SDL both rely on, but not something this workspace has watched. A wrong answer
+  is an inverted first-person camera, which is unmistakable the first time
+  anybody plays.
+
+### Considered and declined in M2
+
+- **`PointerMode::Confined` is not implemented, and `POINTER_CONFINE` is
+  clear.** macOS has no confine API: no `ClipCursor`, no
+  `XGrabPointer(confine_to)`, no `zwp_confined_pointer_v1`. The only technique
+  available is warping the cursor back after it has already crossed the
+  boundary, which runs a frame late (so the pointer visibly leaves and snaps
+  back), fights the user's own motion at the edge, and manufactures motion
+  events a consumer cannot tell from real ones. Approximating it would set a
+  capability bit with no mechanism behind it. `set_pointer_mode` refuses the
+  mode by name. **Do not revisit this without a public API to point at.**
+- **`RAW_POINTER_MOTION` is set although the deltas are accelerated.**
+  `NSEvent`'s `deltaX`/`deltaY` satisfy the half of that bit that decides
+  whether a camera works — separate from the absolute position, and unclamped by
+  the screen edge — and not the half that says "unaccelerated": macOS applies
+  pointer acceleration in the HID system before the event exists and publishes
+  no way to ask for the pre-acceleration value. GLFW answers
+  `glfwRawMouseMotionSupported() == false` on this platform for exactly that
+  reason. The alternative was considered and declined: clearing the bit obliges
+  `raw_delta: None`, and with `abs` also `None` under `Locked` that makes
+  mouselook **impossible** on macOS rather than merely accelerated. Closing it
+  properly means IOKit — `IOHIDManager`, or `IOHIDGetAccelerationWithKey` and a
+  temporary acceleration change — which is a slice of its own and would be the
+  first thing in this crate to reach past AppKit.
+- **`DeviceId` is a constant per device _kind_, as on X11 and Win32.** An
+  `NSEvent` does carry a `deviceID`, but it identifies a tablet and is
+  documented as meaningful only for the tablet event family, so it is not the
+  per-mouse identity `docs/plan/19-input.md` wants. The real answer on this
+  platform is IOKit, which is the same slice as the acceleration entry above.
+- **The candidate window is placed at the window's origin, not at a caret.**
+  `firstRectForCharacterRange:` has to answer something and the seam does not
+  model a caret — nothing above `crcbl-shell` says where text is being typed. So
+  a Japanese candidate list appears at the bottom-left of the window rather than
+  under the text. Closing it needs a seam addition ("the caret is here"), which
+  is a decision above this crate and should be taken once for every backend that
+  has an IME.
+- **`appkit::keys::named_keysym` and `win32::keys::named_keysym` are the same
+  table, and it was not extracted.** It is a pure function of the engine's own
+  `KeyCode` with no platform in it, so it is duplicated _knowledge_ rather than
+  duplicated shape, and the codebase's own rule says extract it. It was not,
+  because M2's brief scoped its edits to `crates/crcbl-shell/src/appkit/**` and
+  the extraction moves a `win32` file. What guards it meanwhile is a test in
+  `appkit::keys` asserting the two agree for every `KeyCode`, which compiles
+  wherever both modules do — every host, under `cfg(test)`. The extraction
+  itself is a shared module (`crate::keysym`, or a third entry beside
+  `linux::keymap`) plus a re-export from `win32::keys` so callers do not churn.
 
 ### Deliberately not in M1
 

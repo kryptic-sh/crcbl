@@ -50,7 +50,7 @@
 
 use crate::{AspectRatio, DisplayMode, LogicalSize, PhysicalRect, PhysicalSize, SizeConstraints};
 
-use super::ffi::{NSRect, NSSize, style, value};
+use super::ffi::{NSPoint, NSRect, NSSize, style, value};
 
 /// The conversion between AppKit's Y-up screen space and the seam's Y-down
 /// desktop space.
@@ -98,6 +98,32 @@ impl Flip {
             rect.size.width,
             rect.size.height,
         )
+    }
+
+    /// A **point** moved between the two spaces.
+    ///
+    /// The same reflection with no height to subtract, which is what makes it
+    /// the simpler of the pair rather than a special case of it: a rectangle's
+    /// origin is its *bottom* edge in one space and its *top* edge in the other,
+    /// so [`rect`](Self::rect) has to reflect `y + height` while a point
+    /// reflects `y`. Writing `rect` in terms of this one is the identity
+    /// `rect.origin.y ↦ top − (y + height)`, and the test below asserts it so
+    /// the two can never disagree about where the edge is.
+    ///
+    /// This is the space `CGWarpMouseCursorPosition` takes and the space
+    /// `CGEventGetLocation` answers in — CoreGraphics puts its origin at the
+    /// top-left of the main display, which is the seam's convention and the
+    /// opposite of AppKit's. So this function is the whole of the warp's second
+    /// reflection; see [`pointer::warp_source`](super::pointer::warp_source) for
+    /// the first.
+    ///
+    /// Its own inverse, for the reason [`rect`](Self::rect) gives.
+    #[must_use]
+    pub const fn point(self, point: NSPoint) -> NSPoint {
+        NSPoint {
+            x: point.x,
+            y: self.top - point.y,
+        }
     }
 }
 
@@ -367,6 +393,52 @@ mod tests {
             NSRect::new(37.5, -0.5, 1.0, 1.0),
         ] {
             assert_eq!(flip.rect(flip.rect(rect)), rect, "{rect:?}");
+        }
+    }
+
+    #[test]
+    fn a_point_reflects_about_the_same_edge_a_rectangle_does() {
+        // The relation that makes the pair one function rather than two: a
+        // rectangle's flipped origin is its *top* edge flipped as a point. A
+        // `Flip::point` written as `top - y - height`, or a `Flip::rect` written
+        // without the height, would disagree here and nowhere else.
+        let flip = Flip::about_primary(PRIMARY);
+        for rect in [
+            PRIMARY,
+            NSRect::new(1920.0, 0.0, 1280.0, 720.0),
+            NSRect::new(-1440.0, -320.0, 1440.0, 900.0),
+        ] {
+            let top_edge = NSPoint {
+                x: rect.origin.x,
+                y: rect.max_y(),
+            };
+            assert_eq!(flip.point(top_edge), flip.rect(rect).origin, "{rect:?}");
+        }
+
+        // The CoreGraphics space a warp is expressed in: the top-left of the
+        // primary display is the origin, and AppKit calls the same place
+        // `(0, 1080)`.
+        assert_eq!(
+            flip.point(NSPoint { x: 0.0, y: 1080.0 }),
+            NSPoint { x: 0.0, y: 0.0 }
+        );
+        assert_eq!(
+            flip.point(NSPoint { x: 640.0, y: 540.0 }),
+            NSPoint { x: 640.0, y: 540.0 },
+            "the middle of a 1080-tall display is its own reflection"
+        );
+
+        // And it is its own inverse, which is what makes one function correct
+        // where a `to_`/`from_` pair would be two chances to disagree.
+        for point in [
+            NSPoint { x: 0.0, y: 0.0 },
+            NSPoint {
+                x: -37.5,
+                y: 2160.0,
+            },
+            NSPoint { x: 1919.0, y: -1.0 },
+        ] {
+            assert_eq!(flip.point(flip.point(point)), point, "{point:?}");
         }
     }
 

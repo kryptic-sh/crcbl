@@ -54,26 +54,31 @@
 //! libwayland, and a Windows cannot lack `user32.dll`. There is no
 //! `windows-rs`.
 //!
-//! P5C also added the **AppKit backend**'s window lifecycle: the Objective-C
-//! runtime FFI, the `NSApplication` bootstrap, `NSWindow` and a layer-hosting
-//! `NSView` carrying the `CAMetalLayer` that *is*
-//! [`SurfaceTarget::AppKit`], the event pump
-//! and a blocking `wait_events`, windowed ↔ borderless on a named display,
-//! `NSScreen` enumeration with scale and refresh, size constraints and
-//! close-request interception. Input, the pasteboard and drag-and-drop are the
-//! slices after it, and [`ShellCaps`] is clear on every bit they would set. It
-//! is hand-written `objc_msgSend` FFI — **linked rather than `dlopen`ed**, for
-//! the same reason the Win32 backend gives — with no `objc2` and no framework.
+//! P5C also added the **AppKit backend**: the Objective-C runtime FFI, the
+//! `NSApplication` bootstrap, `NSWindow` and a layer-hosting `NSView` carrying
+//! the `CAMetalLayer` that *is* [`SurfaceTarget::AppKit`], the event pump and a
+//! blocking `wait_events`, windowed ↔ borderless on a named display, `NSScreen`
+//! enumeration with scale and refresh, size constraints and close-request
+//! interception — then keyboard, text through a real `NSTextInputClient`,
+//! pointer, both scroll units, relative motion, pointer lock, cursors and
+//! warping. The pasteboard and drag-and-drop are the slice after it, and
+//! [`ShellCaps`] is clear on every bit they would set. It is hand-written
+//! `objc_msgSend` FFI — **linked rather than `dlopen`ed**, for the same reason
+//! the Win32 backend gives — with no `objc2` and no framework.
 //!
-//! Three macOS facts are worth knowing at this level rather than at that one.
+//! Four macOS facts are worth knowing at this level rather than at that one.
 //! **AppKit is main-thread-only and enforces it by raising an Objective-C
 //! exception**, which is the concrete reason [`Shell`] is not `Send` and is a
 //! stronger rule than Win32's thread affinity — there, any thread may own a
 //! window as long as it is the one pumping. **The Y axis points up**, and macOS
 //! is the only one of the five platforms whose coordinate system disagrees with
-//! this seam's about that. And **`backingScaleFactor` is 1.0 or 2.0 and nothing
+//! this seam's about that. **`backingScaleFactor` is 1.0 or 2.0 and nothing
 //! between**, so [`ShellCaps::FRACTIONAL_SCALE`] is clear on the one desktop
-//! backend a reader would expect it to be set on.
+//! backend a reader would expect it to be set on. And **macOS cannot confine a
+//! pointer at all** — there is no `ClipCursor` and no `confine_to`, only warping
+//! it back after it has already left — so [`ShellCaps::POINTER_CONFINE`] is
+//! clear while [`ShellCaps::POINTER_LOCK`] is set, which is a split no other
+//! desktop backend has.
 //!
 //! Two Win32 facts the other backends do not have are worth knowing at this
 //! level rather than at that one. A window's contents freeze while the user

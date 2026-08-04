@@ -33,9 +33,50 @@
 //! It is also what makes the coalescing below trivially sound: two
 //! [`Resized`](RawEvent::Resized) markers for one window are the same marker,
 //! because neither of them carries a value that could differ.
+//!
+//! # Input is recorded raw, and interpreted with the shell in hand
+//!
+//! Every input variant carries the numbers the `NSEvent` came with and almost
+//! nothing derived from them — a `kVK_*` code rather than a
+//! [`KeyCode`](crcbl_core::KeyCode), a modifier flags word rather than
+//! [`Modifiers`](crcbl_core::input::Modifiers), a scrolling delta and a
+//! precise-or-not flag rather than a
+//! [`ScrollDelta`](crcbl_core::input::ScrollDelta). The reason is the Win32
+//! backend's: a responder method is called re-entrantly from inside this crate's
+//! own `pump`, so it must not touch the shell, and the interpretations that need
+//! the window's scale or its view's height have nowhere to read them from.
+//!
+//! **The one exception is the character**, and it is forced rather than chosen:
+//! an `NSEvent`'s `charactersIgnoringModifiers` is a string owned by an event
+//! that is gone by the time the pump gets back to it. Win32 can ask
+//! `MapVirtualKeyW` about the layout at any later moment; here the only moment
+//! is inside the callback, so the callback reads the first character and records
+//! it.
+//!
+//! # `TextCommit` is a marker, and its string is on the side
+//!
+//! An input method commits *a string*, not a character — that is the whole
+//! reason [`TextCommit`](crate::ShellEvent::TextCommit) exists as something
+//! other than a key event — and a `String` cannot live in a [`Copy`] enum. So
+//! [`TextCommitted`](RawEvent::TextCommitted) is a marker that keeps the commit
+//! in its place in the stream and the text itself is queued on
+//! [`Shared`](super::app::Shared), which is the same arrangement the Win32
+//! backend uses for a file drop's paths and for the same reason.
+//!
+//! # This enum is `PartialEq` and not `Eq`, unlike Win32's
+//!
+//! Positions, deltas and timestamps are all `f64`, because that is what AppKit
+//! reports them as — a fractional point coordinate is normal on a Retina
+//! display, and the timestamp is a `double` of seconds. [`enqueue`] compares
+//! only the three variants that carry no value at all, so nothing here depends
+//! on float equality; the derive is what the type is, not what the queue uses.
 
-/// One thing the window delegate saw.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+use crcbl_core::input::ButtonState;
+
+use super::ffi::{NSPoint, NSUInteger};
+
+/// One thing the window delegate or the view saw.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RawEvent {
     /// `windowDidResize:` — the frame changed; read it again.
     Resized {
@@ -82,6 +123,124 @@ pub enum RawEvent {
     /// `NSApplicationDidChangeScreenParametersNotification` — a display was
     /// attached, detached or reconfigured.
     ScreensChanged,
+
+    /// `keyDown:` or `keyUp:` on the content view.
+    ///
+    /// **Never a modifier key**: those arrive as
+    /// [`FlagsChanged`](Self::FlagsChanged), because macOS does not deliver a
+    /// key event for one at all.
+    Key {
+        /// `NSWindow *` as an integer.
+        window: usize,
+        /// `-[NSEvent keyCode]`, which is a `kVK_*` value — see
+        /// [`keys::key_code`](super::keys::key_code).
+        keycode: u16,
+        /// The first character of `charactersIgnoringModifiers`, read in the
+        /// callback because the event does not outlive it. `None` for a key that
+        /// produces no character in this layout.
+        character: Option<char>,
+        /// `-[NSEvent modifierFlags]`.
+        flags: NSUInteger,
+        /// Down or up.
+        state: ButtonState,
+        /// `-[NSEvent isARepeat]`.
+        repeat: bool,
+        /// `-[NSEvent timestamp]`: seconds since the system booted.
+        seconds: f64,
+    },
+
+    /// `flagsChanged:` — a modifier key moved, and only the flags say which way.
+    ///
+    /// The `keycode` names the physical key and the flags carry one
+    /// device-dependent bit per modifier;
+    /// [`keys::modifier_is_down`](super::keys::modifier_is_down) is what turns
+    /// the pair into an edge.
+    FlagsChanged {
+        /// `NSWindow *` as an integer.
+        window: usize,
+        /// `-[NSEvent keyCode]`.
+        keycode: u16,
+        /// `-[NSEvent modifierFlags]`, device-dependent bits included.
+        flags: NSUInteger,
+        /// `-[NSEvent timestamp]`.
+        seconds: f64,
+    },
+
+    /// The input method committed text. **The string is on
+    /// [`Shared`](super::app::Shared)**; see the module docs.
+    TextCommitted {
+        /// `NSWindow *` as an integer. Also what the payload is matched by, so a
+        /// commit for a window that dies before the pump is discarded with it
+        /// rather than being handed to the next commit's marker.
+        window: usize,
+        /// The timestamp of the key event being interpreted — not the moment
+        /// `insertText:` ran, which is inside it.
+        seconds: f64,
+    },
+
+    /// `mouseMoved:` or one of the three `*MouseDragged:` methods.
+    PointerMotion {
+        /// `NSWindow *` as an integer.
+        window: usize,
+        /// `-[NSEvent locationInWindow]`: AppKit's window space, Y **up**.
+        location: NSPoint,
+        /// `-[NSEvent deltaX]`, which is Quartz's space and needs no flip.
+        dx: f64,
+        /// `-[NSEvent deltaY]`, likewise — Y **down**, unlike `location` beside
+        /// it.
+        dy: f64,
+        /// `-[NSEvent timestamp]`.
+        seconds: f64,
+    },
+
+    /// `mouseEntered:` or `mouseExited:` from the view's `NSTrackingArea`.
+    PointerFocus {
+        /// `NSWindow *` as an integer.
+        window: usize,
+        /// Whether the pointer is now inside the view.
+        entered: bool,
+        /// Where it entered. Meaningless on leave, which
+        /// [`PointerFocus`](crate::ShellEvent::PointerFocus) reports as `None`.
+        location: NSPoint,
+        /// `-[NSEvent timestamp]`.
+        seconds: f64,
+    },
+
+    /// One of the six `*Mouse{Down,Up}:` methods.
+    Button {
+        /// `NSWindow *` as an integer.
+        window: usize,
+        /// `-[NSEvent buttonNumber]`, which goes past five — see
+        /// [`pointer::button`](super::pointer::button).
+        number: isize,
+        /// Down or up.
+        state: ButtonState,
+        /// `-[NSEvent locationInWindow]`.
+        location: NSPoint,
+        /// `-[NSEvent modifierFlags]`.
+        flags: NSUInteger,
+        /// `-[NSEvent timestamp]`.
+        seconds: f64,
+    },
+
+    /// `scrollWheel:`.
+    Scroll {
+        /// `NSWindow *` as an integer.
+        window: usize,
+        /// `-[NSEvent scrollingDeltaX]`.
+        dx: f64,
+        /// `-[NSEvent scrollingDeltaY]`.
+        dy: f64,
+        /// `-[NSEvent hasPreciseScrollingDeltas]`: pixels when set, lines when
+        /// clear. The device answers, not the backend.
+        precise: bool,
+        /// `-[NSEvent locationInWindow]`.
+        location: NSPoint,
+        /// `-[NSEvent modifierFlags]`.
+        flags: NSUInteger,
+        /// `-[NSEvent timestamp]`.
+        seconds: f64,
+    },
 }
 
 impl RawEvent {
@@ -93,7 +252,14 @@ impl RawEvent {
             | Self::BackingChanged { window }
             | Self::Focus { window, .. }
             | Self::CloseRequested { window }
-            | Self::Closed { window } => Some(window),
+            | Self::Closed { window }
+            | Self::Key { window, .. }
+            | Self::FlagsChanged { window, .. }
+            | Self::TextCommitted { window, .. }
+            | Self::PointerMotion { window, .. }
+            | Self::PointerFocus { window, .. }
+            | Self::Button { window, .. }
+            | Self::Scroll { window, .. } => Some(window),
             Self::ScreensChanged => None,
         }
     }
@@ -126,6 +292,14 @@ impl RawEvent {
 /// marker because the newer one carries a newer size; here the two are equal, so
 /// keeping the first preserves its position in the stream — which is what makes
 /// a focus change that arrived between two resizes still land between them.
+///
+/// **No input is collapsed**, deliberately, and the three arms below are what
+/// makes that structural rather than a promise: a resize is a *state* whose
+/// intermediate values describe frames nobody rendered, while a keystroke, a
+/// click and a motion sample are *events* whose durations between them are what
+/// `docs/plan/19-input.md`'s pattern evaluator is a function of. Coalescing two
+/// motion samples into their endpoints erases the path a drag took, and
+/// coalescing two key edges turns a double-tap into a tap.
 pub fn enqueue(queue: &mut Vec<RawEvent>, event: RawEvent) {
     match event {
         RawEvent::Resized { .. } | RawEvent::BackingChanged { .. } | RawEvent::ScreensChanged
@@ -247,11 +421,181 @@ mod tests {
         assert_eq!(queue, events);
     }
 
+    /// A motion sample, for the burst below.
+    fn motion(window: usize, x: f64, seconds: f64) -> RawEvent {
+        RawEvent::PointerMotion {
+            window,
+            location: NSPoint { x, y: 100.0 },
+            dx: 1.0,
+            dy: -1.0,
+            seconds,
+        }
+    }
+
+    #[test]
+    fn a_burst_of_input_keeps_every_sample_in_order() {
+        // The counterpart to the resize collapse, and the reason `enqueue` names
+        // three variants rather than "anything repeated": a drag path, a
+        // double-click and an auto-repeat run are all sequences whose *members*
+        // are the information.
+        let mut queue = Vec::new();
+        let samples = [
+            motion(A, 10.0, 1.000),
+            motion(A, 11.0, 1.004),
+            RawEvent::Button {
+                window: A,
+                number: 0,
+                state: ButtonState::Pressed,
+                location: NSPoint { x: 11.0, y: 100.0 },
+                flags: 0,
+                seconds: 1.008,
+            },
+            RawEvent::Button {
+                window: A,
+                number: 0,
+                state: ButtonState::Released,
+                location: NSPoint { x: 11.0, y: 100.0 },
+                flags: 0,
+                seconds: 1.060,
+            },
+            RawEvent::Button {
+                window: A,
+                number: 0,
+                state: ButtonState::Pressed,
+                location: NSPoint { x: 11.0, y: 100.0 },
+                flags: 0,
+                seconds: 1.140,
+            },
+            RawEvent::Key {
+                window: A,
+                keycode: 0x0D,
+                character: Some('w'),
+                flags: 0,
+                state: ButtonState::Pressed,
+                repeat: false,
+                seconds: 1.200,
+            },
+            RawEvent::Key {
+                window: A,
+                keycode: 0x0D,
+                character: Some('w'),
+                flags: 0,
+                state: ButtonState::Pressed,
+                repeat: true,
+                seconds: 1.500,
+            },
+            RawEvent::Scroll {
+                window: A,
+                dx: 0.0,
+                dy: -3.0,
+                precise: true,
+                location: NSPoint { x: 11.0, y: 100.0 },
+                flags: 0,
+                seconds: 1.600,
+            },
+            RawEvent::TextCommitted {
+                window: A,
+                seconds: 1.200,
+            },
+        ];
+        for sample in samples {
+            enqueue(&mut queue, sample);
+        }
+        assert_eq!(queue, samples);
+    }
+
+    #[test]
+    fn two_identical_motion_samples_are_two_samples() {
+        // The one case that would be collapsed by a `contains` check applied to
+        // everything: a pointer that came back to where it was is not the same
+        // event twice, and a commit of the same string twice is two commits.
+        let mut queue = Vec::new();
+        let sample = motion(A, 10.0, 1.0);
+        let commit = RawEvent::TextCommitted {
+            window: A,
+            seconds: 1.0,
+        };
+        enqueue(&mut queue, sample);
+        enqueue(&mut queue, sample);
+        enqueue(&mut queue, commit);
+        enqueue(&mut queue, commit);
+        assert_eq!(queue, [sample, sample, commit, commit]);
+    }
+
     #[test]
     fn every_windowed_event_names_its_window_and_the_desktop_one_does_not() {
         // The routing predicate: an event with no window is not a stale-handle
         // problem, it is a shell-wide fact.
         assert_eq!(RawEvent::Resized { window: A }.window(), Some(A));
+        assert_eq!(motion(B, 0.0, 0.0).window(), Some(B));
+        assert_eq!(
+            RawEvent::Key {
+                window: B,
+                keycode: 0x35,
+                character: None,
+                flags: 0,
+                state: ButtonState::Released,
+                repeat: false,
+                seconds: 0.0,
+            }
+            .window(),
+            Some(B)
+        );
+        assert_eq!(
+            RawEvent::FlagsChanged {
+                window: B,
+                keycode: 0x38,
+                flags: 0,
+                seconds: 0.0,
+            }
+            .window(),
+            Some(B)
+        );
+        assert_eq!(
+            RawEvent::TextCommitted {
+                window: B,
+                seconds: 0.0
+            }
+            .window(),
+            Some(B),
+            "a commit's marker has to name its window, because that is what the \
+             text is matched by"
+        );
+        assert_eq!(
+            RawEvent::PointerFocus {
+                window: B,
+                entered: false,
+                location: NSPoint::default(),
+                seconds: 0.0,
+            }
+            .window(),
+            Some(B)
+        );
+        assert_eq!(
+            RawEvent::Button {
+                window: B,
+                number: 2,
+                state: ButtonState::Pressed,
+                location: NSPoint::default(),
+                flags: 0,
+                seconds: 0.0,
+            }
+            .window(),
+            Some(B)
+        );
+        assert_eq!(
+            RawEvent::Scroll {
+                window: B,
+                dx: 0.0,
+                dy: 1.0,
+                precise: false,
+                location: NSPoint::default(),
+                flags: 0,
+                seconds: 0.0,
+            }
+            .window(),
+            Some(B)
+        );
         assert_eq!(RawEvent::BackingChanged { window: B }.window(), Some(B));
         assert_eq!(
             RawEvent::Focus {

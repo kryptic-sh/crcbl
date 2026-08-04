@@ -38,8 +38,33 @@
 //! reporting a pass it did not earn — a helper that reports success on a
 //! platform where it cannot have done anything is the failure this whole suite
 //! exists to avoid.
+//!
+//! # Owning `main` means owning libtest's command line, not only its body
+//!
+//! `cargo nextest` — which is what CI runs — enumerates a target by executing it
+//! with `--list --format terse` and parsing `<name>: test` lines out of its
+//! stdout. A harness that ignores argv answers that with prose, so the
+//! *listing* step runs the whole session and then fails to parse it; that is how
+//! this target broke three CI jobs at once on the run that introduced it. The
+//! listing is therefore answered in [`main`] before anything else happens.
+
+/// The one test this target contains, under the name `nextest` reports it by.
+const TEST_NAME: &str = "appkit_session";
 
 fn main() {
+    // libtest's list protocol, answered before any work: `--list` prints one
+    // `<name>: test` line per test and exits. `--ignored` asks for the ignored
+    // subset, and nothing here is `#[ignore]`d — on the same terms as the rest
+    // of this crate's suites — so that listing is empty rather than the same
+    // line again, which would enumerate one test twice.
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--list") {
+        if !args.iter().any(|arg| arg == "--ignored") {
+            println!("{TEST_NAME}: test");
+        }
+        return;
+    }
+
     #[cfg(not(target_os = "macos"))]
     {
         println!(
@@ -58,8 +83,8 @@ mod macos {
     use std::time::{Duration, Instant};
 
     use crcbl_shell::{
-        DisplayMode, LogicalSize, PhysicalSize, Shell, ShellBackend, ShellEvent, SizeConstraints,
-        WindowDesc, WindowId, open_backend,
+        CursorIcon, DisplayMode, LogicalSize, PhysicalPoint, PhysicalSize, PointerMode, Shell,
+        ShellBackend, ShellCaps, ShellEvent, SizeConstraints, WindowDesc, WindowId, open_backend,
     };
 
     /// How long any one step may take before the session is called stuck.
@@ -134,6 +159,8 @@ mod macos {
         // change is the only thing that invalidates it.
         shell.surface_target(window).expect("surface_target");
 
+        input(&mut shell, window, size);
+
         let borderless = flip(
             &mut shell,
             window,
@@ -149,6 +176,163 @@ mod macos {
             "a destroyed window is a stale handle"
         );
         println!("crcbl appkit session: a window opened, changed mode twice and closed");
+    }
+
+    /// The M2 half: the capability set, the pointer modes, the cursor, and the
+    /// one piece of arithmetic in this slice that only a real window can check.
+    ///
+    /// # The warp is the reason this is here rather than in a `#[test]`
+    ///
+    /// A position crosses **three** spaces on its way from the seam to
+    /// CoreGraphics — the view's own Y-up points, AppKit's Y-up screen points,
+    /// and Quartz's Y-down global pixels — and getting either reflection wrong
+    /// puts the cursor the same distance on the *wrong side of the middle*. That
+    /// is indistinguishable from a working warp for as long as the target
+    /// happens to be centred, which is exactly what a hand-written fixture would
+    /// pick. The check here is the round trip through the real window: warp the
+    /// pointer somewhere known, and read back where the window system says it
+    /// landed.
+    ///
+    /// **The pointer is moved off the window first**, deliberately. Injected
+    /// input describes a transition rather than a state — the Windows half of
+    /// P5C paid for that lesson — so a warp to a point the cursor is already at
+    /// produces no event at all, and a warp that never crosses the window's edge
+    /// produces no `PointerFocus`.
+    fn input(shell: &mut Box<dyn Shell>, window: WindowId, size: PhysicalSize) {
+        let caps = shell.caps();
+        assert!(
+            caps.has_mouselook(),
+            "a locked pointer and a delta beside it are both implemented: {caps:?}"
+        );
+        assert!(caps.contains(ShellCaps::POINTER_WARP), "{caps:?}");
+        assert!(caps.contains(ShellCaps::TEXT_IME), "{caps:?}");
+        assert!(
+            !caps.contains(ShellCaps::POINTER_CONFINE),
+            "macOS has no confine API and this backend must not claim one: {caps:?}"
+        );
+
+        // The capability and the method agree, which is what makes the bit
+        // checkable rather than decorative.
+        let refused = shell
+            .set_pointer_mode(window, PointerMode::Confined)
+            .expect_err("confinement is not implementable on this platform");
+        assert!(
+            refused.to_string().contains("confine"),
+            "the refusal has to name the mode, or nobody can act on it: {refused}"
+        );
+
+        // Somewhere outside the window, so that the warp below is a *crossing*
+        // rather than a warp to where the cursor already is — which produces no
+        // event at all, and is the lesson the Windows half paid for. Past the
+        // bottom-right corner, so the system's clamp to the display arrangement
+        // lands it in the screen's corner and a centred window is nowhere near
+        // it.
+        shell
+            .warp_pointer(
+                window,
+                PhysicalPoint::new(
+                    f64::from(size.width) + 200.0,
+                    f64::from(size.height) + 200.0,
+                ),
+            )
+            .expect("a warp outside the window is clamped, not refused");
+        shell.pump(&mut |_event| {});
+
+        let target =
+            PhysicalPoint::new(f64::from(size.width) * 0.75, f64::from(size.height) * 0.50);
+        shell.warp_pointer(window, target).expect("warp_pointer");
+        let landed = wait_for_pointer(shell);
+
+        // One backing pixel of slack per space crossed: the warp lands on a
+        // whole display pixel and the report comes back through the view's
+        // points, so the two need not agree exactly.
+        let slack = 3.0;
+        assert!(
+            (landed.x - target.x).abs() <= slack && (landed.y - target.y).abs() <= slack,
+            "warped to {target:?} in a {size:?} window and the window system reported \
+             {landed:?}; a Y that is the window's height minus the one asked for is a \
+             missing flip, and an X that matches while the Y does not is the desktop \
+             reflection rather than the window one"
+        );
+        println!("crcbl appkit session: warped to {target:?} and landed at {landed:?}");
+
+        // Locking is the mode macOS does have, and it is observable through the
+        // seam rather than only through the calls it made.
+        shell
+            .set_pointer_mode(window, PointerMode::Locked)
+            .expect("pointer lock");
+        assert_eq!(
+            shell.window_state(window).expect("state").pointer_mode,
+            PointerMode::Locked
+        );
+        shell
+            .set_pointer_mode(window, PointerMode::Free)
+            .expect("back to free");
+        assert_eq!(
+            shell.window_state(window).expect("state").pointer_mode,
+            PointerMode::Free,
+            "the freeze is desktop-wide, so leaving it set would follow the runner out \
+             of this process"
+        );
+
+        // Cursor shapes and hiding, which have no seam readback — the contract
+        // is that they fail only for a stale handle.
+        for cursor in [
+            Some(CursorIcon::Crosshair),
+            Some(CursorIcon::Text),
+            None,
+            Some(CursorIcon::Default),
+        ] {
+            shell.set_cursor(window, cursor).expect("set_cursor");
+        }
+        println!("crcbl appkit session: pointer modes, cursors and the warp all answered");
+    }
+
+    /// Pumps until the window system reports where the pointer is.
+    ///
+    /// A loop of its own rather than [`wait_for`], because this one needs the
+    /// event's **payload** and that function's own pump has already discarded
+    /// it by the time its predicate runs.
+    ///
+    /// Two events can answer and either will do, which is what makes this robust
+    /// to a question nobody has settled about the runner. `PointerFocus` comes
+    /// from the tracking area, registered `NSTrackingActiveAlways`, so it fires
+    /// whether or not this process is frontmost; `PointerMotion` additionally
+    /// needs the window to be **key**, because macOS sends mouse-moved events
+    /// only to a key window that has asked for them. The last one seen wins: a
+    /// CI runner is a real desktop and an event this process did not cause can
+    /// arrive at any moment, so the freshest report is the one that describes
+    /// the warp.
+    fn wait_for_pointer(shell: &mut Box<dyn Shell>) -> PhysicalPoint {
+        let started = Instant::now();
+        let mut seen = Vec::new();
+        loop {
+            let mut landed = None;
+            shell.pump(&mut |event: ShellEvent| {
+                seen.push(event.name());
+                match event {
+                    ShellEvent::PointerFocus {
+                        entered: true,
+                        position: Some(at),
+                        ..
+                    }
+                    | ShellEvent::PointerMotion { abs: Some(at), .. } => landed = Some(at),
+                    _ => {}
+                }
+            });
+            if let Some(at) = landed {
+                return at;
+            }
+            assert!(
+                started.elapsed() < DEADLINE,
+                "crcbl appkit session: waited {DEADLINE:?} for the pointer to be reported \
+                 somewhere after a warp and nothing arrived; the events that did were \
+                 {seen:?}. No PointerFocus at all means the NSTrackingArea is not \
+                 delivering, and a PointerFocus with no PointerMotion means the window \
+                 never became key."
+            );
+            shell.wait_events(Some(Duration::from_millis(20)));
+        }
     }
 
     /// Asks for a mode and waits until the window system has answered it.

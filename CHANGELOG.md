@@ -16,6 +16,47 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl-shell**: **input on the AppKit backend** — keyboard, text, pointer,
+  scroll, relative motion, pointer lock, cursors and warping, so a game is
+  playable on macOS rather than merely windowed. `POINTER_LOCK`, `POINTER_WARP`,
+  `RAW_POINTER_MOTION` and `TEXT_IME` join the capability set, and
+  `ShellCaps::has_mouselook()` is true there.
+
+  Keys carry Apple's `kVK_*` codes mapped to `KeyCode` (a third numbering, which
+  coincides with neither evdev nor PS/2 set 1 at any point), an X11 keysym, the
+  auto-repeat flag and the modifiers of that event. **Four keys the seam names
+  are unreachable on macOS** — `PrintScreen`, `ScrollLock`, `Pause` and
+  `ContextMenu` have no `kVK_*` code, and those positions on a Mac keyboard are
+  `F13`–`F15`, which are their own keys. **Num Lock is not a modifier there**:
+  macOS has no such latch, and `NSEventModifierFlagNumericPad` means "this key
+  is on the keypad", so `Modifiers::NUM_LOCK` is never set. **Option is reported
+  as `ALT` and never `ALT_GR`**, because the same key is macOS's Alt and its
+  level-3 shift and no third key distinguishes them — the opposite conclusion
+  the Win32 backend reaches, from the same starting point.
+
+  Text goes through a real `NSTextInputClient` and `interpretKeyEvents:`, so
+  commits arrive from the **input method** and dead keys compose — reading
+  `-[NSEvent characters]` instead would leave every accented character
+  unreachable. Pre-edit is tracked and never surfaced (the seam has no event for
+  one), so an input method's candidate window appears at the window's origin
+  rather than under a caret.
+
+  The pointer reports both scroll units — a trackpad's `ScrollDelta::Pixels` and
+  a wheel's `Lines`, the first backend where both arms are reachable — buttons
+  past the fifth through `otherMouseDown:`, and enter/leave from an
+  `NSTrackingArea`. `PointerMode::Locked` freezes the cursor with
+  `CGAssociateMouseAndMouseCursorPosition(false)` and needs none of the
+  clip-and-recentre machinery Win32 and X11 carry.
+
+  Two things a consumer must know. **`PointerMode::Confined` is refused,
+  permanently**: macOS has no confine API, only warping the cursor back after it
+  has already left, so `POINTER_CONFINE` stays clear — the only desktop backend
+  where the two capture modes come apart. And **`RAW_POINTER_MOTION` here is
+  unclamped but _accelerated_**: `NSEvent`'s deltas are separate from the
+  absolute position and keep flowing at the screen edge, which is what makes a
+  camera work, but macOS publishes no way to remove the system's pointer
+  acceleration from them.
+
 - **crcbl-shell**: an **AppKit backend**, registered and selected automatically
   on macOS — so `crcbl_shell::open()` now returns a real window there instead of
   `NoBackend`. The window lifecycle: `NSApplication` bootstrap, create, show,
@@ -34,8 +75,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   AppKit**. Borderless is a frameless window at the display's size, not
   `toggleFullScreen:`: the desktop's mode is untouched and there is no Spaces
   transition. `ASPECT_HINT_HONORED`, `WINDOW_POSITION`, `SERVER_DECORATIONS`,
-  `MULTI_WINDOW` and `EVENT_WAIT` are set; input, the pasteboard and drag-and-
-  drop are the slices after this one and every bit they would set stays clear.
+  `MULTI_WINDOW` and `EVENT_WAIT` are set; the pasteboard and drag-and-drop are
+  the slice after this one and every bit they would set stays clear.
 
   Four macOS facts a consumer may need. **`AppKitShell::open` requires the
   process's main thread** and returns `ShellError::Backend` naming that rule
