@@ -1469,6 +1469,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-net**, **crcbl-server**: a delta in the last 25 bytes before the
+  transport's 64 KiB cap encoded and sealed fine but was dropped by
+  `send_unreliable` every tick — and the server had already retained it as the
+  next delta's baseline, evicting the client's real one and leaving it desynced
+  until the world shrank. The encode cap now leaves room for the seal by
+  construction, and a snapshot is retained as a baseline only after the
+  transport accepted it.
+
 - **crcbl-cli**: `crcbl crpix` frame names that are clip keywords silently
   corrupted the written `.crpix` — a frame named `loop` wrote
   `clip flap: loop loop`, which parses as zero frames plus the loop flag, with

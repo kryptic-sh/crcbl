@@ -494,16 +494,21 @@ impl<T: Transport> Server<T> {
             }
         };
 
-        // Store this full snapshot as a new baseline for future deltas.
-        self.session.baseline_store_mut(sector).insert(current);
-
         if self
             .transport
             .send_unreliable(Message::unreliable(payload))
             .is_err()
         {
             self.processing_error_count += 1;
+            return;
         }
+
+        // Store this full snapshot as a new baseline for future deltas — only
+        // once the transport accepted it. A baseline whose snapshot never left
+        // the server must not be the reference future deltas encode against:
+        // that is what evicts the client's real baseline and makes the desync
+        // permanent.
+        self.session.baseline_store_mut(sector).insert(current);
     }
 
     /// Serialise every replicated system into snapshot blobs.
@@ -702,8 +707,8 @@ impl<T: Transport> fmt::Debug for Server<T> {
 mod tests {
     use super::*;
     use crcbl_ecs::System;
-    use crcbl_net::auth::AUTH_TAG;
-    use crcbl_net::{InMemoryTransport, MessageKind};
+    use crcbl_net::auth::{AUTH_OVERHEAD, AUTH_TAG};
+    use crcbl_net::{InMemoryTransport, MAX_IN_MEMORY_MESSAGE_BYTES, MessageKind};
 
     // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -795,6 +800,37 @@ mod tests {
                     .expect("empty snapshot is valid"),
             );
         }
+    }
+
+    /// Serialise a world the way `emit_snapshot` does and return the wire
+    /// length of the keyframe it would emit.
+    ///
+    /// Mirrors `collect_systems`: one synthetic `(0, entity_count)` entry per
+    /// system that does not replicate, the same replicated ids, and the same
+    /// delta wire format. The result is the encoded size before the seal.
+    fn keyframe_payload_len(world: &World) -> usize {
+        let stats = Inspector::collect(world);
+        let mut systems = Vec::new();
+        for (system, stat) in world.schedule().iter().zip(stats.iter()) {
+            let mut data = Vec::new();
+            if !system.replicate(&mut data) {
+                crcbl_net::encode_entity_entry(
+                    &mut data,
+                    0,
+                    &(stat.entity_count as u32).to_le_bytes(),
+                );
+            }
+            systems.push(crcbl_net::SystemSnapshot {
+                system_id: replicated_system_id(system.name()),
+                data,
+            });
+        }
+        let baseline = Baseline::from_snapshot(TickId::from_raw(1), &systems, Trust::Authenticated)
+            .expect("test world must serialise like a real one");
+        let keyframe = DeltaCodec::encode_from_baseline(SectorId::ZERO, &baseline, None);
+        crcbl_net::encode_delta(&keyframe)
+            .expect("probe worlds stay below the encode cap")
+            .len()
     }
 
     // ── Construction ───────────────────────────────────────────────────────
@@ -1010,6 +1046,72 @@ mod tests {
             "a snapshot whose system ids collide must not be sent at all"
         );
         assert_eq!(server.processing_error_count(), 1);
+    }
+
+    #[test]
+    fn oversized_delta_is_not_retained_as_a_baseline() {
+        // A delta in (MAX_IN_MEMORY_MESSAGE_BYTES - AUTH_OVERHEAD,
+        // MAX_IN_MEMORY_MESSAGE_BYTES] encodes under the old cap but seals to
+        // more than the transport accepts. The server must refuse it at encode
+        // time — and must not retain it as the next delta's baseline.
+        //
+        // `System<T>` does not replicate, so every system costs a fixed 32
+        // wire bytes (16-byte system header + one synthetic 16-byte entity);
+        // the size knob is the system count.
+        const FIXTURE_SYSTEMS: usize = 2046;
+
+        // The full fixture's delta exceeds the encode cap once it leaves room
+        // for the seal, so the encoder cannot measure it directly. Measure the
+        // real per-system wire cost on small worlds and extrapolate.
+        let probe_len = |count: usize| {
+            let mut world = World::new();
+            for i in 0..count {
+                world.register_system(Box::new(System::<f32>::new(format!("position_{i}"))));
+            }
+            keyframe_payload_len(&world)
+        };
+        let one_system = probe_len(1);
+        let per_system_bytes = probe_len(2) - one_system;
+        assert_eq!(
+            per_system_bytes, 32,
+            "a non-replicating system must cost 16 header + 12 entry + 4 count bytes"
+        );
+        let fixture_len = one_system + per_system_bytes * (FIXTURE_SYSTEMS - 1);
+        assert!(
+            fixture_len > MAX_IN_MEMORY_MESSAGE_BYTES - AUTH_OVERHEAD
+                && fixture_len <= MAX_IN_MEMORY_MESSAGE_BYTES,
+            "fixture delta of {fixture_len} bytes must fall in the drop window \
+             ({}, {}]",
+            MAX_IN_MEMORY_MESSAGE_BYTES - AUTH_OVERHEAD,
+            MAX_IN_MEMORY_MESSAGE_BYTES,
+        );
+
+        let mut world = World::new();
+        for i in 0..FIXTURE_SYSTEMS {
+            world.register_system(Box::new(System::<f32>::new(format!("position_{i}"))));
+        }
+        let (server_transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world, server_transport);
+        let mut crypto = connect(&mut server, &mut peer);
+
+        // The client acks tick 1, whose retained baseline is empty; the next
+        // delta is the whole world, sized to be dropped by the transport.
+        retain_ack_baselines(&mut server, [1]);
+        send_sealed(&mut peer, &mut crypto, &ack(1));
+        server.update(2 * TICK);
+
+        assert_eq!(server.processing_error_count(), 1);
+        let emitted_tick = server.tick_id();
+        let store = server.session.baseline_store(SectorId::ZERO).unwrap();
+        assert!(
+            store.get(emitted_tick).is_none(),
+            "a snapshot the transport dropped must not become the next delta's \
+             baseline (tick {emitted_tick} was retained)"
+        );
+        assert!(
+            store.get(TickId::from_raw(1)).is_some(),
+            "the client's acked baseline must survive"
+        );
     }
 
     // ── Authentication ─────────────────────────────────────────────────────

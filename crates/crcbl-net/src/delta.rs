@@ -22,12 +22,19 @@ use std::hash::{Hash, Hasher};
 
 use crcbl_core::TickId;
 
+use crate::auth::AUTH_OVERHEAD;
 use crate::codec::{ByteReader, DecodeError};
 use crate::messages::SystemSnapshot;
+use crate::transport::MAX_IN_MEMORY_MESSAGE_BYTES;
 use crate::types::{EntityBits, EntityData, SectorId};
 
-/// Maximum accepted delta packet size. Deltas target a single UDP datagram.
-pub const MAX_DELTA_BYTES: usize = 64 * 1024;
+/// The largest encoded delta whose *sealed* form fits the transport: sealing
+/// adds [`crate::auth::AUTH_OVERHEAD`] bytes, and `send_unreliable` rejects
+/// anything past [`crate::transport::MAX_IN_MEMORY_MESSAGE_BYTES`]. A delta
+/// that encoded fine and then was dropped by the transport is a client that
+/// desyncs for good — the 32-tick keyframe fallback is a full snapshot,
+/// larger, and dropped too.
+pub const MAX_DELTA_BYTES: usize = MAX_IN_MEMORY_MESSAGE_BYTES - AUTH_OVERHEAD;
 /// Largest individual component payload accepted from a delta packet.
 pub const MAX_COMPONENT_BYTES: usize = 60 * 1024;
 /// Maximum systems accepted from an unauthenticated delta packet.
