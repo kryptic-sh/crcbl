@@ -52,6 +52,7 @@ struct Frame {
     swapchain: SwapchainHandle,
     color: ImageHandle,
     color_view: ImageViewHandle,
+    depth_image: ImageHandle,
     depth_view: ImageViewHandle,
     draw_args: BufferHandle,
     draw_count: BufferHandle,
@@ -230,6 +231,7 @@ fn setup(instance: &dyn Instance) -> Frame {
         swapchain,
         color,
         color_view,
+        depth_image,
         depth_view,
         draw_args,
         draw_count,
@@ -266,12 +268,25 @@ fn render(frame: &Frame) {
                 crcbl_hal::ResourceState::IndirectArgument,
             ),
         ],
-        images: &[crcbl_hal::ImageBarrier::new(
-            frame.color,
-            ImageSubresourceRange::all(Format::Rgba16Float),
-            crcbl_hal::ResourceState::Undefined,
-            crcbl_hal::ResourceState::ColorAttachment,
-        )],
+        images: &[
+            crcbl_hal::ImageBarrier::new(
+                frame.color,
+                ImageSubresourceRange::all(Format::Rgba16Float),
+                crcbl_hal::ResourceState::Undefined,
+                crcbl_hal::ResourceState::ColorAttachment,
+            ),
+            // A fresh image's only legal source state is Undefined, and the pass
+            // writes the depth attachment (`read_only: false` pairs with
+            // `DepthStencilWrite`), so the reference frame must transition it too —
+            // wgpu auto-transitions and the null backend checks handles, not
+            // states, and a strict Vulkan backend otherwise records a VUID.
+            crcbl_hal::ImageBarrier::new(
+                frame.depth_image,
+                ImageSubresourceRange::all(Format::D32Float),
+                crcbl_hal::ResourceState::Undefined,
+                crcbl_hal::ResourceState::DepthStencilWrite,
+            ),
+        ],
         global: false,
     });
 
@@ -402,6 +417,29 @@ fn the_same_frame_runs_on_both_tiers_through_trait_objects() {
         expected.extend(["EndRenderPass", "EndDebugLabel"]);
         assert_eq!(recorder.command_names(), expected, "tier {expected_tier:?}");
         assert_eq!(recorder.pass_labels(), vec!["opaque".to_string()]);
+
+        // The reference frame has to be valid on a strict backend too: the depth
+        // image is fresh (`Undefined`) and the pass writes it (`read_only: false`
+        // pairs with `DepthStencilWrite`), so the frame's barrier must transition
+        // it. wgpu auto-transitions and the null backend checks handles, not
+        // states — this assertion is the only thing that sees a missing depth
+        // transition, which is a VUID on a faithful Vulkan backend.
+        let barrier_images = recorder
+            .commands()
+            .into_iter()
+            .find_map(|command| match command {
+                Command::Barrier { images, .. } => Some(images),
+                _ => None,
+            })
+            .expect("the frame records one barrier");
+        assert!(
+            barrier_images.iter().any(|barrier| {
+                barrier.image == frame.depth_image
+                    && barrier.from == crcbl_hal::ResourceState::Undefined
+                    && barrier.to == crcbl_hal::ResourceState::DepthStencilWrite
+            }),
+            "the depth image is transitioned into the pass, not entered in Undefined: {barrier_images:?}"
+        );
 
         // The depth attachment reached the backend cleared to the reversed-Z
         // far plane, not to the conventional-Z 1.0.
