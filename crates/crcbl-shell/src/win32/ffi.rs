@@ -742,6 +742,17 @@ pub mod value {
     pub const MWMO_INPUT_AVAILABLE: u32 = 0x0004;
     /// `INFINITE`.
     pub const INFINITE: u32 = 0xFFFF_FFFF;
+    /// `WAIT_OBJECT_0` — with a handle count of zero this means one thing only:
+    /// a message is available.
+    pub const WAIT_OBJECT_0: u32 = 0;
+    /// `WAIT_TIMEOUT` — the wait slept for its whole timeout, which is the
+    /// outcome [`ShellCaps::EVENT_WAIT`](crate::ShellCaps::EVENT_WAIT) claims is
+    /// reachable.
+    pub const WAIT_TIMEOUT: u32 = 258;
+    /// `WAIT_FAILED`. `GetLastError` says why, and a wait that fails returns
+    /// *immediately* — which is indistinguishable from a wait that woke, unless
+    /// the return value is read.
+    pub const WAIT_FAILED: u32 = 0xFFFF_FFFF;
 
     /// `HTCLIENT` — the `WM_SETCURSOR` hit-test code for the drawable area.
     ///
@@ -918,6 +929,14 @@ unsafe extern "system" {
         wake_mask: u32,
         flags: u32,
     ) -> u32;
+    // Test-only, like `SendMessageW` above and for a related reason: outside a
+    // test nothing knows what the queue *should* hold, so a `QS_*` reading
+    // answers no question the backend can act on. Inside one it is how a wait
+    // that woke when the queue was known to be empty explains itself. The high
+    // word is "there is a message now", the low word "there has been one since
+    // you last looked" — the distinction `MWMO_INPUTAVAILABLE` turns on.
+    #[cfg(test)]
+    pub fn GetQueueStatus(flags: u32) -> u32;
     pub fn MonitorFromWindow(hwnd: Handle, flags: u32) -> Handle;
     pub fn EnumDisplayMonitors(
         hdc: Handle,

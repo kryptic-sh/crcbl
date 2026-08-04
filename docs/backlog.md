@@ -270,22 +270,25 @@ timestamp instead of `CurrentTime` (`Peer::server_time`, kept — it is correct
 EWMH), and asking `openbox` less often or clicking the frame instead. The click
 made it measurably _worse_: five runs, 3-5 failures each.
 
-## The Win32 backend has never been run on Windows
+## What the Win32 backend has and has not been run against
 
 P5C W1 and W2 wrote the whole of `crates/crcbl-shell/src/win32/` on a Linux
-machine. It was cross-checked with
+machine. It is cross-checked with
 `cargo check`/`cargo clippy --target x86_64-pc-windows-msvc`, which do not link
 and do not run — **a cross-check proves the code typechecks and nothing more**.
-Every claim below that is not about arithmetic is unverified until the
-`build + test (windows-latest)` job reports:
 
-- `Win32Shell::open`, `create_window`, the message pump, the borderless round
-  trip, monitor enumeration and per-monitor DPI have never executed.
-- The `#[cfg(all(test, target_os = "windows"))]` suite in `win32/shell.rs` is
-  deliberately **not** `#[ignore]`d, so its first CI run is the answer to
-  whether a GitHub runner gives a process a usable window station. If
-  `register_class` fails there, every test in that module fails with the
-  `GetLastError` code, which is the finding.
+**W1's first CI run on `windows-latest` answered the open question: the runner
+does give a process a usable window station.** 2248 tests passed and 1 failed;
+`Win32Shell::open`, `create_window`, the message pump, the borderless round
+trip, monitor enumeration and per-monitor DPI all executed against a real
+desktop, and `cargo build`/`cargo clippy` linked the hand-written declarations
+for real. The one failure was `wait_events_genuinely_blocks` (three 50 ms waits
+in 47 ms); the wait now reports a `Wake` and the test asserts that reason rather
+than a wall clock, and **whether that fixed the cause or only diagnosed it is
+the next CI run's answer, not something this note may claim in advance.**
+
+What remains unverified:
+
 - The structure layouts in `win32/ffi.rs` are asserted by size and offset on the
   host, which catches a missing or wrong-width field but not a _reordering_ of
   two fields of the same width. `DEVMODEW` is the one with two unions in it and

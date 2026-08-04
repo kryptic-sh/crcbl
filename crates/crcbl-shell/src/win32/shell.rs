@@ -26,6 +26,38 @@ use super::pointer::{RawMotion, Visibility};
 use super::proc::{self, Shared};
 use super::window;
 
+/// Why [`Win32Shell::wait`] came back.
+///
+/// `MsgWaitForMultipleObjectsEx` has four answers and three of them return
+/// *immediately*, so the duration of a wait does not say which one happened —
+/// a failed call and a wait that found a message already queued look identical
+/// from a clock, and both look like a wait that simply did not work. This names
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Wake {
+    /// The timeout elapsed with nothing to do: the wait slept, which is what
+    /// [`ShellCaps::EVENT_WAIT`] promises is possible.
+    TimedOut,
+    /// A message is available — either it arrived during the wait, or it was
+    /// already queued when the wait started and `MWMO_INPUTAVAILABLE` reported
+    /// it. Correct behaviour, and indistinguishable from a broken wait unless
+    /// the queue is known to have been empty.
+    Message,
+    /// `WAIT_FAILED`. Returns at once and sleeps not at all.
+    Failed {
+        /// `GetLastError` immediately afterwards.
+        error: u32,
+    },
+    /// Something outside the documented set. With a handle count of zero
+    /// `WAIT_ABANDONED` and `WAIT_IO_COMPLETION` should both be unreachable,
+    /// which is exactly why one arriving is worth naming rather than folding
+    /// into another arm.
+    Unexpected {
+        /// The raw return value.
+        outcome: u32,
+    },
+}
+
 /// The windowed style and placement a borderless window will be restored to.
 ///
 /// Captured on the way into [`DisplayMode::Borderless`] and applied verbatim on
@@ -356,6 +388,71 @@ impl Win32Shell {
     /// around. It returns zero when the queue is empty, so this terminates:
     /// `WM_PAINT` is the one message that would repeat forever if it were left
     /// unhandled, and `DefWindowProc` validates it.
+    /// [`wait_events`](Shell::wait_events), with the reason it came back.
+    ///
+    /// # Why the return value exists at all
+    ///
+    /// `Shell::wait_events` returns `()`, so the first version of this dropped
+    /// `MsgWaitForMultipleObjectsEx`'s answer on the floor. Three of its four
+    /// outcomes are *immediate* — a message was already queued, one arrived, or
+    /// the call failed outright — and discarding the value makes them
+    /// indistinguishable from each other and from a wait that slept properly.
+    /// The first CI run on Windows produced exactly that: three 50 ms waits in
+    /// 47 ms, with nothing to say which of the three had happened.
+    ///
+    /// [`Wake`] is what a test asserts on, because
+    /// [`EVENT_WAIT`](ShellCaps::EVENT_WAIT) is a claim about a *mechanism* —
+    /// "this sleeps" — and a wall clock cannot tell a wait that slept from a
+    /// wait that failed on a loaded runner. Nothing in the backend branches on
+    /// it; the trait method still ignores it, because a caller has nothing to do
+    /// differently either way.
+    fn wait(&mut self, timeout: Option<Duration>) -> Wake {
+        let milliseconds = timeout.map_or(value::INFINITE, |timeout| {
+            // `INFINITE` is `u32::MAX`, so a timeout that saturates to it would
+            // silently become "forever" — 49 days of sleep is close enough to
+            // the caller's intent, but never waking is not.
+            u32::try_from(timeout.as_millis())
+                .unwrap_or(value::INFINITE - 1)
+                .min(value::INFINITE - 1)
+        });
+        // SAFETY: a count of zero makes the handle array unused, so a null
+        // pointer is correct for it; the flags are the documented pair for
+        // "wake for any message, including ones already queued".
+        let outcome = unsafe {
+            ffi::MsgWaitForMultipleObjectsEx(
+                0,
+                ptr::null(),
+                milliseconds,
+                value::QS_ALL_INPUT,
+                value::MWMO_INPUT_AVAILABLE,
+            )
+        };
+        match outcome {
+            value::WAIT_TIMEOUT => Wake::TimedOut,
+            value::WAIT_OBJECT_0 => Wake::Message,
+            // SAFETY: reading the calling thread's last error, immediately
+            // after the call that set it.
+            value::WAIT_FAILED => Wake::Failed {
+                error: unsafe { ffi::GetLastError() },
+            },
+            other => Wake::Unexpected { outcome: other },
+        }
+    }
+
+    /// Which kinds of message this thread's queue holds, as `QS_*` bits.
+    ///
+    /// Only ever called to *explain* a [`Wake::Message`] that should have been
+    /// a [`Wake::TimedOut`] — so it is not on the wait path and costs a wait
+    /// nothing. Kept beside [`wait`](Self::wait) because that is the only
+    /// question it answers, and test-only because only a test knows what the
+    /// queue was supposed to hold.
+    #[cfg(test)]
+    fn queue_status() -> u32 {
+        // SAFETY: reading the calling thread's own queue state. The call takes
+        // no pointers and has no failure mode.
+        unsafe { ffi::GetQueueStatus(value::QS_ALL_INPUT) }
+    }
+
     fn drain_messages(&mut self) {
         let mut message = Msg::default();
         loop {
@@ -886,25 +983,20 @@ impl Shell for Win32Shell {
     /// something that queued another message, and then went to sleep would
     /// sleep out the whole timeout with work already waiting.
     fn wait_events(&mut self, timeout: Option<Duration>) {
-        let milliseconds = timeout.map_or(value::INFINITE, |timeout| {
-            // `INFINITE` is `u32::MAX`, so a timeout that saturates to it would
-            // silently become "forever" — 49 days of sleep is close enough to
-            // the caller's intent, but never waking is not.
-            u32::try_from(timeout.as_millis())
-                .unwrap_or(value::INFINITE - 1)
-                .min(value::INFINITE - 1)
-        });
-        // SAFETY: a count of zero makes the handle array unused, so a null
-        // pointer is correct for it; the flags are the documented pair for
-        // "wake for any message, including ones already queued".
-        unsafe {
-            ffi::MsgWaitForMultipleObjectsEx(
-                0,
-                ptr::null(),
-                milliseconds,
-                value::QS_ALL_INPUT,
-                value::MWMO_INPUT_AVAILABLE,
-            );
+        // A wait that cannot wait turns an editor idling at zero frames per
+        // second into one spinning a core, and says nothing while it does it.
+        // Nothing can be done about it here — the caller has no alternative to
+        // offer — so it is reported and the loop continues.
+        match self.wait(timeout) {
+            Wake::TimedOut | Wake::Message => {}
+            Wake::Failed { error } => {
+                log::warn!("MsgWaitForMultipleObjectsEx failed with error {error}; not sleeping");
+            }
+            Wake::Unexpected { outcome } => {
+                log::warn!(
+                    "MsgWaitForMultipleObjectsEx returned {outcome}, which is not one of its documented answers"
+                );
+            }
         }
     }
 
@@ -2166,23 +2258,44 @@ mod tests {
 
     #[test]
     fn wait_events_genuinely_blocks() {
-        // What `EVENT_WAIT` claims. Measured over three waits rather than one,
-        // because a message arriving is a legitimate early return — but three
-        // in a row cannot all be early on an idle window, and a `wait_events`
-        // that did nothing would take no time at all.
+        // What `EVENT_WAIT` claims, asserted as the *mechanism* it is rather
+        // than as a duration. The first version of this measured three 50 ms
+        // waits against a wall clock and failed on the runner at 47 ms with
+        // nothing to say why — a wait that found a queued message, a wait that
+        // failed outright, and a wait that never slept are all instant, and a
+        // clock cannot tell them apart. `Wake` can.
+        //
+        // A window that has just been created and shown has messages waiting,
+        // and `MWMO_INPUTAVAILABLE` reports them by design, so the queue is
+        // drained to quiescence first: `Wake::Message` before that point is
+        // correct behaviour and asserting against it would be asserting that
+        // the flag does not work.
         let mut shell = shell();
         let _window = window(&mut shell);
-        shell.pump(&mut |_| {});
+        for _ in 0..16 {
+            shell.pump(&mut |_| {});
+            if shell.wait(Some(Duration::from_millis(0))) == Wake::TimedOut {
+                break;
+            }
+        }
 
         let start = Instant::now();
-        for _ in 0..3 {
-            shell.pump(&mut |_| {});
-            shell.wait_events(Some(Duration::from_millis(50)));
-        }
+        let woke = shell.wait(Some(Duration::from_millis(50)));
         let waited = start.elapsed();
+
+        assert_eq!(
+            woke,
+            Wake::TimedOut,
+            "an idle window with a drained queue must sleep out the timeout; \
+             it took {waited:?} and the queue holds {:#06x}",
+            Win32Shell::queue_status()
+        );
+        // The reason and the clock have to agree: a `WAIT_TIMEOUT` that arrived
+        // instantly would mean the timeout was not the one that was asked for.
+        // Loose on the low side because Windows' timer granularity is 15.6 ms.
         assert!(
-            waited >= Duration::from_millis(60),
-            "three 50 ms waits took {waited:?}, which is not blocking"
+            waited >= Duration::from_millis(40),
+            "it reported a timeout after only {waited:?}"
         );
     }
 
