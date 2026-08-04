@@ -1888,6 +1888,72 @@ fn pasting_our_own_copy_does_not_deadlock() {
     assert_eq!(content.text(), Some("round trip"));
 }
 
+/// A self-paste of an oversized offer leaves the pasting window's input alone.
+///
+/// The `INCR` branch of answering a `SelectionRequest` has to see the
+/// requestor delete each chunk, so it selects `PropertyChange` on the
+/// requestor's window — and `ChangeWindowAttributes(EVENT_MASK, …)` is a
+/// *replace*, not an OR. When both halves of the conversation are this
+/// process, the requestor is one of our own windows, which already selects
+/// `PropertyChange` (and every other input event) through `WINDOW_EVENT_MASK`:
+/// the replace used to strip that window's input forever, permanently. The
+/// transfer itself still completed — the same replace was what let the reader
+/// see the chunks — so the window went deaf silently instead of the paste
+/// failing. The regression this pins down: after the paste, the reader must
+/// still receive a key.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_self_paste_of_an_oversized_offer_keeps_the_window_receiving_input() {
+    let mut session = Session::open();
+    let owner = session.window(&desc("incr owner"));
+    let reader = session.window(&desc("incr reader"));
+    // Comfortably above the server's 256 KiB request limit, so the offer goes
+    // out as `INCR` and `select_property_changes` actually runs. The content
+    // is arbitrary; text offers are UTF-8 and the round trip is byte-exact.
+    let payload: String = (0..300_000u32)
+        .map(|byte| (byte % 251) as u8 as char)
+        .collect();
+
+    session
+        .shell
+        .clipboard_offer(owner, &[ClipboardOffer::text(&payload)])
+        .expect("claim");
+
+    let request = session
+        .shell
+        .clipboard_request(reader, MimeType::TextUtf8)
+        .expect("accepted");
+    let (_, content) = session.clipboard_answer(request);
+    assert_eq!(
+        content.bytes(),
+        Some(payload.as_bytes()),
+        "the INCR transfer completed"
+    );
+
+    // The regression: the reader must still hear keys after the paste.
+    session.focus(reader);
+    session.take_names();
+    session.peer.key(keycode::A, true);
+    session.pump_until("a key after the oversized self-paste", |session| {
+        session.events.iter().any(|event| {
+            matches!(
+                event,
+                ShellEvent::Key {
+                    key_code: Some(KeyCode::KeyA),
+                    ..
+                }
+            )
+        })
+    });
+    session.peer.key(keycode::A, false);
+
+    assert!(
+        session.slowest_pump < SLOWEST_PUMP,
+        "the frame loop never stalled during the transfer: {:?}",
+        session.slowest_pump
+    );
+}
+
 /// Releasing the clipboard leaves nobody owning it.
 #[test]
 #[ignore = "needs an X server; run tests/run-x11-e2e.sh"]

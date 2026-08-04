@@ -180,7 +180,7 @@ impl X11Shell {
             32,
             &window::words_to_bytes(&estimate),
         );
-        self.conn.select_property_changes(event.requestor);
+        self.select_property_changes(event.requestor);
         self.writes.push(Write::new(
             event.requestor,
             property,
@@ -591,6 +591,40 @@ impl X11Shell {
         }
         self.writes.retain(|write| !write.is_stalled(now));
     }
+
+    /// Selects `PropertyChange` on another client's window.
+    ///
+    /// Needed for the *sending* half of an `INCR` transfer: the requestor
+    /// acknowledges each chunk by deleting the property, and without this
+    /// selection those deletions are invisible and the transfer stops after one
+    /// chunk. Never issued for one of our own windows — see the guard inside.
+    pub(super) fn select_property_changes(&self, xid: u32) {
+        // Our own windows already select `PROPERTY_CHANGE` — it is in
+        // `WINDOW_EVENT_MASK`, set at creation and never changed — so an
+        // `INCR` transfer between two of our windows needs no mask change,
+        // and must not get one: `ChangeWindowAttributes(EVENT_MASK, …)`
+        // *replaces* the whole mask, and the old call stripped every input
+        // event off a window pasting our own oversized offer, permanently.
+        // A foreign requestor keeps the replace, which is the only way to
+        // add `PROPERTY_CHANGE` to a window we know nothing about.
+        if self.window_by_xid(xid).is_some() {
+            return;
+        }
+        let values = [ffi::event_mask::PROPERTY_CHANGE];
+        // SAFETY: the connection is live and `xid` is the requestor from a
+        // `SelectionRequest`, which the server vouched for. The value list has
+        // exactly the one word the `EVENT_MASK` bit declares. A window that has
+        // since been destroyed yields an asynchronous `BadWindow`, which is the
+        // correct outcome — the transfer then times out.
+        unsafe {
+            (self.conn.lib.change_window_attributes)(
+                self.conn.raw(),
+                xid,
+                ffi::cw::EVENT_MASK,
+                values.as_ptr().cast::<core::ffi::c_void>(),
+            );
+        }
+    }
 }
 
 impl super::Conn {
@@ -628,29 +662,5 @@ impl super::Conn {
         unsafe { (self.lib.set_selection_owner)(self.raw(), owner, self.atoms.clipboard, time) };
         self.flush();
         self.selection_owner() == owner
-    }
-
-    /// Selects `PropertyChange` on another client's window.
-    ///
-    /// Needed for the *sending* half of an `INCR` transfer: the requestor
-    /// acknowledges each chunk by deleting the property, and without this
-    /// selection those deletions are invisible and the transfer stops after one
-    /// chunk. Event masks are per client, so this cannot disturb whatever the
-    /// requestor itself selected.
-    pub(super) fn select_property_changes(&self, xid: u32) {
-        let values = [ffi::event_mask::PROPERTY_CHANGE];
-        // SAFETY: the connection is live and `xid` is the requestor from a
-        // `SelectionRequest`, which the server vouched for. The value list has
-        // exactly the one word the `EVENT_MASK` bit declares. A window that has
-        // since been destroyed yields an asynchronous `BadWindow`, which is the
-        // correct outcome — the transfer then times out.
-        unsafe {
-            (self.lib.change_window_attributes)(
-                self.raw(),
-                xid,
-                ffi::cw::EVENT_MASK,
-                values.as_ptr().cast::<core::ffi::c_void>(),
-            );
-        }
     }
 }
