@@ -463,6 +463,15 @@ pub(super) unsafe extern "system" fn window_proc(
                 // A minimized window reports 0×0, which is a visibility change
                 // wearing a resize's clothes. See the module docs.
                 shared.push(RawEvent::Minimized { hwnd: window });
+                // **No reclip here.** `client_screen_rect` of an iconic window
+                // maps both corners of the 0×0 client area to the same point,
+                // and re-applying that pins the cursor for the whole minimized
+                // period — the desktop-hostage invariant this module exists to
+                // keep. The recorded target survives, so the first `WM_SIZE`
+                // after restore re-clips from the real rectangle.
+                if shared.clipped() == window {
+                    input::release_clip();
+                }
             } else {
                 shared.push(RawEvent::Resized {
                     hwnd: window,
@@ -474,10 +483,10 @@ pub(super) unsafe extern "system" fn window_proc(
                         high_word(l_param as usize),
                     ),
                 });
+                // A clip is a screen rectangle built from a client rectangle
+                // that has just changed shape.
+                input::reclip(shared, hwnd, window);
             }
-            // A clip is a screen rectangle built from a client rectangle that
-            // has just changed shape.
-            input::reclip(shared, hwnd, window);
             0
         }
 

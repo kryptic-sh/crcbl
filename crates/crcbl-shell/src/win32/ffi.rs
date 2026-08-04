@@ -733,6 +733,17 @@ pub mod value {
     pub const SW_HIDE: i32 = 0;
     /// `SW_SHOWNORMAL`.
     pub const SW_SHOW_NORMAL: i32 = 1;
+    /// `SW_MINIMIZE`: `ShowWindow` command that iconifies the window.
+    ///
+    /// Test-only, like [`PM_NOREMOVE`]: the backend never minimizes a window,
+    /// and the clip test restores it again with [`SW_RESTORE`].
+    #[cfg(test)]
+    pub const SW_MINIMIZE: i32 = 6;
+    /// `SW_RESTORE`: `ShowWindow` command that un-iconifies and activates.
+    ///
+    /// Test-only; see [`SW_MINIMIZE`].
+    #[cfg(test)]
+    pub const SW_RESTORE: i32 = 9;
 
     /// `SWP_NOSIZE`.
     pub const SWP_NO_SIZE: u32 = 0x0001;

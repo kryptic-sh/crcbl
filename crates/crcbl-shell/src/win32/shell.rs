@@ -2563,6 +2563,59 @@ mod tests {
     }
 
     #[test]
+    fn minimizing_a_captured_window_releases_the_clip() {
+        // A minimized window is 0×0, and `client_screen_rect` maps both corners
+        // of that through `ClientToScreen` to the *same* point — so a clip
+        // re-applied from it pins the cursor there for the whole minimized
+        // period. The window is minimized for real rather than handed a
+        // synthetic `WM_SIZE(SIZE_MINIMIZED)`: the degenerate 0×0 client
+        // rectangle only exists for an actually-iconic window.
+        let mut shell = shell();
+        let window = window(&mut shell);
+        shell.pump(&mut |_| {});
+        let hwnd = hwnd_of(&shell, window);
+
+        make_foreground(hwnd);
+        send_focus(hwnd, true);
+        shell.pump(&mut |_| {});
+        let client = super::input::client_screen_rect(hwnd).expect("a live window has one");
+        let clipped = client.intersect(virtual_screen());
+
+        shell
+            .set_pointer_mode(window, PointerMode::Confined)
+            .expect("POINTER_CONFINE is claimed");
+        assert_eq!(clip_rect(), clipped, "the pointer is bounded by the window");
+
+        // SAFETY: this shell's own window; SW_MINIMIZE is a documented command.
+        unsafe { ffi::ShowWindow(hwnd, value::SW_MINIMIZE) };
+        shell.pump(&mut |_| {});
+        let released = clip_rect();
+        assert!(
+            released.right > released.left && released.bottom > released.top,
+            "a minimized captured window must not pin the cursor to a point: {released:?}"
+        );
+        assert_ne!(
+            released, clipped,
+            "the clip is released, not re-applied from the 0×0 client area"
+        );
+
+        // SAFETY: this shell's own window; SW_RESTORE is a documented command.
+        unsafe { ffi::ShowWindow(hwnd, value::SW_RESTORE) };
+        shell.pump(&mut |_| {});
+        assert_eq!(
+            clip_rect(),
+            clipped,
+            "restore re-clips from the real client rectangle"
+        );
+
+        // Going back to free withdraws it for good.
+        shell
+            .set_pointer_mode(window, PointerMode::Free)
+            .expect("free always works");
+        assert_ne!(clip_rect(), clipped);
+    }
+
+    #[test]
     fn a_second_window_takes_the_pointer_capture_from_the_first() {
         // One cursor, so one clip. A shell with two windows must not leave the
         // first one reporting `Locked` while the second holds the clip.

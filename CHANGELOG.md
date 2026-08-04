@@ -1458,6 +1458,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-shell** (Win32): minimizing a captured window re-applied the pointer
+  clip from the iconic window's 0×0 client area — both corners mapped to the
+  same point, pinning the cursor for the whole minimized period. The `WM_SIZE`
+  `SIZE_MINIMIZED` arm now releases the clip (keeping the recorded target, so
+  restore re-clips from the real rectangle) instead of falling through to
+  `reclip`.
+
 - **crcbl-shell** (AppKit): a hidden window — created `visible: false` or hidden
   with `set_visible(false)` — popped on screen and took key focus when
   `set_mode(Borderless)` ran: the borderless arm ordered the window front with
