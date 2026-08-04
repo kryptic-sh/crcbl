@@ -363,11 +363,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   which nothing above this layer could otherwise notice: `WindowState` carries
   an extent and no position.
 
-  **This does not yet fix the defect that prompted it.** A window flipped to
-  `DisplayMode::Borderless` comes out exactly screen-sized at its previous
-  windowed origin, hanging off two edges of the display, and it still does with
-  the override installed and verified. `docs/backlog.md` carries the open
-  investigation and what each remaining cause would look like.
+  That override was necessary and not sufficient; the defect that prompted it is
+  fixed in the entry below.
+
+- **crcbl-shell** (AppKit): **a mode change put the window back where it was
+  created.** `DisplayMode::Borderless` produced a window of exactly the right
+  size at the wrong origin — hanging off two edges of the display — and the way
+  back was worse, restoring the creation frame's origin _and size_ rather than
+  the placement the window had before the flip. Neither was visible through the
+  seam, which carries an extent and no position.
+
+  The cause is a fact about AppKit worth stating on its own:
+  **`-[NSApplication setPresentationOptions:]` returns every window of the
+  application to its creation frame.** Not the window it is called about — the
+  property is on `NSApplication` — and not "constrains it to the screen". The
+  backend applied the borderless presentation options _after_ placing the
+  window, so every frame it set was immediately thrown away, on both legs of the
+  round trip. `apply_mode` now applies the options before the style mask and the
+  frame, making the frame the last geometry it sets; `appkit::window`'s module
+  docs carry the measurement and the rule, since anyone reordering those
+  statements would otherwise reintroduce it.
 
 - **crcbl-shell** (AppKit): windows no longer take part in **macOS state
   restoration**. `isRestorable` defaults to `YES`, which enrols a window in a

@@ -1197,239 +1197,95 @@ target both reach **stderr**, and a `debug!` on another module's target is
 correctly dropped. Stderr is the stream nextest has been surfacing all along —
 every panic message read this session arrived on it.
 
-### The readback layer earned itself: a borderless window at the wrong origin
+### Changing presentation options moves every window to its creation frame
 
-**The first defect `tests/appkit_session.rs`'s "AppKit as the judge" layer
-caught, and the kind only it can catch.** The run after the wheel fix reached
-the borderless flip and reported:
+**This is a fact about AppKit, not about this codebase, and it cost eight CI
+round trips.** It is written up here and in `appkit::window`'s module docs
+because it is documented nowhere Apple publishes and because the next person to
+reorder those statements will otherwise undo it.
 
-```text
-borderless covers the screen AppKit says it is on, exactly
-  left:  [192.0, 160.0, 1024.0, 768.0]   -[NSWindow frame]
- right:  [  0.0,   0.0, 1024.0, 768.0]   -[[NSWindow screen] frame]
-```
+**`-[NSApplication setPresentationOptions:]` returns every window of the
+application to its creation frame.** Not the window it is called about — there
+is no such window, the property is on `NSApplication` — and not "constrains it
+to the screen". It puts windows back where they were created: origin on the way
+into borderless, origin _and size_ on the way out.
 
-The size is exactly right — the whole 1024×768 screen — and the origin is not.
-`(192, 160)` is precisely `geometry::centred` of the requested 640×480 on that
-screen's `visibleFrame`, which is to say **the window never moved from where it
-was created**. A screen-sized borderless window at a non-zero origin hangs off
-two edges of the display: visible, shipping-quality breakage in a game.
-
-**Nothing below AppKit could have seen it.** `WindowState` carries an extent and
-no position — there is no origin anywhere in the seam — so `set_mode` reported a
-perfectly correct `PhysicalSize { 1024, 768 }` and every run before this one
-printed it happily. It took asking `NSWindow` for its `frame` to see the origin
-at all. That is the entire argument for judging the window by AppKit's own
-accessors rather than by the backend's record of what it asked for, and it is
-now paid for.
-
-**`apply_mode` is correct end to end — established, not assumed.** The
-instrumented run printed the backend's own account and it is clean at every
-step:
+Measured on a real runner by bracketing `apply_mode` statement by statement:
 
 ```text
-borderless: asked for monitor None, computed [0,0,1024,768]
-            from screens [(MonitorId(1), frame [0,0,1024,768], visible [0,60,1024,677])]
-borderless: style mask asked 0x0, window carries 0x0
-setFrame:display: from [192,256,512,416] asked [0,0,1024,768] landed [0,0,1024,768]
-borderless: after makeKeyAndOrderFront: the frame is [0,0,1024,768]
+after the Borderless arm                 [0,0,1024,768]
+after size_layer                         [0,0,1024,768]
+after refresh_presentation (options 0x5) [192,160,1024,768]   <- moved
+
+after the Windowed arm                   [192,256,512,416]
+after size_layer                         [192,256,512,416]
+after refresh_presentation (options 0x0) [192,160,640,512]    <- moved and resized
 ```
 
-and the session then read `frame: [192, 160, 1024, 768]` later. So the rectangle
-is computed right, the mask is right, `setFrame:` is handed the right rectangle
-**and lands it**, and it is still right after the last thing `apply_mode` does.
-**Something moves the window after `set_mode` returns.**
+`[192,160,640,512]` is exactly the frame the window was created at, and
+`centred([0, 63, 1024, 674], 640x480)` — the creation-time visible frame — is
+`(192, 160)` on both axes. **One mechanism, both directions.**
 
-Two mechanisms are dead and neither should be tried again:
+**The fix is an ordering rule: presentation options first, frame last.**
+`refresh_presentation` now runs before the style mask and the frame rather than
+in a tail after them, so the frame is the last geometry `apply_mode` sets. It is
+correct by construction rather than by repair, and two properties make the
+reordering free: the borderless frame is computed from `-[NSScreen frame]`
+rather than `visibleFrame`, so it does not depend on what the options do; and
+the effective mode, which `refresh_presentation` decides from, is now settled up
+front by `borderless_target` returning the whole `Screen` instead of only its
+rectangle. That removes the read-back-the-screen-afterwards step which was the
+only reason the effective mode had to be assigned late in the first place.
+
+The alternative — re-asserting the frame after `refresh_presentation` — was
+considered and declined. It leaves a window that visibly moves and then moves
+back (and on the windowed leg, resizes and resizes back), it needs a comment
+explaining why a second call exists, and it is fragile: anything later added
+after the re-assert reintroduces the bug. The ordering rule needs no second
+call.
+
+**The `apply_mode:` bracket readings stay.** They are what made this findable at
+all, and they are what makes a regression obvious: anything added below the arm
+that repositions the window shows up immediately as a frame that changed after
+the arm had set it.
+
+#### What the eight rounds actually eliminated
+
+Written down so none of them is tried again. Each was killed by evidence, not by
+argument:
 
 - **`constrainFrameRect:toScreen:`.** The override is installed and the host
-  test proving it passes on the runner; the window still lands at (192, 160).
-  Its default moves a window _down_ to clear the menu bar and would never move
-  one right by 192, which was reason to doubt it before the run and is worth
-  weighing next time.
-- **A corrupted `NSRect` argument.** `asked` and `landed` are identical, so the
-  HFA-in-`v0`–`v3` theory — the same class as the `wheel1` variadic that did
-  bite — is ruled out for this call.
+  test proving it passes on the runner; the window still moved. Its default
+  moves a window _down_ to clear the menu bar and would never move one right by
+  192 — which was reason to doubt it before the run, and the lesson is to weigh
+  the _shape_ of a symptom against the shape a mechanism produces.
+- **A corrupted `NSRect` argument.** `setFrame:` logged `asked` and `landed`
+  identical, so the HFA-in-`v0`-`v3` theory — the same class as the `wheel1`
+  variadic that did bite — was ruled out for that call.
+- **The event pump and any delegate callback.** The frame reads wrong on the
+  line printed _before the session's first pump_.
+- **macOS state restoration.** `setRestorable:NO` was added, the next run
+  confirmed `isRestorable false`, and the origin was still wrong. The change
+  stays on its own merits, argued in `window.rs`. `frameAutosaveName` was
+  `Some("")` throughout, so autosave was never in it.
 
-**The origin is exactly the creation rectangle — settled by subtraction, not by
-inference.** The creation log gave the geometry as it was _at creation_:
+#### The two rules that got there
 
-```text
-create: content [192,160,640,480], mask 0xf; visible [0,63,1024,674];
-        window frame [192,160,640,512], isRestorable true, frameAutosaveName Some("")
-```
+- **The readback layer earned itself.** `WindowState` carries an extent and no
+  position, so `set_mode` reported a perfectly correct `PhysicalSize` throughout
+  and every run before this printed it happily. Only asking `NSWindow` for its
+  own `frame` showed the origin at all. **This is the first defect that layer
+  caught and it is the kind only it can catch** — and the restore leg's
+  corruption was invisible even to it for eight rounds, because the borderless
+  assertion fired first. Gathering both flips before asserting either is what
+  exposed it.
+- **Instrumentation that cannot report is the same defect as a check that cannot
+  fail.** The `set_frame` readback shipped, a round trip was spent, and it
+  produced nothing because no logger was installed in the session's process — a
+  `log::warn!` with no logger behind it is a discarded string. That rule has its
+  own section below.
 
-`centred([0, 63, 1024, 674], 640x480)` gives `x = (1024 - 640) / 2 = 192` and
-`y = 63 + (674 - 480) / 2 = 160`. **Exact, both axes.** The earlier 158.5 came
-from using the _flip-time_ `visibleFrame` of `[0, 60, 1024, 677]`, which is not
-the same rectangle — the Dock and menu bar move when the application activates —
-and chasing that 1.5-point gap would have meant hunting a bug in
-`geometry::centred` that is not there. **So the creation arithmetic is right,
-there is no second formula and no rounding, and a borderless window is being put
-back to precisely the rectangle it was created at.**
-
-**The move happens with no pump in between.** `apply_mode`'s own trail ends with
-the frame at `[0,0,1024,768]` after `makeKeyAndOrderFront:`, and the session
-reads `[192,160,1024,768]` on the line it prints _before its first pump_. So the
-event loop is not involved and neither is any delegate callback: **"the pump did
-it" is dead**, along with the constraint and the corrupted-argument theories.
-Everything between those two readings is the tail of `set_mode`, which only
-reads.
-
-`set_mode` now logs the frame immediately after `apply_mode` returns, which
-brackets the remaining gap to a single statement: still `[0,0,...]` there and
-the move happens as the autorelease pool drops or asynchronously afterwards;
-already `[192,160,...]` and it happens inside `makeKeyAndOrderFront:`'s own
-run-loop pass.
-
-**Frame autosave and state restoration are both eliminated.**
-`frameAutosaveName` read `Some("")`, so autosave was never in it. `isRestorable`
-was `true`, and `setRestorable:NO` was added at creation — the next run
-confirmed `isRestorable false` **and the origin was still wrong**. So macOS
-state restoration is not the mechanism either. The change stays regardless,
-argued in `window.rs` on its own merits: a game window has no business in a
-feature that promises AppKit can re-create windows through a `restorationClass`
-this backend does not implement, that makes the operating system a second
-invisible source of truth for a placement the seam hands to `WindowDesc`, and
-that writes saved state to disk keyed by an identity an unbundled binary does
-not stably have.
-
-**The bracket is decisive: the move happens inside `apply_mode`'s own tail.**
-
-```text
-borderless: after makeKeyAndOrderFront: the frame is [0,0,1024,768]
-set_mode:   apply_mode returned with the frame [192,160,1024,768]
-```
-
-Correct at the mode arm's last statement, wrong one statement later at
-`apply_mode`'s return. `apply_mode` holds no autorelease pool of its own — the
-pool lives in `set_mode` and drops after that reading — so a pool drain is not
-between the two either.
-
-**And the tail is not ceremony.** Between the end of the match and `Ok(())` sit
-`screen_of`, `backing_scale`, `size_layer` and **`refresh_presentation`**, the
-last of which is the standout suspect and had not been looked at: it sets
-`NSApplicationPresentationOptions` on the **application** to auto-hide the Dock
-and the menu bar. That changes every screen's `visibleFrame` — the one quantity
-the creation-time centred origin was computed from — and it fires on exactly the
-leg that fails, because `effective_mode` is set to borderless three statements
-above it. The tail is now bracketed statement by statement rather than once, so
-the next run names the statement instead of the region, and the presentation
-options are read back **from AppKit** rather than from this shell's cached copy,
-since `refresh_presentation` early-returns when the two agree and only AppKit
-says what is actually in force.
-
-**The frame is also now re-asserted after `makeKeyAndOrderFront:`**, which was
-held back while untested theories were ahead of it and no longer is.
-`makeKeyAndOrderFront:` is not obliged to be the last word on where a window is,
-and ordering a window front is exactly the kind of operation that re-runs
-placement. It is self-reporting: `set_frame` prints where the window _was_ as
-well as what it was asked for, so a `from` of anything but the screen rectangle
-is a move between the two calls made visible rather than assumed away. On the
-evidence so far it will read `from [0,0,1024,768]` and be a no-op, which is
-itself worth knowing — it would put the mover after the arm entirely and leave
-the tail as the whole of the remaining space.
-
-**If the re-assert does not hold, the next move is to stop chasing it.** The
-backend is otherwise complete and the macOS job is otherwise green; the agreed
-outcome is to record the defect with its full trail, mark the borderless-origin
-assertion as a known failure carrying that evidence, and let the remaining
-assertions run — nine green assertions and one documented defect beats a red job
-and an open investigation blocking everything behind it.
-
-**A fact from the restore leg nobody had read yet.** Its `setFrame:` reports
-`from [192,160,1024,800]` — height **800**, not 768. Between the end of the
-borderless flip and the start of the restore the window gained exactly 32 points
-of title bar _and_ kept the moved origin, which is `setStyleMask:` back to
-titled keeping the content rectangle and growing the frame upward. The restore's
-own `setFrame:` then lands `[192,256,512,416]` exactly, so **the way back
-works**; what the 800 confirms is that the window was still at the wrong origin
-when the restore began, and that `setStyleMask:` resizes and repositions on both
-legs.
-
-**Both mode flips now run before either is asserted.** The borderless origin is
-a known open defect, so asserting it in place panicked before the restore ever
-ran and threw away half of every ten-minute round trip. Nothing is weakened —
-every assertion is made about the same `WindowFacts` snapshot as before, since
-those are owned values.
-
-**The cause is not yet known, and the first candidate was wrong.**
-`constrainFrameRect:toScreen:` was the hypothesis:
-`-[NSWindow setFrame:display:]` passes the rectangle it is given through it, and
-its default keeps a title bar clear of the menu bar — right for a document
-window someone dragged, wrong for every frame this backend sets, all of which
-come from an `NSScreen` rectangle and are on that screen by construction.
-`CrcblWindow` now overrides it to answer the proposed rectangle unchanged, and
-the host test
-`the_window_class_installs_every_override_a_borderless_window_needs` **passed on
-the runner**, so the override is installed and `instancesRespondToSelector:`
-finds it. **The window still came out at (192, 160).**
-
-The override was a correct change on its own merits and stays. But the evidence
-now says it is not the mechanism, and there is a specific reason to have doubted
-it earlier: the default implementation moves a window **down**, to keep a title
-bar below the menu bar. It does not move one **right by 192**. A size that is
-the screen's with an origin that is the _creation_ origin is not the shape that
-constraint produces.
-
-Three causes remain open and they need opposite fixes, so the next round carries
-evidence rather than another candidate:
-
-- **`borderless_frame` computes the wrong rectangle**, and the origin never
-  leaves the backend — a conversion bug.
-- **`setFrame:display:` is handed the right rectangle and does something else
-  with it.** An `NSRect` is an HFA passed in `v0`–`v3` on this ABI, so a wrong
-  Rust function type corrupts it exactly this quietly — the same class of defect
-  as the `wheel1` variadic, which this session has already been bitten by once.
-- **The frame is right when `apply_mode` returns and something moves it
-  afterwards**, in which case `makeKeyAndOrderFront:` or the pump is the
-  suspect.
-
-The backend now logs all of it: the rectangle `borderless_frame` computed and
-the screens it chose from, the style mask asked for and the one the window
-carries when `setFrame:` runs, the frame before / asked / landed across
-`setFrame:display:`, and the frame again after `makeKeyAndOrderFront:`. The
-session's assertion prints the window's frame before the flip and everything
-`WindowFacts` holds, and says which log line settles which case.
-
-Three things checked while in there, because the fix is only worth as much as
-its neighbours:
-
-- **The way back did _not_ have the omission.** `apply_mode` saves the whole
-  `-[NSWindow frame]` before going borderless and restores the whole rectangle,
-  origin included — the same reason `win32/window.rs` saves a `WINDOWPLACEMENT`.
-  It was subject to the same silent constraint on the way in, so it gets the
-  same fix, and the session now asserts the restored frame equals the one
-  captured before the flip rather than only checking the style mask.
-- **`Borderless { monitor: Some(..) }` has no omission either**:
-  `borderless_frame` returns the named screen's `frame`, origin included. **It
-  is still unverified**, and cannot be verified on this runner — with one screen
-  attached, a backend that ignored the named monitor entirely would pass. It
-  needs a two-display machine.
-- **A window born borderless goes through the same constraint.**
-  `create_native_window` passes `screen.frame` to `initWithContentRect:` and
-  then `makeKeyAndOrderFront:`, both of which AppKit could constrain; the
-  override covers that path too. Nothing tests it — the session creates its
-  window windowed and flips — so it is fixed by construction rather than by
-  observation.
-
-`set_frame` now reads the frame back and `log::warn!`s if the window did not go
-where it was put, naming both rectangles. That is instrumentation rather than a
-workaround: the override should make them always agree, and a warning means it
-did not take. It is also worth having for a game developer, who has the same
-blind spot the seam does.
-
-**The guard for this is a host `#[test]`**, on the same terms as
-`appkit::view`'s class suite: `objc_allocateClassPair` and `class_addMethod` are
-runtime calls needing no `NSApplication`, so
-`the_window_class_installs_every_override_a_borderless_window_needs` asks
-`instancesRespondToSelector:` for all three overrides. It catches a refused
-`class_addMethod` and a misspelled selector, both of which leave the
-superclass's implementation in place and fail silently — confirmed offline that
-misspelling the selector in the registration still compiles. Like every macOS
-`#[test]` in this crate it is **compiled here and run only on CI**.
-
-### The first responder may not survive a mode change — open, and worse than the origin
+### `setStyleMask:` takes the first responder — open, and next in line
 
 The same run that reported the borderless origin also reported
 `first_responder: "NSKVONotifying_CrcblWindow"`. **That is the window**, KVO's
@@ -1465,10 +1321,17 @@ in the same two functions, this session has twice paid for changing a thing and
 a neighbouring thing in one round, and the origin's own fix may move the same
 statements. One change, one answer.
 
-**It is not asserted yet either**, for the same reason it was not last round:
-the origin assertion fires before it, so a responder assertion would never be
-reached and would teach nothing. It gets one — `first_responder` back to
+**It is not asserted yet either**, for the same reason it was not before: the
+origin assertion fires ahead of it, so a responder assertion would not have been
+reached and would have taught nothing. It gets one — `first_responder` back to
 `CrcblView` after a full mode round trip — in the commit that fixes it.
+
+**It is now unblocked.** The origin defect that shared these two functions is
+fixed, so the next change here is re-asserting `makeFirstResponder:` after every
+`setStyleMask:` on both legs, with that assertion beside it. The
+pointer-identity logging (`first responder is the content view <bool>`) stays
+either way: it is what turned this from a suspicion into an observation, and it
+will show a regression the same way.
 
 ### `wheel1` is a named parameter, and declaring it variadic scrolled by zero
 
@@ -1580,11 +1443,21 @@ Still uncovered after M5:
   construction and not by observation.** The runner has one display, so a
   backend that ignored the named monitor entirely would pass every assertion in
   the suite. Needs a two-display machine; see the borderless-origin entry above.
-- **A window created borderless is untested.** The session creates its window
-  windowed and flips, so `create_native_window`'s borderless arm — which places
-  the window with `initWithContentRect:` rather than `setFrame:display:` — has
-  never run. It shares the `constrainFrameRect:toScreen:` fix, so it is correct
-  by construction.
+- **A window created borderless is untested**, and now carries a known ordering
+  hazard. The session creates its window windowed and flips, so
+  `create_native_window`'s borderless arm — which places the window with
+  `initWithContentRect:` rather than `setFrame:display:` — has never run. It
+  shares the `constrainFrameRect:toScreen:` override, but **the presentation
+  options are applied by `refresh_presentation` on the first `set_mode`, not at
+  creation**, so a window born borderless has its frame set before any options
+  change has happened to it. Whether that matters depends on when the first
+  options change lands relative to it, which nothing has measured. The ordering
+  rule in `appkit::window`'s module docs is the thing to re-read before adding a
+  test here.
+- **The borderless-origin fix is unrun.** The ordering change and the restored
+  placement assertion both land in the same commit as this entry and neither has
+  executed on a runner. The `apply_mode:` bracket readings are what will say so
+  either way.
 
 - **`injection_skipped` is written and unrun**, because the runner granted
   activation. It stays for the case that produced it, which a developer running

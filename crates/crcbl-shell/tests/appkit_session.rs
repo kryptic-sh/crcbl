@@ -425,36 +425,28 @@ mod macos {
         //   landed [0,0,1024,768]` — the rectangle arrived intact and was
         //   applied, so the HFA-in-`v0`–`v3` theory is dead too.
         //
-        // * **The pump.** `apply_mode` ends with the frame at the screen's
-        //   rectangle, and [`flip`] reads it back already wrong on the line it
-        //   prints *before its first pump*. No event loop, no delegate callback.
+        // * **The pump**, a delegate callback, and macOS state restoration. The
+        //   frame is wrong before the first pump, and `setRestorable:NO` took
+        //   without changing the outcome.
         //
-        // **`apply_mode` is correct end to end and the move happens inside
-        // `set_mode`'s own tail**, which does nothing but read. `set_mode` now
-        // logs the frame the instant `apply_mode` returns, and that brackets what
-        // is left to a single statement.
-        //
-        // The origin the window reverts to is *exactly* its creation rectangle:
-        // `centred([0, 63, 1024, 674], 640x480)` is (192, 160) on both axes, from
-        // the visible frame as it was at creation. So the arithmetic is right and
-        // something is restoring a remembered placement.
+        // **It was `setPresentationOptions:`**, which returns every window of the
+        // application to its *creation* frame — which is why the origin the
+        // window reverted to was exactly `centred([0, 63, 1024, 674], 640x480)`,
+        // the creation rectangle, on both axes. `apply_mode` now applies the
+        // presentation options before the mask and the frame; `appkit::window`'s
+        // module docs carry the measurement and the rule.
         assert_eq!(
             covering.frame, screen,
             "borderless covers the screen AppKit says it is on, exactly.\n\
              The window was at {before_borderless:?} before the flip, and everything AppKit says \
              about it while borderless is {covering:?}.\n\
-             The move is known to happen inside `apply_mode`'s own **tail** — right at the mode \
-             arm's last statement, wrong by its return — so **read the `apply_mode:` lines in \
-             this test's stderr**, which bracket that tail statement by statement:\n\
-             * right after the arm, wrong after `size_layer` or after \
-             `refresh_presentation`, names that statement; `refresh_presentation` sets \
-             NSApplicationPresentationOptions to auto-hide the Dock and menu bar, which moves \
-             every screen's visibleFrame — the quantity the creation origin was centred in.\n\
-             * right at all three and wrong here means it happens after `apply_mode` returns, \
-             which the `set_mode:` line brackets.\n\
-             This round also re-asserts the frame after `makeKeyAndOrderFront:`; that \
-             `setFrame:display:` line's `from` says whether anything moved the window between \
-             ordering it front and re-asserting."
+             The mechanism was `setPresentationOptions:`, which returns every window of the \
+             application to its **creation** frame — so `apply_mode` now applies the \
+             presentation options before the style mask and the frame, and the frame is the \
+             last geometry it sets. A failure here means that ordering has been undone or \
+             something new below the arm repositions the window; the `apply_mode:` readings in \
+             this test's stderr say which statement, because each of them prints the frame \
+             after one step."
         );
         assert_eq!(
             borderless,
@@ -477,6 +469,13 @@ mod macos {
         // somewhere before a mode round trip is in the same place after one —
         // which is what a player alt-tabbing out of fullscreen expects and what
         // nothing below AppKit could report.
+        //
+        // **This half was corrupted too and nobody could see it**, because the
+        // borderless assertion above fired first for eight rounds. The restore
+        // leg came back at `[192,160,640,512]` — the creation frame, moved *and*
+        // resized — from the same `setPresentationOptions:` mechanism as the way
+        // in. One bug, both directions, and this is the assertion that pins the
+        // direction that had none.
         assert_eq!(
             restored.frame, before_borderless,
             "the way back restores the whole placement, origin included, and not merely the size"

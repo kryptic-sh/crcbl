@@ -32,6 +32,59 @@
 //! titled window where a frameless one fitted. The desktop's display mode is
 //! never touched, which is the whole reason the mode exists.
 //!
+//! # The ordering rule: presentation options first, frame last
+//!
+//! **Changing an application's `NSApplicationPresentationOptions` repositions
+//! every window of that application back to its creation frame.** Not the
+//! window it is called about — there is no such window, the property is on
+//! `NSApplication` — and not "constrains it to the screen": it puts windows back
+//! where they were created, origin on the way in and origin *and size* on the
+//! way out.
+//!
+//! That is a fact about AppKit rather than about this codebase, it is documented
+//! nowhere Apple publishes, and it cost eight CI round trips to corner. It was
+//! measured, on a real runner, by bracketing
+//! [`apply_mode`](AppKitShell::apply_mode) statement by statement:
+//!
+//! ```text
+//! after the Borderless arm                 [0,0,1024,768]
+//! after size_layer                         [0,0,1024,768]
+//! after refresh_presentation (options 0x5) [192,160,1024,768]   ← moved
+//!
+//! after the Windowed arm                   [192,256,512,416]
+//! after size_layer                         [192,256,512,416]
+//! after refresh_presentation (options 0x0) [192,160,640,512]    ← moved and resized
+//! ```
+//!
+//! `[192,160,640,512]` is exactly the frame the window was created at. One
+//! mechanism, both directions.
+//!
+//! **So `refresh_presentation` runs before the style mask and the frame, never
+//! after, and the frame is the last geometry this function sets.** The
+//! `apply_mode:` readings in the tail exist to keep it that way: anything added
+//! below the arm that repositions the window shows up immediately as a frame
+//! that changed after the arm had set it. If you are moving those statements
+//! around, this paragraph is why you cannot put the presentation options back at
+//! the end.
+//!
+//! Three things follow that are worth knowing before reordering anything else.
+//!
+//! * The borderless frame is computed from `-[NSScreen frame]` rather than
+//!   `visibleFrame`, so it does not depend on what the options do — the ordering
+//!   is free.
+//! * The effective mode has to be settled before the options, because
+//!   `refresh_presentation` decides from it. That is why the target screen is
+//!   resolved up front by
+//!   [`borderless_target`](AppKitShell::borderless_target) instead of being read
+//!   back off the window afterwards.
+//! * **The windowed placement has to be captured before the options too**, and
+//!   this is the trap the fix nearly fell into. The saved mask and frame used to
+//!   be read inside the borderless arm, which was safe only because the options
+//!   were applied later; hoisting the options without hoisting the capture would
+//!   have saved the *creation* frame as the way back and swapped one silent
+//!   corruption for another. Anything that reads the window's current geometry
+//!   in this function belongs above `refresh_presentation`.
+//!
 //! # Decision: `constrainFrameRect:toScreen:` is overridden, because a game says where its window goes
 //!
 //! `-[NSWindow setFrame:display:]` does not simply apply the rectangle it is
@@ -59,13 +112,11 @@
 //! on a real runner. The default moves a window *down* to clear the menu bar; it
 //! does not move one right by 192 points.
 //!
-//! Four other mechanisms have since been eliminated the same way — a corrupted
-//! `NSRect` argument, the event pump, a delegate callback, and macOS state
-//! restoration — and the `log::debug!` trail through
-//! [`AppKitShell::apply_mode`] and [`set_frame`] is what eliminated them.
-//! **The frame is correct at the mode arm's last statement and wrong by
-//! `apply_mode`'s return**, so what is left is this function's own tail;
-//! `docs/backlog.md` carries the trail and the reasoning.
+//! Four other mechanisms were eliminated the same way — a corrupted `NSRect`
+//! argument, the event pump, a delegate callback, and macOS state restoration —
+//! and the `log::debug!` trail through [`AppKitShell::apply_mode`] and
+//! [`set_frame`] is what eliminated them. The answer was the ordering rule
+//! above; `docs/backlog.md` carries the whole trail.
 //!
 //! Unlike the Win32 backend there is no `WINDOWPLACEMENT` to save: AppKit's
 //! zoomed state is a property of the window rather than a rectangle to restore,
@@ -611,9 +662,81 @@ impl AppKitShell {
         let resizable = state.resizable;
         let saved = state.saved;
 
+        // The screen a borderless window will cover, decided **before anything
+        // moves**. `Some` here is exactly the borderless case.
+        //
+        // Reading it up front is what makes the ordering below possible, and it
+        // is a better answer than the read-back this used to do afterwards: for
+        // `Borderless { monitor: Some(id) }` the target is `id` by definition,
+        // and for `None` it is the screen the window is on right now — which is
+        // the very rectangle the frame is computed from. Neither needs the window
+        // to have moved first.
+        let target = match mode {
+            DisplayMode::Borderless { monitor } => Some(self.borderless_target(window, monitor)?),
+            DisplayMode::Windowed => None,
+        };
+
+        // **The window's placement is captured before anything touches it**, and
+        // before the presentation options above all. Those move the window, so a
+        // capture taken after them would remember the *creation* frame rather
+        // than where the player had the window — which is the exact corruption
+        // this ordering fix exists to stop, reintroduced through the back door
+        // as the way back. It used to sit inside the borderless arm, where it
+        // was safe only because `refresh_presentation` ran later; hoisting the
+        // options without hoisting this would have swapped one silent defect for
+        // another.
+        //
+        // `target.is_some()` is the borderless case, and `saved.is_none()` keeps
+        // the first capture: two borderless flips in a row must not overwrite the
+        // windowed placement with a borderless one.
+        if target.is_some() && saved.is_none() {
+            // SAFETY: a live window; both are accessors.
+            let captured = unsafe {
+                super::shell::Saved {
+                    mask: ffi::msg_usize(window, ffi::sel(c"styleMask")),
+                    frame: ffi::msg_rect(window, ffi::sel(c"frame")),
+                }
+            };
+            log::debug!("borderless: saved the windowed placement {captured:?}");
+            self.window_mut(handle)?.saved = Some(captured);
+        }
+
+        // **The presentation options go first and the frame goes last, and that
+        // ordering is the whole of this function's correctness.**
+        // `setPresentationOptions:` returns every window of the application to
+        // its creation frame — see the ordering rule in the [module docs](self)
+        // — so a frame applied before it is a frame thrown away. Setting the
+        // effective mode here rather than in a tail is what lets
+        // `refresh_presentation`, which decides from it, run this early.
+        let state = self.window_mut(handle)?;
+        state.effective_mode = match target {
+            Some(screen) => DisplayMode::Borderless {
+                monitor: Some(screen.id),
+            },
+            None => DisplayMode::Windowed,
+        };
+        self.refresh_presentation();
+        log::debug!(
+            "apply_mode: after refresh_presentation (options {:?}) the frame is {:?} — this is \
+             the call that repositions windows, and every frame below it is applied afterwards",
+            // SAFETY: the main thread, with `set_mode`'s pool in scope.
+            unsafe { presentation_options() }.map(|options| format!("{options:#x}")),
+            // SAFETY: a live `NSWindow` this shell owns; `frame` is an accessor.
+            unsafe { ffi::msg_rect(window, ffi::sel(c"frame")) }
+        );
+
         match mode {
             DisplayMode::Borderless { monitor } => {
-                let frame = self.borderless_frame(window, monitor)?;
+                // `target` is `Some` for exactly this arm, computed from `mode`
+                // above. The `else` is unreachable and says so rather than
+                // panicking, and matching on `mode` rather than on `target`
+                // keeps the compiler checking this match for exhaustiveness.
+                let Some(screen) = target else {
+                    return Err(ShellError::Backend(
+                        "a borderless mode computed no target screen".to_string(),
+                    ));
+                };
+                let frame = screen.frame;
                 // **The rectangle before it leaves this function.** Whether the
                 // origin is already wrong here or only after `setFrame:` decides
                 // between a conversion bug in `borderless_frame` and something
@@ -628,16 +751,6 @@ impl AppKitShell {
                         .map(|screen| (screen.id, screen.frame, screen.visible))
                         .collect::<Vec<_>>()
                 );
-                if saved.is_none() {
-                    // SAFETY: a live window; both are accessors.
-                    let saved = unsafe {
-                        super::shell::Saved {
-                            mask: ffi::msg_usize(window, ffi::sel(c"styleMask")),
-                            frame: ffi::msg_rect(window, ffi::sel(c"frame")),
-                        }
-                    };
-                    self.window_mut(handle)?.saved = Some(saved);
-                }
                 // SAFETY: a live window. The mask goes first: `setFrame:` places
                 // the window for the mask it has, and a borderless window's
                 // frame rectangle *is* its content rectangle.
@@ -676,30 +789,17 @@ impl AppKitShell {
                     // to be told to come forward again on some systems — and
                     // asking twice costs nothing.
                     ffi::msg1_void(window, ffi::sel(c"makeKeyAndOrderFront:"), ptr::null_mut());
-                    // **After the order-front, which is the last thing this
-                    // function does to the window.** A frame that was right
-                    // after `setFrame:` and is wrong here names this call; one
-                    // that is still right here and wrong by the time the session
-                    // looks names the pump, and nothing else is left.
+                    // **Ordering front was measured not to move the window** —
+                    // a re-assert placed here read `from [0,0,1024,768]`, an
+                    // exact no-op — so the frame above stands as the last word.
+                    // The reading stays because that measurement is the only
+                    // reason the re-assert is absent.
                     log::debug!(
                         "borderless: after makeKeyAndOrderFront: the frame is {:?}, first \
                          responder is the content view {}",
                         ffi::msg_rect(window, ffi::sel(c"frame")),
                         view_has_focus(window)
                     );
-                    // **The frame again, after the window has been ordered
-                    // front.** `makeKeyAndOrderFront:` is not obliged to be the
-                    // last word on where a window is, and ordering a window front
-                    // is exactly the kind of operation that re-runs placement.
-                    // Setting the frame before it and never afterwards means
-                    // trusting that it did not — which is an assumption, and this
-                    // defect has already cost several of those.
-                    //
-                    // It is also self-reporting: `set_frame` prints where the
-                    // window *was* as well as what it was asked for, so a `from`
-                    // of anything but `frame` here is a move between the two
-                    // calls, visible rather than assumed away.
-                    set_frame(window, frame);
                 }
             }
             DisplayMode::Windowed => {
@@ -751,36 +851,25 @@ impl AppKitShell {
             }
         }
 
-        // **The tail is bracketed statement by statement, and it is not empty.**
-        // The frame is correct at the mode arm's last line and wrong by the time
-        // `set_mode` reads it one statement later, so the mover is in here — and
-        // "here" contains two calls that reach AppKit rather than only reading:
-        // `size_layer`, and `refresh_presentation`, which sets
-        // `NSApplicationPresentationOptions` on the **application** to auto-hide
-        // the Dock and the menu bar. That changes every screen's `visibleFrame`,
-        // which is the one quantity a creation-time centred origin was computed
-        // from, and it runs on exactly the leg that fails. Three readings pin
-        // which statement rather than leaving it at "somewhere in the tail".
+        // **The tail keeps its bracket readings**, which are what found the
+        // ordering defect and are what make a reintroduction of it obvious:
+        // anything added below that repositions the window shows up as a frame
+        // that changed after the arm set it. Nothing here may reposition the
+        // window. `size_layer` was measured not to — it sets the layer's scale
+        // and drawable size and touches no geometry of the window's — and
+        // `refresh_presentation`, which does, has moved above the arm where it
+        // belongs.
         //
-        // SAFETY of all three: a live `NSWindow` this shell owns, on the main
-        // thread; `frame` is an accessor.
+        // SAFETY of both: a live `NSWindow` this shell owns, on the main thread;
+        // `frame` is an accessor.
         log::debug!(
             "apply_mode: after the {mode:?} arm the frame is {:?}",
             unsafe { ffi::msg_rect(window, ffi::sel(c"frame")) }
         );
 
-        // AppKit has nobody to refuse: the effective mode is what was just
-        // applied. The screen is read back rather than assumed, because
-        // `Borderless { monitor: None }` means "wherever the window already is"
-        // and the answer names it.
-        let screen = self.screen_of(window);
         // SAFETY: a live window.
         let scale = unsafe { backing_scale(window) };
         let state = self.window_mut(handle)?;
-        state.effective_mode = match mode {
-            DisplayMode::Windowed => DisplayMode::Windowed,
-            DisplayMode::Borderless { .. } => DisplayMode::Borderless { monitor: screen },
-        };
         state.scale = scale;
         // SAFETY: the layer and its host view are alive for as long as the
         // window is, and this is the same thread that created them.
@@ -788,35 +877,35 @@ impl AppKitShell {
         log::debug!("apply_mode: after size_layer the frame is {:?}", unsafe {
             ffi::msg_rect(window, ffi::sel(c"frame"))
         });
-
-        self.refresh_presentation();
-        log::debug!(
-            "apply_mode: after refresh_presentation (options {:?}) the frame is {:?}",
-            // SAFETY: the main thread, with `set_mode`'s pool in scope.
-            unsafe { presentation_options() }.map(|options| format!("{options:#x}")),
-            // SAFETY: as above.
-            unsafe { ffi::msg_rect(window, ffi::sel(c"frame")) }
-        );
         Ok(())
     }
 
-    /// The rectangle a borderless window should cover, in AppKit points.
+    /// The screen a borderless window should cover.
     ///
     /// A named screen is looked up in the enumeration — so a detached one is a
     /// clean [`ShellError::NoSuchMonitor`] rather than a window moved to
     /// nowhere — and `None` means the screen the window is already on, which is
     /// what [`DisplayMode::Borderless`]'s field documents.
-    fn borderless_frame(
+    ///
+    /// **The whole [`Screen`] rather than its rectangle**, because the caller
+    /// needs both halves and needs them at the same moment: the frame to place
+    /// the window with, and the [`MonitorId`] to record as the effective mode —
+    /// which has to be settled *before* anything moves, since the presentation
+    /// options are derived from it and must be applied first. Returning only the
+    /// rectangle is what forced the id to be recovered afterwards by reading the
+    /// screen back off the window, and that read is the reason the effective mode
+    /// used to be assigned in a tail.
+    fn borderless_target(
         &self,
         window: Id,
         monitor: Option<MonitorId>,
-    ) -> Result<NSRect, ShellError> {
+    ) -> Result<Screen, ShellError> {
         if let Some(monitor) = monitor {
             return self
                 .screens
                 .iter()
                 .find(|screen| screen.id == monitor)
-                .map(|screen| screen.frame)
+                .copied()
                 .ok_or(ShellError::NoSuchMonitor(monitor.0));
         }
         self.screen_of(window)
@@ -824,7 +913,7 @@ impl AppKitShell {
             // A hotplug between `[window screen]` and the enumeration this shell
             // holds: the primary is a better answer than a failure.
             .or_else(|| self.screens.first())
-            .map(|screen| screen.frame)
+            .copied()
             .ok_or_else(|| {
                 ShellError::Backend(
                     "there is no display to place a borderless window on".to_string(),
