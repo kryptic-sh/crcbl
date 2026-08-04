@@ -1458,6 +1458,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-vk**: a readback whose explicit wait semaphore was destroyed between
+  `request_readback` and `poll_readback` was undefined behaviour — the
+  completion point was stored as the raw `VkSemaphore` and dereferenced at poll
+  time with no liveness check. It is now stored as a generational handle and
+  re-resolved through the device pool, exactly like the readback buffer, so a
+  destroyed semaphore reports `InvalidHandle` instead.
+
+- **crcbl-vk**: query commands with caller-supplied ranges no longer hand
+  out-of-range values to the driver. `reset_query_set`, `write_timestamp` and
+  `resolve_query_set` now bounds-check against the pool's query count at record
+  time and fail with `InvalidDescriptor`, matching `Device::query_results` and
+  the null backend — an over-large range used to be recorded and reached
+  `vkCmdCopyQueryPoolResults`/`vkCmdResetQueryPool` as a validation violation.
+
 - **crcbl-server**: a reconnect hello that arrived **after** the grace deadline
   expired the session without marking it terminated, so the next fresh join
   silently re-issued the dead session's token and id — and the departed client

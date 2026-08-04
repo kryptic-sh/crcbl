@@ -1101,6 +1101,105 @@ fn timestamps_either_work_or_are_refused_cleanly() {
     headless.finish();
 }
 
+/// Query commands with caller-supplied ranges must bounds-check them against
+/// the pool's count **at record time**, matching `Device::query_results` and
+/// the null backend — an out-of-range reset, timestamp or resolve used to be
+/// recorded and handed to the driver, which the validation layer flags.
+///
+/// The three failing encoders never reach a queue: `finish` reports the
+/// `InvalidDescriptor` and drops the recording. The valid calls on the same
+/// set afterwards record cleanly, so the failure is the range, not the set.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn out_of_range_query_commands_fail_recording_not_the_driver() {
+    let headless = Headless::open();
+    let device = &headless.device;
+    let set = device.create_query_set(&QuerySetDesc {
+        label: Some("vk e2e query bounds"),
+        kind: QueryKind::Timestamp,
+        count: 4,
+    });
+    let Ok(set) = set else {
+        assert!(
+            !device.caps().features.contains(Features::TIMESTAMP_QUERY),
+            "a device reporting TIMESTAMP_QUERY must create a timestamp set"
+        );
+        headless.finish();
+        return;
+    };
+    let dst = device
+        .create_buffer(&BufferDesc {
+            label: Some("vk e2e query resolve dst"),
+            size: 4 * 8,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a resolve destination");
+
+    let mut resolve = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("vk e2e out-of-range resolve"),
+        queue: headless.queue,
+    });
+    resolve.resolve_query_set(set, 2..8, dst, 0);
+    let error = resolve
+        .finish()
+        .expect_err("an out-of-range resolve must fail recording, not the driver");
+    assert!(
+        matches!(error, crcbl_hal::HalError::InvalidDescriptor { .. }),
+        "the out-of-range resolve is a descriptor problem: {error}"
+    );
+
+    let mut reset = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("vk e2e out-of-range reset"),
+        queue: headless.queue,
+    });
+    reset.reset_query_set(set, 3..9);
+    let error = reset
+        .finish()
+        .expect_err("an out-of-range reset must fail recording, not the driver");
+    assert!(
+        matches!(error, crcbl_hal::HalError::InvalidDescriptor { .. }),
+        "the out-of-range reset is a descriptor problem: {error}"
+    );
+
+    let mut timestamp = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("vk e2e out-of-range timestamp"),
+        queue: headless.queue,
+    });
+    timestamp.write_timestamp(set, 4);
+    let error = timestamp
+        .finish()
+        .expect_err("an out-of-range timestamp index must fail recording, not the driver");
+    assert!(
+        matches!(error, crcbl_hal::HalError::InvalidDescriptor { .. }),
+        "the out-of-range timestamp is a descriptor problem: {error}"
+    );
+
+    // The valid calls on the same set still record cleanly. Every resolved
+    // query must also have been issued, or the layer flags
+    // `VUID-vkCmdCopyQueryPoolResults-None-08752` (a reset-but-never-issued
+    // query) — so all four slots get a timestamp before the full-range resolve.
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("vk e2e in-range queries"),
+        queue: headless.queue,
+    });
+    encoder.reset_query_set(set, 0..4);
+    for index in 0..4 {
+        encoder.write_timestamp(set, index);
+    }
+    encoder.resolve_query_set(set, 0..4, dst, 0);
+    let commands = encoder.finish().expect("in-range query recording succeeds");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device.wait_idle().expect("idle");
+
+    device.destroy_command_buffer(commands);
+    device.destroy_buffer(dst);
+    device.destroy_query_set(set);
+    headless.finish();
+}
+
 /// A failing encoder must still `finish`, and must report the failure.
 ///
 /// Regression test. `finish` used to close open debug labels with
@@ -3745,6 +3844,64 @@ fn a_failed_submit_does_not_wedge_the_retire_timeline() {
     device.destroy_buffer(staging);
     device.destroy_command_buffer(commands);
     device.destroy_command_buffer(doomed);
+    headless.finish();
+}
+
+/// A readback whose explicit wait semaphore is destroyed before polling must
+/// fail cleanly, never dereference the destroyed semaphore.
+///
+/// Regression test. The completion point used to be stored as the raw
+/// `VkSemaphore` and dereferenced at poll time with no liveness check, so
+/// destroying the semaphore between request and poll was undefined behaviour.
+/// It is now stored as a generational handle and re-resolved through the pool
+/// at poll time — exactly like the buffer — so a destroyed semaphore fails
+/// lookup and reports [`HalError::InvalidHandle`] instead.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_readback_whose_wait_semaphore_is_destroyed_fails_cleanly() {
+    let headless = Headless::open();
+    let device = &headless.device;
+
+    let buffer = device
+        .create_buffer(&BufferDesc {
+            label: Some("vk e2e orphaned readback"),
+            size: 64,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a readback buffer");
+    let semaphore = device
+        .create_semaphore(&SemaphoreDesc {
+            label: Some("vk e2e readback wait"),
+            kind: SemaphoreKind::Timeline { initial_value: 0 },
+        })
+        .expect("timeline semaphores are a hard requirement of this backend");
+
+    let readback = device
+        .request_readback(&ReadbackDesc {
+            label: Some("vk e2e orphaned readback"),
+            buffer,
+            offset: 0,
+            size: 64,
+            after: Some(SemaphoreWait {
+                semaphore,
+                value: 1,
+            }),
+        })
+        .expect("a readback request");
+    device.destroy_semaphore(semaphore);
+
+    let mut bytes = vec![0u8; 64];
+    let error = device
+        .poll_readback(readback, &mut bytes)
+        .expect_err("a destroyed wait semaphore must fail the poll, not be UB");
+    assert!(
+        matches!(error, crcbl_hal::HalError::InvalidHandle { .. }),
+        "the poll must report the destroyed semaphore: {error}"
+    );
+
+    device.destroy_readback(readback);
+    device.destroy_buffer(buffer);
     headless.finish();
 }
 

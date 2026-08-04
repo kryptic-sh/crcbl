@@ -171,10 +171,14 @@ pub(crate) struct ReadbackEntry {
     buffer: BufferHandle,
     offset: u64,
     size: u64,
-    /// The completion point to watch: an explicit timeline wait when the caller
-    /// named one, otherwise this device's own submission counter snapshotted at
-    /// request time — which is exactly "everything submitted before this call".
-    wait: (vk::Semaphore, u64),
+    /// The completion point to watch: the generational handle of an explicit
+    /// timeline wait when the caller named one, otherwise `None` for this
+    /// device's own retire timeline — device-owned and never destroyed — plus
+    /// the value to wait for, snapshotted at request time. The handle is
+    /// re-resolved at poll time like the buffer, so a destroyed semaphore fails
+    /// lookup instead of dereferencing a dead `VkSemaphore`.
+    wait_semaphore: Option<SemaphoreHandle>,
+    wait_value: u64,
 }
 
 owned!(
@@ -770,13 +774,16 @@ impl DeviceInner {
         lookup(&state.views, "image view", handle, self).map(|entry| (entry.raw, entry.format))
     }
 
-    /// Resolves a query-set handle.
+    /// Resolves a query-set handle, returning its pool, kind and query count —
+    /// the encoder bounds-checks caller-supplied ranges against the count before
+    /// handing them to the driver.
     pub(crate) fn query_set_raw(
         &self,
         state: &DeviceState,
         handle: QuerySetHandle,
-    ) -> Result<(vk::QueryPool, QueryKind), HalError> {
-        lookup(&state.query_sets, "query set", handle, self).map(|entry| (entry.raw, entry.kind))
+    ) -> Result<(vk::QueryPool, QueryKind, u32), HalError> {
+        lookup(&state.query_sets, "query set", handle, self)
+            .map(|entry| (entry.raw, entry.kind, entry.count))
     }
 
     /// The submission counter's current value: the retirement key for anything
@@ -1375,7 +1382,7 @@ impl Device for VkDevice {
         // "Everything submitted to this device before this call" is exactly a
         // snapshot of the submission counter, which is what the retire timeline
         // counts — so a readback with no explicit wait needs no extra object.
-        let wait = match desc.after {
+        let (wait_semaphore, wait_value) = match desc.after {
             Some(wait) => {
                 let semaphore =
                     lookup(&state.semaphores, "semaphore", wait.semaphore, &self.inner)?;
@@ -1385,9 +1392,9 @@ impl Device for VkDevice {
                         what: "ReadbackDesc::after must name a timeline semaphore",
                     });
                 }
-                (semaphore.raw, wait.value)
+                (Some(wait.semaphore), wait.value)
             }
-            None => (self.inner.retire_timeline, self.inner.submissions()),
+            None => (None, self.inner.submissions()),
         };
 
         Ok(self.inner.stamp(state.readbacks.insert(ReadbackEntry {
@@ -1395,7 +1402,8 @@ impl Device for VkDevice {
             buffer: desc.buffer,
             offset: desc.offset,
             size: desc.size,
-            wait,
+            wait_semaphore,
+            wait_value,
         })))
     }
 
@@ -1413,12 +1421,20 @@ impl Device for VkDevice {
                 out.len()
             )));
         }
-        // SAFETY: `entry.wait.0` is a live timeline semaphore of this device —
-        // either the retire timeline or one resolved from the pool at request
-        // time and still present.
-        let reached = unsafe { self.inner.raw.get_semaphore_counter_value(entry.wait.0) }
+        // Resolve the wait semaphore from the handle stored at request time,
+        // exactly like the buffer below. A handle that passes `lookup` is live
+        // in this device's pool; `None` names the retire timeline, which is
+        // device-owned and never destroyed — either way the raw semaphore this
+        // call dereferences is live.
+        // SAFETY: the resolved semaphore is live by construction: `lookup`
+        // succeeded, or it is this device's own retire timeline.
+        let wait_semaphore = match entry.wait_semaphore {
+            Some(handle) => lookup(&state.semaphores, "semaphore", handle, &self.inner)?.raw,
+            None => self.inner.retire_timeline,
+        };
+        let reached = unsafe { self.inner.raw.get_semaphore_counter_value(wait_semaphore) }
             .map_err(|error| conv::hal_error("vkGetSemaphoreCounterValue", error))?;
-        if reached < entry.wait.1 {
+        if reached < entry.wait_value {
             return Ok(ReadbackState::Pending);
         }
         if entry.size > 0 {

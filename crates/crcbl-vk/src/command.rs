@@ -1069,13 +1069,22 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         }
         let state = self.device.state();
-        let Ok((raw, _)) = self.device.query_set_raw(&state, set) else {
+        let Ok((raw, _, count)) = self.device.query_set_raw(&state, set) else {
             drop(state);
             self.fail(HalError::invalid_handle("query set", set));
             return;
         };
+        if range.end > count {
+            drop(state);
+            self.fail(HalError::InvalidDescriptor(format!(
+                "query range {}..{} exceeds the set's {count} queries",
+                range.start, range.end
+            )));
+            return;
+        }
         drop(state);
-        // SAFETY: `self.raw` is recording outside a pass and `raw` is live.
+        // SAFETY: `self.raw` is recording outside a pass, `raw` is live, and
+        // the range was bounds-checked against the pool's query count.
         unsafe {
             self.device
                 .raw
@@ -1088,16 +1097,24 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         }
         let state = self.device.state();
-        let Ok((raw, _)) = self.device.query_set_raw(&state, set) else {
+        let Ok((raw, _, count)) = self.device.query_set_raw(&state, set) else {
             drop(state);
             // Accepted and dropped without the feature — but a *bad handle* is
             // still a bug worth reporting.
             self.fail(HalError::invalid_handle("query set", set));
             return;
         };
+        if index >= count {
+            drop(state);
+            self.fail(HalError::InvalidDescriptor(format!(
+                "query index {index} exceeds the set's {count} queries"
+            )));
+            return;
+        }
         drop(state);
-        // SAFETY: `self.raw` is recording and `raw` is a live timestamp pool
-        // whose query `index` has been reset.
+        // SAFETY: `self.raw` is recording, `raw` is a live timestamp pool
+        // whose query `index` was bounds-checked against its count, and the
+        // query has been reset.
         unsafe {
             self.device.raw.cmd_write_timestamp2(
                 self.raw,
@@ -1119,7 +1136,7 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         }
         let state = self.device.state();
-        let (Ok((raw, _)), Ok(buffer)) = (
+        let (Ok((raw, _, count)), Ok(buffer)) = (
             self.device.query_set_raw(&state, set),
             self.device.buffer_raw(&state, dst),
         ) else {
@@ -1127,8 +1144,17 @@ impl CommandEncoder for VkCommandEncoder {
             self.fail(HalError::invalid_handle("query set or buffer", dst));
             return;
         };
+        if range.end > count {
+            drop(state);
+            self.fail(HalError::InvalidDescriptor(format!(
+                "query range {}..{} exceeds the set's {count} queries",
+                range.start, range.end
+            )));
+            return;
+        }
         drop(state);
-        // SAFETY: `self.raw` is recording outside a pass; both objects are live
+        // SAFETY: `self.raw` is recording outside a pass; both objects are
+        // live, the range was bounds-checked against the pool's query count,
         // and `dst` has `QUERY_RESOLVE`/`TRANSFER_DST` usage.
         unsafe {
             self.device.raw.cmd_copy_query_pool_results(
