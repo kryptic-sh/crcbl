@@ -113,6 +113,36 @@ non-obvious residue: each sample's `web.rs` still carries its own
 literal — see _Considered and declined_. Adopting `crcbl_ui::hud` was declined
 on its merits, also below.
 
+## "Told apart at a glance" is the horde art's whole premise and nothing measures it
+
+`apps/horde/assets/actors.crpix` sizes the entire sheet — `art::TEXELS_PER_UNIT`
+= 20, and every argument that follows from it — on three enemy kinds being
+distinguishable in a crowd. Nothing tests that, and after the Diablo II redraw
+it is worth writing down that nothing can:
+
+- `art::tests::the_three_enemy_kinds_are_three_different_pictures` measures each
+  outline along eight rays from the frame's centre and asserts the largest
+  difference between any pair exceeds 0.12 of the frame's half-width. It rules
+  out three sizes of one drawing. It says nothing about legibility, and a pair
+  of genuinely different monsters can score low on it — after the redraw
+  `fallen` against `quill-rat` is **0.162**, where the shapes it replaced scored
+  0.412. The shapes are not less distinct (a horned biped against a spined
+  quadruped); the eight-ray metric is just insensitive to the difference,
+  because both are drawn out to the edges of their own collider box and the
+  metric mostly reports box size. Do not read that number as a legibility
+  margin, and do not tighten the threshold expecting it to mean one.
+- `the_monsters_sit_between_the_grass_and_the_player_in_luma` and
+  `the_monsters_have_a_dark_rim_and_the_player_a_bright_one` pin the two
+  brightness relations the sheet argues for. Neither is a legibility test
+  either; they are the conditions under which legibility is _possible_.
+
+What would actually measure it is a human looking at a full screen of the crowd,
+or a perceptual difference metric over the rendered frames. Neither was
+attempted. **The redraw was eyeballed by its author on a static sprite strip
+against the grass base colour, not in a running window and not at a crowd
+density** — the headless `--prefill 200` run exercises the code path and prints
+stats, and no frame from it was looked at.
+
 ## Frame pacing sleeps on the monotonic clock, which is not what a display does
 
 `crcbl::engine::Pacing` chooses a present mode (`Vsync` → `Fifo`, `Adaptive` →

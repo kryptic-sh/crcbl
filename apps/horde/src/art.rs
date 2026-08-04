@@ -235,11 +235,19 @@ struct FrameArt {
 }
 
 /// Which frame of `assets/actors.crpix` an enemy kind draws.
+///
+/// **The one place a role becomes a picture.** [`EnemyKind`]'s variants name
+/// what the simulation reasons about — the numerous one, the fast one, the one
+/// that will not die — and `assets/actors.crpix`'s frames name what is drawn.
+/// Keeping the two vocabularies apart is what let the art become Diablo II's
+/// monsters without touching `game.rs`'s spawn table, its weights or the tests
+/// that read them; that file argues which monster each role got and why the
+/// choice is a consequence of the collider it has to be drawn inside.
 const fn enemy_frame(kind: EnemyKind) -> &'static str {
     match kind {
-        EnemyKind::Grunt => "grunt",
-        EnemyKind::Runner => "runner",
-        EnemyKind::Brute => "brute",
+        EnemyKind::Grunt => "fallen",
+        EnemyKind::Runner => "quill-rat",
+        EnemyKind::Brute => "overlord",
     }
 }
 
@@ -891,6 +899,91 @@ mod tests {
         })
     }
 
+    /// One texel's Rec. 601 luma.
+    ///
+    /// What "how bright does this look" means for eight-bit sRGB without a
+    /// colour-management pass, which nothing in this game has.
+    fn luma(texel: &[u8]) -> f64 {
+        0.299 * f64::from(texel[0]) + 0.587 * f64::from(texel[1]) + 0.114 * f64::from(texel[2])
+    }
+
+    /// The luma of every opaque texel of one frame, or of a whole sheet when
+    /// `frame` is `None`.
+    ///
+    /// Transparent texels are dropped rather than counted as black: they are
+    /// the margin round a silhouette, and averaging them in would make a small
+    /// kind measure darker than a large one drawn in the same colours.
+    fn lumas(loaded: &Loaded, frame: Option<&str>) -> Vec<f64> {
+        let rect = frame.map(|name| {
+            let index = loaded.sheet.frame_index(name).expect("a frame");
+            loaded.sheet.frames[index].rect
+        });
+        let width = loaded.image.width;
+        let mut out = Vec::new();
+        for y in 0..loaded.image.height {
+            for x in 0..width {
+                if let Some(r) = rect
+                    && !(x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+                {
+                    continue;
+                }
+                let at = ((y * width + x) * 4) as usize;
+                if loaded.image.pixels[at + 3] == 0 {
+                    continue;
+                }
+                out.push(luma(&loaded.image.pixels[at..at + 4]));
+            }
+        }
+        out
+    }
+
+    /// The mean luma of a frame's rim, and of everything that rim encloses.
+    ///
+    /// **The rim is found, not named.** It is the boundary of the opaque
+    /// region — an opaque texel with a transparent or off-frame
+    /// four-neighbour — so this measures whatever outline the art actually has,
+    /// rather than trusting a palette entry to still be the one the outline is
+    /// drawn in. For a frame drawn out to its own edges, which the brute's is,
+    /// the frame border counts as boundary: what is past it is the next frame
+    /// in the strip, not more of this shape.
+    fn rim_and_body(loaded: &Loaded, name: &str) -> (f64, f64) {
+        let index = loaded.sheet.frame_index(name).expect("a frame");
+        let rect = loaded.sheet.frames[index].rect;
+        let width = loaded.image.width;
+        let opaque = |x: u32, y: u32| {
+            x >= rect.x
+                && x < rect.x + rect.w
+                && y >= rect.y
+                && y < rect.y + rect.h
+                && loaded.image.pixels[((y * width + x) * 4 + 3) as usize] != 0
+        };
+        let (mut rim, mut body) = (Vec::new(), Vec::new());
+        for y in rect.y..rect.y + rect.h {
+            for x in rect.x..rect.x + rect.w {
+                if !opaque(x, y) {
+                    continue;
+                }
+                // Wrapping is the point at x = 0: the neighbour off the left of
+                // the sheet is not opaque, which is what `opaque`'s range check
+                // then says.
+                let edge = !opaque(x.wrapping_sub(1), y)
+                    || !opaque(x + 1, y)
+                    || !opaque(x, y.wrapping_sub(1))
+                    || !opaque(x, y + 1);
+                let at = ((y * width + x) * 4) as usize;
+                let value = luma(&loaded.image.pixels[at..at + 4]);
+                if edge { &mut rim } else { &mut body }.push(value);
+            }
+        }
+        assert!(!rim.is_empty(), "{name} has no boundary, so it is blank");
+        assert!(
+            !body.is_empty(),
+            "{name} is all boundary, so it has no interior to compare against",
+        );
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+        (mean(&rim), mean(&body))
+    }
+
     // -----------------------------------------------------------------------
     // The art itself
     // -----------------------------------------------------------------------
@@ -1103,33 +1196,6 @@ mod tests {
         let terrain = baked("terrain", TERRAIN_PNG, TERRAIN_JSON);
         let actors = baked("actors", ACTORS_PNG, ACTORS_JSON);
 
-        // Rec. 601 luma, which is what "how bright does this look" means for
-        // eight-bit sRGB without a colour-management pass nothing here has.
-        let luma =
-            |p: &[u8]| 0.299 * f64::from(p[0]) + 0.587 * f64::from(p[1]) + 0.114 * f64::from(p[2]);
-        let lumas = |loaded: &Loaded, frame: Option<&str>| {
-            let rect = frame.map(|name| {
-                let index = loaded.sheet.frame_index(name).expect("a frame");
-                loaded.sheet.frames[index].rect
-            });
-            let width = loaded.image.width;
-            let mut out = Vec::new();
-            for y in 0..loaded.image.height {
-                for x in 0..width {
-                    if let Some(r) = rect
-                        && !(x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
-                    {
-                        continue;
-                    }
-                    let at = ((y * width + x) * 4) as usize;
-                    if loaded.image.pixels[at + 3] == 0 {
-                        continue;
-                    }
-                    out.push(luma(&loaded.image.pixels[at..at + 4]));
-                }
-            }
-            out
-        };
         let span = |v: &[f64]| {
             let lo = v.iter().copied().fold(f64::MAX, f64::min);
             let hi = v.iter().copied().fold(f64::MIN, f64::max);
@@ -1137,7 +1203,7 @@ mod tests {
         };
 
         let (grass_lo, grass_hi, grass_mean) = span(&lumas(&terrain, None));
-        let (player_lo, player_hi, player_mean) = span(&lumas(&actors, Some("player")));
+        let (player_lo, player_hi, player_mean) = span(&lumas(&actors, Some(IDLE_FRAME)));
 
         assert!(
             grass_hi < player_hi / 3.0,
@@ -1159,6 +1225,98 @@ mod tests {
         // …and it is not simply black, which would satisfy all three and would
         // be a ground nobody can see is there.
         assert!(grass_lo > 8.0, "the darkest grass texel is {grass_lo:.1}");
+    }
+
+    /// **A monster reads against the grass and never against the wizard.**
+    ///
+    /// Two bounds pulling opposite ways, and the crowd has to sit between them.
+    /// Below is the ground: `assets/terrain.crpix` is deliberately dark and
+    /// flat, and a monster inside that band is one the player walks into rather
+    /// than one they saw coming. Above is the player, whose bright rim —
+    /// `the_monsters_have_a_dark_rim_and_the_player_a_bright_one` — is only
+    /// findable while nothing else on screen is as bright, and there are
+    /// hundreds of monsters against the one wizard.
+    ///
+    /// Both are stated as relations between two baked sheets rather than as
+    /// numbers written down here, so a repalette of either side moves this
+    /// instead of leaving `assets/actors.crpix`'s paragraph quietly wrong. The
+    /// pair is also what stops either half being vacuous: the lower bound alone
+    /// is satisfied by painting the horde white, and the upper alone by
+    /// painting it black.
+    #[test]
+    fn the_monsters_sit_between_the_grass_and_the_player_in_luma() {
+        let actors = baked("actors", ACTORS_PNG, ACTORS_JSON);
+        let terrain = baked("terrain", TERRAIN_PNG, TERRAIN_JSON);
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+
+        // The *brightest* grass texel, not its average: a monster has to clear
+        // the lit tip of a blade, which is what it will be standing on.
+        let grass_hi = lumas(&terrain, None)
+            .iter()
+            .copied()
+            .fold(f64::MIN, f64::max);
+        // The player's *average*, not its brightest: the rim is a thin edge, so
+        // comparing against it would let a monster be brighter than the whole
+        // of the figure it must not compete with.
+        let player = mean(&lumas(&actors, Some(IDLE_FRAME)));
+
+        for kind in EnemyKind::ALL {
+            let name = enemy_frame(kind);
+            let texels = lumas(&actors, Some(name));
+            let (average, brightest) = (
+                mean(&texels),
+                texels.iter().copied().fold(f64::MIN, f64::max),
+            );
+            assert!(
+                average > grass_hi,
+                "{name} averages {average:.1} and the brightest grass texel is \
+                 {grass_hi:.1}, so the ground swallows it",
+            );
+            assert!(
+                brightest < player,
+                "{name}'s brightest texel is {brightest:.1} against the \
+                 player's average {player:.1}, so a crowd of these competes \
+                 with the one figure that has to be found",
+            );
+        }
+    }
+
+    /// **The monsters have a dark rim and the player a bright one**, which is
+    /// what lets a player find themselves among hundreds of bodies drawn at the
+    /// same size.
+    ///
+    /// `assets/actors.crpix` has stated this as a rule since the wizard was
+    /// drawn, and a rule in a comment is worth what one is worth: the outline is
+    /// a palette choice repeated in every row of every frame, and nothing else
+    /// notices when one of them changes. So each silhouette's boundary is found
+    /// and its brightness compared with the interior it encloses.
+    ///
+    /// **The direction is the assertion.** A test that only checked the two
+    /// differ passes on a monster outlined in white, which is the exact failure
+    /// this exists for.
+    #[test]
+    fn the_monsters_have_a_dark_rim_and_the_player_a_bright_one() {
+        let actors = baked("actors", ACTORS_PNG, ACTORS_JSON);
+
+        for kind in EnemyKind::ALL {
+            let name = enemy_frame(kind);
+            let (rim, body) = rim_and_body(&actors, name);
+            assert!(
+                rim < body,
+                "{name} is outlined at {rim:.1} against {body:.1} inside it, so \
+                 it is rimmed lighter than it is filled",
+            );
+        }
+        // Every frame of the wizard, not only the standing one: each pose is
+        // drawn by hand, so the walk is where an outline gets lost.
+        for name in WIZARD_FRAMES {
+            let (rim, body) = rim_and_body(&actors, name);
+            assert!(
+                rim > body,
+                "{name} is outlined at {rim:.1} against {body:.1} inside it, so \
+                 the player has stopped being the one bright edge on screen",
+            );
+        }
     }
 
     /// **Every silhouette is the size of the collider it stands for.**
@@ -1339,7 +1497,7 @@ mod tests {
     /// numbers with the ends swapped, the reversed range really does run
     /// backwards, and — the half that matters on a sheet laid out as a strip —
     /// every point the shader will sample stays inside the frame's own interval,
-    /// so a mirrored wizard cannot sample the grunt beside it.
+    /// so a mirrored wizard cannot sample the frame beside it.
     ///
     /// The sampling half reproduces `sprite.slang`'s vertex rule, which is a
     /// copy of it and is worth what a copy is worth: what it catches is this
