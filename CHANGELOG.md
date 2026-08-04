@@ -1469,6 +1469,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-shell** (AppKit): a borderless window dragged to another display
+  published nothing and kept naming the old monitor — `effective_mode.monitor`
+  is written only by `apply_mode`, so a move that left size and scale unchanged
+  also left the configuration unchanged. `refresh_configuration` now re-derives
+  the borderless monitor from the screen the window is actually on.
+
 - **crcbl-net**, **crcbl-server**: a delta in the last 25 bytes before the
   transport's 64 KiB cap encoded and sealed fine but was dropped by
   `send_unreliable` every tick — and the server had already retained it as the

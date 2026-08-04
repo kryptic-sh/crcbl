@@ -431,12 +431,26 @@ impl AppKitShell {
             return;
         };
         let (window, view, layer) = (state.window, state.view, state.layer);
+        let effective_mode = state.effective_mode;
         // SAFETY: a live window and its live view, on the main thread.
         let scale = unsafe { window::backing_scale(window) };
         // SAFETY: the layer and its host are alive for as long as the window is.
         unsafe { window::size_layer(layer, view, scale) };
         // SAFETY: a live view whose window device exists.
         let size = unsafe { window::backing_size(view) };
+        let mode = match effective_mode {
+            DisplayMode::Borderless { monitor: recorded } => DisplayMode::Borderless {
+                // The window may have moved: `windowDidChangeScreen:` fires when it
+                // is dragged to another display, and `effective_mode` is written only
+                // by `apply_mode` — so the recorded monitor goes stale, and when the
+                // move leaves size and scale unchanged the `last_config` comparison
+                // below would publish nothing. Re-derive it from the screen the
+                // window is on now; a window on no screen keeps the last known
+                // monitor rather than claiming it cannot say.
+                monitor: self.screen_of(window).or(recorded),
+            },
+            other => other,
+        };
         let Ok(state) = self.window_mut(handle) else {
             return;
         };
@@ -444,7 +458,7 @@ impl AppKitShell {
         let config = WindowConfiguration {
             size,
             scale_factor: scale,
-            mode: state.effective_mode,
+            mode,
         };
         // A live resize delivers a notification per frame; only a *change* is an
         // event. Comparing the whole configuration rather than the size alone
