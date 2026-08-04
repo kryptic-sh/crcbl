@@ -3467,261 +3467,40 @@ record, and each fix shipped with a test that failed on the old code):
 
 ### Low
 
-17. **Deltas in `(65511, 65536]` bytes encode and seal fine but exceed the
-    transport's 64 KiB cap, so the snapshot is dropped every tick with no
-    recovery.** `crates/crcbl-net/src/delta.rs:814` caps at `MAX_DELTA_BYTES` =
-    65536; `seal` adds `AUTH_OVERHEAD` = 25 (`auth.rs:44`) and `send_unreliable`
-    rejects payloads > 65536 (`transport.rs:177-183,204-210`). In
-    `emit_snapshot` the baseline is inserted (server lib.rs:495) _before_ the
-    send (497-503), so a failed send retains a baseline the client never got,
-    `processing_error_count` climbs, and the 32-tick keyframe fallback
-    (lib.rs:553-573) is a full snapshot — larger, also dropped. Permanent client
-    desync until the state shrinks.
+All thirty closed on 2026-08-04, one commit each (pushed to `main`; `git log` is
+the record, and each fix shipped with its failing-first test or an honestly
+stated gap):
 
-    Repro: world whose delta-encoded snapshot is 65,200 bytes. Expect: snapshot
-    delivered or a bounded fallback. Actual: `MessageTooLarge` every tick;
-    client never advances; no recovery path.
+- **17 — delta encode cap left no room for the seal overhead**
+  (`fix(net): fit the sealed delta in the transport cap; retain baselines only on send`,
+  62f738d).
+- **18, 19 — readback wait-semaphore UB; query bounds** (`fix(vk)`, 8ec3170 —
+  see the Medium list).
+- **20 — stale borderless monitor after a display move** (`fix(shell)`,
+  c4a8c70).
+- **21 — stale `WS_VISIBLE` re-showed a hidden window** (`fix(shell)`, bb6ad48).
+- **22, 23 — INCR read failure mistaken for the terminator; timestamp-probe
+  stall** (`fix(shell)`, 5fd013b).
+- **24 — refused and overwritten drag offers leaked** (`fix(shell)`, bc5bece).
+- **25, 26, 27 — stale and contradictory seam docs** (`docs(hal)`, caae5d0).
+- **28, 29, 30, 31 — wgpu stride/surface/write-buffer; ui counts**
+  (`fix(wgpu,render)`, b4f22f5).
+- **32, 33 — compressed upload sizing; negative `dt`** (`fix(render,input)`,
+  bcd6af7).
+- **34, 35, 36, 37 — phys sweep/overlap/mass edges; synth overflow**
+  (`fix(phys,audio)`, 3fc07da).
+- **38, 39, 40, 41, 42 — replay length; menu drag drawn-state; crpix overflow;
+  quote-unaware XML empty-tag; menu key stuck in `held_keys`**
+  (`fix(store,ui,sprite,xml,engine)`, f768b7d).
+- **43, 44, 45, 46 — asteroids score and tick allocations; breakout start-menu
+  corner; horde kill freeze** (`fix(asteroids,breakout,horde)`, d4f6974).
 
-18. **`poll_readback` calls `vkGetSemaphoreCounterValue` on a raw semaphore that
-    may already be destroyed.** `crates/crcbl-vk/src/device.rs:1388` stores the
-    raw `VkSemaphore` from `ReadbackDesc::after`; device.rs:1419 dereferences it
-    with no liveness check, while the same function re-resolves the _buffer_
-    through its generational handle (device.rs:1429) so destruction fails
-    lookup. UB if the caller destroys the semaphore between request and poll.
-
-    Repro:
-    `S = create_semaphore(Timeline); request_readback({buffer, after: Some({S, v})}); destroy_semaphore(S); poll_readback(...)`.
-    Expect: clean error, as the destroyed-buffer path produces. Actual:
-    `vkGetSemaphoreCounterValue` on a destroyed `VkSemaphore` — UB.
-
-19. **GPU query commands never bounds-check the query range against the pool's
-    count.** `crates/crcbl-vk/src/command.rs:1082` (`reset_query_set`), `:1106`
-    (`write_timestamp`), `:1134-1143` (`resolve_query_set`) pass caller-supplied
-    ranges to the driver with no check, while the CPU sibling `query_results`
-    returns `InvalidDescriptor` for the same range (device.rs:1813-1819). A
-    validation error (VU violation) instead of the seam's promised descriptor
-    error; the pool count is available at all three sites.
-
-    Repro:
-    `create_query_set({kind: Timestamp, count: 4}); resolve_query_set(set, 2..8, dst, 0)`.
-    Expect: `HalError::InvalidDescriptor`. Actual:
-    `vkCmdCopyQueryPoolResults(queryCount=6)` on a 4-query pool.
-
-20. **A window moved to another display publishes nothing and
-    `effective_mode.monitor` goes stale.**
-    `crates/crcbl-shell/src/appkit/app.rs:351-357` records `BackingChanged` on
-    `windowDidChangeScreen:`, but `refresh_configuration` (shell.rs:415-444)
-    copies `state.effective_mode` verbatim (shell.rs:432) — a value only
-    `apply_mode` writes (window.rs:780-783) — and when the move leaves size and
-    scale unchanged, `last_config == config` (shell.rs:439) and no event is
-    published, while the config keeps naming the old monitor. The comment at
-    app.rs:354-356 says the monitor change is "part of the configuration", but
-    the code never re-derives it.
-
-    Repro: borderless window on display A (scale 2); A unplugged, window lands
-    on display B (same scale, same size). Expect: configuration reflects display
-    B; a `ShellEvent` is published. Actual: no event at all; `mode` names
-    `Borderless { monitor: A }` forever.
-
-21. **A window hidden while borderless is re-shown by a second borderless
-    request: the `WS_VISIBLE` bit is read from the stale `saved` style, not the
-    live one.** `crates/crcbl-shell/src/win32/window.rs:384-387` reads
-    `saved.style & VISIBLE` captured at the _first_ borderless entry; the
-    "created borderless" branch reads the live style correctly
-    (window.rs:463-464). The Windowed restore has the same shape
-    (`SetWindowPlacement`, window.rs:435, replays the saved `showCmd`).
-
-    Repro: create visible; `set_mode(Borderless)`; `set_visible(false)`; then
-    `set_mode(Borderless { monitor: other })`. Expect: window stays hidden;
-    `visible == false`. Actual: window shown again while the seam's state still
-    reports hidden.
-
-22. **An INCR chunk that cannot be read is mistaken for the transfer
-    terminator.** `crates/crcbl-shell/src/x11/xselection.rs:332-335`
-    (`get_property(...).map_or_else(Vec::new, ...)`) maps None — null reply
-    (mod.rs:478), `reply_type == 0`, or a chunk over `MAX_BYTES`
-    (mod.rs:503-509) — to an empty slice, and `on_chunk(&[])` is the _success_
-    terminator (selection.rs:250-251). A truncated paste is reported as
-    complete. Hostile/ broken owner only; the per-chunk cap in `get_property`
-    and the per-total cap in `on_chunk` (selection.rs:253-258) collide.
-
-23. **`refresh_server_time` burns its full 250 ms deadline when the probe lands
-    in the same server millisecond as the last event.**
-    `crates/crcbl-shell/src/x11/xselection.rs:536-566` — the loop returns only
-    when `last_server_time != before` (558); a probe stamped with the same
-    millisecond spins to the deadline, logs a spurious warning, and returns
-    `before`. 250 ms stall inside `clipboard_offer` at ≥1 kHz event rates.
-
-24. **A `wl_data_device.enter` naming an unclaimable offer is refused but never
-    destroyed; a second `enter` without `leave` leaks the first drag's offer.**
-    `crates/crcbl-shell/src/wayland/mod.rs:3867-3874` — on `claim` failure
-    `refuse_drag` sends `accept(null)` (mod.rs:3841-3850) but nothing destroys
-    the proxy; `device.drag = Some(...)` (mod.rs:3921-3931) overwrites an
-    existing drag without `destroy_offer`. One `wl_data_offer` proxy + server
-    object leaked per such event. Hostile/protocol-violating compositor only.
-
-    Repro: (a) drag in progress, second `enter` with a fresh offer, no `leave`;
-    (b) `enter` naming an id never announced. Expect: every offer the compositor
-    creates for us is eventually destroyed. Actual: one proxy + server object
-    leaked per event.
-
-25. **`device.rs:91-93` still claims a `CommandEncoder` is "Send but not
-    Sync".** `crates/crcbl-hal/src/command.rs:564-566` identifies that as the
-    wrong earlier version; the trait bound is `HalThreadSafe` (Send + Sync).
-    Stale-doc self-contradiction in the seam's stated contracts.
-
-26. **`caps.rs:218-220` is self-contradictory** — `max_bindless_descriptors` is
-    "0 when `DESCRIPTOR_INDEXING` is absent; Tier B reads this as its
-    texture-array page size instead", but the Tier B floor reports 0
-    (caps.rs:274) — a 0 page size nothing can lay out against. One of the two
-    sentences is dead.
-
-27. **`CommandEncoderDesc::queue` promises where the buffer "will be submitted
-    to" but `submit` never states or enforces the match** (command.rs:758-763,
-    device.rs:847-852); a queue-family mismatch passes the null backend and
-    surfaces only as a Vulkan validation error.
-
-28. **`draw.stride` silently ignored.**
-    `crates/crcbl-wgpu/src/command.rs:672,681` pass `draw.offset`/`draw_count`
-    but never `draw.stride`; wgpu reads tightly packed args, so a padded stride
-    (which crcbl-vk honours) renders garbage silently. In-tree callers pass the
-    packed size, so not live today.
-
-29. **`DeviceDesc::compatible_surface` never validated** — absent from the whole
-    `request` path (device.rs:127-165); a destroyed or foreign surface is
-    accepted where the null backend returns `InvalidHandle`.
-
-30. **`write_buffer` accepts `HostReadback` buffers** — checks `is_mappable()`
-    (device.rs:321; resource.rs:126-127) where the seam says "Only valid for
-    `HostUpload`" (device.rs:541-542) and the null backend enforces exactly that
-    (null/mod.rs:627-631). Cross-backend contract divergence.
-
-31. **`UiRenderer::begin_frame` commits the new element counts before the buffer
-    writes that make them true.** `crates/crcbl-render/src/ui_pass.rs:560-561`
-    set the counts, then `write_buffer` at 566/572 `?`s out on failure leaving
-    new counts over old bytes; `add_pass` then draws `0..new_count` over stale
-    indices (Vulkan OOB index reads vertex 0). `SpriteRenderer::begin_frame` has
-    the sibling shape (sprite_pass.rs:859/879/895 — buffers written before
-    `self.batches[idx]` commits). Error-path only: a caller that propagates the
-    error never reaches `add_pass`.
-
-32. **`upload_texture` mis-sizes compressed formats.** `texel_size(COLOR)`
-    returns `block_size` for BC formats (hal format.rs:162-168), so
-    `row_bytes = width × texel` (texture.rs:105) is wrong for compressed images.
-    Unreachable today (only Rgba8UnormSrgb and R8Unorm callers).
-
-33. **`begin_tick` accepts a negative `dt` (only finiteness is checked), so a
-    held button reports a negative `Held` duration.**
-    `crates/crcbl-input/src/lib.rs:441-442` (`is_finite` only) + `:624`
-    (`(elapsed - hold_start) as f32`). Intended callers never pass a negative
-    delta; a caller that does gets silently wrong durations.
-
-    Repro: hold key F; `begin_tick(-1.0)`; read action → `Held`. Expect:
-    non-negative durations (or a rejected dt). Actual:
-    `Held { duration: -1.0 }`, shifted until the button re-presses.
-
-34. **`solve_quadratic`'s EPSILON floor silently discards tiny-but-real
-    sweeps.** `crates/crcbl-phys/src/query.rs:104` (`a <= f64::EPSILON` → None);
-    the stationary branch catches only `length_squared() <= 0.0`
-    (query.rs:342-345), so a sweep shorter than ~1.5e-8 m that starts _inside_
-    the target returns None instead of the documented
-    `t = 0, started_inside = true`. Game-scale unreachable.
-
-35. **Public overlap queries panic on an inverted AABB.** `f64::clamp` asserts
-    `min <= max` unconditionally; `sphere_overlaps_aabb` (query.rs:27-29) and
-    `swept_sphere_vs_aabb` (404-408) panic on the public `Aabb::EMPTY`
-    (collider.rs:34-37, min=+inf, max=-inf). Internal callers never pass an
-    inverted box; any external caller with `EMPTY` gets a panic, not "no
-    overlap".
-
-    Repro: `sphere_overlaps_aabb(&Sphere::new(DVec3::ZERO, 1.0), &Aabb::EMPTY)`.
-    Expect: false. Actual: panic ("min/max clamping").
-
-36. **`RigidBody::new_dynamic(0.0)` is a silent NaN cascade in release builds.**
-    `crates/crcbl-phys/src/components.rs:43-46` — the only guard is a
-    `debug_assert`; `1.0 / 0.0 = +inf` and `0.0 * inf = NaN` in the integrator
-    (integrator.rs:44-46) poisons velocity → position → AABB → every query in
-    the world returns empty, including for unrelated entities. `is_dynamic()`
-    reads `inverse_mass > 0.0` (true for +inf), so nothing later catches it.
-
-    Repro: `set_body(e, RigidBody::new_dynamic(0.0)); step(1/60)` with any
-    force. Expect: loud contract violation (debug panic). Actual (release):
-    `velocity/position = NaN`; all queries silently empty.
-
-37. **Synth generators can overflow `usize`/abort the process on hostile
-    parameters.** `crates/crcbl-audio/src/synth.rs:106-107,133-134,159-160` —
-    `(sample_rate * seconds) as usize` saturates to `usize::MAX`, then
-    `frames * CHANNELS` overflows (debug panic, release wrap → giant
-    `with_capacity` → alloc abort). `looped_sine(0.0, …)` divides by zero → inf
-    → same.
-
-38. **`ReplayWriter::encode` silently truncates oversized entry lengths.**
-    `crates/crcbl-store/src/replay.rs:114` `data.len() as u32` — a >4 GiB entry
-    writes a truncated length followed by the full payload (corrupt file, no
-    error). Sibling save.rs:159-165 does it correctly with `try_from`.
-
-39. **`Menu::point` draws an un-captured neighbour as `Pressed` during a drag.**
-    `crates/crcbl-ui/src/menu.rs:387-399` — the drawn state comes from a
-    menu-global `pressed` bool + the hovered index (menu.rs:355-364), not from
-    `interact`'s capture; while the pointer is held and dragged onto another
-    item, the destination renders `Pressed` even though `UiState::interact`
-    returns Idle for it (widget.rs:345-350, "a drag-off does not light up its
-    neighbour"). Visual only — release firing is correct.
-
-    Repro: press RESUME, drag to FULLSCREEN, hold, release over FULLSCREEN.
-    Expect: FULLSCREEN stays Idle during the drag. Actual: FULLSCREEN draws
-    `Pressed` while the capture belongs to RESUME; RESUME itself draws Idle once
-    the cursor leaves it.
-
-40. **crpix bake-time pixel math overflows u32 on a large-but-parseable file.**
-    `crates/crcbl-sprite/src/crpix.rs:625` (`(width * height * 4) as usize` in
-    u32) and `:129-138` (`sheet_w = fw * frames.len() as u32`, then
-    `sheet_w * fh * 4`) — 32768×32768×4 = 2³² wraps (debug panic; release: empty
-    allocation then OOB index panic at crpix.rs:138). Needs a ~1 GiB text input.
-
-41. **An attribute value ending in `/` makes a valid XML tag parse as empty and
-    is refused.** `crates/crcbl-wl-scanner/src/xml.rs:187-190` — the empty-tag
-    test is `inner.strip_suffix('/')` on the whole raw inner text, unaware of
-    quotes; `<arg summary="foo/"></arg>` closes the element early and the real
-    `</arg>` then mismatches. Always a hard error, never silent corruption —
-    rejects only valid files whose final attribute value ends in `/`.
-
-42. **`MenuPump` leaves a menu key stuck in `held_keys` when it is released
-    while a menu is showing.** `crates/crcbl/src/engine.rs:2059-2085` — the
-    three menu-key arms `return None` before the held-key tracking at 2087-2093,
-    while the doc at 2041-2043 promises "Held keys are tracked either way". A
-    key released under the menu stays in `held` until focus loss or a re-press +
-    release outside a menu; a game polling held state reads it as held
-    indefinitely.
-
-43. **Asteroids: rocks keep shattering (and scoring) after Game Over, so the
-    final score can exceed the recorded best.** `apps/asteroids/src/game.rs:745`
-    (`sweep_bullets` unconditional), `:1137` (`shatter` scores with no state
-    check), `:1796` (`best.raise` only on the edge into GameOver). Leftover
-    bullets keep sweeping for up to `BULLET_LIFE` (including through a wave
-    dealt on the death tick, game.rs:772) and add score the best never saw.
-
-44. **Breakout: the Start menu pops up between lives when the first life is lost
-    at score 0 with a full grid.** `apps/breakout/src/menu.rs:124-138` —
-    `MenuKind::of` matches `WaitingForLaunch` + score 0 + full grid as `Start`,
-    which is exactly the first-life-lost state; the doc at menu.rs:118-122
-    promises one panel a game, and the guard's test (menu.rs:322-334) misses the
-    (0, full grid) corner.
-
-45. **Horde: kill count keeps rising after death.**
-    `apps/horde/src/game.rs:1114` (`sweep_bolts` ungated) → `:1410` → `:1458`
-    (`kills += 1` with no state check). The death-screen kill counter, kill
-    sounds and gem drops continue for up to `BOLT_LIFE` after `GameState::Dead`,
-    contradicting the documented invariant ("the kill count is frozen",
-    game.rs:797-799) and the test at 3833-3864, whose fixture has no bolt in
-    flight at the death tick. Persisted best is elapsed-based (game.rs:2352,
-    best.rs:73) and unaffected.
-
-46. **Asteroids: ~6 heap allocations per server tick in the frame-loop hot
-    path** — `wrap_everything` (game.rs:1257-1258), `sweep_bullets`
-    (game.rs:1064-1065) and `refresh_views` (game.rs:1374-1375) clone small
-    `Vec`s every tick at 60/s. Perf only; breakout's tick is allocation-free by
-    contrast.
+Coverage notes carried with the fixes: 20, 21, 22 and 23 have no runnable test
+on the runners where they live (two-display drag, Windows-only, timing- or
+hostile-compositor-dependent) and said so; 38 and 40 need multi-GiB fixtures to
+hit the overflow path directly and tested the checked arithmetic instead; 41's
+fix is a regression guard for a case the quote-balancing scan already mostly
+handled, pinning the correct `empty` flag and the un-stripped attribute value.
 
 ### Cleared (the expensive half)
 
