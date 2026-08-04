@@ -57,9 +57,15 @@
 //! still does with this override installed and verified by
 //! `tests::the_window_class_installs_every_override_a_borderless_window_needs`
 //! on a real runner. The default moves a window *down* to clear the menu bar; it
-//! does not move one right by 192 points. `docs/backlog.md` carries the three
-//! remaining causes, and the `log::debug!` trail through [`AppKitShell::apply_mode`]
-//! and [`set_frame`] exists to tell them apart on the next run.
+//! does not move one right by 192 points.
+//!
+//! Four other mechanisms have since been eliminated the same way — a corrupted
+//! `NSRect` argument, the event pump, a delegate callback, and macOS state
+//! restoration — and the `log::debug!` trail through
+//! [`AppKitShell::apply_mode`] and [`set_frame`] is what eliminated them.
+//! **The frame is correct at the mode arm's last statement and wrong by
+//! `apply_mode`'s return**, so what is left is this function's own tail;
+//! `docs/backlog.md` carries the trail and the reasoning.
 //!
 //! Unlike the Win32 backend there is no `WINDOWPLACEMENT` to save: AppKit's
 //! zoomed state is a property of the window rather than a rectangle to restore,
@@ -681,6 +687,19 @@ impl AppKitShell {
                         ffi::msg_rect(window, ffi::sel(c"frame")),
                         view_has_focus(window)
                     );
+                    // **The frame again, after the window has been ordered
+                    // front.** `makeKeyAndOrderFront:` is not obliged to be the
+                    // last word on where a window is, and ordering a window front
+                    // is exactly the kind of operation that re-runs placement.
+                    // Setting the frame before it and never afterwards means
+                    // trusting that it did not — which is an assumption, and this
+                    // defect has already cost several of those.
+                    //
+                    // It is also self-reporting: `set_frame` prints where the
+                    // window *was* as well as what it was asked for, so a `from`
+                    // of anything but `frame` here is a move between the two
+                    // calls, visible rather than assumed away.
+                    set_frame(window, frame);
                 }
             }
             DisplayMode::Windowed => {
@@ -732,6 +751,24 @@ impl AppKitShell {
             }
         }
 
+        // **The tail is bracketed statement by statement, and it is not empty.**
+        // The frame is correct at the mode arm's last line and wrong by the time
+        // `set_mode` reads it one statement later, so the mover is in here — and
+        // "here" contains two calls that reach AppKit rather than only reading:
+        // `size_layer`, and `refresh_presentation`, which sets
+        // `NSApplicationPresentationOptions` on the **application** to auto-hide
+        // the Dock and the menu bar. That changes every screen's `visibleFrame`,
+        // which is the one quantity a creation-time centred origin was computed
+        // from, and it runs on exactly the leg that fails. Three readings pin
+        // which statement rather than leaving it at "somewhere in the tail".
+        //
+        // SAFETY of all three: a live `NSWindow` this shell owns, on the main
+        // thread; `frame` is an accessor.
+        log::debug!(
+            "apply_mode: after the {mode:?} arm the frame is {:?}",
+            unsafe { ffi::msg_rect(window, ffi::sel(c"frame")) }
+        );
+
         // AppKit has nobody to refuse: the effective mode is what was just
         // applied. The screen is read back rather than assumed, because
         // `Borderless { monitor: None }` means "wherever the window already is"
@@ -748,7 +785,18 @@ impl AppKitShell {
         // SAFETY: the layer and its host view are alive for as long as the
         // window is, and this is the same thread that created them.
         unsafe { size_layer(state.layer, state.view, scale) };
+        log::debug!("apply_mode: after size_layer the frame is {:?}", unsafe {
+            ffi::msg_rect(window, ffi::sel(c"frame"))
+        });
+
         self.refresh_presentation();
+        log::debug!(
+            "apply_mode: after refresh_presentation (options {:?}) the frame is {:?}",
+            // SAFETY: the main thread, with `set_mode`'s pool in scope.
+            unsafe { presentation_options() }.map(|options| format!("{options:#x}")),
+            // SAFETY: as above.
+            unsafe { ffi::msg_rect(window, ffi::sel(c"frame")) }
+        );
         Ok(())
     }
 
@@ -783,6 +831,28 @@ impl AppKitShell {
                 )
             })
     }
+}
+
+/// `-[NSApp presentationOptions]`, asked of AppKit rather than read out of this
+/// shell's record of what it last requested.
+///
+/// The distinction is the point: `refresh_presentation` early-returns when its
+/// computed options match the cached copy, so the cache says what was *intended*
+/// and only AppKit says what is in force. `None` means there is no
+/// `NSApplication`, which cannot happen with a window open and is reported
+/// rather than papered over.
+///
+/// # Safety
+///
+/// The main thread, with an autorelease pool in scope.
+unsafe fn presentation_options() -> Option<usize> {
+    let class = ffi::class(c"NSApplication")?;
+    // SAFETY: a class method returning the singleton the runtime keeps for the
+    // life of the process.
+    let app = unsafe { ffi::msg(class, ffi::sel(c"sharedApplication")) };
+    // SAFETY: a live `NSApplication`; the accessor takes no arguments and
+    // answers an `NSUInteger`.
+    (!app.is_null()).then(|| unsafe { ffi::msg_usize(app, ffi::sel(c"presentationOptions")) })
 }
 
 /// Whether the window's first responder is its own content view.

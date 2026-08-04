@@ -443,18 +443,18 @@ mod macos {
             "borderless covers the screen AppKit says it is on, exactly.\n\
              The window was at {before_borderless:?} before the flip, and everything AppKit says \
              about it while borderless is {covering:?}.\n\
-             `apply_mode` is correct end to end and the move is known to happen inside \
-             `set_mode`'s tail with no pump involved, so **read the \
-             `crcbl_shell::appkit::shell` line in this test's stderr**:\n\
-             * `set_mode: apply_mode returned with the frame [0,0,...]` means the window was \
-             still right one statement after apply_mode, so the move happens as the autorelease \
-             pool drops or asynchronously afterwards;\n\
-             * `... returned with the frame [192,160,...]` means it happens inside \
-             makeKeyAndOrderFront:'s own run-loop pass, and re-asserting the frame *after* that \
-             call rather than before it is the next thing to try.\n\
-             This round's one change is setRestorable:NO at creation; the `create: ... \
-             isRestorable false` line confirms it took. If the origin is right now, macOS state \
-             restoration was the mechanism."
+             The move is known to happen inside `apply_mode`'s own **tail** — right at the mode \
+             arm's last statement, wrong by its return — so **read the `apply_mode:` lines in \
+             this test's stderr**, which bracket that tail statement by statement:\n\
+             * right after the arm, wrong after `size_layer` or after \
+             `refresh_presentation`, names that statement; `refresh_presentation` sets \
+             NSApplicationPresentationOptions to auto-hide the Dock and menu bar, which moves \
+             every screen's visibleFrame — the quantity the creation origin was centred in.\n\
+             * right at all three and wrong here means it happens after `apply_mode` returns, \
+             which the `set_mode:` line brackets.\n\
+             This round also re-asserts the frame after `makeKeyAndOrderFront:`; that \
+             `setFrame:display:` line's `from` says whether anything moved the window between \
+             ordering it front and re-asserting."
         );
         assert_eq!(
             borderless,

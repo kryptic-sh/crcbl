@@ -1282,16 +1282,60 @@ the move happens as the autorelease pool drops or asynchronously afterwards;
 already `[192,160,...]` and it happens inside `makeKeyAndOrderFront:`'s own
 run-loop pass.
 
-**`frameAutosaveName` is `Some("")`, so frame autosave was never in it.**
-`isRestorable` was `true`, and **this round turns it off** — argued in
-`window.rs` on its own merits and not as a fix: a game window has no business in
-macOS state restoration, which promises AppKit can re-create windows through a
-`restorationClass` this backend does not implement and never takes the
-application delegate for, makes the operating system a second invisible source
-of truth for a placement the seam hands to `WindowDesc`, and writes saved state
-to disk keyed by an identity an unbundled binary does not stably have. Whether
-it is also the mechanism here is what the next run says. **One change, one
-answer.**
+**Frame autosave and state restoration are both eliminated.**
+`frameAutosaveName` read `Some("")`, so autosave was never in it. `isRestorable`
+was `true`, and `setRestorable:NO` was added at creation — the next run
+confirmed `isRestorable false` **and the origin was still wrong**. So macOS
+state restoration is not the mechanism either. The change stays regardless,
+argued in `window.rs` on its own merits: a game window has no business in a
+feature that promises AppKit can re-create windows through a `restorationClass`
+this backend does not implement, that makes the operating system a second
+invisible source of truth for a placement the seam hands to `WindowDesc`, and
+that writes saved state to disk keyed by an identity an unbundled binary does
+not stably have.
+
+**The bracket is decisive: the move happens inside `apply_mode`'s own tail.**
+
+```text
+borderless: after makeKeyAndOrderFront: the frame is [0,0,1024,768]
+set_mode:   apply_mode returned with the frame [192,160,1024,768]
+```
+
+Correct at the mode arm's last statement, wrong one statement later at
+`apply_mode`'s return. `apply_mode` holds no autorelease pool of its own — the
+pool lives in `set_mode` and drops after that reading — so a pool drain is not
+between the two either.
+
+**And the tail is not ceremony.** Between the end of the match and `Ok(())` sit
+`screen_of`, `backing_scale`, `size_layer` and **`refresh_presentation`**, the
+last of which is the standout suspect and had not been looked at: it sets
+`NSApplicationPresentationOptions` on the **application** to auto-hide the Dock
+and the menu bar. That changes every screen's `visibleFrame` — the one quantity
+the creation-time centred origin was computed from — and it fires on exactly the
+leg that fails, because `effective_mode` is set to borderless three statements
+above it. The tail is now bracketed statement by statement rather than once, so
+the next run names the statement instead of the region, and the presentation
+options are read back **from AppKit** rather than from this shell's cached copy,
+since `refresh_presentation` early-returns when the two agree and only AppKit
+says what is actually in force.
+
+**The frame is also now re-asserted after `makeKeyAndOrderFront:`**, which was
+held back while untested theories were ahead of it and no longer is.
+`makeKeyAndOrderFront:` is not obliged to be the last word on where a window is,
+and ordering a window front is exactly the kind of operation that re-runs
+placement. It is self-reporting: `set_frame` prints where the window _was_ as
+well as what it was asked for, so a `from` of anything but the screen rectangle
+is a move between the two calls made visible rather than assumed away. On the
+evidence so far it will read `from [0,0,1024,768]` and be a no-op, which is
+itself worth knowing — it would put the mover after the arm entirely and leave
+the tail as the whole of the remaining space.
+
+**If the re-assert does not hold, the next move is to stop chasing it.** The
+backend is otherwise complete and the macOS job is otherwise green; the agreed
+outcome is to record the defect with its full trail, mark the borderless-origin
+assertion as a known failure carrying that evidence, and let the remaining
+assertions run — nine green assertions and one documented defect beats a red job
+and an open investigation blocking everything behind it.
 
 **A fact from the restore leg nobody had read yet.** Its `setFrame:` reports
 `from [192,160,1024,800]` — height **800**, not 768. Between the end of the
