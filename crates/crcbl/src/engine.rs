@@ -2038,9 +2038,19 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
 
     /// Offers one event, and returns the key the game should be told about.
     ///
-    /// `None` for anything that was not a key, or that the menu claimed. Held
-    /// keys are tracked either way, because a key released while a menu ate it
-    /// still has to come off the list.
+    /// `None` for anything that was not a key, or that the menu claimed.
+    ///
+    /// # A release the menu claims still reaches the game when the press did
+    ///
+    /// The held list is the keys the *game* has been told are down, so a menu
+    /// key pressed before the menu opened is on it — and its release is
+    /// forwarded even though the menu is claiming that key. Swallowing it
+    /// leaves the game holding the key for good: level up with Down held, pick
+    /// an upgrade, and the wizard keeps walking south with nothing pressed.
+    ///
+    /// The other direction has no such repair. A press the menu claimed never
+    /// reaches the game, so it does not go on the list either, and its release
+    /// is dropped like the press was — the game only ever sees matched pairs.
     pub fn observe(
         &mut self,
         event: &crcbl_shell::ShellEvent,
@@ -2056,46 +2066,33 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
         let code = *code;
         let pressed = matches!(state, crcbl_shell::ButtonState::Pressed);
 
-        // Held keys are tracked before the menu branch, so a menu key pressed
-        // while the menu was off and released while it is on still comes off
-        // the list — the doc below promises the bookkeeping runs either way.
-        if pressed {
-            if !self.held.contains(&code) {
-                self.held.push(code);
-            }
-        } else {
-            self.held.retain(|key| *key != code);
-        }
-
-        if self.showing {
-            match code {
-                MENU_UP_KEY => {
-                    // Repeats move the selection, because holding Down to walk a
-                    // list is what a player expects.
-                    if pressed {
-                        self.menus.select_previous();
-                    }
-                    return None;
-                }
-                MENU_DOWN_KEY => {
-                    if pressed {
-                        self.menus.select_next();
-                    }
-                    return None;
-                }
-                MENU_ACTIVATE_KEY => {
-                    if pressed {
-                        self.menus.press(true);
-                    } else {
-                        self.activated = self.menus.activate();
-                    }
-                    return None;
-                }
+        let claimed =
+            self.showing && matches!(code, MENU_UP_KEY | MENU_DOWN_KEY | MENU_ACTIVATE_KEY);
+        if claimed {
+            match (code, pressed) {
+                // Repeats move the selection, because holding Down to walk a
+                // list is what a player expects.
+                (MENU_UP_KEY, true) => self.menus.select_previous(),
+                (MENU_DOWN_KEY, true) => self.menus.select_next(),
+                (MENU_ACTIVATE_KEY, true) => self.menus.press(true),
+                (MENU_ACTIVATE_KEY, false) => self.activated = self.menus.activate(),
                 _ => {}
             }
         }
 
-        Some((code, pressed))
+        if pressed {
+            if claimed {
+                return None;
+            }
+            if !self.held.contains(&code) {
+                self.held.push(code);
+            }
+            return Some((code, true));
+        }
+
+        let was_held = self.held.contains(&code);
+        self.held.retain(|key| *key != code);
+        (!claimed || was_held).then_some((code, false))
     }
 }
 
@@ -4187,35 +4184,47 @@ mod tests {
         assert!(held.is_empty(), "the release did not clear it: {held:?}");
     }
 
-    /// **A menu key pressed before a menu opened is still released from the
-    /// held list while the menu eats its release.**
+    /// **A menu key pressed before the menu opened is released to the game,
+    /// not only from the held list.**
     ///
-    /// The held-key bookkeeping must run for *every* key, whether or not the
-    /// menu claimed it: a menu key held as the menu opened would otherwise
-    /// stay on the list forever — the game would read it as stuck down — and
-    /// the release that ought to clear it was being dropped by the menu's
-    /// early return.
+    /// Clearing the list alone is not the fix it looks like: the list is only
+    /// read on focus loss, so a game told about the press and never about the
+    /// release goes on steering. Holding Down through a level-up and picking an
+    /// upgrade left the horde's wizard walking south with nothing pressed —
+    /// the menu's early return dropped the release on the floor.
     #[test]
-    fn a_menu_key_is_released_from_the_held_list_while_the_menu_shows() {
+    fn a_menu_key_held_when_the_menu_opens_is_released_to_the_game() {
         let (mut shell, window) = shell();
         let mut set = menus();
         let mut held = Vec::new();
 
-        // Pressed while no menu is up: tracked as held.
+        // Pressed while no menu is up: forwarded, and tracked as held.
         shell.key_press(window, MENU_UP_KEY).expect("live");
         let mut pump = MenuPump::new(&mut set, &mut held, false);
+        let mut forwarded = Vec::new();
         shell.pump(&mut |event| {
-            pump.observe(&event);
+            if let Some(key) = pump.observe(&event) {
+                forwarded.push(key);
+            }
         });
+        assert_eq!(forwarded, vec![(MENU_UP_KEY, true)]);
         assert_eq!(held, vec![MENU_UP_KEY]);
 
-        // Released while the menu is up: the menu consumes the event, but the
-        // release must still take the key off the held list.
+        // Released while the menu is up: the menu is claiming that key, and the
+        // release reaches the game anyway.
         shell.key_release(window, MENU_UP_KEY).expect("live");
         let mut pump = MenuPump::new(&mut set, &mut held, true);
+        let mut forwarded = Vec::new();
         shell.pump(&mut |event| {
-            pump.observe(&event);
+            if let Some(key) = pump.observe(&event) {
+                forwarded.push(key);
+            }
         });
+        assert_eq!(
+            forwarded,
+            vec![(MENU_UP_KEY, false)],
+            "the game was never told the key came up",
+        );
         assert!(
             !held.contains(&MENU_UP_KEY),
             "the menu key is still held: {held:?}",

@@ -1349,6 +1349,56 @@ mod tests {
         assert_eq!(engine.game_mut().game_mut().state, GameState::Playing);
     }
 
+    /// **A movement key let go under the level-up menu stops the wizard.**
+    ///
+    /// `ArrowDown` is also the menu's own "select the next item", so while a
+    /// menu is up the pump claims it — and the release used to go no further
+    /// than the pump. The game was told about the press and never about the
+    /// release, so picking an upgrade handed control back to a wizard still
+    /// walking south with nothing pressed. The assertion is where he is after
+    /// the menu closes, which is the thing the player sees.
+    #[test]
+    fn a_move_key_let_go_under_the_level_up_menu_stops_the_player() {
+        let mut engine = scripted(&headless(256));
+        engine.frame().expect("a frame");
+        run_frames(&mut engine, 1);
+        let window = engine.window();
+
+        let before = engine.game().render_state().player;
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::ArrowDown)
+            .expect("the window is live");
+        run_frames(&mut engine, 4);
+        let walking = engine.game().render_state().player;
+        assert_ne!(walking, before, "holding Down never moved the wizard");
+
+        // Level up with the key still down, and let go under the menu.
+        engine
+            .game_mut()
+            .game_mut()
+            .bank_xp(game::xp_for_next_level(1));
+        run_frames(&mut engine, 2);
+        assert_eq!(engine.menu_kind(), MenuKind::LevelUp);
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::ArrowDown)
+            .expect("the window is live");
+        run_frames(&mut engine, 1);
+
+        tap(&mut engine, KeyCode::Digit1);
+        run_frames(&mut engine, 2);
+        assert_eq!(engine.menu_kind(), MenuKind::None);
+
+        let settled = engine.game().render_state().player;
+        run_frames(&mut engine, 8);
+        assert_eq!(
+            engine.game().render_state().player,
+            settled,
+            "the wizard walked on with nothing pressed",
+        );
+    }
+
     /// `before`, with `upgrade` applied — the loop-side mirror of
     /// `game::apply_upgrade`, so the test above names an *effect* rather than
     /// re-reading the simulation's own arithmetic.

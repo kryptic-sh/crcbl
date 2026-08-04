@@ -484,6 +484,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl** (engine): **a key held when a menu opened stayed held forever.**
+  `MenuPump` claims Up, Down and Enter while a menu is showing, and it was
+  claiming the _release_ as well as the press — so a movement key pressed before
+  the menu opened and let go under it was never reported up to the game. In the
+  horde: hold Down, level up, pick an upgrade, and the wizard walked south with
+  nothing pressed until the key was tapped again.
+
+  The held-key list is now what its documentation always said it was — the keys
+  the game has been told are down — and a claimed release is forwarded when the
+  key is on it. A claimed _press_ still does not reach the game and no longer
+  joins the list, so the game only ever sees matched pairs. The list already
+  cleared correctly here; clearing it was never the fix, because nothing but
+  focus loss reads it.
+
 - **crcbl-shell** (AppKit): `CrcblWindow` overrides
   `constrainFrameRect:toScreen:` to answer the proposed rectangle unchanged, so
   AppKit can no longer silently rewrite a frame this backend sets. The default
