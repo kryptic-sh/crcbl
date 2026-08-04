@@ -46,7 +46,7 @@
 //! (which need a remote-desktop session or a tablet), and multi-monitor
 //! behaviour (the runner has one display).
 //!
-//! # Two facts about the runner that shaped every test below
+//! # Three facts about the runner that shaped every test below
 //!
 //! * **The desktop is 1024×768.** Anything that assumes a default-sized window
 //!   fits on it is wrong there, which is why the windows here are small and why
@@ -56,6 +56,13 @@
 //!   before this suite asks for it. Three CI round trips were spent learning
 //!   that one assertion at a time, so nothing below assumes its own event is the
 //!   first one, and every wait is a poll with a deadline.
+//! * **The foreground is locked, and asking for it politely does not work.**
+//!   `SetForegroundWindow` is granted to a process that already has the
+//!   foreground or received the last input event, and under `nextest` every test
+//!   is a fresh process that has neither. The first run of this suite lost three
+//!   tests to twenty seconds each of being refused by the job's own console
+//!   window. What defeats it is in [`desktop::take_foreground`], it is in this
+//!   harness rather than in the backend, and that placement is argued there.
 //!
 //! # Nothing here has been run
 //!
@@ -97,6 +104,16 @@ mod scancode {
 /// message naming what never happened, while one left to nextest is a SIGKILL
 /// with no context at all.
 const WAIT: Duration = Duration::from_secs(20);
+
+/// How long [`Session::foreground`] may go on asking before the desktop is
+/// judged to be refusing.
+///
+/// Deliberately a fraction of [`WAIT`]: nothing is being waited *for* here — the
+/// window station answers the request on the turn it is made — so the only thing
+/// a long deadline buys is a window that is still being shown, and the only
+/// thing it costs is a CI job spending a minute repeating one refusal. See
+/// [`Session::foreground`], which is where that bill was paid.
+const FOREGROUND_WAIT: Duration = Duration::from_secs(4);
 
 /// The most any single [`Session::pump`] may take before the frame loop is
 /// judged to have blocked.
@@ -197,6 +214,11 @@ mod desktop {
     /// `QS_ALLINPUT`.
     const QS_ALL_INPUT: u32 = 0x04FF;
 
+    /// `SPI_GETFOREGROUNDLOCKTIMEOUT`.
+    const SPI_GET_FOREGROUND_LOCK_TIMEOUT: u32 = 0x2000;
+    /// `SPI_SETFOREGROUNDLOCKTIMEOUT`.
+    const SPI_SET_FOREGROUND_LOCK_TIMEOUT: u32 = 0x2001;
+
     /// `USER_DEFAULT_SCREEN_DPI` — the DPI that is 100%.
     pub const DEFAULT_DPI: u32 = 96;
 
@@ -219,21 +241,206 @@ mod desktop {
         fn GetDpiForWindow(hwnd: Handle) -> u32;
         fn GetQueueStatus(flags: u32) -> u32;
         fn GetCursorPos(point: *mut Point) -> i32;
+        fn SystemParametersInfoW(action: u32, param: u32, value: *mut c_void, ini: u32) -> i32;
+        fn GetWindowThreadProcessId(hwnd: Handle, process: *mut u32) -> u32;
+        fn AttachThreadInput(attach: u32, attach_to: u32, join: i32) -> i32;
+        fn BringWindowToTop(hwnd: Handle) -> i32;
+        fn SetFocus(hwnd: Handle) -> Handle;
+        fn GetClassNameW(hwnd: Handle, buffer: *mut u16, capacity: i32) -> i32;
+        fn GetWindowTextW(hwnd: Handle, buffer: *mut u16, capacity: i32) -> i32;
     }
 
-    /// Asks for the foreground, and answers whether this window now has it.
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThreadId() -> u32;
+        fn GetCurrentProcessId() -> u32;
+    }
+
+    /// Takes the foreground the way a test harness has to, and answers whether
+    /// this window now has it.
     ///
-    /// The request is allowed to be refused — Windows only grants it to a
-    /// process that already has the foreground, received the last input event,
-    /// or is starting into a session with nothing in front — so callers ask once
-    /// per turn of a poll rather than once, and judge by
-    /// [`foreground_window`] rather than by the return value.
+    /// # The foreground lock, and why a bare `SetForegroundWindow` is not enough
+    ///
+    /// The first CI run of this suite failed three tests identically: twenty
+    /// seconds of asking, a drained queue, and the foreground still on `0x10200`
+    /// — a window belonging to the job's own console rather than to any of these
+    /// tests. That is **Windows' foreground lock** doing exactly what it is for.
+    /// `SetForegroundWindow` is granted only to a process that already owns the
+    /// foreground, was started by the process that does, received the last input
+    /// event, or is asking after the lock timeout has expired with no user input
+    /// at all. Under `nextest` every test is its own short-lived process running
+    /// serially, so the *first* one to ask may well qualify — the job had been
+    /// compiling silently for minutes, so the timeout had expired — and every
+    /// later one is asking a few seconds after the previous test injected input,
+    /// which restarts that clock and hands the qualification to nobody.
+    ///
+    /// # The two levers, and both are pulled
+    ///
+    /// * [`unlock_foreground`] sets the lock timeout to zero, which removes the
+    ///   "following user input" window the grant is refused inside of. It is
+    ///   itself refusable, which is why it is not the only lever.
+    /// * **`AttachThreadInput` against the thread that owns the current
+    ///   foreground window.** Attaching merges the two threads' input queues, so
+    ///   for the length of the attachment this thread *is* part of the
+    ///   foreground queue and the grant is not a request. `BringWindowToTop`
+    ///   raises the window out from under whatever was covering it and `SetFocus`
+    ///   moves the keyboard within the shared queue, which is the state that
+    ///   survives the detach.
+    ///
+    /// The attachment is held across three calls and no longer. Attaching to a
+    /// thread that has stopped pumping is a documented way to hang, and the
+    /// runner's console is a thread this suite does not control.
+    ///
+    /// Neither lever is in `src/win32/`, and that is deliberate: **a game does
+    /// not get to steal the focus.** Everything here is what an automated
+    /// *harness* does to arrange a precondition a human would have arranged by
+    /// clicking, and a backend that knew how to do it would be a backend that
+    /// could do it to a user.
+    ///
+    /// Called once per turn of a poll rather than once, because a single refusal
+    /// must not decide a test, and judged by [`foreground_window`] rather than by
+    /// any return value.
     #[must_use]
     pub fn take_foreground(hwnd: Handle) -> bool {
-        // SAFETY: a window handle by value. The call changes window-station
-        // state and reads no memory of ours.
-        unsafe { SetForegroundWindow(hwnd) };
+        let front = foreground_window();
+        if front == hwnd {
+            return true;
+        }
+        // SAFETY: a window handle by value and a null out-pointer, which the
+        // call documents as "do not report the process".
+        let theirs = unsafe { GetWindowThreadProcessId(front, core::ptr::null_mut()) };
+        // SAFETY: reads the calling thread's own id and cannot fail.
+        let ours = unsafe { GetCurrentThreadId() };
+        // SAFETY: two thread ids by value. Attaching this thread to the
+        // foreground one shares their input state; it is undone below on every
+        // path, and is skipped entirely when there is no other thread to attach
+        // to.
+        let attached =
+            theirs != 0 && theirs != ours && unsafe { AttachThreadInput(ours, theirs, 1) } != 0;
+        // SAFETY: three window-station calls taking this process's own window by
+        // value. None reads memory of ours.
+        unsafe {
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            SetFocus(hwnd);
+        }
+        if attached {
+            // SAFETY: the same two ids, undoing the attachment made above.
+            unsafe { AttachThreadInput(ours, theirs, 0) };
+        }
         foreground_window() == hwnd
+    }
+
+    /// Sets the foreground lock timeout, answering the value that was there
+    /// before so a caller can put it back.
+    ///
+    /// `fWinIni` is zero on purpose: the change is wanted for this session and
+    /// not written into the user's profile or broadcast to every window on the
+    /// desktop. A CI runner is thrown away afterwards; a developer running this
+    /// suite on their own machine is not, and [`Session`](super::Session) puts
+    /// the old value back on the way out.
+    ///
+    /// `None` means the system refused to say what the old value was, which is
+    /// itself worth printing — the set is documented as being available only to
+    /// a process that could already take the foreground, so a refusal here is
+    /// the first thing to look at when [`take_foreground`] never takes.
+    pub fn unlock_foreground(timeout_ms: u32) -> Option<u32> {
+        let mut previous: u32 = 0;
+        // SAFETY: `previous` is a live, initialised `DWORD` and this action
+        // documents `pvParam` as pointing at one. `uiParam` must be zero.
+        let read = unsafe {
+            SystemParametersInfoW(
+                SPI_GET_FOREGROUND_LOCK_TIMEOUT,
+                0,
+                (&raw mut previous).cast::<c_void>(),
+                0,
+            )
+        };
+        // SAFETY: the *set* action takes the new value **in** `pvParam` rather
+        // than through it — the pointer is never dereferenced — which is why
+        // this one is a provenance-free integer and not a borrow.
+        unsafe {
+            SystemParametersInfoW(
+                SPI_SET_FOREGROUND_LOCK_TIMEOUT,
+                0,
+                core::ptr::without_provenance_mut(timeout_ms as usize),
+                0,
+            )
+        };
+        (read != 0).then_some(previous)
+    }
+
+    /// The foreground lock timeout the system reports right now, in
+    /// milliseconds.
+    ///
+    /// Only ever read into a failure message, and it is the one number that says
+    /// whether the lock is still the reason: a zero here with the foreground
+    /// still somewhere else means the refusal is not the timeout, and every
+    /// other value means [`unlock_foreground`] was refused.
+    #[must_use]
+    pub fn foreground_lock_timeout() -> Option<u32> {
+        let mut timeout: u32 = 0;
+        // SAFETY: as in `unlock_foreground`'s read above.
+        let read = unsafe {
+            SystemParametersInfoW(
+                SPI_GET_FOREGROUND_LOCK_TIMEOUT,
+                0,
+                (&raw mut timeout).cast::<c_void>(),
+                0,
+            )
+        };
+        (read != 0).then_some(timeout)
+    }
+
+    /// A window named the way a person reading a CI log can act on.
+    ///
+    /// The handle alone is what made the first failure diagnosable in one round
+    /// — `0x10200` was the same window every time and was not ours — and it is
+    /// still printed. What it could not say is *whose* window it is, which took
+    /// a guess; the class and the title say it outright, and the thread and
+    /// process ids say whether it belongs to this process at all.
+    #[must_use]
+    pub fn describe(hwnd: Handle) -> String {
+        if hwnd.is_null() {
+            return "0x0 (there is no foreground window at all)".to_owned();
+        }
+        let mut process: u32 = 0;
+        // SAFETY: a window handle by value and a live `DWORD` the call writes
+        // the owning process id into.
+        let thread = unsafe { GetWindowThreadProcessId(hwnd, &raw mut process) };
+        format!(
+            "{hwnd:?} class {:?} title {:?} thread {thread} process {process}",
+            // SAFETY of both: each call writes at most `capacity` UTF-16 units
+            // into a buffer of that length and answers how many it wrote.
+            text(|buffer, capacity| unsafe { GetClassNameW(hwnd, buffer, capacity) }),
+            text(|buffer, capacity| unsafe { GetWindowTextW(hwnd, buffer, capacity) }),
+        )
+    }
+
+    /// This process, for comparing against [`describe`]'s answer.
+    #[must_use]
+    pub fn ours() -> String {
+        // SAFETY: both read the caller's own identity and cannot fail.
+        unsafe {
+            format!(
+                "thread {} process {}",
+                GetCurrentThreadId(),
+                GetCurrentProcessId()
+            )
+        }
+    }
+
+    /// Runs a `GetClassNameW`-shaped call and decodes what it wrote.
+    fn text(fill: impl FnOnce(*mut u16, i32) -> i32) -> String {
+        /// Longer than any window class or a title worth printing.
+        const CAPACITY: usize = 256;
+        let mut buffer = [0u16; CAPACITY];
+        let written = fill(
+            buffer.as_mut_ptr(),
+            i32::try_from(CAPACITY).expect("a small constant"),
+        );
+        let written = usize::try_from(written).unwrap_or(0).min(CAPACITY);
+        String::from_utf16_lossy(&buffer[..written])
     }
 
     /// The window the session's input stream is currently pointed at.
@@ -357,6 +564,15 @@ struct Session {
     /// a count of one, on an idle machine and on a runner with nothing left to
     /// give alike.
     pumps: u32,
+    /// The foreground lock timeout as it was before this session lowered it, to
+    /// be put back on the way out.
+    ///
+    /// The setting is **session-global** rather than per-process, so it outlives
+    /// the test that changed it: on a CI runner that is free, and on a
+    /// developer's own desktop it is their machine's focus-stealing protection
+    /// left switched off by a test suite. `None` means the system would not say
+    /// what the old value was, and then there is nothing to restore.
+    previous_lock_timeout: Option<u32>,
 }
 
 impl Session {
@@ -372,6 +588,13 @@ impl Session {
             windows: Vec::new(),
             slowest_pump: Duration::ZERO,
             pumps: 0,
+            // Lowered here rather than inside `foreground`, because the lock is
+            // a property of the *session* and not of a window: doing it once per
+            // process is enough, and doing it before any window exists means the
+            // very first request is already made under the relaxed rule. See
+            // `desktop::take_foreground` for what the lock is and why this is
+            // only one of the two levers against it.
+            previous_lock_timeout: desktop::unlock_foreground(0),
         }
     }
 
@@ -401,9 +624,10 @@ impl Session {
             assert!(
                 Instant::now() < deadline,
                 "timed out after {WAIT:?} waiting for {what}; the queue holds {:#06x}, the \
-                 foreground window is {:?}, and the events so far are {:?}",
+                 foreground window is {}, we are {}, and the events so far are {:?}",
                 desktop::queue_status(),
-                desktop::foreground_window(),
+                desktop::describe(desktop::foreground_window()),
+                desktop::ours(),
                 self.names()
             );
             // Also exercises `ShellCaps::EVENT_WAIT`: a backend that claimed it
@@ -501,19 +725,57 @@ impl Session {
     /// Asked once per turn rather than once: `SetForegroundWindow` is refused
     /// while another process still owns the foreground, and one refusal must not
     /// decide a test.
+    ///
+    /// # Its own deadline, and a shorter one
+    ///
+    /// [`WAIT`] is twenty seconds because the things it waits on are *other
+    /// processes* — a helper injecting a keystroke, the desktop settling — and a
+    /// slow runner must not read as a broken backend. **Taking the foreground is
+    /// not one of those.** The grant is decided by the window station on the turn
+    /// it is asked for, against rules that do not change while this loop spins;
+    /// twenty seconds of asking is the same refusal four hundred times over. The
+    /// first CI run of this suite spent sixty seconds across three tests learning
+    /// nothing that the first second did not already say, so this waits long
+    /// enough to cover a window that is still being shown and no longer.
+    ///
+    /// A refusal that survives the deadline is a **finding about the runner**,
+    /// and it fails carrying the evidence to act on it: which window holds the
+    /// foreground and whose it is, whether the lock timeout took, and whether the
+    /// shell believes it has the keyboard. What it must not do is pass — the
+    /// tests that call this inject input, and input follows the foreground, so a
+    /// session that skipped it would assert against a keystroke that went to
+    /// somebody else's window.
     fn foreground(&mut self, window: WindowId) {
         let hwnd = self.hwnd(window);
-        self.pump_until(
-            "the window to take the foreground and the keyboard",
-            |session| {
-                let in_front = desktop::take_foreground(hwnd);
-                in_front
-                    && session
-                        .shell
-                        .window_state(window)
-                        .is_ok_and(|state| state.focused)
-            },
-        );
+        let deadline = Instant::now() + FOREGROUND_WAIT;
+        loop {
+            self.pump();
+            let in_front = desktop::take_foreground(hwnd);
+            let focused = self
+                .shell
+                .window_state(window)
+                .is_ok_and(|state| state.focused);
+            if in_front && focused {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the desktop would not give {hwnd:?} the foreground within {FOREGROUND_WAIT:?}: \
+                 it is on {}, we are {}, the lock timeout reads {:?} ms after asking for 0, the \
+                 shell says focused={focused}, the queue holds {:#06x} and the events so far are \
+                 {:?}.\nA timeout of 0 with the foreground still elsewhere means the lock is not \
+                 what is refusing and `SetForegroundWindow` is being denied for another reason; \
+                 anything else means SPI_SETFOREGROUNDLOCKTIMEOUT was itself refused, which it is \
+                 documented to be for a process that cannot already take the foreground. Either \
+                 way this test cannot inject input at its own window on this runner.",
+                desktop::describe(desktop::foreground_window()),
+                desktop::ours(),
+                desktop::foreground_lock_timeout(),
+                desktop::queue_status(),
+                self.names(),
+            );
+            self.shell.wait_events(Some(Duration::from_millis(10)));
+        }
     }
 
     fn names(&self) -> Vec<&'static str> {
@@ -587,6 +849,12 @@ impl Drop for Session {
         // desktop is not left holding the foreground for a window that no longer
         // exists.
         self.shell.pump(&mut |_| {});
+        // And put the desktop's focus-stealing protection back, for the machine
+        // that is not a CI runner. Ignored on purpose, like everything else on
+        // this path.
+        if let Some(previous) = self.previous_lock_timeout {
+            let _ = desktop::unlock_foreground(previous);
+        }
     }
 }
 

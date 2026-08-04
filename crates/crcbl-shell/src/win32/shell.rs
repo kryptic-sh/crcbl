@@ -2284,13 +2284,34 @@ mod tests {
         //
         // The leave is what puts the derived state on a known edge: the backend
         // ignores one for a pointer it already thinks is outside, so this is
-        // either a no-op or exactly the transition needed, and the pump that
-        // follows discards whatever the desktop did on its own. Nothing here
-        // moves the cursor, which would only trade one assumption about the
-        // environment for another.
-        send_leave(hwnd);
+        // either a no-op or exactly the transition needed. Nothing here moves the
+        // cursor, which would only trade one assumption about the environment for
+        // another.
+        //
+        // # The drain comes *before* the leave, and the order is the whole fix
+        //
+        // It used to be the other way round, and a `windows-latest` run collected
+        // `[(false, None)]` — a leave with no arrival in front of it. The
+        // sequence explains itself once written out: the leave marked the pointer
+        // outside, then the discarding pump dispatched a **real** `WM_MOUSEMOVE`
+        // the desktop had queued, which derived the arrival and threw it away,
+        // and the synthetic movements that followed found the pointer already
+        // inside. The runner delivers real motion every few milliseconds, so this
+        // was never a rare interleaving.
+        //
+        // Draining first and leaving second closes the gap completely, because
+        // `send_mouse` and `send_leave` are `SendMessageW`: they call the window
+        // procedure **synchronously**, and nothing between the leave and the
+        // first movement pumps. No queued message can be processed in that
+        // window, so the arrival below is derived from this test's own movement
+        // and from nothing else. What the desktop queued meanwhile is dispatched
+        // during the collecting pump — *after* everything sent here, because
+        // `pump` translates what the procedure recorded in the order it recorded
+        // it — which is why the assertions read the front of the sequence and
+        // tolerate a tail.
         shell.pump(&mut |_| {});
         let frame = super::input::client_screen_rect(hwnd).expect("a live window has one");
+        send_leave(hwnd);
 
         // A movement into a window nothing has been over is an arrival, and
         // Windows sends no message for that — it is derived.
@@ -2321,6 +2342,12 @@ mod tests {
         let mut buttons = Vec::new();
         let mut wheel = None;
         let mut crossings = Vec::new();
+        // Every arrival paired with the index of the movement it is supposed to
+        // have been derived from — the **next** one, because the procedure
+        // pushes the derived arrival before the motion that triggered it. Kept
+        // as a pair rather than compared on the spot so the failure can print
+        // both sides.
+        let mut arrivals = Vec::new();
         shell.pump(&mut |event| {
             names.push(event.name());
             match event {
@@ -2339,39 +2366,63 @@ mod tests {
                 } => wheel = Some((delta, position)),
                 ShellEvent::PointerFocus {
                     entered, position, ..
-                } => crossings.push((entered, position)),
+                } => {
+                    crossings.push((entered, position));
+                    if entered {
+                        arrivals.push((position, motions.len()));
+                    }
+                }
                 _ => {}
             }
         });
 
-        // **The rule, not the coincidence.** The arrival is derived from the
-        // first movement after a leave and carries *that* movement's position —
-        // whichever movement turns out to be first. Naming (40, 30) here was an
-        // assertion that no other motion could reach the window, which is a
-        // claim about the desktop rather than about the backend.
+        // **The rule, not a count the machine gets a vote in.** The desktop keeps
+        // delivering real movement into the collecting pump, and a real movement
+        // arriving after this test's own leave derives a *third* crossing that
+        // nothing here caused. Counting crossings therefore asserts that the
+        // runner held still, which is the assumption this file exists to have
+        // stopped making — so what is asserted is the ordering property instead,
+        // which no amount of extra motion can satisfy by accident:
         //
-        // Exactly two crossings, because the second movement must not re-arm a
-        // second leave: `TrackMouseEvent` is one-shot and is re-armed only on
-        // the transition, so a backend that armed it per movement would show a
-        // third here.
-        assert_eq!(
-            crossings.len(),
-            2,
-            "one arrival and one leave: {crossings:?} out of {names:?}"
+        // * the first crossing is an arrival, and it is this test's,
+        // * the second is the leave this test sent, carrying no position,
+        // * crossings alternate all the way to the end, and
+        // * every arrival carries the position of the movement it was derived
+        //   from — the one *after* it in the stream, since the procedure pushes
+        //   the derived arrival first and the movement second.
+        //
+        // Alternation is what keeps the one-shot claim: `TrackMouseEvent` is
+        // re-armed only on a transition, so a backend that derived an arrival per
+        // movement would show two arrivals in a row here — and would show them
+        // whether or not the desktop contributed anything.
+        assert!(
+            crossings.len() >= 2,
+            "an arrival and a leave, at least: {crossings:?} out of {names:?}"
         );
-        let (entered, at) = crossings[0];
-        assert!(entered, "the first crossing is the arrival: {crossings:?}");
-        assert_eq!(
-            at,
-            motions.first().copied().flatten(),
-            "the arrival is derived from the first movement and carries its \
-             position: motions {motions:?}, events {names:?}"
+        assert!(
+            crossings[0].0,
+            "the first crossing after a leave is the arrival: {crossings:?} out of {names:?}"
         );
         assert_eq!(
             crossings[1],
             (false, None),
-            "the leave carries no position: {crossings:?}"
+            "the leave this test sent follows it and carries no position: {crossings:?}"
         );
+        for pair in crossings.windows(2) {
+            assert_ne!(
+                pair[0].0, pair[1].0,
+                "crossings alternate — an arrival is not announced twice without a leave \
+                 between: {crossings:?} out of {names:?}"
+            );
+        }
+        for (position, next) in &arrivals {
+            assert!(
+                position.is_some() && motions.get(*next).copied() == Some(*position),
+                "an arrival carries the position of the movement it was derived from; this one \
+                 said {position:?} where motion {next} of {motions:?} is what triggered it. \
+                 Events {names:?}"
+            );
+        }
         assert!(
             motions.contains(&Some(PhysicalPoint::new(41.0, 31.0))),
             "{motions:?}"
@@ -3184,10 +3235,10 @@ mod tests {
         // that point is correct behaviour and asserting against it would be
         // asserting that the drain does not work.
         //
-        // That it *reached* quiescence is asserted rather than assumed. A loop
-        // that simply ran out of attempts left the two findings — "this runner's
-        // queue never empties" and "the wait woke spuriously" — reported by the
-        // same failure, and they call for opposite fixes.
+        // Whether it reached quiescence is *reported* rather than asserted, and
+        // that is this test's second correction — see below. On a runner where
+        // the desktop delivers messages unbidden every few milliseconds, "the
+        // queue went quiet" is a fact about the machine's mood.
         let mut shell = shell();
         let _window = window(&mut shell);
         let mut settled = false;
@@ -3198,63 +3249,97 @@ mod tests {
                 break;
             }
         }
-        assert!(
-            settled,
-            "the queue never went quiet in 16 drain-and-check rounds; it holds \
-             {:#06x} and the message at its head is {:?}",
-            Win32Shell::queue_status(),
-            Win32Shell::peek_pending()
-        );
 
-        // # "At least one of five", and that is not a loosened assertion
+        // # The observable is "it slept", not "it reached the timeout"
         //
-        // [`Shell::wait_events`] says outright that returning immediately is
-        // *always* a correct implementation, so "it must sleep every time"
-        // asserts more than the seam requires — and on a real, non-idle desktop
-        // it is not even true: a message this process did not cause can arrive
-        // in any given 50 ms window, and that is the runner behaving normally.
-        // What [`ShellCaps::EVENT_WAIT`] claims is narrower and still has teeth:
-        // this wait **can** block. A wait that never blocks makes the bit a lie
-        // and fails here; one the system woke early does not.
+        // **This assertion has been wrong twice, in the same direction, and the
+        // evidence for the current shape is worth keeping so nobody tightens it
+        // back.** It first measured a wall clock and failed at 47 ms of a 50 ms
+        // timeout. It then asked for `Wake::TimedOut` on at least one of five
+        // attempts — and a `windows-latest` run printed all five:
         //
-        // Every attempt that did not time out carries its evidence, because two
-        // of the three CI rounds spent on this were settled only by the failure
-        // printing more than the last one did. The queue word says what kind of
-        // message woke it; the `MSG` beside it says which one — an id, an `hwnd`
-        // and two parameters, which is a thing that can be looked up rather than
-        // guessed at. `None` there, with a bit set, is the observation that
-        // identified `QS_SENDMESSAGE`; see [`Win32Shell::wait`].
+        // ```text
+        // attempt 0: Message after  5.7433ms, queue 0x80008, message id 799
+        // attempt 1: Message after 16.0896ms, queue 0x400040, message None
+        // attempt 2: Message after 31.6668ms, queue 0x400040, message None
+        // attempt 3: Message after   299.7µs, queue 0x80008, message id 96
+        // attempt 4: Message after 10.9571ms, queue 0x20002, message id 512
+        // ```
+        //
+        // 799 is `WM_DWMNCRENDERINGCHANGED` and 512 is `WM_MOUSEMOVE`: the
+        // desktop is delivering compositor notifications and **real mouse
+        // movement** to this window every few milliseconds. An idle window with a
+        // drained queue does not exist there, and no amount of draining will make
+        // one.
+        //
+        // Read those numbers again, though, because they also say the wait
+        // *works*: four of the five blocked for between 5.7 ms and 31.7 ms before
+        // something woke them. That is what blocking looks like on a busy
+        // desktop. Only attempt 3, at 299 µs, returned to an already-full queue.
+        //
+        // So the assertion is now the thing that actually separates a blocking
+        // wait from a no-op one. [`ShellCaps::EVENT_WAIT`] claims the call
+        // *sleeps until something happens*; it never claimed the machine would go
+        // quiet. A wait that does nothing returns in microseconds **every single
+        // time** — five of those in a row is unmistakable and is what fails here.
+        // A wait woken after milliseconds slept, whatever woke it.
+        //
+        // Every attempt carries its evidence, because two of the CI rounds spent
+        // on this were settled only by the failure printing more than the last
+        // one did. The queue word says what kind of message woke it; the `MSG`
+        // beside it says which one — an id, an `hwnd` and two parameters, which
+        // is a thing that can be looked up rather than guessed at. `None` there,
+        // with a bit set, is the observation that identified `QS_SENDMESSAGE`;
+        // see [`Win32Shell::wait`].
         const ATTEMPTS: usize = 5;
         const TIMEOUT: Duration = Duration::from_millis(50);
-        // Loose on the low side because Windows' timer granularity is 15.6 ms.
+        // The full timeout, loose on the low side because Windows' timer
+        // granularity is 15.6 ms. Only a `TimedOut` is held to it: a
+        // `WAIT_TIMEOUT` that arrived instantly would mean the timeout was not
+        // the one that was asked for, so it is not evidence of sleeping.
         const FLOOR: Duration = Duration::from_millis(40);
+        // The line between "it slept and was woken" and "it never slept", drawn
+        // between the two populations the run above measured: 299 µs for a return
+        // to a full queue, 5.7 ms for the shortest genuine block. An order of
+        // magnitude of clearance on each side, and no dependence on the desktop
+        // being quiet.
+        const BLOCKED: Duration = Duration::from_millis(2);
 
-        let mut slept = None;
+        let mut slept = false;
         let mut woken = Vec::new();
         for attempt in 0..ATTEMPTS {
             let start = Instant::now();
             let woke = shell.wait(Some(TIMEOUT));
             let waited = start.elapsed();
-            // The reason and the clock have to agree: a `WAIT_TIMEOUT` that
-            // arrived instantly would mean the timeout was not the one that was
-            // asked for, so it is not evidence of sleeping.
-            if woke == Wake::TimedOut && waited >= FLOOR {
-                slept = Some(waited);
-                break;
-            }
             woken.push(format!(
                 "attempt {attempt}: {woke:?} after {waited:?}, queue {:#06x}, message {:?}",
                 Win32Shell::queue_status(),
                 Win32Shell::peek_pending()
             ));
+            slept = match woke {
+                Wake::TimedOut => waited >= FLOOR,
+                // Woken early, which on a live desktop is the ordinary case —
+                // but a wait has to have slept to be woken out of.
+                _ => waited >= BLOCKED,
+            };
+            if slept {
+                break;
+            }
             // Whatever woke it is still in the queue; leaving it there would
             // wake the next attempt too.
             shell.pump(&mut |_| {});
         }
         assert!(
-            slept.is_some(),
-            "not one of {ATTEMPTS} waits on an idle window with a drained queue slept for \
-             {FLOOR:?} of its {TIMEOUT:?}, so this backend's EVENT_WAIT never blocks: {woken:#?}"
+            slept,
+            "every one of {ATTEMPTS} waits came back inside {BLOCKED:?} without reaching its \
+             {TIMEOUT:?} timeout, so this backend's EVENT_WAIT never sleeps at all (the queue \
+             {}): {woken:#?}",
+            if settled {
+                "was drained to quiescence first"
+            } else {
+                "never went quiet in 16 drain-and-check rounds, so a return to a full queue is \
+                 expected — but not five in a row, each in microseconds"
+            }
         );
     }
 

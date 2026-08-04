@@ -39,6 +39,53 @@
 //! platform where it cannot have done anything is the failure this whole suite
 //! exists to avoid.
 //!
+//! # M4 extends this target rather than adding a second one
+//!
+//! The end-to-end pass could have been a `appkit_e2e` target of its own, on the
+//! model of `tests/win32_e2e.rs`. It is here instead, and the reason is not
+//! tidiness:
+//!
+//! * **`nextest` runs test binaries in parallel.** Two harness-less targets that
+//!   each bootstrap an `NSApplication`, activate it and take the key window
+//!   would be two processes fighting over which one is frontmost — and
+//!   `CGEventPost` delivers to *whoever is frontmost*, so the loser would report
+//!   that injected input never arrived. Serialising them means a test group in
+//!   `.config/nextest.toml`, which is a configuration change for a problem one
+//!   process does not have.
+//! * **There is one `NSApplication` per process and it is not restartable.** A
+//!   second target would repeat the bootstrap, the activation and the window,
+//!   and would then be asserting the same M1 lifecycle a second time to get to
+//!   its own subject.
+//!
+//! The cost is that this target is one `nextest` test, so a failure anywhere in
+//! it reports the whole session as failed. That is paid for by every step
+//! printing what it reached before the next one starts, which is what a
+//! `harness = false` target has instead of a test name.
+//!
+//! # What M4 adds, and the one thing it cannot do
+//!
+//! * **Input the window system generated**, through `CGEventPost` — the macOS
+//!   counterpart of `SendInput`. That is what reaches `interpretKeyEvents:`,
+//!   which no test had ever reached: `appkit::view`'s module docs list five
+//!   switches that decide
+//!   whether an event is *generated or routed* rather than what a responder does
+//!   with it, and every one of them is invisible to a test that calls the
+//!   responder method itself. The Win32 half of P5C shipped a backend whose
+//!   `TextCommit` was unreachable from a real keyboard for exactly that reason.
+//! * **A pasteboard round trip against `pbcopy` and `pbpaste`**, which are
+//!   Apple's own processes and have no `crcbl-shell` in them. A shell answering
+//!   its own reads out of a cache passes an in-process round trip and fails this.
+//! * **AppKit as the judge** of the first responder, the mouse-moved flag, the
+//!   dragged types, the style mask, the frame and the screen —
+//!   [`crcbl_shell::session_support::key_window`] reads them off `NSWindow`
+//!   rather than out of the backend's own record of what it asked for.
+//!
+//! What is **not** here is the sample-level pass: driving a running game and
+//! pressing F11 at it, which the two Linux suites do. That needs a renderer, and
+//! macOS has no Vulkan until MoltenVK clears its P14 gate —
+//! `docs/plan/ROADMAP.md`'s 2026-08-04 correction says so in as many words.
+//! `docs/backlog.md` carries it as the gap it is rather than approximating it.
+//!
 //! # Owning `main` means owning libtest's command line, not only its body
 //!
 //! `cargo nextest` — which is what CI runs — enumerates a target by executing it
@@ -83,10 +130,23 @@ mod macos {
     use std::time::{Duration, Instant};
 
     use crcbl_shell::{
-        ClipboardContent, ClipboardOffer, CursorIcon, DisplayMode, LogicalSize, MimeType,
-        PhysicalPoint, PhysicalSize, PointerMode, ReceivedMime, Shell, ShellBackend, ShellCaps,
-        ShellEvent, SizeConstraints, WindowDesc, WindowId, open_backend, session_support,
+        ButtonState, ClipboardContent, ClipboardOffer, CursorIcon, DisplayMode, KeyCode, Keysym,
+        LogicalSize, MimeType, PhysicalPoint, PhysicalSize, PointerButton, PointerMode,
+        ReceivedMime, ScrollDelta, Shell, ShellBackend, ShellCaps, ShellEvent, SizeConstraints,
+        WindowDesc, WindowId, open_backend, session_support,
     };
+
+    /// The window's title, which is also how [`session_support::key_window`]'s
+    /// answer is told apart from some other application's window.
+    const TITLE: &str = "crcbl appkit session";
+
+    /// `kVK_ANSI_A`, which `appkit::keys::key_code` maps to
+    /// [`KeyCode::KeyA`] — and which, unlike an arrow key, is a character.
+    const VK_A: u16 = 0x00;
+
+    /// `kVK_UpArrow`. A key that moves a cursor and commits no text, which is
+    /// the other half of the text assertion.
+    const VK_UP_ARROW: u16 = 0x7E;
 
     /// How long any one step may take before the session is called stuck.
     ///
@@ -156,7 +216,7 @@ mod macos {
         // and a first responder.
         let window = shell
             .create_window(&WindowDesc {
-                title: "crcbl appkit session",
+                title: TITLE,
                 app_id: "sh.kryptic.crcbl.appkit-session",
                 size: REQUESTED,
                 constraints: SizeConstraints::min(LogicalSize::new(320.0, 180.0)),
@@ -191,8 +251,12 @@ mod macos {
         // change is the only thing that invalidates it.
         shell.surface_target(window).expect("surface_target");
 
+        let facts = appkit_agrees(&mut shell, size);
         input(&mut shell, window, size);
+        injected_input(&mut shell, window, size);
         clipboard(&mut shell, window);
+        clipboard_peer(&mut shell, window);
+        resize(&mut shell, window, facts.backing_scale);
 
         let borderless = flip(
             &mut shell,
@@ -200,8 +264,45 @@ mod macos {
             DisplayMode::Borderless { monitor: None },
         );
         println!("crcbl appkit session: borderless at {borderless:?}");
+        // Judged against `NSScreen` rather than against the request: borderless
+        // here is "a frameless window at screen size", and both halves of that
+        // are things AppKit will say out loud.
+        let covering = key_window("borderless");
+        assert!(
+            !covering.titled,
+            "a borderless window has no title bar; the style mask is {:#x}",
+            covering.style_mask
+        );
+        let screen = covering
+            .screen_frame
+            .expect("a visible window is on a screen");
+        assert_eq!(
+            covering.frame, screen,
+            "borderless covers the screen AppKit says it is on, exactly"
+        );
+        assert_eq!(
+            borderless,
+            PhysicalSize::new(
+                (screen[2] * covering.backing_scale).round() as u32,
+                (screen[3] * covering.backing_scale).round() as u32,
+            ),
+            "and the extent the seam reports is that screen in backing pixels, at a scale of \
+             {}",
+            covering.backing_scale
+        );
+
         let windowed = flip(&mut shell, window, DisplayMode::Windowed);
         println!("crcbl appkit session: windowed again at {windowed:?}");
+        let restored = key_window("windowed again");
+        assert!(
+            restored.titled,
+            "a windowed window has its title bar back; the style mask is {:#x}",
+            restored.style_mask
+        );
+        assert_eq!(
+            restored.title, TITLE,
+            "and it is still this session's window"
+        );
 
         shell.destroy_window(window).expect("destroy_window");
         assert!(
@@ -406,6 +507,540 @@ mod macos {
         println!("crcbl appkit session: both formats round-tripped through the system pasteboard");
     }
 
+    // -----------------------------------------------------------------------
+    // M4: AppKit as the judge
+    // -----------------------------------------------------------------------
+
+    /// [`session_support::key_window`], or a failure naming the step that asked.
+    fn key_window(step: &str) -> session_support::KeyWindow {
+        session_support::key_window()
+            .unwrap_or_else(|detail| panic!("crcbl appkit session: {step}: {detail}"))
+    }
+
+    /// What `NSWindow` says about the window the shell just built.
+    ///
+    /// # Three structural claims stop being structural here
+    ///
+    /// `appkit::view`'s module docs list five switches that decide whether an
+    /// event is *generated or routed*, and `docs/backlog.md` has carried all five
+    /// as "structural rather than verified" since M2 — because each is invisible
+    /// to a test that calls the responder method itself. Three of them have a
+    /// readback on a live window, and this is where they are read:
+    ///
+    /// * **`setAcceptsMouseMovedEvents:`** — the system generates no
+    ///   `NSEventTypeMouseMoved` at all for a window that answers `false`, so a
+    ///   game would have a pointer that only moves while a button is held.
+    /// * **`makeFirstResponder:`** — `sendEvent:` delivers key events to the
+    ///   first responder, which is the *window* until something claims it. A
+    ///   window that is its own first responder swallows every keystroke.
+    /// * **`registerForDraggedTypes:`** — on the real window this time, rather
+    ///   than on the throwaway view
+    ///   [`session_support::dragged_types_register_on_a_view`] builds, so it also
+    ///   says that a window carrying a tracking area and a first responder still
+    ///   ends up registered.
+    ///
+    /// The window being **key** is waited for rather than asserted outright: it
+    /// has just been ordered front, and which window has the keyboard is the
+    /// window server's to decide on its own schedule.
+    fn appkit_agrees(shell: &mut Box<dyn Shell>, size: PhysicalSize) -> session_support::KeyWindow {
+        let facts = wait_for(shell, "AppKit to report a key window", |_| {
+            session_support::key_window().ok()
+        });
+        assert_eq!(
+            facts.title, TITLE,
+            "the key window is this session's own and not some other application's: {facts:?}"
+        );
+        assert!(
+            facts.accepts_mouse_moved,
+            "-[NSWindow acceptsMouseMovedEvents] is what makes pointer motion exist at all; \
+             without it a game's camera only moves while a button is held: {facts:?}"
+        );
+        assert_eq!(
+            facts.first_responder, "CrcblView",
+            "the content view has the first responder, so `sendEvent:` routes key events to it \
+             rather than to the window: {facts:?}"
+        );
+        assert_eq!(
+            facts.content_view, "CrcblView",
+            "and the content view is this backend's own class: {facts:?}"
+        );
+        assert_eq!(
+            facts.dragged_types,
+            vec!["public.file-url".to_owned()],
+            "a window created with accept_drops: true is registered for exactly the type this \
+             backend reads; AppKit sends no dragging message to a view registered for nothing: \
+             {facts:?}"
+        );
+        assert!(facts.titled, "a windowed window is titled: {facts:?}");
+
+        // The extent, judged the long way round: the content view's frame in
+        // points times the window's backing scale. The backend computes the same
+        // number through `convertRectToBacking:` on the view's *bounds*, so this
+        // is two different AppKit reads agreeing rather than the backend agreeing
+        // with itself.
+        assert_eq!(
+            (
+                (facts.content_points[0] * facts.backing_scale).round() as u32,
+                (facts.content_points[1] * facts.backing_scale).round() as u32,
+            ),
+            (size.width, size.height),
+            "the seam reported {size:?}; AppKit says the content view is {:?} points at a \
+             backing scale of {}",
+            facts.content_points,
+            facts.backing_scale
+        );
+        println!(
+            "crcbl appkit session: AppKit agrees — first responder {}, mouse-moved {}, dragged \
+             types {:?}, scale {}",
+            facts.first_responder,
+            facts.accepts_mouse_moved,
+            facts.dragged_types,
+            facts.backing_scale
+        );
+        facts
+    }
+
+    /// A resize AppKit performed, delivered as one [`ShellEvent::Resized`] at the
+    /// size the window system ended at.
+    ///
+    /// `-[NSWindow setContentSize:]` is what a user dragging the window's edge
+    /// produces, minus the modal drag loop that `pump` cannot return from — the
+    /// same substitution the Win32 suite makes with `SetWindowPos`, and for the
+    /// same reason: CI has nobody to hold a mouse button.
+    fn resize(shell: &mut Box<dyn Shell>, window: WindowId, scale: f64) {
+        /// The content size to ask for, in points. Small enough to fit on the
+        /// 1024×768 display both CI runners turned out to have.
+        const POINTS: (f64, f64) = (512.0, 384.0);
+        session_support::resize_key_window(POINTS.0, POINTS.1).expect("resize_key_window");
+
+        let expected = PhysicalSize::new(
+            (POINTS.0 * scale).round() as u32,
+            (POINTS.1 * scale).round() as u32,
+        );
+        let got = wait_for(shell, "the resize AppKit was asked for", |shell| {
+            shell
+                .window_state(window)
+                .ok()
+                .and_then(|state| state.size())
+                .filter(|size| *size == expected)
+        });
+        // And AppKit's own account of the same window, which is what makes this
+        // a resize rather than the seam echoing a number back.
+        let after = key_window("after the resize");
+        assert_eq!(
+            after.content_points,
+            [POINTS.0, POINTS.1],
+            "-[NSWindow setContentSize:] took: {after:?}"
+        );
+        println!("crcbl appkit session: resized to {got:?} backing pixels");
+    }
+
+    // -----------------------------------------------------------------------
+    // M4: input the window system generated
+    // -----------------------------------------------------------------------
+
+    /// What a failure to see injected input most likely means, printed with
+    /// every one of them.
+    ///
+    /// **Nothing here has run on a Mac.** The one thing that could stop all of
+    /// it is TCC: macOS 10.14 and later require a process to hold the
+    /// Accessibility right before it may synthesize keyboard events, and a
+    /// GitHub runner has nobody to grant one. What is *not* known — and what the
+    /// first run of this answers — is whether that gate applies when the events
+    /// are delivered back to the posting process itself, which is the whole of
+    /// what happens here. If it does, every assertion below fails with this text
+    /// beside it and the finding is the runner's, not the backend's.
+    const INJECTION_HINT: &str = "\nNo injected event arriving at all, with the window key and \
+         this process frontmost, is the signature of TCC refusing CGEventPost: macOS 10.14+ \
+         gates synthetic keyboard events behind the Accessibility right, and a CI runner has \
+         nobody to grant one. Whether that gate applies to events posted back to the posting \
+         process is what this run answers. If it does, the fallback is \
+         `-[NSApplication postEvent:atStart:]`, which needs no permission and still goes through \
+         nextEventMatchingMask:, sendEvent:, the first responder and interpretKeyEvents: — \
+         everything but the window server's own leg.";
+
+    /// Keyboard, text and pointer, all of it generated by the window system
+    /// rather than by a call into a responder.
+    ///
+    /// # This is the test M4 exists for
+    ///
+    /// `TextCommit` on macOS comes out of `insertText:replacementRange:`, which
+    /// is called **by the input method**, from inside `interpretKeyEvents:`,
+    /// which `keyDown:` calls on a real key event that `sendEvent:` routed to a
+    /// first responder whose `inputContext` is non-nil — and that last part is
+    /// only true because `CrcblView` conforms to `NSTextInputClient`. Every link
+    /// in that chain was written on a Linux machine and none of them had ever
+    /// run. The Win32 half of P5C was in exactly this state and its e2e suite
+    /// found `TranslateMessage` missing from the pump, which is the same defect
+    /// one platform over.
+    ///
+    /// # Nothing is posted until this process is the one input goes to
+    ///
+    /// `CGEventPost` puts the event in the **session's** stream and the session
+    /// hands it to whatever is frontmost. Posting while another application holds
+    /// the key window types into that application — on a CI runner, into the
+    /// job's own shell. So the key window is checked first, by title, and this
+    /// fails rather than posting if it is not ours.
+    fn injected_input(shell: &mut Box<dyn Shell>, window: WindowId, size: PhysicalSize) {
+        let before = key_window("before injecting input");
+        assert_eq!(
+            before.title, TITLE,
+            "input follows the key window, so nothing may be posted while somebody else has it: \
+             {before:?}"
+        );
+
+        // --- a printable key, and the text it commits ---
+        quartz::tap_key(VK_A);
+        let typed = collect_until(shell, "the injected 'a' and its release", |seen| {
+            seen.iter()
+                .filter(|event| matches!(event, ShellEvent::Key { .. }))
+                .count()
+                >= 2
+        });
+        let typed_keys = keys(&typed);
+        assert_eq!(
+            typed_keys[0].0,
+            u32::from(VK_A),
+            "the scan code is the `kVK_*` the event carried: {:?}",
+            names(&typed)
+        );
+        assert_eq!(
+            typed_keys[0].1,
+            Some(KeyCode::KeyA),
+            "the physical position"
+        );
+        assert_eq!(typed_keys[0].3, ButtonState::Pressed);
+        assert!(!typed_keys[0].4, "the first press is not a repeat");
+        assert_eq!(
+            typed_keys[0].2,
+            Keysym::from_char('a'),
+            "the layout's symbol, lowercased so a rebind menu reads the same as it does on Linux"
+        );
+        assert_eq!(typed_keys[1].3, ButtonState::Released);
+
+        let committed: String = typed
+            .iter()
+            .filter_map(|event| match event {
+                ShellEvent::TextCommit { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            committed,
+            "a",
+            "**the first text this backend has ever committed from a real keystroke.** It needs \
+             `sendEvent:` to route the event to the first responder, `keyDown:` to hand it to \
+             `interpretKeyEvents:`, and the view's `inputContext` to be non-nil — which it is \
+             only because CrcblView conforms to NSTextInputClient. The events that did arrive \
+             were {:?}",
+            names(&typed)
+        );
+
+        // --- and a key that is not a character ---
+        quartz::tap_key(VK_UP_ARROW);
+        let arrow = collect_until(shell, "the injected arrow key", |seen| {
+            seen.iter()
+                .any(|event| matches!(event, ShellEvent::Key { .. }))
+        });
+        let arrow_keys = keys(&arrow);
+        assert_eq!(
+            arrow_keys[0].1,
+            Some(KeyCode::ArrowUp),
+            "{:?}",
+            names(&arrow)
+        );
+        assert_eq!(arrow_keys[0].0, u32::from(VK_UP_ARROW));
+        assert!(
+            !names(&arrow).contains(&"TextCommit"),
+            "an arrow key moves a cursor; it is not a character in a text field, and a backend \
+             reading `-[NSEvent characters]` instead of asking the input method would commit one \
+             here: {:?}",
+            names(&arrow)
+        );
+
+        // --- the pointer, moved by the window server ---
+        //
+        // Parked inside the window with the seam's own warp first, because a
+        // mouse-moved event goes to the window under the cursor: posting motion
+        // while the cursor sits over some other application's window is a test of
+        // that application.
+        let target =
+            PhysicalPoint::new(f64::from(size.width) * 0.25, f64::from(size.height) * 0.25);
+        shell.warp_pointer(window, target).expect("warp_pointer");
+        let parked = wait_for_pointer(shell);
+
+        let from = quartz::cursor();
+        quartz::move_mouse(from.x + 40.0, from.y + 30.0);
+        let moved = collect_until(shell, "the injected motion", |seen| {
+            seen.iter().any(|event| {
+                matches!(
+                    event,
+                    ShellEvent::PointerMotion {
+                        abs: Some(_),
+                        raw_delta: Some(_),
+                        ..
+                    }
+                )
+            })
+        });
+        let (at, delta) = moved
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                ShellEvent::PointerMotion {
+                    abs: Some(at),
+                    raw_delta: Some(delta),
+                    ..
+                } => Some((*at, *delta)),
+                _ => None,
+            })
+            .expect("just waited for it");
+        // **The asymmetry `appkit::pointer` exists to make visible, observed.**
+        // `locationInWindow` is Y-up and the delta beside it is Quartz's, which
+        // is Y-down and already agrees with this seam — so a move that goes down
+        // the screen has to come back as a *larger* window Y **and** a positive
+        // raw delta. A backend that reflected the delta as well as the position
+        // would fail the second half and pass the first, and the symptom in a
+        // game is an inverted first-person camera.
+        assert!(
+            at.x > parked.x && at.y > parked.y,
+            "the cursor was moved right and down the screen from {parked:?} and the window \
+             reported {at:?}; the desktop is {:?} and the events were {:?}",
+            quartz::cursor(),
+            names(&moved)
+        );
+        assert!(
+            delta.0 > 0.0 && delta.1 > 0.0,
+            "and the raw delta beside it is Quartz's own, unflipped: {delta:?}. A negative Y \
+             here with a correct position above is the delta being reflected, which is an \
+             inverted camera"
+        );
+
+        // --- a click, and a scroll ---
+        let at = quartz::cursor();
+        quartz::click(at.x, at.y);
+        let clicked = collect_until(shell, "the injected click", |seen| {
+            seen.iter()
+                .filter(|event| matches!(event, ShellEvent::Button { .. }))
+                .count()
+                >= 2
+        });
+        let buttons: Vec<_> = clicked
+            .iter()
+            .filter_map(|event| match event {
+                ShellEvent::Button { button, state, .. } => Some((*button, *state)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            buttons,
+            vec![
+                (PointerButton::Left, ButtonState::Pressed),
+                (PointerButton::Left, ButtonState::Released),
+            ],
+            "one click, two events: {:?}",
+            names(&clicked)
+        );
+
+        quartz::scroll_lines(1);
+        let scrolled = collect_until(shell, "the injected scroll", |seen| {
+            seen.iter()
+                .any(|event| matches!(event, ShellEvent::Wheel { .. }))
+        });
+        let wheel = scrolled
+            .iter()
+            .find_map(|event| match event {
+                ShellEvent::Wheel { delta, .. } => Some(*delta),
+                _ => None,
+            })
+            .expect("just waited for it");
+        // **The unit, not the sign.** `kCGScrollEventUnitLine` produces an
+        // `NSEvent` whose `hasPreciseScrollingDeltas` is `NO`, which is the whole
+        // of what decides `Lines` against `Pixels` — and that is the branch worth
+        // pinning. The *sign* is not: "natural" scrolling is a per-user system
+        // preference that inverts it, so an assertion on it would be an assertion
+        // about the runner's settings. `docs/backlog.md` carries the horizontal
+        // sign as unverified for the same reason.
+        match wheel {
+            ScrollDelta::Lines { x, y } => {
+                assert_eq!(x, 0.0, "a vertical notch has no horizontal component");
+                assert!(y != 0.0, "a notch of one line is not zero lines");
+            }
+            other => panic!(
+                "a line-unit scroll wheel event is Lines and not {other:?}; a backend reading \
+                 hasPreciseScrollingDeltas backwards would report a trackpad's pixels here: {:?}",
+                names(&scrolled)
+            ),
+        }
+        println!(
+            "crcbl appkit session: the window server's own keyboard, text, pointer, click and \
+             scroll all arrived"
+        );
+    }
+
+    /// Every key event in `events`, flattened for assertion.
+    ///
+    /// Fails rather than answering an empty list: every caller indexes it, and
+    /// "the slice was empty" is a worse message than the one the wait already
+    /// printed.
+    fn keys(events: &[ShellEvent]) -> Vec<(u32, Option<KeyCode>, Keysym, ButtonState, bool)> {
+        let keys: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                ShellEvent::Key {
+                    scancode,
+                    key_code,
+                    keysym,
+                    state,
+                    repeat,
+                    ..
+                } => Some((scancode.0, *key_code, *keysym, *state, *repeat)),
+                _ => None,
+            })
+            .collect();
+        assert!(!keys.is_empty(), "no key events in {:?}", names(events));
+        keys
+    }
+
+    /// The names of everything in `events`, for a failure message.
+    fn names(events: &[ShellEvent]) -> Vec<&'static str> {
+        events.iter().map(ShellEvent::name).collect()
+    }
+
+    /// Pumps until everything collected so far satisfies `enough`, and answers
+    /// all of it.
+    ///
+    /// A deadline and a poll rather than a sleep, which
+    /// `docs/plan/12-testing.md` makes the rule for anything asynchronous — and
+    /// here the asynchronous thing is the **window server**, which is the case
+    /// the rule was written for. Everything is kept rather than only the
+    /// matching event, because the assertions that follow need to see what
+    /// *else* arrived: a CI runner is a real desktop and an event this process
+    /// did not cause can turn up at any moment.
+    fn collect_until(
+        shell: &mut Box<dyn Shell>,
+        what: &str,
+        mut enough: impl FnMut(&[ShellEvent]) -> bool,
+    ) -> Vec<ShellEvent> {
+        let started = Instant::now();
+        let mut seen = Vec::new();
+        loop {
+            shell.pump(&mut |event| seen.push(event));
+            if enough(&seen) {
+                return seen;
+            }
+            assert!(
+                started.elapsed() < DEADLINE,
+                "crcbl appkit session: waited {DEADLINE:?} for {what} and it never came; the \
+                 events that did arrive were {:?}.{INJECTION_HINT}",
+                names(&seen)
+            );
+            shell.wait_events(Some(Duration::from_millis(20)));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // M4: the pasteboard, against processes that are not this one
+    // -----------------------------------------------------------------------
+
+    /// A round trip through the system pasteboard with **another process** on
+    /// the far side, in both directions.
+    ///
+    /// # What this earns over [`clipboard`]
+    ///
+    /// That one writes with `NSPasteboard` and reads with `NSPasteboard`, from
+    /// one process. It would pass unchanged against a shell that never touched
+    /// the pasteboard server at all and answered its own reads out of a cache —
+    /// which is precisely the failure the Win32 suite added a second binary to
+    /// rule out. Only a reader with no `crcbl-shell` in it can tell those apart.
+    ///
+    /// # Decision: `pbcopy` and `pbpaste`, not a helper binary of ours
+    ///
+    /// The Win32 suite ships `crcbl-e2e-win32-clip` because Windows has no stock
+    /// command-line clipboard client. macOS has two, in `/usr/bin`, installed on
+    /// every Mac and written by Apple — so a peer of our own would be a second
+    /// hand-written Objective-C FFI whose only advantage over Apple's is that we
+    /// maintain it. It would also have to be a `[[bin]]` with no
+    /// `required-features`, since this target has none, and would therefore be
+    /// built on Linux, Windows and `wasm32` by every `--all-features` job to do
+    /// nothing there.
+    ///
+    /// What the substitution costs is the **engine's own format**: `pbpaste`
+    /// reads text and cannot be asked for `application/x-crcbl+ron`. So the
+    /// cross-process claim is made about the format another application would
+    /// actually read, and the RON half stays covered in-process by [`clipboard`].
+    /// `docs/backlog.md` records the difference rather than implying parity.
+    fn clipboard_peer(shell: &mut Box<dyn Shell>, window: WindowId) {
+        const OURS: &str = "crcbl M4 — written by the shell 🎮";
+        const THEIRS: &str = "crcbl M4 — written by pbcopy 🎮";
+
+        // Out: the shell writes, and a process with none of this code in it
+        // reads what the shell wrote.
+        shell
+            .clipboard_offer(window, &[ClipboardOffer::text(OURS)])
+            .expect("clipboard_offer");
+        assert_eq!(
+            pbpaste().trim_end_matches('\n'),
+            OURS,
+            "another process read the general pasteboard and did not find what this shell put \
+             there, so the bytes never reached the pasteboard server"
+        );
+
+        // In: the same, the other way round. `pbcopy` is a whole process
+        // starting, claiming the pasteboard and exiting, none of which this one
+        // pumped for — which on X11 or Wayland would be a conversation this shell
+        // had to take part in, and here is nobody's business but the server's.
+        pbcopy(THEIRS);
+        let (_, content) = paste(shell, window, MimeType::TextUtf8);
+        assert_eq!(
+            content.text(),
+            Some(THEIRS),
+            "the shell read {content:?} rather than what pbcopy had just written, so it is \
+             answering out of its own cache rather than from the pasteboard server"
+        );
+
+        // Left empty, which is the state to leave a shared runner in.
+        shell
+            .clipboard_offer(window, &[])
+            .expect("an empty offer clears the pasteboard");
+        println!("crcbl appkit session: pbcopy and pbpaste both agree with the seam");
+    }
+
+    /// Everything `/usr/bin/pbpaste` prints, or a failure naming why it could
+    /// not be asked.
+    fn pbpaste() -> String {
+        let output = std::process::Command::new("/usr/bin/pbpaste")
+            .output()
+            .expect("pbpaste is part of a stock macOS");
+        assert!(
+            output.status.success(),
+            "pbpaste failed with {:?}: {:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// Hands `text` to `/usr/bin/pbcopy` and waits for it to exit.
+    ///
+    /// Waiting matters: the pasteboard is claimed while `pbcopy` runs, so a read
+    /// issued before it exits is a race rather than a test.
+    fn pbcopy(text: &str) {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("/usr/bin/pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("pbcopy is part of a stock macOS");
+        child
+            .stdin
+            .take()
+            .expect("stdin was piped")
+            .write_all(text.as_bytes())
+            .expect("pbcopy reads its stdin");
+        let status = child.wait().expect("pbcopy exits");
+        assert!(status.success(), "pbcopy failed with {status:?}");
+    }
+
     /// Issues one read and pumps until its answer arrives, asserting there is
     /// **exactly one**.
     ///
@@ -550,6 +1185,196 @@ mod macos {
             // free: it is advisory, so a backend that returns immediately just
             // spins this loop as it would have anyway.
             shell.wait_events(Some(Duration::from_millis(20)));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The Quartz event stream, which is the only way in from outside
+    // -----------------------------------------------------------------------
+
+    /// The CoreGraphics surface a *harness* needs, as distinct from the
+    /// backend's.
+    ///
+    /// Hand-written here rather than borrowed from `crcbl_shell::appkit::ffi`,
+    /// which is `pub(crate)` — and rightly so, on the same grounds
+    /// `tests/win32_e2e.rs` gives for its own `user32` table: a test that drove
+    /// the backend through the backend's own ABI declarations would be grading
+    /// its own homework. These are the calls somebody else's input device makes.
+    ///
+    /// # Decision: posted from this process, and that is still "from outside"
+    ///
+    /// The Win32 suite injects from a **second process** because `SendInput`
+    /// from the thread that owns the window is the one arrangement that proves
+    /// nothing about the message queue. That argument does not transfer.
+    /// `CGEventPost` does not put an event in this process's queue: it hands it
+    /// to the **window server**, which decides who is frontmost, builds the
+    /// `NSEvent`, and delivers it to the application's run loop — so the event
+    /// re-enters through `nextEventMatchingMask:` exactly as a keyboard's would,
+    /// whoever posted it. A second process would add a TCC surface (synthetic
+    /// events *to another application* are unambiguously gated) and one more
+    /// binary built on three platforms that cannot use it, and would buy nothing
+    /// this does not already have.
+    mod quartz {
+        use core::ffi::c_void;
+
+        /// `CGEventRef`.
+        type EventRef = *mut c_void;
+
+        /// `CGPoint`, in Quartz's global space: **Y down** from the top-left of
+        /// the primary display, which is the space this seam already uses and
+        /// the opposite of AppKit's.
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug, Default, PartialEq)]
+        pub struct Point {
+            /// Rightwards from the primary display's left edge.
+            pub x: f64,
+            /// **Downwards** from the primary display's top edge.
+            pub y: f64,
+        }
+
+        /// `kCGHIDEventTap` — inject where a device would, ahead of everything
+        /// that filters the session's input.
+        const HID_TAP: u32 = 0;
+        /// `kCGEventLeftMouseDown`.
+        const LEFT_DOWN: u32 = 1;
+        /// `kCGEventLeftMouseUp`.
+        const LEFT_UP: u32 = 2;
+        /// `kCGEventMouseMoved`.
+        const MOUSE_MOVED: u32 = 5;
+        /// `kCGMouseButtonLeft`.
+        const BUTTON_LEFT: u32 = 0;
+        /// `kCGScrollEventUnitLine` — a wheel notch rather than a trackpad's
+        /// pixels, which is what decides `ScrollDelta::Lines` at the far end.
+        const UNIT_LINE: u32 = 1;
+
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGEventCreate(source: *mut c_void) -> EventRef;
+            fn CGEventGetLocation(event: EventRef) -> Point;
+            fn CGEventCreateKeyboardEvent(
+                source: *mut c_void,
+                keycode: u16,
+                down: bool,
+            ) -> EventRef;
+            fn CGEventCreateMouseEvent(
+                source: *mut c_void,
+                kind: u32,
+                at: Point,
+                button: u32,
+            ) -> EventRef;
+            /// **Variadic, and it has to be declared that way.**
+            ///
+            /// The C signature is
+            /// `CGEventCreateScrollWheelEvent(source, units, wheelCount, ...)`,
+            /// so the per-axis amounts are variadic arguments. On
+            /// `aarch64-apple-darwin` — the architecture of the runner and of
+            /// every Mac sold since 2020 — variadic arguments are passed on the
+            /// **stack** while ordinary ones are passed in registers, so a
+            /// non-variadic declaration of this compiles, links, runs, and
+            /// scrolls by whatever was in the register it looked in. It is the
+            /// same hazard `appkit::ffi` documents at length for `objc_msgSend`,
+            /// arriving through a plain C function.
+            fn CGEventCreateScrollWheelEvent(
+                source: *mut c_void,
+                units: u32,
+                wheels: u32,
+                ...
+            ) -> EventRef;
+            fn CGEventPost(tap: u32, event: EventRef);
+        }
+
+        #[link(name = "CoreFoundation", kind = "framework")]
+        unsafe extern "C" {
+            fn CFRelease(object: *mut c_void);
+        }
+
+        /// Where the cursor is, in Quartz's global space.
+        ///
+        /// Read through an event rather than through `NSEvent`'s
+        /// `mouseLocation`, so that no part of this file is in AppKit's Y-up
+        /// space: mixing the two is the mistake `appkit::geometry` exists to
+        /// prevent, and a harness that made it would be reporting the backend's
+        /// coordinate handling as broken while its own arithmetic was.
+        #[must_use]
+        pub fn cursor() -> Point {
+            // SAFETY: a null source asks for an event stamped with the current
+            // state; the result is a live `CGEventRef` this function owns and
+            // releases, and `CGEventGetLocation` only reads it.
+            unsafe {
+                let event = CGEventCreate(core::ptr::null_mut());
+                if event.is_null() {
+                    return Point::default();
+                }
+                let at = CGEventGetLocation(event);
+                CFRelease(event);
+                at
+            }
+        }
+
+        /// Presses and releases one key by its `kVK_*` code.
+        ///
+        /// Two events rather than one, and in that order: an injected key
+        /// describes a **transition**, which the Windows half of P5C paid a CI
+        /// round trip to learn — a second down for a key already held produces
+        /// no event at all, so a press that is never released leaves the session
+        /// with a stuck modifier for the next test.
+        pub fn tap_key(keycode: u16) {
+            key(keycode, true);
+            key(keycode, false);
+        }
+
+        /// One key edge.
+        fn key(keycode: u16, down: bool) {
+            // SAFETY: a null source is the documented "no particular source";
+            // the event is live, posted, and released exactly once here.
+            unsafe {
+                let event = CGEventCreateKeyboardEvent(core::ptr::null_mut(), keycode, down);
+                if event.is_null() {
+                    return;
+                }
+                CGEventPost(HID_TAP, event);
+                CFRelease(event);
+            }
+        }
+
+        /// Moves the cursor to a point in Quartz's global space.
+        pub fn move_mouse(x: f64, y: f64) {
+            mouse(MOUSE_MOVED, Point { x, y });
+        }
+
+        /// A press and its release, both at the same point.
+        pub fn click(x: f64, y: f64) {
+            let at = Point { x, y };
+            mouse(LEFT_DOWN, at);
+            mouse(LEFT_UP, at);
+        }
+
+        /// One mouse event.
+        fn mouse(kind: u32, at: Point) {
+            // SAFETY: as in `key`; `at` is a `CGPoint` passed by value.
+            unsafe {
+                let event = CGEventCreateMouseEvent(core::ptr::null_mut(), kind, at, BUTTON_LEFT);
+                if event.is_null() {
+                    return;
+                }
+                CGEventPost(HID_TAP, event);
+                CFRelease(event);
+            }
+        }
+
+        /// Scrolls `lines` notches on the vertical axis.
+        pub fn scroll_lines(lines: i32) {
+            // SAFETY: as in `key`. One axis is declared and one variadic
+            // argument is passed, which is what `wheels: 1` promises the call.
+            unsafe {
+                let event =
+                    CGEventCreateScrollWheelEvent(core::ptr::null_mut(), UNIT_LINE, 1, lines);
+                if event.is_null() {
+                    return;
+                }
+                CGEventPost(HID_TAP, event);
+                CFRelease(event);
+            }
         }
     }
 }

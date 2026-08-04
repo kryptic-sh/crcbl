@@ -16,6 +16,45 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl-shell**: an **AppKit end-to-end pass**, so macOS is held to the
+  standard the other three backends already were. It extends
+  `crates/crcbl-shell/tests/appkit_session.rs` — the `harness = false` target
+  that exists because `libtest` runs every body on a thread it spawns and AppKit
+  raises off the main thread — rather than adding a second one, because two
+  processes each bootstrapping an `NSApplication` would fight over which is
+  frontmost and injected input follows whichever wins.
+
+  **Input the window system generated**, through `CGEventPost`: a key press and
+  its release, an arrow key, pointer motion, a click and a wheel notch. That is
+  what reaches `interpretKeyEvents:`, which nothing had ever reached — so
+  `ShellEvent::TextCommit` on macOS was in exactly the state the Win32 backend's
+  was in before its own e2e suite found `TranslateMessage` missing from the
+  pump. It also observes the asymmetry `appkit::pointer` exists to describe: a
+  cursor moved down the screen comes back with a _larger_ window Y and a
+  _positive_ raw delta, because `locationInWindow` is Y-up and Quartz's delta is
+  not.
+
+  **A pasteboard round trip against `pbcopy` and `pbpaste`**, in both directions
+  — Apple's own processes, with no `crcbl-shell` in them, which is what
+  separates "the pasteboard server has the bytes" from "the shell answered its
+  own read out of a cache". A helper binary of ours was considered and declined;
+  `docs/backlog.md` records that this covers text only, since `pbpaste` cannot
+  be asked for the engine's own format.
+
+  **AppKit as the judge** rather than the backend's own bookkeeping, through two
+  new `crcbl_shell::session_support` entry points, `key_window` and
+  `resize_key_window`. Three of the five switches `appkit::view` lists as
+  "structural rather than verified" are now read back off the live window —
+  `acceptsMouseMovedEvents`, the first responder being `CrcblView` rather than
+  the window, and the registered dragged types — and a resize AppKit performed,
+  a borderless flip that covers the `NSScreen` it names exactly, and the
+  restored title bar are all checked against `NSWindow` and `NSScreen`.
+
+  **The sample-level pass has no macOS equivalent**, on the same terms as
+  Windows: it needs a renderer and macOS has no Vulkan until MoltenVK clears its
+  P14 gate. `docs/plan/ROADMAP.md`'s 2026-08-04 correction says so, and
+  `docs/backlog.md` carries it as a gap rather than approximating it.
+
 - **crcbl-shell**: **the clipboard and file drops on the AppKit backend**, so
   `ShellCaps::CLIPBOARD` and `ShellCaps::DRAG_DROP` are set there and
   `clipboard_offer`/`clipboard_request` answer instead of returning
@@ -232,6 +271,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Two helper binaries come with it, `crcbl-e2e-win32-input` and
   `crcbl-e2e-win32-clip`, on the same terms as the two Linux key senders:
   `required-features`, and a `main` that fails loudly on any other platform.
+
+  **The harness defeats Windows' foreground lock, and the backend does not learn
+  how.** `SetForegroundWindow` is granted only to a process that already owns
+  the foreground or received the last input event, and under `nextest` every
+  test is a fresh process with neither — so three tests spent twenty seconds
+  each being refused by the job's own console window. The suite now lowers
+  `SPI_SETFOREGROUNDLOCKTIMEOUT` for the session (restoring it on the way out,
+  for a desktop that is not a CI runner) and attaches its input queue to the
+  foreground thread's around the request, which is what an automated harness
+  does to arrange a precondition a human would have arranged by clicking. None
+  of it is in `src/win32/`: a game does not get to steal focus, and a backend
+  that knew how could do it to a user.
 
   **The sample-level pass has no Windows equivalent yet.** The Linux suites
   press F11 at a running game, which needs a renderer, and no runner on this

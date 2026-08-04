@@ -286,17 +286,57 @@ written from now on has to hold under all of it:
 - **The display is 1024×768.** Smaller than `WindowDesc::default`'s 1280×720, so
   anything that assumes a default-sized window fits on screen is wrong there.
   `ClipCursor` clamps to the virtual screen, which is how this was found.
-- **A cursor is over the window.** Showing a window under it delivers a genuine
-  `WM_MOUSEMOVE`, so the backend's derived pointer arrival happens before a test
-  sends anything. A test whose own event has to be the first must put the state
-  on a known edge itself — `the_pointer_enters_moves_clicks_scrolls_and_leaves`
-  sends a `WM_MOUSELEAVE` before it starts, and asserts the _rule_ ("the arrival
-  carries the first movement's position") rather than a literal coordinate.
-- **Messages arrive that this process did not cause.** `QS_POSTMESSAGE` is set
-  on a queue that was drained microseconds earlier, by something outside this
-  crate; see the `wait_events_genuinely_blocks` entry below.
-- **The foreground is somebody else's** until asked for. `SetForegroundWindow`
-  is asked for once per turn of a poll, never once.
+- **A cursor is over the window, and it keeps moving.** Showing a window under
+  it delivers a genuine `WM_MOUSEMOVE`, so the backend's derived pointer arrival
+  happens before a test sends anything.
+  `the_pointer_enters_moves_clicks_scrolls_and_leaves` has been rewritten for
+  this twice, and the second time is the instructive one. It sends a
+  `WM_MOUSELEAVE` to put the derived state on a known edge — but it sent it
+  _before_ the pump that discards the desktop's own events, and that pump
+  dispatched a real `WM_MOUSEMOVE`, derived the arrival from it, and threw the
+  arrival away. The run collected `[(false, None)]`: a leave with nothing in
+  front of it. **The order is the fix**: drain first, then leave, because
+  `SendMessageW` calls the window procedure synchronously and nothing pumps
+  between the leave and the first synthetic movement, so no queued message can
+  be processed in that gap. The assertions are now ordering properties — the
+  first crossing is an arrival carrying the position of the movement it was
+  derived from, the second is the leave, and crossings alternate to the end —
+  because the desktop keeps contributing motion into the collecting pump and a
+  _count_ of crossings is a number the machine gets a vote in.
+- **Messages arrive that this process did not cause**, every few milliseconds,
+  and here is the proof rather than the assertion. Five consecutive timed waits
+  on a window whose queue had just been drained to quiescence:
+
+  ```text
+  attempt 0: Message after  5.7433ms, queue 0x80008, message id 799
+  attempt 1: Message after 16.0896ms, queue 0x400040, message None
+  attempt 2: Message after 31.6668ms, queue 0x400040, message None
+  attempt 3: Message after   299.7µs, queue 0x80008, message id 96
+  attempt 4: Message after 10.9571ms, queue 0x20002, message id 512
+  ```
+
+  **799 is `WM_DWMNCRENDERINGCHANGED` and 512 is `WM_MOUSEMOVE`.** The desktop
+  window manager is sending composition notifications and the physical cursor is
+  moving over the window, continuously, with nothing running on the machine but
+  this test. **An idle window with a drained queue does not exist on that
+  runner**, and no amount of draining will create one. Any assertion that needs
+  quiet is a flaky assertion; assert what a busy desktop cannot fake instead —
+  those numbers also say the wait _worked_, since four of the five blocked for
+  5.7 ms to 31.7 ms before something woke them, and only the 299 µs one returned
+  to an already-full queue.
+
+- **The foreground is somebody else's, and it is _locked_.**
+  `SetForegroundWindow` is granted only to a process that already owns the
+  foreground, was started by the one that does, received the last input event,
+  or asks after the lock timeout has expired with no user input at all. Under
+  `nextest` every test is a fresh, short-lived process with none of those, so
+  the first e2e run lost three tests to twenty seconds each of being refused —
+  the foreground sitting on `0x10200`, the job's own console, every time. What
+  defeats it is `SPI_SETFOREGROUNDLOCKTIMEOUT` plus `AttachThreadInput` against
+  the current foreground thread, and it lives in `desktop::take_foreground` in
+  the **e2e suite**, never in `src/win32/`: a game does not get to steal focus.
+  Unrun; see the M4 entry below for what its failure now prints if the lock
+  survives both levers.
 
 **W1's first CI run on `windows-latest` answered the open question: the runner
 does give a process a usable window station.** 2248 tests passed and 1 failed;
@@ -383,12 +423,9 @@ Two things it settled, and the second is the one worth carrying:
   The third run's `0x80008` was the same phenomenon showing a different bit.
 
   The fix is `QS_ALLEVENTS` (`0x04BF`), which is precisely `QS_ALLINPUT` minus
-  `QS_SENDMESSAGE`, and the test now attempts the timed wait up to five times
-  and asserts that **at least one** attempt sleeps — because
-  `Shell::wait_events` says outright that returning immediately is always a
-  correct implementation, so "every time" asserts more than the seam requires,
-  while "never" makes `EVENT_WAIT` a lie. **Unrun.** The next run says whether
-  it is enough.
+  `QS_SENDMESSAGE`. **That much is settled; the assertion beside it was not, and
+  went red again on the M3 run** — see the M4 entry below, which is where the
+  observable finally stopped being "the machine went quiet".
 
 - **The transferable lesson, which is not the `QS_` bit.** Four round trips, and
   every one of them was settled only by making the failure carry more evidence
@@ -423,6 +460,64 @@ reported a healthy-looking fifteen. The pattern is now
 `(?:(\d+)/)?(\d+) tests? run` and a present first group is treated as a
 cancelled run and fails the gate. Falsified offline against a regex engine with
 the same semantics, not against `pwsh`, which is not on the development machine.
+
+**M4 changed two in-crate assertions that the M3 run failed, and neither was a
+code change.** `build + test (windows-latest)` went from 2360/2360 green to 2362
+passed, 2 failed on a commit that touched only `appkit/` — so both tests were
+flaky all along and the runner simply decided differently. They are the second
+and third instances of the same rule, and they are why it is written at the top
+of this section with its evidence attached:
+
+- **`wait_events_genuinely_blocks` no longer asks the machine to be quiet.** It
+  asserted `Wake::TimedOut` on at least one of five attempts; the run printed
+  all five and every one was woken early by a real message (see the decoded
+  queue evidence above). The observable is now the one that actually separates a
+  blocking wait from a no-op one — an attempt that either reached its timeout or
+  **slept at all** before being woken. A wait that does nothing returns in
+  microseconds every single time; the measured populations are 299 µs for a
+  return to a full queue against 5.7 ms for the shortest genuine block, so the
+  line is drawn at 2 ms with an order of magnitude of clearance on each side.
+  The pre-drain loop still runs and its outcome is still printed, but it is
+  **reported rather than asserted**: whether a desktop goes quiet is the
+  desktop's business.
+- **`the_pointer_enters_moves_clicks_scrolls_and_leaves` stopped counting
+  crossings.** Covered in the runner section above, because the fix is a fact
+  about the runner rather than about that one test.
+
+**The Win32 e2e suite's three foreground failures are addressed and unrun.** All
+three timed out identically in `Session::foreground`. Two levers are now pulled
+per request — `SPI_SETFOREGROUNDLOCKTIMEOUT` lowered to zero for the session and
+restored on the way out, and `AttachThreadInput` against the thread owning the
+current foreground window, held across `BringWindowToTop`, `SetForegroundWindow`
+and `SetFocus` and released immediately (attaching to a thread that has stopped
+pumping is a documented way to hang). Two things about the shape are worth
+keeping whatever the next run says:
+
+- **The deadline is four seconds, not twenty.** Everything else in that suite
+  waits on another process and deserves a generous deadline; a foreground grant
+  is decided by the window station on the turn it is asked for, against rules
+  that do not change while a poll spins. Twenty seconds of asking was the same
+  refusal four hundred times, three times over, for a minute of CI that taught
+  nothing the first second had not.
+- **The failure names the lever that did not work.** It prints the foreground
+  window's handle, class, title, thread and process, this process's own thread
+  and process, and the lock timeout _read back_ after asking for zero. A zero
+  there with the foreground still elsewhere means the lock is not what is
+  refusing; anything else means `SPI_SETFOREGROUNDLOCKTIMEOUT` was itself
+  refused, which it is documented to be for a process that cannot already take
+  the foreground. If both levers fail, the honest outcome is that a GitHub
+  runner does not let a fresh process take the foreground and the five tests
+  that need it cannot run there — which is a finding to record, not a reason to
+  make them pass.
+
+**The in-crate suite has the same latent problem and was left alone.**
+`confining_the_pointer_clips_it_...` and
+`warping_the_pointer_moves_it_to_a_position_in_the_window` call a bare
+`SetForegroundWindow` (`make_foreground`, in `src/win32/shell.rs`'s test module)
+and have been passing on the runner regardless — the ordinary `build + test` job
+is one process, so once it owns the foreground it keeps qualifying. If they ever
+start failing, the same dance is the answer and it should move to a shared
+helper rather than being written twice.
 
 What remains unverified:
 
@@ -826,14 +921,112 @@ Not nothing, and it covers the highest-risk item in the backend:
   not been seen — the session pass goes borderless but sends no keystroke while
   it is there.
 
+### What M4 wrote, and the single thing that could void all of it
+
+M4 is the end-to-end pass: input the window system generated, a pasteboard round
+trip against another process, and AppKit as the judge of the window. **None of
+it has run.** It was written on Linux and cross-checked with
+`cargo clippy --target aarch64-apple-darwin`, which does not link and does not
+run.
+
+**The risk that decides the whole slice is TCC.** macOS 10.14 and later require
+a process to hold the Accessibility right before it may synthesize keyboard
+events, and a GitHub runner has nobody to grant one — this is the same gate that
+makes `osascript … keystroke` fail there. What is **not** known is whether the
+gate applies when the posted events are delivered back to the _posting_ process,
+which is the whole of what happens here: `CGEventPost` is called from the
+session target itself, the window server builds the `NSEvent`, and it comes back
+to this process's own run loop. The first run answers it, one way or the other.
+
+- **If injection works**, `interpretKeyEvents:` is reached end to end, the
+  tracking area is exercised by a real crossing, and the Y-up/Y-down asymmetry
+  in `appkit::pointer` is observed rather than reasoned — a cursor moved down
+  the screen must come back with a _larger_ window Y and a _positive_ raw delta.
+- **If it does not**, every injected-input assertion fails together with
+  `INJECTION_HINT` beside it, and the fallback is already chosen:
+  `-[NSApplication postEvent:atStart:]` with an `NSEvent` built by
+  `+[NSEvent keyEventWithType:…]`. It needs no permission and still goes through
+  `nextEventMatchingMask:`, `sendEvent:`, the first responder and
+  `interpretKeyEvents:` — everything except the window server's own leg, which
+  is the leg the Win32 `TranslateMessage` lesson was never about. It was not
+  written speculatively because it is a ten-argument `objc_msgSend` transmute
+  with an `NSPoint` by value, which is exactly the class of FFI this crate says
+  must not be written blind; it costs one commit with the CI answer in hand.
+
+Decisions and limits worth keeping whatever the run says:
+
+- **The injection is posted from the session process, not from a helper
+  binary.** The Win32 suite needs a second process because `SendInput` from the
+  thread that owns the window never touches the message queue. That argument
+  does not transfer: `CGEventPost` hands the event to the **window server**,
+  which decides who is frontmost and delivers it through the ordinary run loop,
+  so it re-enters from outside whoever posted it. A second process would also
+  make the TCC question unambiguous in the wrong direction — synthetic events
+  aimed at _another_ application are gated for certain.
+- **`CGEventCreateScrollWheelEvent` is declared variadic, and it has to be.**
+  Its per-axis amounts are C variadic arguments; on `aarch64-apple-darwin`
+  variadic arguments go on the stack while ordinary ones go in registers, so a
+  non-variadic declaration compiles, links, runs and scrolls by whatever was in
+  the register it looked in. Same hazard `appkit::ffi` documents for
+  `objc_msgSend`, arriving through a plain C function.
+- **The scroll's _sign_ is not asserted, only its unit.** "Natural scrolling" is
+  a per-user system preference that inverts it, so an assertion on the sign is
+  an assertion about the runner's settings. What is pinned is `Lines` rather
+  than `Pixels`, which is what `hasPreciseScrollingDeltas` decides. The
+  horizontal sign stays unverified for the same reason it always did.
+- **The cross-process pasteboard check is `pbcopy` and `pbpaste`, so it covers
+  text only.** A helper binary of ours was considered and declined: macOS ships
+  two stock clipboard clients written by Apple, and a peer of our own would be a
+  second hand-written Objective-C FFI whose only advantage is that we maintain
+  it — and, since this target has no `required-features`, it would be built on
+  Linux, Windows and `wasm32` by every `--all-features` job to do nothing there.
+  What that costs is that `application/x-crcbl+ron` is **not** round-tripped
+  through a second process; `pbpaste` cannot be asked for it. The RON half stays
+  covered in-process. If an engine-to-engine paste ever misbehaves on macOS,
+  this is the gap it would hide in.
+- **M4 extends `tests/appkit_session.rs` rather than adding a second
+  harness-less target.** `nextest` runs binaries in parallel, and two processes
+  each bootstrapping an `NSApplication` and taking the key window would fight
+  over which is frontmost — the loser reporting that injected input never
+  arrived. Serialising them means a test group in `.config/nextest.toml`. The
+  cost is that the whole session is one `nextest` test, so any failure reports
+  all of it as failed; that is paid for by every step printing what it reached,
+  and by the CI step below.
+- **CI names the target rather than relying on the sweep.**
+  `build + test (macos-latest)` gained a step running
+  `cargo nextest run -p crcbl-shell --test appkit_session --no-tests fail --success-output immediate`.
+  `--no-tests fail` is the macOS shape of the count gate `run-win32-e2e.ps1`
+  performs by parsing the summary: this target is the _only_ executable coverage
+  the AppKit backend has, is `harness = false`, and is behind no feature — so
+  nothing would go red if it stopped being built. `--success-output immediate`
+  prints the session's own narrative on a green run, which is the run where a
+  reader most wants to know which optional path actually happened, and nobody on
+  this team has a Mac to ask.
+
+Still uncovered after M4, deliberately:
+
+- **The sample-level F11 pass.** Needs a renderer; macOS has no Vulkan until
+  MoltenVK clears its P14 gate (`docs/plan/ROADMAP.md`, 2026-08-04). Not
+  approximated.
+- **A real drag and drop.** Unchanged from M3: a drag needs a _source_
+  application with a mouse held down over a Finder item, which `CGEventPost`
+  alone does not provide. What M4 adds is that the registration is now read back
+  off the real window rather than off a throwaway view.
+- **`AXIsProcessTrusted()` is not called**, although it would say outright
+  whether TCC is the reason for a failed injection. It lives in
+  `ApplicationServices`, which this crate does not link, and adding a framework
+  to the macOS build to improve one failure message is a link error's worth of
+  risk on a platform nobody here can build for. If the first run's diagnosis is
+  ambiguous, that is the next instrument to add.
+
 ### What M2 could not verify, and what would verify it
 
 Input is the half of this backend with the least executable coverage, because
 the thing it needs is **injected input at the session level** — the macOS
 counterpart of `SendInput`, which is `CGEventCreateKeyboardEvent` plus
-`CGEventPost`. That is M4's job, and until it exists the following are
-structural claims rather than observed behaviour. Each is stated with what it
-would take, so M4 has a list rather than a rediscovery.
+`CGEventPost`. **M4 has now written that, and none of it has run** — so
+everything below is still a structural claim, and the M4 section further down
+says what would turn each one into an observation and what could stop it.
 
 - **The switches that make input exist at all**, written out in `appkit::view`'s
   module docs: `setAcceptsMouseMovedEvents:`, `makeFirstResponder:`, the
@@ -846,10 +1039,21 @@ would take, so M4 has a list rather than a rediscovery.
   the event is generated or routed rather than what the method does with it. The
   session pass exercises two of them indirectly: it warps the pointer into the
   window and requires a `PointerFocus` (the tracking area) or a `PointerMotion`
-  (the accepts-moved flag plus first responder) to come back. **Nothing
-  exercises `interpretKeyEvents:`**, so `TextCommit` is unreached from a real
-  keystroke — exactly the state the Win32 backend was in before its e2e suite
-  found it.
+  (the accepts-moved flag plus first responder) to come back.
+
+  **M4 closes three of the five by readback and attacks the other two by
+  injection, and neither half has run.** `session_support::key_window` reads
+  `acceptsMouseMovedEvents`, the first responder's class and the content view's
+  `registeredDraggedTypes` off the **live** window, which turns those three from
+  "we called the setter" into "the window is in that state". The tracking area
+  and `interpretKeyEvents:` have no readback, so they are attacked with
+  `CGEventPost`: a posted `kVK_ANSI_A` has to come back as a `Key` **and** a
+  `TextCommit` of `"a"`, which is only possible if `sendEvent:` routed the event
+  to the first responder, `keyDown:` handed it to `interpretKeyEvents:`, and the
+  view's `inputContext` was non-nil — the last of which is true only because
+  `CrcblView` conforms to `NSTextInputClient`. Until the runner reports, macOS
+  is still where Windows was before its e2e suite found `TranslateMessage`.
+
 - **Every type encoding on `CrcblView`'s methods.** The runtime reads them only
   when it forwards a method through an `NSInvocation`, which nothing in this
   crate does and an input method might. A wrong one is a wrong-width read in a

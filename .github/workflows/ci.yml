@@ -281,6 +281,36 @@ jobs:
       # otherwise never be linted at all.
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo nextest run --workspace --all-features --locked --profile ci
+      # # Why the AppKit session gets a step of its own, and no job of its own
+      #
+      # It is already in the sweep above, so this runs it a second time — for
+      # 1.2 seconds, against a workspace that is already built. What the second
+      # run buys is the two things the sweep cannot give it.
+      #
+      # **`--no-tests fail` is the macOS shape of the count check.**
+      # `tests/appkit_session.rs` is the *only* executable coverage the AppKit
+      # backend has, it is `harness = false`, and it is behind no feature — so
+      # nothing anywhere would go red if it stopped being built or was renamed.
+      # `docs/plan/12-testing.md` calls a silently-skipped e2e job a known trap;
+      # this is that trap's macOS shape, and naming the target explicitly is what
+      # closes it. `tests/run-win32-e2e.ps1` does the same thing by parsing
+      # nextest's summary, because its suite is feature-gated and `#[ignore]`d
+      # and there is something to turn on. Here there is not, which is also why
+      # this is a step rather than the separate job the Win32 suite needs.
+      #
+      # **`--success-output immediate` prints the session's own narrative.**
+      # That target owns its `main` and reports every step it reached — the
+      # capability set, the configured size, what AppKit said about the first
+      # responder, what the window server's keyboard delivered. nextest captures
+      # a passing test's stdout, so all of that is invisible on a green run,
+      # which is the run where a reader most wants to see which optional path
+      # (a key window, an injected event) actually happened. Nobody on this team
+      # has a Mac to run it on.
+      - name: The AppKit window session, named rather than swept up
+        if: runner.os == 'macOS'
+        run: >-
+          cargo nextest run --locked -p crcbl-shell --test appkit_session
+          --no-tests fail --success-output immediate
 
   # The only job that runs the Wayland backend against a real compositor.
   # `docs/plan/12-testing.md` schedules "scripted resize/mode-switch sequences
