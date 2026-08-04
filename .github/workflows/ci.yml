@@ -117,7 +117,7 @@ jobs:
       # installed as "latest" changes what CI enforces without a commit, and a
       # new `cargo-machete` heuristic turning a green repo red is indistinguish-
       # able from a regression.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.6
         with:
           tool: cargo-machete@0.9.2
       - run: cargo machete
@@ -131,7 +131,7 @@ jobs:
       # Pinned: `deny.toml`'s `skip` list is written against this version's
       # `crate = "name@version"` spelling, and its `multiple-versions = "deny"`
       # gate is calibrated against what this version reports.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.6
         with:
           tool: cargo-deny@0.19.7
       - run: cargo deny --all-features check
@@ -232,7 +232,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.6
         with:
           tool: cargo-nextest@0.9.140
       # ALSA headers for `cpal`; see the `clippy` job for why.
@@ -272,7 +272,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.6
         with:
           tool: cargo-nextest@0.9.140
       - run: cargo build --workspace --locked
@@ -301,7 +301,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.6
         with:
           tool: cargo-nextest@0.9.140
       # `libwayland-client0` and `libxkbcommon0`, not their `-dev` packages:
@@ -361,7 +361,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.6
         with:
           tool: cargo-nextest@0.9.140
       # Runtime packages, not their `-dev` counterparts: the backend resolves
@@ -455,7 +455,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.6
         with:
           tool: cargo-nextest@0.9.140
       # Runs the `#[ignore]`d suite with `--features win32-e2e`, serialised
@@ -490,7 +490,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.6
         with:
           tool: cargo-nextest@0.9.140
       # `crcbl` re-exports `crcbl-audio` as of the umbrella slice, so the CLI —
@@ -562,7 +562,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.6
         with:
           tool: cargo-nextest@0.9.140
       # `libvulkan1` is the loader — which `crcbl-vk` `dlopen`s rather than
@@ -658,7 +658,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.6
         with:
           tool: cargo-nextest@0.9.140
       # `libasound2-dev` is the one `-dev` package here, and the one that is not
@@ -817,7 +817,7 @@ jobs:
         with:
           shared-key: decoder-fuzz
           workspaces: crates/crcbl-net/fuzz -> target
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.6
         with:
           tool: cargo-fuzz@0.13.1
       # ALSA headers for `cpal`; see the `clippy` job for why. The fuzz target
@@ -885,7 +885,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: coverage
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.6
         with:
           tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.140
       # ALSA headers for `cpal`; see the `clippy` job for why.
