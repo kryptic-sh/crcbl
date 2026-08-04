@@ -362,6 +362,68 @@ produced no text at all. The in-crate suite could not see it: those tests send
 `a_key_typed_by_another_process_carries_its_position_its_symbol_and_its_text` is
 the guard — **unrun, like everything else here**.
 
+**The W4 run reached a real desktop, and its instrumentation ended the
+`wait_events` investigation.** The PowerShell harness parsed and ran, the suite
+compiled and started, `SendInput` from a second process reached the suite's
+window (the sender reported the foreground as ours on every command), and the
+resize-coalescing test — a burst of resizes injected from another process,
+collapsed into one event — passed. That was the single most uncertain assumption
+in the slice and it holds.
+
+Two things it settled, and the second is the one worth carrying:
+
+- **`wait_events_genuinely_blocks` printed the observation that ends it:**
+  `the queue holds 0x400040, and the message still in it is None`. A `QS_` bit
+  is set and `PeekMessage` with `PM_NOREMOVE` has nothing to return. `0x40` is
+  `QS_SENDMESSAGE`: a message _sent_ to a window of this thread is **processed**
+  by `PeekMessage` and never _returned_ by it, so it can neither report it nor
+  clear its bit — and MSDN says so in its own caveat, that a `QS_` flag being
+  set does not guarantee a subsequent `PeekMessage` will return a message. No
+  amount of draining fixes it, because there is nothing retrievable to drain.
+  The third run's `0x80008` was the same phenomenon showing a different bit.
+
+  The fix is `QS_ALLEVENTS` (`0x04BF`), which is precisely `QS_ALLINPUT` minus
+  `QS_SENDMESSAGE`, and the test now attempts the timed wait up to five times
+  and asserts that **at least one** attempt sleeps — because
+  `Shell::wait_events` says outright that returning immediately is always a
+  correct implementation, so "every time" asserts more than the seam requires,
+  while "never" makes `EVENT_WAIT` a lie. **Unrun.** The next run says whether
+  it is enough.
+
+- **The transferable lesson, which is not the `QS_` bit.** Four round trips, and
+  every one of them was settled only by making the failure carry more evidence
+  than the last: a duration, then `Wake`, then the `QS_` word, then the `MSG`
+  itself. The first three were hypotheses that each looked like a fix. Applies
+  to M4 and to the macOS slices as much as to this one — **when a remote failure
+  has no diagnosis, spend the round trip on instrumentation rather than on a
+  candidate fix.**
+
+**Genuine OS auto-repeat is not reachable from `SendInput`, and is therefore
+uncovered on this backend.**
+`a_key_held_by_another_process_reports_its_second_press_as_a_repeat` asserted
+press-repeat-release and got press-release: a second `SendInput` key-down for a
+key already down is **not a state transition**, so no second `WM_KEYDOWN` is
+generated at all. Real typematic comes from the keyboard driver's repeat timer
+holding a physically-depressed key, which no injection API reproduces. The test
+now asserts the coalescing (renamed
+`a_second_injected_press_of_a_held_key_produces_no_second_event`), and the
+_decoding_ of `lParam` bit 30 stays covered where it can be — the in-crate suite
+builds that `lParam` itself and delivers it with `SendMessageW`. What is
+uncovered is that the **system** sets the bit on a real held key. Closing it
+needs a physical keyboard or a kernel-level virtual HID device; neither is a CI
+runner.
+
+**The e2e harness stopped at the first failure and hid thirteen tests.**
+`Summary [0.694s] 2/15 tests run` — nextest's default fail-fast, on a suite
+nobody can run locally and whose round trip is half an hour. `run-win32-e2e.ps1`
+now passes `--no-fail-fast`. Its count gate needed a second fix to go with it:
+the old regex `(\d+) tests? run` matches the digits immediately before the
+words, which for `2/15 tests run` is **15** — so a run that executed two tests
+reported a healthy-looking fifteen. The pattern is now
+`(?:(\d+)/)?(\d+) tests? run` and a present first group is treated as a
+cancelled run and fails the gate. Falsified offline against a regex engine with
+the same semantics, not against `pwsh`, which is not on the development machine.
+
 What remains unverified:
 
 - The structure layouts in `win32/ffi.rs` are asserted by size and offset on the
@@ -592,21 +654,132 @@ What W4 closes, and what it does not:
   one frame now", which is a decision above `crcbl-shell`. Recorded here rather
   than attempted.
 
-## macOS has no windowing coverage because it has no backend
+## What the AppKit backend has and has not been run against
 
-The X11 and Win32 halves are done; AppKit is not. `crcbl-shell` compiles
-`ShellBackend::AppKit` as a _name_ — the registry has no entry for it, `open()`
-on macOS returns `ShellError::NoBackend`, and `crates/crcbl-shell/src/` has no
-`macos` module. Reaching the other backends' coverage there means **writing the
-backend**: hand-written `objc_msgSend` FFI to AppKit, per
-`docs/plan/15-windowing.md`'s P5C row.
+P5C M1 wrote the whole of `crates/crcbl-shell/src/appkit/` on a Linux machine.
+It is cross-checked with
+`cargo check`/`cargo clippy --target aarch64-apple-darwin`, which do not link
+and do not run — **a cross-check proves the code typechecks and nothing more.**
+No line of this backend has executed on a Mac.
 
-What the cross-platform CI job covers today, and it is not nothing: the whole
-workspace builds, lints and runs its unit and integration suites on
-`macos-latest` and `windows-latest`, including `HeadlessShell` and the
-`seam_from_outside` suite. The backend-selection tests assert the honest answer
-on macOS — `NoBackend` naming what was tried, `UnknownBackend` for `appkit` — so
-the _absence_ is tested even though the backend is not.
+### The window session cannot be a `#[test]`, and that is measured rather than assumed
+
+This is the finding to know before writing any macOS test, because it decides
+the shape of the whole suite:
+
+- **AppKit is main-thread-only and enforces it by raising.**
+  `-[NSApplication nextEventMatchingMask:untilDate:inMode:dequeue:]` asserts on
+  the thread and throws `NSInternalInconsistencyException`; an Objective-C
+  exception unwinding through a Rust frame is undefined behaviour, not an error
+  return. So `AppKitShell::open` refuses off the main thread
+  (`appkit::app::require_main_thread`) rather than finding out.
+- **Rust's `libtest` always runs a test body on a thread it spawns.** Measured
+  on this workspace's toolchain, not recalled: a probe crate asserting
+  `gettid() == getpid()` fails under `cargo nextest run`, and fails again when
+  the test binary is invoked directly with `--exact <name> --test-threads=1`.
+  The serial path in `libtest` does not put the body on the main thread.
+
+Together those mean a `#[test]` can never drive an AppKit window, so the pass
+the slice most wanted — open a window, pump to the first `Resized`, read the
+size back, flip to borderless and back, destroy it, which is also what tells us
+whether a GitHub runner gives a process a usable WindowServer session — **is not
+in the suite.** Nothing about it is written and passing; it is absent.
+
+Closing it needs a target whose `main` this crate owns, which is a
+`crates/crcbl-shell/Cargo.toml` edit outside M1's allowed paths:
+
+```toml
+[[test]]
+name = "appkit_e2e"
+path = "tests/appkit_e2e.rs"
+harness = false
+```
+
+`nextest` runs a `harness = false` target as a single test, so it would be
+picked up by the existing `build + test (macos-latest)` job with no workflow
+change. The alternative considered and declined was re-executing the test binary
+as a child process with `--test-threads=1`: it does not work, for the measured
+reason above.
+
+### What the macOS suite does cover
+
+Not nothing, and it covers the highest-risk item in the backend:
+
+- **Every `objc_msgSend` signature shape this backend transmutes**, dispatched
+  against Foundation classes that are thread-safe and against a class built at
+  runtime for the purpose (`CrcblFfiProbe`, in `appkit::shell`'s tests) — so
+  both sides of the call are ours and a mismatch shows up as a wrong value
+  rather than as a crash somewhere later. That includes the `NSRect` return,
+  which must go through `objc_msgSend_stret` on x86_64 and must **not** on
+  aarch64, an `NSRect` argument, `BOOL` in both directions, and
+  `class_addMethod` with its type encodings.
+- **The main-thread refusal**, exercised from a thread spawned explicitly rather
+  than relying on `libtest`'s.
+- **That the runner has a graphics session at all**, through `CGMainDisplayID` —
+  CoreGraphics is thread-safe, so this is the one thing about the runner's
+  display a spawned test body may ask.
+- The pure modules — `appkit::geometry` and `appkit::events` — run on **every**
+  host including this Linux one, which is where the Y flip and the
+  points-to-backing-pixels conversion are falsifiable.
+
+### Uncovered, and why each one is uncovered
+
+- **Every capability bit's mechanism.** `appkit::caps()` is a `const fn` and its
+  set is asserted, but `EVENT_WAIT` actually sleeping, `WINDOW_POSITION` putting
+  a borderless window on a named display, `ASPECT_HINT_HONORED` reaching
+  `setContentAspectRatio:` and `SERVER_DECORATIONS` meaning a real title bar all
+  need a window. Blocked on the section above.
+- **The borderless round trip.** The style mask and frame are saved and restored
+  in `appkit::window::apply_mode`; nothing has watched it happen.
+- **`NSApplicationPresentationOptions`.** An invalid combination _raises_, and
+  `geometry::presentation_options` never produces one — asserted as a pairing in
+  a host test. That the pair is accepted by a running `NSApplication` is
+  unverified.
+- **Reference counting.** `releasedWhenClosed` is turned off at creation and
+  `appkit::shell::release_window` is the single matching release for the window
+  and the layer. Reasoned, not observed; there is no leak check anywhere in this
+  workspace and Instruments is not in CI.
+- **The delegate-to-shell table.** `appkit::app::DELEGATES` is a thread-local
+  `Vec<(usize, *const Shared)>` rather than an Objective-C instance variable,
+  deliberately: the ivar route is `ivar_getOffset` plus pointer arithmetic into
+  the middle of an object, which corrupts rather than fails when it is wrong,
+  and none of it can be falsified from a Linux machine. The table is safe Rust
+  with the same lifetime story. Reconsider if a profile ever shows the lookup.
+- **The `NSWindow` subclass.** `CrcblWindow` overrides `canBecomeKeyWindow` and
+  `canBecomeMainWindow` so that a borderless window can take the keyboard. That
+  it is needed is documented AppKit behaviour; that our override is reached has
+  not been seen.
+- **Activation without a bundle.** `setActivationPolicy:Regular` is asked for
+  and its answer kept in `Bootstrap::policy_accepted`, on the theory that an
+  unbundled binary otherwise cannot become frontmost. Whether a GitHub macOS
+  runner lets a process activate at all is exactly what the missing window
+  session would find out.
+
+### Deliberately not in M1
+
+- **No menu bar.** An unbundled application with the Regular activation policy
+  gets the system's default menu bar, which is enough for a window to be
+  focusable and is not enough to ship — no application menu, so no ⌘Q. Building
+  one is `NSMenu`/`NSMenuItem` and a decision about what belongs in it, which is
+  above this crate.
+- **`HW_UPSCALE` is clear although macOS has it.** A `CAMetalLayer`'s
+  `drawableSize` is independent of its bounds and Core Animation scales the
+  difference in hardware — exactly what Wayland's `wp_viewport` buys and what
+  `docs/plan/15-windowing.md`'s borderless render-scale wants. **The seam has no
+  way to ask for it**: nothing in `Shell` says "present a buffer smaller than
+  the window". Setting the bit would be a claim with no mechanism behind it.
+  Closing it is a seam change (a render-scale request on `Shell`, honoured by
+  the Wayland backend through `wp_viewport` and here through `drawableSize`),
+  which is a decision above this crate and should be taken once for both.
+- **`app_id` has nowhere to go.** macOS's equivalent is `CFBundleIdentifier` in
+  an `Info.plist`, which is a property of the bundle and cannot be set by a
+  running process. `WindowDesc::app_id` is validated for a NUL byte so that a
+  descriptor rejected on the other backends is rejected here, and is otherwise
+  unused. Unlike the Win32 `AppUserModelID` entry this is not a deferral — there
+  is nothing to defer to.
+- **A live resize drag freezes the window**, on the same terms as the Win32
+  modal loop and with the same unavailable fix. See that entry above; the two
+  share one problem and one answer.
 
 ## Not covered on either backend
 

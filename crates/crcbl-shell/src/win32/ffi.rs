@@ -828,13 +828,48 @@ pub mod value {
     /// `ERROR_CLASS_ALREADY_EXISTS`.
     pub const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
 
-    /// `QS_ALLINPUT` — every kind of message wakes the wait.
+    /// `QS_ALLINPUT` — every kind of message, `QS_SENDMESSAGE` included.
+    ///
+    /// **Not what the wait asks for**; see [`QS_ALL_EVENTS`]. This is what
+    /// `GetQueueStatus` is asked for when a test has to explain a wait that came
+    /// back early, because reporting *everything* is what makes the diagnosis
+    /// complete — and it is the bit this constant has and the other one does not
+    /// that ended a three-round-trip investigation.
     ///
     /// `MWMO_INPUTAVAILABLE` is deliberately **not** declared beside it: the
     /// shell's `wait` drains the queue itself and then sleeps with no flags,
     /// which is the stronger form of what that flag was there for. The CI
     /// evidence that took it out is written up on that function.
+    ///
+    /// Test-only since the wait moved to [`QS_ALL_EVENTS`], on the same terms as
+    /// [`Rect::intersect`](super::Rect::intersect): the backend never asks for
+    /// this mask, and only a test has to *explain* a wake.
+    #[cfg(test)]
     pub const QS_ALL_INPUT: u32 = 0x04FF;
+    /// `QS_ALLEVENTS` — `QS_ALLINPUT` **minus `QS_SENDMESSAGE`**, and what
+    /// [`wait`](super::Win32Shell) actually sleeps on.
+    ///
+    /// # The one bit that cannot be drained
+    ///
+    /// A message *sent* to a window of this thread — `SendMessageW` from another
+    /// process, and the system does this constantly — sets `QS_SENDMESSAGE`.
+    /// `PeekMessageW` **processes** such a message but never *returns* it, so it
+    /// can neither report it nor clear its bit: the instrumented CI run that
+    /// settled this reported `GetQueueStatus` = `0x400040` with `PeekMessageW`
+    /// (`PM_NOREMOVE`) answering `None` in the same breath. MSDN says as much in
+    /// its own caveat — the presence of a `QS_` flag does not guarantee that a
+    /// subsequent `PeekMessage` will return a message. So a wait that includes
+    /// `QS_SENDMESSAGE` returns immediately, every time, and no amount of
+    /// draining fixes it because there is nothing retrievable to drain.
+    ///
+    /// # What it costs, stated rather than glossed
+    ///
+    /// A sent message that arrives *while* this thread is asleep no longer wakes
+    /// it; it waits out the timeout and is dispatched by the next
+    /// `drain_messages`. That is the trade this constant makes, and it is the
+    /// reason `SendMessageTimeout` exists — a well-behaved broadcaster does not
+    /// rely on the recipient being awake.
+    pub const QS_ALL_EVENTS: u32 = 0x04BF;
     /// `INFINITE`.
     pub const INFINITE: u32 = 0xFFFF_FFFF;
     /// `WAIT_OBJECT_0` — with a handle count of zero this means one thing only:

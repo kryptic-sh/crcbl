@@ -54,6 +54,27 @@
 //! libwayland, and a Windows cannot lack `user32.dll`. There is no
 //! `windows-rs`.
 //!
+//! P5C also added the **AppKit backend**'s window lifecycle: the Objective-C
+//! runtime FFI, the `NSApplication` bootstrap, `NSWindow` and a layer-hosting
+//! `NSView` carrying the `CAMetalLayer` that *is*
+//! [`SurfaceTarget::AppKit`], the event pump
+//! and a blocking `wait_events`, windowed ↔ borderless on a named display,
+//! `NSScreen` enumeration with scale and refresh, size constraints and
+//! close-request interception. Input, the pasteboard and drag-and-drop are the
+//! slices after it, and [`ShellCaps`] is clear on every bit they would set. It
+//! is hand-written `objc_msgSend` FFI — **linked rather than `dlopen`ed**, for
+//! the same reason the Win32 backend gives — with no `objc2` and no framework.
+//!
+//! Three macOS facts are worth knowing at this level rather than at that one.
+//! **AppKit is main-thread-only and enforces it by raising an Objective-C
+//! exception**, which is the concrete reason [`Shell`] is not `Send` and is a
+//! stronger rule than Win32's thread affinity — there, any thread may own a
+//! window as long as it is the one pumping. **The Y axis points up**, and macOS
+//! is the only one of the five platforms whose coordinate system disagrees with
+//! this seam's about that. And **`backingScaleFactor` is 1.0 or 2.0 and nothing
+//! between**, so [`ShellCaps::FRACTIONAL_SCALE`] is clear on the one desktop
+//! backend a reader would expect it to be set on.
+//!
 //! Two Win32 facts the other backends do not have are worth knowing at this
 //! level rather than at that one. A window's contents freeze while the user
 //! drags its edge, because Windows runs a **modal message loop** of its own
@@ -286,6 +307,22 @@ pub(crate) mod x11;
 /// argument, which is the reverse of the one `src/x11/ffi.rs` makes.
 #[cfg(any(target_os = "windows", test))]
 pub(crate) mod win32;
+
+/// The AppKit backend (P5C).
+///
+/// Same terms as the other three native backends: private, reached only through
+/// [`open`]. The `cfg` is the Win32 one for the Win32 reason — **the parts of
+/// this backend that are pure arithmetic compile on every host under
+/// `cfg(test)`** — and it earns more here than it did there, because more of
+/// this backend *is* arithmetic: macOS is the only platform whose coordinate
+/// system disagrees with the seam's about which way the Y axis points, and the
+/// flip that reconciles them is exercised by `cargo test` on the Linux machine
+/// this engine is developed on. Everything that calls AppKit is
+/// `#[cfg(target_os = "macos")]` inside the module, which is also why there is
+/// no `dlopen` here — see `appkit::ffi`, which makes the same argument
+/// `src/win32/ffi.rs` does and the reverse of `src/x11/ffi.rs`'s.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) mod appkit;
 
 /// The Web/canvas backend (P5).
 ///

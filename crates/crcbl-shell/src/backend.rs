@@ -24,15 +24,27 @@
 //!
 //! # What is registered today
 //!
-//! Wayland then X11 on Linux, Win32 on Windows, and [`HeadlessShell`]
-//! everywhere — the last only when asked for by name. **P0.6 confirmed the
-//! property this module was shaped to have and P5C confirmed it again**: adding
-//! a whole X11 backend touched [`REGISTRY`](self) and these tests, and no other
-//! file outside `src/x11/` (plus `src/linux/`, which is the evdev table and
-//! libxkbcommon moving up one level to be shared rather than copied); adding
-//! the Win32 backend touched this file, `src/lib.rs` and `src/win32/`. No
-//! consumer changed, no trait method was added, and no `#[cfg]` appeared
-//! anywhere above this crate.
+//! Wayland then X11 on Linux, Win32 on Windows, AppKit on macOS, and
+//! [`HeadlessShell`] everywhere — the last only when asked for by name. **P0.6
+//! confirmed the property this module was shaped to have and P5C confirmed it
+//! twice more**: adding a whole X11 backend touched [`REGISTRY`](self) and these
+//! tests, and no other file outside `src/x11/` (plus `src/linux/`, which is the
+//! evdev table and libxkbcommon moving up one level to be shared rather than
+//! copied); adding the Win32 backend touched this file, `src/lib.rs` and
+//! `src/win32/`, and adding the AppKit one touched this file, `src/lib.rs` and
+//! `src/appkit/`. No consumer changed, no trait method was added, and no
+//! `#[cfg]` appeared anywhere above this crate.
+//!
+//! **Every variant of [`ShellBackend`] is now registered somewhere**, which
+//! changes how the "a backend this build does not have" property is tested. It
+//! used to be asserted against whichever variant had not landed yet — X11 until
+//! P0.6, Win32 until P5C, AppKit until this slice — and there is no fourth
+//! candidate. The tests below now derive the absent set from the table itself
+//! and assert the property per platform, which is what was actually meant all
+//! along: *asking for a backend this build lacks is an honest
+//! [`UnknownBackend`](ShellError::UnknownBackend)*. It also cannot go stale
+//! again — a future backend is covered the day it is added, on the platforms
+//! that do not have it.
 //!
 //! Headless is registered with `auto: false`, so [`open`] never selects it
 //! implicitly. A game that silently ran headless because a compositor was
@@ -49,11 +61,12 @@
 //! since X11 is the *fallback* and is reached only after Wayland has already
 //! failed.
 //!
-//! The Win32 entry links its libraries instead, and the difference is this
-//! list's shape rather than a change of mind: Windows has one backend, so
-//! nothing falls through to anything, and `user32.dll` cannot be missing from a
-//! Windows that is running a process at all. `src/win32/ffi.rs` states it in
-//! full.
+//! The Win32 and AppKit entries link their libraries instead, and the
+//! difference is this list's shape rather than a change of mind: each of those
+//! platforms has one backend, so nothing falls through to anything, and neither
+//! `user32.dll` nor AppKit can be missing from a system that is running a
+//! process at all. `src/win32/ffi.rs` states it in full and `src/appkit/ffi.rs`
+//! repeats it for the frameworks.
 
 use crate::{HeadlessShell, Shell, ShellError};
 
@@ -160,6 +173,14 @@ static REGISTRY: &[Registration] = &[
         auto: true,
         open: || Ok(Box::new(crate::win32::Win32Shell::open()?)),
     },
+    // macOS likewise has exactly one backend, so `src/appkit/ffi.rs` links its
+    // frameworks for the same reason `src/win32/ffi.rs` links its DLLs.
+    #[cfg(target_os = "macos")]
+    Registration {
+        backend: ShellBackend::AppKit,
+        auto: true,
+        open: || Ok(Box::new(crate::appkit::AppKitShell::open()?)),
+    },
     Registration {
         backend: ShellBackend::Headless,
         auto: false,
@@ -199,12 +220,14 @@ fn registry_names(entries: impl Iterator<Item = ShellBackend>) -> String {
 /// # Today
 ///
 /// On Linux, Wayland is tried and then X11; `CRCBL_SHELL=wayland` or
-/// `CRCBL_SHELL=x11` forces one of them. On Windows there is one backend and it
-/// is selected automatically. On macOS only [`HeadlessShell`] is compiled in
-/// and it is not auto-selected, so this returns [`ShellError::NoBackend`] there
-/// unless `CRCBL_SHELL=headless` is set — the honest answer for a build with no
-/// window-system backend in it. P5C's AppKit slice changes that by adding a
-/// registration and nothing else.
+/// `CRCBL_SHELL=x11` forces one of them. On Windows and on macOS there is one
+/// backend each and it is selected automatically — although the AppKit one
+/// requires the process's **main thread** and returns
+/// [`ShellError::Backend`] naming that rule anywhere else, which is a failure
+/// this list falls through rather than one it hides. Every other target has
+/// only [`HeadlessShell`], which is not auto-selected, so this returns
+/// [`ShellError::NoBackend`] there unless `CRCBL_SHELL=headless` is set — the
+/// honest answer for a build with no window-system backend in it.
 pub fn open() -> Result<Box<dyn Shell>, ShellError> {
     match std::env::var(BACKEND_ENV_VAR) {
         Ok(value) if !value.trim().is_empty() => {
@@ -341,6 +364,15 @@ mod tests {
                     ShellBackend::Web,
                 ]
             );
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(
+                backends,
+                [
+                    ShellBackend::AppKit,
+                    ShellBackend::Headless,
+                    ShellBackend::Web,
+                ]
+            );
         } else {
             assert_eq!(backends, [ShellBackend::Headless, ShellBackend::Web]);
         }
@@ -374,26 +406,67 @@ mod tests {
             assert!(what.contains("wasm32"), "{what}");
         }
 
-        // AppKit is the stable example of a backend this build does not have.
-        // (X11 was that example until P0.6 registered it, and Win32 until P5C
-        // did — which is the point of the test.)
-        let error = open_backend(ShellBackend::AppKit).expect_err("not registered yet");
-        let ShellError::UnknownBackend {
-            requested,
-            available,
-        } = error
-        else {
-            panic!("wrong variant");
-        };
-        assert_eq!(requested, "appkit");
-        assert!(available.contains("headless"), "{available}");
+        // **Every backend this build does not have**, derived from the table
+        // rather than named. X11 was the example until P0.6 registered it,
+        // Win32 until P5C did, and AppKit until the slice after that — at which
+        // point every variant is registered *somewhere* and there is no fourth
+        // candidate to promote. The property being asserted was never about a
+        // particular backend: it is that asking for one this build lacks is an
+        // honest `UnknownBackend` rather than a silent fallback onto something
+        // else. Reading the absent set out of `REGISTRY` says exactly that, and
+        // covers a future backend on the day it is added.
+        let registered: Vec<ShellBackend> = REGISTRY.iter().map(|entry| entry.backend).collect();
+        let absent: Vec<ShellBackend> = [
+            ShellBackend::Wayland,
+            ShellBackend::X11,
+            ShellBackend::Win32,
+            ShellBackend::AppKit,
+            ShellBackend::Web,
+            ShellBackend::Headless,
+        ]
+        .into_iter()
+        .filter(|backend| !registered.contains(backend))
+        .collect();
+        // A loop over an empty set asserts nothing, and this one would be empty
+        // if the `#[cfg]`s ever compiled every entry in at once.
+        assert!(
+            !absent.is_empty(),
+            "every backend is registered on this platform, so nothing here checks the \
+             UnknownBackend path: {registered:?}"
+        );
+        for backend in absent {
+            let error = open_backend(backend).expect_err("not in this build");
+            let ShellError::UnknownBackend {
+                requested,
+                available,
+            } = error
+            else {
+                panic!("{backend} is not registered here, so it must answer UnknownBackend");
+            };
+            assert_eq!(requested, backend.as_str());
+            assert!(available.contains("headless"), "{available}");
+        }
 
-        // Win32 *is* registered on Windows, so asking for it by name gets a
-        // real shell or its own failure — never `UnknownBackend`.
+        // And the other half, which is what makes the first half meaningful:
+        // this platform's own backend **is** registered, so asking for it by
+        // name gets a real shell or its own failure — never `UnknownBackend`.
         #[cfg(target_os = "windows")]
         {
             let shell = open_backend(ShellBackend::Win32).expect("registered on Windows");
             assert_eq!(shell.backend(), ShellBackend::Win32);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // Not `expect`: AppKit requires the process's main thread, and a
+            // test body never is one — see `appkit::app`. The point here is the
+            // *variant*, and the failure that is legal is the backend's own.
+            match open_backend(ShellBackend::AppKit) {
+                Ok(shell) => assert_eq!(shell.backend(), ShellBackend::AppKit),
+                Err(error) => assert!(
+                    !matches!(error, ShellError::UnknownBackend { .. }),
+                    "AppKit is registered on macOS, so this must be its own failure: {error}"
+                ),
+            }
         }
     }
 
@@ -406,10 +479,13 @@ mod tests {
             Ok(shell) => assert!(
                 matches!(
                     shell.backend(),
-                    ShellBackend::Wayland | ShellBackend::X11 | ShellBackend::Win32
+                    ShellBackend::Wayland
+                        | ShellBackend::X11
+                        | ShellBackend::Win32
+                        | ShellBackend::AppKit
                 ),
                 "the auto-selectable backends are the two Linux ones — Wayland \
-                 first — and the single Windows one: {}",
+                 first — and the single Windows and macOS ones: {}",
                 shell.backend()
             ),
             Err(ShellError::NoBackend { tried }) => {
@@ -417,6 +493,13 @@ mod tests {
                     "wayland, x11"
                 } else if cfg!(target_os = "windows") {
                     "win32"
+                } else if cfg!(target_os = "macos") {
+                    // Reached on every macOS test run, because a test body is
+                    // never the main thread and `AppKitShell::open` refuses
+                    // there — so this branch is the *normal* path on that
+                    // platform rather than the degraded one, and it is still
+                    // asserting the same thing: the failure names what it tried.
+                    "appkit"
                 } else {
                     "none"
                 };

@@ -445,24 +445,69 @@ fn the_factory_selects_a_backend_at_runtime() {
         crcbl_shell::open_backend(ShellBackend::Headless).expect("headless is registered");
     assert_eq!(shell.backend(), ShellBackend::Headless);
 
-    // AppKit lands later in P5C; asking for it today is an honest error rather
-    // than a silent fallback onto something else. (Win32 was this example
-    // until P5C registered it, which is the point.)
-    assert!(matches!(
-        crcbl_shell::open_backend(ShellBackend::AppKit),
-        Err(ShellError::UnknownBackend { .. })
-    ));
+    // **Asking for a backend this build does not have is an honest error**
+    // rather than a silent fallback onto something else. That property used to
+    // be asserted against whichever backend had not landed yet — X11 until
+    // P0.6, Win32 until P5C's Windows slice, AppKit until its macOS one — and
+    // after that every variant is registered *somewhere*, so there is no fourth
+    // candidate to promote. Which backends are absent is a fact about the
+    // platform, so that is what this names. (`Headless` and `Web` are
+    // registered on every target and so are never in this list.)
+    let absent: &[ShellBackend] = if cfg!(target_os = "linux") {
+        &[ShellBackend::Win32, ShellBackend::AppKit]
+    } else if cfg!(target_os = "windows") {
+        &[
+            ShellBackend::Wayland,
+            ShellBackend::X11,
+            ShellBackend::AppKit,
+        ]
+    } else if cfg!(target_os = "macos") {
+        &[
+            ShellBackend::Wayland,
+            ShellBackend::X11,
+            ShellBackend::Win32,
+        ]
+    } else {
+        &[
+            ShellBackend::Wayland,
+            ShellBackend::X11,
+            ShellBackend::Win32,
+            ShellBackend::AppKit,
+        ]
+    };
+    // A loop over an empty slice asserts nothing.
+    assert!(!absent.is_empty(), "nothing here checks the error path");
+    for backend in absent {
+        assert!(
+            matches!(
+                crcbl_shell::open_backend(*backend),
+                Err(ShellError::UnknownBackend { .. })
+            ),
+            "{backend} is not in a build for this platform, so it must say so"
+        );
+    }
 
-    // Wayland (P0.5a) and X11 (P0.6) *are* registered on Linux, so asking for
-    // either by name gets a real shell or a connection error — never
+    // And this platform's own backends *are* registered, so asking for one by
+    // name gets a real shell or that backend's own failure — never
     // `UnknownBackend`. This test runs on machines with a compositor, with an X
-    // server, and with neither, and all three are correct answers; what must
-    // not happen is a fallback to something else.
+    // server, with neither, and on a Mac where the AppKit backend refuses
+    // because a test body is not the process's main thread; all of those are
+    // correct answers, and what must not happen is a fallback to something else.
     #[cfg(target_os = "windows")]
     {
         let shell = crcbl_shell::open_backend(ShellBackend::Win32)
             .expect("the Win32 backend is registered on Windows");
         assert_eq!(shell.backend(), ShellBackend::Win32);
+    }
+
+    #[cfg(target_os = "macos")]
+    match crcbl_shell::open_backend(ShellBackend::AppKit) {
+        Ok(shell) => assert_eq!(shell.backend(), ShellBackend::AppKit),
+        Err(error) => assert!(
+            !matches!(error, ShellError::UnknownBackend { .. }),
+            "the AppKit backend is registered on macOS, so this must be its own failure: \
+             {error}"
+        ),
     }
 
     #[cfg(target_os = "linux")]

@@ -57,6 +57,14 @@ try {
         # `Continue` above precisely so that a native command writing to stderr —
         # which cargo does constantly, for progress — is not turned into a
         # terminating error by the merge.
+        # `--no-fail-fast`, and it is not a preference. nextest stops at the
+        # first failure by default, and the first CI run of this suite reported
+        # `2/15 tests run` — thirteen tests never executed, and each round trip
+        # on a suite nobody can run locally costs half an hour. A remote suite
+        # has to report everything it knows in one round; the zero-count gate
+        # below is what keeps "no failures" from meaning "nothing ran", and the
+        # partial-run check beside it is what keeps a cut-short run from
+        # reading as a whole one.
         cargo nextest run `
             --locked `
             --package crcbl-shell `
@@ -64,6 +72,7 @@ try {
             --test win32_e2e `
             --run-ignored all `
             --test-threads 1 `
+            --no-fail-fast `
             @args 2>&1 | Tee-Object -FilePath $log
         $status = $LASTEXITCODE
     } finally {
@@ -84,14 +93,33 @@ try {
     # nextest emits the count as `\e[1m<n>\e[0m tests run` and a plain-text match
     # sees no digits next to "tests run". That is how the Wayland harness's guard
     # first fired — on a run where every test had in fact passed.
+    #
+    # # A cut-short run has a different summary, and the old pattern read it as
+    # # a healthy one
+    #
+    # nextest prints `<n> tests run:` for a complete run and `<ran>/<total>
+    # tests run:` for one it cancelled. `(\d+) tests? run` matches the digits
+    # immediately before the words in both — which for `2/15 tests run` is
+    # **15**, the total, not the two that executed. So a run that stopped after
+    # two tests reported a healthy-looking fifteen. The optional `<ran>/` group
+    # below is what tells the two shapes apart; when it is present the run was
+    # cancelled and that is a failure of the gate whatever the exit status said.
     $escape = [char]27
     $plain = (Get-Content -Raw -Path $log) -replace "$escape\[[0-9;]*[a-zA-Z]", ''
-    $hits = [regex]::Matches($plain, '(\d+) tests? run')
+    $hits = [regex]::Matches($plain, '(?:(\d+)/)?(\d+) tests? run')
     if ($hits.Count -eq 0) {
         Write-Error 'crcbl e2e: nextest printed no test count at all — the gate is not gating'
         exit 1
     }
-    $ran = [int]$hits[$hits.Count - 1].Groups[1].Value
+    $summary = $hits[$hits.Count - 1]
+    if ($summary.Groups[1].Success) {
+        $ran = [int]$summary.Groups[1].Value
+        $total = [int]$summary.Groups[2].Value
+        Write-Error ("crcbl e2e: the run was cancelled after $ran of $total tests — " +
+            'the remaining ones never executed, so a green count here would be a lie')
+        exit 1
+    }
+    $ran = [int]$summary.Groups[2].Value
     if ($ran -eq 0) {
         Write-Error 'crcbl e2e: the suite reported no tests run — the gate is not gating'
         exit 1

@@ -16,6 +16,40 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl-shell**: an **AppKit backend**, registered and selected automatically
+  on macOS — so `crcbl_shell::open()` now returns a real window there instead of
+  `NoBackend`. The window lifecycle: `NSApplication` bootstrap, create, show,
+  hide, destroy, title, close-request interception (`windowShouldClose:` answers
+  `NO`, and the seam asks), windowed ↔ borderless on a **named** display with
+  the windowed style mask and frame restored exactly, size constraints through
+  `setContentMinSize:`/`setContentMaxSize:`/`setContentAspectRatio:`, `NSScreen`
+  enumeration with visible frame, backing scale, refresh rate and hotplug, an
+  event pump and a blocking `wait_events`, and `SurfaceTarget::AppKit` for the
+  HAL. Built on hand-written Objective-C runtime FFI — `objc_getClass`,
+  `sel_registerName`, `objc_msgSend` and runtime-built classes — with no `objc2`
+  and no `cocoa`.
+
+  The shell creates and owns the `CAMetalLayer` and hosts it on its `NSView`, so
+  `SurfaceTarget::AppKit` carries the layer and **no HAL backend ever touches
+  AppKit**. Borderless is a frameless window at the display's size, not
+  `toggleFullScreen:`: the desktop's mode is untouched and there is no Spaces
+  transition. `ASPECT_HINT_HONORED`, `WINDOW_POSITION`, `SERVER_DECORATIONS`,
+  `MULTI_WINDOW` and `EVENT_WAIT` are set; input, the pasteboard and drag-and-
+  drop are the slices after this one and every bit they would set stays clear.
+
+  Four macOS facts a consumer may need. **`AppKitShell::open` requires the
+  process's main thread** and returns `ShellError::Backend` naming that rule
+  anywhere else — AppKit raises an Objective-C exception otherwise, which
+  unwinding into Rust is undefined behaviour. **`FRACTIONAL_SCALE` is clear**,
+  because `backingScaleFactor` is 1.0 or 2.0 and a "scaled" HiDPI mode changes
+  the point resolution rather than the factor. **`MonitorInfo::bounds` does not
+  tile** across displays of different scales, because AppKit's global coordinate
+  space is points rather than pixels — the caveat that field already documents
+  for Wayland, now true on a second platform; window placement is unaffected,
+  because it is expressed in points. And `MonitorInfo::refresh_millihertz` can
+  finally be non-integral: `CGDisplayModeGetRefreshRate` reports 59.94 as 59.94,
+  which no other backend's API is able to.
+
 - **crcbl-shell**: a **Win32 backend**, registered and selected automatically on
   Windows — so `crcbl_shell::open()` now returns a real window there instead of
   `NoBackend`. The window lifecycle: create, show, hide, destroy, title,

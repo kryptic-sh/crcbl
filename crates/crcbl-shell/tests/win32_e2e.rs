@@ -1277,20 +1277,35 @@ fn a_key_typed_by_another_process_carries_its_position_its_symbol_and_its_text()
     );
 }
 
-/// A key held down reports the second press as a repeat, and the release as a
-/// release.
+/// A second injected press of a key that is already down produces **no second
+/// event**, and the release still arrives.
 ///
-/// Windows does not auto-repeat an injected key — typematic belongs to the
-/// keyboard — so the hold is two presses. That is not a weaker test of the same
-/// thing: bit 30 of the `lParam`, the previous-key-state bit, is set by the
-/// *system* on the second message because the system knows the key is down, and
-/// reading it is the difference between a jump button that fires once and one
-/// that fires thirty times a second.
+/// # This test asserted the opposite, and the backend was right
+///
+/// It was written as "press, repeat, release" on the reasoning that bit 30 of
+/// the `lParam` — the previous-key-state bit — would be set by the system on the
+/// second `WM_KEYDOWN` because the system knows the key is down. The first CI
+/// run against a real desktop reported two `down` commands sent and one
+/// `Pressed` delivered, and that is correct: **`SendInput` describes a state
+/// transition, not a keystroke.** The input system tracks which keys are down,
+/// a second down for a key already down is not a transition, and no second
+/// `WM_KEYDOWN` is generated at all.
+///
+/// Genuine auto-repeat comes from the keyboard driver's typematic timer holding
+/// a *physically* depressed key, which no amount of `SendInput` reproduces — so
+/// this suite cannot reach the repeat bit, and `docs/backlog.md` carries that as
+/// a real gap rather than a solved problem. What it *can* reach is the
+/// coalescing above, which is worth pinning precisely because it surprised us.
+///
+/// The decoding of the repeat bit is covered where it can be: the in-crate suite
+/// in `src/win32/shell.rs` builds the `lParam` itself and delivers it with
+/// `SendMessageW`, so it exercises `keys::` on a message with bit 30 set without
+/// needing the system to have set it.
 #[test]
 #[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
-fn a_key_held_by_another_process_reports_its_second_press_as_a_repeat() {
+fn a_second_injected_press_of_a_held_key_produces_no_second_event() {
     let mut session = Session::open();
-    let window = session.window("repeat");
+    let window = session.window("held");
     session.foreground(window);
     session.take_names();
 
@@ -1314,11 +1329,10 @@ fn a_key_held_by_another_process_reports_its_second_press_as_a_repeat() {
         states,
         vec![
             (ButtonState::Pressed, false),
-            (ButtonState::Pressed, true),
             (ButtonState::Released, false),
         ],
-        "press, repeat, release — and the release is never a repeat however long the key was \
-         held; the sender said {:?}",
+        "two injected downs are one transition, so one press — and the release is never a \
+         repeat however long the key was held; the sender said {:?}",
         sender.lines()
     );
 }

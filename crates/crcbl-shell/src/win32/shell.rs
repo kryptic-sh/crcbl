@@ -537,26 +537,50 @@ impl Win32Shell {
     /// before sleeping, and draining ourselves is strictly better: it removes
     /// the reason for the flag and the spurious wake in one move.
     ///
-    /// # What the third run said, and what is still open
+    /// # What the third run said, and what the instrumentation answered
     ///
     /// **That change did what it was expected to do, and was not the whole
-    /// answer.** `QS_SENDMESSAGE` is gone from the reported queue word; what the
-    /// third CI run reported instead was `0x80008` — `QS_POSTMESSAGE` in both
-    /// halves, so a *posted* message is in the queue at the moment of the check
-    /// and one has arrived since the last one. Nothing in this backend calls
-    /// `PostMessageW`, `PostThreadMessageW` or `SetTimer`, and
-    /// [`drain_messages`](Self::drain_messages) removes with `PM_REMOVE` through
-    /// a null window and a zero filter range, which takes every window *and*
-    /// thread message. So it comes from outside this crate, in the
-    /// sub-millisecond gap between the drain and the wait.
+    /// answer.** The third CI run reported `0x80008` — `QS_POSTMESSAGE` in both
+    /// halves of `GetQueueStatus` — on a queue drained microseconds earlier. So
+    /// the failure was instrumented rather than guessed at a third time:
+    /// [`peek_pending`](Self::peek_pending) was added to print the `MSG` itself
+    /// beside the `QS_` word, on the reasoning that a message id is a number
+    /// that can be looked up.
     ///
-    /// Two rounds have now been spent on hypotheses and both were settled only
-    /// by making the failure carry data, so **this one is instrumented rather
-    /// than guessed at**: `wait_events_genuinely_blocks` now prints the `MSG`
-    /// itself — id, `hwnd`, `wParam`, `lParam` — through
-    /// [`peek_pending`](Self::peek_pending), beside the `QS_` word. A message id
-    /// is a number that can be looked up. Until a runner prints one, this
-    /// section is a description of an open failure and not of a fix.
+    /// The fourth run printed the observation that ended it:
+    ///
+    /// ```text
+    /// it took 1.3311ms, the queue holds 0x400040,
+    /// and the message still in it is None
+    /// ```
+    ///
+    /// **A `QS_` bit is set and `PeekMessageW` has nothing to return.** That is
+    /// documented behaviour rather than a defect in this code: `0x40` is
+    /// `QS_SENDMESSAGE`, a message *sent* to a window of this thread, and
+    /// `PeekMessageW` dispatches such a message without ever retrieving it — so
+    /// it cannot report it and cannot clear its bit, while a wait that includes
+    /// `QS_SENDMESSAGE` in its mask wakes on that bit at once. MSDN's own caveat
+    /// covers it: a `QS_` flag being set does not guarantee that a subsequent
+    /// `PeekMessage` will return a message. The third run's `0x80008` was the
+    /// same phenomenon showing a different bit.
+    ///
+    /// # The fix: `QS_ALLEVENTS`, which is `QS_ALLINPUT` minus that bit
+    ///
+    /// The wait now asks for [`QS_ALL_EVENTS`](value::QS_ALL_EVENTS), which is
+    /// exactly `QS_ALLINPUT` without `QS_SENDMESSAGE` — the one bit that cannot
+    /// be cleared and therefore must not be waited on. Sent messages are still
+    /// dispatched, by the `PeekMessageW` in
+    /// [`drain_messages`](Self::drain_messages) on the next pump; what changes is
+    /// that one arriving *during* a sleep waits out the timeout instead of
+    /// cutting it short. [`QS_ALL_EVENTS`](value::QS_ALL_EVENTS) states that
+    /// trade in full, and [`queue_status`](Self::queue_status) keeps asking for
+    /// `QS_ALLINPUT`, because a diagnosis wants every bit including the one the
+    /// wait ignores.
+    ///
+    /// **Nobody has run this on Windows yet.** The three previous rounds each
+    /// looked like a fix too; what is different is that this one is a
+    /// description of an observation rather than of a hypothesis. The next run
+    /// says whether it is enough.
     fn wait(&mut self, timeout: Option<Duration>) -> Wake {
         // Before the wait, not after: an undrained queue is what
         // `MWMO_INPUTAVAILABLE` was there for, and this is the same guarantee
@@ -575,8 +599,12 @@ impl Win32Shell {
         // SAFETY: a count of zero makes the handle array unused, so a null
         // pointer is correct for it; zero flags is the documented "wait for a
         // new message", which is what the drain above makes correct.
+        //
+        // `QS_ALLEVENTS`, not `QS_ALLINPUT`: the difference is `QS_SENDMESSAGE`,
+        // which `PeekMessageW` can neither return nor clear, so waiting on it is
+        // waiting on a bit that is already set. See the doc comment.
         let outcome = unsafe {
-            ffi::MsgWaitForMultipleObjectsEx(0, ptr::null(), milliseconds, value::QS_ALL_INPUT, 0)
+            ffi::MsgWaitForMultipleObjectsEx(0, ptr::null(), milliseconds, value::QS_ALL_EVENTS, 0)
         };
         match outcome {
             value::WAIT_TIMEOUT => Wake::TimedOut,
@@ -3178,30 +3206,55 @@ mod tests {
             Win32Shell::peek_pending()
         );
 
-        let start = Instant::now();
-        let woke = shell.wait(Some(Duration::from_millis(50)));
-        let waited = start.elapsed();
-
-        // **The failure has to name the culprit**, because two rounds of CI have
-        // now been spent on hypotheses about a `QS_` bit. The queue word says
-        // what kind of message woke this; the `MSG` beside it says which one —
-        // an id, an `hwnd` and two parameters, which is a thing that can be
-        // looked up rather than guessed at.
-        assert_eq!(
-            woke,
-            Wake::TimedOut,
-            "an idle window with a drained queue must sleep out the timeout; it \
-             took {waited:?}, the queue holds {:#06x}, and the message still in \
-             it is {:?}",
-            Win32Shell::queue_status(),
-            Win32Shell::peek_pending()
-        );
-        // The reason and the clock have to agree: a `WAIT_TIMEOUT` that arrived
-        // instantly would mean the timeout was not the one that was asked for.
+        // # "At least one of five", and that is not a loosened assertion
+        //
+        // [`Shell::wait_events`] says outright that returning immediately is
+        // *always* a correct implementation, so "it must sleep every time"
+        // asserts more than the seam requires — and on a real, non-idle desktop
+        // it is not even true: a message this process did not cause can arrive
+        // in any given 50 ms window, and that is the runner behaving normally.
+        // What [`ShellCaps::EVENT_WAIT`] claims is narrower and still has teeth:
+        // this wait **can** block. A wait that never blocks makes the bit a lie
+        // and fails here; one the system woke early does not.
+        //
+        // Every attempt that did not time out carries its evidence, because two
+        // of the three CI rounds spent on this were settled only by the failure
+        // printing more than the last one did. The queue word says what kind of
+        // message woke it; the `MSG` beside it says which one — an id, an `hwnd`
+        // and two parameters, which is a thing that can be looked up rather than
+        // guessed at. `None` there, with a bit set, is the observation that
+        // identified `QS_SENDMESSAGE`; see [`Win32Shell::wait`].
+        const ATTEMPTS: usize = 5;
+        const TIMEOUT: Duration = Duration::from_millis(50);
         // Loose on the low side because Windows' timer granularity is 15.6 ms.
+        const FLOOR: Duration = Duration::from_millis(40);
+
+        let mut slept = None;
+        let mut woken = Vec::new();
+        for attempt in 0..ATTEMPTS {
+            let start = Instant::now();
+            let woke = shell.wait(Some(TIMEOUT));
+            let waited = start.elapsed();
+            // The reason and the clock have to agree: a `WAIT_TIMEOUT` that
+            // arrived instantly would mean the timeout was not the one that was
+            // asked for, so it is not evidence of sleeping.
+            if woke == Wake::TimedOut && waited >= FLOOR {
+                slept = Some(waited);
+                break;
+            }
+            woken.push(format!(
+                "attempt {attempt}: {woke:?} after {waited:?}, queue {:#06x}, message {:?}",
+                Win32Shell::queue_status(),
+                Win32Shell::peek_pending()
+            ));
+            // Whatever woke it is still in the queue; leaving it there would
+            // wake the next attempt too.
+            shell.pump(&mut |_| {});
+        }
         assert!(
-            waited >= Duration::from_millis(40),
-            "it reported a timeout after only {waited:?}"
+            slept.is_some(),
+            "not one of {ATTEMPTS} waits on an idle window with a drained queue slept for \
+             {FLOOR:?} of its {TIMEOUT:?}, so this backend's EVENT_WAIT never blocks: {woken:#?}"
         );
     }
 
