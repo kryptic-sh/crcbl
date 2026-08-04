@@ -769,7 +769,8 @@ fn insets_syntax(raw: &str) -> String {
 /// list, a `:` ends the name early in a `frame …:` line, and a `#` opens a
 /// comment. Each produces a file the format's own parser refuses or, worse,
 /// reads as something else — so the refusal belongs here, before anything is
-/// written.
+/// written. The clip keywords are refused for the same reason: the parser reads
+/// `loop`, `reverse`, `pingpong` and `@` as flags, not frame names.
 pub fn check_sheet_name(name: &str) -> Result<(), &'static str> {
     if name.is_empty() {
         return Err("it is empty");
@@ -782,6 +783,18 @@ pub fn check_sheet_name(name: &str) -> Result<(), &'static str> {
     }
     if name.contains('#') {
         return Err("`#` opens a comment, so the rest of the name would be discarded");
+    }
+    // A name that is exactly a clip keyword is read as that keyword when the
+    // clip's frame list is parsed back: `loop`, `reverse` and `pingpong`
+    // become flags and `@` becomes the hold marker. A frame named any of them
+    // writes a clip that is not the frames asked for — silently, with exit 0 —
+    // and a stem of exactly `@` fails the parse-back and blames the tool. Only
+    // the exact token collides: the parser matches whole whitespace-separated
+    // tokens, so `loop2` and `a@b` are ordinary frame names.
+    if matches!(name, "loop" | "reverse" | "pingpong" | "@") {
+        return Err(
+            "it is a clip keyword (`loop`, `reverse`, `pingpong`, `@`) that the format reads as a flag",
+        );
     }
     Ok(())
 }

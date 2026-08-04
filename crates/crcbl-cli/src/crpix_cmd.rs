@@ -226,6 +226,16 @@ mod tests {
             frame_name(Path::new("bird.up.png")).expect("a usable stem"),
             "bird.up"
         );
+        // The keyword check is exact-token, not substring: these contain `loop`
+        // and `@` without being either keyword.
+        assert_eq!(
+            frame_name(Path::new("art/looped.png")).expect("a usable stem"),
+            "looped"
+        );
+        assert_eq!(
+            frame_name(Path::new("art/a@b.png")).expect("a usable stem"),
+            "a@b"
+        );
     }
 
     /// A stem the format cannot spell back is refused before anything is
@@ -247,6 +257,10 @@ mod tests {
             ("art/my art.png", "my art"),
             ("art/a:b.png", "a:b"),
             ("art/a#b.png", "a#b"),
+            ("art/loop.png", "loop"),
+            ("art/reverse.png", "reverse"),
+            ("art/pingpong.png", "pingpong"),
+            ("art/@.png", "@"),
         ] {
             let failure = match frame_name(Path::new(path)) {
                 Ok(name) => panic!("`{path}` must not yield a frame name, and gave `{name}`"),

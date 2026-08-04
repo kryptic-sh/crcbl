@@ -1469,6 +1469,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-cli**: `crcbl crpix` frame names that are clip keywords silently
+  corrupted the written `.crpix` — a frame named `loop` wrote
+  `clip flap: loop loop`, which parses as zero frames plus the loop flag, with
+  exit 0. The shared name guard now refuses exact `loop`, `reverse`, `pingpong`
+  and `@`, which the format reads as flags rather than frame names.
+
 - **crcbl**, **sandbox**: `--tick-hz` values above `1_000_000_000` parsed
   cleanly and then panicked the engine — `1e9 / hz` truncates to a zero
   nanosecond period, which `FrameClock` asserts against after the GPU is already
