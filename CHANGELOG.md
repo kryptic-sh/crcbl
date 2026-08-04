@@ -1496,6 +1496,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-render**: `UiRenderer::begin_frame` committed the new element counts
+  before the buffer uploads that make them true — a failed `write_buffer` left
+  the new counts over stale indices and the next draw read out of bounds. The
+  counts are now committed only after the uploads succeed.
+
+- **crcbl-wgpu**: `DeviceDesc::compatible_surface` was never validated — a
+  destroyed or foreign surface handle was accepted where the null backend
+  returns `InvalidHandle`. `request()` now checks the handle against the
+  instance's surface pool. `write_buffer` also accepted `HostReadback` buffers
+  (mappable, but not a valid target); it now requires `HostUpload` exactly,
+  matching the null backend.
+
+- **crcbl-wgpu**: a padded indirect-draw `stride` was silently ignored — wgpu
+  reads tightly packed argument structs while crcbl-vk honours a stride, so a
+  padded one rendered garbage. All four indirect draw methods now refuse a
+  non-tight stride loudly.
+
 - **crcbl-shell** (Wayland): a `wl_data_offer` the compositor announced and
   never claimed leaked when refused — a drag `enter` for a vanished seat or
   naming an unannounced id sent `accept(null)` but never destroyed the proxy,

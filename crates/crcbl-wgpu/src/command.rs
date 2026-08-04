@@ -686,6 +686,13 @@ impl CommandEncoder for WgpuCommandEncoder {
     }
 
     fn draw_indirect(&mut self, draw: &hal::DrawIndirect) {
+        // wgpu's multi_draw_indirect reads tightly packed DrawIndirect structs
+        // (16 bytes); crcbl-vk honours `stride`, and a padded stride here would
+        // read garbage silently.
+        if draw.stride != core::mem::size_of::<wgpu::util::DrawIndirectArgs>() as u32 {
+            return self
+                .unsupported("draw_indirect: wgpu requires a tightly packed stride (16 bytes)");
+        }
         let Some(args) = self.indirect_args(draw) else {
             return;
         };
@@ -695,6 +702,14 @@ impl CommandEncoder for WgpuCommandEncoder {
     }
 
     fn draw_indexed_indirect(&mut self, draw: &hal::DrawIndirect) {
+        // wgpu's multi_draw_indexed_indirect reads tightly packed
+        // DrawIndexedIndirect structs (20 bytes); crcbl-vk honours `stride`,
+        // and a padded stride here would read garbage silently.
+        if draw.stride != core::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>() as u32 {
+            return self.unsupported(
+                "draw_indexed_indirect: wgpu requires a tightly packed stride (20 bytes)",
+            );
+        }
         let Some(args) = self.indirect_args(draw) else {
             return;
         };
@@ -704,6 +719,15 @@ impl CommandEncoder for WgpuCommandEncoder {
     }
 
     fn draw_indirect_count(&mut self, draw: &hal::DrawIndirectCount) {
+        // The count methods read the same tightly packed argument structs wgpu
+        // requires of the CPU-counted draws, so the padded stride is refused
+        // the same way — the count buffer only says *how many* draws, never how
+        // far apart the arguments are.
+        if draw.stride != core::mem::size_of::<wgpu::util::DrawIndirectArgs>() as u32 {
+            return self.unsupported(
+                "draw_indirect_count: wgpu requires a tightly packed stride (16 bytes)",
+            );
+        }
         let Some((args, count)) = self.indirect_count_args(draw) else {
             return;
         };
@@ -719,6 +743,11 @@ impl CommandEncoder for WgpuCommandEncoder {
     }
 
     fn draw_indexed_indirect_count(&mut self, draw: &hal::DrawIndirectCount) {
+        if draw.stride != core::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>() as u32 {
+            return self.unsupported(
+                "draw_indexed_indirect_count: wgpu requires a tightly packed stride (20 bytes)",
+            );
+        }
         let Some((args, count)) = self.indirect_count_args(draw) else {
             return;
         };

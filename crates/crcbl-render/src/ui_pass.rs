@@ -557,9 +557,6 @@ impl UiRenderer {
             device.destroy_buffer(std::mem::replace(&mut self.index_buffers[idx], fresh));
             self.index_capacity[idx] = size;
         }
-        self.last_vertex_count[idx] = vertices.len();
-        self.last_index_count[idx] = indices.len();
-
         // Upload vertex data
         if !vertices.is_empty() {
             let bytes: &[u8] = bytemuck::cast_slice(&vertices);
@@ -571,6 +568,12 @@ impl UiRenderer {
             let bytes: &[u8] = bytemuck::cast_slice(&indices);
             device.write_buffer(self.index_buffers[idx], 0, bytes)?;
         }
+
+        // The counts describe the bytes just written: committing them only after
+        // the uploads succeeded keeps a failed write from drawing new counts over
+        // stale indices (a Vulkan OOB index read).
+        self.last_vertex_count[idx] = vertices.len();
+        self.last_index_count[idx] = indices.len();
 
         // Only a new vertex buffer needs a new bind group; the atlas and the
         // sampler never change, so a steady-state frame writes no descriptors.

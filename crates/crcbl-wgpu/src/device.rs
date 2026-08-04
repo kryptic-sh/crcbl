@@ -129,6 +129,15 @@ impl WgpuDevice {
         desc: &DeviceDesc<'_>,
         surfaces: Shared<Lock<Pool<SurfaceSlot>>>,
     ) -> Result<WgpuPendingDevice, HalError> {
+        // A compatible surface names a surface this instance must still own —
+        // same lookup `create_swapchain` does, so a destroyed or foreign handle
+        // is `InvalidHandle` here too instead of a device that presents nowhere.
+        if let Some(surface) = desc.compatible_surface
+            && surfaces.lock().unwrap().get(surface.cast()).is_none()
+        {
+            return Err(HalError::invalid_handle("surface", surface));
+        }
+
         let advertised = crate::instance::adapter_caps(adapter);
         let missing = advertised.missing(desc.required_features);
         if !missing.is_empty() {
@@ -318,9 +327,12 @@ impl Device for WgpuDevice {
         let slot = pools
             .get(h.cast())
             .ok_or_else(|| HalError::invalid_handle("buffer", h))?;
-        if !slot.memory.is_mappable() {
+        // Only HostUpload is writable here: wgpu's `Queue::write_buffer` is a
+        // host→device copy, and `HostReadback` is mappable but reserved for the
+        // readback ring, exactly as the null backend enforces.
+        if slot.memory != hal::MemoryLocation::HostUpload {
             return Err(HalError::InvalidDescriptor(format!(
-                "write_buffer needs a host-visible buffer; this one is {:?}",
+                "write_buffer needs HostUpload memory, buffer is {:?}",
                 slot.memory
             )));
         }

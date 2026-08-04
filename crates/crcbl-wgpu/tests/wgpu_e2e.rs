@@ -33,12 +33,12 @@ use std::time::{Duration, Instant};
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
-    CommandEncoderDesc, CompositeAlpha, Device, DeviceDesc, Extent3d, Features, Format, HalError,
-    ImageAspect, ImageDesc, ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage,
-    ImageViewDesc, ImageViewType, Instance, LoadOp, MemoryLocation, Offset3d, PipelineLayoutDesc,
-    PresentInfo, PresentMode, PushConstantRange, QueueKind, ReadbackDesc, ReadbackState, Rect2d,
-    RenderPassDesc, ResourceState, ShaderModuleDesc, ShaderStages, StoreOp, SubmitInfo,
-    SurfaceError, SwapchainDesc,
+    CommandEncoderDesc, CompositeAlpha, Device, DeviceDesc, DrawIndirect, Extent3d, Features,
+    Format, HalError, ImageAspect, ImageDesc, ImageSubresourceLayers, ImageSubresourceRange,
+    ImageType, ImageUsage, ImageViewDesc, ImageViewType, Instance, LoadOp, MemoryLocation,
+    Offset3d, PipelineLayoutDesc, PresentInfo, PresentMode, PushConstantRange, QueueKind,
+    ReadbackDesc, ReadbackState, Rect2d, RenderPassDesc, ResourceState, ShaderModuleDesc,
+    ShaderStages, StoreOp, SubmitInfo, SurfaceError, SwapchainDesc,
 };
 use crcbl_wgpu::WgpuInstance;
 
@@ -1167,5 +1167,145 @@ fn a_stale_resolve_handle_is_refused_rather_than_dropped() {
 
     device.destroy_image_view(msaa_view);
     device.destroy_image(msaa);
+    headless.finish();
+}
+
+/// A padded [`DrawIndirect`] stride is wgpu's silent-garbage case: wgpu reads
+/// tightly packed 16-byte argument structs, while `crcbl-vk` honours the
+/// caller's stride — so a padded stride here must fail at `finish` like every
+/// other recording error, never record a draw that reads padding bytes as
+/// argument fields.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_padded_indirect_draw_stride_is_refused_at_finish() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+
+    // A real indirect draw needs a pass to record into and an argument buffer;
+    // no pipeline is needed because the stride check fires before wgpu ever
+    // sees the draw.
+    let format = Format::Rgba8UnormSrgb;
+    let target = device
+        .create_image(&ImageDesc {
+            label: Some("wgpu e2e indirect target"),
+            image_type: ImageType::D2,
+            extent: Extent3d::d2(EXTENT.0, EXTENT.1),
+            format,
+            mip_levels: 1,
+            samples: 1,
+            usage: ImageUsage::COLOR_ATTACHMENT,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a render target");
+    let view = device
+        .create_image_view(&ImageViewDesc {
+            label: Some("wgpu e2e indirect view"),
+            image: target,
+            view_type: ImageViewType::D2,
+            format,
+            range: ImageSubresourceRange::all(format),
+        })
+        .expect("a view of the target");
+    let args = device
+        .create_buffer(&BufferDesc {
+            label: Some("wgpu e2e indirect args"),
+            size: 64,
+            usage: BufferUsage::INDIRECT,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("an argument buffer");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("wgpu e2e padded stride"),
+        queue: headless.queue,
+    });
+    encoder.begin_render_pass(&RenderPassDesc {
+        label: Some("padded stride"),
+        color_attachments: &[ColorAttachment {
+            view,
+            resolve: None,
+            load: LoadOp::Clear,
+            store: StoreOp::Store,
+            clear: ClearValue::color(CLEAR),
+        }],
+        depth_stencil_attachment: None,
+        render_area: Rect2d::from_size(EXTENT.0, EXTENT.1),
+    });
+    // 32 bytes between arguments is twice the tightly packed 16 wgpu reads.
+    encoder.draw_indirect(&DrawIndirect {
+        args,
+        offset: 0,
+        draw_count: 1,
+        stride: 32,
+    });
+    encoder.end_render_pass();
+    let error = encoder
+        .finish()
+        .expect_err("a padded stride would draw from padding bytes, so it must fail at finish");
+    assert!(
+        matches!(error, HalError::Unsupported { .. }),
+        "the padded stride is a wgpu limitation, so the refusal must be Unsupported; got {error}"
+    );
+
+    device.destroy_buffer(args);
+    device.destroy_image_view(view);
+    device.destroy_image(target);
+    headless.finish();
+}
+
+/// A `compatible_surface` naming a surface this instance has already destroyed
+/// is not a surface at all, so `create_device` must refuse it up front — the
+/// null backend's `InvalidHandle`, not a device that quietly presents nowhere.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_destroyed_compatible_surface_is_refused_when_creating_a_device() {
+    let instance = instance();
+    let adapter = instance.adapters().remove(0);
+
+    let target = SurfaceTarget::Offscreen;
+    // SAFETY: `Offscreen` names no platform object at all, so there is nothing
+    // to outlive the surface — exactly as `Headless::open_device` documents.
+    let surface = unsafe { instance.create_surface(&target) }.expect("an offscreen surface");
+    instance.destroy_surface(surface);
+
+    let error = instance
+        .create_device(&DeviceDesc {
+            label: Some("wgpu e2e stale surface"),
+            adapter: adapter.id,
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            compatible_surface: Some(surface),
+        })
+        .expect_err("a surface this instance destroyed is not a compatible surface");
+    assert!(
+        matches!(error, HalError::InvalidHandle { kind, .. } if kind == "surface"),
+        "{error}"
+    );
+}
+
+/// `write_buffer` is only valid for [`MemoryLocation::HostUpload`] memory; a
+/// `HostReadback` buffer is mappable, so the old mappability guard let it
+/// through and uploaded into a buffer the seam reserves for the readback ring.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn write_buffer_refuses_a_host_readback_buffer() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+
+    let readback = device
+        .create_buffer(&BufferDesc {
+            label: Some("wgpu e2e readback-only"),
+            size: 64,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a HostReadback buffer");
+
+    let error = device
+        .write_buffer(readback, 0, &[0u8; 4])
+        .expect_err("write_buffer needs HostUpload memory, and this buffer is HostReadback");
+    assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error}");
+
+    device.destroy_buffer(readback);
     headless.finish();
 }
