@@ -379,10 +379,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   property is on `NSApplication` — and not "constrains it to the screen". The
   backend applied the borderless presentation options _after_ placing the
   window, so every frame it set was immediately thrown away, on both legs of the
-  round trip. `apply_mode` now applies the options before the style mask and the
-  frame, making the frame the last geometry it sets; `appkit::window`'s module
-  docs carry the measurement and the rule, since anyone reordering those
-  statements would otherwise reintroduce it.
+  round trip.
+
+  `apply_mode` now applies the style mask, then the presentation options, then
+  the frame, making the frame the last geometry it sets. The middle position
+  matters as much as the last: applying the options before the style mask
+  changes makes AppKit raise `NSInvalidArgumentException`, and an Objective-C
+  exception unwinding through Rust aborts the process. `appkit::window`'s module
+  docs carry the measurement and all three positions, since anyone reordering
+  those statements would otherwise reintroduce one defect or the other.
 
 - **crcbl-shell** (AppKit): windows no longer take part in **macOS state
   restoration**. `isRestorable` defaults to `YES`, which enrols a window in a

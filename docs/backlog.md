@@ -1226,10 +1226,11 @@ after refresh_presentation (options 0x0) [192,160,640,512]    <- moved and resiz
 `centred([0, 63, 1024, 674], 640x480)` — the creation-time visible frame — is
 `(192, 160)` on both axes. **One mechanism, both directions.**
 
-**The fix is an ordering rule: presentation options first, frame last.**
-`refresh_presentation` now runs before the style mask and the frame rather than
-in a tail after them, so the frame is the last geometry `apply_mode` sets. It is
-correct by construction rather than by repair, and two properties make the
+**The fix is an ordering rule: mask, then options, then frame.**
+`refresh_presentation` now runs between the style mask and the frame rather than
+in a tail after both, so the frame is the last geometry `apply_mode` sets. (The
+middle position rather than the first is its own finding, immediately below.) It
+is correct by construction rather than by repair, and two properties make the
 reordering free: the borderless frame is computed from `-[NSScreen frame]`
 rather than `visibleFrame`, so it does not depend on what the options do; and
 the effective mode, which `refresh_presentation` decides from, is now settled up
@@ -1248,6 +1249,55 @@ call.
 all, and they are what makes a regression obvious: anything added below the arm
 that repositions the window shows up immediately as a frame that changed after
 the arm had set it.
+
+#### The options will not take before the style mask — a third position, paid for separately
+
+The obvious repair for the above was to hoist `refresh_presentation` to the very
+front of `apply_mode`. That put `setPresentationOptions:` before the style mask
+had changed, and **AppKit raised**. The process aborted with `SIGTRAP` — an
+Objective-C exception unwinding through a Rust frame — with the whole
+injected-input suite already green behind it and nothing logged after the
+statement before it.
+
+**The value was not the problem, and that is provable rather than assumed.**
+M1's docs warn that `AutoHideMenuBar` without a Dock bit is an illegal
+combination AppKit raises on, which made it the natural suspect.
+`geometry::presentation_options` is a `const fn` whose only input is a
+two-variant enum and whose only outputs are `PRESENTATION_DEFAULT` (`0x0`) and
+`PRESENTATION_BORDERLESS` (`AutoHideDock | AutoHideMenuBar`, `0x5`). It cannot
+construct the illegal combination at any call site at any time, so _when_ it is
+called cannot change the value's legality. What changed was the window's state
+when the options were applied.
+
+So the rule has **three** positions: `setStyleMask:`, then
+`refresh_presentation`, then `setFrame:`. The frame is last because both of the
+others move the window; the mask is first because the options are not accepted
+while the window is still in the style it is leaving. `apply_mode` now hoists
+the target mask and target frame out of what were two `match` arms so the
+sequence reads as one ordered block — buried in a `match`, the rule was
+expressible twice and enforceable neither time.
+
+#### An Objective-C exception reaching Rust is undefined behaviour, and this backend has now done it
+
+`appkit::mod`'s docs already state the hazard; this is the first time it has
+actually happened, and it happened in CI. Worth recording plainly:
+
+- **Nothing guards it.** There is no `@try`/`@catch` anywhere in this backend
+  and no `extern "C-unwind"` boundary — grepped, not assumed. Every
+  `objc_msgSend` through `appkit::ffi` is a potential abort if the receiver
+  raises. That is a deliberate position rather than an oversight: catching
+  Objective-C exceptions from Rust needs a C shim or `objc_exception_try_enter`,
+  and an `NSException` that has already been thrown has left AppKit's internal
+  state undefined anyway, so surviving one buys very little.
+- **The failure is at least loud.** `SIGTRAP` from an aborted unwind is
+  unmistakable in a CI log, and it takes the process down rather than continuing
+  with corrupted state. What it is not is _diagnosable_ — nothing after the
+  raising statement runs, so any diagnostic printed after the call is a
+  diagnostic that never prints. `refresh_presentation` now logs the value it is
+  about to send **before** sending it, for exactly that reason.
+- **`refresh_presentation` is the one path known to be able to raise**, and it
+  is called from `apply_mode` and from window destruction. The known trigger is
+  applying borderless options before the window carries a borderless style mask.
 
 #### What the eight rounds actually eliminated
 
@@ -1435,10 +1485,12 @@ Decisions and limits worth keeping whatever the run says:
 
 Still uncovered after M5:
 
-- **The click is the last assertion in the session nothing has observed.** Two
-  `Button` events from one injected click, in order. Everything else in
-  `injected_input` has now been seen green on a runner, including the wheel
-  notch, and the session has since run past all of it to the borderless flip.
+- **Everything through the injected-input suite and both pasteboard directions
+  now passes on a runner**, including the click and the wheel notch that were
+  the last unobserved assertions: key, text, arrow, pointer position, raw delta,
+  click, scroll, the in-process pasteboard round trip and the cross-process
+  `pbcopy`/`pbpaste` check, and the resize. **That is every assertion M4 was
+  built for.** What has never completed is the mode round trip after it.
 - **`Borderless { monitor: Some(..) }` lands on the named screen's origin by
   construction and not by observation.** The runner has one display, so a
   backend that ignored the named monitor entirely would pass every assertion in
@@ -1454,10 +1506,11 @@ Still uncovered after M5:
   options change lands relative to it, which nothing has measured. The ordering
   rule in `appkit::window`'s module docs is the thing to re-read before adding a
   test here.
-- **The borderless-origin fix is unrun.** The ordering change and the restored
-  placement assertion both land in the same commit as this entry and neither has
-  executed on a runner. The `apply_mode:` bracket readings are what will say so
-  either way.
+- **The borderless-origin fix is unrun, and its second arrangement doubly so.**
+  The first arrangement — options before the mask — aborted the process; the
+  three-position sequence replacing it has not executed at all, and neither has
+  the restored-placement assertion, which no run has ever reached. The
+  `apply_mode:` and `presentation:` readings are what will say so either way.
 
 - **`injection_skipped` is written and unrun**, because the runner granted
   activation. It stays for the case that produced it, which a developer running

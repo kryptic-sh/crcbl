@@ -32,7 +32,7 @@
 //! titled window where a frameless one fitted. The desktop's display mode is
 //! never touched, which is the whole reason the mode exists.
 //!
-//! # The ordering rule: presentation options first, frame last
+//! # The ordering rule: style mask, then presentation options, then frame
 //!
 //! **Changing an application's `NSApplicationPresentationOptions` repositions
 //! every window of that application back to its creation frame.** Not the
@@ -59,13 +59,32 @@
 //! `[192,160,640,512]` is exactly the frame the window was created at. One
 //! mechanism, both directions.
 //!
-//! **So `refresh_presentation` runs before the style mask and the frame, never
-//! after, and the frame is the last geometry this function sets.** The
-//! `apply_mode:` readings in the tail exist to keep it that way: anything added
-//! below the arm that repositions the window shows up immediately as a frame
-//! that changed after the arm had set it. If you are moving those statements
-//! around, this paragraph is why you cannot put the presentation options back at
-//! the end.
+//! **There are three positions, not two, and the middle one was paid for
+//! separately.** The obvious repair — hoist the options to the very front — put
+//! `setPresentationOptions:` before the style mask ever changed, and AppKit
+//! raised `NSInvalidArgumentException`. An Objective-C exception unwinding
+//! through a Rust frame is undefined behaviour: the process aborted, `SIGTRAP`,
+//! with the whole injected-input suite already green behind it and nothing
+//! logged after the statement before. **The options are not accepted while the
+//! window is still in the style it is leaving.**
+//!
+//! So the sequence is: **`setStyleMask:`, then `refresh_presentation`, then
+//! `setFrame:`.** Both of the first two reposition the window and the third has
+//! to survive, which is why the frame is last; the mask is first because the
+//! options will not take before it. `apply_mode` hoists both the target mask and
+//! the target frame out of what used to be two `match` arms so that this reads
+//! as one ordered block — buried in a `match`, the rule was expressible twice
+//! and enforceable neither time. The `apply_mode:` readings around each step
+//! exist to keep it that way: anything that repositions the window after the
+//! frame shows up immediately as a frame that changed after it was set.
+//!
+//! The value being sent is **not** the thing that raised, and this is provable
+//! rather than assumed: [`geometry::presentation_options`] is a `const fn` whose
+//! only input is a two-variant enum and whose only outputs are
+//! `PRESENTATION_DEFAULT` (`0x0`) and `PRESENTATION_BORDERLESS`
+//! (`AutoHideDock | AutoHideMenuBar`, `0x5`). The illegal lone-menu-bar
+//! combination this crate warns about cannot be constructed by it at any call
+//! site, at any time.
 //!
 //! Three things follow that are worth knowing before reordering anything else.
 //!
@@ -77,13 +96,14 @@
 //!   resolved up front by
 //!   [`borderless_target`](AppKitShell::borderless_target) instead of being read
 //!   back off the window afterwards.
-//! * **The windowed placement has to be captured before the options too**, and
-//!   this is the trap the fix nearly fell into. The saved mask and frame used to
-//!   be read inside the borderless arm, which was safe only because the options
-//!   were applied later; hoisting the options without hoisting the capture would
-//!   have saved the *creation* frame as the way back and swapped one silent
-//!   corruption for another. Anything that reads the window's current geometry
-//!   in this function belongs above `refresh_presentation`.
+//! * **The windowed placement has to be captured before all three**, and this is
+//!   the trap the fix nearly fell into. The saved mask and frame used to be read
+//!   inside the borderless arm, which was safe only because the options were
+//!   applied later; moving the options up without moving the capture would have
+//!   saved the *creation* frame as the way back and swapped one silent
+//!   corruption for another. **Anything that reads the window's current geometry
+//!   in this function belongs above the sequence**, not inside it — the mask
+//!   changes the frame too, so "before the options" is not far enough.
 //!
 //! # Decision: `constrainFrameRect:toScreen:` is overridden, because a game says where its window goes
 //!
@@ -701,119 +721,25 @@ impl AppKitShell {
             self.window_mut(handle)?.saved = Some(captured);
         }
 
-        // **The presentation options go first and the frame goes last, and that
-        // ordering is the whole of this function's correctness.**
-        // `setPresentationOptions:` returns every window of the application to
-        // its creation frame — see the ordering rule in the [module docs](self)
-        // — so a frame applied before it is a frame thrown away. Setting the
-        // effective mode here rather than in a tail is what lets
-        // `refresh_presentation`, which decides from it, run this early.
-        let state = self.window_mut(handle)?;
-        state.effective_mode = match target {
-            Some(screen) => DisplayMode::Borderless {
-                monitor: Some(screen.id),
-            },
-            None => DisplayMode::Windowed,
-        };
-        self.refresh_presentation();
-        log::debug!(
-            "apply_mode: after refresh_presentation (options {:?}) the frame is {:?} — this is \
-             the call that repositions windows, and every frame below it is applied afterwards",
-            // SAFETY: the main thread, with `set_mode`'s pool in scope.
-            unsafe { presentation_options() }.map(|options| format!("{options:#x}")),
-            // SAFETY: a live `NSWindow` this shell owns; `frame` is an accessor.
-            unsafe { ffi::msg_rect(window, ffi::sel(c"frame")) }
-        );
-
-        match mode {
-            DisplayMode::Borderless { monitor } => {
-                // `target` is `Some` for exactly this arm, computed from `mode`
-                // above. The `else` is unreachable and says so rather than
-                // panicking, and matching on `mode` rather than on `target`
-                // keeps the compiler checking this match for exhaustiveness.
-                let Some(screen) = target else {
-                    return Err(ShellError::Backend(
-                        "a borderless mode computed no target screen".to_string(),
-                    ));
-                };
-                let frame = screen.frame;
-                // **The rectangle before it leaves this function.** Whether the
-                // origin is already wrong here or only after `setFrame:` decides
-                // between a conversion bug in `borderless_frame` and something
-                // AppKit did with a correct rectangle, and those need opposite
-                // fixes. The screens it was chosen from go with it, because a
-                // frame that matches none of them is a third answer again.
-                log::debug!(
-                    "borderless: asked for monitor {monitor:?}, computed {frame:?} from screens \
-                     {:?}",
-                    self.screens
-                        .iter()
-                        .map(|screen| (screen.id, screen.frame, screen.visible))
-                        .collect::<Vec<_>>()
-                );
-                // SAFETY: a live window. The mask goes first: `setFrame:` places
-                // the window for the mask it has, and a borderless window's
-                // frame rectangle *is* its content rectangle.
-                unsafe {
-                    // **The first responder across the mask change**, because the
-                    // session reported the window as its own first responder
-                    // after a flip where it had been `CrcblView` before one.
-                    // `setStyleMask:` rebuilds the window's frame view, and if it
-                    // takes the responder with it then every keystroke after a
-                    // mode change goes to the window and the view gets none —
-                    // which is one of the five switches `view` exists to keep on,
-                    // and a worse defect than the origin.
-                    log::debug!(
-                        "borderless: first responder is the content view — before setStyleMask: \
-                         {}",
-                        view_has_focus(window)
-                    );
-                    ffi::msg_set_usize(
-                        window,
-                        ffi::sel(c"setStyleMask:"),
-                        geometry::style_mask(mode, resizable),
-                    );
-                    // The mask the window actually carries when `setFrame:` runs,
-                    // read back rather than assumed: AppKit is entitled to keep
-                    // bits, and a window that is still titled here is a window
-                    // whose frame includes a title bar.
-                    log::debug!(
-                        "borderless: style mask asked {:#x}, window carries {:#x}, first \
-                         responder is the content view {}",
-                        geometry::style_mask(mode, resizable),
-                        ffi::msg_usize(window, ffi::sel(c"styleMask")),
-                        view_has_focus(window)
-                    );
-                    set_frame(window, frame);
-                    // A window that was key stays key, but a borderless one has
-                    // to be told to come forward again on some systems — and
-                    // asking twice costs nothing.
-                    ffi::msg1_void(window, ffi::sel(c"makeKeyAndOrderFront:"), ptr::null_mut());
-                    // **Ordering front was measured not to move the window** —
-                    // a re-assert placed here read `from [0,0,1024,768]`, an
-                    // exact no-op — so the frame above stands as the last word.
-                    // The reading stays because that measurement is the only
-                    // reason the re-assert is absent.
-                    log::debug!(
-                        "borderless: after makeKeyAndOrderFront: the frame is {:?}, first \
-                         responder is the content view {}",
-                        ffi::msg_rect(window, ffi::sel(c"frame")),
-                        view_has_focus(window)
-                    );
-                }
-            }
-            DisplayMode::Windowed => {
+        // **The placement both legs will apply, decided before any of it is
+        // applied.** Hoisting this out of the two arms is what lets the three
+        // AppKit steps below read as the single ordered sequence they have to
+        // be; buried in a `match`, the ordering rule was expressible only twice
+        // and enforceable neither time.
+        let (new_mask, new_frame) = match target {
+            Some(screen) => (geometry::style_mask(mode, resizable), screen.frame),
+            None => {
                 let restored = match self.window_mut(handle)?.saved.take() {
                     Some(saved) => saved,
                     None => {
                         // **A window created borderless has nothing saved**, and
-                        // there is nothing dishonest to do about it: it has
-                        // never had a titled style or a windowed rectangle. So
-                        // one is built — the windowed mask, and
-                        // `WindowDesc::size` centred on the screen it is
-                        // covering. Without this the mask would stay borderless
-                        // while the effective mode said windowed, which is the
-                        // seam reporting a mode the window is not in.
+                        // there is nothing dishonest to do about it: it has never
+                        // had a titled style or a windowed rectangle. So one is
+                        // built — the windowed mask, and `WindowDesc::size`
+                        // centred on the screen it is covering. Without this the
+                        // mask would stay borderless while the effective mode
+                        // said windowed, which is the seam reporting a mode the
+                        // window is not in.
                         let state = self.window(handle)?;
                         let size = geometry::points(state.requested_size);
                         let area = self
@@ -828,26 +754,76 @@ impl AppKitShell {
                         }
                     }
                 };
-                // SAFETY: a live window. Mask first, for the reason the module
-                // docs give: restoring the rectangle under a borderless mask
-                // would put a titled window where a frameless one fitted.
-                unsafe {
-                    log::debug!(
-                        "windowed: restoring mask {:#x} frame {:?}; first responder is the \
-                         content view {}",
-                        restored.mask,
-                        restored.frame,
-                        view_has_focus(window)
-                    );
-                    ffi::msg_set_usize(window, ffi::sel(c"setStyleMask:"), restored.mask);
-                    set_frame(window, restored.frame);
-                    log::debug!(
-                        "windowed: after the restore the frame is {:?}, first responder is the \
-                         content view {}",
-                        ffi::msg_rect(window, ffi::sel(c"frame")),
-                        view_has_focus(window)
-                    );
-                }
+                (restored.mask, restored.frame)
+            }
+        };
+
+        // The effective mode has to be settled before the options, because
+        // `refresh_presentation` decides from it.
+        let state = self.window_mut(handle)?;
+        state.effective_mode = match target {
+            Some(screen) => DisplayMode::Borderless {
+                monitor: Some(screen.id),
+            },
+            None => DisplayMode::Windowed,
+        };
+
+        // ===================================================================
+        // The ordered sequence. **Mask, then options, then frame.** Both of the
+        // first two reposition the window and the third is the one that has to
+        // survive, so the frame is last and nothing below it may move the
+        // window. See the ordering rule in the [module docs](self); this is the
+        // block it is about, and reordering these three lines is how the defect
+        // it describes comes back.
+        // ===================================================================
+
+        // SAFETY: a live window; `setStyleMask:` takes an `NSUInteger`, and the
+        // two accessors beside it take nothing.
+        unsafe {
+            log::debug!(
+                "apply_mode: {mode:?} — before setStyleMask: the frame is {:?}, first responder                  is the content view {}",
+                ffi::msg_rect(window, ffi::sel(c"frame")),
+                view_has_focus(window)
+            );
+            ffi::msg_set_usize(window, ffi::sel(c"setStyleMask:"), new_mask);
+            log::debug!(
+                "apply_mode: style mask asked {new_mask:#x}, window carries {:#x}, the frame is                  {:?}, first responder is the content view {}",
+                ffi::msg_usize(window, ffi::sel(c"styleMask")),
+                ffi::msg_rect(window, ffi::sel(c"frame")),
+                view_has_focus(window)
+            );
+        }
+
+        // **Second, not first and not last.** Last is the original defect, and
+        // it is measured. First — before the mask — is what raised
+        // `NSInvalidArgumentException` through Rust and aborted the process with
+        // SIGTRAP, which is why there are three positions here rather than two.
+        self.refresh_presentation();
+        log::debug!(
+            "apply_mode: after refresh_presentation (options {:?}) the frame is {:?}",
+            // SAFETY: the main thread, with `set_mode`'s pool in scope.
+            unsafe { presentation_options() }.map(|options| format!("{options:#x}")),
+            // SAFETY: a live `NSWindow` this shell owns; `frame` is an accessor.
+            unsafe { ffi::msg_rect(window, ffi::sel(c"frame")) }
+        );
+
+        // **Last.** Everything that repositions a window has now happened.
+        // SAFETY: a live window; `nil` is the documented sender for
+        // `makeKeyAndOrderFront:`.
+        unsafe {
+            set_frame(window, new_frame);
+            if target.is_some() {
+                // A window that was key stays key, but a borderless one has to
+                // be told to come forward again on some systems — and asking
+                // twice costs nothing. Ordering front was measured **not** to
+                // move the window: a re-assert placed after it read
+                // `from [0,0,1024,768]`, an exact no-op.
+                ffi::msg1_void(window, ffi::sel(c"makeKeyAndOrderFront:"), ptr::null_mut());
+                log::debug!(
+                    "apply_mode: after makeKeyAndOrderFront: the frame is {:?}, first responder                      is the content view {}",
+                    ffi::msg_rect(window, ffi::sel(c"frame")),
+                    view_has_focus(window)
+                );
             }
         }
 
@@ -863,7 +839,7 @@ impl AppKitShell {
         // SAFETY of both: a live `NSWindow` this shell owns, on the main thread;
         // `frame` is an accessor.
         log::debug!(
-            "apply_mode: after the {mode:?} arm the frame is {:?}",
+            "apply_mode: after the {mode:?} placement sequence the frame is {:?}",
             unsafe { ffi::msg_rect(window, ffi::sel(c"frame")) }
         );
 

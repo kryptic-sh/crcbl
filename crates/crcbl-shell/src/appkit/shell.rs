@@ -395,13 +395,28 @@ impl AppKitShell {
             DisplayMode::Windowed
         });
         if wanted == self.presentation {
+            log::debug!("presentation: already {wanted:#x}, nothing sent");
             return;
         }
+        // **Printed before the send, not after.** `setPresentationOptions:`
+        // raises on a combination it dislikes, and an Objective-C exception
+        // unwinding into Rust aborts the process — so a line printed afterwards
+        // is a line that never runs on the one occasion it is wanted. This
+        // backend has already paid for a `log::warn!` with no logger behind it
+        // and for a duration where a value belonged; a diagnostic that reports
+        // only on the paths that did not fail is the same defect again.
+        log::debug!(
+            "presentation: setting {wanted:#x} (was {:#x}), borderless windows {borderless}, \
+             {} window(s)",
+            self.presentation,
+            self.windows.len()
+        );
         self.presentation = wanted;
         // SAFETY: `self.app` is the live `NSApplication` singleton, and `wanted`
         // is one of the two combinations `geometry::presentation_options`
         // produces — never the menu-bar bit on its own, which would raise.
         unsafe { ffi::msg_set_usize(self.app, ffi::sel(c"setPresentationOptions:"), wanted) };
+        log::debug!("presentation: {wanted:#x} accepted");
     }
 
     /// Recomputes a window's configuration from AppKit and queues it if it
