@@ -83,8 +83,9 @@ mod macos {
     use std::time::{Duration, Instant};
 
     use crcbl_shell::{
-        CursorIcon, DisplayMode, LogicalSize, PhysicalPoint, PhysicalSize, PointerMode, Shell,
-        ShellBackend, ShellCaps, ShellEvent, SizeConstraints, WindowDesc, WindowId, open_backend,
+        ClipboardContent, ClipboardOffer, CursorIcon, DisplayMode, LogicalSize, MimeType,
+        PhysicalPoint, PhysicalSize, PointerMode, ReceivedMime, Shell, ShellBackend, ShellCaps,
+        ShellEvent, SizeConstraints, WindowDesc, WindowId, open_backend, session_support,
     };
 
     /// How long any one step may take before the session is called stuck.
@@ -122,6 +123,37 @@ mod macos {
             "a session with a window server has at least one screen"
         );
 
+        // The checks that need AppKit *objects* rather than only the
+        // Objective-C runtime, run now that `NSApplication` is up and this is
+        // the main thread. Each of them was, or would have been, a `#[test]`
+        // that passes on a developer's host and fails on the runner — see
+        // `crcbl_shell::session_support`, which states the rule.
+        for (name, outcome) in [
+            (
+                "every cursor shape",
+                session_support::every_cursor_shape_exists(),
+            ),
+            (
+                "the dragged-type registration",
+                session_support::dragged_types_register_on_a_view(),
+            ),
+            (
+                "the general pasteboard",
+                session_support::pasteboard_round_trip(),
+            ),
+        ] {
+            match outcome {
+                Ok(()) => println!("crcbl appkit session: {name} answered"),
+                Err(detail) => panic!("crcbl appkit session: {name} — {detail}"),
+            }
+        }
+
+        // **`accept_drops: true`**, so that the drop path is registered on a
+        // real window rather than only on the throwaway view above. There is no
+        // way to *deliver* a drop from inside this process — a drag comes from
+        // another application's mouse — so what this earns is that nothing
+        // about the registration refuses a window that also has a tracking area
+        // and a first responder.
         let window = shell
             .create_window(&WindowDesc {
                 title: "crcbl appkit session",
@@ -131,7 +163,7 @@ mod macos {
                 mode: DisplayMode::Windowed,
                 resizable: true,
                 visible: true,
-                accept_drops: false,
+                accept_drops: true,
             })
             .expect("create_window");
 
@@ -160,6 +192,7 @@ mod macos {
         shell.surface_target(window).expect("surface_target");
 
         input(&mut shell, window, size);
+        clipboard(&mut shell, window);
 
         let borderless = flip(
             &mut shell,
@@ -286,6 +319,146 @@ mod macos {
             shell.set_cursor(window, cursor).expect("set_cursor");
         }
         println!("crcbl appkit session: pointer modes, cursors and the warp all answered");
+    }
+
+    /// The M3 half: a real round trip through the **system** pasteboard, in
+    /// both formats, through the seam rather than through the FFI.
+    ///
+    /// # What this earns over `session_support::pasteboard_round_trip`
+    ///
+    /// That one proves the pasteboard calls work and that the change count
+    /// advances. This one proves the *seam* does: that
+    /// [`clipboard_offer`](Shell::clipboard_offer) publishes both formats under
+    /// types the reader half finds, that
+    /// [`clipboard_request`](Shell::clipboard_request) answers **exactly once**
+    /// per accepted read with the id it returned, and that the three
+    /// [`ClipboardContent`] outcomes are told apart — a backend that answered
+    /// `Empty` for "I did not look" would pass a bytes-only check and violate
+    /// obligation 5.
+    ///
+    /// It ends by clearing the pasteboard, which is what an empty offer means
+    /// on this platform and is also the state to leave a shared runner in.
+    fn clipboard(shell: &mut Box<dyn Shell>, window: WindowId) {
+        const TEXT: &str = "crcbl M3 — clipboard 🎮";
+        const RON: &str = "(kind:\"node\",id:7)";
+
+        let caps = shell.caps();
+        assert!(caps.contains(ShellCaps::CLIPBOARD), "{caps:?}");
+        assert!(caps.contains(ShellCaps::DRAG_DROP), "{caps:?}");
+        assert!(
+            shell.clipboard_readable(window),
+            "any process may read the general pasteboard at any time, so this backend has \
+             nothing to gate on and must say so"
+        );
+
+        // Both formats at once, which is what `15-windowing.md` specifies: the
+        // text is what TextEdit pastes and the RON is what another Crucible
+        // pastes, from one write.
+        shell
+            .clipboard_offer(
+                window,
+                &[ClipboardOffer::text(TEXT), ClipboardOffer::ron(RON)],
+            )
+            .expect("clipboard_offer");
+
+        let (mime, content) = paste(shell, window, MimeType::TextUtf8);
+        assert_eq!(
+            content.text(),
+            Some(TEXT),
+            "the general pasteboard answered {content:?} for the text that was just written"
+        );
+        assert!(
+            mime.matches(MimeType::TextUtf8),
+            "a pasteboard type is a UTI and not a mime, so the answer must name the format \
+             that was asked for: {mime}"
+        );
+
+        let (_, content) = paste(shell, window, MimeType::CrcblRon);
+        assert_eq!(
+            content.bytes(),
+            Some(RON.as_bytes()),
+            "the engine's own format has to be byte-exact or a pasted scene node will not \
+             parse: {content:?}"
+        );
+
+        // A format nobody published. `Empty` and not `Unavailable`: the
+        // pasteboard was read and holds nothing in that type, which
+        // `ClipboardContent` is explicit is not a failure.
+        let (_, content) = paste(shell, window, MimeType::UriList);
+        assert_eq!(
+            content,
+            ClipboardContent::Empty,
+            "a type nobody wrote is an empty answer, not a failed read"
+        );
+
+        // An empty offer, which on this platform can only mean "clear" — there
+        // is no owner to give up.
+        shell
+            .clipboard_offer(window, &[])
+            .expect("an empty offer clears the pasteboard");
+        let (_, content) = paste(shell, window, MimeType::TextUtf8);
+        assert_eq!(
+            content,
+            ClipboardContent::Empty,
+            "clearContents left {content:?} behind"
+        );
+
+        println!("crcbl appkit session: both formats round-tripped through the system pasteboard");
+    }
+
+    /// Issues one read and pumps until its answer arrives, asserting there is
+    /// **exactly one**.
+    ///
+    /// The pump after the answer is the half that has teeth: obligation 4 is
+    /// "exactly once", and a backend that queued its answer twice would satisfy
+    /// a loop that stopped at the first one.
+    fn paste(
+        shell: &mut Box<dyn Shell>,
+        window: WindowId,
+        mime: MimeType,
+    ) -> (ReceivedMime, ClipboardContent) {
+        let request = shell
+            .clipboard_request(window, mime)
+            .expect("clipboard_request");
+        let started = Instant::now();
+        let mut answers = Vec::new();
+        let mut seen = Vec::new();
+        let collect = |event: ShellEvent, answers: &mut Vec<_>, seen: &mut Vec<_>| {
+            seen.push(event.name());
+            if let ShellEvent::ClipboardData {
+                window: asked,
+                request: id,
+                mime,
+                content,
+            } = event
+            {
+                assert_eq!(asked, window, "an answer named a window nobody asked about");
+                assert_eq!(id, request, "an answer named a request nobody issued");
+                answers.push((mime, content));
+            }
+        };
+        loop {
+            shell.pump(&mut |event| collect(event, &mut answers, &mut seen));
+            if !answers.is_empty() {
+                break;
+            }
+            assert!(
+                started.elapsed() < DEADLINE,
+                "crcbl appkit session: waited {DEADLINE:?} for the answer to {request} \
+                 ({mime}) and nothing arrived; the events that did were {seen:?}"
+            );
+            shell.wait_events(Some(Duration::from_millis(20)));
+        }
+        // One more turn, collecting the same way, so a **second** answer is
+        // caught here rather than left in the queue for whatever pumps next.
+        shell.pump(&mut |event| collect(event, &mut answers, &mut seen));
+        assert_eq!(
+            answers.len(),
+            1,
+            "{request} was answered {} times, and obligation 4 says exactly once: {answers:?}",
+            answers.len()
+        );
+        answers.remove(0)
     }
 
     /// Pumps until the window system reports where the pointer is.

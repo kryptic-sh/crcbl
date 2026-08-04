@@ -370,9 +370,10 @@ impl AppKitShell {
             ffi::msg_void(view, ffi::sel(c"release"));
         }
 
-        // **The three switches without which input does not exist**, and none of
-        // them is visible to a test that calls a responder method itself — see
-        // [`view`](super::view), which is where all four gaps are written out.
+        // **The switches without which input and drops do not exist**, and none
+        // of them is visible to a test that calls a responder method itself —
+        // see [`view`](super::view), which is where all five gaps are written
+        // out.
         //
         // SAFETY: a live window and its live content view.
         unsafe {
@@ -394,6 +395,15 @@ impl AppKitShell {
             // Enter, exit and cursor updates, none of which any other mechanism
             // produces.
             view::add_tracking_area(view);
+            // And the drop gate, which is the same shape: **AppKit sends no
+            // dragging message at all to a view that has not registered**, so
+            // `accept_drops` being off is enforced by the system rather than by
+            // this backend refusing an offer it was given. The shell checks the
+            // flag again when it translates a drop, because registration is a
+            // property of the view and anything in the process could set it.
+            if desc.accept_drops {
+                view::register_dragged_types(view);
+            }
         }
 
         // SAFETY: an autoreleased `NSString`, valid for this pool.

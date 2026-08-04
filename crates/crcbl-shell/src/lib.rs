@@ -360,6 +360,20 @@ pub use wayland::e2e as wayland_test_support;
 #[cfg(all(target_os = "linux", feature = "x11-e2e"))]
 pub use x11::e2e as x11_test_support;
 
+/// Scaffolding for the AppKit window session, `tests/appkit_session.rs`.
+///
+/// Not part of the seam and not for consumers. Behind no feature, unlike the
+/// two above, because the session target is behind none either: `libtest`
+/// always runs a body on a thread it spawns and AppKit is main-thread-only, so
+/// that target owns its `main` and there is no version of it that a feature
+/// flag could turn off.
+///
+/// What it holds is the checks that need a live `NSApplication` **on that
+/// thread** — a distinction P5C has now paid for twice, and which the module's
+/// own docs state as a rule.
+#[cfg(target_os = "macos")]
+pub use appkit::session_support;
+
 pub use backend::{BACKEND_ENV_VAR, ShellBackend, open, open_backend};
 pub use caps::ShellCaps;
 pub use clipboard::{

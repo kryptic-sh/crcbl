@@ -10,10 +10,10 @@
 //!
 //! # What is here, and what is not
 //!
-//! **P5C M1** was the window lifecycle and **M2** added input. M3 is the
-//! pasteboard and drag and drop, M4 the end-to-end pass. What is left is stated
-//! here rather than implied, and [`ShellCaps`](crate::ShellCaps) agrees with it
-//! bit for bit:
+//! **P5C M1** was the window lifecycle, **M2** added input and **M3** the
+//! pasteboard and drag and drop. M4 is the end-to-end pass. What is left is
+//! stated here rather than implied, and [`ShellCaps`](crate::ShellCaps) agrees
+//! with it bit for bit:
 //!
 //! | Area | State |
 //! | --- | --- |
@@ -33,7 +33,10 @@
 //! | [`PointerMode::Confined`](crate::PointerMode) | **never** — macOS has no confine API at all, and every approximation is a warp fighting the user. [`POINTER_CONFINE`](crate::ShellCaps::POINTER_CONFINE) is clear; see [`set_pointer_mode`](crate::Shell::set_pointer_mode) |
 //! | Cursor shapes and hiding | complete — `NSCursor` through `cursorUpdate:`, hiding through a balanced hide count |
 //! | Event timestamps rebased onto the engine clock | complete — [`TimeBase`] |
-//! | `NSPasteboard`, drag and drop | **M3** — [`clipboard_offer`](crate::Shell::clipboard_offer) and [`clipboard_request`](crate::Shell::clipboard_request) refuse |
+//! | `NSPasteboard`, both directions, `public.utf8-plain-text` beside the engine's own format | complete — [`CLIPBOARD`](crate::ShellCaps::CLIPBOARD), see [`pasteboard`] |
+//! | File drops in: `registerForDraggedTypes:`, `NSDraggingDestination`, the `accept_drops` gate | complete — [`DRAG_DROP`](crate::ShellCaps::DRAG_DROP), see [`view`] |
+//! | Drag and drop **out** — starting a drag from a window | **never in this plan** — `docs/plan/15-windowing.md` scopes drag-and-drop to "file paths in (viewer/editor import)", which is what every other backend implements too |
+//! | Lazily provided pasteboard data (`pasteboard:provideDataForType:`) | **never** — structurally unavailable to a shell whose callbacks record rather than act; [`pasteboard`] argues it in full |
 //! | Spaces fullscreen (`toggleFullScreen:`) | **never** — `docs/plan/15-windowing.md` keeps two display modes, and borderless here is a frameless window at screen size |
 //!
 //! # What AppKit does that no other backend models
@@ -149,6 +152,22 @@
 //!     rather than AppKit's — so a warp crosses **two** reflections, one
 //!     window-local and one about the primary display. [`geometry::Flip::point`]
 //!     is the second.
+//! 17. **The clipboard is versioned, not locked, and not owned.** X11 and
+//!     Wayland have an *owner* that serves transfers later; Win32 has content
+//!     plus an exclusive `OpenClipboard` another process can be holding.
+//!     `NSPasteboard` has neither: `setData:forType:` copies the bytes to the
+//!     pasteboard server and `changeCount` records that somebody claimed it. So
+//!     this is the only backend whose clipboard needs no deadline, no retry
+//!     budget and no state carried across a [`pump`](crate::Shell::pump) — and
+//!     the only one where a *write* is assertable as a mechanism rather than
+//!     inferred from a read, which is what [`session_support`] does with it.
+//! 18. **A drop is read through a pasteboard, so it is the same code as a
+//!     paste.** On Win32 a drop is an `HDROP` delivered as a window message and
+//!     shares nothing with the clipboard, which is why that backend has two
+//!     modules. `-[NSDraggingInfo draggingPasteboard]` answers an
+//!     `NSPasteboard`, so this backend has one — the "one implementation, two
+//!     triggers" `docs/plan/15-windowing.md` states for the two Linux backends,
+//!     arriving on a third platform for a reason of its own.
 //!
 //! # Decision: `objc_msgSend` is transmuted per call site, from one place
 //!
@@ -182,6 +201,7 @@
 pub mod events;
 pub mod geometry;
 pub mod keys;
+pub mod pasteboard;
 pub mod pointer;
 
 // The ABI declarations and the pure arithmetic over them are compiled on every
@@ -200,6 +220,8 @@ mod app;
 mod input;
 #[cfg(target_os = "macos")]
 mod monitors;
+#[cfg(target_os = "macos")]
+pub mod session_support;
 #[cfg(target_os = "macos")]
 mod shell;
 #[cfg(target_os = "macos")]
@@ -342,6 +364,8 @@ pub(crate) const fn caps() -> ShellCaps {
         .union(ShellCaps::POINTER_WARP)
         .union(ShellCaps::RAW_POINTER_MOTION)
         .union(ShellCaps::TEXT_IME)
+        .union(ShellCaps::CLIPBOARD)
+        .union(ShellCaps::DRAG_DROP)
 }
 
 #[cfg(test)]
@@ -362,22 +386,21 @@ mod tests {
             ShellCaps::POINTER_WARP,
             ShellCaps::RAW_POINTER_MOTION,
             ShellCaps::TEXT_IME,
+            ShellCaps::CLIPBOARD,
+            ShellCaps::DRAG_DROP,
         ] {
             assert!(caps.contains(present), "{present:?} is implemented");
         }
         // Clear, and each for a reason `Shell::caps` gives on this backend:
         // `FRACTIONAL_SCALE` because macOS has no fractional scale factor at
         // all, `HW_UPSCALE` because the platform can do it and the seam has no
-        // way to ask, `POINTER_CONFINE` because **macOS has no confine API** and
-        // the alternatives are warp-based approximations, and the last two
-        // because M3 owns them. A capability that overstates itself is worse
-        // than one that is missing.
+        // way to ask, and `POINTER_CONFINE` because **macOS has no confine API**
+        // and the alternatives are warp-based approximations. A capability that
+        // overstates itself is worse than one that is missing.
         for absent in [
             ShellCaps::FRACTIONAL_SCALE,
             ShellCaps::HW_UPSCALE,
             ShellCaps::POINTER_CONFINE,
-            ShellCaps::CLIPBOARD,
-            ShellCaps::DRAG_DROP,
         ] {
             assert!(!caps.contains(absent), "{absent:?} is not implemented");
         }

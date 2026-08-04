@@ -42,11 +42,15 @@
 //! | `-[NSWindow makeFirstResponder:view]` | every key event | `sendEvent:` delivers key events to the first responder, which is the window itself by default; a direct `keyDown:` bypasses the question |
 //! | the `NSTrackingArea` | `PointerFocus` in both directions | nothing else produces `mouseEntered:`, so a test that calls it is testing its own call |
 //! | `interpretKeyEvents:` | **all** text, including dead keys | `insertText:` is called *by the input method*; a test that calls it is the input method |
+//! | `-[NSView registerForDraggedTypes:]` | **every** file drop | AppKit sends no `NSDraggingDestination` message to an unregistered view; `performDragOperation:` called by hand reads a pasteboard perfectly well |
 //!
-//! All four are established in [`window`](super::window) and here, and the
+//! All five are established in [`window`](super::window) and here, and the
 //! honest statement about them is in `docs/backlog.md`: they are structural
 //! rather than verified, because verifying them needs injected input at the
-//! session level, which is M4.
+//! session level, which is M4. The registration is the one of the five with a
+//! **readback** — `-[NSView registeredDraggedTypes]` — so it is asserted as a
+//! mechanism in [`session_support`](super::session_support) rather than only
+//! written down.
 //!
 //! # Decision: a real `NSTextInputClient`, not `-[NSEvent characters]`
 //!
@@ -74,6 +78,7 @@
 
 use core::ffi::CStr;
 use core::ptr;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crcbl_core::input::ButtonState;
@@ -82,6 +87,7 @@ use super::app;
 use super::events::RawEvent;
 use super::ffi::{self, Class, Id, Imp, NSPoint, NSRange, NSRect, NSUInteger, ObjcBool, Sel, YES};
 use super::keys;
+use super::pasteboard;
 
 /// The name of the `NSView` subclass this module builds at runtime.
 const VIEW_CLASS: &CStr = c"CrcblView";
@@ -543,6 +549,129 @@ unsafe extern "C" fn cursor_update(view: Id, _cmd: Sel, _event: Id) {
 }
 
 // ---------------------------------------------------------------------------
+// NSDraggingDestination
+// ---------------------------------------------------------------------------
+
+/// `-[NSDraggingInfo draggingLocation]`, in AppKit's window space with Y **up**
+/// — the same space `locationInWindow` is in, and converted the same way.
+///
+/// # Safety
+///
+/// `sender` must be a live object conforming to `NSDraggingInfo`.
+unsafe fn dragging_location(sender: Id) -> NSPoint {
+    // SAFETY: an `NSPoint` is 16 bytes and comes back in registers on both
+    // ABIs, so this is `msg_send` and never `msg_send_stret`.
+    let send: unsafe extern "C" fn(Id, Sel) -> NSPoint = unsafe { ffi::msg_send() };
+    unsafe { send(sender, ffi::sel(c"draggingLocation")) }
+}
+
+/// `draggingEntered:` and `draggingUpdated:` — **`NSDragOperationCopy`, with no
+/// inspection of what is being dragged.**
+///
+/// That is not laziness, it is what `registerForDraggedTypes:` already
+/// guarantees: **AppKit sends no `NSDraggingDestination` message at all for a
+/// drag that carries none of the registered types**, and this backend registers
+/// exactly [`FILE_URL`](super::pasteboard::FILE_URL). So a drag that reaches
+/// here has a file URL on it, and re-deriving that from the pasteboard would be
+/// asking a question the system has already answered — while getting it wrong
+/// would show a "no drop" cursor over a file this backend can perfectly well
+/// accept.
+///
+/// Both selectors share this implementation because the answers must agree:
+/// AppKit reuses `draggingEntered:`'s value only while `draggingUpdated:` is
+/// absent, and a destination that accepted on entry and refused on the next
+/// mouse movement is one whose drop cursor flickers.
+///
+/// # Safety
+///
+/// Called only by AppKit, on an instance of the class built below.
+unsafe extern "C" fn dragging_entered(_view: Id, _cmd: Sel, _sender: Id) -> NSUInteger {
+    ffi::value::DRAG_OPERATION_COPY
+}
+
+/// `prepareForDragOperation:` — **`YES`**.
+///
+/// The last chance to refuse before the drop happens, and there is nothing left
+/// to refuse on: whether the pasteboard yields a usable path is decided in
+/// [`perform_drag_operation`], which is where the answer can also be *reported*.
+/// Implemented rather than left out because a `NO` from the default is the
+/// difference between a drop that does nothing and a drop that is delivered,
+/// and inheriting an answer from `NSView` is not something to leave to a
+/// release note.
+///
+/// # Safety
+///
+/// Called only by AppKit, on an instance of the class built below.
+unsafe extern "C" fn prepare_for_drag_operation(_view: Id, _cmd: Sel, _sender: Id) -> ObjcBool {
+    YES
+}
+
+/// `performDragOperation:` — **the drop itself.**
+///
+/// The paths are read *here*, in the callback, for the reason the Win32
+/// backend's window procedure reads its `HDROP` there: the dragging pasteboard
+/// belongs to the drag and is not valid after this returns. That produces the
+/// one thing a [`RawEvent`] cannot carry — a `Vec<PathBuf>` in a [`Copy`] enum —
+/// so the payload goes into a queue of its own on [`Shared`](super::app::Shared)
+/// and the raw event is a **marker** that keeps the drop in its place in the
+/// event stream, exactly as a text commit's string does.
+///
+/// The payload is pushed **before** the marker, so that a marker is never in
+/// the queue with nothing behind it.
+///
+/// A drag with no local file on it — a URL from a browser, a remote
+/// `file://host/…` — answers `NO`: nothing was accepted, and saying otherwise
+/// would leave the source believing a copy happened.
+///
+/// # Safety
+///
+/// Called only by AppKit, on an instance of the class built below.
+unsafe extern "C" fn perform_drag_operation(view: Id, _cmd: Sel, sender: Id) -> ObjcBool {
+    // SAFETY: AppKit passes a live object conforming to `NSDraggingInfo`; the
+    // pasteboard it answers is autoreleased into the pool `pump` holds.
+    let pasteboard = unsafe { ffi::msg(sender, ffi::sel(c"draggingPasteboard")) };
+    if pasteboard.is_null() {
+        return ffi::NO;
+    }
+    // SAFETY: a live `NSPasteboard`, on the main thread with a pool in scope.
+    let paths: Vec<PathBuf> = unsafe { pasteboard::file_urls(pasteboard) }
+        .iter()
+        .filter_map(|url| pasteboard::path_from_file_url(url))
+        .collect();
+    if paths.is_empty() {
+        return ffi::NO;
+    }
+    // SAFETY: a live view.
+    let window = unsafe { window_of(view) };
+    if window.is_null() {
+        return ffi::NO;
+    }
+    // SAFETY: as above.
+    let delegate = unsafe { delegate_of(view) };
+    if app::with_shared(delegate, |shared| shared.push_drop(window as usize, paths)).is_none() {
+        // The window's delegate has already been cleared, so there is no shell
+        // left to deliver this to — see `delegate_of`.
+        return ffi::NO;
+    }
+    // SAFETY: takes nothing and returns a `CFTimeInterval`. A drag carries no
+    // `NSEvent` and therefore no timestamp of its own, and this is the same
+    // clock `-[NSEvent timestamp]` is measured against — see
+    // [`TimeBase`](super::TimeBase), which is why a reading of *this* clock and
+    // not of `systemUptime` is the one that rebases correctly.
+    let seconds = unsafe { ffi::CACurrentMediaTime() };
+    app::record(
+        delegate,
+        RawEvent::FilesDropped {
+            window: window as usize,
+            // SAFETY: a live `NSDraggingInfo`.
+            location: unsafe { dragging_location(sender) },
+            seconds,
+        },
+    );
+    YES
+}
+
+// ---------------------------------------------------------------------------
 // NSTextInputClient
 // ---------------------------------------------------------------------------
 
@@ -789,6 +918,23 @@ fn bool_imp(implementation: unsafe extern "C" fn(Id, Sel) -> ObjcBool) -> Imp {
     }
 }
 
+/// An `IMP` from the `(id, SEL, id) -> BOOL` shape — the first-mouse answer and
+/// the two halves of a drop's acceptance.
+fn bool_event_imp(implementation: unsafe extern "C" fn(Id, Sel, Id) -> ObjcBool) -> Imp {
+    // SAFETY: as [`event_imp`].
+    unsafe {
+        core::mem::transmute::<unsafe extern "C" fn(Id, Sel, Id) -> ObjcBool, Imp>(implementation)
+    }
+}
+
+/// An `IMP` from the `(id, SEL, id) -> NSDragOperation` shape.
+fn drag_imp(implementation: unsafe extern "C" fn(Id, Sel, Id) -> NSUInteger) -> Imp {
+    // SAFETY: as [`event_imp`].
+    unsafe {
+        core::mem::transmute::<unsafe extern "C" fn(Id, Sel, Id) -> NSUInteger, Imp>(implementation)
+    }
+}
+
 /// An `IMP` from the `(id, SEL) -> NSRange` shape.
 fn range_imp(implementation: unsafe extern "C" fn(Id, Sel) -> NSRange) -> Imp {
     // SAFETY: as [`event_imp`].
@@ -870,9 +1016,14 @@ fn install(class: Class) -> Result<(), String> {
             .expect("the encoding characters contain no NUL");
     let index_for_point = std::ffi::CString::new(format!("Q@:{}", ffi::ENC_POINT))
         .expect("the encoding characters contain no NUL");
+    // `NSDragOperation` is an `NSUInteger`, which encodes as `Q` on a 64-bit
+    // target — the same character `characterIndexForPoint:` returns above, and
+    // the reason both are spelled rather than shared: they are the same width
+    // for different reasons and would change independently.
+    let drag_event = c"Q@:@";
 
     // Every entry is `(selector, implementation, type encoding)`.
-    let methods: [(&CStr, Imp, &CStr); 22] = [
+    let methods: [(&CStr, Imp, &CStr); 26] = [
         (
             c"acceptsFirstResponder",
             bool_imp(accepts_first_responder),
@@ -880,13 +1031,7 @@ fn install(class: Class) -> Result<(), String> {
         ),
         (
             c"acceptsFirstMouse:",
-            // SAFETY: a correctly-typed `extern "C"` function cast to the
-            // runtime's opaque `IMP`, with the matching encoding beside it.
-            unsafe {
-                core::mem::transmute::<unsafe extern "C" fn(Id, Sel, Id) -> ObjcBool, Imp>(
-                    accepts_first_mouse,
-                )
-            },
+            bool_event_imp(accepts_first_mouse),
             bool_event.as_c_str(),
         ),
         (c"keyDown:", event_imp(key_down), void_event),
@@ -910,6 +1055,22 @@ fn install(class: Class) -> Result<(), String> {
         (c"mouseEntered:", event_imp(mouse_entered), void_event),
         (c"mouseExited:", event_imp(mouse_exited), void_event),
         (c"cursorUpdate:", event_imp(cursor_update), void_event),
+        // `NSDraggingDestination`. Unreachable without the
+        // `registerForDraggedTypes:` in `register_dragged_types` below, which
+        // is what makes `WindowDesc::accept_drops` a gate the system enforces
+        // rather than one this backend promises.
+        (c"draggingEntered:", drag_imp(dragging_entered), drag_event),
+        (c"draggingUpdated:", drag_imp(dragging_entered), drag_event),
+        (
+            c"prepareForDragOperation:",
+            bool_event_imp(prepare_for_drag_operation),
+            bool_event.as_c_str(),
+        ),
+        (
+            c"performDragOperation:",
+            bool_event_imp(perform_drag_operation),
+            bool_event.as_c_str(),
+        ),
         (
             c"insertText:replacementRange:",
             // SAFETY: as above.
@@ -1096,6 +1257,49 @@ pub(super) unsafe fn add_tracking_area(view: Id) {
     }
 }
 
+/// Turns a view's file drops on, which is the whole of
+/// [`WindowDesc::accept_drops`](crate::WindowDesc::accept_drops) here.
+///
+/// **The gate is the system's.** No `NSDraggingDestination` message is
+/// delivered to a view that has not registered — the same strength of gate as
+/// Win32's `WS_EX_ACCEPTFILES`, and stronger than Wayland's, where the backend
+/// has to record the refusal itself and answer `accept(null)`. The shell checks
+/// the descriptor's flag again when it translates a drop, for the case the
+/// system cannot cover: registration is a property of a *view*, and anything in
+/// the process could register ours.
+///
+/// Only [`FILE_URL`](super::pasteboard::FILE_URL) is asked for, because that is
+/// the only type this backend can turn into a
+/// [`DroppedFile`](crate::ShellEvent::DroppedFile). Registering for more would
+/// mean accepting drags this view then refuses at `performDragOperation:`,
+/// which shows the user a copy cursor over something that will not drop.
+///
+/// # Safety
+///
+/// `view` must be a live `NSView`, on the main thread, with an autorelease pool
+/// in scope.
+pub(super) unsafe fn register_dragged_types(view: Id) {
+    let Some(class) = ffi::class(c"NSArray") else {
+        log::warn!(
+            "the Objective-C runtime has no NSArray; this window cannot register for file \
+             drops and will receive none"
+        );
+        return;
+    };
+    // SAFETY: an autoreleased string, valid for the caller's pool. `None` is a
+    // type identifier with an interior NUL, which this constant is not.
+    let Some(kind) = (unsafe { ffi::nsstring(pasteboard::FILE_URL) }) else {
+        log::warn!("the dragged-type identifier could not be made into an NSString");
+        return;
+    };
+    // SAFETY: `arrayWithObject:` returns an autoreleased array holding the type,
+    // and `registerForDraggedTypes:` copies the list it is given.
+    unsafe {
+        let types = ffi::msg1(class, ffi::sel(c"arrayWithObject:"), kind);
+        ffi::msg1_void(view, ffi::sel(c"registerForDraggedTypes:"), types);
+    }
+}
+
 /// What can be checked about this class without a window.
 ///
 /// **The class is built by the same function the real path calls**, which is
@@ -1146,6 +1350,14 @@ mod tests {
             c"mouseEntered:",
             c"mouseExited:",
             c"cursorUpdate:",
+            // `NSDraggingDestination`. A missing one here is a drop that is
+            // refused, or one that is accepted and never delivered — and the
+            // registration in `register_dragged_types` would still succeed,
+            // because registering says nothing about what the view implements.
+            c"draggingEntered:",
+            c"draggingUpdated:",
+            c"prepareForDragOperation:",
+            c"performDragOperation:",
         ] {
             // SAFETY: a class is an object, and every object answers
             // `instancesRespondToSelector:`.

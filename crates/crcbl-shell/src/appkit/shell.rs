@@ -9,9 +9,10 @@ use std::rc::Rc;
 use crcbl_core::{Pool, SurfaceTarget};
 
 use crate::{
-    ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode, LogicalSize, MimeType,
-    MonitorId, MonitorInfo, PhysicalPoint, PointerMode, Shell, ShellBackend, ShellCaps, ShellError,
-    ShellEvent, SizeConstraints, WindowConfiguration, WindowDesc, WindowId, WindowState,
+    ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
+    LogicalSize, MimeType, MonitorId, MonitorInfo, PhysicalPoint, PointerMode, ReceivedMime, Shell,
+    ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints, WindowConfiguration,
+    WindowDesc, WindowId, WindowState,
 };
 
 use super::TimeBase;
@@ -21,6 +22,7 @@ use super::ffi::{self, Id, NSRect, Pool as AutoreleasePool, Sel, value};
 use super::geometry;
 use super::input;
 use super::monitors::{self, Screen};
+use super::pasteboard;
 use super::pointer::Visibility;
 use super::window;
 
@@ -103,6 +105,14 @@ pub(super) struct AppWindow {
     cursor: Option<Option<CursorIcon>>,
     /// The pointer mode in effect for this window.
     pub(super) pointer_mode: PointerMode,
+    /// Whether [`WindowDesc::accept_drops`] was set.
+    ///
+    /// The system enforces this already — an unregistered view receives no
+    /// `NSDraggingDestination` message at all — so this is the second half of
+    /// the gate rather than the whole of it, for the case the system cannot
+    /// cover: registration is a property of the *view*, and anything else in
+    /// the process could register ours. See [`view`](super::view).
+    pub(super) accept_drops: bool,
     pub(super) focused: bool,
     close_pending: bool,
 }
@@ -157,6 +167,12 @@ pub struct AppKitShell {
     pub(super) time: TimeBase,
     /// The `+[NSCursor hide]` count this shell holds, kept balanced.
     pub(super) visibility: Visibility,
+    /// The next [`ClipboardRequestId`], which is unique for the session.
+    ///
+    /// A counter rather than a slot map: nothing outlives the
+    /// [`clipboard_request`](Shell::clipboard_request) that issued it, because
+    /// the answer is queued before that call returns — see there.
+    next_request: u32,
     /// Whether this shell currently has the mouse disconnected from the cursor.
     ///
     /// Desktop-wide state, so it is tracked and handed back exactly as the
@@ -214,6 +230,7 @@ impl AppKitShell {
             presentation: value::PRESENTATION_DEFAULT,
             time: TimeBase::at(input::now_seconds()),
             visibility: Visibility::default(),
+            next_request: 1,
             pointer_frozen: false,
             caps: super::caps(),
         };
@@ -268,6 +285,67 @@ impl AppKitShell {
     /// Records the `NSCursor` a window wants, for `cursorUpdate:` to apply.
     pub(super) fn record_cursor(&self, window: usize, cursor: usize) {
         self.shared.set_cursor(window, cursor);
+    }
+
+    /// Claims the paths of the oldest drop delivered on a window.
+    ///
+    /// The drop counterpart of [`shared_text`](Self::shared_text), and for the
+    /// same reason: the marker keeps the drop's place in the stream and the
+    /// paths are queued beside it, because a `Vec<PathBuf>` cannot live in a
+    /// [`Copy`] enum.
+    pub(super) fn shared_drop(&self, window: usize) -> Option<Vec<std::path::PathBuf>> {
+        self.shared.take_drop(window)
+    }
+
+    /// Discards any queued answer to a clipboard read for `window`.
+    ///
+    /// The one case where an accepted read is not answered, and it is
+    /// [obligation 1](Shell) winning over [obligation 4](Shell): an answer names
+    /// the window it was asked for, and emitting one for a handle the consumer
+    /// has already been told is stale is the stronger violation. The X11 and
+    /// Win32 backends both name the same exception.
+    fn drop_clipboard_answers(&mut self, window: WindowId) {
+        self.queue.retain(|event| {
+            !matches!(event, ShellEvent::ClipboardData { window: asked, .. } if *asked == window)
+        });
+    }
+
+    /// The clipboard's content in `mime`, read now.
+    ///
+    /// The whole of the read, and it is synchronous because a pasteboard is
+    /// *content the server holds* rather than an owner to negotiate with — see
+    /// [`pasteboard`](super::pasteboard). The three outcomes are the three
+    /// [`ClipboardContent`] means:
+    ///
+    /// * **AppKit could not be reached at all** — no `NSPasteboard` class, no
+    ///   general pasteboard, a type identifier that could not be made into an
+    ///   `NSString` — is [`Unavailable`](ClipboardContent::Unavailable). There
+    ///   may well be something on the pasteboard; we could not ask.
+    /// * **The type is not there** — [`Empty`](ClipboardContent::Empty), which
+    ///   the seam defines as merging "holds nothing" with "holds nothing in
+    ///   that format". Both are true here and neither is a failure.
+    /// * **Anything else** — [`Bytes`](ClipboardContent::Bytes), possibly
+    ///   empty, which is a successful transfer of nothing.
+    fn read_pasteboard(mime: MimeType) -> ClipboardContent {
+        let kind = pasteboard::pasteboard_type(mime);
+        if kind.contains('\0') {
+            // A type identifier is an `NSString` built from a NUL-terminated
+            // buffer, so an interior NUL would silently truncate it and read
+            // some *other* format. Only `MimeType::Other` can carry one.
+            log::warn!("the pasteboard type for {mime} contains a NUL byte and cannot be named");
+            return ClipboardContent::Unavailable;
+        }
+        // SAFETY: the main thread — a `Shell` is not `Send` — inside the pool
+        // the caller holds.
+        let Some(board) = (unsafe { pasteboard::general() }) else {
+            log::warn!("+[NSPasteboard generalPasteboard] answered nil; nothing can be pasted");
+            return ClipboardContent::Unavailable;
+        };
+        // SAFETY: a live pasteboard, on the main thread with a pool in scope.
+        match unsafe { pasteboard::get(board, kind) } {
+            Some(bytes) => ClipboardContent::Bytes(bytes),
+            None => ClipboardContent::Empty,
+        }
     }
 
     /// Which of the enumerated screens a window is on.
@@ -414,6 +492,7 @@ impl AppKitShell {
                         // SAFETY: the window is closing itself, so only this
                         // shell's own references are released here.
                         unsafe { release_window(removed.window, removed.layer, false) };
+                        self.drop_clipboard_answers(handle);
                         self.queue
                             .push_back(ShellEvent::WindowDestroyed { window: handle });
                         self.refresh_presentation();
@@ -436,6 +515,7 @@ impl AppKitShell {
                 | RawEvent::PointerMotion { .. }
                 | RawEvent::PointerFocus { .. }
                 | RawEvent::Button { .. }
+                | RawEvent::FilesDropped { .. }
                 | RawEvent::Scroll { .. } => self.translate_input(event, handle),
             }
         }
@@ -742,6 +822,21 @@ impl Shell for AppKitShell {
     ///   compose without the answers) and never surfaced, and the candidate
     ///   window is placed at the window's origin rather than at a caret the seam
     ///   does not model. See [`view`](super::view).
+    /// * [`CLIPBOARD`](ShellCaps::CLIPBOARD) — `NSPasteboard`, both directions,
+    ///   with `public.utf8-plain-text` beside the engine's own format so a copy
+    ///   reaches TextEdit and an engine-to-engine copy is lossless. The bytes
+    ///   are handed to the pasteboard server outright rather than promised, so
+    ///   this backend keeps nothing and needs no deadline; the whole argument,
+    ///   including why `pasteboard:provideDataForType:` is structurally
+    ///   unavailable here, is in [`pasteboard`](super::pasteboard).
+    /// * [`DRAG_DROP`](ShellCaps::DRAG_DROP) — `registerForDraggedTypes:` and
+    ///   the `NSDraggingDestination` methods on the content view, honouring
+    ///   [`WindowDesc::accept_drops`](crate::WindowDesc::accept_drops). The bit
+    ///   is **files in**, which is what `docs/plan/15-windowing.md` scopes
+    ///   drag-and-drop to and what the other three backends implement:
+    ///   *starting* a drag is not in the plan on any platform. Registration is
+    ///   what the system gates on, so a window created without the flag cannot
+    ///   receive a drop even in principle.
     ///
     /// # What is clear, and why each one is a decision
     ///
@@ -768,9 +863,6 @@ impl Shell for AppKitShell {
     ///   four where the two capture modes come apart, and
     ///   [`set_pointer_mode`](Shell::set_pointer_mode) refuses
     ///   [`Confined`](PointerMode::Confined) by name.
-    /// * [`CLIPBOARD`](ShellCaps::CLIPBOARD),
-    ///   [`DRAG_DROP`](ShellCaps::DRAG_DROP) — M3. No `NSPasteboard`, no
-    ///   `registerForDraggedTypes:`.
     fn caps(&self) -> ShellCaps {
         self.caps
     }
@@ -857,6 +949,7 @@ impl Shell for AppKitShell {
             saved: None,
             cursor: None,
             pointer_mode: PointerMode::Free,
+            accept_drops: desc.accept_drops,
             focused: false,
             close_pending: false,
         };
@@ -892,6 +985,7 @@ impl Shell for AppKitShell {
         //
         // SAFETY: the objects are this shell's own and are not used afterwards.
         unsafe { release_window(removed.window, removed.layer, true) };
+        self.drop_clipboard_answers(handle);
         self.queue
             .push_back(ShellEvent::WindowDestroyed { window: handle });
         self.refresh_presentation();
@@ -1292,45 +1386,194 @@ impl Shell for AppKitShell {
         }
     }
 
-    /// **Not implemented in this slice.**
+    /// Publishes content on the general pasteboard, or clears it with an empty
+    /// slice.
     ///
-    /// [`CLIPBOARD`](ShellCaps::CLIPBOARD) is clear: `NSPasteboard` is M3.
+    /// Every offer goes under its own pasteboard type —
+    /// [`public.utf8-plain-text`](super::pasteboard::UTF8_PLAIN_TEXT) for text
+    /// and the mime string itself for everything else — so a `[text, ron]` pair
+    /// reaches TextEdit *and* round-trips through another Crucible losslessly.
+    /// The reader picks; see [`pasteboard`](super::pasteboard).
+    ///
+    /// The claim and the declaration are one call, `declareTypes:owner:`, with
+    /// **`owner:nil`**: nothing here is provided lazily, and that module argues
+    /// at length why a lazy owner is structurally unavailable to this backend
+    /// rather than merely unimplemented.
+    ///
+    /// # "Release" means "clear", because that is what a pasteboard has
+    ///
+    /// The seam says an empty slice "releases the clipboard, where the platform
+    /// can express that". X11 and Wayland can: both have an *owner*, and giving
+    /// it up leaves whatever the previous owner published in place. macOS has
+    /// no owner to give up — a pasteboard is content the server holds — so an
+    /// empty slice is `clearContents` and afterwards the pasteboard holds
+    /// nothing rather than holding what it held before. The same answer the
+    /// Win32 backend gives, for the same reason.
+    ///
+    /// # AppKit never returns `NeedsUserInteraction`, and that is complete
+    ///
+    /// [Obligation 6](Shell) says a backend on a platform with no
+    /// user-interaction rule never returns
+    /// [`ShellError::NeedsUserInteraction`]. macOS has no such rule for
+    /// *writing*: any process may claim the general pasteboard at any time,
+    /// with no serial, no timestamp and no focus involved — a background
+    /// process can take it, which Wayland forbids by design. The same sentence
+    /// the X11 and Win32 backends write, and for the same reason.
     ///
     /// # Errors
     ///
-    /// [`ShellError::InvalidWindow`] for a stale handle, otherwise
-    /// [`ShellError::Unsupported`].
+    /// [`ShellError::InvalidWindow`] for a stale handle, or
+    /// [`ShellError::Backend`] if the general pasteboard could not be reached
+    /// or refused every format — which is what a pasteboard claimed by another
+    /// process between the declaration and the write looks like.
     fn clipboard_offer(
         &mut self,
         handle: WindowId,
         offers: &[ClipboardOffer<'_>],
     ) -> Result<(), ShellError> {
+        let _pool = AutoreleasePool::push();
         self.window(handle)?;
-        let _ = offers;
-        Err(ShellError::Unsupported {
-            backend: ShellBackend::AppKit,
-            what: "the clipboard",
-        })
+        // SAFETY: the main thread, with the pool above in scope.
+        let Some(board) = (unsafe { pasteboard::general() }) else {
+            return Err(ShellError::Backend(
+                "+[NSPasteboard generalPasteboard] answered nil, so nothing can be published"
+                    .to_string(),
+            ));
+        };
+
+        // A type with an interior NUL cannot be named, and only
+        // `MimeType::Other` can carry one. Dropped here rather than at the
+        // write, so the declaration and the writes agree about the type list.
+        let types: Vec<&str> = offers
+            .iter()
+            .map(|offer| pasteboard::pasteboard_type(offer.mime))
+            .filter(|kind| {
+                if kind.contains('\0') {
+                    log::warn!("the pasteboard type {kind:?} contains a NUL byte and is skipped");
+                    return false;
+                }
+                true
+            })
+            .collect();
+
+        if types.is_empty() {
+            // Either a release, or a set of offers none of which could be
+            // named. Both leave the pasteboard cleared, which is the honest
+            // state: this process claimed it and published nothing, rather than
+            // leaving somebody else's content under our ownership.
+            //
+            // SAFETY: a live pasteboard, on the main thread.
+            unsafe { pasteboard::clear(board) };
+            if offers.is_empty() {
+                return Ok(());
+            }
+            return Err(ShellError::Backend(
+                "no offered format could be named as a pasteboard type".to_string(),
+            ));
+        }
+
+        // SAFETY: as above, with the pool in scope for the strings this builds.
+        let declared = unsafe { pasteboard::declare(board, &types) };
+        if declared.is_none() {
+            return Err(ShellError::Backend(
+                "declareTypes:owner: could not be built, so the pasteboard was not claimed"
+                    .to_string(),
+            ));
+        }
+
+        let mut published = 0usize;
+        for offer in offers {
+            let kind = pasteboard::pasteboard_type(offer.mime);
+            if !types.contains(&kind) {
+                continue;
+            }
+            if offer.mime == MimeType::TextUtf8 && core::str::from_utf8(offer.bytes).is_err() {
+                // `ClipboardOffer` is explicit that it does not validate. Unlike
+                // Win32's `CF_UNICODETEXT` there is no re-encoding to lose the
+                // bytes in — an `NSData` under `public.utf8-plain-text` carries
+                // them verbatim — but a reader decoding it as UTF-8 will not
+                // get back what was copied, so it is said out loud.
+                log::warn!(
+                    "a text/plain clipboard offer is not valid UTF-8; a reader decoding \
+                     public.utf8-plain-text will not recover these bytes"
+                );
+            }
+            // SAFETY: a live pasteboard this call has just declared `kind` on,
+            // on the main thread with a pool in scope.
+            if unsafe { pasteboard::put(board, kind, offer.bytes) } {
+                published += 1;
+            }
+        }
+        if published == 0 {
+            return Err(ShellError::Backend(
+                "the general pasteboard refused every declared format, so another process \
+                 claimed it mid-write"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 
-    /// **Not implemented in this slice.** See
-    /// [`clipboard_offer`](Self::clipboard_offer).
+    /// Asks for the general pasteboard's content in `mime`.
+    ///
+    /// # Which obligations this satisfies, and how
+    ///
+    /// * **Exactly one answer** ([obligation 4](Shell)): the read happens inside
+    ///   this call and its [`ClipboardData`](ShellEvent::ClipboardData) is
+    ///   queued before it returns, so it is delivered by the next
+    ///   [`pump`](Shell::pump). There is no list of outstanding reads to lose
+    ///   one from. The single exception is the one the X11 and Win32 backends
+    ///   name too — a window destroyed before that pump, where obligation 1
+    ///   wins; see [`drop_clipboard_answers`](Self::drop_clipboard_answers).
+    /// * **Within a bounded time** (also 4): there is **nothing to bound**.
+    ///   `dataForType:` fetches bytes the pasteboard server already holds — the
+    ///   writer copied them in at `setData:forType:` — so this backend has no
+    ///   equivalent of X11's `INCR` deadline, Wayland's pipe timeout or Win32's
+    ///   `OpenClipboard` retry budget. A pasteboard is versioned rather than
+    ///   locked, so there is no exclusive open another process can be holding.
+    /// * **Held rather than answered empty** ([obligation 5](Shell)): there is
+    ///   nothing to hold. Any process may read the general pasteboard at any
+    ///   time — **macOS has neither Wayland's focus gate nor its serial
+    ///   requirement** — so "hold until answerable" collapses to "answer", and
+    ///   the obligation is discharged by answering.
+    ///   [`clipboard_readable`](Shell::clipboard_readable) is therefore left at
+    ///   the trait's provided default, exactly as on X11 and Win32.
+    ///
+    /// # The answer names the format that was asked for
+    ///
+    /// [`ClipboardData::mime`](ShellEvent::ClipboardData) is "the format that
+    /// was delivered, spelled the way the *other* application spelled it". A
+    /// pasteboard type is a **UTI**: `public.utf8-plain-text` is not a mime
+    /// type and a consumer comparing it with [`ReceivedMime::matches`] would
+    /// find no match, so echoing it would break every paste handler for the sake
+    /// of a string the peer did not choose either. There is no peer spelling in
+    /// existence to report, which is the case [`ReceivedMime`] documents as
+    /// answering the request.
     ///
     /// # Errors
     ///
-    /// [`ShellError::InvalidWindow`] for a stale handle, otherwise
-    /// [`ShellError::Unsupported`].
+    /// [`ShellError::InvalidWindow`] for a stale handle. An empty pasteboard is
+    /// an answer, not an error.
     fn clipboard_request(
         &mut self,
         handle: WindowId,
         mime: MimeType,
     ) -> Result<ClipboardRequestId, ShellError> {
+        let _pool = AutoreleasePool::push();
         self.window(handle)?;
-        let _ = mime;
-        Err(ShellError::Unsupported {
-            backend: ShellBackend::AppKit,
-            what: "the clipboard",
-        })
+        let request = ClipboardRequestId(self.next_request);
+        self.next_request = self.next_request.wrapping_add(1);
+        let content = Self::read_pasteboard(mime);
+        // Queued rather than returned, even though it is known now: a consumer
+        // written against the asynchronous shape is one that also works on X11,
+        // where the answer is several round trips away.
+        self.queue_event(ShellEvent::ClipboardData {
+            window: handle,
+            request,
+            mime: ReceivedMime::from(mime),
+            content,
+        });
+        Ok(request)
     }
 }
 

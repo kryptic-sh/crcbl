@@ -681,6 +681,35 @@ the shape of the whole suite:
   the test binary is invoked directly with `--exact <name> --test-threads=1`.
   The serial path in `libtest` does not put the body on the main thread.
 
+**The rule those two findings generalise to, now with a second instance behind
+it: on macOS a test's _thread_ and its _app state_ are part of its
+preconditions, and `#[test]` supplies neither.** M2 shipped a green `#[test]`
+asserting every `CursorIcon`'s `NSCursor` selector exists and answers a non-nil
+object; the `macos-latest` runner failed it with
+`+[NSCursor "arrowCursor"] answered nil`. The selector table was correct — the
+environment was one in which an AppKit **object** cannot be created, because
+`libtest` runs bodies on a spawned thread in a process where `NSApplication` was
+never initialised.
+
+The dividing line, and it is the question to ask before writing any macOS test:
+
+- **The Objective-C runtime is thread-safe and needs no application.**
+  `objc_getClass`, `sel_registerName`, `objc_allocateClassPair`,
+  `class_addMethod`, `objc_msgSend` against Foundation. `appkit::view`'s and
+  `appkit::shell`'s suites are all of this shape and stay `#[test]`s.
+- **CoreGraphics is thread-safe too.** `CGMainDisplayID`,
+  `CGWarpMouseCursorPosition`, `CGAssociateMouseAndMouseCursorPosition` —
+  `appkit::input`'s two remaining tests.
+- **An AppKit object needs both the main thread and `NSApplication`.** Cursors,
+  screens, pasteboards, views, windows. These live in
+  `crcbl_shell::session_support`, called from `tests/appkit_session.rs`, and the
+  M2 cursor test was moved there unchanged.
+
+`session_support`'s functions answer `Result<(), String>` rather than asserting,
+so the failure names the selector or the value that disagreed — which is what
+made the M2 failure diagnosable at a glance and is the same reason `Wake` is a
+named value rather than a duration.
+
 Together those mean a `#[test]` can never drive an AppKit window. **Closed in
 the same commit** by `crates/crcbl-shell/tests/appkit_session.rs`, a
 `harness = false` target that owns its `main` and therefore runs _as_ the
@@ -748,7 +777,19 @@ Not nothing, and it covers the highest-risk item in the backend:
   is real.
 - **That every `NSCursor` selector `pointer::cursor_selector` names exists in
   this AppKit** and answers with a non-nil cursor — the half a host test cannot
-  reach, since it has no `NSCursor` to ask.
+  reach, since it has no `NSCursor` to ask. It is checked from the **session
+  target**, not from a `#[test]`; see the rule below for why the `#[test]`
+  version was green here and red on the runner.
+- **That `CrcblView`'s `registerForDraggedTypes:` really registers, and that a
+  view that never called it accepts nothing.** Read back through
+  `-[NSView registeredDraggedTypes]`, which makes the `accept_drops` gate a
+  mechanism rather than a promise. Also from the session target.
+- **A round trip through the real system pasteboard**, in both formats, twice
+  over: `session_support::pasteboard_round_trip` through the FFI, asserting that
+  `-[NSPasteboard changeCount]` advanced across the write, and the session's own
+  `clipboard()` through the `Shell` seam, asserting that each accepted read is
+  answered **exactly once** and that the three `ClipboardContent` outcomes are
+  told apart.
 - **That `CrcblView` really installs every responder and `NSTextInputClient`
   method and claims the protocol.** The class is built by the same
   `view::view_class` the real path calls, and `objc_allocateClassPair` has no
@@ -794,18 +835,21 @@ counterpart of `SendInput`, which is `CGEventCreateKeyboardEvent` plus
 structural claims rather than observed behaviour. Each is stated with what it
 would take, so M4 has a list rather than a rediscovery.
 
-- **The four switches that make input exist at all**, written out in
-  `appkit::view`'s module docs: `setAcceptsMouseMovedEvents:`,
-  `makeFirstResponder:`, the `NSTrackingArea`, and `interpretKeyEvents:`. These
-  are this platform's shape of the `TranslateMessage` gap the Windows half paid
-  a CI round trip for — **each of them is invisible to a test that calls the
-  responder method itself**, because each governs whether the event is generated
-  or routed rather than what the method does with it. The session pass exercises
-  two of them indirectly: it warps the pointer into the window and requires a
-  `PointerFocus` (the tracking area) or a `PointerMotion` (the accepts-moved
-  flag plus first responder) to come back. **Nothing exercises
-  `interpretKeyEvents:`**, so `TextCommit` is unreached from a real keystroke —
-  exactly the state the Win32 backend was in before its e2e suite found it.
+- **The switches that make input exist at all**, written out in `appkit::view`'s
+  module docs: `setAcceptsMouseMovedEvents:`, `makeFirstResponder:`, the
+  `NSTrackingArea`, and `interpretKeyEvents:` — plus M3's
+  `registerForDraggedTypes:`, which is the one of them with a readback
+  (`-[NSView registeredDraggedTypes]`) and is therefore asserted rather than
+  only written down. These are this platform's shape of the `TranslateMessage`
+  gap the Windows half paid a CI round trip for — **each of them is invisible to
+  a test that calls the responder method itself**, because each governs whether
+  the event is generated or routed rather than what the method does with it. The
+  session pass exercises two of them indirectly: it warps the pointer into the
+  window and requires a `PointerFocus` (the tracking area) or a `PointerMotion`
+  (the accepts-moved flag plus first responder) to come back. **Nothing
+  exercises `interpretKeyEvents:`**, so `TextCommit` is unreached from a real
+  keystroke — exactly the state the Win32 backend was in before its e2e suite
+  found it.
 - **Every type encoding on `CrcblView`'s methods.** The runtime reads them only
   when it forwards a method through an `NSInvocation`, which nothing in this
   crate does and an input method might. A wrong one is a wrong-width read in a
@@ -877,6 +921,84 @@ would take, so M4 has a list rather than a rediscovery.
   wherever both modules do — every host, under `cfg(test)`. The extraction
   itself is a shared module (`crate::keysym`, or a third entry beside
   `linux::keymap`) plus a re-export from `win32::keys` so callers do not churn.
+
+### What M3 could not verify, and what would verify it
+
+M3 is `NSPasteboard` and file drops in. The clipboard half has real coverage —
+see the two round trips listed above — so what is left is the drop half and two
+edges.
+
+- **No drop has ever been delivered.** A drag comes from another application's
+  mouse, so nothing inside this process can produce one: what is verified is
+  that `CrcblView` implements the four `NSDraggingDestination` methods, that
+  `registerForDraggedTypes:` registers exactly `public.file-url`, and that a
+  view which never registered accepts nothing. What is **not** verified is that
+  `performDragOperation:` is reached, that `-[NSDraggingInfo draggingLocation]`
+  is in the window space this backend converts it as, or that
+  `-[NSPasteboard pasteboardItems]` on a real Finder drag yields one item per
+  file with a `public.file-url` on it. All three are documented behaviour and
+  none has been watched. Closing it is the same lever as M2's input gaps —
+  session-level injected input, `CGEventPost` — plus a source application to
+  drag from, which `CGEventPost` alone does not provide: a drag needs a real
+  mouse-down-and-move over a Finder item. That is a harder problem than key
+  injection and may be M4's honest answer of "not coverable in CI".
+- **Only `public.file-url` is read.** `NSFilenamesPboardType` (deprecated in
+  10.13) and `com.apple.pasteboard.promised-file-url` are not. The promised form
+  is the interesting one: the source has not written the file yet and the
+  receiver has to name a destination directory for it, which the seam has no way
+  to ask for — `ShellEvent::DroppedFile` carries a path that already exists.
+  Closing it is a seam question ("where should a promised drop land?"), not a
+  backend one, and it should be answered once for every platform that has the
+  concept.
+- **macOS 15's pasteboard-access prompt has not been met.** Recent macOS asks
+  the user before an application reads the pasteboard outside an explicit paste
+  action. It gates _reads_, not writes, and it does not turn a read into an
+  error — but if a future runner image shows it, the session's `clipboard()`
+  would block rather than fail, which reads as a hang. Nothing has been
+  observed; this is recorded so that a mysterious ten-second timeout in
+  `paste()` is diagnosed rather than rediscovered. The runner's macOS version is
+  in the job log.
+- **`clipboard_offer` racing another process.** `declareTypes:owner:` claims the
+  pasteboard and `setData:forType:` answers `NO` if ownership changed in
+  between; the backend reports that as `ShellError::Backend` naming it. Reasoned
+  from the documented return, not observed — producing it needs two processes
+  writing at once.
+
+### Considered and declined in M3
+
+- **Lazy pasteboard provision (`pasteboard:provideDataForType:`) is not used,
+  and it is structurally unavailable rather than merely unimplemented.** It
+  would save a copy of every payload and it cannot work here for two reasons.
+  The callback arrives on our **main run loop**, driven by the pasteboard server
+  on behalf of a reader in another process — and between two `Shell::pump`s an
+  engine is rendering, so there is no run-loop turn to service it in; every
+  callback in this backend records and returns (see `appkit::events`), and an
+  owner that deferred the answer to the next pump has already handed the reader
+  nothing. And a lazy owner owes the pasteboard a flush before the process exits
+  and must stay messageable until it does, so a shell dropped by a host
+  application that keeps running leaves the server holding an unretained pointer
+  to a freed object. This is the same refusal `win32::clipboard` makes about
+  `WM_RENDERFORMAT`, arriving for the same reason on a second platform. **Do not
+  revisit without a seam that gives the shell a run-loop turn it owns.**
+- **The engine's own format is published under its mime string, not under a
+  `dyn.*` UTI.** `UTTypeCreatePreferredIdentifierForTag` can synthesize a type
+  identifier from a mime type, and the result is opaque, version-dependent, and
+  reaches nothing that `application/x-crcbl+ron` does not — a pasteboard type is
+  an arbitrary string, so the mime is a legal one, it is unique to this engine
+  by construction, and it is byte-identical to what the other three backends
+  name the same format with. Only text uses a system UTI
+  (`public.utf8-plain-text`), because that is the one format other applications
+  have to recognise.
+- **Drag and drop _out_ is not implemented on any backend.**
+  `docs/plan/15-windowing.md` scopes drag-and-drop to "file paths in
+  (viewer/editor import)". Named here only because `NSDraggingSource` is the
+  obvious next thing a reader of `appkit::view` would look for and its absence
+  is a plan decision rather than a gap in this backend.
+- **`clipboard_readable` is left at the trait's provided default.** Any process
+  may read the general pasteboard at any time: macOS has neither Wayland's focus
+  gate nor its serial requirement, so there is nothing to override. The trait
+  method's own documentation already names this shape as the one the default is
+  right for, alongside X11 and Win32.
 
 ### Deliberately not in M1
 

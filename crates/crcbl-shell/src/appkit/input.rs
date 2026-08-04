@@ -275,6 +275,51 @@ impl AppKitShell {
                 });
             }
 
+            RawEvent::FilesDropped {
+                window: key,
+                location,
+                seconds,
+            } => {
+                // **Taken before anything can return.** The payload and its
+                // marker are one drop; leaving the payload behind when the
+                // marker is discarded would hand it to the next marker for this
+                // window, which is a scene importing the assets dropped on the
+                // previous one.
+                let Some(paths) = self.shared_drop(key) else {
+                    return;
+                };
+                if !self.window(window).is_ok_and(|state| state.accept_drops) {
+                    // AppKit sends no dragging message to a view that has not
+                    // registered, so this is the case the system cannot cover:
+                    // something outside this backend registered our view. The
+                    // descriptor said no; that is the answer.
+                    log::debug!(
+                        "discarding a drop of {} file(s) on a window created without accept_drops",
+                        paths.len()
+                    );
+                    return;
+                }
+                let time = self.event_time(seconds);
+                // The drop's own position, converted like every other one.
+                // Deliberately not through `position_of`, which answers `None`
+                // for a locked pointer: a drag cannot happen against a frozen
+                // cursor, and a drop whose position went missing would be one a
+                // consumer could not place in its scene.
+                let position = self
+                    .view_metrics(window)
+                    .map(|(height, scale)| pointer::view_point(location, height, scale));
+                // One event per file, which is what `DroppedFile` documents: a
+                // multi-file drop is several.
+                for path in paths {
+                    self.queue_event(ShellEvent::DroppedFile {
+                        window,
+                        time,
+                        path,
+                        position,
+                    });
+                }
+            }
+
             RawEvent::Scroll {
                 dx,
                 dy,
@@ -495,14 +540,25 @@ fn keysym_of(key_code: Option<KeyCode>, character: Option<char>) -> Keysym {
     character.map_or(Keysym::NONE, keys::keysym_from_character)
 }
 
-/// What a real Mac can be asked without a window.
+/// What a real Mac can be asked from a `libtest` thread.
 ///
 /// Almost nothing in this module can be: it needs `&mut self` on a shell, and a
-/// shell cannot exist on a `libtest` thread — see
-/// [`shell`](super::shell)'s own test module for that measurement. **Two things
-/// can**, because they are CoreGraphics rather than AppKit and CoreGraphics is
-/// thread-safe: the warp and the freeze. They are also the two calls in this
+/// shell cannot exist on a spawned thread — see [`shell`](super::shell)'s own
+/// test module for that measurement. **Two things can**, because they are
+/// CoreGraphics rather than AppKit, and CoreGraphics is thread-safe and needs
+/// no application: the warp and the freeze. They are also the two calls in this
 /// slice whose failure would be silent, so they are the two worth reaching.
+///
+/// # What used to be here, and why it is not
+///
+/// A third test asserted that every [`CursorIcon`]'s `NSCursor` selector exists
+/// and answers a real object. It was green on the host and **failed on the
+/// macOS runner** with `+[NSCursor "arrowCursor"] answered nil`: an AppKit
+/// object needs `NSApplication` and the main thread, and a `#[test]` supplies
+/// neither. It now lives in
+/// [`session_support::every_cursor_shape_exists`](super::session_support::every_cursor_shape_exists),
+/// where both hold, with the same assertion and the same message. That module
+/// states the rule the two failures together establish.
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
@@ -594,45 +650,5 @@ mod tests {
              so pointer lock cannot work on this runner"
         );
         assert_eq!(reconnected, 0, "and it would not give the cursor back");
-    }
-
-    #[test]
-    fn every_cursor_shape_this_backend_names_exists_in_this_appkit() {
-        // `cursor_selector` is a table of selectors checked on a host that has
-        // no `NSCursor`; this is where the other half is checked. A shape naming
-        // a method Apple removed — or one this table spelled wrong — would
-        // otherwise be a `nil` cursor and a `set` that does nothing.
-        let _pool = super::super::ffi::Pool::push();
-        let class = ffi::class(c"NSCursor").expect("AppKit is linked");
-        for shape in [
-            CursorIcon::Default,
-            CursorIcon::Pointer,
-            CursorIcon::Text,
-            CursorIcon::Crosshair,
-            CursorIcon::Wait,
-            CursorIcon::Progress,
-            CursorIcon::NotAllowed,
-            CursorIcon::Grab,
-            CursorIcon::Grabbing,
-            CursorIcon::Move,
-            CursorIcon::ResizeNorthSouth,
-            CursorIcon::ResizeEastWest,
-            CursorIcon::ResizeNorthEastSouthWest,
-            CursorIcon::ResizeNorthWestSouthEast,
-            CursorIcon::ResizeColumn,
-            CursorIcon::ResizeRow,
-        ] {
-            let selector = pointer::cursor_selector(shape);
-            // SAFETY: every object answers `respondsToSelector:`, and a class
-            // is an object.
-            assert!(
-                unsafe { ffi::responds_to(class, ffi::sel(selector)) },
-                "+[NSCursor {selector:?}] does not exist, so {shape:?} would be nil"
-            );
-            // SAFETY: the selector exists on this system and is a class method
-            // taking nothing and returning the shared cursor.
-            let cursor = unsafe { ffi::msg(class, ffi::sel(selector)) };
-            assert!(!cursor.is_null(), "+[NSCursor {selector:?}] answered nil");
-        }
     }
 }

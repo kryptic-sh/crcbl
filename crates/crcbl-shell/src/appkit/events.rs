@@ -223,6 +223,31 @@ pub enum RawEvent {
         seconds: f64,
     },
 
+    /// `performDragOperation:` on the content view. **The paths are on
+    /// [`Shared`](super::app::Shared)**, for the reason
+    /// [`TextCommitted`](Self::TextCommitted) says: a `Vec<PathBuf>` cannot
+    /// live in a [`Copy`] enum, and the drop's *place in the stream* still has
+    /// to be kept — a drop that followed the pointer motion which positioned it
+    /// must still follow it.
+    FilesDropped {
+        /// `NSWindow *` as an integer. Also what the payload is matched by, so
+        /// a drop on a window that dies before the pump is discarded with it
+        /// rather than being handed to the next drop's marker.
+        window: usize,
+        /// `-[NSDraggingInfo draggingLocation]`: AppKit's window space, Y
+        /// **up**, exactly as `locationInWindow` is.
+        location: NSPoint,
+        /// [`CACurrentMediaTime`](super::ffi::CACurrentMediaTime) at the drop.
+        ///
+        /// **Not an event's own timestamp, because a drag has none**: it is the
+        /// one thing this backend records that AppKit did not stamp. The clock
+        /// is the one `-[NSEvent timestamp]` is measured against, so it rebases
+        /// through [`TimeBase`](super::TimeBase) like everything else — see
+        /// there for why reading a *different* clock also called uptime would
+        /// put every drop a constant offset from the truth.
+        seconds: f64,
+    },
+
     /// `scrollWheel:`.
     Scroll {
         /// `NSWindow *` as an integer.
@@ -259,6 +284,7 @@ impl RawEvent {
             | Self::PointerMotion { window, .. }
             | Self::PointerFocus { window, .. }
             | Self::Button { window, .. }
+            | Self::FilesDropped { window, .. }
             | Self::Scroll { window, .. } => Some(window),
             Self::ScreensChanged => None,
         }
@@ -520,6 +546,27 @@ mod tests {
         enqueue(&mut queue, commit);
         enqueue(&mut queue, commit);
         assert_eq!(queue, [sample, sample, commit, commit]);
+    }
+
+    #[test]
+    fn a_drop_keeps_its_place_behind_the_motion_that_positioned_it() {
+        // A drop is a marker whose payload is queued beside it, so its position
+        // in the stream is the only thing that says *where* the pointer was
+        // when it happened — and two drops of the same files on the same spot
+        // are two imports, not one. Both are properties of `enqueue` naming
+        // three variants rather than collapsing anything that repeats.
+        let mut queue = Vec::new();
+        let dropped = RawEvent::FilesDropped {
+            window: A,
+            location: NSPoint { x: 12.0, y: 34.0 },
+            seconds: 2.0,
+        };
+        let sample = motion(A, 12.0, 1.9);
+        enqueue(&mut queue, sample);
+        enqueue(&mut queue, dropped);
+        enqueue(&mut queue, dropped);
+        assert_eq!(queue, [sample, dropped, dropped]);
+        assert_eq!(dropped.window(), Some(A));
     }
 
     #[test]

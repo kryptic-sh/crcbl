@@ -16,6 +16,42 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **crcbl-shell**: **the clipboard and file drops on the AppKit backend**, so
+  `ShellCaps::CLIPBOARD` and `ShellCaps::DRAG_DROP` are set there and
+  `clipboard_offer`/`clipboard_request` answer instead of returning
+  `Unsupported`. macOS is now the fourth backend to implement the whole seam.
+
+  A copy publishes every offered format at once under its own `NSPasteboard`
+  type: text under `public.utf8-plain-text`, which is what TextEdit and every
+  other application reads, and the engine's own `application/x-crcbl+ron` under
+  that mime string verbatim — the same spelling the other three backends use, so
+  an engine-to-engine copy is lossless and byte-identical across platforms. An
+  empty offer slice **clears** the pasteboard, because macOS has no owner to
+  release: a pasteboard is content the server holds. Reads answer the three
+  `ClipboardContent` outcomes distinctly, and the answer names the format that
+  was _asked_ for — a pasteboard type is a UTI rather than a mime, so there is
+  no peer spelling to report.
+
+  Nothing is provided lazily and nothing is held after a write:
+  `setData:forType:` copies the bytes to the pasteboard server, so this backend
+  carries no deadline, no retry budget and no state between pumps — the only one
+  of the four whose clipboard needs none of them.
+  `pasteboard:provideDataForType:` is refused for the same structural reason the
+  Win32 backend refuses `WM_RENDERFORMAT`, and `docs/backlog.md` says not to
+  revisit it without a seam change.
+
+  File drops arrive through `registerForDraggedTypes:` and the
+  `NSDraggingDestination` methods on the content view, honouring
+  `WindowDesc::accept_drops` — and there the gate is the **system's**: AppKit
+  sends no dragging message at all to a view that has not registered, which is
+  the same strength as Win32's `WS_EX_ACCEPTFILES` and stronger than Wayland's.
+  Each `public.file-url` goes through the shared `parse_uri_list`, so a
+  percent-encoded name, a `file://localhost/…` authority and a filename that is
+  not valid UTF-8 all behave exactly as they do on the other backends, and a
+  dragged _URL_ is not turned into a path that looks plausible and does not
+  exist. Promised files (`com.apple.pasteboard.promised-file-url`) are not
+  accepted; the seam has no way to name a destination for one.
+
 - **crcbl-shell**: **input on the AppKit backend** — keyboard, text, pointer,
   scroll, relative motion, pointer lock, cursors and warping, so a game is
   playable on macOS rather than merely windowed. `POINTER_LOCK`, `POINTER_WARP`,

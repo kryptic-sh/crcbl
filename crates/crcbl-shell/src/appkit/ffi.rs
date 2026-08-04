@@ -63,7 +63,9 @@
 //! | Not used | What it would buy | Why not |
 //! | --- | --- | --- |
 //! | `toggleFullScreen:` and `NSWindowStyleMaskFullScreen` | Spaces fullscreen | `docs/plan/15-windowing.md` drops exclusive fullscreen and keeps two modes; Spaces fullscreen is a third, with its own animation, its own space and its own failure modes. Borderless here is a frameless window at screen size — see [`window`](super::window) |
-//! | `NSPasteboard`, `registerForDraggedTypes:` | clipboard, drops | M3. [`ShellCaps`](crate::ShellCaps) is clear on every bit they would set |
+//! | `NSPasteboardTypeString` and `NSPasteboardTypeFileURL` as `NSString *` globals | the two type identifiers | they are *values* — `public.utf8-plain-text` and `public.file-url` — and a compatibility contract with every other application, so [`pasteboard`](super::pasteboard) spells them out where a Linux host's tests can read them. Reaching them through a linker symbol would put the one part of the pasteboard mapping that can be silently wrong somewhere no test can see |
+//! | `pasteboard:provideDataForType:` and a non-nil `addTypes:owner:` | lazily provided pasteboard data | the callback has to be answered from a run-loop turn this backend does not own between two [`pump`](crate::Shell::pump)s, and a lazy owner owes the pasteboard a flush before the process exits. [`pasteboard`](super::pasteboard) argues both; it is the same refusal `win32::clipboard` makes about `WM_RENDERFORMAT` |
+//! | `NSFilenamesPboardType`, `com.apple.pasteboard.promised-file-url` | older and promised file drops | deprecated in 10.13 and, for a promise, a file the seam has no way to name a destination directory for. See [`pasteboard`](super::pasteboard) |
 //! | `IOHIDManager`, `IOHIDGetAccelerationWithKey` | genuinely unaccelerated pointer deltas | `NSEvent`'s `deltaX`/`deltaY` carry the system's pointer acceleration and macOS exposes no public way to take it off. Reaching past AppKit into IOKit for it is a slice of its own; [`caps`](super::AppKitShell::caps) states exactly what [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION) does and does not mean here |
 //! | any `_windowResize*Cursor` and `busyButClickableCursor` | diagonal-resize and busy cursors | **private selectors.** `NSCursor`'s public set has no diagonal resize and no wait cursor; [`pointer::cursor_selector`](super::pointer::cursor_selector) names each approximation rather than calling a method Apple does not publish |
 //! | `NSAutoreleasePool` as an object | a scope for autoreleased returns | [`objc_autoreleasePoolPush`]/[`objc_autoreleasePoolPop`] are the same thing without a message send, and are the form that works under ARC and non-ARC alike |
@@ -340,6 +342,18 @@ pub mod value {
     /// pump routes such an event to the key window itself; see
     /// [`AppKitShell::drain_events`](super::AppKitShell).
     pub const EVENT_TYPE_KEY_UP: NSUInteger = 11;
+
+    /// `NSDragOperationCopy` — the only operation this backend ever answers.
+    ///
+    /// The same choice the Wayland backend makes with its `ACTION_COPY` and for
+    /// the same reason: `NSDragOperationMove` promises the source that its own
+    /// copy may be deleted, which an engine importing an asset into a scene
+    /// must never say, and `NSDragOperationGeneric` leaves the source to
+    /// decide. `NSDragOperationNone` is deliberately **not** declared beside
+    /// it: this module is audited by use, and a refusal is expressed by a `NO`
+    /// from `performDragOperation:` rather than by an operation mask — see
+    /// [`view`](super::view).
+    pub const DRAG_OPERATION_COPY: NSUInteger = 1;
 }
 
 /// `NSEventModifierFlags`, and the device-dependent bits underneath them.
