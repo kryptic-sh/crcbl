@@ -207,8 +207,8 @@ impl From<SheetError> for LoadError {
 /// # Errors
 ///
 /// [`LoadError::Png`] if the bytes are not a readable PNG, the image is
-/// larger than this host can address, or the IHDR declares more than
-/// [`MAX_PIXELS`] pixels.
+/// larger than this host can address, or the IHDR declares more pixels than
+/// the ceiling this function applies to the IHDR before allocating.
 pub fn decode_png(bytes: &[u8]) -> Result<Rgba8, LoadError> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(
