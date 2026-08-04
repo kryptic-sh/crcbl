@@ -242,6 +242,17 @@ mod macos {
     /// system is entitled to move or resize before anyone looks at it.
     const REQUESTED: LogicalSize = LogicalSize::new(640.0, 480.0);
 
+    /// How far a reported pointer position may sit from the one that was asked
+    /// for and still be a report *of* it.
+    ///
+    /// One backing pixel per space crossed: a warp lands on a whole display
+    /// pixel and the report comes back through the view's points, so the two
+    /// need not agree exactly. It is also what makes a position *identifying* —
+    /// [`wait_for_pointer`] uses it to tell its own report from somebody
+    /// else's, so it has to stay far smaller than the distance between the
+    /// points this session parks the cursor at.
+    const POINTER_SLACK: f64 = 3.0;
+
     pub fn run() {
         install_logger();
         println!("crcbl appkit session: opening the AppKit backend on the main thread");
@@ -621,19 +632,7 @@ mod macos {
         let target =
             PhysicalPoint::new(f64::from(size.width) * 0.75, f64::from(size.height) * 0.50);
         shell.warp_pointer(window, target).expect("warp_pointer");
-        let landed = wait_for_pointer(shell, quartz::cursor());
-
-        // One backing pixel of slack per space crossed: the warp lands on a
-        // whole display pixel and the report comes back through the view's
-        // points, so the two need not agree exactly.
-        let slack = 3.0;
-        assert!(
-            (landed.x - target.x).abs() <= slack && (landed.y - target.y).abs() <= slack,
-            "warped to {target:?} in a {size:?} window and the window system reported \
-             {landed:?}; a Y that is the window's height minus the one asked for is a \
-             missing flip, and an X that matches while the Y does not is the desktop \
-             reflection rather than the window one"
-        );
+        let landed = wait_for_pointer(shell, quartz::cursor(), target);
         println!("crcbl appkit session: warped to {target:?} and landed at {landed:?}");
     }
 
@@ -1173,7 +1172,7 @@ mod macos {
         let target =
             PhysicalPoint::new(f64::from(size.width) * 0.25, f64::from(size.height) * 0.25);
         shell.warp_pointer(window, target).expect("warp_pointer");
-        let parked = wait_for_pointer(shell, quartz::cursor());
+        let parked = wait_for_pointer(shell, quartz::cursor(), target);
 
         // **Identified by how far it went, not by being the last one.**
         // `wait_for_pointer` posts a move at the parked point on every turn
@@ -1579,12 +1578,42 @@ mod macos {
     /// registered `NSTrackingActiveAlways`, so it fires whether or not this
     /// process is frontmost; `PointerMotion` additionally needs the window to be
     /// **key**, because macOS sends mouse-moved events only to a key window that
-    /// has asked for them. The last one seen wins: a CI runner is a real desktop
-    /// and an event this process did not cause can arrive at any moment, so the
-    /// freshest report is the one that describes where the cursor was put.
-    fn wait_for_pointer(shell: &mut Box<dyn Shell>, post_at: quartz::Point) -> PhysicalPoint {
+    /// has asked for them.
+    ///
+    /// # `want` is what makes a report *this* report, and taking the freshest
+    /// one instead was a flake
+    ///
+    /// This used to accept the first position of any value, on the reasoning
+    /// that the freshest report describes where the cursor was just put. It does
+    /// not, and CI showed it: `warp_round_trip` asked for x = 480 in a 640×480
+    /// window and was told 320, which is the window's exact **centre** —
+    /// `PointerMode::Locked` warps there before it freezes the cursor
+    /// (`appkit::input::centre_pointer`), [`input`] leaves that lock behind
+    /// without pumping, and AppKit re-evaluates its tracking areas against a
+    /// warp. So a truthful report of where the cursor was one step ago was still
+    /// in flight, arrived first, and was read as the answer to a question asked
+    /// after it.
+    ///
+    /// Draining before the warp would not fix it — the window server delivers
+    /// asynchronously, so the stale report need not have *arrived* yet by the
+    /// time anything drains. The position it carries is the only thing that
+    /// distinguishes it, which is the rule the Win32 suite reached first and the
+    /// nudge below already follows: **on a live desktop, identify your own event
+    /// by its payload.**
+    ///
+    /// It keeps its teeth in the direction that matters. A backend that converts
+    /// the position wrongly reports the same wrong point every turn, never
+    /// matches, and fails on the deadline below with every position it saw
+    /// printed — the reflection this exists to catch cannot slip through, since
+    /// [`POINTER_SLACK`] is a few pixels and a reflection is off by hundreds.
+    fn wait_for_pointer(
+        shell: &mut Box<dyn Shell>,
+        post_at: quartz::Point,
+        want: PhysicalPoint,
+    ) -> PhysicalPoint {
         let started = Instant::now();
         let mut seen = Vec::new();
+        let mut reported: Vec<PhysicalPoint> = Vec::new();
         loop {
             quartz::move_mouse(post_at.x, post_at.y);
             let mut landed = None;
@@ -1596,7 +1625,14 @@ mod macos {
                         position: Some(at),
                         ..
                     }
-                    | ShellEvent::PointerMotion { abs: Some(at), .. } => landed = Some(at),
+                    | ShellEvent::PointerMotion { abs: Some(at), .. } => {
+                        reported.push(at);
+                        if (at.x - want.x).abs() <= POINTER_SLACK
+                            && (at.y - want.y).abs() <= POINTER_SLACK
+                        {
+                            landed = Some(at);
+                        }
+                    }
                     _ => {}
                 }
             });
@@ -1605,16 +1641,22 @@ mod macos {
             }
             assert!(
                 started.elapsed() < DEADLINE,
-                "crcbl appkit session: waited {DEADLINE:?} for the pointer to be reported \
-                 somewhere. A kCGEventMouseMoved was posted at {post_at:?} on every turn of \
-                 that wait and the only events that arrived were {seen:?}. What AppKit says \
-                 about this window: {:?}.\n\
-                 Three mechanisms produce this, and they are distinguishable:\n\
-                 * **Nothing was posted.** CGWarpMouseCursorPosition generates no event at \
-                 all, so a wait that relies on the warp alone sees nothing — that is what \
-                 this function was rewritten to stop doing. If the posted move is also \
-                 arriving nowhere, CGEventPost is being refused, which is TCC and which the \
-                 injected keyboard above would have failed on first.\n\
+                "crcbl appkit session: waited {DEADLINE:?} for the pointer to be reported at \
+                 {want:?}. A kCGEventMouseMoved was posted at {post_at:?} on every turn of \
+                 that wait; the positions that came back were {reported:?} and the events \
+                 that arrived were {seen:?}. What AppKit says about this window: {:?}.\n\
+                 Read the reported positions first, because they separate the mechanisms:\n\
+                 * **Positions arrived, none of them {want:?}.** The conversion is wrong \
+                 rather than absent. A Y that is the window's height minus the one asked \
+                 for is a missing flip; an X that matches while the Y does not is the \
+                 desktop reflection rather than the window one; both wrong by the window's \
+                 origin is the screen's space reaching the seam unconverted.\n\
+                 * **No positions at all, and nothing was posted.** \
+                 CGWarpMouseCursorPosition generates no event, so a wait that relies on the \
+                 warp alone sees nothing — that is what this function was rewritten to stop \
+                 doing. If the posted move is also arriving nowhere, CGEventPost is being \
+                 refused, which is TCC and which the injected keyboard above would have \
+                 failed on first.\n\
                  * **No PointerFocus and no PointerMotion, with the post landing.** The \
                  NSTrackingArea is not delivering; it is registered NSTrackingActiveAlways \
                  and NSTrackingInVisibleRect, so it should fire even for an inactive \
