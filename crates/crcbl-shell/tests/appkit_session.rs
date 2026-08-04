@@ -400,6 +400,19 @@ mod macos {
             "a borderless window has no title bar; the style mask is {:#x}",
             covering.style_mask
         );
+        // **The keyboard survives the flip**, asserted here and not only after
+        // the round trip. `setStyleMask:` takes the first responder off the
+        // content view, so a mode change used to leave the window swallowing
+        // every keystroke — and a game goes borderless and *stays* there, so a
+        // responder that came back only on the way out would be a game that is
+        // deaf for exactly as long as anybody is playing it. An end-to-end check
+        // would have passed that.
+        assert_eq!(
+            covering.first_responder, "CrcblView",
+            "a borderless window still routes key events to the view: `sendEvent:` delivers to \
+             the first responder, so the window being its own is every keystroke going nowhere. \
+             {covering:?}"
+        );
         let screen = covering
             .screen_frame
             .expect("a visible window is on a screen");
@@ -479,6 +492,12 @@ mod macos {
         assert_eq!(
             restored.frame, before_borderless,
             "the way back restores the whole placement, origin included, and not merely the size"
+        );
+        // And the keyboard again, because the way back changes the style mask
+        // too and therefore takes the responder a second time.
+        assert_eq!(
+            restored.first_responder, "CrcblView",
+            "and the view still has the keyboard after a full mode round trip: {restored:?}"
         );
 
         shell.destroy_window(window).expect("destroy_window");
@@ -1611,70 +1630,22 @@ mod macos {
 
     /// Asks for a mode and waits until the window system has answered it.
     fn flip(shell: &mut Box<dyn Shell>, window: WindowId, mode: DisplayMode) -> PhysicalSize {
+        shell.set_mode(window, mode).expect("set_mode");
         let what = if matches!(mode, DisplayMode::Windowed) {
             "windowed"
         } else {
             "borderless"
         };
-        shell.set_mode(window, mode).expect("set_mode");
-
-        // **The frame and the first responder on every turn that changes one**,
-        // which is the half of the open borderless-origin question the backend's
-        // own logging cannot answer. `apply_mode` has been shown correct end to
-        // end — it computes the screen rectangle, hands it to `setFrame:`, gets
-        // it back, and still has it after `makeKeyAndOrderFront:` — so whatever
-        // moves the window does it *after* `set_mode` returns, and the only
-        // thing running between there and the assertion is this loop. Reading
-        // before the first pump separates "already wrong on return" from "moved
-        // by a turn of the pump", and naming the events delivered on the turn it
-        // changes says which one.
-        //
-        // The first responder rides along because the same flip is where it
-        // stopped being `CrcblView`, and the two questions have the same shape:
-        // something after `set_mode` changed a property nothing asked it to.
-        let mut last = appkit_says(what);
-        println!(
-            "crcbl appkit session: {what}: set_mode returned with the frame at {:?} and the \
-             first responder {}, before any pump",
-            last.frame, last.first_responder
-        );
-
-        let started = Instant::now();
-        let mut seen = Vec::new();
-        loop {
-            let mut turn = Vec::new();
-            shell.pump(&mut |event: ShellEvent| turn.push(event.name()));
-            seen.extend_from_slice(&turn);
-
-            let now = appkit_says(what);
-            if now.frame != last.frame || now.first_responder != last.first_responder {
-                println!(
-                    "crcbl appkit session: {what}: the frame went {:?} -> {:?} and the first \
-                     responder {} -> {} on the pump turn that delivered {turn:?}",
-                    last.frame, now.frame, last.first_responder, now.first_responder
-                );
-                last = now;
-            }
-
-            let ready = shell.window_state(window).ok().and_then(|state| {
-                // Both halves: the request has to be *honoured*, and there has to
-                // be a size to render at afterwards. A mode that reported success
-                // with no extent behind it would pass on the first check alone.
-                state
-                    .mode_request_honoured()
-                    .then(|| state.size())
-                    .flatten()
-            });
-            if let Some(size) = ready {
-                return size;
-            }
-            assert!(
-                started.elapsed() < DEADLINE,
-                "crcbl appkit session: waited {DEADLINE:?} for {what} and it never came; \
-                 the events that did arrive were {seen:?}"
-            );
-            shell.wait_events(Some(Duration::from_millis(20)));
-        }
+        wait_for(shell, what, |shell| {
+            let state = shell.window_state(window).ok()?;
+            // Both halves: the request has to be *honoured*, and there has to be
+            // a size to render at afterwards. A mode that reported success with
+            // no extent behind it would pass on the first check alone.
+            state
+                .mode_request_honoured()
+                .then(|| state.size())
+                .flatten()
+        })
     }
 
     /// Pumps until `ready` answers, or fails naming the step that did not.

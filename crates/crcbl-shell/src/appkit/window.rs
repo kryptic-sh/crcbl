@@ -123,20 +123,14 @@
 //! net for a frame this backend computed wrongly; what it buys is that a frame
 //! this backend computed *correctly* is the frame the window gets.
 //!
-//! **It is not, however, the explanation for the open borderless-origin
-//! defect.** A window flipped to borderless comes out exactly screen-sized at its
-//! previous windowed origin — nothing in the seam can see that, since
-//! [`WindowState`](crate::WindowState) carries a size and no position — and it
-//! still does with this override installed and verified by
-//! `tests::the_window_class_installs_every_override_a_borderless_window_needs`
-//! on a real runner. The default moves a window *down* to clear the menu bar; it
-//! does not move one right by 192 points.
-//!
-//! Four other mechanisms were eliminated the same way — a corrupted `NSRect`
-//! argument, the event pump, a delegate callback, and macOS state restoration —
-//! and the `log::debug!` trail through [`AppKitShell::apply_mode`] and
-//! [`set_frame`] is what eliminated them. The answer was the ordering rule
-//! above; `docs/backlog.md` carries the whole trail.
+//! **It was not, however, the cause of the borderless-origin defect** — it was
+//! the first of six mechanisms proposed for it and eliminated by measurement,
+//! and it is kept because it is right on its own terms rather than because it
+//! fixed anything. The others were a corrupted `NSRect` argument, the event
+//! pump, a delegate callback, macOS state restoration, and an illegal
+//! presentation-options combination. The answer was the ordering rule above, and
+//! the `log::debug!` trail through [`AppKitShell::apply_mode`] and [`set_frame`]
+//! is what eliminated every one of them; `docs/backlog.md` carries the trail.
 //!
 //! Unlike the Win32 backend there is no `WINDOWPLACEMENT` to save: AppKit's
 //! zoomed state is a property of the window rather than a rectangle to restore,
@@ -603,15 +597,10 @@ impl AppKitShell {
             // exactly as long as somebody is holding a button.
             ffi::msg_set_bool(window, ffi::sel(c"setAcceptsMouseMovedEvents:"), true);
             // `sendEvent:` delivers key events to the first responder, which is
-            // the *window* until something else claims it. `CrcblView` answers
-            // `YES` to `acceptsFirstResponder:` precisely so this can succeed.
-            let make: unsafe extern "C" fn(Id, Sel, Id) -> ObjcBool = ffi::msg_send();
-            if make(window, ffi::sel(c"makeFirstResponder:"), view) == ffi::NO {
-                log::warn!(
-                    "-[NSWindow makeFirstResponder:] refused the content view; this window \
-                     will receive no key events"
-                );
-            }
+            // the *window* until something else claims it. Shared with
+            // `apply_mode`, which has to do it again after every
+            // `setStyleMask:` — see [`focus_content_view`].
+            focus_content_view(window);
             // Enter, exit and cursor updates, none of which any other mechanism
             // produces.
             view::add_tracking_area(view);
@@ -780,14 +769,13 @@ impl AppKitShell {
         // SAFETY: a live window; `setStyleMask:` takes an `NSUInteger`, and the
         // two accessors beside it take nothing.
         unsafe {
-            log::debug!(
-                "apply_mode: {mode:?} — before setStyleMask: the frame is {:?}, first responder                  is the content view {}",
-                ffi::msg_rect(window, ffi::sel(c"frame")),
-                view_has_focus(window)
-            );
             ffi::msg_set_usize(window, ffi::sel(c"setStyleMask:"), new_mask);
+            // The mask the window actually carries, the frame it moved to, and
+            // whether the view still has the keyboard — this one call changes
+            // all three, and each was a defect once.
             log::debug!(
-                "apply_mode: style mask asked {new_mask:#x}, window carries {:#x}, the frame is                  {:?}, first responder is the content view {}",
+                "apply_mode: after setStyleMask: asked {new_mask:#x}, carries {:#x}, frame {:?}, \
+                 view has the keyboard {}",
                 ffi::msg_usize(window, ffi::sel(c"styleMask")),
                 ffi::msg_rect(window, ffi::sel(c"frame")),
                 view_has_focus(window)
@@ -808,8 +796,10 @@ impl AppKitShell {
         );
 
         // **Last.** Everything that repositions a window has now happened.
+        //
         // SAFETY: a live window; `nil` is the documented sender for
-        // `makeKeyAndOrderFront:`.
+        // `makeKeyAndOrderFront:`, and `focus_content_view` documents what it
+        // needs.
         unsafe {
             set_frame(window, new_frame);
             if target.is_some() {
@@ -819,12 +809,21 @@ impl AppKitShell {
                 // move the window: a re-assert placed after it read
                 // `from [0,0,1024,768]`, an exact no-op.
                 ffi::msg1_void(window, ffi::sel(c"makeKeyAndOrderFront:"), ptr::null_mut());
-                log::debug!(
-                    "apply_mode: after makeKeyAndOrderFront: the frame is {:?}, first responder                      is the content view {}",
-                    ffi::msg_rect(window, ffi::sel(c"frame")),
-                    view_has_focus(window)
-                );
             }
+
+            // **The keyboard, last of all.** `setStyleMask:` above takes the
+            // first responder off the content view — measured, on both legs —
+            // and nothing between there and here gives it back, so a mode
+            // change without this leaves the window swallowing every keystroke.
+            //
+            // *Last* rather than immediately after the mask, for the same
+            // reason the frame is last: it is a state that has to survive, and
+            // putting it after everything means nothing in this sequence can
+            // take it away again. It is **not** covered by the rule that reads
+            // of the window's geometry belong above the sequence — it reads the
+            // content view and the responder chain, and neither the mask, the
+            // options nor the frame invalidates those.
+            focus_content_view(window);
         }
 
         // **The tail keeps its bracket readings**, which are what found the
@@ -836,13 +835,6 @@ impl AppKitShell {
         // `refresh_presentation`, which does, has moved above the arm where it
         // belongs.
         //
-        // SAFETY of both: a live `NSWindow` this shell owns, on the main thread;
-        // `frame` is an accessor.
-        log::debug!(
-            "apply_mode: after the {mode:?} placement sequence the frame is {:?}",
-            unsafe { ffi::msg_rect(window, ffi::sel(c"frame")) }
-        );
-
         // SAFETY: a live window.
         let scale = unsafe { backing_scale(window) };
         let state = self.window_mut(handle)?;
@@ -850,9 +842,18 @@ impl AppKitShell {
         // SAFETY: the layer and its host view are alive for as long as the
         // window is, and this is the same thread that created them.
         unsafe { size_layer(state.layer, state.view, scale) };
-        log::debug!("apply_mode: after size_layer the frame is {:?}", unsafe {
-            ffi::msg_rect(window, ffi::sel(c"frame"))
-        });
+
+        // **The state this function promises, read back at its exit.** One
+        // reading rather than the per-statement bracket the hunt needed: the
+        // steps above each print what they changed, so a disagreement here and
+        // agreement there localises a regression to the tail in one run.
+        //
+        // SAFETY: a live `NSWindow` this shell owns, on the main thread.
+        log::debug!(
+            "apply_mode: {mode:?} done — frame {:?}, view has the keyboard {}",
+            unsafe { ffi::msg_rect(window, ffi::sel(c"frame")) },
+            unsafe { view_has_focus(window) }
+        );
         Ok(())
     }
 
@@ -918,6 +919,46 @@ unsafe fn presentation_options() -> Option<usize> {
     // SAFETY: a live `NSApplication`; the accessor takes no arguments and
     // answers an `NSUInteger`.
     (!app.is_null()).then(|| unsafe { ffi::msg_usize(app, ffi::sel(c"presentationOptions")) })
+}
+
+/// Gives the window's content view the first responder, and says so if AppKit
+/// refuses.
+///
+/// # Why this is called more than once
+///
+/// `sendEvent:` delivers key events to the first responder, which is the
+/// *window* until something claims it — so a window that is its own first
+/// responder swallows every keystroke and hands the view none, with nothing
+/// anywhere reporting it. `CrcblView` answers `YES` to `acceptsFirstResponder`
+/// precisely so this can succeed.
+///
+/// Setting it once at creation is not enough: **`setStyleMask:` takes the
+/// responder back.** It rebuilds the window's frame view and the content view
+/// stops being first responder, which was measured on a runner — `true` before
+/// the call and `false` one statement after, on both legs of a mode round trip.
+/// A game that pressed F11 therefore went permanently deaf, and it is the exact
+/// failure this call is on [`view`](super::view)'s list of five switches to
+/// prevent.
+///
+/// # Safety
+///
+/// `window` must be a live `NSWindow` whose content view is set, on the main
+/// thread.
+unsafe fn focus_content_view(window: Id) -> bool {
+    // SAFETY: a live window; `contentView` answers the view the window owns.
+    let view = unsafe { ffi::msg(window, ffi::sel(c"contentView")) };
+    // SAFETY: `makeFirstResponder:` takes a responder and answers `BOOL`.
+    let taken = unsafe {
+        let make: unsafe extern "C" fn(Id, Sel, Id) -> ObjcBool = ffi::msg_send();
+        make(window, ffi::sel(c"makeFirstResponder:"), view) != ffi::NO
+    };
+    if !taken {
+        log::warn!(
+            "-[NSWindow makeFirstResponder:] refused the content view; this window will receive \
+             no key events"
+        );
+    }
+    taken
 }
 
 /// Whether the window's first responder is its own content view.

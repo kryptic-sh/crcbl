@@ -389,6 +389,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   docs carry the measurement and all three positions, since anyone reordering
   those statements would otherwise reintroduce one defect or the other.
 
+- **crcbl-shell** (AppKit): **a mode change took the keyboard away from the
+  view.** `-[NSWindow setStyleMask:]` rebuilds a window's frame view and the
+  content view stops being the first responder — so after a flip to
+  `DisplayMode::Borderless`, or back, `sendEvent:` delivered every key event to
+  the window and `CrcblView` received none. A game that pressed F11 went
+  permanently deaf, silently, with no error anywhere. `apply_mode` now re-claims
+  the first responder after each style-mask change, sharing `focus_content_view`
+  with window creation so the two cannot drift, and the session asserts the view
+  still has the keyboard **after the borderless leg** as well as after a full
+  round trip — a game stays borderless, so a responder restored only on the way
+  out would be a game that is deaf for as long as it is being played.
+
 - **crcbl-shell** (AppKit): windows no longer take part in **macOS state
   restoration**. `isRestorable` defaults to `YES`, which enrols a window in a
   feature this backend cannot honour and should not want: restoration re-creates

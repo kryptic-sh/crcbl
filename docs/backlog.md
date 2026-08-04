@@ -1319,6 +1319,47 @@ argument:
   stays on its own merits, argued in `window.rs`. `frameAutosaveName` was
   `Some("")` throughout, so autosave was never in it.
 
+#### What instrumentation was kept, and what was scaffolding
+
+The hunt left a lot of logging. Kept is whatever would make a _regression_
+diagnosable in one round rather than nine; dropped is whatever only answered a
+question that is now answered.
+
+**Kept:**
+
+- **`set_frame`'s from / asked / landed line, and its warning on mismatch.** The
+  one place a frame can be silently rewritten, and the warning is the only thing
+  that would ever say so — `WindowState` carries no position, so nothing above
+  this layer can notice.
+- **`apply_mode`'s four readings**: the placement capture (the input the restore
+  assertion is checked against, so a failure explains itself), after
+  `setStyleMask:` (which changes the mask, the frame _and_ the responder — each
+  of the three was a defect once), after `refresh_presentation` (the mover), and
+  one at the exit carrying the frame and the responder. Each step prints what it
+  changed, so a disagreement at the exit with agreement above localises a
+  regression to the tail immediately.
+- **`refresh_presentation`'s pre-send line.** That path can raise and abort the
+  process, and a diagnostic printed after a call that can abort is a diagnostic
+  that never runs on the one occasion it is wanted.
+- **`install_logger` in the session.** Without it none of the above exists at
+  all; that lesson has its own section.
+
+**Dropped:**
+
+- **The `set_mode:` bracket in `shell.rs`.** It existed to prove the move
+  happened inside `apply_mode` rather than after it. That is settled, and the
+  line now duplicates `apply_mode`'s own exit reading one frame later.
+- **The session's per-pump-turn frame and responder tracking in `flip`.** Built
+  to answer "which turn does it change on", which turned out to be "none — it is
+  wrong before the first pump". `flip` is back to `wait_for`, and the assertions
+  on the snapshots either side of each leg cover what it was watching for.
+- **The screens dump in the borderless path**
+  (`computed <rect> from screens [...]`). It existed to test "is
+  `borderless_frame` wrong", which it was not. `set_frame`'s `asked` still names
+  the rectangle that was computed.
+- **The `before setStyleMask:` baseline reading.** The capture line above it
+  already names the frame, and the after-mask line names the delta.
+
 #### The two rules that got there
 
 - **The readback layer earned itself.** `WindowState` carries an extent and no
@@ -1335,53 +1376,47 @@ argument:
   `log::warn!` with no logger behind it is a discarded string. That rule has its
   own section below.
 
-### `setStyleMask:` takes the first responder — open, and next in line
+### `setStyleMask:` takes the first responder, and every mode change had to give it back
 
-The same run that reported the borderless origin also reported
-`first_responder: "NSKVONotifying_CrcblWindow"`. **That is the window**, KVO's
-subclass of `CrcblWindow`. Every earlier run said `CrcblView`, and
-`appkit_agrees` asserts `CrcblView` _before_ the flip and passes — so the
-responder changed at or after the mode change.
+**Fixed.** `sendEvent:` delivers key events to the first responder, which is the
+_window_ until something claims it — so a window that is its own first responder
+swallows every keystroke and hands the view none, with nothing anywhere
+reporting it. `create_native_window` claimed it once with `makeFirstResponder:`,
+and `setStyleMask:` took it straight back.
 
-If that is real it is a **second defect and a more serious one than the
-origin**. `sendEvent:` delivers key events to the first responder; a window that
-is its own first responder receives every keystroke and hands the view none. It
-is precisely the failure `makeFirstResponder:` is on `appkit::view`'s list of
-five to prevent, it would arrive only after a player toggles fullscreen, and
-nothing in the seam would report it — the events simply stop.
-
-**`setStyleMask:` is the mechanism, and that is now observed rather than
-supposed.** The instrumented run reports, on the borderless leg:
+Observed rather than supposed, one statement apart, on both legs:
 
 ```text
 borderless: first responder is the content view — before setStyleMask: true
-borderless: style mask asked 0x0, window carries 0x0, first responder is the content view false
+borderless: style mask asked 0x0, ... first responder is the content view false
 ```
 
-`true` before, `false` after, one statement apart — and the same on the windowed
-leg. Changing the style mask rebuilds the window's frame view and takes the
-first responder with it, and `apply_mode` never re-asserts it. So **every mode
-change silently costs the view the keyboard**, on both legs, and nothing in the
-seam reports it: the events simply stop arriving.
+and the session's own trail across a round trip read
+`CrcblView -> NSKVONotifying_CrcblWindow -> NSKVONotifying_CrcblWindow`. **A
+game that pressed F11 went permanently deaf**, silently, which is precisely the
+failure `makeFirstResponder:` is on `appkit::view`'s list of five switches to
+prevent — and the second of those five to turn out to be genuinely broken rather
+than merely unverified.
 
-The fix is to re-assert `makeFirstResponder:` after every `setStyleMask:` — the
-same call `create_native_window` already makes once, whose refusal it already
-logs. It is **deliberately not being made yet**: the origin defect is unresolved
-in the same two functions, this session has twice paid for changing a thing and
-a neighbouring thing in one round, and the origin's own fix may move the same
-statements. One change, one answer.
+`focus_content_view` now does it, shared between creation and `apply_mode`
+rather than copied, and it warns when AppKit refuses. Two decisions worth
+keeping:
 
-**It is not asserted yet either**, for the same reason it was not before: the
-origin assertion fires ahead of it, so a responder assertion would not have been
-reached and would have taught nothing. It gets one — `first_responder` back to
-`CrcblView` after a full mode round trip — in the commit that fixes it.
+- **It goes last in the ordered sequence**, after the frame and after
+  `makeKeyAndOrderFront:`, for the same reason the frame is late: it is a state
+  that has to survive, and putting it after everything means nothing in the
+  sequence can take it away again.
+- **It is exempt from the "reads of window geometry go above the sequence"
+  rule.** It reads the content view and the responder chain, and neither the
+  mask, the options nor the frame invalidates those — so the rule that forced
+  the placement capture upwards does not reach it. Worth stating because the two
+  rules sit in the same function and look alike.
 
-**It is now unblocked.** The origin defect that shared these two functions is
-fixed, so the next change here is re-asserting `makeFirstResponder:` after every
-`setStyleMask:` on both legs, with that assertion beside it. The
-pointer-identity logging (`first responder is the content view <bool>`) stays
-either way: it is what turned this from a suspicion into an observation, and it
-will show a regression the same way.
+**Asserted after the borderless leg as well as after the round trip**, and the
+first of those is the one with teeth: a game goes borderless and _stays_ there,
+so a responder restored only on the way back out would be a game that is deaf
+for exactly as long as anyone is playing it — and an end-to-end check would have
+passed that happily.
 
 ### `wheel1` is a named parameter, and declaring it variadic scrolled by zero
 
@@ -1483,14 +1518,15 @@ Decisions and limits worth keeping whatever the run says:
   reader most wants to know which optional path actually happened, and nobody on
   this team has a Mac to ask.
 
+**The whole session now passes on a runner, end to end** — every injected event
+(key, text, arrow, pointer position, raw delta, click, scroll), both pasteboard
+directions including the cross-process `pbcopy`/`pbpaste` check, the resize, and
+the mode round trip: borderless covering the screen exactly, and the restore
+landing on the pre-flip frame to the point. What follows is what the session
+still does **not** reach.
+
 Still uncovered after M5:
 
-- **Everything through the injected-input suite and both pasteboard directions
-  now passes on a runner**, including the click and the wheel notch that were
-  the last unobserved assertions: key, text, arrow, pointer position, raw delta,
-  click, scroll, the in-process pasteboard round trip and the cross-process
-  `pbcopy`/`pbpaste` check, and the resize. **That is every assertion M4 was
-  built for.** What has never completed is the mode round trip after it.
 - **`Borderless { monitor: Some(..) }` lands on the named screen's origin by
   construction and not by observation.** The runner has one display, so a
   backend that ignored the named monitor entirely would pass every assertion in
@@ -1506,11 +1542,9 @@ Still uncovered after M5:
   options change lands relative to it, which nothing has measured. The ordering
   rule in `appkit::window`'s module docs is the thing to re-read before adding a
   test here.
-- **The borderless-origin fix is unrun, and its second arrangement doubly so.**
-  The first arrangement — options before the mask — aborted the process; the
-  three-position sequence replacing it has not executed at all, and neither has
-  the restored-placement assertion, which no run has ever reached. The
-  `apply_mode:` and `presentation:` readings are what will say so either way.
+- **The first-responder fix is unrun.** `focus_content_view` after every
+  `setStyleMask:`, and the two assertions that guard it, land in the same commit
+  as this entry. Everything else in the session has now been seen green.
 
 - **`injection_skipped` is written and unrun**, because the runner granted
   activation. It stays for the case that produced it, which a developer running
