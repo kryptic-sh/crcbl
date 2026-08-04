@@ -393,6 +393,39 @@ impl AppKitShell {
         // SAFETY: a live window; the setter takes a `BOOL`.
         unsafe { ffi::msg_set_bool(window, ffi::sel(c"setReleasedWhenClosed:"), false) };
 
+        // **Evidence for the open borderless-origin defect**, and the creation
+        // half of it. A window flipped to borderless is landing back at what
+        // looks like a *centred* origin, and `geometry::centred` has exactly one
+        // caller — the line above this. Whether that is the same rectangle is
+        // arithmetic nobody can do without the screen geometry **as it was at
+        // creation**: the flip-time `visibleFrame` is not the creation-time one,
+        // because the Dock and the menu bar move when the application activates.
+        //
+        // The two properties beside it are the other half. Neither is set by this
+        // backend, which is not the same as neither being in force: `isRestorable`
+        // defaults to `YES` and macOS window restoration genuinely does put
+        // windows back where it remembers them, and a non-empty
+        // `frameAutosaveName` does the same out of user defaults. If either is
+        // live, the origin is not this backend's arithmetic at all and the fix is
+        // to turn the feature off rather than to change a formula.
+        //
+        // SAFETY: a live window; `frame` returns an `NSRect`, `isRestorable`
+        // answers `BOOL`, and `frameAutosaveName` an `NSString` the window owns.
+        unsafe {
+            log::debug!(
+                "create: mode {:?} asked {:?} -> content {content:?}, mask {mask:#x}; screen \
+                 frame {:?} visible {:?}; window frame {:?}, isRestorable {}, \
+                 frameAutosaveName {:?}",
+                desc.mode,
+                desc.size,
+                target.map(|screen| screen.frame),
+                target.map(|screen| screen.visible),
+                ffi::msg_rect(window, ffi::sel(c"frame")),
+                ffi::msg_bool(window, ffi::sel(c"isRestorable")),
+                ffi::string_from_nsstring(ffi::msg(window, ffi::sel(c"frameAutosaveName"))),
+            );
+        }
+
         // SAFETY: `alloc` then `initWithFrame:` on `NSView`; the frame is in the
         // window's own coordinates, so the origin is zero whatever the window's
         // screen position is.
@@ -570,6 +603,19 @@ impl AppKitShell {
                 // the window for the mask it has, and a borderless window's
                 // frame rectangle *is* its content rectangle.
                 unsafe {
+                    // **The first responder across the mask change**, because the
+                    // session reported the window as its own first responder
+                    // after a flip where it had been `CrcblView` before one.
+                    // `setStyleMask:` rebuilds the window's frame view, and if it
+                    // takes the responder with it then every keystroke after a
+                    // mode change goes to the window and the view gets none —
+                    // which is one of the five switches `view` exists to keep on,
+                    // and a worse defect than the origin.
+                    log::debug!(
+                        "borderless: first responder is the content view — before setStyleMask: \
+                         {}",
+                        view_has_focus(window)
+                    );
                     ffi::msg_set_usize(
                         window,
                         ffi::sel(c"setStyleMask:"),
@@ -580,9 +626,11 @@ impl AppKitShell {
                     // bits, and a window that is still titled here is a window
                     // whose frame includes a title bar.
                     log::debug!(
-                        "borderless: style mask asked {:#x}, window carries {:#x}",
+                        "borderless: style mask asked {:#x}, window carries {:#x}, first \
+                         responder is the content view {}",
                         geometry::style_mask(mode, resizable),
-                        ffi::msg_usize(window, ffi::sel(c"styleMask"))
+                        ffi::msg_usize(window, ffi::sel(c"styleMask")),
+                        view_has_focus(window)
                     );
                     set_frame(window, frame);
                     // A window that was key stays key, but a borderless one has
@@ -595,8 +643,10 @@ impl AppKitShell {
                     // that is still right here and wrong by the time the session
                     // looks names the pump, and nothing else is left.
                     log::debug!(
-                        "borderless: after makeKeyAndOrderFront: the frame is {:?}",
-                        ffi::msg_rect(window, ffi::sel(c"frame"))
+                        "borderless: after makeKeyAndOrderFront: the frame is {:?}, first \
+                         responder is the content view {}",
+                        ffi::msg_rect(window, ffi::sel(c"frame")),
+                        view_has_focus(window)
                     );
                 }
             }
@@ -630,8 +680,21 @@ impl AppKitShell {
                 // docs give: restoring the rectangle under a borderless mask
                 // would put a titled window where a frameless one fitted.
                 unsafe {
+                    log::debug!(
+                        "windowed: restoring mask {:#x} frame {:?}; first responder is the \
+                         content view {}",
+                        restored.mask,
+                        restored.frame,
+                        view_has_focus(window)
+                    );
                     ffi::msg_set_usize(window, ffi::sel(c"setStyleMask:"), restored.mask);
                     set_frame(window, restored.frame);
+                    log::debug!(
+                        "windowed: after the restore the frame is {:?}, first responder is the \
+                         content view {}",
+                        ffi::msg_rect(window, ffi::sel(c"frame")),
+                        view_has_focus(window)
+                    );
                 }
             }
         }
@@ -686,6 +749,27 @@ impl AppKitShell {
                     "there is no display to place a borderless window on".to_string(),
                 )
             })
+    }
+}
+
+/// Whether the window's first responder is its own content view.
+///
+/// A pointer comparison rather than a class name, because it needs no runtime
+/// entry point this module does not already have and answers the only question
+/// that matters: `sendEvent:` delivers key events to the first responder, and a
+/// window that is its own first responder receives every keystroke and hands the
+/// view none.
+///
+/// # Safety
+///
+/// `window` must be a live `NSWindow`, on the main thread.
+unsafe fn view_has_focus(window: Id) -> bool {
+    // SAFETY: two `NSWindow` accessors on a live window, both answering objects
+    // the window owns.
+    unsafe {
+        let responder = ffi::msg(window, ffi::sel(c"firstResponder"));
+        let content = ffi::msg(window, ffi::sel(c"contentView"));
+        !responder.is_null() && responder == content
     }
 }
 

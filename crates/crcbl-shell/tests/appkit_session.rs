@@ -364,6 +364,13 @@ mod macos {
         // reason and the Win32 suite asserts it for exactly this reason.
         let before_borderless = appkit_says("before going borderless").frame;
 
+        // **Both flips run before either is judged**, and that is not a
+        // loosening — every assertion below is made about the same snapshot it
+        // was made about before, `WindowFacts` being owned data. It is a round
+        // trip: the borderless origin is a known open defect, so asserting it
+        // here would panic before the *restore* ever ran and throw away half the
+        // evidence of a run that costs ten minutes. Both halves are gathered,
+        // then both are checked.
         let borderless = flip(
             &mut shell,
             window,
@@ -374,6 +381,20 @@ mod macos {
         // here is "a frameless window at screen size", and both halves of that
         // are things AppKit will say out loud.
         let covering = appkit_says("borderless");
+
+        let windowed = flip(&mut shell, window, DisplayMode::Windowed);
+        println!("crcbl appkit session: windowed again at {windowed:?}");
+        let restored = appkit_says("windowed again");
+        println!(
+            "crcbl appkit session: the mode round trip — before {before_borderless:?}, \
+             borderless {:?}, restored {:?}; first responder {} -> {} -> {}",
+            covering.frame,
+            restored.frame,
+            facts.first_responder,
+            covering.first_responder,
+            restored.first_responder
+        );
+
         assert!(
             !covering.titled,
             "a borderless window has no title bar; the style mask is {:#x}",
@@ -392,26 +413,39 @@ mod macos {
         // shows it, which is the entire argument for this readback layer: **this
         // is the first defect it caught, and it is the kind only it can catch.**
         //
-        // **`constrainFrameRect:toScreen:` has been ruled out** and does not need
-        // trying again: `CrcblWindow` overrides it, the host test asserting the
-        // override is installed passes on the runner, and the window still comes
-        // out at (192, 160). Its default moves a window *down* to clear the menu
-        // bar, which was never the shape of this failure anyway.
+        // **Two candidate mechanisms are ruled out by evidence and neither
+        // should be tried again.**
+        //
+        // * `constrainFrameRect:toScreen:`. `CrcblWindow` overrides it, the host
+        //   test asserting the override is installed passes on the runner, and
+        //   the window still comes out at (192, 160). Its default moves a window
+        //   *down* to clear the menu bar, which was never this failure's shape.
+        // * A corrupted `NSRect` argument. The backend's own trail reported
+        //   `setFrame:display: from [192,256,512,416] asked [0,0,1024,768]
+        //   landed [0,0,1024,768]` — the rectangle arrived intact and was
+        //   applied, so the HFA-in-`v0`–`v3` theory is dead too.
+        //
+        // **`apply_mode` is correct end to end**: it computes the screen
+        // rectangle, hands it over, gets it back, and still has it after
+        // `makeKeyAndOrderFront:`. Whatever moves the window does it *after*
+        // `set_mode` returns, which is what [`flip`]'s per-turn trace is for.
         assert_eq!(
             covering.frame, screen,
             "borderless covers the screen AppKit says it is on, exactly.\n\
              The window was at {before_borderless:?} before the flip, and everything AppKit says \
-             about it now is {covering:?}.\n\
-             **Read the `crcbl_shell::appkit::window` lines in this test's stderr**, which are \
-             the backend's own account and are what tells the three remaining causes apart:\n\
-             * `borderless: ... computed <rect> from screens [...]` — if that rect is not the \
-             screen's frame, the origin never left the backend and `borderless_frame` is wrong.\n\
-             * `setFrame:display: from <a> asked <b> landed <c>` — if `c` has `b`'s size at \
-             `a`'s origin, the origin was dropped or overruled between the call and AppKit; an \
-             NSRect is an HFA in v0-v3 on this ABI, so a wrong Rust fn type corrupts it exactly \
-             this quietly.\n\
-             * `after makeKeyAndOrderFront: the frame is <rect>` — if that is right and this \
-             assertion is wrong, nothing in apply_mode moved it and the pump did."
+             about it while borderless is {covering:?}.\n\
+             `apply_mode` has already been shown correct end to end, so **read the \
+             `crcbl appkit session: borderless:` trace lines above**, which say which pump turn \
+             changed the frame and what was delivered on it:\n\
+             * a change on a turn carrying a `Resized` or a `Focus` points at a delegate \
+             callback re-applying a frame, which is a backend bug;\n\
+             * a change on a turn carrying nothing points at AppKit itself, and the \
+             `create: ... isRestorable <b>, frameAutosaveName <name>` line says whether window \
+             restoration is live — if it is, the fix is to turn that off rather than to change \
+             any arithmetic;\n\
+             * no change at all, with the frame already wrong on the line printed before the \
+             first pump, means `set_mode` returned with it wrong and the backend trail is \
+             lying about what it saw."
         );
         assert_eq!(
             borderless,
@@ -424,9 +458,6 @@ mod macos {
             covering.backing_scale
         );
 
-        let windowed = flip(&mut shell, window, DisplayMode::Windowed);
-        println!("crcbl appkit session: windowed again at {windowed:?}");
-        let restored = appkit_says("windowed again");
         assert!(
             restored.titled,
             "a windowed window has its title bar back; the style mask is {:#x}",
@@ -1567,22 +1598,70 @@ mod macos {
 
     /// Asks for a mode and waits until the window system has answered it.
     fn flip(shell: &mut Box<dyn Shell>, window: WindowId, mode: DisplayMode) -> PhysicalSize {
-        shell.set_mode(window, mode).expect("set_mode");
         let what = if matches!(mode, DisplayMode::Windowed) {
             "windowed"
         } else {
             "borderless"
         };
-        wait_for(shell, what, |shell| {
-            let state = shell.window_state(window).ok()?;
-            // Both halves: the request has to be *honoured*, and there has to be
-            // a size to render at afterwards. A mode that reported success with
-            // no extent behind it would pass on the first check alone.
-            state
-                .mode_request_honoured()
-                .then(|| state.size())
-                .flatten()
-        })
+        shell.set_mode(window, mode).expect("set_mode");
+
+        // **The frame and the first responder on every turn that changes one**,
+        // which is the half of the open borderless-origin question the backend's
+        // own logging cannot answer. `apply_mode` has been shown correct end to
+        // end — it computes the screen rectangle, hands it to `setFrame:`, gets
+        // it back, and still has it after `makeKeyAndOrderFront:` — so whatever
+        // moves the window does it *after* `set_mode` returns, and the only
+        // thing running between there and the assertion is this loop. Reading
+        // before the first pump separates "already wrong on return" from "moved
+        // by a turn of the pump", and naming the events delivered on the turn it
+        // changes says which one.
+        //
+        // The first responder rides along because the same flip is where it
+        // stopped being `CrcblView`, and the two questions have the same shape:
+        // something after `set_mode` changed a property nothing asked it to.
+        let mut last = appkit_says(what);
+        println!(
+            "crcbl appkit session: {what}: set_mode returned with the frame at {:?} and the \
+             first responder {}, before any pump",
+            last.frame, last.first_responder
+        );
+
+        let started = Instant::now();
+        let mut seen = Vec::new();
+        loop {
+            let mut turn = Vec::new();
+            shell.pump(&mut |event: ShellEvent| turn.push(event.name()));
+            seen.extend_from_slice(&turn);
+
+            let now = appkit_says(what);
+            if now.frame != last.frame || now.first_responder != last.first_responder {
+                println!(
+                    "crcbl appkit session: {what}: the frame went {:?} -> {:?} and the first \
+                     responder {} -> {} on the pump turn that delivered {turn:?}",
+                    last.frame, now.frame, last.first_responder, now.first_responder
+                );
+                last = now;
+            }
+
+            let ready = shell.window_state(window).ok().and_then(|state| {
+                // Both halves: the request has to be *honoured*, and there has to
+                // be a size to render at afterwards. A mode that reported success
+                // with no extent behind it would pass on the first check alone.
+                state
+                    .mode_request_honoured()
+                    .then(|| state.size())
+                    .flatten()
+            });
+            if let Some(size) = ready {
+                return size;
+            }
+            assert!(
+                started.elapsed() < DEADLINE,
+                "crcbl appkit session: waited {DEADLINE:?} for {what} and it never came; \
+                 the events that did arrive were {seen:?}"
+            );
+            shell.wait_events(Some(Duration::from_millis(20)));
+        }
     }
 
     /// Pumps until `ready` answers, or fails naming the step that did not.

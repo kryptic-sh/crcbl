@@ -1223,6 +1223,69 @@ at all. That is the entire argument for judging the window by AppKit's own
 accessors rather than by the backend's record of what it asked for, and it is
 now paid for.
 
+**`apply_mode` is correct end to end — established, not assumed.** The
+instrumented run printed the backend's own account and it is clean at every
+step:
+
+```text
+borderless: asked for monitor None, computed [0,0,1024,768]
+            from screens [(MonitorId(1), frame [0,0,1024,768], visible [0,60,1024,677])]
+borderless: style mask asked 0x0, window carries 0x0
+setFrame:display: from [192,256,512,416] asked [0,0,1024,768] landed [0,0,1024,768]
+borderless: after makeKeyAndOrderFront: the frame is [0,0,1024,768]
+```
+
+and the session then read `frame: [192, 160, 1024, 768]` later. So the rectangle
+is computed right, the mask is right, `setFrame:` is handed the right rectangle
+**and lands it**, and it is still right after the last thing `apply_mode` does.
+**Something moves the window after `set_mode` returns.**
+
+Two mechanisms are dead and neither should be tried again:
+
+- **`constrainFrameRect:toScreen:`.** The override is installed and the host
+  test proving it passes on the runner; the window still lands at (192, 160).
+  Its default moves a window _down_ to clear the menu bar and would never move
+  one right by 192, which was reason to doubt it before the run and is worth
+  weighing next time.
+- **A corrupted `NSRect` argument.** `asked` and `landed` are identical, so the
+  HFA-in-`v0`–`v3` theory — the same class as the `wheel1` variadic that did
+  bite — is ruled out for this call.
+
+**The origin is a centred rectangle, and the arithmetic does not quite close.**
+`geometry::centred` has exactly one caller, the creation path, and with the
+flip-time `visibleFrame` of `[0, 60, 1024, 677]` a 640×480 window centres at x =
+192 — matching — and y = 158.5, which does **not** match the observed 160. A
+1.5-point discrepancy is either rounding or a different formula, and which one
+decides where a fix goes, so it is not being called close enough. The likeliest
+reading is that the creation-time `visibleFrame` was not the flip-time one: the
+Dock and menu bar move when the application activates, and `[0, 64, 1024, 672]`
+would give exactly (192, 160). **That is now logged at creation** — the content
+rectangle, the screen frame and visible frame it was derived from, and the
+window frame that resulted — so the next run can settle it by subtraction
+instead of by inference.
+
+Alongside it, the two AppKit properties that move a window with nobody asking:
+`isRestorable`, which defaults to `YES` and drives real macOS window
+restoration, and `frameAutosaveName`. Neither is set by this backend, which is
+not the same as neither being in force. If either is live, the origin is not
+this backend's arithmetic at all and the fix is to turn the feature off rather
+than to change a formula.
+
+**What the next run adds** is when and on which turn. `flip` in
+`tests/appkit_session.rs` now reads the frame and the first responder before the
+first pump and after every pump turn, and prints the transition together with
+the events delivered on the turn that caused it. A change on a turn carrying a
+`Resized` or `Focus` points at a delegate callback re-applying a frame — a
+backend bug; a change on a turn carrying nothing points at AppKit; no change at
+all, with the frame already wrong before the first pump, would mean the backend
+trail is lying about what it saw.
+
+**Both mode flips now run before either is asserted.** The borderless origin is
+a known open defect, so asserting it in place panicked before the restore ever
+ran and threw away half of every ten-minute round trip. Nothing is weakened —
+every assertion is made about the same `WindowFacts` snapshot as before, since
+those are owned values.
+
 **The cause is not yet known, and the first candidate was wrong.**
 `constrainFrameRect:toScreen:` was the hypothesis:
 `-[NSWindow setFrame:display:]` passes the rectangle it is given through it, and
@@ -1298,6 +1361,42 @@ runtime calls needing no `NSApplication`, so
 superclass's implementation in place and fail silently — confirmed offline that
 misspelling the selector in the registration still compiles. Like every macOS
 `#[test]` in this crate it is **compiled here and run only on CI**.
+
+### The first responder may not survive a mode change — open, and worse than the origin
+
+The same run that reported the borderless origin also reported
+`first_responder: "NSKVONotifying_CrcblWindow"`. **That is the window**, KVO's
+subclass of `CrcblWindow`. Every earlier run said `CrcblView`, and
+`appkit_agrees` asserts `CrcblView` _before_ the flip and passes — so the
+responder changed at or after the mode change.
+
+If that is real it is a **second defect and a more serious one than the
+origin**. `sendEvent:` delivers key events to the first responder; a window that
+is its own first responder receives every keystroke and hands the view none. It
+is precisely the failure `makeFirstResponder:` is on `appkit::view`'s list of
+five to prevent, it would arrive only after a player toggles fullscreen, and
+nothing in the seam would report it — the events simply stop.
+
+**The likely mechanism is `setStyleMask:`**, which rebuilds a window's frame
+view and may take the responder with it; `apply_mode` sets the mask on both legs
+of the round trip and never re-asserts the responder afterwards. That is a
+hypothesis and is deliberately **not** being acted on: the run before this one
+spent a round trip on a mechanism that turned out to be wrong, and the
+instrument to settle it is cheaper than the guess.
+
+What is now logged, as a pointer comparison against the window's own content
+view so it needs no new runtime entry point: whether the view holds the
+responder before `setStyleMask:`, after it, after `makeKeyAndOrderFront:`, and
+on both legs of the windowed restore. `flip` in the session tracks the
+responder's class alongside the frame on every pump turn, and the session prints
+the whole `CrcblView -> ? -> ?` trail across the round trip.
+
+**It is not yet asserted**, and that is deliberate for one round: the origin
+assertion fires first, so a responder assertion added now would never be reached
+and would teach nothing. Once the trail says where it changes, the fix is
+whichever of "re-assert `makeFirstResponder:` after every `setStyleMask:`" or
+"nothing, the reading was taken at a misleading moment" the evidence supports —
+and then it gets an assertion of its own.
 
 ### `wheel1` is a named parameter, and declaring it variadic scrolled by zero
 
