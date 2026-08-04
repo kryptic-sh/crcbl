@@ -798,16 +798,25 @@ impl AppKitShell {
         // **Last.** Everything that repositions a window has now happened.
         //
         // SAFETY: a live window; `nil` is the documented sender for
-        // `makeKeyAndOrderFront:`, and `focus_content_view` documents what it
-        // needs.
+        // `makeKeyAndOrderFront:`, `isVisible` is an accessor taking nothing,
+        // and `focus_content_view` documents what it needs.
         unsafe {
             set_frame(window, new_frame);
-            if target.is_some() {
+            if target.is_some() && ffi::msg_bool(window, ffi::sel(c"isVisible")) {
                 // A window that was key stays key, but a borderless one has to
                 // be told to come forward again on some systems — and asking
                 // twice costs nothing. Ordering front was measured **not** to
                 // move the window: a re-assert placed after it read
                 // `from [0,0,1024,768]`, an exact no-op.
+                //
+                // **Guarded by `isVisible`**: a window hidden with
+                // `set_visible(false)` (or created `visible: false`) must stay
+                // hidden across a mode change. Win32 carries `WS_VISIBLE`
+                // across the style change, and creation already guards its show
+                // behind `desc.visible`; without the check,
+                // `set_mode(Borderless)` pops the hidden window on screen and
+                // takes key focus, and `window_state().visible` reports true
+                // for a window nobody showed.
                 ffi::msg1_void(window, ffi::sel(c"makeKeyAndOrderFront:"), ptr::null_mut());
             }
 

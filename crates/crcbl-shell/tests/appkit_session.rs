@@ -511,6 +511,11 @@ mod macos {
             "and the view still has the keyboard after a full mode round trip: {restored:?}"
         );
 
+        // A second window, created hidden, is flipped borderless after the main
+        // window's own round trip is fully asserted — so the regression this
+        // guards cannot disturb a single one of the assertions above.
+        hidden_window_stays_hidden(&mut shell);
+
         shell.destroy_window(window).expect("destroy_window");
         assert!(
             shell.window_state(window).is_err(),
@@ -1688,6 +1693,67 @@ mod macos {
                 .then(|| state.size())
                 .flatten()
         })
+    }
+
+    /// A window hidden at creation must stay hidden across a mode change.
+    ///
+    /// `apply_mode` used to order the window front unconditionally in the
+    /// borderless arm — `makeKeyAndOrderFront:` behind no `isVisible` check —
+    /// so `set_mode(Borderless)` popped a hidden window on screen and took key
+    /// focus with it, and `window_state().visible` reported true for a window
+    /// nobody showed. Creation guards its own show behind `desc.visible` and
+    /// the Win32 sibling carries `WS_VISIBLE` across its style change; this
+    /// step pins the same guarantee on AppKit, which reads `isVisible` for the
+    /// truth.
+    ///
+    /// A second window, deliberately: the main window is visible and key for
+    /// the whole session, so only a separate one can carry hidden state. Its
+    /// title is distinct, because [`session_support::window_facts`] finds
+    /// windows by title.
+    ///
+    /// Visibility is judged through the seam (`window_state().visible`), and
+    /// the keyboard through AppKit's own `isKeyWindow` readback — the half
+    /// [`session_support::window_facts`] answers without any activation.
+    fn hidden_window_stays_hidden(shell: &mut Box<dyn Shell>) {
+        const HIDDEN_TITLE: &str = "crcbl appkit session — hidden mode flip";
+        let hidden = shell
+            .create_window(&WindowDesc {
+                title: HIDDEN_TITLE,
+                app_id: "sh.kryptic.crcbl.appkit-session",
+                size: REQUESTED,
+                constraints: SizeConstraints::min(LogicalSize::new(320.0, 180.0)),
+                mode: DisplayMode::Windowed,
+                resizable: true,
+                visible: false,
+                accept_drops: false,
+            })
+            .expect("create_window");
+
+        // Creation must not show it.
+        assert!(
+            !shell.window_state(hidden).expect("state").visible,
+            "a window created visible: false is not on screen"
+        );
+
+        // The flip, and a pump until the window system has honoured it.
+        let _ = flip(shell, hidden, DisplayMode::Borderless { monitor: None });
+        assert!(
+            !shell.window_state(hidden).expect("state").visible,
+            "set_mode(Borderless) must not show a hidden window: apply_mode used to order it \
+             front unconditionally, so window_state().visible reported true for a window nobody \
+             showed"
+        );
+        let facts = session_support::window_facts(HIDDEN_TITLE)
+            .expect("the hidden window is still this process's to read");
+        assert!(
+            !facts.is_key,
+            "a hidden window takes no key focus across a mode change: {facts:?}"
+        );
+
+        shell.destroy_window(hidden).expect("destroy_window");
+        println!(
+            "crcbl appkit session: a window hidden at creation stayed hidden across a mode flip"
+        );
     }
 
     /// Pumps until `ready` answers, or fails naming the step that did not.

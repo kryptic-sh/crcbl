@@ -1458,6 +1458,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-shell** (AppKit): a hidden window — created `visible: false` or hidden
+  with `set_visible(false)` — popped on screen and took key focus when
+  `set_mode(Borderless)` ran: the borderless arm ordered the window front with
+  no visibility check, and `window_state().visible` reported true for a window
+  nobody showed. `apply_mode` now guards `makeKeyAndOrderFront:` behind AppKit's
+  `isVisible`, matching the `WS_VISIBLE` the Win32 sibling carries across its
+  style change.
+
 - **crcbl-vk**: the deletion queue freed a destroyed object one submission after
   it was parked — right for one future submission, a GPU-side use-after-free for
   two: an object recorded into two command buffers was freed when the first
