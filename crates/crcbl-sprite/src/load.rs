@@ -206,8 +206,9 @@ impl From<SheetError> for LoadError {
 ///
 /// # Errors
 ///
-/// [`LoadError::Png`] if the bytes are not a readable PNG or the image is
-/// larger than this host can address.
+/// [`LoadError::Png`] if the bytes are not a readable PNG, the image is
+/// larger than this host can address, or the IHDR declares more than
+/// [`MAX_PIXELS`] pixels.
 pub fn decode_png(bytes: &[u8]) -> Result<Rgba8, LoadError> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(
@@ -216,9 +217,36 @@ pub fn decode_png(bytes: &[u8]) -> Result<Rgba8, LoadError> {
     let mut reader = decoder
         .read_info()
         .map_err(|error| LoadError::Png(error.to_string()))?;
+    // `output_buffer_size` is computed from the IHDR's width and height alone,
+    // capped only at `isize::MAX`, so a hundred-byte file can claim gigabytes
+    // (65536×65536 is a multi-gigabyte allocation; 2²⁰×2²⁰ aborts the process).
+    // Bound the claim before allocating a single byte — the same guard
+    // `crcbl-golden`'s `load_png` carries (its module doc calls this "the
+    // pattern load.rs should copy").
+    const MAX_PIXELS: u64 = 1 << 28;
+    let (declared_width, declared_height) = reader.info().size();
+    let rgba_bytes = {
+        // Two u32s multiplied in u64 cannot overflow, and MAX_PIXELS * 4 is 2^30.
+        let pixels = u64::from(declared_width) * u64::from(declared_height);
+        if pixels > MAX_PIXELS {
+            return Err(LoadError::Png(format!(
+                "a {declared_width}x{declared_height} PNG declares more than {MAX_PIXELS} pixels"
+            )));
+        }
+        usize::try_from(pixels * 4).map_err(|_| {
+            LoadError::Png("the image does not fit in this host's address space".to_owned())
+        })?
+    };
     let capacity = reader.output_buffer_size().ok_or_else(|| {
         LoadError::Png("the image does not fit in this host's address space".to_owned())
     })?;
+    if capacity > rgba_bytes {
+        // More than four bytes per pixel; with `EXPAND | ALPHA | STRIP_16` this
+        // cannot happen, and refusing before allocating is cheap either way.
+        return Err(LoadError::Png(format!(
+            "a {declared_width}x{declared_height} PNG needing {capacity} bytes is deeper than 8-bit RGBA"
+        )));
+    }
     let mut buffer = vec![0u8; capacity];
     let info = reader
         .next_frame(&mut buffer)
@@ -1345,6 +1373,52 @@ mod tests {
             writer.finish().expect("the end");
         }
         bytes
+    }
+
+    /// CRC-32, the PNG chunk CRC, in the bitwise reflected form.
+    ///
+    /// Pinned by the standard check value below so a transcription slip cannot
+    /// silently produce a CRC the decoder rejects.
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &byte in data {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                let mask = 0u32.wrapping_sub(crc & 1);
+                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
+    /// `png_bytes`'s output with the IHDR's declared size rewritten and the
+    /// chunk's CRC fixed up, so the decoder believes the hostile claim.
+    fn png_with_declared_size(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = png_bytes(1, 1);
+        bytes[16..20].copy_from_slice(&width.to_be_bytes());
+        bytes[20..24].copy_from_slice(&height.to_be_bytes());
+        let crc = crc32(&bytes[12..29]);
+        bytes[29..33].copy_from_slice(&crc.to_be_bytes());
+        bytes
+    }
+
+    /// A hostile IHDR must be refused before `vec![0u8; …]` is sized from it —
+    /// `output_buffer_size` trusts the file's own claim, and 65536×65536 is a
+    /// multi-gigabyte allocation (2²⁰×2²⁰ aborts the process).
+    #[test]
+    fn a_png_that_declares_a_huge_size_is_refused_before_allocating() {
+        // Pins the CRC implementation: the standard check value for "123456789".
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        let hostile = png_with_declared_size(65_536, 65_536);
+        let error = decode_png(&hostile).expect_err("a multi-gigabyte claim must be refused");
+        assert!(
+            matches!(&error, LoadError::Png(message) if message.contains("declares more than")),
+            "the refusal must name the pixel-count guard: {error:?}"
+        );
+        // The same file at a sane size still decodes — the refusal is the claim,
+        // not the file's shape.
+        let fine = decode_png(&png_bytes(6, 3)).expect("a sane PNG still decodes");
+        assert_eq!((fine.width, fine.height), (6, 3));
     }
 
     /// §7 writes no sidecar for a still sprite, so the loader has to invent the

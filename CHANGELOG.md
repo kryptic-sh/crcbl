@@ -1469,6 +1469,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-sprite**: `decode_png` sized its output buffer from the PNG's IHDR
+  width and height alone — `output_buffer_size` trusts the file's claim and is
+  capped only at `isize::MAX`, so a ~100-byte hostile PNG declaring 65536×65536
+  forced a multi-gigabyte allocation (2²⁰×2²⁰ aborts the process). The declared
+  pixel count is now bounded against `1 << 28` before any allocation, the same
+  guard `crcbl-golden`'s `load_png` carries.
+
 - **crcbl-audio**: native audio played 48 kHz-authored voices at the device rate
   — on a 44.1 kHz device everything ran ~9% slow, ~147 cents flat, the exact
   failure the browser path resamples to avoid. The mixer now steps each voice's
