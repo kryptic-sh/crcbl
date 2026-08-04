@@ -679,27 +679,26 @@ the shape of the whole suite:
   the test binary is invoked directly with `--exact <name> --test-threads=1`.
   The serial path in `libtest` does not put the body on the main thread.
 
-Together those mean a `#[test]` can never drive an AppKit window, so the pass
-the slice most wanted — open a window, pump to the first `Resized`, read the
-size back, flip to borderless and back, destroy it, which is also what tells us
-whether a GitHub runner gives a process a usable WindowServer session — **is not
-in the suite.** Nothing about it is written and passing; it is absent.
+Together those mean a `#[test]` can never drive an AppKit window. **Closed in
+the same commit** by `crates/crcbl-shell/tests/appkit_session.rs`, a
+`harness = false` target that owns its `main` and therefore runs _as_ the
+process: it opens the backend, creates a window, pumps to the first `Resized`,
+reads the size back, flips to borderless and back, and destroys it. The
+alternative considered and declined was re-executing the test binary as a child
+process with `--test-threads=1` — it does not work, for the measured reason
+above.
 
-Closing it needs a target whose `main` this crate owns, which is a
-`crates/crcbl-shell/Cargo.toml` edit outside M1's allowed paths:
+Two things about that target are worth knowing before touching it. It is **not**
+feature-gated and it runs on every host, because cargo builds and runs a
+harness-less target everywhere; off macOS it prints why it did nothing rather
+than reporting a pass it did not earn. And it was falsified the way any other
+guard is: a `panic!` in its body fails both `cargo test` (exit 101) and
+`cargo nextest run`, so it is genuinely wired into the run and can go red.
 
-```toml
-[[test]]
-name = "appkit_e2e"
-path = "tests/appkit_e2e.rs"
-harness = false
-```
-
-`nextest` runs a `harness = false` target as a single test, so it would be
-picked up by the existing `build + test (macos-latest)` job with no workflow
-change. The alternative considered and declined was re-executing the test binary
-as a child process with `--test-threads=1`: it does not work, for the measured
-reason above.
+**Whether it passes is still unknown.** It has never executed on a Mac, and what
+it reports on its first run is the answer to whether a GitHub macOS runner gives
+a process a usable WindowServer session — a question the Windows half answered
+"yes" for its own runner, which transfers nothing.
 
 ### What the macOS suite does cover
 

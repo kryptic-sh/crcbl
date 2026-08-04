@@ -76,6 +76,21 @@ name = "crcbl-e2e-win32-clip"
 path = "tests/bin/clipboard_peer_win32.rs"
 required-features = ["win32-e2e"]
 
+# The one target in this crate that owns its `main`, because `libtest` always
+# runs a test body on a thread it spawns and AppKit is main-thread-only — it
+# *raises* rather than failing, and an Objective-C exception unwinding into Rust
+# is undefined behaviour. So no `#[test]` can drive an AppKit window, and
+# without this target the window lifecycle has no executable coverage at all.
+# See the file's own docs; `nextest` runs a harness-less target as one test, so
+# the existing macOS job picks it up with no workflow change.
+#
+# Not feature-gated, and it runs on every host: off macOS it prints why it did
+# nothing rather than reporting a pass it did not earn.
+[[test]]
+name = "appkit_session"
+path = "tests/appkit_session.rs"
+harness = false
+
 [features]
 # The nested-compositor end-to-end suite. Off by default so a plain
 # `cargo nextest run` on a machine with no compositor stays green; CI enables it
