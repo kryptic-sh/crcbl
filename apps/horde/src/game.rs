@@ -459,7 +459,7 @@ pub const MAX_PICKUPS: usize = 512;
 ///
 /// Derived from [`PLAYER_MAX_HP`] rather than spelled out, so the two cannot
 /// drift into a potion that is most of a bar or a rounding of it. What it is
-/// actually clamped against is [`Stats::max_hp`] — see [`heal_player`].
+/// actually clamped against is [`Stats::max_hp`], which an upgrade moves.
 ///
 /// It happens to equal [`VITALITY_HP`] and is deliberately not defined in terms
 /// of it: a quarter of the bar is the natural unit of healing in this game, and
@@ -500,7 +500,7 @@ pub const POTION_HEAL: f64 = PLAYER_MAX_HP / 4.0;
 /// `potions_drop_from_brutes_at_the_rate_the_constant_says` is where the rate a
 /// player actually sees is read off a seeded run, because it is a property of
 /// this constant *and* the spawn table together and neither says it alone.
-const POTION_DROP_CHANCE: f64 = 1.0 / 20.0;
+pub const POTION_DROP_CHANCE: f64 = 1.0 / 20.0;
 
 /// The hand the loot is dealt from, as a salt on the run's seed.
 ///
@@ -527,8 +527,10 @@ const DRAW_POTION_BEARING: u64 = 1;
 
 /// Whether the `kill`-th kill of run `seed` leaves a potion, given what died.
 ///
-/// See [`POTION_DROP_CHANCE`] for the design and [`LOOT_HAND`] for why the
-/// draw is salted rather than packed into the spawner's index space.
+/// See [`POTION_DROP_CHANCE`] for the design. The draw is salted onto the seed
+/// rather than packed into the spawner's index space because `spawn_index`
+/// already owns the whole of a `u64`, leaving no bit pattern for a second index
+/// space in the run's own hand.
 #[must_use]
 pub fn drops_potion(seed: u64, kill: u64, kind: EnemyKind) -> bool {
     kind == EnemyKind::Brute
@@ -1061,7 +1063,8 @@ const DRAW_PROP_KIND: u64 = 3;
 ///
 /// # It is dealt from the game's seed, not the run's
 ///
-/// The horde is re-dealt by a restart — [`run_seed`] — and the scenery is not.
+/// The horde is re-dealt by a restart, which advances the run's own seed, and
+/// the scenery is not.
 /// A prop is a feature of the *place*: the walls do not move when a player
 /// presses `R` and neither does the ground, and a player who learns where the
 /// cover is should keep that between attempts at the same seed. Two games built

@@ -27,15 +27,16 @@
 //! `SampleMode::Pixel`; pause, level-up and death menus, the debug panel,
 //! fullscreen and focus handling.
 //!
-//! **Three sheets, and that is the sample's own decision.** Everything numerous
-//! — the player, all three enemy kinds and the gems — shares one sheet at one
-//! frame size, so the whole field is a single `SpriteRenderer` batch whatever
-//! order it is emitted in; the shot and the tiled grass ground are the other
-//! two, each one run of its own. The claim is that the batch count is **flat in
-//! the size of the horde**, not that it is any particular number: a sheet added
-//! for a new subject adds a constant and ten enemies and ten thousand still come
-//! out as the same three draws. `src/art.rs` carries the argument, and
-//! [`SceneStats`] is where the game reports the number it produces.
+//! **A sheet per subject, and that is the sample's own decision.** Everything
+//! numerous — the player, all three enemy kinds, the gems and the potions —
+//! shares one sheet at one frame size, so the whole field is a single
+//! `SpriteRenderer` batch whatever order it is emitted in; the shot, the tiled
+//! grass ground and the scattered props are the others, each one run of its own.
+//! The claim is that the batch count is **flat in the size of the horde**, not
+//! that it is any particular number: a sheet added for a new subject adds a
+//! constant, and ten enemies and ten thousand still come out as the same few
+//! draws. `src/art.rs` carries the argument, and [`SceneStats`] is where the
+//! game reports the number it produces.
 //!
 //! Five spatial cues — the gun, an enemy coming apart, a gem, a level and the
 //! player's own end — through `crcbl-audio`'s grammar with the listener on the
@@ -74,11 +75,12 @@ pub use art::{ACTOR_HALF_EXTENT, BOLT_HALF_EXTENT, GROUND, Scene, SceneStats, TE
 pub use game::{
     ARENA_HALF_HEIGHT, ARENA_HALF_WIDTH, BOLT_DAMAGE, BOLT_LIFE, BOLT_RADIUS, BOLT_SPEED, BoltView,
     DEFAULT_MAX_ENEMIES, DEFAULT_SEED, DEFAULT_TICK_HZ, EnemyKind, EnemyView, FIRE_COOLDOWN,
-    FIRE_COOLDOWN_FLOOR, Game, GameError, GameState, LOOT_RADIUS, MAX_PICKUPS, PLAYER_MAX_HP,
-    PLAYER_RADIUS, PLAYER_SPEED, POTION_HEAL, PickupKind, PickupView, RenderState,
-    SEPARATION_SLACK, SEPARATION_STRENGTH, SPAWN_INTERVAL_MIN, SPAWN_INTERVAL_START,
-    SPAWN_RAMP_SECONDS, SPAWN_RING, Setup, Stats, UPGRADE_CHOICES, Upgrade, VIEW_HALF_HEIGHT,
-    WEAPON_RANGE, clamp_axis, clamp_to_arena, drops_potion, hash_unit, max_enemy_radius,
+    FIRE_COOLDOWN_FLOOR, Facing, Game, GameError, GameState, LOOT_RADIUS, MAX_PICKUPS,
+    PLAYER_MAX_HP, PLAYER_RADIUS, PLAYER_SPEED, POTION_DROP_CHANCE, POTION_HEAL, PROP_CELL,
+    PROP_JITTER, PickupKind, PickupView, PropKind, PropView, RenderState, SEPARATION_SLACK,
+    SEPARATION_STRENGTH, SPAWN_INTERVAL_MIN, SPAWN_INTERVAL_START, SPAWN_RAMP_SECONDS, SPAWN_RING,
+    Setup, Stats, UPGRADE_CHOICES, Upgrade, VIEW_HALF_HEIGHT, VITALITY_HP, WEAPON_RANGE,
+    clamp_axis, clamp_to_arena, drops_potion, hash_unit, max_enemy_radius, scatter_props,
     separation_query_radius, spawn_interval, spawn_jitter, spawn_kind, spawn_offset, upgrade_offer,
     xp_for_next_level,
 };
