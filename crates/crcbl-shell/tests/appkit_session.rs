@@ -511,6 +511,42 @@ mod macos {
     // M4: AppKit as the judge
     // -----------------------------------------------------------------------
 
+    /// Pumps until a window of this process has the keyboard, or fails with
+    /// **which of the two mechanisms** refused.
+    ///
+    /// The first version of this discarded
+    /// [`session_support::key_window`]'s error with `.ok()` and reported only
+    /// "it never came", which is precisely the shape of failure the Windows
+    /// half of P5C spent four CI round trips on: a symptom that cannot say
+    /// which mechanism produced it. [`session_support::activation`] separates
+    /// them, and the two want opposite responses:
+    ///
+    /// * `can_become_key: false` on a `CrcblWindow` is **our** defect — the
+    ///   `canBecomeKeyWindow` override is not on the class the window turned
+    ///   out to be, and a borderless window would silently stop taking
+    ///   keystrokes.
+    /// * `app_active: false` with `can_become_key: true` is the **session**
+    ///   refusing to activate an unbundled binary, which no backend can fix.
+    fn wait_for_key_window(shell: &mut Box<dyn Shell>) -> session_support::KeyWindow {
+        let started = Instant::now();
+        let mut last;
+        loop {
+            shell.pump(&mut |_event: ShellEvent| {});
+            match session_support::key_window() {
+                Ok(facts) => return facts,
+                Err(detail) => last = detail,
+            }
+            assert!(
+                started.elapsed() < DEADLINE,
+                "crcbl appkit session: waited {DEADLINE:?} for a key window and none came.\n\
+                 The last answer was: {last}\n\
+                 What the application and its first window say: {:?}",
+                session_support::activation()
+            );
+            shell.wait_events(Some(Duration::from_millis(20)));
+        }
+    }
+
     /// [`session_support::key_window`], or a failure naming the step that asked.
     fn key_window(step: &str) -> session_support::KeyWindow {
         session_support::key_window()
@@ -543,9 +579,7 @@ mod macos {
     /// has just been ordered front, and which window has the keyboard is the
     /// window server's to decide on its own schedule.
     fn appkit_agrees(shell: &mut Box<dyn Shell>, size: PhysicalSize) -> session_support::KeyWindow {
-        let facts = wait_for(shell, "AppKit to report a key window", |_| {
-            session_support::key_window().ok()
-        });
+        let facts = wait_for_key_window(shell);
         assert_eq!(
             facts.title, TITLE,
             "the key window is this session's own and not some other application's: {facts:?}"

@@ -329,6 +329,121 @@ pub fn pasteboard_round_trip() -> Result<(), String> {
 /// not the window — and [`dragged_types`](Self::dragged_types). Reading them off
 /// the window a shell actually created is what turns "we called the setter" into
 /// "the window is in that state".
+/// Why no window of this process has the keyboard.
+///
+/// # It separates our defect from the runner's refusal, and those need
+/// different answers
+///
+/// [`key_window`] answering `Err` has two completely different causes and one
+/// message, which is the shape of failure P5C has already paid for four times
+/// on Windows: a symptom with no way to tell which mechanism produced it.
+///
+/// * **`can_become_key` is false on our own window** — that is *our* bug.
+///   `CrcblWindow` overrides `canBecomeKeyWindow` to answer `YES` precisely
+///   because a borderless `NSWindow` answers `NO` by default, so a false here
+///   means the override is not installed on the class the window actually is.
+///   A game would go borderless and silently stop receiving keystrokes.
+/// * **`app_active` is false while `can_become_key` is true** — the *session*
+///   refused to activate us. An unbundled binary on a machine with nobody
+///   logged in at the console is the case that matters here, and there is
+///   nothing a backend can do about it.
+///
+/// Nothing branches on this in the backend; it exists so a failure can say
+/// which of the two happened rather than leaving the next reader to guess, and
+/// guessing is what cost four CI round trips on the other platform.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Activation {
+    /// `-[NSApp isActive]`.
+    pub app_active: bool,
+    /// How many windows `-[NSApp windows]` holds. Zero means the shell's window
+    /// never reached the application, which is a third failure again.
+    pub windows: usize,
+    /// `-[NSWindow title]` of the first window, or `None` when there is none.
+    pub title: Option<String>,
+    /// The class name of that window — `CrcblWindow` if the subclass took.
+    pub class: String,
+    /// `-[NSWindow isVisible]`.
+    pub visible: bool,
+    /// `-[NSWindow canBecomeKeyWindow]`, the one that separates our bug from
+    /// the environment's refusal.
+    pub can_become_key: bool,
+    /// `-[NSWindow isKeyWindow]`, for completeness — if this is true then
+    /// [`key_window`] should not have failed at all.
+    pub is_key: bool,
+}
+
+/// What the application and its first window say about taking the keyboard.
+///
+/// See [`Activation`] for why the two halves are reported separately.
+///
+/// # Errors
+///
+/// A string when there is no `NSApplication` at all, which means the shell was
+/// never opened in this process.
+pub fn activation() -> Result<Activation, String> {
+    let _pool = Pool::push();
+    let Some(class) = ffi::class(c"NSApplication") else {
+        return Err("the Objective-C runtime has no NSApplication".into());
+    };
+    // SAFETY: a class method returning the singleton the runtime keeps for the
+    // life of the process.
+    let app = unsafe { ffi::msg(class, ffi::sel(c"sharedApplication")) };
+    if app.is_null() {
+        return Err("[NSApplication sharedApplication] answered nil".into());
+    }
+    // SAFETY: a live `NSApplication`; both accessors take no arguments.
+    let (app_active, windows) = unsafe {
+        (
+            ffi::msg_bool(app, ffi::sel(c"isActive")),
+            ffi::msg(app, ffi::sel(c"windows")),
+        )
+    };
+    // SAFETY: `-[NSApp windows]` answers an `NSArray`, or nil before any window
+    // exists; `count` on nil is zero, which is the honest answer here.
+    let count = if windows.is_null() {
+        0
+    } else {
+        unsafe { ffi::msg_usize(windows, ffi::sel(c"count")) }
+    };
+    if count == 0 {
+        return Ok(Activation {
+            app_active,
+            windows: 0,
+            title: None,
+            class: "nil".to_owned(),
+            visible: false,
+            can_become_key: false,
+            is_key: false,
+        });
+    }
+    // SAFETY: index 0 is in range for an array of `count` objects, and the
+    // array owns what it answers.
+    let window = unsafe {
+        let send: unsafe extern "C" fn(Id, Sel, NSUInteger) -> Id = ffi::msg_send();
+        send(windows, ffi::sel(c"objectAtIndex:"), 0)
+    };
+    // SAFETY: a live `NSWindow`. `title` answers an `NSString` the window owns;
+    // the three predicates take no arguments and answer `BOOL`.
+    let (title, class, visible, can_become_key, is_key) = unsafe {
+        (
+            ffi::string_from_nsstring(ffi::msg(window, ffi::sel(c"title"))),
+            class_name(window),
+            ffi::msg_bool(window, ffi::sel(c"isVisible")),
+            ffi::msg_bool(window, ffi::sel(c"canBecomeKeyWindow")),
+            ffi::msg_bool(window, ffi::sel(c"isKeyWindow")),
+        )
+    };
+    Ok(Activation {
+        app_active,
+        windows: count,
+        title,
+        class,
+        visible,
+        can_become_key,
+        is_key,
+    })
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyWindow {
     /// `-[NSWindow title]`, which is how a caller tells its own window from
