@@ -41,14 +41,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `docs/backlog.md` records that this covers text only, since `pbpaste` cannot
   be asked for the engine's own format.
 
-  **AppKit as the judge** rather than the backend's own bookkeeping, through two
-  new `crcbl_shell::session_support` entry points, `key_window` and
-  `resize_key_window`. Three of the five switches `appkit::view` lists as
+  **AppKit as the judge** rather than the backend's own bookkeeping, through
+  three new `crcbl_shell::session_support` entry points — `window_facts`,
+  `key_window` and `resize_window` — and `activation`, which now takes the title
+  of the window to describe. Three of the five switches `appkit::view` lists as
   "structural rather than verified" are now read back off the live window —
   `acceptsMouseMovedEvents`, the first responder being `CrcblView` rather than
   the window, and the registered dragged types — and a resize AppKit performed,
   a borderless flip that covers the `NSScreen` it names exactly, and the
   restored title bar are all checked against `NSWindow` and `NSScreen`.
+
+  **None of that readback goes through `-[NSApp keyWindow]` any more**, which is
+  the correction the first macOS run forced. That run reported
+  `app_active: false` with `can_become_key: true`: a GitHub runner gives an
+  unbundled binary a window server and a window but not activation, so the key
+  window was nil and every assertion behind it was being discarded over a
+  precondition it did not have. `window_facts` finds this process's own window
+  by title among `-[NSApp windows]`, and reports `app_active` and `is_key` as
+  fields rather than requiring them; `key_window` remains for the one caller
+  that genuinely needs the keyboard, which is `CGEventPost`. If activation is
+  still refused after the harness has asked for it, the injected-input
+  assertions — and only those — are skipped with a printed account of what did
+  not run and why; `docs/backlog.md` carries `interpretKeyEvents:` as unverified
+  on CI.
 
   **The sample-level pass has no macOS equivalent**, on the same terms as
   Windows: it needs a renderer and macOS has no Vulkan until MoltenVK clears its

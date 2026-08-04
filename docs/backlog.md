@@ -290,19 +290,43 @@ written from now on has to hold under all of it:
   it delivers a genuine `WM_MOUSEMOVE`, so the backend's derived pointer arrival
   happens before a test sends anything.
   `the_pointer_enters_moves_clicks_scrolls_and_leaves` has been rewritten for
-  this twice, and the second time is the instructive one. It sends a
-  `WM_MOUSELEAVE` to put the derived state on a known edge — but it sent it
-  _before_ the pump that discards the desktop's own events, and that pump
-  dispatched a real `WM_MOUSEMOVE`, derived the arrival from it, and threw the
-  arrival away. The run collected `[(false, None)]`: a leave with nothing in
-  front of it. **The order is the fix**: drain first, then leave, because
-  `SendMessageW` calls the window procedure synchronously and nothing pumps
-  between the leave and the first synthetic movement, so no queued message can
-  be processed in that gap. The assertions are now ordering properties — the
-  first crossing is an arrival carrying the position of the movement it was
-  derived from, the second is the leave, and crossings alternate to the end —
-  because the desktop keeps contributing motion into the collecting pump and a
-  _count_ of crossings is a number the machine gets a vote in.
+  this **three** times, and each version assumed a slightly quieter machine than
+  the last. It sends a `WM_MOUSELEAVE` to put the derived state on a known edge;
+  the first rewrite sent it _before_ the pump that discards the desktop's own
+  events, and that pump dispatched a real `WM_MOUSEMOVE`, derived the arrival
+  from it, and threw the arrival away. The run collected `[(false, None)]`: a
+  leave with nothing in front of it. Draining first and leaving second is
+  genuinely part of the fix, and stays — `SendMessageW` calls the window
+  procedure synchronously and nothing pumps between the leave and the first
+  synthetic movement, so no queued message can be processed in that gap.
+
+  **What it did not fix is the position of our events in the sequence**, and the
+  second rewrite still asserted that, requiring the first crossing to be an
+  arrival. The runner answered:
+
+  ```text
+  the first crossing after a leave is the arrival:
+    [(false, None), (true, Some(PhysicalPoint { x: 40.0, y: 30.0 })), (false, None)]
+  ```
+
+  Our arrival, at the injected point, with a crossing of the desktop's in front
+  of it: the discarding pump had derived an arrival it threw away, so
+  `send_leave` was a real transition rather than the no-op it is on a still
+  desktop, and it produced a leave that nothing in the test's own sequence
+  accounts for.
+
+  **The general rule, which is the part to carry to any other suite that runs on
+  a live desktop: identify your own events by their payload, never by their
+  index.** A live desktop may insert crossings before, between and after yours,
+  so any claim about position-in-the-sequence is a claim that it held still. The
+  test now finds its arrival by the point it injected — `(40, 30)`, which no
+  real movement reports — and asserts only about that pair: the arrival carries
+  the position of the movement it was derived from, the crossing straight after
+  it is the leave (safe, because every `send_*` between them is a synchronous
+  `SendMessageW`), and **no** arrival carries the second movement's point, which
+  is the one-shot `TrackMouseEvent` claim the old alternation check was there
+  for. Nothing at all is asserted about the crossings the desktop contributes.
+
 - **Messages arrive that this process did not cause**, every few milliseconds,
   and here is the proof rather than the assertion. Five consecutive timed waits
   on a window whose queue had just been drained to quiescence:
@@ -481,8 +505,9 @@ of this section with its evidence attached:
   **reported rather than asserted**: whether a desktop goes quiet is the
   desktop's business.
 - **`the_pointer_enters_moves_clicks_scrolls_and_leaves` stopped counting
-  crossings.** Covered in the runner section above, because the fix is a fact
-  about the runner rather than about that one test.
+  crossings**, and after a third failure stopped indexing them too. Covered in
+  the runner section above, because the fix is a fact about the runner rather
+  than about that one test.
 
 **The Win32 e2e suite's three foreground failures are addressed and unrun.** All
 three timed out identically in `Session::foreground`. Two levers are now pulled
@@ -915,43 +940,97 @@ Not nothing, and it covers the highest-risk item in the backend:
   the middle of an object, which corrupts rather than fails when it is wrong,
   and none of it can be falsified from a Linux machine. The table is safe Rust
   with the same lifetime story. Reconsider if a profile ever shows the lookup.
-- **The `NSWindow` subclass.** `CrcblWindow` overrides `canBecomeKeyWindow` and
-  `canBecomeMainWindow` so that a borderless window can take the keyboard. That
-  it is needed is documented AppKit behaviour; that our override is reached has
-  not been seen — the session pass goes borderless but sends no keystroke while
-  it is there.
+- **The `NSWindow` subclass is now half observed.** `CrcblWindow` overrides
+  `canBecomeKeyWindow` and `canBecomeMainWindow` so that a borderless window can
+  take the keyboard. The M4 run read the live window back and reported
+  `class: "NSKVONotifying_CrcblWindow"` with `can_become_key: true` — so the
+  runtime-built subclass took, AppKit's KVO subclassed it in turn as it does for
+  any observed object, and **the override is installed and answering**. What is
+  still unseen is the override mattering: no keystroke has been delivered to a
+  borderless window, because no keystroke has been delivered at all (see the M5
+  entry below).
 
-### What M4 wrote, and the single thing that could void all of it
+### What M4 wrote, and what the runner answered
 
 M4 is the end-to-end pass: input the window system generated, a pasteboard round
-trip against another process, and AppKit as the judge of the window. **None of
-it has run.** It was written on Linux and cross-checked with
+trip against another process, and AppKit as the judge of the window. It was
+written on Linux and cross-checked with
 `cargo clippy --target aarch64-apple-darwin`, which does not link and does not
 run.
 
-**The risk that decides the whole slice is TCC.** macOS 10.14 and later require
-a process to hold the Accessibility right before it may synthesize keyboard
-events, and a GitHub runner has nobody to grant one — this is the same gate that
-makes `osascript … keystroke` fail there. What is **not** known is whether the
-gate applies when the posted events are delivered back to the _posting_ process,
-which is the whole of what happens here: `CGEventPost` is called from the
-session target itself, the window server builds the `NSEvent`, and it comes back
-to this process's own run loop. The first run answers it, one way or the other.
+**It has now run, and it stopped before the injection.** The session got as far
+as the cursor shapes, the dragged-type registration, the general pasteboard and
+a window configured at 640×480, then waited ten seconds for a key window that
+never came. The diagnostic added for exactly this said which mechanism refused:
 
-- **If injection works**, `interpretKeyEvents:` is reached end to end, the
-  tracking area is exercised by a real crossing, and the Y-up/Y-down asymmetry
-  in `appkit::pointer` is observed rather than reasoned — a cursor moved down
-  the screen must come back with a _larger_ window Y and a _positive_ raw delta.
-- **If it does not**, every injected-input assertion fails together with
-  `INJECTION_HINT` beside it, and the fallback is already chosen:
-  `-[NSApplication postEvent:atStart:]` with an `NSEvent` built by
-  `+[NSEvent keyEventWithType:…]`. It needs no permission and still goes through
-  `nextEventMatchingMask:`, `sendEvent:`, the first responder and
-  `interpretKeyEvents:` — everything except the window server's own leg, which
-  is the leg the Win32 `TranslateMessage` lesson was never about. It was not
-  written speculatively because it is a ten-argument `objc_msgSend` transmute
-  with an `NSPoint` by value, which is exactly the class of FFI this crate says
-  must not be written blind; it costs one commit with the CI answer in hand.
+```text
+-[NSApp keyWindow] is nil and the application is inactive
+Activation { app_active: false, windows: 1, title: Some("crcbl appkit session"),
+             class: "NSKVONotifying_CrcblWindow", visible: true,
+             can_become_key: true, is_key: false }
+```
+
+**So the finding is about activation and not about TCC**, which was the risk
+this section had been written around. A GitHub macOS runner gives an unbundled
+binary a window server and a window and does **not** give it activation, even
+though `setActivationPolicy:Regular` was accepted (`open()` fails loudly
+otherwise), `finishLaunching` ran, and `activate` was sent in both the macOS 14
+and the legacy spelling. Whether TCC would also have refused `CGEventPost` is
+still unknown, because nothing has been posted yet: the two gates are in series
+and only the first one has been reached.
+
+M5 is what follows from it, and it is three things:
+
+- **The readback stopped going through the key window**, which is where nearly
+  all the recovered coverage is. Every fact M4 asserts about the window —
+  `acceptsMouseMovedEvents`, the first responder, the registered dragged types,
+  the frame, the content extent, the backing scale, the screen, the style mask —
+  is an ordinary `NSWindow` or `NSView` accessor that answers whether or not the
+  application is active. `session_support::window_facts` finds this process's
+  own window by title among `-[NSApp windows]` and reads them there;
+  `app_active` and `is_key` became reported fields of `WindowFacts` rather than
+  preconditions for reading anything. `key_window` stays for its one genuine
+  caller, the check that this process holds the keyboard before anything is
+  posted. **The rule is general: a precondition belongs on the assertions that
+  need it, not on the function that gathers the evidence.**
+- **The harness asks for activation itself**, in `frontmost::ask` in
+  `tests/appkit_session.rs` — `-[NSRunningApplication currentApplication]` plus
+  `activateWithOptions:` with `NSApplicationActivateIgnoringOtherApps`, and the
+  legacy `-[NSApp activateIgnoringOtherApps:]` beside it, both guarded by
+  `respondsToSelector:`. It is deliberately **not** in `src/appkit/`, on exactly
+  the argument `tests/win32_e2e.rs`'s `desktop::take_foreground` gives: a
+  harness may arrange a precondition a backend must never arrange for itself,
+  because a game does not get to steal the focus. It is judged by
+  `-[NSApp isActive]` afterwards rather than by what the method returned, and
+  pulled once per turn of the poll rather than once.
+- **If activation is still refused, only the injection is skipped**, loudly. See
+  the entry below; that is the coverage gap this slice leaves behind.
+
+**Why `activateWithOptions:` is worth trying and might still not work.** The
+backend's own `activate` prefers `-[NSApplication activate]` where
+`respondsToSelector:` finds it, which on macOS 14 and later is the _cooperative_
+spelling: it asks, and an application that is not entitled to interrupt whatever
+is frontmost does not get to. The forceful spellings are deprecated as of 14 and
+not removed, and deprecation is a compiler diagnostic in Objective-C and nothing
+at all across `objc_msgSend` — so the harness can reach a lever the backend
+never takes. What that does not answer is whether the runner has a foreground
+session for anything to be frontmost _in_; if the process is in a login session
+with no active GUI console, no spelling of activate will help and the skip is
+the honest outcome.
+
+**If the injection does eventually run and fails**, the TCC question above is
+the first suspect and `INJECTION_HINT` prints it beside every failed assertion.
+The fallback is still the one already chosen:
+`-[NSApplication postEvent:atStart:]` with an `NSEvent` built by
+`+[NSEvent keyEventWithType:…]`, which needs no permission and still goes
+through `nextEventMatchingMask:`, `sendEvent:`, the first responder and
+`interpretKeyEvents:` — everything but the window server's own leg. It was not
+written speculatively because it is a ten-argument `objc_msgSend` transmute with
+an `NSPoint` by value, which is exactly the class of FFI this crate says must
+not be written blind. **Note that it would also route around the activation
+refusal entirely**, since it puts the event in this process's own queue rather
+than in the session's — which makes it a stronger candidate now than it was when
+it was written down as a TCC fallback.
 
 Decisions and limits worth keeping whatever the run says:
 
@@ -1003,8 +1082,34 @@ Decisions and limits worth keeping whatever the run says:
   reader most wants to know which optional path actually happened, and nobody on
   this team has a Mac to ask.
 
-Still uncovered after M4, deliberately:
+Still uncovered after M5:
 
+- **`interpretKeyEvents:` and the whole injected-input path are unverified on
+  CI**, and this is a real gap rather than a solved problem — stated here on the
+  same terms as the F11 pass below. If the runner refuses activation, the
+  session cannot post an event without typing into whatever process _is_
+  frontmost, so `injection_skipped` in `tests/appkit_session.rs` prints what did
+  not run and the session goes green without it. What that leaves unobserved is
+  everything `CGEventPost` was there to reach: the key event routed by
+  `sendEvent:` to the first responder, `keyDown:` handing it to
+  `interpretKeyEvents:`, the input method calling
+  `insertText:replacementRange:`, and therefore `ShellEvent::TextCommit` — which
+  is the exact defect the Win32 suite found one platform over, where
+  `TranslateMessage` was missing from the pump. Also unobserved: the arrow key
+  committing nothing, the `NSTrackingArea`, the Y-up/Y-down asymmetry in
+  `appkit::pointer` under real motion, the click, and
+  `hasPreciseScrollingDeltas` deciding `Lines` against `Pixels`. **The skip is
+  never silent** — `docs/plan/12-testing.md` names that as a known trap — and it
+  prints the `Activation` evidence, so the next run says which mechanism refused
+  without another round trip. Closing it needs either activation to be granted,
+  or the `postEvent:atStart:` path described above.
+- **Whether the skip branch or the injection branch is the one CI takes has not
+  been seen.** M5 was written on Linux like everything before it; the
+  cross-check compiles `tests/appkit_session.rs` for `aarch64-apple-darwin` and
+  does not link it. Both branches are therefore unrun, including
+  `frontmost::ask` itself — if `NSRunningApplication` or either selector is
+  missing, `ask` answers `false` rather than crashing, and the line it prints on
+  the first turn is what says so.
 - **The sample-level F11 pass.** Needs a renderer; macOS has no Vulkan until
   MoltenVK clears its P14 gate (`docs/plan/ROADMAP.md`, 2026-08-04). Not
   approximated.
@@ -1024,9 +1129,11 @@ Still uncovered after M4, deliberately:
 Input is the half of this backend with the least executable coverage, because
 the thing it needs is **injected input at the session level** — the macOS
 counterpart of `SendInput`, which is `CGEventCreateKeyboardEvent` plus
-`CGEventPost`. **M4 has now written that, and none of it has run** — so
-everything below is still a structural claim, and the M4 section further down
-says what would turn each one into an observation and what could stop it.
+`CGEventPost`. **M4 wrote that, and the first macOS run never reached it** — the
+application does not become active on a GitHub runner, so nothing may be posted.
+Everything below is therefore still a structural claim, and the M4/M5 section
+further down says what would turn each one into an observation, what recovered
+without activation, and what did not.
 
 - **The switches that make input exist at all**, written out in `appkit::view`'s
   module docs: `setAcceptsMouseMovedEvents:`, `makeFirstResponder:`, the
@@ -1042,17 +1149,21 @@ says what would turn each one into an observation and what could stop it.
   (the accepts-moved flag plus first responder) to come back.
 
   **M4 closes three of the five by readback and attacks the other two by
-  injection, and neither half has run.** `session_support::key_window` reads
-  `acceptsMouseMovedEvents`, the first responder's class and the content view's
-  `registeredDraggedTypes` off the **live** window, which turns those three from
-  "we called the setter" into "the window is in that state". The tracking area
-  and `interpretKeyEvents:` have no readback, so they are attacked with
-  `CGEventPost`: a posted `kVK_ANSI_A` has to come back as a `Key` **and** a
-  `TextCommit` of `"a"`, which is only possible if `sendEvent:` routed the event
-  to the first responder, `keyDown:` handed it to `interpretKeyEvents:`, and the
-  view's `inputContext` was non-nil — the last of which is true only because
-  `CrcblView` conforms to `NSTextInputClient`. Until the runner reports, macOS
-  is still where Windows was before its e2e suite found `TranslateMessage`.
+  injection. After M5 the readback half runs on a runner that never activates;
+  the injection half may still not run at all.** `session_support::window_facts`
+  reads `acceptsMouseMovedEvents`, the first responder's class and the content
+  view's `registeredDraggedTypes` off the **live** window — found by title
+  rather than through `-[NSApp keyWindow]`, which is what makes it independent
+  of activation — and that turns those three from "we called the setter" into
+  "the window is in that state". The tracking area and `interpretKeyEvents:`
+  have no readback, so they are attacked with `CGEventPost`: a posted
+  `kVK_ANSI_A` has to come back as a `Key` **and** a `TextCommit` of `"a"`,
+  which is only possible if `sendEvent:` routed the event to the first
+  responder, `keyDown:` handed it to `interpretKeyEvents:`, and the view's
+  `inputContext` was non-nil — the last of which is true only because
+  `CrcblView` conforms to `NSTextInputClient`. That is the half that is skipped
+  when activation is refused, so until the runner grants it, macOS is still
+  where Windows was before its e2e suite found `TranslateMessage`.
 
 - **Every type encoding on `CrcblView`'s methods.** The runtime reads them only
   when it forwards a method through an `NSInvocation`, which nothing in this

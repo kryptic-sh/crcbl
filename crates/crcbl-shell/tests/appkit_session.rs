@@ -77,8 +77,35 @@
 //!   its own reads out of a cache passes an in-process round trip and fails this.
 //! * **AppKit as the judge** of the first responder, the mouse-moved flag, the
 //!   dragged types, the style mask, the frame and the screen —
-//!   [`crcbl_shell::session_support::key_window`] reads them off `NSWindow`
+//!   [`crcbl_shell::session_support::window_facts`] reads them off `NSWindow`
 //!   rather than out of the backend's own record of what it asked for.
+//!
+//! # M5: only the injection needs the keyboard, and the runner may refuse it
+//!
+//! The first macOS run of M4 got as far as the key window and stopped there.
+//! `-[NSApp keyWindow]` was nil, and the diagnostic beside it was decisive:
+//! `can_become_key: true`, `visible: true`, one window with the right title and
+//! the right class, `app_active: false`. The `canBecomeKeyWindow` override is
+//! installed and answering; the **application** never becomes active, which is
+//! what a GitHub runner does to an unbundled binary and which no backend can
+//! fix. Three things follow, and they are this slice:
+//!
+//! * **The readback stops going through the key window.** Every fact M4 asserts
+//!   — the three view switches, the geometry, the style mask, the backing scale
+//!   — is an ordinary accessor that any window answers, active or not. They come
+//!   from this process's own window, found by title among `-[NSApp windows]`, so
+//!   they run on a runner that never activates instead of being discarded.
+//! * **The harness asks for activation itself**, through
+//!   [`macos::frontmost`] — exactly parallel to `tests/win32_e2e.rs`'s
+//!   `desktop::take_foreground`, and in a harness for the same reason: a game
+//!   does not get to steal the focus, so the lever must not live in
+//!   `src/appkit/`.
+//! * **If it is still refused, the injection is skipped out loud.**
+//!   `CGEventPost` puts an event in the session's stream and the session gives
+//!   it to whoever is frontmost, so it is the one part that cannot proceed.
+//!   `docs/plan/12-testing.md` calls a silently-skipped end-to-end check a known
+//!   trap, so the skip prints what did not run, why, and the evidence — and
+//!   `docs/backlog.md` carries `interpretKeyEvents:` as unverified on CI.
 //!
 //! What is **not** here is the sample-level pass: driving a running game and
 //! pressing F11 at it, which the two Linux suites do. That needs a renderer, and
@@ -136,8 +163,13 @@ mod macos {
         WindowDesc, WindowId, open_backend, session_support,
     };
 
-    /// The window's title, which is also how [`session_support::key_window`]'s
-    /// answer is told apart from some other application's window.
+    /// The window's title, which is **how this session finds its own window**.
+    ///
+    /// [`session_support::window_facts`] looks it up by this among
+    /// `-[NSApp windows]`, so it is the identity every readback rests on rather
+    /// than a decoration — and the same string is what tells
+    /// [`session_support::key_window`]'s answer apart from another
+    /// application's.
     const TITLE: &str = "crcbl appkit session";
 
     /// `kVK_ANSI_A`, which `appkit::keys::key_code` maps to
@@ -251,9 +283,24 @@ mod macos {
         // change is the only thing that invalidates it.
         shell.surface_target(window).expect("surface_target");
 
-        let facts = appkit_agrees(&mut shell, size);
+        // **The one precondition this harness arranges for itself**, before
+        // anything reads the window: see [`frontmost`] for why it is here and
+        // not in the backend. Its answer decides only whether input may be
+        // injected — nothing below it is gated on the keyboard.
+        let activation = take_activation(&mut shell);
+
+        let facts = appkit_agrees(size);
         input(&mut shell, window, size);
-        injected_input(&mut shell, window, size);
+        match &activation {
+            Ok(active) => {
+                println!(
+                    "crcbl appkit session: this process is frontmost and its window has the \
+                     keyboard, so input can be injected: {active:?}"
+                );
+                injected_input(&mut shell, window, size);
+            }
+            Err(refused) => injection_skipped(refused),
+        }
         clipboard(&mut shell, window);
         clipboard_peer(&mut shell, window);
         resize(&mut shell, window, facts.backing_scale);
@@ -267,7 +314,7 @@ mod macos {
         // Judged against `NSScreen` rather than against the request: borderless
         // here is "a frameless window at screen size", and both halves of that
         // are things AppKit will say out loud.
-        let covering = key_window("borderless");
+        let covering = appkit_says("borderless");
         assert!(
             !covering.titled,
             "a borderless window has no title bar; the style mask is {:#x}",
@@ -293,15 +340,11 @@ mod macos {
 
         let windowed = flip(&mut shell, window, DisplayMode::Windowed);
         println!("crcbl appkit session: windowed again at {windowed:?}");
-        let restored = key_window("windowed again");
+        let restored = appkit_says("windowed again");
         assert!(
             restored.titled,
             "a windowed window has its title bar back; the style mask is {:#x}",
             restored.style_mask
-        );
-        assert_eq!(
-            restored.title, TITLE,
-            "and it is still this session's window"
         );
 
         shell.destroy_window(window).expect("destroy_window");
@@ -511,46 +554,141 @@ mod macos {
     // M4: AppKit as the judge
     // -----------------------------------------------------------------------
 
-    /// Pumps until a window of this process has the keyboard, or fails with
-    /// **which of the two mechanisms** refused.
+    /// Everything AppKit will say about **this session's own window**, or a
+    /// failure naming the step that asked.
     ///
-    /// The first version of this discarded
-    /// [`session_support::key_window`]'s error with `.ok()` and reported only
-    /// "it never came", which is precisely the shape of failure the Windows
-    /// half of P5C spent four CI round trips on: a symptom that cannot say
-    /// which mechanism produced it. [`session_support::activation`] separates
-    /// them, and the two want opposite responses:
+    /// The window is found by [`TITLE`] among `-[NSApp windows]`, so this is
+    /// also the check that the window is still ours and still named: a title
+    /// that changed is a lookup that fails, carrying every title that was there
+    /// instead. That is what replaced an `assert_eq!` on the title, which could
+    /// only have been made about a window already found by some other means.
+    fn appkit_says(step: &str) -> session_support::WindowFacts {
+        session_support::window_facts(TITLE).unwrap_or_else(|detail| {
+            panic!(
+                "crcbl appkit session: {step}: {detail}\n\
+                 What the application says: {:?}",
+                session_support::activation(TITLE)
+            )
+        })
+    }
+
+    /// Tries to make this process frontmost and its window key, and answers what
+    /// AppKit said once it stopped trying.
     ///
-    /// * `can_become_key: false` on a `CrcblWindow` is **our** defect — the
-    ///   `canBecomeKeyWindow` override is not on the class the window turned
-    ///   out to be, and a borderless window would silently stop taking
-    ///   keystrokes.
-    /// * `app_active: false` with `can_become_key: true` is the **session**
-    ///   refusing to activate an unbundled binary, which no backend can fix.
-    fn wait_for_key_window(shell: &mut Box<dyn Shell>) -> session_support::KeyWindow {
+    /// # Judged by the mechanism, not by a return value
+    ///
+    /// [`frontmost::ask`] answering `true` means a method returned `YES`, which
+    /// is not the same as the session having activated anything. What is read
+    /// instead is [`session_support::activation`], which is `-[NSApp isActive]`
+    /// and `-[NSWindow isKeyWindow]` — the two things that decide where an
+    /// injected event actually lands. That is the same standard
+    /// `tests/win32_e2e.rs` holds `take_foreground` to, which judges by
+    /// `GetForegroundWindow` and ignores what `SetForegroundWindow` returned.
+    ///
+    /// The lever is pulled once per turn rather than once, for the reason that
+    /// suite gives too: a single refusal must not decide a test.
+    ///
+    /// `Ok` when both are true, `Err` carrying the last state otherwise —
+    /// **which is not a failure**, only the fact that injection cannot proceed.
+    /// See [`injection_skipped`].
+    fn take_activation(
+        shell: &mut Box<dyn Shell>,
+    ) -> Result<session_support::Activation, session_support::Activation> {
         let started = Instant::now();
-        let mut last;
+        let mut announced = false;
         loop {
-            shell.pump(&mut |_event: ShellEvent| {});
-            match session_support::key_window() {
-                Ok(facts) => return facts,
-                Err(detail) => last = detail,
+            let asked = frontmost::ask();
+            if !announced {
+                announced = true;
+                // Printed once, and it is the line that separates "the lever
+                // does not exist on this system" from "the lever said yes and
+                // the session did nothing" — two findings a bare timeout could
+                // not tell apart.
+                println!(
+                    "crcbl appkit session: asked the session for activation; \
+                     -[NSRunningApplication activateWithOptions:] answered {asked}"
+                );
             }
-            assert!(
-                started.elapsed() < DEADLINE,
-                "crcbl appkit session: waited {DEADLINE:?} for a key window and none came.\n\
-                 The last answer was: {last}\n\
-                 What the application and its first window say: {:?}",
-                session_support::activation()
-            );
+            shell.pump(&mut |_event: ShellEvent| {});
+            let state = session_support::activation(TITLE).unwrap_or_else(|detail| {
+                panic!(
+                    "crcbl appkit session: the shell is open and there is no NSApplication \
+                     behind it: {detail}"
+                )
+            });
+            // Both halves: an active application whose key window belongs to
+            // somebody else sends this session's keystrokes to that window, and
+            // a key window in an inactive application receives nothing at all.
+            if state.app_active && state.is_key {
+                return Ok(state);
+            }
+            if started.elapsed() >= DEADLINE {
+                return Err(state);
+            }
             shell.wait_events(Some(Duration::from_millis(20)));
         }
     }
 
-    /// [`session_support::key_window`], or a failure naming the step that asked.
-    fn key_window(step: &str) -> session_support::KeyWindow {
-        session_support::key_window()
-            .unwrap_or_else(|detail| panic!("crcbl appkit session: {step}: {detail}"))
+    /// Says — at length, and where nobody can miss it — that the injected-input
+    /// half of this session did not run, and why.
+    ///
+    /// # A skip that is quiet is worse than a failure
+    ///
+    /// `docs/plan/12-testing.md` names a silently-skipped end-to-end check as a
+    /// known trap: it reports the same green as one that ran, so a path stops
+    /// being covered and nothing says so. This is the opposite of that. It names
+    /// what was skipped, names what is therefore unverified, and prints the
+    /// [`session_support::Activation`] evidence inline so the next reader can
+    /// tell the session's refusal from a defect of ours without another CI round
+    /// trip.
+    ///
+    /// It does **not** fail the session, and that is deliberate: whether a CI
+    /// runner activates an unbundled binary is not a property of this engine,
+    /// and a red run here would say the backend is broken when it is not.
+    fn injection_skipped(refused: &session_support::Activation) {
+        // Which of the two refused, read off the evidence rather than assumed:
+        // the observed case is an inactive application, and an active one whose
+        // keyboard is elsewhere is a different sentence with the same
+        // consequence.
+        let mechanism = if refused.app_active {
+            "the application is active but the keyboard is on another window"
+        } else {
+            "the application never became active"
+        };
+        // The half that says whose defect this is, and it is a genuine branch:
+        // `can_become_key: false` on a `CrcblWindow` would be **ours** — the
+        // `canBecomeKeyWindow` override missing from the class the window turned
+        // out to be, which is a borderless window that silently stops taking
+        // keystrokes. A CI run must not have to know which one it got.
+        let whose = if refused.can_become_key {
+            "can_become_key is true, so the CrcblWindow canBecomeKeyWindow override is installed \
+             and answering: this is the session refusing to activate an unbundled binary, and no \
+             backend can fix it"
+        } else {
+            "can_become_key is FALSE on our own window, which is a defect of this backend and not \
+             the runner's refusal: the canBecomeKeyWindow override is not on the class the window \
+             turned out to be, and a borderless window would silently stop receiving keystrokes"
+        };
+        println!(
+            "crcbl appkit session: ============================================================\n\
+             crcbl appkit session: INJECTED INPUT WAS NOT EXERCISED — {mechanism}, so no window \
+             of this process holds it.\n\
+             crcbl appkit session: CGEventPost puts an event in the *session's* stream and the \
+             session gives it to whatever is frontmost, so posting now would type this test's \
+             keystrokes into some other process on the runner rather than into our window.\n\
+             crcbl appkit session: What AppKit says: {refused:?}\n\
+             crcbl appkit session: {whose}. The harness asked for activation itself, once per \
+             turn for {DEADLINE:?}, through -[NSRunningApplication activateWithOptions:] and \
+             -[NSApp activateIgnoringOtherApps:], and was refused.\n\
+             crcbl appkit session: SKIPPED: the injected key and its release, the TextCommit \
+             behind interpretKeyEvents:, the arrow key, the window-server pointer motion, the \
+             click and the wheel notch. Nothing else — every other assertion in this session \
+             ran.\n\
+             crcbl appkit session: STILL UNVERIFIED ON CI: interpretKeyEvents: and the whole \
+             injected-input path. docs/backlog.md carries it as a gap, on the same terms as \
+             the F11 pass that needs a renderer.\n\
+             crcbl appkit session: ============================================================"
+        );
     }
 
     /// What `NSWindow` says about the window the shell just built.
@@ -575,15 +713,17 @@ mod macos {
     ///   says that a window carrying a tracking area and a first responder still
     ///   ends up registered.
     ///
-    /// The window being **key** is waited for rather than asserted outright: it
-    /// has just been ordered front, and which window has the keyboard is the
-    /// window server's to decide on its own schedule.
-    fn appkit_agrees(shell: &mut Box<dyn Shell>, size: PhysicalSize) -> session_support::KeyWindow {
-        let facts = wait_for_key_window(shell);
-        assert_eq!(
-            facts.title, TITLE,
-            "the key window is this session's own and not some other application's: {facts:?}"
-        );
+    /// # None of it needs the window to be key, and M4 learned that the hard way
+    ///
+    /// The first version reached the window through `-[NSApp keyWindow]` and
+    /// waited for one, so on a runner that never activates this whole function
+    /// — the three switches included — never ran at all. Every field it reads is
+    /// an accessor any `NSWindow` answers whether or not it has the keyboard, so
+    /// it now reads them off this session's own window, found by title. Whether
+    /// the window *is* key is reported by [`session_support::WindowFacts`] and
+    /// gates only the injection.
+    fn appkit_agrees(size: PhysicalSize) -> session_support::WindowFacts {
+        let facts = appkit_says("the window AppKit knows about");
         assert!(
             facts.accepts_mouse_moved,
             "-[NSWindow acceptsMouseMovedEvents] is what makes pointer motion exist at all; \
@@ -625,11 +765,13 @@ mod macos {
         );
         println!(
             "crcbl appkit session: AppKit agrees — first responder {}, mouse-moved {}, dragged \
-             types {:?}, scale {}",
+             types {:?}, scale {}, application active {}, window key {}",
             facts.first_responder,
             facts.accepts_mouse_moved,
             facts.dragged_types,
-            facts.backing_scale
+            facts.backing_scale,
+            facts.app_active,
+            facts.is_key
         );
         facts
     }
@@ -645,7 +787,7 @@ mod macos {
         /// The content size to ask for, in points. Small enough to fit on the
         /// 1024×768 display both CI runners turned out to have.
         const POINTS: (f64, f64) = (512.0, 384.0);
-        session_support::resize_key_window(POINTS.0, POINTS.1).expect("resize_key_window");
+        session_support::resize_window(TITLE, POINTS.0, POINTS.1).expect("resize_window");
 
         let expected = PhysicalSize::new(
             (POINTS.0 * scale).round() as u32,
@@ -660,7 +802,7 @@ mod macos {
         });
         // And AppKit's own account of the same window, which is what makes this
         // a resize rather than the seam echoing a number back.
-        let after = key_window("after the resize");
+        let after = appkit_says("after the resize");
         assert_eq!(
             after.content_points,
             [POINTS.0, POINTS.1],
@@ -716,7 +858,13 @@ mod macos {
     /// job's own shell. So the key window is checked first, by title, and this
     /// fails rather than posting if it is not ours.
     fn injected_input(shell: &mut Box<dyn Shell>, window: WindowId, size: PhysicalSize) {
-        let before = key_window("before injecting input");
+        // **The one place `-[NSApp keyWindow]` is still the question asked**,
+        // because it is the one place the answer changes what may happen: the
+        // session hands an injected event to whoever is frontmost. Reached only
+        // after `take_activation` said both halves are true, so a failure here
+        // is the keyboard moving between that check and this one.
+        let before = session_support::key_window()
+            .unwrap_or_else(|detail| panic!("crcbl appkit session: before injecting: {detail}"));
         assert_eq!(
             before.title, TITLE,
             "input follows the key window, so nothing may be posted while somebody else has it: \
@@ -1219,6 +1367,218 @@ mod macos {
             // free: it is advisory, so a backend that returns immediately just
             // spins this loop as it would have anyway.
             shell.wait_events(Some(Duration::from_millis(20)));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // M5: the activation a harness may arrange and a backend may not
+    // -----------------------------------------------------------------------
+
+    /// Asking the session to make **this** process frontmost.
+    ///
+    /// # Decision: this is a harness, so it is not in `src/appkit/`
+    ///
+    /// `tests/win32_e2e.rs`'s `desktop::take_foreground` states the rule for the
+    /// other platform and it is the same rule here: **a game does not get to
+    /// steal the focus.** A backend that knew how to force itself frontmost is a
+    /// backend that could do it to a user mid-sentence, so
+    /// `appkit::app::activate` does the polite thing — `-[NSApp activate]` where
+    /// it exists, `activateIgnoringOtherApps:` before that — and stops. What is
+    /// here is what an automated harness does to arrange a precondition a human
+    /// would have arranged by clicking on the window, and it belongs on this side
+    /// of the seam for exactly that reason.
+    ///
+    /// # Why `NSRunningApplication` and not more of what the backend already did
+    ///
+    /// The backend's own activation runs on every `open()` and the runner still
+    /// reported `app_active: false`. On macOS 14 `-[NSApplication activate]` is
+    /// *cooperative*: it asks, and an application that is not entitled to
+    /// interrupt whatever is frontmost does not get to. `respondsToSelector:`
+    /// finds that selector on any modern system, so the backend takes that branch
+    /// and never reaches the forceful one.
+    ///
+    /// `-[NSRunningApplication activateWithOptions:]` is the lever from the other
+    /// side — the process object rather than the application object — and
+    /// `NSApplicationActivateIgnoringOtherApps` is the bit that says "do it
+    /// anyway". Both spellings are deprecated as of macOS 14 and neither is
+    /// removed; deprecated is a compiler diagnostic in Objective-C and nothing at
+    /// all across `objc_msgSend`. The legacy `activateIgnoringOtherApps:` is sent
+    /// as well, because it is the branch the backend skips and it costs one
+    /// message.
+    ///
+    /// **Every selector is checked with `respondsToSelector:` first.** Sending
+    /// one a system does not have is a crash, not a graceful nothing, and this
+    /// crate has no deployment target to reason from — the same discipline
+    /// `appkit::ffi::responds_to` exists for.
+    ///
+    /// # Hand-written FFI rather than the backend's
+    ///
+    /// `crcbl_shell::appkit::ffi` is `pub(crate)`, rightly, and [`quartz`] gives
+    /// the argument in full: a harness that drove the backend through the
+    /// backend's own ABI declarations would be grading its own homework. So this
+    /// declares the three runtime entry points it needs and transmutes
+    /// `objc_msgSend` per call site, which is the only form of the call that is
+    /// correct on `aarch64-apple-darwin` — see [`msg_send`].
+    mod frontmost {
+        use core::ffi::{CStr, c_char, c_void};
+
+        /// Any Objective-C object pointer: `id`, and also `Class`.
+        type Id = *mut c_void;
+        /// `SEL`.
+        type Sel = *const c_void;
+        /// `BOOL`, as `i8`: it is `signed char` on x86_64 and `_Bool` on arm64,
+        /// and only the second has exactly two valid bit patterns — so reading
+        /// one straight into a Rust `bool` would be undefined behaviour the day
+        /// a method answered `2`.
+        type ObjcBool = i8;
+
+        /// `NSApplicationActivateAllWindows` — bring this process's other
+        /// windows up with it, rather than only the frontmost one.
+        const ACTIVATE_ALL_WINDOWS: usize = 1 << 0;
+        /// `NSApplicationActivateIgnoringOtherApps` — the bit that makes this a
+        /// harness's call and not a well-behaved application's.
+        const ACTIVATE_IGNORING_OTHER_APPS: usize = 1 << 1;
+
+        #[link(name = "objc")]
+        unsafe extern "C" {
+            fn objc_getClass(name: *const c_char) -> Id;
+            fn sel_registerName(name: *const c_char) -> Sel;
+            /// The dispatch trampoline. **Never called through this
+            /// declaration** — see [`msg_send`].
+            fn objc_msgSend();
+            fn objc_autoreleasePoolPush() -> *mut c_void;
+            fn objc_autoreleasePoolPop(pool: *mut c_void);
+        }
+
+        /// A scope in which autoreleased objects are valid.
+        ///
+        /// **`+[NSRunningApplication currentApplication]` returns an
+        /// autoreleased object**, and [`ask`] is called once per turn of a poll
+        /// that can run for the whole deadline. With no pool the runtime logs
+        /// `autoreleased with no pool in place — just leaking` and does exactly
+        /// that, several hundred times, which buries the session's own narrative
+        /// in the one log a reader has. The backend's `appkit::ffi::Pool` is
+        /// `pub(crate)` and this is a harness, so this is the same two runtime
+        /// calls declared here.
+        struct Pool(*mut c_void);
+
+        impl Pool {
+            /// Pushes a pool, popped by [`Drop`] in the reverse order.
+            fn push() -> Self {
+                // SAFETY: the runtime's own pool stack; the token is opaque and
+                // is handed back unmodified in `drop`.
+                Self(unsafe { objc_autoreleasePoolPush() })
+            }
+        }
+
+        impl Drop for Pool {
+            fn drop(&mut self) {
+                // SAFETY: `self.0` is the token this pool pushed and has not
+                // been popped before. Rust's drop order gives the nesting the
+                // runtime requires.
+                unsafe { objc_autoreleasePoolPop(self.0) };
+            }
+        }
+
+        /// `objc_msgSend`, transmuted to the exact signature of the method being
+        /// sent.
+        ///
+        /// **There is no variadic ABI to declare it with on
+        /// `aarch64-apple-darwin`.** Apple's arm64 convention passes variadic
+        /// arguments on the stack and ordinary ones in registers, and
+        /// `objc_msgSend` is a trampoline that must be called with the signature
+        /// of the method it dispatches to, so that every argument is already in
+        /// the register the implementation reads it from. Declaring it
+        /// `fn(Id, Sel, ...)` compiles, links, runs, and hands the method
+        /// whatever happened to be lying in that register. The same hazard
+        /// [`quartz`](super::quartz) documents for
+        /// `CGEventCreateScrollWheelEvent`, arriving through the runtime instead.
+        ///
+        /// # Safety
+        ///
+        /// `F` must be a function pointer type whose signature is exactly the
+        /// receiver, the selector, the method's arguments and its return type.
+        unsafe fn msg_send<F: Copy>() -> F {
+            assert!(
+                size_of::<F>() == size_of::<*const c_void>(),
+                "msg_send's type parameter must be a function pointer"
+            );
+            // SAFETY: `F` is a function pointer of pointer size, asserted above,
+            // and the value copied into it is the address of a real function.
+            // The caller carries the obligation that the signature matches.
+            unsafe { core::mem::transmute_copy(&(objc_msgSend as *const c_void)) }
+        }
+
+        /// The selector for `name`, interned by the runtime.
+        fn sel(name: &CStr) -> Sel {
+            // SAFETY: a NUL-terminated C string that outlives the call; the
+            // result is a pointer into the runtime's own table.
+            unsafe { sel_registerName(name.as_ptr()) }
+        }
+
+        /// Whether `receiver` implements `selector`.
+        ///
+        /// # Safety
+        ///
+        /// `receiver` must be a live object; every object answers this.
+        unsafe fn responds_to(receiver: Id, selector: Sel) -> bool {
+            // SAFETY: `respondsToSelector:` is on `NSObject`, so every object
+            // implements it with this signature.
+            let send: unsafe extern "C" fn(Id, Sel, Sel) -> ObjcBool = unsafe { msg_send() };
+            unsafe { send(receiver, sel(c"respondsToSelector:"), selector) != 0 }
+        }
+
+        /// Pulls both levers once, and answers whether
+        /// `activateWithOptions:` said yes.
+        ///
+        /// **That answer is not the judgment** and no caller should treat it as
+        /// one: a method returning `YES` is not the session having activated
+        /// anything. `take_activation` reads `-[NSApp isActive]` afterwards
+        /// instead, exactly as the Win32 suite judges `take_foreground` by
+        /// `GetForegroundWindow`. What the return value is good for is telling
+        /// "this system has no such lever" apart from "the lever was pulled and
+        /// nothing moved", which are different findings and would otherwise both
+        /// arrive as a timeout.
+        #[must_use]
+        pub fn ask() -> bool {
+            let _pool = Pool::push();
+            // SAFETY: every call below is a class lookup, a `respondsToSelector:`
+            // or a message whose signature is written at its own call site.
+            // `currentApplication` and `sharedApplication` are class methods
+            // returning objects the runtime owns for the life of the process,
+            // and each is null-checked before anything is sent to it.
+            unsafe {
+                let running = objc_getClass(c"NSRunningApplication".as_ptr());
+                let application = objc_getClass(c"NSApplication".as_ptr());
+                if running.is_null() || application.is_null() {
+                    return false;
+                }
+                let class_method: unsafe extern "C" fn(Id, Sel) -> Id = msg_send();
+
+                // The legacy, forceful spelling on `NSApp`. The backend skips
+                // this branch on any system new enough to have `activate`, so
+                // sending it here is not a repeat of what `open()` already did.
+                let app = class_method(application, sel(c"sharedApplication"));
+                let ignoring = sel(c"activateIgnoringOtherApps:");
+                if !app.is_null() && responds_to(app, ignoring) {
+                    let send: unsafe extern "C" fn(Id, Sel, ObjcBool) = msg_send();
+                    send(app, ignoring, 1);
+                }
+
+                // And the process object's own, which is the lever this module
+                // exists for.
+                let current = class_method(running, sel(c"currentApplication"));
+                let with_options = sel(c"activateWithOptions:");
+                if current.is_null() || !responds_to(current, with_options) {
+                    return false;
+                }
+                let activate: unsafe extern "C" fn(Id, Sel, usize) -> ObjcBool = msg_send();
+                activate(
+                    current,
+                    with_options,
+                    ACTIVATE_ALL_WINDOWS | ACTIVATE_IGNORING_OTHER_APPS,
+                ) != 0
+            }
         }
     }
 

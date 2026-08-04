@@ -2271,6 +2271,18 @@ mod tests {
 
     #[test]
     fn the_pointer_enters_moves_clicks_scrolls_and_leaves() {
+        /// Where this test's **first** movement puts the pointer, and therefore
+        /// the position the arrival derived from it carries.
+        ///
+        /// This is the payload that identifies a crossing as ours: a real
+        /// movement reports where the physical cursor actually is, so no event
+        /// the desktop contributes carries this point.
+        const ARRIVED_AT: PhysicalPoint = PhysicalPoint::new(40.0, 30.0);
+        /// Where the **second** movement puts it. No arrival may carry this:
+        /// the pointer is already inside by then, and `TrackMouseEvent` is
+        /// re-armed only on a transition.
+        const MOVED_TO: PhysicalPoint = PhysicalPoint::new(41.0, 31.0);
+
         let mut shell = shell();
         let window = window(&mut shell);
         let hwnd = hwnd_of(&shell, window);
@@ -2307,8 +2319,10 @@ mod tests {
         // and from nothing else. What the desktop queued meanwhile is dispatched
         // during the collecting pump — *after* everything sent here, because
         // `pump` translates what the procedure recorded in the order it recorded
-        // it — which is why the assertions read the front of the sequence and
-        // tolerate a tail.
+        // it. What that does **not** buy is a known position in the sequence:
+        // the discarding pump above runs before any of it and can leave a
+        // crossing of the desktop's in front, which is what the assertions below
+        // are written around.
         shell.pump(&mut |_| {});
         let frame = super::input::client_screen_rect(hwnd).expect("a live window has one");
         send_leave(hwnd);
@@ -2341,13 +2355,13 @@ mod tests {
         let mut motions = Vec::new();
         let mut buttons = Vec::new();
         let mut wheel = None;
-        let mut crossings = Vec::new();
-        // Every arrival paired with the index of the movement it is supposed to
-        // have been derived from — the **next** one, because the procedure
-        // pushes the derived arrival before the motion that triggered it. Kept
-        // as a pair rather than compared on the spot so the failure can print
-        // both sides.
-        let mut arrivals = Vec::new();
+        // Every crossing, carried with the number of movements seen ahead of
+        // it. That count is what pairs an arrival with the movement it was
+        // derived from: the procedure pushes the derived arrival *before* the
+        // motion that triggered it, so the motion sits at exactly that index.
+        // Kept alongside rather than compared on the spot so the failure can
+        // print both sides.
+        let mut crossings: Vec<(bool, Option<PhysicalPoint>, usize)> = Vec::new();
         shell.pump(&mut |event| {
             names.push(event.name());
             match event {
@@ -2366,90 +2380,94 @@ mod tests {
                 } => wheel = Some((delta, position)),
                 ShellEvent::PointerFocus {
                     entered, position, ..
-                } => {
-                    crossings.push((entered, position));
-                    if entered {
-                        arrivals.push((position, motions.len()));
-                    }
-                }
+                } => crossings.push((entered, position, motions.len())),
                 _ => {}
             }
         });
 
-        // **The rule, not a count the machine gets a vote in.** The desktop keeps
-        // delivering real movement into the collecting pump, and a real movement
-        // arriving after this test's own leave derives a *third* crossing that
-        // nothing here caused. Counting crossings therefore asserts that the
-        // runner held still, which is the assumption this file exists to have
-        // stopped making — so what is asserted is the ordering property instead,
-        // which no amount of extra motion can satisfy by accident:
+        // **Our own crossings are found by their payload, never by their
+        // index**, and nothing at all is claimed about the ones the desktop
+        // contributes.
         //
-        // * the first crossing is an arrival, and it is this test's,
-        // * the second is the leave this test sent, carrying no position,
-        // * crossings alternate all the way to the end, and
-        // * every arrival carries the position of the movement it was derived
-        //   from — the one *after* it in the stream, since the procedure pushes
-        //   the derived arrival first and the movement second.
+        // # Three runs, three failures, and the fourth shape is different in kind
         //
-        // Alternation is what keeps the one-shot claim: `TrackMouseEvent` is
-        // re-armed only on a transition, so a backend that derived an arrival per
-        // movement would show two arrivals in a row here — and would show them
-        // whether or not the desktop contributed anything.
-        assert!(
-            crossings.len() >= 2,
-            "an arrival and a leave, at least: {crossings:?} out of {names:?}"
-        );
-        assert!(
-            crossings[0].0,
-            "the first crossing after a leave is the arrival: {crossings:?} out of {names:?}"
+        // This assertion has now been rewritten three times, each version
+        // assuming a slightly quieter machine than the last, and `windows-latest`
+        // voted against every one. The last of them required the first crossing
+        // to be an arrival, and came back with:
+        //
+        // ```text
+        // the first crossing after a leave is the arrival:
+        //   [(false, None), (true, Some(PhysicalPoint { x: 40.0, y: 30.0 })), (false, None)]
+        //   out of ["PointerFocus", "PointerFocus", "PointerMotion", "PointerMotion",
+        //           "Button", ×4, "Wheel", "PointerFocus", "Focus"]
+        // ```
+        //
+        // A leave in front, then our arrival at the injected point, then our
+        // leave. The discarding pump above had dispatched a real `WM_MOUSEMOVE`
+        // whose derived arrival it threw away, so `send_leave` was a genuine
+        // transition rather than the no-op it is on a still desktop — and a
+        // crossing nothing in this test's own sequence accounts for was sitting
+        // ahead of everything.
+        //
+        // So the shape changed rather than tightening again: **a live desktop is
+        // entitled to insert crossings before, between and after ours**, and any
+        // claim about position-in-the-sequence is a claim that it held still.
+        // What this test injected is identifiable — the arrival it derives
+        // carries [`ARRIVED_AT`], which is a point no real movement reports —
+        // so the property is stated about that pair and about nothing else:
+        //
+        // * an arrival carries the position this test moved to,
+        // * the movement it was derived from is the very next motion in the
+        //   stream, since the procedure pushes the arrival ahead of it,
+        // * the crossing straight after it is a leave carrying no position —
+        //   this test's own, and nothing can be dispatched between the two
+        //   because every `send_*` here is a synchronous `SendMessageW`, and
+        // * **no arrival carries [`MOVED_TO`]**, which is the one-shot claim:
+        //   `TrackMouseEvent` is re-armed only on a transition, so a backend
+        //   deriving an arrival per movement would announce the second movement
+        //   as an arrival too.
+        let ours = crossings
+            .iter()
+            .position(|(entered, at, _)| *entered && *at == Some(ARRIVED_AT))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no arrival carried {ARRIVED_AT:?}, which is where this test's first \
+                     movement put the pointer: {crossings:?} out of {names:?}"
+                )
+            });
+        let derived_from = crossings[ours].2;
+        assert_eq!(
+            motions.get(derived_from).copied(),
+            Some(Some(ARRIVED_AT)),
+            "an arrival carries the position of the movement it was derived from, and that \
+             movement is still delivered: motion {derived_from} of {motions:?}. Events {names:?}"
         );
         assert_eq!(
-            crossings[1],
-            (false, None),
-            "the leave this test sent follows it and carries no position: {crossings:?}"
+            crossings
+                .get(ours + 1)
+                .map(|(entered, at, _)| (*entered, *at)),
+            Some((false, None)),
+            "the leave this test sent follows its arrival and carries no position; every \
+             message between the two is a synchronous SendMessageW, so nothing else can be \
+             dispatched in there: {crossings:?} out of {names:?}"
         );
-        for pair in crossings.windows(2) {
-            assert_ne!(
-                pair[0].0, pair[1].0,
-                "crossings alternate — an arrival is not announced twice without a leave \
-                 between: {crossings:?} out of {names:?}"
-            );
-        }
-        for (position, next) in &arrivals {
-            assert!(
-                position.is_some() && motions.get(*next).copied() == Some(*position),
-                "an arrival carries the position of the movement it was derived from; this one \
-                 said {position:?} where motion {next} of {motions:?} is what triggered it. \
-                 Events {names:?}"
-            );
-        }
         assert!(
-            motions.contains(&Some(PhysicalPoint::new(41.0, 31.0))),
-            "{motions:?}"
+            !crossings
+                .iter()
+                .any(|(entered, at, _)| *entered && *at == Some(MOVED_TO)),
+            "the pointer was already inside by the second movement, so {MOVED_TO:?} is a \
+             movement and not an arrival; announcing it would mean TrackMouseEvent is re-armed \
+             per message rather than per transition: {crossings:?} out of {names:?}"
         );
+        assert!(motions.contains(&Some(MOVED_TO)), "{motions:?}");
         assert_eq!(
             buttons,
             vec![
-                (
-                    PointerButton::Left,
-                    ButtonState::Pressed,
-                    Some(PhysicalPoint::new(41.0, 31.0))
-                ),
-                (
-                    PointerButton::Left,
-                    ButtonState::Released,
-                    Some(PhysicalPoint::new(41.0, 31.0))
-                ),
-                (
-                    PointerButton::Back,
-                    ButtonState::Pressed,
-                    Some(PhysicalPoint::new(41.0, 31.0))
-                ),
-                (
-                    PointerButton::Back,
-                    ButtonState::Released,
-                    Some(PhysicalPoint::new(41.0, 31.0))
-                ),
+                (PointerButton::Left, ButtonState::Pressed, Some(MOVED_TO)),
+                (PointerButton::Left, ButtonState::Released, Some(MOVED_TO)),
+                (PointerButton::Back, ButtonState::Pressed, Some(MOVED_TO)),
+                (PointerButton::Back, ButtonState::Released, Some(MOVED_TO)),
             ],
             "{names:?}"
         );
@@ -2457,7 +2475,7 @@ mod tests {
         assert_eq!(delta, ScrollDelta::Lines { x: 0.0, y: 1.0 });
         assert_eq!(
             position,
-            Some(PhysicalPoint::new(41.0, 31.0)),
+            Some(MOVED_TO),
             "the screen coordinates a wheel message carries were converted"
         );
     }
