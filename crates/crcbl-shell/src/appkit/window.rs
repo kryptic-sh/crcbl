@@ -44,18 +44,22 @@
 //! one is meant to land exactly where it was.
 //!
 //! The default is not merely unhelpful, it is silent — it preserves the size it
-//! was given and moves the origin, so the symptom is a window of exactly the
-//! right extent in the wrong place. **A borderless window that is screen-sized
-//! but offset hangs off two edges of the display**, and nothing in the seam can
-//! see it: [`WindowState`](crate::WindowState) carries a size and no position, so
-//! `set_mode` reported a perfectly correct 1024×768 while the window sat at
-//! (192, 160) — its creation origin, untouched.
+//! was given and moves the origin. Overriding it to answer the proposed
+//! rectangle unchanged is the documented way out, and the subclass to do it in
+//! already exists for `canBecomeKeyWindow`. What that gives up is AppKit's safety
+//! net for a frame this backend computed wrongly; what it buys is that a frame
+//! this backend computed *correctly* is the frame the window gets.
 //!
-//! Overriding it to answer the proposed rectangle unchanged is the documented
-//! way out, and the subclass to do it in already exists for
-//! `canBecomeKeyWindow`. What that gives up is AppKit's safety net for a frame
-//! this backend computed wrongly; what it buys is that a frame this backend
-//! computed *correctly* is the frame the window gets.
+//! **It is not, however, the explanation for the open borderless-origin
+//! defect.** A window flipped to borderless comes out exactly screen-sized at its
+//! previous windowed origin — nothing in the seam can see that, since
+//! [`WindowState`](crate::WindowState) carries a size and no position — and it
+//! still does with this override installed and verified by
+//! `tests::the_window_class_installs_every_override_a_borderless_window_needs`
+//! on a real runner. The default moves a window *down* to clear the menu bar; it
+//! does not move one right by 192 points. `docs/backlog.md` carries the three
+//! remaining causes, and the `log::debug!` trail through [`AppKitShell::apply_mode`]
+//! and [`set_frame`] exists to tell them apart on the next run.
 //!
 //! Unlike the Win32 backend there is no `WINDOWPLACEMENT` to save: AppKit's
 //! zoomed state is a property of the window rather than a rectangle to restore,
@@ -538,6 +542,20 @@ impl AppKitShell {
         match mode {
             DisplayMode::Borderless { monitor } => {
                 let frame = self.borderless_frame(window, monitor)?;
+                // **The rectangle before it leaves this function.** Whether the
+                // origin is already wrong here or only after `setFrame:` decides
+                // between a conversion bug in `borderless_frame` and something
+                // AppKit did with a correct rectangle, and those need opposite
+                // fixes. The screens it was chosen from go with it, because a
+                // frame that matches none of them is a third answer again.
+                log::debug!(
+                    "borderless: asked for monitor {monitor:?}, computed {frame:?} from screens \
+                     {:?}",
+                    self.screens
+                        .iter()
+                        .map(|screen| (screen.id, screen.frame, screen.visible))
+                        .collect::<Vec<_>>()
+                );
                 if saved.is_none() {
                     // SAFETY: a live window; both are accessors.
                     let saved = unsafe {
@@ -557,11 +575,29 @@ impl AppKitShell {
                         ffi::sel(c"setStyleMask:"),
                         geometry::style_mask(mode, resizable),
                     );
+                    // The mask the window actually carries when `setFrame:` runs,
+                    // read back rather than assumed: AppKit is entitled to keep
+                    // bits, and a window that is still titled here is a window
+                    // whose frame includes a title bar.
+                    log::debug!(
+                        "borderless: style mask asked {:#x}, window carries {:#x}",
+                        geometry::style_mask(mode, resizable),
+                        ffi::msg_usize(window, ffi::sel(c"styleMask"))
+                    );
                     set_frame(window, frame);
                     // A window that was key stays key, but a borderless one has
                     // to be told to come forward again on some systems — and
                     // asking twice costs nothing.
                     ffi::msg1_void(window, ffi::sel(c"makeKeyAndOrderFront:"), ptr::null_mut());
+                    // **After the order-front, which is the last thing this
+                    // function does to the window.** A frame that was right
+                    // after `setFrame:` and is wrong here names this call; one
+                    // that is still right here and wrong by the time the session
+                    // looks names the pump, and nothing else is left.
+                    log::debug!(
+                        "borderless: after makeKeyAndOrderFront: the frame is {:?}",
+                        ffi::msg_rect(window, ffi::sel(c"frame"))
+                    );
                 }
             }
             DisplayMode::Windowed => {
@@ -671,25 +707,39 @@ impl AppKitShell {
 /// carries an extent and no origin, so every layer above this one would keep
 /// reporting a perfectly correct size.
 ///
-/// So this asks the window where it actually ended up. The override above should
-/// make the two always agree; a warning here means it did not take, and it names
-/// both rectangles rather than leaving the next reader to infer one of them.
+/// So this asks the window where it actually ended up. **All three rectangles
+/// are reported** — where the window was, what was asked for, and where it
+/// landed — because they distinguish causes that need opposite fixes and a
+/// message carrying only the last two cannot:
+///
+/// * *before* and *applied* identical, *asked* different: the call did nothing.
+/// * *applied* has the asked size at the *before* origin: the origin did not
+///   arrive or was overruled — an `NSRect` is an HFA passed in `v0`–`v3` on this
+///   ABI, so a wrong function type corrupts it exactly this quietly, and
+///   `constrainFrameRect:toScreen:` overrules it exactly this quietly too.
+/// * *applied* equals *asked*: this call is innocent and whatever moved the
+///   window did it later.
 ///
 /// # Safety
 ///
 /// `window` must be a live `NSWindow`, on the main thread.
 unsafe fn set_frame(window: Id, frame: NSRect) {
+    // SAFETY: a live window; `frame` is an accessor returning an `NSRect`.
+    let before = unsafe { ffi::msg_rect(window, ffi::sel(c"frame")) };
     // SAFETY: an `NSWindow` setter taking an `NSRect` and a `BOOL`.
     let send: unsafe extern "C" fn(Id, Sel, NSRect, ObjcBool) = unsafe { ffi::msg_send() };
     unsafe { send(window, ffi::sel(c"setFrame:display:"), frame, YES) };
-
-    // SAFETY: a live window; `frame` is an accessor returning an `NSRect`.
+    // SAFETY: as the read above.
     let applied = unsafe { ffi::msg_rect(window, ffi::sel(c"frame")) };
+
+    log::debug!("setFrame:display: from {before:?} asked {frame:?} landed {applied:?}");
     if applied != frame {
         log::warn!(
-            "-[NSWindow setFrame:display:] was asked for {frame:?} and the window is at \
-             {applied:?}; a matching size with a different origin is AppKit constraining the \
-             rectangle, which CrcblWindow overrides constrainFrameRect:toScreen: to prevent"
+            "-[NSWindow setFrame:display:] did not take: the window was at {before:?}, was asked \
+             for {frame:?}, and is at {applied:?}. A landed size matching the asked size at the \
+             *previous* origin means the origin was dropped or overruled — CrcblWindow overrides \
+             constrainFrameRect:toScreen: to stop AppKit doing the overruling, so if that \
+             override is installed the argument itself is the suspect"
         );
     }
 }

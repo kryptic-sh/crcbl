@@ -1162,6 +1162,41 @@ which is worth recording so a round trip is not spent finding out:
   real click looks like, and AppKit acting on that would be a harness defect
   reported as a backend one.
 
+### Instrumentation that cannot report is the same defect as a check that cannot fail
+
+**A `log::warn!` with no logger behind it is a discarded string**, and a whole
+CI round trip was spent on one. The readback added to
+`appkit::window::set_frame` — whose entire purpose was to say whether the window
+landed where it was put — was structurally incapable of speaking, because
+nothing in `tests/appkit_session.rs`'s process had ever called
+`crcbl_core::log::try_init_logging`. It shipped, the run failed, and the
+diagnostic it was written to produce was not in the log because it could never
+have been.
+
+This is the "a check that cannot fail is not a check" rule one level up, and it
+is worth stating separately because the reflex that catches the first one does
+not catch this: an assertion is obviously something you can try to break, while
+a log line looks like it either prints or does not and the failure mode is
+invisible. **Before trusting a diagnostic, make it emit once.**
+
+The session now installs a logger before it opens the backend, with the filter
+fixed in code rather than read from `CRCBL_LOG` — `Filter::from_env` would leave
+the session's own diagnosis depending on whether a CI job happened to set an
+environment variable, and the job does not. `crcbl_shell::appkit::window` is
+turned up to `debug` and everything else stays at `info`, so the placement trail
+is complete and the event pump does not bury it. `try_init_logging` rather than
+`init_logging`, because the `Result` says whether a logger was already there and
+silently ignoring that is how this went wrong the first time.
+
+**Falsified offline rather than reasoned about**, in a throwaway crate against
+the real `crcbl-core`: `Filter::parse("info,crcbl_shell::appkit::window=debug")`
+answers `Debug` for `crcbl_shell::appkit::window`, `Info` for
+`crcbl_shell::appkit::shell`, and `max_level` `Debug` so the facade's global
+fast path lets the records through; a `debug!` and a `warn!` on the window
+target both reach **stderr**, and a `debug!` on another module's target is
+correctly dropped. Stderr is the stream nextest has been surfacing all along —
+every panic message read this session arrived on it.
+
 ### The readback layer earned itself: a borderless window at the wrong origin
 
 **The first defect `tests/appkit_session.rs`'s "AppKit as the judge" layer
@@ -1188,15 +1223,44 @@ at all. That is the entire argument for judging the window by AppKit's own
 accessors rather than by the backend's record of what it asked for, and it is
 now paid for.
 
-The cause is `-[NSWindow setFrame:display:]`, which does not simply apply the
-rectangle it is given: it passes it through `constrainFrameRect:toScreen:`
-first. That default keeps a title bar clear of the menu bar and the window on a
-screen — right for a document window someone dragged, wrong for every frame this
-backend sets, all of which come from an `NSScreen` rectangle and are on that
-screen by construction. And it fails in the worst available way: **silently,
-preserving the size it was given and moving the origin.** `CrcblWindow` now
-overrides it to answer the proposed rectangle unchanged, which is the documented
-way out and which the subclass already existed for.
+**The cause is not yet known, and the first candidate was wrong.**
+`constrainFrameRect:toScreen:` was the hypothesis:
+`-[NSWindow setFrame:display:]` passes the rectangle it is given through it, and
+its default keeps a title bar clear of the menu bar — right for a document
+window someone dragged, wrong for every frame this backend sets, all of which
+come from an `NSScreen` rectangle and are on that screen by construction.
+`CrcblWindow` now overrides it to answer the proposed rectangle unchanged, and
+the host test
+`the_window_class_installs_every_override_a_borderless_window_needs` **passed on
+the runner**, so the override is installed and `instancesRespondToSelector:`
+finds it. **The window still came out at (192, 160).**
+
+The override was a correct change on its own merits and stays. But the evidence
+now says it is not the mechanism, and there is a specific reason to have doubted
+it earlier: the default implementation moves a window **down**, to keep a title
+bar below the menu bar. It does not move one **right by 192**. A size that is
+the screen's with an origin that is the _creation_ origin is not the shape that
+constraint produces.
+
+Three causes remain open and they need opposite fixes, so the next round carries
+evidence rather than another candidate:
+
+- **`borderless_frame` computes the wrong rectangle**, and the origin never
+  leaves the backend — a conversion bug.
+- **`setFrame:display:` is handed the right rectangle and does something else
+  with it.** An `NSRect` is an HFA passed in `v0`–`v3` on this ABI, so a wrong
+  Rust function type corrupts it exactly this quietly — the same class of defect
+  as the `wheel1` variadic, which this session has already been bitten by once.
+- **The frame is right when `apply_mode` returns and something moves it
+  afterwards**, in which case `makeKeyAndOrderFront:` or the pump is the
+  suspect.
+
+The backend now logs all of it: the rectangle `borderless_frame` computed and
+the screens it chose from, the style mask asked for and the one the window
+carries when `setFrame:` runs, the frame before / asked / landed across
+`setFrame:display:`, and the frame again after `makeKeyAndOrderFront:`. The
+session's assertion prints the window's frame before the flip and everything
+`WindowFacts` holds, and says which log line settles which case.
 
 Three things checked while in there, because the fix is only worth as much as
 its neighbours:

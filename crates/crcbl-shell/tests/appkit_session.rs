@@ -179,6 +179,7 @@ fn main() {
 mod macos {
     use std::time::{Duration, Instant};
 
+    use crcbl_core::log::Filter;
     use crcbl_shell::{
         ButtonState, ClipboardContent, ClipboardOffer, CursorIcon, DisplayMode, KeyCode, Keysym,
         LogicalSize, MimeType, PhysicalPoint, PhysicalSize, PointerButton, PointerMode,
@@ -242,6 +243,7 @@ mod macos {
     const REQUESTED: LogicalSize = LogicalSize::new(640.0, 480.0);
 
     pub fn run() {
+        install_logger();
         println!("crcbl appkit session: opening the AppKit backend on the main thread");
 
         let mut shell = match open_backend(ShellBackend::AppKit) {
@@ -389,12 +391,27 @@ mod macos {
         // that is all `WindowState` carries. Only asking AppKit for the frame
         // shows it, which is the entire argument for this readback layer: **this
         // is the first defect it caught, and it is the kind only it can catch.**
+        //
+        // **`constrainFrameRect:toScreen:` has been ruled out** and does not need
+        // trying again: `CrcblWindow` overrides it, the host test asserting the
+        // override is installed passes on the runner, and the window still comes
+        // out at (192, 160). Its default moves a window *down* to clear the menu
+        // bar, which was never the shape of this failure anyway.
         assert_eq!(
             covering.frame, screen,
-            "borderless covers the screen AppKit says it is on, exactly. A matching size with a \
-             different origin means the frame was constrained on its way in — CrcblWindow \
-             overrides constrainFrameRect:toScreen: to stop that, so a failure here means the \
-             override is not on the class the window turned out to be"
+            "borderless covers the screen AppKit says it is on, exactly.\n\
+             The window was at {before_borderless:?} before the flip, and everything AppKit says \
+             about it now is {covering:?}.\n\
+             **Read the `crcbl_shell::appkit::window` lines in this test's stderr**, which are \
+             the backend's own account and are what tells the three remaining causes apart:\n\
+             * `borderless: ... computed <rect> from screens [...]` — if that rect is not the \
+             screen's frame, the origin never left the backend and `borderless_frame` is wrong.\n\
+             * `setFrame:display: from <a> asked <b> landed <c>` — if `c` has `b`'s size at \
+             `a`'s origin, the origin was dropped or overruled between the call and AppKit; an \
+             NSRect is an HFA in v0-v3 on this ABI, so a wrong Rust fn type corrupts it exactly \
+             this quietly.\n\
+             * `after makeKeyAndOrderFront: the frame is <rect>` — if that is right and this \
+             assertion is wrong, nothing in apply_mode moved it and the pump did."
         );
         assert_eq!(
             borderless,
@@ -650,6 +667,42 @@ mod macos {
     // -----------------------------------------------------------------------
     // M4: AppKit as the judge
     // -----------------------------------------------------------------------
+
+    /// Puts a logger behind the backend's own `log::` calls.
+    ///
+    /// # Instrumentation that cannot report is the same defect as a check that cannot fail
+    ///
+    /// `appkit::window::set_frame` reads the frame back after every placement
+    /// and warns when the window did not go where it was put — and that warning
+    /// was added, shipped, and **produced nothing**, because nothing in this
+    /// process had ever installed a logger. `log::warn!` with no logger behind it
+    /// is a discarded string. A whole CI round trip was spent on a diagnostic
+    /// that was structurally incapable of speaking, which is exactly the shape
+    /// this suite keeps finding in assertions and had not thought to look for in
+    /// logging.
+    ///
+    /// # The filter is fixed here rather than read from the environment
+    ///
+    /// `Filter::from_env` would leave the session's own diagnosis depending on
+    /// whether a CI job happened to set `CRCBL_LOG`, and the job does not. The
+    /// backend's window module is turned up to `debug` and everything else left
+    /// at `info`, so the placement trail is complete and the event pump does not
+    /// bury it. `try_init_logging` rather than `init_logging` because its
+    /// `Result` says whether a logger was already installed, and ignoring that
+    /// silently is how this went wrong the first time.
+    fn install_logger() {
+        let filter = Filter::parse("info,crcbl_shell::appkit::window=debug");
+        match crcbl_core::log::try_init_logging(filter) {
+            Ok(()) => println!(
+                "crcbl appkit session: logging installed — backend warnings and the window \
+                 module's placement trail follow on stderr"
+            ),
+            Err(error) => println!(
+                "crcbl appkit session: a logger was already installed, so the backend's own \
+                 account of where it put the window may be filtered out: {error}"
+            ),
+        }
+    }
 
     /// Everything AppKit will say about **this session's own window**, or a
     /// failure naming the step that asked.

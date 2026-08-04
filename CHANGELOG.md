@@ -353,22 +353,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
-- **crcbl-shell** (AppKit): a borderless window covered the right **number of
-  pixels in the wrong place**. `-[NSWindow setFrame:display:]` passes the
-  rectangle it is given through `constrainFrameRect:toScreen:`, whose default
-  keeps a title bar clear of the menu bar — and which fails silently by
-  preserving the size and moving the origin. A window flipped to
-  `DisplayMode::Borderless` came out exactly screen-sized at its previous
-  windowed origin, hanging off two edges of the display. `CrcblWindow` now
-  overrides `constrainFrameRect:toScreen:` to answer the proposed rectangle
-  unchanged, so every frame this backend computes from an `NSScreen` is the
-  frame the window gets — the borderless flip, the restore on the way back, and
-  a window created borderless alike.
+- **crcbl-shell** (AppKit): `CrcblWindow` overrides
+  `constrainFrameRect:toScreen:` to answer the proposed rectangle unchanged, so
+  AppKit can no longer silently rewrite a frame this backend sets. The default
+  keeps a title bar clear of the menu bar, which is right for a window a person
+  dragged and wrong for every frame here — all of them are computed from an
+  `NSScreen` rectangle and are on that screen by construction. `setFrame:` also
+  now reads the frame back and logs when a window did not go where it was put,
+  which nothing above this layer could otherwise notice: `WindowState` carries
+  an extent and no position.
 
-  Nothing in the seam could report this: `WindowState` carries an extent and no
-  position, so `set_mode` answered a perfectly correct size throughout. It was
-  found by `tests/appkit_session.rs` asking `NSWindow` for its own `frame`,
-  which is the first defect that readback layer has caught.
+  **This does not yet fix the defect that prompted it.** A window flipped to
+  `DisplayMode::Borderless` comes out exactly screen-sized at its previous
+  windowed origin, hanging off two edges of the display, and it still does with
+  the override installed and verified. `docs/backlog.md` carries the open
+  investigation and what each remaining cause would look like.
 
 - **crcbl-shell** (X11): hiding a window with `set_visible(false)` unmapped it
   without telling the window manager. ICCCM 4.1.4 requires a synthetic
