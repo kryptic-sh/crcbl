@@ -1469,6 +1469,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-shell** (Wayland): a `wl_data_offer` the compositor announced and
+  never claimed leaked when refused — a drag `enter` for a vanished seat or
+  naming an unannounced id sent `accept(null)` but never destroyed the proxy,
+  and a second `enter` without `leave` overwrote the first drag without
+  destroying its offer. Refused offers and the previous drag's offer are now
+  destroyed.
+
 - **crcbl-shell** (X11): an INCR chunk that could not be read was mistaken for
   the transfer terminator — a null reply or an over-cap property mapped to the
   empty slice that means "paste complete", so a hostile or broken owner's

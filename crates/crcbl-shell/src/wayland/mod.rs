@@ -3865,6 +3865,10 @@ impl WaylandShell {
         let proxy = offer as *mut WlProxy;
         let Some(index) = self.data_seat(device) else {
             self.refuse_drag(proxy, serial);
+            // Refusing is not enough: the offer was announced for this `enter`,
+            // but with the seat gone it can never be claimed, so nothing will
+            // ever destroy it but this.
+            self.destroy_offer(&data::Offer::new(proxy));
             return;
         };
         let Some(offer) = self.seats[index]
@@ -3873,6 +3877,10 @@ impl WaylandShell {
             .and_then(|device| device.claim(offer))
         else {
             self.refuse_drag(proxy, serial);
+            // Same shape as the seat-gone path: the `enter` named an offer that
+            // was never announced, so it is unclaimable and refusing alone
+            // would leak the proxy.
+            self.destroy_offer(&data::Offer::new(proxy));
             return;
         };
         // A window that did not ask for drops is not a drop target: the source
@@ -3920,6 +3928,17 @@ impl WaylandShell {
             }
         }
         self.conn.flush();
+
+        // A second `enter` without `leave` violates the protocol, but it must
+        // not leak: the previous drag's offer is destroyed before being
+        // replaced, exactly as `leave` would have done.
+        let previous = self.seats[index]
+            .data
+            .as_mut()
+            .and_then(|device| device.drag.take());
+        if let Some(previous) = previous {
+            self.destroy_offer(&previous.offer);
+        }
 
         if let Some(device) = self.seats[index].data.as_mut() {
             device.drag = Some(data::Drag {
