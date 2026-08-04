@@ -1469,6 +1469,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl**, **sandbox**: `--tick-hz` values above `1_000_000_000` parsed
+  cleanly and then panicked the engine — `1e9 / hz` truncates to a zero
+  nanosecond period, which `FrameClock` asserts against after the GPU is already
+  open (exit 101 instead of the documented exit 2). Both parsers now refuse
+  rates past `MAX_TICK_RATE`, the same bound `sim` already carried.
+
 - **crcbl-sprite**: `decode_png` sized its output buffer from the PNG's IHDR
   width and height alone — `output_buffer_size` trusts the file's claim and is
   capped only at `isize::MAX`, so a ~100-byte hostile PNG declaring 65536×65536

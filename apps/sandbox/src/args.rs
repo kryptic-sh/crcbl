@@ -4,6 +4,7 @@
 //! which makes the same argument at the length it deserves and is the one that
 //! had a real choice to make.
 
+use crcbl::args::MAX_TICK_RATE;
 use crcbl::backend::GpuBackend;
 
 use crate::app::{CameraMode, Options};
@@ -99,7 +100,12 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
                     return Invocation::BadUsage("--tick-hz must be at least 1".to_string());
                 }
                 Ok(hz) => match u32::try_from(hz) {
-                    Ok(hz) => options.tick_hz = hz,
+                    Ok(hz) if hz <= MAX_TICK_RATE => options.tick_hz = hz,
+                    Ok(hz) => {
+                        return Invocation::BadUsage(format!(
+                            "--tick-hz {hz} is out of range (max {MAX_TICK_RATE})"
+                        ));
+                    }
                     Err(_) => {
                         return Invocation::BadUsage(format!("--tick-hz {hz} is out of range"));
                     }
@@ -194,6 +200,13 @@ mod tests {
         assert_eq!(options.camera, CameraMode::Perspective);
     }
 
+    /// `MAX_TICK_RATE` is the largest rate the clock can express — `1e9 / 1e9`
+    /// is a 1 ns period — and stays accepted.
+    #[test]
+    fn the_largest_expressible_tick_rate_is_still_accepted() {
+        assert_eq!(options(&["--tick-hz", "1000000000"]).tick_hz, 1_000_000_000);
+    }
+
     /// Milestone 5's flag. The mode reaches the renderer as a
     /// [`Projection`](crcbl::render::Projection) and changes nothing else — see
     /// `app::CameraMode`.
@@ -246,6 +259,7 @@ mod tests {
             vec!["--frames", "lots"],
             vec!["--tick-hz"],
             vec!["--tick-hz", "0"],
+            vec!["--tick-hz", "1000000001"],
             vec!["--tick-hz", "5000000000"],
             vec!["--title"],
             vec!["--backend"],

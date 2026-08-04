@@ -66,6 +66,12 @@ pub const COMMON_TAIL_HELP: &str = "\
 /// waiting on four of them is not waiting long.
 pub const HEADLESS_FRAME_BUDGET: u64 = 120;
 
+/// The highest tick rate a `FrameClock` can express: `1e9 / hz` is the tick
+/// period in nanoseconds, and `hz > 1e9` truncates it to zero, which the
+/// clock asserts against after the GPU is already open. `apps/sim` guards its
+/// own flag with the same bound.
+pub const MAX_TICK_RATE: u32 = 1_000_000_000;
+
 /// What the command line asked for, wrapped around a game's own options.
 ///
 /// Generic because each game's `Options` is its own — `Run` carries the game's
@@ -199,7 +205,12 @@ impl Common {
             },
             "--tick-hz" => match positive(arg, rest, "tick rate") {
                 Ok(hz) => match u32::try_from(hz) {
-                    Ok(hz) => self.tick_hz = hz,
+                    Ok(hz) if hz <= MAX_TICK_RATE => self.tick_hz = hz,
+                    Ok(hz) => {
+                        return Consumed::Bad(format!(
+                            "tick rate {hz} is too large (max {MAX_TICK_RATE})"
+                        ));
+                    }
                     Err(_) => return Consumed::Bad(format!("not a positive tick rate: {hz}")),
                 },
                 Err(message) => return Consumed::Bad(message),
@@ -362,8 +373,19 @@ mod tests {
         // A negative rate fails the `u64` parse, which is the same rejection by
         // a different route.
         assert!(rejected(&["--tick-hz", "-1"]).contains("tick rate"));
+        // Above `MAX_TICK_RATE` the nanosecond period truncates to zero and the
+        // clock asserts — refused here, where the exit code is 2, instead of
+        // after the GPU is open.
+        assert!(rejected(&["--tick-hz", "1000000001"]).contains("tick rate"));
         assert!(rejected(&["--frames", "0"]).contains("frame count"));
         assert!(rejected(&["--frames"]).contains("--frames"));
+    }
+
+    /// `MAX_TICK_RATE` is the largest rate the clock can express — `1e9 / 1e9`
+    /// is a 1 ns period — and stays accepted.
+    #[test]
+    fn the_largest_expressible_tick_rate_is_still_accepted() {
+        assert_eq!(parsed(&["--tick-hz", "1000000000"]).tick_hz, 1_000_000_000);
     }
 
     /// A tick rate above `u32::MAX` parses as a `u64` and has to be caught on
