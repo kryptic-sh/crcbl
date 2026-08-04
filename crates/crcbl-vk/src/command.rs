@@ -36,6 +36,7 @@ use core::ops::Range;
 use std::sync::Arc;
 
 use ash::vk;
+use ash::vk::Handle as _;
 
 use crcbl_hal::{
     Barriers, BindGroupHandle, BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle,
@@ -76,6 +77,10 @@ pub(crate) struct VkCommandEncoder {
     render_pass_label: bool,
     /// The same, for the open compute pass.
     compute_pass_label: bool,
+    /// Raw device objects the recorded commands use; handed to the device at
+    /// `finish` so a submission can keep destroyed-but-referenced objects parked
+    /// in the deletion queue until it completes.
+    references: Vec<u64>,
 }
 
 impl core::fmt::Debug for VkCommandEncoder {
@@ -99,6 +104,7 @@ impl VkCommandEncoder {
             label_depth: 0,
             render_pass_label: false,
             compute_pass_label: false,
+            references: Vec::new(),
         };
         if let Err(error) = encoder.begin(desc) {
             encoder.failed = Some(error);
@@ -161,6 +167,14 @@ impl VkCommandEncoder {
         if self.failed.is_none() {
             log::error!("crcbl-vk: command recording failed: {error}");
             self.failed = Some(error);
+        }
+    }
+
+    /// Records a raw device object the recorded commands use. Deduplicated so a
+    /// buffer bound or copied many times costs one queue extension.
+    fn use_object(&mut self, raw: u64) {
+        if !self.references.contains(&raw) {
+            self.references.push(raw);
         }
     }
 }
@@ -326,6 +340,16 @@ impl CommandEncoder for VkCommandEncoder {
         }
         drop(state);
 
+        // The raw values were moved into the barriers above, so read them back
+        // for the reference list — this is the last point before the driver
+        // call where every resolved object is still named by this command.
+        for barrier in &buffer_barriers {
+            self.use_object(barrier.buffer.as_raw());
+        }
+        for barrier in &image_barriers {
+            self.use_object(barrier.image.as_raw());
+        }
+
         // The sledgehammer the seam documents: a dependency the graph knows
         // exists but cannot attribute to a resource.
         let memory_barriers = if barriers.global {
@@ -371,6 +395,8 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         };
         drop(state);
+        self.use_object(src.as_raw());
+        self.use_object(dst.as_raw());
         let region = vk::BufferCopy {
             src_offset: copy.src_offset,
             dst_offset: copy.dst_offset,
@@ -398,6 +424,8 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         };
         drop(state);
+        self.use_object(buffer.as_raw());
+        self.use_object(image.as_raw());
         let region = buffer_image_region(copy);
         // SAFETY: `self.raw` is recording, both objects are live, and the image
         // is in `TRANSFER_DST_OPTIMAL` because the graph put it there — the
@@ -427,6 +455,8 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         };
         drop(state);
+        self.use_object(image.as_raw());
+        self.use_object(buffer.as_raw());
         let region = buffer_image_region(copy);
         // SAFETY: as above, with the image in `TRANSFER_SRC_OPTIMAL`.
         unsafe {
@@ -454,6 +484,8 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         };
         drop(state);
+        self.use_object(src.as_raw());
+        self.use_object(dst.as_raw());
         let region = vk::ImageCopy::default()
             .src_subresource(conv::subresource_layers(copy.src_subresource))
             .src_offset(vk::Offset3D {
@@ -507,6 +539,7 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         };
         drop(state);
+        self.use_object(raw.as_raw());
         // SAFETY: `self.raw` is recording and `raw` is live.
         unsafe {
             self.device
@@ -578,6 +611,18 @@ impl CommandEncoder for VkCommandEncoder {
             None => None,
         };
         drop(state);
+
+        // The views went into the rendering info above; read them back for the
+        // reference list, plus the depth/stencil view if the pass has one.
+        for info in &colors {
+            self.use_object(info.image_view.as_raw());
+            if !info.resolve_image_view.is_null() {
+                self.use_object(info.resolve_image_view.as_raw());
+            }
+        }
+        if let Some((view, _, _)) = &depth_stencil {
+            self.use_object(view.as_raw());
+        }
 
         // **The layout must match the one the image is actually in.** The graph
         // transitions a read-only depth attachment to
@@ -753,6 +798,7 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         };
         drop(state);
+        self.use_object(raw.as_raw());
         let index_type = match format {
             IndexFormat::Uint16 => vk::IndexType::UINT16,
             IndexFormat::Uint32 => vk::IndexType::UINT32,
@@ -780,9 +826,9 @@ impl CommandEncoder for VkCommandEncoder {
         }
         let bind_point = self.current_bind_point();
         let state = self.device.state();
-        let (record, group_layout) =
+        let (record, pool, group_layout) =
             match crate::device::lookup(&state.bind_groups, "bind group", group, &self.device) {
-                Ok(record) => (record.raw, record.layout),
+                Ok(entry) => (entry.raw, entry.pool, entry.layout),
                 Err(error) => {
                     drop(state);
                     self.fail(error);
@@ -846,6 +892,11 @@ impl CommandEncoder for VkCommandEncoder {
             }
         };
         drop(state);
+        // The descriptor-set raw itself is never parked — `destroy_bind_group`
+        // frees the pool the set came from — so the pool is the object whose
+        // retirement this bind must extend, alongside the pipeline layout.
+        self.use_object(pool.as_raw());
+        self.use_object(layout_raw.as_raw());
         // SAFETY: `self.raw` is recording, `record` is a live descriptor set,
         // and `layout_raw` is the layout this group was created for.
         unsafe {
@@ -918,6 +969,7 @@ impl CommandEncoder for VkCommandEncoder {
             )));
             return;
         }
+        self.use_object(layout_raw.as_raw());
         // The layout's stages, not the caller's: `vkCmdPushConstants` requires
         // the mask to match the declared range exactly, while the seam lets a
         // caller name a subset. Passing the caller's would be a validation error
@@ -1056,6 +1108,7 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         };
         drop(state);
+        self.use_object(raw.as_raw());
         // SAFETY: `self.raw` is recording and `raw` is a live buffer.
         unsafe {
             self.device.raw.cmd_dispatch_indirect(self.raw, raw, offset);
@@ -1083,6 +1136,7 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         }
         drop(state);
+        self.use_object(raw.as_raw());
         // SAFETY: `self.raw` is recording outside a pass, `raw` is live, and
         // the range was bounds-checked against the pool's query count.
         unsafe {
@@ -1112,6 +1166,7 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         }
         drop(state);
+        self.use_object(raw.as_raw());
         // SAFETY: `self.raw` is recording, `raw` is a live timestamp pool
         // whose query `index` was bounds-checked against its count, and the
         // query has been reset.
@@ -1153,6 +1208,8 @@ impl CommandEncoder for VkCommandEncoder {
             return;
         }
         drop(state);
+        self.use_object(raw.as_raw());
+        self.use_object(buffer.as_raw());
         // SAFETY: `self.raw` is recording outside a pass; both objects are
         // live, the range was bounds-checked against the pool's query count,
         // and `dst` has `QUERY_RESOLVE`/`TRANSFER_DST` usage.
@@ -1205,6 +1262,7 @@ impl CommandEncoder for VkCommandEncoder {
         // not free it as well.
         let pool = core::mem::replace(&mut self.pool, vk::CommandPool::null());
         let raw = self.raw;
+        let references = core::mem::take(&mut self.references);
         Ok(self
             .device
             .stamp(
@@ -1215,6 +1273,7 @@ impl CommandEncoder for VkCommandEncoder {
                         owner: self.device.id,
                         raw,
                         pool,
+                        references,
                     }),
             ))
     }
@@ -1255,7 +1314,10 @@ impl VkCommandEncoder {
             .map(|entry| entry.raw);
         drop(state);
         match resolved {
-            Ok(resolved) => Some(resolved),
+            Ok(resolved) => {
+                self.use_object(resolved.as_raw());
+                Some(resolved)
+            }
             Err(error) => {
                 self.fail(error);
                 None
@@ -1287,6 +1349,7 @@ impl VkCommandEncoder {
             return;
         };
         drop(state);
+        self.use_object(args.as_raw());
         // SAFETY: `self.raw` is recording inside a render pass and `args` is a
         // live buffer with `INDIRECT` usage in `IndirectArgument` state.
         unsafe {
@@ -1336,6 +1399,8 @@ impl VkCommandEncoder {
             return;
         };
         drop(state);
+        self.use_object(args.as_raw());
+        self.use_object(count.as_raw());
         // SAFETY: `self.raw` is recording inside a render pass; both buffers
         // are live, have `INDIRECT` usage and are in `IndirectArgument` state.
         unsafe {

@@ -1458,6 +1458,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-vk**: the deletion queue freed a destroyed object one submission after
+  it was parked — right for one future submission, a GPU-side use-after-free for
+  two: an object recorded into two command buffers was freed when the first
+  completed while the second was still queued or running. Command buffers now
+  record the raw objects their commands use, and a submission extends the
+  retirement of every referenced parked object to its own completion, so a
+  destroyed object stays alive until the **last** submission referencing it
+  finishes. The retire scan frees every entry whose own key is reached, so an
+  extended key cannot hold up a ready successor.
+
 - **crcbl-vk**: a readback whose explicit wait semaphore was destroyed between
   `request_readback` and `poll_readback` was undefined behaviour — the
   completion point was stored as the raw `VkSemaphore` and dereferenced at poll

@@ -32,6 +32,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use ash::vk::Handle as _;
 use ash::{ext, khr, vk};
 
 use crcbl_core::{Handle, Pool};
@@ -158,6 +159,12 @@ pub(crate) struct CommandBufferEntry {
     pub(crate) owner: u64,
     pub(crate) raw: vk::CommandBuffer,
     pub(crate) pool: vk::CommandPool,
+    /// Raw device objects (buffers, images, views, semaphores, pools, pipelines,
+    /// layouts, samplers) the recorded commands use, collected at record time. A
+    /// submission extends the deletion-queue retirement of any of these that are
+    /// parked, so an object destroyed after recording stays alive until the last
+    /// submission referencing it completes.
+    pub(crate) references: Vec<u64>,
 }
 
 /// An in-flight readback request.
@@ -228,6 +235,26 @@ pub(crate) enum Trash {
     /// Boxed anyway: it is by far the largest variant, so inlining it would pad
     /// every buffer and view that *is* parked up to its size.
     Swapchain(Box<TrashSwapchain>),
+}
+
+/// The raw handle value this parked object carries, for matching a command
+/// buffer's recorded references. `Swapchain` is never parked in the queue
+/// (see `retire_swapchain`), so it returns a sentinel that matches nothing.
+fn trash_raw(item: &Trash) -> u64 {
+    match item {
+        Trash::Buffer(buffer, _) => buffer.as_raw(),
+        Trash::Image(image, _) => image.as_raw(),
+        Trash::ImageView(view) => view.as_raw(),
+        Trash::Semaphore(semaphore) => semaphore.as_raw(),
+        Trash::QueryPool(pool) => pool.as_raw(),
+        Trash::ShaderModule(module) => module.as_raw(),
+        Trash::DescriptorSetLayout(layout) => layout.as_raw(),
+        Trash::DescriptorPool(pool) => pool.as_raw(),
+        Trash::PipelineLayout(layout) => layout.as_raw(),
+        Trash::Pipeline(pipeline) => pipeline.as_raw(),
+        Trash::Sampler(sampler) => sampler.as_raw(),
+        Trash::Swapchain(_) => u64::MAX,
+    }
 }
 
 /// Everything a retired swapchain owns.
@@ -2033,6 +2060,30 @@ impl Device for VkDevice {
         // lock serialises `submit` against itself, so reading here and
         // committing after the driver call is safe.
         let value = self.inner.submissions() + 1;
+        // A recorded command buffer may use driver objects that were destroyed
+        // after recording (the seam's record → destroy → submit order). Each such
+        // object parked in the deletion queue must stay parked until THIS
+        // submission completes, or it is freed when an earlier submission finishes
+        // while this one still runs. Matching is by raw handle, which is exact:
+        // a parked object is still allocated in the driver, so its raw value has
+        // not been reused by a new object.
+        for handle in submit.command_buffers {
+            let entry = lookup(
+                &state.command_buffers,
+                "command buffer",
+                *handle,
+                &self.inner,
+            )?;
+            // Cloned so the borrow of `entry` (through the state lock) ends
+            // before the queue is mutated below — the two are disjoint fields
+            // of the guarded state, which a `Deref` cannot see.
+            let references = entry.references.clone();
+            for raw in &references {
+                state
+                    .trash
+                    .extend_matching(value, |item| trash_raw(item) == *raw);
+            }
+        }
         let mut signals = Vec::with_capacity(submit.signals.len() + 1);
         for signal in submit.signals {
             let entry = lookup(

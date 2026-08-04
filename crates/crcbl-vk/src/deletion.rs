@@ -32,18 +32,21 @@
 //! [`RetireQueue`] is generic over its payload and knows nothing about Vulkan.
 //! The device parameterises it with a closure that calls the right
 //! `vkDestroy*`; the ordering rules — nothing retires early, everything retires
-//! eventually, and the queue drains in submission order — are unit tests.
+//! eventually, and each entry frees exactly when its own key is reached — are
+//! unit tests.
 
 use core::fmt;
 use std::collections::VecDeque;
 
-/// A FIFO of payloads waiting for the device timeline to reach a value.
+/// Payloads waiting for the device timeline to reach a value.
 ///
-/// The queue is ordered by construction: [`push`](Self::push) is only ever
-/// called with a non-decreasing `retire_at`, because the value is the
-/// submission counter, which only goes up. [`retire`](Self::retire) therefore
-/// stops at the first entry that is not ready instead of scanning the whole
-/// queue.
+/// [`push`](Self::push) is only ever called with a non-decreasing `retire_at`,
+/// because the value is the submission counter, which only goes up — so the
+/// queue is FIFO by construction. [`extend_matching`](Self::extend_matching)
+/// can leave a later key in front of an earlier one, so [`retire`](Self::retire)
+/// scans the whole queue and frees every entry whose own key has been reached:
+/// each entry is freed exactly when its own submission count is passed, never
+/// earlier.
 pub struct RetireQueue<T> {
     entries: VecDeque<(u64, T)>,
 }
@@ -83,6 +86,19 @@ impl<T> RetireQueue<T> {
         self.entries.push_back((retire_at, payload));
     }
 
+    /// Extends the retirement key of every parked payload matching `matches` to
+    /// at least `new_at`. `submit` uses this: a submission that references a
+    /// parked object keeps it parked until that submission completes. Keys may
+    /// now leave FIFO order, which [`Self::retire`] tolerates by freeing every
+    /// entry whose own key is reached.
+    pub fn extend_matching(&mut self, new_at: u64, mut matches: impl FnMut(&T) -> bool) {
+        for (retire_at, payload) in &mut self.entries {
+            if matches(payload) {
+                *retire_at = (*retire_at).max(new_at);
+            }
+        }
+    }
+
     /// How many payloads are still parked.
     #[must_use]
     pub fn pending(&self) -> usize {
@@ -91,20 +107,24 @@ impl<T> RetireQueue<T> {
 
     /// Hands `destroy` every payload whose `retire_at` the timeline has reached.
     ///
-    /// `completed` is the timeline's current value. Entries are visited in
-    /// submission order and the scan stops at the first one that is not ready,
-    /// so a long-lived object cannot hold up its successors' *ordering* — only
-    /// its own retirement, which is the correct behaviour.
+    /// `completed` is the timeline's current value. The whole queue is scanned
+    /// rather than stopping at the first entry that is not ready, because
+    /// [`extend_matching`](Self::extend_matching) can put a later key in front
+    /// of an earlier one — a ready entry behind an extended one must still free
+    /// promptly. Each entry is freed exactly when its own submission count is
+    /// passed, never earlier.
     pub fn retire(&mut self, completed: u64, mut destroy: impl FnMut(T)) {
-        while let Some((retire_at, _)) = self.entries.front() {
-            if *retire_at > completed {
-                break;
+        let mut index = 0;
+        while index < self.entries.len() {
+            if self.entries[index].0 <= completed {
+                let (_, payload) = self
+                    .entries
+                    .remove(index)
+                    .unwrap_or_else(|| unreachable!("index is in bounds above"));
+                destroy(payload);
+            } else {
+                index += 1;
             }
-            let (_, payload) = self
-                .entries
-                .pop_front()
-                .unwrap_or_else(|| unreachable!("the queue is non-empty above"));
-            destroy(payload);
         }
     }
 
@@ -180,6 +200,55 @@ mod tests {
             queue.push(value, value as u32 * 10);
         }
         assert_eq!(drained(&mut queue, 5), vec![10, 20, 30, 40, 50]);
+    }
+
+    /// A submission referencing a parked object extends its key to this
+    /// submission's value, so the object stays parked until the *last*
+    /// submission using it completes — the whole fix. A payload the predicate
+    /// does not match is left on its own schedule.
+    #[test]
+    fn extend_matching_keeps_a_referenced_object_parked() {
+        let mut queue = RetireQueue::new();
+        queue.push(5, 30_u32);
+        queue.push(7, 50);
+        queue.extend_matching(9, |payload| *payload == 30_u32);
+        assert_eq!(
+            drained(&mut queue, 7),
+            vec![50],
+            "the non-matching payload frees on its own schedule"
+        );
+        assert_eq!(queue.pending(), 1);
+        assert_eq!(
+            drained(&mut queue, 9),
+            vec![30],
+            "the referenced payload stays parked until its extended key"
+        );
+
+        // And a predicate that matches nothing extends nothing.
+        queue.push(3, 70_u32);
+        queue.extend_matching(9, |_| false);
+        assert_eq!(drained(&mut queue, 9), vec![70]);
+        assert_eq!(queue.pending(), 0);
+    }
+
+    /// Extending a key can put it behind a later-pushed one; `retire` must scan
+    /// the whole queue rather than stop at the first not-ready entry, or the
+    /// ready successor behind the extended entry frees late.
+    #[test]
+    fn retire_frees_every_ready_entry_even_out_of_order() {
+        let mut queue = RetireQueue::new();
+        queue.push(5, 30_u32);
+        queue.push(7, 50);
+        // Extending X from 5 to 9 leaves it behind Y's 7, out of FIFO order.
+        queue.extend_matching(9, |payload| *payload == 30_u32);
+        assert_eq!(
+            drained(&mut queue, 7),
+            vec![50],
+            "the ready successor behind an extended entry still frees promptly"
+        );
+        assert_eq!(queue.pending(), 1);
+        assert_eq!(drained(&mut queue, 9), vec![30]);
+        assert_eq!(queue.pending(), 0);
     }
 
     /// Shutdown frees everything whatever the timeline says, because the caller

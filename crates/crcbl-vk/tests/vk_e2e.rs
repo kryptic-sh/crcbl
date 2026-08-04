@@ -1374,6 +1374,86 @@ fn destroying_a_resource_mid_flight_is_safe() {
     headless.finish();
 }
 
+/// Two submissions referencing one destroyed buffer: the deletion queue must
+/// keep the buffer parked until the **last** submission using it completes.
+///
+/// `park` keys a destroyed object at `submissions() + 1`, which is correct for
+/// one future submission and a use-after-free for two: the timeline reaches the
+/// first submission's value while the second is still queued or running, and
+/// the buffer's `vkDestroyBuffer` runs under it. Recording buffer X into two
+/// command buffers and submitting both is exactly the repro — the seam permits
+/// record → destroy → submit, twice over.
+///
+/// Whether lavapipe has finished submission A when submit(B)'s poll runs is
+/// timing-dependent, so this is the integration smoke test; the deterministic
+/// proof is `RetireQueue`'s own unit tests for `extend_matching` and the
+/// scan-all `retire`.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn two_submissions_referencing_one_destroyed_buffer_keep_it_alive() {
+    let headless = Headless::open();
+    let device = &headless.device;
+
+    let source = device
+        .create_buffer(&BufferDesc {
+            label: Some("destroyed, still referenced"),
+            size: 4096,
+            usage: BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("a source buffer");
+    let record_copy = |label, dst| {
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some(label),
+            queue: headless.queue,
+        });
+        encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+            src: source,
+            src_offset: 0,
+            dst,
+            dst_offset: 0,
+            size: 4096,
+        });
+        encoder.finish().expect("recording succeeded")
+    };
+    let dst_a = device
+        .create_buffer(&BufferDesc {
+            label: Some("first submission (dst)"),
+            size: 4096,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a destination buffer");
+    let dst_b = device
+        .create_buffer(&BufferDesc {
+            label: Some("second submission (dst)"),
+            size: 4096,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a destination buffer");
+    let a = record_copy("copy to A", dst_a);
+    let b = record_copy("copy to B", dst_b);
+
+    // The seam's record → destroy → submit order. Both submissions reference
+    // X, so X must stay parked until B completes — freeing it when A's value is
+    // reached would destroy it while B is queued or running.
+    device.destroy_buffer(source);
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[a]))
+        .expect("submit A");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[b]))
+        .expect("submit B");
+
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(a);
+    device.destroy_command_buffer(b);
+    device.destroy_buffer(dst_a);
+    device.destroy_buffer(dst_b);
+    headless.finish();
+}
+
 // --- milestone 2: the triangle ---------------------------------------------
 
 /// The size the triangle suite renders at.
