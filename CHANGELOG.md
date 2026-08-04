@@ -1469,6 +1469,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-shell** (X11): an INCR chunk that could not be read was mistaken for
+  the transfer terminator — a null reply or an over-cap property mapped to the
+  empty slice that means "paste complete", so a hostile or broken owner's
+  truncated paste was reported as a successful transfer. A type-less property
+  (the ICCCM terminator) is now returned distinctly from a read failure, and a
+  failed chunk read leaves the transfer to time out as `Unavailable` instead.
+
+- **crcbl-shell** (X11): `refresh_server_time` burned its full 250 ms deadline
+  when the probe's notify carried the same server millisecond as the previous
+  event — at ≥1 kHz event rates the `last_server_time != before` wait could
+  never be satisfied. The loop now waits for the probe's own notify to arrive,
+  regardless of its stamp.
+
 - **crcbl-shell** (Win32): a window hidden while borderless was re-shown by a
   second borderless request, and by the windowed restore. Both read the
   `WS_VISIBLE` bit from the style snapshot captured at the first borderless

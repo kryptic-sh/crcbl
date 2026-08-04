@@ -433,9 +433,13 @@ impl Conn {
 
     /// Reads a property in full, following `bytes_after` until it is exhausted.
     ///
-    /// Returns `(type, format, bytes)`, or `None` when the property does not
-    /// exist. A property that exists and is empty answers `Some` with an empty
-    /// vector — the distinction [`ClipboardContent`] is built on.
+    /// Returns `(type, format, bytes)`, or `None` when the property cannot be
+    /// read at all: a null reply (the connection failed) or a property larger
+    /// than [`selection::MAX_BYTES`]. A type-less property — one the owner
+    /// deleted, which ICCCM's `INCR` protocol uses as its transfer terminator —
+    /// answers `Some((0, …))` and is a *value*, not an absence. A property that
+    /// exists and is empty answers `Some` with an empty vector — the
+    /// distinction [`ClipboardContent`] is built on.
     ///
     /// # The size cap is here, not in the caller
     ///
@@ -495,7 +499,12 @@ impl Conn {
             unsafe { ffi::free_reply(reply) };
 
             if reply_type == 0 {
-                return None;
+                // A type-less property is not an absence: it is what the owner
+                // deleting the property looks like, and ICCCM's `INCR` protocol
+                // ends its transfers on exactly this read. `reply_format` is 0
+                // for a deleted property, and the accumulated `bytes` are what
+                // this loop had read so far.
+                return Some((0, reply_format, bytes));
             }
             type_ = reply_type;
             format = reply_format;
@@ -691,6 +700,13 @@ pub struct X11Shell {
     held: Vec<u8>,
     /// The most recent server timestamp seen, for requests that must quote one.
     last_server_time: u32,
+    /// Whether the current timestamp probe's own `PropertyNotify` has arrived.
+    ///
+    /// `refresh_server_time` waits for this rather than for `last_server_time`
+    /// to change: at ≥1 kHz event rates the server may stamp the probe with
+    /// the same millisecond as the previous event, and the arrival of the
+    /// probe is the one signal that does not depend on the stamp.
+    timestamp_probe_seen: bool,
     /// Reads waiting on the selection owner; see [`selection`].
     reads: Vec<Read>,
     /// `INCR` transfers we are feeding to a peer.
@@ -856,6 +872,7 @@ impl X11Shell {
             keymap,
             held: Vec::new(),
             last_server_time: ffi::value::CURRENT_TIME,
+            timestamp_probe_seen: false,
             reads: Vec::new(),
             writes: Vec::new(),
             offers: Vec::new(),

@@ -252,7 +252,12 @@ impl X11Shell {
         // A refused conversion writes no property, so there is nothing to read.
         let value = (event.property != 0)
             .then(|| self.conn.get_property(xid, event.property))
-            .flatten();
+            .flatten()
+            // A type-less read is the property having vanished between the
+            // notify and the read — a peer that reset itself — which
+            // `get_property` now returns as `Some((0, …))` rather than `None`.
+            // Treat it as the absence the `None` arm below already handles.
+            .filter(|(type_, _, _)| *type_ != 0);
 
         if is_targets {
             // The atom list, or empty for a peer with no `TARGETS` support —
@@ -305,6 +310,14 @@ impl X11Shell {
             return;
         };
         self.last_server_time = event.time;
+        // The timestamp probe is the only writer of `CRCBL_TIMESTAMP`, so its
+        // notify is the probe's answer — the signal `refresh_server_time` waits
+        // for. It must not depend on the stamp: at ≥1 kHz event rates the
+        // server may give the probe the same millisecond as the previous event,
+        // and `last_server_time` would then never change.
+        if event.atom == self.conn.atoms.crcbl_timestamp {
+            self.timestamp_probe_seen = true;
+        }
 
         // Not a selection at all: the window manager rewriting `_NET_WM_STATE`
         // is how a fullscreen request is *answered*, and it arrives here
@@ -329,10 +342,15 @@ impl X11Shell {
                         .is_some_and(|window| window.id == event.window)
             })
         {
-            let bytes = self
-                .conn
-                .get_property(event.window, event.atom)
-                .map_or_else(Vec::new, |(_, _, bytes)| bytes);
+            let bytes = match self.conn.get_property(event.window, event.atom) {
+                Some((_, _, bytes)) => bytes,
+                // A failed read is not the end of the transfer — the terminator is a
+                // type-less property, and `get_property` returns that as `Some((0, …))`.
+                // A null reply or an over-cap chunk means no progress: the read is left
+                // in place and `service_transfers` abandons it as stalled (`Unavailable`)
+                // instead of a truncated paste being reported complete.
+                None => return,
+            };
             let step = self.reads[index].on_chunk(&bytes, ffi::monotonic_nanos());
             self.settle(index, step);
             return;
@@ -525,6 +543,11 @@ impl X11Shell {
     /// [`handle_property_notify`](Self::handle_property_notify) latches into
     /// `last_server_time` on the way past.
     ///
+    /// The probe's own notify is the answer, not the stamp it carries: at ≥1
+    /// kHz event rates the server may timestamp it with the same millisecond as
+    /// the previous event, so the loop waits for the event to arrive rather
+    /// than for `last_server_time` to change.
+    ///
     /// Bounded, and draining through the ordinary path: any other event that
     /// arrives while waiting is handled exactly as it would have been, and is
     /// delivered on the next [`pump`](crate::Shell::pump) rather than lost.
@@ -533,7 +556,12 @@ impl X11Shell {
         /// feels slow. A local X socket answers in microseconds.
         const DEADLINE: core::time::Duration = core::time::Duration::from_millis(250);
 
-        let before = self.last_server_time;
+        // The probe's own notify is the answer even when the server stamps it
+        // with the same millisecond as the previous event — at that rate
+        // `last_server_time` cannot change, and the loop would otherwise burn
+        // its whole deadline. `handle_property_notify` sets the flag for
+        // exactly this event, so the reset is what arms the wait.
+        self.timestamp_probe_seen = false;
         // SAFETY: the connection and window are live. Appending zero elements
         // is well-defined and leaves the property's value untouched — the
         // event is the whole point.
@@ -555,7 +583,7 @@ impl X11Shell {
             ffi::monotonic_nanos() + u64::try_from(DEADLINE.as_nanos()).unwrap_or(u64::MAX);
         loop {
             self.drain();
-            if self.last_server_time != before || self.lost.is_some() {
+            if self.timestamp_probe_seen || self.lost.is_some() {
                 return;
             }
             if ffi::monotonic_nanos() >= deadline {
