@@ -52,6 +52,30 @@ pub fn map_format(f: Format) -> wgpu::TextureFormat {
     }
 }
 
+/// The sRGB-encoded counterpart of a linear surface format.
+///
+/// `None` for everything else, which includes the sRGB formats themselves and
+/// the block-compressed pairs: only a *surface* format is asked about here, and
+/// the pair exists so a canvas that cannot be configured sRGB can still be
+/// viewed that way. See [`WgpuInstance::surface_caps`](crate::WgpuInstance).
+pub const fn srgb_counterpart(f: Format) -> Option<Format> {
+    match f {
+        Format::Rgba8Unorm => Some(Format::Rgba8UnormSrgb),
+        Format::Bgra8Unorm => Some(Format::Bgra8UnormSrgb),
+        _ => None,
+    }
+}
+
+/// Reverse of [`srgb_counterpart`]: the linear format an sRGB one is the encode
+/// of, and `None` for a format that is already linear.
+pub const fn linear_counterpart(f: Format) -> Option<Format> {
+    match f {
+        Format::Rgba8UnormSrgb => Some(Format::Rgba8Unorm),
+        Format::Bgra8UnormSrgb => Some(Format::Bgra8Unorm),
+        _ => None,
+    }
+}
+
 /// Reverse of [`map_format`]: wgpu format → HAL format.
 ///
 /// `None` for a wgpu format the seam has no name for. Callers enumerating what

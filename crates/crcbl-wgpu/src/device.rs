@@ -1345,7 +1345,7 @@ impl Device for WgpuDevice {
 
             match surface_slot.surface.as_ref() {
                 Some(surface) => {
-                    let config = swapchain_config(desc);
+                    let config = swapchain_config(desc, surface_slot.srgb_view_only);
                     surface.configure(&self.device, &config);
                     Some(config)
                 }
@@ -1429,7 +1429,7 @@ impl Device for WgpuDevice {
                 if let Some(texture) = windowed.acquired.take() {
                     self.queue.present(texture);
                 }
-                let config = swapchain_config(desc);
+                let config = swapchain_config(desc, surface_slot.srgb_view_only);
                 surface.configure(&self.device, &config);
                 windowed.config = config;
                 slot.extent = desc.extent;
@@ -1484,6 +1484,19 @@ impl Device for WgpuDevice {
             .ok_or(SurfaceError::Lost)?;
         let extent = slot.extent;
         let surface_handle = slot.surface_handle;
+        // The format the *seam* was told this swapchain has, when it differs
+        // from the one the surface is configured with — on a WebGPU canvas the
+        // seam's is the sRGB counterpart of the canvas's, and
+        // `swapchain_config` declared it as a view format for exactly this.
+        // Everywhere else the two agree and the view inherits, as it always
+        // did.
+        let view_format = match &slot.kind {
+            SwapchainKind::Windowed(windowed) => {
+                let seam = conv::map_format(slot.format);
+                (seam != windowed.config.format).then_some(seam)
+            }
+            SwapchainKind::Offscreen(_) => None,
+        };
 
         // Checked **before** anything is acquired, on both shapes. An acquire
         // with one still outstanding would drop the previous
@@ -1522,6 +1535,10 @@ impl Device for WgpuDevice {
                 let texture = surface_texture.texture.clone();
                 let view = texture.create_view(&wgpu::TextureViewDescriptor {
                     label: Some("swapchain_view"),
+                    // Inheriting the texture's format here is what skipped the
+                    // sRGB encode on a canvas and presented the frame far too
+                    // dark. See `view_format` above.
+                    format: view_format,
                     ..Default::default()
                 });
 
@@ -1788,10 +1805,27 @@ fn remaining(count: u32) -> Option<u32> {
     (count != hal::ImageSubresourceRange::ALL).then_some(count)
 }
 
-fn swapchain_config(desc: &SwapchainDesc<'_>) -> wgpu::SurfaceConfiguration {
+/// The wgpu configuration for a swapchain the seam asked for.
+///
+/// `srgb_view_only` is [`SurfaceSlot::srgb_view_only`](crate::resources::SurfaceSlot):
+/// a WebGPU canvas, whose supported context formats are all linear. An sRGB
+/// format is configured there as its linear counterpart plus an sRGB *view*
+/// format, which is what makes the hardware encode happen on a target that
+/// cannot be configured with it. `acquire_next_frame` builds the view that way
+/// round; a view left to inherit the texture's format would skip the encode and
+/// the frame would present far too dark.
+fn swapchain_config(desc: &SwapchainDesc<'_>, srgb_view_only: bool) -> wgpu::SurfaceConfiguration {
+    let wanted = conv::map_format(desc.format);
+    let (format, view_formats) = match srgb_view_only
+        .then(|| conv::linear_counterpart(desc.format))
+        .flatten()
+    {
+        Some(linear) => (conv::map_format(linear), vec![wanted]),
+        None => (wanted, Vec::new()),
+    };
     wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format: conv::map_format(desc.format),
+        format,
         color_space: wgpu::SurfaceColorSpace::Auto,
         width: desc.extent.0,
         height: desc.extent.1,
@@ -1808,13 +1842,59 @@ fn swapchain_config(desc: &SwapchainDesc<'_>) -> wgpu::SurfaceConfiguration {
             hal::CompositeAlpha::PostMultiplied => wgpu::CompositeAlphaMode::PostMultiplied,
             hal::CompositeAlpha::Inherit => wgpu::CompositeAlphaMode::Inherit,
         },
-        view_formats: vec![],
+        view_formats,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn swapchain_desc(format: hal::Format) -> SwapchainDesc<'static> {
+        SwapchainDesc {
+            label: Some("test"),
+            // Never dereferenced: `swapchain_config` reads the format, the
+            // extent and the pacing, and nothing else.
+            surface: crcbl_hal::SurfaceHandle::from_bits(1 << 32).expect("generation 1, slot 0"),
+            format,
+            extent: (64, 48),
+            image_count: 2,
+            present_mode: hal::PresentMode::Fifo,
+            composite_alpha: hal::CompositeAlpha::Opaque,
+        }
+    }
+
+    /// **A canvas takes the linear format and an sRGB view of it.**
+    ///
+    /// WebGPU refuses an `-srgb` context format outright, so configuring the
+    /// canvas with what the seam asked for is not an option; the encode has to
+    /// come from the view instead. Both halves are asserted, because a config
+    /// that dropped the sRGB format from `view_formats` would configure
+    /// perfectly well and then reject the view `acquire_next_frame` builds.
+    #[test]
+    fn an_srgb_swapchain_on_a_canvas_is_configured_linear_and_viewed_srgb() {
+        let config = swapchain_config(&swapchain_desc(hal::Format::Bgra8UnormSrgb), true);
+        assert_eq!(config.format, wgpu::TextureFormat::Bgra8Unorm);
+        assert_eq!(
+            config.view_formats,
+            vec![wgpu::TextureFormat::Bgra8UnormSrgb],
+        );
+    }
+
+    /// And nothing else moves: a surface that can be configured sRGB is, a
+    /// linear request stays linear, and neither declares a view format.
+    #[test]
+    fn every_other_surface_is_configured_with_exactly_what_was_asked_for() {
+        for format in [hal::Format::Bgra8UnormSrgb, hal::Format::Rgba8Unorm] {
+            let native = swapchain_config(&swapchain_desc(format), false);
+            assert_eq!(native.format, conv::map_format(format));
+            assert!(native.view_formats.is_empty(), "{format:?}");
+        }
+        // A linear request on a canvas has no counterpart to swap in either.
+        let canvas = swapchain_config(&swapchain_desc(hal::Format::Rgba8Unorm), true);
+        assert_eq!(canvas.format, wgpu::TextureFormat::Rgba8Unorm);
+        assert!(canvas.view_formats.is_empty());
+    }
 
     /// The sentinel is the value every graph-owned view is built with, and
     /// passing it through is out of range in wgpu.

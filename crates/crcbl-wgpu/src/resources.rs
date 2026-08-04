@@ -19,6 +19,15 @@ pub struct SurfaceSlot {
     pub surface: Option<wgpu::Surface<'static>>,
     /// Platform tag from the SurfaceTarget that created it, for logs.
     pub platform: &'static str,
+    /// Whether this surface can only reach an sRGB format through a *view*.
+    ///
+    /// True for a WebGPU canvas and nothing else: the spec's supported context
+    /// formats are `rgba8unorm`, `bgra8unorm` and `rgba16float`, so `configure`
+    /// refuses an `-srgb` one — while `viewFormats` accepts it, which is the
+    /// whole reason that member exists. Read by `Instance::surface_caps`, which
+    /// advertises the counterparts, and by `Device::create_swapchain`, which
+    /// configures the canvas linear and views it sRGB.
+    pub srgb_view_only: bool,
 }
 
 /// A buffer plus the two facts the seam validates writes against.

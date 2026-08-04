@@ -305,6 +305,11 @@ impl Instance for WgpuInstance {
             .iter()
             .filter_map(|f| crate::conv::unmap_format(*f))
             .collect();
+        let formats = if slot.srgb_view_only {
+            with_srgb_views(formats)
+        } else {
+            formats
+        };
 
         let present_modes: Vec<_> = caps
             .present_modes
@@ -360,6 +365,7 @@ impl Instance for WgpuInstance {
                 .insert(SurfaceSlot {
                     surface: None,
                     platform: "offscreen",
+                    srgb_view_only: false,
                 })
                 .cast());
         }
@@ -380,6 +386,7 @@ impl Instance for WgpuInstance {
             .insert(SurfaceSlot {
                 surface: Some(surface),
                 platform,
+                srgb_view_only: matches!(target, SurfaceTarget::Web { .. }),
             })
             .cast())
     }
@@ -470,6 +477,38 @@ unsafe fn map_surface_target(
     }
 }
 
+/// `formats` plus the sRGB counterparts a view format can reach.
+///
+/// **For a WebGPU canvas, and the reason the browser build is not dark.** The
+/// spec's supported context formats are all linear — `getPreferredCanvasFormat`
+/// returns `rgba8unorm` or `bgra8unorm`, and `configure` refuses an `-srgb`
+/// one — so wgpu's list alone would hand
+/// [`SurfaceCaps::preferred_format`](crcbl_hal::SurfaceCaps::preferred_format)
+/// a linear target. Every pass above the seam writes display-referred values
+/// and leaves the encode to the hardware, so a linear target skips the encode
+/// and the frame presents far too dark: the horde's grass came out black in a
+/// browser while it was right on Vulkan.
+///
+/// The encode is still free. An `-srgb` view of the same image is what
+/// `viewFormats` exists for — the pair differ in nothing else — and
+/// `Device::create_swapchain` configures the canvas linear and views it sRGB.
+///
+/// Appended rather than substituted, and only where the surface did not offer
+/// the counterpart outright, so the linear formats stay askable and a list that
+/// already had both is unchanged. Order matters: `preferred_format` takes the
+/// first sRGB entry, and appending puts the counterpart of the browser's own
+/// preferred canvas format there.
+fn with_srgb_views(mut formats: Vec<Format>) -> Vec<Format> {
+    for index in 0..formats.len() {
+        if let Some(srgb) = crate::conv::srgb_counterpart(formats[index])
+            && !formats.contains(&srgb)
+        {
+            formats.push(srgb);
+        }
+    }
+    formats
+}
+
 /// The capabilities an offscreen "surface" reports.
 ///
 /// There is no window system to ask, so this is a statement of what the ring
@@ -501,6 +540,60 @@ pub(crate) fn offscreen_surface_caps() -> SurfaceCaps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A canvas's linear-only format list still yields an sRGB target.**
+    ///
+    /// The list is what WebGPU actually reports — the two 8-bit formats with
+    /// the browser's preferred one first, and `Rgba16Float` where the canvas
+    /// takes it. Without the counterparts `preferred_format` falls through to
+    /// the first entry, which is linear, and the whole frame presents dark.
+    #[test]
+    fn a_web_canvas_is_offered_an_srgb_format_to_view_it_through() {
+        let reported = vec![Format::Bgra8Unorm, Format::Rgba8Unorm, Format::Rgba16Float];
+        let eight_bit = 2;
+        let offered = with_srgb_views(reported.clone());
+
+        let caps = SurfaceCaps {
+            formats: offered.clone(),
+            present_modes: vec![PresentMode::Fifo],
+            composite_alpha: vec![CompositeAlpha::Opaque],
+            min_image_count: 2,
+            max_image_count: 3,
+            current_extent: None,
+        };
+        assert_eq!(
+            caps.preferred_format(),
+            Some(Format::Bgra8UnormSrgb),
+            "the sRGB counterpart of the canvas's *preferred* format has to win",
+        );
+        for format in &reported {
+            assert!(offered.contains(format), "{format:?} stopped being askable",);
+        }
+        assert_eq!(
+            offered.len(),
+            reported.len() + eight_bit,
+            "one counterpart per 8-bit format and none for the float: {offered:?}",
+        );
+    }
+
+    /// Nothing is added where the surface already offers the counterpart, and
+    /// nothing at all for a format that has none — a native surface's list must
+    /// come back exactly as it was.
+    #[test]
+    fn a_list_that_already_has_its_srgb_formats_is_left_alone() {
+        let native = vec![
+            Format::Bgra8UnormSrgb,
+            Format::Bgra8Unorm,
+            Format::Rgba8UnormSrgb,
+            Format::Rgba8Unorm,
+            Format::Rgba16Float,
+        ];
+        assert_eq!(with_srgb_views(native.clone()), native);
+        assert_eq!(
+            with_srgb_views(vec![Format::Rgba16Float]),
+            vec![Format::Rgba16Float],
+        );
+    }
 
     /// The reported limits must agree with the reported features: a
     /// push-constant budget on a device without push constants is a promise no

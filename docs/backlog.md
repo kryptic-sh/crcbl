@@ -196,6 +196,38 @@ against the grass base colour, not in a running window and not at a crowd
 density** — the headless `--prefill 200` run exercises the code path and prints
 stats, and no frame from it was looked at.
 
+## The browser's sRGB fix has never been seen in a browser
+
+`crcbl-wgpu` now advertises the sRGB counterparts of a canvas's linear formats
+and configures the canvas linear with an sRGB `viewFormats` entry, so the
+hardware encode happens on the view rather than not at all. What is verified,
+and what is not:
+
+- **Verified by falsification.** `with_srgb_views` and `swapchain_config` are
+  the two decision points and both are unit tested against the format list
+  WebGPU actually reports (`wgpu-30.0.0/src/backend/webgpu.rs`, whose
+  `get_capabilities` returns `Rgba8Unorm`, `Bgra8Unorm` and — only where the
+  canvas takes it — `Rgba16Float`). Each test was watched go red with its half
+  of the fix removed.
+- **Verified by the compiler.** The wasm32 clippy and rustdoc gates both pass,
+  which is what CI runs; there is no wasm test harness.
+- **Not verified at all: that the frame is no longer dark.** Nothing here can
+  open a browser. The diagnosis is read off the shader (`sprite.wgsl`'s fragment
+  entry returns `textureSample(...) * tint` with no OETF) and the sheet's format
+  (`Rgba8UnormSrgb`, so sampling decodes to linear), and the arithmetic says
+  `#19211a` reaches the canvas as roughly `#020302` without the encode — which
+  is what "the grass is black" looked like. Confidence in the cause is high;
+  confidence that _this_ is the whole of it rests on nobody having loaded the
+  page.
+
+`./web/build.sh --serve` and half a minute at `http://localhost:8000` settles
+it, and would also settle the eyeball gap recorded above. Until then the entry
+stays here.
+
+Also unclosed by this fix: every other sample presents through the same path, so
+breakout, flappy and asteroids were dark in a browser too and are expected to
+have changed appearance. None of them was looked at either.
+
 ## Frame pacing sleeps on the monotonic clock, which is not what a display does
 
 `crcbl::engine::Pacing` chooses a present mode (`Vsync` → `Fifo`, `Adaptive` →

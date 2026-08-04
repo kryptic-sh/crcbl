@@ -484,6 +484,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-wgpu**: **the browser build presented every frame far too dark.**
+  WebGPU's supported context formats are all linear — `getPreferredCanvasFormat`
+  returns `rgba8unorm` or `bgra8unorm`, and `configure` refuses an `-srgb` one —
+  so `SurfaceCaps::preferred_format` fell through to its "first format offered"
+  fallback and picked a linear target. Every pass above the seam writes
+  display-referred values and leaves the sRGB encode to the hardware, so on a
+  linear target the encode simply never happened: the horde's grass, authored at
+  `#19211a`, reached the canvas as roughly `#020302` while the same bytes were
+  right on Vulkan.
+
+  A WebGPU surface now advertises the sRGB counterpart of each 8-bit format it
+  reports, and a swapchain asked for one is configured with the linear
+  counterpart plus that format in `viewFormats` — the encode comes from the view
+  `acquire_next_frame` builds. Nothing changes for a native surface, which
+  offers its sRGB formats outright: the counterparts are appended only where the
+  surface did not already list them, and only for a canvas.
+
 - **crcbl** (engine): **a key held when a menu opened stayed held forever.**
   `MenuPump` claims Up, Down and Enter while a menu is showing, and it was
   claiming the _release_ as well as the press — so a movement key pressed before
