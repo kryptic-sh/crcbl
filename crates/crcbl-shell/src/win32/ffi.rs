@@ -50,8 +50,10 @@
 //! | --- | --- | --- |
 //! | `EnumDisplayDevicesW` | a monitor's marketing name | it usually answers "Generic PnP Monitor", which is worse than the device name for telling two displays apart |
 //! | `QueryDisplayConfig` | exact refresh as a numerator/denominator | the only way to see 59.94 rather than 60 — recorded in `docs/backlog.md`, not implemented |
-//! | `RegisterRawInputDevices`, `TrackMouseEvent`, `SetCursorPos` | input | W2, and the capability set says so today |
-//! | `OpenClipboard`, `RegisterDragDrop` | clipboard and drag-drop | W3, same |
+//! | `ImmGetContext` and the `WM_IME_*` family | a real input method | W2 leaves [`TEXT_IME`](crate::ShellCaps::TEXT_IME) clear rather than claiming what `WM_CHAR` alone earns; see [`Win32Shell::caps`](super::Win32Shell) |
+//! | `ToUnicode` | the character a key produces | it **consumes** dead-key state, so calling it would eat the accent `WM_CHAR` was about to deliver. [`MapVirtualKeyW`] with `MAPVK_VK_TO_CHAR` answers the same question without side effects |
+//! | `GetAsyncKeyState` | modifier state | it reads the hardware *now*, not at the message's time. [`GetKeyboardState`] is the snapshot that belongs to the message being processed |
+//! | `OpenClipboard`, `RegisterDragDrop` | clipboard and drag-drop | W3, and the capability set says so today |
 //! | `SetTimer` | a frame during a modal resize loop | see the `win32` module docs — it needs a callback the seam does not have |
 
 #![allow(non_snake_case)]
@@ -421,6 +423,108 @@ impl Default for DevModeW {
     }
 }
 
+/// `TRACKMOUSEEVENT` — what `TrackMouseEvent` is asked to watch for.
+///
+/// Needed because **Windows has no `WM_MOUSEENTER`**. A window is told when the
+/// pointer leaves and never when it arrives, and only if it asked: this
+/// structure is the asking, and it re-arms one shot at a time. See
+/// [`proc`](super::proc) for where the entry half is derived from.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TrackMouse {
+    /// `size_of::<TrackMouse>()`, which the system validates.
+    pub cb_size: u32,
+    /// `TME_*`.
+    pub dw_flags: u32,
+    /// The window to watch.
+    pub hwnd_track: Handle,
+    /// Hover timeout, unused without `TME_HOVER`.
+    pub dw_hover_time: u32,
+}
+
+/// `RAWINPUTDEVICE` — one usage page/usage pair to receive `WM_INPUT` for.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RawInputDevice {
+    /// HID usage page. `0x01` is the generic desktop page.
+    pub us_usage_page: u16,
+    /// HID usage within the page. `0x02` is the mouse.
+    pub us_usage: u16,
+    /// `RIDEV_*`.
+    pub dw_flags: u32,
+    /// Where `WM_INPUT` is delivered. Null means "follow the keyboard focus",
+    /// which is what this backend wants — see [`input`](super::input).
+    pub hwnd_target: Handle,
+}
+
+/// `RAWINPUTHEADER`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RawInputHeader {
+    /// `RIM_TYPE*`.
+    pub dw_type: u32,
+    /// Size of the whole `RAWINPUT` this heads.
+    pub dw_size: u32,
+    /// The device that produced it. Not used here; see
+    /// [`input`](super::input) on why device ids are constants.
+    pub h_device: Handle,
+    /// The `wParam` of the `WM_INPUT` that carried it.
+    pub w_param: Wparam,
+}
+
+/// `RAWMOUSE`.
+///
+/// The two-byte hole after [`us_flags`](Self::us_flags) is the C union's
+/// alignment, spelled out rather than left to the compiler: the union's first
+/// arm is a `ULONG`, so it starts at offset 4 whatever `usFlags` did. Naming it
+/// changes nothing the compiler would not have done — `#[repr(C)]` inserts the
+/// same two bytes — and it is here so a reader diffing this against `winuser.h`
+/// can see that the gap was noticed rather than missed.
+///
+/// What the layout assertion in this module's tests actually catches is a field
+/// that is **absent or the wrong width**, which moves every offset after it.
+/// That is the real hazard: reading [`l_last_x`](Self::l_last_x) from offset 8
+/// instead of 12 gives half a button mask as a mouse delta, and a plausible
+/// number rather than a crash. Same shape as [`DevModeW`]'s, checked the same
+/// way.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RawMouse {
+    /// `MOUSE_MOVE_RELATIVE`, `MOUSE_MOVE_ABSOLUTE`, `MOUSE_VIRTUAL_DESKTOP`.
+    /// **The field that decides what the two coordinates mean.**
+    pub us_flags: u16,
+    /// The union's alignment padding.
+    pub padding: u16,
+    /// Button transitions. Not read: the button *messages* carry position and
+    /// ordering, and raw button edges would double every click.
+    pub ul_buttons: u32,
+    /// Raw button state, likewise unread.
+    pub ul_raw_buttons: u32,
+    /// Relative motion, or an absolute coordinate — see
+    /// [`us_flags`](Self::us_flags).
+    pub l_last_x: i32,
+    /// See [`l_last_x`](Self::l_last_x).
+    pub l_last_y: i32,
+    /// Driver-supplied extra information.
+    pub ul_extra_information: u32,
+}
+
+/// `RAWINPUT`, narrowed to its mouse arm.
+///
+/// The real structure's tail is a union of `RAWMOUSE`, `RAWKEYBOARD` and
+/// `RAWHID`, and `RAWMOUSE` is the largest of the two fixed-size arms — this
+/// backend registers only the mouse usage, so nothing else can arrive. The
+/// [`header`](Self::header)'s `dwType` is checked before the mouse arm is read,
+/// which is what makes narrowing it sound rather than hopeful.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RawInput {
+    /// Type, size and source device.
+    pub header: RawInputHeader,
+    /// Valid only when `header.dw_type` is `RIM_TYPE_MOUSE`.
+    pub mouse: RawMouse,
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -460,6 +564,9 @@ pub mod style {
 pub mod msg {
     /// `WM_DESTROY`.
     pub const DESTROY: u32 = 0x0002;
+    /// `WM_MOVE` — the window moved, so a pointer clip built from its client
+    /// rectangle is now in the wrong place.
+    pub const MOVE: u32 = 0x0003;
     /// `WM_SIZE`.
     pub const SIZE: u32 = 0x0005;
     /// `WM_SETFOCUS`.
@@ -468,6 +575,9 @@ pub mod msg {
     pub const KILL_FOCUS: u32 = 0x0008;
     /// `WM_CLOSE`.
     pub const CLOSE: u32 = 0x0010;
+    /// `WM_SETCURSOR` — asked on every pointer movement over the window, and
+    /// the **only** place a cursor shape may be set.
+    pub const SET_CURSOR: u32 = 0x0020;
     /// `WM_GETMINMAXINFO`.
     pub const GET_MIN_MAX_INFO: u32 = 0x0024;
     /// `WM_DISPLAYCHANGE`.
@@ -476,8 +586,49 @@ pub mod msg {
     pub const NC_CREATE: u32 = 0x0081;
     /// `WM_NCDESTROY`.
     pub const NC_DESTROY: u32 = 0x0082;
+    /// `WM_INPUT` — a raw input report.
+    pub const INPUT: u32 = 0x00FF;
+    /// `WM_KEYDOWN`.
+    pub const KEY_DOWN: u32 = 0x0100;
+    /// `WM_KEYUP`.
+    pub const KEY_UP: u32 = 0x0101;
+    /// `WM_CHAR` — one UTF-16 code unit of committed text.
+    pub const CHAR: u32 = 0x0102;
+    /// `WM_SYSKEYDOWN` — a key pressed with Alt held, or F10.
+    pub const SYS_KEY_DOWN: u32 = 0x0104;
+    /// `WM_SYSKEYUP`.
+    pub const SYS_KEY_UP: u32 = 0x0105;
+    /// `WM_MOUSEMOVE`.
+    pub const MOUSE_MOVE: u32 = 0x0200;
+    /// `WM_LBUTTONDOWN`.
+    pub const L_BUTTON_DOWN: u32 = 0x0201;
+    /// `WM_LBUTTONUP`.
+    pub const L_BUTTON_UP: u32 = 0x0202;
+    /// `WM_RBUTTONDOWN`.
+    pub const R_BUTTON_DOWN: u32 = 0x0204;
+    /// `WM_RBUTTONUP`.
+    pub const R_BUTTON_UP: u32 = 0x0205;
+    /// `WM_MBUTTONDOWN`.
+    pub const M_BUTTON_DOWN: u32 = 0x0207;
+    /// `WM_MBUTTONUP`.
+    pub const M_BUTTON_UP: u32 = 0x0208;
+    /// `WM_MOUSEWHEEL`.
+    pub const MOUSE_WHEEL: u32 = 0x020A;
+    /// `WM_XBUTTONDOWN` — the two thumb buttons, told apart by `wParam`.
+    pub const X_BUTTON_DOWN: u32 = 0x020B;
+    /// `WM_XBUTTONUP`.
+    pub const X_BUTTON_UP: u32 = 0x020C;
+    /// `WM_MOUSEHWHEEL` — the tilt wheel.
+    pub const MOUSE_H_WHEEL: u32 = 0x020E;
     /// `WM_SIZING`.
     pub const SIZING: u32 = 0x0214;
+    /// `WM_CAPTURECHANGED` — somebody else took the mouse capture, so ours is
+    /// gone whether we released it or not.
+    pub const CAPTURE_CHANGED: u32 = 0x0215;
+    /// `WM_EXITSIZEMOVE` — the modal drag loop finished.
+    pub const EXIT_SIZE_MOVE: u32 = 0x0232;
+    /// `WM_MOUSELEAVE` — the one-shot `TrackMouseEvent` armed for.
+    pub const MOUSE_LEAVE: u32 = 0x02A3;
     /// `WM_DPICHANGED`.
     pub const DPI_CHANGED: u32 = 0x02E0;
 }
@@ -546,6 +697,29 @@ pub mod value {
 
     /// `IDC_ARROW`, as the integer resource id `MAKEINTRESOURCE` wraps.
     pub const IDC_ARROW: usize = 32_512;
+    /// `IDC_IBEAM`.
+    pub const IDC_IBEAM: usize = 32_513;
+    /// `IDC_WAIT`.
+    pub const IDC_WAIT: usize = 32_514;
+    /// `IDC_CROSS`.
+    pub const IDC_CROSS: usize = 32_515;
+    /// `IDC_SIZENWSE`.
+    pub const IDC_SIZE_NWSE: usize = 32_642;
+    /// `IDC_SIZENESW`.
+    pub const IDC_SIZE_NESW: usize = 32_643;
+    /// `IDC_SIZEWE`.
+    pub const IDC_SIZE_WE: usize = 32_644;
+    /// `IDC_SIZENS`.
+    pub const IDC_SIZE_NS: usize = 32_645;
+    /// `IDC_SIZEALL`.
+    pub const IDC_SIZE_ALL: usize = 32_646;
+    /// `IDC_NO`.
+    pub const IDC_NO: usize = 32_648;
+    /// `IDC_HAND`.
+    pub const IDC_HAND: usize = 32_649;
+    /// `IDC_APPSTARTING`.
+    pub const IDC_APP_STARTING: usize = 32_650;
+
     /// `BLACK_BRUSH`.
     pub const BLACK_BRUSH: i32 = 4;
     /// `CS_HREDRAW | CS_VREDRAW` — repaint the whole client area on a resize,
@@ -568,6 +742,92 @@ pub mod value {
     pub const MWMO_INPUT_AVAILABLE: u32 = 0x0004;
     /// `INFINITE`.
     pub const INFINITE: u32 = 0xFFFF_FFFF;
+
+    /// `HTCLIENT` — the `WM_SETCURSOR` hit-test code for the drawable area.
+    ///
+    /// Every other value is a piece of the frame the *system* owns a cursor
+    /// for: the resize arrows on a border, the arrow over the caption. Setting
+    /// ours for those would replace a working resize affordance with an arrow.
+    pub const HT_CLIENT: u32 = 1;
+
+    /// `TME_LEAVE`.
+    pub const TME_LEAVE: u32 = 0x0000_0002;
+
+    /// `XBUTTON1` — the `wParam` high word of a `WM_XBUTTON*`, "back".
+    pub const XBUTTON1: u32 = 0x0001;
+    /// `XBUTTON2` — "forward".
+    pub const XBUTTON2: u32 = 0x0002;
+
+    /// `WHEEL_DELTA` — one detent of a notched wheel.
+    ///
+    /// A high-resolution wheel reports fractions of it, which is why the
+    /// division that produces
+    /// [`ScrollDelta::Lines`](crcbl_core::input::ScrollDelta::Lines) is done in
+    /// floating point rather than as an integer count of detents.
+    ///
+    /// `i16` because that is the width the message carries it in, and because
+    /// it converts to `f32` losslessly — a widening cast on the divisor is the
+    /// kind of thing that goes unnoticed until a lint changes.
+    pub const WHEEL_DELTA: i16 = 120;
+
+    /// `HID_USAGE_PAGE_GENERIC`.
+    pub const HID_USAGE_PAGE_GENERIC: u16 = 0x01;
+    /// `HID_USAGE_GENERIC_MOUSE`.
+    pub const HID_USAGE_GENERIC_MOUSE: u16 = 0x02;
+    /// `RID_INPUT` — ask `GetRawInputData` for the report rather than its
+    /// header.
+    pub const RID_INPUT: u32 = 0x1000_0003;
+    /// `RIM_TYPEMOUSE`.
+    pub const RIM_TYPE_MOUSE: u32 = 0;
+    /// `MOUSE_MOVE_ABSOLUTE` — the report carries a *position*, not a delta.
+    ///
+    /// Set by a remote-desktop session, a tablet and some virtual machines. A
+    /// backend that assumes relative motion reads a screen coordinate as a
+    /// delta, which sends the camera to the far wall on the first event.
+    pub const MOUSE_MOVE_ABSOLUTE: u16 = 0x0001;
+    /// `MOUSE_VIRTUAL_DESKTOP` — an absolute report normalized over the whole
+    /// virtual desktop rather than over the primary monitor.
+    pub const MOUSE_VIRTUAL_DESKTOP: u16 = 0x0002;
+    /// The range an absolute [`RawMouse`] coordinate is normalized to.
+    pub const ABSOLUTE_RANGE: i32 = 65_535;
+
+    /// `SM_CXSCREEN`.
+    pub const SM_CX_SCREEN: i32 = 0;
+    /// `SM_CYSCREEN`.
+    pub const SM_CY_SCREEN: i32 = 1;
+    /// `SM_CXVIRTUALSCREEN`.
+    pub const SM_CX_VIRTUAL_SCREEN: i32 = 78;
+    /// `SM_CYVIRTUALSCREEN`.
+    pub const SM_CY_VIRTUAL_SCREEN: i32 = 79;
+
+    /// `MAPVK_VK_TO_CHAR` — the unshifted character a virtual key produces in
+    /// the current layout, with no dead-key side effect.
+    pub const MAPVK_VK_TO_CHAR: u32 = 2;
+
+    /// `VK_SHIFT`-adjacent virtual keys, left and right told apart.
+    ///
+    /// The unsided `VK_SHIFT`/`VK_CONTROL`/`VK_MENU` are deliberately not here:
+    /// the AltGr disambiguation in [`keys::modifiers`](super::keys::modifiers)
+    /// depends on seeing *which* Control is down.
+    pub const VK_L_SHIFT: usize = 0xA0;
+    /// See [`VK_L_SHIFT`].
+    pub const VK_R_SHIFT: usize = 0xA1;
+    /// See [`VK_L_SHIFT`].
+    pub const VK_L_CONTROL: usize = 0xA2;
+    /// See [`VK_L_SHIFT`].
+    pub const VK_R_CONTROL: usize = 0xA3;
+    /// See [`VK_L_SHIFT`]. `VK_MENU` is Windows' name for Alt.
+    pub const VK_L_MENU: usize = 0xA4;
+    /// See [`VK_L_SHIFT`].
+    pub const VK_R_MENU: usize = 0xA5;
+    /// `VK_LWIN`.
+    pub const VK_L_WIN: usize = 0x5B;
+    /// `VK_RWIN`.
+    pub const VK_R_WIN: usize = 0x5C;
+    /// `VK_CAPITAL` — Caps Lock, read for its *toggle* bit.
+    pub const VK_CAPITAL: usize = 0x14;
+    /// `VK_NUMLOCK`, likewise.
+    pub const VK_NUM_LOCK: usize = 0x90;
 
     /// The `WMSZ_*` edge a `WM_SIZING` is being dragged by.
     pub const WMSZ_LEFT: usize = 1;
@@ -670,6 +930,48 @@ unsafe extern "system" {
     pub fn GetDpiForWindow(hwnd: Handle) -> u32;
     pub fn SetProcessDpiAwarenessContext(context: isize) -> Bool32;
     pub fn LoadCursorW(instance: Handle, name: usize) -> Handle;
+    // The time of the message currently being processed, on the same
+    // `GetTickCount` clock as `Msg::time`. A window procedure is not handed its
+    // message's `MSG`, so this is the only way to stamp an event from inside
+    // one — see `TimeBase`.
+    pub fn GetMessageTime() -> i32;
+    pub fn TrackMouseEvent(track: *mut TrackMouse) -> Bool32;
+    pub fn SetCapture(hwnd: Handle) -> Handle;
+    pub fn ReleaseCapture() -> Bool32;
+    // A null rectangle *releases* the clip, which is the call that must run
+    // when a window loses focus. See `input` for why that is not optional.
+    pub fn ClipCursor(rect: *const Rect) -> Bool32;
+    // Test-only: the clip is otherwise invisible from inside the process that
+    // set it, and "the pointer is confined" is a claim about the *system's*
+    // state rather than about a field this backend keeps. Reading it back is
+    // what makes the confinement tests able to fail.
+    #[cfg(test)]
+    pub fn GetClipCursor(rect: *mut Rect) -> Bool32;
+    // Test-only, and for one reason: `ClipCursor` and `SetCursorPos` are
+    // restricted to the process that owns the foreground window, and CI has
+    // nobody to click on ours. This is the click.
+    #[cfg(test)]
+    pub fn SetForegroundWindow(hwnd: Handle) -> Bool32;
+    pub fn ClientToScreen(hwnd: Handle, point: *mut Point) -> Bool32;
+    pub fn ScreenToClient(hwnd: Handle, point: *mut Point) -> Bool32;
+    pub fn SetCursorPos(x: i32, y: i32) -> Bool32;
+    pub fn GetCursorPos(point: *mut Point) -> Bool32;
+    pub fn SetCursor(cursor: Handle) -> Handle;
+    // Returns the new display count; the cursor is drawn while it is >= 0,
+    // which is why the count has to be balanced rather than merely decremented.
+    pub fn ShowCursor(show: Bool32) -> i32;
+    pub fn GetKeyboardState(state: *mut u8) -> Bool32;
+    pub fn MapVirtualKeyW(code: u32, map_type: u32) -> u32;
+    pub fn RegisterRawInputDevices(devices: *const RawInputDevice, count: u32, size: u32)
+    -> Bool32;
+    pub fn GetRawInputData(
+        raw_input: Handle,
+        command: u32,
+        data: *mut c_void,
+        size: *mut u32,
+        header_size: u32,
+    ) -> u32;
+    pub fn GetSystemMetrics(index: i32) -> i32;
 }
 
 // The `gdi32` surface: one call, for the class background brush.
@@ -770,6 +1072,20 @@ mod tests {
         assert_eq!(size_of::<DevModeW>(), 220);
         assert_eq!(core::mem::offset_of!(DevModeW, dm_display_frequency), 184);
         assert_eq!(core::mem::offset_of!(MonitorInfoExW, sz_device), 40);
+
+        // The input structures. `RAWMOUSE` is the one that matters: its
+        // `usFlags` is followed by two bytes of union alignment, and reading
+        // `lLastX` from offset 6 instead of 12 would produce a delta made of
+        // half a button mask — a plausible number, never a crash.
+        assert_eq!(size_of::<TrackMouse>(), 24);
+        assert_eq!(size_of::<RawInputDevice>(), 16);
+        assert_eq!(size_of::<RawMouse>(), 24);
+        assert_eq!(core::mem::offset_of!(RawMouse, ul_buttons), 4);
+        assert_eq!(core::mem::offset_of!(RawMouse, l_last_x), 12);
+        assert_eq!(core::mem::offset_of!(RawMouse, l_last_y), 16);
+        assert_eq!(size_of::<RawInputHeader>(), 24);
+        assert_eq!(size_of::<RawInput>(), 48);
+        assert_eq!(core::mem::offset_of!(RawInput, mouse), 24);
     }
 
     #[test]

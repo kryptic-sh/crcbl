@@ -7,7 +7,7 @@ use core::time::Duration;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use crcbl_core::{Pool, SurfaceTarget};
+use crcbl_core::{EventTime, Pool, SurfaceTarget};
 
 use crate::{
     ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode, LogicalSize, MimeType,
@@ -20,6 +20,9 @@ use super::TimeBase;
 use super::events::RawEvent;
 use super::ffi::{self, Handle, Msg, WindowPlacement, value};
 use super::geometry;
+use super::input;
+use super::keys::Utf16;
+use super::pointer::{RawMotion, Visibility};
 use super::proc::{self, Shared};
 use super::window;
 
@@ -76,11 +79,11 @@ pub(super) struct WinWindow {
     /// rather than assumed.
     pub effective_mode: DisplayMode,
     pub saved: Option<Saved>,
-    /// The cursor last asked for. **Recorded, not applied**; see
-    /// [`set_cursor`](Shell::set_cursor).
+    /// The cursor last asked for: `None` for "never asked", `Some(None)` for
+    /// hidden, `Some(Some(icon))` for a shape.
     cursor: Option<Option<CursorIcon>>,
-    pointer_mode: PointerMode,
-    focused: bool,
+    pub(super) pointer_mode: PointerMode,
+    pub(super) focused: bool,
     visible: bool,
     close_pending: bool,
 }
@@ -89,6 +92,15 @@ impl WinWindow {
     /// The raw handle, for the many calls that need it.
     pub(super) fn raw(&self) -> Handle {
         self.hwnd.as_ptr()
+    }
+
+    /// Whether this window asked for the cursor to be hidden.
+    ///
+    /// A window that has never asked is not asking for hidden — which is the
+    /// difference between `None` and `Some(None)` and the reason the field is a
+    /// nested `Option` rather than a flat one.
+    pub(super) fn cursor_hidden(&self) -> bool {
+        self.cursor == Some(None)
     }
 }
 
@@ -115,6 +127,16 @@ pub struct Win32Shell {
     pub(super) next_monitor_id: u32,
     queue: VecDeque<ShellEvent>,
     time: TimeBase,
+    /// The half-finished surrogate pair `WM_CHAR` may be in the middle of.
+    ///
+    /// Shell-wide rather than per window because the messages are a stream on
+    /// one thread and only the focused window receives them: two windows cannot
+    /// interleave halves of a pair.
+    pub(super) text: Utf16,
+    /// The previous absolute raw sample, for a device that reports positions.
+    pub(super) raw_motion: RawMotion,
+    /// `ShowCursor`'s reference count, kept balanced.
+    pub(super) visibility: Visibility,
     caps: ShellCaps,
 }
 
@@ -193,6 +215,9 @@ impl Win32Shell {
             });
         };
         window::register_class(instance.as_ptr())?;
+        // Before any window exists, because the registration is per process and
+        // the capability set is latched from whether it took.
+        let raw_motion = input::register_raw_input();
 
         let mut shell = Self {
             instance,
@@ -203,25 +228,39 @@ impl Win32Shell {
             next_monitor_id: 1,
             queue: VecDeque::new(),
             time: TimeBase::at(ffi::tick_nanos()),
-            caps: Self::latch_caps(),
+            text: Utf16::default(),
+            raw_motion: RawMotion::default(),
+            visibility: Visibility::default(),
+            caps: Self::latch_caps(raw_motion),
         };
         shell.monitors = shell.enumerate_monitors();
         Ok(shell)
     }
 
-    /// The capability set, which on this platform is a constant.
+    /// The capability set, which on this platform is a constant but one.
     ///
-    /// See the [module docs](super) for why there is nothing to compute it
-    /// from: every API this backend uses is present above its version floor or
-    /// the process would not have started. Each bit set here is exercised by a
-    /// test in this module.
-    const fn latch_caps() -> ShellCaps {
-        ShellCaps::MULTI_WINDOW
+    /// See the [module docs](super) for why there is almost nothing to compute
+    /// it from: every API this backend uses is present above its version floor
+    /// or the process would not have started. The exception is
+    /// [`RAW_POINTER_MOTION`](ShellCaps::RAW_POINTER_MOTION), which is latched
+    /// from whether `RegisterRawInputDevices` actually took — the one call in
+    /// this backend that can be refused for a reason outside the version floor.
+    /// Each bit set here is exercised by a test in this module.
+    const fn latch_caps(raw_motion: bool) -> ShellCaps {
+        let caps = ShellCaps::MULTI_WINDOW
             .union(ShellCaps::EVENT_WAIT)
             .union(ShellCaps::WINDOW_POSITION)
             .union(ShellCaps::SERVER_DECORATIONS)
             .union(ShellCaps::FRACTIONAL_SCALE)
             .union(ShellCaps::ASPECT_HINT_HONORED)
+            .union(ShellCaps::POINTER_LOCK)
+            .union(ShellCaps::POINTER_CONFINE)
+            .union(ShellCaps::POINTER_WARP);
+        if raw_motion {
+            caps.union(ShellCaps::RAW_POINTER_MOTION)
+        } else {
+            caps
+        }
     }
 
     pub(super) fn instance(&self) -> Handle {
@@ -258,6 +297,28 @@ impl Win32Shell {
             .iter()
             .find(|(known, _)| known == device)
             .map(|(_, id)| *id)
+    }
+
+    /// Every live window, by the handle the seam names it with.
+    pub(super) fn windows_iter(&self) -> impl Iterator<Item = (WindowId, &WinWindow)> {
+        self.windows
+            .iter()
+            .map(|(handle, window)| (handle.cast(), window))
+    }
+
+    /// A message's `GetMessageTime` on the engine's clock.
+    ///
+    /// The clock is read *now* rather than being cached, because
+    /// [`TimeBase::widen`] resolves the message's 32 bits against a full-width
+    /// reading and a stale one would resolve the wrap the wrong way for exactly
+    /// as long as it was stale.
+    pub(super) fn event_time(&self, millis: u32) -> EventTime {
+        self.time.event_time_at(ffi::tick_nanos(), millis)
+    }
+
+    /// Queues an event for the current [`pump`](Shell::pump) to deliver.
+    pub(super) fn queue_event(&mut self, event: ShellEvent) {
+        self.queue.push_back(event);
     }
 
     /// The [`WindowId`] owning an `HWND`, for routing a raw event.
@@ -383,6 +444,16 @@ impl Win32Shell {
                     if let Ok(state) = self.window_mut(window) {
                         state.focused = focused;
                     }
+                    // The window procedure has already released or re-applied
+                    // the *clip*, because one frame of a hostage desktop is one
+                    // frame too many. Both are refreshed again here, and neither
+                    // is redundant: `refresh_clip` is what establishes a
+                    // confinement that was asked for **before** the window had
+                    // the keyboard, and the visibility is what makes alt-tabbing
+                    // out of mouselook give the pointer back. See
+                    // [`input`](super::input).
+                    self.refresh_clip();
+                    self.refresh_cursor_visibility();
                     self.queue.push_back(ShellEvent::Focus { window, focused });
                 }
                 RawEvent::CloseRequested { .. } => {
@@ -408,6 +479,17 @@ impl Win32Shell {
                     self.monitors = self.enumerate_monitors();
                     self.queue.push_back(ShellEvent::MonitorsChanged);
                 }
+
+                // The input half, which needs the layout, the modifier snapshot
+                // and this shell's own surrogate and raw-motion state — see
+                // [`input`](super::input).
+                input_event @ (RawEvent::Key { .. }
+                | RawEvent::Char { .. }
+                | RawEvent::PointerMotion { .. }
+                | RawEvent::PointerFocus { .. }
+                | RawEvent::Button { .. }
+                | RawEvent::Wheel { .. }
+                | RawEvent::RawMotion { .. }) => self.translate_input(input_event, window),
             }
         }
     }
@@ -460,7 +542,7 @@ impl Shell for Win32Shell {
 
     /// What this backend can do, fixed for the shell's lifetime.
     ///
-    /// Six bits, and each is a claim about code that exists in this slice:
+    /// Each bit is a claim about code that exists in this backend:
     ///
     /// * [`MULTI_WINDOW`](ShellCaps::MULTI_WINDOW) — nothing about a window
     ///   class or a message queue is single-window.
@@ -480,13 +562,43 @@ impl Shell for Win32Shell {
     /// * [`ASPECT_HINT_HONORED`](ShellCaps::ASPECT_HINT_HONORED) — `WM_SIZING`,
     ///   named by `docs/plan/15-windowing.md` as this platform's form of it,
     ///   and implemented in [`geometry`](super::geometry).
+    /// * [`POINTER_CONFINE`](ShellCaps::POINTER_CONFINE) and
+    ///   [`POINTER_LOCK`](ShellCaps::POINTER_LOCK) — `ClipCursor` over the
+    ///   client rectangle, plus a hidden cursor and a recentre for the second.
+    ///   Re-established when the window moves, resizes or regains focus, and
+    ///   released the instant it loses it.
+    /// * [`POINTER_WARP`](ShellCaps::POINTER_WARP) — `SetCursorPos`, which
+    ///   Windows has and Wayland refuses to.
+    /// * [`RAW_POINTER_MOTION`](ShellCaps::RAW_POINTER_MOTION) — `WM_INPUT`, and
+    ///   the **only bit here that is genuinely latched**: it is set if and only
+    ///   if `RegisterRawInputDevices` succeeded at [`open`](Self::open). An
+    ///   absolute-reporting device (remote desktop, a tablet) is differenced
+    ///   rather than misread, so the bit means the same thing on `mstsc` as it
+    ///   does on a desk.
     ///
-    /// Everything else is **clear because it is not written yet**, not because
-    /// Windows cannot do it: pointer capture, warping, raw motion and IME are
-    /// W2; the clipboard and drag-and-drop are W3.
-    /// [`HW_UPSCALE`](ShellCaps::HW_UPSCALE) is the one that is clear for a
-    /// reason rather than for want of work — a plain `HWND` presents at its own
-    /// size, and the renderer does the upscale blit.
+    /// # `TEXT_IME` is clear, and that is a decision rather than a gap
+    ///
+    /// `WM_CHAR` is handled, so typing produces
+    /// [`TextCommit`](ShellEvent::TextCommit) — surrogate pairs included, which
+    /// is what makes an astral codepoint arrive whole. **That is not what this
+    /// bit claims.** [`TEXT_IME`](ShellCaps::TEXT_IME) says the commit path is
+    /// wired to a real input method, and nothing in this backend touches the
+    /// `WM_IME_*` family: there is no composition string, no candidate-window
+    /// placement, and no way for the seam to tell a pre-edit from a commit.
+    ///
+    /// Leaving `DefWindowProc` to run the default IME does deliver a committed
+    /// Japanese string as `WM_CHAR`, and it would be easy to read that as the
+    /// capability being met. It is not the standard the other backends are held
+    /// to — Wayland latches this bit on having *bound* `text-input-v3` — and
+    /// this backend has never been run on Windows, so setting it would be an
+    /// unverified claim about a code path nobody has watched. A capability that
+    /// overstates itself is worse than one that is missing.
+    ///
+    /// [`CLIPBOARD`](ShellCaps::CLIPBOARD) and
+    /// [`DRAG_DROP`](ShellCaps::DRAG_DROP) are clear because W3 has not landed.
+    /// [`HW_UPSCALE`](ShellCaps::HW_UPSCALE) is clear for a reason rather than
+    /// for want of work — a plain `HWND` presents at its own size, and the
+    /// renderer does the upscale blit.
     fn caps(&self) -> ShellCaps {
         self.caps
     }
@@ -830,12 +942,29 @@ impl Shell for Win32Shell {
         })
     }
 
-    /// Frees, confines or locks the pointer. **Only the first, in this slice.**
+    /// Frees, confines or locks the pointer.
     ///
-    /// Confinement (`ClipCursor`) and lock (clip plus a hidden cursor plus raw
-    /// input) are W2, so [`POINTER_LOCK`](ShellCaps::POINTER_LOCK) and
-    /// [`POINTER_CONFINE`](ShellCaps::POINTER_CONFINE) are clear and this
-    /// refuses the two modes that need them.
+    /// # Both captured modes are one `ClipCursor`
+    ///
+    /// [`Confined`](PointerMode::Confined) and [`Locked`](PointerMode::Locked)
+    /// bound the pointer identically — the client rectangle, in screen
+    /// coordinates — and differ in what is *reported*:
+    ///
+    /// * Confined keeps the cursor drawn and
+    ///   [`abs`](ShellEvent::PointerMotion) flowing. The clip is the whole
+    ///   implementation.
+    /// * Locked additionally hides the cursor, suppresses `abs` — which
+    ///   [`ShellEvent::PointerMotion`] documents as the invariant of the mode —
+    ///   and recentres the pointer when it drifts, so leaving the mode does not
+    ///   leave the cursor in a corner. The camera reads `WM_INPUT` instead, which
+    ///   is unaffected by either the clip or the recentre.
+    ///
+    /// Unlike X11 there is no grab to be refused: `ClipCursor` is not a request
+    /// to another client, so this cannot fail for a reason outside this process.
+    /// It *can* stop being in effect, and does — see
+    /// [`input`](super::input) and the window procedure, which release the clip
+    /// the instant the window loses focus and re-establish it when focus
+    /// returns, when the window moves and when it is resized.
     ///
     /// # Errors
     ///
@@ -848,23 +977,59 @@ impl Shell for Win32Shell {
         if !self.caps.contains(mode.required_cap()) {
             return Err(Self::unsupported(mode.as_str()));
         }
+        // The clip is per shell rather than per window — there is one cursor —
+        // so a second window taking it releases the first's, exactly as the X11
+        // backend's grab does.
+        let previous: Vec<WindowId> = self
+            .windows_iter()
+            .filter(|(handle, state)| *handle != window && state.pointer_mode.is_captured())
+            .map(|(handle, _)| handle)
+            .collect();
+        for held in previous {
+            if let Ok(state) = self.window_mut(held) {
+                state.pointer_mode = PointerMode::Free;
+            }
+        }
         self.window_mut(window)?.pointer_mode = mode;
+        self.refresh_clip();
+        self.refresh_cursor_visibility();
+        if mode == PointerMode::Locked
+            && let Some(size) = self.window(window)?.configuration.map(|config| config.size)
+        {
+            // Start from the middle, so the first recentre is not immediate.
+            self.warp_to_client(
+                window,
+                i32::try_from(size.width / 2).unwrap_or(0),
+                i32::try_from(size.height / 2).unwrap_or(0),
+            );
+        }
         Ok(())
     }
 
-    /// **Records the request and does not apply it.**
+    /// Sets the cursor shape, or hides the cursor with `None`.
     ///
-    /// The same shape as the X11 backend's shape handling, arrived at from a
-    /// different direction: there, hiding is real and only a themed *shape*
-    /// needs a loader this engine does not have. Here neither half is wired
-    /// yet, because both are the cursor half of W2 — the class cursor is the
-    /// system arrow, `SetCursor` has to be answered from `WM_SETCURSOR` on
-    /// every mouse move, and hiding is `ShowCursor`'s reference count, which is
-    /// per thread and needs the pointer-capture code to be correct.
+    /// # Two mechanisms, because Windows has two questions
     ///
-    /// So [`WindowState`] can report what was asked for and nothing on screen
-    /// changes. This is stated in the module docs and in `docs/backlog.md`
-    /// rather than left to be discovered.
+    /// A *shape* is answered from `WM_SETCURSOR`, and only from there: the
+    /// system asks on every pointer movement and applies the window class's
+    /// cursor if nothing answers, so a `SetCursor` called from here would be
+    /// overwritten before the next frame. The loaded `HCURSOR` is therefore
+    /// recorded for the window procedure — see [`proc`](super::proc) — and takes
+    /// effect on the next movement, which is the first moment anything could
+    /// have been drawn anyway.
+    ///
+    /// *Hiding* is `ShowCursor`, whose per-thread reference count is the classic
+    /// bug in this API and is kept balanced by
+    /// [`pointer::Visibility`](super::pointer::Visibility) rather than by
+    /// counting calls by hand. It applies while the **focused** window wants it
+    /// hidden; [`input`](super::input) states that rule and its one visible
+    /// consequence.
+    ///
+    /// Unlike the X11 backend, a named shape really is applied here: Windows
+    /// ships the stock cursor set in `user32`, so there is no theme to load and
+    /// no dependency to take on. Three of the seam's shapes have no exact stock
+    /// equivalent and are approximated;
+    /// [`pointer::cursor_id`](super::pointer::cursor_id) names which and to what.
     ///
     /// # Errors
     ///
@@ -875,31 +1040,38 @@ impl Shell for Win32Shell {
         cursor: Option<CursorIcon>,
     ) -> Result<(), ShellError> {
         self.window_mut(window)?.cursor = Some(cursor);
+        if let Some(icon) = cursor {
+            self.apply_cursor_shape(window, icon)?;
+        }
+        self.refresh_cursor_visibility();
         Ok(())
     }
 
-    /// Not in this slice.
+    /// Moves the pointer to a position in the window.
     ///
-    /// `SetCursorPos` is one call and it is deliberately not made: it belongs
-    /// with the pointer capture and the raw motion it exists alongside, and
-    /// [`POINTER_WARP`](ShellCaps::POINTER_WARP) is clear so a caller that
-    /// checks first never gets here.
+    /// `ClientToScreen` then `SetCursorPos`, which is the capability
+    /// [`POINTER_WARP`](ShellCaps::POINTER_WARP) names and which Wayland
+    /// deliberately does not have. The warning on the trait method applies here
+    /// as it does on X11 and is worth repeating: a camera must not be built on
+    /// this. A warp produces a `WM_MOUSEMOVE` indistinguishable from the user's
+    /// own, so a warp-based camera fights every real movement — which is why
+    /// [`PointerMode::Locked`] plus `WM_INPUT` exists.
+    ///
+    /// The position is **clamped by the system** to the current clip rectangle
+    /// and to the virtual screen, so a warp outside a confined window lands on
+    /// its edge rather than being refused.
     ///
     /// # Errors
     ///
-    /// [`ShellError::InvalidWindow`] for a stale handle — checked **first**, so
-    /// a stale handle is reported as stale rather than as unsupported — or
-    /// [`ShellError::Unsupported`].
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
     fn warp_pointer(
         &mut self,
         window: WindowId,
         position: PhysicalPoint,
     ) -> Result<(), ShellError> {
         self.window(window)?;
-        let _ = position;
-        Err(Self::unsupported(
-            "pointer warp, which lands with the rest of the pointer code",
-        ))
+        self.warp_to_client(window, position.x as i32, position.y as i32);
+        Ok(())
     }
 
     fn reply_close_request(
@@ -964,8 +1136,26 @@ impl Drop for Win32Shell {
     /// it here — before the field is dropped — guarantees.
     ///
     /// The window class is deliberately not unregistered; see
-    /// [`window`](super::window).
+    /// [`window`](super::window). Neither is the raw-input registration; see
+    /// [`input`](super::input).
+    ///
+    /// # Two pieces of desktop state have to be handed back
+    ///
+    /// Both are process- or thread-wide rather than per window, so destroying
+    /// the windows does not undo them, and both are user-visible if they are
+    /// left behind:
+    ///
+    /// * The **cursor clip**. A process that exits with the cursor clipped
+    ///   leaves it clipped to a rectangle no window occupies. Windows does clean
+    ///   this up when the *process* exits, which is exactly why it must be done
+    ///   here — a shell dropped by a host application that keeps running would
+    ///   otherwise hold the desktop hostage with no window to point at.
+    /// * The **`ShowCursor` count**, for the same reason and with the same
+    ///   asymmetry: one hide outstanding is an invisible cursor over every
+    ///   window this thread owns afterwards.
     fn drop(&mut self) {
+        input::release_clip();
+        Self::show_cursor(self.visibility.want(false));
         let windows: Vec<Handle> = self
             .windows
             .iter()
@@ -991,9 +1181,16 @@ impl Drop for Win32Shell {
 mod tests {
     use super::*;
     use crate::{AspectRatio, ClipboardContent, LogicalSize, MimeType};
+    use crcbl_core::KeyCode;
+    use crcbl_core::input::{ButtonState, Keysym, PointerButton, Scancode, ScrollDelta};
     use std::time::Instant;
 
-    use super::super::ffi::{MinMaxInfo, Rect, msg};
+    use super::super::ffi::{Lparam, MinMaxInfo, Rect, msg};
+
+    /// `VK_W`, which is the letter's virtual key on every layout that has one.
+    const VK_W: usize = 0x57;
+    /// `VK_UP`.
+    const VK_UP: usize = 0x26;
 
     /// A shell, or a failure that names what the runner did not provide.
     fn shell() -> Win32Shell {
@@ -1006,7 +1203,7 @@ mod tests {
     fn window(shell: &mut Win32Shell) -> WindowId {
         shell
             .create_window(&WindowDesc {
-                title: "crcbl P5C W1",
+                title: "crcbl P5C W2",
                 ..WindowDesc::default()
             })
             .expect("creating a top-level window")
@@ -1015,6 +1212,117 @@ mod tests {
     /// The `HWND`, for the messages only a user's mouse would otherwise send.
     fn hwnd_of(shell: &Win32Shell, window: WindowId) -> Handle {
         shell.window(window).expect("a live window").raw()
+    }
+
+    /// Sends a key message with the `lParam` the keyboard driver would build.
+    ///
+    /// The whole of input is otherwise unreachable from CI, which has no
+    /// keyboard and no mouse. `SendMessageW` runs the real window procedure
+    /// against the real cached state, so everything below the driver — the scan
+    /// code table, the modifier snapshot, the layout lookup — is exercised.
+    fn send_key(
+        hwnd: Handle,
+        message: u32,
+        virtual_key: usize,
+        scancode: isize,
+        extended: bool,
+        previous: bool,
+    ) {
+        let mut l_param = (scancode << 16) | 1;
+        if extended {
+            l_param |= 1 << 24;
+        }
+        if previous {
+            l_param |= 1 << 30;
+        }
+        if message == msg::KEY_UP {
+            // The transition bit, which is set on every release and which this
+            // backend must not confuse with the previous-state bit beside it.
+            l_param |= 1 << 31;
+        }
+        // SAFETY: a keyboard message to this shell's own window, with the
+        // `wParam`/`lParam` encoding `winuser.h` documents for it.
+        unsafe { ffi::SendMessageW(hwnd, message, virtual_key, l_param) };
+    }
+
+    /// Sends a mouse message with two coordinates packed into `lParam`.
+    fn send_mouse(hwnd: Handle, message: u32, w_param: usize, x: i32, y: i32) {
+        let l_param = (((y as u16 as usize) << 16) | (x as u16 as usize)) as Lparam;
+        // SAFETY: a mouse message to this shell's own window, with the packed
+        // coordinate encoding `winuser.h` documents.
+        unsafe { ffi::SendMessageW(hwnd, message, w_param, l_param) };
+    }
+
+    /// Makes a window the foreground one.
+    ///
+    /// `ClipCursor` and `SetCursorPos` are both restricted to the process that
+    /// owns the foreground window — the desktop's protection against exactly the
+    /// hostage-taking this backend is careful not to do — so a test that
+    /// exercises either has to arrange it. A runner where this does not take is
+    /// a runner where those two tests fail with the clip unchanged, which is the
+    /// honest report.
+    fn make_foreground(hwnd: Handle) {
+        // SAFETY: this shell's own window, from the thread that created it.
+        unsafe { ffi::SetForegroundWindow(hwnd) };
+    }
+
+    /// Sends `WM_SETFOCUS` or `WM_KILLFOCUS`.
+    ///
+    /// The clip and the cursor both follow the focus, and CI cannot click on a
+    /// window to give it one.
+    fn send_focus(hwnd: Handle, focused: bool) {
+        let message = if focused {
+            msg::SET_FOCUS
+        } else {
+            msg::KILL_FOCUS
+        };
+        // SAFETY: a focus message to this shell's own window.
+        unsafe { ffi::SendMessageW(hwnd, message, 0, 0) };
+    }
+
+    /// Every [`ShellEvent::Key`] one pump produced, flattened for assertion.
+    fn pump_keys(
+        shell: &mut Win32Shell,
+    ) -> Vec<(Scancode, Option<KeyCode>, Keysym, ButtonState, bool)> {
+        let mut keys = Vec::new();
+        shell.pump(&mut |event| {
+            if let ShellEvent::Key {
+                scancode,
+                key_code,
+                keysym,
+                state,
+                repeat,
+                ..
+            } = event
+            {
+                keys.push((scancode, key_code, keysym, state, repeat));
+            }
+        });
+        keys
+    }
+
+    /// The rectangle the cursor is currently clipped to.
+    fn clip_rect() -> Rect {
+        let mut rect = Rect::default();
+        // SAFETY: `rect` is a live, initialised `RECT` the call writes into.
+        unsafe { ffi::GetClipCursor(&raw mut rect) };
+        rect
+    }
+
+    /// The cursor's display count, read without changing it.
+    ///
+    /// There is no read-only accessor: `ShowCursor` returns the count *after*
+    /// its own adjustment, so the only way to see it is to move it and put it
+    /// back. The pair is balanced, which is exactly what the code under test has
+    /// to be as well.
+    fn cursor_display_count() -> i32 {
+        // SAFETY: two integers by value; neither call can fail, and together
+        // they leave the count where they found it.
+        unsafe {
+            let raised = ffi::ShowCursor(1);
+            ffi::ShowCursor(0);
+            raised - 1
+        }
     }
 
     #[test]
@@ -1176,7 +1484,7 @@ mod tests {
     }
 
     #[test]
-    fn the_capabilities_are_exactly_what_this_slice_implements() {
+    fn the_capabilities_are_exactly_what_this_backend_implements() {
         let mut shell = shell();
         let window = window(&mut shell);
         let caps = shell.caps();
@@ -1187,22 +1495,31 @@ mod tests {
             ShellCaps::SERVER_DECORATIONS,
             ShellCaps::FRACTIONAL_SCALE,
             ShellCaps::ASPECT_HINT_HONORED,
-        ] {
-            assert!(caps.contains(present), "{present:?} is claimed by W1");
-        }
-        // Clear because the code is in W2 and W3, and a capability that
-        // overstates itself is worse than one that is missing.
-        for absent in [
-            ShellCaps::CLIPBOARD,
-            ShellCaps::DRAG_DROP,
             ShellCaps::POINTER_LOCK,
             ShellCaps::POINTER_CONFINE,
             ShellCaps::POINTER_WARP,
-            ShellCaps::RAW_POINTER_MOTION,
+        ] {
+            assert!(caps.contains(present), "{present:?} is implemented");
+        }
+        // Latched from the registration rather than assumed — the one bit on
+        // this backend that is not a constant.
+        assert!(
+            caps.contains(ShellCaps::RAW_POINTER_MOTION),
+            "RegisterRawInputDevices was refused on this runner, which is a finding"
+        );
+        assert!(caps.has_mouselook(), "both halves, which is the point");
+
+        // Clear, and each for a stated reason: the clipboard and drag-and-drop
+        // are W3; `TEXT_IME` is not earned by `WM_CHAR` alone; `HW_UPSCALE` is
+        // not something a plain `HWND` can do. A capability that overstates
+        // itself is worse than one that is missing.
+        for absent in [
+            ShellCaps::CLIPBOARD,
+            ShellCaps::DRAG_DROP,
             ShellCaps::TEXT_IME,
             ShellCaps::HW_UPSCALE,
         ] {
-            assert!(!caps.contains(absent), "{absent:?} is not implemented yet");
+            assert!(!caps.contains(absent), "{absent:?} is not implemented");
         }
         assert_eq!(caps, shell.caps(), "latched for the shell's lifetime");
 
@@ -1220,24 +1537,19 @@ mod tests {
             !shell.clipboard_readable(window),
             "the trait's default answers from the capability"
         );
-        assert!(matches!(
-            shell.set_pointer_mode(window, PointerMode::Locked),
-            Err(ShellError::Unsupported { .. })
-        ));
-        assert!(matches!(
-            shell.set_pointer_mode(window, PointerMode::Confined),
-            Err(ShellError::Unsupported { .. })
-        ));
-        assert!(
-            shell.set_pointer_mode(window, PointerMode::Free).is_ok(),
-            "free needs no capability and is where every window already is"
-        );
-        assert!(matches!(
-            shell.warp_pointer(window, PhysicalPoint::ORIGIN),
-            Err(ShellError::Unsupported { .. })
-        ));
-        // Recorded, not applied — and it does not fail, which is the
-        // difference from the two above.
+        for mode in [
+            PointerMode::Free,
+            PointerMode::Confined,
+            PointerMode::Locked,
+            PointerMode::Free,
+        ] {
+            assert!(
+                shell.set_pointer_mode(window, mode).is_ok(),
+                "{mode:?} is claimed by the capability set"
+            );
+            assert_eq!(shell.window_state(window).expect("live").pointer_mode, mode);
+        }
+        assert!(shell.warp_pointer(window, PhysicalPoint::ORIGIN).is_ok());
         assert!(
             shell
                 .set_cursor(window, Some(CursorIcon::Crosshair))
@@ -1245,6 +1557,398 @@ mod tests {
         );
         assert!(shell.set_cursor(window, None).is_ok());
         let _ = ClipboardContent::Empty;
+    }
+
+    #[test]
+    fn a_key_press_carries_its_position_its_symbol_and_its_repeat_flag() {
+        // The real window procedure, the real scan-code table, the real
+        // `GetKeyboardState` and the real `MapVirtualKeyW` — driven by a
+        // message CI has no keyboard to send.
+        let mut shell = shell();
+        let window = window(&mut shell);
+        shell.pump(&mut |_| {});
+        let hwnd = hwnd_of(&shell, window);
+
+        send_key(hwnd, msg::KEY_DOWN, VK_W, 0x0011, false, false);
+        send_key(hwnd, msg::KEY_DOWN, VK_W, 0x0011, false, true);
+        send_key(hwnd, msg::KEY_UP, VK_W, 0x0011, false, true);
+        // An extended key, which is the half a dropped `E0` bit gets wrong.
+        send_key(hwnd, msg::KEY_DOWN, VK_UP, 0x0048, true, false);
+
+        let keys = pump_keys(&mut shell);
+        assert_eq!(keys.len(), 4, "{keys:?}");
+        let (scancode, key_code, keysym, state, repeat) = keys[0];
+        assert_eq!(scancode, Scancode(0x0011));
+        assert_eq!(key_code, Some(KeyCode::KeyW));
+        assert_eq!(state, ButtonState::Pressed);
+        assert!(!repeat, "the first press is not a repeat");
+        assert_eq!(
+            keysym.to_char(),
+            Some('w'),
+            "a US layout labels this key w; a different layout is a different \
+             letter and still a character"
+        );
+
+        assert!(keys[1].4, "the second press is the system repeating it");
+        assert_eq!(keys[2].3, ButtonState::Released);
+        assert!(
+            !keys[2].4,
+            "bit 30 is always set on a release and must not be read there"
+        );
+
+        assert_eq!(keys[3].0, Scancode(0xE048), "the E0 prefix is folded in");
+        assert_eq!(keys[3].1, Some(KeyCode::ArrowUp));
+        assert_eq!(keys[3].2, Keysym(0xFF52), "XK_Up, from the named table");
+    }
+
+    #[test]
+    fn typing_commits_text_and_a_control_key_commits_nothing() {
+        let mut shell = shell();
+        let window = window(&mut shell);
+        shell.pump(&mut |_| {});
+        let hwnd = hwnd_of(&shell, window);
+
+        // A BMP character, then a surrogate pair, then the carriage return
+        // Windows really does deliver when Enter is pressed.
+        for unit in [
+            u32::from(b'a'),
+            0x3042, // あ
+            0xD83C, // 🎮, high half
+            0xDFAE, // 🎮, low half
+            0x000D, // Enter
+            0x0008, // Backspace
+        ] {
+            // SAFETY: `WM_CHAR` to this shell's own window, with `wParam` the
+            // UTF-16 code unit the system would have put there.
+            unsafe { ffi::SendMessageW(hwnd, msg::CHAR, unit as usize, 0) };
+        }
+
+        let mut text = String::new();
+        shell.pump(&mut |event| {
+            if let ShellEvent::TextCommit { text: piece, .. } = event {
+                text.push_str(&piece);
+            }
+        });
+        assert_eq!(
+            text, "aあ🎮",
+            "the pair is one character and the controls are not text"
+        );
+    }
+
+    #[test]
+    fn the_pointer_enters_moves_clicks_scrolls_and_leaves() {
+        let mut shell = shell();
+        let window = window(&mut shell);
+        shell.pump(&mut |_| {});
+        let hwnd = hwnd_of(&shell, window);
+        let frame = super::input::client_screen_rect(hwnd).expect("a live window has one");
+
+        // A movement into a window nothing has been over is an arrival, and
+        // Windows sends no message for that — it is derived.
+        send_mouse(hwnd, msg::MOUSE_MOVE, 0, 40, 30);
+        send_mouse(hwnd, msg::MOUSE_MOVE, 0, 41, 31);
+        // A press and its release, which also takes and gives back the capture.
+        send_mouse(hwnd, msg::L_BUTTON_DOWN, 0, 41, 31);
+        send_mouse(hwnd, msg::L_BUTTON_UP, 0, 41, 31);
+        // The thumb button, whose identity is in the *high* word.
+        send_mouse(hwnd, msg::X_BUTTON_DOWN, 1 << 16, 41, 31);
+        send_mouse(hwnd, msg::X_BUTTON_UP, 1 << 16, 41, 31);
+        // The wheel, whose position is in **screen** coordinates.
+        send_mouse(
+            hwnd,
+            msg::MOUSE_WHEEL,
+            (120usize) << 16,
+            frame.left + 41,
+            frame.top + 31,
+        );
+        // SAFETY: the one-shot notification this backend arms with
+        // `TrackMouseEvent`, sent by hand because CI has no mouse to move out.
+        unsafe { ffi::SendMessageW(hwnd, msg::MOUSE_LEAVE, 0, 0) };
+
+        // Collected rather than compared position by position: a runner whose
+        // physical cursor happens to sit over the window contributes real
+        // messages of its own, and the claim under test is that ours produced
+        // the events below — not that nothing else did.
+        let mut names = Vec::new();
+        let mut motions = Vec::new();
+        let mut buttons = Vec::new();
+        let mut wheel = None;
+        let mut crossings = Vec::new();
+        shell.pump(&mut |event| {
+            names.push(event.name());
+            match event {
+                ShellEvent::PointerMotion { abs, raw_delta, .. } => {
+                    motions.push(abs);
+                    assert_eq!(raw_delta, None, "WM_MOUSEMOVE is not raw motion");
+                }
+                ShellEvent::Button {
+                    button,
+                    state,
+                    position,
+                    ..
+                } => buttons.push((button, state, position)),
+                ShellEvent::Wheel {
+                    delta, position, ..
+                } => wheel = Some((delta, position)),
+                ShellEvent::PointerFocus {
+                    entered, position, ..
+                } => crossings.push((entered, position)),
+                _ => {}
+            }
+        });
+
+        assert_eq!(
+            crossings.first(),
+            Some(&(true, Some(PhysicalPoint::new(40.0, 30.0)))),
+            "the entry is derived from the first movement: {names:?}"
+        );
+        assert!(
+            crossings.contains(&(false, None)),
+            "the leave carries no position: {crossings:?}"
+        );
+        assert_eq!(
+            crossings.iter().filter(|(entered, _)| !entered).count(),
+            1,
+            "the second movement must not re-arm a second leave: {crossings:?}"
+        );
+        assert!(
+            motions.contains(&Some(PhysicalPoint::new(41.0, 31.0))),
+            "{motions:?}"
+        );
+        assert_eq!(
+            buttons,
+            vec![
+                (
+                    PointerButton::Left,
+                    ButtonState::Pressed,
+                    Some(PhysicalPoint::new(41.0, 31.0))
+                ),
+                (
+                    PointerButton::Left,
+                    ButtonState::Released,
+                    Some(PhysicalPoint::new(41.0, 31.0))
+                ),
+                (
+                    PointerButton::Back,
+                    ButtonState::Pressed,
+                    Some(PhysicalPoint::new(41.0, 31.0))
+                ),
+                (
+                    PointerButton::Back,
+                    ButtonState::Released,
+                    Some(PhysicalPoint::new(41.0, 31.0))
+                ),
+            ],
+            "{names:?}"
+        );
+        let (delta, position) = wheel.expect("the wheel scrolled: {names:?}");
+        assert_eq!(delta, ScrollDelta::Lines { x: 0.0, y: 1.0 });
+        assert_eq!(
+            position,
+            Some(PhysicalPoint::new(41.0, 31.0)),
+            "the screen coordinates a wheel message carries were converted"
+        );
+    }
+
+    #[test]
+    fn confining_the_pointer_clips_it_and_losing_focus_gives_the_desktop_back() {
+        // The hazard that a compile cannot catch: a process that keeps the
+        // cursor clipped after it stops being the foreground window has taken
+        // the desktop hostage. The clip is read back from the *system*, because
+        // that is the thing being claimed.
+        let mut shell = shell();
+        let window = window(&mut shell);
+        shell.pump(&mut |_| {});
+        let hwnd = hwnd_of(&shell, window);
+        let client = super::input::client_screen_rect(hwnd).expect("a live window has one");
+        assert_ne!(clip_rect(), client, "nothing is clipped to start with");
+
+        // The clip follows the focus, so the window has to have it. CI cannot
+        // click on a window; the message is what a click would have produced,
+        // and the foreground call is what makes `ClipCursor` allowed at all.
+        make_foreground(hwnd);
+        send_focus(hwnd, true);
+        shell.pump(&mut |_| {});
+        assert!(shell.window_state(window).expect("live").focused);
+
+        shell
+            .set_pointer_mode(window, PointerMode::Confined)
+            .expect("POINTER_CONFINE is claimed");
+        assert_eq!(clip_rect(), client, "the pointer is bounded by the window");
+
+        // **Released synchronously**, inside the window procedure, without a
+        // pump — one frame of a hostage desktop is one frame too many.
+        send_focus(hwnd, false);
+        assert_ne!(clip_rect(), client, "focus loss releases the clip");
+
+        // And it comes back with the focus, because the request has not been
+        // withdrawn.
+        send_focus(hwnd, true);
+        assert_eq!(clip_rect(), client);
+        shell.pump(&mut |_| {});
+
+        // The other order: a mode asked for while the window does **not** have
+        // the keyboard gets no clip — the hostage rule does not care why the
+        // focus is missing — and takes effect when the keyboard arrives, rather
+        // than being lost.
+        shell
+            .set_pointer_mode(window, PointerMode::Free)
+            .expect("start from nothing");
+        send_focus(hwnd, false);
+        shell.pump(&mut |_| {});
+        shell
+            .set_pointer_mode(window, PointerMode::Confined)
+            .expect("asking is allowed whether or not it takes effect now");
+        assert_ne!(
+            clip_rect(),
+            client,
+            "an unfocused window does not get the pointer"
+        );
+        send_focus(hwnd, true);
+        assert_eq!(clip_rect(), client, "and gets it when the keyboard arrives");
+        shell.pump(&mut |_| {});
+
+        // Going back to free withdraws it for good.
+        shell
+            .set_pointer_mode(window, PointerMode::Free)
+            .expect("free always works");
+        assert_ne!(clip_rect(), client);
+        send_focus(hwnd, true);
+        assert_ne!(clip_rect(), client, "and focus does not resurrect it");
+    }
+
+    #[test]
+    fn a_second_window_takes_the_pointer_capture_from_the_first() {
+        // One cursor, so one clip. A shell with two windows must not leave the
+        // first one reporting `Locked` while the second holds the clip.
+        let mut shell = shell();
+        let first = window(&mut shell);
+        let second = shell
+            .create_window(&WindowDesc {
+                title: "crcbl P5C W2 — second",
+                size: LogicalSize::new(640.0, 480.0),
+                ..WindowDesc::default()
+            })
+            .expect("a second window");
+        shell.pump(&mut |_| {});
+
+        shell
+            .set_pointer_mode(first, PointerMode::Locked)
+            .expect("lock");
+        shell
+            .set_pointer_mode(second, PointerMode::Confined)
+            .expect("confine");
+        assert_eq!(
+            shell.window_state(first).expect("live").pointer_mode,
+            PointerMode::Free,
+            "the first window no longer holds anything"
+        );
+        assert_eq!(
+            shell.window_state(second).expect("live").pointer_mode,
+            PointerMode::Confined
+        );
+    }
+
+    #[test]
+    fn hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for() {
+        // The `ShowCursor` reference-count bug, observed through the count
+        // itself: two hides and one show leave the cursor invisible for the
+        // rest of the process's life, with no error anywhere.
+        let mut shell = shell();
+        let window = window(&mut shell);
+        shell.pump(&mut |_| {});
+        let hwnd = hwnd_of(&shell, window);
+        let baseline = cursor_display_count();
+
+        make_foreground(hwnd);
+        send_focus(hwnd, true);
+        shell.pump(&mut |_| {});
+
+        shell.set_cursor(window, None).expect("hide");
+        assert_eq!(cursor_display_count(), baseline - 1, "one hide is owed");
+        shell.set_cursor(window, None).expect("hide again");
+        assert_eq!(
+            cursor_display_count(),
+            baseline - 1,
+            "asking twice must not owe two shows"
+        );
+
+        shell
+            .set_cursor(window, Some(CursorIcon::Text))
+            .expect("a shape reveals it again");
+        assert_eq!(cursor_display_count(), baseline);
+        shell
+            .set_cursor(window, Some(CursorIcon::Crosshair))
+            .expect("and another shape changes nothing about visibility");
+        assert_eq!(cursor_display_count(), baseline);
+
+        // Losing focus gives the cursor back, which is what stops a game in
+        // mouselook leaving the desktop without a pointer.
+        shell.set_cursor(window, None).expect("hide");
+        assert_eq!(cursor_display_count(), baseline - 1);
+        send_focus(hwnd, false);
+        shell.pump(&mut |_| {});
+        assert_eq!(cursor_display_count(), baseline, "focus loss reveals it");
+    }
+
+    #[test]
+    fn a_cursor_shape_is_answered_from_the_window_procedure() {
+        // `WM_SETCURSOR` is the only message allowed to set a shape, and the
+        // system uses `DefWindowProc`'s answer — the class arrow — unless ours
+        // says it handled it. Sending the message runs exactly the path a
+        // mouse movement would.
+        let mut shell = shell();
+        let window = window(&mut shell);
+        shell
+            .set_cursor(window, Some(CursorIcon::Text))
+            .expect("an I-beam is a stock Windows cursor");
+        let hwnd = hwnd_of(&shell, window);
+
+        // SAFETY: `WM_SETCURSOR` to this shell's own window. `wParam` is the
+        // window under the cursor and `lParam` packs the hit-test code in its
+        // low word and the triggering message in its high one.
+        let handled = unsafe {
+            ffi::SendMessageW(
+                hwnd,
+                msg::SET_CURSOR,
+                hwnd as usize,
+                value::HT_CLIENT as isize,
+            )
+        };
+        assert_eq!(handled, 1, "the shape was applied, not the class cursor");
+
+        // The frame is the system's: answering for it would replace the resize
+        // arrows on the window border with an I-beam.
+        const HT_BOTTOM_RIGHT: isize = 17;
+        // SAFETY: as above, with the hit-test code for a corner of the frame.
+        let frame =
+            unsafe { ffi::SendMessageW(hwnd, msg::SET_CURSOR, hwnd as usize, HT_BOTTOM_RIGHT) };
+        assert_ne!(frame, 1, "the non-client area is left to DefWindowProc");
+    }
+
+    #[test]
+    fn warping_the_pointer_moves_it_to_a_position_in_the_window() {
+        // What `POINTER_WARP` claims, and the conversion it depends on: the
+        // seam is in window pixels and `SetCursorPos` is in screen ones.
+        let mut shell = shell();
+        let window = window(&mut shell);
+        shell.pump(&mut |_| {});
+        let hwnd = hwnd_of(&shell, window);
+        let client = super::input::client_screen_rect(hwnd).expect("a live window has one");
+        make_foreground(hwnd);
+
+        shell
+            .warp_pointer(window, PhysicalPoint::new(30.0, 20.0))
+            .expect("POINTER_WARP is claimed");
+        let mut point = super::super::ffi::Point::default();
+        // SAFETY: `point` is a live, initialised `POINT` the call writes into.
+        let read = unsafe { ffi::GetCursorPos(&raw mut point) };
+        assert_ne!(read, 0, "a session with a desktop has a cursor position");
+        assert_eq!(
+            (point.x, point.y),
+            (client.left + 30, client.top + 20),
+            "the warp landed in screen space at the client offset asked for"
+        );
     }
 
     #[test]

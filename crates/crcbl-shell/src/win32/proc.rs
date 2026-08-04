@@ -52,8 +52,41 @@
 //! nothing else. That is what makes the aspect lock
 //! ([`ShellCaps::ASPECT_HINT_HONORED`](crate::ShellCaps::ASPECT_HINT_HONORED))
 //! and the size constraints work *during* a drag rather than after it.
+//!
+//! # The four things input adds to that list
+//!
+//! Input mostly fits the record-and-answer-later shape, and four pieces of it
+//! do not. Each is here because deferring it to the next
+//! [`pump`](crate::Shell::pump) would be observably wrong, not merely late:
+//!
+//! 1. **`WM_SETCURSOR`.** The system asks which cursor to draw and uses
+//!    `DefWindowProc`'s answer — the *class* cursor — if we do not give one.
+//!    Answering next frame means answering after the arrow has already been
+//!    drawn, on every mouse movement.
+//! 2. **`SetCapture` on a button press.** A button released outside the window
+//!    is delivered to whatever window is under the pointer unless the capture
+//!    was taken *when the button went down*. Taking it a frame later is taking
+//!    it after the drag has already escaped.
+//! 3. **`TrackMouseEvent` on the derived enter.** Windows has no
+//!    `WM_MOUSEENTER`; the leave notification has to be armed at the moment the
+//!    pointer arrives, and the request is one-shot.
+//! 4. **`ClipCursor(NULL)` on focus loss.** This is the one that is not a
+//!    latency question at all. A process that keeps the cursor clipped after it
+//!    stops being the foreground window has **taken the desktop hostage**: the
+//!    user cannot reach the taskbar, another window, or the button that would
+//!    close ours. Deferring it to the next pump makes the hostage-taking last
+//!    exactly as long as the application's next frame takes — which, for the
+//!    application that is about to hang, is forever. So the clip is released
+//!    here, synchronously, before the procedure returns.
+//!
+//! The cursor's *visibility* deliberately does **not** join that list. It is
+//! `ShowCursor`'s per-thread reference count, which only takes effect while the
+//! pointer is over a window of this thread — so an un-hide that arrives a frame
+//! late is an invisible cursor over our own window for one frame, and cannot
+//! escape onto the desktop the way a clip can. It stays with the shell, where
+//! the count has one owner. See [`pointer::Visibility`](super::pointer::Visibility).
 
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 
 use crate::AspectRatio;
 
@@ -66,13 +99,21 @@ use super::geometry::{Frame, Track};
 // word arithmetic — compiles and is tested on every host. See
 // [`geometry`](super::geometry) for why that matters.
 #[cfg(target_os = "windows")]
-use super::ffi::{self, CreateStructW, Lparam, Lresult, MinMaxInfo, Rect, Wparam, msg, value};
+use super::ffi::{
+    self, CreateStructW, Lparam, Lresult, MinMaxInfo, Point, Rect, Wparam, msg, value,
+};
 #[cfg(target_os = "windows")]
 use super::geometry;
+#[cfg(target_os = "windows")]
+use super::input;
+#[cfg(target_os = "windows")]
+use super::{keys, pointer};
 #[cfg(target_os = "windows")]
 use crate::PhysicalSize;
 #[cfg(target_os = "windows")]
 use core::ptr;
+#[cfg(target_os = "windows")]
+use crcbl_core::input::ButtonState;
 
 /// An `HWND` as the integer the queue and the window pool match on.
 ///
@@ -100,6 +141,20 @@ pub(super) struct Limits {
     pub frame: Frame,
 }
 
+/// A window's cursor shape, for the one message allowed to set it.
+///
+/// Recorded by [`set_cursor`](crate::Shell::set_cursor) and read by
+/// `WM_SETCURSOR`. Hiding is **not** here: it is `ShowCursor`'s reference count,
+/// which is per thread rather than per window and belongs to the shell.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Shape {
+    /// Which window.
+    pub hwnd: isize,
+    /// The `HCURSOR`, owned by the system — a stock cursor from `LoadCursorW`,
+    /// which must not be destroyed.
+    pub cursor: Handle,
+}
+
 /// What the shell and its window procedure share.
 ///
 /// Owned by the shell as an `Rc`, and reached by the procedure as a raw pointer
@@ -107,10 +162,33 @@ pub(super) struct Limits {
 /// is what has to keep it true: **every window is destroyed before this is
 /// dropped**, so no procedure can run after the allocation goes away. See
 /// [`Win32Shell::drop`](super::Win32Shell).
+///
+/// The four `Cell`s are the state the *procedure* owns rather than the shell,
+/// because each answers a question the procedure has to act on before it
+/// returns — see the [module docs](self). They are `Cell` rather than `RefCell`
+/// because each is one `Copy` value: there is no borrow to be held across a call
+/// back into the system, which is the hazard the `RefCell`s carry.
 #[derive(Debug, Default)]
 pub(super) struct Shared {
     events: RefCell<Vec<RawEvent>>,
     limits: RefCell<Vec<Limits>>,
+    shapes: RefCell<Vec<Shape>>,
+    /// The window `TrackMouseEvent` is currently armed for, or zero.
+    ///
+    /// Also the answer to "is the pointer inside?", which is the only way to
+    /// derive the entry Windows does not send.
+    tracked: Cell<isize>,
+    /// The window holding the mouse capture, and which buttons are down on it.
+    ///
+    /// A mask rather than a count; [`pointer::button_bit`](super::pointer::button_bit)
+    /// says why.
+    capture: Cell<(isize, u32)>,
+    /// The window the cursor is clipped to, or zero.
+    ///
+    /// Kept across a focus loss — the clip is *released* there and re-applied
+    /// when focus comes back — so this records what the shell asked for rather
+    /// than what the system currently has.
+    clipped: Cell<isize>,
 }
 
 impl Shared {
@@ -138,9 +216,24 @@ impl Shared {
         }
     }
 
-    /// Drops a window's limits, on the way out.
+    /// Drops everything recorded for a window, on the way out.
+    ///
+    /// Every table **and** every `Cell` that could still name it: an `HWND`
+    /// value is handed to a new window after the old one dies, so a leftover
+    /// clip or capture target would be applied to whichever window inherits the
+    /// number.
     pub(super) fn forget(&self, hwnd: isize) {
         self.limits.borrow_mut().retain(|known| known.hwnd != hwnd);
+        self.shapes.borrow_mut().retain(|known| known.hwnd != hwnd);
+        if self.tracked.get() == hwnd {
+            self.tracked.set(0);
+        }
+        if self.capture.get().0 == hwnd {
+            self.capture.set((0, 0));
+        }
+        if self.clipped.get() == hwnd {
+            self.clipped.set(0);
+        }
     }
 
     /// A window's limits, by value so no borrow outlives the lookup.
@@ -150,6 +243,104 @@ impl Shared {
             .iter()
             .find(|known| known.hwnd == hwnd)
             .copied()
+    }
+
+    /// Publishes the cursor `WM_SETCURSOR` will set for a window.
+    pub(super) fn set_shape(&self, shape: Shape) {
+        let mut table = self.shapes.borrow_mut();
+        match table.iter_mut().find(|known| known.hwnd == shape.hwnd) {
+            Some(known) => *known = shape,
+            None => table.push(shape),
+        }
+    }
+
+    /// A window's cursor, or `None` to leave the class cursor alone.
+    fn shape_for(&self, hwnd: isize) -> Option<Handle> {
+        self.shapes
+            .borrow()
+            .iter()
+            .find(|known| known.hwnd == hwnd)
+            .map(|known| known.cursor)
+    }
+
+    /// Whether the pointer has just arrived in `hwnd`.
+    ///
+    /// `true` exactly once per entry, which is what makes it both the
+    /// [`PointerFocus`](RawEvent::PointerFocus) edge and the moment to arm
+    /// `TrackMouseEvent`. Two windows cannot both be tracked, because the
+    /// pointer is in one place.
+    fn enter(&self, hwnd: isize) -> bool {
+        if self.tracked.get() == hwnd {
+            return false;
+        }
+        self.tracked.set(hwnd);
+        true
+    }
+
+    /// Whether a `WM_MOUSELEAVE` belongs to the window currently tracked.
+    ///
+    /// A leave for a window we are not tracking is a stale one-shot from before
+    /// the last entry, and reporting it would tell a consumer the pointer left a
+    /// window it is currently inside.
+    fn leave(&self, hwnd: isize) -> bool {
+        if self.tracked.get() != hwnd {
+            return false;
+        }
+        self.tracked.set(0);
+        true
+    }
+
+    /// Records a button going down; `true` when the capture must be taken.
+    ///
+    /// A press in a *different* window replaces the mask rather than merging
+    /// into it: the previous window's buttons cannot still be down if the
+    /// pointer is here, and merging would leave a bit set that no release ever
+    /// clears — a capture that is never given back.
+    fn press(&self, hwnd: isize, bit: u32) -> bool {
+        let (holder, held) = self.capture.get();
+        if holder != hwnd {
+            self.capture.set((hwnd, bit));
+            return true;
+        }
+        self.capture.set((hwnd, held | bit));
+        held == 0
+    }
+
+    /// Records a button coming up; `true` when the capture must be released.
+    fn release(&self, hwnd: isize, bit: u32) -> bool {
+        let (holder, held) = self.capture.get();
+        if holder != hwnd {
+            // A release with no press — a button held down before this window
+            // existed, or one whose press went to another application.
+            return false;
+        }
+        let held = held & !bit;
+        if held == 0 {
+            self.capture.set((0, 0));
+            return true;
+        }
+        self.capture.set((hwnd, held));
+        false
+    }
+
+    /// Forgets the capture because somebody else took it.
+    ///
+    /// `WM_CAPTURECHANGED` arrives when another window grabs the mouse — a
+    /// system menu, a drag from another application. Our mask would otherwise
+    /// still say a button is down and the next release would try to give back a
+    /// capture we no longer hold.
+    fn capture_lost(&self) {
+        self.capture.set((0, 0));
+    }
+
+    /// Records which window the cursor is clipped to; zero for none.
+    pub(super) fn set_clipped(&self, hwnd: isize) {
+        self.clipped.set(hwnd);
+    }
+
+    /// The window the cursor is clipped to, or zero.
+    pub(super) fn clipped(&self) -> isize {
+        self.clipped.get()
     }
 }
 
@@ -211,6 +402,14 @@ pub(super) unsafe extern "system" fn window_proc(
         return default();
     };
     let window = key(hwnd);
+    // The message's own time, not the time the queue is drained. A window
+    // procedure is never handed its `MSG`, so this is the only way to reach it;
+    // `TimeBase` widens the 32 bits and rebases them onto the engine's clock.
+    //
+    // SAFETY: `GetMessageTime` takes no arguments, reads no memory of ours and
+    // answers for the message this thread is currently dispatching — which is
+    // the one that called us.
+    let millis = unsafe { ffi::GetMessageTime() } as u32;
 
     match message {
         msg::SIZE => {
@@ -230,7 +429,27 @@ pub(super) unsafe extern "system" fn window_proc(
                     ),
                 });
             }
+            // A clip is a screen rectangle built from a client rectangle that
+            // has just changed shape.
+            input::reclip(shared, hwnd, window);
             0
+        }
+
+        // Nothing is recorded — the seam has no "the window moved" event — and
+        // the clip still has to follow, because it was computed in screen
+        // coordinates from a window that is no longer there.
+        msg::MOVE => {
+            input::reclip(shared, hwnd, window);
+            0
+        }
+
+        // The modal drag loop ran our procedure for every intermediate position
+        // and returned here. Re-establishing once at the end is not redundant
+        // with the `WM_MOVE`/`WM_SIZE` arms above: a drag that the user cancels
+        // with Escape ends with neither.
+        msg::EXIT_SIZE_MOVE => {
+            input::reclip(shared, hwnd, window);
+            default()
         }
 
         // Intercepted, never forwarded: `DefWindowProc`'s answer to `WM_CLOSE`
@@ -244,11 +463,221 @@ pub(super) unsafe extern "system" fn window_proc(
         }
 
         msg::SET_FOCUS | msg::KILL_FOCUS => {
+            let focused = message == msg::SET_FOCUS;
+            // **Not deferred to the pump.** A window that keeps the cursor
+            // clipped after it stops being the foreground window has taken the
+            // desktop hostage; see the module docs for why one frame of that is
+            // one frame too many. The recorded target survives, so focus coming
+            // back restores the clip the caller asked for.
+            if shared.clipped() == window {
+                if focused {
+                    input::apply_clip(hwnd);
+                } else {
+                    input::release_clip();
+                }
+            }
             shared.push(RawEvent::Focus {
                 hwnd: window,
-                focused: message == msg::SET_FOCUS,
+                focused,
             });
             0
+        }
+
+        msg::KEY_DOWN | msg::KEY_UP | msg::SYS_KEY_DOWN | msg::SYS_KEY_UP => {
+            let pressed = message == msg::KEY_DOWN || message == msg::SYS_KEY_DOWN;
+            shared.push(RawEvent::Key {
+                hwnd: window,
+                scancode: keys::scancode(l_param),
+                virtual_key: low_word(w_param) as u16,
+                state: ButtonState::from_pressed(pressed),
+                // Bit 30 is meaningful only on the way down; on a release it is
+                // always set, and reading it there reports every release as a
+                // repeat.
+                repeat: pressed && keys::was_already_down(l_param),
+                millis,
+            });
+            if message == msg::SYS_KEY_DOWN || message == msg::SYS_KEY_UP {
+                // The `WM_SYS*` pair **must** reach the default handler. It is
+                // what turns Alt+F4 into the `WM_CLOSE` this backend intercepts
+                // into a close *request*, and what opens the window menu on
+                // Alt+Space. Swallowing them silently removes the platform's own
+                // keyboard contract from every Crucible window.
+                default()
+            } else {
+                0
+            }
+        }
+
+        // Text, which is not the same thing as a keystroke — see
+        // [`TextCommit`](crate::ShellEvent::TextCommit). `WM_SYSCHAR` is
+        // deliberately absent: Alt+E is a menu accelerator, not the letter E.
+        msg::CHAR => {
+            shared.push(RawEvent::Char {
+                hwnd: window,
+                unit: low_word(w_param) as u16,
+                millis,
+            });
+            0
+        }
+
+        msg::MOUSE_MOVE => {
+            let (x, y) = pointer::point(l_param);
+            if shared.enter(window) {
+                // There is no `WM_MOUSEENTER`. The arrival is derived from the
+                // first movement after a leave, and the leave has to be asked
+                // for — `TrackMouseEvent` is one-shot, so this is also where it
+                // is re-armed.
+                input::track_leave(hwnd);
+                shared.push(RawEvent::PointerFocus {
+                    hwnd: window,
+                    entered: true,
+                    x,
+                    y,
+                    millis,
+                });
+            }
+            shared.push(RawEvent::PointerMotion {
+                hwnd: window,
+                x,
+                y,
+                millis,
+            });
+            0
+        }
+
+        msg::MOUSE_LEAVE => {
+            if shared.leave(window) {
+                shared.push(RawEvent::PointerFocus {
+                    hwnd: window,
+                    entered: false,
+                    x: 0,
+                    y: 0,
+                    millis,
+                });
+            }
+            0
+        }
+
+        msg::L_BUTTON_DOWN
+        | msg::L_BUTTON_UP
+        | msg::R_BUTTON_DOWN
+        | msg::R_BUTTON_UP
+        | msg::M_BUTTON_DOWN
+        | msg::M_BUTTON_UP
+        | msg::X_BUTTON_DOWN
+        | msg::X_BUTTON_UP => {
+            let Some((button, state)) = pointer::button(message, w_param) else {
+                return default();
+            };
+            let (x, y) = pointer::point(l_param);
+            let bit = pointer::button_bit(button);
+            // The capture, taken on the first button down and given back on the
+            // last button up. Without it a drag that leaves the window is
+            // delivered to whatever is under the pointer, so the release never
+            // arrives here and the button stays down forever from the
+            // consumer's point of view.
+            if state.is_pressed() {
+                if shared.press(window, bit) {
+                    // SAFETY: this shell's own window, on the thread that owns
+                    // it — a window procedure runs on that thread by
+                    // construction. `SetCapture` sends `WM_CAPTURECHANGED` to
+                    // whoever held it, which this procedure handles below.
+                    unsafe { ffi::SetCapture(hwnd) };
+                }
+            } else if shared.release(window, bit) {
+                // SAFETY: releasing a capture this thread holds; a no-op when
+                // it does not.
+                unsafe { ffi::ReleaseCapture() };
+            }
+            shared.push(RawEvent::Button {
+                hwnd: window,
+                button,
+                state,
+                x,
+                y,
+                millis,
+            });
+            if message == msg::X_BUTTON_DOWN || message == msg::X_BUTTON_UP {
+                // The two `WM_XBUTTON*` messages are the only mouse messages
+                // documented to want `TRUE` rather than zero.
+                1
+            } else {
+                0
+            }
+        }
+
+        // Somebody else took the mouse. Our mask has to be cleared or the next
+        // release tries to give back a capture we no longer hold.
+        //
+        // `l_param` is the window *gaining* it, and the check is not
+        // decoration: `SetCapture` sends this to the window losing the capture,
+        // and our own call above is what sends it. Clearing unconditionally
+        // would wipe the mask one line after the press that set it, and the
+        // matching release would then never give the capture back.
+        msg::CAPTURE_CHANGED => {
+            if l_param != hwnd as Lparam {
+                shared.capture_lost();
+            }
+            default()
+        }
+
+        msg::MOUSE_WHEEL | msg::MOUSE_H_WHEEL => {
+            // **The one pair that carries screen coordinates.** Every other
+            // mouse message is in client space; reading these the same way puts
+            // a scroll at a position off the bottom-right of the window on any
+            // window that is not at the desktop origin.
+            let (x, y) = pointer::point(l_param);
+            let mut position = Point { x, y };
+            // SAFETY: `position` is a live, initialised `POINT` the call
+            // converts in place, and `hwnd` is a live window of this shell.
+            unsafe { ffi::ScreenToClient(hwnd, &raw mut position) };
+            shared.push(RawEvent::Wheel {
+                hwnd: window,
+                horizontal: message == msg::MOUSE_H_WHEEL,
+                ticks: high_word(w_param) as u16 as i16,
+                x: position.x,
+                y: position.y,
+                millis,
+            });
+            0
+        }
+
+        msg::INPUT => {
+            // SAFETY: for `WM_INPUT` the system documents `l_param` as an
+            // `HRAWINPUT` handle valid for the duration of this message, which
+            // is exactly what `GetRawInputData` takes.
+            if let Some(mouse) = unsafe { input::read_raw_mouse(l_param) } {
+                shared.push(RawEvent::RawMotion {
+                    hwnd: window,
+                    flags: mouse.us_flags,
+                    x: mouse.l_last_x,
+                    y: mouse.l_last_y,
+                    millis,
+                });
+            }
+            // `WM_INPUT` must reach the default handler even when it was read:
+            // that is what releases the report's buffer.
+            default()
+        }
+
+        msg::SET_CURSOR => {
+            // Only over the drawable area. Every other hit-test code names a
+            // piece of the frame the system owns a cursor for, and answering
+            // for those replaces the resize arrows with ours.
+            if low_word(l_param as usize) != value::HT_CLIENT {
+                return default();
+            }
+            let Some(cursor) = shared.shape_for(window) else {
+                // Nothing was asked for, so the class cursor is right and
+                // `DefWindowProc` is what sets it.
+                return default();
+            };
+            // SAFETY: `cursor` is a stock cursor handle from `LoadCursorW`,
+            // owned by the system and valid for the process's lifetime.
+            unsafe { ffi::SetCursor(cursor) };
+            // `TRUE`: the cursor was set, so `DefWindowProc` must not overwrite
+            // it with the class one on the next mouse movement.
+            1
         }
 
         msg::DPI_CHANGED => {
@@ -329,6 +758,12 @@ pub(super) unsafe extern "system" fn window_proc(
         }
 
         msg::NC_DESTROY => {
+            // The clip outlives the window that asked for it unless somebody
+            // takes it back, and a window being destroyed is the one moment
+            // nothing else will.
+            if shared.clipped() == window {
+                input::release_clip();
+            }
             shared.forget(window);
             // The last message this window will ever receive, and the last
             // moment the slot is ours: the `HWND` value can be reused
@@ -432,6 +867,125 @@ mod tests {
         shared.forget(1);
         assert!(shared.limits_for(1).is_none());
         assert!(shared.limits_for(2).is_some(), "one window, not the table");
+    }
+
+    #[test]
+    fn the_pointer_enters_once_per_arrival_and_a_stale_leave_is_ignored() {
+        // Windows sends no `WM_MOUSEENTER`, so the arrival is derived from the
+        // first movement after a leave — which means the latch has to be right
+        // or every mouse movement reports an entry.
+        let shared = Shared::default();
+        assert!(shared.enter(1), "the first movement is an arrival");
+        assert!(!shared.enter(1), "and the next two hundred are not");
+        assert!(!shared.enter(1));
+
+        // The pointer is in one place, so moving to another window is a leave
+        // of the first even before its one-shot fires.
+        assert!(shared.enter(2));
+        assert!(
+            !shared.leave(1),
+            "a leave for a window we stopped tracking is stale"
+        );
+        assert!(shared.leave(2));
+        assert!(!shared.leave(2), "and it only fires once");
+        // After a leave the next movement is an arrival again.
+        assert!(shared.enter(2));
+    }
+
+    #[test]
+    fn the_capture_is_taken_on_the_first_button_and_given_back_on_the_last() {
+        // The whole point of the mask: a two-button drag that releases one
+        // button outside the window must not release the capture, or the second
+        // release goes to whatever is underneath and the button stays down
+        // forever from the consumer's point of view.
+        let shared = Shared::default();
+        const LEFT: u32 = 1;
+        const RIGHT: u32 = 2;
+        assert!(shared.press(1, LEFT), "the first press takes it");
+        assert!(!shared.press(1, RIGHT), "the second does not take it twice");
+        assert!(!shared.release(1, LEFT), "one button is still down");
+        assert!(shared.release(1, RIGHT), "the last one gives it back");
+        assert!(!shared.release(1, RIGHT), "and not a second time");
+
+        // A release with no press — a button held before the window existed.
+        // A counter would go negative here and never release again.
+        assert!(!shared.release(1, LEFT));
+        assert!(shared.press(1, LEFT), "which must still work afterwards");
+
+        // A press in another window replaces rather than merging: the first
+        // window's bit would otherwise never be cleared.
+        assert!(shared.press(2, RIGHT));
+        assert!(shared.release(2, RIGHT));
+
+        // And somebody else taking the mouse clears the mask outright.
+        assert!(shared.press(1, LEFT));
+        shared.capture_lost();
+        assert!(
+            shared.press(1, RIGHT),
+            "the next press takes the capture again"
+        );
+    }
+
+    #[test]
+    fn a_cursor_shape_is_replaced_per_window_and_read_back_for_wm_setcursor() {
+        let shared = Shared::default();
+        let arrow = 0x1234 as Handle;
+        let beam = 0x5678 as Handle;
+        assert_eq!(shared.shape_for(1), None, "nothing asked for yet");
+
+        shared.set_shape(Shape {
+            hwnd: 1,
+            cursor: arrow,
+        });
+        shared.set_shape(Shape {
+            hwnd: 2,
+            cursor: beam,
+        });
+        assert_eq!(shared.shape_for(1), Some(arrow));
+        assert_eq!(shared.shape_for(2), Some(beam));
+
+        // Replaced in place: a second `set_cursor` must not leave the first
+        // shape for `WM_SETCURSOR` to find.
+        shared.set_shape(Shape {
+            hwnd: 1,
+            cursor: beam,
+        });
+        assert_eq!(shared.shape_for(1), Some(beam));
+        assert_eq!(shared.shapes.borrow().len(), 2);
+    }
+
+    #[test]
+    fn a_destroyed_window_leaves_nothing_behind_that_names_it() {
+        // An `HWND` value is handed to a *new* window after the old one dies,
+        // so a leftover clip or capture target would be applied to whichever
+        // window inherits the number — and a leftover tracking latch would
+        // suppress the new window's first pointer entry.
+        let shared = Shared::default();
+        shared.set_limits(limits(1));
+        shared.set_shape(Shape {
+            hwnd: 1,
+            cursor: 0x1234 as Handle,
+        });
+        assert!(shared.enter(1));
+        assert!(shared.press(1, 1));
+        shared.set_clipped(1);
+
+        shared.forget(1);
+        assert!(shared.limits_for(1).is_none());
+        assert_eq!(shared.shape_for(1), None);
+        assert_eq!(shared.clipped(), 0);
+        assert!(shared.enter(1), "the reused handle is a fresh arrival");
+        assert!(shared.press(1, 1), "and a fresh capture");
+
+        // Another window's state is untouched.
+        shared.set_clipped(2);
+        shared.set_shape(Shape {
+            hwnd: 2,
+            cursor: 0x5678 as Handle,
+        });
+        shared.forget(1);
+        assert_eq!(shared.clipped(), 2);
+        assert!(shared.shape_for(2).is_some());
     }
 
     #[test]

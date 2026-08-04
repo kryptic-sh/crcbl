@@ -272,8 +272,8 @@ made it measurably _worse_: five runs, 3-5 failures each.
 
 ## The Win32 backend has never been run on Windows
 
-P5C W1 wrote the whole window-lifecycle half of `crates/crcbl-shell/src/win32/`
-on a Linux machine. It was cross-checked with
+P5C W1 and W2 wrote the whole of `crates/crcbl-shell/src/win32/` on a Linux
+machine. It was cross-checked with
 `cargo check`/`cargo clippy --target x86_64-pc-windows-msvc`, which do not link
 and do not run — **a cross-check proves the code typechecks and nothing more**.
 Every claim below that is not about arithmetic is unverified until the
@@ -287,14 +287,49 @@ Every claim below that is not about arithmetic is unverified until the
   `register_class` fails there, every test in that module fails with the
   `GetLastError` code, which is the finding.
 - The structure layouts in `win32/ffi.rs` are asserted by size and offset on the
-  host, which catches padding mistakes but not a _wrong_ field order that
-  happens to keep the size — `DEVMODEW` is the one with two unions in it and the
-  one to re-read if a refresh rate ever looks implausible.
-- The pure arithmetic (`win32/geometry.rs`, `win32/events.rs`, `TimeBase`,
-  `win32/proc.rs`'s shared state) _is_ covered on Linux and each of its guards
-  was falsified by mutation before this was written.
+  host, which catches a missing or wrong-width field but not a _reordering_ of
+  two fields of the same width. `DEVMODEW` is the one with two unions in it and
+  the one to re-read if a refresh rate ever looks implausible; `RAWMOUSE` is the
+  one to re-read if a raw delta does.
+- The pure arithmetic (`win32/geometry.rs`, `win32/events.rs`, `win32/keys.rs`,
+  `win32/pointer.rs`, `TimeBase`, `win32/proc.rs`'s shared state) _is_ covered
+  on Linux and each of its guards was falsified by mutation before this was
+  written.
 
-## Owed on the Win32 backend after W1
+What W2 adds to that list, in the order it would hurt:
+
+- **No input has ever been delivered by a real device.** The Windows suite
+  drives the window procedure with `SendMessageW`, which is the real procedure
+  against the real cached state but not the real message stream. Nothing has
+  confirmed that `WM_KEYDOWN`'s `lParam` carries what `keys::scancode` expects
+  from an actual keyboard, or that `GetMessageTime` inside a procedure answers
+  for the message being dispatched.
+- **`WM_INPUT` is untestable from CI and is untested.** A raw report needs an
+  `HRAWINPUT` only the system can produce, so `input::read_raw_mouse` and the
+  `RIM_TYPE_MOUSE` check have never run. `pointer::RawMotion`'s
+  absolute-versus-relative arithmetic _is_ covered on Linux; the plumbing that
+  feeds it is not. The absolute path additionally needs a machine that produces
+  absolute reports — a remote-desktop session or a tablet — which no runner has.
+- **`ClipCursor` and `SetCursorPos` are restricted to the foreground process.**
+  `confining_the_pointer_clips_it_and_losing_focus_gives_the_desktop_back` and
+  `warping_the_pointer_moves_it_to_a_position_in_the_window` call
+  `SetForegroundWindow` first and then assert against the system's own state
+  (`GetClipCursor`, `GetCursorPos`). If a GitHub runner does not let a process
+  take the foreground, both fail — which is a finding about the runner rather
+  than about the code, and is the reason to read the failure before changing
+  anything.
+- **`MapVirtualKeyW(.., MAPVK_VK_TO_CHAR)` is assumed to answer the uppercase
+  letter** for a letter key, which `input::unshifted` then lowercases so that a
+  rebind menu reads the same as it does on Linux. If the call already answers
+  lowercase, the lowercasing is a no-op and nothing changes;
+  `a_key_press_carries_its_position_its_symbol_and_its_repeat_flag` asserts the
+  lowercase result either way.
+- **The `ShowCursor` balance is asserted through the count itself**
+  (`cursor_display_count` reads it by moving it and putting it back). That test
+  is the only thing standing between this backend and an invisible cursor for
+  the rest of a session, so it is the one to keep rather than relax.
+
+## Owed on the Win32 backend after W2
 
 - **`WindowDesc::app_id` is validated and never applied.** Win32's equivalent of
   `WM_CLASS` is the Application User Model ID, set process-wide with
@@ -304,11 +339,35 @@ Every claim below that is not about arithmetic is unverified until the
   Explorer infers. Wiring it means a third system library and a decision about
   _where_ a process-wide property is set (opening a shell is the wrong place if
   a host application embedded the engine).
-- **`set_cursor` records the request and does not apply it.** Both halves —
-  naming a shape and hiding the pointer — belong with W2's `WM_SETCURSOR`
-  handling and `ShowCursor` reference count. `WindowState` reports what was
-  asked for; nothing on screen changes. Documented on the method and in the
-  module, so it is a stated gap rather than a silent one.
+- **`ShellCaps::TEXT_IME` is clear although typing works.** `WM_CHAR` is
+  handled, including surrogate pairs, and leaving `DefWindowProc` to run the
+  default IME does deliver a committed CJK string through it — so composition
+  probably works today, invisibly. The bit stays clear because it claims the
+  commit path is _wired to an input method_: nothing here touches
+  `WM_IME_STARTCOMPOSITION`/`WM_IME_COMPOSITION`/`WM_IME_ENDCOMPOSITION`, the
+  seam cannot tell a pre-edit from a commit, and there is no way to place the
+  candidate window at the caret. Wayland latches the same bit on having _bound_
+  `text-input-v3`; matching that standard here means handling the `WM_IME_*`
+  family and giving the seam a pre-edit event, which is its own slice. The
+  argument is written out in `Win32Shell::caps`.
+- **`DeviceId` names a device kind, not a device.** `KEYBOARD_DEVICE` and
+  `POINTER_DEVICE` in `win32/input.rs` are constants, the same admission the X11
+  backend makes. Windows is better placed to fix this than X11 is —
+  `RAWINPUTHEADER::hDevice` identifies the physical device on every `WM_INPUT` —
+  but turning a handle into a stable `DeviceId` needs a handle table and a
+  hotplug story (`WM_INPUT_DEVICE_CHANGE`), and raw input would have to become
+  the source of button and wheel events too rather than only of motion.
+  Local-multiplayer device assignment is what wants it.
+- **A modal drag-resize accumulates raw motion.** `WM_INPUT` keeps arriving
+  while Windows runs its own message loop, and nothing drains the queue until
+  the drag ends, so a three-second edge drag delivers a few thousand
+  `PointerMotion` events in one `pump`. It is bounded (the drag is finite) and
+  it is not a leak, but it is a burst. Not fixed because the two obvious fixes
+  are both wrong: coalescing relative samples loses the per-event timing
+  `docs/plan/19-input.md`'s pattern evaluator is a function of, and dropping
+  them needs a "we are inside a modal loop" flag whose only consumer would be
+  this. The pointer is on a window edge rather than in mouselook while it
+  happens.
 - **Refresh rate is a whole hertz, so 59.94 Hz reports as 60.**
   `EnumDisplaySettingsW`'s `DEVMODEW::dmDisplayFrequency` is an integer, and
   `MonitorInfo::refresh_millihertz` exists precisely because that rounding

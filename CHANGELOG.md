@@ -18,26 +18,44 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 - **crcbl-shell**: a **Win32 backend**, registered and selected automatically on
   Windows — so `crcbl_shell::open()` now returns a real window there instead of
-  `NoBackend`. This first slice is the window lifecycle: create, show, hide,
-  destroy, title, close-request interception, windowed ↔ borderless on a named
-  monitor with the windowed placement restored exactly, size constraints
-  (`WM_GETMINMAXINFO` limits and a live `WM_SIZING` aspect lock), monitor
-  enumeration with work area, refresh rate and per-monitor DPI, per-monitor-v2
-  DPI awareness with `WM_DPICHANGED` handled mid-session, a message pump, a
-  blocking `wait_events`, and `SurfaceTarget::Win32` for the HAL. Built on
-  hand-written `extern "system"` declarations for `user32`, `gdi32`, `shcore`
-  and `kernel32` — there is no `windows-rs` and no `winapi`.
+  `NoBackend`. The window lifecycle: create, show, hide, destroy, title,
+  close-request interception, windowed ↔ borderless on a named monitor with the
+  windowed placement restored exactly, size constraints (`WM_GETMINMAXINFO`
+  limits and a live `WM_SIZING` aspect lock), monitor enumeration with work
+  area, refresh rate and per-monitor DPI, per-monitor-v2 DPI awareness with
+  `WM_DPICHANGED` handled mid-session, a message pump, a blocking `wait_events`,
+  and `SurfaceTarget::Win32` for the HAL. Built on hand-written
+  `extern "system"` declarations for `user32`, `gdi32`, `shcore` and `kernel32`
+  — there is no `windows-rs` and no `winapi`.
 
-  **Input, the clipboard and drag-and-drop are not in it**, and `ShellCaps` says
-  so: `POINTER_LOCK`, `POINTER_CONFINE`, `POINTER_WARP`, `RAW_POINTER_MOTION`,
-  `TEXT_IME`, `CLIPBOARD` and `DRAG_DROP` are clear on this backend, the methods
-  behind them return `Unsupported`, and `set_cursor` records the request without
-  applying it. What is set — `MULTI_WINDOW`, `EVENT_WAIT`, `WINDOW_POSITION`,
-  `SERVER_DECORATIONS`, `FRACTIONAL_SCALE`, `ASPECT_HINT_HONORED` — is
-  implemented. Two Windows facts worth knowing before building on it: a window
-  frozen during a user drag-resize is the system's modal message loop and not a
-  hang, and a monitor's refresh rate is a whole hertz here, so 59.94 Hz reports
-  as 60.
+- **crcbl-shell** (Win32): **input**. Keyboard events carry a PS/2 set-1 scan
+  code with its `E0` prefix folded in, the `KeyCode` for that physical position,
+  the layout's `Keysym`, the modifiers and the auto-repeat flag; `WM_CHAR`
+  becomes `TextCommit`, with surrogate pairs reassembled so an astral codepoint
+  arrives whole and control characters dropped. Pointer motion, all five buttons
+  including the two thumb buttons, derived enter and real leave, mouse capture
+  so a button released outside the window is still reported, and both wheel axes
+  with high-resolution fractions of a detent preserved. `WM_INPUT` raw relative
+  motion, with an absolute-reporting device — a remote-desktop session, a tablet
+  — differenced into a delta instead of being read as one.
+  `PointerMode::Confined` and `PointerMode::Locked` through `ClipCursor`, and
+  `warp_pointer` through `SetCursorPos`. Cursor shapes are the stock `IDC_*` set
+  applied from `WM_SETCURSOR`, and hiding goes through a balanced `ShowCursor`
+  count.
+
+  `POINTER_LOCK`, `POINTER_CONFINE`, `POINTER_WARP` and `RAW_POINTER_MOTION` are
+  now set on this backend — the last of them latched on whether
+  `RegisterRawInputDevices` was accepted — and `set_cursor` applies rather than
+  records. **`TEXT_IME` stays clear**: nothing here touches `WM_IME_*`, so there
+  is no composition string and no candidate-window placement, and typing working
+  through `WM_CHAR` is not the same claim. `CLIPBOARD` and `DRAG_DROP` stay
+  clear and their methods still return `Unsupported`.
+
+  Three Windows facts worth knowing before building on it: a window frozen
+  during a user drag-resize is the system's modal message loop and not a hang; a
+  monitor's refresh rate is a whole hertz here, so 59.94 Hz reports as 60; and a
+  `DeviceId` names a device _kind_ rather than a device, so two mice cannot be
+  told apart yet.
 
 - **crcbl-shell**: `DisplayMode::satisfied_by`, the request-versus-answer
   comparison `WindowState::mode_request_honoured` now uses.

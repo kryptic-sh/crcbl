@@ -37,6 +37,33 @@
 //! event: the intermediate sizes are not information anyone can act on, since
 //! no frame was rendered at any of them.
 
+//! # Input is recorded raw, and interpreted with the shell in hand
+//!
+//! Every input variant below carries the numbers the message came with and
+//! nothing derived from them — a scan code rather than a
+//! [`KeyCode`](crcbl_core::KeyCode), a detent count rather than a
+//! [`ScrollDelta`](crcbl_core::input::ScrollDelta), a `RAWMOUSE` flag word
+//! rather than a delta. Two reasons, and both are about the window procedure
+//! rather than about taste:
+//!
+//! * The interpretations that need *state* — a surrogate pair spanning two
+//!   `WM_CHAR`s, an absolute raw report differenced against the previous one —
+//!   have nowhere to keep it in a procedure that must not touch the shell.
+//! * The interpretations that need a *system call* — the modifier snapshot, the
+//!   layout's keysym — are two more calls in a callback the system runs inside
+//!   our own `SetWindowPos`.
+//!
+//! So the procedure copies fields and the shell does the arithmetic, on the
+//! pure functions in [`keys`](super::keys) and [`pointer`](super::pointer).
+//!
+//! Each of them also carries `millis`: `GetMessageTime` for the message being
+//! processed, which [`TimeBase`](super::TimeBase) widens and rebases. It is read
+//! in the procedure rather than at translation time because by then the value
+//! belongs to a *later* message — the whole point of a timestamp is that it is
+//! not the moment the queue was drained.
+
+use crcbl_core::input::{ButtonState, PointerButton};
+
 use crate::PhysicalSize;
 
 /// One thing the window procedure saw.
@@ -87,6 +114,116 @@ pub enum RawEvent {
         /// `HWND` as an integer.
         hwnd: isize,
     },
+    /// `WM_KEYDOWN`, `WM_KEYUP` or either of their `WM_SYS*` twins.
+    Key {
+        /// `HWND` as an integer.
+        hwnd: isize,
+        /// The scan code out of `lParam`, with the `E0` prefix folded in — see
+        /// [`keys::scancode`](super::keys::scancode).
+        scancode: u32,
+        /// The virtual key out of `wParam`, which is the only thing that can
+        /// name the *symbol* the key produces in the current layout.
+        virtual_key: u16,
+        /// Down or up.
+        state: ButtonState,
+        /// Whether `lParam` said the key was already held — an auto-repeat.
+        repeat: bool,
+        /// `GetMessageTime` milliseconds.
+        millis: u32,
+    },
+    /// `WM_CHAR` — one **UTF-16 code unit** of committed text.
+    ///
+    /// Not a character: an astral codepoint arrives as two of these carrying a
+    /// surrogate pair, which [`keys::Utf16`](super::keys::Utf16) reassembles.
+    /// Deliberately separate from [`Key`](Self::Key), which is the relationship
+    /// [`TextCommit`](crate::ShellEvent::TextCommit) documents as not being
+    /// one-to-one.
+    Char {
+        /// `HWND` as an integer.
+        hwnd: isize,
+        /// The code unit out of `wParam`.
+        unit: u16,
+        /// `GetMessageTime` milliseconds.
+        millis: u32,
+    },
+    /// `WM_MOUSEMOVE`, in client pixels.
+    PointerMotion {
+        /// `HWND` as an integer.
+        hwnd: isize,
+        /// Client x, **signed** — a captured pointer is legitimately outside.
+        x: i32,
+        /// Client y, likewise.
+        y: i32,
+        /// `GetMessageTime` milliseconds.
+        millis: u32,
+    },
+    /// The pointer arrived or left.
+    ///
+    /// The arrival half has **no message of its own**: Windows sends
+    /// `WM_MOUSELEAVE` and nothing for the entry, so the procedure derives it
+    /// from the first motion after a leave. See [`proc`](super::proc).
+    PointerFocus {
+        /// `HWND` as an integer.
+        hwnd: isize,
+        /// Whether the pointer is now inside the client area.
+        entered: bool,
+        /// Client x where it entered. Meaningless on leave, which
+        /// [`PointerFocus`](crate::ShellEvent::PointerFocus) reports as `None`.
+        x: i32,
+        /// Client y where it entered.
+        y: i32,
+        /// `GetMessageTime` milliseconds.
+        millis: u32,
+    },
+    /// One of the five `WM_*BUTTON*` messages.
+    Button {
+        /// `HWND` as an integer.
+        hwnd: isize,
+        /// Which button, already told apart from the `WM_XBUTTON*` pair.
+        button: PointerButton,
+        /// Down or up.
+        state: ButtonState,
+        /// Client x.
+        x: i32,
+        /// Client y.
+        y: i32,
+        /// `GetMessageTime` milliseconds.
+        millis: u32,
+    },
+    /// `WM_MOUSEWHEEL` or `WM_MOUSEHWHEEL`.
+    Wheel {
+        /// `HWND` as an integer.
+        hwnd: isize,
+        /// Whether this is the tilt axis.
+        horizontal: bool,
+        /// The signed detent count, in `WHEEL_DELTA` units.
+        ticks: i16,
+        /// Client x — converted from the **screen** coordinates the wheel
+        /// messages carry, which is the one place they differ from the rest.
+        x: i32,
+        /// Client y.
+        y: i32,
+        /// `GetMessageTime` milliseconds.
+        millis: u32,
+    },
+    /// `WM_INPUT` carrying a `RAWMOUSE` report.
+    ///
+    /// The coordinates are a delta **or** a position depending on `flags`; see
+    /// [`pointer::RawMotion`](super::pointer::RawMotion), which is where that is
+    /// resolved and why it cannot be resolved here.
+    RawMotion {
+        /// `HWND` as an integer — raw input follows the keyboard focus, so this
+        /// is whichever of our windows had it.
+        hwnd: isize,
+        /// `RAWMOUSE::usFlags`.
+        flags: u16,
+        /// `RAWMOUSE::lLastX`.
+        x: i32,
+        /// `RAWMOUSE::lLastY`.
+        y: i32,
+        /// `GetMessageTime` milliseconds.
+        millis: u32,
+    },
     /// `WM_DISPLAYCHANGE` — a monitor was plugged, unplugged or reconfigured.
     MonitorsChanged,
 }
@@ -101,7 +238,14 @@ impl RawEvent {
             | Self::DpiChanged { hwnd, .. }
             | Self::Focus { hwnd, .. }
             | Self::CloseRequested { hwnd }
-            | Self::Destroyed { hwnd } => Some(hwnd),
+            | Self::Destroyed { hwnd }
+            | Self::Key { hwnd, .. }
+            | Self::Char { hwnd, .. }
+            | Self::PointerMotion { hwnd, .. }
+            | Self::PointerFocus { hwnd, .. }
+            | Self::Button { hwnd, .. }
+            | Self::Wheel { hwnd, .. }
+            | Self::RawMotion { hwnd, .. } => Some(hwnd),
             Self::MonitorsChanged => None,
         }
     }
@@ -122,6 +266,15 @@ impl RawEvent {
 /// Everything else is kept, in order. A close request, a focus change and a
 /// destruction are each a discrete thing that happened, and dropping the first
 /// of two would lose a question the consumer has to answer.
+///
+/// **No input is collapsed**, deliberately. A resize is a *state* and its
+/// intermediate values describe frames nobody rendered; a keystroke, a click and
+/// a motion sample are *events*, and the durations between them are what
+/// `docs/plan/19-input.md`'s pattern evaluator is a function of. Coalescing two
+/// motion samples into their endpoints would erase the path a drag took, and
+/// coalescing two key edges would turn a double-tap into a tap. Windows already
+/// collapses `WM_MOUSEMOVE` in its own queue, which is the only place that
+/// collapse is sound — the system knows which samples the application never saw.
 pub fn enqueue(queue: &mut Vec<RawEvent>, event: RawEvent) {
     match event {
         RawEvent::Resized { hwnd, .. } => {
@@ -223,6 +376,118 @@ mod tests {
     }
 
     #[test]
+    fn a_burst_of_input_keeps_every_sample_in_order() {
+        // The counterpart to the resize collapse, and the reason `enqueue` is
+        // not "coalesce anything repeated": a drag path, a double-click and an
+        // auto-repeat run are all sequences whose *members* are the
+        // information. Collapsing them turns a double-tap into a tap.
+        let mut queue = Vec::new();
+        let samples = [
+            RawEvent::PointerMotion {
+                hwnd: A,
+                x: 10,
+                y: 10,
+                millis: 1_000,
+            },
+            RawEvent::PointerMotion {
+                hwnd: A,
+                x: 11,
+                y: 12,
+                millis: 1_004,
+            },
+            RawEvent::Button {
+                hwnd: A,
+                button: PointerButton::Left,
+                state: ButtonState::Pressed,
+                x: 11,
+                y: 12,
+                millis: 1_008,
+            },
+            RawEvent::Button {
+                hwnd: A,
+                button: PointerButton::Left,
+                state: ButtonState::Released,
+                x: 11,
+                y: 12,
+                millis: 1_060,
+            },
+            RawEvent::Button {
+                hwnd: A,
+                button: PointerButton::Left,
+                state: ButtonState::Pressed,
+                x: 11,
+                y: 12,
+                millis: 1_140,
+            },
+            RawEvent::Key {
+                hwnd: A,
+                scancode: 0x0011,
+                virtual_key: 0x57,
+                state: ButtonState::Pressed,
+                repeat: false,
+                millis: 1_200,
+            },
+            RawEvent::Key {
+                hwnd: A,
+                scancode: 0x0011,
+                virtual_key: 0x57,
+                state: ButtonState::Pressed,
+                repeat: true,
+                millis: 1_500,
+            },
+            RawEvent::RawMotion {
+                hwnd: A,
+                flags: 0,
+                x: 3,
+                y: -2,
+                millis: 1_501,
+            },
+            RawEvent::RawMotion {
+                hwnd: A,
+                flags: 0,
+                x: 4,
+                y: -1,
+                millis: 1_502,
+            },
+            RawEvent::Char {
+                hwnd: A,
+                unit: 0xD83C,
+                millis: 1_600,
+            },
+            RawEvent::Char {
+                hwnd: A,
+                unit: 0xDFAE,
+                millis: 1_600,
+            },
+        ];
+        for sample in samples {
+            enqueue(&mut queue, sample);
+        }
+        assert_eq!(queue, samples);
+    }
+
+    #[test]
+    fn a_resize_still_collapses_past_the_input_that_arrived_with_it() {
+        // The collapse is in-place, so it must not reorder a resize past the
+        // input events queued after it — a click delivered before the resize
+        // that produced the window it was aimed at is a click at the wrong
+        // coordinates.
+        let mut queue = Vec::new();
+        let click = RawEvent::Button {
+            hwnd: A,
+            button: PointerButton::Right,
+            state: ButtonState::Pressed,
+            x: 4,
+            y: 4,
+            millis: 9,
+        };
+        enqueue(&mut queue, resize(A, 800));
+        enqueue(&mut queue, click);
+        enqueue(&mut queue, resize(A, 900));
+        assert_eq!(queue, [resize(A, 900), click]);
+    }
+
+    #[test]
     fn every_windowed_event_names_its_window_and_the_desktop_one_does_not() {
         // The routing predicate: an event with no `HWND` is not a stale-window
         // problem, it is a shell-wide fact.
@@ -239,6 +504,83 @@ mod tests {
         );
         assert_eq!(RawEvent::CloseRequested { hwnd: A }.hwnd(), Some(A));
         assert_eq!(RawEvent::Destroyed { hwnd: A }.hwnd(), Some(A));
+        assert_eq!(
+            RawEvent::Key {
+                hwnd: B,
+                scancode: 1,
+                virtual_key: 0x1B,
+                state: ButtonState::Released,
+                repeat: false,
+                millis: 0,
+            }
+            .hwnd(),
+            Some(B)
+        );
+        assert_eq!(
+            RawEvent::Char {
+                hwnd: B,
+                unit: 0x61,
+                millis: 0
+            }
+            .hwnd(),
+            Some(B)
+        );
+        assert_eq!(
+            RawEvent::PointerMotion {
+                hwnd: B,
+                x: 0,
+                y: 0,
+                millis: 0
+            }
+            .hwnd(),
+            Some(B)
+        );
+        assert_eq!(
+            RawEvent::PointerFocus {
+                hwnd: B,
+                entered: false,
+                x: 0,
+                y: 0,
+                millis: 0,
+            }
+            .hwnd(),
+            Some(B)
+        );
+        assert_eq!(
+            RawEvent::Button {
+                hwnd: B,
+                button: PointerButton::Middle,
+                state: ButtonState::Pressed,
+                x: 0,
+                y: 0,
+                millis: 0,
+            }
+            .hwnd(),
+            Some(B)
+        );
+        assert_eq!(
+            RawEvent::Wheel {
+                hwnd: B,
+                horizontal: false,
+                ticks: 120,
+                x: 0,
+                y: 0,
+                millis: 0,
+            }
+            .hwnd(),
+            Some(B)
+        );
+        assert_eq!(
+            RawEvent::RawMotion {
+                hwnd: B,
+                flags: 0,
+                x: 1,
+                y: 1,
+                millis: 0
+            }
+            .hwnd(),
+            Some(B)
+        );
         assert_eq!(RawEvent::MonitorsChanged.hwnd(), None);
     }
 }

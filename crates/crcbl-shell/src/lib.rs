@@ -41,12 +41,13 @@
 //! Wayland protocol marshalling generated at build time from vendored XML by
 //! `crcbl-wl-scanner`. There is no `wayland-client`, no `x11rb` and no `winit`.
 //!
-//! P5C added the **Win32 backend**'s window lifecycle: the window class and its
-//! procedure, create/destroy, title, visibility, windowed ↔ borderless on a
-//! named monitor, `WM_GETMINMAXINFO` and `WM_SIZING` size constraints, monitor
-//! enumeration with per-monitor-v2 DPI, the message pump and a blocking
-//! `wait_events`. Input, the clipboard and drag-and-drop are the slices after
-//! it, and [`ShellCaps`] is clear on every bit they would set. It is
+//! P5C added the **Win32 backend**: the window class and its procedure,
+//! create/destroy, title, visibility, windowed ↔ borderless on a named monitor,
+//! `WM_GETMINMAXINFO` and `WM_SIZING` size constraints, monitor enumeration with
+//! per-monitor-v2 DPI, the message pump and a blocking `wait_events` — then
+//! keyboard, text, pointer, wheel, raw relative motion, pointer lock and
+//! confinement, cursors and warping. The clipboard and drag-and-drop are the
+//! slice after it, and [`ShellCaps`] is clear on every bit they would set. It is
 //! hand-written `extern "system"` FFI to `user32`, `gdi32`, `shcore` and
 //! `kernel32` — **linked rather than `dlopen`ed**, which is the one place the
 //! three native backends deliberately disagree: a Linux box can genuinely lack

@@ -1,5 +1,5 @@
 //! The Win32 backend: window class, message pump, display modes, size
-//! constraints, monitors and per-monitor DPI.
+//! constraints, monitors, per-monitor DPI, and the whole of input.
 //!
 //! `docs/plan/15-windowing.md`'s Windows row, which reads in full: "hand-written
 //! Win32 FFI (`extern "system"` decls for the surface we use)". Every
@@ -7,10 +7,10 @@
 //! framework, and — unlike the two Linux backends — no `dlopen`, for the reason
 //! that module states at length.
 //!
-//! # What is in this slice, and what is not
+//! # What is here, and what is not
 //!
-//! This is **P5C W1, the window lifecycle half.** Input, the clipboard and
-//! drag-and-drop are W2 and W3, and [`ShellCaps`](crate::ShellCaps) says so today rather than
+//! **P5C W1** was the window lifecycle; **W2** added input. The clipboard and
+//! drag-and-drop are W3, and [`ShellCaps`](crate::ShellCaps) says so rather than
 //! promising them:
 //!
 //! | Area | State |
@@ -22,15 +22,20 @@
 //! | Per-monitor-v2 DPI, and `WM_DPICHANGED` mid-session | complete |
 //! | Message pump, and a blocking [`wait_events`](crate::Shell::wait_events) | complete |
 //! | [`SurfaceTarget::Win32`](crcbl_core::SurfaceTarget::Win32) for the HAL | complete |
-//! | **Keyboard, pointer, wheel, text, cursors, pointer capture** | **W2** — [`POINTER_LOCK`](crate::ShellCaps::POINTER_LOCK), [`POINTER_WARP`](crate::ShellCaps::POINTER_WARP), [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION) and [`TEXT_IME`](crate::ShellCaps::TEXT_IME) are clear |
+//! | Keyboard: scan codes, [`KeyCode`](crcbl_core::KeyCode), keysyms, modifiers, auto-repeat | complete — [`keys`] |
+//! | Text: `WM_CHAR` with surrogate pairs, as [`TextCommit`](crate::ShellEvent::TextCommit) | complete, but **not** [`TEXT_IME`](crate::ShellCaps::TEXT_IME) — see [`caps`](Win32Shell::caps) |
+//! | Pointer: motion, five buttons, enter/leave, capture, both wheel axes | complete — [`pointer`] |
+//! | Raw relative motion, absolute devices included | complete — [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION), latched on the registration |
+//! | [`PointerMode`](crate::PointerMode) confine and lock, and [`warp_pointer`](crate::Shell::warp_pointer) | complete — [`POINTER_CONFINE`](crate::ShellCaps::POINTER_CONFINE), [`POINTER_LOCK`](crate::ShellCaps::POINTER_LOCK), [`POINTER_WARP`](crate::ShellCaps::POINTER_WARP) |
+//! | Cursor shapes and hiding | complete — stock `IDC_*` cursors through `WM_SETCURSOR`, hiding through a balanced `ShowCursor` |
 //! | **Clipboard and drag-and-drop** | **W3** — [`CLIPBOARD`](crate::ShellCaps::CLIPBOARD) and [`DRAG_DROP`](crate::ShellCaps::DRAG_DROP) are clear |
 //!
-//! [`set_cursor`](crate::Shell::set_cursor) is the one method in between: it **records**
-//! the request and does not apply it, exactly as the X11 backend records a
-//! shape it cannot load a theme for. [`WindowState`](crate::WindowState) can report what was asked
-//! and nothing on screen changes until W2. That is stated here, in the method's
-//! own documentation and in `docs/backlog.md`, because a recorded-and-ignored
-//! request that is not written down is indistinguishable from a bug.
+//! Two things input needs that no other area of this backend does are worth
+//! finding here rather than in a call stack. [`ShellCaps::TEXT_IME`](crate::ShellCaps::TEXT_IME)
+//! is deliberately **clear** although typing works — [`caps`](Win32Shell::caps)
+//! gives the argument. And a [`DeviceId`](crcbl_core::input::DeviceId) is a
+//! constant per device *kind* rather than per device, exactly as on X11; raw
+//! input carries a per-device handle that a later slice can turn into a real id.
 //!
 //! # What Win32 does that neither Linux backend nor `HeadlessShell` models
 //!
@@ -94,7 +99,30 @@
 //!    `GetTickCount64`, so unlike X11 there is nothing to *calibrate*: the two
 //!    are the same counter and widening the message's low 32 bits against the
 //!    full-width reading is exact. The wrap is 49.7 days of system uptime,
-//!    which a Windows desktop reaches routinely.
+//!    which a Windows desktop reaches routinely. A window procedure is never
+//!    handed its `MSG`, though, so the value comes from `GetMessageTime` — the
+//!    time of the message *currently being dispatched*, which is the whole
+//!    point of a timestamp and not the moment the queue was drained.
+//! 9. **There is no "the pointer arrived" message.** `wl_pointer.enter` and
+//!    X11's `EnterNotify` both exist; Win32 has `WM_MOUSELEAVE` and nothing on
+//!    the way in — and even the leave has to be *asked for*, one notification at
+//!    a time, with `TrackMouseEvent`. So the entry half of
+//!    [`PointerFocus`](crate::ShellEvent::PointerFocus) is derived from the
+//!    first movement after a leave, in the window procedure, which is also where
+//!    the next leave is armed.
+//! 10. **The cursor is a desktop-wide resource, not a window property.** Its
+//!     *clip* is one rectangle for the whole session and its *visibility* is a
+//!     per-thread reference count — neither is scoped to a window by the API, so
+//!     both have to be scoped by this backend. That is why losing focus releases
+//!     the clip synchronously inside the window procedure (a process that keeps
+//!     it has taken the desktop hostage) and why hiding goes through a balanced
+//!     counter rather than a call per request. See [`input`].
+//! 11. **Which key it was and what it produces come from two different fields of
+//!     one message.** The scan code in `lParam` is the physical position and the
+//!     virtual key in `wParam` is the layout's opinion; Wayland and X11 hand over
+//!     one number and ask XKB for the rest. Reading [`KeyCode`](crcbl_core::KeyCode)
+//!     out of the virtual key is the mistake that binds AZERTY's Z to
+//!     `KeyCode::KeyW`'s neighbour instead of to `KeyW`.
 //!
 //! # Decision: the modal resize loop is accepted, and here is what that costs
 //!
@@ -133,21 +161,28 @@
 //! that is not running. Resolving that means a second seam ("render one frame
 //! now"), which is a decision above this crate. `docs/backlog.md` carries it.
 //!
-//! # Decision: capabilities are latched, and there is nothing to latch them
-//! *from*
+//! # Decision: capabilities are latched, and almost nothing latches them
 //!
 //! [`caps`](crate::caps) requires a fixed value for the shell's lifetime, and
 //! the two Linux backends compute one from what the server turned out to have:
 //! an X server with no RandR, a compositor with no `wp_viewporter`. Windows has
-//! no such variation above its version floor — every API this backend uses is
-//! present or the process did not start — so the set is a constant, computed
-//! once in [`Win32Shell::open`] and stated in
-//! [`caps`](Win32Shell::caps). What it is *not* is a wish list: every bit that
-//! is set is exercised by a test in this module, and every bit that is clear is
-//! clear because the code for it is in W2 or W3.
+//! almost no such variation above its version floor — every API this backend
+//! uses is present or the process did not start — so the set is very nearly a
+//! constant, computed once in [`Win32Shell::open`] and stated in
+//! [`caps`](Win32Shell::caps).
+//!
+//! The one genuine latch is
+//! [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION), which follows
+//! whether `RegisterRawInputDevices` was accepted — the only call here that can
+//! be refused for a reason the version floor does not cover. What the set is
+//! *not* is a wish list: every bit that is set is exercised by a test in this
+//! module, and every bit that is clear is clear for a reason the method's
+//! documentation gives.
 
 pub mod events;
 pub mod geometry;
+pub mod keys;
+pub mod pointer;
 pub mod proc;
 
 // The ABI declarations are compiled on every host so that the structure sizes
@@ -159,6 +194,8 @@ pub mod proc;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod ffi;
 
+#[cfg(target_os = "windows")]
+mod input;
 #[cfg(target_os = "windows")]
 mod monitors;
 #[cfg(target_os = "windows")]
@@ -199,9 +236,9 @@ use crcbl_core::EventTime;
 /// reading rather than against a high-water mark, which is stronger than the
 /// X11 backend's equivalent — there, no wider clock exists to compare against.
 ///
-/// Input events land in W2. This type is here now because the alternative is
-/// discovering at W2 that [`align_event_clock`](crate::Shell::align_event_clock) has
-/// nowhere to write, and because the wrap is testable today.
+/// The 32 bits come from `GetMessageTime` rather than from a `MSG`: a window
+/// procedure is called with four arguments and none of them is the message's
+/// timestamp. See the [module docs](self).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimeBase {
     /// `GetTickCount64` nanoseconds at the engine epoch.
@@ -252,10 +289,6 @@ impl TimeBase {
     /// Split from the reading of the clock for the reason `crcbl-core`'s
     /// `TimeSource` gives: nothing reads a clock where a test needs to drive
     /// one, and the wrap is not something a test can arrange by waiting.
-    // W2 delivers the first input event; nothing in the window lifecycle
-    // carries a timestamp, because `event`'s state transitions deliberately do
-    // not have one.
-    #[allow(dead_code, reason = "W2 is the first caller; the wrap is tested now")]
     #[must_use]
     pub fn event_time_at(self, now_nanos: u64, message_millis: u32) -> EventTime {
         let widened = Self::widen(now_nanos / 1_000_000, message_millis);
