@@ -1469,6 +1469,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-wgpu**: an MSAA pass silently dropped its resolve target — every
+  `wgpu::RenderPassColorAttachment` hardcoded `resolve_target: None`, so a 4x
+  pass rendered into the MSAA image and nothing was ever resolved. The resolve
+  views are now resolved from the pool and wired into the pass, and a stale
+  resolve handle fails loudly instead of dropping the resolve unnoticed.
+
+- **crcbl-wgpu**: push-constant range addition overflowed — `offset + size` in
+  plain u32 arithmetic panicked in debug and wrapped to 0 in release. The end is
+  now computed with `saturating_add` and ranges past the device's maximum are
+  refused with `InvalidDescriptor`, matching the null backend.
+
 - **crcbl-shell** (Wayland): announced-but-unclaimed `wl_data_offer`s grew
   without bound — a hostile compositor that announces offers and never claims
   them accumulated proxies, sink entries and per-offer mime strings for the

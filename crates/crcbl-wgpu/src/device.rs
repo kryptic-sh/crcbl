@@ -875,7 +875,18 @@ impl Device for WgpuDevice {
                         "push constants: this device did not enable wgpu's IMMEDIATES feature",
                     ));
                 }
-                range.offset + range.size
+                // Saturating, not wrapping: `PushConstantRange { offset: u32::MAX,
+                // size: 1 }` panicked in debug and wrapped to 0 in release, and 0
+                // then *passed* the check it was supposed to fail. The null backend
+                // documents this exact bug as already fixed there.
+                let end = range.offset.saturating_add(range.size);
+                if end > self.device.limits().max_immediate_size {
+                    return Err(HalError::InvalidDescriptor(format!(
+                        "push constant range ends at {end} but max_push_constant_size is {}",
+                        self.device.limits().max_immediate_size
+                    )));
+                }
+                end
             }
         };
         let layouts = self.pools.bind_group_layouts.lock().unwrap();

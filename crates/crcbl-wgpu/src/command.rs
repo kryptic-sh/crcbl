@@ -461,6 +461,26 @@ impl CommandEncoder for WgpuCommandEncoder {
                 return self.fail(HalError::invalid_handle("image view", attachment.view));
             }
         }
+        // The resolve destinations, alongside the colour views: `att.resolve`
+        // is read here and nowhere else, so a stale handle has to fail here
+        // rather than silently dropping the resolve.
+        let resolve_views: Vec<Option<wgpu::TextureView>> = {
+            let views = self.pools.image_views.lock().unwrap();
+            desc.color_attachments
+                .iter()
+                .map(|a| match a.resolve {
+                    Some(handle) => views.get(handle.cast()).cloned(),
+                    None => None,
+                })
+                .collect()
+        };
+        for (attachment, resolve) in desc.color_attachments.iter().zip(&resolve_views) {
+            if let Some(handle) = attachment.resolve
+                && resolve.is_none()
+            {
+                return self.fail(HalError::invalid_handle("image view", handle));
+            }
+        }
         let depth_view: Option<wgpu::TextureView> = match desc.depth_stencil_attachment {
             Some(ds) => {
                 let views = self.pools.image_views.lock().unwrap();
@@ -479,12 +499,13 @@ impl CommandEncoder for WgpuCommandEncoder {
             .color_attachments
             .iter()
             .zip(color_views.iter())
-            .map(|(att, view)| {
+            .zip(resolve_views.iter())
+            .map(|((att, view), resolve)| {
                 let clear_color: [f64; 4] = att.clear.color.map(f64::from);
                 view.as_ref().map(|view| wgpu::RenderPassColorAttachment {
                     view,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: resolve.as_ref(),
                     ops: wgpu::Operations {
                         load: map_color_load_op(att.load, clear_color),
                         store: map_store_op(att.store),

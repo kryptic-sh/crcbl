@@ -34,10 +34,11 @@ use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
     CommandEncoderDesc, CompositeAlpha, Device, DeviceDesc, Extent3d, Features, Format, HalError,
-    ImageAspect, ImageSubresourceLayers, ImageSubresourceRange, Instance, LoadOp, MemoryLocation,
-    Offset3d, PresentInfo, PresentMode, QueueKind, ReadbackDesc, ReadbackState, Rect2d,
-    RenderPassDesc, ResourceState, ShaderModuleDesc, StoreOp, SubmitInfo, SurfaceError,
-    SwapchainDesc,
+    ImageAspect, ImageDesc, ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage,
+    ImageViewDesc, ImageViewType, Instance, LoadOp, MemoryLocation, Offset3d, PipelineLayoutDesc,
+    PresentInfo, PresentMode, PushConstantRange, QueueKind, ReadbackDesc, ReadbackState, Rect2d,
+    RenderPassDesc, ResourceState, ShaderModuleDesc, ShaderStages, StoreOp, SubmitInfo,
+    SurfaceError, SwapchainDesc,
 };
 use crcbl_wgpu::WgpuInstance;
 
@@ -134,6 +135,21 @@ impl Headless {
         crcbl_hal::QueueHandle,
         Format,
     ) {
+        Self::open_device_with(Features::TIER_A | Features::DEBUG_MARKERS)
+    }
+
+    /// [`Self::open_device`], with the caller's choice of optional features — a
+    /// test that needs an optional feature requests it here and checks
+    /// `Device::caps` afterwards to learn whether the adapter granted it.
+    fn open_device_with(
+        optional: Features,
+    ) -> (
+        WgpuInstance,
+        Box<dyn Device>,
+        crcbl_hal::SurfaceHandle,
+        crcbl_hal::QueueHandle,
+        Format,
+    ) {
         let instance = instance();
         let adapter = instance.adapters().remove(0);
 
@@ -158,7 +174,7 @@ impl Headless {
                 label: Some("wgpu e2e"),
                 adapter: adapter.id,
                 required_features: Features::empty(),
-                optional_features: Features::TIER_A | Features::DEBUG_MARKERS,
+                optional_features: optional,
                 compatible_surface: Some(surface),
             })
             .expect("a device opens");
@@ -847,4 +863,309 @@ fn a_shader_module_that_will_not_compile_is_refused_instead_of_handed_back() {
     instance.destroy_surface(surface);
     drop(device);
     drop(instance);
+}
+
+/// `PushConstantRange { offset: u32::MAX, size: 1 }` used to panic in debug
+/// ("attempt to add with overflow") and wrap to `0` in release — and `0` then
+/// *passed* the limit check it was supposed to fail, silently creating a
+/// zero-size immediate block.
+///
+/// The overflow is only reachable when the device actually enabled wgpu's
+/// `IMMEDIATES` feature: the unsupported check fires first otherwise. This
+/// backend never enables it — `instance.rs` deliberately never reports
+/// [`Features::PUSH_CONSTANTS`] (the seam's name for `IMMEDIATES`), so even an
+/// optional request maps to nothing and the overflow path is unreachable
+/// through the seam. Requesting it as optional and checking `Device::caps` is
+/// the honest probe: a device that granted it exercises the real path, and one
+/// that did not skips with the reason printed.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_push_constant_range_that_overflows_is_refused_not_wrapped() {
+    let (instance, device, surface, _queue, _format) =
+        Headless::open_device_with(Features::PUSH_CONSTANTS);
+    if !device.caps().features.contains(Features::PUSH_CONSTANTS) {
+        println!(
+            "wgpu e2e: IMMEDIATES is not enabled on this adapter, so the push-constant \
+             overflow path is unreachable here; skipping"
+        );
+        instance.destroy_surface(surface);
+        drop(device);
+        drop(instance);
+        return;
+    }
+
+    let overflow = device
+        .create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("overflow"),
+            bind_group_layouts: &[],
+            push_constants: Some(PushConstantRange {
+                stages: ShaderStages::ALL,
+                offset: u32::MAX,
+                size: 1,
+            }),
+        })
+        .expect_err("the range ends past every possible budget");
+    assert!(
+        matches!(overflow, HalError::InvalidDescriptor(_)),
+        "{overflow:?}"
+    );
+
+    // And a range inside the budget still creates a layout — the check must
+    // reject the overflow, not push constants wholesale.
+    let small = device
+        .create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("in budget"),
+            bind_group_layouts: &[],
+            push_constants: Some(PushConstantRange {
+                stages: ShaderStages::ALL,
+                offset: 0,
+                size: 4,
+            }),
+        })
+        .expect("a range inside the budget still creates");
+    device.destroy_pipeline_layout(small);
+
+    instance.destroy_surface(surface);
+    drop(device);
+    drop(instance);
+}
+
+/// A 4x-MSAA pass with [`ColorAttachment::resolve`] set must land its resolved
+/// image in the resolve view.
+///
+/// The seam documents `resolve` as the MSAA resolve destination, the null
+/// backend records it, and `crcbl-vk` renders it. This backend used to build
+/// every `wgpu::RenderPassColorAttachment` with `resolve_target: None`, so the
+/// pass rendered into the MSAA target and nothing was ever resolved — silent
+/// wrong output, no error, no log. The resolve view is read back here, so a
+/// backend that drops the field yields the texture's untouched contents
+/// instead of the clear colour.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn an_msaa_pass_resolves_into_its_resolve_target() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+
+    // RGBA so the channel order below needs no BGRA swap — this test owns its
+    // format, unlike the ring tests that read back the adapter's preferred one.
+    let format = Format::Rgba8UnormSrgb;
+    let pixels = u64::from(EXTENT.0 * EXTENT.1 * 4);
+
+    let msaa = device
+        .create_image(&ImageDesc {
+            label: Some("wgpu e2e msaa target"),
+            image_type: ImageType::D2,
+            extent: Extent3d::d2(EXTENT.0, EXTENT.1),
+            format,
+            mip_levels: 1,
+            samples: 4,
+            usage: ImageUsage::COLOR_ATTACHMENT,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a 4x target");
+    let resolve = device
+        .create_image(&ImageDesc {
+            label: Some("wgpu e2e resolve target"),
+            image_type: ImageType::D2,
+            extent: Extent3d::d2(EXTENT.0, EXTENT.1),
+            format,
+            mip_levels: 1,
+            samples: 1,
+            usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a 1x resolve target");
+    let msaa_view = device
+        .create_image_view(&ImageViewDesc {
+            label: Some("wgpu e2e msaa view"),
+            image: msaa,
+            view_type: ImageViewType::D2,
+            format,
+            range: ImageSubresourceRange::all(format),
+        })
+        .expect("a view of the msaa target");
+    let resolve_view = device
+        .create_image_view(&ImageViewDesc {
+            label: Some("wgpu e2e resolve view"),
+            image: resolve,
+            view_type: ImageViewType::D2,
+            format,
+            range: ImageSubresourceRange::all(format),
+        })
+        .expect("a view of the resolve target");
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("wgpu e2e resolve readback"),
+            size: pixels,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a readback buffer");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("wgpu e2e resolve pass"),
+        queue: headless.queue,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        images: &[crcbl_hal::ImageBarrier::new(
+            msaa,
+            ImageSubresourceRange::all(format),
+            ResourceState::Undefined,
+            ResourceState::ColorAttachment,
+        )],
+        ..Barriers::default()
+    });
+    encoder.begin_render_pass(&RenderPassDesc {
+        label: Some("resolve clear"),
+        color_attachments: &[ColorAttachment {
+            view: msaa_view,
+            resolve: Some(resolve_view),
+            load: LoadOp::Clear,
+            store: StoreOp::Store,
+            clear: ClearValue::color(CLEAR),
+        }],
+        depth_stencil_attachment: None,
+        render_area: Rect2d::from_size(EXTENT.0, EXTENT.1),
+    });
+    encoder.end_render_pass();
+    encoder.pipeline_barrier(&Barriers {
+        images: &[crcbl_hal::ImageBarrier::new(
+            resolve,
+            ImageSubresourceRange::all(format),
+            ResourceState::ColorAttachment,
+            ResourceState::TransferSrc,
+        )],
+        ..Barriers::default()
+    });
+    encoder.copy_image_to_buffer(&BufferImageCopy {
+        buffer: staging,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: resolve,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: Offset3d::default(),
+        image_extent: Extent3d::d2(EXTENT.0, EXTENT.1),
+    });
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+
+    let readback = device
+        .request_readback(&ReadbackDesc {
+            label: Some("wgpu e2e resolve pixels"),
+            buffer: staging,
+            offset: 0,
+            size: pixels,
+            after: None,
+        })
+        .expect("a readback request");
+    let mut bytes = vec![0u8; pixels as usize];
+    drain(device, readback, &mut bytes);
+
+    // Every sample of the 4x target held the clear colour, so the resolved
+    // image must be exactly it: uniform, non-zero, alpha 1.0, and — through
+    // the sRGB encoding, exactly like the ring tests — red < green < blue.
+    let first: [u8; 4] = bytes[0..4].try_into().expect("four bytes");
+    assert!(
+        bytes.chunks_exact(4).all(|pixel| pixel == first),
+        "the resolved image must be uniformly the clear colour; got {first:?} then {:?}",
+        &bytes[4..8]
+    );
+    assert_ne!(
+        first,
+        [0, 0, 0, 0],
+        "an all-zero result means the resolve never wrote the target"
+    );
+    assert_eq!(first[3], 255, "alpha 1.0 must survive the resolve");
+    assert!(
+        first[0] < first[1] && first[1] < first[2],
+        "the clear was {CLEAR:?}, so red < green < blue must survive the resolve; got {first:?}"
+    );
+
+    device.destroy_readback(readback);
+    device.destroy_buffer(staging);
+    device.destroy_command_buffer(commands);
+    device.destroy_image_view(resolve_view);
+    device.destroy_image_view(msaa_view);
+    device.destroy_image(resolve);
+    device.destroy_image(msaa);
+    headless.finish();
+}
+
+/// A stale [`ColorAttachment::resolve`] handle is the same class of bug as a
+/// stale attachment handle, so the pass must refuse it at `finish` — not
+/// silently drop the resolve and keep rendering, which is how a resolve that
+/// never happens goes unnoticed.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_stale_resolve_handle_is_refused_rather_than_dropped() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+
+    let format = Format::Rgba8UnormSrgb;
+    let msaa = device
+        .create_image(&ImageDesc {
+            label: Some("wgpu e2e msaa target"),
+            image_type: ImageType::D2,
+            extent: Extent3d::d2(EXTENT.0, EXTENT.1),
+            format,
+            mip_levels: 1,
+            samples: 4,
+            usage: ImageUsage::COLOR_ATTACHMENT,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a 4x target");
+    let msaa_view = device
+        .create_image_view(&ImageViewDesc {
+            label: Some("wgpu e2e msaa view"),
+            image: msaa,
+            view_type: ImageViewType::D2,
+            format,
+            range: ImageSubresourceRange::all(format),
+        })
+        .expect("a view of the msaa target");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("wgpu e2e stale resolve"),
+        queue: headless.queue,
+    });
+    encoder.begin_render_pass(&RenderPassDesc {
+        label: Some("stale resolve"),
+        color_attachments: &[ColorAttachment {
+            view: msaa_view,
+            // A generation no pool ever issued: valid handle value, matches no
+            // live slot.
+            resolve: Some(
+                crcbl_hal::ImageViewHandle::from_bits(0xFFFF_FFFF_0000_0000)
+                    .expect("the generation half is non-zero"),
+            ),
+            load: LoadOp::Clear,
+            store: StoreOp::Store,
+            clear: ClearValue::color(CLEAR),
+        }],
+        depth_stencil_attachment: None,
+        render_area: Rect2d::from_size(EXTENT.0, EXTENT.1),
+    });
+    encoder.end_render_pass();
+    let error = encoder
+        .finish()
+        .expect_err("a resolve handle no pool issued is not a pass");
+    assert!(
+        matches!(
+            error,
+            HalError::InvalidHandle { kind, .. } if kind == "image view"
+        ),
+        "{error}"
+    );
+
+    device.destroy_image_view(msaa_view);
+    device.destroy_image(msaa);
+    headless.finish();
 }
