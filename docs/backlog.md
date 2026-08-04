@@ -80,6 +80,20 @@ phase attached to it.
   measurement needs the reference machine and a release build, and H1 and H4
   were art slices.
 
+- **The whole horde art overhaul is verified by measurement and none of it by
+  eye**, and that is one gap rather than five. The grass ground, the wizard and
+  its walk cycle, the three monsters, the props and the potions all landed on
+  2026-08-04 without a display in the environment, so every claim about the
+  _picture_ is an assertion about baked bytes: silhouettes against colliders,
+  palettes against each other's luma, the staff orb's centroid against
+  `game::STAFF_MUZZLE`, drop rates off seeded runs. The per-slice entries below
+  and under "Told apart at a glance" say what each one specifically has not been
+  seen doing. **The grass has the least behind it of the five** — it was checked
+  as an offline mosaic rendered from the same `.crpix` bytes and the same hash,
+  which is not the shipped pipeline, and no test anywhere asserts that the
+  tiling has no visible seam. Half an hour of `cargo run -p horde` on a machine
+  with a screen closes more of this than any test that could be written for it.
+
 - **Nobody has looked at horde's props on a screen.** H4 was developed and
   verified headless. `assets/props.crpix`'s two frames are pinned against the
   other sheets by `the_props_sit_between_the_grass_and_the_crowd_in_luma` and
@@ -295,15 +309,19 @@ sample from outside its process. What is still uncovered:
   `run-x11-e2e.sh` starts no key sender: the equivalent there is XTEST through
   the suite's own peer client, which is in-process and would need the same
   out-of-process treatment.
-- **macOS and Windows have no shell backend at all**, so display modes there are
-  not late — they do not exist. See the platform sections of `crcbl-shell`.
+- **macOS and Windows have shell backends now, and neither has a game-level mode
+  pass.** P5C built both, and each has an end-to-end suite that opens a window,
+  flips its mode and reports injected input — but that is the _shell_ being
+  driven directly. Nobody presses `F11` at a running sample on either, the way
+  `run-wayland-e2e.sh` does: Windows would need the key sender pointed at a game
+  rather than at the suite's own window, and macOS has no renderer to run a game
+  with until MoltenVK clears P14. See the platform sections below.
 
 ## The docs gate reads more files than any other, and it reads them on wasm32
 
 CI runs `cargo doc --workspace --all-features` on the host **and**
-`--target wasm32-unknown-unknown`, both under `RUSTDOCFLAGS: -D warnings`. Two
-consequences that cost a round trip each if you do not know them, and both are
-about `--all-features` rather than about docs:
+`--target wasm32-unknown-unknown`, both under `RUSTDOCFLAGS: -D warnings`. Three
+consequences that cost a round trip each if you do not know them:
 
 - **An intra-doc link to an item that is `cfg`-ed out on the other target is an
   error there.** Write it as a code span instead. `#[cfg_attr]`-ing two versions
@@ -313,9 +331,18 @@ about `--all-features` rather than about docs:
   Give it a `#[cfg(not(target_os = "linux"))] fn main` that fails and says why,
   rather than a `cfg` that quietly compiles it to nothing —
   `crates/crcbl-shell/tests/bin/send_key.rs` is the worked example.
+- **Rustdoc is the only gate that notices a public type nobody exported.** A
+  `pub` field whose type is `pub` inside a private module is readable and
+  unnameable: a consumer can get the value out and cannot write it down.
+  `cargo clippy`, `cargo fmt` and the whole test suite pass straight through it,
+  because nothing in the crate itself needs the path. Rustdoc reports it as
+  `public documentation for X links to private item Y`, which reads like a
+  formatting nit and is an unusable API. `RenderState::player_facing` and
+  `RenderState::props` shipped that way and were caught only in CI.
 
-Neither is reachable from a local `cargo clippy --all-targets`, which is what
-makes them worth writing down rather than rediscovering.
+None of the three is reachable from a local `cargo clippy --all-targets`, which
+is what makes them worth writing down rather than rediscovering. **Run
+`cargo doc` before pushing**, both targets, or CI will run it for you.
 
 ## Cross-test state, found by adding a window manager and a second monitor
 
@@ -382,6 +409,35 @@ written from now on has to hold under all of it:
   genuinely part of the fix, and stays — `SendMessageW` calls the window
   procedure synchronously and nothing pumps between the leave and the first
   synthetic movement, so no queued message can be processed in that gap.
+- **The foreground can be taken away mid-test, and two tests reported it as
+  something else.** `refresh_cursor_visibility` and `refresh_clip` both act only
+  for a window that is focused, so a stolen foreground makes each of them a
+  no-op — and the assertion that then fails is about the _consequence_.
+  `hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for` failed as
+  `left: 0, right: -1`, which reads exactly like the `ShowCursor`
+  reference-count bug it exists to catch;
+  `minimizing_a_captured_window_releases_the_clip` failed naming the wrong
+  rectangle when in fact no clip had been applied at all. Both are now routed
+  through `focus_and_confirm`, which grants the focus, reads it back and
+  retries, so a runner that cannot host the test says so.
+
+  The audit that followed has a clean answer, and it is the reason nothing else
+  in that module needs the same treatment: the window procedure handles
+  `WM_SETFOCUS`/`WM_KILLFOCUS` **synchronously**, gated on `shared.clipped()`
+  rather than on pumped state. So a test that _delivers the focus message
+  itself_ and asserts immediately cannot flake, which covers the three
+  assertions in
+  `confining_the_pointer_clips_it_and_losing_focus_gives_the_desktop_back`; that
+  test also asserts `state.focused` after arranging it, which is the line the
+  two broken ones were missing. The vulnerable shape is precisely **asking the
+  system for focus and then asserting something read back from pumped state**.
+
+  **Neither fix was reproduced.** There is no Windows machine here; both were
+  diagnosed by reading the focus gates and matching them against the observed
+  values, then typechecked for `x86_64-pc-windows-msvc` from Linux, which proves
+  they compile and nothing more. Both went green on the next run — but this
+  family failed twice in two consecutive runs on two different tests, so one
+  green run is not evidence that it is stable.
 
   **What it did not fix is the position of our events in the sequence**, and the
   second rewrite still asserted that, requiring the first crossing to be an
