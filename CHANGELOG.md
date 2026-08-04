@@ -1469,6 +1469,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-audio**: native audio played 48 kHz-authored voices at the device rate
+  — on a 44.1 kHz device everything ran ~9% slow, ~147 cents flat, the exact
+  failure the browser path resamples to avoid. The mixer now steps each voice's
+  playhead at the internal rate per output frame, so pitch and duration hold on
+  any hardware (and are bit-identical when the rates match).
+
+- **crcbl-audio**: the mono and multichannel output paths allocated a scratch
+  `Vec` on the OS audio thread every block. The scratch is now owned by the
+  stream's callback and reused — one allocation, then a resize and zero per
+  block, with no malloc on the realtime path after the first block.
+
 - **crcbl-wgpu**: an MSAA pass silently dropped its resolve target — every
   `wgpu::RenderPassColorAttachment` hardcoded `resolve_target: None`, so a 4x
   pass rendered into the MSAA image and nothing was ever resolved. The resolve

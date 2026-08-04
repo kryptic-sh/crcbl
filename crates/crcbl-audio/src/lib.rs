@@ -32,9 +32,11 @@
 //! - [`INTERNAL_SAMPLE_RATE`] is what the mixer's voices are authored for and
 //!   the only rate [`AudioSource::fill`] is ever driven at in the browser.
 //! - The *device* rate is whatever the hardware runs at. cpal reports it and
-//!   the native path passes it straight to `fill`; the browser reports
-//!   `AudioContext.sampleRate` and [`web`] resamples between the two rather
-//!   than passing it down.
+//!   the native path passes it down to `fill`, where the mixer steps its
+//!   voices at the internal rate per output frame — a device at any other
+//!   rate keeps the same pitch and duration, so the native path no longer
+//!   detunes. The browser reports `AudioContext.sampleRate` and [`web`]
+//!   resamples between the two rather than passing it down.
 
 pub mod event;
 pub mod mixer;
@@ -168,6 +170,7 @@ impl AudioStream {
         let config: cpal::StreamConfig = supported.into();
 
         let src = Arc::clone(&source);
+        let mut scratch: Vec<f32> = Vec::new();
 
         let stream = device
             .build_output_stream::<f32, _, _>(
@@ -176,7 +179,7 @@ impl AudioStream {
                     let alive_weak = alive_weak.clone();
                     move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
                         if alive_weak.upgrade().is_some() {
-                            fill_audio(data, channels, src.as_ref(), sample_rate);
+                            fill_audio(data, channels, src.as_ref(), sample_rate, &mut scratch);
                         } else {
                             // Not writing at all would let the device play back
                             // whatever the buffer happened to hold.
@@ -267,7 +270,13 @@ impl Drop for AudioStream {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn fill_audio(data: &mut [f32], channels: usize, source: &dyn AudioSource, sample_rate: u32) {
+fn fill_audio(
+    data: &mut [f32],
+    channels: usize,
+    source: &dyn AudioSource,
+    sample_rate: u32,
+    scratch: &mut Vec<f32>,
+) {
     // `AudioSource::fill` is additive and documented to receive a zeroed
     // buffer; cpal hands back whatever the device buffer last held.
     data.fill(0.0);
@@ -276,18 +285,24 @@ fn fill_audio(data: &mut [f32], channels: usize, source: &dyn AudioSource, sampl
         source.fill(data, sample_rate);
     } else if channels == 1 {
         let block = data.len();
-        let mut stereo = vec![0.0f32; block * CHANNELS];
-        source.fill(&mut stereo, sample_rate);
+        // The scratch is owned by the stream's callback and reused across
+        // blocks: one allocation, then this resize/fill per block — no malloc
+        // on the audio thread after the first block. Re-zero every block, or
+        // the additive fill stacks the previous block's values in.
+        scratch.resize(block * CHANNELS, 0.0);
+        scratch.fill(0.0);
+        source.fill(scratch, sample_rate);
         for (i, sample) in data.iter_mut().enumerate() {
-            *sample = (stereo[i * 2] + stereo[i * 2 + 1]) * 0.5;
+            *sample = (scratch[i * 2] + scratch[i * 2 + 1]) * 0.5;
         }
     } else {
         let block = data.len() / channels;
-        let mut stereo = vec![0.0f32; block * CHANNELS];
-        source.fill(&mut stereo, sample_rate);
+        scratch.resize(block * CHANNELS, 0.0);
+        scratch.fill(0.0);
+        source.fill(scratch, sample_rate);
         for i in 0..block {
-            data[i * channels] = stereo[i * CHANNELS];
-            data[i * channels + 1] = stereo[i * CHANNELS + 1];
+            data[i * channels] = scratch[i * CHANNELS];
+            data[i * channels + 1] = scratch[i * CHANNELS + 1];
         }
     }
 }
@@ -363,11 +378,57 @@ mod tests {
         // nothing must leave silence, not the stale buffer.
         for channels in [1usize, CHANNELS, 6] {
             let mut data = vec![0.7f32; 8 * channels];
-            fill_audio(&mut data, channels, &Silent, 48_000);
+            let mut scratch = Vec::new();
+            fill_audio(&mut data, channels, &Silent, 48_000, &mut scratch);
             assert!(
                 data.iter().all(|s| *s == 0.0),
                 "stale samples left for {channels} channels: {data:?}"
             );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn mono_and_multichannel_fills_reuse_the_scratch_correctly() {
+        // The observable here is the down/up-mix's correctness across scratch
+        // reuse, not the allocation itself: a scratch that is reused but not
+        // re-zeroed makes `AudioSource`'s additive fill double the previous
+        // block's value into the next one.
+        let source = DcSource::new(0.25);
+        let mut scratch = Vec::new();
+
+        // Mono, large block first then a smaller one: the scratch shrinks but
+        // keeps its capacity, so a missing re-zero would leave the first
+        // block's 0.25 in the buffer for the additive fill to stack on — 0.5
+        // out instead of 0.25. Downmix is (L + R) * 0.5 = 0.25.
+        let mut mono = vec![0.0f32; 16];
+        fill_audio(&mut mono, 1, &source, 48_000, &mut scratch);
+        for &s in &mono {
+            assert_eq!(s, 0.25, "mono, first block: {s}");
+        }
+        let mut mono_small = vec![0.0f32; 4];
+        fill_audio(&mut mono_small, 1, &source, 48_000, &mut scratch);
+        for &s in &mono_small {
+            assert_eq!(s, 0.25, "mono, reused scratch leaked a stale value: {s}");
+        }
+
+        // Six channels, small block first then a larger one so the scratch
+        // must *grow* across calls. Only the first two channels carry the
+        // downmix; channels 2..=5 must be the zeroing `fill_audio` does on
+        // the device buffer every block.
+        let mut six_small = vec![7.0f32; 6 * 4];
+        fill_audio(&mut six_small, 6, &source, 48_000, &mut scratch);
+        let mut six_large = vec![7.0f32; 6 * 20];
+        fill_audio(&mut six_large, 6, &source, 48_000, &mut scratch);
+        for (name, data) in [("small", &six_small), ("large", &six_large)] {
+            for frame in data.chunks_exact(6) {
+                assert_eq!(frame[0], 0.25, "{name}: left channel: {frame:?}");
+                assert_eq!(frame[1], 0.25, "{name}: right channel: {frame:?}");
+                assert!(
+                    frame[2..].iter().all(|s| *s == 0.0),
+                    "{name}: extra channels not zeroed: {frame:?}",
+                );
+            }
         }
     }
 

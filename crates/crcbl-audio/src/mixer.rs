@@ -7,7 +7,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::{AudioSample, AudioSource, CHANNELS};
+use crate::{AudioSample, AudioSource, CHANNELS, INTERNAL_SAMPLE_RATE};
 
 /// Clamp a caller-supplied parameter, substituting `fallback` when it is NaN or
 /// infinite.
@@ -216,12 +216,16 @@ impl Voice {
     /// Mix this voice into `buffer`, advancing the playhead.
     ///
     /// `buffer` is interleaved stereo: `[L0,R0, L1,R1, …]`. The voice
-    /// applies per-channel gains and a varispeed pitch ratio.
+    /// applies per-channel gains and a varispeed pitch ratio. `sample_rate`
+    /// is the rate `buffer` is being produced at: voices are authored for
+    /// [`INTERNAL_SAMPLE_RATE`], so a device at any other rate steps the
+    /// playhead by the ratio rather than one source frame per output frame,
+    /// keeping pitch and duration right on any hardware.
     /// Returns `true` if the voice is still active after this block.
     ///
     /// The playhead steps by *frames*, not samples: stepping by samples would
     /// make any `pitch != 1.0` read one interleaved channel into both outputs.
-    fn mix_block(&mut self, buffer: &mut [AudioSample]) -> bool {
+    fn mix_block(&mut self, buffer: &mut [AudioSample], sample_rate: u32) -> bool {
         if self.stopped {
             return false;
         }
@@ -234,7 +238,18 @@ impl Voice {
 
         // f64 playhead for sub-sample precision under pitch shift.
         let mut pos = self.playhead as f64;
-        let step = self.pitch as f64;
+        // Voices are authored for INTERNAL_SAMPLE_RATE; a device at some other
+        // rate must not step one source frame per output frame or every sound
+        // detunes (147 cents at 44.1 kHz — the exact failure the browser path
+        // resamples to avoid). Stepping by the ratio keeps pitch and duration
+        // right on any device; when the rates match the ratio is 1.0 and the
+        // playhead behaves exactly as before.
+        let ratio = if sample_rate == 0 {
+            1.0
+        } else {
+            INTERNAL_SAMPLE_RATE as f64 / f64::from(sample_rate)
+        };
+        let step = self.pitch as f64 * ratio;
 
         for out in buffer.chunks_exact_mut(CHANNELS) {
             if pos as usize >= frames {
@@ -461,8 +476,9 @@ impl std::fmt::Display for SoundBank {
 }
 
 impl AudioSource for Mixer {
-    fn fill(&self, buffer: &mut [AudioSample], _sample_rate: u32) {
-        self.lock().retain_mut(|(_, voice)| voice.mix_block(buffer));
+    fn fill(&self, buffer: &mut [AudioSample], sample_rate: u32) {
+        self.lock()
+            .retain_mut(|(_, voice)| voice.mix_block(buffer, sample_rate));
 
         // Clip once, here, where the finished mix is written: N voices summing
         // past ±1.0 would otherwise wrap or distort in the device. A NaN that
@@ -512,7 +528,7 @@ mod tests {
         let mut voice = Voice::new(data);
         let mut buf = vec![0.0f32; 32 * CHANNELS];
 
-        assert!(voice.mix_block(&mut buf));
+        assert!(voice.mix_block(&mut buf, 48_000));
         for &s in &buf {
             assert!((s - 0.5).abs() < 0.001);
         }
@@ -524,8 +540,8 @@ mod tests {
         let mut voice = Voice::new(data);
         let mut buf = vec![0.0f32; 16 * CHANNELS];
 
-        assert!(voice.mix_block(&mut buf));
-        assert!(!voice.mix_block(&mut buf));
+        assert!(voice.mix_block(&mut buf, 48_000));
+        assert!(!voice.mix_block(&mut buf, 48_000));
     }
 
     #[test]
@@ -534,7 +550,7 @@ mod tests {
         let mut voice = Voice::new(data).with_looping();
         let mut buf = vec![0.0f32; 32 * CHANNELS];
 
-        assert!(voice.mix_block(&mut buf));
+        assert!(voice.mix_block(&mut buf, 48_000));
         for &s in &buf {
             assert!((s - 0.5).abs() < 0.001);
         }
@@ -809,7 +825,7 @@ mod tests {
         // channel into both outputs; L and R here have opposite signs.
         let mut voice = Voice::new(split_channels(64)).with_pitch(2.0);
         let mut buf = vec![0.0f32; 16 * CHANNELS];
-        assert!(voice.mix_block(&mut buf));
+        assert!(voice.mix_block(&mut buf, 48_000));
 
         for frame in buf.chunks_exact(CHANNELS) {
             assert!((frame[0] - 1.0).abs() < 1e-6, "left: {}", frame[0]);
@@ -829,7 +845,7 @@ mod tests {
         }
         let mut voice = Voice::new(data).with_pitch(2.0);
         let mut buf = vec![0.0f32; 8 * CHANNELS];
-        assert!(voice.mix_block(&mut buf));
+        assert!(voice.mix_block(&mut buf, 48_000));
 
         // Output frame i must be input frame 2i.
         for (i, frame) in buf.chunks_exact(CHANNELS).enumerate() {
@@ -838,12 +854,50 @@ mod tests {
         }
     }
 
+    /// Voices are authored for [`INTERNAL_SAMPLE_RATE`]; a device at some
+    /// other rate must not step one source frame per output frame, or a 0.1 s
+    /// sound takes 4800/44100 s on 44.1 kHz hardware.
+    #[test]
+    fn voices_run_at_the_internal_rate_regardless_of_the_device_rate() {
+        let mixer = Mixer::new();
+        // A 0.1-second sound at the internal rate: 4800 frames.
+        mixer.play(Voice::new(vec![0.5f32; 4800 * CHANNELS]));
+        let mut buf = vec![0.0f32; 100 * CHANNELS];
+        let mut fills = 0;
+        while mixer.voice_count() > 0 {
+            buf.fill(0.0);
+            mixer.fill(&mut buf, 44_100);
+            fills += 1;
+        }
+        assert_eq!(
+            fills, 45,
+            "a 0.1 s sound ends after 0.1 s at 44.1 kHz (4410 output frames = 44.1 blocks), not after 48 fills"
+        );
+
+        // The same sound at the internal rate takes 49 fills: 48 blocks emit
+        // the 4800 frames, then the end-check fires on the first frame of the
+        // 49th. The two rates agree in wall time — 45 × 100 / 44100 ≈
+        // 49 × 100 / 48000 ≈ 0.102 s of output either way.
+        let mixer = Mixer::new();
+        mixer.play(Voice::new(vec![0.5f32; 4800 * CHANNELS]));
+        let mut fills = 0;
+        while mixer.voice_count() > 0 {
+            buf.fill(0.0);
+            mixer.fill(&mut buf, 48_000);
+            fills += 1;
+        }
+        assert_eq!(
+            fills, 49,
+            "same 0.1 s at 48 kHz: 48 full blocks plus the reap block"
+        );
+    }
+
     #[test]
     fn looping_voice_over_empty_data_does_not_panic() {
         // `pos % 0` used to panic inside the audio callback.
         let mut voice = Voice::new(Vec::new()).with_looping();
         let mut buf = vec![0.0f32; 8 * CHANNELS];
-        assert!(!voice.mix_block(&mut buf));
+        assert!(!voice.mix_block(&mut buf, 48_000));
         assert!(buf.iter().all(|s| *s == 0.0));
     }
 
