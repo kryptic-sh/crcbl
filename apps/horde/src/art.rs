@@ -1,4 +1,4 @@
-//! Horde's art: three baked sheets, the layers they are drawn on, and the one
+//! Horde's art: four baked sheets, the layers they are drawn on, and the one
 //! function that turns a frame of simulation into a list of sprites.
 //!
 //! ```text
@@ -6,7 +6,7 @@
 //!                                                                    │
 //!  RenderState + extent ───────────────── Scene::build ──────────────┤
 //!                                                                    ▼
-//!          LayerStack   ground ▸ gems ▸ crowd ▸ hero ▸ shots   ──▶ &[Sprite]
+//!    LayerStack  ground ▸ props ▸ gems ▸ crowd ▸ hero ▸ shots  ──▶ &[Sprite]
 //!                                                                    │
 //!                                                     SpriteRenderer::begin_frame
 //! ```
@@ -21,7 +21,7 @@
 //! rectangle in this file read in texels and because a fourth sample using a
 //! different convention for no reason would be a fourth thing to learn.
 //!
-//! # Three sheets, three batches, and the count is flat in the horde
+//! # Four sheets, four batches, and the count is flat in the horde
 //!
 //! **This is the decision the scale sub-slice measured.** [`SpriteRenderer`]
 //! starts a new batch — a bind and a draw — whenever consecutive sprites name a
@@ -36,19 +36,21 @@
 //! second sheet, because it is 8 texels against 34 and putting it in the big
 //! frame would draw it in a quad twenty times its own area. The ground is a
 //! third, because it is a 40-texel tile of a different subject and it is drawn
-//! *under* everything, which is a layer of its own however it is packed.
+//! *under* everything, which is a layer of its own however it is packed. The
+//! props are a fourth at 36 texels, and a `.crpix` declares one frame size for
+//! the whole file, so no existing sheet could have held them.
 //!
-//! **The claim that matters is not the number three — it is that the number
+//! **The claim that matters is not the number four — it is that the number
 //! does not move with the size of the horde**, which is what
 //! [`SceneStats::batches`] is there to show. Every sheet is one uninterrupted
-//! run, so ten enemies and ten thousand come out as the same three draws; the
-//! terrain sheet added a constant and constants are what this claim tolerates.
-//! What would break it is emitting a sheet more than once — putting the shots
-//! between the crowd and the player, say — and
-//! `tests::an_interleaved_field_of_every_kind_is_three_batches` and
-//! `tests::ten_thousand_visible_enemies_are_still_three_batches` are what say
+//! run, so ten enemies and ten thousand come out as the same four draws; the
+//! terrain and props sheets each added a constant and constants are what this
+//! claim tolerates. What would break it is emitting a sheet more than once —
+//! putting the shots between the crowd and the player, say — and
+//! `tests::an_interleaved_field_of_every_kind_is_four_batches` and
+//! `tests::ten_thousand_visible_enemies_are_still_four_batches` are what say
 //! it has not happened. The measured table in `docs/plan/sample/03-horde.md`
-//! was taken before the ground existed and reads two; it says so.
+//! was taken before either sheet existed and reads two; it says so.
 //!
 //! What the shared actors frame costs is the transparent margin round the two
 //! small kinds. A runner is 13 texels of art in a 34-texel quad, so about seven
@@ -96,6 +98,23 @@
 //! marks today — drawing an edge for it would be a gameplay change smuggled in
 //! by a texture.
 //!
+//! # The props are above the ground and below everything that moves
+//!
+//! There is no other order available: over the crowd they would hide the horde,
+//! and under the ground they would not be drawn. The cost of that order is the
+//! one a tall prop pays — a canopy painted *under* a figure standing in front of
+//! it — and `assets/props.crpix` answers it by not drawing a tall prop at all.
+//! Both are footprints, seen from directly above like the lawn under them and
+//! drawn to their own collider like every actor, so a wizard overlapping a
+//! canopy edge is a wizard standing on that ground. Splitting the sheet so a
+//! canopy could go over the actors would be a second run of one sheet, which is
+//! another draw call in a number `docs/plan/sample/03-horde.md` and the
+//! changelog both quote.
+//!
+//! They are above the ground rather than in it for a plainer reason: the ground
+//! is generated from the view and the props are culled against it, so they are
+//! two different kinds of list even before they are two sheets.
+//!
 //! # The camera moves, so this culls
 //!
 //! The arena is 96 × 72 units against a view of about 37 × 28, so most of a
@@ -113,7 +132,7 @@ use crcbl::render::{Layer, LayerStack, Parallax, SheetDesc, SheetId, Sprite, Spr
 use crcbl::sprite::load::{Loaded, load};
 use crcbl::sprite::{Clip, Playback, Sheet};
 
-use crate::game::{EnemyKind, Facing, RenderState};
+use crate::game::{EnemyKind, Facing, PropKind, RenderState};
 use crate::gpu::{camera_centre, view_half_width};
 
 // `build.rs` writes this: one `*_PNG` and one `*_JSON` per `assets/*.crpix`,
@@ -214,6 +233,15 @@ const WALK_CLIP: &str = "walk";
 /// against `game.rs`'s radii.
 pub const ACTOR_HALF_EXTENT: f64 = 0.85;
 
+/// Half the side of the one frame size every prop is drawn at, in world units.
+///
+/// `PropKind::Tree.radius()`, and therefore 36 texels — the same relation
+/// [`ACTOR_HALF_EXTENT`] has to the brute, for the same reason, and asserted
+/// against `game.rs`'s radii by
+/// `tests::every_prop_silhouette_is_the_size_of_the_collider_it_stands_for`.
+/// A bush is 20 texels of art in that frame and the rest is transparent.
+pub const PROP_HALF_EXTENT: f64 = 0.9;
+
 /// The same for a shot.
 ///
 /// Larger than [`BOLT_RADIUS`](crate::game::BOLT_RADIUS) = 0.15, deliberately:
@@ -251,6 +279,22 @@ const fn enemy_frame(kind: EnemyKind) -> &'static str {
     }
 }
 
+/// Which frame of `assets/props.crpix` a prop kind draws.
+const fn prop_frame(kind: PropKind) -> &'static str {
+    match kind {
+        PropKind::Tree => "tree",
+        PropKind::Bush => "bush",
+    }
+}
+
+/// Which of [`Scene::props`] a kind draws from.
+const fn prop_index(kind: PropKind) -> usize {
+    match kind {
+        PropKind::Tree => 0,
+        PropKind::Bush => 1,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The scene
 // ---------------------------------------------------------------------------
@@ -281,8 +325,12 @@ pub struct Scene {
     /// The grass, indexed by [`ground_variant`]. One sheet, so the whole ground
     /// is a run however the variants fall out.
     grass: [FrameArt; GROUND_VARIANTS],
+    /// The trees and bushes, indexed by [`prop_index`].
+    props: [FrameArt; 2],
     /// The grass, under everything including the gems.
     ground: Layer,
+    /// The scenery, on the grass and under everything that moves.
+    props_layer: Layer,
     /// The gems, on the ground and under everything that moves.
     gems: Layer,
     /// The horde.
@@ -332,6 +380,15 @@ pub struct SceneStats {
     /// [`SceneStats::drawn`] and would otherwise look like a horde that stopped
     /// being culled.
     pub ground: usize,
+    /// Props the view kept, of the whole scatter.
+    ///
+    /// Out of [`SceneStats::field`] and [`SceneStats::culled`] for the same
+    /// reason [`SceneStats::ground`] is, arrived at from the other side: props
+    /// *are* culled, but their total is fixed by the seed and does not move with
+    /// the horde, and those two numbers exist to show what does. Counting a
+    /// rejected tree beside a rejected enemy would put a constant into the one
+    /// figure that has to be read against the field.
+    pub props: usize,
     /// Sprites the pass uploads and draws: the ground, plus whatever survived
     /// the cull, plus the player — who is never culled.
     pub drawn: usize,
@@ -345,6 +402,7 @@ impl crcbl::ui::DebugModule for SceneStats {
         section.row("field", format_args!("{}", self.field));
         section.row("culled", format_args!("{}", self.culled));
         section.row("ground", format_args!("{}", self.ground));
+        section.row("props", format_args!("{}", self.props));
         section.row("drawn", format_args!("{}", self.drawn));
         section.row("batches", format_args!("{}", self.batches));
     }
@@ -367,19 +425,23 @@ impl Scene {
     pub fn new(device: &dyn Device, sprites: &mut SpriteRenderer) -> Result<Self, HalError> {
         let actors = baked("actors", ACTORS_PNG, ACTORS_JSON);
         let bolt = baked("bolt", BOLT_PNG, BOLT_JSON);
+        let props = baked("props", PROPS_PNG, PROPS_JSON);
         let terrain = baked("terrain", TERRAIN_PNG, TERRAIN_JSON);
 
         let actors_sheet = register(device, sprites, "actors", &actors)?;
         let bolt_sheet = register(device, sprites, "bolt", &bolt)?;
+        let props_sheet = register(device, sprites, "props", &props)?;
         let terrain_sheet = register(device, sprites, "terrain", &terrain)?;
 
         // Back to front, and this is the only place the depth order is written
-        // down: `LayerStack` has no depth field to disagree with it. All five
+        // down: `LayerStack` has no depth field to disagree with it. All six
         // take the world's rate — the camera follows the player and there is
         // nothing behind the field to drift. The ground least of all: a parallax
-        // factor on it would slide the grass under the player's feet.
+        // factor on it would slide the grass under the player's feet, and one on
+        // the props would slide a tree off the ground the player collides with.
         let mut stack = LayerStack::new();
         let ground = stack.push_layer(Parallax::WORLD);
+        let props_layer = stack.push_layer(Parallax::WORLD);
         let gems = stack.push_layer(Parallax::WORLD);
         let crowd = stack.push_layer(Parallax::WORLD);
         let hero = stack.push_layer(Parallax::WORLD);
@@ -405,7 +467,12 @@ impl Scene {
             // the loader's rather than the `.crpix`'s.
             bolt: still(bolt_sheet, &bolt.sheet),
             grass: GROUND_FRAMES.map(|name| frame(terrain_sheet, &terrain.sheet, name)),
+            props: [
+                frame(props_sheet, &props.sheet, prop_frame(PropKind::Tree)),
+                frame(props_sheet, &props.sheet, prop_frame(PropKind::Bush)),
+            ],
             ground,
+            props_layer,
             gems,
             crowd,
             hero,
@@ -471,6 +538,34 @@ impl Scene {
             }),
         );
 
+        // The scenery, culled like the field and not generated like the ground:
+        // the scatter is a finite list the simulation owns. The cull box is the
+        // actors' one grown to the prop frame, so a tree does not pop in halfway
+        // across the edge either.
+        let prop_art = self.props;
+        let prop_half_x = view_half_width(extent) + PROP_HALF_EXTENT;
+        let prop_half_y = crate::game::VIEW_HALF_HEIGHT + PROP_HALF_EXTENT;
+        let near = move |p: DVec3| {
+            (p.x - camera.x).abs() <= prop_half_x && (p.y - camera.y).abs() <= prop_half_y
+        };
+        self.stack.extend(
+            self.props_layer,
+            render
+                .props
+                .iter()
+                .filter(move |prop| near(prop.position))
+                .map(move |prop| Sprite {
+                    sheet: prop_art[prop_index(prop.kind)].sheet,
+                    rect: rect(prop.position, PROP_HALF_EXTENT),
+                    // Square quad, round shape: a rotation would be an instance
+                    // field spent on a picture nobody could tell had turned.
+                    rotation: 0.0,
+                    uv: prop_art[prop_index(prop.kind)].uv,
+                    tint: UNTINTED,
+                }),
+        );
+        let prop_count = self.stack.sprites(self.props_layer).len();
+
         let gem = self.gem;
         self.stack.extend(
             self.gems,
@@ -534,10 +629,12 @@ impl Scene {
         let drawn = frame.len();
         self.stats = SceneStats {
             field,
-            // What is left of `frame` once the ground and the never-culled
-            // player are taken out of it is the part of `field` that survived.
-            culled: field + 1 + ground_count - drawn,
+            // What is left of `frame` once the ground, the props and the
+            // never-culled player are taken out of it is the part of `field`
+            // that survived.
+            culled: field + 1 + ground_count + prop_count - drawn,
             ground: ground_count,
+            props: prop_count,
             drawn,
             batches: crcbl::render::sprite_pass::batch_count(frame),
         };
@@ -766,7 +863,7 @@ mod tests {
 
     use crate::game::{
         ARENA_HALF_HEIGHT, ARENA_HALF_WIDTH, BOLT_RADIUS, EnemyView, PLAYER_RADIUS, PickupView,
-        STAFF_MUZZLE, VIEW_HALF_HEIGHT, XP_RADIUS,
+        PropView, STAFF_MUZZLE, VIEW_HALF_HEIGHT, XP_RADIUS,
     };
 
     /// The wizard's frames: the standing frame, then the walk cycle in the order
@@ -1181,6 +1278,125 @@ mod tests {
             GROUND_VARIANTS,
             "two tiles are the same picture"
         );
+    }
+
+    /// **The props bake to two frames of the size the code draws them at**, and
+    /// each silhouette is the collider the player will actually be stopped by.
+    ///
+    /// Two claims in one test because neither is worth anything alone. The frame
+    /// size is 36 × 36 by construction, so a sheet of blank squares satisfies
+    /// every assertion about the *frame*; and a silhouette measured without
+    /// pinning the frame it sits in says nothing about the quad the scene emits.
+    /// The sizes are taken off `game.rs`'s radii rather than repeated here, so a
+    /// prop that changed size fails this instead of quietly colliding at a size
+    /// it is not drawn at.
+    #[test]
+    fn every_prop_silhouette_is_the_size_of_the_collider_it_stands_for() {
+        let props = baked("props", PROPS_PNG, PROPS_JSON);
+        let scale = f64::from(TEXELS_PER_UNIT);
+
+        let side = (2.0 * PROP_HALF_EXTENT * scale).round() as u32;
+        assert_eq!(side, 36);
+        assert!(
+            (f64::from(side) - 2.0 * PROP_HALF_EXTENT * scale).abs() < 1e-9,
+            "the shared prop frame does not land on a whole texel",
+        );
+        assert_eq!(props.sheet.frames.len(), PropKind::ALL.len());
+        assert_eq!(
+            (props.image.width, props.image.height),
+            (PropKind::ALL.len() as u32 * side, side),
+            "the sheet is not {} {side}-texel frames in a strip",
+            PropKind::ALL.len(),
+        );
+        assert!(props.sheet.clips.is_empty(), "nothing here animates");
+        assert_eq!(props.sheet.nine, None, "nothing here is stretched");
+        assert_eq!(props.sheet.sample, SampleMode::Pixel);
+
+        for kind in PropKind::ALL {
+            let name = prop_frame(kind);
+            let want = (2.0 * kind.radius() * scale).ceil() as u32;
+            assert_eq!(
+                silhouette(&props, name),
+                (want, want),
+                "{name} is not drawn to the collider the player is stopped by",
+            );
+        }
+        // The tree is the one that fills its frame exactly — the frame size is
+        // its collider — so the transparent margin is entirely the bush's.
+        assert_eq!(
+            silhouette(&props, prop_frame(PropKind::Tree)),
+            (side, side),
+            "the frame is no longer the tree's own size",
+        );
+        let clear = props
+            .image
+            .pixels
+            .chunks_exact(4)
+            .filter(|p| p[3] == 0)
+            .count();
+        assert!(
+            clear > 0 && clear < (props.image.pixels.len() / 4),
+            "the props sheet is {clear} clear of {} texels",
+            props.image.pixels.len() / 4,
+        );
+    }
+
+    /// **A prop reads against the grass and never against the crowd.**
+    ///
+    /// The same pair of bounds `assets/actors.crpix` puts the monsters between,
+    /// one shelf lower. Below is the ground: scenery inside the grass's own band
+    /// is scenery the player walks into. Above is the horde: there are tens of
+    /// props against hundreds of monsters, and a static obstacle that out-shines
+    /// a moving one pulls the eye to the thing that cannot kill you.
+    ///
+    /// Both are relations between baked sheets rather than numbers written here,
+    /// so a repalette of either side moves this instead of leaving
+    /// `assets/props.crpix`'s paragraph quietly wrong — and stating both is what
+    /// stops either being vacuous, since the lower bound alone is met by white
+    /// trees and the upper alone by black ones.
+    #[test]
+    fn the_props_sit_between_the_grass_and_the_crowd_in_luma() {
+        let props = baked("props", PROPS_PNG, PROPS_JSON);
+        let actors = baked("actors", ACTORS_PNG, ACTORS_JSON);
+        let terrain = baked("terrain", TERRAIN_PNG, TERRAIN_JSON);
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+
+        // The *brightest* grass texel, not its average: a prop has to clear the
+        // lit tip of a blade, which is what it stands on.
+        let grass_hi = lumas(&terrain, None)
+            .iter()
+            .copied()
+            .fold(f64::MIN, f64::max);
+        // The dimmest monster's *average*, because the claim is about which of
+        // two masses on screen is brighter, not about either one's highlights.
+        let crowd_lo = EnemyKind::ALL
+            .iter()
+            .map(|kind| mean(&lumas(&actors, Some(enemy_frame(*kind)))))
+            .fold(f64::MAX, f64::min);
+        assert!(grass_hi < crowd_lo, "there is no band to sit in");
+
+        for kind in PropKind::ALL {
+            let name = prop_frame(kind);
+            let average = mean(&lumas(&props, Some(name)));
+            assert!(
+                average > grass_hi,
+                "{name} averages {average:.1} and the brightest grass texel is \
+                 {grass_hi:.1}, so the ground swallows it",
+            );
+            assert!(
+                average < crowd_lo,
+                "{name} averages {average:.1} against the dimmest monster's \
+                 {crowd_lo:.1}, so the scenery is brighter than the horde",
+            );
+            // And it is rimmed like a monster rather than like the player: the
+            // wizard's bright edge is only findable while nothing else has one.
+            let (rim, body) = rim_and_body(&props, name);
+            assert!(
+                rim < body,
+                "{name} is outlined at {rim:.1} against {body:.1} inside it, so \
+                 a tree has the edge the player is supposed to have",
+            );
+        }
     }
 
     /// **The grass is darker and flatter than what stands on it.**
@@ -2033,19 +2249,28 @@ mod tests {
         });
     }
 
-    /// **The whole field is three batches, whatever order it comes in.**
+    /// **The whole field is four batches, whatever order it comes in.**
     ///
     /// The claim this module's sheet split exists for, and the one the scale
     /// sub-slice measured: a `SpriteRenderer` batch is a run of consecutive
     /// sprites naming one sheet, so an interleaved field of every kind must
-    /// still resolve to the terrain sheet, then the actors sheet, then the bolt
-    /// sheet — three runs, not one per enemy and not one per ground tile.
+    /// still resolve to the terrain sheet, then the props sheet, then the actors
+    /// sheet, then the bolt sheet — four runs, not one per enemy and not one per
+    /// ground tile.
     #[test]
-    fn an_interleaved_field_of_every_kind_is_three_batches() {
+    fn an_interleaved_field_of_every_kind_is_four_batches() {
         with_scene(|scene| {
             let kinds = [EnemyKind::Brute, EnemyKind::Grunt, EnemyKind::Runner];
             let render = RenderState {
                 player: DVec3::ZERO,
+                // Interleaved kinds here too: the props are two frames of one
+                // sheet, so the order they come in must not matter either.
+                props: (0..8)
+                    .map(|i| PropView {
+                        position: DVec3::new(i as f64 * 1.5 - 6.0, 6.0, 0.0),
+                        kind: PropKind::ALL[i % 2],
+                    })
+                    .collect(),
                 // Deliberately shuffled, which is what the simulation's
                 // `swap_remove` actually leaves behind.
                 enemies: (0..24)
@@ -2071,7 +2296,8 @@ mod tests {
             let frame = scene.build(&render, EXTENT).to_vec();
             let ground = scene.stats().ground;
             assert!(ground > 0, "the ground layer emitted nothing");
-            assert_eq!(frame.len(), ground + 6 + 24 + 1 + 3);
+            assert_eq!(scene.stats().props, 8, "a prop was culled by accident");
+            assert_eq!(frame.len(), ground + 8 + 6 + 24 + 1 + 3);
 
             let runs = 1 + frame
                 .windows(2)
@@ -2079,17 +2305,24 @@ mod tests {
                 .count();
             assert_eq!(
                 runs,
-                3,
-                "{} sprites in three kinds came out as {runs} batches",
+                4,
+                "{} sprites in four kinds came out as {runs} batches",
                 frame.len(),
             );
-            // …and the three sheets really are three, or the count above is
+            // …and the four sheets really are four, or the count above is
             // satisfied by everything sharing one.
             let mut sheets: Vec<_> = frame.iter().map(|s| s.sheet).collect();
             sheets.dedup();
-            assert_eq!(sheets.len(), 3);
+            assert_eq!(sheets.len(), 4);
             assert_eq!(sheets[0], scene.grass[0].sheet, "the ground comes first");
-            assert_eq!(sheets[2], scene.bolt.sheet, "the shots come last");
+            assert_eq!(sheets[1], scene.props[0].sheet, "then the scenery");
+            assert_eq!(sheets[3], scene.bolt.sheet, "the shots come last");
+            // The two prop kinds really are two frames of that one sheet.
+            assert_ne!(
+                scene.props[0].uv.map(f32::to_bits),
+                scene.props[1].uv.map(f32::to_bits),
+                "a tree and a bush are the same frame",
+            );
 
             // The three enemy kinds really are three different frames of that
             // one sheet, or "one batch" is one picture.
@@ -2144,9 +2377,9 @@ mod tests {
         });
     }
 
-    /// **Ten thousand enemies are still three batches**, which is what the
+    /// **Ten thousand enemies are still four batches**, which is what the
     /// plan's exit criterion asks for — a count that does not move with the
-    /// horde — and what the 34-sprite test above cannot give.
+    /// horde — and what the 42-sprite test above cannot give.
     ///
     /// The whole field is packed *inside* the view so nothing is culled: a
     /// version that let the cull do its job would assert the batch count over
@@ -2154,7 +2387,7 @@ mod tests {
     /// the pressure. The counting rule is
     /// [`crcbl::render::sprite_pass::batch_count`], the pass's own.
     #[test]
-    fn ten_thousand_visible_enemies_are_still_three_batches() {
+    fn ten_thousand_visible_enemies_are_still_four_batches() {
         const COUNT: usize = 10_000;
         with_scene(|scene| {
             // A grid inside the view box, which is 2 * view_half_width by
@@ -2179,6 +2412,10 @@ mod tests {
                     )
                 })
                 .collect();
+            // The real scatter, so the batch claim is made against the arena the
+            // game actually deals rather than against a fixture.
+            let props = crate::game::scatter_props(crate::game::DEFAULT_SEED);
+            assert!(!props.is_empty(), "the scatter dealt nothing");
             let render = RenderState {
                 player: DVec3::ZERO,
                 enemies,
@@ -2187,6 +2424,7 @@ mod tests {
                         position: DVec3::new(i as f64 * 0.5, 0.0, 0.0),
                     })
                     .collect(),
+                props,
                 ..RenderState::default()
             };
 
@@ -2199,24 +2437,26 @@ mod tests {
             );
             assert_eq!(stats.field, COUNT + 8);
             assert!(stats.ground > 0, "the ground layer emitted nothing");
+            assert!(stats.props > 0, "the props layer emitted nothing");
             assert_eq!(
                 stats.drawn,
-                stats.ground + COUNT + 8 + 1,
-                "the ground and the player are drawn too",
+                stats.ground + stats.props + COUNT + 8 + 1,
+                "the ground, the scenery and the player are drawn too",
             );
             assert_eq!(frame.len(), stats.drawn);
             assert_eq!(
-                stats.batches, 3,
+                stats.batches, 4,
                 "{} sprites came out as {} batches",
                 stats.drawn, stats.batches,
             );
-            // …and the three really are terrain, then actors, then the bolt
-            // sheet, or "three batches" is one sheet drawn three times.
+            // …and the four really are terrain, then props, then actors, then
+            // the bolt sheet, or "four batches" is one sheet drawn four times.
             let mut sheets: Vec<_> = frame.iter().map(|s| s.sheet).collect();
             sheets.dedup();
-            assert_eq!(sheets.len(), 3);
+            assert_eq!(sheets.len(), 4);
             assert_eq!(sheets[0], scene.grass[0].sheet, "the ground comes first");
-            assert_eq!(sheets[2], scene.bolt.sheet, "the shots come last");
+            assert_eq!(sheets[1], scene.props[0].sheet, "then the scenery");
+            assert_eq!(sheets[3], scene.bolt.sheet, "the shots come last");
         });
     }
 
@@ -2314,20 +2554,23 @@ mod tests {
             let render = RenderState {
                 player: DVec3::ZERO,
                 enemies,
+                props: crate::game::scatter_props(crate::game::DEFAULT_SEED),
                 ..RenderState::default()
             };
             scene.build(&render, EXTENT);
             let stats = scene.stats();
             assert_eq!(stats.field, count);
+            assert!(stats.props > 0, "the props layer emitted nothing");
             assert_eq!(
-                stats.field + 1 + stats.ground,
+                stats.field + 1 + stats.ground + stats.props,
                 stats.culled + stats.drawn,
                 "the cull's own arithmetic does not close",
             );
 
             // The enemies alone: the ground is generated rather than culled and
-            // would otherwise pad the number this test is about.
-            let survivors = stats.drawn - stats.ground - 1;
+            // the scenery is a constant of the seed, so both would otherwise pad
+            // the number this test is about.
+            let survivors = stats.drawn - stats.ground - stats.props - 1;
             // The view is about 37 x 28 units of a 96 x 72 arena, so a little
             // over an eighth of it. The bound is loose on purpose — the exact
             // number depends on the grid — but a cull that rejected nothing, or
@@ -2336,20 +2579,28 @@ mod tests {
                 survivors > 500 && survivors < count / 4,
                 "{survivors} of {count} survived the cull",
             );
-            assert_eq!(stats.batches, 2, "the ground, then one sheet of actors");
+            assert_eq!(
+                stats.batches, 3,
+                "the ground, the scenery, then one sheet of actors",
+            );
         });
     }
 
     /// Each kind of thing goes on the layer it belongs to, back to front.
+    ///
+    /// The props sit between the grass and everything that moves, which is the
+    /// order this module's header argues is the only one available — and the
+    /// reason `assets/props.crpix` draws a footprint rather than a treetop.
     #[test]
-    fn the_ground_is_behind_the_gems_and_the_shots_are_in_front() {
+    fn the_ground_is_behind_the_props_and_the_shots_are_in_front() {
         with_scene(|scene| {
-            assert_eq!(scene.stack.layer_count(), 5);
+            assert_eq!(scene.stack.layer_count(), 6);
             assert_eq!(scene.ground.depth(), 0);
-            assert_eq!(scene.gems.depth(), 1);
-            assert_eq!(scene.crowd.depth(), 2);
-            assert_eq!(scene.hero.depth(), 3);
-            assert_eq!(scene.shots.depth(), 4);
+            assert_eq!(scene.props_layer.depth(), 1);
+            assert_eq!(scene.gems.depth(), 2);
+            assert_eq!(scene.crowd.depth(), 3);
+            assert_eq!(scene.hero.depth(), 4);
+            assert_eq!(scene.shots.depth(), 5);
         });
     }
 
@@ -2389,6 +2640,49 @@ mod tests {
             };
             scene.build(&high, EXTENT);
             assert_eq!(scene.stack.sprites(scene.crowd).len(), 0);
+        });
+    }
+
+    /// **A prop outside the view is not a sprite**, and the near one is.
+    ///
+    /// The scatter is a whole arena's worth of scenery and a view is a fifteenth
+    /// of the arena, so a prop layer that drew the lot would hand the pass the
+    /// same constant every frame forever. Both halves are asserted in one run,
+    /// because a cull that rejected everything looks exactly like a cull that
+    /// works if only the far one is checked.
+    #[test]
+    fn props_outside_the_view_are_culled_and_the_near_one_is_not() {
+        with_scene(|scene| {
+            let far = view_half_width(EXTENT) + PROP_HALF_EXTENT + 5.0;
+            assert!(
+                far < ARENA_HALF_WIDTH,
+                "the far prop has to be somewhere the arena can hold it",
+            );
+            let render = RenderState {
+                player: DVec3::ZERO,
+                props: vec![
+                    PropView {
+                        position: DVec3::new(2.0, 0.0, 0.0),
+                        kind: PropKind::Tree,
+                    },
+                    PropView {
+                        position: DVec3::new(far, 0.0, 0.0),
+                        kind: PropKind::Bush,
+                    },
+                    // And vertically, which a cull written against one axis
+                    // passes.
+                    PropView {
+                        position: DVec3::new(0.0, VIEW_HALF_HEIGHT + PROP_HALF_EXTENT + 5.0, 0.0),
+                        kind: PropKind::Bush,
+                    },
+                ],
+                ..RenderState::default()
+            };
+            scene.build(&render, EXTENT);
+            let drawn = scene.stack.sprites(scene.props_layer).to_vec();
+            assert_eq!(drawn.len(), 1, "the near prop, and only it");
+            assert_eq!(drawn[0].uv, scene.props[prop_index(PropKind::Tree)].uv);
+            assert_eq!(scene.stats().props, 1, "the stat disagrees");
         });
     }
 

@@ -16,6 +16,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **horde**: **trees and bushes scattered over the arena, and the player cannot
+  walk through them.** A new `apps/horde/assets/props.crpix` — one 36-texel
+  frame size, a 0.9-unit tree and a 0.5-unit bush, each drawn to its own
+  collider to the texel — on a sheet and a layer of its own between the grass
+  and everything that moves. `game::scatter_props` deals them from a jittered
+  lattice as a pure function of the game's seed, so two games built from one
+  `Setup` stand in the same arena on every machine and in a replay.
+
+  **The collision is the player's alone**: enemies walk through props and bolts
+  fly through them, which is `docs/plan/sample/03-horde.md`'s hard cap on
+  pathfinding doing its job — a prop the horde had to route around would be an
+  obstacle query per enemy per tick on the one loop this sample exists to keep
+  flat. So a prop is a `game::PropView` in a plain `Vec` with no entity and no
+  collider, and the soak test's two exact leak equalities are unchanged.
+  `game::push_out_of_props` moves the player to the nearest point on the prop's
+  surface, so walking into a trunk off-centre slides round it rather than
+  sticking, and it runs beside the arena clamp — props first, then the wall,
+  which is the order that terminates. The lattice keeps every prop far enough
+  from a wall that the clamp can never hand the player back to one, and far
+  enough from the spawn that a run never starts inside a tree; both are `const`
+  assertions as well as tests.
+
+  `RenderState` carries `props`, `SceneStats` gained a `props` count beside
+  `ground`, and a populated frame is **four** batches instead of three. The
+  claim that number exists to make visible is unchanged and is the one it always
+  was: the batch count is flat in the size of the horde, not any particular
+  value.
+
 - **horde**: the three enemy kinds are **Diablo II monsters**. The frames in
   `apps/horde/assets/actors.crpix` are renamed and redrawn — `grunt` → `fallen`
   (a horned, hunched imp with a crude bone blade), `runner` → `quill-rat` (a low

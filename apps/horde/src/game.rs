@@ -679,9 +679,11 @@ fn run_seed(seed: u64, runs: u32) -> u64 {
 
 /// The index space for one spawn's draws.
 ///
-/// The **only** index space in this game, so there is nothing for it to collide
-/// with. Three bits of `which` leaves room for five more draws per spawn before
-/// the counter has to move.
+/// Three bits of `which` leaves room for five more draws per spawn before the
+/// counter has to move. The counter itself is unbounded, so this space is the
+/// whole of `u64` and there is no room in it for a second one — which is why
+/// the props are dealt from a **salted** seed rather than from a range of this.
+/// See [`PROP_HAND`].
 const fn spawn_index(counter: u64, which: u64) -> u64 {
     (counter << 3) | which
 }
@@ -754,6 +756,296 @@ pub fn clamp_to_arena(position: DVec3, radius: f64) -> DVec3 {
         clamp_axis(position.y, ARENA_HALF_HEIGHT - radius),
         position.z,
     )
+}
+
+// ---------------------------------------------------------------------------
+// The props
+// ---------------------------------------------------------------------------
+
+/// One of the two things scattered over the arena that the player cannot walk
+/// through.
+///
+/// # The player collides with these and nothing else does
+///
+/// **Enemies walk through them and bolts fly through them**, and that is the
+/// decision rather than an unfinished half of one.
+/// `docs/plan/sample/03-horde.md`'s hard cap bars pathfinding, and a prop the
+/// horde had to route around is pathfinding wearing a tree costume: the seek
+/// loop is the hottest path in this game and the sample exists to show that its
+/// cost does not move with the size of the field. An obstacle query per enemy
+/// per tick would be exactly the term that breaks that, for scenery.
+///
+/// The same reasoning keeps them out of the ECS and out of the broadphase.
+/// A prop is [`PropView`] in a plain `Vec` — no entity, no collider — so
+/// `steer_enemies`' `N` overlap queries return what they returned before,
+/// `sweep_bolts` sweeps what it swept before, and the leak test's two exact
+/// equalities (`entity_count` and `collider_count` in `Harness`) mean what they
+/// meant before. There is nothing here for either of them to count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PropKind {
+    /// The large one. A canopy seen from above.
+    Tree,
+    /// The small one.
+    Bush,
+}
+
+impl PropKind {
+    /// Every kind, in a fixed order, for the tests and the scatter.
+    pub const ALL: [Self; 2] = [Self::Tree, Self::Bush];
+
+    /// The collider radius, in world units.
+    ///
+    /// The tree is a little larger than [`EnemyKind::Brute`], so the biggest
+    /// thing on the field is scenery; the bush is exactly [`PLAYER_RADIUS`],
+    /// because "can I get round this" is judged against the shape the player
+    /// already knows the size of. `assets/props.crpix` draws each to its own
+    /// collider, to the texel, and `art.rs` asserts it.
+    #[must_use]
+    pub const fn radius(self) -> f64 {
+        match self {
+            Self::Tree => 0.9,
+            Self::Bush => 0.5,
+        }
+    }
+}
+
+/// The largest [`PropKind::radius`] there is.
+///
+/// A constant rather than a fold over [`PropKind::ALL`], because the scatter's
+/// spacing guarantees are `const` assertions and a fold is not a constant
+/// expression. `the_largest_prop_radius_is_the_one_the_spacing_was_checked
+/// _against` is what stops a third kind leaving it stale.
+const PROP_MAX_RADIUS: f64 = PropKind::Tree.radius();
+
+/// One prop: where it stands and what it is.
+///
+/// **One type, where the enemies and the gems each have two.** `Enemy` carries
+/// hit points and an entity that `EnemyView` has no use for; a prop is a
+/// position and a kind to the simulation and the same position and kind to the
+/// renderer, so a second struct would be a copy of this one with the same two
+/// fields in it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PropView {
+    pub position: DVec3,
+    pub kind: PropKind,
+}
+
+/// The side of one scatter cell, in world units.
+///
+/// **The pitch of the whole layout**: at most one prop is dealt per cell, so
+/// this is how far apart props can be and how often one can turn up in a
+/// straight walk. At [`PLAYER_SPEED`] a cell takes a little over a second to
+/// cross, which is the interval a player meets scenery at — often enough to be
+/// something you steer around, rare enough that steering is not what the game
+/// is about.
+///
+/// It is also both spacing guarantees. See [`scatter_props`].
+pub const PROP_CELL: f64 = 8.0;
+
+/// How far from its cell's centre a prop may be dealt, in world units.
+///
+/// The lattice is what bounds the layout and the jitter is what stops it
+/// *looking* like a lattice — the same split `assets/terrain.crpix` makes for
+/// the ground, arrived at the other way round: the grass hides its grid by
+/// having no tile-scale feature, and the scatter hides its grid by moving the
+/// feature. Half the cell would erase the grid entirely and take both spacing
+/// guarantees with it.
+pub const PROP_JITTER: f64 = 2.0;
+
+/// The share of cells that hold a prop at all.
+///
+/// A share rather than a count, so the layout follows the arena instead of
+/// having to be re-tuned beside it. The number is bounded on both sides by how
+/// a survivors run reads: too many and a 96 × 72 arena is a maze the horde
+/// ignores while the player is penned in by scenery the horde walks through;
+/// too few and props are a surprise rather than a feature of the ground.
+/// A little under half the cells puts a handful in a view of about 37 × 28
+/// units and leaves the great majority of the arena open —
+/// `the_scatter_is_sparse_and_never_pens_the_player_in` measures both.
+const PROP_DENSITY: f64 = 0.45;
+
+/// The share of props that are trees rather than bushes.
+///
+/// The minority, because the tree is the one that actually blocks a route: at
+/// 0.9 units it is wider than any monster, and a field where most of the
+/// scenery is that size stops being scenery.
+const PROP_TREE_SHARE: f64 = 0.4;
+
+/// How much clear ground the player is dealt around the spawn, in world units.
+///
+/// **The player must not begin a run inside a tree**, and this is what makes
+/// that true by construction rather than by a rejection loop: any prop whose
+/// disc reaches inside this radius of the origin — where `place_player` puts
+/// the wizard, on a fresh game and on every restart — is simply not dealt.
+///
+/// Three player-diameters of clear ground on every side, so at [`PLAYER_SPEED`]
+/// there is most of a second of travel in any direction before the first prop
+/// can be reached. `a_run_never_starts_inside_a_prop` asserts the clearance
+/// over a spread of seeds, having first asserted the scatter is not empty.
+pub const PROP_SPAWN_CLEARANCE: f64 = 4.0;
+
+/// The hand the props are dealt from, as a salt on the game's seed.
+///
+/// `"PROPS"` in ASCII, in the spirit of `COMPATIBILITY` — an arbitrary constant
+/// that is at least readable in a hex dump. [`crcbl::core::rand::salt`] is the
+/// operation for *another seed from this one*, which is what keeps the scatter's
+/// index space clear of the spawner's: `spawn_index` packs a counter that is
+/// unbounded, so no bit pattern is free for a second index space to use and the
+/// two have to be told apart by the seed instead.
+const PROP_HAND: u64 = 0x0000_0050_524F_5053;
+
+/// The index space for one scatter cell's draws.
+///
+/// The same packing [`spawn_index`] uses, in the salted hand [`PROP_HAND`]
+/// names, and with the same three bits of headroom.
+const fn prop_index(cell: u64, which: u64) -> u64 {
+    (cell << 3) | which
+}
+
+/// Which draw of a cell is which.
+const DRAW_PROP_PRESENCE: u64 = 0;
+const DRAW_PROP_X: u64 = 1;
+const DRAW_PROP_Y: u64 = 2;
+const DRAW_PROP_KIND: u64 = 3;
+
+/// The props of a game seeded with `seed`.
+///
+/// # It is dealt from the game's seed, not the run's
+///
+/// The horde is re-dealt by a restart — [`run_seed`] — and the scenery is not.
+/// A prop is a feature of the *place*: the walls do not move when a player
+/// presses `R` and neither does the ground, and a player who learns where the
+/// cover is should keep that between attempts at the same seed. Two games built
+/// from the same [`Setup`] therefore stand in the same arena, on every machine
+/// and in a replay, which is what makes a recorded script meet the layout it
+/// recorded against.
+///
+/// # A jittered lattice, so the spacing is a property rather than a hope
+///
+/// The arena is cut into whole cells of at least [`PROP_CELL`] — `floor`, so a
+/// cell is never *smaller* than that — and each cell deals at most one prop,
+/// displaced from its own centre by up to [`PROP_JITTER`] on each axis. Two
+/// consequences follow from arithmetic rather than from tuning, and both are
+/// asserted below at compile time:
+///
+/// * **No two props can overlap the player at once.** Two props are at least
+///   `cell - 2 * jitter` apart, which is wider than two of the largest discs
+///   the player can be inside of — so `push_out_of_props` resolving them one at
+///   a time in a single pass is exact and not an approximation.
+/// * **The arena clamp can never push the player into a prop.** The outermost
+///   cell centre sits half a cell from the wall, so a prop is at least
+///   `cell / 2 - jitter` from it; a player pressed against that wall has its
+///   centre [`PLAYER_RADIUS`] inside, so the clearance the layout needs is the
+///   prop's radius plus *two* of the player's.
+///
+/// A rejection loop over random points would give neither, and would not be a
+/// pure function of the seed without a bound nobody could state.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the lattice is a dozen cells across an arena fixed at compile time"
+)]
+pub fn scatter_props(seed: u64) -> Vec<PropView> {
+    const {
+        assert!(
+            PROP_CELL - 2.0 * PROP_JITTER >= 2.0 * (PROP_MAX_RADIUS + PLAYER_RADIUS),
+            "two props can be close enough to overlap the player at once, so \
+             pushing out of one at a time is not exact",
+        );
+        assert!(
+            PROP_CELL / 2.0 - PROP_JITTER >= PROP_MAX_RADIUS + 2.0 * PLAYER_RADIUS,
+            "a prop can be dealt close enough to a wall that the arena clamp \
+             pushes the player into it",
+        );
+        assert!(
+            PROP_CELL <= 2.0 * ARENA_HALF_HEIGHT && PROP_CELL <= 2.0 * ARENA_HALF_WIDTH,
+            "the arena does not hold one whole scatter cell",
+        );
+    }
+
+    let hand = crcbl::core::rand::salt(seed, PROP_HAND);
+    let cols = (2.0 * ARENA_HALF_WIDTH / PROP_CELL).floor() as u32;
+    let rows = (2.0 * ARENA_HALF_HEIGHT / PROP_CELL).floor() as u32;
+    let step_x = 2.0 * ARENA_HALF_WIDTH / f64::from(cols);
+    let step_y = 2.0 * ARENA_HALF_HEIGHT / f64::from(rows);
+
+    let mut props = Vec::new();
+    for row in 0..rows {
+        for col in 0..cols {
+            let cell = u64::from(row) * u64::from(cols) + u64::from(col);
+            if hash_unit(hand, prop_index(cell, DRAW_PROP_PRESENCE)) >= PROP_DENSITY {
+                continue;
+            }
+            let kind = if hash_unit(hand, prop_index(cell, DRAW_PROP_KIND)) < PROP_TREE_SHARE {
+                PropKind::Tree
+            } else {
+                PropKind::Bush
+            };
+            let offset =
+                |which| (hash_unit(hand, prop_index(cell, which)) * 2.0 - 1.0) * PROP_JITTER;
+            let position = DVec3::new(
+                -ARENA_HALF_WIDTH + (f64::from(col) + 0.5) * step_x + offset(DRAW_PROP_X),
+                -ARENA_HALF_HEIGHT + (f64::from(row) + 0.5) * step_y + offset(DRAW_PROP_Y),
+                0.0,
+            );
+            // The glade the player starts in. See `PROP_SPAWN_CLEARANCE`.
+            if position.length() < PROP_SPAWN_CLEARANCE + kind.radius() {
+                continue;
+            }
+            props.push(PropView { position, kind });
+        }
+    }
+    props
+}
+
+/// Brings a body of `radius` out of any prop it is standing in, and leaves it
+/// **bit-exact** when it is standing in none.
+///
+/// # It slides rather than sticking
+///
+/// The body is moved to the nearest point on the prop's surface — straight out
+/// along the line between the two centres — so only the component of the
+/// approach that was *into* the disc is taken away and the component along it
+/// survives. Walking diagonally into a trunk therefore slides round it, which is
+/// exactly what [`clamp_axis`] does at a wall: it takes one axis and leaves the
+/// other alone. Stopping the body dead instead would need this to know what
+/// velocity brought it here, which is a second thing to keep in step for a worse
+/// feel.
+///
+/// Bit-exactness is load-bearing for the same reason it is on [`clamp_axis`]:
+/// `confine_player` writes a transform back only when the position it computed
+/// differs from the one it was handed.
+///
+/// **One pass.** [`scatter_props`] spaces props so that no two can contain one
+/// body at once, so resolving them in sequence cannot push out of one and into
+/// another and there is no iteration to converge.
+#[must_use]
+pub fn push_out_of_props(position: DVec3, radius: f64, props: &[PropView]) -> DVec3 {
+    let mut out = position;
+    for prop in props {
+        let clear = prop.kind.radius() + radius;
+        let (dx, dy) = (out.x - prop.position.x, out.y - prop.position.y);
+        let distance = dx.hypot(dy);
+        if distance >= clear {
+            continue;
+        }
+        // Two exactly coincident centres have no direction between them — the
+        // same tie `spawn_jitter` exists to break for two coincident enemies.
+        // A fixed axis is enough here where a drawn one was needed there: there
+        // is one player, so there is no pair to push apart symmetrically.
+        let (nx, ny) = if distance > 0.0 {
+            (dx / distance, dy / distance)
+        } else {
+            (1.0, 0.0)
+        };
+        out = DVec3::new(
+            prop.position.x + nx * clear,
+            prop.position.y + ny * clear,
+            out.z,
+        );
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -964,6 +1256,14 @@ struct GameLogic {
     /// the collection query and the separation query hand back entity ids.
     pickups: Vec<Pickup>,
     pickup_by_entity: HashMap<Entity, usize>,
+
+    /// The trees and bushes the player cannot walk through.
+    ///
+    /// **Dealt once, from the game's seed, and never touched again** — see
+    /// [`scatter_props`] for why a restart does not re-deal them and
+    /// [`PropKind`] for why they are a plain `Vec` rather than entities with
+    /// colliders. `clamp_bodies` reads it and nothing writes it.
+    props: Vec<PropView>,
 
     /// Experience banked towards the next level, and which level the run is on.
     /// The run starts at level 1.
@@ -1243,11 +1543,17 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
 /// Only bodies that are actually outside are written, which is what makes
 /// [`clamp_axis`]' bit-exactness load-bearing: an inexact round trip would make
 /// this an unconditional `N` transform writes a tick.
+///
+/// **The props are the player's alone**, so the enemies go through the plain
+/// clamp and the player goes through [`confine_player`]. [`PropKind`] carries
+/// the reasoning; the shape of it here is that the horde's per-body work is
+/// unchanged by scenery existing.
 fn clamp_bodies(logic: &mut GameLogic, world: &mut World) {
     let player = logic.player;
     let mut enemies = std::mem::take(&mut logic.enemies);
+    let props = std::mem::take(&mut logic.props);
     with_physics(world, |phys| {
-        clamp_one(phys, player, PLAYER_RADIUS);
+        confine_player(phys, player, &props);
         for enemy in &mut enemies {
             if let Some(position) = clamp_one(phys, enemy.entity, enemy.kind.radius()) {
                 enemy.position = position;
@@ -1255,6 +1561,7 @@ fn clamp_bodies(logic: &mut GameLogic, world: &mut World) {
         }
     });
     logic.enemies = enemies;
+    logic.props = props;
 }
 
 /// Clamps one body, and reports where it ended up if it moved.
@@ -1266,6 +1573,28 @@ fn clamp_one(phys: &mut PhysicsSystem, entity: Entity, radius: f64) -> Option<DV
     }
     phys.set_transform(entity, Transform::new(clamped, transform.rotation));
     Some(clamped)
+}
+
+/// The same for the player, which is also pushed out of the props.
+///
+/// **Props first, then the wall**, and the order is the one that terminates.
+/// The other way round, a player pushed out of a prop could finish outside the
+/// arena and spend the next tick being clamped back into it — a body oscillating
+/// between two resolutions that each undo the other. This way the wall has the
+/// last word, and [`scatter_props`] guarantees the wall never hands the player
+/// back to a prop: no prop is dealt close enough to one for a clamped player to
+/// be inside it.
+fn confine_player(phys: &mut PhysicsSystem, entity: Entity, props: &[PropView]) -> Option<DVec3> {
+    let transform = phys.transform(entity).copied()?;
+    let confined = clamp_to_arena(
+        push_out_of_props(transform.position, PLAYER_RADIUS, props),
+        PLAYER_RADIUS,
+    );
+    if confined == transform.position {
+        return None;
+    }
+    phys.set_transform(entity, Transform::new(confined, transform.rotation));
+    Some(confined)
 }
 
 // ---------------------------------------------------------------------------
@@ -2098,6 +2427,12 @@ pub struct RenderState {
     pub enemies: Vec<EnemyView>,
     pub bolts: Vec<BoltView>,
     pub pickups: Vec<PickupView>,
+    /// The trees and bushes, which never move and never change.
+    ///
+    /// Copied per frame like everything else here rather than handed over once:
+    /// the list is tens of items where the crowd is thousands, and a renderer
+    /// that held its own copy would be a second place the layout lives.
+    pub props: Vec<PropView>,
     /// How long this run has lasted, in simulated seconds.
     pub elapsed: f64,
     pub kills: u64,
@@ -2288,6 +2623,7 @@ impl Game {
             bolts: Vec::new(),
             pickups: Vec::new(),
             pickup_by_entity: HashMap::new(),
+            props: scatter_props(setup.seed),
             xp: 0,
             level: 1,
             offer: None,
@@ -2524,6 +2860,8 @@ impl Game {
         out.bolts.extend_from_slice(&logic.bolt_views);
         out.pickups.clear();
         out.pickups.extend_from_slice(&logic.pickup_views);
+        out.props.clear();
+        out.props.extend_from_slice(&logic.props);
         out.elapsed = logic.elapsed;
         out.kills = logic.kills;
         out.xp = logic.xp;
@@ -2573,6 +2911,15 @@ impl Game {
     #[must_use]
     pub fn pickup_count(&self) -> usize {
         lock(&self.shared).pickups.len()
+    }
+
+    /// The trees and bushes this game's arena was dealt.
+    ///
+    /// Fixed for the life of the game, restarts included — see
+    /// [`scatter_props`].
+    #[must_use]
+    pub fn props(&self) -> Vec<PropView> {
+        lock(&self.shared).props.clone()
     }
 
     /// Experience banked towards the next level.
@@ -3376,6 +3723,462 @@ mod tests {
         let mut harness = Harness::staged(60, 60, DVec3::ZERO);
         harness.run_ticks(60, &[(0, KeyCode::KeyD, true), (0, KeyCode::KeyA, true)]);
         assert_eq!(harness.game.player, DVec3::ZERO);
+    }
+
+    // ---- the props -----------------------------------------------------------
+
+    /// The distance from `point` to the segment `a → b`.
+    fn distance_to_segment(point: DVec3, a: DVec3, b: DVec3) -> f64 {
+        let ab = b - a;
+        let length = ab.length_squared();
+        let t = if length > 0.0 {
+            ((point - a).dot(ab) / length).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (point - (a + ab * t)).length()
+    }
+
+    /// A prop of this game's own scatter with `clear` units of open ground round
+    /// it and the same off every wall, so a test can walk into it without
+    /// meeting something else on the way.
+    ///
+    /// Taken from the real layout rather than staged, because a prop is not
+    /// something the simulation can be handed — the whole list is a function of
+    /// the seed. The `expect` is the test's own anti-vacuity: a scatter that
+    /// stopped producing anything walkable-to fails here rather than passing a
+    /// collision test that never touched a prop.
+    fn isolated_prop(props: &[PropView], kind: PropKind, clear: f64) -> PropView {
+        *props
+            .iter()
+            .find(|prop| {
+                prop.kind == kind
+                    && ARENA_HALF_WIDTH - prop.position.x.abs() > clear
+                    && ARENA_HALF_HEIGHT - prop.position.y.abs() > clear
+                    && props.iter().all(|other| {
+                        std::ptr::eq(*prop, other)
+                            || (other.position - prop.position).length() > clear
+                    })
+            })
+            .unwrap_or_else(|| panic!("no {kind:?} in the scatter has {clear} units round it"))
+    }
+
+    /// **The layout is a pure function of the seed**, and two seeds are two
+    /// arenas.
+    ///
+    /// Derived twice from the seed *independently* — through two whole `Game`s,
+    /// not two calls that could be reading one memoised answer — because the
+    /// scatter is simulation the player collides with, and a layout that differed
+    /// between a run and its replay, or between a client and a server, is the
+    /// failure this exists to rule out.
+    ///
+    /// A constant function is perfectly deterministic, so the second half is what
+    /// makes the first mean anything: different seeds must give different arenas.
+    #[test]
+    fn the_prop_layout_is_a_pure_function_of_the_seed() {
+        let setup = |seed| Setup {
+            headless: true,
+            seed,
+            ..Setup::default()
+        };
+        let dealt = |seed| {
+            Game::with_setup(&setup(seed))
+                .expect("a headless game always starts")
+                .props()
+        };
+
+        let first = dealt(DEFAULT_SEED);
+        assert!(!first.is_empty(), "the default seed was dealt no props");
+        assert_eq!(
+            first,
+            dealt(DEFAULT_SEED),
+            "two games on one seed stand in two different arenas",
+        );
+        // …and the free function agrees with what the game is holding, so the
+        // tests below may use either.
+        assert_eq!(first, scatter_props(DEFAULT_SEED));
+
+        // Different seeds, different arenas — asserted as *layouts* rather than
+        // as counts, because two different scatters of the same size are a pass
+        // for a count and a failure for this.
+        let mut seen = std::collections::HashSet::new();
+        for run in 0..64u64 {
+            let seed = DEFAULT_SEED.wrapping_add(run.wrapping_mul(0x9E37_79B9));
+            let props = dealt(seed);
+            assert!(!props.is_empty(), "seed {seed:#x} was dealt no props");
+            let key: Vec<(u64, u64, PropKind)> = props
+                .iter()
+                .map(|prop| {
+                    (
+                        prop.position.x.to_bits(),
+                        prop.position.y.to_bits(),
+                        prop.kind,
+                    )
+                })
+                .collect();
+            assert!(seen.insert(key), "seed {seed:#x} repeated another's arena");
+        }
+    }
+
+    /// **A restart does not re-deal the scenery**, which is the one place this
+    /// game's determinism story differs from the horde's.
+    ///
+    /// `run_seed` deals a new hand of enemies every run on purpose. The arena is
+    /// not a hand: a player who learns where the cover is keeps that between
+    /// attempts, exactly as they keep where the walls are. See `scatter_props`.
+    #[test]
+    fn a_restart_deals_a_new_horde_and_the_same_arena() {
+        let mut harness = Harness::new(60, 60);
+        // One tick first, so the queued start edge is spent before the restart
+        // edge arrives — two on one tick is a start, not a start and a restart.
+        harness.run_ticks(1, &[]);
+        let before = harness.game.props();
+        let horde_before = harness.game.run_seed();
+        harness.restart_run();
+        assert_eq!(harness.game.props(), before, "the arena was re-dealt");
+        assert_ne!(
+            harness.game.run_seed(),
+            horde_before,
+            "the horde was not re-dealt, so this test compares nothing",
+        );
+    }
+
+    /// **A run never starts inside a prop**, on any seed.
+    ///
+    /// `place_player` puts the wizard at the origin on a fresh game and on every
+    /// restart, and `scatter_props` refuses to deal anything whose disc reaches
+    /// the clearing round it. Asserted over a spread of seeds, and each one is
+    /// asserted to have produced a scatter first — the whole check is vacuous on
+    /// an empty arena, which is exactly what a broken scatter would give.
+    #[test]
+    fn a_run_never_starts_inside_a_prop() {
+        for run in 0..256u64 {
+            let seed = DEFAULT_SEED.wrapping_add(run.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let props = scatter_props(seed);
+            assert!(!props.is_empty(), "seed {seed:#x} was dealt no props");
+            for prop in &props {
+                let gap = prop.position.length() - prop.kind.radius();
+                assert!(
+                    gap >= PROP_SPAWN_CLEARANCE - 1e-9,
+                    "seed {seed:#x}: a {:?} leaves {gap} of clear ground at the \
+                     spawn, against {PROP_SPAWN_CLEARANCE}",
+                    prop.kind,
+                );
+            }
+        }
+
+        // …and the player really is put at the origin and left there, rather
+        // than being pushed off it by something the arithmetic above missed.
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        harness.run_ticks(30, &[]);
+        assert_eq!(harness.game.player, DVec3::ZERO);
+    }
+
+    /// **The arena clamp can never push the player into a prop**, which is the
+    /// other half of "and cannot be pushed into one".
+    ///
+    /// The lattice keeps every prop at least its own radius plus a player's
+    /// *diameter* off the wall, so a player squashed against that wall — the one
+    /// position they have no way out of — is at worst exactly touching. Asserted
+    /// by walking the whole clamped boundary rather than by re-deriving the
+    /// inequality: `push_out_of_props` must leave every clamped point alone.
+    #[test]
+    fn the_arena_clamp_never_pushes_the_player_into_a_prop() {
+        for run in 0..32u64 {
+            let seed = DEFAULT_SEED.wrapping_add(run.wrapping_mul(0x2545_F491_4F6C_DD1D));
+            let props = scatter_props(seed);
+            assert!(!props.is_empty(), "seed {seed:#x} was dealt no props");
+            // A fine walk round the inside of all four walls, plus the corners,
+            // which is where two clamps meet.
+            let steps = 2_000;
+            for step in 0..=steps {
+                let t = f64::from(step) / f64::from(steps);
+                let x = -ARENA_HALF_WIDTH + t * 2.0 * ARENA_HALF_WIDTH;
+                let y = -ARENA_HALF_HEIGHT + t * 2.0 * ARENA_HALF_HEIGHT;
+                for outside in [
+                    DVec3::new(x, 1e6, 0.0),
+                    DVec3::new(x, -1e6, 0.0),
+                    DVec3::new(1e6, y, 0.0),
+                    DVec3::new(-1e6, y, 0.0),
+                ] {
+                    let clamped = clamp_to_arena(outside, PLAYER_RADIUS);
+                    assert_eq!(
+                        push_out_of_props(clamped, PLAYER_RADIUS, &props),
+                        clamped,
+                        "seed {seed:#x}: the wall put the player at {clamped:?}, \
+                         which is inside a prop",
+                    );
+                }
+            }
+        }
+    }
+
+    /// **The scatter is scenery, not a maze**, and neither half is left to the
+    /// eye.
+    ///
+    /// The failure at one end is a 96 × 72 arena the player is penned into while
+    /// the horde walks through the pen; at the other it is scenery nobody sees.
+    /// So: the gap between any two props is wider than the player, the arena is
+    /// overwhelmingly open ground, and the count is pinned — the numbers here are
+    /// what `PROP_DENSITY`'s reasoning claims, so a change to it is told rather
+    /// than left to be noticed in play.
+    #[test]
+    fn the_scatter_is_sparse_and_never_pens_the_player_in() {
+        let arena = 4.0 * ARENA_HALF_WIDTH * ARENA_HALF_HEIGHT;
+        let (mut fewest, mut most) = (usize::MAX, 0usize);
+        for run in 0..64u64 {
+            let seed = DEFAULT_SEED.wrapping_add(run.wrapping_mul(0x1234_5678_9ABC_DEF1));
+            let props = scatter_props(seed);
+            fewest = fewest.min(props.len());
+            most = most.max(props.len());
+
+            let mut covered = 0.0;
+            for (index, prop) in props.iter().enumerate() {
+                covered += std::f64::consts::PI * prop.kind.radius().powi(2);
+                for other in &props[index + 1..] {
+                    let gap = (other.position - prop.position).length()
+                        - prop.kind.radius()
+                        - other.kind.radius();
+                    assert!(
+                        gap > 2.0 * PLAYER_RADIUS,
+                        "seed {seed:#x}: two props leave a {gap}-unit gap, which \
+                         the player is {} across and cannot fit through",
+                        2.0 * PLAYER_RADIUS,
+                    );
+                }
+                // Inside the arena, by the margin the clamp proof needs.
+                let inset = prop.kind.radius() + 2.0 * PLAYER_RADIUS;
+                assert!(
+                    prop.position.x.abs() <= ARENA_HALF_WIDTH - inset + 1e-9
+                        && prop.position.y.abs() <= ARENA_HALF_HEIGHT - inset + 1e-9,
+                    "seed {seed:#x}: a prop at {:?} is too close to a wall",
+                    prop.position,
+                );
+            }
+            assert!(
+                covered < arena / 50.0,
+                "seed {seed:#x}: the props cover {covered:.0} of {arena:.0} \
+                 square units, which is scenery you have to walk round",
+            );
+        }
+        assert!(
+            (30..=70).contains(&fewest) && (30..=70).contains(&most),
+            "the scatter dealt between {fewest} and {most} props over 64 seeds",
+        );
+    }
+
+    /// **A player walking at a prop is stopped by it, at its surface**, and an
+    /// unobstructed walk of the same length is not stopped at all.
+    ///
+    /// The control is the half that makes this a test. A player aimed at a prop
+    /// and *missing* it stops nowhere and passes any assertion about not having
+    /// reached the far side — so the same script is run over open ground and
+    /// asserted to have covered the whole distance, and the obstructed run is
+    /// asserted to have finished exactly one radius pair from the prop's centre
+    /// rather than merely somewhere short.
+    #[test]
+    fn a_player_walking_at_a_prop_stops_at_its_surface() {
+        const APPROACH: f64 = 6.0;
+        const TICKS: u64 = 120;
+        // Twice the approach, so a walk that was not stopped ends up well past
+        // the prop rather than just short of the far side.
+        let travel = PLAYER_SPEED * f64::from(u32::try_from(TICKS).expect("small")) / 60.0;
+        assert!(travel > 2.0 * APPROACH, "the script does not overshoot");
+
+        let props = scatter_props(DEFAULT_SEED);
+        let target = isolated_prop(&props, PropKind::Tree, 9.0);
+        let start = target.position - DVec3::X * APPROACH;
+
+        let mut harness = Harness::staged(60, 60, start);
+        harness.run_ticks(TICKS, &[(0, KeyCode::KeyD, true)]);
+        let stopped = harness.game.player;
+
+        let clear = target.kind.radius() + PLAYER_RADIUS;
+        assert!(
+            ((stopped - target.position).length() - clear).abs() < 1e-9,
+            "the player finished {} from the trunk and its surface is at \
+             {clear}: {stopped:?} against {:?}",
+            (stopped - target.position).length(),
+            target.position,
+        );
+        assert!(
+            (stopped.y - start.y).abs() < 1e-9,
+            "a head-on approach slid sideways: {stopped:?} from {start:?}",
+        );
+        // It walked, rather than being stopped where it stood.
+        assert!(
+            stopped.x - start.x > APPROACH - clear - 1e-9,
+            "the player only covered {} of the {} to the trunk",
+            stopped.x - start.x,
+            APPROACH - clear,
+        );
+
+        // The control: the same script over ground with nothing on it.
+        let open = (0..)
+            .map(|i| start + DVec3::Y * (f64::from(i) * 0.25 + 3.0))
+            .take(400)
+            .find(|from| {
+                from.y.abs() < ARENA_HALF_HEIGHT - PLAYER_RADIUS
+                    && props.iter().all(|prop| {
+                        distance_to_segment(prop.position, *from, *from + DVec3::X * travel)
+                            > prop.kind.radius() + PLAYER_RADIUS + 0.5
+                    })
+            })
+            .expect("the arena holds an unobstructed corridor");
+        let mut harness = Harness::staged(60, 60, open);
+        harness.run_ticks(TICKS, &[(0, KeyCode::KeyD, true)]);
+        assert!(
+            (harness.game.player.x - open.x - travel).abs() < 0.15,
+            "an unobstructed walk covered {} of {travel}",
+            harness.game.player.x - open.x,
+        );
+    }
+
+    /// **A player walking into a prop off-centre slides round it**, which is the
+    /// difference between scenery and glue.
+    ///
+    /// The push takes the component of the approach that was *into* the disc and
+    /// leaves the component along it, exactly as `clamp_axis` takes one axis at a
+    /// wall — so a player pressing east against a trunk they met off-centre
+    /// keeps sliding until they are past it, on a single held key.
+    ///
+    /// The offset is well inside the pair of radii, so the straight-line path
+    /// really does run into the trunk: a version that missed it would slide
+    /// nowhere and pass a weaker assertion about having got past.
+    #[test]
+    fn a_player_walking_into_a_prop_off_centre_slides_round_it() {
+        let props = scatter_props(DEFAULT_SEED);
+        let target = isolated_prop(&props, PropKind::Tree, 9.0);
+        let clear = target.kind.radius() + PLAYER_RADIUS;
+        let offset = 0.35;
+        assert!(
+            offset < clear,
+            "the approach misses the trunk, so nothing is being slid round",
+        );
+
+        let start = target.position - DVec3::X * 6.0 + DVec3::Y * offset;
+        let mut harness = Harness::staged(60, 60, start);
+        harness.run_ticks(180, &[(0, KeyCode::KeyD, true)]);
+        let end = harness.game.player;
+
+        assert!(
+            end.x > target.position.x + clear - 1e-9,
+            "the player stuck on the trunk at {end:?}, west of {:?}",
+            target.position,
+        );
+        assert!(
+            end.y - start.y > 1.0,
+            "the player got past without sliding: it left y = {} and finished \
+             at y = {}",
+            start.y,
+            end.y,
+        );
+    }
+
+    /// **Enemies and bolts pass through the props, and that is the decision.**
+    ///
+    /// `docs/plan/sample/03-horde.md`'s hard cap bars pathfinding, so a prop the
+    /// horde had to route around would be pathfinding wearing a tree costume —
+    /// see `PropKind`. Both halves are asserted here because both are things a
+    /// later change could quietly take away, and neither would show up as a
+    /// failure anywhere else: the horde would simply get slower.
+    #[test]
+    fn enemies_and_bolts_pass_through_the_props_the_player_cannot() {
+        let props = scatter_props(DEFAULT_SEED);
+        let target = isolated_prop(&props, PropKind::Tree, 9.0);
+        let full = EnemyKind::Brute.max_hp();
+
+        // **The horde walks through.** The player stands far enough back that
+        // the gun never fires, so what crosses the trunk is a seeking body and
+        // nothing else — a brute shot to pieces on the way would prove nothing.
+        let far = target.position - DVec3::X * (WEAPON_RANGE + 2.0);
+        let mut harness = Harness::staged(60, 60, far);
+        harness
+            .game
+            .stage_enemy(EnemyKind::Brute, target.position + DVec3::X * 3.0);
+        let mut walked_through = false;
+        // Stopped the moment it has, rather than run on: the brute is closing
+        // on the player the whole time, and a long enough run brings it into
+        // `WEAPON_RANGE` and turns this into a test with a gun in it.
+        while harness.ticks < 150 && !walked_through {
+            harness.run_ticks(harness.ticks + 1, &[]);
+            for position in harness.game.enemy_positions() {
+                if (position - target.position).length() < target.kind.radius() {
+                    walked_through = true;
+                }
+            }
+        }
+        assert_eq!(harness.game.bolts_fired(), 0, "the gun joined in");
+        assert!(
+            walked_through,
+            "the brute never stood inside the trunk, so nothing was tested",
+        );
+
+        // **The gun shoots through.** Close enough to fire, and short enough
+        // that the brute is still on the far side of the trunk when the damage
+        // is read — so the bolts that landed crossed it.
+        let player = target.position - DVec3::X * 3.0;
+        let mut harness = Harness::staged(60, 60, player);
+        let brute = harness
+            .game
+            .stage_enemy(EnemyKind::Brute, target.position + DVec3::X * 3.0);
+        assert_eq!(harness.game.enemy_hp(brute), Some(full));
+        harness.run_ticks(30, &[]);
+        let left = harness
+            .game
+            .enemy_hp(brute)
+            .expect("half a second of a four-a-second gun does not kill a brute");
+        assert!(
+            left < full,
+            "no bolt reached the brute through the trunk: {left} of {full}",
+        );
+        let standing = harness
+            .game
+            .enemy_positions()
+            .first()
+            .copied()
+            .expect("the brute is alive");
+        assert!(
+            standing.x > target.position.x + target.kind.radius(),
+            "the brute walked clear of the trunk before it was hit, so the shot \
+             had a clear line: {standing:?} against {:?}",
+            target.position,
+        );
+    }
+
+    /// **A prop is neither an entity nor a collider**, which is what leaves the
+    /// leak test's two exact equalities meaning what they meant.
+    ///
+    /// `Harness::assert_nothing_leaked` says the world holds the player, the
+    /// enemies, the bolts and the gems and nothing else, and that the broadphase
+    /// holds the enemies and the gems and nothing else. Scenery that had entered
+    /// either would break both — and would also have put itself in front of every
+    /// separation query the sample exists to measure.
+    #[test]
+    fn the_props_are_neither_entities_nor_colliders() {
+        let mut harness = Harness::new(60, 60);
+        assert!(
+            !harness.game.props().is_empty(),
+            "an empty arena makes the counts below vacuous",
+        );
+        harness.play_ticks(240);
+        assert!(harness.game.enemy_count() > 0, "nothing to count against");
+        harness.assert_nothing_leaked();
+    }
+
+    /// `PROP_MAX_RADIUS` really is the largest, so the spacing this file
+    /// `const`-asserts was checked against the right number.
+    ///
+    /// It cannot be a fold over [`PropKind::ALL`] — a `const` assertion needs a
+    /// constant — so a third kind added below the tree is exactly the change
+    /// that would leave it stale.
+    #[test]
+    fn the_largest_prop_radius_is_the_one_the_spacing_was_checked_against() {
+        let largest = PropKind::ALL
+            .iter()
+            .map(|kind| kind.radius())
+            .fold(0.0f64, f64::max);
+        assert_eq!(largest, PROP_MAX_RADIUS);
     }
 
     // ---- seeking and separation, which is what this sample is for -------------

@@ -83,9 +83,20 @@ separation, contact damage, hit points, death and restart; `.crpix` art through
 `SpriteRenderer` with `SampleMode::Pixel`; XP gems that drop where an enemy died
 and a "pick 1 of 3" level-up from a fixed pool of six upgrades; pause, level-up
 and death menus over the shared `crcbl_render::menu` art, with the debug panel
-on; a tiled grass ground under all of it; five spatial cues, the longest run
-kept between sessions, and the browser demo at
-`https://crcbl.kryptic.sh/demos/horde/`. 129 tests.
+on; a tiled grass ground under all of it with trees and bushes scattered over
+it; five spatial cues, the longest run kept between sessions, and the browser
+demo at `https://crcbl.kryptic.sh/demos/horde/`. 151 tests.
+
+**The props block the player and nothing else**, which is the hard cap above
+being enforced rather than an unfinished half of the feature.
+`game::scatter_props` deals a jittered lattice of trees and bushes from the
+game's seed — the _game's_, not the run's: a restart re-deals the horde and
+leaves the arena where it was, because a player who learns where the cover is
+should keep that between attempts. They are `PropView` in a plain `Vec` with no
+entity and no collider, so the horde's `N` overlap queries per tick return
+exactly what they returned before and the leak test's two exact equalities still
+account for the whole world. `game::push_out_of_props` runs once, on the player,
+inside the same pass as the arena clamp, and slides rather than sticking.
 
 **And a start screen, which was argued against and then asked for.** The slice
 that built the menus deliberately shipped without one: this game's board is
@@ -109,7 +120,9 @@ to emit largest-first to hold three batches; a field of ten thousand walked in
 the order the game holds it would be ten thousand. The shot is a second sheet,
 because it is 8 texels and would otherwise be drawn in a quad twenty times its
 own area, and `assets/terrain.crpix` — the tiled grass ground, added after these
-measurements — is a third. The price is the transparent margin round the small
+measurements — is a third, with `assets/props.crpix` a fourth at 36 texels. Both
+of the last two are a sheet of their own because a `.crpix` declares one frame
+size for the whole file. The price is the transparent margin round the small
 kinds — a runner is 13 texels of art in a 34-texel quad — and it is bounded by
 the screen rather than by the horde. **18c measured both halves and both hold**;
 see "The batching claim, measured" below, including what the ground did and did
@@ -188,9 +201,12 @@ more than two ticks and the frame being measured is the **render path alone**.
 `drawn` is what survived the CPU view cull and reached the pass — the arena is
 96 × 72 units against a view of about 37 × 28, so most of a large horde is off
 screen and the number on screen is bounded by the **screen** rather than by the
-field. `field`, `culled`, `drawn` and `batches` are a `scene` section this
-sample adds to the debug panel, so they are readable in the running game and not
-only from a test.
+field. `field`, `culled`, `ground`, `props`, `drawn` and `batches` are a `scene`
+section this sample adds to the debug panel, so they are readable in the running
+game and not only from a test. `ground` and `props` are reported beside `field`
+rather than inside it: the tiles are generated from the view and the scenery is
+a constant of the seed, so folding either into `field` or `culled` would put a
+constant into the two numbers that exist to show what moves with the horde.
 
 **The exit criterion "CPU frame time demonstrably flat 1k → 10k on the render
 side" is met, and by a wide margin.** 0.096 ms at one thousand and 0.120 ms at
@@ -213,20 +229,22 @@ when no bolt happens to be in the air, and it does not move between one thousand
 and ten thousand. Pushed harder than the running game can: the
 ten-thousand-visible-enemies test packs the whole ten thousand _inside_ the view
 so nothing is culled, interleaves the three kinds in the order `swap_remove`
-leaves behind, and asserts the count over 10 009 sprites. It goes red one higher
-if the shots are moved onto the crowd's layer.
+leaves behind, and asserts the count over every sprite in the frame — the ten
+thousand, the shots, the player, the whole ground lattice and the scenery. It
+goes red one higher if the shots are moved onto the crowd's layer.
 
-**The number is 3 now, and that is not a regression.** `assets/terrain.crpix`
-landed after this table was taken and puts the ground on a sheet and a layer of
-its own, so a populated frame is terrain, then actors, then the bolt — the table
-above still reads 2 because it was measured before the grass existed, and it is
-left as measured. **The claim was never the number**: it is that the count is
-flat in the size of the horde, which is why `SceneStats::batches` is in the
-debug panel at all. A sheet added for a new subject adds a constant; what would
-break the claim is emitting one sheet more than once, which is what
-`an_interleaved_field_of_every_kind_is_three_batches` and
-`ten_thousand_visible_enemies_are_still_three_batches` are there to catch. Ten
-enemies and ten thousand are the same three draws.
+**The number is 4 now, and that is not a regression.** `assets/terrain.crpix`
+and `assets/props.crpix` both landed after this table was taken and each puts
+its subject on a sheet and a layer of its own, so a populated frame is terrain,
+then props, then actors, then the bolt — the table above still reads 2 because
+it was measured before either existed, and it is left as measured. **The claim
+was never the number**: it is that the count is flat in the size of the horde,
+which is why `SceneStats::batches` is in the debug panel at all. A sheet added
+for a new subject adds a constant; what would break the claim is emitting one
+sheet more than once, which is what
+`an_interleaved_field_of_every_kind_is_four_batches` and
+`ten_thousand_visible_enemies_are_still_four_batches` are there to catch. Ten
+enemies and ten thousand are the same four draws.
 
 **The caveat this section used to carry is gone.** The count was `art::batches`,
 a **mirror** of `sprite_pass`'s rule kept in the sample, because

@@ -1402,10 +1402,11 @@ mod tests {
             "a field of 2000 over a 96x72 arena should be partly on screen: {stats:?}",
         );
         assert_eq!(
-            stats.batches, 2,
-            "the ground, then one sheet of actors — no bolt is in the air on \
-             the first frame",
+            stats.batches, 3,
+            "the ground, the scenery, then one sheet of actors — no bolt is in \
+             the air on the first frame",
         );
+        assert!(stats.props > 0, "the arena was dealt no scenery");
 
         // A run with no prefill draws the handful of enemies a fifteenth of a
         // second produces, which is what says the assertion above is about the

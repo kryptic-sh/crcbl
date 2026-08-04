@@ -65,19 +65,58 @@ phase attached to it.
   property, but nobody has heard whether ten joins a second is inaudible in
   practice. Both want a person with headphones.
 
-- **Horde's render-side scale table has not been re-measured with the ground in
-  it.** `docs/plan/sample/03-horde.md`'s "The render side: flat, and not close
-  to a budget" was taken before `assets/terrain.crpix` existed, and the section
-  says so. Every frame now also carries the ground tiles — 300 of them at 960 ×
-  720, which
+- **Horde's render-side scale table has not been re-measured with the ground and
+  the props in it.** `docs/plan/sample/03-horde.md`'s "The render side: flat,
+  and not close to a budget" was taken before `assets/terrain.crpix` and
+  `assets/props.crpix` existed, and the section says so. Every frame now also
+  carries the ground tiles — 300 of them at 960 × 720, which
   `art::tests::the_visible_ground_is_bounded_by_the_view_and_not_the_arena` pins
-  — as opaque, full-coverage quads under everything else. That is a constant
-  addition and does not touch the flat-in-the-horde claim the exit criterion is
-  about, but the `sprites` GPU column and the CPU column are both now
-  understated by whatever those quads cost. Re-running the same `--prefill`
-  series would settle it; the fixture and the conditions are written out in that
-  section. Nobody has, because the measurement needs the reference machine and a
-  release build, and H1 was an art slice.
+  — as opaque, full-coverage quads under everything else, and the handful of
+  props the view holds. Both are constant additions and neither touches the
+  flat-in-the-horde claim the exit criterion is about, but the `sprites` GPU
+  column and the CPU column are both now understated by whatever those quads
+  cost. Re-running the same `--prefill` series would settle it; the fixture and
+  the conditions are written out in that section. Nobody has, because the
+  measurement needs the reference machine and a release build, and H1 and H4
+  were art slices.
+
+- **Nobody has looked at horde's props on a screen.** H4 was developed and
+  verified headless. `assets/props.crpix`'s two frames are pinned against the
+  other sheets by `the_props_sit_between_the_grass_and_the_crowd_in_luma` and
+  sized against their colliders by
+  `every_prop_silhouette_is_the_size_of_the_collider_it_stands_for`, both in
+  `art::tests` — which is the same standing the monsters' art has and no better.
+  Three things are therefore unverified rather than wrong: whether a top-down
+  canopy reads as a _tree_ at all rather than as a green disc; whether the
+  overlap of a wizard standing on a canopy edge looks acceptable in motion (the
+  reasoning for accepting it is in `assets/props.crpix`, and it is reasoning);
+  and whether the density feels right in play. One run of the demo with a person
+  watching settles all three. Related and already recorded below: "Told apart at
+  a glance" is the same shape of gap for the crowd.
+
+- **How many props a view holds is not pinned by anything.** The count over the
+  whole arena is —
+  `game::tests::the_scatter_is_sparse_and_never_pens_the_player_in` asserts it
+  lands between 30 and 70 over 64 seeds — and so is the fact that the layer is
+  culled, but the number a 960 × 720 window actually shows is only observable
+  from `SceneStats::props` in a running frame. A test in the shape of
+  `the_visible_ground_is_bounded_by_the_view_and_not_the_arena` would pin it and
+  would make `PROP_DENSITY`'s "a handful in a view" checkable rather than
+  asserted. Not written because the honest bound is wide — the scatter is random
+  and the player's own glade sits in the first view — and a wide bound on one
+  seed is a weak test.
+
+- **Horde's movement tests now share an arena with the scenery.** Several tests
+  that predate H4 — `a_player_walking_at_a_wall_stops_at_it`,
+  `the_player_moves_at_the_stated_speed_and_a_diagonal_is_no_faster` — walk the
+  player across ground that `scatter_props` has since put trees on. They pass,
+  and they pass deterministically, because the layout is a pure function of
+  `DEFAULT_SEED`. But they pass because that particular layout leaves their
+  paths clear, not because anything arranged it: a change to `PROP_DENSITY`,
+  `PROP_CELL` or `DEFAULT_SEED` could drop a tree in front of one of them, and
+  the failure would look like a movement bug. Two ways out, neither taken: give
+  those tests a seed chosen for a clear corridor, or let `Harness::staged` take
+  a prop-free arena — which would make them tests of a game that does not exist.
 
 ## The goal: a sample depends on `crcbl` and `std`, and it is met bar one line
 
