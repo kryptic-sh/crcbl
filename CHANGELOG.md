@@ -59,11 +59,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   precondition it did not have. `window_facts` finds this process's own window
   by title among `-[NSApp windows]`, and reports `app_active` and `is_key` as
   fields rather than requiring them; `key_window` remains for the one caller
-  that genuinely needs the keyboard, which is `CGEventPost`. If activation is
-  still refused after the harness has asked for it, the injected-input
-  assertions — and only those — are skipped with a printed account of what did
-  not run and why; `docs/backlog.md` carries `interpretKeyEvents:` as unverified
-  on CI.
+  that genuinely needs the keyboard, which is `CGEventPost`. The harness then
+  asks the session for activation itself —
+  `-[NSRunningApplication activateWithOptions:]`, which reaches a lever the
+  backend is right not to have, since a game does not get to steal the focus —
+  and **the runner grants it**, so the window becomes key and the injected input
+  runs. If it is ever refused, the injected-input assertions and the warp
+  readback are skipped with a printed account of what did not run and why,
+  rather than failing the session or going quietly green.
+
+  **A warp is not an event**, which the same run found:
+  `CGWarpMouseCursorPosition` moves the cursor and posts nothing, so reading a
+  warp back needs a real `kCGEventMouseMoved` posted at the point the cursor was
+  moved to. That makes the check stronger than it was — the seam's conversion
+  into Quartz's global space and the backend's conversion out of
+  `locationInWindow` are now judged against each other, rather than one of them
+  against a tracking-area crossing that a boundary-crossing warp happened to
+  produce.
 
   **The sample-level pass has no macOS equivalent**, on the same terms as
   Windows: it needs a renderer and macOS has no Vulkan until MoltenVK clears its

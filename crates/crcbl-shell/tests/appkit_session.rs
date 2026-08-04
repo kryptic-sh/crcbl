@@ -107,6 +107,19 @@
 //!   trap, so the skip prints what did not run, why, and the evidence — and
 //!   `docs/backlog.md` carries `interpretKeyEvents:` as unverified on CI.
 //!
+//! **The runner granted the activation**, so the skip branch is written and
+//! unrun and the whole M4 judge passes. It also found the one thing M4 had
+//! genuinely wrong: **a warp is not an event.**
+//! `CGWarpMouseCursorPosition` moves the cursor and posts nothing, so a wait for
+//! "the pointer to be reported after a warp" is a wait for something that does
+//! not exist. It looked correct because [`macos::input`]'s warp crossed the
+//! window's edge and AppKit re-evaluates its tracking areas against where the
+//! cursor actually is — a `mouseEntered:`, not a report of the warp — while
+//! [`macos::injected_input`]'s warp stayed inside the window, crossed nothing
+//! and waited ten seconds. [`macos::wait_for_pointer`] now posts a real
+//! `kCGEventMouseMoved` to ask the question, and the warp is left to do only
+//! what it promises.
+//!
 //! What is **not** here is the sample-level pass: driving a running game and
 //! pressing F11 at it, which the two Linux suites do. That needs a renderer, and
 //! macOS has no Vulkan until MoltenVK clears its P14 gate —
@@ -179,6 +192,18 @@ mod macos {
     /// `kVK_UpArrow`. A key that moves a cursor and commits no text, which is
     /// the other half of the text assertion.
     const VK_UP_ARROW: u16 = 0x7E;
+
+    /// How far the injected pointer move goes, right and down, in Quartz's
+    /// global display coordinates.
+    ///
+    /// Two things at once, which is why it is a constant rather than two
+    /// literals at the call site. It has to be **large enough to be
+    /// identifiable**: `wait_for_pointer` posts moves at the parked point, so a
+    /// report has to be recognisable as this move rather than as one of those,
+    /// and half of this is the margin that decides it. And it has to be
+    /// **small enough to stay on the window**, since a mouse-moved event goes to
+    /// whatever is under the cursor.
+    const NUDGE: (f64, f64) = (40.0, 30.0);
 
     /// How long any one step may take before the session is called stuck.
     ///
@@ -297,6 +322,7 @@ mod macos {
                     "crcbl appkit session: this process is frontmost and its window has the \
                      keyboard, so input can be injected: {active:?}"
                 );
+                warp_round_trip(&mut shell, window, size);
                 injected_input(&mut shell, window, size);
             }
             Err(refused) => injection_skipped(refused),
@@ -355,26 +381,13 @@ mod macos {
         println!("crcbl appkit session: a window opened, changed mode twice and closed");
     }
 
-    /// The M2 half: the capability set, the pointer modes, the cursor, and the
-    /// one piece of arithmetic in this slice that only a real window can check.
+    /// The M2 half: the capability set, the pointer modes and the cursor.
     ///
-    /// # The warp is the reason this is here rather than in a `#[test]`
-    ///
-    /// A position crosses **three** spaces on its way from the seam to
-    /// CoreGraphics — the view's own Y-up points, AppKit's Y-up screen points,
-    /// and Quartz's Y-down global pixels — and getting either reflection wrong
-    /// puts the cursor the same distance on the *wrong side of the middle*. That
-    /// is indistinguishable from a working warp for as long as the target
-    /// happens to be centred, which is exactly what a hand-written fixture would
-    /// pick. The check here is the round trip through the real window: warp the
-    /// pointer somewhere known, and read back where the window system says it
-    /// landed.
-    ///
-    /// **The pointer is moved off the window first**, deliberately. Injected
-    /// input describes a transition rather than a state — the Windows half of
-    /// P5C paid for that lesson — so a warp to a point the cursor is already at
-    /// produces no event at all, and a warp that never crosses the window's edge
-    /// produces no `PointerFocus`.
+    /// **Nothing here posts an event**, which is what keeps it on this side of
+    /// the activation gate. Every assertion is either a property of the
+    /// capability set or a call whose contract is that it fails only for a stale
+    /// handle, so all of it runs on a runner that never activates. The half that
+    /// needs the window server to answer is [`warp_round_trip`].
     fn input(shell: &mut Box<dyn Shell>, window: WindowId, size: PhysicalSize) {
         let caps = shell.caps();
         assert!(
@@ -398,12 +411,10 @@ mod macos {
             "the refusal has to name the mode, or nobody can act on it: {refused}"
         );
 
-        // Somewhere outside the window, so that the warp below is a *crossing*
-        // rather than a warp to where the cursor already is — which produces no
-        // event at all, and is the lesson the Windows half paid for. Past the
-        // bottom-right corner, so the system's clamp to the display arrangement
-        // lands it in the screen's corner and a centred window is nowhere near
-        // it.
+        // A warp to somewhere outside the window is **clamped, not refused** —
+        // a seam claim that needs nobody to be listening, so it stays here.
+        // Past the bottom-right corner, so the system's clamp to the display
+        // arrangement lands it in the screen's corner.
         shell
             .warp_pointer(
                 window,
@@ -414,24 +425,6 @@ mod macos {
             )
             .expect("a warp outside the window is clamped, not refused");
         shell.pump(&mut |_event| {});
-
-        let target =
-            PhysicalPoint::new(f64::from(size.width) * 0.75, f64::from(size.height) * 0.50);
-        shell.warp_pointer(window, target).expect("warp_pointer");
-        let landed = wait_for_pointer(shell);
-
-        // One backing pixel of slack per space crossed: the warp lands on a
-        // whole display pixel and the report comes back through the view's
-        // points, so the two need not agree exactly.
-        let slack = 3.0;
-        assert!(
-            (landed.x - target.x).abs() <= slack && (landed.y - target.y).abs() <= slack,
-            "warped to {target:?} in a {size:?} window and the window system reported \
-             {landed:?}; a Y that is the window's height minus the one asked for is a \
-             missing flip, and an X that matches while the Y does not is the desktop \
-             reflection rather than the window one"
-        );
-        println!("crcbl appkit session: warped to {target:?} and landed at {landed:?}");
 
         // Locking is the mode macOS does have, and it is observable through the
         // seam rather than only through the calls it made.
@@ -463,6 +456,58 @@ mod macos {
             shell.set_cursor(window, cursor).expect("set_cursor");
         }
         println!("crcbl appkit session: pointer modes, cursors and the warp all answered");
+    }
+
+    /// The warp, judged by where the **window system** says the pointer ended
+    /// up.
+    ///
+    /// # The one piece of arithmetic in this slice that only a real window can check
+    ///
+    /// A position crosses **three** spaces on its way from the seam to
+    /// CoreGraphics — the view's own Y-up points, AppKit's Y-up screen points,
+    /// and Quartz's Y-down global pixels — and getting either reflection wrong
+    /// puts the cursor the same distance on the *wrong side of the middle*. That
+    /// is indistinguishable from a working warp for as long as the target
+    /// happens to be centred, which is exactly what a hand-written fixture would
+    /// pick.
+    ///
+    /// # The warp is only half the round trip, and the other half must be posted
+    ///
+    /// `CGWarpMouseCursorPosition` moves the cursor and generates no event, so
+    /// there is nothing to read back from the warp itself. The seam converts
+    /// `target` into Quartz's global space and puts the cursor there;
+    /// `quartz::cursor` reads back the global point it chose;
+    /// [`wait_for_pointer`] posts a real `kCGEventMouseMoved` *at that point*,
+    /// and the backend converts what the window server delivers back into the
+    /// seam's space. **Both conversions are therefore checked against each
+    /// other** — a warp that put the cursor in the wrong place posts the move in
+    /// the wrong place and comes back disagreeing with `target`.
+    ///
+    /// # Why this is behind the activation gate and [`input`] is not
+    ///
+    /// It posts. `CGEventPost` hands the event to the session and the session
+    /// gives it to whatever is frontmost, so running this without the keyboard
+    /// would move the cursor inside somebody else's application and then fail
+    /// waiting for a report that was never coming to us — which is the whole
+    /// failure M5 exists to stop. [`input`] posts nothing and stays unconditional.
+    fn warp_round_trip(shell: &mut Box<dyn Shell>, window: WindowId, size: PhysicalSize) {
+        let target =
+            PhysicalPoint::new(f64::from(size.width) * 0.75, f64::from(size.height) * 0.50);
+        shell.warp_pointer(window, target).expect("warp_pointer");
+        let landed = wait_for_pointer(shell, quartz::cursor());
+
+        // One backing pixel of slack per space crossed: the warp lands on a
+        // whole display pixel and the report comes back through the view's
+        // points, so the two need not agree exactly.
+        let slack = 3.0;
+        assert!(
+            (landed.x - target.x).abs() <= slack && (landed.y - target.y).abs() <= slack,
+            "warped to {target:?} in a {size:?} window and the window system reported \
+             {landed:?}; a Y that is the window's height minus the one asked for is a \
+             missing flip, and an X that matches while the Y does not is the desktop \
+             reflection rather than the window one"
+        );
+        println!("crcbl appkit session: warped to {target:?} and landed at {landed:?}");
     }
 
     /// The M3 half: a real round trip through the **system** pasteboard, in
@@ -682,8 +727,11 @@ mod macos {
              -[NSApp activateIgnoringOtherApps:], and was refused.\n\
              crcbl appkit session: SKIPPED: the injected key and its release, the TextCommit \
              behind interpretKeyEvents:, the arrow key, the window-server pointer motion, the \
-             click and the wheel notch. Nothing else — every other assertion in this session \
-             ran.\n\
+             click, the wheel notch, and the warp round trip — which is skipped because \
+             reading a warp back needs a posted mouse-moved, a warp generating no event of \
+             its own. Nothing else: the capability set, the confine refusal, the pointer \
+             modes, the cursors, the clipboard, pbcopy/pbpaste, the resize, both mode flips \
+             and every AppKit readback all ran and asserted.\n\
              crcbl appkit session: STILL UNVERIFIED ON CI: interpretKeyEvents: and the whole \
              injected-input path. docs/backlog.md carries it as a gap, on the same terms as \
              the F11 pass that needs a renderer.\n\
@@ -946,36 +994,54 @@ mod macos {
         // mouse-moved event goes to the window under the cursor: posting motion
         // while the cursor sits over some other application's window is a test of
         // that application.
+        //
+        // **This is the call that failed on the first macOS run**, and the
+        // reason is worth keeping next to it: the cursor is already inside the
+        // window by now, so this warp crosses no boundary — no `mouseEntered:`,
+        // and a warp generates no `mouseMoved:` either, so the old version waited
+        // ten seconds for an event nothing had asked for.
+        // [`wait_for_pointer`] posts the question now instead of assuming the
+        // warp was one.
         let target =
             PhysicalPoint::new(f64::from(size.width) * 0.25, f64::from(size.height) * 0.25);
         shell.warp_pointer(window, target).expect("warp_pointer");
-        let parked = wait_for_pointer(shell);
+        let parked = wait_for_pointer(shell, quartz::cursor());
 
+        // **Identified by how far it went, not by being the last one.**
+        // `wait_for_pointer` posts a move at the parked point on every turn
+        // until one is reported, and the last of those can still be in flight
+        // when this starts collecting — so "the most recent `PointerMotion`" can
+        // be a stale report of `parked`, which would then be compared against
+        // itself. `NUDGE` is far enough outside that ambiguity that a report of
+        // it cannot be one of them, which is the same rule the Win32 suite
+        // arrived at: on a live desktop, find your own event by its payload.
+        //
+        // The filter takes the **distance** and the assertions below take the
+        // **direction**, deliberately: a backend that reflected the Y would
+        // report a point `NUDGE.1` above `parked`, which this admits and the
+        // assertion catches. Filtering on direction would have hidden exactly
+        // the bug this is here for.
         let from = quartz::cursor();
-        quartz::move_mouse(from.x + 40.0, from.y + 30.0);
+        quartz::move_mouse(from.x + NUDGE.0, from.y + NUDGE.1);
+        let injected = |event: &ShellEvent| match event {
+            ShellEvent::PointerMotion {
+                abs: Some(at),
+                raw_delta: Some(delta),
+                ..
+            } if (at.x - parked.x).abs() >= NUDGE.0 / 2.0
+                && (at.y - parked.y).abs() >= NUDGE.1 / 2.0 =>
+            {
+                Some((*at, *delta))
+            }
+            _ => None,
+        };
         let moved = collect_until(shell, "the injected motion", |seen| {
-            seen.iter().any(|event| {
-                matches!(
-                    event,
-                    ShellEvent::PointerMotion {
-                        abs: Some(_),
-                        raw_delta: Some(_),
-                        ..
-                    }
-                )
-            })
+            seen.iter().any(|event| injected(event).is_some())
         });
         let (at, delta) = moved
             .iter()
             .rev()
-            .find_map(|event| match event {
-                ShellEvent::PointerMotion {
-                    abs: Some(at),
-                    raw_delta: Some(delta),
-                    ..
-                } => Some((*at, *delta)),
-                _ => None,
-            })
+            .find_map(injected)
             .expect("just waited for it");
         // **The asymmetry `appkit::pointer` exists to make visible, observed.**
         // `locationInWindow` is Y-up and the delta beside it is Quartz's, which
@@ -1278,25 +1344,51 @@ mod macos {
         answers.remove(0)
     }
 
-    /// Pumps until the window system reports where the pointer is.
+    /// Posts a mouse-moved at `post_at` until the window system reports where
+    /// the pointer is, and answers the position it reported.
     ///
     /// A loop of its own rather than [`wait_for`], because this one needs the
     /// event's **payload** and that function's own pump has already discarded
     /// it by the time its predicate runs.
     ///
-    /// Two events can answer and either will do, which is what makes this robust
-    /// to a question nobody has settled about the runner. `PointerFocus` comes
-    /// from the tracking area, registered `NSTrackingActiveAlways`, so it fires
-    /// whether or not this process is frontmost; `PointerMotion` additionally
-    /// needs the window to be **key**, because macOS sends mouse-moved events
-    /// only to a key window that has asked for them. The last one seen wins: a
-    /// CI runner is a real desktop and an event this process did not cause can
-    /// arrive at any moment, so the freshest report is the one that describes
-    /// the warp.
-    fn wait_for_pointer(shell: &mut Box<dyn Shell>) -> PhysicalPoint {
+    /// # A warp is not an event, and the first macOS run proved it twice over
+    ///
+    /// This used to warp and then wait, which is a category error:
+    /// **`CGWarpMouseCursorPosition` moves the cursor and posts nothing.** Apple
+    /// documents it that way, and the run showed both halves of what that means
+    /// in one log. [`input`] warps *outside* the window and then to a point
+    /// inside it, and passed — because AppKit re-evaluates its tracking areas
+    /// against where the cursor actually is, so crossing the boundary produces a
+    /// `mouseEntered:` and therefore a `PointerFocus` with a position, warp or no
+    /// warp. [`injected_input`] then warped from one point inside the window to
+    /// another, crossed nothing, and waited ten seconds for an event that was
+    /// never going to exist:
+    ///
+    /// ```text
+    /// waited 10s for the pointer to be reported somewhere after a warp and
+    /// nothing arrived; the events that did were ["MonitorsChanged"]
+    /// ```
+    ///
+    /// So the warp is left to do its own job — moving the cursor, which is the
+    /// thing [`Shell::warp_pointer`] promises — and the *question* is asked with
+    /// a real `kCGEventMouseMoved` through the window server, which is the same
+    /// machinery the click and the wheel already use. Posted every turn rather
+    /// than once: `CGWarpMouseCursorPosition` suppresses local events for a
+    /// short interval afterwards, and a single post swallowed by that window
+    /// would be a flake rather than a finding.
+    ///
+    /// Either event answers. `PointerFocus` comes from the tracking area,
+    /// registered `NSTrackingActiveAlways`, so it fires whether or not this
+    /// process is frontmost; `PointerMotion` additionally needs the window to be
+    /// **key**, because macOS sends mouse-moved events only to a key window that
+    /// has asked for them. The last one seen wins: a CI runner is a real desktop
+    /// and an event this process did not cause can arrive at any moment, so the
+    /// freshest report is the one that describes where the cursor was put.
+    fn wait_for_pointer(shell: &mut Box<dyn Shell>, post_at: quartz::Point) -> PhysicalPoint {
         let started = Instant::now();
         let mut seen = Vec::new();
         loop {
+            quartz::move_mouse(post_at.x, post_at.y);
             let mut landed = None;
             shell.pump(&mut |event: ShellEvent| {
                 seen.push(event.name());
@@ -1316,10 +1408,23 @@ mod macos {
             assert!(
                 started.elapsed() < DEADLINE,
                 "crcbl appkit session: waited {DEADLINE:?} for the pointer to be reported \
-                 somewhere after a warp and nothing arrived; the events that did were \
-                 {seen:?}. No PointerFocus at all means the NSTrackingArea is not \
-                 delivering, and a PointerFocus with no PointerMotion means the window \
-                 never became key."
+                 somewhere. A kCGEventMouseMoved was posted at {post_at:?} on every turn of \
+                 that wait and the only events that arrived were {seen:?}. What AppKit says \
+                 about this window: {:?}.\n\
+                 Three mechanisms produce this, and they are distinguishable:\n\
+                 * **Nothing was posted.** CGWarpMouseCursorPosition generates no event at \
+                 all, so a wait that relies on the warp alone sees nothing — that is what \
+                 this function was rewritten to stop doing. If the posted move is also \
+                 arriving nowhere, CGEventPost is being refused, which is TCC and which the \
+                 injected keyboard above would have failed on first.\n\
+                 * **No PointerFocus and no PointerMotion, with the post landing.** The \
+                 NSTrackingArea is not delivering; it is registered NSTrackingActiveAlways \
+                 and NSTrackingInVisibleRect, so it should fire even for an inactive \
+                 application.\n\
+                 * **A PointerFocus with no PointerMotion.** acceptsMouseMovedEvents is off, \
+                 or the window is not key — read is_key in the facts above rather than \
+                 guessing, because both are printed there.",
+                session_support::activation(TITLE)
             );
             shell.wait_events(Some(Duration::from_millis(20)));
         }

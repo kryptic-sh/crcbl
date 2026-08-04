@@ -972,12 +972,10 @@ Activation { app_active: false, windows: 1, title: Some("crcbl appkit session"),
 
 **So the finding is about activation and not about TCC**, which was the risk
 this section had been written around. A GitHub macOS runner gives an unbundled
-binary a window server and a window and does **not** give it activation, even
-though `setActivationPolicy:Regular` was accepted (`open()` fails loudly
-otherwise), `finishLaunching` ran, and `activate` was sent in both the macOS 14
-and the legacy spelling. Whether TCC would also have refused `CGEventPost` is
-still unknown, because nothing has been posted yet: the two gates are in series
-and only the first one has been reached.
+binary a window server and a window and does **not** give it activation on the
+backend's own polite request, even though `setActivationPolicy:Regular` was
+accepted (`open()` fails loudly otherwise), `finishLaunching` ran, and
+`activate` was sent in both the macOS 14 and the legacy spelling.
 
 M5 is what follows from it, and it is three things:
 
@@ -1006,31 +1004,88 @@ M5 is what follows from it, and it is three things:
 - **If activation is still refused, only the injection is skipped**, loudly. See
   the entry below; that is the coverage gap this slice leaves behind.
 
-**Why `activateWithOptions:` is worth trying and might still not work.** The
-backend's own `activate` prefers `-[NSApplication activate]` where
+**The runner granted it, and the harness lever is why.** The M5 run reported
+`-[NSRunningApplication activateWithOptions:] answered true`, then
+`application active true, window key true`, then went on to inject. So a GitHub
+macOS runner **does** have a foreground session an unbundled binary can be put
+into — it simply will not hand it over to the cooperative
+`-[NSApplication activate]` that the backend is right to be limited to. The
+whole M4 judge passes on that runner, the warp lands exactly, and **TCC did not
+block activation**; whether it blocks `CGEventPost` is answered by the injection
+assertions themselves, which now run.
+
+`injection_skipped` is therefore **written and unrun**. It stays: the same
+refusal is what a developer's laptop gives a background process, and the branch
+that keeps a real coverage gap honest is worth more than the lines it costs.
+
+**Why `activateWithOptions:` worked where the backend's own attempt did not.**
+The backend's `activate` prefers `-[NSApplication activate]` where
 `respondsToSelector:` finds it, which on macOS 14 and later is the _cooperative_
 spelling: it asks, and an application that is not entitled to interrupt whatever
 is frontmost does not get to. The forceful spellings are deprecated as of 14 and
 not removed, and deprecation is a compiler diagnostic in Objective-C and nothing
-at all across `objc_msgSend` — so the harness can reach a lever the backend
-never takes. What that does not answer is whether the runner has a foreground
-session for anything to be frontmost _in_; if the process is in a login session
-with no active GUI console, no spelling of activate will help and the skip is
-the honest outcome.
+at all across `objc_msgSend` — so the harness reaches a lever the backend never
+takes, which is the whole shape of the harness/backend split here.
 
-**If the injection does eventually run and fails**, the TCC question above is
-the first suspect and `INJECTION_HINT` prints it beside every failed assertion.
-The fallback is still the one already chosen:
-`-[NSApplication postEvent:atStart:]` with an `NSEvent` built by
-`+[NSEvent keyEventWithType:…]`, which needs no permission and still goes
-through `nextEventMatchingMask:`, `sendEvent:`, the first responder and
+**If the injection ever fails**, the TCC question above is the first suspect and
+`INJECTION_HINT` prints it beside every failed assertion. The fallback is still
+the one already chosen: `-[NSApplication postEvent:atStart:]` with an `NSEvent`
+built by `+[NSEvent keyEventWithType:…]`, which needs no permission and still
+goes through `nextEventMatchingMask:`, `sendEvent:`, the first responder and
 `interpretKeyEvents:` — everything but the window server's own leg. It was not
 written speculatively because it is a ten-argument `objc_msgSend` transmute with
 an `NSPoint` by value, which is exactly the class of FFI this crate says must
-not be written blind. **Note that it would also route around the activation
-refusal entirely**, since it puts the event in this process's own queue rather
-than in the session's — which makes it a stronger candidate now than it was when
-it was written down as a TCC fallback.
+not be written blind. It would also route around an activation refusal entirely,
+since it puts the event in this process's own queue rather than in the
+session's.
+
+### A warp is not an event, and that is the M5 run's own finding
+
+`CGWarpMouseCursorPosition` moves the cursor and **posts nothing**. Apple
+documents it that way; M4 did not read it that way, and wrote `wait_for_pointer`
+as "warp, then wait for the pointer to be reported". The run showed both halves
+of what that means in one log, which is why this is worth writing down rather
+than just fixing:
+
+- `input`'s warp goes from _outside_ the window to a point inside it, and it
+  **passed** —
+  `warped to PhysicalPoint { x: 480.0, y: 240.0 } and landed at PhysicalPoint { x: 480.0, y: 240.0 }`.
+  Not because the warp reported anything: AppKit re-evaluates its tracking areas
+  against where the cursor actually is, so crossing the boundary produces a
+  `mouseEntered:` and therefore a `PointerFocus` carrying a position. The warp
+  was never the thing being observed.
+- `injected_input`'s warp goes from one point _inside_ the window to another. It
+  crosses nothing, so there is no `mouseEntered:`, and a warp generates no
+  `mouseMoved:` either. It waited the full ten seconds and collected
+  `["MonitorsChanged"]`.
+
+The fix is that `wait_for_pointer` now posts a real `kCGEventMouseMoved` at a
+caller-supplied point on **every turn** of its poll — every turn, because
+`CGWarpMouseCursorPosition` suppresses local events briefly afterwards and a
+single swallowed post would be a flake rather than a finding. The warp is left
+to do only what it promises. Three consequences worth keeping:
+
+- **The round trip is stronger than it was**, not weaker. The seam converts the
+  target into Quartz's global space and warps; `quartz::cursor` reads back the
+  global point it chose; the posted move goes to _that_ point; the backend
+  converts what the window server delivers back into the seam's space. Both
+  conversions are now checked against each other rather than one of them against
+  a tracking-area crossing.
+- **The warp round trip moved behind the activation gate**, into
+  `warp_round_trip`, because it posts and `CGEventPost` goes to whoever is
+  frontmost. `input` keeps everything that posts nothing — the capability set,
+  the confine refusal, the clamped out-of-window warp, the pointer modes, the
+  cursors — and stays unconditional.
+- **The injected motion is identified by distance, not by recency.**
+  `wait_for_pointer` posts moves at the parked point until one is reported, and
+  the last of those can still be in flight when the next collection starts, so
+  "the most recent `PointerMotion`" could be a stale report of `parked` compared
+  against itself. The filter takes any motion at least half of `NUDGE` away in
+  both axes and the assertions take the **direction**, deliberately — a backend
+  that reflected the Y reports a point `NUDGE.1` _above_ `parked`, which the
+  filter admits and the assertion catches. Filtering on direction would have
+  hidden the exact bug the check exists for. Same rule as the Win32 crossing
+  fix: on a live desktop, find your own event by its payload.
 
 Decisions and limits worth keeping whatever the run says:
 
@@ -1084,32 +1139,26 @@ Decisions and limits worth keeping whatever the run says:
 
 Still uncovered after M5:
 
-- **`interpretKeyEvents:` and the whole injected-input path are unverified on
-  CI**, and this is a real gap rather than a solved problem — stated here on the
-  same terms as the F11 pass below. If the runner refuses activation, the
-  session cannot post an event without typing into whatever process _is_
-  frontmost, so `injection_skipped` in `tests/appkit_session.rs` prints what did
-  not run and the session goes green without it. What that leaves unobserved is
-  everything `CGEventPost` was there to reach: the key event routed by
-  `sendEvent:` to the first responder, `keyDown:` handing it to
-  `interpretKeyEvents:`, the input method calling
-  `insertText:replacementRange:`, and therefore `ShellEvent::TextCommit` — which
-  is the exact defect the Win32 suite found one platform over, where
-  `TranslateMessage` was missing from the pump. Also unobserved: the arrow key
-  committing nothing, the `NSTrackingArea`, the Y-up/Y-down asymmetry in
-  `appkit::pointer` under real motion, the click, and
-  `hasPreciseScrollingDeltas` deciding `Lines` against `Pixels`. **The skip is
-  never silent** — `docs/plan/12-testing.md` names that as a known trap — and it
-  prints the `Activation` evidence, so the next run says which mechanism refused
-  without another round trip. Closing it needs either activation to be granted,
-  or the `postEvent:atStart:` path described above.
-- **Whether the skip branch or the injection branch is the one CI takes has not
-  been seen.** M5 was written on Linux like everything before it; the
-  cross-check compiles `tests/appkit_session.rs` for `aarch64-apple-darwin` and
-  does not link it. Both branches are therefore unrun, including
-  `frontmost::ask` itself — if `NSRunningApplication` or either selector is
-  missing, `ask` answers `false` rather than crashing, and the line it prints on
-  the first turn is what says so.
+- **The injected-input assertions have not been seen green.** The M5 run got
+  _into_ `injected_input` — activation was granted and the keyboard was ours —
+  and failed on the warp readback described above, so everything the session
+  would print after that point is still unobserved: the posted `kVK_ANSI_A`
+  coming back as a `Key` **and** a `TextCommit` of `"a"`, which is the
+  `interpretKeyEvents:` chain and the whole reason M4 exists; the arrow key
+  committing nothing; the Y-up/Y-down asymmetry in `appkit::pointer` under real
+  posted motion; the click; and `hasPreciseScrollingDeltas` deciding `Lines`
+  against `Pixels`. That is the same defect class the Win32 suite found one
+  platform over, where `TranslateMessage` was missing from the pump. **TCC is no
+  longer the open question for activation** — that was granted — but whether it
+  gates `CGEventPost` is answered only by the next run. Note the keyboard
+  assertions run _before_ the pointer ones, so a TCC refusal would have failed
+  there first and never got the chance: the failure was ours, in a wait for an
+  event a warp does not generate.
+- **`injection_skipped` is written and unrun**, because the runner granted
+  activation. It stays for the case that produced it, which a developer running
+  this as a background process on their own machine will meet. If it is ever
+  taken it prints the `Activation` evidence and branches on `can_become_key` to
+  say whose defect it is, rather than reporting a bare timeout.
 - **The sample-level F11 pass.** Needs a renderer; macOS has no Vulkan until
   MoltenVK clears its P14 gate (`docs/plan/ROADMAP.md`, 2026-08-04). Not
   approximated.
