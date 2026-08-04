@@ -1183,7 +1183,15 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
         logic.player_moving = false;
     }
 
-    sweep_bolts(logic, world, dt);
+    // The sweep is gated on the state, because a bolt is a kill carrier and the
+    // death screen freezes the kill count (`GameState::Dead` says so). A bolt
+    // still in flight when the player dies would otherwise keep sweeping behind
+    // the panel, killing enemies, playing the kill sound and dropping gems for
+    // up to `BOLT_LIFE`. The bolts themselves still age and expire below, which
+    // is what keeps the field honest after the sweep stops.
+    if logic.state == GameState::Playing {
+        sweep_bolts(logic, world, dt);
+    }
     expire_bolts(logic, world, dt);
 
     if logic.state == GameState::Playing {
@@ -4105,6 +4113,69 @@ mod tests {
         assert_eq!(
             harness.game.player_hp, 0.0,
             "a dead player kept taking damage",
+        );
+        harness.assert_nothing_leaked();
+    }
+
+    /// **A bolt still in flight when the player dies kills nothing afterwards.**
+    ///
+    /// The death screen freezes the kill count ([`GameState::Dead`] says so),
+    /// but a bolt the gun fired *before* the death tick keeps flying — and
+    /// before the fix the ungated sweep kept resolving it, so a bolt that
+    /// would reach an enemy after the death tick added a kill, a kill sound
+    /// and a gem drop the frozen counter had already reported.
+    #[test]
+    fn a_bolt_in_flight_at_death_kills_nothing_afterwards() {
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        // A runner down the gun's line — far enough that the bolt fired at it
+        // is still travelling when the player dies. One bolt kills a runner,
+        // so this is the enemy the in-flight bolt would take with it.
+        let runner = harness
+            .game
+            .stage_enemy(EnemyKind::Runner, DVec3::new(7.07, -7.07, 0.0));
+        // Tick 0: the only enemy in range is the runner, so the gun fires at it.
+        harness.run_ticks(1, &[]);
+        assert_eq!(harness.game.bolts_fired(), 1, "the gun did not fire");
+
+        // Now the death source, on the *other* side of the player from the
+        // staff — the bolt's path to the runner misses it: the muzzle sits at
+        // `STAFF_MUZZLE` from the player's centre, and the brute is tucked in
+        // opposite it, clear of the line to the runner. Just enough hit points
+        // that the contact damage runs the player out long before the bolt
+        // reaches the runner.
+        harness
+            .game
+            .stage_enemy(EnemyKind::Brute, DVec3::new(-0.884, -0.884, 0.0));
+        harness.game.set_player_hp(5.0);
+
+        // Run to the death tick, and confirm the bolt is still in flight with
+        // the runner still alive — the state the finding names.
+        let mut death_kills = 0;
+        for _ in 0..60 {
+            harness.run_ticks(harness.ticks + 1, &[]);
+            if harness.game.state == GameState::Dead {
+                death_kills = harness.game.kills;
+                break;
+            }
+        }
+        assert_eq!(harness.game.state, GameState::Dead, "the run did not end");
+        assert!(
+            harness.game.enemy_hp(runner).is_some(),
+            "the runner died before the player did, so there is no bolt in \
+             flight that would kill it",
+        );
+        assert!(
+            !harness.game.bolt_positions().is_empty(),
+            "no bolt was in flight at the death tick",
+        );
+
+        // More than enough ticks for the in-flight bolt to have reached the
+        // runner (it was ~10 units out, and a bolt covers 30 a second).
+        harness.run_ticks(harness.ticks + 120, &[]);
+        assert_eq!(harness.game.state, GameState::Dead);
+        assert_eq!(
+            harness.game.kills, death_kills,
+            "a bolt in flight at death kept counting kills after the death tick",
         );
         harness.assert_nothing_leaked();
     }

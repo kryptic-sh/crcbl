@@ -1517,6 +1517,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **asteroids**: rocks kept shattering and scoring behind the game-over panel —
+  leftover bullets swept unconditionally, and the score the best never saw could
+  exceed the recorded one. The bullet sweep and `shatter`'s score line are now
+  gated on the playing state. The tick also allocates nothing now: the sweep,
+  wrap and view-refresh paths borrow or hoist their per-tick buffers.
+
+- **breakout**: the Start menu popped up between lives when the first life was
+  lost at score 0 with the grid still full — that state is indistinguishable
+  from a fresh game by score and grid alone. `MenuKind::of` now also requires
+  full lives, so "never started" and "one life down" are told apart.
+
+- **horde**: a bolt still in flight when the player died kept killing enemies
+  behind the death panel — the kill counter, kill sound and gem drops continued
+  for up to `BOLT_LIFE`, contradicting the documented "the kill count is
+  frozen". The bolt sweep is now gated on the playing state.
+
 - **crcbl-ui**: a drag from one menu item onto a neighbour drew the neighbour
   `Pressed` — the drawn state came from a menu-global "something is down" flag
   plus whatever was hovered, not from `UiState`'s capture. The item the press

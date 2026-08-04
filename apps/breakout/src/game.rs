@@ -134,7 +134,11 @@ const MIN_VERTICAL_FRACTION: f64 = 0.25;
 /// How far below the paddle the ball has to fall before the life is lost.
 const BALL_DEAD_Y: f64 = PADDLE_Y - 2.0;
 
-const STARTING_LIVES: u32 = 3;
+/// A fresh game's lives. The start menu is only for a fresh game, so this is
+/// also how `menu.rs` tells "never started" from "lost a life": the moment one
+/// goes, `lives` is one fewer and no state the game can be in brings it back
+/// without a restart.
+pub const STARTING_LIVES: u32 = 3;
 
 /// The ball's collider, named once so the sweep can lift it out of the world
 /// and put the identical shape back.

@@ -49,7 +49,7 @@
 use crcbl::ui::WidgetId;
 use crcbl::ui::menu::{Menu, MenuItem, MenuSet};
 
-use crate::game::{BRICK_COUNT, GameState, RenderState};
+use crate::game::{BRICK_COUNT, GameState, RenderState, STARTING_LIVES};
 
 /// What only breakout's menus do.
 ///
@@ -117,9 +117,11 @@ impl MenuKind {
     ///
     /// The start menu is for a **fresh** game only — `WaitingForLaunch` is also
     /// where a player who has just lost a life waits, and a modal panel between
-    /// every life would be three panels a game rather than one at the start. A
-    /// full grid and a score of zero is what "fresh" means, and both are needed:
-    /// a score can be zero several bricks in.
+    /// every life would be three panels a game rather than one at the start.
+    /// Full lives, a full grid and a score of zero is what "fresh" means, and
+    /// all three are needed: a score can be zero several bricks in, and the
+    /// first life can be lost at score zero with the grid still full — which is
+    /// exactly the corner a "full grid and a score of zero" check lets through.
     #[must_use]
     pub fn of(paused: bool, render: &RenderState) -> Self {
         if paused {
@@ -129,7 +131,9 @@ impl MenuKind {
             Some(GameState::Won) => Self::Won,
             Some(GameState::Lost) => Self::Lost,
             Some(GameState::WaitingForLaunch) | None
-                if render.score == 0 && render.bricks.len() == BRICK_COUNT =>
+                if render.score == 0
+                    && render.lives == STARTING_LIVES
+                    && render.bricks.len() == BRICK_COUNT =>
             {
                 Self::Start
             }
@@ -234,10 +238,13 @@ mod tests {
     }
 
     /// A render state for a game that is `state`, with `broken` bricks gone.
+    ///
+    /// A fresh game: full lives. The corner cases say when that is not true.
     fn render(state: Option<GameState>, score: u32, broken: usize) -> RenderState {
         RenderState {
             state,
             score,
+            lives: STARTING_LIVES,
             bricks: vec![DVec3::ZERO; BRICK_COUNT - broken],
             ..RenderState::default()
         }
@@ -329,6 +336,20 @@ mod tests {
         // Score on the board, grid somehow full.
         assert_eq!(
             MenuKind::of(false, &render(Some(GameState::WaitingForLaunch), 70, 0)),
+            MenuKind::None,
+        );
+        // **The corner the old "fresh" test missed**: score 0, grid full, but
+        // one life already lost — exactly the state the first life lost at
+        // score 0 leaves behind. This is the bug: a full grid at score zero
+        // used to mean "never started" even when it meant "one life down".
+        assert_eq!(
+            MenuKind::of(
+                false,
+                &RenderState {
+                    lives: STARTING_LIVES - 1,
+                    ..render(Some(GameState::WaitingForLaunch), 0, 0)
+                },
+            ),
             MenuKind::None,
         );
     }

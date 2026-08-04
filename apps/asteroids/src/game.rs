@@ -615,6 +615,9 @@ struct GameLogic {
     /// Scratch space for the per-tick sweeps, kept here for the same reason.
     scratch_entities: Vec<Entity>,
 
+    /// Scratch for the bullet sweep's hit list, kept here for the same reason.
+    scratch_hits: Vec<(usize, Entity)>,
+
     /// Cues raised this tick: `(sound id, world x, world y)`. Drained by the
     /// facade, which owns the output stream — audio does not belong on the
     /// simulation's side of the seam, and a frame that ran two ticks must play
@@ -742,7 +745,14 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
     // what makes both look like a game rather than a screenshot.
     tumble_rocks(logic, dt);
 
-    sweep_bullets(logic, world, dt);
+    // The bullets are the other way round — gated, because a bullet is a score
+    // carrier and the score must freeze the moment the game does. A leftover
+    // bullet kept sweeping behind the game-over panel would shatter rocks and
+    // add score that `best.raise`, which runs only on the edge into `GameOver`,
+    // never saw. `shatter` doubles the guard on its own score line.
+    if logic.state == GameState::Playing {
+        sweep_bullets(logic, world, dt);
+    }
 
     // **After the sweep, which is the whole point.** A sweep reconstructs where
     // a bullet was as `position - velocity * dt`, and for one created *this*
@@ -1061,10 +1071,14 @@ fn sweep_bullets(logic: &mut GameLogic, world: &mut World, dt: f64) {
     }
 
     // `(bullet index, rock entity)` for everything that connected this tick.
-    let mut hits: Vec<(usize, Entity)> = Vec::new();
-    let bullets = logic.bullets.clone();
+    // Hoisted into the game state and taken out for the round trip, the way
+    // `rock_views` are, so a steady-state tick allocates nothing — the buffer
+    // grows back into the capacity it already has. The bullets are borrowed,
+    // not cloned, for the same reason: the closure only reads them.
+    let mut hits = std::mem::take(&mut logic.scratch_hits);
+    hits.clear();
     with_physics(world, |phys| {
-        for (index, bullet) in bullets.iter().enumerate() {
+        for (index, bullet) in logic.bullets.iter().enumerate() {
             let Some((body, transform)) = phys
                 .body(bullet.entity)
                 .copied()
@@ -1098,6 +1112,7 @@ fn sweep_bullets(logic: &mut GameLogic, world: &mut World, dt: f64) {
             shatter(logic, world, rock);
         }
     }
+    logic.scratch_hits = hits;
 }
 
 /// Ages every bullet and destroys the ones that have run out.
@@ -1134,7 +1149,13 @@ fn despawn_bullet(world: &mut World, bullet: Bullet) {
 /// Breaks rock `index` into its children, scores it and destroys it.
 fn shatter(logic: &mut GameLogic, world: &mut World, index: usize) {
     let rock = logic.rocks.swap_remove(index);
-    logic.score += rock.size.score();
+    // **State-gated, not merely sweep-gated.** The only caller sweeps only
+    // while `Playing`, but the invariant "no score after game over" belongs on
+    // the score line itself, so a future caller that shatters behind the panel
+    // breaks the rock and plays the cue but scores nothing.
+    if logic.state == GameState::Playing {
+        logic.score += rock.size.score();
+    }
 
     let (position, direction) = with_physics(world, |phys| {
         let position = phys
@@ -1254,8 +1275,6 @@ fn deal_wave(logic: &mut GameLogic, world: &mut World) {
 fn wrap_everything(logic: &mut GameLogic, world: &mut World) {
     let ship = logic.ship;
     let ship_alive = logic.ship_alive;
-    let rocks: Vec<(Entity, RockSize)> = logic.rocks.iter().map(|r| (r.entity, r.size)).collect();
-    let bullets: Vec<Entity> = logic.bullets.iter().map(|b| b.entity).collect();
 
     with_physics(world, |phys| {
         if ship_alive {
@@ -1264,11 +1283,13 @@ fn wrap_everything(logic: &mut GameLogic, world: &mut World) {
             // where the teleport rule actually bites.
             teleport_if_outside(phys, ship, None);
         }
-        for (entity, size) in rocks {
-            teleport_if_outside(phys, entity, Some(&size.collider()));
+        // The lists are borrowed, not snapshotted: the closure only reads
+        // them, so a steady-state tick allocates nothing here.
+        for rock in &logic.rocks {
+            teleport_if_outside(phys, rock.entity, Some(&rock.size.collider()));
         }
-        for entity in bullets {
-            teleport_if_outside(phys, entity, None);
+        for bullet in &logic.bullets {
+            teleport_if_outside(phys, bullet.entity, None);
         }
     });
 }
@@ -1371,19 +1392,19 @@ fn restart(logic: &mut GameLogic, world: &mut World) {
 /// Copies the authoritative state the renderer needs out of the physics world.
 fn refresh_views(logic: &mut GameLogic, world: &mut World) {
     let ship = logic.ship;
-    let rocks: Vec<Rock> = logic.rocks.clone();
-    let bullets: Vec<Entity> = logic.bullets.iter().map(|b| b.entity).collect();
 
     // Taken out and put back rather than borrowed through the guard: the
     // closure below needs the physics system *and* these two lists, and both
     // live behind the same `&mut logic`. The allocations survive the round
-    // trip, which is the point of reusing them.
+    // trip, which is the point of reusing them. The rocks and bullets being
+    // *read* are borrowed, not cloned — the closure only reads them, so a
+    // steady-state tick allocates nothing here.
     let mut rock_views = std::mem::take(&mut logic.rock_views);
     let mut bullet_views = std::mem::take(&mut logic.bullet_views);
     rock_views.clear();
     bullet_views.clear();
     let ship_state = with_physics(world, |phys| {
-        for rock in rocks {
+        for rock in &logic.rocks {
             if let Some(transform) = phys.transform(rock.entity) {
                 rock_views.push(RockView {
                     position: transform.position,
@@ -1393,8 +1414,8 @@ fn refresh_views(logic: &mut GameLogic, world: &mut World) {
                 });
             }
         }
-        for entity in bullets {
-            if let Some(transform) = phys.transform(entity) {
+        for bullet in &logic.bullets {
+            if let Some(transform) = phys.transform(bullet.entity) {
                 bullet_views.push(BulletView {
                     position: transform.position,
                 });
@@ -1626,6 +1647,7 @@ impl Game {
             rock_views: Vec::new(),
             bullet_views: Vec::new(),
             scratch_entities: Vec::new(),
+            scratch_hits: Vec::new(),
             cues: Vec::new(),
             thrust: ThrustForce::new(SHIP_THRUST, DVec3::Y),
             damping: DampingForce::new(SHIP_DAMPING),
@@ -3537,6 +3559,81 @@ mod tests {
             ended_with,
             "the restart cleared the best score",
         );
+    }
+
+    /// **The score freezes the tick the game ends.** A bullet still in flight
+    /// when the ship dies keeps flying behind the game-over panel, and before
+    /// the fix the ungated sweep kept resolving it — shattering the rock it was
+    /// aimed at and adding score that `best.raise`, which runs only on the edge
+    /// into `GameOver`, never saw.
+    #[test]
+    fn score_is_frozen_from_the_tick_the_game_ends() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        harness.game.stage_ship(DVec3::ZERO, 0.0, DVec3::ZERO);
+        // A rock that kills the ship on every respawn. Off the gun's line (the
+        // ship faces up, so the line is +Y), so a shot fired up the line never
+        // touches it.
+        harness
+            .game
+            .stage_rock(DVec3::new(0.5, 0.0, 0.0), DVec3::ZERO, RockSize::Small);
+
+        // Spend two lives: the ship returns into the killer rock, and
+        // `RESPAWN_MAX_WAIT` is what keeps each cycle finite.
+        while harness.game.lives > 1 {
+            harness.run_ticks(harness.ticks + 1, &[]);
+        }
+        assert!(!harness.game.ship_alive, "the second life never went");
+
+        // Clear the field and park the real target up the gun's line. The
+        // centre is clear again, so the ship comes back.
+        harness
+            .game
+            .stage_rock(DVec3::new(0.0, 8.0, 0.0), DVec3::ZERO, RockSize::Small);
+        harness.run_ticks(harness.ticks + 300, &[]);
+        assert!(harness.game.ship_alive, "the ship never came back");
+        assert_eq!(harness.game.lives, 1);
+
+        // Fire up the line: a bullet now in flight towards the rock at (0, 8),
+        // which takes ~18 ticks to reach. Kill the ship before it arrives.
+        harness.tap(KeyCode::Space);
+        assert_eq!(harness.game.bullet_count(), 1, "nothing was fired");
+        harness
+            .game
+            .stage_another_rock(DVec3::new(0.5, 0.0, 0.0), DVec3::ZERO, RockSize::Small);
+
+        harness.run_ticks(harness.ticks + 1, &[]);
+        assert_eq!(
+            harness.game.state,
+            GameState::GameOver,
+            "the game never ended"
+        );
+        let score_at_death = harness.game.score;
+        assert_eq!(score_at_death, 0, "a rock was broken before the game ended");
+        assert!(
+            harness.game.bullet_count() > 0,
+            "no bullet was in flight at the moment of death",
+        );
+
+        // More than enough ticks for the in-flight bullet to have reached the
+        // rock at (0, 8) and shattered it.
+        harness.run_ticks(harness.ticks + 100, &[]);
+        assert_eq!(harness.game.state, GameState::GameOver);
+        assert_eq!(
+            harness.game.score, score_at_death,
+            "the score kept counting after the game ended",
+        );
+        assert!(
+            harness.game.score <= harness.game.best.get(),
+            "the score outgrew the best, which was recorded on the edge into \
+             GameOver",
+        );
+        assert_eq!(
+            harness.game.rock_count(),
+            2,
+            "the rock the in-flight bullet was aimed at was shattered after death",
+        );
+        harness.assert_nothing_leaked();
     }
 
     /// The best score reaches the renderer, so the HUD can show it.
