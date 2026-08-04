@@ -1469,6 +1469,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-shell** (X11): an `INCR` clipboard transfer **to one of our own
+  windows** — a self-paste, or one of our windows pasting our own offer, of a
+  payload over the server's request limit — replaced that window's event mask
+  with `{PropertyChange}` and stripped every input event off it permanently.
+  `ChangeWindowAttributes(EVENT_MASK, …)` is a replace, not an OR, and our own
+  windows already select `PropertyChange` through `WINDOW_EVENT_MASK`; the call
+  is now skipped for them, and kept only for foreign requestors, whose mask we
+  cannot know.
+
 - **crcbl-shell** (Win32): minimizing a captured window re-applied the pointer
   clip from the iconic window's 0×0 client area — both corners mapped to the
   same point, pinning the cursor for the whole minimized period. The `WM_SIZE`
