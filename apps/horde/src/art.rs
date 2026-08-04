@@ -57,6 +57,26 @@
 //! of them whatever the field size. `assets/actors.crpix` carries the
 //! arithmetic.
 //!
+//! # One thing in this game is animated, and it is the player
+//!
+//! The wizard has a walk cycle — [`WALK_CLIP`] of `assets/actors.crpix` — and
+//! everything else is a still frame at a moving position. Two consequences worth
+//! stating, because both are the sort of thing a reader assumes the other way
+//! round:
+//!
+//! * **The clock is [`RenderState::elapsed`]**, the run's simulated seconds,
+//!   through [`walk_tick`]. Not a wall clock: `elapsed` is replicated, so a
+//!   replay of a script animates frame for frame the way the run it replays did,
+//!   and a level-up screen freezes the cycle with the rest of the field for free.
+//! * **Facing is a reversed `u` range, not a second column of art.** The figure
+//!   is drawn facing right and [`mirrored`] turns it round, so there is one
+//!   column of art rather than two and the facings cannot drift apart. Which way
+//!   it faces is [`RenderState::player_facing`], which the *input* decides — see
+//!   [`game::Facing`](crate::game::Facing) for why it is not the aim.
+//!
+//! Neither costs a batch: every frame of the wizard is a frame of the one actors
+//! sheet, and a flip is four floats on the instance.
+//!
 //! # The ground overruns the arena rather than stopping at it
 //!
 //! [`Scene::build`] lays [`GROUND_TILE`] tiles over the *view*, not over the
@@ -90,10 +110,10 @@
 use crcbl::hal::{Device, HalError};
 use crcbl::math::DVec3;
 use crcbl::render::{Layer, LayerStack, Parallax, SheetDesc, SheetId, Sprite, SpriteRenderer};
-use crcbl::sprite::Sheet;
 use crcbl::sprite::load::{Loaded, load};
+use crcbl::sprite::{Clip, Playback, Sheet};
 
-use crate::game::{EnemyKind, RenderState};
+use crate::game::{EnemyKind, Facing, RenderState};
 use crate::gpu::{camera_centre, view_half_width};
 
 // `build.rs` writes this: one `*_PNG` and one `*_JSON` per `assets/*.crpix`,
@@ -173,6 +193,18 @@ const GROUND_SEED: u64 = 0x0000_0047_5241_5353;
 /// "The sheet as authored" — no tinting anywhere in this game.
 const UNTINTED: [f32; 4] = [1.0; 4];
 
+/// The frame the wizard stands on.
+const IDLE_FRAME: &str = "player";
+
+/// The clip `assets/actors.crpix` names the wizard's walk cycle.
+///
+/// The frames it holds and how long each is held are the sheet's, not this
+/// module's: [`Playback`] reads both off the baked sheet, so the `.crpix` is the
+/// only place the cycle is written down. What this module pins is that the round
+/// trip through the sidecar returned what that file authored —
+/// `tests::the_walk_cycle_survives_the_round_trip_through_the_sidecar`.
+const WALK_CLIP: &str = "walk";
+
 /// Half the side of the one frame size every actor is drawn at, in world units.
 ///
 /// `EnemyKind::Brute.radius()`, and therefore 34 texels — see this module's
@@ -226,7 +258,16 @@ pub struct Scene {
     /// One per [`EnemyKind`], indexed by [`kind_index`]. Three *frames* of one
     /// sheet, which is the whole batching argument in this module's header.
     enemies: [FrameArt; 3],
+    /// The wizard standing still.
     player: FrameArt,
+    /// The sheet the wizard's walk is played out of, and the clip that names it.
+    ///
+    /// Kept whole rather than flattened to a list of frames, because that is
+    /// what [`Playback`] takes: the holds live on the sheet's frames, so the
+    /// timing comes from `assets/actors.crpix` through the sidecar and there is
+    /// no second copy of it here to disagree.
+    actors_desc: Sheet,
+    walk: Clip,
     gem: FrameArt,
     bolt: FrameArt,
     /// The grass, indexed by [`ground_variant`]. One sheet, so the whole ground
@@ -243,11 +284,13 @@ pub struct Scene {
     /// The shots, over the player.
     ///
     /// **Over, where asteroids draws its ship last and its bullets under it.**
-    /// Two reasons, and the second is the load-bearing one: a bolt leaves the
-    /// muzzle at `PLAYER_RADIUS + BOLT_RADIUS + 0.05`, so it is outside the hull
-    /// before it is ever drawn and there is nothing to paste over; and the
-    /// player shares the actors sheet, so putting the shots between the crowd
-    /// and the player would split the field's one batch into three.
+    /// Two reasons, and both are load-bearing now: a bolt leaves the head of the
+    /// wizard's staff — [`game::STAFF_MUZZLE`](crate::game::STAFF_MUZZLE), which
+    /// is *inside* the figure's own box, because the whole figure is drawn to
+    /// the collider — so a shot on any layer below this one would spend its
+    /// first frames behind the robe; and the player shares the actors sheet, so
+    /// putting the shots between the crowd and the player would split the
+    /// field's one batch into three.
     shots: Layer,
     /// What the last [`Scene::build`] produced. See [`SceneStats`].
     stats: SceneStats,
@@ -341,7 +384,13 @@ impl Scene {
                 frame(actors_sheet, &actors.sheet, enemy_frame(EnemyKind::Runner)),
                 frame(actors_sheet, &actors.sheet, enemy_frame(EnemyKind::Brute)),
             ],
-            player: frame(actors_sheet, &actors.sheet, "player"),
+            player: frame(actors_sheet, &actors.sheet, IDLE_FRAME),
+            walk: actors
+                .sheet
+                .clip(WALK_CLIP)
+                .unwrap_or_else(|| panic!("the baked sheet has no clip called {WALK_CLIP}"))
+                .clone(),
+            actors_desc: actors.sheet.clone(),
             gem: frame(actors_sheet, &actors.sheet, "gem"),
             // By index, not by name: a sheet with no sidecar has one frame
             // synthesised by `load` covering the whole image, and its name is
@@ -440,8 +489,11 @@ impl Scene {
 
         // The player is always inside the view — `gpu::camera_centre` is what
         // guarantees it — so there is nothing to cull here.
-        self.stack
-            .push(self.hero, actor(self.player, render.player));
+        let mut wizard = self.wizard(render);
+        if render.player_facing == Facing::Left {
+            wizard.uv = mirrored(wizard.uv);
+        }
+        self.stack.push(self.hero, actor(wizard, render.player));
 
         let bolt = self.bolt;
         self.stack.extend(
@@ -483,11 +535,74 @@ impl Scene {
         };
         frame
     }
+
+    /// Which frame of the wizard this render state draws.
+    ///
+    /// The standing frame while the player is not being driven, and the walk
+    /// cycle while they are — the whole of "the animation plays when the wizard
+    /// walks". Both come out of the same sheet, so neither costs a batch.
+    fn wizard(&self, render: &RenderState) -> FrameArt {
+        if !render.player_walking {
+            return self.player;
+        }
+        let mut play = Playback::new();
+        play.seek(walk_tick(render.elapsed));
+        // Both `expect`s are `Sheet::validate`'s rules, which `load` ran on this
+        // sheet at start-up: a clip with no frames, or one naming a frame the
+        // sheet does not have, never gets this far.
+        let index = play
+            .frame_index(&self.actors_desc, &self.walk)
+            .expect("a validated clip always has a frame to show");
+        FrameArt {
+            sheet: self.player.sheet,
+            uv: self
+                .actors_desc
+                .uv(index)
+                .expect("a clip's frames are the sheet's own"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Pure geometry — no device, no sheet ids
 // ---------------------------------------------------------------------------
+
+/// The animation clock, in the ticks a `.crpix` hold is counted in.
+///
+/// **[`RenderState::elapsed`] and not a wall clock.** It is the run's *simulated*
+/// seconds, and it is replicated — so a replay of a script animates frame for
+/// frame the way the run it replays did, which a clock read off the host would
+/// not. It is also what freezes the cycle with the rest of the field on the
+/// level-up screen, for free: `run_tick` stops advancing it.
+///
+/// [`ART_TICK_HZ`] is the rate `build.rs` baked the holds against, so it is the
+/// rate that turns those seconds back into the units the holds are in. It is
+/// **not** the simulation's tick rate: `--tick-hz 20` changes how often the game
+/// thinks, and a walk cycle that slowed down to match would be a different
+/// animation on a slower machine.
+fn walk_tick(elapsed: f64) -> u64 {
+    // `elapsed` never goes backwards within a run and never reaches the range
+    // where this saturates; the clamp is what makes the cast total rather than
+    // an assumption about the caller.
+    (elapsed * f64::from(ART_TICK_HZ)).max(0.0) as u64
+}
+
+/// The same frame, mirrored left to right.
+///
+/// [`Sprite::uv`] is `[u0, v0, u1, v1]` with the **top-left** corner first, and
+/// `crates/crcbl-shaders`' `sprite.slang` builds each vertex's `u` as
+/// `lerp(uv.x, uv.z, corner.x)` — an unconditional linear interpolation with no
+/// clamp and no `saturate` — so swapping the two ends runs the frame backwards
+/// across the quad rather than degenerating. The reversed range is a *subset* of
+/// the same interval, which is what stops a mirrored actor sampling the frame
+/// next to it in the strip. `tests::facing_left_reverses_the_frames_u_range`
+/// asserts both halves.
+///
+/// `v` is untouched: this is a horizontal flip, and swapping it too would stand
+/// the wizard on its hat.
+const fn mirrored(uv: [f32; 4]) -> [f32; 4] {
+    [uv[2], uv[1], uv[0], uv[3]]
+}
 
 /// The tiles whose squares meet the view box, as a pair of inclusive ranges
 /// over the tile lattice.
@@ -639,12 +754,41 @@ mod tests {
     use super::*;
     use crcbl::hal::null::NullInstance;
     use crcbl::hal::{DeviceDesc, Format, Instance, QueueKind};
-    use crcbl::sprite::SampleMode;
+    use crcbl::sprite::{Direction, SampleMode};
 
     use crate::game::{
         ARENA_HALF_HEIGHT, ARENA_HALF_WIDTH, BOLT_RADIUS, EnemyView, PLAYER_RADIUS, PickupView,
-        VIEW_HALF_HEIGHT, XP_RADIUS,
+        STAFF_MUZZLE, VIEW_HALF_HEIGHT, XP_RADIUS,
     };
+
+    /// The wizard's frames: the standing frame, then the walk cycle in the order
+    /// [`WALK_CLIP`] plays them.
+    const WIZARD_FRAMES: [&str; 5] = [IDLE_FRAME, "walk-a", "walk-b", "walk-c", "walk-d"];
+
+    /// The hold `assets/actors.crpix` authors for each frame of the walk, in
+    /// simulation ticks.
+    ///
+    /// **A checksum, not the source.** Nothing in this module reads it to *play*
+    /// the clip — [`Playback`] takes each frame's hold off the baked sheet — so
+    /// this is here to be compared against what came back, and
+    /// `the_walk_cycle_survives_the_round_trip_through_the_sidecar` is what
+    /// compares them. The round trip is `hold → ceil(ms) → floor(ticks)` through
+    /// the Aseprite sidecar, and a hold of one survives that at almost any pair
+    /// of rates; a hold of several does not, which is the whole reason this
+    /// number is worth asserting now that horde has a clip at all.
+    const WALK_HOLD_TICKS: u32 = 4;
+
+    /// The colour of the head of the wizard's staff in `assets/actors.crpix`, as
+    /// the baked PNG carries it.
+    ///
+    /// That file gives the orb a palette entry of its own and uses it nowhere
+    /// else, so "the texels of this colour" *is* the staff head — which is how
+    /// `the_staff_head_is_where_the_muzzle_says_it_is` locates it without
+    /// hard-coding where it expects to find it. The second half of that test
+    /// asserts the colour really is unique to the wizard, so a repalette that
+    /// spent it somewhere else fails loudly rather than dragging the measured
+    /// centroid off.
+    const STAFF_HEAD_RGBA: [u8; 4] = [0xff, 0xf3, 0xb0, 0xff];
 
     /// Runs `body` against a scene built on the null backend.
     ///
@@ -770,11 +914,13 @@ mod tests {
             (f64::from(side) - 2.0 * ACTOR_HALF_EXTENT * scale).abs() < 1e-9,
             "the shared frame does not land on a whole texel",
         );
-        assert_eq!(actors.sheet.frames.len(), 5, "five actors in one sheet");
+        // The wizard's five frames, the three enemy kinds and the gem.
+        let frames = WIZARD_FRAMES.len() + EnemyKind::ALL.len() + 1;
+        assert_eq!(actors.sheet.frames.len(), frames);
         assert_eq!(
             (actors.image.width, actors.image.height),
-            (5 * side, side),
-            "the sheet is not five {side}-texel frames in a strip",
+            (frames as u32 * side, side),
+            "the sheet is not {frames} {side}-texel frames in a strip",
         );
         for frame in &actors.sheet.frames {
             assert_eq!(
@@ -783,17 +929,7 @@ mod tests {
                 "{}: a .crpix has one frame size for the whole file",
                 frame.name,
             );
-            assert_eq!(
-                frame.hold, 1,
-                "{}: the default hold in ticks did not survive the millisecond \
-                 round trip, so bake and load disagree about milliseconds",
-                frame.name,
-            );
         }
-        assert!(
-            actors.sheet.clips.is_empty(),
-            "nothing in this game is animated",
-        );
         assert_eq!(actors.sheet.nine, None, "nothing here is stretched");
         assert_eq!(
             actors.sheet.sample,
@@ -824,11 +960,37 @@ mod tests {
         // transparent texels too. A sheet of zeroes satisfies every assertion
         // above, and `silhouette` panics on a blank frame rather than returning
         // a size.
-        for name in ["player", "grunt", "runner", "brute", "gem"] {
-            let (w, h) = silhouette(&actors, name);
+        for frame in &actors.sheet.frames {
+            let (w, h) = silhouette(&actors, &frame.name);
+            let name = &frame.name;
             assert!(w > 1 && h > 1, "{name} is a dot: {w} x {h}");
             assert!(w <= side && h <= side, "{name} overflows its frame");
         }
+
+        // …and the wizard's five are five different pictures. Five copies of one
+        // pose would bake, load, index and play exactly as a cycle does, and
+        // every assertion in this file passes on them — which would make the
+        // walk a slideshow of one drawing.
+        let mut poses: Vec<Vec<u8>> = WIZARD_FRAMES
+            .iter()
+            .map(|name| {
+                let index = actors.sheet.frame_index(name).expect("a wizard frame");
+                let rect = actors.sheet.frames[index].rect;
+                (rect.y..rect.y + rect.h)
+                    .flat_map(|y| {
+                        let row = (y * actors.image.width + rect.x) as usize * 4;
+                        actors.image.pixels[row..row + rect.w as usize * 4].to_vec()
+                    })
+                    .collect()
+            })
+            .collect();
+        poses.sort_unstable();
+        poses.dedup();
+        assert_eq!(
+            poses.len(),
+            WIZARD_FRAMES.len(),
+            "two of the wizard's frames are the same picture",
+        );
         let clear = actors
             .image
             .pixels
@@ -1023,14 +1185,294 @@ mod tests {
                 2.0 * kind.radius(),
             );
         }
-        assert_eq!(
-            silhouette(&actors, "player"),
-            (want(PLAYER_RADIUS), want(PLAYER_RADIUS)),
-        );
+        // Every frame of the wizard, not only the standing one: the walk moves
+        // the figure inside its box — the body rises, the feet step, the hem
+        // swings — and a frame that grew past the collider while doing it would
+        // be a player who is bigger than they collide on one tick in four.
+        for name in WIZARD_FRAMES {
+            assert_eq!(
+                silhouette(&actors, name),
+                (want(PLAYER_RADIUS), want(PLAYER_RADIUS)),
+                "{name} is not drawn to the player's collider",
+            );
+        }
         assert_eq!(
             silhouette(&actors, "gem"),
             (want(XP_RADIUS), want(XP_RADIUS))
         );
+    }
+
+    /// **The walk's holds came back the length `assets/actors.crpix` authored.**
+    ///
+    /// A `.crpix` counts a hold in simulation ticks and an Aseprite sidecar
+    /// counts milliseconds, so every hold makes a `ceil` out to milliseconds and
+    /// a `floor` back — and the two conversions have to use the same rate or
+    /// every animation in the game plays at the wrong speed. This is the guard
+    /// on that, and until horde had a clip it could not exist: the default hold
+    /// of one tick survives a fairly wide range of wrong arithmetic, which is
+    /// what `apps/horde/build.rs` used to say and no longer does.
+    ///
+    /// [`WALK_HOLD_TICKS`] is the only place this module writes the number down,
+    /// and it is not what plays the clip — see that constant.
+    #[test]
+    fn the_walk_cycle_survives_the_round_trip_through_the_sidecar() {
+        let actors = baked("actors", ACTORS_PNG, ACTORS_JSON);
+        assert_eq!(
+            actors.sheet.clips.len(),
+            1,
+            "the wizard's walk is the only clip in this game",
+        );
+        let clip = actors
+            .sheet
+            .clip(WALK_CLIP)
+            .expect("the sheet declares the walk");
+        assert_eq!(clip.direction, Direction::Forward);
+        assert!(clip.looping, "a walk that stopped would be a stumble");
+
+        let walk = &WIZARD_FRAMES[1..];
+        let named: Vec<&str> = clip
+            .frames
+            .iter()
+            .map(|index| actors.sheet.frames[*index].name.as_str())
+            .collect();
+        assert_eq!(named, walk, "the clip does not play the frames it should");
+
+        for frame in &actors.sheet.frames {
+            let want = if walk.contains(&frame.name.as_str()) {
+                WALK_HOLD_TICKS
+            } else {
+                // A frame no clip names keeps the parser's default, and a still
+                // sprite held for anything else would be a hold that survived
+                // the round trip in one direction only.
+                1
+            };
+            assert_eq!(
+                frame.hold, want,
+                "{}: authored at {want} ticks and came back at {}, so bake and \
+                 load disagree about milliseconds",
+                frame.name, frame.hold,
+            );
+        }
+
+        assert_eq!(
+            actors.sheet.clip_duration(clip),
+            Some(u64::from(WALK_HOLD_TICKS) * walk.len() as u64),
+            "the cycle is not the sum of its holds",
+        );
+    }
+
+    /// **A bolt leaves the staff the art actually draws.**
+    ///
+    /// [`STAFF_MUZZLE`] is where `game.rs` starts a shot, and it is a point on a
+    /// picture — so it is measured off the baked bytes rather than trusted. The
+    /// orb has a palette entry of its own in `assets/actors.crpix`, so the check
+    /// is exact: find every texel of that colour, take the centroid, and it must
+    /// land on the muzzle to the texel, in **every** frame of the wizard.
+    ///
+    /// That last part is the animation's constraint. The staff is the one thing
+    /// the walk does not move, precisely so the muzzle can be a constant; a walk
+    /// frame that nudged the orb would put a shot somewhere else one tick in
+    /// four, and this is what says it has not.
+    #[test]
+    fn the_staff_head_is_where_the_muzzle_says_it_is() {
+        let actors = baked("actors", ACTORS_PNG, ACTORS_JSON);
+        let width = actors.image.width;
+
+        let mut measured = Vec::new();
+        let mut elsewhere = 0usize;
+        for frame in &actors.sheet.frames {
+            let rect = frame.rect;
+            let found: Vec<(u32, u32)> = (rect.y..rect.y + rect.h)
+                .flat_map(|y| (rect.x..rect.x + rect.w).map(move |x| (x, y)))
+                .filter(|(x, y)| {
+                    let at = ((y * width + x) * 4) as usize;
+                    actors.image.pixels[at..at + 4] == STAFF_HEAD_RGBA
+                })
+                .collect();
+            if !WIZARD_FRAMES.contains(&frame.name.as_str()) {
+                elsewhere += found.len();
+                continue;
+            }
+            assert!(
+                !found.is_empty(),
+                "{}: no staff head, so the wizard has nothing to fire from",
+                frame.name,
+            );
+            let count = found.len() as f64;
+            // Texel centres, so an even-sized orb lands on a texel boundary and
+            // the arithmetic below is exact rather than nearly.
+            let cx = found.iter().map(|(x, _)| f64::from(*x) + 0.5).sum::<f64>() / count;
+            let cy = found.iter().map(|(_, y)| f64::from(*y) + 0.5).sum::<f64>() / count;
+            // Relative to the frame's own centre. Image rows run down and the
+            // world's +Y runs up, so the vertical one is subtracted the other
+            // way round.
+            measured.push((
+                frame.name.clone(),
+                cx - (f64::from(rect.x) + f64::from(rect.w) / 2.0),
+                (f64::from(rect.y) + f64::from(rect.h) / 2.0) - cy,
+            ));
+        }
+
+        assert_eq!(
+            elsewhere, 0,
+            "the staff head's colour is used outside the wizard, so it no \
+             longer identifies the orb",
+        );
+        assert_eq!(measured.len(), WIZARD_FRAMES.len());
+
+        let scale = f64::from(TEXELS_PER_UNIT);
+        let (want_x, want_y) = (STAFF_MUZZLE.x * scale, STAFF_MUZZLE.y * scale);
+        for (name, dx, dy) in &measured {
+            assert!(
+                (dx - want_x).abs() < 1e-9 && (dy - want_y).abs() < 1e-9,
+                "{name}: the staff head is {dx}, {dy} texels from the centre of \
+                 its frame and game::STAFF_MUZZLE says {want_x}, {want_y}",
+            );
+        }
+    }
+
+    /// **Facing left is the same frame with its `u` range reversed**, and the
+    /// reversal is asserted rather than the mere fact that something changed.
+    ///
+    /// A test that only checked the two `u`s differ cannot tell a flip from a
+    /// crop or from the frame next door. So: the rectangle is the *same* four
+    /// numbers with the ends swapped, the reversed range really does run
+    /// backwards, and — the half that matters on a sheet laid out as a strip —
+    /// every point the shader will sample stays inside the frame's own interval,
+    /// so a mirrored wizard cannot sample the grunt beside it.
+    ///
+    /// The sampling half reproduces `sprite.slang`'s vertex rule, which is a
+    /// copy of it and is worth what a copy is worth: what it catches is this
+    /// module handing the shader something the rule would degenerate on. See
+    /// [`mirrored`] for the reading of the shader itself.
+    #[test]
+    fn facing_left_reverses_the_frames_u_range() {
+        with_scene(|scene| {
+            let hero = |scene: &mut Scene, facing| {
+                scene.build(
+                    &RenderState {
+                        player: DVec3::ZERO,
+                        player_facing: facing,
+                        ..RenderState::default()
+                    },
+                    EXTENT,
+                );
+                scene.stack.sprites(scene.hero)[0]
+            };
+            let right = hero(scene, Facing::Right);
+            let left = hero(scene, Facing::Left);
+
+            assert_eq!(right.uv, scene.player.uv, "the frame as authored");
+            assert_eq!(
+                left.uv,
+                [right.uv[2], right.uv[1], right.uv[0], right.uv[3]],
+                "a horizontal flip swaps u and leaves v alone",
+            );
+            assert!(
+                left.uv[0] > left.uv[2],
+                "the mirrored range does not run backwards: {:?}",
+                left.uv,
+            );
+            assert_eq!(left.rect, right.rect, "a flip is not a move");
+
+            // `lerp(uv.x, uv.z, corner.x)`, over the two corners the quad has.
+            let sample = |uv: [f32; 4], corner: f32| uv[0] + (uv[2] - uv[0]) * corner;
+            assert_eq!(
+                sample(left.uv, 0.0),
+                sample(right.uv, 1.0),
+                "the left edge of a mirrored quad must show the frame's right edge",
+            );
+            assert_eq!(sample(left.uv, 1.0), sample(right.uv, 0.0));
+            for corner in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let u = sample(left.uv, corner);
+                assert!(
+                    u >= right.uv[0] && u <= right.uv[2],
+                    "a mirrored quad samples u = {u}, outside the frame's \
+                     {}..{}",
+                    right.uv[0],
+                    right.uv[2],
+                );
+            }
+            // …and there really is something next door to sample by mistake.
+            assert!(
+                right.uv[2] < 1.0,
+                "the wizard is the whole sheet, so staying inside its frame is \
+                 not a claim about anything",
+            );
+        });
+    }
+
+    /// **The walk plays while the player is walking and not while they are
+    /// standing**, and it is the frame that is asserted to move, not the clock.
+    ///
+    /// The trap this is written against: a test that reads the frame at
+    /// `elapsed = 0.0` passes identically whether the clip advances or is frozen
+    /// solid. So every frame of the cycle is asked for by name, they are checked
+    /// to be four *different* frames, the cycle is checked to come back to its
+    /// first frame after exactly one period, and the boundary between two holds
+    /// is checked from both sides.
+    #[test]
+    fn the_walk_cycle_plays_while_walking_and_holds_still_while_stopped() {
+        with_scene(|scene| {
+            let uv_at = |scene: &mut Scene, walking: bool, elapsed: f64| {
+                scene.build(
+                    &RenderState {
+                        player: DVec3::ZERO,
+                        player_walking: walking,
+                        elapsed,
+                        ..RenderState::default()
+                    },
+                    EXTENT,
+                );
+                scene.stack.sprites(scene.hero)[0].uv.map(f32::to_bits)
+            };
+            let steps = WIZARD_FRAMES.len() - 1;
+            let hold = f64::from(WALK_HOLD_TICKS) / f64::from(ART_TICK_HZ);
+            let cycle = hold * steps as f64;
+
+            // Standing still is one frame, whatever the clock says.
+            let idle = uv_at(scene, false, 0.0);
+            assert_eq!(idle, scene.player.uv.map(f32::to_bits));
+            assert_eq!(
+                idle,
+                uv_at(scene, false, cycle * 3.7),
+                "the standing wizard animated",
+            );
+
+            // Walking is a different frame each hold, all of them, none of them
+            // the standing frame.
+            let seen: Vec<[u32; 4]> = (0..steps)
+                .map(|step| uv_at(scene, true, (step as f64 + 0.5) * hold))
+                .collect();
+            assert_ne!(seen[0], seen[1], "the cycle never left its first frame");
+            let mut distinct = seen.clone();
+            distinct.sort_unstable();
+            distinct.dedup();
+            assert_eq!(
+                distinct.len(),
+                steps,
+                "the cycle showed {} of its {steps} frames",
+                distinct.len(),
+            );
+            assert!(
+                !distinct.contains(&idle),
+                "a walk frame is the standing frame, so stopping would not show",
+            );
+
+            // …and it comes back, which is what makes it a cycle rather than a
+            // sequence that ran off the end and parked.
+            assert_eq!(
+                uv_at(scene, true, cycle + 0.5 * hold),
+                seen[0],
+                "a full cycle did not return to the first frame",
+            );
+
+            // The boundary between two holds, from both sides: half a tick short
+            // of it is still the first frame and half a tick past it is not.
+            let half_tick = 0.5 / f64::from(ART_TICK_HZ);
+            assert_eq!(uv_at(scene, true, hold - half_tick), seen[0]);
+            assert_eq!(uv_at(scene, true, hold + half_tick), seen[1]);
+        });
     }
 
     /// **The three enemy kinds are three different pictures.**

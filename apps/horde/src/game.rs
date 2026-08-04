@@ -157,6 +157,29 @@ pub const PLAYER_SPEED: f64 = 7.0;
 /// read as "how many seconds of contact is this".
 pub const PLAYER_MAX_HP: f64 = 100.0;
 
+/// Which way the wizard is turned.
+///
+/// **Set by the input**, in `drive_player`, and by nothing else. Not by the aim,
+/// which is the gun's business and would spin the figure round every time the
+/// nearest enemy changed; and not by the velocity, which is the input after the
+/// arena clamp has had it and would leave a wizard pressed against a wall facing
+/// whichever way the wall let it slide.
+///
+/// Only the horizontal keys move it. Pressing up, down, both horizontals or
+/// nothing at all leaves it exactly where it was — a wizard that snapped back to
+/// a default on key-up would flicker every time the player stopped, and stopping
+/// is most of what a player does.
+///
+/// [`Facing::Right`] is the default because that is the way
+/// `assets/actors.crpix` draws the figure; the other one is the same art with
+/// its `u` range reversed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Facing {
+    #[default]
+    Right,
+    Left,
+}
+
 // ---------------------------------------------------------------------------
 // The weapon
 // ---------------------------------------------------------------------------
@@ -194,12 +217,50 @@ pub const BOLT_LIFE: f64 = 0.6;
 /// The gap between shots, in seconds. Four a second.
 pub const FIRE_COOLDOWN: f64 = 0.25;
 
-/// How far in front of the player's centre a bolt appears.
+/// Where a bolt appears, relative to the player's centre, for a wizard facing
+/// right. In world units.
 ///
-/// Outside [`PLAYER_RADIUS`], so a shot never begins inside the thing that fired
-/// it — which matters more here than in asteroids, because the enemy the bolt is
-/// aimed at is very often already touching the player.
-const MUZZLE_OFFSET: f64 = PLAYER_RADIUS + BOLT_RADIUS + 0.05;
+/// **The head of the staff, to the texel.** `assets/actors.crpix` draws the orb
+/// at exactly this offset — this constant times `art::TEXELS_PER_UNIT`, from the
+/// centre of the frame — and `art::tests::the_staff_head_is_where_the_muzzle_says_it_is`
+/// measures the baked bytes against it, so the picture and the shot cannot drift
+/// apart. It is a *point* rather than a distance because the staff is held out
+/// to one side and up: there is no direction it is "in front" along.
+///
+/// It sits **inside** [`PLAYER_RADIUS`] plus [`BOLT_RADIUS`], which the old
+/// straight-ahead muzzle did not, and that is a consequence of drawing the
+/// wizard to its collider rather than an oversight: the whole figure, staff
+/// included, is 2 × [`PLAYER_RADIUS`] across, so nothing on it can be further
+/// out than that. Nothing depended on the clearance — a bolt has no collider
+/// against the player, and the reason it is not drawn *through* the wizard is
+/// that `art::Scene` puts the shots on a layer above the hero.
+pub const STAFF_MUZZLE: DVec3 = DVec3::new(0.45, 0.45, 0.0);
+
+/// The muzzle for a wizard turned this way.
+///
+/// The sprite is one drawing with its `u` range reversed, so the staff mirrors
+/// with the figure and the muzzle mirrors on X with the staff.
+///
+/// # It does not follow the target
+///
+/// The wizard faces where the input pointed and the gun aims itself, so a
+/// wizard can be walking left and firing right. When that happens the bolt still
+/// starts at the drawn staff head and crosses the body — it is not flipped to
+/// the firing side. The choice is that the staff head is a thing on screen: a
+/// bolt appearing a body's width away from the orb because the target is behind
+/// would make the picture a lie about where the magic comes from, and the cost
+/// is a bolt sweeping across a 1-unit figure in a thirtieth of a second, drawn
+/// over the wizard rather than under it. It also cannot make the weapon miss —
+/// `sweep_bolts` sweeps from wherever the bolt starts, so a shot that begins on
+/// the far side of the body sweeps *more* of the ground in front of it, not
+/// less.
+#[must_use]
+pub const fn staff_muzzle(facing: Facing) -> DVec3 {
+    match facing {
+        Facing::Right => STAFF_MUZZLE,
+        Facing::Left => DVec3::new(-STAFF_MUZZLE.x, STAFF_MUZZLE.y, STAFF_MUZZLE.z),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // The enemies
@@ -872,6 +933,11 @@ struct GameLogic {
 
     player_pos: DVec3,
     player_hp: f64,
+    /// Which way the wizard is turned, and whether it is being driven. Both are
+    /// written by `drive_player` from the *intent*, so both replicate and a
+    /// replay animates the same way the run it replays did. See [`Facing`].
+    player_facing: Facing,
+    player_moving: bool,
 
     /// Seconds until the next shot is allowed.
     fire_timer: f64,
@@ -1109,6 +1175,12 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
 
     if logic.state == GameState::Playing {
         drive_player(logic, world, intent);
+    } else {
+        // Nothing is driving the wizard, so it is standing still whatever keys
+        // are down. Without this a player who dies holding a direction gets a
+        // corpse walking on the spot behind the death screen, because the last
+        // tick that ran `drive_player` left the flag set.
+        logic.player_moving = false;
     }
 
     sweep_bolts(logic, world, dt);
@@ -1197,9 +1269,28 @@ fn clamp_one(phys: &mut PhysicsSystem, entity: Entity, radius: f64) -> Option<DV
 /// Straight to `velocity`, not through a force: see this module's header. The
 /// body is kinematic, so [`PhysicsSystem::apply_force`] would be a no-op on it
 /// and there is nothing to be gained by pretending otherwise.
+///
+/// It is also where the wizard's *drawing* is decided, because both halves of
+/// that are properties of the intent rather than of anything physics gives back.
+/// [`Facing`] says why it is the intent and not the velocity; the walk cycle
+/// plays exactly when there is a direction being asked for, so a wizard held
+/// against a wall keeps walking on the spot — which is what a player pushing
+/// into a wall is doing.
 fn drive_player(logic: &mut GameLogic, world: &mut World, intent: Intent) {
     let player = logic.player;
-    let velocity = intent.direction() * logic.stats.player_speed;
+    let direction = intent.direction();
+    // Only a horizontal key turns the figure, and only one of them: with both
+    // down, or neither, there is nothing being asked for and the wizard keeps
+    // the facing it had.
+    if intent.left != intent.right {
+        logic.player_facing = if intent.right {
+            Facing::Right
+        } else {
+            Facing::Left
+        };
+    }
+    logic.player_moving = direction != DVec3::ZERO;
+    let velocity = direction * logic.stats.player_speed;
     with_physics(world, |phys| {
         if let Some(mut body) = phys.body(player).copied() {
             body.velocity = velocity;
@@ -1265,14 +1356,24 @@ fn fire(logic: &mut GameLogic, world: &mut World, dt: f64) {
     let Some((_, aim)) = target else {
         return;
     };
-    let Some(direction) = (aim - origin).try_normalize() else {
-        // The target is exactly on top of the player. There is no direction to
-        // fire in, and contact damage is already dealing with it.
+    // **Chosen from the player's centre, aimed from the staff.** The range that
+    // decides what is shootable is a property of the *player*, and a query
+    // centred on a muzzle that moves with the facing would put a different set
+    // of enemies in reach depending on which way the wizard happened to be
+    // turned. Where the bolt actually goes is another matter: it leaves the head
+    // of the staff, which is up and off to one side, so a direction taken from
+    // the centre would send it along a line parallel to the one that hits and
+    // half a unit beside it — far enough to miss a runner outright. The staff
+    // points at the target; see [`staff_muzzle`] for what that looks like when
+    // the wizard is facing the other way.
+    let position = origin + staff_muzzle(logic.player_facing);
+    let Some(direction) = (aim - position).try_normalize() else {
+        // The target is exactly on the staff head. There is no direction to fire
+        // in, and contact damage is already dealing with it.
         return;
     };
     logic.fire_timer = logic.stats.fire_cooldown;
 
-    let position = origin + direction * MUZZLE_OFFSET;
     let velocity = direction * BOLT_SPEED;
 
     let entity = world.spawn();
@@ -1887,9 +1988,15 @@ fn restart(logic: &mut GameLogic, world: &mut World) {
 }
 
 /// Puts the player in the middle of the arena, stationary.
+///
+/// Stationary in the drawing as well as in the physics: the walk cycle and the
+/// facing both go back to where a fresh wizard starts, so a run that ended
+/// mid-stride does not deal the next one a figure already turned and walking.
 fn place_player(logic: &mut GameLogic, world: &mut World, position: DVec3) {
     let player = logic.player;
     logic.player_pos = position;
+    logic.player_facing = Facing::default();
+    logic.player_moving = false;
     with_physics(world, |phys| {
         phys.set_body(player, RigidBody::new_kinematic());
         phys.set_transform(player, Transform::from_position(position));
@@ -1969,6 +2076,13 @@ fn with_physics<R>(world: &mut World, f: impl FnOnce(&mut PhysicsSystem) -> R) -
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RenderState {
     pub player: DVec3,
+    /// Which way the wizard is turned. See [`Facing`].
+    pub player_facing: Facing,
+    /// Whether the wizard is being walked, which is what `art::Scene::build`
+    /// chooses between the walk cycle and the standing frame on.
+    ///
+    /// The *intent's* answer, not the velocity's: see `drive_player`.
+    pub player_walking: bool,
     /// What is left of the player's hit points, and the ceiling they are
     /// against — the ceiling moves, so the HUD cannot read it off a constant.
     pub player_hp: f64,
@@ -2155,6 +2269,8 @@ impl Game {
             state: GameState::WaitingToStart,
             player_pos: DVec3::ZERO,
             player_hp: PLAYER_MAX_HP,
+            player_facing: Facing::default(),
+            player_moving: false,
             fire_timer: 0.0,
             spawn_timer: 0.0,
             elapsed: 0.0,
@@ -2390,6 +2506,8 @@ impl Game {
     pub fn render_state(&self, out: &mut RenderState) {
         let logic = lock(&self.shared);
         out.player = logic.player_pos;
+        out.player_facing = logic.player_facing;
+        out.player_walking = logic.player_moving;
         out.player_hp = logic.player_hp;
         out.player_max_hp = logic.stats.max_hp;
         out.enemies.clear();
@@ -3716,6 +3834,131 @@ mod tests {
         );
     }
 
+    /// **The wizard faces the way the input last pointed**, and nothing else
+    /// turns it.
+    ///
+    /// Every clause here is a way of getting it wrong that would look fine in a
+    /// screenshot: a facing taken from the velocity turns the wrong way against
+    /// a wall, one taken from the aim spins with the crowd, one that resets on
+    /// key-up flickers every time the player stops, and one driven by any key
+    /// rather than the horizontal pair turns on `W`.
+    #[test]
+    fn the_wizard_faces_the_way_the_input_last_pointed() {
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        let facing = |harness: &Harness| lock(&harness.game.shared).player_facing;
+        let walking = |harness: &Harness| lock(&harness.game.shared).player_moving;
+
+        assert_eq!(facing(&harness), Facing::Right, "the way it is drawn");
+        assert!(!walking(&harness), "nobody has pressed anything");
+
+        let step = |harness: &mut Harness, key, down| {
+            harness.game.key_event(key, down);
+            harness.run_ticks(harness.ticks + 1, &[]);
+        };
+
+        step(&mut harness, KeyCode::KeyA, true);
+        assert_eq!(facing(&harness), Facing::Left);
+        assert!(walking(&harness));
+
+        // …and both reach the renderer. `art::Scene::build` takes a
+        // `RenderState` and nothing else, so a `render_state` that forgot either
+        // field would leave the wizard permanently facing right and standing
+        // still, with every assertion in this test still passing.
+        let mut out = RenderState::default();
+        harness.game.render_state(&mut out);
+        assert_eq!(out.player_facing, Facing::Left);
+        assert!(out.player_walking);
+
+        // Released, and it keeps the facing it had. This is the flicker.
+        step(&mut harness, KeyCode::KeyA, false);
+        assert_eq!(facing(&harness), Facing::Left, "it snapped back on key-up");
+        assert!(!walking(&harness));
+
+        // Straight up: walking, and still facing left, because facing is a
+        // left/right property and `W` says nothing about it.
+        step(&mut harness, KeyCode::KeyW, true);
+        assert_eq!(facing(&harness), Facing::Left, "`W` turned the wizard");
+        assert!(walking(&harness));
+        step(&mut harness, KeyCode::KeyW, false);
+
+        step(&mut harness, KeyCode::KeyD, true);
+        assert_eq!(facing(&harness), Facing::Right);
+
+        // Both horizontals: nothing is being asked for, so the facing stands and
+        // the wizard is not walking either.
+        step(&mut harness, KeyCode::KeyA, true);
+        assert_eq!(
+            facing(&harness),
+            Facing::Right,
+            "a cancelled input turned it"
+        );
+        assert!(!walking(&harness), "a cancelled input walked it");
+        step(&mut harness, KeyCode::KeyD, false);
+        assert_eq!(facing(&harness), Facing::Left, "and `A` is still down");
+
+        // Dead is not walking, whatever is held. Without this the death screen
+        // shows a corpse walking on the spot.
+        harness.game.set_player_hp(0.000_1);
+        harness
+            .game
+            .stage_enemy(EnemyKind::Brute, harness.game.player);
+        harness.run_ticks(harness.ticks + 8, &[]);
+        assert_eq!(harness.game.state, GameState::Dead);
+        assert!(!walking(&harness), "the dead wizard kept walking");
+    }
+
+    /// **A bolt leaves the head of the staff, on the side the wizard is
+    /// facing — even when that is the side the target is not on.**
+    ///
+    /// The decision [`staff_muzzle`] records, asserted rather than described.
+    /// The wizard is turned left and the only enemy is due east, so a muzzle
+    /// mirrored to the *firing* side and a muzzle mirrored to the *facing* side
+    /// are a body's width apart and this can tell them apart.
+    #[test]
+    fn a_bolt_leaves_the_staff_on_the_side_the_wizard_faces() {
+        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        // One tick of `A`, so the wizard is turned and then standing still: the
+        // bolt's position is read against where the player actually is, and a
+        // player still moving would make that a moving target.
+        harness.game.key_event(KeyCode::KeyA, true);
+        harness.run_ticks(harness.ticks + 1, &[]);
+        harness.game.key_event(KeyCode::KeyA, false);
+        harness.run_ticks(harness.ticks + 2, &[]);
+        assert_eq!(lock(&harness.game.shared).player_facing, Facing::Left);
+        assert_eq!(harness.game.bolts_fired(), 0, "there was nothing to shoot");
+
+        // Now give it a target on the other side, and let it fire exactly once.
+        let target = DVec3::new(4.0, 0.0, 0.0);
+        harness.game.stage_enemy(EnemyKind::Grunt, target);
+        harness.run_ticks(harness.ticks + 1, &[]);
+        assert_eq!(harness.game.bolts_fired(), 1);
+
+        let bolt = harness.game.bolts()[0].position;
+        let player = harness.game.player;
+        let want = player + staff_muzzle(Facing::Left);
+        assert!(
+            (bolt - want).length() < 1e-9,
+            "the bolt started at {bolt:?}, and the staff head is at {want:?}",
+        );
+        // …and the two candidates really are far apart, so the assertion above
+        // is not satisfied by both of them.
+        let mirrored = player + staff_muzzle(Facing::Right);
+        assert!(
+            (want - mirrored).length() > 2.0 * STAFF_MUZZLE.x - 1e-9,
+            "the two muzzles are the same point, so this test cannot fail",
+        );
+        // The bolt starts behind the aim and flies through the wizard, which is
+        // the documented consequence and not an accident.
+        assert!(
+            bolt.x < player.x,
+            "the bolt did not start on the staff side"
+        );
+        assert!(
+            harness.game.bolts()[0].position.x < target.x,
+            "the bolt did not start short of its target",
+        );
+    }
+
     /// **A bolt outlives the range it was fired at.** A shot that expired short
     /// of its target would make [`WEAPON_RANGE`] a lie.
     ///
@@ -3724,8 +3967,11 @@ mod tests {
     #[test]
     fn the_reach_of_a_bolt_covers_the_weapons_range() {
         let reach = BOLT_SPEED * BOLT_LIFE;
+        // The staff head is the third term: the range is measured from the
+        // player's centre and the bolt starts at the muzzle, which can be on the
+        // far side of the wizard from the target.
         assert!(
-            reach > WEAPON_RANGE + max_enemy_radius(),
+            reach > WEAPON_RANGE + max_enemy_radius() + STAFF_MUZZLE.length(),
             "a bolt reaches {reach}, short of a target at {WEAPON_RANGE}",
         );
         // …and does not cross the whole arena, or the range is decoration.
@@ -4311,12 +4557,19 @@ mod tests {
              was never exercised",
         );
         // The most the world can legitimately hold: the player, the enemy cap,
-        // and every bolt that can be in the air at once — plus as many again
-        // waiting for the deferred sweep. Derived rather than measured: a number
-        // taken from a passing run breaks on the next tuning change for a reason
-        // that is not a leak.
+        // every bolt that can be in the air at once and every gem the ground
+        // will keep — plus as many again waiting for the deferred sweep. Derived
+        // rather than measured: a number taken from a passing run breaks on the
+        // next tuning change for a reason that is not a leak.
+        //
+        // **The gems were missing from this and it passed anyway**, because a
+        // soak that killed a little less left fewer of them lying about than the
+        // enemy cap did. They are the largest population in the run by a wide
+        // margin, so leaving them out was a bound on the wrong thing; the
+        // per-tick equality in `assert_nothing_leaked` is what carries the exact
+        // claim, and this is the growth bound over it.
         let bolts_in_flight = (BOLT_LIFE / FIRE_COOLDOWN).ceil() as usize + 1;
-        let ceiling = 2 * (1 + 120 + bolts_in_flight);
+        let ceiling = 2 * (1 + 120 + bolts_in_flight + MAX_PICKUPS);
         assert!(
             peak <= ceiling,
             "the world peaked at {peak} entities against a ceiling of {ceiling}",
@@ -5027,6 +5280,9 @@ mod tests {
         harness.game.stage_enemy(EnemyKind::Grunt, at);
         harness.run_ticks(harness.ticks + 90, &[]);
         assert!(plays(&harness, SOUND_SHOT) > 0, "the gun was silent");
+        // Read here, before the fixture walks the player east: the muzzle
+        // asserted at the bottom is the one this facing had when the gun fired.
+        let facing = lock(&harness.game.shared).player_facing;
         assert_eq!(plays(&harness, SOUND_KILL), 1, "the kill was silent");
         assert_eq!(plays(&harness, SOUND_PICKUP), 0, "the gem banked itself");
 
@@ -5065,12 +5321,20 @@ mod tests {
                 .unwrap_or_else(|| panic!("cue {want} was counted, so it was played"))
         };
 
-        // The shot leaves the **muzzle**, not the player's centre: the grunt is
-        // due east, so the first bolt is exactly `MUZZLE_OFFSET` along +X.
+        // The shot leaves the **head of the staff**, not the player's centre and
+        // not a point along the aim: the wizard has never pressed a horizontal
+        // key in this fixture, so it is still facing the way it was drawn, and
+        // the first bolt starts at that facing's muzzle whatever direction the
+        // grunt is in.
+        assert_eq!(
+            facing,
+            Facing::Right,
+            "nothing in this fixture turns the wizard before it fires",
+        );
         let shot = position_of(SOUND_SHOT);
         assert!(
-            (shot - DVec3::new(MUZZLE_OFFSET, 0.0, 0.0)).length() < 1e-9,
-            "the shot was heard at {shot:?}, not at the muzzle",
+            (shot - staff_muzzle(facing)).length() < 1e-9,
+            "the shot was heard at {shot:?}, not at the staff head",
         );
         let killed_at = position_of(SOUND_KILL);
         assert!(

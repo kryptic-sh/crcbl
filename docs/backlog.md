@@ -2725,7 +2725,35 @@ annotated.
 - **Enemies do not turn to face anything.** Every silhouette is deliberately
   non-directional — a lump, a four-legged X, a horned slab — so no sprite
   rotation is needed and no `atan2` runs per enemy per frame. It is the right
-  trade at 10k and it does mean the crowd has no sense of heading.
+  trade at 10k and it does mean the crowd has no sense of heading. The _player_
+  turns, and it does it by reversing the frame's `u` range (`art::mirrored`)
+  rather than by rotating — which would cost nothing per enemy either, if a
+  future enemy ever wants a heading.
+
+- **The mirrored wizard has never been rasterised, and the walk has never been
+  watched.** `art::mirrored` swaps a frame's `u` ends;
+  `art::tests::facing_left_reverses_the_frames_u_range` asserts the exact
+  reversal, asserts every point the quad will sample stays inside the frame's
+  own interval — the property that stops a mirrored actor sampling the grunt
+  next to it in the strip — and reproduces `sprite.slang`'s
+  `lerp(uv.x, uv.z, corner.x)` on the CPU. That last part is a **copy of the
+  shader's rule, not the shader**. What was checked by reading the shader: `u`
+  is an unconditional `lerp` with no clamp and no `saturate`, and the fragment's
+  `sharpen` is written in terms of `fwidth`, which is symmetric — so a reversed
+  range interpolates rather than degenerating. The evidence that would actually
+  settle it is a golden in `crates/crcbl-vk/tests/vk_e2e.rs` that renders a
+  frame and its mirror and compares the two images column-reversed; that file
+  was outside the write scope of the slice that added the flip. Nobody has seen
+  a picture of a wizard facing left, and nobody has seen the walk cycle play —
+  the browser gate's canvas capture that a human looked at predates both.
+
+- **A wizard walking into a wall keeps walking on the spot.**
+  `RenderState::player_walking` is the intent, not the velocity after
+  `clamp_to_arena`, so a player holding a direction against the arena edge
+  animates while going nowhere. Deliberate — it is what the player is doing, and
+  taking it from the velocity would make the wizard freeze mid-stride against
+  every wall — but it is the one place the animation and the movement disagree,
+  and it is worth knowing before someone "fixes" it.
 
 - **Not measured, not reviewed: the windowed native path.** It is compiled and
   never run — there is no display in this environment — so the follow camera,

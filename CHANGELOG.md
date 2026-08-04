@@ -16,6 +16,33 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **horde**: the player is a **wizard**, and it moves like one. Five new frames
+  in `apps/horde/assets/actors.crpix` — a standing pose and a four-frame walk
+  cycle held four ticks a frame, played from `RenderState::elapsed` so a replay
+  animates the way the run it replays did. The wizard **faces the way the input
+  last pointed**, not the way the gun is aiming and not the way the arena clamp
+  left it moving: `RenderState` carries `player_facing` and `player_walking`,
+  and a released key leaves the facing where it was rather than snapping back.
+  Facing left is the same art with its `u` range reversed, so there is no second
+  column of frames.
+
+  **Bolts leave the head of the staff.** `game::MUZZLE_OFFSET` — a distance
+  along the aim — is replaced by `game::STAFF_MUZZLE` and `game::staff_muzzle`,
+  a point that mirrors with the figure;
+  `art::tests::the_staff_head_is_where_the_muzzle_says_it_is` measures the baked
+  art against it, so the orb and the shot cannot drift apart. The gun still
+  _chooses_ its target from the player's centre and now _aims_ from the staff,
+  which is what stops a shot fired from an offset muzzle travelling parallel to
+  the line that would have hit. When the wizard is facing away from its target
+  the bolt still starts at the drawn staff and crosses the body; that choice is
+  written down on `staff_muzzle`.
+
+  The batch count is unchanged — every frame of the wizard is a frame of the one
+  actors sheet — and the hold guard in `apps/horde/build.rs` and `art.rs` is
+  real for the first time, because until now no horde clip held a frame for
+  longer than the one tick that survives almost any wrong tick↔millisecond
+  arithmetic.
+
 - **horde**: a **tiled grass ground** under the field, from a new
   `apps/horde/assets/terrain.crpix` — four 2-unit variants chosen per tile by
   `crcbl::core::rand`'s index hash, so a tile draws the same grass whichever way

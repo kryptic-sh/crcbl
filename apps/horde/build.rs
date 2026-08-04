@@ -39,10 +39,17 @@ use std::path::PathBuf;
 /// changes. `bake_dir` writes this number into the generated table as
 /// `ART_TICK_HZ`, so the loader reads it rather than declaring its own.
 ///
-/// Nothing horde draws is animated: an enemy is a still frame at a moving
-/// position, and nothing in this game even turns. So no hold here is longer than
-/// the default of one tick, and the guard in `art.rs` is as weak as breakout's
-/// and asteroids' for the same reason — recorded in `docs/backlog.md`.
+/// **One thing horde draws is animated**: the player's walk cycle, in
+/// `assets/actors.crpix`. Everything else is a still frame at a moving position,
+/// and nothing in this game turns.
+///
+/// That one clip is what makes the guard on this number worth anything.
+/// `art::tests::the_walk_cycle_survives_the_round_trip_through_the_sidecar`
+/// asserts each of the walk's frames came back holding for the several ticks
+/// that file authored, and every other frame for the default one — where a suite
+/// with nothing but default holds can only assert the one, which survives a wide
+/// range of wrong arithmetic. Breakout's, asteroids' and `crcbl-render`'s are
+/// still in that state; `docs/backlog.md` records it.
 const ART_TICK_HZ: u32 = 60;
 
 /// The sheets, by file stem. Each is `assets/<stem>.crpix`.
