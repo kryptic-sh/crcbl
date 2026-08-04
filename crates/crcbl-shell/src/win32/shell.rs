@@ -2615,9 +2615,7 @@ mod tests {
         shell.pump(&mut |_| {});
         let hwnd = hwnd_of(&shell, window);
 
-        make_foreground(hwnd);
-        send_focus(hwnd, true);
-        shell.pump(&mut |_| {});
+        focus_and_confirm(&mut shell, window, hwnd);
         let client = super::input::client_screen_rect(hwnd).expect("a live window has one");
         let clipped = client.intersect(virtual_screen());
 
@@ -2642,6 +2640,14 @@ mod tests {
         // SAFETY: this shell's own window; SW_RESTORE is a documented command.
         unsafe { ffi::ShowWindow(hwnd, value::SW_RESTORE) };
         shell.pump(&mut |_| {});
+        // **The keyboard has to come back before the clip can.** `refresh_clip`
+        // applies to a captured window only while it is focused, and minimizing
+        // took the focus away — so on a runner where something else grabs the
+        // foreground in between, restore leaves the clip released and the
+        // assertion below reports the *rectangle* being wrong when the real
+        // answer is that nobody was focused. What this test is about is which
+        // rectangle a restore re-clips from, not who ends up focused.
+        focus_and_confirm(&mut shell, window, hwnd);
         assert_eq!(
             clip_rect(),
             clipped,
