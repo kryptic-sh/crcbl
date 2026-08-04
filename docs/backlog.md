@@ -1110,6 +1110,49 @@ to do only what it promises. Three consequences worth keeping:
   hidden the exact bug the check exists for. Same rule as the Win32 crossing
   fix: on a live desktop, find your own event by its payload.
 
+### The payload rule was written down and then not applied one caller up
+
+The bullet above ends "on a live desktop, find your own event by its payload",
+and `wait_for_pointer` — the function that bullet is _about_ — went on taking
+the first position of any value. It flaked on a docs-only commit, `c6531c4`,
+whose code was byte-identical to a run that had passed:
+
+```text
+warped to PhysicalPoint { x: 480.0, y: 240.0 } in a
+PhysicalSize { width: 640, height: 480 } window and the window system
+reported PhysicalPoint { x: 320.0, y: 240.0 }
+```
+
+`(320, 240)` is the window's exact centre, and nothing was broken: it is where
+`PointerMode::Locked` puts the cursor before freezing it
+(`appkit::input::centre_pointer`). `input` sets and clears that lock without
+pumping afterwards, AppKit re-evaluates its tracking areas against a warp, and
+so a **truthful report of where the cursor was one step earlier** was still in
+flight when the next question was asked. It arrived first and was read as the
+answer.
+
+Two things are worth keeping from it:
+
+- **Draining before the warp does not fix this class of bug**, and reaching for
+  it would have looked like a fix. The window server delivers asynchronously, so
+  the stale report need not have _arrived_ by the time anything drains. Only the
+  payload distinguishes it. `wait_for_pointer` now takes the position it is
+  waiting for and accepts a report only within `POINTER_SLACK` (3 px) of it.
+- **A rule recorded next to one call site does not propagate to the others.**
+  This one was learned on Win32, written into the AppKit suite, and applied to
+  the nudge check twenty lines below the function that needed it most. When a
+  finding is about a _class_ of check, the next step is grepping for the rest of
+  that class, not documenting the instance.
+
+**Unfalsified, stated as the gap it is:** the run after the fix shows the filter
+_accepting_ the right report —
+`warped to PhysicalPoint { x: 480.0, y: 240.0 } and landed at PhysicalPoint { x: 480.0, y: 240.0 }`,
+CI run 30897245466, all nineteen jobs green. It does not show the filter
+_rejecting_ a wrong one. The failure path is the same `DEADLINE` assert that has
+been seen red in an earlier run, so the mechanism works; what nobody has watched
+go red is this predicate against a genuinely wrong conversion. That would take a
+deliberate mutation round on a macOS runner.
+
 ### A synthesized mouse event carries no delta unless you put one on it
 
 The run after the warp fix got past the pointer position and failed one
