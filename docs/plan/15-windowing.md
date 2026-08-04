@@ -168,8 +168,8 @@ Explicitly out (post-MVP or never): exclusive fullscreen, multi-window MVP
 | Wayland  | libwayland-client connection/proxies + **our** protocol codegen on `wl_proxy_marshal_flags` (wayr donor) | P0    |
 | X11      | libxcb connection + **our** request/event layer (core, EWMH atoms, RandR, XKB)                           | P0    |
 | Web      | canvas + DOM events via our own minimal JS shim + wasm imports                                           | P5    |
-| Windows  | hand-written Win32 FFI (`extern "system"` decls for the surface we use)                                  | P14   |
-| macOS    | hand-written Objective-C runtime FFI (`objc_msgSend`) to AppKit                                          | P14   |
+| Windows  | hand-written Win32 FFI (`extern "system"` decls for the surface we use)                                  | P5C   |
+| macOS    | hand-written Objective-C runtime FFI (`objc_msgSend`) to AppKit                                          | P5C   |
 
 Notes on the from-scratch protocol work:
 
@@ -185,8 +185,14 @@ Notes on the from-scratch protocol work:
   XKB for keymaps. Request/event layer is ours; scope stays at what the shell
   actually uses.
 - **Windows/macOS**: FFI declarations are code we write and own — dozens of
-  functions, not thousands; audited by use. Land with Metal/DX12 (P14) — before
-  that they'd be compile-verified-only anyway (gpur lesson: that's not support).
+  functions, not thousands; audited by use. **Moved to P5C** (see ROADMAP's
+  2026-08-04 correction). They were scheduled with Metal/DX12 because "before
+  that they'd be compile-verified-only anyway (gpur lesson: that's not
+  support)", and that reasoning turned out to be the HAL's rather than the
+  shell's: P0.6 tested a whole X11 backend against a real server with no
+  renderer in existence, and both CI runners are desktops. What genuinely does
+  wait for P14 is the sample-level pass — driving a running game and pressing
+  F11 at it needs something to draw with.
 - **Web**: `wasm-bindgen` is avoided in the shell; a small hand-rolled JS glue
   file exports canvas/event/rAF hooks as plain wasm imports. (Whether the rest
   of the wasm build keeps wasm-bindgen is a stage 10 decision — the shell
@@ -207,7 +213,7 @@ Notes on the from-scratch protocol work:
 
 - **Edge-case iceberg** (the reason winit exists): DPI transitions, focus
   semantics, IME, WM quirks. Contained by: Linux-first (daily-driven + CI-tested
-  from P0), Win32/AppKit deferred to P14 with real-hardware time budgeted,
+  from P0), Win32/AppKit at P5C behind e2e suites against real desktops,
   letterbox-always-works fallback, and the two-mode model cutting the worst
   platform surface (modesetting) entirely.
 - **Protocol-from-scratch cost**: wire codecs, keymap handling (XKB parsing),
