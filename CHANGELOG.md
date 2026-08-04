@@ -77,6 +77,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   against a tracking-area crossing that a boundary-crossing warp happened to
   produce.
 
+  **And a synthesized mouse event carries no delta unless the poster sets one.**
+  `CGEventCreateMouseEvent` leaves `kCGMouseEventDeltaX`/`Y` at zero and
+  `-[NSEvent deltaX]` reads exactly those, so `raw_delta` came back `(0.0, 0.0)`
+  — correctly. The harness now writes a known delta onto the event, so the seam
+  is held to reporting _that_ pair rather than merely something non-zero, and
+  the asymmetry `appkit::pointer` exists to describe is observed for the first
+  time: a move right and **up** comes back with a larger window X, a smaller
+  window Y, and a delta whose Y is still negative, because `locationInWindow` is
+  flipped into the seam's space and Quartz's delta is already in it.
+
+  **`ShellEvent::TextCommit` from a real keystroke now has executable coverage
+  on macOS.** The injected `kVK_ANSI_A` reaches `interpretKeyEvents:` through
+  `sendEvent:` and the first responder, and commits `"a"` — the chain that was
+  written blind and is the macOS counterpart of the `TranslateMessage` gap the
+  Win32 backend shipped with.
+
   **The sample-level pass has no macOS equivalent**, on the same terms as
   Windows: it needs a renderer and macOS has no Vulkan until MoltenVK clears its
   P14 gate. `docs/plan/ROADMAP.md`'s 2026-08-04 correction says so, and

@@ -120,6 +120,16 @@
 //! `kCGEventMouseMoved` to ask the question, and the warp is left to do only
 //! what it promises.
 //!
+//! **And a posted mouse event carries no delta unless the poster puts one on
+//! it.** `CGEventCreateMouseEvent` places an event at an absolute location and
+//! leaves `kCGMouseEventDeltaX`/`Y` at zero; `appkit::view` reads exactly those
+//! fields into `raw_delta`, so the next run reported `(0.0, 0.0)` — faithfully.
+//! The assertion had been checking a value this harness never supplied, and
+//! could only ever have passed by accident. [`macos::quartz::move_mouse_by`]
+//! now sets the field, so the seam is held to reporting *the* delta rather than
+//! *a* delta, and the Y-up position against Y-down delta asymmetry that
+//! `appkit::pointer` exists for is finally observable.
+//!
 //! What is **not** here is the sample-level pass: driving a running game and
 //! pressing F11 at it, which the two Linux suites do. That needs a renderer, and
 //! macOS has no Vulkan until MoltenVK clears its P14 gate —
@@ -193,17 +203,30 @@ mod macos {
     /// the other half of the text assertion.
     const VK_UP_ARROW: u16 = 0x7E;
 
-    /// How far the injected pointer move goes, right and down, in Quartz's
-    /// global display coordinates.
+    /// The relative delta the injected pointer move carries, in Quartz's global
+    /// display coordinates — **right and up**, since Quartz's Y is down.
     ///
-    /// Two things at once, which is why it is a constant rather than two
-    /// literals at the call site. It has to be **large enough to be
-    /// identifiable**: `wait_for_pointer` posts moves at the parked point, so a
-    /// report has to be recognisable as this move rather than as one of those,
-    /// and half of this is the margin that decides it. And it has to be
-    /// **small enough to stay on the window**, since a mouse-moved event goes to
-    /// whatever is under the cursor.
-    const NUDGE: (f64, f64) = (40.0, 30.0);
+    /// It is both the distance the cursor travels and the value written into
+    /// the event's `kCGMouseEventDeltaX`/`Y`, so the two cannot drift apart.
+    ///
+    /// Every part of the pair is doing a job:
+    ///
+    /// * **The magnitudes differ**, so a backend reading `deltaX` and `deltaY`
+    ///   out of each other's field reports a pair that is wrong rather than one
+    ///   that happens to be symmetric.
+    /// * **The signs differ**, so the reflection this whole check exists for
+    ///   fails *distinctly* from a swap: reflecting Y makes the second
+    ///   component positive, while swapping makes the first one negative.
+    ///   Having a negative component at all is also the only way to see that one
+    ///   survives the trip rather than being clamped or `abs`ed somewhere.
+    /// * **It is large enough to be identifiable.** `wait_for_pointer` posts
+    ///   moves at the parked point, so this move's report has to be
+    ///   recognisable as this one and not as one of those; half of each
+    ///   component is the margin that decides it.
+    /// * **It is small enough to stay on the window**, since a mouse-moved
+    ///   event goes to whatever is under the cursor, and the parked point is a
+    ///   quarter of the way in from the window's top-left corner.
+    const NUDGE: (i64, i64) = (40, -30);
 
     /// How long any one step may take before the session is called stuck.
     ///
@@ -1018,19 +1041,18 @@ mod macos {
         //
         // The filter takes the **distance** and the assertions below take the
         // **direction**, deliberately: a backend that reflected the Y would
-        // report a point `NUDGE.1` above `parked`, which this admits and the
-        // assertion catches. Filtering on direction would have hidden exactly
-        // the bug this is here for.
+        // report a point `NUDGE.1` on the wrong side of `parked`, which this
+        // admits and the assertion catches. Filtering on direction would have
+        // hidden exactly the bug this is here for.
         let from = quartz::cursor();
-        quartz::move_mouse(from.x + NUDGE.0, from.y + NUDGE.1);
+        quartz::move_mouse_by(from, NUDGE);
+        let reach = (NUDGE.0.abs() as f64 / 2.0, NUDGE.1.abs() as f64 / 2.0);
         let injected = |event: &ShellEvent| match event {
             ShellEvent::PointerMotion {
                 abs: Some(at),
                 raw_delta: Some(delta),
                 ..
-            } if (at.x - parked.x).abs() >= NUDGE.0 / 2.0
-                && (at.y - parked.y).abs() >= NUDGE.1 / 2.0 =>
-            {
+            } if (at.x - parked.x).abs() >= reach.0 && (at.y - parked.y).abs() >= reach.1 => {
                 Some((*at, *delta))
             }
             _ => None,
@@ -1043,25 +1065,47 @@ mod macos {
             .rev()
             .find_map(injected)
             .expect("just waited for it");
-        // **The asymmetry `appkit::pointer` exists to make visible, observed.**
-        // `locationInWindow` is Y-up and the delta beside it is Quartz's, which
-        // is Y-down and already agrees with this seam — so a move that goes down
-        // the screen has to come back as a *larger* window Y **and** a positive
-        // raw delta. A backend that reflected the delta as well as the position
-        // would fail the second half and pass the first, and the symptom in a
-        // game is an inverted first-person camera.
+        // **The asymmetry `appkit::pointer` exists to make visible, observed at
+        // last.** `locationInWindow` is Y-up and is flipped into this seam's
+        // Y-down space; the delta beside it is Quartz's own, which is Y-down
+        // already and must *not* be flipped. So this move — right and up the
+        // screen — has to come back as a larger window X, a **smaller** window
+        // Y, and a delta whose second component is still negative. A backend
+        // that reflected the delta as well as the position passes the first half
+        // and fails the second, and the symptom in a game is an inverted
+        // first-person camera.
         assert!(
-            at.x > parked.x && at.y > parked.y,
-            "the cursor was moved right and down the screen from {parked:?} and the window \
-             reported {at:?}; the desktop is {:?} and the events were {:?}",
+            at.x > parked.x && at.y < parked.y,
+            "the cursor was moved right and up the screen by {NUDGE:?} from {parked:?} and the \
+             window reported {at:?}; the desktop is {:?} and the events were {:?}",
             quartz::cursor(),
             names(&moved)
         );
         assert!(
-            delta.0 > 0.0 && delta.1 > 0.0,
-            "and the raw delta beside it is Quartz's own, unflipped: {delta:?}. A negative Y \
-             here with a correct position above is the delta being reflected, which is an \
-             inverted camera"
+            delta.0 > 0.0 && delta.1 < 0.0,
+            "the raw delta beside it is Quartz's own, unflipped: this move set \
+             kCGMouseEventDeltaX/Y to {NUDGE:?} and the seam reported {delta:?}. (0, 0) means \
+             the posted event carried no delta at all — CGEventCreateMouseEvent computes none, \
+             which is what the run before this one found. A *positive* second component with \
+             the position above correct is the delta being reflected into the position's Y-up \
+             convention, which is an inverted camera. A negative *first* component is deltaX \
+             and deltaY being read from each other's field."
+        );
+        // Proportion, on top of the signs, and it is scale-independent on
+        // purpose: `-[NSEvent deltaX]` is documented in device-independent
+        // points while the field set above is in the event stream's own units,
+        // and nothing here can say whether a Retina host scales between the two.
+        // A uniform factor is a fact about the display rather than a defect and
+        // passes; one axis scaled differently from the other is a defect and
+        // does not. The signs above have already ruled out reflection and swap,
+        // so this is the remaining way the pair can be wrong.
+        let asked = NUDGE.0 as f64 / NUDGE.1 as f64;
+        let got = delta.0 / delta.1;
+        assert!(
+            (got - asked).abs() <= asked.abs() * 0.05,
+            "the delta's two axes are out of proportion with each other: {NUDGE:?} was posted \
+             and {delta:?} came back, a ratio of {got} where {asked} was asked for. The signs \
+             are right, so this is one axis being scaled and the other not"
         );
 
         // --- a click, and a scroll ---
@@ -1742,6 +1786,25 @@ mod macos {
         const MOUSE_MOVED: u32 = 5;
         /// `kCGMouseButtonLeft`.
         const BUTTON_LEFT: u32 = 0;
+
+        // The `CGEventField` numbers this harness sets. **Every one of them is
+        // zero on an event `CGEventCreateMouseEvent` just built**, which is the
+        // whole reason they are here: that function places an event at an
+        // absolute location and computes nothing else about it.
+
+        /// `kCGMouseEventClickState` — which click of a multiple-click this is.
+        ///
+        /// **Not read by this seam**, which takes the button from
+        /// `buttonNumber` alone, so nothing asserted here depends on it. Set
+        /// anyway because a press whose click state is zero is not what a real
+        /// click looks like, and AppKit is entitled to act on that rather than
+        /// on nothing — which would be a defect of the harness reported as one
+        /// of the backend.
+        const MOUSE_CLICK_STATE: u32 = 1;
+        /// `kCGMouseEventDeltaX`.
+        const MOUSE_DELTA_X: u32 = 4;
+        /// `kCGMouseEventDeltaY`.
+        const MOUSE_DELTA_Y: u32 = 5;
         /// `kCGScrollEventUnitLine` — a wheel notch rather than a trackpad's
         /// pixels, which is what decides `ScrollDelta::Lines` at the far end.
         const UNIT_LINE: u32 = 1;
@@ -1780,6 +1843,13 @@ mod macos {
                 ...
             ) -> EventRef;
             fn CGEventPost(tap: u32, event: EventRef);
+            /// Sets one integer-valued field on an event before it is posted.
+            ///
+            /// The only way to put a **relative delta** on a synthesized mouse
+            /// move: `CGEventCreateMouseEvent` takes an absolute location and
+            /// leaves `kCGMouseEventDeltaX`/`Y` at zero, and `-[NSEvent deltaX]`
+            /// reads exactly those fields.
+            fn CGEventSetIntegerValueField(event: EventRef, field: u32, value: i64);
         }
 
         #[link(name = "CoreFoundation", kind = "framework")]
@@ -1823,6 +1893,13 @@ mod macos {
         }
 
         /// One key edge.
+        ///
+        /// **The one field this leaves at its default is the right one.**
+        /// `kCGKeyboardEventAutorepeat` is zero on a freshly built event and
+        /// `-[NSEvent isARepeat]` reads it, which is what
+        /// [`injected_input`](super::injected_input) asserts about the first
+        /// press — so the default is the value under test rather than an
+        /// oversight. Checked when the mouse delta turned out not to be.
         fn key(keycode: u16, down: bool) {
             // SAFETY: a null source is the documented "no particular source";
             // the event is live, posted, and released exactly once here.
@@ -1836,25 +1913,67 @@ mod macos {
             }
         }
 
-        /// Moves the cursor to a point in Quartz's global space.
+        /// Moves the cursor to a point in Quartz's global space, carrying **no**
+        /// relative delta.
+        ///
+        /// Which is honest rather than convenient: the event genuinely says the
+        /// pointer did not travel, and this is used to ask where the pointer is
+        /// rather than to claim it moved. [`move_mouse_by`] is the one that
+        /// makes a claim about travel.
         pub fn move_mouse(x: f64, y: f64) {
-            mouse(MOUSE_MOVED, Point { x, y });
+            mouse(MOUSE_MOVED, Point { x, y }, &[]);
         }
 
-        /// A press and its release, both at the same point.
+        /// Moves the cursor `delta` from `from`, and **says so on the event**.
+        ///
+        /// # `CGEventCreateMouseEvent` does not compute a delta, and that cost a round trip
+        ///
+        /// It places an event at an absolute location and leaves
+        /// `kCGMouseEventDeltaX`/`Y` at zero. `-[NSEvent deltaX]` reads exactly
+        /// those fields, so a backend passing them through faithfully — which
+        /// `appkit::view` does, straight into `raw_delta` — reports the zero it
+        /// was handed. The first run to reach this asserted the delta was
+        /// positive in both axes and got `(0.0, 0.0)`.
+        ///
+        /// **The assertion was checking a value this harness had never
+        /// supplied**, so it could only ever have passed by accident, from some
+        /// unrelated movement on the runner's desk. Setting the field turns it
+        /// into a real check: the window server is told a known delta, and the
+        /// seam can be held to reporting *that* rather than merely something
+        /// non-zero.
+        pub fn move_mouse_by(from: Point, delta: (i64, i64)) {
+            let at = Point {
+                x: from.x + delta.0 as f64,
+                y: from.y + delta.1 as f64,
+            };
+            mouse(
+                MOUSE_MOVED,
+                at,
+                &[(MOUSE_DELTA_X, delta.0), (MOUSE_DELTA_Y, delta.1)],
+            );
+        }
+
+        /// A press and its release, both at the same point, each carrying a
+        /// click state of one.
         pub fn click(x: f64, y: f64) {
             let at = Point { x, y };
-            mouse(LEFT_DOWN, at);
-            mouse(LEFT_UP, at);
+            let single = &[(MOUSE_CLICK_STATE, 1)];
+            mouse(LEFT_DOWN, at, single);
+            mouse(LEFT_UP, at, single);
         }
 
-        /// One mouse event.
-        fn mouse(kind: u32, at: Point) {
-            // SAFETY: as in `key`; `at` is a `CGPoint` passed by value.
+        /// One mouse event, with `fields` set on it before it is posted.
+        fn mouse(kind: u32, at: Point, fields: &[(u32, i64)]) {
+            // SAFETY: as in `key`; `at` is a `CGPoint` passed by value, and each
+            // entry of `fields` is a documented `CGEventField` of a mouse event
+            // set on the live event before it is posted.
             unsafe {
                 let event = CGEventCreateMouseEvent(core::ptr::null_mut(), kind, at, BUTTON_LEFT);
                 if event.is_null() {
                     return;
+                }
+                for (field, value) in fields {
+                    CGEventSetIntegerValueField(event, *field, *value);
                 }
                 CGEventPost(HID_TAP, event);
                 CFRelease(event);
@@ -1862,6 +1981,13 @@ mod macos {
         }
 
         /// Scrolls `lines` notches on the vertical axis.
+        ///
+        /// **Nothing here rests on a default.** The unit is an argument of the
+        /// constructor rather than a field left unset, and it is the whole of
+        /// what decides `hasPreciseScrollingDeltas` at the far end and therefore
+        /// `ScrollDelta::Lines` against `Pixels`; the per-axis amount is the
+        /// variadic argument below. Checked alongside the mouse delta, which did
+        /// rest on one.
         pub fn scroll_lines(lines: i32) {
             // SAFETY: as in `key`. One axis is declared and one variadic
             // argument is passed, which is what `wheels: 1` promises the call.

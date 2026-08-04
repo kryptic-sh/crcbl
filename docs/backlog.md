@@ -1087,6 +1087,58 @@ to do only what it promises. Three consequences worth keeping:
   hidden the exact bug the check exists for. Same rule as the Win32 crossing
   fix: on a live desktop, find your own event by its payload.
 
+### A synthesized mouse event carries no delta unless you put one on it
+
+The run after the warp fix got past the pointer position and failed one
+assertion deeper, with `raw_delta` of `(0.0, 0.0)`. The backend was right and
+the harness was wrong: **`CGEventCreateMouseEvent` places an event at an
+absolute location and computes nothing else.** `kCGMouseEventDeltaX` and
+`kCGMouseEventDeltaY` stay zero unless the poster sets them with
+`CGEventSetIntegerValueField`, and `-[NSEvent deltaX]` reads exactly those
+fields — which `appkit::view` passes straight into `raw_delta`. It reported the
+zero it was handed, faithfully.
+
+**The assertion was checking a value the harness had never supplied**, which is
+the more useful half of this finding: it asserted only that the delta was
+positive in both axes, so it could never have failed for the right reason and
+could only have _passed_ by accident, off some unrelated movement on the
+runner's desk. That is "a check that cannot fail is not a check" arriving
+through an injected-input harness rather than through a stub.
+
+`quartz::move_mouse_by` now sets both fields, and the delta is the same constant
+as the travel (`NUDGE`) so the two cannot drift. Every part of the pair earns
+its place: the magnitudes differ so a `deltaX`/`deltaY` swap shows up, the signs
+differ so a **reflection** fails distinctly from a swap — reflecting Y makes the
+second component positive, swapping makes the first negative — and a negative
+component is the only way to see one survive the trip rather than being clamped
+or `abs`ed. That makes the Y-up-position-against-Y-down-delta asymmetry that
+`appkit::pointer` exists to describe observable for the first time; M2 listed it
+as reasoned rather than observed and it has been ever since.
+
+The delta is judged by **sign and proportion, not exact equality**, and that is
+the general form rather than a loosening: `-[NSEvent deltaX]` is documented in
+device-independent points while the field being set is in the event stream's own
+units, and nothing reachable from a Linux machine says whether a Retina host
+scales between them. A uniform factor is a fact about the display and passes;
+one axis scaled differently from the other is a defect and does not.
+
+**The two neighbouring posters were audited for the same defect and are clean**,
+which is worth recording so a round trip is not spent finding out:
+
+- `CGEventCreateScrollWheelEvent` takes its unit as an **argument**, not a field
+  left unset, and the unit is the whole of what decides
+  `hasPreciseScrollingDeltas` and therefore `Lines` against `Pixels`. The
+  per-axis amount is the variadic argument beside it.
+- `CGEventCreateKeyboardEvent` leaves `kCGKeyboardEventAutorepeat` at zero and
+  `-[NSEvent isARepeat]` reads it — but the session asserts the first press is
+  **not** a repeat, so there the default _is_ the value under test rather than
+  an oversight.
+- `kCGMouseEventClickState` is zero on a synthesized click and this seam never
+  reads it (buttons come from `buttonNumber`), so nothing asserted depends on
+  it. It is set to one anyway: a press with a click state of zero is not what a
+  real click looks like, and AppKit acting on that would be a harness defect
+  reported as a backend one.
+
 Decisions and limits worth keeping whatever the run says:
 
 - **The injection is posted from the session process, not from a helper
@@ -1140,20 +1192,24 @@ Decisions and limits worth keeping whatever the run says:
 Still uncovered after M5:
 
 - **The injected-input assertions have not been seen green.** The M5 run got
-  _into_ `injected_input` — activation was granted and the keyboard was ours —
-  and failed on the warp readback described above, so everything the session
-  would print after that point is still unobserved: the posted `kVK_ANSI_A`
-  coming back as a `Key` **and** a `TextCommit` of `"a"`, which is the
-  `interpretKeyEvents:` chain and the whole reason M4 exists; the arrow key
-  committing nothing; the Y-up/Y-down asymmetry in `appkit::pointer` under real
-  posted motion; the click; and `hasPreciseScrollingDeltas` deciding `Lines`
-  against `Pixels`. That is the same defect class the Win32 suite found one
-  platform over, where `TranslateMessage` was missing from the pump. **TCC is no
-  longer the open question for activation** — that was granted — but whether it
-  gates `CGEventPost` is answered only by the next run. Note the keyboard
-  assertions run _before_ the pointer ones, so a TCC refusal would have failed
-  there first and never got the chance: the failure was ours, in a wait for an
-  event a warp does not generate.
+  _into_ `injected_input`, and the run after it got most of the way through.
+  **What that means is worth stating plainly, because it closes the risk this
+  whole slice was written around: TCC does not gate `CGEventPost` when the
+  events come back to the posting process.** The injected `kVK_ANSI_A` arrived
+  as a `Key`, and the `TextCommit` of `"a"` behind it arrived too — so
+  `sendEvent:` routed the event to the first responder, `keyDown:` handed it to
+  `interpretKeyEvents:`, and `CrcblView`'s `inputContext` was non-nil because it
+  conforms to `NSTextInputClient`. That chain was written on a Linux machine and
+  had never run; **macOS is no longer where Windows was before its e2e suite
+  found `TranslateMessage`.** The arrow key committing nothing passed beside it,
+  and so did the injected pointer's position.
+
+  What is still unobserved is only what comes after the delta assertion that
+  failed: **the click and the wheel notch** — the two `Button` events of one
+  click, and `hasPreciseScrollingDeltas` deciding `Lines` against `Pixels`.
+  Neither has a reason to fail that the keyboard's arrival did not already rule
+  out, but neither has been seen.
+
 - **`injection_skipped` is written and unrun**, because the runner granted
   activation. It stays for the case that produced it, which a developer running
   this as a background process on their own machine will meet. If it is ever
@@ -1210,9 +1266,14 @@ without activation, and what did not.
   which is only possible if `sendEvent:` routed the event to the first
   responder, `keyDown:` handed it to `interpretKeyEvents:`, and the view's
   `inputContext` was non-nil — the last of which is true only because
-  `CrcblView` conforms to `NSTextInputClient`. That is the half that is skipped
-  when activation is refused, so until the runner grants it, macOS is still
-  where Windows was before its e2e suite found `TranslateMessage`.
+  `CrcblView` conforms to `NSTextInputClient`. **That has now happened on a
+  runner.** The posted `kVK_ANSI_A` came back as a `Key` and the `TextCommit` of
+  `"a"` came with it, so `interpretKeyEvents:` is reached end to end and macOS
+  is no longer where Windows was before its e2e suite found `TranslateMessage`.
+  Of the original five, only the `NSTrackingArea` is still a structural claim —
+  the posted pointer motion goes to the key window through `mouseMoved:` rather
+  than through a tracking crossing, so nothing yet _requires_ the tracking area
+  to have been registered.
 
 - **Every type encoding on `CrcblView`'s methods.** The runtime reads them only
   when it forwards a method through an `NSInvocation`, which nothing in this
