@@ -1,0 +1,470 @@
+use crate::harness::Headless;
+use crate::mesh::MESH_EXTENT;
+use crcbl_hal::{
+    Barriers, BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Device, Extent3d,
+    Format, ImageAspect, ImageSubresourceLayers, MemoryLocation, PresentInfo, ResourceState,
+    SubmitInfo,
+};
+
+// --- reversed-Z, proved rather than asserted --------------------------------
+
+/// Two overlapping quads, the **near one drawn first**, so the depth test is the
+/// only thing deciding what is visible.
+///
+/// This is the fixture that makes reversed-Z a test result. `crcbl-render`'s
+/// `camera` module proves the *maths* on the CPU — two surfaces a centimetre
+/// apart at 300 m quantise to the same `f32` under a conventional projection and
+/// to different ones under the engine's. This proves the *pipeline*: the same
+/// geometry, the same shader, the same `CompareOp::Greater`, the same clear of
+/// 0.0, and **only the projection matrix differs** between the two runs. One
+/// produces a red square, the other a blue one.
+///
+/// Why the near quad is drawn first: with the far quad first, a broken depth
+/// test would still leave the near one on top by draw order, and the test would
+/// pass for the wrong reason.
+struct DepthProbe {
+    vertices: crcbl_hal::BufferHandle,
+    indices: crcbl_hal::BufferHandle,
+    uniforms: crcbl_hal::BufferHandle,
+    layout: crcbl_hal::BindGroupLayoutHandle,
+    group: crcbl_hal::BindGroupHandle,
+    pipeline_layout: crcbl_hal::PipelineLayoutHandle,
+    pipeline: crcbl_hal::GraphicsPipelineHandle,
+}
+
+/// Where the probe's camera sits, on the +Z axis looking at the origin.
+const PROBE_EYE: f32 = 2.0;
+/// The probe's near plane. The only number that controls depth precision.
+const PROBE_NEAR: f32 = 0.1;
+/// The probe's far plane — used **only** by the conventional control matrix; the
+/// engine's own projection has none.
+const PROBE_FAR: f32 = 100.0;
+
+impl DepthProbe {
+    /// The two quads, near-first, in `crcbl_shaders::mesh::MeshVertex` layout.
+    fn geometry() -> (Vec<u8>, Vec<u8>) {
+        // (z, half-extent, colour). The near quad is smaller, so a correct
+        // frame is a red square inside a blue ring and a *wrong* one is a plain
+        // blue rectangle — two visibly different pictures, not two shades.
+        let quads = [
+            (0.3f32, 0.25f32, [0.9f32, 0.05, 0.05]),
+            (-0.3, 0.6, [0.05, 0.1, 0.9]),
+        ];
+        let mut vertices = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        for (quad, (z, half, color)) in quads.iter().enumerate() {
+            let base = u32::try_from(quad * 4).expect("two quads");
+            for (x, y) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                for value in [x * half, y * half, *z, 1.0] {
+                    vertices.extend_from_slice(&value.to_le_bytes());
+                }
+                // Facing the camera, so both quads are lit identically and the
+                // only difference between them is their albedo.
+                for value in [0.0f32, 0.0, 1.0, 0.0] {
+                    vertices.extend_from_slice(&value.to_le_bytes());
+                }
+                for value in [color[0], color[1], color[2], 1.0] {
+                    vertices.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        let index_bytes = indices
+            .iter()
+            .flat_map(|index| index.to_le_bytes())
+            .collect();
+        (vertices, index_bytes)
+    }
+
+    fn new(headless: &Headless) -> Self {
+        let device = headless.device.as_ref();
+        let (vertex_bytes, index_bytes) = Self::geometry();
+
+        let upload = |label, usage, bytes: &[u8], state| {
+            let size = bytes.len() as u64;
+            let staging = device
+                .create_buffer(&BufferDesc {
+                    label: Some("probe staging"),
+                    size,
+                    usage: BufferUsage::TRANSFER_SRC,
+                    memory: MemoryLocation::HostUpload,
+                })
+                .expect("a staging buffer");
+            device.write_buffer(staging, 0, bytes).expect("write");
+            let target = device
+                .create_buffer(&BufferDesc {
+                    label: Some(label),
+                    size,
+                    usage: usage | BufferUsage::TRANSFER_DST,
+                    memory: MemoryLocation::DeviceLocal,
+                })
+                .expect("a device-local buffer");
+            let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+                label: Some("probe upload"),
+                queue: headless.queue,
+            });
+            encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+                src: staging,
+                src_offset: 0,
+                dst: target,
+                dst_offset: 0,
+                size,
+            });
+            encoder.pipeline_barrier(&Barriers {
+                buffers: &[crcbl_hal::BufferBarrier::new(
+                    target,
+                    ResourceState::TransferDst,
+                    state,
+                )],
+                ..Barriers::default()
+            });
+            let commands = encoder.finish().expect("recorded");
+            device
+                .submit(headless.queue, &SubmitInfo::new(&[commands]))
+                .expect("submit");
+            device.wait_idle().expect("idle");
+            device.destroy_command_buffer(commands);
+            device.destroy_buffer(staging);
+            target
+        };
+
+        let vertices = upload(
+            "probe vertices",
+            BufferUsage::STORAGE,
+            &vertex_bytes,
+            ResourceState::ShaderRead,
+        );
+        let indices = upload(
+            "probe indices",
+            BufferUsage::INDEX,
+            &index_bytes,
+            ResourceState::IndexBuffer,
+        );
+        let uniforms = device
+            .create_buffer(&BufferDesc {
+                label: Some("probe uniforms"),
+                size: crcbl_shaders::mesh::FRAME_UNIFORMS_SIZE as u64,
+                usage: BufferUsage::UNIFORM,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a uniform buffer");
+
+        let entries = [
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: crcbl_hal::ShaderStages::VERTEX
+                    .union(crcbl_hal::ShaderStages::FRAGMENT),
+                kind: crcbl_hal::BindingKind::UniformBuffer { dynamic: false },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: crcbl_hal::ShaderStages::VERTEX,
+                kind: crcbl_hal::BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
+        ];
+        let layout = device
+            .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+                label: Some("probe"),
+                entries: &entries,
+            })
+            .expect("a layout");
+        let group_entries = [
+            crcbl_hal::BindGroupEntry {
+                binding: 0,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(uniforms),
+            },
+            crcbl_hal::BindGroupEntry {
+                binding: 1,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(vertices),
+            },
+        ];
+        let group = device
+            .create_bind_group(&crcbl_hal::BindGroupDesc {
+                label: Some("probe"),
+                layout,
+                entries: &group_entries,
+                variable_count: None,
+            })
+            .expect("a bind group");
+        let set_layouts = [layout];
+        let pipeline_layout = device
+            .create_pipeline_layout(&crcbl_hal::PipelineLayoutDesc {
+                label: Some("probe"),
+                bind_group_layouts: &set_layouts,
+                push_constants: None,
+            })
+            .expect("a pipeline layout");
+
+        let module = device
+            .create_shader_module(&crcbl_hal::ShaderModuleDesc {
+                label: Some("mesh.slang"),
+                spirv: crcbl_shaders::MESH.spirv(),
+                wgsl: crcbl_shaders::MESH.wgsl(),
+                msl: crcbl_shaders::MESH.msl(),
+            })
+            .expect("the committed SPIR-V is accepted");
+        let color_targets = [crcbl_hal::ColorTargetState::opaque(headless.format)];
+        let pipeline = device.create_graphics_pipeline(&crcbl_hal::GraphicsPipelineDesc {
+            label: Some("depth probe"),
+            layout: pipeline_layout,
+            vertex: crcbl_hal::ShaderEntry {
+                module,
+                entry_point: "vertexMain",
+            },
+            fragment: Some(crcbl_hal::ShaderEntry {
+                module,
+                entry_point: "fragmentMain",
+            }),
+            primitive: crcbl_hal::PrimitiveState {
+                // No culling: the point is the depth test, and a winding
+                // mistake would otherwise delete a quad and look like one.
+                cull_mode: crcbl_hal::CullMode::None,
+                ..crcbl_hal::PrimitiveState::default()
+            },
+            // The seam's default, unchanged: `Greater` on `D32Float` with
+            // writes on. **This is what the two projections are tested
+            // against, and it is not adjusted between runs.**
+            depth_stencil: Some(crcbl_hal::DepthStencilState::default()),
+            multisample: crcbl_hal::MultisampleState::default(),
+            color_targets: &color_targets,
+        });
+        device.destroy_shader_module(module);
+
+        Self {
+            vertices,
+            indices,
+            uniforms,
+            layout,
+            group,
+            pipeline_layout,
+            pipeline: pipeline.expect("a graphics pipeline"),
+        }
+    }
+
+    fn destroy(self, device: &dyn Device) {
+        device.destroy_graphics_pipeline(self.pipeline);
+        device.destroy_pipeline_layout(self.pipeline_layout);
+        device.destroy_bind_group(self.group);
+        device.destroy_bind_group_layout(self.layout);
+        device.destroy_buffer(self.uniforms);
+        device.destroy_buffer(self.indices);
+        device.destroy_buffer(self.vertices);
+    }
+}
+
+/// Renders the probe with `view_proj` and reads the frame back.
+fn render_probe(
+    headless: &Headless,
+    probe: &DepthProbe,
+    pool: &mut crcbl_render::TransientPool,
+    view_proj: glam::Mat4,
+) -> crcbl_golden::Image {
+    let device = headless.device.as_ref();
+    let (width, height) = MESH_EXTENT;
+
+    let uniforms = crcbl_shaders::mesh::FrameUniforms {
+        view_proj: view_proj.to_cols_array(),
+        model: glam::Mat4::IDENTITY.to_cols_array(),
+        camera_position: [0.0, 0.0, PROBE_EYE, 1.0],
+        // Straight at the quads, so both are lit identically and the only
+        // difference between them is their albedo.
+        light_direction: [0.0, 0.0, 1.0, 0.0],
+        light_color: [0.8, 0.8, 0.8, 0.0],
+        ambient: [0.2, 0.2, 0.2, 0.0],
+    };
+    device
+        .write_buffer(probe.uniforms, 0, &uniforms.to_bytes())
+        .expect("write");
+
+    let acquired = device
+        .acquire_next_frame(headless.swapchain)
+        .expect("an image");
+    let bytes = u64::from(width) * u64::from(height) * 4;
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("probe readback"),
+            size: bytes,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a readback buffer");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("probe frame"),
+        queue: headless.queue,
+    });
+    let compiled = {
+        let mut graph = crcbl_render::RenderGraph::new(headless.queue);
+        let target = graph.import_image(
+            "swapchain",
+            crcbl_render::ImportedImage {
+                image: acquired.image,
+                view: acquired.view,
+                format: headless.format,
+                extent: MESH_EXTENT,
+                initial: ResourceState::Undefined,
+                final_state: ResourceState::TransferSrc,
+            },
+        );
+        let depth = graph.create_image(
+            "probe-depth",
+            crcbl_render::TransientImageDesc::scene_depth(MESH_EXTENT),
+        );
+        graph
+            .add_render_pass("probe")
+            .clear_color(target, [0.0, 0.0, 0.0, 1.0])
+            // The reversed-Z clear: `depth::CLEAR` = 0.0, so any geometry beats
+            // the empty buffer under `Greater`.
+            .clear_depth(depth)
+            .execute(|ctx| {
+                let encoder = ctx.encoder();
+                encoder.bind_graphics_pipeline(probe.pipeline);
+                encoder.bind_group(0, probe.group, &[], probe.pipeline_layout);
+                encoder.bind_index_buffer(probe.indices, 0, crcbl_hal::IndexFormat::Uint32);
+                encoder.draw_indexed(0..12, 0, 0..1);
+            });
+        graph.compile(&*pool).expect("a legal frame")
+    };
+    compiled
+        .execute(device, pool, encoder.as_mut(), None)
+        .expect("executed");
+
+    encoder.copy_image_to_buffer(&BufferImageCopy {
+        buffer: staging,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: acquired.image,
+        image_subresource: ImageSubresourceLayers {
+            aspect: ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        },
+        image_offset: crcbl_hal::Offset3d::default(),
+        image_extent: Extent3d::d2(width, height),
+    });
+    let commands = encoder.finish().expect("recorded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device
+        .present(
+            headless.queue,
+            &PresentInfo {
+                swapchain: headless.swapchain,
+                waits: acquired.present_semaphore.as_slice(),
+            },
+        )
+        .expect("present");
+
+    let mut pixels = vec![0u8; bytes as usize];
+    headless.readback(staging, bytes, &mut pixels);
+    device.destroy_command_buffer(commands);
+    device.destroy_buffer(staging);
+
+    let order = match headless.format {
+        Format::Bgra8Unorm | Format::Bgra8UnormSrgb => crcbl_golden::ChannelOrder::Bgra,
+        _ => crcbl_golden::ChannelOrder::Rgba,
+    };
+    crcbl_golden::Image::from_readback(width, height, &pixels, order).expect("one image")
+}
+
+/// **Reversed-Z, on the GPU, discriminated against the alternative.**
+///
+/// `docs/plan/02-vulkan-backend.md` locks reversed-Z, and it is the kind of
+/// decision a comment can claim and nothing checks. This renders the *same*
+/// geometry through the *same* pipeline with the *same* `Greater` compare op and
+/// the *same* clear of 0.0, twice, changing one thing: the projection matrix.
+///
+/// * With the engine's reversed-Z projection, the near quad wins → **red**.
+/// * With a conventional `0 at near, 1 at far` projection, the far quad has the
+///   larger depth value, passes `Greater`, and overwrites it → **blue**.
+///
+/// So this test would fail under standard-Z, in the direction that says which
+/// convention is in force — which is the point.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
+    let headless = Headless::open_for_mesh();
+    let probe = DepthProbe::new(&headless);
+    let mut pool = crcbl_render::TransientPool::new();
+
+    #[allow(clippy::cast_precision_loss)]
+    let aspect = MESH_EXTENT.0 as f32 / MESH_EXTENT.1 as f32;
+    let view = glam::camera::rh::view::look_at_mat4(
+        glam::Vec3::new(0.0, 0.0, PROBE_EYE),
+        glam::Vec3::ZERO,
+        glam::Vec3::Y,
+    );
+    let fov = core::f32::consts::FRAC_PI_4;
+
+    // The engine's own projection, straight out of `crcbl-render`.
+    let reversed = crcbl_render::Projection::Perspective {
+        fov_y: fov,
+        near: PROBE_NEAR,
+    }
+    .matrix(aspect)
+        * view;
+    // The control: conventional depth, 0 at the near plane and 1 at the far one.
+    // `crcbl-render` deliberately has no constructor for this, which is why the
+    // suite reaches for glam directly.
+    let standard =
+        glam::camera::rh::proj::directx::perspective(fov, aspect, PROBE_NEAR, PROBE_FAR) * view;
+
+    let centre = (MESH_EXTENT.0 / 2, MESH_EXTENT.1 / 2);
+
+    let reversed_frame = render_probe(&headless, &probe, &mut pool, reversed);
+    let pixel = reversed_frame.pixel(centre.0, centre.1).expect("inside");
+    assert!(
+        pixel[0] > pixel[2] && pixel[0] > 100,
+        "under reversed-Z the *near* quad must win the depth test, so the centre \
+         must be red; got {pixel:?}. If it is blue, the projection matrix is not \
+         reversed and every depth comparison in the engine is inverted."
+    );
+
+    // And the far quad really is there, around the edge of the near one — so
+    // "red at the centre" is a depth test rather than the blue quad having
+    // failed to draw at all.
+    // Between the two quads' silhouettes. At this camera the near quad reaches
+    // 34 pixels from the centre and the far one 60, so 48 is comfortably inside
+    // the blue ring and comfortably outside the red square — worth deriving
+    // rather than guessing, because a sample point that lands on neither reads
+    // as a depth-test failure.
+    let ring = (MESH_EXTENT.0 / 2, MESH_EXTENT.1 / 2 + 48);
+    let pixel = reversed_frame.pixel(ring.0, ring.1).expect("inside");
+    assert!(
+        pixel[2] > pixel[0] && pixel[2] > 100,
+        "the far quad is larger, so it must be visible around the near one; got \
+         {pixel:?} at {ring:?}"
+    );
+
+    let standard_frame = render_probe(&headless, &probe, &mut pool, standard);
+    let pixel = standard_frame.pixel(centre.0, centre.1).expect("inside");
+    assert!(
+        pixel[2] > pixel[0] && pixel[2] > 100,
+        "the control is only meaningful if a conventional projection really does \
+         invert the outcome under the engine's `Greater` test; it gave {pixel:?}, \
+         which is not blue. Re-derive the quad depths rather than relaxing this."
+    );
+
+    eprintln!(
+        "vk e2e: reversed-Z centre {:?}, conventional-Z centre {:?} — the same \
+         pipeline, the same compare op, only the projection differs",
+        reversed_frame.pixel(centre.0, centre.1).expect("inside"),
+        standard_frame.pixel(centre.0, centre.1).expect("inside"),
+    );
+
+    probe.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}

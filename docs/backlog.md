@@ -4710,13 +4710,28 @@ longer the Tier B leg it was assumed to be.
 One arm was salvaged: the `update_bind_group` refusal is a layout rule rather
 than a tier rule, so that test runs its refusal path on Tier A devices too.
 
-## `crates/crcbl-vk/tests/vk_e2e.rs` is one file and it is far past reviewable
+## `frame_loop_sequences.rs`'s section banner counts three tests and holds four
 
-It was already a monolith before the compute and indirect-draw tests, and those
-added to it rather than splitting it. Splitting is not free: the harness is
-addressed as `--test vk_e2e` by `run-vk-e2e.sh` and by CI, so the split has to
-keep that name working or change both. Worth its own slice, and worth doing
-before the next batch of e2e tests rather than after.
+The `// --- regressions from the 2026-08 code review ---` banner at the top of
+`crates/crcbl-vk/tests/vk_e2e/frame_loop_sequences.rs` says "Three paths the
+review identified", and four tests sit under it —
+`a_read_only_depth_pass_uses_the_read_only_layout`,
+`a_failed_submit_does_not_wedge_the_retire_timeline`,
+`a_readback_whose_wait_semaphore_is_destroyed_fails_cleanly` and
+`a_reconfigure_between_acquire_and_present_is_survivable`. The count was already
+stale before the file was split; the split moved the banner verbatim rather than
+editing it, because that change was out of scope for a move-only slice. Dropping
+the count is the fix — "a count of code elements loses the number entirely".
+
+## Modules of `--test vk_e2e` need `#[path]`, which is not obvious
+
+`crates/crcbl-vk/tests/vk_e2e.rs` declares its modules with
+`#[path = "vk_e2e/<name>.rs"]`. Without it a crate root resolves `mod foo;`
+beside itself — `tests/foo.rs` — and Cargo would then compile that file as its
+own separate test binary. Verified: plain `mod harness;` fails with E0583 naming
+`tests/harness.rs`. The alternative Cargo supports is `tests/vk_e2e/main.rs` as
+the target root, which needs no `#[path]` at all; it was not taken because the
+slice's brief pinned `tests/vk_e2e.rs` as the root file.
 
 ## Vulkan's cross-submission barriers are unverified on this machine
 
