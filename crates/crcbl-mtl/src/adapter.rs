@@ -162,20 +162,34 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   about unwritten code. It is reported with no query because there is none
 ///   to make; [`Limits::max_sampler_anisotropy`] carries the API's own ceiling
 ///   beside it, and `crcbl_mtl::device`'s sampler creation is what enforces it.
+/// * [`Features::TIMELINE_SEMAPHORE`] — unconditional in Metal, and now backed
+///   by the calls the command slice makes: `MTLDevice::newSharedEvent`,
+///   `MTLCommandBuffer::encodeSignalEvent:value:` and
+///   `MTLSharedEvent::waitUntilSignaledValue:timeoutMS:` are the three halves
+///   of the seam's timeline, and `crcbl_mtl::device`'s `create_semaphore`,
+///   `submit` and `wait_semaphores` are where each one lands. Reporting it is
+///   load-bearing rather than cosmetic: the seam says a timeline semaphore on a
+///   device without this feature must be refused.
+/// * [`Features::DEBUG_MARKERS`] — likewise unconditional, and likewise now
+///   real: `MTLCommandBuffer::pushDebugGroup:` and
+///   `MTLCommandEncoder::pushDebugGroup:`/`insertDebugSignpost:` are what
+///   `crcbl_mtl::command`'s debug-label methods call, which is what puts named
+///   regions in an Xcode GPU capture — one of this phase's exit criteria.
 ///
 /// # Absent, with the reason for each
 ///
-/// * [`Features::COMPUTE`], [`Features::TIMELINE_SEMAPHORE`],
-///   [`Features::DEBUG_MARKERS`], [`Features::OCCLUSION_QUERY`],
-///   [`Features::DEPTH_CLAMP`], [`Features::DEPTH_BIAS_CLAMP`],
-///   [`Features::POLYGON_MODE_LINE`] — every one is unconditional in Metal
-///   (`MTLComputeCommandEncoder`, `MTLSharedEvent`, `pushDebugGroup:`,
-///   `visibilityResultBuffer`, `MTLDepthClipMode::Clamp`,
+/// * [`Features::COMPUTE`] — an `MTLComputeCommandEncoder` is unconditional,
+///   but a compute pass with no pipeline to bind dispatches nothing, and
+///   `create_compute_pipeline` still refuses. It lands with the pipeline slice.
+/// * [`Features::OCCLUSION_QUERY`], [`Features::DEPTH_CLAMP`],
+///   [`Features::DEPTH_BIAS_CLAMP`], [`Features::POLYGON_MODE_LINE`] — every
+///   one is unconditional in Metal (`visibilityResultBuffer`,
+///   `MTLDepthClipMode::Clamp`,
 ///   `MTLRenderCommandEncoder::setDepthBias:…:clamp:`,
 ///   `MTLTriangleFillMode::Lines`) and every one is still a promise about a
-///   call this backend cannot make: there is a device now, but no encoder and
-///   no pipeline. They land with the slices that implement them, exactly as
-///   `SAMPLER_ANISOTROPY` just did.
+///   call this backend cannot make: there are passes now, but no pipeline and
+///   no draw. They land with the slices that implement them, exactly as
+///   `SAMPLER_ANISOTROPY` and the two above just did.
 /// * [`Features::DRAW_INDIRECT_COUNT`] and [`Features::MULTI_DRAW_INDIRECT`] —
 ///   Metal's plain `drawPrimitives:indirectBuffer:indirectBufferOffset:` emits
 ///   exactly one draw and takes no count buffer. Indirect command buffers are
@@ -214,9 +228,12 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>) -> Features {
     if device.supportsBCTextureCompression() {
         out |= Features::TEXTURE_COMPRESSION_BC;
     }
-    // No query: every Metal device samples anisotropically, and the device
-    // slice creates the samplers that use it.
+    // No query for these three: every Metal device has anisotropic sampling,
+    // `MTLSharedEvent` and `pushDebugGroup:`, and the slices that call them
+    // have now landed. See the doc comment above for which call backs each.
     out |= Features::SAMPLER_ANISOTROPY;
+    out |= Features::TIMELINE_SEMAPHORE;
+    out |= Features::DEBUG_MARKERS;
     out
 }
 

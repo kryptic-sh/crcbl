@@ -68,6 +68,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   colour is wrong), and it is the same class of defect as the missing sRGB
   encode that made the browser build render too dark.
 
+  **Its third slice records and submits GPU work, and produces the first
+  pixel.** `MetalCommandEncoder` owns one open Metal encoder at a time and
+  closes it before opening another, because a second concurrent encoder raises.
+  `begin_render_pass` builds a real `MTLRenderPassDescriptor` — colour slots,
+  MSAA resolve folded into the store action, the reversed-Z depth clear passed
+  through untouched, stencil attached only when the view's format has a stencil
+  plane. Copies go through `MTLBlitCommandEncoder`, `submit` takes waits and
+  signals, timeline semaphores are `MTLSharedEvent`, and readback is request /
+  poll / destroy that genuinely observes command-buffer completion rather than
+  assuming it. Draws and dispatches fail the encoder rather than being dropped,
+  so `finish` returns the refusal instead of a command buffer that submits and
+  draws nothing.
+
+  **`pipeline_barrier` ends the open blit encoder and records nothing else — the
+  encoder boundary is the barrier.** Metal tracks hazards automatically between
+  encoders for resources whose `hazardTrackingMode` is `Tracked`, which is the
+  default for everything allocated straight from an `MTLDevice`, and this
+  backend allocates nothing else. What would break that — heaps, parallel render
+  encoders, a barrier inside a pass — is written down where the decision is, and
+  a test asserts the premise on real objects instead of trusting it.
+
+  A submission may no longer wait on a timeline value that only a _later_
+  submission signals. With one queue and no CPU-side signal in the seam that can
+  never be satisfied, and its failure mode is a queue that stops with the
+  process alive and nothing in any log — so it is refused up front, by name.
+
 - **`crcbl-jobs`**: a new crate, opening P5B with **the seam every engine thread
   will start through**. `Spawn` has three methods — `threaded`, `parallelism`
   and `spawn` — with two backends behind it: `Threads` over `std::thread`, and

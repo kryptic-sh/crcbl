@@ -8,25 +8,44 @@
 //!
 //! # What this slice is
 //!
-//! **A device, its queue, and its resources.** `MetalInstance` enumerates
-//! adapters as it always did and now opens devices, and `MetalDevice`
-//! implements the resource half of [`Device`](crcbl_hal::Device) — buffers,
-//! images, image views and samplers, created and destroyed through generational
-//! handles, plus `write_buffer`, `caps`, `queue` and `wait_idle`. (Both types
-//! are named rather than linked, for the reason the next section gives: they do
-//! not exist in the build these docs are generated from.)
+//! **The first pixel.** `MetalInstance` enumerates adapters and opens devices,
+//! `MetalDevice` owns the resource tables, and — as of the command slice — it
+//! records, submits and reads back real GPU work: an `MTLCommandBuffer` behind
+//! every [`CommandEncoder`](crcbl_hal::CommandEncoder), a real
+//! `MTLRenderCommandEncoder` behind every render pass, an
+//! `MTLBlitCommandEncoder` behind every copy, `MTLSharedEvent` behind every
+//! timeline semaphore, and `MTLCommandBuffer::status` behind
+//! `poll_readback`. (The types are named rather than linked, for the reason the
+//! next section gives: they do not exist in the build these docs are generated
+//! from.)
+//!
+//! That is the plan's **clear** rung: a render pass opened with
+//! [`LoadOp::Clear`](crcbl_hal::LoadOp::Clear) and closed again is a clear, and
+//! `a_render_pass_clear_reads_back_the_exact_texels` submits one, copies the
+//! image into a host-readable buffer and asserts the byte values. There are no
+//! draws yet, because there are no pipelines to draw with.
 //!
 //! Everything else refuses with
 //! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported) whose `what`
 //! names the slice it arrives in, so a caller reads "not yet" rather than
-//! "broken": surfaces and swapchains, shader modules, bind groups and
-//! pipelines, query sets, semaphores, readback, command recording and
-//! submission. Nothing in this crate is a stub that reports success — the one
-//! entry point with no `Result` to refuse through,
-//! [`Device::create_command_encoder`](crcbl_hal::Device::create_command_encoder),
-//! hands back an encoder whose `finish` is the refusal; see this crate's
-//! `command` module for why that is the honest shape rather than a command
-//! buffer that submits and draws nothing.
+//! "broken": surfaces and swapchains, shader modules, bind groups, pipeline
+//! layouts, pipelines, query sets, and every draw and dispatch. Nothing in this
+//! crate is a stub that reports success — a draw recorded into an encoder
+//! *fails the encoder*, so `finish` hands back the refusal rather than a
+//! command buffer that submits and draws nothing.
+//!
+//! # Barriers are encoder boundaries, not calls
+//!
+//! Metal has no `vkCmdPipelineBarrier`, and this backend does not invent one.
+//! Every resource it allocates is hazard-tracked by the driver — the default
+//! for anything created straight from an `MTLDevice` — and Metal inserts the
+//! dependency itself **between encoders**. So
+//! [`pipeline_barrier`](crcbl_hal::CommandEncoder::pipeline_barrier) ends the
+//! open blit encoder and records nothing else: the encoder split *is* the
+//! barrier. The argument in full, including the three changes that would
+//! invalidate it, is on that method in this crate's `command` module, and
+//! `every_resource_is_hazard_tracked` is what checks the premise on real
+//! objects rather than on paper.
 //!
 //! # `MetalInstance` exists only on macOS, and is unlinked here on purpose
 //!
@@ -80,13 +99,20 @@
 //! `MTLBuffer::contents` returns a raw pointer into the allocation, and a
 //! binding cannot know what a caller will do with it.
 //!
-//! So this crate does contain one `unsafe` assertion, in `device.rs`, and the
-//! SAFETY comment there is narrow on purpose: every buffer and texture lives
-//! behind the device's `Mutex`, the only `contents` call is `write_buffer`'s
-//! and it copies under that lock without letting the pointer escape, and
-//! Objective-C reference counting is atomic. `MTLCommandQueue` and
-//! `MTLSamplerState` are declared `Send + Sync` upstream and are not why the
-//! impl exists.
+//! So this crate does contain `unsafe` marker assertions, and each SAFETY
+//! comment is narrow on purpose. `device.rs` asserts them for the object
+//! tables: every buffer, texture and command buffer lives behind the device's
+//! `Mutex`, the only `contents` calls are `write_buffer`'s and
+//! `poll_readback`'s and both copy under that lock without letting the pointer
+//! escape, and Objective-C reference counting is atomic. `MTLCommandQueue`,
+//! `MTLSamplerState` and `MTLEvent` are declared `Send + Sync` upstream and are
+//! not why that impl exists.
+//!
+//! `command.rs` asserts them for the encoder, and there the argument is the
+//! *trait's own shape* rather than a lock: `CommandEncoder` takes `&mut self`
+//! on every recording method, so the borrow checker enforces Metal's "one
+//! thread at a time" rule for a command buffer, and the only `&self` method is
+//! `Debug::fmt`, which touches no Objective-C object at all.
 //!
 //! # Handles are generational, and they carry their device
 //!
@@ -108,12 +134,15 @@
 //! `docs/plan/09-backends-metal-dx12.md` specs this backend as Tier A, and the
 //! hardware supports it. [`DeviceCaps::tier`](crcbl_hal::DeviceCaps::tier) is
 //! *derived* from [`Features`](crcbl_hal::Features) precisely so that a backend
-//! cannot assert a tier it has not earned, and two of the six Tier A features —
-//! [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) and
-//! [`MULTI_DRAW_INDIRECT`](crcbl_hal::Features::MULTI_DRAW_INDIRECT) — depend on
-//! which indirect path this backend takes (indirect command buffers, per the
-//! plan's mapping table), a decision the command slice makes. Until then they
-//! are off, so the derived tier is B.
+//! cannot assert a tier it has not earned, and three of the six Tier A features
+//! are still off. [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT)
+//! and [`MULTI_DRAW_INDIRECT`](crcbl_hal::Features::MULTI_DRAW_INDIRECT) depend
+//! on which indirect path this backend takes — indirect command buffers, per
+//! the plan's mapping table — and this slice deliberately does not choose one:
+//! there is nothing to draw with, so a choice made here would be a guess.
+//! [`COMPUTE`](crcbl_hal::Features::COMPUTE) waits for the pipeline slice for
+//! the same reason. [`TIMELINE_SEMAPHORE`](crcbl_hal::Features::TIMELINE_SEMAPHORE)
+//! is the one that *did* arrive here, on `MTLSharedEvent`.
 //!
 //! That has a visible consequence now that devices open:
 //! [`DeviceDesc::for_adapter`](crcbl_hal::DeviceDesc::for_adapter) asks for
@@ -127,11 +156,14 @@
 //! The Tier A features that *are* adapter questions —
 //! [`DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING) and
 //! [`BUFFER_DEVICE_ADDRESS`](crcbl_hal::Features::BUFFER_DEVICE_ADDRESS) — are
-//! reported from real queries, and
-//! [`SAMPLER_ANISOTROPY`](crcbl_hal::Features::SAMPLER_ANISOTROPY) joined them
-//! with this slice, because it is the slice that creates samplers. The full
-//! list, with a reason against every flag that is absent, is in this crate's
-//! `adapter` module.
+//! reported from real queries. Every other flag this backend reports is
+//! reported because a call in *this* crate now makes it true, never because
+//! Metal has the capability in the abstract:
+//! [`SAMPLER_ANISOTROPY`](crcbl_hal::Features::SAMPLER_ANISOTROPY) arrived with
+//! sampler creation, and `TIMELINE_SEMAPHORE` and
+//! [`DEBUG_MARKERS`](crcbl_hal::Features::DEBUG_MARKERS) with the command
+//! slice. The full list, with a reason against every flag that is absent, is in
+//! this crate's `adapter` module.
 
 #[cfg(target_os = "macos")]
 mod adapter;

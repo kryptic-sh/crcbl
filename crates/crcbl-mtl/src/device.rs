@@ -32,6 +32,7 @@
 //! reintroduces the hazard and must reintroduce the queue with it.
 
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 
 use crcbl_core::{Handle, Pool};
 use crcbl_hal::{
@@ -42,15 +43,17 @@ use crcbl_hal::{
     GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageType, ImageViewDesc,
     ImageViewHandle, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo,
     QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle,
-    ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, ShaderModuleDesc,
-    ShaderModuleHandle, SubmitInfo, SurfaceError, SwapchainDesc, SwapchainHandle,
+    ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind,
+    SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, SurfaceError, SwapchainDesc,
+    SwapchainHandle,
 };
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSRange, NSString, NSUInteger};
 use objc2_metal::{
-    MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue, MTLDevice, MTLResource,
-    MTLSamplerDescriptor, MTLSamplerState, MTLTexture, MTLTextureDescriptor,
+    MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue, MTLDevice, MTLEvent,
+    MTLResource, MTLSamplerDescriptor, MTLSamplerState, MTLSharedEvent, MTLTexture,
+    MTLTextureDescriptor,
 };
 
 use crate::command::MetalCommandEncoder;
@@ -96,52 +99,153 @@ struct BufferEntry {
     location: MemoryLocation,
 }
 
-/// A texture, plus the seam-side format it was created with.
+/// A texture, plus the seam-side facts Metal cannot answer from the object.
 ///
 /// The format is kept because `create_image_view` needs to compare against it,
 /// and comparing `MTLPixelFormat`s would answer a subtly different question:
 /// two seam formats never share a Metal format (`conv`'s injectivity test), but
-/// the reverse direction is what the view check is about.
+/// the reverse direction is what the view check is about. `image_type` is kept
+/// because [`Extent3d::depth_or_layers`](crcbl_hal::Extent3d::depth_or_layers)
+/// is a depth for a volume and a layer count for everything else, and a copy
+/// region has to be built the right way round.
 #[derive(Debug)]
 struct ImageEntry {
     owner: u64,
     raw: Retained<ProtocolObject<dyn MTLTexture>>,
     format: Format,
+    image_type: ImageType,
 }
 
-/// A texture view.
+/// A texture view, and the format it reinterprets its image as.
+///
+/// The format is what tells `begin_render_pass` whether a depth/stencil
+/// attachment has a stencil plane to attach at all — a question the view's own
+/// `MTLPixelFormat` could answer too, but only by a second mapping table
+/// running backwards.
 #[derive(Debug)]
 struct ViewEntry {
     owner: u64,
-    /// Held to keep the view alive for as long as its handle resolves. Nothing
-    /// in this slice reads it back: the first reader is the bind-group slice,
-    /// which binds it, and the render-pass slice, which attaches it.
-    #[allow(dead_code)]
     raw: Retained<ProtocolObject<dyn MTLTexture>>,
+    format: Format,
 }
 
 /// A sampler state.
 #[derive(Debug)]
 struct SamplerEntry {
     owner: u64,
-    /// Held to keep the sampler alive; see [`ViewEntry::raw`].
+    /// Held to keep the sampler alive for as long as its handle resolves.
+    /// Nothing reads it back until the bind-group slice binds it.
     #[allow(dead_code)]
     raw: Retained<ProtocolObject<dyn MTLSamplerState>>,
 }
 
-owned!(BufferEntry, ImageEntry, ViewEntry, SamplerEntry);
+/// A finished command buffer, waiting to be submitted.
+#[derive(Debug)]
+pub(crate) struct CommandBufferEntry {
+    pub(crate) owner: u64,
+    pub(crate) raw: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    /// Set by [`Device::submit`]. **Metal raises on a second `commit`**, and a
+    /// raise aborts the process, so a handle submitted twice has to be refused
+    /// before it reaches the driver rather than after.
+    pub(crate) committed: bool,
+}
+
+/// A semaphore: an `MTLSharedEvent` for a timeline, a plain `MTLEvent` for a
+/// binary one.
+///
+/// Both are held as [`MTLEvent`], which is the protocol
+/// `encodeWaitForEvent:value:` and `encodeSignalEvent:value:` take, with the
+/// shared one kept beside it because `signaledValue` and
+/// `waitUntilSignaledValue:timeoutMS:` — the two calls the CPU side of the seam
+/// needs — exist only on [`MTLSharedEvent`].
+struct SemaphoreEntry {
+    owner: u64,
+    raw: Retained<ProtocolObject<dyn MTLEvent>>,
+    /// `None` for a binary semaphore, which has no CPU-visible value.
+    shared: Option<Retained<ProtocolObject<dyn MTLSharedEvent>>>,
+    /// The highest value **encoded** so far, which is not the same as the
+    /// highest signalled: a signal sits in a committed command buffer until the
+    /// GPU reaches it. The monotonicity check has to compare against this, or
+    /// two submissions in flight can encode the same value and the second wait
+    /// is satisfied by the first submission's work.
+    encoded: u64,
+}
+
+impl core::fmt::Debug for SemaphoreEntry {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SemaphoreEntry")
+            .field("timeline", &self.shared.is_some())
+            .field("encoded", &self.encoded)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a readback is waiting for.
+#[derive(Debug)]
+enum ReadbackWait {
+    /// "Everything submitted to this device before the request" — the seam's
+    /// meaning for [`ReadbackDesc::after`] of `None`, expressed as the last
+    /// command buffer of the last submission. Metal runs a queue's command
+    /// buffers in commit order, so that one completing means every earlier one
+    /// has. `None` inside means nothing had been submitted at all, whose
+    /// completion point is now.
+    Submission(Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>),
+    /// An explicit timeline point the caller named.
+    Timeline {
+        semaphore: SemaphoreHandle,
+        value: u64,
+    },
+}
+
+/// An in-flight readback request.
+#[derive(Debug)]
+struct ReadbackEntry {
+    owner: u64,
+    buffer: BufferHandle,
+    offset: u64,
+    size: u64,
+    wait: ReadbackWait,
+}
+
+owned!(
+    BufferEntry,
+    ImageEntry,
+    ViewEntry,
+    SamplerEntry,
+    CommandBufferEntry,
+    SemaphoreEntry,
+    ReadbackEntry,
+);
 
 /// Every table the device owns, behind one lock.
 #[derive(Debug, Default)]
-struct DeviceState {
+pub(crate) struct DeviceState {
     buffers: Pool<BufferEntry>,
     images: Pool<ImageEntry>,
     views: Pool<ViewEntry>,
     samplers: Pool<SamplerEntry>,
+    pub(crate) command_buffers: Pool<CommandBufferEntry>,
+    semaphores: Pool<SemaphoreEntry>,
+    readbacks: Pool<ReadbackEntry>,
+    /// The last command buffer of the most recent submission, retained.
+    ///
+    /// This is the whole of this backend's completion tracking, and it is one
+    /// object rather than a queue because Metal's own ordering does the rest: a
+    /// command buffer completing implies every buffer committed before it has.
+    /// A readback clones it, so a later submission replacing it here does not
+    /// take the completion point out from under a request already in flight.
+    last_submission: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
+}
+
+/// An image handle resolved to everything a copy or a pass needs from it.
+pub(crate) struct ResolvedImage {
+    pub(crate) raw: Retained<ProtocolObject<dyn MTLTexture>>,
+    pub(crate) format: Format,
+    pub(crate) image_type: ImageType,
 }
 
 /// The device's shared state.
-struct DeviceInner {
+pub(crate) struct DeviceInner {
     /// Obligation 1: a `Device` may outlive its `Instance`, so the instance's
     /// state — on Metal, the enumerated `MTLDevice` objects — is kept alive
     /// here rather than borrowed. See [`InstanceInner`].
@@ -150,9 +254,9 @@ struct DeviceInner {
     /// The one queue. Metal has a single `MTLCommandQueue` type and no queue
     /// families, which is exactly why the seam's enum is named
     /// [`QueueKind`] rather than `QueueFamily`.
-    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    caps: DeviceCaps,
-    id: u64,
+    pub(crate) queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    pub(crate) caps: DeviceCaps,
+    pub(crate) id: u64,
     /// This device's stamp on every handle it issues; see the handle-tagging
     /// section below. Never zero.
     tag: u32,
@@ -184,6 +288,20 @@ struct DeviceInner {
 //   makes for being a copy.
 // * Retain and release are atomic in the Objective-C runtime, so moving a
 //   `Retained` between threads and dropping it on another is sound on its own.
+//
+// MTL3 added two more unmarked kinds to `state`, and each is covered by the
+// same lock argument:
+//
+// * **`MTLCommandBuffer`**, in the command-buffer table and in
+//   `last_submission`. Every access — `commit`, `status`, `error`,
+//   `encodeSignalEvent:value:` — happens with the `Mutex` held, so no two
+//   threads touch one at once. A command buffer being *recorded* lives in
+//   `MetalCommandEncoder` instead and never enters this table until `finish`,
+//   and that type carries its own marker impl with its own argument.
+// * **`MTLEvent`**, in the semaphore table. `MTLSharedEvent` inherits from
+//   `MTLEvent`, which `objc2-metal` declares `NSObjectProtocol + Send + Sync`
+//   upstream — so the events are not why this impl exists either; they are
+//   named here only so the next reader does not have to re-derive that.
 //
 // Apple documents `MTLDevice` and the objects created from it as safe to use
 // from multiple threads; the two impls below narrow that to the accesses this
@@ -394,8 +512,33 @@ impl MetalDevice {
     }
 
     fn state(&self) -> MutexGuard<'_, DeviceState> {
-        self.inner
-            .state
+        self.inner.state()
+    }
+
+    /// Stamps this device's tag into a handle its pools just issued.
+    fn stamp<A, B>(&self, handle: Handle<A>) -> Handle<B> {
+        self.inner.stamp(handle)
+    }
+
+    /// An empty command buffer, for the waits and signals that have nowhere
+    /// else to go. See [`Device::submit`].
+    fn new_command_buffer(
+        &self,
+        label: &str,
+    ) -> Result<Retained<ProtocolObject<dyn MTLCommandBuffer>>, HalError> {
+        let Some(raw) = self.inner.queue.commandBuffer() else {
+            return Err(HalError::DeviceLost(
+                "MTLCommandQueue::commandBuffer returned nil".to_string(),
+            ));
+        };
+        raw.setLabel(Some(&NSString::from_str(label)));
+        Ok(raw)
+    }
+}
+
+impl DeviceInner {
+    pub(crate) fn state(&self) -> MutexGuard<'_, DeviceState> {
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -407,8 +550,8 @@ impl MetalDevice {
     /// device's tag is [`HalError::ForeignObject`] — the caller crossed two
     /// objects that never met — while one carrying no tag at all was never
     /// issued by any device and is [`HalError::InvalidHandle`].
-    fn check_queue(&self, queue: QueueHandle) -> Result<(), HalError> {
-        if queue == queue_handle(self.inner.tag, QueueKind::Graphics) {
+    pub(crate) fn check_queue(&self, queue: QueueHandle) -> Result<(), HalError> {
+        if queue == queue_handle(self.tag, QueueKind::Graphics) {
             return Ok(());
         }
         Err(if handle_tag(queue) == 0 {
@@ -429,7 +572,7 @@ impl MetalDevice {
     /// until the device is dropped, which is far better than a handle that
     /// might resolve to another device's object. It takes more live objects of
     /// one kind than [`POOL_INDEX_MASK`] admits to reach.
-    fn stamp<A, B>(&self, handle: Handle<A>) -> Handle<B> {
+    pub(crate) fn stamp<A, B>(&self, handle: Handle<A>) -> Handle<B> {
         let index = handle.index();
         let tag = if index > POOL_INDEX_MASK {
             log::error!(
@@ -439,12 +582,51 @@ impl MetalDevice {
             );
             0
         } else {
-            self.inner.tag
+            self.tag
         };
         Handle::from_bits(
             (u64::from(handle.generation()) << 32) | u64::from((tag << DEVICE_TAG_SHIFT) | index),
         )
         .unwrap_or_else(|| unreachable!("a handle's generation is never zero"))
+    }
+
+    /// The `MTLBuffer` a handle names, cloned so the lock can be released
+    /// before the object is used.
+    ///
+    /// The clone is a retain, not a copy of the allocation, and it is what lets
+    /// the command encoder resolve handles under the lock and then encode
+    /// without holding it — which matters because encoding is the slow part and
+    /// `&self` on this trait means the lock is shared with every other thread's
+    /// resource creation.
+    pub(crate) fn buffer_raw(
+        &self,
+        handle: BufferHandle,
+    ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, HalError> {
+        let state = self.state();
+        Ok(lookup(&state.buffers, "buffer", handle, self)?.raw.clone())
+    }
+
+    /// The `MTLTexture` a handle names, with the two seam facts the object
+    /// cannot answer. See [`ImageEntry`].
+    pub(crate) fn image_raw(&self, handle: ImageHandle) -> Result<ResolvedImage, HalError> {
+        let state = self.state();
+        let entry = lookup(&state.images, "image", handle, self)?;
+        Ok(ResolvedImage {
+            raw: entry.raw.clone(),
+            format: entry.format,
+            image_type: entry.image_type,
+        })
+    }
+
+    /// The `MTLTexture` an image-view handle names, and the format it
+    /// reinterprets its image as.
+    pub(crate) fn view_raw(
+        &self,
+        handle: ImageViewHandle,
+    ) -> Result<(Retained<ProtocolObject<dyn MTLTexture>>, Format), HalError> {
+        let state = self.state();
+        let entry = lookup(&state.views, "image view", handle, self)?;
+        Ok((entry.raw.clone(), entry.format))
     }
 }
 
@@ -456,7 +638,7 @@ fn not_yet(what: &'static str) -> HalError {
 
 /// Saturating `u64` → `NSUInteger`, for a length already bounds-checked against
 /// a device limit.
-fn to_ns(value: u64) -> NSUInteger {
+pub(crate) fn to_ns(value: u64) -> NSUInteger {
     NSUInteger::try_from(value).unwrap_or(NSUInteger::MAX)
 }
 
@@ -553,8 +735,10 @@ impl Device for MetalDevice {
     ///
     /// A [`MemoryLocation::DeviceLocal`] buffer is `MTLStorageMode::Private`
     /// and has no `contents` pointer at all — Metal's only route into one is a
-    /// blit from a staging buffer, and the blit encoder is the MTL3 slice. So
-    /// this refuses with [`HalError::InvalidDescriptor`] naming the location,
+    /// blit from a staging buffer, which is
+    /// [`CommandEncoder::copy_buffer_to_buffer`](crcbl_hal::CommandEncoder::copy_buffer_to_buffer)
+    /// and not this call. So this refuses with
+    /// [`HalError::InvalidDescriptor`] naming the location,
     /// which is both what the seam documents ("`InvalidDescriptor` … if the
     /// buffer is not host-visible") and what `crcbl-vk` answers for the same
     /// call, so the two backends disagree about nothing.
@@ -576,7 +760,8 @@ impl Device for MetalDevice {
         if !entry.location.is_mappable() {
             return Err(HalError::InvalidDescriptor(format!(
                 "write_buffer needs a host-visible buffer; this one is {:?}, which Metal can \
-                 only reach through a blit from a staging buffer (the Metal command slice)",
+                 only reach through a blit from a staging buffer — record a copy_buffer_to_buffer \
+                 instead",
                 entry.location
             )));
         }
@@ -609,25 +794,165 @@ impl Device for MetalDevice {
         Ok(())
     }
 
-    fn request_readback(&self, _desc: &ReadbackDesc<'_>) -> Result<ReadbackHandle, HalError> {
-        // Deliberately refused before the buffer handle is checked. A readback
-        // is not a buffer read: the seam's contract is that it covers work
-        // already submitted, which means waiting on a completion point and, on
-        // a `Private` source, blitting into a host-visible one. Both need the
-        // blit encoder.
-        Err(not_yet("GPU readback (the Metal command slice)"))
+    /// Records what a readback is waiting for. It does not wait.
+    ///
+    /// # The completion point, and why it is a command buffer
+    ///
+    /// The seam says a readback covers "everything submitted to this device
+    /// before this call" unless [`ReadbackDesc::after`] names a timeline point.
+    /// On Metal the first of those is **the last command buffer of the last
+    /// submission**, retained here: a queue runs its command buffers in commit
+    /// order, so that one reaching
+    /// [`MTLCommandBufferStatus::Completed`] means every buffer committed
+    /// before it has completed too.
+    ///
+    /// Nothing submitted yet is not an error — the set of work being waited for
+    /// is empty, and an empty set is already finished — so the request is
+    /// created ready. That is the same answer WebGPU's `mapAsync` gives for a
+    /// buffer nothing has written.
+    ///
+    /// An explicit [`ReadbackDesc::after`] naming a value **nothing has
+    /// signalled yet is perfectly legal here**, unlike the same value in a
+    /// [`Device::submit`] wait. The difference is who is waiting: a submission's
+    /// wait occupies the queue and so cannot be satisfied by anything the queue
+    /// has not yet reached, while this one is a CPU-side poll that simply keeps
+    /// answering [`ReadbackState::Pending`] until a later submission signals it.
+    ///
+    /// # Why a `Shared` buffer still needs the wait
+    ///
+    /// It is tempting to read a `HostReadback` buffer's `contents` immediately,
+    /// since the pointer is valid the moment the buffer exists. Metal
+    /// guarantees coherency for a `Shared` resource **at command buffer
+    /// boundaries**, so a blit that has not completed has not necessarily
+    /// landed. Reading early is how a screenshot comes back as the frame before
+    /// it, intermittently, on one machine.
+    fn request_readback(&self, desc: &ReadbackDesc<'_>) -> Result<ReadbackHandle, HalError> {
+        let mut state = self.state();
+        let entry = lookup(&state.buffers, "buffer", desc.buffer, &self.inner)?;
+        if entry.location != MemoryLocation::HostReadback {
+            return Err(HalError::InvalidDescriptor(format!(
+                "request_readback needs a HostReadback buffer; this one is {:?}",
+                entry.location
+            )));
+        }
+        let end = desc
+            .offset
+            .checked_add(desc.size)
+            .ok_or_else(|| HalError::InvalidDescriptor("readback range overflows".to_string()))?;
+        if end > entry.size {
+            return Err(HalError::InvalidDescriptor(format!(
+                "readback range {}..{end} exceeds the buffer's {} bytes",
+                desc.offset, entry.size
+            )));
+        }
+
+        let wait = match desc.after {
+            Some(after) => {
+                let semaphore =
+                    lookup(&state.semaphores, "semaphore", after.semaphore, &self.inner)?;
+                if semaphore.shared.is_none() {
+                    return Err(HalError::Unsupported {
+                        backend: BackendKind::Metal,
+                        what: "ReadbackDesc::after must name a timeline semaphore",
+                    });
+                }
+                ReadbackWait::Timeline {
+                    semaphore: after.semaphore,
+                    value: after.value,
+                }
+            }
+            None => ReadbackWait::Submission(state.last_submission.clone()),
+        };
+        let handle = state.readbacks.insert(ReadbackEntry {
+            owner: self.inner.id,
+            buffer: desc.buffer,
+            offset: desc.offset,
+            size: desc.size,
+            wait,
+        });
+        Ok(self.stamp(handle))
     }
 
+    /// Observes the completion point, and copies the bytes once it is reached.
+    ///
+    /// A poll, never a wait: the two branches below are
+    /// `MTLCommandBuffer::status` and `MTLSharedEvent::signaledValue`, both of
+    /// which answer immediately. Neither `waitUntilCompleted` nor
+    /// `waitUntilSignaledValue:timeoutMS:` appears here, which is the whole
+    /// point of the shape [`crcbl_hal::readback`] argues for.
     fn poll_readback(
         &self,
-        _readback: ReadbackHandle,
-        _out: &mut [u8],
+        readback: ReadbackHandle,
+        out: &mut [u8],
     ) -> Result<ReadbackState, HalError> {
-        Err(not_yet("GPU readback (the Metal command slice)"))
+        let state = self.state();
+        let entry = lookup(&state.readbacks, "readback", readback, &self.inner)?;
+        if out.len() as u64 != entry.size {
+            return Err(HalError::InvalidDescriptor(format!(
+                "poll_readback needs exactly {} bytes, got {}",
+                entry.size,
+                out.len()
+            )));
+        }
+        match &entry.wait {
+            ReadbackWait::Submission(None) => {}
+            ReadbackWait::Submission(Some(command_buffer)) => match command_buffer.status() {
+                MTLCommandBufferStatus::Completed => {}
+                MTLCommandBufferStatus::Error => {
+                    let reason = command_buffer
+                        .error()
+                        .map_or_else(|| "no reason given".to_string(), |error| error.to_string());
+                    return Err(HalError::DeviceLost(format!(
+                        "the submission a readback was waiting for failed: {reason}"
+                    )));
+                }
+                _ => return Ok(ReadbackState::Pending),
+            },
+            ReadbackWait::Timeline { semaphore, value } => {
+                // Resolved from the handle stored at request time, so a
+                // semaphore destroyed in between fails lookup here rather than
+                // being dereferenced after its last reference went.
+                let entry = lookup(&state.semaphores, "semaphore", *semaphore, &self.inner)?;
+                let Some(shared) = entry.shared.as_ref() else {
+                    return Err(HalError::Unsupported {
+                        backend: BackendKind::Metal,
+                        what: "ReadbackDesc::after must name a timeline semaphore",
+                    });
+                };
+                if shared.signaledValue() < *value {
+                    return Ok(ReadbackState::Pending);
+                }
+            }
+        }
+        if entry.size == 0 {
+            return Ok(ReadbackState::Ready);
+        }
+        // Resolved from the handle stored at request time for the same reason:
+        // a buffer destroyed between request and poll fails lookup rather than
+        // having its freed `contents` read.
+        let buffer = lookup(&state.buffers, "buffer", entry.buffer, &self.inner)?;
+        let contents = buffer.raw.contents();
+        // SAFETY: `contents` covers the whole `Shared` allocation, the range was
+        // bounds-checked against `entry.size` at request time and `out.len()`
+        // was just checked to equal it, the completion point above has been
+        // reached so the GPU's writes are visible, and the read happens under
+        // the device lock with the pointer never escaping this block.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                contents.as_ptr().cast::<u8>().add(entry.offset as usize),
+                out.as_mut_ptr(),
+                out.len(),
+            );
+        }
+        Ok(ReadbackState::Ready)
     }
 
-    fn destroy_readback(&self, _readback: ReadbackHandle) {
-        // Unreachable with a live handle: `request_readback` above issues none.
+    fn destroy_readback(&self, readback: ReadbackHandle) {
+        // No driver object of its own: the mapping belongs to the buffer, which
+        // the caller still owns, and the retained command buffer is released
+        // with the entry. Dropping the tracking entry is the whole of it.
+        let mut state = self.state();
+        take_owned(&mut state.readbacks, readback, &self.inner);
     }
 
     fn create_image(&self, desc: &ImageDesc<'_>) -> Result<ImageHandle, HalError> {
@@ -751,6 +1076,7 @@ impl Device for MetalDevice {
             owner: self.inner.id,
             raw,
             format: desc.format,
+            image_type: desc.image_type,
         });
         Ok(self.stamp(handle))
     }
@@ -830,6 +1156,7 @@ impl Device for MetalDevice {
         let handle = state.views.insert(ViewEntry {
             owner: self.inner.id,
             raw: view,
+            format: desc.format,
         });
         Ok(self.stamp(handle))
     }
@@ -979,6 +1306,32 @@ impl Device for MetalDevice {
 
     // --- queries ---
 
+    /// Still refused, and the reason is Metal's rather than this slice's.
+    ///
+    /// MTL3 owns the blit encoder, which is what a Vulkan-shaped query set
+    /// resolves through, so this looked like the slice that would land
+    /// `MTLCounterSampleBuffer`. It is not, and the obstacle is in the headers:
+    ///
+    /// * **Metal samples counters at *boundaries*, and which boundaries exist is
+    ///   a per-device question.** `MTLDevice::supportsCounterSampling:` takes an
+    ///   `MTLCounterSamplingPoint` and answers separately for each — the query
+    ///   would not exist if every device answered yes. The seam's
+    ///   [`write_timestamp`](crcbl_hal::CommandEncoder::write_timestamp) is a
+    ///   free-standing command legal anywhere outside a pass, and the only
+    ///   sampling point Metal guarantees is a *stage* boundary declared in a
+    ///   pass descriptor **before the pass is created** — which is not
+    ///   somewhere the seam's call can reach.
+    /// * **A half-built version would be worse than none.** Sampling only where
+    ///   the device happens to support a blit or dispatch boundary gives a
+    ///   profiler HUD that silently reports timings on some Macs and zeroes on
+    ///   others, which is the "not implemented arriving as passed" failure this
+    ///   workspace treats as a defect.
+    ///
+    /// So [`Features::TIMESTAMP_QUERY`] stays absent — with it,
+    /// [`Limits::timestamp_period_ns`](crcbl_hal::Limits::timestamp_period_ns),
+    /// which Metal has no fixed answer for either — and this refuses by name.
+    /// The slice that takes it on has to decide where a timestamp is *allowed*
+    /// to be written, which is a seam question rather than a backend one.
     fn create_query_set(&self, _desc: &QuerySetDesc<'_>) -> Result<QuerySetHandle, HalError> {
         Err(not_yet("query sets (the Metal query slice)"))
     }
@@ -1000,22 +1353,147 @@ impl Device for MetalDevice {
 
     // --- synchronisation ---
 
-    fn create_semaphore(&self, _desc: &SemaphoreDesc<'_>) -> Result<SemaphoreHandle, HalError> {
-        Err(not_yet("semaphores (the Metal command slice)"))
+    /// Creates a semaphore: `MTLSharedEvent` for a timeline, `MTLEvent` for a
+    /// binary one.
+    ///
+    /// # Timeline
+    ///
+    /// `docs/plan/09-backends-metal-dx12.md`'s mapping table names
+    /// `MTLSharedEvent`, and it is a one-for-one fit: a monotonic `u64` that
+    /// the GPU signals through `encodeSignalEvent:value:`, that the GPU waits on
+    /// through `encodeWaitForEvent:value:`, and that the CPU can both read
+    /// (`signaledValue`) and block on (`waitUntilSignaledValue:timeoutMS:`).
+    /// The seam's [`SemaphoreKind::Timeline::initial_value`] becomes a
+    /// CPU-side `setSignaledValue:` before the object is ever handed out.
+    ///
+    /// # Binary, and the one rule it comes with
+    ///
+    /// Metal has no one-shot GPU-only signal, so a binary semaphore is a plain
+    /// `MTLEvent` — device-private, and deliberately *not* a shared one, because
+    /// a binary semaphore has no CPU-visible value and lending it one would
+    /// invite exactly the reads [`Device::semaphore_value`] refuses. The value
+    /// is kept in this crate's own `SemaphoreEntry`: a submission that signals it
+    /// encodes the next integer, and a submission that waits on it waits for
+    /// the one most recently encoded. **So a binary semaphore must be signalled
+    /// by an earlier submission than the one that waits on it**, which is how
+    /// the seam says they are used ("the swapchain owns them"). The surface
+    /// slice, which is the only thing that will create one, is where a
+    /// presentation-engine signal has to be reconciled with this.
+    fn create_semaphore(&self, desc: &SemaphoreDesc<'_>) -> Result<SemaphoreHandle, HalError> {
+        let label = desc.label.map(NSString::from_str);
+        let (raw, shared) = match desc.kind {
+            SemaphoreKind::Timeline { initial_value } => {
+                let Some(shared) = self.inner.raw.newSharedEvent() else {
+                    return Err(HalError::Backend(
+                        "MTLDevice::newSharedEvent returned nil".to_string(),
+                    ));
+                };
+                shared.setSignaledValue(initial_value);
+                if let Some(label) = label.as_deref() {
+                    shared.setLabel(Some(label));
+                }
+                let raw: Retained<ProtocolObject<dyn MTLEvent>> =
+                    ProtocolObject::from_retained(shared.clone());
+                (raw, Some(shared))
+            }
+            SemaphoreKind::Binary => {
+                let Some(raw) = self.inner.raw.newEvent() else {
+                    return Err(HalError::Backend(
+                        "MTLDevice::newEvent returned nil".to_string(),
+                    ));
+                };
+                if let Some(label) = label.as_deref() {
+                    raw.setLabel(Some(label));
+                }
+                (raw, None)
+            }
+        };
+        let encoded = match desc.kind {
+            SemaphoreKind::Timeline { initial_value } => initial_value,
+            SemaphoreKind::Binary => 0,
+        };
+        let handle = self.state().semaphores.insert(SemaphoreEntry {
+            owner: self.inner.id,
+            raw,
+            shared,
+            encoded,
+        });
+        Ok(self.stamp(handle))
     }
 
-    fn destroy_semaphore(&self, _semaphore: SemaphoreHandle) {}
+    fn destroy_semaphore(&self, semaphore: SemaphoreHandle) {
+        // No deletion queue, for the reason the module docs give: an
+        // `MTLCommandBuffer` retains every object it references, so an event a
+        // committed submission still has to signal outlives this call by
+        // itself.
+        let mut state = self.state();
+        take_owned(&mut state.semaphores, semaphore, &self.inner);
+    }
 
     fn semaphore_value(&self, semaphore: SemaphoreHandle) -> Result<u64, HalError> {
-        Err(HalError::invalid_handle("semaphore", semaphore))
+        let state = self.state();
+        let entry = lookup(&state.semaphores, "semaphore", semaphore, &self.inner)?;
+        let Some(shared) = entry.shared.as_ref() else {
+            return Err(HalError::Unsupported {
+                backend: BackendKind::Metal,
+                what: "a binary semaphore has no value to read",
+            });
+        };
+        Ok(shared.signaledValue())
     }
 
-    fn wait_semaphores(
-        &self,
-        _waits: &[crcbl_hal::SemaphoreWait],
-        _timeout_ns: u64,
-    ) -> Result<bool, HalError> {
-        Err(not_yet("semaphores (the Metal command slice)"))
+    /// Blocks until every wait is satisfied, or until the timeout runs out.
+    ///
+    /// Metal offers one wait per event (`waitUntilSignaledValue:timeoutMS:`)
+    /// rather than Vulkan's wait-on-many, so several waits are performed in
+    /// sequence against a shared deadline — which is the same answer either way,
+    /// because the seam's contract is that *all* of them must be reached. The
+    /// deadline rather than a per-wait timeout is what stops N waits taking N
+    /// times as long to time out.
+    ///
+    /// Metal counts in **milliseconds** and the seam counts in nanoseconds, so
+    /// the remaining budget is rounded *up*: rounding down would turn a
+    /// sub-millisecond timeout into a busy poll that never waits at all.
+    fn wait_semaphores(&self, waits: &[SemaphoreWait], timeout_ns: u64) -> Result<bool, HalError> {
+        if waits.is_empty() {
+            return Ok(true);
+        }
+        let mut events = Vec::with_capacity(waits.len());
+        {
+            let state = self.state();
+            for wait in waits {
+                let entry = lookup(&state.semaphores, "semaphore", wait.semaphore, &self.inner)?;
+                let Some(shared) = entry.shared.as_ref() else {
+                    return Err(HalError::Unsupported {
+                        backend: BackendKind::Metal,
+                        what: "a binary semaphore cannot be waited on from the CPU",
+                    });
+                };
+                events.push((shared.clone(), wait.value));
+            }
+        }
+        // The lock is released before blocking: holding it across a wait would
+        // deadlock against the very submission that is going to signal.
+        let start = Instant::now();
+        for (event, value) in events {
+            let remaining = if timeout_ns == u64::MAX {
+                u64::MAX
+            } else {
+                let elapsed = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                timeout_ns.saturating_sub(elapsed)
+            };
+            // Round up, and never to zero for a non-zero budget.
+            let milliseconds = if remaining == u64::MAX {
+                u64::MAX
+            } else {
+                remaining.div_ceil(1_000_000)
+            };
+            if !event.waitUntilSignaledValue_timeoutMS(value, milliseconds) {
+                // Not an error: a frame-pacing poll times out routinely.
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Blocks until the device has finished everything submitted so far.
@@ -1051,22 +1529,230 @@ impl Device for MetalDevice {
 
     // --- commands ---
 
-    fn create_command_encoder(&self, _desc: &CommandEncoderDesc<'_>) -> Box<dyn CommandEncoder> {
-        Box::new(MetalCommandEncoder::new())
+    fn create_command_encoder(&self, desc: &CommandEncoderDesc<'_>) -> Box<dyn CommandEncoder> {
+        Box::new(MetalCommandEncoder::new(Arc::clone(&self.inner), desc))
     }
 
-    fn destroy_command_buffer(&self, _buffer: CommandBufferHandle) {
-        // Unreachable with a live handle: no encoder finishes, so this device
-        // has issued no command buffer for a caller to release.
+    fn destroy_command_buffer(&self, buffer: CommandBufferHandle) {
+        // Releasing the last reference is the whole of it, and it is safe even
+        // mid-flight: an `MTLCommandBuffer` is retained by its queue until it
+        // completes, and it retains every resource it references. The seam
+        // requires the caller to have waited anyway.
+        let mut state = self.state();
+        take_owned(&mut state.command_buffers, buffer, &self.inner);
     }
 
-    fn submit(&self, queue: QueueHandle, _submit: &SubmitInfo<'_>) -> Result<(), HalError> {
-        // The queue check is real and comes first, because it is the one thing
-        // here this slice can genuinely diagnose: a handle from another device
-        // is a caller bug with its own contract, and hiding it behind the
-        // refusal below would lose it.
-        self.check_queue(queue)?;
-        Err(not_yet("submission (the Metal command slice)"))
+    /// Commits command buffers to the queue, with the waits before and the
+    /// signals after.
+    ///
+    /// # Metal has no `vkQueueSubmit`, so this is three things at once
+    ///
+    /// An `MTLCommandBuffer` is created already recording and `commit` *is* the
+    /// submission, so there is no submit-info structure to fill and nowhere to
+    /// hang a wait or a signal except on a command buffer. The three parts of
+    /// [`SubmitInfo`] therefore land in three different places:
+    ///
+    /// * **Signals go on the last command buffer**, through
+    ///   `encodeSignalEvent:value:`. That call is legal only when no encoder is
+    ///   open on the buffer, which is exactly the state
+    ///   [`CommandEncoder::finish`] leaves it in, and it fires when the GPU has
+    ///   finished everything encoded before it — which is the seam's "signalled
+    ///   on completion".
+    /// * **Waits go on a command buffer of their own, committed first.**
+    ///   `encodeWaitForEvent:value:` has to precede the work it gates, and the
+    ///   work's command buffer already has its encoders recorded, so there is no
+    ///   way to insert one at the front. A leading empty buffer holding only the
+    ///   waits does the job because a queue schedules its command buffers in
+    ///   commit order — the same property `wait_idle` has relied on since MTL2.
+    /// * **The command buffers themselves** are committed in order.
+    ///
+    /// # Wait-before-signal is refused rather than deadlocked
+    ///
+    /// That same commit ordering is what makes a wait for a value **no earlier
+    /// submission has encoded** unsatisfiable: the queue would have to reach a
+    /// later submission to signal it, and it cannot while an earlier one is
+    /// still waiting. This device has one queue and the seam offers no CPU-side
+    /// signal, so there is nowhere else the value could come from. Metal reports
+    /// nothing for that — the queue simply stops, with the process alive and no
+    /// log line anywhere — so the check is made here and turns a silent hang
+    /// into an [`HalError::InvalidDescriptor`]. The seam's own use satisfies it
+    /// by construction: a frames-in-flight timeline waits on the value the
+    /// *previous* frame signalled.
+    ///
+    /// # Timeline values may not go backwards
+    ///
+    /// `MTLSharedEvent` is monotonic and so is the seam
+    /// ([`SemaphoreSignal::value`](crcbl_hal::SemaphoreSignal::value) "must
+    /// exceed the semaphore's current value"). Signalling a value at or below
+    /// one already encoded does not fail loudly on Metal: the event simply
+    /// never reaches the value a later waiter is blocked on, and the process
+    /// hangs. The check below is against the highest value *encoded*, not the
+    /// highest *signalled*, because a signal sitting in a committed buffer has
+    /// not fired yet and comparing against `signaledValue` would let two
+    /// in-flight submissions encode the same value.
+    fn submit(&self, queue: QueueHandle, submit: &SubmitInfo<'_>) -> Result<(), HalError> {
+        // First, because it is the one thing here with its own contract: a
+        // handle from another device is a caller bug that must be reported as
+        // the crossing it is.
+        self.inner.check_queue(queue)?;
+        let mut state = self.state();
+
+        // Everything is resolved and checked before anything is committed. A
+        // submission that fails halfway would leave some of its command buffers
+        // running and some not, with no way to tell a caller which.
+        let mut commands = Vec::with_capacity(submit.command_buffers.len());
+        for handle in submit.command_buffers {
+            let entry = lookup(
+                &state.command_buffers,
+                "command buffer",
+                *handle,
+                &self.inner,
+            )?;
+            if entry.committed {
+                return Err(HalError::InvalidDescriptor(
+                    "this command buffer was already submitted; Metal raises on a second commit"
+                        .to_string(),
+                ));
+            }
+            // The same handle twice in one `SubmitInfo` would pass the flag
+            // check above — nothing has been committed yet — and then reach
+            // `commit` twice inside this call.
+            if submit
+                .command_buffers
+                .iter()
+                .filter(|other| *other == handle)
+                .count()
+                > 1
+            {
+                return Err(HalError::InvalidDescriptor(
+                    "the same command buffer appears twice in one submission; Metal raises on a \
+                     second commit"
+                        .to_string(),
+                ));
+            }
+            commands.push(entry.raw.clone());
+        }
+        let mut waits = Vec::with_capacity(submit.waits.len());
+        for wait in submit.waits {
+            let entry = lookup(&state.semaphores, "semaphore", wait.semaphore, &self.inner)?;
+            // A binary semaphore's value is the one most recently encoded onto
+            // it; the seam says its `value` field is ignored.
+            let value = if entry.shared.is_some() {
+                // **Wait-before-signal is a deadlock here, so it is refused.**
+                // This device has one queue and the seam gives no way to signal
+                // an event from the CPU, so the only thing that can ever move a
+                // timeline is a submission on this queue — and a queue cannot
+                // reach a later submission's signal while an earlier one is
+                // still waiting for it. Metal has no diagnostic for that: the
+                // queue simply stops, with the process alive and nothing in any
+                // log. Vulkan behaves the same way for the same reason; the
+                // difference is only that this one can be caught.
+                if wait.value > entry.encoded {
+                    return Err(HalError::InvalidDescriptor(format!(
+                        "waiting for timeline value {} when nothing has yet encoded a signal past \
+                         {}: on a single queue only an earlier submission can satisfy it, so this \
+                         would stop the queue rather than wait",
+                        wait.value, entry.encoded
+                    )));
+                }
+                wait.value
+            } else {
+                entry.encoded
+            };
+            waits.push((entry.raw.clone(), value));
+        }
+        let mut signals = Vec::with_capacity(submit.signals.len());
+        for signal in submit.signals {
+            let entry = lookup(
+                &state.semaphores,
+                "semaphore",
+                signal.semaphore,
+                &self.inner,
+            )?;
+            // The floor is the highest value encoded onto this semaphore so
+            // far, *including* by an earlier signal in this same submission —
+            // otherwise two signals on one semaphore in one `SubmitInfo` would
+            // both be checked against the stale value and could encode the same
+            // number twice, which is the silent version of the hang below.
+            let floor = signals
+                .iter()
+                .filter(|(handle, _, _)| *handle == signal.semaphore)
+                .map(|(_, _, value)| *value)
+                .max()
+                .unwrap_or(entry.encoded);
+            let value = if entry.shared.is_some() {
+                if signal.value <= floor {
+                    return Err(HalError::InvalidDescriptor(format!(
+                        "a timeline semaphore signalled with {} has already been signalled with \
+                         {floor}; MTLSharedEvent values are monotonic and a waiter on the higher \
+                         value would never wake",
+                        signal.value
+                    )));
+                }
+                signal.value
+            } else {
+                floor + 1
+            };
+            signals.push((signal.semaphore, entry.raw.clone(), value));
+        }
+        if signals.is_empty() && commands.is_empty() && waits.is_empty() {
+            // Nothing to do, and nothing to record as the completion point.
+            return Ok(());
+        }
+
+        // A submission with signals but no work still needs somewhere to encode
+        // them, and one with waits needs a buffer in front. Both are empty
+        // command buffers, which is the cheapest object Metal has.
+        let mut committed: Vec<Retained<ProtocolObject<dyn MTLCommandBuffer>>> = Vec::new();
+        if !waits.is_empty() {
+            let leading = self.new_command_buffer("crcbl submit waits")?;
+            for (event, value) in &waits {
+                leading.encodeWaitForEvent_value(event, *value);
+            }
+            committed.push(leading);
+        }
+        committed.extend(commands);
+        if !signals.is_empty() {
+            // Onto the last command buffer of the submission when there is one,
+            // so the signal fires when *its* work is done rather than one
+            // command buffer later.
+            let last = match committed.last() {
+                Some(last) => last.clone(),
+                None => {
+                    let trailing = self.new_command_buffer("crcbl submit signals")?;
+                    committed.push(trailing.clone());
+                    trailing
+                }
+            };
+            for (_, event, value) in &signals {
+                last.encodeSignalEvent_value(event, *value);
+            }
+        }
+
+        for raw in &committed {
+            raw.commit();
+        }
+        // Committed only now, for the same reason `crcbl-vk` bumps its
+        // submission counter after `vkQueueSubmit2` rather than before: a value
+        // recorded for a submission that never reached the driver would leave
+        // every waiter on it stuck for the life of the process.
+        for handle in submit.command_buffers {
+            if let Ok(local) =
+                local_handle::<CommandBufferEntry, _>("command buffer", *handle, &self.inner)
+                && let Some(entry) = state.command_buffers.get_mut(local)
+            {
+                entry.committed = true;
+            }
+        }
+        for (handle, _, value) in signals {
+            if let Ok(local) = local_handle::<SemaphoreEntry, _>("semaphore", handle, &self.inner)
+                && let Some(entry) = state.semaphores.get_mut(local)
+            {
+                entry.encoded = value;
+            }
+        }
+        state.last_submission = committed.pop();
+        Ok(())
     }
 
     // --- presentation ---
@@ -1122,9 +1808,15 @@ fn resolve_count(requested: u32, base: NSUInteger, total: NSUInteger) -> NSUInte
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
     use crcbl_hal::{
-        Extent3d, ImageAspect, ImageSubresourceRange, ImageUsage, ImageViewType, Instance,
+        Barriers, BufferCopy, BufferImageCopy, ClearValue, ColorAttachment, Extent3d, ImageAspect,
+        ImageBarrier, ImageSubresourceLayers, ImageSubresourceRange, ImageUsage, ImageViewType,
+        Instance, LoadOp, Offset3d, Rect2d, RenderPassDesc, ResourceState, SemaphoreSignal,
+        StoreOp,
     };
+    use objc2_metal::MTLHazardTrackingMode;
 
     use crate::MetalInstance;
     use crate::instance::tests::{desc as device_desc, open as open_instance};
@@ -1172,6 +1864,798 @@ mod tests {
         // allocation, `len` was just asserted to be within it, and the read
         // happens under the device lock with no GPU work in flight.
         unsafe { core::slice::from_raw_parts(contents.as_ptr().cast::<u8>(), len) }.to_vec()
+    }
+
+    // --- the clear rung ----------------------------------------------------
+
+    /// The attachment every render-pass test clears.
+    ///
+    /// 64 texels wide so a row of `Rgba8Unorm` is 256 bytes, which clears every
+    /// buffer-row alignment any Metal implementation asks for by a wide margin;
+    /// four rows so the row stride is exercised at all rather than being the
+    /// whole copy.
+    const TARGET: Extent3d = Extent3d::d2(64, 4);
+
+    /// Bytes one full copy of [`TARGET`] occupies: `Rgba8Unorm` is four bytes a
+    /// texel, tightly packed.
+    const TARGET_BYTES: usize = 64 * 4 * 4;
+
+    /// **The clear colour, and why the expected bytes are what they are.**
+    ///
+    /// [`Format::Rgba8Unorm`] is a plain UNORM format: **no sRGB transfer
+    /// function on either read or write**, so the hardware stores a clear
+    /// component `c` as `round(c × 255)` and nothing else happens to it. Every
+    /// component here is written as `n / 255`, so `round((n / 255) × 255)` is
+    /// exactly `n` — the round trip is exact for all 256 values, and the
+    /// half-ulp of `f32` division is nowhere near the 0.5 that would round to a
+    /// neighbour.
+    ///
+    /// The four values are chosen so that **no byte of the result is zero** and
+    /// no two channels are equal. A clear to black asserting zeroes passes just
+    /// as well against a buffer nothing ever wrote, and equal channels pass
+    /// against a channel swizzle.
+    ///
+    /// The linear/sRGB trap this avoids is real and this repo has hit it: had
+    /// the attachment been `Rgba8UnormSrgb`, a clear of `0.5` would land as
+    /// `188`, not `128`, because the hardware encodes on write. See
+    /// `crcbl_mtl::conv`.
+    const CLEAR: [f32; 4] = [17.0 / 255.0, 34.0 / 255.0, 51.0 / 255.0, 1.0];
+
+    /// What [`CLEAR`] must read back as, per the derivation above.
+    const CLEAR_TEXEL: [u8; 4] = [0x11, 0x22, 0x33, 0xFF];
+
+    /// A second colour, for the load/store pair. Same derivation.
+    const OTHER: [f32; 4] = [204.0 / 255.0, 187.0 / 255.0, 170.0 / 255.0, 1.0];
+
+    /// What [`OTHER`] must read back as.
+    const OTHER_TEXEL: [u8; 4] = [0xCC, 0xBB, 0xAA, 0xFF];
+
+    /// A byte pattern that appears nowhere in any expected result, written into
+    /// every readback buffer before it is used.
+    ///
+    /// Without it "the copy never ran" and "the copy ran" are indistinguishable
+    /// on a buffer Metal happened to hand back zeroed.
+    const POISON: u8 = 0xA5;
+
+    /// A colour target with a whole-image view of it.
+    fn color_target(device: &MetalDevice) -> (ImageHandle, ImageViewHandle) {
+        let image = device
+            .create_image(&ImageDesc {
+                label: Some("crcbl-mtl clear target"),
+                image_type: ImageType::D2,
+                extent: TARGET,
+                format: Format::Rgba8Unorm,
+                mip_levels: 1,
+                samples: 1,
+                usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a colour attachment");
+        let view = device
+            .create_image_view(&ImageViewDesc {
+                label: Some("crcbl-mtl clear view"),
+                image,
+                view_type: ImageViewType::D2,
+                format: Format::Rgba8Unorm,
+                range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+            })
+            .expect("a whole-image view");
+        (image, view)
+    }
+
+    /// A host-readable buffer, poisoned so an absent copy cannot pass.
+    fn readback_buffer(device: &MetalDevice, size: u64) -> BufferHandle {
+        let handle = device
+            .create_buffer(&buffer(size, MemoryLocation::HostReadback))
+            .expect("a readback buffer");
+        device
+            .write_buffer(handle, 0, &vec![POISON; size as usize])
+            .expect("HostReadback is host-visible");
+        handle
+    }
+
+    /// The whole of an image, copied into the start of a buffer.
+    fn whole_image_copy(image: ImageHandle, into: BufferHandle) -> BufferImageCopy {
+        BufferImageCopy {
+            buffer: into,
+            buffer_offset: 0,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            image,
+            image_subresource: ImageSubresourceLayers {
+                aspect: ImageAspect::COLOR,
+                mip: 0,
+                base_layer: 0,
+                layer_count: 1,
+            },
+            image_offset: Offset3d { x: 0, y: 0, z: 0 },
+            image_extent: TARGET,
+        }
+    }
+
+    /// Polls a readback to completion, with a deadline rather than a sleep.
+    ///
+    /// This is the loop `crcbl_hal::readback` sanctions for "callers that
+    /// genuinely have nothing else to do"; the deadline is what turns a
+    /// completion point that is never reached into a failed test instead of a
+    /// hung one.
+    fn drain(device: &MetalDevice, readback: ReadbackHandle, size: usize) -> Vec<u8> {
+        let mut out = vec![0u8; size];
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let state = device
+                .poll_readback(readback, &mut out)
+                .expect("the readback resolves");
+            if state.is_ready() {
+                return out;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the readback never became ready; the submission it waits on has not completed"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// One texel repeated across a whole [`TARGET`]-sized copy.
+    fn expected(texel: [u8; 4]) -> Vec<u8> {
+        texel.iter().copied().cycle().take(TARGET_BYTES).collect()
+    }
+
+    /// **The first pixel.** A render pass clears an offscreen image, a blit
+    /// copies it into a host-readable buffer, and the exact bytes come back.
+    ///
+    /// This is `docs/plan/09-backends-metal-dx12.md`'s "clear" rung, and every
+    /// stage of the slice is on the path: the command buffer, the render pass
+    /// descriptor and its load action, the clear value, the barrier that splits
+    /// the encoders, the blit, the submission, and the readback's completion
+    /// observation.
+    ///
+    /// **What turns it red.** Mapping [`LoadOp::Clear`] to any other
+    /// `MTLLoadAction`, or [`StoreOp::Store`] to `DontCare` — the poison
+    /// pattern comes back. Dropping the copy, or reading before the command
+    /// buffer completes — the poison pattern comes back. Widening or narrowing
+    /// the clear colour, or swapping two channels — [`CLEAR_TEXEL`] is
+    /// asymmetric in every channel, so any permutation is caught. Getting the
+    /// row stride wrong — only the first row would match.
+    #[test]
+    fn a_render_pass_clear_reads_back_the_exact_texels() {
+        let (_instance, device) = open_device();
+        let (image, view) = color_target(&device);
+        let readback = readback_buffer(&device, TARGET_BYTES as u64);
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("crcbl-mtl clear"),
+            queue,
+        });
+        encoder.begin_render_pass(&RenderPassDesc {
+            label: Some("clear"),
+            color_attachments: &[ColorAttachment {
+                view,
+                resolve: None,
+                load: LoadOp::Clear,
+                store: StoreOp::Store,
+                clear: ClearValue::color(CLEAR),
+            }],
+            depth_stencil_attachment: None,
+            render_area: Rect2d::from_size(TARGET.width, TARGET.height),
+        });
+        encoder.end_render_pass();
+        encoder.pipeline_barrier(&Barriers {
+            images: &[ImageBarrier::new(
+                image,
+                ImageSubresourceRange::all(Format::Rgba8Unorm),
+                ResourceState::ColorAttachment,
+                ResourceState::TransferSrc,
+            )],
+            ..Barriers::default()
+        });
+        encoder.copy_image_to_buffer(&whole_image_copy(image, readback));
+        let commands = encoder.finish().expect("the recording is complete");
+
+        device
+            .submit(queue, &SubmitInfo::new(&[commands]))
+            .expect("the queue accepts it");
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: Some("the first pixel"),
+                buffer: readback,
+                offset: 0,
+                size: TARGET_BYTES as u64,
+                after: None,
+            })
+            .expect("a HostReadback buffer, in range");
+
+        let bytes = drain(&device, request, TARGET_BYTES);
+        assert_eq!(
+            &bytes[..4],
+            &CLEAR_TEXEL,
+            "the first texel is not the colour the pass cleared to"
+        );
+        assert_eq!(
+            bytes,
+            expected(CLEAR_TEXEL),
+            "every texel of the attachment must carry the clear colour"
+        );
+
+        device.destroy_readback(request);
+        device.destroy_command_buffer(commands);
+        device.destroy_image_view(view);
+        device.destroy_image(image);
+        device.destroy_buffer(readback);
+    }
+
+    /// Clears to `first`, then runs a second pass with `load` and the clear
+    /// value `second`, and returns what the image holds afterwards.
+    fn two_passes(
+        device: &MetalDevice,
+        first: [f32; 4],
+        load: LoadOp,
+        second: [f32; 4],
+    ) -> Vec<u8> {
+        let (image, view) = color_target(device);
+        let readback = readback_buffer(device, TARGET_BYTES as u64);
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("crcbl-mtl load/clear"),
+            queue,
+        });
+        for (colour, load) in [(first, LoadOp::Clear), (second, load)] {
+            encoder.begin_render_pass(&RenderPassDesc {
+                label: None,
+                color_attachments: &[ColorAttachment {
+                    view,
+                    resolve: None,
+                    load,
+                    store: StoreOp::Store,
+                    clear: ClearValue::color(colour),
+                }],
+                depth_stencil_attachment: None,
+                render_area: Rect2d::from_size(TARGET.width, TARGET.height),
+            });
+            encoder.end_render_pass();
+        }
+        encoder.copy_image_to_buffer(&whole_image_copy(image, readback));
+        let commands = encoder.finish().expect("the recording is complete");
+        device
+            .submit(queue, &SubmitInfo::new(&[commands]))
+            .expect("the queue accepts it");
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: None,
+                buffer: readback,
+                offset: 0,
+                size: TARGET_BYTES as u64,
+                after: None,
+            })
+            .expect("a HostReadback buffer, in range");
+        let bytes = drain(device, request, TARGET_BYTES);
+        device.destroy_readback(request);
+        device.destroy_command_buffer(commands);
+        device.destroy_image_view(view);
+        device.destroy_image(image);
+        device.destroy_buffer(readback);
+        bytes
+    }
+
+    /// **`LoadOp::Load` keeps what `LoadOp::Clear` replaces**, which is the
+    /// pair that catches a load action wired to the wrong constant.
+    ///
+    /// Two runs differing in exactly one field, so neither result can be
+    /// explained by anything else. **What turns it red:** mapping
+    /// [`LoadOp::Load`] onto `MTLLoadAction::Clear` makes the first assertion
+    /// return `OTHER_TEXEL`; mapping [`LoadOp::Clear`] onto
+    /// `MTLLoadAction::Load` makes the second return `CLEAR_TEXEL`; collapsing
+    /// both onto one action makes the two runs agree, which either assertion
+    /// then catches.
+    #[test]
+    fn load_op_preserves_what_clear_replaces() {
+        let (_instance, device) = open_device();
+        assert_ne!(
+            CLEAR_TEXEL, OTHER_TEXEL,
+            "the two colours must differ or neither assertion means anything"
+        );
+        assert_eq!(
+            two_passes(&device, CLEAR, LoadOp::Load, OTHER),
+            expected(CLEAR_TEXEL),
+            "a Load pass must keep the first pass's clear, not apply its own clear value"
+        );
+        assert_eq!(
+            two_passes(&device, CLEAR, LoadOp::Clear, OTHER),
+            expected(OTHER_TEXEL),
+            "a Clear pass must replace what the first pass left"
+        );
+    }
+
+    /// A buffer-to-buffer copy moves the bytes, at the offsets it was given.
+    ///
+    /// **What turns it red.** Dropping the copy, or swapping source and
+    /// destination — the poison survives. Ignoring either offset — the moved
+    /// window lands in the wrong place, which the untouched head and tail
+    /// assertions catch. Ignoring the size — the tail is overwritten.
+    #[test]
+    fn a_buffer_to_buffer_copy_moves_the_bytes_at_both_offsets() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+
+        // A source whose bytes are all distinct within the copied window, so a
+        // copy that is off by one lands somewhere the assertion notices.
+        let source: Vec<u8> = (0..64u8).map(|byte| byte.wrapping_add(1)).collect();
+        let upload = device
+            .create_buffer(&buffer(64, MemoryLocation::HostUpload))
+            .expect("an upload buffer");
+        device
+            .write_buffer(upload, 0, &source)
+            .expect("HostUpload is what write_buffer is for");
+        let readback = readback_buffer(&device, 64);
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("crcbl-mtl b2b"),
+            queue,
+        });
+        encoder.copy_buffer_to_buffer(&BufferCopy {
+            src: upload,
+            src_offset: 8,
+            dst: readback,
+            dst_offset: 16,
+            size: 32,
+        });
+        let commands = encoder.finish().expect("the recording is complete");
+        device
+            .submit(queue, &SubmitInfo::new(&[commands]))
+            .expect("the queue accepts it");
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: None,
+                buffer: readback,
+                offset: 0,
+                size: 64,
+                after: None,
+            })
+            .expect("a HostReadback buffer, in range");
+
+        let bytes = drain(&device, request, 64);
+        let mut want = vec![POISON; 64];
+        want[16..48].copy_from_slice(&source[8..40]);
+        assert_eq!(bytes, want, "the copy moved the wrong window");
+
+        device.destroy_readback(request);
+        device.destroy_command_buffer(commands);
+        device.destroy_buffer(upload);
+        device.destroy_buffer(readback);
+    }
+
+    /// **The premise the barrier decision rests on**: every resource this
+    /// backend allocates is hazard-tracked by the driver, so Metal inserts the
+    /// dependency between encoders itself and
+    /// [`CommandEncoder::pipeline_barrier`] has only to create the boundary.
+    ///
+    /// Read off the objects rather than asserted on paper. **What turns it
+    /// red:** adding `MTLResourceHazardTrackingModeUntracked` to
+    /// `conv::resource_options`, or moving allocation onto an `MTLHeap` — the
+    /// two changes that would make `pipeline_barrier` a silent no-op instead of
+    /// a working barrier.
+    #[test]
+    fn every_resource_is_hazard_tracked() {
+        let (_instance, device) = open_device();
+        assert!(!LOCATIONS.is_empty(), "nothing to check");
+        for &location in LOCATIONS {
+            let handle = device
+                .create_buffer(&buffer(256, location))
+                .unwrap_or_else(|error| panic!("{location:?}: {error:?}"));
+            let state = device.state();
+            let entry = lookup(&state.buffers, "buffer", handle, &device.inner)
+                .expect("the buffer is live");
+            assert_ne!(
+                entry.raw.hazardTrackingMode(),
+                MTLHazardTrackingMode::Untracked,
+                "{location:?}: an untracked buffer gets no implicit dependency, so \
+                 pipeline_barrier would be a no-op that looks like a barrier"
+            );
+            assert!(
+                !entry
+                    .raw
+                    .resourceOptions()
+                    .contains(objc2_metal::MTLResourceOptions::HazardTrackingModeUntracked),
+                "{location:?}: resource_options asked for untracked"
+            );
+            drop(state);
+            device.destroy_buffer(handle);
+        }
+
+        let (image, view) = color_target(&device);
+        let state = device.state();
+        let entry =
+            lookup(&state.images, "image", image, &device.inner).expect("the image is live");
+        assert_ne!(
+            entry.raw.hazardTrackingMode(),
+            MTLHazardTrackingMode::Untracked,
+            "an untracked texture has the same problem as an untracked buffer"
+        );
+        drop(state);
+        device.destroy_image_view(view);
+        device.destroy_image(image);
+    }
+
+    /// A timeline semaphore carries its initial value, is signalled by a
+    /// submission, and is observable and waitable from the CPU.
+    ///
+    /// **What turns it red.** Dropping the `setSignaledValue:` for
+    /// `initial_value` — the first assertion. Not encoding the signal, or
+    /// encoding it onto a command buffer that is never committed — the wait
+    /// times out and the value never moves. Returning `Ok(true)` from a wait
+    /// that timed out — the second assertion, which is made *before* anything
+    /// signals. Dropping the monotonicity check — the last one.
+    #[test]
+    fn a_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let semaphore = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("crcbl-mtl timeline"),
+                kind: crcbl_hal::SemaphoreKind::Timeline { initial_value: 5 },
+            })
+            .expect("this device reports TIMELINE_SEMAPHORE");
+        assert_eq!(
+            device.semaphore_value(semaphore).expect("a timeline value"),
+            5,
+            "initial_value must reach MTLSharedEvent::setSignaledValue:"
+        );
+
+        // Nothing has signalled 9 yet, so this must time out — and a timeout is
+        // a normal outcome the seam spells `Ok(false)`, not an error.
+        assert!(
+            !device
+                .wait_semaphores(
+                    &[SemaphoreWait {
+                        semaphore,
+                        value: 9
+                    }],
+                    1_000_000
+                )
+                .expect("a timeout is not a failure"),
+            "a wait for a value nothing has signalled must not be satisfied"
+        );
+
+        device
+            .submit(
+                queue,
+                &SubmitInfo {
+                    command_buffers: &[],
+                    waits: &[],
+                    signals: &[SemaphoreSignal {
+                        semaphore,
+                        value: 9,
+                    }],
+                },
+            )
+            .expect("a signal-only submission is legal");
+        assert!(
+            device
+                .wait_semaphores(
+                    &[SemaphoreWait {
+                        semaphore,
+                        value: 9
+                    }],
+                    10_000_000_000
+                )
+                .expect("the wait resolves"),
+            "the submission's signal never reached the event"
+        );
+        assert_eq!(
+            device.semaphore_value(semaphore).expect("a timeline value"),
+            9
+        );
+
+        // Backwards is refused. Without this the event would never reach the
+        // value a later waiter is blocked on, and the process would hang with
+        // nothing to point at.
+        let error = device
+            .submit(
+                queue,
+                &SubmitInfo {
+                    command_buffers: &[],
+                    waits: &[],
+                    signals: &[SemaphoreSignal {
+                        semaphore,
+                        value: 9,
+                    }],
+                },
+            )
+            .expect_err("9 has already been signalled");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+
+        device.destroy_semaphore(semaphore);
+    }
+
+    /// **`poll_readback` is a poll**: pending before its completion point and
+    /// ready after, with the right bytes.
+    ///
+    /// The pending half is deterministic rather than a race, and that is the
+    /// whole design of this test: the request names an explicit timeline value
+    /// that **nothing has signalled yet**, so a correct implementation cannot
+    /// report `Ready` however fast the GPU is.
+    ///
+    /// **What turns it red.** Returning `Ready` unconditionally, or reading the
+    /// `Shared` buffer without observing the completion point at all — the
+    /// first assertion. Never reaching `Ready` — `drain`'s deadline. Copying
+    /// from the wrong offset — the byte comparison.
+    #[test]
+    fn a_readback_is_pending_before_its_completion_point_and_ready_after() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let semaphore = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("crcbl-mtl readback gate"),
+                kind: crcbl_hal::SemaphoreKind::Timeline { initial_value: 0 },
+            })
+            .expect("this device reports TIMELINE_SEMAPHORE");
+
+        let source = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let upload = device
+            .create_buffer(&buffer(source.len() as u64, MemoryLocation::HostUpload))
+            .expect("an upload buffer");
+        device
+            .write_buffer(upload, 0, &source)
+            .expect("HostUpload is writable");
+        let readback = readback_buffer(&device, source.len() as u64);
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("crcbl-mtl gated copy"),
+            queue,
+        });
+        encoder.copy_buffer_to_buffer(&BufferCopy {
+            src: upload,
+            src_offset: 0,
+            dst: readback,
+            dst_offset: 0,
+            size: source.len() as u64,
+        });
+        let commands = encoder.finish().expect("the recording is complete");
+        device
+            .submit(queue, &SubmitInfo::new(&[commands]))
+            .expect("the queue accepts it");
+
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: Some("gated"),
+                buffer: readback,
+                offset: 0,
+                size: source.len() as u64,
+                after: Some(SemaphoreWait {
+                    semaphore,
+                    value: 1,
+                }),
+            })
+            .expect("a HostReadback buffer and a timeline semaphore");
+        let mut out = vec![0u8; source.len()];
+        assert_eq!(
+            device
+                .poll_readback(request, &mut out)
+                .expect("the readback resolves"),
+            ReadbackState::Pending,
+            "nothing has signalled value 1, so this cannot be ready"
+        );
+        assert!(
+            out.iter().all(|byte| *byte == 0),
+            "a pending poll must leave the output slice untouched"
+        );
+
+        device
+            .submit(
+                queue,
+                &SubmitInfo {
+                    command_buffers: &[],
+                    waits: &[],
+                    signals: &[SemaphoreSignal {
+                        semaphore,
+                        value: 1,
+                    }],
+                },
+            )
+            .expect("a signal-only submission is legal");
+        assert_eq!(drain(&device, request, source.len()), source);
+
+        // The wrong output length is a caller bug with its own contract.
+        let mut wrong = vec![0u8; source.len() + 1];
+        let error = device
+            .poll_readback(request, &mut wrong)
+            .expect_err("the slice must be exactly ReadbackDesc::size");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+
+        device.destroy_readback(request);
+        device.destroy_command_buffer(commands);
+        device.destroy_semaphore(semaphore);
+        device.destroy_buffer(upload);
+        device.destroy_buffer(readback);
+    }
+
+    /// A submission carrying a wait runs, and a wait nothing can satisfy is
+    /// refused instead of stopping the queue.
+    ///
+    /// The two halves are the two things that matter about
+    /// `encodeWaitForEvent:value:` on this backend. The first is that a wait on
+    /// an already-signalled value does not **wedge** the submission it gates —
+    /// the failure that would otherwise appear as a hang with nothing to point
+    /// at. The second is the deadlock guard: with one queue and no CPU-side
+    /// signal, a wait for a value no earlier submission encoded can never be
+    /// satisfied, and refusing it is the only way that ends in a message rather
+    /// than in silence.
+    ///
+    /// **What turns it red.** A wait encoded onto a command buffer that is
+    /// never committed, or encoded after the work rather than before it, leaves
+    /// the copy's completion point unreachable and `drain` hits its deadline.
+    /// Dropping the guard makes the first half return `Ok` — and, run for real
+    /// in that shape, would stop the queue, which is what the guard exists to
+    /// prevent.
+    ///
+    /// It deliberately does **not** claim to prove the wait *gated* anything.
+    /// Proving that needs an observation taken between two submissions, and
+    /// every such observation is a race rather than an assertion.
+    #[test]
+    fn a_wait_runs_when_it_is_satisfiable_and_is_refused_when_it_is_not() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let semaphore = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("crcbl-mtl gate"),
+                kind: crcbl_hal::SemaphoreKind::Timeline { initial_value: 0 },
+            })
+            .expect("this device reports TIMELINE_SEMAPHORE");
+
+        // Nothing has encoded a signal yet, so this wait could only be met by a
+        // later submission — which the queue can never reach while it waits.
+        let error = device
+            .submit(
+                queue,
+                &SubmitInfo {
+                    command_buffers: &[],
+                    waits: &[SemaphoreWait {
+                        semaphore,
+                        value: 1,
+                    }],
+                    signals: &[],
+                },
+            )
+            .expect_err("nothing can ever satisfy that wait");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+
+        let source = [0xDEu8, 0xAD, 0xBE, 0xEF];
+        let upload = device
+            .create_buffer(&buffer(4, MemoryLocation::HostUpload))
+            .expect("an upload buffer");
+        device.write_buffer(upload, 0, &source).expect("writable");
+        let readback = readback_buffer(&device, 4);
+
+        // Signal in its own, earlier submission, so the gate is open before the
+        // work that waits on it is committed.
+        device
+            .submit(
+                queue,
+                &SubmitInfo {
+                    command_buffers: &[],
+                    waits: &[],
+                    signals: &[SemaphoreSignal {
+                        semaphore,
+                        value: 1,
+                    }],
+                },
+            )
+            .expect("a signal-only submission is legal");
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("crcbl-mtl gated"),
+            queue,
+        });
+        encoder.copy_buffer_to_buffer(&BufferCopy {
+            src: upload,
+            src_offset: 0,
+            dst: readback,
+            dst_offset: 0,
+            size: 4,
+        });
+        let commands = encoder.finish().expect("the recording is complete");
+        device
+            .submit(
+                queue,
+                &SubmitInfo {
+                    command_buffers: &[commands],
+                    waits: &[SemaphoreWait {
+                        semaphore,
+                        value: 1,
+                    }],
+                    signals: &[],
+                },
+            )
+            .expect("the gate is already open");
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: None,
+                buffer: readback,
+                offset: 0,
+                size: 4,
+                after: None,
+            })
+            .expect("a HostReadback buffer, in range");
+        assert_eq!(drain(&device, request, 4), source);
+
+        device.destroy_readback(request);
+        device.destroy_command_buffer(commands);
+        device.destroy_semaphore(semaphore);
+        device.destroy_buffer(upload);
+        device.destroy_buffer(readback);
+    }
+
+    /// A command buffer is submitted once. Metal raises on a second `commit`,
+    /// and a raise aborts the process, so the guard has to be here.
+    ///
+    /// **What turns it red:** dropping `CommandBufferEntry::committed` — the
+    /// second submit would then reach the driver, and this test would abort the
+    /// whole run rather than fail, which is itself the loudest possible signal.
+    #[test]
+    fn a_command_buffer_cannot_be_submitted_twice() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("crcbl-mtl empty"),
+            queue,
+        });
+        let commands = encoder.finish().expect("an empty recording is complete");
+        device
+            .submit(queue, &SubmitInfo::new(&[commands]))
+            .expect("the first submission");
+        let error = device
+            .submit(queue, &SubmitInfo::new(&[commands]))
+            .expect_err("the second submission must not reach commit");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+
+        device.wait_idle().expect("the queue drains");
+        device.destroy_command_buffer(commands);
+        // And the handle stops resolving once released.
+        let error = device
+            .submit(queue, &SubmitInfo::new(&[commands]))
+            .expect_err("the handle was destroyed");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "command buffer"),
+            "{error:?}"
+        );
+    }
+
+    /// An encoder made against another device's queue refuses at `finish`
+    /// rather than recording onto the wrong device.
+    #[test]
+    fn an_encoder_built_on_a_foreign_queue_refuses() {
+        let (_instance, device) = open_device();
+        let (_other_instance, other) = open_device();
+        let foreign = other
+            .queue(QueueKind::Graphics)
+            .expect("the other device has a queue");
+        let encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: None,
+            queue: foreign,
+        });
+        let error = encoder
+            .finish()
+            .expect_err("that queue is not this device's");
+        assert!(
+            matches!(error, HalError::ForeignObject { kind, .. } if kind == "queue"),
+            "{error:?}"
+        );
     }
 
     /// The device opens, says which backend it is, and has exactly the queue
@@ -1637,25 +3121,28 @@ mod tests {
                     .expect_err("no counter sampling yet"),
             ),
             (
-                "semaphores",
+                "compute pipelines",
                 device
-                    .create_semaphore(&SemaphoreDesc {
+                    .create_compute_pipeline(&ComputePipelineDesc {
                         label: None,
-                        kind: crcbl_hal::SemaphoreKind::Timeline { initial_value: 0 },
+                        layout: Handle::from_bits(1 << 32).expect("generation 1"),
+                        compute: crcbl_hal::ShaderEntry {
+                            module: Handle::from_bits(1 << 32).expect("generation 1"),
+                            entry_point: "main",
+                        },
                     })
-                    .expect_err("no MTLSharedEvent yet"),
+                    .expect_err("no MSL path yet"),
             ),
             (
-                "readback",
+                "bind groups",
                 device
-                    .request_readback(&ReadbackDesc {
+                    .create_bind_group(&BindGroupDesc {
                         label: None,
-                        buffer: Handle::from_bits(1 << 32).expect("generation 1"),
-                        offset: 0,
-                        size: 4,
-                        after: None,
+                        layout: Handle::from_bits(1 << 32).expect("generation 1"),
+                        entries: &[],
+                        variable_count: None,
                     })
-                    .expect_err("no blit encoder yet"),
+                    .expect_err("no argument buffers yet"),
             ),
         ];
         assert!(!refusals.is_empty(), "nothing to check");
@@ -1672,27 +3159,63 @@ mod tests {
             );
         }
 
-        // Recording is refused where the seam gives it a `Result` to say so:
-        // `create_command_encoder` returns a bare `Box`, so the encoder accepts
-        // the recording calls and `finish` is the refusal.
+        // Recording works now, so the encoder's refusals moved to the commands
+        // that still need a pipeline. `create_command_encoder` returns a bare
+        // `Box`, so a draw has nowhere to report itself and `finish` carries it.
         let queue = device
             .queue(QueueKind::Graphics)
             .expect("the graphics queue exists");
-        let encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
-        let error = encoder.finish().expect_err("nothing was recorded");
-        assert!(
-            matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Metal),
-            "{error:?}"
-        );
+        /// One recording call that still has to refuse, and the name it must
+        /// refuse under.
+        type Refused = (&'static str, fn(&mut dyn CommandEncoder));
 
-        // Submission checks the queue handle first and refuses second.
-        let error = device
+        let recording: &[Refused] = &[
+            ("draws", |encoder| encoder.draw(0..3, 0..1)),
+            ("dispatches", |encoder| encoder.dispatch(1, 1, 1)),
+            ("bind groups", |encoder| {
+                encoder.push_constants(
+                    crcbl_hal::ShaderStages::ALL,
+                    0,
+                    &[0u8; 4],
+                    Handle::from_bits(1 << 32).expect("generation 1"),
+                );
+            }),
+            ("indirect-count draws", |encoder| {
+                encoder.draw_indexed_indirect_count(&crcbl_hal::DrawIndirectCount {
+                    args: Handle::from_bits(1 << 32).expect("generation 1"),
+                    args_offset: 0,
+                    count_buffer: Handle::from_bits(1 << 32).expect("generation 1"),
+                    count_offset: 0,
+                    max_draw_count: 1,
+                    stride: 20,
+                });
+            }),
+        ];
+        assert!(!recording.is_empty(), "nothing to check");
+        for (what, record) in recording {
+            let mut encoder =
+                device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+            record(encoder.as_mut());
+            let Err(error) = encoder.finish() else {
+                panic!("{what} recorded successfully, so the encoder reported a lie");
+            };
+            assert!(
+                matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Metal),
+                "{what}: {error:?}"
+            );
+            let text = error.to_string();
+            assert!(
+                text.contains("metal") && text.contains("Metal") && text.contains("slice"),
+                "{what}: {text}"
+            );
+        }
+
+        // An empty submission is legal now and does nothing, which is the only
+        // honest answer: there is no work to run and nothing to signal.
+        device
             .submit(queue, &SubmitInfo::new(&[]))
-            .expect_err("nothing can be submitted yet");
-        assert!(
-            matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Metal),
-            "{error:?}"
-        );
+            .expect("an empty submission is a no-op, not a refusal");
+
         // A queue handle really belonging to another device is foreign; a
         // hand-made one carries no device tag at all and was never issued.
         let (_other_instance, other) = open_device();

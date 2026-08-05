@@ -32,12 +32,14 @@
 //! hand; a table cannot answer them and must not pretend to.
 
 use crcbl_hal::{
-    CompareOp, FilterMode, Format, ImageType, ImageUsage, ImageViewType, MemoryLocation,
-    SamplerAddressMode,
+    BufferImageCopy, CompareOp, Extent3d, FilterMode, Format, ImageAspect, ImageType, ImageUsage,
+    ImageViewType, LoadOp, MemoryLocation, Offset3d, SamplerAddressMode, StoreOp,
 };
+use objc2_foundation::NSUInteger;
 use objc2_metal::{
-    MTLCPUCacheMode, MTLCompareFunction, MTLPixelFormat, MTLResourceOptions, MTLSamplerAddressMode,
-    MTLSamplerMinMagFilter, MTLSamplerMipFilter, MTLStorageMode, MTLTextureType, MTLTextureUsage,
+    MTLCPUCacheMode, MTLClearColor, MTLCompareFunction, MTLLoadAction, MTLOrigin, MTLPixelFormat,
+    MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerMinMagFilter, MTLSamplerMipFilter,
+    MTLSize, MTLStorageMode, MTLStoreAction, MTLTextureType, MTLTextureUsage,
 };
 
 /// The seam's texel format as Metal spells it.
@@ -104,11 +106,12 @@ pub(crate) fn pixel_format(format: Format) -> MTLPixelFormat {
 /// reach for, and the reason is not performance:
 ///
 /// 1. **It is the two-copy mode, and both directions need a call this backend
-///    does not have.** Metal's own header states the contract: a CPU write to a
+///    does not make.** Metal's own header states the contract: a CPU write to a
 ///    managed resource must be followed by `didModifyRange:`, and the CPU
 ///    cannot see GPU writes until a `MTLBlitCommandEncoder`
-///    `synchronizeResource:` has completed. The blit encoder is the MTL3 slice.
-///    Picking `Managed` for [`MemoryLocation::HostReadback`] today would return
+///    `synchronizeResource:` has completed. Neither call appears anywhere in
+///    this crate, and neither needs to while `Managed` is unreachable.
+///    Picking `Managed` for [`MemoryLocation::HostReadback`] would return
 ///    **stale bytes on an Intel Mac and correct bytes on an Apple silicon
 ///    one** — a correctness bug visible on exactly one class of machine, which
 ///    is the failure mode worth the most care in this file.
@@ -336,6 +339,156 @@ pub(crate) fn compare_function(op: CompareOp) -> MTLCompareFunction {
         CompareOp::GreaterOrEqual => MTLCompareFunction::GreaterEqual,
         CompareOp::Always => MTLCompareFunction::Always,
     }
+}
+
+// --- render passes ---------------------------------------------------------
+
+/// What a pass does with an attachment's existing contents.
+///
+/// The three seam ops and Metal's three actions line up one for one, and the
+/// pairing is worth spelling out because a transposition here is invisible
+/// until someone reads a frame back: [`LoadOp::Load`] as
+/// [`MTLLoadAction::Clear`] wipes a depth prepass, and [`LoadOp::Clear`] as
+/// [`MTLLoadAction::Load`] leaves whatever the last frame put in the tile.
+/// `load_and_store_actions_are_not_transposed` is the assertion that pins it.
+pub(crate) const fn load_action(load: LoadOp) -> MTLLoadAction {
+    match load {
+        LoadOp::Load => MTLLoadAction::Load,
+        LoadOp::Clear => MTLLoadAction::Clear,
+        LoadOp::DontCare => MTLLoadAction::DontCare,
+    }
+}
+
+/// What a pass does with an attachment's contents at the end.
+///
+/// [`MTLStoreAction::Unknown`] is never produced: it is Metal's "the action
+/// will be set before the encoder ends" placeholder, and an encoder that ends
+/// while an attachment still carries it raises rather than storing.
+pub(crate) const fn store_action(store: StoreOp) -> MTLStoreAction {
+    match store {
+        StoreOp::Store => MTLStoreAction::Store,
+        StoreOp::Discard => MTLStoreAction::DontCare,
+    }
+}
+
+/// The same, for a colour attachment that also resolves into a second texture.
+///
+/// Metal folds "resolve" into the *store* action rather than carrying it
+/// separately the way `VkRenderingAttachmentInfo::resolveMode` does, so a
+/// resolving attachment has two store actions rather than one and the seam's
+/// [`StoreOp`] picks between them: [`StoreOp::Store`] keeps the multisampled
+/// texture as well, [`StoreOp::Discard`] keeps only the resolved one — which is
+/// the whole point of resolving an MSAA target nothing reads afterwards.
+pub(crate) const fn resolve_store_action(store: StoreOp) -> MTLStoreAction {
+    match store {
+        StoreOp::Store => MTLStoreAction::StoreAndMultisampleResolve,
+        StoreOp::Discard => MTLStoreAction::MultisampleResolve,
+    }
+}
+
+/// A clear colour, widened to the doubles Metal takes.
+///
+/// **Nothing is encoded or decoded here.** The seam documents
+/// [`ClearValue::color`](crcbl_hal::ClearValue::color) as being "in the
+/// attachment's own space", and Metal says the same of `MTLClearColor` — the
+/// hardware applies the attachment format's own transfer function, so a clear
+/// of `0.5` into an `_sRGB` attachment does **not** land as `128`. A backend
+/// that "helpfully" encoded here would apply it twice.
+pub(crate) const fn clear_color(color: [f32; 4]) -> MTLClearColor {
+    MTLClearColor {
+        red: color[0] as f64,
+        green: color[1] as f64,
+        blue: color[2] as f64,
+        alpha: color[3] as f64,
+    }
+}
+
+// --- copies ----------------------------------------------------------------
+
+/// A copy's texel offset, or `None` if it is negative.
+///
+/// The seam's [`Offset3d`] is signed because Vulkan's `VkOffset3D` is; Metal's
+/// `MTLOrigin` is unsigned, and a negative offset has no meaning for a copy in
+/// either API. Returning `None` is what lets the caller report it as the
+/// descriptor error it is instead of wrapping it into a colossal `NSUInteger`
+/// and letting Metal raise.
+pub(crate) fn origin(offset: Offset3d) -> Option<MTLOrigin> {
+    let x = NSUInteger::try_from(offset.x).ok()?;
+    let y = NSUInteger::try_from(offset.y).ok()?;
+    let z = NSUInteger::try_from(offset.z).ok()?;
+    Some(MTLOrigin { x, y, z })
+}
+
+/// A copy region's size in texels.
+///
+/// `is_3d` decides what [`Extent3d::depth_or_layers`] means, exactly as it does
+/// at image creation: a volume's third component is a depth Metal wants in
+/// `MTLSize::depth`, while an array's is a layer count that Metal expresses as
+/// a *slice* on the copy call instead — so a 2D copy is always one slice deep.
+pub(crate) const fn copy_size(extent: Extent3d, is_3d: bool) -> MTLSize {
+    MTLSize {
+        width: extent.width as NSUInteger,
+        height: extent.height as NSUInteger,
+        depth: if is_3d {
+            extent.depth_or_layers as NSUInteger
+        } else {
+            1
+        },
+    }
+}
+
+/// How a [`BufferImageCopy`]'s buffer side is laid out, in the bytes Metal
+/// counts rather than the texels the seam counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CopyFootprint {
+    /// `sourceBytesPerRow` / `destinationBytesPerRow`.
+    pub(crate) bytes_per_row: u64,
+    /// `sourceBytesPerImage` / `destinationBytesPerImage` — the stride from one
+    /// array slice to the next.
+    pub(crate) bytes_per_image: u64,
+}
+
+/// Translates a copy's buffer layout from the seam's units into Metal's.
+///
+/// Two conversions happen here and each is a place a backend gets copies
+/// silently wrong:
+///
+/// * **Texels to bytes.** The seam counts
+///   [`buffer_row_length`](BufferImageCopy::buffer_row_length) in *texels* and
+///   [`buffer_image_height`](BufferImageCopy::buffer_image_height) in *rows*,
+///   with `0` meaning tightly packed; Metal counts both in bytes. A compressed
+///   format makes the two differ by a factor of sixteen rather than a constant,
+///   which is why the block extent is divided out rather than assumed to be 1.
+/// * **The aspect decides the element size.** A depth-aspect copy of a
+///   `D32FloatS8Uint` image moves four bytes per texel while the format's own
+///   element is eight — [`Format::texel_size`] is the seam's answer to exactly
+///   that, and `block_size` would be the wrong number.
+///
+/// `None` when the aspect names no single plane of this format, which is a
+/// caller error the copy cannot describe.
+pub(crate) fn copy_footprint(
+    format: Format,
+    aspect: ImageAspect,
+    copy: &BufferImageCopy,
+) -> Option<CopyFootprint> {
+    let texel = u64::from(format.texel_size(aspect)?);
+    let (block_width, block_height) = format.block_extent();
+    let row_texels = if copy.buffer_row_length == 0 {
+        copy.image_extent.width
+    } else {
+        copy.buffer_row_length
+    };
+    let rows = if copy.buffer_image_height == 0 {
+        copy.image_extent.height
+    } else {
+        copy.buffer_image_height
+    };
+    let bytes_per_row = u64::from(row_texels.div_ceil(block_width)) * texel;
+    let bytes_per_image = bytes_per_row * u64::from(rows.div_ceil(block_height));
+    Some(CopyFootprint {
+        bytes_per_row,
+        bytes_per_image,
+    })
 }
 
 #[cfg(test)]
@@ -709,6 +862,165 @@ mod tests {
         assert_eq!(
             min_mag_filter(FilterMode::Nearest),
             MTLSamplerMinMagFilter::Nearest
+        );
+    }
+
+    /// **Load and store actions, pinned by name.** A transposition here is the
+    /// bug the `load_op_preserves_what_clear_replaces` device test exists to
+    /// catch on hardware; this is the same check without a GPU.
+    #[test]
+    fn load_and_store_actions_are_not_transposed() {
+        assert_eq!(load_action(LoadOp::Load), MTLLoadAction::Load);
+        assert_eq!(load_action(LoadOp::Clear), MTLLoadAction::Clear);
+        assert_eq!(load_action(LoadOp::DontCare), MTLLoadAction::DontCare);
+        // The three are distinct, so none of them collapsed onto another.
+        let actions = [
+            load_action(LoadOp::Load),
+            load_action(LoadOp::Clear),
+            load_action(LoadOp::DontCare),
+        ];
+        for (index, action) in actions.iter().enumerate() {
+            assert!(
+                !actions[..index].contains(action),
+                "two load ops map to {action:?}"
+            );
+        }
+
+        assert_eq!(store_action(StoreOp::Store), MTLStoreAction::Store);
+        assert_eq!(store_action(StoreOp::Discard), MTLStoreAction::DontCare);
+        for store in [StoreOp::Store, StoreOp::Discard] {
+            assert_ne!(
+                store_action(store),
+                MTLStoreAction::Unknown,
+                "an encoder that ends on Unknown raises: {store:?}"
+            );
+            // A resolving attachment must still resolve whichever store op it
+            // was given; only whether the multisampled texture survives differs.
+            let resolving = resolve_store_action(store);
+            assert!(
+                resolving == MTLStoreAction::MultisampleResolve
+                    || resolving == MTLStoreAction::StoreAndMultisampleResolve,
+                "{store:?} stopped resolving: {resolving:?}"
+            );
+        }
+        assert_eq!(
+            resolve_store_action(StoreOp::Store),
+            MTLStoreAction::StoreAndMultisampleResolve
+        );
+        assert_eq!(
+            resolve_store_action(StoreOp::Discard),
+            MTLStoreAction::MultisampleResolve
+        );
+    }
+
+    /// A clear colour crosses unchanged — no sRGB encode, no premultiply, no
+    /// clamp. The `0.5` case is the one that matters: a backend that encoded
+    /// here would send `0.7353…` and the readback test would land on `188`.
+    #[test]
+    fn clear_colours_cross_unencoded() {
+        let colour = clear_color([0.5, 0.25, 1.0, 0.0]);
+        assert_eq!(colour.red, 0.5);
+        assert_eq!(colour.green, 0.25);
+        assert_eq!(colour.blue, 1.0);
+        assert_eq!(colour.alpha, 0.0);
+        // The reversed-Z depth default is a `f32` on the seam and a `f64` here;
+        // 0.0 must survive the widening as 0.0 and not become the 1.0 a
+        // conventional-Z backend would clear to.
+        assert_eq!(crcbl_hal::ClearValue::default().color, [0.0; 4]);
+        assert_eq!(f64::from(crcbl_hal::depth::CLEAR), 0.0);
+    }
+
+    /// A negative copy offset is refused rather than wrapped.
+    #[test]
+    fn a_negative_copy_offset_has_no_origin() {
+        assert_eq!(
+            origin(Offset3d { x: 3, y: 4, z: 5 }),
+            Some(MTLOrigin { x: 3, y: 4, z: 5 })
+        );
+        assert_eq!(origin(Offset3d { x: -1, y: 0, z: 0 }), None);
+        assert_eq!(origin(Offset3d { x: 0, y: -1, z: 0 }), None);
+        assert_eq!(origin(Offset3d { x: 0, y: 0, z: -1 }), None);
+    }
+
+    /// A 2D copy is one slice deep whatever its layer count says; a volume's
+    /// third component really is a depth.
+    #[test]
+    fn only_a_volume_copies_more_than_one_slice_deep() {
+        let extent = Extent3d {
+            width: 8,
+            height: 4,
+            depth_or_layers: 6,
+        };
+        assert_eq!(copy_size(extent, false).depth, 1);
+        assert_eq!(copy_size(extent, true).depth, 6);
+        assert_eq!(copy_size(extent, false).width, 8);
+        assert_eq!(copy_size(extent, false).height, 4);
+    }
+
+    /// The buffer footprint of a copy, in the three cases that differ:
+    /// tightly packed, explicitly padded, and block compressed.
+    #[test]
+    fn copy_footprints_convert_texels_to_bytes_through_the_block_size() {
+        let packed = BufferImageCopy {
+            buffer: crcbl_core::Handle::from_bits(1 << 32).expect("generation 1"),
+            buffer_offset: 0,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            image: crcbl_core::Handle::from_bits(1 << 32).expect("generation 1"),
+            image_subresource: crcbl_hal::ImageSubresourceLayers {
+                aspect: ImageAspect::COLOR,
+                mip: 0,
+                base_layer: 0,
+                layer_count: 1,
+            },
+            image_offset: Offset3d { x: 0, y: 0, z: 0 },
+            image_extent: Extent3d::d2(16, 8),
+        };
+        let footprint = copy_footprint(Format::Rgba8Unorm, ImageAspect::COLOR, &packed)
+            .expect("a colour aspect of a colour format");
+        assert_eq!(footprint.bytes_per_row, 16 * 4);
+        assert_eq!(footprint.bytes_per_image, 16 * 4 * 8);
+
+        // An explicit row length is in texels, so it must be multiplied, not
+        // used as a byte count.
+        let padded = BufferImageCopy {
+            buffer_row_length: 32,
+            buffer_image_height: 16,
+            ..packed
+        };
+        let footprint = copy_footprint(Format::Rgba8Unorm, ImageAspect::COLOR, &padded)
+            .expect("a colour aspect of a colour format");
+        assert_eq!(footprint.bytes_per_row, 32 * 4);
+        assert_eq!(footprint.bytes_per_image, 32 * 4 * 16);
+
+        // BC7 is 16 bytes per 4x4 block: a 16-texel row is four blocks, and
+        // eight rows of texels are two rows of blocks.
+        let footprint = copy_footprint(Format::Bc7RgbaUnorm, ImageAspect::COLOR, &packed)
+            .expect("a colour aspect of a compressed colour format");
+        assert_eq!(footprint.bytes_per_row, 4 * 16);
+        assert_eq!(footprint.bytes_per_image, 4 * 16 * 2);
+
+        // The aspect picks the plane, and a depth copy of a combined format
+        // moves four bytes per texel rather than the format's eight.
+        let depth = copy_footprint(Format::D32FloatS8Uint, ImageAspect::DEPTH, &packed)
+            .expect("the depth plane");
+        assert_eq!(depth.bytes_per_row, 16 * 4);
+        let stencil = copy_footprint(Format::D32FloatS8Uint, ImageAspect::STENCIL, &packed)
+            .expect("the stencil plane");
+        assert_eq!(stencil.bytes_per_row, 16);
+        // Two planes at once is not a region Metal (or Vulkan) can copy.
+        assert_eq!(
+            copy_footprint(
+                Format::D32FloatS8Uint,
+                ImageAspect::DEPTH | ImageAspect::STENCIL,
+                &packed
+            ),
+            None
+        );
+        assert_eq!(
+            copy_footprint(Format::Rgba8Unorm, ImageAspect::DEPTH, &packed),
+            None,
+            "a colour format has no depth plane"
         );
     }
 

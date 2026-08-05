@@ -53,6 +53,24 @@ log = { workspace = true }
 #   sampler's `compareFunction` takes — the type lives with depth/stencil state
 #   in Metal even though a sampler is the only thing this slice puts it on.
 #
+# MTL3 — command encoding, submission and readback — adds five more:
+#
+# * `MTLCommandEncoder` is the base protocol every encoder inherits, and the one
+#   `endEncoding`, `pushDebugGroup:` and `insertDebugSignpost:` live on. Both
+#   encoder features below are `cfg`-gated on it upstream, so it is not
+#   optional.
+# * `MTLBlitCommandEncoder` for every copy and fill: `copyFromBuffer:…`,
+#   `copyFromTexture:…` and `fillBuffer:range:value:`.
+# * `MTLRenderCommandEncoder` for the pass a clear happens inside, and for
+#   `setScissorRect:`/`setViewport:`.
+# * `MTLRenderPass` for `MTLRenderPassDescriptor` and the `MTLLoadAction`,
+#   `MTLStoreAction` and `MTLClearColor` the attachment table maps onto.
+# * `MTLEvent` for `MTLSharedEvent`, which is the seam's timeline semaphore, and
+#   for the plain `MTLEvent` a binary one becomes.
+#
+# `MTLCounters` is deliberately **absent**: query sets still refuse, and
+# `crcbl_mtl::device`'s `create_query_set` says why.
+#
 # A slice that needs more adds it here.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
@@ -67,12 +85,17 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 objc2-metal = { version = "0.3.2", default-features = false, features = [
   "std",
   "MTLAllocation",
+  "MTLBlitCommandEncoder",
   "MTLBuffer",
   "MTLCommandBuffer",
+  "MTLCommandEncoder",
   "MTLCommandQueue",
   "MTLDepthStencil",
   "MTLDevice",
+  "MTLEvent",
   "MTLPixelFormat",
+  "MTLRenderCommandEncoder",
+  "MTLRenderPass",
   "MTLResource",
   "MTLSampler",
   "MTLTexture",

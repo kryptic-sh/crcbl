@@ -4237,3 +4237,62 @@ time of writing; `cargo clippy`/`rustdoc --target aarch64-apple-darwin` is the
 only local gate and it checks types and links, not behaviour. Both gates were
 shown able to fail. CI's `build + test (macos-latest)` leg is the first
 execution.
+
+## `render_area` does not exist in Metal, and clears diverge because of it
+
+**The closest thing to a seam leak the Metal backend has hit.** Found in MTL3,
+not fixed, and `crcbl-hal` was deliberately not changed.
+
+`MTLRenderPassDescriptor` has no render-area rectangle.
+`renderTargetWidth`/`renderTargetHeight` are an origin-anchored size limit with
+no offset, so they cannot express `RenderPassDesc::render_area`'s `Rect2d`.
+`crcbl-mtl` therefore turns `render_area` into the render encoder's **scissor**,
+set only when it is a genuine sub-rect.
+
+The consequence is a real behaviour difference: **a `LoadOp::Clear` clears the
+whole attachment on Metal, where Vulkan clears only the render area.** A scissor
+constrains rasterisation; it does not constrain a load action.
+
+Nothing above the seam depends on it today — the render graph always passes the
+full attachment — so this is latent rather than broken. Options, none taken:
+
+1. Document `render_area` as affecting rasterisation only, and require a caller
+   wanting a partial clear to draw one. Cheapest; makes the seam honest about
+   the weaker guarantee, and Vulkan's stronger one becomes an implementation
+   detail nobody may rely on.
+2. Have the Metal backend emulate a partial clear with a draw when `render_area`
+   is a sub-rect and the load op is `Clear`. Costs a pipeline in the backend and
+   makes a clear silently expensive.
+3. Drop `render_area` from the seam entirely and give the encoder a scissor
+   call. Largest change, and closest to what Metal, DX12 and WebGPU all do.
+
+Wants a decision before anything starts relying on the Vulkan behaviour. Both
+backends must then be re-verified, which is why it was not settled inside a
+Metal slice.
+
+## What MTL3 left open
+
+- **Binary semaphores are emulated** on an `MTLEvent` plus an internal counter,
+  with the rule that a binary semaphore must be signalled by an _earlier_
+  submission than the one waiting on it. **WSI acquire breaks that rule** — the
+  presentation engine signals it, not a submission — so the swapchain slice
+  (MTL5) has to revisit this rather than inherit it.
+- **The GPU-side wait is not proven to gate.** The test proves a wait does not
+  wedge the queue and that an unsatisfiable wait is refused up front. Proving
+  the wait actually orders two submissions needs an observation _between_ them,
+  which is a race rather than an assertion, so it is not attempted. Stated as a
+  gap.
+- **Query sets stay refused**, deliberately and with the argument in
+  `create_query_set`'s docs: `supportsCounterSampling:` answers per _sampling
+  point_, and the point Metal guarantees is a stage boundary declared in a pass
+  descriptor before the pass exists — which the seam's free-standing
+  `write_timestamp` cannot reach. Half-building it would give real timings on
+  some Macs and zeroes on others. `write_timestamp` is accepted-and-dropped per
+  the seam's degrade rule; `resolve_query_set` fails, because it is the only one
+  that writes somewhere.
+- **`device.rs` is 3243 lines** and should be split — the tables, the resource
+  create/destroy pairs, submission and readback are four separable
+  responsibilities. Not done inside a slice that was already large; it wants to
+  be a move-only change so a reviewer can see it is only a move.
+- **`DepthStencilAttachment::read_only` is read and deliberately not acted on.**
+  Metal has no image layouts, so there is nothing to set.
