@@ -16,6 +16,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-jobs` has a work-stealing pool, and `par_for` works with or without
+  threads.** `Pool::new(spawner)` sizes itself to `Spawn::parallelism` minus the
+  thread that drives it, `Pool::with_workers(spawner, n)` names a count for a
+  caller that knows what else is running, and `Pool::par_for(items, chunk, f)`
+  calls `f(start, chunk)` once per fixed-size chunk of a `&mut [T]`. The pool is
+  built through the `Spawn` seam rather than `std::thread`, which is what gives
+  it a browser story: on a spawner with no threads it has no workers and runs
+  every chunk on the calling thread, and **the chunk boundaries come from the
+  caller's chunk length and the slice, never from the worker count**, so the
+  same call reaches the same closure calls and the same bytes in both modes.
+
+  `par_for` takes `&mut self`, so one thread drives a pool at a time; a
+  subsystem that wants its own parallelism builds its own pool. The driving
+  thread is a participant rather than a waiter — it runs chunks off its own end
+  of the deque while the workers steal from the other — so a call completes even
+  if no worker ever wakes, and waking one is throughput rather than correctness.
+
+  **A panicking chunk does not poison the pool**: it is caught where it runs,
+  the other chunks still run, and the panic is re-raised on the calling thread
+  afterwards. Where several panic, the lowest-numbered chunk's is the one
+  re-raised, so the failure reported is the same with and without threads.
+  Dropping the pool wakes every parked worker and returns without waiting for
+  them, because the seam detaches its threads by design.
+
+  The deque behind it is a **bounded Chase-Lev**, written here rather than
+  taken: `crossbeam-deque` is the ecosystem's answer and is not in this
+  workspace's lockfile, and adding a dependency is not this crate's call.
+  Bounded because growing is what forces epoch-based reclamation; a push the
+  queue will not take is run on the spot. Its slots hold pointers in atomics so
+  that the speculative read a thief does before it knows the item is its cannot
+  be a data race.
+
 - **The seam can now be asked when a frame actually reached the display, and the
   engine asks.** `Device::wait_until_presented(swapchain, present_id, timeout)`
   blocks until a numbered present has completed, `PresentInfo::present_id`

@@ -31,26 +31,34 @@
 //! its own docs for why — so a link to it is unresolvable in exactly the build
 //! this crate was written for, and the wasm rustdoc gate says so.
 //!
-//! Above the seam, [`mailbox`] is the first of the design's three
-//! communication primitives: a latest-wins triple buffer for *states*, where
-//! neither side ever waits and the newest is the only one anybody wants.
+//! Above the seam are the design's two communication primitives — [`mailbox`],
+//! a latest-wins triple buffer for *states*, where neither side ever waits and
+//! the newest is the only one anybody wants, and [`ring`], a bounded SPSC for
+//! *streams*, where every item is delivered because an input edge must not be
+//! droppable the way a state is.
 //!
-//! **Not here yet**: the accumulate-then-swap ring for *streams* — input edges
-//! and audio commands, which must not be droppable the way a mailbox drops —
-//! and the work-stealing pool with `par_for` in both modes. Both are slices
-//! above this one and both will be built on [`Spawn`] rather than on
-//! `std::thread`, which is the whole reason the seam landed first. The
-//! browser's worker backend is not here either: it needs the pinned nightly and
-//! cross-origin isolation proved locally, and the ordering exists so neither
-//! blocks anything below it.
+//! Beside them is [`pool`]: a work-stealing pool and
+//! [`par_for`](pool::Pool::par_for), for the data-parallel bursts *inside* a
+//! stage. It is built on [`Spawn`] rather than on `std::thread` — the whole
+//! reason the seam landed first — so it works on a runtime with no threads at
+//! all, where it runs every chunk on the calling thread and reaches the same
+//! answer.
+//!
+//! **Not here yet**: the browser's worker backend, which needs the pinned
+//! nightly and cross-origin isolation proved locally. Until it lands, wasm gets
+//! [`Inline`] from [`default_spawner`] and a pool with no workers, which is a
+//! whole answer rather than a stub.
 //!
 //! # The unsafe, and what checks it
 //!
-//! [`mailbox`] and [`ring`] are the modules that reach past the language's
-//! checks, for the reason the design names: the primitives are the sole novel
-//! concurrency surface, so they are kept tiny and checked hard. Each invariant
-//! is stated where its `unsafe` is and asserted directly by the tests rather
-//! than argued for.
+//! [`mailbox`], [`ring`] and [`pool`] are the modules that reach past the
+//! language's checks, for the reason the design names: the primitives are the
+//! sole novel concurrency surface, so they are kept tiny and checked hard. Each
+//! invariant is stated where its `unsafe` is and asserted directly by the tests
+//! rather than argued for. The pool's work-stealing deque is the exception that
+//! proves it — its slots hold pointers in atomics precisely so that the
+//! speculative read a thief does, before it knows whether the item is its own,
+//! needs no `unsafe` at all.
 //!
 //! **The memory orderings are checked by Miri and by nothing else, and that is
 //! a property of the hardware rather than a gap in the suite.** x86-64 is
@@ -59,12 +67,15 @@
 //! machine however long the stress tests run. Measured, not assumed —
 //! `Ordering::Release` was weakened to `Relaxed` in [`ring`]'s push and the
 //! whole suite stayed green, while Miri reported the data race in `pop` with a
-//! backtrace. Miri is therefore the only thing standing between a wrong
-//! ordering and an aarch64 or wasm user, and **a change to any of these atomics
-//! has to be run under it locally before it is believed** — `cargo miri test -p
-//! crcbl-jobs` interprets this crate in about seventeen seconds. The CI job is
-//! weekly (`.github/workflows/cron.yml`), so waiting for it is waiting up to a
-//! week to find out.
+//! backtrace. The same was done again for [`pool`]: weakening the release on
+//! the outstanding-chunk count, or the acquire the deque's thieves take on
+//! `bottom`, leaves every test passing here and is a data race under Miri.
+//! Miri is therefore the only thing standing between a wrong ordering and an
+//! aarch64 or wasm user, and **a change to any of these atomics has to be run
+//! under it locally before it is believed** — `cargo miri test -p crcbl-jobs`
+//! interprets this crate in about twenty seconds. The CI job is weekly
+//! (`.github/workflows/cron.yml`), so waiting for it is waiting up to a week to
+//! find out.
 //!
 //! # Degrading is a decision, not an error
 //!
@@ -77,10 +88,13 @@
 //! [`spawn`](Spawn::spawn) failure is a real error on a runtime that promised
 //! otherwise.
 
+mod deque;
 pub mod mailbox;
+pub mod pool;
 pub mod ring;
 mod spawn;
 
+pub use pool::Pool;
 #[cfg(not(target_arch = "wasm32"))]
 pub use spawn::Threads;
 pub use spawn::{Inline, Spawn, SpawnError, Work, default_spawner};

@@ -349,20 +349,20 @@ every frame under it, which is the argument against it in one line.
 ## P5B — the job system, and the two decisions in front of it
 
 `crates/crcbl-jobs` carries the spawn seam (`Spawn`, `Threads`, `Inline`,
-`default_spawner`) and two of the design's three communication primitives:
-`mailbox` (latest-wins triple buffer, for states) and `ring` (bounded SPSC, for
-streams). `docs/plan/21-jobs.md` and the roadmap's 2026-08-03 correction carry
-the design and the measurements; what belongs here is the ordering, what the
-primitives do not do, and the two questions that were not ours to answer.
+`default_spawner`), the design's two communication primitives — `mailbox`
+(latest-wins triple buffer, for states) and `ring` (bounded SPSC, for streams) —
+and now the work-stealing `pool` with `par_for` in both modes.
+`docs/plan/21-jobs.md` and the roadmap's 2026-08-03 correction carry the design
+and the measurements; what belongs here is the ordering, what the primitives do
+not do, and the two questions that were not ours to answer.
 
 The order is forced: **the spawn seam and its single-threaded fallback come
 first** — done — because `docs/plan/21-jobs.md` records that
 `std::thread::spawn` _compiles_ on `wasm32-unknown-unknown` and returns
 `UNSUPPORTED_PLATFORM` at run time, so a pool built on `std::thread` is a pool
-that silently has no browser story. What is still owed, in order: the
-work-stealing pool and `par_for` in both modes, adoption by the four samples
-(four consumers is what proves a seam before P6–P8 build on it), then the worker
-backend behind it.
+that silently has no browser story. The pool came next and is now in. What is
+still owed, in order: adoption by the four samples (four consumers is what
+proves a seam before P6–P8 build on it), then the worker backend behind it.
 
 **The atomics are checked by Miri and by nothing else.** x86-64 is
 total-store-order, so a `Release` store and a `Relaxed` one compile to the same
@@ -383,12 +383,14 @@ mind:
 - **An ordering regression can sit on `main` for up to a week.** Nothing on the
   per-PR path can see one.
 - So the obligation moves to the author: `cargo miri test -p crcbl-jobs`
-  interprets that crate in about **seventeen seconds**, and any change to its
-  atomics is expected to be run under it before it is pushed. That is written
-  into the crate docs as well, where somebody editing the atomics will see it.
-- The narrower option — a `crcbl-jobs`-only per-PR leg at that seventeen-second
-  cost, leaving the broad list weekly — was **not** taken and remains available
-  if the weekly cadence ever misses something real.
+  interprets that crate in about **twenty seconds** — 23.4 s for its 40 tests
+  with the pool in it, measured 2026-08-06 with `cron.yml`'s own `MIRIFLAGS` —
+  and any change to its atomics is expected to be run under it before it is
+  pushed. That is written into the crate docs as well, where somebody editing
+  the atomics will see it.
+- The narrower option — a `crcbl-jobs`-only per-PR leg at that cost, leaving the
+  broad list weekly — was **not** taken and remains available if the weekly
+  cadence ever misses something real.
 
 Also still open: **nothing runs the primitives on a weakly-ordered machine.**
 Miri models the memory ordering, which is a stronger check than any test on x86,
@@ -404,6 +406,61 @@ because the job was briefly moved onto the per-PR path. The install step is
 there now. The habit that would have caught it sooner: after a dependency lands,
 trigger the cron manually (`gh workflow run cron.yml`) instead of waiting for
 Monday.
+
+**The pool's own gaps.** The orderings and the Chase-Lev transcription were
+falsified individually — weakening `run_one`'s `Release` on `remaining`, or
+`Stealer::steal`'s `Acquire` on `bottom`, leaves `cargo test` green and turns
+Miri red with a data race, which is the same demonstration `ring` gave. What is
+_not_ covered:
+
+- **The lost-wakeup window is argued, not tested.** A worker reads the
+  submission count under the lock, searches once more, and only then sleeps
+  while that count is unchanged; the second search is what closes the gap
+  between the first search and the read. Making a test land inside that window
+  needs an injection point the pool does not have. It is bounded rather than
+  frightening: **waking a worker is throughput, never correctness** — the
+  driving thread runs the chunks itself until they are gone, so a missed wakeup
+  costs parallelism for one call and cannot hang it.
+- **Nothing measures the pool.** There is no benchmark, so "faster than inline"
+  is a design claim rather than a number. The horde sample is the forcing
+  function the design names, and the adoption slice is where the before/after
+  belongs.
+- **The determinism gate is unit-level.**
+  `threaded_and_inline_pools_compute_the_same_answer` compares the split _and_
+  the bytes between a pool with workers and one without, which is the property
+  `par_for` promises. The design's killer test — the same input script at
+  `--threads 1`, `2`, `N` hashing identically per tick — needs a sim to run, and
+  there is none on the pool yet.
+- **One deque, not one per worker.** Only the driving thread pushes today, so a
+  per-worker deque would be a queue nothing ever puts anything in. The Chase-Lev
+  code is unchanged by adding them; what needs them is `scope(|s| …)` fork-join
+  (the design lists it for BVH build), where a running chunk spawns more work.
+  Not written, and nothing calls it.
+- **`Mutex` + `Condvar` for the sleep, in the frame path.** The design's rule is
+  no mutexes in the frame path; this takes one per _submission_, not per job,
+  and a worker takes it only on its way to sleep. A submission that finds no
+  parked worker skips the broadcast entirely. A futex-style parking scheme would
+  remove the lock, and needs the profiler to say whether it is worth the
+  reasoning.
+- **Considered and declined: aborting the remaining chunks when one panics.**
+  Rayon does. Running them all instead is what lets the panic be reported by
+  chunk index — the lowest wins — so a panicking `par_for` fails identically
+  with and without threads. Mode equality is worth more here than the work saved
+  in a call that is about to unwind anyway.
+- **A broken completion count hangs the suite rather than failing it.** Three
+  mutations were tried against the panic test — dropping the `catch_unwind`,
+  skipping the decrement on the panicking path, and dropping a chunk the full
+  queue refused — and each wedges `par_for`'s wait loop instead of going red,
+  because a chunk that never finishes is exactly what that loop waits for. The
+  demonstration is real (`timeout 60` reports 124 in each case) but a CI job
+  would show it as a timeout, not a failure. A deadline in the wait loop would
+  fix the symptom by putting a timeout in the frame path, which is a worse
+  trade; the honest note is that this class of defect looks like a hang.
+- **Considered and declined: `crossbeam-deque`.** It is the ecosystem's answer
+  and would be the right one, but neither it nor any `crossbeam-*` nor `rayon`
+  is in `Cargo.lock`, and a new dependency is the user's call. Worth revisiting
+  if one arrives for another reason: its growable deque would remove this one's
+  capacity ceiling, past which `par_for` runs the extra chunks on the driver.
 
 **`ring` does not implement drop-oldest**, though `21-jobs.md` lists it beside
 drop-newest as an overflow policy. It cannot be done from the producer: the read
