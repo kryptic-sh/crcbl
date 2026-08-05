@@ -4143,3 +4143,56 @@ buys golden-image coverage on a second OS. If WARP is Tier B only, `crcbl-wgpu`
 already covers that on Windows and the CI half of the justification collapses,
 leaving Xbox and tooling. Cheap to check, and it changes how much of the above
 is true — so check it before committing the phase, not during it.
+
+## Considered and deferred: console backends
+
+**Decided 2026-08-05. No console support now; open to it if someone asks for
+it.** Nothing is being built speculatively, and nothing in the engine forecloses
+it. The canonical platform matrix is in `docs/plan/01-foundations.md`.
+
+### What each console would actually need
+
+- **Xbox — comes free with DX12.** It is D3D12X through the GDK rather than
+  desktop D3D12, so it is not literally the same backend, but `crcbl-dx12` is
+  the prerequisite and the delta is small. This is already the strongest item in
+  DX12's justification (see the DX12 entry above).
+- **PlayStation — a private crate.** There is no Vulkan on PlayStation, ever.
+  PS5 is AGC (with a GNM compatibility layer), PS4 is GNM/GNMX, and shaders are
+  PSSL. **The blocker is legal rather than technical**: the SDK, its headers and
+  the API's detailed shape are under NDA, and downloading any of it requires
+  licensed-developer status with an approved concept. So it cannot live in this
+  repository and cannot be written speculatively by anyone.
+- **Switch — probably `crcbl-vk` with a shell backend.** It has a working Vulkan
+  driver. NVN is the faster native path and what shipping titles use, but Vulkan
+  is a genuine bring-up route, which makes Switch by far the cheapest console to
+  reach and the only one needing no new HAL backend.
+
+### Why this costs nothing to defer
+
+**The seam is what makes a console backend possible at all.** A closed crate
+implementing the public `crcbl-hal` traits drops into a private workspace as a
+path dependency, with zero changes above the seam — the renderer, ECS, UI and
+every game compile unchanged. That property is already load-bearing for the four
+public backends; consoles just exercise it under an NDA.
+
+AGC is also close to the shape already built: explicit command buffers, explicit
+sync, bindless descriptors, GPU virtual addresses. The Vulkan-flavoured seam is
+roughly right for it, for the same reason DX12 maps near-1:1.
+
+The genuinely new axis is **shaders**. PSSL is HLSL-like and the platform
+toolchain consumes HLSL-ish input, so the path is Slang → HLSL → PSSL — a fourth
+artifact after SPIR-V, WGSL, MSL and DXIL, and the only one whose compiler could
+never run in public CI.
+
+### One thing to settle before the seam freezes
+
+`crcbl_hal::BackendKind` is a **closed enum** —
+`Vulkan | Wgpu | Metal | Dx12 | Null`. Any console backend needs either a new
+variant (naming a console is not an NDA breach) or a `Custom(&'static str)`.
+`crcbl-hal`'s docs say the seam freezes at P5 exit and P14 work has already
+begun, so this is worth deciding while variants are still cheap to add: after
+the freeze it is a breaking change to a public enum, and a private backend
+cannot patch a public crate to get one.
+
+Not acted on — it is a HAL change, wants Vulkan re-verified, and no console work
+is scheduled.

@@ -12,6 +12,30 @@ Nothing draws yet; everything after this stage has a place to live.
 - Window + event loop + swapchain-ready surface handle on Linux.
 - CI: fmt, clippy `-D warnings`, tests on Linux from day one.
 
+## Platform matrix (canonical — settled 2026-08-05)
+
+The one place this is stated. Everything else that needs it links here rather
+than restating it, because it had drifted into three half-versions across the
+plan and the backlog.
+
+| Backend       | Platforms                  | Crate        |
+| ------------- | -------------------------- | ------------ |
+| Vulkan        | Linux, Windows, Android    | `crcbl-vk`   |
+| Metal         | macOS, iOS                 | `crcbl-mtl`  |
+| DX12          | Windows                    | `crcbl-dx12` |
+| wgpu / WebGPU | Browser, and native triage | `crcbl-wgpu` |
+
+Windows deliberately carries **two** backends; DX12 never replaces Vulkan there.
+`crcbl-vk` exists for Linux and Android regardless, so Windows support falls out
+of it at no marginal cost, and running both against one GPU is the differential
+debugging the seam's dynamic dispatch was chosen for.
+
+Decided against, each with its reasoning in `docs/backlog.md`: **OpenGL/GLES**
+(the blocker is that GLES 3.0 cannot reach even Tier B, and a Tier C is a
+renderer change); **Vulkan on Apple** via MoltenVK (Metal is the only Apple
+path); **consoles for now** (Xbox would come free with DX12; PlayStation needs a
+private crate and a devkit; Switch would likely run `crcbl-vk`).
+
 ## Workspace layout
 
 ```
