@@ -40,11 +40,12 @@ impl AdapterRecord {
     /// one was asked to print it.
     pub(crate) fn report(&self) -> String {
         format!(
-            "crcbl-dx12 adapter {id} \"{name}\" type={kind:?} vendor={vendor:#06x} \
-             device={device:#06x} ResourceBindingTier={tier} HighestShaderModel={model} \
-             sm66-dynamic-resources={dynamic} renderer-tier={renderer:?} features={features:?} \
-             driver=\"{driver}\"",
+            "crcbl-dx12 adapter {id} \"{name}\" luid={luid:#018x} type={kind:?} \
+             vendor={vendor:#06x} device={device:#06x} ResourceBindingTier={tier} \
+             HighestShaderModel={model} sm66-dynamic-resources={dynamic} \
+             renderer-tier={renderer:?} features={features:?} driver=\"{driver}\"",
             id = self.info.id.0,
+            luid = self.raw.luid,
             name = self.info.name,
             kind = self.info.device_type,
             vendor = self.info.vendor_id,
@@ -88,12 +89,22 @@ impl Dx12Instance {
     /// stock Windows — "Microsoft Basic Render Driver", which *is* WARP — so
     /// enumerating it and then appending
     /// [`IDXGIFactory4::EnumWarpAdapter`](IDXGIFactory4) would list one
-    /// rasteriser twice under two ids. Skipping
-    /// `DXGI_ADAPTER_FLAG_SOFTWARE` in the first pass — `crcbl_dx12::adapter`'s
-    /// `is_software` is the one place that flag is tested — and asking for WARP
-    /// by name in the second gives exactly one entry, and it
-    /// gives one on the machines where DXGI does *not* list it — which is the
+    /// rasteriser twice under two ids. The first pass therefore skips
+    /// `DXGI_ADAPTER_FLAG_SOFTWARE` — `crcbl_dx12::adapter`'s `is_software` is
+    /// the one place that flag is tested — and the second asks for WARP by name,
+    /// which is also what gets it on machines where DXGI does *not* list it, the
     /// whole reason `EnumWarpAdapter` exists as a separate call.
+    ///
+    /// **That flag alone is not enough, and the first CI run is the evidence.**
+    /// On a runner with no GPU, DXGI listed the Basic Render Driver with
+    /// `DXGI_ADAPTER_FLAG_SOFTWARE` *clear*: it survived the hardware pass, and
+    /// `EnumWarpAdapter` then returned the same device again. One adapter
+    /// appeared twice, once as `Integrated` and once as `Cpu`, with identical
+    /// name, vendor, device and driver strings. So the append also compares
+    /// `AdapterLuid`, which is the only identity DXGI guarantees — unique per
+    /// adapter for the lifetime of the system, and equal across two interfaces
+    /// onto one. Name and ids would not do: two distinct cards of one model
+    /// share all of them.
     ///
     /// The cost is that WARP is always last, so its [`AdapterId`] moves when a
     /// GPU is added or removed. That is true of every adapter id in every
@@ -221,7 +232,31 @@ fn candidates(factory: &IDXGIFactory4) -> Vec<(IDXGIAdapter1, DXGI_ADAPTER_DESC1
     match unsafe { factory.EnumWarpAdapter::<IDXGIAdapter1>() } {
         Ok(warp) => {
             if let Some(desc) = desc_of(&warp) {
-                out.push((warp, desc));
+                // **The `is_software` filter above is not sufficient, and the
+                // first CI run proved it.** On a runner with no GPU, DXGI lists
+                // "Microsoft Basic Render Driver" — which *is* WARP — as an
+                // ordinary adapter with `DXGI_ADAPTER_FLAG_SOFTWARE` clear, so
+                // it survives the first pass and `EnumWarpAdapter` then returns
+                // the same device again. The measured result was one physical
+                // adapter enumerated twice, once as `Integrated` and once as
+                // `Cpu`, with identical vendor, device and driver strings.
+                //
+                // `AdapterLuid` is the identity DXGI actually guarantees:
+                // locally unique for the lifetime of the system, and equal for
+                // two interfaces onto one adapter. Comparing it is what makes
+                // the de-duplication independent of a flag a driver may or may
+                // not set.
+                let duplicate = out
+                    .iter()
+                    .any(|(_, seen)| seen.AdapterLuid == desc.AdapterLuid);
+                if duplicate {
+                    log::debug!(
+                        "crcbl-dx12: WARP is already in the list as an unflagged adapter; \
+                         keeping the one entry"
+                    );
+                } else {
+                    out.push((warp, desc));
+                }
             }
         }
         // Loud, because this is the interesting failure: WARP ships in Windows,
@@ -534,6 +569,34 @@ mod tests {
         let instance = open();
         let all = report_all(&instance);
         println!("{all}");
+
+        // **No adapter is listed twice, keyed on the identity DXGI guarantees.**
+        // This is the assertion the first CI run needed and did not have: the
+        // check below counts adapters DXGI *flagged* as software, and on a
+        // GPU-less runner "Microsoft Basic Render Driver" — which is WARP —
+        // arrives unflagged, survives the hardware pass, and is then appended a
+        // second time by `EnumWarpAdapter`. One physical adapter appeared twice,
+        // once as `Integrated` and once as `Cpu`, and the flag count was still
+        // exactly 1.
+        //
+        // Name, vendor and device id would not do as a key either: two genuinely
+        // distinct cards of one model share all three. `AdapterLuid` is the only
+        // thing DXGI promises is unique.
+        let mut luids: Vec<u64> = instance
+            .records()
+            .iter()
+            .map(|record| record.raw.luid)
+            .collect();
+        let listed = luids.len();
+        assert!(listed > 0, "nothing to check:\n{all}");
+        luids.sort_unstable();
+        luids.dedup();
+        assert_eq!(
+            luids.len(),
+            listed,
+            "one adapter is enumerated more than once — the WARP de-duplication \
+             is keying on something DXGI does not guarantee:\n{all}"
+        );
 
         let software: Vec<&AdapterRecord> = instance
             .records()

@@ -4601,29 +4601,56 @@ this slice, and the other four Tier A features were already on.
   now the only thing that would catch a regression in bind groups, indexed draws
   or multi-draw-indirect.
 
-## DX1 landed the WARP measurement, but the answer is not in yet
+## WARP clears the bindless bar — measured, 2026-08-05
 
-`crates/crcbl-dx12` enumerates adapters and reports, per adapter, its
-`ResourceBindingTier`, `HighestShaderModel`, whether SM6.6 dynamic resources are
-supported, and the derived renderer tier. A CI step in the
-`build + test (windows-latest)` job publishes those lines with
-`--success-output immediate`, because nextest hides a passing test's stdout and
-a green run is exactly when a measurement wants reading.
+The question `docs/backlog.md` said to settle before committing to the DX12
+phase is settled. The `windows-latest` runner reports, for both the adapter DXGI
+lists and the one `EnumWarpAdapter` returns:
 
-**Nothing has executed yet.** This is a Linux tree; the crate is
-`#[cfg(target_os = "windows")]` and the Windows cross-check gates types, not
-behaviour — which this workspace has now twice learned is a different thing.
-**Read the answer off the next `windows-latest` run**, and specifically off
-`sm66-dynamic-resources`, never off `renderer-tier`: every adapter reports Tier
-B in this slice because `COMPUTE`, `TIMELINE_SEMAPHORE` and the two indirect
-features wait on calls no slice has written. That is the backend's gap, not the
-hardware's.
+```text
+ResourceBindingTier=3  HighestShaderModel=6.8  sm66-dynamic-resources=yes
+driver="D3D12 UMD 10.0.26100.33158"
+```
 
-What the answer decides, restated so it is not re-derived: **yes** and DX12 buys
-Windows the equivalent of lavapipe, closing a coverage hole that has been open
-since the platform crates were empty; **no** and `crcbl-wgpu` already covers
-Tier B there, leaving DX12's case as the Xbox door plus first-class Windows
-tooling.
+**So WARP supports SM6.6 dynamic resources**, which is what `crcbl-dx12` is
+specced around, and the CI half of DX12's justification is real rather than
+hoped for: Windows can have a software rasteriser to render against, the way
+Linux has lavapipe. That closes a coverage hole open since the platform crates
+were empty — `windows-latest` has never had golden images or a render pass.
+
+**What is still unmeasured**: whether WARP will actually _execute_ a shader
+without hanging. macOS taught this the hard way — its runner enumerates a
+perfectly capable-looking `Apple Paravirtual device` and then hangs the command
+buffer on any draw. Reporting tier 3 and SM6.8 is a claim about the API surface,
+not proof that a pixel comes out. **The clear-and-readback test in DX3 is what
+settles that**, and until it runs, "WARP gives Windows lavapipe-equivalent
+coverage" remains a plan rather than a fact.
+
+`renderer-tier=B` in those lines is the backend's own gap — `COMPUTE`,
+`TIMELINE_SEMAPHORE` and the two indirect features wait on calls no slice has
+written — and says nothing about the hardware.
+
+### The same run exposed a bug the test could not catch
+
+The two lines above are **one physical adapter, listed twice**: identical name,
+vendor, device and driver, differing only in that the first was classified
+`Integrated` and the second `Cpu`.
+
+The de-duplication skipped `DXGI_ADAPTER_FLAG_SOFTWARE` in the hardware pass and
+then appended WARP by name. But on that runner DXGI lists "Microsoft Basic
+Render Driver" — which _is_ WARP — with the flag **clear**, so it survived the
+filter and `EnumWarpAdapter` returned it again.
+
+The test meant to catch this asserted "exactly one _software-flagged_ adapter",
+which was true the whole time: the duplicate was not flagged. **Another
+assertion keyed on the wrong thing** — the third in this workspace, after the
+zero-valued bitflag and the stale `Unsupported` expectation.
+
+Fixed by comparing `AdapterLuid`, the only identity DXGI guarantees, with a test
+that asserts no two enumerated adapters share one. Name plus vendor plus device
+id would not have done either: two genuinely distinct cards of one model share
+all three. The LUID is now in the adapter report as well, so a duplicate is
+visible to anyone reading the CI log.
 
 ### Two things DX1 decided that a later slice may have to undo
 

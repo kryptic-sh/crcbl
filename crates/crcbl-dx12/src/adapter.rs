@@ -115,6 +115,16 @@ pub(crate) struct RawCaps {
     /// `D3D12_FEATURE_DATA_ARCHITECTURE1::UMA`: the GPU shares the CPU's memory
     /// pool.
     pub(crate) unified_memory: bool,
+    /// `DXGI_ADAPTER_DESC1::AdapterLuid`, packed — **the only identity DXGI
+    /// actually guarantees**, locally unique for the lifetime of the system and
+    /// equal for two interfaces onto one adapter.
+    ///
+    /// Kept because name, vendor and device id are *not* an identity: the first
+    /// CI run listed one physical adapter twice under identical strings, and
+    /// two genuinely distinct cards of the same model would share all three
+    /// anyway. Enumeration de-duplicates on this, and a test asserts no two
+    /// adapters share one.
+    pub(crate) luid: u64,
 }
 
 impl RawCaps {
@@ -558,6 +568,11 @@ pub(crate) fn describe(
         shader_model: highest_shader_model(&device),
         software: is_software(desc),
         unified_memory: architecture.UMA.as_bool(),
+        // The two halves are distinct fields rather than one integer in the
+        // API, so they are packed here in a fixed order; nothing reads the
+        // parts back, only compares whole values.
+        luid: (u64::from(desc.AdapterLuid.HighPart.cast_unsigned()) << 32)
+            | u64::from(desc.AdapterLuid.LowPart),
     };
     let features = features_of(&raw);
     let info = AdapterInfo {
@@ -644,6 +659,7 @@ mod tests {
             shader_model: D3D_SHADER_MODEL_6_6,
             software: false,
             unified_memory: false,
+            luid: 0,
         };
         assert!(base.dynamic_resources(), "tier 3 with SM6.6 is the answer");
 
@@ -694,6 +710,7 @@ mod tests {
                 shader_model,
                 software: false,
                 unified_memory: false,
+                luid: 0,
             };
             let features = features_of(&raw);
             let limits = limits_of(features);
@@ -722,6 +739,7 @@ mod tests {
             shader_model: D3D_SHADER_MODEL_6_6,
             software: true,
             unified_memory: true,
+            luid: 0,
         };
         assert_eq!(device_type_of(&warp), DeviceType::Cpu, "{warp:?}");
 
@@ -737,6 +755,7 @@ mod tests {
 
         let discrete = RawCaps {
             unified_memory: false,
+            luid: 0,
             ..integrated
         };
         assert_eq!(
