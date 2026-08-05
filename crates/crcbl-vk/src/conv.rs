@@ -731,46 +731,26 @@ mod tests {
         ResourceState::Present,
     ];
 
-    const ALL_FORMATS: &[Format] = &[
-        Format::R8Unorm,
-        Format::Rg8Unorm,
-        Format::Rgba8Unorm,
-        Format::Rgba8UnormSrgb,
-        Format::Bgra8Unorm,
-        Format::Bgra8UnormSrgb,
-        Format::Rgb10a2Unorm,
-        Format::R11g11b10Float,
-        Format::R16Float,
-        Format::Rg16Float,
-        Format::Rgba16Float,
-        Format::R32Float,
-        Format::Rg32Float,
-        Format::Rgba32Float,
-        Format::R32Uint,
-        Format::Rg32Uint,
-        Format::D32Float,
-        Format::D32FloatS8Uint,
-        Format::D24UnormS8Uint,
-        Format::D16Unorm,
-        Format::Bc1RgbaUnorm,
-        Format::Bc1RgbaUnormSrgb,
-        Format::Bc3RgbaUnorm,
-        Format::Bc3RgbaUnormSrgb,
-        Format::Bc4RUnorm,
-        Format::Bc5RgUnorm,
-        Format::Bc6hRgbUfloat,
-        Format::Bc7RgbaUnorm,
-        Format::Bc7RgbaUnormSrgb,
-    ];
-
     /// A format that survives a round trip is one a surface query can report
     /// back to the seam without inventing anything. Every seam format must,
     /// or `surface_caps` would silently drop a format the engine can render to.
+    ///
+    /// Driven off [`Format::ALL`] — the seam's list, not a second copy kept
+    /// here. The copy that used to sit in this module was tied to nothing: a
+    /// format added to `Format` and forgotten in [`format_from_vk`]'s
+    /// `_ => None` tail could equally be forgotten here, and this test would
+    /// have stayed green while `surface_caps` dropped it.
     #[test]
     fn every_seam_format_round_trips_through_vulkan() {
-        for &f in ALL_FORMATS {
+        for &f in Format::ALL {
             assert_eq!(format_from_vk(format(f)), Some(f), "{f:?}");
         }
+        // Injective as well as total: two seam formats sharing one Vulkan
+        // format would make the reverse mapping pick one of them arbitrarily.
+        let mut raw: Vec<i32> = Format::ALL.iter().map(|&f| format(f).as_raw()).collect();
+        raw.sort_unstable();
+        raw.dedup();
+        assert_eq!(raw.len(), Format::ALL.len(), "two formats map to one");
         // The long tail is honestly `None` rather than a nearest match.
         assert_eq!(format_from_vk(vk::Format::R5G6B5_UNORM_PACK16), None);
         assert_eq!(format_from_vk(vk::Format::UNDEFINED), None);
@@ -801,6 +781,268 @@ mod tests {
             vec![CompositeAlpha::Opaque, CompositeAlpha::Inherit]
         );
         assert!(composite_alpha_from_vk(vk::CompositeAlphaFlagsKHR::empty()).is_empty());
+    }
+
+    /// `buffer_usage` is a chain of `if contains { flags |= }`, which is the
+    /// shape that drops a bit silently: the seam flag stays legal, the Vulkan
+    /// flag never appears, and the failure is a validation error inside
+    /// whatever draw eventually needs it.
+    ///
+    /// Both halves are checked per bit — the right flag arrives, and nothing
+    /// else does — because an arm pasted from the line above passes a
+    /// "contains" test and fails this one.
+    #[test]
+    fn every_buffer_usage_bit_maps_to_its_own_vulkan_flag() {
+        use crcbl_hal::BufferUsage as U;
+
+        // Not part of the table: it is added unconditionally, which is also
+        // what covers `QUERY_RESOLVE`. See `buffer_usage`.
+        const ALWAYS: vk::BufferUsageFlags = vk::BufferUsageFlags::TRANSFER_DST;
+        let table = [
+            (U::TRANSFER_SRC, vk::BufferUsageFlags::TRANSFER_SRC),
+            (U::TRANSFER_DST, vk::BufferUsageFlags::empty()),
+            (U::UNIFORM, vk::BufferUsageFlags::UNIFORM_BUFFER),
+            (U::STORAGE, vk::BufferUsageFlags::STORAGE_BUFFER),
+            (U::INDEX, vk::BufferUsageFlags::INDEX_BUFFER),
+            (U::INDIRECT, vk::BufferUsageFlags::INDIRECT_BUFFER),
+            (
+                U::DEVICE_ADDRESS,
+                vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            ),
+            (U::QUERY_RESOLVE, vk::BufferUsageFlags::empty()),
+        ];
+
+        assert_eq!(
+            buffer_usage(U::empty()),
+            ALWAYS,
+            "every buffer is a copy dst"
+        );
+        for (seam, expected) in table {
+            assert_eq!(
+                buffer_usage(seam),
+                ALWAYS | expected,
+                "{seam:?} maps to exactly one flag beyond the unconditional one"
+            );
+        }
+        // Nothing is dropped when they arrive together, which a per-bit table
+        // alone cannot show.
+        let every = table
+            .iter()
+            .fold(ALWAYS, |flags, (_, expected)| flags | *expected);
+        assert_eq!(buffer_usage(U::all()), every);
+        assert_eq!(
+            table.len(),
+            U::all().bits().count_ones() as usize,
+            "a usage bit was added to the seam and not to this table"
+        );
+    }
+
+    /// As above. `PRESENT` is the one bit with no Vulkan usage flag — a
+    /// swapchain image's presentability belongs to the swapchain — so it maps
+    /// to nothing *on purpose*, which is worth pinning rather than leaving as
+    /// an omission indistinguishable from a forgotten arm.
+    #[test]
+    fn every_image_usage_bit_maps_to_its_own_vulkan_flag() {
+        use crcbl_hal::ImageUsage as U;
+
+        let table = [
+            (U::TRANSFER_SRC, vk::ImageUsageFlags::TRANSFER_SRC),
+            (U::TRANSFER_DST, vk::ImageUsageFlags::TRANSFER_DST),
+            (U::SAMPLED, vk::ImageUsageFlags::SAMPLED),
+            (U::STORAGE, vk::ImageUsageFlags::STORAGE),
+            (U::COLOR_ATTACHMENT, vk::ImageUsageFlags::COLOR_ATTACHMENT),
+            (
+                U::DEPTH_STENCIL_ATTACHMENT,
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            ),
+            (U::PRESENT, vk::ImageUsageFlags::empty()),
+        ];
+
+        assert!(image_usage(U::empty()).is_empty());
+        for (seam, expected) in table {
+            assert_eq!(image_usage(seam), expected, "{seam:?}");
+        }
+        let every = table
+            .iter()
+            .fold(vk::ImageUsageFlags::empty(), |flags, (_, expected)| {
+                flags | *expected
+            });
+        assert_eq!(image_usage(U::all()), every);
+        assert_eq!(
+            table.len(),
+            U::all().bits().count_ones() as usize,
+            "a usage bit was added to the seam and not to this table"
+        );
+    }
+
+    /// The same shape once more, for the aspect mask a copy and every barrier
+    /// is built from.
+    #[test]
+    fn every_aspect_bit_maps_and_an_empty_set_stays_empty() {
+        use crcbl_hal::ImageAspect as A;
+
+        let table = [
+            (A::COLOR, vk::ImageAspectFlags::COLOR),
+            (A::DEPTH, vk::ImageAspectFlags::DEPTH),
+            (A::STENCIL, vk::ImageAspectFlags::STENCIL),
+        ];
+        assert!(aspect(A::empty()).is_empty());
+        for (seam, expected) in table {
+            assert_eq!(aspect(seam), expected, "{seam:?}");
+        }
+        assert_eq!(
+            aspect(A::DEPTH | A::STENCIL),
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        );
+        assert_eq!(
+            table.len(),
+            A::all().bits().count_ones() as usize,
+            "an aspect bit was added to the seam and not to this table"
+        );
+    }
+
+    /// `LoadOp::Load` reaches no golden test at all — every one of them clears
+    /// — so this is the only thing standing between it and `DONT_CARE`, which
+    /// would discard the previous contents of an accumulation target and look
+    /// like a flickering pass rather than a mapping bug.
+    #[test]
+    fn attachment_ops_map_to_distinct_vulkan_ops() {
+        use crcbl_hal::{LoadOp, StoreOp};
+
+        assert_eq!(load_op(LoadOp::Load), vk::AttachmentLoadOp::LOAD);
+        assert_eq!(load_op(LoadOp::Clear), vk::AttachmentLoadOp::CLEAR);
+        assert_eq!(load_op(LoadOp::DontCare), vk::AttachmentLoadOp::DONT_CARE);
+        let mut raw: Vec<i32> = [LoadOp::Load, LoadOp::Clear, LoadOp::DontCare]
+            .iter()
+            .map(|op| load_op(*op).as_raw())
+            .collect();
+        raw.sort_unstable();
+        raw.dedup();
+        assert_eq!(raw.len(), 3, "two load ops collapsed into one");
+
+        assert_eq!(store_op(StoreOp::Store), vk::AttachmentStoreOp::STORE);
+        assert_eq!(
+            store_op(StoreOp::Discard),
+            vk::AttachmentStoreOp::DONT_CARE,
+            "the seam calls it Discard; Vulkan spells it DONT_CARE, and \
+             swapping it for STORE would make every transient attachment live"
+        );
+    }
+
+    /// Dimensionality is two enums in Vulkan and two in the seam, and they do
+    /// not line up: `D2Array` and `Cube` are view types with no image type, so
+    /// a shared mapping would have to invent one.
+    #[test]
+    fn image_and_view_types_map_to_distinct_vulkan_enums() {
+        use crcbl_hal::{ImageType, ImageViewType};
+
+        assert_eq!(image_type(ImageType::D1), vk::ImageType::TYPE_1D);
+        assert_eq!(image_type(ImageType::D2), vk::ImageType::TYPE_2D);
+        assert_eq!(image_type(ImageType::D3), vk::ImageType::TYPE_3D);
+
+        let views = [
+            (ImageViewType::D1, vk::ImageViewType::TYPE_1D),
+            (ImageViewType::D2, vk::ImageViewType::TYPE_2D),
+            (ImageViewType::D2Array, vk::ImageViewType::TYPE_2D_ARRAY),
+            (ImageViewType::Cube, vk::ImageViewType::CUBE),
+            (ImageViewType::CubeArray, vk::ImageViewType::CUBE_ARRAY),
+            (ImageViewType::D3, vk::ImageViewType::TYPE_3D),
+        ];
+        for (seam, expected) in views {
+            assert_eq!(image_view_type(seam), expected, "{seam:?}");
+        }
+        let mut raw: Vec<i32> = views
+            .iter()
+            .map(|(seam, _)| image_view_type(*seam).as_raw())
+            .collect();
+        raw.sort_unstable();
+        raw.dedup();
+        assert_eq!(raw.len(), views.len(), "two view types collapsed into one");
+    }
+
+    /// A copy names one mip level and a layer range, and `layer_count` passes
+    /// through unchanged — unlike `subresource_range`'s, which has a sentinel.
+    /// Confusing the two is how a whole-image copy becomes a one-layer copy.
+    #[test]
+    fn subresource_layers_pass_through_without_the_range_sentinel() {
+        use crcbl_hal::{ImageAspect, ImageSubresourceLayers};
+
+        let layers = subresource_layers(ImageSubresourceLayers {
+            aspect: ImageAspect::DEPTH,
+            mip: 3,
+            base_layer: 2,
+            layer_count: 4,
+        });
+        assert_eq!(layers.aspect_mask, vk::ImageAspectFlags::DEPTH);
+        assert_eq!(layers.mip_level, 3);
+        assert_eq!(layers.base_array_layer, 2);
+        assert_eq!(layers.layer_count, 4);
+        assert_ne!(
+            layers.layer_count,
+            vk::REMAINING_ARRAY_LAYERS,
+            "a copy region has no 'remaining' sentinel"
+        );
+    }
+
+    /// The forward direction of the composite-alpha mapping; the reverse one is
+    /// already covered, and a test of the reverse alone would pass on a forward
+    /// mapping that had every mode wrong in the same way.
+    #[test]
+    fn every_composite_alpha_mode_maps_to_its_own_flag() {
+        let modes = [
+            (CompositeAlpha::Opaque, vk::CompositeAlphaFlagsKHR::OPAQUE),
+            (
+                CompositeAlpha::PreMultiplied,
+                vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED,
+            ),
+            (
+                CompositeAlpha::PostMultiplied,
+                vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED,
+            ),
+            (CompositeAlpha::Inherit, vk::CompositeAlphaFlagsKHR::INHERIT),
+        ];
+        for (seam, expected) in modes {
+            assert_eq!(composite_alpha(seam), expected, "{seam:?}");
+            assert_eq!(
+                composite_alpha_from_vk(expected),
+                vec![seam],
+                "and back again, alone"
+            );
+        }
+    }
+
+    /// The masks and the reference live on `StencilState`, not per face, so the
+    /// two facings must receive the same ones while keeping their own ops. A
+    /// mapping that took the ops from one face for both is invisible until a
+    /// two-sided stencil effect.
+    #[test]
+    fn stencil_faces_keep_their_own_ops_and_share_the_masks() {
+        use crcbl_hal::{CompareOp, StencilFaceState, StencilOp, StencilState};
+
+        let state = StencilState {
+            read_mask: 0x0F,
+            write_mask: 0xF0,
+            reference: 7,
+            ..StencilState::default()
+        };
+        let face = StencilFaceState {
+            fail_op: StencilOp::Zero,
+            depth_fail_op: StencilOp::IncrementClamp,
+            pass_op: StencilOp::Replace,
+            compare: CompareOp::Equal,
+        };
+        let mapped = stencil_face(face, state);
+        assert_eq!(mapped.fail_op, vk::StencilOp::ZERO);
+        assert_eq!(mapped.depth_fail_op, vk::StencilOp::INCREMENT_AND_CLAMP);
+        assert_eq!(mapped.pass_op, vk::StencilOp::REPLACE);
+        assert_eq!(mapped.compare_op, vk::CompareOp::EQUAL);
+        assert_eq!(mapped.compare_mask, state.read_mask);
+        assert_eq!(mapped.write_mask, state.write_mask);
+        assert_eq!(mapped.reference, state.reference);
+        assert_ne!(
+            mapped.compare_mask, mapped.write_mask,
+            "the two masks are distinct fields, not one read twice"
+        );
     }
 
     /// The seam's `ALL` sentinel and Vulkan's `REMAINING_*` are the same bits,

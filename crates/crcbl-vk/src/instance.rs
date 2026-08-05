@@ -54,6 +54,14 @@ struct SurfaceEntry {
 
 /// The surface table, plus the surfaces whose handle is dead but whose driver
 /// object is not.
+///
+/// Obligation 2b — defer `vkDestroySurfaceKHR` until the last swapchain on the
+/// surface is gone — lives here as **pure bookkeeping**, separately from the
+/// driver call it decides on. That split is what makes it testable at all: the
+/// only surface this crate's e2e suite can create is
+/// [`SurfaceTarget::Offscreen`](crcbl_core::SurfaceTarget::Offscreen), which
+/// has no driver object to defer, so a headless run cannot reach the case whose
+/// failure mode is undefined behaviour rather than a wrong error code.
 #[derive(Debug, Default)]
 struct Surfaces {
     live: Pool<SurfaceEntry>,
@@ -61,6 +69,139 @@ struct Surfaces {
     /// `crcbl-hal`'s obligation 2: "the handle dies when the caller says so,
     /// the object dies when it is safe".
     zombies: Vec<SurfaceEntry>,
+}
+
+impl Surfaces {
+    /// Issues a handle for an entry this instance just inserted, tagged with
+    /// the instance that owns it.
+    ///
+    /// The tag is what makes obligation 3 checkable at all here. Every
+    /// instance's surface pool is its own, so two `VkInstance`s hand out
+    /// *identical* bits — index 0, generation 1, both of them — and an untagged
+    /// lookup in the other one's pool then resolves to a real, wrong surface
+    /// with a matching `owner`. It did: instance A accepted instance B's handle
+    /// in `surface_caps` and freed its own surface when given it to destroy.
+    fn insert(&mut self, entry: SurfaceEntry) -> SurfaceHandle {
+        let owner = entry.owner;
+        let slot = self.live.insert(entry);
+        crate::device::stamp(crate::device::owner_tag(owner), slot, "surface")
+    }
+
+    /// Decodes a handle into this instance's own pool index, or says why it is
+    /// not one of ours.
+    fn local(
+        &self,
+        surface: SurfaceHandle,
+        owner: u64,
+    ) -> Result<crcbl_core::Handle<SurfaceEntry>, HalError> {
+        let tag = crate::device::handle_tag(surface);
+        if tag == crate::device::owner_tag(owner) {
+            return Ok(crate::device::untag(surface));
+        }
+        // Tag zero was never issued by any instance — a hand-made handle, or
+        // one whose pool index overflowed the tagged range.
+        Err(if tag == 0 {
+            HalError::invalid_handle("surface", surface)
+        } else {
+            HalError::ForeignObject {
+                kind: "surface",
+                bits: surface.to_bits(),
+            }
+        })
+    }
+
+    /// Resolves a handle against `owner`, per obligation 3.
+    fn raw(&self, surface: SurfaceHandle, owner: u64) -> Result<vk::SurfaceKHR, HalError> {
+        let local = self.local(surface, owner)?;
+        match self.live.get(local) {
+            Some(entry) if entry.owner == owner => Ok(entry.raw),
+            Some(_) => Err(HalError::ForeignObject {
+                kind: "surface",
+                bits: surface.to_bits(),
+            }),
+            None => Err(HalError::invalid_handle("surface", surface)),
+        }
+    }
+
+    /// Notes that a swapchain now references `surface`.
+    ///
+    /// An offscreen surface — which has no driver object — is deliberately not
+    /// counted. Counting it would leave a zombie nothing could ever release,
+    /// because [`Surfaces::release`] is keyed on the raw handle and every
+    /// offscreen surface's is null.
+    fn retain(&mut self, surface: SurfaceHandle, owner: u64) -> Result<(), HalError> {
+        let local = self.local(surface, owner)?;
+        match self.live.get_mut(local) {
+            Some(entry) if entry.owner == owner => {
+                if entry.raw != vk::SurfaceKHR::null() {
+                    entry.swapchains += 1;
+                }
+                Ok(())
+            }
+            Some(_) => Err(HalError::ForeignObject {
+                kind: "surface",
+                bits: surface.to_bits(),
+            }),
+            None => Err(HalError::invalid_handle("surface", surface)),
+        }
+    }
+
+    /// Notes that a swapchain no longer references `raw`.
+    ///
+    /// Returns the driver object the caller must now destroy: `Some` only when
+    /// this was the last swapchain on a surface whose *handle* the caller has
+    /// already let go.
+    fn release(&mut self, raw: vk::SurfaceKHR) -> Option<vk::SurfaceKHR> {
+        if raw == vk::SurfaceKHR::null() {
+            return None;
+        }
+        for (_, entry) in self.live.iter_mut() {
+            if entry.raw == raw {
+                entry.swapchains = entry.swapchains.saturating_sub(1);
+                return None;
+            }
+        }
+        let index = self
+            .zombies
+            .iter()
+            .position(|entry| entry.raw == raw && entry.swapchains > 0)?;
+        self.zombies[index].swapchains -= 1;
+        if self.zombies[index].swapchains == 0 {
+            return Some(self.zombies.swap_remove(index).raw);
+        }
+        None
+    }
+
+    /// Invalidates `surface`'s handle immediately, per obligation 2.
+    ///
+    /// Returns the driver object to destroy *now*, or `None` when a swapchain
+    /// still references it and the object must outlive the handle.
+    fn destroy(&mut self, surface: SurfaceHandle, owner: u64) -> Option<vk::SurfaceKHR> {
+        // Only this instance's surfaces: another instance's handle carries a
+        // different tag and, before it did, collided on bits and freed this
+        // instance's own surface instead.
+        let local = self.local(surface, owner).ok()?;
+        if !self
+            .live
+            .get(local)
+            .is_some_and(|entry| entry.owner == owner)
+        {
+            return None;
+        }
+        let entry = self.live.remove(local)?;
+        if entry.swapchains == 0 {
+            return Some(entry.raw);
+        }
+        // Obligation 2: the handle is dead now, the object is not.
+        log::debug!(
+            "crcbl-vk: {} surface handle destroyed with {} swapchain(s) still on it; \
+             deferring the driver object",
+            entry.platform,
+            entry.swapchains
+        );
+        self.zombies.push(entry);
+        None
+    }
 }
 
 /// Everything a device needs to keep alive from the instance that made it.
@@ -116,66 +257,23 @@ impl InstanceInner {
 
     /// Resolves a surface handle against *this* instance, per obligation 3.
     pub(crate) fn surface_raw(&self, surface: SurfaceHandle) -> Result<vk::SurfaceKHR, HalError> {
-        let surfaces = self.surfaces();
-        match surfaces.live.get(surface.cast()) {
-            Some(entry) if entry.owner == self.id => Ok(entry.raw),
-            Some(_) => Err(HalError::ForeignObject {
-                kind: "surface",
-                bits: surface.to_bits(),
-            }),
-            None => Err(HalError::invalid_handle("surface", surface)),
-        }
+        self.surfaces().raw(surface, self.id)
     }
 
     /// Notes that a swapchain now references `surface`.
-    ///
-    /// The count exists only to defer `vkDestroySurfaceKHR`, so an offscreen
-    /// surface — which has no driver object — is deliberately not counted.
-    /// Counting it would leave a zombie nothing could ever release, because
-    /// [`release_surface`](Self::release_surface) is keyed on the raw handle
-    /// and every offscreen surface's is null.
     pub(crate) fn retain_surface(&self, surface: SurfaceHandle) -> Result<(), HalError> {
-        let mut surfaces = self.surfaces();
-        match surfaces.live.get_mut(surface.cast()) {
-            Some(entry) if entry.owner == self.id => {
-                if entry.raw != vk::SurfaceKHR::null() {
-                    entry.swapchains += 1;
-                }
-                Ok(())
-            }
-            Some(_) => Err(HalError::ForeignObject {
-                kind: "surface",
-                bits: surface.to_bits(),
-            }),
-            None => Err(HalError::invalid_handle("surface", surface)),
-        }
+        self.surfaces().retain(surface, self.id)
     }
 
     /// Notes that a swapchain no longer references `raw`, destroying the driver
     /// object if that was the last one and the caller has already let the
     /// handle go.
     pub(crate) fn release_surface(&self, raw: vk::SurfaceKHR) {
-        if raw == vk::SurfaceKHR::null() {
-            return;
-        }
-        let mut surfaces = self.surfaces();
-        for (_, entry) in surfaces.live.iter_mut() {
-            if entry.raw == raw {
-                entry.swapchains = entry.swapchains.saturating_sub(1);
-                return;
-            }
-        }
-        let Some(index) = surfaces
-            .zombies
-            .iter()
-            .position(|entry| entry.raw == raw && entry.swapchains > 0)
-        else {
-            return;
-        };
-        surfaces.zombies[index].swapchains -= 1;
-        if surfaces.zombies[index].swapchains == 0 {
-            let entry = surfaces.zombies.swap_remove(index);
-            self.destroy_surface_object(entry.raw);
+        // The lock is dropped before the driver call, not held across it: the
+        // decision and the destruction are deliberately separate steps.
+        let orphaned = self.surfaces().release(raw);
+        if let Some(raw) = orphaned {
+            self.destroy_surface_object(raw);
         }
     }
 
@@ -669,17 +767,12 @@ impl Instance for VkInstance {
             }
         };
 
-        let handle: SurfaceHandle = self
-            .inner
-            .surfaces()
-            .live
-            .insert(SurfaceEntry {
-                raw,
-                owner: self.inner.id,
-                platform: target.platform_name(),
-                swapchains: 0,
-            })
-            .cast();
+        let handle: SurfaceHandle = self.inner.surfaces().insert(SurfaceEntry {
+            raw,
+            owner: self.inner.id,
+            platform: target.platform_name(),
+            swapchains: 0,
+        });
         log::debug!(
             "crcbl-vk: created a {} surface {:?}",
             target.platform_name(),
@@ -689,32 +782,9 @@ impl Instance for VkInstance {
     }
 
     fn destroy_surface(&self, surface: SurfaceHandle) {
-        let mut surfaces = self.inner.surfaces();
-        // Only this instance's surfaces: another instance's handle may collide
-        // on bits and must not be destroyed by mistake.
-        if !surfaces
-            .live
-            .get(surface.cast())
-            .is_some_and(|entry| entry.owner == self.inner.id)
-        {
-            return;
-        }
-        let Some(entry) = surfaces.live.remove(surface.cast()) else {
-            return;
-        };
-        if entry.swapchains == 0 {
-            let raw = entry.raw;
-            drop(surfaces);
+        let now = self.inner.surfaces().destroy(surface, self.inner.id);
+        if let Some(raw) = now {
             self.inner.destroy_surface_object(raw);
-        } else {
-            // Obligation 2: the handle is dead now, the object is not.
-            log::debug!(
-                "crcbl-vk: {} surface handle destroyed with {} swapchain(s) still on it; \
-                 deferring the driver object",
-                entry.platform,
-                entry.swapchains
-            );
-            surfaces.zombies.push(entry);
         }
     }
 
@@ -934,6 +1004,10 @@ pub(crate) fn build_surface_caps(
 mod tests {
     use super::*;
 
+    // `from_raw`, for building a surface handle that stands in for a windowed
+    // one. `ash` puts it on a trait rather than the type.
+    use ash::vk::Handle as _;
+
     fn surface_format(format: vk::Format) -> vk::SurfaceFormatKHR {
         vk::SurfaceFormatKHR {
             format,
@@ -1116,6 +1190,153 @@ mod tests {
             &[vk::PresentModeKHR::FIFO],
         );
         assert_eq!(caps.composite_alpha, vec![CompositeAlpha::Opaque]);
+    }
+
+    /// A surface with a driver object, which
+    /// [`SurfaceTarget::Offscreen`](crcbl_core::SurfaceTarget::Offscreen) — the
+    /// only kind this crate's headless suite can create — never has.
+    fn windowed(surfaces: &mut Surfaces, owner: u64, raw: u64) -> SurfaceHandle {
+        surfaces.insert(SurfaceEntry {
+            raw: vk::SurfaceKHR::from_raw(raw),
+            owner,
+            platform: "test",
+            swapchains: 0,
+        })
+    }
+
+    /// **Obligation 2b.** `vkDestroySurfaceKHR` with a live swapchain is
+    /// undefined behaviour in the driver, so the handle must die when the
+    /// caller says so and the object only when the last swapchain on it does.
+    ///
+    /// Nothing checked this in any backend. It cannot be checked end to end
+    /// here either — an offscreen surface has no driver object, so the deferral
+    /// never engages for it, which is the case below — so the decision is
+    /// separated from the `vkDestroySurfaceKHR` it drives and asserted directly:
+    /// `Some(raw)` *is* "destroy it now".
+    #[test]
+    fn a_surface_with_a_live_swapchain_defers_its_driver_object() {
+        let mut surfaces = Surfaces::default();
+        let surface = windowed(&mut surfaces, 1, 0xBEEF);
+
+        surfaces.retain(surface, 1).expect("a swapchain takes it");
+        surfaces.retain(surface, 1).expect("and a second one");
+
+        // The handle dies immediately, and the object does not.
+        assert_eq!(surfaces.destroy(surface, 1), None, "two swapchains hold it");
+        assert!(
+            surfaces.raw(surface, 1).is_err(),
+            "the handle is invalid the moment the caller destroys it"
+        );
+        assert_eq!(surfaces.zombies.len(), 1);
+
+        // Releasing all but the last changes nothing.
+        assert_eq!(surfaces.release(vk::SurfaceKHR::from_raw(0xBEEF)), None);
+        assert_eq!(surfaces.zombies.len(), 1, "one swapchain still holds it");
+
+        // The last one hands the object back to be destroyed, exactly once.
+        assert_eq!(
+            surfaces.release(vk::SurfaceKHR::from_raw(0xBEEF)),
+            Some(vk::SurfaceKHR::from_raw(0xBEEF))
+        );
+        assert!(surfaces.zombies.is_empty());
+        assert_eq!(
+            surfaces.release(vk::SurfaceKHR::from_raw(0xBEEF)),
+            None,
+            "a double release must not destroy the object twice"
+        );
+    }
+
+    /// The other half: with nothing on it, the object goes immediately, and a
+    /// swapchain created *after* that cannot resurrect the handle.
+    #[test]
+    fn a_surface_with_no_swapchain_is_destroyed_at_once() {
+        let mut surfaces = Surfaces::default();
+        let surface = windowed(&mut surfaces, 1, 0xF00D);
+        assert_eq!(
+            surfaces.destroy(surface, 1),
+            Some(vk::SurfaceKHR::from_raw(0xF00D))
+        );
+        assert!(surfaces.zombies.is_empty());
+        assert!(surfaces.retain(surface, 1).is_err());
+        assert_eq!(
+            surfaces.destroy(surface, 1),
+            None,
+            "destroying twice must not hand the same object back twice"
+        );
+    }
+
+    /// An offscreen surface has no driver object, so it is deliberately never
+    /// counted — counting it would park a zombie that
+    /// [`Surfaces::release`], which is keyed on the raw handle, could never
+    /// release.
+    #[test]
+    fn an_offscreen_surface_is_never_deferred() {
+        let mut surfaces = Surfaces::default();
+        let surface = windowed(&mut surfaces, 1, 0);
+        surfaces.retain(surface, 1).expect("a ring takes it");
+        assert_eq!(surfaces.destroy(surface, 1), Some(vk::SurfaceKHR::null()));
+        assert!(
+            surfaces.zombies.is_empty(),
+            "an offscreen surface must never become a zombie"
+        );
+        assert_eq!(surfaces.release(vk::SurfaceKHR::null()), None);
+    }
+
+    /// **Obligation 3, across two instances**, in the shape it actually occurs:
+    /// each instance has its *own* surface pool, so both hand out slot 0 at
+    /// generation 1. Before the handles carried an instance tag, one instance's
+    /// handle therefore resolved to the other's surface with a matching
+    /// `owner` — `surface_caps` answered for the wrong surface, and
+    /// `destroy_surface` freed it.
+    #[test]
+    fn another_instances_surface_is_foreign_and_undestroyable() {
+        let mut first = Surfaces::default();
+        let mut second = Surfaces::default();
+        let mine = windowed(&mut first, 1, 0xABCD);
+        let theirs = windowed(&mut second, 2, 0xDCBA);
+        assert_ne!(
+            mine.to_bits(),
+            theirs.to_bits(),
+            "two instances' first surfaces sit in the same pool slot, so only \
+             the tag can tell them apart"
+        );
+
+        assert!(matches!(
+            first.raw(theirs, 1),
+            Err(HalError::ForeignObject {
+                kind: "surface",
+                ..
+            })
+        ));
+        assert!(matches!(
+            first.retain(theirs, 1),
+            Err(HalError::ForeignObject {
+                kind: "surface",
+                ..
+            })
+        ));
+        assert_eq!(
+            first.destroy(theirs, 1),
+            None,
+            "one instance must not be able to free another's surface — nor, \
+             through a bit collision, its own"
+        );
+        assert!(
+            first.raw(mine, 1).is_ok(),
+            "and both surfaces are untouched"
+        );
+        assert!(second.raw(theirs, 2).is_ok());
+
+        // A handle nobody stamped resolves nowhere rather than aliasing slot 0.
+        let unstamped: SurfaceHandle =
+            crcbl_core::Handle::from_bits(1 << 32).expect("generation 1");
+        assert!(matches!(
+            first.raw(unstamped, 1),
+            Err(HalError::InvalidHandle {
+                kind: "surface",
+                ..
+            })
+        ));
     }
 
     /// The registry above this crate falls through on `NoLoader`, so the error

@@ -819,6 +819,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-vk`**: **a surface handle crossed instances silently, and freeing it
+  destroyed the wrong object.** Each `VkInstance` owns its own surface pool, so
+  two instances issue byte-identical handles; the ownership check compared the
+  entry's owner against the looking-up instance, which is trivially true for
+  whatever _that_ instance holds at the same index. So instance A answered
+  `surface_caps` for instance B's handle with A's own surface, accepted it as
+  `compatible_surface` in `request_device`, and — the one that corrupts state —
+  `A.destroy_surface(b)` freed **A's** surface while B went on using a handle it
+  still believed live. `crcbl-hal`'s obligation 3 requires
+  `HalError::ForeignObject` here; the arm existed and was unreachable.
+
+  Surface handles now carry their issuing instance, reusing the tagging scheme
+  the device-scoped handles already used, so the check is against the handle's
+  own tag rather than against the pool it was looked up in. A handle no instance
+  issued is still `InvalidHandle`, and one belonging to another instance is now
+  `ForeignObject`. Found by writing the cross-instance test the reference
+  backend did not have — `crcbl-hal`'s null backend had covered this case all
+  along.
+
 - **crcbl-dx12**: **a software rasteriser was enumerated as an integrated GPU.**
   `is_software` consulted only `DXGI_ADAPTER_FLAG_SOFTWARE`, and DXGI lists
   "Microsoft Basic Render Driver" — which is WARP — with that flag _clear_, so

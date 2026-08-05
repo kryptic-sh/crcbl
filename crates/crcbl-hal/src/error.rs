@@ -201,10 +201,21 @@ mod tests {
     fn out_of_date_is_its_own_variant_and_survives_a_hal_error_wrap() {
         // The frame loop matches on `OutOfDate` directly; if a `HalError`
         // conversion ever swallowed it into `Hal(..)`, resize handling would
-        // silently become fatal.
-        let error = SurfaceError::OutOfDate;
-        assert!(matches!(error, SurfaceError::OutOfDate));
+        // silently become fatal. (`matches!(SurfaceError::OutOfDate,
+        // SurfaceError::OutOfDate)` used to stand here and could not fail.)
         let wrapped: SurfaceError = HalError::OutOfHostMemory.into();
         assert!(matches!(wrapped, SurfaceError::Hal(_)));
+        assert!(
+            !matches!(
+                wrapped,
+                SurfaceError::OutOfDate | SurfaceError::Lost | SurfaceError::Timeout
+            ),
+            "and the conversion must not manufacture a presentation variant \
+             either — a resize is something a backend decides, never something \
+             a generic error becomes"
+        );
+        // `transparent`, so the wrap keeps the inner message rather than
+        // prefixing one a caller would have to strip.
+        assert_eq!(wrapped.to_string(), HalError::OutOfHostMemory.to_string());
     }
 }

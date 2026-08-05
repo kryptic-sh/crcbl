@@ -924,20 +924,27 @@ fn a_zero_extent_swapchain_is_refused_with_a_reason() {
 fn a_buffer_from_one_device_is_foreign_to_another() {
     let instance = instance();
     let adapter = instance.adapters().remove(0);
-    let open = || {
-        instance
-            .create_device(&DeviceDesc::for_adapter(adapter.id))
-            .or_else(|_| {
-                // `for_adapter` demands Tier A, which lavapipe may not have.
-                instance.create_device(&DeviceDesc {
+    let open = || match instance.create_device(&DeviceDesc::for_adapter(adapter.id)) {
+        Ok(device) => device,
+        Err(error) => {
+            // `for_adapter` demands Tier A, which lavapipe may not have — but
+            // that is the *only* reason it may fail here, and swallowing any
+            // error would let a genuine one hide behind the fallback.
+            assert!(
+                matches!(error, crcbl_hal::HalError::UnsupportedFeatures { .. }),
+                "the only permitted refusal of a Tier A request is a named \
+                 feature gap: {error}"
+            );
+            instance
+                .create_device(&DeviceDesc {
                     label: None,
                     adapter: adapter.id,
                     required_features: Features::empty(),
                     optional_features: Features::empty(),
                     compatible_surface: None,
                 })
-            })
-            .expect("a headless device opens")
+                .expect("a featureless headless device opens on any adapter")
+        }
     };
     let first = open();
     let second = open();
@@ -1014,6 +1021,265 @@ fn a_device_outlives_the_instance_that_made_it() {
     report_source.validation_report().assert_clean();
 }
 
+/// **Obligation 2b**, as far as a headless run can take it: `destroy_surface`
+/// invalidates the handle *immediately*, and everything already built on that
+/// surface goes on working.
+///
+/// The half that cannot be reached from here is the one whose failure mode is
+/// undefined behaviour: an offscreen "surface" is `VK_NULL_HANDLE`, so there is
+/// no `vkDestroySurfaceKHR` to defer and the zombie list never engages. That
+/// bookkeeping is asserted directly in `instance.rs`
+/// (`a_surface_with_a_live_swapchain_defers_its_driver_object`), because the
+/// only surfaces this suite can create are the ones it cannot exercise.
+///
+/// What this *does* prove against a real driver: a frame rendered and presented
+/// through a swapchain whose surface handle is already gone raises nothing from
+/// the validation layer, which is the observable the deferral exists to keep.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
+    let headless = Headless::open();
+    let device = &headless.device;
+
+    // The handle dies here, mid-life of the swapchain built on it.
+    headless.instance.destroy_surface(headless.surface);
+    let error = headless
+        .instance
+        .surface_caps(headless.surface, crcbl_hal::AdapterId(0))
+        .expect_err("the handle is invalid the moment the caller destroys it");
+    assert!(
+        matches!(error, crcbl_hal::HalError::InvalidHandle { .. }),
+        "a destroyed surface handle is stale, not foreign: {error}"
+    );
+
+    // And the swapchain on it still renders a whole frame.
+    let acquired = device
+        .acquire_next_frame(headless.swapchain)
+        .expect("the ring outlives the surface handle");
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("after the surface handle went away"),
+        queue: headless.queue,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        images: &[crcbl_hal::ImageBarrier::new(
+            acquired.image,
+            ImageSubresourceRange::all(headless.format),
+            ResourceState::Undefined,
+            ResourceState::ColorAttachment,
+        )],
+        ..Barriers::default()
+    });
+    encoder.begin_render_pass(&RenderPassDesc {
+        label: Some("clear"),
+        color_attachments: &[ColorAttachment {
+            view: acquired.view,
+            resolve: None,
+            load: LoadOp::Clear,
+            store: StoreOp::Store,
+            clear: ClearValue::color(CLEAR),
+        }],
+        depth_stencil_attachment: None,
+        render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
+    });
+    encoder.end_render_pass();
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device
+        .present(
+            headless.queue,
+            &PresentInfo {
+                swapchain: headless.swapchain,
+                waits: acquired.present_semaphore.as_slice(),
+            },
+        )
+        .expect("present");
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(commands);
+
+    // Teardown in the order the deferral is for: the swapchain last, long after
+    // the surface handle. `Headless::finish` cannot be used because it destroys
+    // the surface, which this test already did.
+    device.destroy_swapchain(headless.swapchain);
+    drop(headless.device);
+    headless.instance.validation_report().assert_clean();
+}
+
+/// **Obligation 3, across two instances.** Handle bits are only unique within
+/// the backend that issued them, so two `VkInstance`s genuinely hand out
+/// identical ones — a surface crossing them must be detected, and detected as
+/// `ForeignObject` rather than as a stale handle, because the two send a reader
+/// to different bugs.
+///
+/// `crcbl-hal`'s null backend covers this; the reference backend did not, and
+/// no vk test opened two instances at all.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_surface_from_one_instance_is_foreign_to_another() {
+    let owner = instance();
+    let other = instance();
+
+    // SAFETY: `Offscreen` names no platform object at all.
+    let surface =
+        unsafe { owner.create_surface(&SurfaceTarget::Offscreen) }.expect("offscreen always works");
+    let adapter = other.adapters().remove(0);
+
+    let error = other
+        .surface_caps(surface, adapter.id)
+        .expect_err("this surface belongs to the other instance");
+    assert!(
+        matches!(
+            error,
+            crcbl_hal::HalError::ForeignObject {
+                kind: "surface",
+                ..
+            }
+        ),
+        "a live handle from another instance is foreign, not unresolvable: {error}"
+    );
+
+    let error = other
+        .create_device(&DeviceDesc {
+            label: Some("foreign surface"),
+            adapter: adapter.id,
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            compatible_surface: Some(surface),
+        })
+        .expect_err("and the same on the device-creation path");
+    assert!(
+        matches!(
+            error,
+            crcbl_hal::HalError::ForeignObject {
+                kind: "surface",
+                ..
+            }
+        ),
+        "{error}"
+    );
+
+    // The other instance must not be able to free it either, which is what
+    // stops a stray `destroy_surface` from turning a bit collision into a
+    // double free.
+    other.destroy_surface(surface);
+    owner
+        .surface_caps(surface, owner.adapters().remove(0).id)
+        .expect("the owning instance still has its surface");
+
+    owner.destroy_surface(surface);
+    owner.validation_report().assert_clean();
+    other.validation_report().assert_clean();
+}
+
+/// The two `request_device` argument errors, neither of which any vk test
+/// asserted. Both are decided before a `VkDevice` exists, so they need nothing
+/// from the driver beyond an open instance.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn request_device_names_an_unknown_adapter_and_an_absent_feature() {
+    let instance = instance();
+    let adapters = instance.adapters();
+    assert!(
+        !adapters.is_empty(),
+        "open() rejects an adapter-less loader"
+    );
+
+    let past_the_end = u32::try_from(adapters.len()).expect("a handful of adapters");
+    let error = instance
+        .create_device(&DeviceDesc::for_adapter(crcbl_hal::AdapterId(past_the_end)))
+        .expect_err("there is no adapter one past the last");
+    assert!(
+        matches!(error, crcbl_hal::HalError::NoSuchAdapter(index) if index == past_the_end),
+        "the error names the index that was asked for: {error}"
+    );
+
+    // `adapter::features_of` never sets `SHADER_DEBUG_PRINTF` — it needs the
+    // layer's printf feature wired to a message handler and lands with the
+    // debug UI — so it is the one capability no adapter here can satisfy,
+    // whatever driver this is.
+    let adapter = &adapters[0];
+    assert!(
+        !adapter.caps.supports(Features::SHADER_DEBUG_PRINTF),
+        "this backend reports SHADER_DEBUG_PRINTF absent until it works"
+    );
+    let error = instance
+        .create_device(&DeviceDesc {
+            label: Some("impossible"),
+            adapter: adapter.id,
+            required_features: Features::SHADER_DEBUG_PRINTF,
+            optional_features: Features::empty(),
+            compatible_surface: None,
+        })
+        .expect_err("a required feature the adapter lacks is refused");
+    let crcbl_hal::HalError::UnsupportedFeatures { missing } = error else {
+        panic!("a feature gap is UnsupportedFeatures, not {error:?}");
+    };
+    assert_eq!(
+        missing,
+        Features::SHADER_DEBUG_PRINTF,
+        "the error carries the exact gap, so the log says which capability to \
+         go look up"
+    );
+
+    instance.validation_report().assert_clean();
+}
+
+/// The polled device-creation path, which every other test in this suite skips
+/// by going through the blocking `create_device` wrapper.
+///
+/// `vkCreateDevice` is synchronous, so this backend's first poll is always
+/// `Ready` — and the contract's other half is that there is no *second* device
+/// behind it. Until now that was asserted only against the null backend.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_device_request_hands_its_device_over_exactly_once() {
+    let instance = instance();
+    let adapter = instance.adapters().remove(0);
+    let mut pending = instance
+        .request_device(&DeviceDesc {
+            label: Some("polled"),
+            adapter: adapter.id,
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            compatible_surface: None,
+        })
+        .expect("the request is accepted");
+    assert_eq!(pending.backend(), crcbl_hal::BackendKind::Vulkan);
+
+    let device = match pending.poll().expect("the first poll succeeds") {
+        crcbl_hal::DeviceRequestState::Ready(device) => device,
+        crcbl_hal::DeviceRequestState::Pending => {
+            panic!("vkCreateDevice already ran, so this backend never defers")
+        }
+    };
+
+    let error = pending
+        .poll()
+        .expect_err("polling a finished request must not produce a second device");
+    assert!(
+        matches!(error, crcbl_hal::HalError::InvalidDescriptor(_)),
+        "a poll after Ready is a caller bug with a message, not a device: {error}"
+    );
+
+    // And the device the one successful poll produced is a working one.
+    let buffer = device
+        .create_buffer(&BufferDesc {
+            label: Some("from a polled request"),
+            size: 64,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("the polled device works");
+    device.write_buffer(buffer, 0, &[5; 64]).expect("write");
+    device.destroy_buffer(buffer);
+    device.wait_idle().expect("idle");
+    drop(device);
+    drop(pending);
+
+    instance.validation_report().assert_clean();
+}
+
 /// The tier determination, against whatever this machine actually is. The
 /// assertion is not "Tier A" — lavapipe may not be — but that the *report is
 /// consistent*, which is the property a renderer branches on.
@@ -1021,7 +1287,16 @@ fn a_device_outlives_the_instance_that_made_it() {
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
 fn the_reported_tier_agrees_with_the_reported_features() {
     let instance = instance();
-    for adapter in instance.adapters() {
+    let adapters = instance.adapters();
+    // Without this the whole test is a loop over an empty list — every
+    // assertion below is skipped and the test passes having checked nothing.
+    // `open()` already refuses an adapter-less loader, so this is also the
+    // check that it did.
+    assert!(
+        !adapters.is_empty(),
+        "open() rejects an adapter-less loader"
+    );
+    for adapter in adapters {
         let caps = adapter.caps;
         assert_eq!(
             caps.tier().is_a(),

@@ -243,20 +243,13 @@ mod tests {
     }
 
     /// SPIR-V magic number, as the first word of any valid module.
+    ///
+    /// There is deliberately no test that [`ShaderModuleDesc::spirv`] is words
+    /// rather than bytes: it is `&[u32]`, so the compiler checks it and a test
+    /// could only read its own literal back. That the *magic word* is what a
+    /// backend reads is checked where a backend reads it —
+    /// `crate::null`'s `shader_modules_reject_non_spirv`.
     const MAGIC: u32 = 0x0723_0203;
-
-    #[test]
-    fn shader_desc_takes_words_not_bytes() {
-        let spirv = [MAGIC, 0x0001_0600, 0, 0, 0];
-        let desc = ShaderModuleDesc {
-            label: Some("probe"),
-            spirv: &spirv,
-            wgsl: None,
-            msl: None,
-        };
-        assert_eq!(desc.spirv[0], MAGIC);
-        assert_eq!(desc.spirv.len(), 5);
-    }
 
     /// The contract's "empty means absent" rule, in both fields, read back
     /// through the one function every backend uses to read it.

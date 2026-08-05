@@ -4644,6 +4644,48 @@ re-listing an adapter the hardware pass already kept. It never collapsed the
 runner's two entries — those carry different LUIDs and really are two adapter
 objects.
 
+## `Format::ALL` cannot be made airtight on stable, and two backends still copy it
+
+The seam now owns the canonical format list as `Format::ALL` in
+`crcbl-hal::format`, and `crcbl-vk` was repointed at it — the two lists that had
+drifted apart are one. Two things are left.
+
+**`crcbl-mtl` and `crcbl-dx12` still keep their own copies**, in each crate's
+`conv.rs`. Both should be repointed at `Format::ALL`; they were left alone only
+because the slice that added it was scoped to `crcbl-hal` and `crcbl-vk`. Until
+then, each backend's injectivity test still covers only the formats its own copy
+happens to list. (`crcbl-mtl/src/swapchain.rs`'s `LAYER_FORMATS` and
+`OFFSCREEN_FORMATS` are deliberate subsets and are not this.)
+
+**The list is hand-maintained, and the gap that remains is a variant appended to
+the enum and not to `ALL`.** `the_format_table_is_in_declaration_order` compares
+each entry's discriminant against its index, so an entry inserted or duplicated
+anywhere but the very end is caught. An appended one is not, and **nothing on
+stable Rust can count an enum's variants**. Closing it properly needs either a
+declarative macro generating the enum and the list from one source, or a
+proc-macro dependency — and a new dependency is the user's call, so this is
+recorded rather than decided. Both `ALL`'s doc comment and the test say this
+outright rather than implying full coverage.
+
+The same shape applies to `Command`'s list in `crcbl-hal/src/null/record.rs`,
+except that there an exhaustive `match` in the test forces an author who adds a
+variant to visit the file — which is the mitigation `Format` cannot have,
+because its list lives in a different crate from its consumers.
+
+## Vulkan's cross-submission barriers are unverified on this machine
+
+`run-vk-e2e.sh` reports its own reach, and on a local run it prints
+`sync-validation reach: record-time=yes one-submission=yes cross-submission=no`.
+So a green local run against radv says nothing about a missing barrier _between_
+submissions, which is the class every missing cross-frame barrier falls into.
+CI's layer configuration has caught one that a local run cannot see.
+
+Neither environment subsumes the other: the local run has a real driver, a
+discrete GPU and a real async-compute queue that CI has never had; CI has the
+cross-submission checking. Treat "green locally" as insufficient for anything
+touching barriers, and rely on `cargo nextest run -p crcbl-render` for that
+class — it compiles consecutive frames against one pool and needs no layer.
+
 ### Two things DX1 decided that a later slice may have to undo
 
 - **`DESCRIPTOR_INDEXING` is reported ahead of a call**, which is the opposite

@@ -971,21 +971,214 @@ mod tests {
         assert!(!state.is_owned_by(ObjectKind::Buffer, buffer.to_bits(), 7));
     }
 
+    /// One of every [`Command`] variant.
+    ///
+    /// The `match` at the end is what keeps the list honest: it is exhaustive,
+    /// so a variant added to `Command` stops this module compiling until
+    /// someone comes here — which is the point at which the list beside it is
+    /// impossible to miss. A sampled list has no such moment; this one used to
+    /// hold five of them.
+    fn every_command_variant() -> Vec<Command> {
+        fn handle<T>() -> Handle<T> {
+            Handle::from_bits(1 << 32).expect("generation 1 is a real generation")
+        }
+        let layers = crate::ImageSubresourceLayers {
+            aspect: crate::ImageAspect::COLOR,
+            mip: 0,
+            base_layer: 0,
+            layer_count: 1,
+        };
+        let region = BufferImageCopy {
+            buffer: handle(),
+            buffer_offset: 0,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            image: handle(),
+            image_subresource: layers,
+            image_offset: crate::Offset3d::default(),
+            image_extent: crate::Extent3d::d2(1, 1),
+        };
+        let indirect = DrawIndirect {
+            args: handle(),
+            offset: 0,
+            draw_count: 1,
+            stride: 16,
+        };
+        let indirect_count = DrawIndirectCount {
+            args: handle(),
+            args_offset: 0,
+            count_buffer: handle(),
+            count_offset: 0,
+            max_draw_count: 1,
+            stride: 16,
+        };
+
+        let samples = vec![
+            Command::BeginDebugLabel("label".into()),
+            Command::EndDebugLabel,
+            Command::DebugMarker("marker".into()),
+            Command::Barrier {
+                buffers: Vec::new(),
+                images: Vec::new(),
+                global: true,
+            },
+            Command::CopyBufferToBuffer(BufferCopy {
+                src: handle(),
+                src_offset: 0,
+                dst: handle(),
+                dst_offset: 0,
+                size: 4,
+            }),
+            Command::CopyBufferToImage(region),
+            Command::CopyImageToBuffer(region),
+            Command::CopyImageToImage(ImageCopy {
+                src: handle(),
+                src_subresource: layers,
+                src_offset: crate::Offset3d::default(),
+                dst: handle(),
+                dst_subresource: layers,
+                dst_offset: crate::Offset3d::default(),
+                extent: crate::Extent3d::d2(1, 1),
+            }),
+            Command::FillBuffer {
+                buffer: handle(),
+                offset: 0,
+                size: 4,
+                value: 0,
+            },
+            Command::BeginRenderPass {
+                label: None,
+                color_attachments: Vec::new(),
+                depth_stencil_attachment: None,
+                render_area: Rect2d::from_size(1, 1),
+            },
+            Command::EndRenderPass,
+            Command::SetViewport(Viewport::default()),
+            Command::SetScissor(Rect2d::from_size(1, 1)),
+            Command::SetStencilReference(0),
+            Command::BindGraphicsPipeline(handle()),
+            Command::BindIndexBuffer {
+                buffer: handle(),
+                offset: 0,
+                format: IndexFormat::Uint32,
+            },
+            Command::BindGroup {
+                slot: 0,
+                group: handle(),
+                dynamic_offsets: Vec::new(),
+            },
+            Command::PushConstants {
+                stages: ShaderStages::VERTEX,
+                offset: 0,
+                len: 4,
+            },
+            Command::Draw {
+                vertices: 0..3,
+                instances: 0..1,
+            },
+            Command::DrawIndexed {
+                indices: 0..3,
+                base_vertex: 0,
+                instances: 0..1,
+            },
+            Command::DrawIndirect(indirect),
+            Command::DrawIndexedIndirect(indirect),
+            Command::DrawIndirectCount(indirect_count),
+            Command::DrawIndexedIndirectCount(indirect_count),
+            Command::BeginComputePass { label: None },
+            Command::EndComputePass,
+            Command::BindComputePipeline(handle()),
+            Command::Dispatch { x: 1, y: 1, z: 1 },
+            Command::DispatchIndirect {
+                args: handle(),
+                offset: 0,
+            },
+            Command::ResetQuerySet {
+                set: handle(),
+                range: 0..1,
+            },
+            Command::WriteTimestamp {
+                set: handle(),
+                index: 0,
+            },
+            Command::ResolveQuerySet {
+                set: handle(),
+                range: 0..1,
+                dst: handle(),
+                dst_offset: 0,
+            },
+        ];
+
+        for command in &samples {
+            match command {
+                Command::BeginDebugLabel(_)
+                | Command::EndDebugLabel
+                | Command::DebugMarker(_)
+                | Command::Barrier { .. }
+                | Command::CopyBufferToBuffer(_)
+                | Command::CopyBufferToImage(_)
+                | Command::CopyImageToBuffer(_)
+                | Command::CopyImageToImage(_)
+                | Command::FillBuffer { .. }
+                | Command::BeginRenderPass { .. }
+                | Command::EndRenderPass
+                | Command::SetViewport(_)
+                | Command::SetScissor(_)
+                | Command::SetStencilReference(_)
+                | Command::BindGraphicsPipeline(_)
+                | Command::BindIndexBuffer { .. }
+                | Command::BindGroup { .. }
+                | Command::PushConstants { .. }
+                | Command::Draw { .. }
+                | Command::DrawIndexed { .. }
+                | Command::DrawIndirect(_)
+                | Command::DrawIndexedIndirect(_)
+                | Command::DrawIndirectCount(_)
+                | Command::DrawIndexedIndirectCount(_)
+                | Command::BeginComputePass { .. }
+                | Command::EndComputePass
+                | Command::BindComputePipeline(_)
+                | Command::Dispatch { .. }
+                | Command::DispatchIndirect { .. }
+                | Command::ResetQuerySet { .. }
+                | Command::WriteTimestamp { .. }
+                | Command::ResolveQuerySet { .. } => {}
+            }
+        }
+        samples
+    }
+
+    /// A duplicated name would make every `command_names()` assertion in the
+    /// suite ambiguous — two different commands would read as the same one, and
+    /// an expected stream would match a wrong one.
     #[test]
     fn command_names_are_unique_per_variant() {
-        // A duplicated name would make `command_names()` assertions ambiguous.
-        let samples = [
-            Command::EndDebugLabel,
-            Command::EndRenderPass,
-            Command::EndComputePass,
-            Command::SetStencilReference(0),
-            Command::Dispatch { x: 1, y: 1, z: 1 },
-        ];
+        let samples = every_command_variant();
         let mut names: Vec<_> = samples.iter().map(Command::name).collect();
         let count = names.len();
+        assert!(names.iter().all(|name| !name.is_empty()));
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), count);
+        assert_eq!(names.len(), count, "two variants share a name");
+    }
+
+    /// The other half of the same claim: a variant that opens a pass says so,
+    /// and every other variant says it does not.
+    #[test]
+    fn only_the_two_begin_commands_open_a_pass() {
+        for command in every_command_variant() {
+            let expected = match command.name() {
+                "BeginRenderPass" => Some("render"),
+                "BeginComputePass" => Some("compute"),
+                _ => None,
+            };
+            assert_eq!(
+                command.opens_pass().map(|(kind, _)| kind),
+                expected,
+                "{}",
+                command.name()
+            );
+        }
     }
 
     #[test]

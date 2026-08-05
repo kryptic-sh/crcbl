@@ -386,6 +386,7 @@ impl DeviceCaps {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HalError;
 
     #[test]
     fn tier_is_derived_from_features_not_asserted() {
@@ -445,27 +446,124 @@ mod tests {
         assert!(caps.missing(Features::COMPUTE).is_empty());
     }
 
+    /// Strictly below, not merely "not above". The regression worth guarding is
+    /// the desktop preset being pasted into `minimum()`, and a table of `<=`
+    /// passes on two byte-identical presets while the name says otherwise.
     #[test]
     fn minimum_limits_are_below_desktop_limits() {
         let min = Limits::minimum();
         let desktop = Limits::desktop();
-        assert!(min.max_image_2d <= desktop.max_image_2d);
-        assert!(min.max_bind_groups <= desktop.max_bind_groups);
-        assert!(min.max_draw_indirect_count <= desktop.max_draw_indirect_count);
-        assert!(min.max_sample_count <= desktop.max_sample_count);
+        assert!(min.max_image_2d < desktop.max_image_2d);
+        assert!(min.max_image_array_layers < desktop.max_image_array_layers);
+        assert!(min.max_storage_buffer_range < desktop.max_storage_buffer_range);
+        assert!(min.max_bind_groups < desktop.max_bind_groups);
+        assert!(min.max_bindless_descriptors < desktop.max_bindless_descriptors);
+        assert!(min.max_push_constant_size < desktop.max_push_constant_size);
+        assert!(min.max_color_attachments < desktop.max_color_attachments);
+        assert!(min.max_sample_count < desktop.max_sample_count);
+        assert!(min.max_draw_indirect_count < desktop.max_draw_indirect_count);
+        assert!(min.max_compute_workgroup_size[0] < desktop.max_compute_workgroup_size[0]);
+        assert!(min.max_compute_workgroup_size[1] < desktop.max_compute_workgroup_size[1]);
+        assert!(
+            min.max_compute_invocations_per_workgroup
+                < desktop.max_compute_invocations_per_workgroup
+        );
+        assert!(min.max_sampler_anisotropy < desktop.max_sampler_anisotropy);
+        assert!(min.timestamp_period_ns < desktop.timestamp_period_ns);
+
+        // The fields the two presets legitimately agree on. Listed rather than
+        // omitted, so "the floor already matches a desktop device here" is a
+        // stated fact instead of a gap in the table above.
+        assert!(min.max_image_3d <= desktop.max_image_3d);
+        assert!(min.max_uniform_buffer_range <= desktop.max_uniform_buffer_range);
+        assert!(min.max_compute_workgroup_size[2] <= desktop.max_compute_workgroup_size[2]);
+        assert!(
+            min.max_compute_workgroups_per_dimension
+                <= desktop.max_compute_workgroups_per_dimension
+        );
+
         // A sample count is a bit in a mask underneath, so a preset reporting a
         // non-power-of-two ceiling would make every backend's check nonsense.
         for limits in [min, desktop] {
             assert!(limits.max_sample_count.is_power_of_two());
             assert!(limits.max_sample_count <= 64);
         }
-        // Alignment limits run the other way: the floor is the *coarser* one.
+        // Alignment limits run the other way: the floor is the *coarser* one,
+        // and strictly so for the same reason.
         assert!(
-            min.min_uniform_buffer_offset_alignment >= desktop.min_uniform_buffer_offset_alignment
+            min.min_uniform_buffer_offset_alignment > desktop.min_uniform_buffer_offset_alignment
         );
         assert!(
-            min.min_storage_buffer_offset_alignment >= desktop.min_storage_buffer_offset_alignment
+            min.min_storage_buffer_offset_alignment > desktop.min_storage_buffer_offset_alignment
         );
+        assert!(
+            min.optimal_buffer_copy_offset_alignment > desktop.optimal_buffer_copy_offset_alignment
+        );
+    }
+
+    /// Every flag is a hand-written `1 << N`, and nothing checked the shifts
+    /// were distinct. A repeated shift makes [`Features::contains`] vacuously
+    /// true for the shadowed flag — it is never absent, so no test that asks
+    /// "is X missing" can ever see it.
+    ///
+    /// The count comes from the flag table rather than a literal, so the check
+    /// grows with the enum instead of needing an edit that would not happen.
+    #[test]
+    fn every_feature_owns_a_distinct_bit() {
+        use bitflags::Flags;
+
+        // `TIER_A` is a named union of other flags, not a bit of its own.
+        let single_bit: Vec<&'static str> = Features::FLAGS
+            .iter()
+            .filter(|flag| flag.value().bits().is_power_of_two())
+            .map(bitflags::Flag::name)
+            .collect();
+        assert_eq!(
+            Features::all().bits().count_ones() as usize,
+            single_bit.len(),
+            "two of {single_bit:?} share a bit"
+        );
+    }
+
+    /// Every optional feature must be individually observable: `missing` names
+    /// exactly it, and a device without it refuses it.
+    ///
+    /// Driven off the flag table, because the `TIER_A` loop above is a good
+    /// self-growing pattern that structurally cannot reach the optional half —
+    /// nine flags had no mention in any test at all, including the two the
+    /// queue selection keys off.
+    #[test]
+    fn every_feature_is_reported_one_at_a_time() {
+        use bitflags::Flags;
+
+        for flag in Features::FLAGS {
+            let feature = *flag.value();
+            if !feature.bits().is_power_of_two() {
+                continue;
+            }
+            let name = flag.name();
+            let without = DeviceCaps {
+                features: Features::all().difference(feature),
+                limits: Limits::desktop(),
+            };
+            assert_eq!(without.missing(feature), feature, "{name}");
+            assert!(!without.supports(feature), "{name}");
+
+            let only = DeviceCaps {
+                features: feature,
+                limits: Limits::minimum(),
+            };
+            assert!(only.supports(feature), "{name}");
+            assert!(only.missing(feature).is_empty(), "{name}");
+            assert!(
+                HalError::UnsupportedFeatures {
+                    missing: without.missing(feature)
+                }
+                .to_string()
+                .contains(name),
+                "the error a backend owes must name {name}"
+            );
+        }
     }
 
     #[test]

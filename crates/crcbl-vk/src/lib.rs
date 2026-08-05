@@ -242,19 +242,56 @@ mod tests {
     /// On a machine that has one this simply succeeds, and that is also fine —
     /// the property under test is that neither outcome panics, which is what
     /// makes this test meaningful on the macOS and Windows CI legs.
+    ///
+    /// The arm it takes is **not** left to whatever the machine is. The
+    /// `test (linux)` job installs no loader, so this test used to spend every
+    /// run in an `Err` arm asserting only that the message was non-empty —
+    /// which every variant satisfies by construction, being a `#[error("…")]`
+    /// literal. Probing the loader separately is what turns "some error" into
+    /// "the error this machine should have produced": a missing loader means
+    /// [`OpenError::NoLoader`] and nothing else, and a present one means every
+    /// variant *but* that.
     #[test]
     fn opening_the_backend_never_panics_whatever_the_machine_has() {
-        match VkInstance::open() {
+        // SAFETY: the same `dlopen` `VkInstance::open` performs and the same
+        // trust — see its own comment. Nothing is called through the result;
+        // it is dropped immediately.
+        let has_loader = unsafe { ash::Entry::load() }.is_ok();
+        let opened = VkInstance::open();
+        assert_eq!(
+            matches!(opened, Err(OpenError::NoLoader(_))),
+            !has_loader,
+            "a loader failure must arrive as NoLoader — the registry falls \
+             through on that variant and on no other"
+        );
+
+        match opened {
             Ok(instance) => {
                 assert_eq!(instance.backend(), BackendKind::Vulkan);
                 assert!(
                     !instance.adapters().is_empty(),
                     "open() rejects an adapter-less loader"
                 );
+                let (major, minor, _) = instance.loader_version();
+                assert!(
+                    (major, minor) >= (1, 3),
+                    "open() refuses a loader below 1.3, so a success reports at \
+                     least that: {major}.{minor}"
+                );
             }
             Err(error) => {
+                // The variant, not merely the existence of a message: each one
+                // sends the reader somewhere different, and `NoLoader` is the
+                // only one a backend registry may fall through on.
                 let text = error.to_string();
-                assert!(!text.is_empty(), "a failure must say what happened");
+                match error {
+                    OpenError::NoLoader(_) => assert!(text.contains("no Vulkan loader"), "{text}"),
+                    OpenError::ApiTooOld { major, minor } => {
+                        assert!(text.contains(&format!("{major}.{minor}")), "{text}");
+                    }
+                    OpenError::Instance(_) => assert!(text.contains("vkCreateInstance"), "{text}"),
+                    OpenError::NoAdapters => assert!(text.contains("no physical device"), "{text}"),
+                }
             }
         }
     }

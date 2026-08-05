@@ -131,17 +131,84 @@ mod tests {
         assert!(!ReadbackState::Pending.is_ready());
     }
 
+    /// [`ReadbackDesc::after`] is the field with two meanings, so both are read
+    /// back through a backend rather than off the literal that was just
+    /// written: `None` needs no synchronisation object to exist at all, and
+    /// `Some` names one the device must resolve.
+    ///
+    /// That a `None` request observes *everything submitted so far* is not
+    /// checked here and cannot be: [`crate::null`] records commands rather than
+    /// executing them, so no submission it accepts changes a byte. The backends
+    /// that do execute check it in their own e2e suites.
     #[test]
-    fn a_request_without_an_explicit_wait_means_everything_submitted_so_far() {
-        let mut pool: crcbl_core::Pool<u8> = crcbl_core::Pool::new();
+    fn a_readback_wait_is_optional_and_resolved_when_it_is_given() {
+        use crate::null::NullInstance;
+        use crate::{
+            AdapterId, BufferDesc, BufferUsage, DeviceDesc, HalError, Instance, MemoryLocation,
+            SemaphoreDesc, SemaphoreKind,
+        };
+
+        let instance = NullInstance::tier_a();
+        let device = instance
+            .create_device(&DeviceDesc::for_adapter(AdapterId(0)))
+            .expect("the tier A preset opens");
+        let buffer = device
+            .create_buffer(&BufferDesc {
+                label: Some("culling stats"),
+                size: 8,
+                usage: BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::HostReadback,
+            })
+            .expect("a readback buffer");
         let desc = ReadbackDesc {
             label: Some("culling stats"),
-            buffer: pool.insert(0).cast(),
+            buffer,
             offset: 0,
             size: 8,
             after: None,
         };
-        assert!(desc.after.is_none());
-        assert_eq!(desc.size, 8);
+
+        // No wait named, and no semaphore in existence anywhere: the request
+        // still stands and completes.
+        let readback = device
+            .request_readback(&desc)
+            .expect("an unqualified request needs no synchronisation object");
+        let mut bytes = [0u8; 8];
+        assert_eq!(
+            device.poll_readback(readback, &mut bytes).expect("poll"),
+            ReadbackState::Ready
+        );
+        // The size is the contract on the output slice, not a hint.
+        let error = device
+            .poll_readback(readback, &mut [0u8; 4])
+            .expect_err("a slice of the wrong length is a caller bug");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+        device.destroy_readback(readback);
+
+        // A named wait is resolved, so a stale one is refused rather than
+        // ignored — the failure mode that would make a latent readback return
+        // whatever happened to be in the buffer.
+        let semaphore = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("frame timeline"),
+                kind: SemaphoreKind::Timeline { initial_value: 0 },
+            })
+            .expect("a timeline semaphore");
+        let named = ReadbackDesc {
+            after: Some(SemaphoreWait {
+                semaphore,
+                value: 1,
+            }),
+            ..desc
+        };
+        let waiting = device
+            .request_readback(&named)
+            .expect("a live semaphore is accepted");
+        device.destroy_readback(waiting);
+        device.destroy_semaphore(semaphore);
+        let error = device
+            .request_readback(&named)
+            .expect_err("a destroyed semaphore must not be silently ignored");
+        assert!(matches!(error, HalError::InvalidHandle { .. }), "{error:?}");
     }
 }

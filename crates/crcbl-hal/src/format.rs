@@ -94,6 +94,52 @@ pub enum Format {
 }
 
 impl Format {
+    /// Every variant, in declaration order.
+    ///
+    /// The seam owns this list so a backend does not keep a second copy of it.
+    /// That mattered: `crcbl-vk`'s reverse mapping ends in `_ => None`, so a
+    /// format added forward and forgotten in reverse is not a compile error —
+    /// it is a format its `surface_caps` silently drops — and the round-trip
+    /// test that would have caught it was iterating the backend's *own* copy of
+    /// this list, which had the same omission. Iterating `ALL` ties the two
+    /// together.
+    ///
+    /// **Add a variant above, add it here.** Nothing on stable Rust can count
+    /// an enum's variants, so this list is hand-maintained; the closest guard
+    /// is this module's `the_format_table_is_in_declaration_order` test, which
+    /// catches an entry inserted anywhere but the very end.
+    pub const ALL: &'static [Self] = &[
+        Self::R8Unorm,
+        Self::Rg8Unorm,
+        Self::Rgba8Unorm,
+        Self::Rgba8UnormSrgb,
+        Self::Bgra8Unorm,
+        Self::Bgra8UnormSrgb,
+        Self::Rgb10a2Unorm,
+        Self::R11g11b10Float,
+        Self::R16Float,
+        Self::Rg16Float,
+        Self::Rgba16Float,
+        Self::R32Float,
+        Self::Rg32Float,
+        Self::Rgba32Float,
+        Self::R32Uint,
+        Self::Rg32Uint,
+        Self::D32Float,
+        Self::D32FloatS8Uint,
+        Self::D24UnormS8Uint,
+        Self::D16Unorm,
+        Self::Bc1RgbaUnorm,
+        Self::Bc1RgbaUnormSrgb,
+        Self::Bc3RgbaUnorm,
+        Self::Bc3RgbaUnormSrgb,
+        Self::Bc4RUnorm,
+        Self::Bc5RgUnorm,
+        Self::Bc6hRgbUfloat,
+        Self::Bc7RgbaUnorm,
+        Self::Bc7RgbaUnormSrgb,
+    ];
+
     /// Bytes per block. For uncompressed formats a "block" is one texel.
     ///
     /// # Not the copy footprint of a depth/stencil format
@@ -282,48 +328,33 @@ impl IndexFormat {
 mod tests {
     use super::*;
 
-    const ALL: &[Format] = &[
-        Format::R8Unorm,
-        Format::Rg8Unorm,
-        Format::Rgba8Unorm,
-        Format::Rgba8UnormSrgb,
-        Format::Bgra8Unorm,
-        Format::Bgra8UnormSrgb,
-        Format::Rgb10a2Unorm,
-        Format::R11g11b10Float,
-        Format::R16Float,
-        Format::Rg16Float,
-        Format::Rgba16Float,
-        Format::R32Float,
-        Format::Rg32Float,
-        Format::Rgba32Float,
-        Format::R32Uint,
-        Format::Rg32Uint,
-        Format::D32Float,
-        Format::D32FloatS8Uint,
-        Format::D24UnormS8Uint,
-        Format::D16Unorm,
-        Format::Bc1RgbaUnorm,
-        Format::Bc1RgbaUnormSrgb,
-        Format::Bc3RgbaUnorm,
-        Format::Bc3RgbaUnormSrgb,
-        Format::Bc4RUnorm,
-        Format::Bc5RgUnorm,
-        Format::Bc6hRgbUfloat,
-        Format::Bc7RgbaUnorm,
-        Format::Bc7RgbaUnormSrgb,
-    ];
+    /// [`Format::ALL`] must list every variant exactly once, in declaration
+    /// order — that is what lets every consumer of it, this module and
+    /// `crcbl-vk` alike, treat "iterated `ALL`" as "covered every format".
+    ///
+    /// Casting a variant to its discriminant is what makes it checkable at all,
+    /// and it only works because `Format` is fieldless. An entry inserted or
+    /// duplicated anywhere shifts every index after it and fails here; a
+    /// variant *appended* to the enum and not appended here does not, and
+    /// nothing on stable Rust can see it. That gap is the reason `ALL` carries
+    /// the instruction it does.
+    #[test]
+    fn the_format_table_is_in_declaration_order() {
+        for (index, format) in Format::ALL.iter().enumerate() {
+            assert_eq!(*format as usize, index, "{format:?} is out of place");
+        }
+    }
 
     #[test]
     fn every_format_has_a_nonzero_block_size() {
-        for format in ALL {
+        for format in Format::ALL {
             assert!(format.block_size() > 0, "{format:?}");
         }
     }
 
     #[test]
     fn compressed_formats_use_four_by_four_blocks() {
-        for format in ALL {
+        for format in Format::ALL {
             let expected = if format.is_compressed() {
                 (4, 4)
             } else {
@@ -339,7 +370,7 @@ mod tests {
         assert!(!Format::D32Float.has_stencil());
         assert!(Format::D32FloatS8Uint.has_stencil());
         assert!(Format::D24UnormS8Uint.has_stencil());
-        for format in ALL {
+        for format in Format::ALL {
             assert_eq!(
                 format.is_depth_stencil(),
                 format.has_depth() || format.has_stencil(),
@@ -392,7 +423,7 @@ mod tests {
         assert_eq!(Format::D24UnormS8Uint.texel_size(A::STENCIL), Some(1));
         assert_eq!(Format::D16Unorm.texel_size(A::DEPTH), Some(2));
 
-        for format in ALL {
+        for format in Format::ALL {
             // A colour format has exactly one plane, and it is the block size.
             if !format.is_depth_stencil() {
                 assert_eq!(format.texel_size(A::COLOR), Some(format.block_size()));

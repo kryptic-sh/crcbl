@@ -431,30 +431,114 @@ mod tests {
         );
     }
 
-    /// The Tier B shape from the module docs: a backend with an implicit
-    /// acquire returns `None` for both semaphores, and the renderer's splice
-    /// becomes a no-op rather than a branch. The image, the view and the
-    /// extent are **not** optional — every backend has all three, which is the
-    /// whole reason they sit beside the semaphores rather than being left to
-    /// the caller.
+    /// The Tier B shape from the module docs, asserted against the backend that
+    /// models it rather than against a hand-built literal: an implicit acquire
+    /// returns `None` for both semaphores, so the renderer's splice becomes an
+    /// empty slice rather than a branch. The image, the view and the extent are
+    /// **not** optional — every backend has all three, which is the whole
+    /// reason they sit beside the semaphores rather than being left to the
+    /// caller — and here they are checked by *using* them.
+    ///
+    /// The Tier A half of the same contract, and the ring's rotation and
+    /// reconfigure behaviour, are the null backend's own
+    /// `swapchain_acquire_matches_the_tiers_sync_model`.
     #[test]
     fn an_implicit_acquire_frame_carries_no_semaphores() {
-        let mut pool: crcbl_core::Pool<u8> = crcbl_core::Pool::new();
-        let frame = AcquiredFrame {
-            image: pool.insert(0).cast(),
-            view: pool.insert(1).cast(),
-            extent: (1280, 720),
-            index: 0,
-            acquire_semaphore: None,
-            present_semaphore: None,
-            suboptimal: false,
+        use crate::null::NullInstance;
+        use crate::{
+            AdapterId, ClearValue, ColorAttachment, CommandEncoderDesc, DeviceDesc, Features,
+            Instance, LoadOp, QueueKind, Rect2d, RenderPassDesc, StoreOp, SubmitInfo,
+            SurfaceTarget,
         };
-        let waits: Vec<_> = frame.acquire_semaphore.into_iter().collect();
-        let signals: Vec<_> = frame.present_semaphore.into_iter().collect();
-        assert!(waits.is_empty());
-        assert!(signals.is_empty());
+
+        const EXTENT: (u32, u32) = (1280, 720);
+
+        let instance = NullInstance::tier_b();
+        // SAFETY: `Offscreen` names no platform object at all, so there is
+        // nothing that has to outlive the surface.
+        let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+            .expect("an offscreen surface always works");
+        let device = instance
+            .create_device(&DeviceDesc {
+                required_features: Features::COMPUTE,
+                ..DeviceDesc::for_adapter(AdapterId(0))
+            })
+            .expect("the tier B preset has compute");
+        let surface_caps = instance
+            .surface_caps(surface, AdapterId(0))
+            .expect("surface caps");
+        let format = surface_caps
+            .preferred_format()
+            .expect("a format is offered");
+        let swapchain = device
+            .create_swapchain(&SwapchainDesc {
+                label: Some("implicit acquire"),
+                surface,
+                format,
+                extent: EXTENT,
+                image_count: surface_caps.min_image_count,
+                present_mode: surface_caps.choose_present_mode(&[PresentMode::Fifo]),
+                composite_alpha: CompositeAlpha::Opaque,
+            })
+            .expect("a swapchain");
+
+        let frame = device.acquire_next_frame(swapchain).expect("acquire");
+        assert!(
+            frame.acquire_semaphore.is_none(),
+            "a backend with an implicit acquire has nothing to wait on"
+        );
+        assert!(
+            frame.present_semaphore.is_none(),
+            "and nothing to signal into the present"
+        );
         // Obligation 3: this is the number a caller renders at.
-        assert_eq!(frame.extent, (1280, 720));
+        assert_eq!(frame.extent, EXTENT);
+
+        // The view is a live object beside the optional semaphores, not a
+        // placeholder — so hand it to the thing it exists for. The null backend
+        // records a validation error for a dead attachment view rather than
+        // failing the call, which is what `assert_valid` below reads.
+        let queue = device.queue(QueueKind::Graphics).expect("a graphics queue");
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("implicit acquire"),
+            queue,
+        });
+        encoder.begin_render_pass(&RenderPassDesc {
+            label: Some("clear"),
+            color_attachments: &[ColorAttachment {
+                view: frame.view,
+                resolve: None,
+                load: LoadOp::Clear,
+                store: StoreOp::Store,
+                clear: ClearValue::default(),
+            }],
+            depth_stencil_attachment: None,
+            render_area: Rect2d::from_size(frame.extent.0, frame.extent.1),
+        });
+        encoder.end_render_pass();
+        let commands = encoder.finish().expect("recording succeeded");
+        instance.recorder().assert_valid();
+        device
+            .submit(queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+
+        // The renderer's splice: `None` collects to an empty slice, so the
+        // present is the same code as Tier A's with nothing in it.
+        let waits: Vec<SemaphoreHandle> = frame.present_semaphore.into_iter().collect();
+        assert!(waits.is_empty(), "the splice is an empty slice");
+        device
+            .present(
+                queue,
+                &PresentInfo {
+                    swapchain,
+                    waits: &waits,
+                },
+            )
+            .expect("presenting with no waits is the Tier B path, not an error");
+
+        device.destroy_command_buffer(commands);
+        device.destroy_swapchain(swapchain);
+        instance.destroy_surface(surface);
     }
 
     #[test]

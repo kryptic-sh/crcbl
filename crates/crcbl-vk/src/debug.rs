@@ -245,13 +245,34 @@ impl ValidationSink {
 /// Debug builds yes, release builds no, [`VALIDATION_ENV_VAR`] overrides both.
 #[must_use]
 pub(crate) fn validation_wanted() -> bool {
-    env_flag(VALIDATION_ENV_VAR).unwrap_or(cfg!(debug_assertions))
+    validation_policy(env_flag(VALIDATION_ENV_VAR))
+}
+
+/// The pure half of [`validation_wanted`], so the *default* is testable.
+///
+/// It has to be reachable without the environment: a test that set
+/// [`VALIDATION_ENV_VAR`] would be setting it for every other test in this
+/// binary, and one that only asserts on [`parse_flag`] never reaches the
+/// fallback at all — which is how this policy went unguarded.
+const fn validation_policy(override_: Option<bool>) -> bool {
+    match override_ {
+        Some(explicit) => explicit,
+        None => cfg!(debug_assertions),
+    }
 }
 
 /// Whether synchronisation validation should be layered on top. Opt-in only.
 #[must_use]
 pub(crate) fn sync_validation_wanted() -> bool {
-    env_flag(SYNC_VALIDATION_ENV_VAR).unwrap_or(false)
+    sync_validation_policy(env_flag(SYNC_VALIDATION_ENV_VAR))
+}
+
+/// The pure half of [`sync_validation_wanted`]; see [`validation_policy`].
+const fn sync_validation_policy(override_: Option<bool>) -> bool {
+    match override_ {
+        Some(explicit) => explicit,
+        None => false,
+    }
 }
 
 /// Parses a boolean environment variable, tolerating the spellings people
@@ -557,20 +578,32 @@ mod tests {
         assert_eq!(parse_flag("   "), None);
     }
 
-    /// The default policy, stated as a test so flipping it is a deliberate edit:
-    /// on in debug, off in release.
+    /// The default policy, stated as a test so flipping it is a deliberate
+    /// edit: on in debug, off in release. This is the guard on the oracle the
+    /// whole e2e suite leans on — `assert_clean` can only fail when the layer
+    /// was asked for — so it asserts against [`validation_policy`] itself
+    /// rather than restating `cfg!(debug_assertions)` back at itself.
+    ///
+    /// A debug run is what distinguishes the fallback from a hardcoded `false`;
+    /// under `--release` the two are the same function, and nothing can tell
+    /// them apart.
     #[test]
     fn validation_defaults_follow_the_build_profile() {
-        // `validation_wanted` reads the environment, which a parallel test
-        // cannot safely mutate, so the *policy* is asserted through the pure
-        // half plus the documented fallback.
-        assert_eq!(parse_flag("0"), Some(false));
-        assert!(
-            cfg!(debug_assertions) == cfg!(debug_assertions),
-            "the fallback is `cfg!(debug_assertions)`; see validation_wanted"
+        assert_eq!(
+            validation_policy(None),
+            cfg!(debug_assertions),
+            "an unset CRCBL_VK_VALIDATION means 'on in debug, off in release'"
         );
-        // Sync validation is opt-in on every profile.
-        assert_eq!(parse_flag("1"), Some(true));
+        assert!(
+            !validation_policy(Some(false)),
+            "an explicit answer beats the profile"
+        );
+        assert!(validation_policy(Some(true)));
+
+        // Sync validation is opt-in on every profile, debug included.
+        assert!(!sync_validation_policy(None));
+        assert!(sync_validation_policy(Some(true)));
+        assert!(!sync_validation_policy(Some(false)));
     }
 
     /// The user-data pointer round trip. If `into_raw`/`from_raw` ever stop

@@ -150,18 +150,57 @@ mod tests {
         assert!(submit.command_buffers.is_empty());
     }
 
+    /// The split the two kinds exist for. A Tier B backend has no timeline
+    /// semaphores and must say so — but it must still hand out a **binary**
+    /// one, because WSI acquire/present needs one and the swapchain is where
+    /// they come from. A backend that refused both would satisfy every test
+    /// that only checks the timeline half.
+    ///
+    /// `initial_value` is deliberately not asserted here: [`crate::null`]
+    /// records rather than executes, so its `semaphore_value` is a constant and
+    /// asserting against it would be asserting the value unfinished code
+    /// already returns. The counter's behaviour belongs to the backends that
+    /// have one.
     #[test]
-    fn timeline_semaphores_carry_an_initial_value() {
-        let desc = SemaphoreDesc {
-            label: Some("frame timeline"),
-            kind: SemaphoreKind::Timeline { initial_value: 0 },
-        };
-        assert_eq!(
-            desc.kind,
-            SemaphoreKind::Timeline { initial_value: 0 },
-            "frames-in-flight pacing starts the timeline at zero and signals \
-             frame_index + 1"
-        );
-        assert_ne!(desc.kind, SemaphoreKind::Binary);
+    fn only_the_timeline_kind_needs_the_timeline_feature() {
+        use crate::null::NullInstance;
+        use crate::{AdapterId, DeviceDesc, Features, HalError, Instance};
+
+        let instance = NullInstance::tier_b();
+        let device = instance
+            .create_device(&DeviceDesc {
+                required_features: Features::COMPUTE,
+                ..DeviceDesc::for_adapter(AdapterId(0))
+            })
+            .expect("the tier B preset has compute");
+        assert!(!device.caps().supports(Features::TIMELINE_SEMAPHORE));
+
+        let error = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("frame timeline"),
+                kind: SemaphoreKind::Timeline { initial_value: 0 },
+            })
+            .expect_err("a device without the feature cannot make a timeline");
+        assert!(matches!(error, HalError::Unsupported { .. }), "{error:?}");
+
+        let binary = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("acquire"),
+                kind: SemaphoreKind::Binary,
+            })
+            .expect("WSI acquire needs a binary semaphore on every tier");
+        device.destroy_semaphore(binary);
+
+        let instance = NullInstance::tier_a();
+        let device = instance
+            .create_device(&DeviceDesc::for_adapter(AdapterId(0)))
+            .expect("the tier A preset opens");
+        let timeline = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("frame timeline"),
+                kind: SemaphoreKind::Timeline { initial_value: 0 },
+            })
+            .expect("tier A has timeline semaphores");
+        device.destroy_semaphore(timeline);
     }
 }

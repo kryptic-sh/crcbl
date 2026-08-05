@@ -351,47 +351,76 @@ impl core::fmt::Debug for DeviceInner {
 
 // --- handle tagging --------------------------------------------------------
 //
-// **Every object table in this backend is per-device**, and every insert stamps
-// `owner: self.id`. That made `entry.owner() != owner` unreachable and
-// `HalError::ForeignObject` unproducible: obligation 3 was met only by accident,
-// because device B's handle *usually* failed to resolve in device A's pool.
-// Usually is not a guarantee — two devices allocating in step reach the same
-// slot index at the same generation almost immediately, and from that moment
-// device A silently accepts device B's handle and writes, or destroys, its own
-// unrelated object.
+// **Every object table in this backend is per-owner** — per device here, per
+// instance for surfaces — and every insert stamps `owner: self.id`. That made
+// `entry.owner() != owner` unreachable and `HalError::ForeignObject`
+// unproducible: obligation 3 was met only by accident, because owner B's handle
+// *usually* failed to resolve in owner A's pool. Usually is not a guarantee —
+// two of them allocating in step reach the same slot index at the same
+// generation almost immediately, and from that moment A silently accepts B's
+// handle and writes, or destroys, its own unrelated object.
 //
-// So the handle carries the issuing device. The top byte of the index half is
-// the device's tag; the rest is the pool's own index, restored before any
+// So the handle carries the owner that issued it. The top byte of the index
+// half is the owner's tag; the rest is the pool's own index, restored before any
 // lookup. The generation half is left alone, so `Pool`'s generation-exhaustion
 // rule is untouched.
+//
+// These primitives are `pub(crate)` because `instance.rs` applies the same
+// scheme to `SurfaceHandle`, where two `VkInstance`s have exactly the colliding
+// pools described above.
 
-/// Bits of a handle's index half given over to the owning device's tag.
-const DEVICE_TAG_SHIFT: u32 = 24;
+/// Bits of a handle's index half given over to the owning object's tag.
+pub(crate) const OWNER_TAG_SHIFT: u32 = 24;
 /// The part of a handle's index half that is the pool's own index.
-const POOL_INDEX_MASK: u32 = (1 << DEVICE_TAG_SHIFT) - 1;
-/// How many distinct device tags exist. Tag `0` is reserved for "nobody", so a
-/// hand-made or un-stamped handle is foreign to every device.
-const DEVICE_TAG_COUNT: u64 = (u32::MAX >> DEVICE_TAG_SHIFT) as u64;
+pub(crate) const POOL_INDEX_MASK: u32 = (1 << OWNER_TAG_SHIFT) - 1;
+/// How many distinct owner tags exist. Tag `0` is reserved for "nobody", so a
+/// hand-made or un-stamped handle is foreign to every owner.
+const OWNER_TAG_COUNT: u64 = (u32::MAX >> OWNER_TAG_SHIFT) as u64;
 
-/// The tag a device with this owner id stamps into its handles. Never zero.
-fn device_tag(id: u64) -> u32 {
+/// The tag an owner with this id stamps into its handles. Never zero.
+pub(crate) fn owner_tag(id: u64) -> u32 {
     #[allow(clippy::cast_possible_truncation)]
     {
-        1 + (id % DEVICE_TAG_COUNT) as u32
+        1 + (id % OWNER_TAG_COUNT) as u32
     }
 }
 
-/// The device tag a handle carries, or `0` if it carries none.
-const fn handle_tag<M>(handle: Handle<M>) -> u32 {
-    handle.index() >> DEVICE_TAG_SHIFT
+/// The owner tag a handle carries, or `0` if it carries none.
+pub(crate) const fn handle_tag<M>(handle: Handle<M>) -> u32 {
+    handle.index() >> OWNER_TAG_SHIFT
 }
 
-/// Strips the device tag, recovering the pool's own handle.
-fn untag<A, B>(handle: Handle<A>) -> Handle<B> {
+/// Strips the owner tag, recovering the pool's own handle.
+pub(crate) fn untag<A, B>(handle: Handle<A>) -> Handle<B> {
     Handle::from_bits(
         (u64::from(handle.generation()) << 32) | u64::from(handle.index() & POOL_INDEX_MASK),
     )
     .unwrap_or_else(|| unreachable!("a handle's generation is never zero"))
+}
+
+/// Stamps `tag` into a handle a pool just issued.
+///
+/// A pool index too large to carry the tag gets tag `0` instead, which resolves
+/// nowhere — the object leaks until teardown, which is far better than a handle
+/// that might resolve to another owner's object. Reaching it takes
+/// [`POOL_INDEX_MASK`] live objects of one kind on one owner.
+pub(crate) fn stamp<A, B>(tag: u32, handle: Handle<A>, what: &str) -> Handle<B> {
+    let index = handle.index();
+    let tag = if index > POOL_INDEX_MASK {
+        log::error!(
+            "crcbl-vk: {what} pool index {index} is too large to carry an owner tag; issuing a \
+             handle that resolves nowhere rather than one that might resolve to another owner's \
+             object"
+        );
+        0
+    } else {
+        tag
+    };
+    Handle::from_bits(
+        (u64::from(handle.generation()) << 32)
+            | u64::from((index & POOL_INDEX_MASK) | (tag << OWNER_TAG_SHIFT)),
+    )
+    .unwrap_or_else(|| unreachable!("a pool handle's generation is never zero"))
 }
 
 /// Deterministic queue handles.
@@ -403,7 +432,7 @@ fn untag<A, B>(handle: Handle<A>) -> Handle<B> {
 /// index alone carried no device identity at all, so every device accepted
 /// every other device's.
 fn queue_handle(tag: u32, kind: QueueKind) -> QueueHandle {
-    Handle::from_bits((1u64 << 32) | u64::from((tag << DEVICE_TAG_SHIFT) | queue_index(kind)))
+    Handle::from_bits((1u64 << 32) | u64::from((tag << OWNER_TAG_SHIFT) | queue_index(kind)))
         .unwrap_or_else(|| unreachable!("generation 1 is non-zero"))
 }
 
@@ -659,7 +688,7 @@ impl VkDevice {
                 limits: record.info.caps.limits,
             },
             id,
-            tag: device_tag(id),
+            tag: owner_tag(id),
             memory_properties,
             queues,
             state: Mutex::new(DeviceState::default()),
@@ -690,28 +719,9 @@ impl DeviceInner {
     /// Stamps this device's tag into a handle its pools just issued.
     ///
     /// Every handle that crosses the seam goes through here; every handle that
-    /// comes back goes through [`local_handle`]. A pool index too large to
-    /// carry the tag gets tag `0` instead, which resolves nowhere — the object
-    /// leaks until teardown, which is far better than a handle that might
-    /// resolve to the wrong device's object. It takes 16 777 216 live objects
-    /// of one kind on one device to reach.
+    /// comes back goes through [`local_handle`].
     pub(crate) fn stamp<A, B>(&self, handle: Handle<A>) -> Handle<B> {
-        let index = handle.index();
-        let tag = if index > POOL_INDEX_MASK {
-            log::error!(
-                "crcbl-vk: pool index {index} is too large to carry a device tag; issuing a \
-                 handle that resolves nowhere rather than one that might resolve to another \
-                 device's object"
-            );
-            0
-        } else {
-            self.tag
-        };
-        Handle::from_bits(
-            (u64::from(handle.generation()) << 32)
-                | u64::from((index & POOL_INDEX_MASK) | (tag << DEVICE_TAG_SHIFT)),
-        )
-        .unwrap_or_else(|| unreachable!("a pool handle's generation is never zero"))
+        stamp(self.tag, handle, "device")
     }
 
     /// Attaches a debug name, if the instance has `VK_EXT_debug_utils`.
@@ -3062,7 +3072,7 @@ mod tests {
     #[test]
     fn queue_handles_are_distinct_per_kind_and_round_trip() {
         let kinds = [QueueKind::Graphics, QueueKind::Compute, QueueKind::Transfer];
-        let tag = device_tag(1);
+        let tag = owner_tag(1);
         let handles: Vec<QueueHandle> = kinds
             .iter()
             .copied()
@@ -3088,7 +3098,7 @@ mod tests {
         let mut pool: Pool<u8> = Pool::new();
         let slot: Handle<u8> = pool.insert(0);
 
-        let tags: Vec<u32> = (1..=4).map(device_tag).collect();
+        let tags: Vec<u32> = (1..=4).map(owner_tag).collect();
         assert!(tags.iter().all(|tag| *tag != 0), "tag 0 means 'nobody'");
         assert_eq!(
             tags.iter().collect::<std::collections::HashSet<_>>().len(),
@@ -3101,7 +3111,7 @@ mod tests {
         for tag in tags {
             let stamped: Handle<u8> = Handle::from_bits(
                 (u64::from(slot.generation()) << 32)
-                    | u64::from(slot.index() | (tag << DEVICE_TAG_SHIFT)),
+                    | u64::from(slot.index() | (tag << OWNER_TAG_SHIFT)),
             )
             .expect("generation is non-zero");
             assert_eq!(handle_tag(stamped), tag);

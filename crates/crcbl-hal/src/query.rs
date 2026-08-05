@@ -15,6 +15,17 @@
 //! [`write_timestamp`](crate::CommandEncoder::write_timestamp) as a no-op and
 //! return zeros from [`Device::query_results`](crate::Device::query_results) —
 //! the HUD shows blanks, the frame still renders.
+//!
+//! # There are no unit tests in this module
+//!
+//! It declares three types and no behaviour: `Copy`, `PartialEq` and the field
+//! layout are derives the compiler checks, and everything else this module
+//! documents is an obligation on a *backend*. Both halves of the degrading rule
+//! above are checked where they are implemented — `crate::null`'s
+//! `timestamp_queries_read_back_zeros_without_failing` and
+//! `tier_b_refuses_query_kinds_it_lacks`. A test here could only rebuild a
+//! [`QuerySetDesc`] and read its own literals back, which is what used to be
+//! here.
 
 use crcbl_core::Handle;
 
@@ -52,21 +63,4 @@ pub struct QuerySetDesc<'a> {
     pub kind: QueryKind,
     /// How many queries it holds. Query indices are `0..count`.
     pub count: u32,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn query_set_desc_is_pod_and_copyable() {
-        let desc = QuerySetDesc {
-            label: Some("frame timers"),
-            kind: QueryKind::Timestamp,
-            count: 64,
-        };
-        let copy = desc;
-        assert_eq!(desc, copy);
-        assert_eq!(copy.kind, QueryKind::Timestamp);
-    }
 }
