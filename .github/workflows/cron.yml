@@ -52,6 +52,13 @@ jobs:
   # storage and ECS containers, the physics broadphase, the UI vertex builders,
   # and the audio mixer's sample buffers.
   #
+  # `crcbl-jobs` is the one whose unsafe is *concurrent* rather than merely
+  # aliasing, and it is what turns this job from a nice-to-have into the only
+  # check of its kind here. Its mailbox hands slots between two threads through
+  # an atomic word, and miri runs the two-thread stress test for real: a torn
+  # read there is reported as a data race, which nothing else in this repository
+  # can detect.
+  #
   # ## Why the flags
   #
   # `-Zmiri-disable-isolation`: several suites read the clock and the
@@ -110,5 +117,6 @@ jobs:
         run: >-
           cargo miri test
           -p crcbl-core -p crcbl-hal -p crcbl-ecs -p crcbl-store -p crcbl-ui
+          -p crcbl-jobs
       - name: Interpret the physics and audio libraries
         run: cargo miri test --lib -p crcbl-phys -p crcbl-audio

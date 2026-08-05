@@ -31,13 +31,28 @@
 //! its own docs for why — so a link to it is unresolvable in exactly the build
 //! this crate was written for, and the wasm rustdoc gate says so.
 //!
-//! **Not here yet**: the latest-wins mailboxes, the SPSC rings, the
-//! work-stealing pool and `par_for`. They are the slices above this one and
-//! they will be built on this trait rather than on `std::thread`, which is the
-//! whole reason the seam lands first. The browser's worker backend is not here
-//! either — it needs a pinned nightly and cross-origin isolation, both of them
-//! open questions recorded in `docs/backlog.md`, and the ordering exists so
-//! that neither answer blocks anything below it.
+//! Above the seam, [`mailbox`] is the first of the design's three
+//! communication primitives: a latest-wins triple buffer for *states*, where
+//! neither side ever waits and the newest is the only one anybody wants.
+//!
+//! **Not here yet**: the accumulate-then-swap ring for *streams* — input edges
+//! and audio commands, which must not be droppable the way a mailbox drops —
+//! and the work-stealing pool with `par_for` in both modes. Both are slices
+//! above this one and both will be built on [`Spawn`] rather than on
+//! `std::thread`, which is the whole reason the seam landed first. The
+//! browser's worker backend is not here either: it needs the pinned nightly and
+//! cross-origin isolation proved locally, and the ordering exists so neither
+//! blocks anything below it.
+//!
+//! # The unsafe, and what checks it
+//!
+//! [`mailbox`] is the only module here that reaches past the language's checks,
+//! and it does so for the reason the design names: the primitives are the sole
+//! novel concurrency surface, so they are kept tiny and checked hard. Its
+//! invariant is stated where the `unsafe` is, asserted directly by the tests
+//! rather than argued for, and the whole crate is interpreted by the weekly
+//! Miri job — including a two-thread stress run that would report a torn read
+//! as a data race.
 //!
 //! # Degrading is a decision, not an error
 //!
@@ -50,6 +65,7 @@
 //! [`spawn`](Spawn::spawn) failure is a real error on a runtime that promised
 //! otherwise.
 
+pub mod mailbox;
 mod spawn;
 
 #[cfg(not(target_arch = "wasm32"))]

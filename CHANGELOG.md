@@ -38,11 +38,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   tick-driven loop from the answer. A `spawn` that fails afterwards is a real
   error, and the closure is gone by then either way.
 
-  Not here yet: the mailboxes, the SPSC rings, the work-stealing pool and
-  `par_for` — the slices above this one — and the browser's worker backend,
-  which needs a pinned nightly and cross-origin isolation. Both of those are
-  open questions in `docs/backlog.md`, and this ordering is what keeps either
-  answer from blocking the rest.
+  Not here yet: the SPSC rings, the work-stealing pool and `par_for` — the
+  slices above this one — and the browser's worker backend.
+
+- **`crcbl-jobs`**: `mailbox` — the latest-wins triple buffer a _state_ crosses
+  a thread boundary through. One producer publishes complete states at its own
+  cadence, one consumer takes the newest, and neither ever waits: a slow
+  producer publishes less often and a slow consumer skips the states in between.
+  `Publisher::publish` swaps an index rather than copying the payload, and
+  `Subscriber::read` always returns a whole state — never an `Option`, because a
+  frame drawn from a state one tick old is the outcome this design prefers to a
+  frame that waited. `Subscriber::has_new` is the staleness the profiler will
+  report.
+
+  Three slots, because that is the count at which neither side ever waits: one
+  the producer owns, one the consumer owns, one in the handoff. The `unsafe`
+  rests on `{producer, handoff, consumer}` staying a permutation of `{0, 1, 2}`
+  — both sides only ever exchange their own index with the handoff's — and the
+  tests assert that permutation directly after every operation rather than
+  arguing for it. `crcbl-jobs` joins the weekly Miri job, which runs the
+  two-thread stress test for real: a torn read is reported there as a data race,
+  and nothing else in this workspace can detect one.
+
+  **Deliberately not for streams.** Input edges, audio commands and net packets
+  must not be droppable, and this drops by construction — a 3 ms tap between two
+  reads would simply not be there. Those want the accumulate-then-swap ring,
+  which is the next slice.
 
 - **horde**: **health potions, dropped by brutes and drunk by walking over
   them.** A `potion` frame in `apps/horde/assets/actors.crpix` — a stoppered
