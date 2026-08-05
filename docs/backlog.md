@@ -4481,3 +4481,33 @@ Worth recording because neither would have shown up in a test that passed:
   that one instance.
 - **A leak** on the reconfigure race path, where a destroyed-during-rebuild
   swapchain dropped its entry without its ring rows ever leaving the pools.
+
+## The Win32 focus flake is recurring, and now has a second data point
+
+`crcbl-shell`'s
+`win32::shell::tests::hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for`
+failed the `build + test (windows-latest)` leg on 2026-08-05 with:
+
+```text
+the window would not keep the keyboard over 8 attempts, so nothing below this
+can be asked about a focused window
+```
+
+**Re-running the same job passed clean**, on a commit whose only code change was
+macOS-gated. So it is environmental — the shared runner's foreground being
+contended — rather than a defect, and it is the same family as the three tests
+W1/W2 already record losing to the foreground lock.
+
+Two things worth keeping from it:
+
+- **The assertion is doing its job.** It fails at the point where focus was
+  lost, naming why nothing after it can be trusted, instead of proceeding to
+  assert against an unfocused window and producing a confusing downstream
+  failure. That is the shape a focus-dependent test should have.
+- **It is still a red build on an unrelated change**, which is the actual cost:
+  it trains readers to re-run rather than read. Options, none taken — retry the
+  focus acquisition with a longer budget than 8 attempts; move the
+  focus-dependent assertions into the feature-gated e2e suite where
+  `desktop::take_foreground` already pulls `SPI_SETFOREGROUNDLOCKTIMEOUT` and
+  `AttachThreadInput`; or mark the test as allowed-to-retry if nextest's retry
+  support is acceptable here. Wants a decision rather than another re-run.
