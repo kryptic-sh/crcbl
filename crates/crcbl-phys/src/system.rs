@@ -15,7 +15,7 @@ use crate::components::{ColliderComponent, RigidBody, Transform};
 use crate::forces::ForceProvider;
 use crate::integrator::{Integrator as _, SemiImplicitEuler};
 use crate::query::ShapeHit;
-use crate::world::{ColliderId, PhysicsWorld};
+use crate::world::{ColliderId, OverlapQueries, PhysicsWorld, QueryScratch};
 use crate::{Ray, Segment};
 
 // ---------------------------------------------------------------------------
@@ -49,9 +49,69 @@ pub struct PhysicsSystem {
     /// Force providers applied in order each substep before integration.
     force_providers: Vec<Box<dyn ForceProvider>>,
 
-    /// The collider ids an overlap query returns, kept between calls so
-    /// [`PhysicsSystem::overlap_sphere_into`] allocates nothing.
-    scratch_ids: Vec<ColliderId>,
+    /// The buffers an overlap query works in, kept between calls so
+    /// [`PhysicsSystem::overlap_sphere_into`] allocates nothing. A caller
+    /// querying from several threads brings its own — see
+    /// [`EntityOverlapQueries`].
+    scratch: QueryScratch,
+}
+
+/// Read-only overlap queries by entity, against a broadphase already built.
+///
+/// [`PhysicsSystem::overlap_queries`] is the only thing that makes one, and it
+/// takes `&mut PhysicsSystem` to build the tree before handing back this shared
+/// borrow — so the tree is current for as long as this exists, and nothing can
+/// move a body while it does. [`crate::world::OverlapQueries`] carries the full
+/// argument; the difference here is only that the hits come back as entities.
+///
+/// **This is what a `par_for` over a crowd captures.** It is `Copy` and `Sync`,
+/// every chunk queries through the same one, and each chunk brings a
+/// [`QueryScratch`] of its own.
+#[derive(Clone, Copy, Debug)]
+pub struct EntityOverlapQueries<'a> {
+    queries: OverlapQueries<'a>,
+    collider_to_entity: &'a [Option<Entity>],
+}
+
+impl EntityOverlapQueries<'_> {
+    /// [`PhysicsSystem::overlap_sphere_into`] under a shared borrow, working in
+    /// `scratch` instead of the system's own buffers.
+    ///
+    /// `out` is cleared and then filled, with the same entities in the same
+    /// order the `&mut self` form produces — which is the property a sample
+    /// swapping one for the other depends on, and which holds because the two
+    /// share one traversal rather than because they were compared.
+    /// `crcbl_phys::system::tests::the_view_names_the_right_entities_from_every_thread_at_once`
+    /// checks the entities against the positions they were placed at.
+    pub fn overlap_sphere_into(
+        &self,
+        centre: DVec3,
+        radius: f64,
+        scratch: &mut QueryScratch,
+        out: &mut Vec<(Entity, ShapeHit)>,
+    ) {
+        out.clear();
+        let mut ids = std::mem::take(&mut scratch.ids);
+        self.queries
+            .overlap_sphere_into(centre, radius, scratch, &mut ids);
+        for id in ids.iter() {
+            let slot = id.index() as usize;
+            let Some(entity) = self.collider_to_entity.get(slot).and_then(|e| *e) else {
+                continue;
+            };
+            out.push((
+                entity,
+                ShapeHit {
+                    t: 0.0,
+                    point: centre,
+                    normal: DVec3::Y,
+                    started_inside: true,
+                },
+            ));
+        }
+        // Back where it came from, keeping the capacity for the next call.
+        scratch.ids = ids;
+    }
 }
 
 impl PhysicsSystem {
@@ -68,7 +128,7 @@ impl PhysicsSystem {
             transforms: HashMap::new(),
             collider_comps: HashMap::new(),
             force_providers: Vec::new(),
-            scratch_ids: Vec::new(),
+            scratch: QueryScratch::new(),
         }
     }
 
@@ -299,26 +359,34 @@ impl PhysicsSystem {
         radius: f64,
         out: &mut Vec<(Entity, ShapeHit)>,
     ) {
-        out.clear();
-        let mut ids = std::mem::take(&mut self.scratch_ids);
-        self.world.overlap_sphere_into(centre, radius, &mut ids);
-        for id in ids.iter() {
-            let slot = id.index() as usize;
-            let Some(entity) = self.collider_to_entity.get(slot).and_then(|e| *e) else {
-                continue;
-            };
-            out.push((
-                entity,
-                ShapeHit {
-                    t: 0.0,
-                    point: centre,
-                    normal: DVec3::Y,
-                    started_inside: true,
-                },
-            ));
+        // Lent to the view and put straight back — see
+        // [`PhysicsWorld::overlap_sphere_into`], which does the same thing for
+        // the same reason.
+        let mut scratch = std::mem::take(&mut self.scratch);
+        self.overlap_queries()
+            .overlap_sphere_into(centre, radius, &mut scratch, out);
+        self.scratch = scratch;
+    }
+
+    /// Builds the broadphase and hands back a shared view that can query it by
+    /// entity.
+    ///
+    /// The system-level twin of [`PhysicsWorld::overlap_queries`], and the
+    /// entry point a data-parallel pass over a crowd wants: it is what lets
+    /// every chunk of a `crcbl_jobs` `par_for` run its own neighbourhood
+    /// queries at the same time. See [`EntityOverlapQueries`].
+    pub fn overlap_queries(&mut self) -> EntityOverlapQueries<'_> {
+        // Split borrows: the view needs the reverse map shared and the world
+        // exclusively, and they are different fields of this struct.
+        let Self {
+            world,
+            collider_to_entity,
+            ..
+        } = self;
+        EntityOverlapQueries {
+            queries: world.overlap_queries(),
+            collider_to_entity,
         }
-        // Back where it came from, keeping the capacity for the next call.
-        self.scratch_ids = ids;
     }
 
     /// Overlap query: return all entities whose AABB intersects `aabb`.
@@ -594,6 +662,98 @@ mod tests {
     fn empty_system_has_no_colliders() {
         let phys = PhysicsSystem::new();
         assert_eq!(phys.collider_count(), 0);
+    }
+
+    /// **The view names the entities that are actually within reach, and says
+    /// the same thing to every thread asking at once.**
+    ///
+    /// Two claims, and the fixture serves both. The oracle is the entity
+    /// positions themselves, not [`PhysicsSystem::overlap_sphere_into`] — that
+    /// is the same code under a different borrow, so comparing them proves
+    /// nothing about either. What the system layer adds over
+    /// [`crate::world::OverlapQueries`] is the collider-slot-to-entity step, and
+    /// a slot mapped to the wrong entity is what this catches.
+    ///
+    /// The concurrent half is the reason the API exists: several threads share
+    /// one view and each brings its own [`crate::world::QueryScratch`], and
+    /// every one of them must reach the answers the calling thread reached
+    /// alone. It is a guard against a future regression rather than against
+    /// today's code — the view holds only shared references, so there is
+    /// nothing here for threads to race over, and putting the scratch back
+    /// inside it is exactly the change that would make that false.
+    #[test]
+    fn the_view_names_the_right_entities_from_every_thread_at_once() {
+        const RADIUS: f64 = 0.45;
+        const REACH: f64 = 1.5;
+
+        let mut phys = PhysicsSystem::new();
+        let mut placed: Vec<(Entity, DVec3)> = Vec::new();
+        for idx in 0..40u32 {
+            let entity = test_entity(idx);
+            let position = DVec3::new(f64::from(idx % 7), f64::from(idx / 7), 0.0);
+            let transform = Transform::from_position(position);
+            phys.set_collider(
+                entity,
+                &ColliderComponent::Sphere {
+                    offset: DVec3::ZERO,
+                    radius: RADIUS,
+                    is_trigger: false,
+                },
+                &transform,
+            );
+            phys.set_transform(entity, transform);
+            placed.push((entity, position));
+        }
+
+        let centres: Vec<DVec3> = placed.iter().map(|(_, p)| *p).collect();
+        // Two spheres overlap when their centres are within the sum of their
+        // radii, which is the whole of the test the query is meant to be doing.
+        let oracle = |centre: DVec3| {
+            let mut hits: Vec<Entity> = placed
+                .iter()
+                .filter(|(_, p)| p.distance(centre) <= REACH + RADIUS)
+                .map(|(e, _)| *e)
+                .collect();
+            hits.sort_unstable_by_key(|e| e.to_bits());
+            hits
+        };
+        let expected: Vec<Vec<Entity>> = centres.iter().map(|c| oracle(*c)).collect();
+        let biggest = expected.iter().map(Vec::len).max().unwrap_or(0);
+        assert!(
+            biggest > 4,
+            "the widest query in the fixture reaches {biggest} entities, which \
+             is not a neighbourhood",
+        );
+
+        let ask = |queries: &EntityOverlapQueries<'_>| {
+            let mut scratch = crate::world::QueryScratch::new();
+            let mut out = Vec::new();
+            centres
+                .iter()
+                .map(|centre| {
+                    queries.overlap_sphere_into(*centre, REACH, &mut scratch, &mut out);
+                    let mut hits: Vec<Entity> = out.iter().map(|(e, _)| *e).collect();
+                    hits.sort_unstable_by_key(|e| e.to_bits());
+                    hits
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let queries = phys.overlap_queries();
+        assert_eq!(ask(&queries), expected, "the calling thread's own answers");
+
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| ask(&queries)))
+                .collect::<Vec<_>>();
+            for handle in handles {
+                assert_eq!(
+                    handle.join().expect("a query thread panicked"),
+                    expected,
+                    "a thread sharing the view disagreed with the scan",
+                );
+            }
+        });
     }
 
     #[test]

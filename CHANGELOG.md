@@ -16,6 +16,46 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/horde` steers its crowd on the job pool, and `--workers` is the switch
+  that proves it deterministic.** The separation pass — one broadphase
+  neighbourhood query per enemy per tick, which is the workload the sample
+  exists to produce — now decides every velocity through
+  `crcbl_jobs::Pool::par_for` in chunks of 64, and writes them back serially.
+  `--workers <N>` sizes the pool; `--workers 0` gives the pool a spawner with no
+  threads, which is the shape the browser gets, so the design's `--threads 1`
+  versus `--threads N` comparison can be run on one machine. Nothing about the
+  game changes: the results are bit-identical at every worker count, because the
+  chunk boundaries never depend on it and each enemy's arithmetic — including
+  the neighbour sum, whose floating-point order is the BVH's — is untouched by
+  which thread ran it.
+
+  Measured on a 32-core machine, 600 headless frames with `--prefill 6000` and
+  the null backend: **8.38 s at `--workers 0`, 1.48 s at the default**. There is
+  no `cfg(target_arch)` in the sample; `crcbl_jobs::default_spawner` answers the
+  browser question, and on `wasm32` the pool has no workers and runs every chunk
+  on the calling thread.
+
+  The other four samples were left alone. Breakout's forty bricks, flappy's
+  handful of pipes and asteroids' forty-four rocks are smaller than one chunk,
+  and sandbox and bare have no per-frame collection at all — a `par_for` over
+  any of them would be slower than the loop it replaced.
+
+- **`crcbl-phys` can answer overlap queries under a shared borrow, so several
+  threads can ask at once.** `PhysicsWorld::overlap_queries` and
+  `PhysicsSystem::overlap_queries` take `&mut self` once, build the broadphase,
+  and hand back an `OverlapQueries` / `EntityOverlapQueries` — `Copy`, `Sync`,
+  and valid only while the world cannot be mutated, which is the type system
+  enforcing what a comment would otherwise have to ask for. Their
+  `overlap_sphere_into` takes a caller-owned `QueryScratch` in place of the
+  world's own buffers, so a data-parallel pass gives one to each thread and
+  still allocates nothing in the steady state. The `&mut self` forms are
+  unchanged for callers and now delegate to the same traversal, so there are not
+  two implementations to drift apart.
+
+- **The umbrella re-exports the job system as `crcbl::jobs`**, so a game reaches
+  `Pool`, `par_for` and `default_spawner` without naming a second workspace path
+  — the same arrangement the other nine simulation crates already had.
+
 - **`crcbl-jobs` has a work-stealing pool, and `par_for` works with or without
   threads.** `Pool::new(spawner)` sizes itself to `Spawn::parallelism` minus the
   thread that drives it, `Pool::with_workers(spawner, n)` names a count for a

@@ -263,6 +263,7 @@ dependencies = [
  "crcbl-golden",
  "crcbl-hal",
  "crcbl-input",
+ "crcbl-jobs",
  "crcbl-mtl",
  "crcbl-net",
  "crcbl-phys",

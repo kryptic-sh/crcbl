@@ -34,6 +34,7 @@ crcbl-audio = { workspace = true }
 crcbl-client = { workspace = true }
 crcbl-ecs = { workspace = true }
 crcbl-input = { workspace = true }
+crcbl-jobs = { workspace = true }
 crcbl-net = { workspace = true }
 crcbl-phys = { workspace = true }
 crcbl-server = { workspace = true }

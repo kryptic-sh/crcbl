@@ -360,9 +360,58 @@ The order is forced: **the spawn seam and its single-threaded fallback come
 first** — done — because `docs/plan/21-jobs.md` records that
 `std::thread::spawn` _compiles_ on `wasm32-unknown-unknown` and returns
 `UNSUPPORTED_PLATFORM` at run time, so a pool built on `std::thread` is a pool
-that silently has no browser story. The pool came next and is now in. What is
-still owed, in order: adoption by the four samples (four consumers is what
-proves a seam before P6–P8 build on it), then the worker backend behind it.
+that silently has no browser story. The pool came next and is now in. Adoption
+came after it, and is where the plan met the samples — see below. What is still
+owed is the worker backend behind the seam.
+
+**The adoption slice found one consumer, not four, and that is a fact about the
+samples rather than a shortfall.** `apps/horde`'s `steer_enemies` is on
+`par_for` now: one broadphase neighbourhood query per enemy per tick, in chunks
+of `STEER_CHUNK`, with the velocities written back serially. The other four have
+no per-frame collection worth splitting — breakout has forty bricks, flappy a
+handful of pipes, asteroids at most forty-four rocks (`MAX_WAVE_ROCKS` large
+ones splitting into four each), and `apps/sandbox` and `apps/bare` have no game
+entities at all. Every one of those is smaller than a single chunk, so a
+`par_for` over them would be the serial loop plus a pool, which is the thing
+this file's own rule against abstracting ahead of need exists to prevent.
+
+So **the "two samples freeze a seam" rule has not been met and should not be
+treated as met.** What the one consumer did push back on is recorded below and
+in the entries that follow: nothing about `Spawn` or `Pool` had to change, which
+is weak evidence rather than none, and the next real consumer — P6–P8's pipeline
+stages — is still the first thing that will test the seam's shape properly.
+`Spawn::threaded` returning a `bool` is still the most likely thing to give.
+
+- **What the adoption did change was `crcbl-phys`, not `crcbl-jobs`.** The pass
+  could not be parallelised at all while every query took `&mut PhysicsSystem` —
+  the exclusive borrow was for the lazy BVH rebuild and for scratch buffers the
+  world owned, neither of which the traversal itself needs. `overlap_queries`
+  now spends that borrow once and hands back an `OverlapQueries` /
+  `EntityOverlapQueries`: `Copy`, `Sync`, alive only while the world cannot be
+  mutated, with the scratch passed in. That is the shape any future
+  data-parallel physics consumer wants, and it arrived because a caller needed
+  it rather than because it looked tidy.
+- **Only `overlap_sphere_into` has the shared form.** `cast_ray`, `sweep_sphere`
+  and `overlap_aabb` are still `&mut self` — nothing parallel calls them yet,
+  and `sweep_bolts` (the obvious candidate) reduces into a shared hit list in an
+  order the scheduler would choose, so it needs a design decision before it
+  needs an API.
+- **The pool now has a number.** `docs/plan/21-jobs.md`'s claim that the pool
+  beats inline is measured: 600 headless frames of horde with `--prefill 6000`
+  against the null backend take **8.38 s at `--workers 0` and 1.48 s at the
+  default** on a 32-core machine, 2026-08-06. That is a whole-run wall clock,
+  not a benchmark of `par_for` itself — there is still no harness that isolates
+  the pool, so the figure includes the render and the rest of the tick.
+- **`STEER_CHUNK` was chosen by argument, not by measurement.** Sixty-four
+  enemies a chunk keeps the split independent of the worker count and stays
+  under the pool's 1024-slot queue up to 65 536 enemies. Nothing has swept the
+  value, and the right time to is when there is a benchmark that isolates the
+  pass.
+- **The steering scratch is `thread_local!`.** A `par_for` closure is `Fn` and
+  cannot own mutable state, so the alternative was allocating the query buffers
+  per chunk per tick — which would have falsified the pass's documented claim to
+  allocate nothing in the steady state. The cost is buffers that live as long as
+  the pool's threads do, which is the process.
 
 **The atomics are checked by Miri and by nothing else.** x86-64 is
 total-store-order, so a `Release` store and a `Relaxed` one compile to the same
@@ -421,16 +470,27 @@ _not_ covered:
   frightening: **waking a worker is throughput, never correctness** — the
   driving thread runs the chunks itself until they are gone, so a missed wakeup
   costs parallelism for one call and cannot hang it.
-- **Nothing measures the pool.** There is no benchmark, so "faster than inline"
-  is a design claim rather than a number. The horde sample is the forcing
-  function the design names, and the adoption slice is where the before/after
-  belongs.
-- **The determinism gate is unit-level.**
-  `threaded_and_inline_pools_compute_the_same_answer` compares the split _and_
-  the bytes between a pool with workers and one without, which is the property
-  `par_for` promises. The design's killer test — the same input script at
-  `--threads 1`, `2`, `N` hashing identically per tick — needs a sim to run, and
-  there is none on the pool yet.
+- **Nothing benchmarks the pool in isolation.** The horde numbers above are a
+  whole run's wall clock, which is the honest thing to have and not the same as
+  a measurement of `par_for`. A harness that times the pass alone, and sweeps
+  the chunk length, is what would let `STEER_CHUNK` be chosen rather than
+  argued.
+- **The determinism gate now runs a sim, and stops short of per-tick hashing.**
+  `threaded_and_inline_pools_compute_the_same_answer` still compares the split
+  and the bytes at the unit level, and `apps/horde` adds the two the design
+  actually asked for: `steering_is_bit_identical_however_many_workers_run_it`
+  compares one pass at 0, 1, 3 and 7 workers over the raw `f64` bits, and
+  `the_same_script_replays_bit_identically_at_every_worker_count` replays one
+  script to the same state at every worker count including the machine's own.
+  What is still missing is the design's exact shape — a hash **per tick**, so a
+  divergence is reported at the tick it happened rather than at the end of the
+  run. The comparison catches the same defects; it just says less about where.
+- **A mode comparison cannot catch a defect that is symmetric across modes**,
+  and this was measured rather than assumed: dropping the last chunk of every
+  `par_for` leaves both worker-count tests green, because a pool with no workers
+  drops it too. Eight other horde tests go red on that mutation, which is what
+  actually covers it — worth knowing before anyone reaches for the worker-count
+  tests as a general correctness net.
 - **One deque, not one per worker.** Only the driving thread pushes today, so a
   per-worker deque would be a queue nothing ever puts anything in. The Chase-Lev
   code is unchanged by adding them; what needs them is `scope(|s| …)` fork-join
@@ -470,13 +530,14 @@ hands the item back and counts the refusal instead, leaving the policy to the
 caller. If a real consumer turns up wanting drop-oldest, the honest options are
 a consumer-side drain-and-discard or an MPSC design, not a flag on this one.
 
-**The seam has no consumers yet, which is the thing to be honest about.** Its
-shape was chosen from the design doc and the topology, not from a caller pushing
-back on it — and this workspace's own rule is that a seam is not frozen until
-two samples have used it. Expect the adoption slice to change something here;
-`Spawn::threaded` returning a `bool` rather than a richer capability is the most
-likely candidate, since a caller that wants "threads, but only one" cannot say
-so today.
+**The seam has one consumer, and one is not two.** Its shape was chosen from the
+design doc and the topology; `apps/horde` has now used it without asking for
+anything back, which is evidence and not the two samples this workspace's rule
+wants before a seam is frozen. `Spawn::threaded` returning a `bool` rather than
+a richer capability is still the most likely thing to give — horde works around
+it by handing `Pool::with_workers` an `Inline` spawner when `--workers 0` is
+asked for, which is a caller saying "threads, but none" through the only channel
+there is.
 
 - **Decided 2026-08-05: pin a dated nightly for the wasm worker target only.** A
   threaded wasm artifact needs
@@ -2882,14 +2943,15 @@ neither was taken, because either is an API change to `crcbl-phys` and this
 slice was the sample.
 
 - **The allocations are gone and nobody has measured what they cost.**
-  `overlap_sphere_into` runs through all three layers now, so horde's
-  `steer_enemies` hoists one `neighbours` buffer out of its loop and the pass
-  allocates nothing once it has grown: the collider ids land in a scratch buffer
-  on `PhysicsSystem`, and the BVH's descent stack and candidate list are
-  `PhysicsWorld`'s own fields. It used to be **three** `Vec`s per enemy per tick
-  — `overlap_sphere`'s own, `PhysicsWorld::overlap_sphere`'s, and
-  `Bvh::traverse_aabb`'s — which at the plan's ten thousand is 1.8 million
-  allocations a second, every one dropped immediately.
+  `overlap_sphere_into` runs through all three layers now, and the pass
+  allocates nothing once its buffers have grown: `steer_enemies` keeps one
+  `QueryScratch` and one neighbour list per thread in a `thread_local!`, which
+  is what a `par_for` closure can reach, and the `&mut self` callers still use
+  the `QueryScratch` on `PhysicsSystem` and `PhysicsWorld`. It used to be
+  **three** `Vec`s per enemy per tick — `overlap_sphere`'s own,
+  `PhysicsWorld::overlap_sphere`'s, and `Bvh::traverse_aabb`'s — which at the
+  plan's ten thousand is 1.8 million allocations a second, every one dropped
+  immediately.
 
   **What is not known is whether it mattered.** No before/after number exists,
   for the reason under _What horde still owes_: ten thousand enemies kill the
@@ -2897,18 +2959,6 @@ slice was the sample.
   stopped, and this repository has no allocation counter and no benchmark
   harness. The change is justified by the count, not by a measurement, and
   anybody quoting it as a speed-up is quoting something nobody ran.
-
-- **Steering is embarrassingly parallel and there is nothing to run it on.**
-  Horde's separation pass reads positions, queries, and writes velocities —
-  nothing it writes is read by the broadphase, so the pass is order-independent
-  by construction and every enemy could be done on a different thread. There is
-  no `crcbl-jobs` (P8) and no parallel ECS schedule, so it is a `for` loop. This
-  is the entry the roadmap already predicted; it is repeated here with the
-  evidence that the _shape_ is right, which the roadmap could not know — and
-  with a number: **14.66 ms a tick at ten thousand spread, 84.09 ms converged**,
-  against a 16.67 ms budget. Sixteen cores is the difference between the sample
-  hitting its target and missing it by 5×, and there is no shared mutable state
-  in the pass to stop them.
 
 - **A broadphase query costs what its _answer_ costs, so the tick's cost tracks
   local density rather than entity count.** The same ten thousand enemies cost

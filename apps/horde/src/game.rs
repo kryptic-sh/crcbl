@@ -79,6 +79,7 @@
 //! client-side facade: it resolves input into an `Intent`, advances the server
 //! and the client by exactly one tick period, and reads back what to draw.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -86,9 +87,11 @@ use std::time::Duration;
 use crcbl::core::input::KeyCode;
 use crcbl::ecs::{Entity, GameModule, World};
 use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
+use crcbl::jobs::{Inline, Pool, Spawn, default_spawner};
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
-use crcbl::phys::{ColliderComponent, PhysicsSystem, RigidBody, Segment, Transform};
+use crcbl::phys::query::ShapeHit;
+use crcbl::phys::{ColliderComponent, PhysicsSystem, QueryScratch, RigidBody, Segment, Transform};
 use crcbl::session::Loopback;
 
 /// Distinct from breakout's, flappy's and asteroids', because they are distinct
@@ -1478,6 +1481,14 @@ struct GameLogic {
     /// Scratch space for the per-tick passes, kept here for the same reason.
     scratch_entities: Vec<Entity>,
 
+    /// The velocity [`steer_enemies`] decided for each enemy, parallel to
+    /// [`Self::enemies`].
+    ///
+    /// It is a field rather than a local because the pass runs every tick and
+    /// this is one `Vec` per tick otherwise; it carries nothing between ticks
+    /// and `steer_enemies` refills it whole before reading a single slot.
+    steer_velocities: Vec<DVec3>,
+
     /// Cues raised this tick, as `(sound id, where it happened)`.
     ///
     /// **Filled inside the tick and drained outside it**, by [`Game::tick`],
@@ -1549,11 +1560,22 @@ fn remove_pickup(logic: &mut GameLogic, index: usize) -> Pickup {
 /// registered on the world in [`Game::with_setup`] before the server is built.
 struct HordeModule {
     shared: Arc<Mutex<GameLogic>>,
+    /// The pool [`steer_enemies`] splits the crowd across.
+    ///
+    /// **It lives on the module, not in [`GameLogic`]**, for the reason
+    /// `crcbl_jobs::Pool`'s own docs give: `par_for` takes `&mut self`, so one
+    /// thread drives a pool at a time, and the module is the thing that is
+    /// already single-threaded per tick. The shared state behind the mutex is
+    /// read by the render path on another thread, and a pool in there would be
+    /// a pool two threads could reach.
+    pool: Pool,
 }
 
 impl std::fmt::Debug for HordeModule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HordeModule").finish_non_exhaustive()
+        f.debug_struct("HordeModule")
+            .field("workers", &self.pool.workers())
+            .finish_non_exhaustive()
     }
 }
 
@@ -1566,7 +1588,7 @@ impl GameModule for HordeModule {
 
     fn tick(&mut self, world: &mut World) {
         let mut logic = lock(&self.shared);
-        run_tick(&mut logic, world);
+        run_tick(&mut logic, world, &mut self.pool);
     }
 }
 
@@ -1608,7 +1630,7 @@ fn lock(shared: &Mutex<GameLogic>) -> MutexGuard<'_, GameLogic> {
 /// does it after the restart edge: the field stays where `freeze_field` left it.
 /// See this module's header for why that is one pass on entry rather than a
 /// branch on the hot path.
-fn run_tick(logic: &mut GameLogic, world: &mut World) {
+fn run_tick(logic: &mut GameLogic, world: &mut World, pool: &mut Pool) {
     logic.ticks += 1;
     let dt = world.tick_dt();
     let intent = std::mem::take(&mut logic.intent);
@@ -1673,7 +1695,7 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
 
     // Unconditional on the state: the horde keeps converging behind the death
     // screen, which is what makes it look like a game rather than a screenshot.
-    steer_enemies(logic, world);
+    steer_enemies(logic, world, pool);
 
     if logic.state == GameState::Playing {
         contact_damage(logic, world, dt);
@@ -2351,16 +2373,49 @@ fn thaw_field(logic: &mut GameLogic, world: &mut World) {
 /// neighbourhood would make it independent of the *tree* as well, at the price
 /// of a sort per enemy per tick; it is not worth it and the decision is recorded
 /// in `docs/backlog.md`.
-fn steer_enemies(logic: &mut GameLogic, world: &mut World) {
+///
+/// # And that is why it is the pass that runs on the job pool
+///
+/// Order-independence is exactly the precondition
+/// [`crcbl_jobs::Pool::par_for`] asks for, so this is the sample's adoption of
+/// the job system. The shape is three steps, and the middle one is the only
+/// parallel one:
+///
+/// 1. **Cache the positions**, serially, because it reads the transform map.
+/// 2. **Decide every velocity**, in chunks of [`STEER_CHUNK`], through
+///    [`PhysicsSystem::overlap_queries`]. Chunk `i` writes
+///    `steer_velocities[i * STEER_CHUNK ..]` and reads nothing any other chunk
+///    writes, so the value in a slot is a pure function of that enemy, the
+///    crowd, and a broadphase nothing can touch while the view is alive.
+/// 3. **Write them back**, serially, because `body_mut` is `&mut`.
+///
+/// **The results are bit-identical to the serial version's, at any worker
+/// count**, which is the property the whole adoption stands on. Two things make
+/// it true rather than likely: the chunk boundaries come from
+/// [`STEER_CHUNK`] and the crowd's length and never from the worker count, so
+/// every mode calls the closure with exactly the same `(start, slice)` pairs;
+/// and each slot's arithmetic — including the neighbour sum, whose `f64` order
+/// is the tree's and not the scheduler's — is untouched by which thread ran it.
+/// `steering_is_bit_identical_however_many_workers_run_it` and
+/// `the_same_script_replays_bit_identically_on_a_threaded_pool` are what hold
+/// both halves, and the second one is the design's `--threads 1` versus
+/// `--threads N` gate that `--workers` exists to drive.
+///
+/// A pool with no workers — the browser, today — runs every chunk on the
+/// calling thread in ascending order, which is the serial loop this replaced
+/// with one extra `Vec` write per enemy. There is no `cfg` here and there is
+/// none in `crate::web` either; `crcbl_jobs::default_spawner` answers it.
+fn steer_enemies(logic: &mut GameLogic, world: &mut World, pool: &mut Pool) {
     if logic.enemies.is_empty() {
         return;
     }
     let mut enemies = std::mem::take(&mut logic.enemies);
     let by_entity = std::mem::take(&mut logic.by_entity);
+    let mut velocities = std::mem::take(&mut logic.steer_velocities);
     let player = logic.player_pos;
 
     with_physics(world, |phys| {
-        // One read of the authoritative positions, so the loop below never has
+        // One read of the authoritative positions, so the pass below never has
         // to go back for a neighbour's.
         for enemy in &mut enemies {
             if let Some(transform) = phys.transform(enemy.entity) {
@@ -2368,37 +2423,91 @@ fn steer_enemies(logic: &mut GameLogic, world: &mut World) {
             }
         }
 
-        // One buffer for the whole pass: `overlap_sphere_into` clears and
-        // refills it, and nothing below it allocates either, so `N` queries a
-        // tick cost no allocations at all once it has grown.
-        let mut neighbours = Vec::new();
-        for me in &enemies {
-            let mut push = DVec3::ZERO;
-            phys.overlap_sphere_into(
-                me.position,
-                separation_query_radius(me.kind),
-                &mut neighbours,
-            );
-            for &(other, _hit) in neighbours.iter() {
-                if other == me.entity {
-                    continue;
-                }
-                let Some(them) = by_entity.get(&other).and_then(|index| enemies.get(*index)) else {
-                    continue;
-                };
-                push += separation_push(me, them);
-            }
+        // Sized to the crowd before anything is queued, so every chunk has its
+        // own slots and the closure never has to grow the buffer.
+        velocities.clear();
+        velocities.resize(enemies.len(), DVec3::ZERO);
 
-            let seek = (player - me.position).normalize_or_zero() * me.kind.speed();
-            let velocity = seek + clamp_length(push, 1.0) * SEPARATION_STRENGTH;
-            if let Some(body) = phys.body_mut(me.entity) {
-                body.velocity = velocity;
+        {
+            // The exclusive borrow is spent once, here, and buys a view several
+            // threads can query at the same time. It is dropped at the end of
+            // this block, which is what lets `body_mut` below take `phys` back.
+            let queries = phys.overlap_queries();
+            let crowd = &enemies;
+            let by_entity = &by_entity;
+            pool.par_for(&mut velocities, STEER_CHUNK, |start, out| {
+                STEER_SCRATCH.with_borrow_mut(|(scratch, neighbours)| {
+                    for (offset, velocity) in out.iter_mut().enumerate() {
+                        let me = &crowd[start + offset];
+                        let mut push = DVec3::ZERO;
+                        queries.overlap_sphere_into(
+                            me.position,
+                            separation_query_radius(me.kind),
+                            scratch,
+                            neighbours,
+                        );
+                        for &(other, _hit) in neighbours.iter() {
+                            if other == me.entity {
+                                continue;
+                            }
+                            let Some(them) =
+                                by_entity.get(&other).and_then(|index| crowd.get(*index))
+                            else {
+                                continue;
+                            };
+                            push += separation_push(me, them);
+                        }
+
+                        let seek = (player - me.position).normalize_or_zero() * me.kind.speed();
+                        *velocity = seek + clamp_length(push, 1.0) * SEPARATION_STRENGTH;
+                    }
+                });
+            });
+        }
+
+        for (enemy, velocity) in enemies.iter().zip(velocities.iter()) {
+            if let Some(body) = phys.body_mut(enemy.entity) {
+                body.velocity = *velocity;
             }
         }
     });
 
     logic.enemies = enemies;
     logic.by_entity = by_entity;
+    logic.steer_velocities = velocities;
+}
+
+/// How many enemies one [`steer_enemies`] chunk decides a velocity for.
+///
+/// **A constant, not a function of the worker count**, which is what keeps the
+/// closure calls identical between a pool with workers and one without — see
+/// [`crcbl_jobs::Pool::par_for`], whose docs are explicit that the boundaries
+/// are the caller's. Sizing it to the pool would make the split a function of
+/// the machine, and the `--workers` determinism gate compares runs on the same
+/// machine at different worker counts.
+///
+/// Sixty-four enemies is a few microseconds of BVH descents, which is far more
+/// than the per-chunk overhead and small enough that
+/// [`DEFAULT_MAX_ENEMIES`] still splits into more chunks than any desktop has
+/// cores. The pool's queue holds 1024 chunks, so this stays under it up to
+/// 65 536 enemies and degrades to running the excess on the driving thread
+/// above that rather than dropping it.
+const STEER_CHUNK: usize = 64;
+
+thread_local! {
+    /// The buffers one thread's [`steer_enemies`] chunks query into.
+    ///
+    /// **Thread-local rather than per-chunk**, because a `par_for` closure is
+    /// `Fn` and cannot own mutable state: allocating inside it would be three
+    /// `Vec`s per chunk per tick, and the pass's whole documented claim above is
+    /// that it allocates nothing in the steady state. One set per worker,
+    /// reused for the life of the thread, keeps that true.
+    ///
+    /// It cannot affect an answer: both halves are cleared by the query before
+    /// it writes them, so what a chunk finds in here is whatever the last chunk
+    /// on this thread left, and nothing reads it.
+    static STEER_SCRATCH: RefCell<(QueryScratch, Vec<(Entity, ShapeHit)>)> =
+        RefCell::new((QueryScratch::new(), Vec::new()));
 }
 
 /// How hard `me` is pushed away from `them`, as a weight in `[0, 1]` along the
@@ -2681,6 +2790,16 @@ pub struct Setup {
     pub tick_hz: u32,
     pub seed: u64,
     pub max_enemies: usize,
+    /// How many worker threads the steering pass's pool gets, or `None` for as
+    /// many as the machine has to spare.
+    ///
+    /// **`Some(0)` is the browser's answer and the gate's**: a pool with no
+    /// workers runs every chunk on the calling thread, which is what
+    /// `wasm32` gets from `crcbl_jobs::default_spawner` whether this asks for
+    /// workers or not. Setting it here is how a native run reproduces that,
+    /// which is the whole of the design's `--threads 1` versus `--threads N`
+    /// determinism comparison.
+    pub workers: Option<usize>,
 }
 
 impl Default for Setup {
@@ -2690,6 +2809,7 @@ impl Default for Setup {
             tick_hz: DEFAULT_TICK_HZ,
             seed: DEFAULT_SEED,
             max_enemies: DEFAULT_MAX_ENEMIES,
+            workers: None,
         }
     }
 }
@@ -2751,17 +2871,48 @@ impl std::fmt::Debug for Game {
 #[derive(Debug)]
 pub enum GameError {
     Server(String),
+    /// A runtime that said it had threads then refused one for the steering
+    /// pool. Not the browser, which says it has none and gets a pool with no
+    /// workers — see this module's `steer_pool`.
+    Pool(String),
 }
 
 impl std::fmt::Display for GameError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Server(msg) => write!(f, "server creation failed: {msg}"),
+            Self::Pool(msg) => write!(f, "the steering pool would not start: {msg}"),
         }
     }
 }
 
 impl std::error::Error for GameError {}
+
+/// The pool [`steer_enemies`] splits the crowd across.
+///
+/// **The one place the sample asks about threads at all.** `default_spawner`
+/// answers native versus browser — `Threads` on a desktop, `Inline` in a
+/// browser, which is where the worker backend will land without this file
+/// changing — and `Pool::with_workers` treats the count as a request a spawner
+/// with no threads answers with zero. So `wasm32` reaches a pool of zero
+/// workers however `workers` was set, and there is no `cfg(target_arch)` here.
+///
+/// `Some(0)` asks for that same pool on a machine that *does* have threads,
+/// which is what `--workers 0` is for: the serial half of the determinism
+/// comparison, run on the same hardware as the parallel half. It takes
+/// [`Inline`] rather than a `Threads` spawner asked for zero workers, so the
+/// pool is the browser's own shape and not merely one that behaves like it.
+fn steer_pool(workers: Option<usize>) -> Result<Pool, GameError> {
+    let spawner: Box<dyn Spawn> = match workers {
+        Some(0) => Box::new(Inline),
+        _ => default_spawner(),
+    };
+    match workers {
+        None => Pool::new(spawner.as_ref()),
+        Some(count) => Pool::with_workers(spawner.as_ref(), count),
+    }
+    .map_err(|e| GameError::Pool(e.to_string()))
+}
 
 impl Game {
     /// Builds the world, the physics system, the server and the client on the
@@ -2860,6 +3011,7 @@ impl Game {
             bolt_views: Vec::new(),
             pickup_views: Vec::new(),
             scratch_entities: Vec::new(),
+            steer_velocities: Vec::new(),
             cues: Vec::new(),
             ticks: 0,
         }));
@@ -2873,6 +3025,7 @@ impl Game {
             world,
             Box::new(HordeModule {
                 shared: Arc::clone(&shared),
+                pool: steer_pool(setup.workers)?,
             }),
             setup.tick_hz,
             COMPATIBILITY,
@@ -5779,6 +5932,221 @@ mod tests {
             "the reference run left no loot to compare"
         );
         assert_eq!(first, run());
+    }
+
+    /// The bits of one `DVec3`, so a comparison is bit-identity rather than
+    /// numeric equality — `-0.0 == 0.0` and a `NaN` equals nothing, and neither
+    /// is what "the parallel pass produced the same answer" means.
+    fn bits(v: DVec3) -> (u64, u64, u64) {
+        (v.x.to_bits(), v.y.to_bits(), v.z.to_bits())
+    }
+
+    /// Runs one [`steer_enemies`] over a staged crowd at a chosen worker count,
+    /// and hands back the pool it used with the velocities it decided.
+    ///
+    /// The pool comes back because the test that calls this has to prove the
+    /// parallel run was *parallel*; see
+    /// [`steering_is_bit_identical_however_many_workers_run_it`].
+    fn steer_a_staged_crowd(workers: Option<usize>, crowd: usize) -> (Pool, Vec<DVec3>) {
+        let mut harness = Harness::with_setup(
+            60,
+            &Setup {
+                headless: true,
+                max_enemies: crowd,
+                workers,
+                ..Setup::default()
+            },
+        );
+        assert_eq!(
+            harness.game.stage_field(crowd),
+            crowd,
+            "the field did not fill"
+        );
+        // **Two seconds of play before the pass being measured**, and it is
+        // load-bearing rather than warm-up. A freshly staged field is a regular
+        // lattice, so an enemy's neighbours are symmetric about it and their
+        // separation pushes sum to the same `f64` in either order — a
+        // reassociated sum would be invisible. Measured: with the crowd staged
+        // and not run, reversing the neighbour list on worker threads left this
+        // test green. A field that has converged for two seconds is irregular
+        // and the same mutation turns it red.
+        harness.play_ticks(120);
+
+        let mut pool = steer_pool(workers).expect("a steering pool");
+        let shared = Arc::clone(&harness.game.shared);
+        let world = harness.game.session.server_mut().world_mut();
+        let mut logic = lock(&shared);
+        steer_enemies(&mut logic, world, &mut pool);
+        let velocities = logic.steer_velocities.clone();
+        drop(logic);
+        (pool, velocities)
+    }
+
+    /// **The whole adoption in one assertion: the crowd steers to the same bits
+    /// however many threads decided them.**
+    ///
+    /// Three worker counts against the browser's own pool — zero workers, every
+    /// chunk on the calling thread — and the comparison is over the raw `f64`
+    /// bits, because a separation sum that had been reassociated would still be
+    /// numerically close and is exactly the defect this exists to catch.
+    ///
+    /// Two things stop it being vacuous, and both are asserted rather than
+    /// argued. The crowd splits into more chunks than one, so `par_for` takes
+    /// the parallel path instead of the single-chunk shortcut it runs inline by
+    /// construction. And the pool the parallel run used is then made to prove it
+    /// spreads work: a probe `par_for` on that same pool, whose chunks each wait
+    /// for a second thread to arrive, so a pool that ran everything on the
+    /// caller fails here instead of quietly making the comparison above a
+    /// comparison of two serial runs.
+    #[test]
+    fn steering_is_bit_identical_however_many_workers_run_it() {
+        // Thirteen chunks at `STEER_CHUNK`, which is more than this machine has
+        // cores and comfortably more than one.
+        const CROWD: usize = 800;
+        assert!(
+            CROWD.div_ceil(STEER_CHUNK) > 1,
+            "a crowd of {CROWD} is one chunk, which `par_for` runs inline",
+        );
+
+        let (serial_pool, serial) = steer_a_staged_crowd(Some(0), CROWD);
+        assert_eq!(serial_pool.workers(), 0, "the serial run had workers");
+        assert!(
+            serial.len() > STEER_CHUNK,
+            "the field was down to {} enemies by the time the pass ran",
+            serial.len(),
+        );
+        assert!(
+            serial.iter().any(|v| *v != DVec3::ZERO),
+            "every enemy was left standing still, so nothing was compared",
+        );
+        assert!(
+            serial.iter().any(|v| bits(*v) != bits(serial[0])),
+            "every enemy steered identically, so a chunk that dropped its \
+             results would still match",
+        );
+        let serial_bits: Vec<_> = serial.iter().copied().map(bits).collect();
+
+        for workers in [1_usize, 3, 7] {
+            let (mut pool, parallel) = steer_a_staged_crowd(Some(workers), CROWD);
+            assert_eq!(pool.workers(), workers, "the pool was not the size asked");
+            let parallel_bits: Vec<_> = parallel.iter().copied().map(bits).collect();
+            assert_eq!(
+                serial_bits, parallel_bits,
+                "{workers} workers steered the crowd differently",
+            );
+
+            // The pool that just ran the pass, made to show it is not running
+            // everything on this thread. Bounded, so a pool whose workers never
+            // arrive goes red rather than hanging.
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let arrived = std::sync::atomic::AtomicUsize::new(0);
+            let threads = Mutex::new(std::collections::HashSet::new());
+            let mut probe = vec![0_u8; 64];
+            pool.par_for(&mut probe, 8, |_, _| {
+                lock_set(&threads).insert(std::thread::current().id());
+                arrived.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                while arrived.load(std::sync::atomic::Ordering::SeqCst) < 2
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::yield_now();
+                }
+            });
+            assert!(
+                lock_set(&threads).len() >= 2,
+                "the {workers}-worker pool ran every chunk on the calling \
+                 thread, so the comparison above compared two serial runs: {:?}",
+                lock_set(&threads),
+            );
+        }
+    }
+
+    /// The same lock recovery `lock` does, for the probe's thread set.
+    fn lock_set<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+        m.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// **The design's `--threads 1` versus `--threads N` gate, on a whole
+    /// run rather than one pass.**
+    ///
+    /// `docs/backlog.md` records this as the test the pool did not have because
+    /// nothing was driving it: the same input script at every worker count,
+    /// compared per run rather than per tick. `--workers` is what drives it, and
+    /// horde is the sim it was waiting for.
+    ///
+    /// It is a strictly stronger claim than
+    /// [`steering_is_bit_identical_however_many_workers_run_it`] because it
+    /// closes the loop: a velocity difference too small to matter in one tick
+    /// still moves a body, which moves the broadphase, which changes the next
+    /// tick's neighbourhoods — so twenty-four hundred ticks of it end
+    /// somewhere visibly different, and the kill count and the loot are in the
+    /// comparison to say so.
+    #[test]
+    fn the_same_script_replays_bit_identically_at_every_worker_count() {
+        let run = |workers: Option<usize>| {
+            let mut harness = Harness::with_setup(
+                60,
+                &Setup {
+                    headless: true,
+                    max_enemies: 400,
+                    workers,
+                    ..Setup::default()
+                },
+            );
+            // Staged rather than waited for: the spawner needs minutes to reach
+            // a crowd that splits into more than one chunk, and the gun clears
+            // the field faster than it fills. This is the same fixture the scale
+            // measurement uses, for the same reason.
+            let staged = harness.game.stage_field(300);
+            harness.play_ticks(300);
+            // Read midway as well as at the end, because the field does not
+            // survive: three hundred enemies on top of the wizard is a death and
+            // a restart, which wipes it. This is the sample taken while the
+            // crowd is still large enough that the pass was genuinely splitting
+            // — and the restart it dies into is churn the comparison covers for
+            // free.
+            let midway = harness.game.enemy_positions();
+            harness.play_ticks(2_400);
+            (
+                staged,
+                midway,
+                harness.game.elapsed,
+                harness.game.kills,
+                harness.game.player_hp,
+                harness.game.player,
+                harness.game.enemies(),
+                harness.game.bolts(),
+                harness.game.enemies_spawned(),
+                harness.game.bolts_fired(),
+                harness.game.pickups_on_the_ground(),
+            )
+        };
+
+        let serial = run(Some(0));
+        assert!(
+            serial.1.len() > STEER_CHUNK,
+            "the reference run was down to {} enemies by tick 300, which is one \
+             steering chunk — the worker counts below would have nothing to split",
+            serial.1.len(),
+        );
+        assert!(serial.3 > 0, "the reference run killed nothing");
+        assert!(serial.9 > 0, "the reference run fired nothing");
+
+        for workers in [1_usize, 3] {
+            assert_eq!(
+                serial,
+                run(Some(workers)),
+                "the run diverged at {workers} workers",
+            );
+        }
+        // And the default, which is whatever this machine had to spare — the
+        // configuration every other test in this file, and every CI run, has
+        // actually been using.
+        assert_eq!(
+            serial,
+            run(None),
+            "the run diverged at the machine's own \
+             worker count"
+        );
     }
 
     /// **The frame rate is not the tick rate.** The same script reaches the same

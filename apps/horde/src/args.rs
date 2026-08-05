@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! horde [--headless] [--frames N] [--tick-hz N] [--backend B] [--seed N]
-//!       [--max-enemies N] [--prefill N] [--wall-clock]
+//!       [--max-enemies N] [--prefill N] [--workers N] [--wall-clock]
 //! ```
 //!
 //! # What is left here after the engine took the shared half
@@ -44,6 +44,10 @@ OPTIONS:
                          measurement's fixture: the spawner would take over ten
                          minutes to reach the plan's target and nothing lives
                          that long.
+    --workers <N>        Worker threads for the steering pass (default: one per
+                         spare core). 0 runs it on the calling thread, which is
+                         what a browser gets and what the determinism gate
+                         compares a threaded run against.
     --wall-clock         Drive a headless run from the real monotonic clock, so
                          the debug panel's frame timing measures the frame
                          rather than reporting the fixed step a headless clock
@@ -66,6 +70,9 @@ pub struct Options {
     pub prefill: usize,
     /// Whether a headless run reads the real clock. See [`USAGE`].
     pub wall_clock: bool,
+    /// Worker threads for the steering pool, or `None` for the machine's
+    /// answer. See [`crate::game::Setup::workers`].
+    pub workers: Option<usize>,
 }
 
 impl Default for Options {
@@ -76,6 +83,7 @@ impl Default for Options {
             max_enemies: crate::game::DEFAULT_MAX_ENEMIES,
             prefill: 0,
             wall_clock: false,
+            workers: None,
         }
     }
 }
@@ -105,6 +113,7 @@ impl Options {
             tick_hz: self.common.tick_hz,
             seed: self.seed,
             max_enemies: self.max_enemies.max(self.prefill),
+            workers: self.workers,
         }
     }
 }
@@ -148,6 +157,19 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
                     Err(message) => return Invocation::BadUsage(message),
                 }
             }
+            // `number`, not `positive`: zero is the flag's most interesting
+            // value — it is the browser's pool, asked for on a machine that has
+            // threads — so rejecting it would leave the serial half of the
+            // determinism comparison unreachable from the command line.
+            "--workers" => match crcbl::args::number("--workers", &mut args, "worker count") {
+                Ok(count) => match usize::try_from(count) {
+                    Ok(count) => options.workers = Some(count),
+                    Err(_) => {
+                        return Invocation::BadUsage(format!("not a worker count: {count}"));
+                    }
+                },
+                Err(message) => return Invocation::BadUsage(message),
+            },
             "--prefill" => match crcbl::args::number("--prefill", &mut args, "enemy count") {
                 Ok(count) => match usize::try_from(count) {
                     Ok(count) => options.prefill = count,
@@ -293,6 +315,26 @@ mod tests {
         assert!(rejected(&["--prefill", "lots"]).contains("enemy count"));
         assert!(rejected(&["--prefill"]).contains("--prefill"));
         assert!(USAGE.contains("--prefill"));
+    }
+
+    /// **`--workers 0` has to survive parsing**, because it is the flag's whole
+    /// point: it is the browser's pool asked for on a machine that has threads,
+    /// and it is the serial half of the determinism comparison
+    /// `crate::game`'s `the_same_script_replays_bit_identically_at_every_worker_count`
+    /// runs. Every other count flag here goes through `positive`, which would
+    /// reject it.
+    #[test]
+    fn the_worker_count_reaches_the_simulation_and_zero_is_a_real_answer() {
+        assert_eq!(parsed(&["--workers", "0"]).setup().workers, Some(0));
+        assert_eq!(parsed(&["--workers", "4"]).setup().workers, Some(4));
+        assert_eq!(
+            parsed(&[]).setup().workers,
+            None,
+            "an unset flag must leave the pool sizing itself to the machine",
+        );
+        assert!(rejected(&["--workers", "some"]).contains("worker count"));
+        assert!(rejected(&["--workers"]).contains("--workers"));
+        assert!(USAGE.contains("--workers"));
     }
 
     /// The clock a run reads: real when there is a window, real when the

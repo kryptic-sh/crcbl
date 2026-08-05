@@ -103,16 +103,130 @@ pub struct PhysicsWorld {
     /// with no element). Populated during [`PhysicsWorld::rebuild`]. Used by
     /// update methods for O(log n) refit.
     bvh_slot_to_elem: Vec<u32>,
-    /// The BVH descent stack and its candidate list, kept between queries.
+    /// The buffers an overlap query works in, kept between calls.
     ///
-    /// Every overlap query needs both and neither outlives the call, so
-    /// allocating them per call is a cost a caller running one query per body
-    /// per tick pays for nothing. They live here rather than being passed in
-    /// because every query method already takes `&mut self` for
-    /// [`ensure_bvh`](Self::ensure_bvh), so keeping them costs the caller no
-    /// API at all.
-    scratch_stack: Vec<u32>,
-    scratch_candidates: Vec<u32>,
+    /// None of them outlives the call, so allocating them per call is a cost a
+    /// caller running one query per body per tick pays for nothing. They live
+    /// here rather than being passed in because `&mut self` query methods
+    /// already take the exclusive borrow that makes one shared set sound —
+    /// [`OverlapQueries`] is the shape for callers who cannot, and it asks for
+    /// a [`QueryScratch`] of their own instead.
+    scratch: QueryScratch,
+}
+
+/// The buffers one overlap query works in, owned by whoever runs the query.
+///
+/// [`OverlapQueries::overlap_sphere_into`] takes `&self`, so it cannot reach
+/// the world's own buffers — several threads running queries at once would be
+/// writing the same ones. One of these per thread is what replaces them, and it
+/// is reused across calls exactly as the world's are: the contents are cleared
+/// on entry and mean nothing between calls, so a scratch buffer never changes
+/// an answer, only what a query has to allocate to reach it.
+#[derive(Debug, Default)]
+pub struct QueryScratch {
+    /// The BVH descent stack.
+    stack: Vec<u32>,
+    /// The elements the descent turned up, before the exact shape test.
+    candidates: Vec<u32>,
+    /// The collider ids the exact test kept, for a caller mapping them onto
+    /// something of its own — [`crate::system::EntityOverlapQueries`] maps them
+    /// to entities, which is why this is reachable from that module and from
+    /// nowhere outside the crate.
+    pub(crate) ids: Vec<ColliderId>,
+}
+
+impl QueryScratch {
+    /// Empty buffers, which the first query grows.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Read-only overlap queries against a world whose broadphase is already built.
+///
+/// **The type is the proof, not a comment.** A query needs the BVH to be
+/// current, and building it needs `&mut PhysicsWorld` — so
+/// [`PhysicsWorld::overlap_queries`] takes that exclusive borrow, builds the
+/// tree, and hands back a shared borrow of the world in its place. A caller
+/// cannot reach these queries without the tree being current and cannot mutate
+/// the world while one is outstanding, which is what makes the query itself
+/// `&self` and therefore `Sync`.
+///
+/// That is the whole point of it: a data-parallel pass over a crowd hands the
+/// same view to every chunk and gives each chunk a [`QueryScratch`] of its own.
+/// A caller that is not doing that wants
+/// [`PhysicsWorld::overlap_sphere_into`], which keeps the scratch itself.
+#[derive(Clone, Copy, Debug)]
+pub struct OverlapQueries<'a> {
+    colliders: &'a [Option<ColliderSlot>],
+    generations: &'a [u32],
+    bvh: &'a Bvh,
+}
+
+impl OverlapQueries<'_> {
+    /// [`PhysicsWorld::overlap_sphere_into`] under a shared borrow, working in
+    /// `scratch` instead of the world's own buffers.
+    ///
+    /// `out` is cleared and then filled. The results are identical to the
+    /// `&mut self` form's — same tree, same traversal order, same exact tests —
+    /// because the two are one implementation and not two that agree;
+    /// `crcbl_phys::world::tests::the_shared_view_finds_exactly_what_a_scan_would`
+    /// is what checks that implementation against a scan.
+    pub fn overlap_sphere_into(
+        &self,
+        centre: DVec3,
+        radius: f64,
+        scratch: &mut QueryScratch,
+        out: &mut Vec<ColliderId>,
+    ) {
+        overlap_sphere_core(
+            self.bvh,
+            self.colliders,
+            self.generations,
+            centre,
+            radius,
+            scratch,
+            out,
+        );
+    }
+}
+
+/// The one implementation of "which colliders overlap this sphere".
+///
+/// Both the `&mut self` form and [`OverlapQueries`] come through here, so there
+/// is no second copy of the traversal for the two to disagree in — which
+/// matters more than usual, because a caller mixing the two in one pass is
+/// exactly what a `par_for` adoption looks like mid-migration.
+fn overlap_sphere_core(
+    bvh: &Bvh,
+    colliders: &[Option<ColliderSlot>],
+    generations: &[u32],
+    centre: DVec3,
+    radius: f64,
+    scratch: &mut QueryScratch,
+    out: &mut Vec<ColliderId>,
+) {
+    out.clear();
+    let query_aabb = Aabb::from_centre_half(centre, DVec3::splat(radius));
+    let query_sphere = Sphere::new(centre, radius);
+
+    bvh.traverse_aabb_into(&query_aabb, &mut scratch.stack, &mut scratch.candidates);
+
+    for &idx in scratch.candidates.iter() {
+        let slot = idx as usize;
+        let hit = colliders
+            .get(slot)
+            .and_then(|s| s.as_ref())
+            .is_some_and(|slot| match &slot.entry {
+                ColliderEntry::Sphere(s) => query::sphere_overlaps_sphere(&query_sphere, s),
+                ColliderEntry::Box(b) => query::sphere_overlaps_aabb(&query_sphere, &b.aabb()),
+                ColliderEntry::Capsule(c) => query::sphere_overlaps_capsule(&query_sphere, c),
+            });
+        if hit {
+            out.push(ColliderId::new(idx, generations[slot]));
+        }
+    }
 }
 
 impl PhysicsWorld {
@@ -126,8 +240,7 @@ impl PhysicsWorld {
             live_count: 0,
             bvh: None,
             bvh_slot_to_elem: Vec::new(),
-            scratch_stack: Vec::new(),
-            scratch_candidates: Vec::new(),
+            scratch: QueryScratch::new(),
         }
     }
 
@@ -289,37 +402,27 @@ impl PhysicsWorld {
     /// reused between calls, so a caller that hoists one `out` out of its loop
     /// runs the whole pass without allocating.
     pub fn overlap_sphere_into(&mut self, centre: DVec3, radius: f64, out: &mut Vec<ColliderId>) {
-        out.clear();
+        // Lent to the view and put straight back, which is what lets one
+        // implementation serve both borrow shapes: the view cannot reach a
+        // field of the world it is only sharing.
+        let mut scratch = core::mem::take(&mut self.scratch);
+        self.overlap_queries()
+            .overlap_sphere_into(centre, radius, &mut scratch, out);
+        self.scratch = scratch;
+    }
+
+    /// Builds the broadphase and hands back a shared view that can query it.
+    ///
+    /// The exchange this makes is the point: it costs the caller's exclusive
+    /// borrow *once*, and buys a [`Sync`] query it can run from several threads
+    /// at a time — see [`OverlapQueries`] for why the type is what enforces
+    /// that rather than a rule in a comment.
+    pub fn overlap_queries(&mut self) -> OverlapQueries<'_> {
         self.ensure_bvh();
-        let query_aabb = Aabb::from_centre_half(centre, DVec3::splat(radius));
-        let query_sphere = Sphere::new(centre, radius);
-
-        // Split borrows: the traversal reads the tree while writing the two
-        // scratch buffers, which are different fields of the same struct.
-        let Self {
-            bvh,
-            colliders,
-            generations,
-            scratch_stack,
-            scratch_candidates,
-            ..
-        } = self;
-        let bvh = bvh.as_ref().expect("ensure_bvh built it");
-        bvh.traverse_aabb_into(&query_aabb, scratch_stack, scratch_candidates);
-
-        for &idx in scratch_candidates.iter() {
-            let slot = idx as usize;
-            let hit = colliders
-                .get(slot)
-                .and_then(|s| s.as_ref())
-                .is_some_and(|slot| match &slot.entry {
-                    ColliderEntry::Sphere(s) => query::sphere_overlaps_sphere(&query_sphere, s),
-                    ColliderEntry::Box(b) => query::sphere_overlaps_aabb(&query_sphere, &b.aabb()),
-                    ColliderEntry::Capsule(c) => query::sphere_overlaps_capsule(&query_sphere, c),
-                });
-            if hit {
-                out.push(ColliderId::new(idx, generations[slot]));
-            }
+        OverlapQueries {
+            colliders: &self.colliders,
+            generations: &self.generations,
+            bvh: self.bvh.as_ref().expect("ensure_bvh built it"),
         }
     }
 
@@ -571,6 +674,112 @@ mod tests {
         let world = PhysicsWorld::new();
         assert!(world.is_empty());
         assert_eq!(world.len(), 0);
+    }
+
+    /// **The shared view finds exactly what overlaps, checked against a scan
+    /// rather than against the other form.**
+    ///
+    /// Comparing [`OverlapQueries`] with [`PhysicsWorld::overlap_sphere_into`]
+    /// would prove nothing: they are one implementation, and a defect in it
+    /// breaks both sides of that comparison equally — measured, not assumed, by
+    /// reversing the core's output and watching the comparison stay green. So
+    /// the oracle here is an exhaustive scan of every collider in the fixture,
+    /// which shares no code with the traversal at all.
+    ///
+    /// It is a set comparison, because a scan cannot reproduce the tree's
+    /// order. The *order* is what a caller reducing over the neighbourhood in
+    /// `f64` depends on, and it comes from having one implementation rather than
+    /// from this test — which is the reason the two forms were made to share
+    /// one, and the reason `apps/horde`'s
+    /// `steering_is_bit_identical_however_many_workers_run_it` is where that
+    /// property is actually asserted.
+    #[test]
+    fn the_shared_view_finds_exactly_what_a_scan_would() {
+        let mut world = PhysicsWorld::new();
+        // A lattice, so a query sphere lands on a neighbourhood rather than on
+        // one collider or none, and a descent that pruned a subtree it should
+        // not have loses something the scan still finds.
+        let mut expected: Vec<(ColliderId, Sphere)> = Vec::new();
+        for x in -3..=3 {
+            for y in -3..=3 {
+                let sphere = Sphere::new(DVec3::new(f64::from(x), f64::from(y), 0.0), 0.4);
+                expected.push((world.add_sphere(sphere), sphere));
+            }
+        }
+        // A capsule and a box as well, so every arm of the exact test is
+        // exercised rather than only the sphere one.
+        let capsule = Capsule::new(DVec3::ZERO, 0.3, 1.0);
+        let capsule_id = world.add_capsule(capsule);
+        let boxed = BoxCollider::new(DVec3::new(1.5, 1.5, 0.0), DVec3::splat(0.5));
+        let box_id = world.add_box(boxed);
+
+        let centres = [
+            DVec3::ZERO,
+            DVec3::new(1.2, -0.7, 0.0),
+            DVec3::new(-2.5, 2.5, 0.0),
+            DVec3::new(50.0, 50.0, 0.0),
+        ];
+        let mut scratch = QueryScratch::new();
+        let mut biggest = 0usize;
+        for centre in centres {
+            for radius in [0.1, 0.75, 2.0] {
+                let probe = Sphere::new(centre, radius);
+                // The oracle: every collider, tested directly, with no tree and
+                // no traversal between the shapes and the answer.
+                let mut scanned: Vec<ColliderId> = expected
+                    .iter()
+                    .filter(|(_, s)| query::sphere_overlaps_sphere(&probe, s))
+                    .map(|(id, _)| *id)
+                    .collect();
+                if query::sphere_overlaps_capsule(&probe, &capsule) {
+                    scanned.push(capsule_id);
+                }
+                if query::sphere_overlaps_aabb(&probe, &boxed.aabb()) {
+                    scanned.push(box_id);
+                }
+                scanned.sort_unstable_by_key(|id| id.index());
+
+                let mut shared = Vec::new();
+                world.overlap_queries().overlap_sphere_into(
+                    centre,
+                    radius,
+                    &mut scratch,
+                    &mut shared,
+                );
+                shared.sort_unstable_by_key(|id| id.index());
+
+                assert_eq!(scanned, shared, "at {centre} r{radius}");
+                biggest = biggest.max(shared.len());
+            }
+        }
+        assert!(
+            biggest > 4,
+            "the widest query in the fixture found {biggest} colliders, so the \
+             comparison above was mostly two empty vectors",
+        );
+    }
+
+    /// One scratch, many queries: the buffers carry nothing between calls.
+    ///
+    /// The whole point of handing the caller the scratch is that it is reused,
+    /// so a query that read a stale `candidates` from the call before it would
+    /// be a defect this API introduced and the owning form cannot have.
+    #[test]
+    fn a_reused_scratch_does_not_leak_one_query_into_the_next() {
+        let mut world = PhysicsWorld::new();
+        world.add_sphere(Sphere::new(DVec3::ZERO, 0.5));
+        world.add_sphere(Sphere::new(DVec3::new(20.0, 0.0, 0.0), 0.5));
+
+        let mut scratch = QueryScratch::new();
+        let mut out = Vec::new();
+        let queries = world.overlap_queries();
+
+        queries.overlap_sphere_into(DVec3::ZERO, 1.0, &mut scratch, &mut out);
+        assert_eq!(out.len(), 1);
+        queries.overlap_sphere_into(DVec3::new(0.0, 100.0, 0.0), 1.0, &mut scratch, &mut out);
+        assert!(out.is_empty(), "a stale candidate survived the next query");
+        queries.overlap_sphere_into(DVec3::new(20.0, 0.0, 0.0), 1.0, &mut scratch, &mut out);
+        assert_eq!(out.len(), 1);
     }
 
     #[test]

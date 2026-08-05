@@ -89,6 +89,16 @@ pub use crcbl_hal as hal;
 /// [`crcbl-input`](crcbl_input): action maps, bindings, and the button and axis
 /// accessors a game polls once a tick.
 pub use crcbl_input as input;
+/// [`crcbl-jobs`](crcbl_jobs): the spawn seam, the two communication
+/// primitives, and the work-stealing pool a game's data-parallel passes run on.
+///
+/// Re-exported for the same reason the rest are: a game that wants
+/// [`Pool::par_for`](crcbl_jobs::pool::Pool::par_for) over its crowd should not
+/// have to name a second workspace path to get it, and
+/// [`default_spawner`](crcbl_jobs::default_spawner) is the one place the
+/// browser-versus-native question is answered — a sample writing that `cfg`
+/// itself is exactly what the seam exists to prevent.
+pub use crcbl_jobs as jobs;
 /// [`crcbl-net`](crcbl_net): the transport seam, the wire protocol and the
 /// in-memory transport a single-player session is built on.
 pub use crcbl_net as net;
