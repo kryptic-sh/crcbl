@@ -1829,12 +1829,15 @@ mod tests {
         Barriers, BufferCopy, BufferImageCopy, ClearValue, ColorAttachment, ColorTargetState,
         Extent3d, ImageAspect, ImageBarrier, ImageSubresourceLayers, ImageSubresourceRange,
         ImageUsage, ImageViewType, Instance, LoadOp, MultisampleState, Offset3d, PrimitiveState,
-        Rect2d, RenderPassDesc, ResourceState, SemaphoreSignal, ShaderEntry, StoreOp, Viewport,
+        Rect2d, RenderPassDesc, ResourceState, SemaphoreSignal, ShaderEntry, StoreOp,
     };
     use objc2_metal::MTLHazardTrackingMode;
 
     use crate::MetalInstance;
     use crate::instance::tests::{desc as device_desc, open as open_instance};
+    // Only the hardware suite draws, and only a draw sets a viewport.
+    #[cfg(feature = "mtl-e2e")]
+    use crcbl_hal::Viewport;
 
     /// Every [`MemoryLocation`] the seam has, so the buffer tests cover all
     /// three rather than the one that was convenient.
@@ -2203,11 +2206,13 @@ mod tests {
 
     // --- the triangle rung -------------------------------------------------
 
+    #[cfg(feature = "mtl-e2e")]
     /// The image the triangle is drawn into: square, so "the centre" and "a
     /// corner" are far apart, and 64 texels wide so a row is 256 bytes — the
     /// same comfortable stride [`TARGET`] was chosen for.
     const CANVAS: Extent3d = Extent3d::d2(64, 64);
 
+    #[cfg(feature = "mtl-e2e")]
     /// Bytes one full copy of [`CANVAS`] occupies, at four bytes a texel.
     const CANVAS_BYTES: usize = 64 * 64 * 4;
 
@@ -2224,6 +2229,7 @@ mod tests {
     /// centre depend on the exact rasterisation of the triangle's vertices.
     const INK: [f32; 4] = [64.0 / 255.0, 128.0 / 255.0, 192.0 / 255.0, 1.0];
 
+    #[cfg(feature = "mtl-e2e")]
     /// What [`INK`] must read back as, per the derivation above.
     const INK_TEXEL: [u8; 4] = [0x40, 0x80, 0xC0, 0xFF];
 
@@ -2293,6 +2299,7 @@ mod tests {
             .expect("a layout naming no bind groups and no push constants")
     }
 
+    #[cfg(feature = "mtl-e2e")]
     /// The texel at `(x, y)` of a [`CANVAS`]-sized readback.
     fn texel_at(bytes: &[u8], x: u32, y: u32) -> [u8; 4] {
         let offset = ((y * CANVAS.width + x) * 4) as usize;
@@ -2322,7 +2329,36 @@ mod tests {
     /// comparison. Never running the copy, or reading before the command buffer
     /// completes — every texel comes back [`POISON`], which is neither of the
     /// two colours the last assertion admits.
+    /// **Needs a real GPU, and CI does not have one.** Feature-gated *and*
+    /// `#[ignore]`d, the shape `crcbl-vk` and `crcbl-wgpu` already use for the
+    /// same reason: `--all-features` on a machine that cannot run it must stay
+    /// green, and `tests/run-mtl-e2e.sh` is the only thing that turns it on —
+    /// and that script fails when the suite reports zero tests run, because
+    /// `docs/plan/12-testing.md` calls a silently-skipped e2e job a known trap.
+    ///
+    /// The evidence, rather than an assumption. On `macos-latest` this hung the
+    /// GPU, and the fault report named both halves of the question:
+    ///
+    /// ```text
+    /// GPU Hang Error (kIOGPUCommandBufferCallbackErrorHang) on `Apple Paravirtual device`;
+    /// encoders in recorded order: `triangle` completed, `crcbl copies` completed
+    /// ```
+    ///
+    /// **Both encoders completed and neither faulted**, so the command stream is
+    /// not what broke — the paravirtual GPU those runners expose cannot execute
+    /// a shader program. Everything up to that line still runs there and still
+    /// passes: clears go through load actions, copies through the blit engine,
+    /// and `the_engines_own_triangle_artifact_builds_a_real_pipeline` compiles
+    /// MSL and builds a pipeline state. **This is the only test in the crate
+    /// that makes the GPU run a shader**, which is exactly why it is the only
+    /// one gated.
+    ///
+    /// Unlike Vulkan there is no software rasteriser to fall back to — no
+    /// lavapipe for Metal — so this is a coverage gap rather than a
+    /// substitution, and `docs/backlog.md` records it as one.
+    #[cfg(feature = "mtl-e2e")]
     #[test]
+    #[ignore = "executes a shader; the CI runner's Apple Paravirtual device hangs on one"]
     fn a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear() {
         let (_instance, device) = open_device();
         assert_ne!(

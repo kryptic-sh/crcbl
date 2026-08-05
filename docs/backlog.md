@@ -4380,3 +4380,61 @@ Next steps, cheapest first:
   the fix attempt, because a test edit that turns CI green without an
   explanation is indistinguishable from weakening it — do it as a named
   experiment, and if it passes, say so in the shader's docs.
+
+## Not covered: Metal cannot execute a shader in CI, and there is no substitute
+
+**Measured on `macos-latest`, 2026-08-05.** `crcbl-mtl`'s draw test hung the
+GPU, and with `MTLCommandBufferErrorOption::EncoderExecutionStatus` wired in,
+the fault named both halves of the question:
+
+```text
+GPU Hang Error (kIOGPUCommandBufferCallbackErrorHang) [MTLCommandBufferErrorDomain 2]
+on `Apple Paravirtual device`;
+encoders in recorded order: `triangle` completed, `crcbl copies` completed
+```
+
+**Both encoders completed and neither faulted**, so the command stream is not
+what broke — the paravirtual GPU those runners expose cannot execute a shader
+program. Everything short of that still runs and still passes there: adapter
+enumeration, device and resource creation, clears through load actions, blit
+copies, timeline semaphores, readback with real completion observation, MSL
+compilation, and building an `MTLRenderPipelineState` from the engine's own
+committed `msl/triangle.metal`.
+
+So the one test that makes the GPU run a shader is feature-gated behind
+`mtl-e2e` **and** `#[ignore]`d, with `crates/crcbl-mtl/tests/run-mtl-e2e.sh` the
+only thing that turns it on — the same shape `vk-e2e` and `wgpu-e2e` already
+use, including the zero-tests-run check that `docs/plan/12-testing.md` demands.
+
+**The difference from those two is what makes this a gap rather than a
+substitution.** `crcbl-vk` has lavapipe and `crcbl-wgpu` has lavapipe through
+its GL/Vulkan paths, so their e2e suites run in CI against a software
+rasteriser. **Metal has no software rasteriser at all.** There is nothing to
+point `run-mtl-e2e.sh` at except a real Mac, so its results are not automated
+and no CI job asserts them.
+
+What that leaves unproven, and what would prove it:
+
+- **Nothing above `crcbl-mtl`'s clear path is verified by machine.** Draws,
+  pipelines-in-anger, and everything MTL5/MTL6 add are compile- and
+  lint-verified for `aarch64-apple-darwin` plus whatever a person runs by hand.
+- **A self-hosted macOS runner with a real GPU** is the only thing that closes
+  it, and `docs/plan/09-backends-metal-dx12.md` already anticipated exactly this
+  under "on-hardware smoke (render one frame, hash the readback) on
+  self-hosted/manual runners — compile-verified-only backends are a known trap".
+  That line was written before anyone checked whether the hosted runner would
+  do; it will not.
+- Until then, **`run-mtl-e2e.sh` on a Mac is a release-gate step a person
+  owns**, not something CI can be trusted to have done.
+
+### The diagnostic that found this nearly hid it
+
+Worth keeping, because the shape recurs. The first version of the fault reporter
+read `MTLCommandBufferEncoderInfo::debugSignposts`, which `objc2` generates as
+returning a non-optional `Retained<NSArray<NSString>>` while the real
+implementation returns **nil** for an encoder with no signposts — which is every
+encoder this backend produces. So the reporter panicked inside the binding and
+**substituted its own failure for the GPU fault it existed to report**, costing
+a full CI round trip. A diagnostic that can fail can destroy the evidence it was
+added to collect; prefer the nil-tolerant path even when the binding says the
+value is non-optional.

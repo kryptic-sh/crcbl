@@ -147,3 +147,18 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
 
 [lints]
 workspace = true
+
+[features]
+# The tests that make the GPU execute a shader program, which the `macos-latest`
+# runner cannot do: its `Apple Paravirtual device` hangs the command buffer with
+# both encoders reporting `completed`, so the fault is the device rather than the
+# command stream. Feature-gated *and* `#[ignore]`d, exactly like `crcbl-vk`'s
+# `vk-e2e` and `crcbl-wgpu`'s `wgpu-e2e`: a plain
+# `cargo nextest run --workspace --all-features` on a machine without a real
+# Metal GPU must stay green, and `tests/run-mtl-e2e.sh` is the only thing that
+# turns these on — and it fails when the suite reports zero tests run.
+#
+# Unlike Vulkan there is no software rasteriser to substitute (no lavapipe for
+# Metal), so what this gates is a genuine coverage gap; `docs/backlog.md` says so
+# rather than implying CI covers it.
+mtl-e2e = []
