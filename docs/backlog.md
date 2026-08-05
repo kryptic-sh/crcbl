@@ -4250,11 +4250,6 @@ Metal slice.
 
 ## What MTL3 left open
 
-- **Binary semaphores are emulated** on an `MTLEvent` plus an internal counter,
-  with the rule that a binary semaphore must be signalled by an _earlier_
-  submission than the one waiting on it. **WSI acquire breaks that rule** — the
-  presentation engine signals it, not a submission — so the swapchain slice
-  (MTL5) has to revisit this rather than inherit it.
 - **The GPU-side wait is not proven to gate.** The test proves a wait does not
   wedge the queue and that an unsatisfiable wait is refused up front. Proving
   the wait actually orders two submissions needs an observation _between_ them,
@@ -4438,3 +4433,51 @@ encoder this backend produces. So the reporter panicked inside the binding and
 a full CI round trip. A diagnostic that can fail can destroy the evidence it was
 added to collect; prefer the nil-tolerant path even when the binding says the
 value is non-optional.
+
+## What MTL5 left open on the swapchain
+
+- **`nextDrawable` and `presentDrawable:` are proven by nothing automated.**
+  Every other part of the layer path — creating the surface, configuring the
+  layer's format and drawable size, the caps lists, rejecting a non-Metal layer
+  — runs on CI, because a detached `CAMetalLayer` needs no window server,
+  `NSView` or run loop. Acquiring an actual drawable does. That one test is
+  behind `mtl-e2e` and `#[ignore]`, so a person on a Mac is the only thing that
+  has ever run it. See "Metal cannot execute a shader in CI" above for why there
+  is no substitute.
+- **`surface_caps` can never return the `Unsupported` branch its own contract
+  requires.** The trait documents that an adapter which cannot present to a
+  surface must be reported as `Unsupported`, and callers must treat that as "try
+  the next adapter". On Metal every device can drive any layer, so the branch is
+  unreachable — which means **the contract is untested here by construction**,
+  not merely untested. `crcbl-vk` is where that path is exercised.
+- **`CompositeAlpha` offers only `Opaque`.** `CAMetalLayer` has `opaque` and can
+  composite with alpha, but nothing verified the non-opaque behaviour, so it is
+  not offered rather than offered untested.
+- **`device.rs` is 4057 lines**, up from the 3243 that was already flagged for
+  splitting after MTL3. `pipeline.rs`, `swapchain.rs` and `fault.rs` were split
+  out as they were written, so the growth is in what remains: the pools, the
+  resource create/destroy pairs, submission and readback. Still wants to be a
+  move-only change.
+
+### What MTL5 dissolved rather than deferred
+
+The MTL3 item about binary semaphores and WSI acquire is **deleted**, not
+carried: Metal has no presentation-engine signal to reconcile. `nextDrawable`
+blocks the CPU and hands back a ready texture, so this backend creates no
+semaphore for WSI and returns `None` for both `acquire_semaphore` and
+`present_semaphore` — the implicit-acquire shape the seam already documents for
+`crcbl-wgpu`, and the reason those fields are `Option`s. MTL3's "signalled by an
+earlier submission" rule is never engaged and stands unweakened. No seam change
+was needed.
+
+### Two defects found mid-slice, both invisible until they weren't
+
+Worth recording because neither would have shown up in a test that passed:
+
+- **A deadlock.** `release_swapchain_rows` re-locked the non-reentrant device
+  `Mutex` while `reconfigure` already held it — the first window resize would
+  have hung with no diagnostic at all. Fixed by having it take
+  `&mut DeviceState` so the borrow checker forbids the whole class rather than
+  that one instance.
+- **A leak** on the reconfigure race path, where a destroyed-during-rebuild
+  swapchain dropped its entry without its ring rows ever leaving the pools.

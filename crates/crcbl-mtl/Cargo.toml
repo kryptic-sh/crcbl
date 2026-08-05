@@ -104,14 +104,46 @@ crcbl-shaders = { workspace = true }
 # `MTLRenderCommandEncoder`, and `MTLStencilDescriptor`/`MTLStencilOperation` in
 # `MTLDepthStencil`; both were already on. `MTLPipelineOption` is in `MTLDevice`.
 #
+# MTL5 — the `CAMetalLayer` swapchain — adds one feature here and two crates
+# below:
+#
+# * `MTLDrawable` for the `MTLDrawable` protocol a `CAMetalDrawable` inherits
+#   from, and for `MTLCommandBuffer::presentDrawable:` — which is `cfg`-gated on
+#   it upstream, so it is not optional. `crcbl_mtl::swapchain` argues there why
+#   a present is a command buffer rather than `MTLDrawable::present`.
+#
 # `MTLCounters` is deliberately **absent**: query sets still refuse, and
 # `crcbl_mtl::device`'s `create_query_set` says why. So is `MTLVertexDescriptor`
 # — this engine has no vertex input state at all, by design, and enabling it
 # would advertise a path `crcbl_hal::pipeline` deliberately does not have.
 #
 # A slice that needs more adds it here.
+#
+# # The two crates MTL5 adds, and why they are not a widening
+#
+# `CAMetalLayer` is a **Core Animation** class, not a Metal one, so the
+# `SurfaceTarget::AppKit` pointer cannot be typed at all without
+# `objc2-quartz-core`; and its `drawableSize` is a `CGSize`, which lives in
+# `objc2-core-foundation`. Both are the same one-binding-per-ABI family
+# `docs/plan/09-backends-metal-dx12.md`'s FFI correction already sanctions for
+# `objc2-metal`, both are pinned to macOS beside it, and both were **already in
+# this workspace's lockfile** — `wgpu-hal` resolves them for `crcbl-wgpu` — so
+# naming them here adds features to the build graph and not crates.
+#
+# The alternative was hand-rolled `msg_send!` against a raw pointer, which is
+# the same FFI with the type checking taken out.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
+# `CGSize`, and only `CGSize`: `CAMetalLayer::setDrawableSize:` is how the seam's
+# extent obligation is discharged, and `drawableSize` is how `current_extent` is
+# answered. `CFCGTypes` is the feature the geometry types live behind; `objc2` is
+# what gives them their `Encode` impls, without which they cannot cross a message
+# send at all.
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "CFCGTypes",
+  "objc2",
+] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "std",
   "NSArray",
@@ -133,6 +165,7 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
   "MTLComputePipeline",
   "MTLDepthStencil",
   "MTLDevice",
+  "MTLDrawable",
   "MTLEvent",
   "MTLLibrary",
   "MTLPixelFormat",
@@ -143,6 +176,20 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
   "MTLSampler",
   "MTLTexture",
   "MTLTypes",
+] }
+# `CAMetalLayer` and `CAMetalDrawable`. `CALayer` is not optional beside them —
+# `CAMetalLayer` is declared as a subclass of it, so the type does not exist
+# without it — and it is also where `setOpaque:` lives, which is how
+# `CompositeAlpha::Opaque` is honoured. The two `objc2-*` features name the
+# optional dependencies that make the Metal-facing and geometry-facing halves of
+# the class exist: without them `nextDrawable`, `setDevice:`, `setPixelFormat:`
+# and `drawableSize` are all absent.
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "CALayer",
+  "CAMetalLayer",
+  "objc2-core-foundation",
+  "objc2-metal",
 ] }
 
 [lints]

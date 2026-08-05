@@ -444,7 +444,7 @@ impl MetalDevice {
                 &state.shader_modules,
                 "shader module",
                 entry.module,
-                &self.inner,
+                &*self.inner,
             )?
             .raw
             .clone()
@@ -501,7 +501,7 @@ impl MetalDevice {
             &state.pipeline_layouts,
             "pipeline layout",
             layout,
-            &self.inner,
+            &*self.inner,
         )?;
         Ok(())
     }
@@ -509,22 +509,22 @@ impl MetalDevice {
     /// Removes a pipeline-family object from its pool.
     pub(crate) fn destroy_shader_module_impl(&self, module: ShaderModuleHandle) {
         let mut state = self.state();
-        crate::device::take_owned(&mut state.shader_modules, module, &self.inner);
+        crate::device::take_owned(&mut state.shader_modules, module, &*self.inner);
     }
 
     pub(crate) fn destroy_pipeline_layout_impl(&self, layout: PipelineLayoutHandle) {
         let mut state = self.state();
-        crate::device::take_owned(&mut state.pipeline_layouts, layout, &self.inner);
+        crate::device::take_owned(&mut state.pipeline_layouts, layout, &*self.inner);
     }
 
     pub(crate) fn destroy_graphics_pipeline_impl(&self, pipeline: GraphicsPipelineHandle) {
         let mut state = self.state();
-        crate::device::take_owned(&mut state.graphics_pipelines, pipeline, &self.inner);
+        crate::device::take_owned(&mut state.graphics_pipelines, pipeline, &*self.inner);
     }
 
     pub(crate) fn destroy_compute_pipeline_impl(&self, pipeline: ComputePipelineHandle) {
         let mut state = self.state();
-        crate::device::take_owned(&mut state.compute_pipelines, pipeline, &self.inner);
+        crate::device::take_owned(&mut state.compute_pipelines, pipeline, &*self.inner);
     }
 }
 

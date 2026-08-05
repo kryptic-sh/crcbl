@@ -1,9 +1,10 @@
 //! The Metal [`Instance`] implementation — adapter enumeration, device
 //! creation, and the refusals that still name themselves.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
+use crcbl_core::Pool;
 use crcbl_hal::{
     AdapterId, AdapterInfo, BackendKind, DeviceDesc, DeviceRequestState, HalError, Instance,
     PendingDevice, SurfaceCaps, SurfaceHandle, SurfaceTarget,
@@ -13,7 +14,8 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLCopyAllDevices, MTLDevice};
 
 use crate::adapter;
-use crate::device::MetalDevice;
+use crate::device::{MetalDevice, Owner, device_tag, lookup};
+use crate::swapchain::SurfaceEntry;
 
 /// Process-wide source of owner ids.
 ///
@@ -67,14 +69,75 @@ impl core::fmt::Debug for AdapterRecord {
 /// and it is guaranteed by the `Arc` rather than by a rule anyone has to
 /// follow.
 ///
-/// There is no instance-level owner id here. Obligation 3 splits ownership two
-/// ways — surfaces are checked against the *instance*, everything else against
-/// the *device* — and this instance issues no surfaces, so an instance id would
-/// be a field nothing compares. The surface slice adds it along with the
-/// surfaces it has to check.
-#[derive(Debug)]
+/// Obligation 3 splits ownership two ways — surfaces are checked against the
+/// *instance*, everything else against the *device* — so the surface slice
+/// brought the instance's own id and tag with the surfaces they identify. They
+/// are the same pair a device carries and are compared the same way; see
+/// `crcbl_mtl::device`'s handle-tagging section for why the owner id alone is
+/// not enough.
 pub(crate) struct InstanceInner {
     pub(crate) adapters: Vec<AdapterRecord>,
+    pub(crate) id: u64,
+    /// This instance's stamp on every surface handle it issues. Never zero.
+    tag: u32,
+    /// The surfaces this instance has issued. One lock, for the reason
+    /// `crcbl_mtl::device` gives for its own: a surface is created once per
+    /// window, so there is no contention to design around and a second lock
+    /// would only add an ordering to get wrong.
+    surfaces: Mutex<Pool<SurfaceEntry>>,
+}
+
+// SAFETY: `Instance` requires `HalThreadSafe`, and this type held only
+// `MTLDevice` objects — declared `Send + Sync` upstream — until the surface
+// slice put a `CAMetalLayer` in `surfaces`. The argument for that object is the
+// one `crcbl_mtl::device`'s marker impls make in full: every access is under
+// this `Mutex`, the only selectors this crate ever sends a layer are the
+// Metal-facing ones, no `NSView`/`NSWindow`/`NSScreen` is ever reached from
+// here, and Objective-C reference counting is atomic. It is deliberately not
+// widened past that — `Instance::create_surface` still requires the window's
+// own thread, and this crate does not claim otherwise.
+unsafe impl Send for InstanceInner {}
+// SAFETY: as above.
+unsafe impl Sync for InstanceInner {}
+
+impl core::fmt::Debug for InstanceInner {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("InstanceInner")
+            .field("id", &self.id)
+            .field("adapters", &self.adapters.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Owner for InstanceInner {
+    fn owner_id(&self) -> u64 {
+        self.id
+    }
+
+    fn tag(&self) -> u32 {
+        self.tag
+    }
+}
+
+impl InstanceInner {
+    pub(crate) fn surfaces(&self) -> MutexGuard<'_, Pool<SurfaceEntry>> {
+        self.surfaces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether `surface` is one this instance issued, without saying anything
+    /// about what it is.
+    ///
+    /// [`Instance::request_device`]'s
+    /// [`compatible_surface`](DeviceDesc::compatible_surface) is the only
+    /// caller: on Metal every device can present to every surface (see
+    /// `crcbl_mtl::swapchain`), so the question is purely obligation 3's — is
+    /// this handle ours — and the answer is [`lookup`]'s three-way one.
+    fn check_surface(&self, surface: SurfaceHandle) -> Result<(), HalError> {
+        let surfaces = self.surfaces();
+        lookup(&surfaces, "surface", surface, self).map(|_| ())
+    }
 }
 
 /// Every Metal device on the machine, described before any of them is opened.
@@ -85,7 +148,7 @@ pub(crate) struct InstanceInner {
 /// crate docs for why none of it needs an `unsafe` marker.
 #[derive(Debug)]
 pub struct MetalInstance {
-    inner: Arc<InstanceInner>,
+    pub(crate) inner: Arc<InstanceInner>,
 }
 
 impl MetalInstance {
@@ -124,8 +187,14 @@ impl MetalInstance {
             log::warn!("crcbl-mtl: the system reports no Metal device");
             return None;
         }
+        let id = next_owner_id();
         Some(Self {
-            inner: Arc::new(InstanceInner { adapters }),
+            inner: Arc::new(InstanceInner {
+                adapters,
+                id,
+                tag: device_tag(id),
+                surfaces: Mutex::new(Pool::new()),
+            }),
         })
     }
 
@@ -164,10 +233,13 @@ impl MetalInstance {
             return Err(HalError::UnsupportedFeatures { missing });
         }
         if let Some(surface) = desc.compatible_surface {
-            // Not `ForeignObject`: this instance has issued no surface at all
-            // (`create_surface` refuses), so every handle offered here is one
-            // that never resolved rather than one belonging to somebody else.
-            return Err(HalError::invalid_handle("surface", surface));
+            // Obligation 3's instance half, and the whole of what this check
+            // can be on Metal: a surface from *this* instance is compatible
+            // with every device opened from it, because presenting is
+            // `setDevice:` and there is no per-device support query to fail.
+            // What is left is telling a stale handle from another instance's,
+            // which is exactly what `lookup` answers.
+            self.inner.check_surface(surface)?;
         }
         MetalDevice::open(Arc::clone(&self.inner), record, desc)
     }
@@ -186,39 +258,31 @@ impl Instance for MetalInstance {
             .collect()
     }
 
-    unsafe fn create_surface(&self, _target: &SurfaceTarget) -> Result<SurfaceHandle, HalError> {
-        // Nothing is dereferenced, so the trait's safety contract is discharged
-        // trivially here — this slice creates no `CAMetalLayer` binding and
-        // never reads `target`. The surface slice is where obligation 1 (the
-        // handles really are what they say) starts to matter.
-        Err(Self::not_yet("surface creation (the Metal surface slice)"))
+    /// Creates a surface from a `CAMetalLayer`, or from nothing at all for
+    /// [`SurfaceTarget::Offscreen`]. See `crcbl_mtl::swapchain`.
+    ///
+    /// # Safety
+    ///
+    /// The trait's contract, discharged in `crcbl_mtl::swapchain`'s
+    /// `create_surface_impl`, which is where the `CAMetalLayer` pointer is
+    /// actually retained.
+    unsafe fn create_surface(&self, target: &SurfaceTarget) -> Result<SurfaceHandle, HalError> {
+        // SAFETY: forwarded verbatim — this function adds no assumption of its
+        // own, and the callee documents the same three obligations the trait
+        // does.
+        unsafe { self.create_surface_impl(target) }
     }
 
-    fn destroy_surface(&self, _surface: SurfaceHandle) {
-        // A no-op that cannot be reached with a live handle: `create_surface`
-        // above never returns one, so this instance has issued no surface for a
-        // caller to destroy. The signature returns `()` and so has no way to
-        // report that, which is precisely why the refusal lives in
-        // `create_surface` — a caller cannot get far enough to need one here.
+    fn destroy_surface(&self, surface: SurfaceHandle) {
+        self.destroy_surface_impl(surface);
     }
 
     fn surface_caps(
         &self,
-        _surface: SurfaceHandle,
-        _adapter: AdapterId,
+        surface: SurfaceHandle,
+        adapter: AdapterId,
     ) -> Result<SurfaceCaps, HalError> {
-        // Deliberately refused before either argument is checked. The trait
-        // documents `InvalidHandle` for a stale surface and `NoSuchAdapter` for
-        // an unknown adapter, and neither branch is reachable: no
-        // `SurfaceHandle` exists, so every handle is stale and the adapter check
-        // could only ever be answering about a surface that was never made.
-        //
-        // What must never happen here is the failure the trait calls out by
-        // name — reporting a non-presentable adapter as empty `formats` or empty
-        // `present_modes`. This slice cannot present at all, so it says so.
-        Err(Self::not_yet(
-            "surface capability queries (the Metal surface slice)",
-        ))
+        self.surface_caps_impl(surface, adapter)
     }
 
     /// Opens the device *now* and hands it over on the first poll.
@@ -469,8 +533,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// A device asked to be compatible with a surface is refused on the
-    /// surface, not on the device — no surface exists to be compatible with.
+    /// A device asked to be compatible with a handle nobody issued is refused
+    /// on the surface, not on the device.
+    ///
+    /// The surface slice made the other half of this real —
+    /// `a_device_opens_against_its_own_instances_surface` in
+    /// `crcbl_mtl::swapchain` is the case where a live surface is accepted — so
+    /// what is left here is the handle that never resolved.
     #[test]
     fn a_compatible_surface_is_refused_as_an_unresolvable_handle() {
         let instance = open();
@@ -478,32 +547,60 @@ pub(crate) mod tests {
         assert!(!adapters.is_empty(), "nothing to check");
 
         let mut with_surface = desc(adapters[0].id);
-        // `create_surface` issues nothing, so any handle at all is one that
-        // never resolved. `Handle::from_bits` is the only way to build one.
+        // `Handle::from_bits` is the only way to build a handle no instance
+        // issued, and it carries no owner tag, so it is stale rather than
+        // foreign.
         with_surface.compatible_surface =
             Some(crcbl_core::Handle::from_bits(1 << 32).expect("generation 1 is non-zero"));
 
         let error = instance
             .request_device(&with_surface)
-            .expect_err("no surface handle can resolve on this backend");
+            .expect_err("no instance issued that handle");
         assert!(
             matches!(error, HalError::InvalidHandle { kind, .. } if kind == "surface"),
             "{error:?}"
         );
     }
 
-    /// Surfaces are refused in the same voice, including the offscreen target
-    /// that needs no window at all.
+    /// The targets this backend has no window system for are refused by name,
+    /// and the refusal says which backend is speaking.
+    ///
+    /// `Offscreen` and `AppKit` are **not** here any more — the surface slice
+    /// implements both, and `crcbl_mtl::swapchain`'s tests cover them. What is
+    /// left is the three platforms Metal genuinely is not, and a wildcard arm
+    /// added to `create_surface_impl` would make this pass while quietly
+    /// swallowing a new one.
     #[test]
-    fn surfaces_are_refused_and_the_refusal_names_metal() {
+    fn the_platforms_metal_is_not_are_refused_by_name() {
         let instance = open();
-        // SAFETY: `SurfaceTarget::Offscreen` names no platform object, so the
-        // trait's obligations about live handles are vacuous for it.
-        let error = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
-            .expect_err("this slice creates no surfaces");
-        let text = error.to_string();
-        assert!(text.contains("metal"), "{text}");
-        assert!(text.contains("surface creation"), "{text}");
+        let dangling = core::ptr::NonNull::dangling();
+        let elsewhere = [
+            SurfaceTarget::Wayland {
+                display: dangling,
+                surface: dangling,
+            },
+            SurfaceTarget::Xcb {
+                connection: dangling,
+                window: 1,
+                visual_id: 2,
+            },
+            SurfaceTarget::Win32 {
+                hinstance: dangling,
+                hwnd: dangling,
+            },
+            SurfaceTarget::Web { canvas_id: 0 },
+        ];
+        for target in elsewhere {
+            // SAFETY: every arm below is refused before the target is read —
+            // `create_surface_impl` matches on the variant and returns — so the
+            // dangling pointers are never dereferenced. That is what makes it
+            // safe to name a platform this backend does not implement.
+            let error = unsafe { instance.create_surface(&target) }
+                .expect_err("Metal has no window system but macOS's");
+            let text = error.to_string();
+            assert!(text.contains("metal"), "{target:?}: {text}");
+            assert!(text.contains("surfaces"), "{target:?}: {text}");
+        }
     }
 
     /// Obligation 1, made observable: the device must survive its instance

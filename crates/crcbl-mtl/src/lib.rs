@@ -31,8 +31,22 @@
 //! clear's. `crcbl_mtl::pipeline` is where that all lives, and where the split
 //! of Metal's pipeline state across the object and the encoder is argued.
 //!
+//! **The surface slice is what makes macOS usable at all**, since
+//! `docs/backlog.md`'s 2026-08-05 decision leaves Apple platforms with no other
+//! GPU path. `Instance::create_surface` takes the shell's `CAMetalLayer`
+//! straight from [`SurfaceTarget::AppKit`](crcbl_core::SurfaceTarget::AppKit),
+//! `surface_caps` answers from the layer, and `create_swapchain` /
+//! `acquire_next_frame` / `present` map onto `setDrawableSize:`,
+//! `nextDrawable` and `MTLCommandBuffer::presentDrawable:`.
+//! [`SurfaceTarget::Offscreen`](crcbl_core::SurfaceTarget::Offscreen) is a ring
+//! of plain textures through the *same* acquire/present path, which is what
+//! `crcbl screenshot` uses and — needing neither a window server nor a shader —
+//! is the half CI can execute end to end. `crcbl_mtl::swapchain` is where all of
+//! it lives, along with the sRGB argument, the extent rule and the reason a
+//! Metal acquire hands back no semaphores.
+//!
 //! What is still refused, with `what` naming the slice it will arrive in:
-//! surfaces and swapchains, **bind groups and everything that needs one** —
+//! **bind groups and everything that needs one** —
 //! bind group layouts, a pipeline layout that names any, push constants — query
 //! sets, indexed and indirect draws, and compute dispatches. The bind-group gap
 //! is the one with a visible consequence: a pipeline can be built here only
@@ -99,8 +113,10 @@
 //! `pub unsafe trait MTLDevice: NSObjectProtocol + Send + Sync`, so
 //! `Retained<ProtocolObject<dyn MTLDevice>>` picks the markers up upstream
 //! rather than each user asserting them. That is still true, and it is why
-//! `MetalInstance` — which holds `MTLDevice` objects and owned `AdapterInfo`
-//! and nothing else — needs no `unsafe` of its own.
+//! `MetalInstance` — which held `MTLDevice` objects and owned `AdapterInfo` and
+//! nothing else — needed no `unsafe` of its own until the surface slice put a
+//! `CAMetalLayer` in its table. See below for that one, which is deliberately
+//! the narrowest of the three.
 //!
 //! **It does not extend to resources, and MTL1's guess that the device slice
 //! "will not need a marker impl" was wrong.** `MTLBuffer` and `MTLTexture` are
@@ -125,6 +141,24 @@
 //! thread at a time" rule for a command buffer, and the only `&self` method is
 //! `Debug::fmt`, which touches no Objective-C object at all.
 //!
+//! ## The Core Animation one, which is narrower again
+//!
+//! The surface slice put a `CAMetalLayer` in the instance's surface table and a
+//! `CAMetalDrawable` in the device's swapchain table, so `instance.rs` now
+//! carries a marker impl too. Exclusion is the same lock argument as above; the
+//! part that is *not* about exclusion is **thread affinity**, and it is
+//! discharged by what this crate does not do rather than by a claim about Core
+//! Animation. The only selectors it ever sends a layer are the Metal-facing ones
+//! — `setDevice:`, `setPixelFormat:`, `setDrawableSize:`, `nextDrawable` and
+//! their neighbours — and **no `NSView`, `NSWindow` or `NSScreen` is reached
+//! from anywhere in this crate**. Those are the genuinely main-thread-only
+//! objects that `crcbl_core::surface`'s thread-safety note is about, and nothing
+//! here walks a layer's `superlayer` or `delegate` to find one.
+//!
+//! The claim is not widened past that. `Instance::create_surface` still requires
+//! the window's own thread, exactly as the seam says, and this crate does not
+//! pretend otherwise.
+//!
 //! # Handles are generational, and they carry their device
 //!
 //! Resources are [`Pool`](crcbl_core::Pool) entries and the seam's
@@ -138,6 +172,13 @@
 //! matching. The issuing device's tag therefore rides in the top byte of the
 //! handle's index, exactly as it does in `crcbl-vk`, which arrived at the same
 //! scheme from the same bug.
+//!
+//! The surface slice generalised that rather than copying it: obligation 3
+//! checks a surface against the *instance* and everything else against the
+//! *device*, so `MetalInstance` now carries an id and a tag of its own and both
+//! owners share one lookup path. Two instances issue bit-identical surface
+//! handles for the same reason two devices do, and the tag is what separates
+//! them.
 //!
 //! # Tier: this slice still reports **Tier B**, and that is not a claim about
 //! Metal
@@ -198,6 +239,8 @@ mod fault;
 mod instance;
 #[cfg(target_os = "macos")]
 mod pipeline;
+#[cfg(target_os = "macos")]
+mod swapchain;
 
 #[cfg(target_os = "macos")]
 pub use device::MetalDevice;

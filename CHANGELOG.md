@@ -124,6 +124,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `[[vertex_id]]` triangle instead, generated from the same constant the
   assertion uses so the two cannot drift.
 
+- **`crcbl-mtl`** presents. Its fifth slice adds surfaces over `CAMetalLayer`
+  for `SurfaceTarget::AppKit`, an offscreen image ring for
+  `SurfaceTarget::Offscreen`, and the whole swapchain half of the seam —
+  `surface_caps`, create / reconfigure / destroy, `acquire_next_frame` and
+  `present`. **macOS now has a native GPU path from window to pixel**, which
+  since the 2026-08-05 platform decision it otherwise did not have at all.
+
+  **The offscreen ring is the half CI can actually run**, and it does: acquire →
+  render-pass clear → barrier → blit → submit → present → readback, with the
+  exact texels asserted, on the runner's real (if paravirtual) device. Acquiring
+  a `CAMetalLayer` drawable needs a display, so that one test is gated behind
+  `mtl-e2e` like the triangle.
+
+  **No semaphore is created for WSI, and that is Metal's shape rather than a
+  shortcut.** `nextDrawable` blocks the CPU and returns a ready texture, so
+  there is no presentation-engine signal to reconcile: `acquire_semaphore` and
+  `present_semaphore` are both `None`, the implicit-acquire form the seam
+  already documents for `crcbl-wgpu`. Presenting goes through
+  `MTLCommandBuffer::presentDrawable:` rather than `MTLDrawable::present`, which
+  would hand the drawable over while the GPU may still be writing it.
+
+  A layer is offered `Bgra8UnormSrgb` first and **never the RGBA8 pair** —
+  `CAMetalLayer::pixelFormat` raises on RGBA8 — so `preferred_format` lands on
+  an sRGB format the layer will actually accept. A test reads the format back
+  off the layer and pins it against the conversion table, because the value that
+  would make it false is `BGRA8Unorm`: exactly the missing-encode bug that made
+  the browser build render too dark.
+
 - **`crcbl-shaders`** now emits **MSL** beside the SPIR-V and WGSL. Slang's
   `-target metal` output is committed as `msl/*.metal`, hashed into
   `spirv/manifest.txt` exactly like the other two, verified by `build.rs` on

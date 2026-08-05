@@ -75,6 +75,32 @@ pub(crate) trait Owned {
     fn owner(&self) -> u64;
 }
 
+/// Anything that owns an object table: a device, or — since the surface slice —
+/// the instance.
+///
+/// Obligation 3 splits ownership two ways, checking surfaces against the
+/// *instance* and everything else against the *device*, and both halves need
+/// the same two facts and the same three-way answer (mine, somebody else's,
+/// nobody's). This is that pair, so [`lookup`] and friends are written once
+/// rather than once per owner.
+pub(crate) trait Owner {
+    /// The id every entry in this owner's tables is stamped with.
+    fn owner_id(&self) -> u64;
+    /// The tag this owner stamps into the handles it issues. Never zero; see
+    /// the handle-tagging section below.
+    fn tag(&self) -> u32;
+}
+
+impl Owner for DeviceInner {
+    fn owner_id(&self) -> u64 {
+        self.id
+    }
+
+    fn tag(&self) -> u32 {
+        self.tag
+    }
+}
+
 macro_rules! owned {
     ($($ty:ty),+ $(,)?) => {
         $(impl Owned for $ty {
@@ -109,12 +135,20 @@ struct BufferEntry {
 /// because [`Extent3d::depth_or_layers`](crcbl_hal::Extent3d::depth_or_layers)
 /// is a depth for a volume and a layer count for everything else, and a copy
 /// region has to be built the right way round.
+///
+/// `swapchain_owned` is what stops [`Device::destroy_image`] freeing a row the
+/// swapchain still hands out. The seam says an
+/// [`AcquiredFrame::image`](crcbl_hal::AcquiredFrame::image) is the swapchain's,
+/// and a caller that destroys one anyway must get a no-op rather than a ring
+/// with a hole in it — `crcbl_mtl::swapchain` owns both the flag and every path
+/// that removes such a row.
 #[derive(Debug)]
 struct ImageEntry {
     owner: u64,
     raw: Retained<ProtocolObject<dyn MTLTexture>>,
     format: Format,
     image_type: ImageType,
+    swapchain_owned: bool,
 }
 
 /// A texture view, and the format it reinterprets its image as.
@@ -123,11 +157,16 @@ struct ImageEntry {
 /// attachment has a stencil plane to attach at all — a question the view's own
 /// `MTLPixelFormat` could answer too, but only by a second mapping table
 /// running backwards.
+///
+/// `swapchain_owned` is [`ImageEntry`]'s flag, for the same reason: the seam
+/// says "do not destroy it" about [`AcquiredFrame::view`](crcbl_hal::AcquiredFrame::view)
+/// too.
 #[derive(Debug)]
 struct ViewEntry {
     owner: u64,
     raw: Retained<ProtocolObject<dyn MTLTexture>>,
     format: Format,
+    swapchain_owned: bool,
 }
 
 /// A sampler state.
@@ -218,6 +257,10 @@ owned!(
     ReadbackEntry,
 );
 
+/// A semaphore resolved to what a GPU-side wait needs: the event, and the value
+/// to wait for.
+pub(crate) type ResolvedWait = (Retained<ProtocolObject<dyn MTLEvent>>, u64);
+
 /// Every table the device owns, behind one lock.
 #[derive(Debug, Default)]
 pub(crate) struct DeviceState {
@@ -234,6 +277,9 @@ pub(crate) struct DeviceState {
     pub(crate) pipeline_layouts: Pool<crate::pipeline::PipelineLayoutEntry>,
     pub(crate) graphics_pipelines: Pool<crate::pipeline::GraphicsPipelineEntry>,
     pub(crate) compute_pipelines: Pool<crate::pipeline::ComputePipelineEntry>,
+    /// The surface slice's one table; `crcbl_mtl::swapchain` owns its entries
+    /// and every call that touches them.
+    pub(crate) swapchains: Pool<crate::swapchain::SwapchainEntry>,
     /// The last command buffer of the most recent submission, retained.
     ///
     /// This is the whole of this backend's completion tracking, and it is one
@@ -254,9 +300,15 @@ pub(crate) struct ResolvedImage {
 /// The device's shared state.
 pub(crate) struct DeviceInner {
     /// Obligation 1: a `Device` may outlive its `Instance`, so the instance's
-    /// state — on Metal, the enumerated `MTLDevice` objects — is kept alive
-    /// here rather than borrowed. See [`InstanceInner`].
-    _instance: Arc<InstanceInner>,
+    /// state — on Metal, the enumerated `MTLDevice` objects and, since the
+    /// surface slice, the surface table — is kept alive here rather than
+    /// borrowed. See [`InstanceInner`].
+    ///
+    /// It stopped being write-only with surfaces: `create_swapchain` resolves a
+    /// [`SurfaceHandle`](crcbl_hal::SurfaceHandle) through it, which is how
+    /// obligation 3's instance half — a surface from another instance is
+    /// [`HalError::ForeignObject`] — is checked at all.
+    pub(crate) instance: Arc<InstanceInner>,
     pub(crate) raw: Retained<ProtocolObject<dyn MTLDevice>>,
     /// The one queue. Metal has a single `MTLCommandQueue` type and no queue
     /// families, which is exactly why the seam's enum is named
@@ -310,6 +362,33 @@ pub(crate) struct DeviceInner {
 //   upstream — so the events are not why this impl exists either; they are
 //   named here only so the next reader does not have to re-derive that.
 //
+// MTL5 added two more, and they are the ones worth being careful about because
+// they are **Core Animation** objects rather than Metal ones:
+//
+// * **`CAMetalLayer`**, cloned into every swapchain entry, and
+// * **`CAMetalDrawable`**, held between an acquire and its present.
+//
+//   Both live in `state` and every access is under the `Mutex`, so the
+//   exclusion half is the same argument as above. The half that is *not* about
+//   exclusion is thread affinity, and it is discharged by what this crate does
+//   not do: the only messages it ever sends a layer are the Metal-facing ones —
+//   `setDevice:`, `setPixelFormat:`, `setFramebufferOnly:`, `setOpaque:`,
+//   `setMaximumDrawableCount:`, `setDisplaySyncEnabled:`, `setDrawableSize:`,
+//   `setName:`, `drawableSize` and `nextDrawable` — plus `texture` and
+//   `presentDrawable:` on a drawable. **No `NSView`, `NSWindow` or `NSScreen`
+//   is ever reached**, and nothing walks a layer's `superlayer` or `delegate`
+//   to find one; those are the genuinely main-thread-only objects, and touching
+//   one off the main thread is what `crcbl_core::surface`'s thread-safety note
+//   is about. Rendering to a `CAMetalLayer` from a thread other than the main
+//   one is the ordinary Metal arrangement, and `wgpu-hal`'s Metal backend makes
+//   the same assertion about the same object for the same reason.
+//
+//   The claim is deliberately **not** widened past that: the seam still
+//   requires `create_surface` to be called from the window's own thread
+//   (`Instance::create_surface` obligation 3), because retaining the layer is a
+//   message send to an object the shell may still be constructing, and nothing
+//   here can know that it is not.
+//
 // Apple documents `MTLDevice` and the objects created from it as safe to use
 // from multiple threads; the two impls below narrow that to the accesses this
 // crate actually performs.
@@ -355,8 +434,13 @@ const POOL_INDEX_MASK: u32 = (1 << DEVICE_TAG_SHIFT) - 1;
 /// hand-made or un-stamped handle is foreign to every device.
 const DEVICE_TAG_COUNT: u64 = (u32::MAX >> DEVICE_TAG_SHIFT) as u64;
 
-/// The tag a device with this owner id stamps into its handles. Never zero.
-fn device_tag(id: u64) -> u32 {
+/// The tag an owner with this id stamps into its handles. Never zero.
+///
+/// Instances take one from the same counter as devices, and the two ranges
+/// deliberately overlap: a surface handle is only ever looked up in an
+/// instance's surface pool and an image handle only ever in a device's image
+/// pool, so a shared tag value cannot make one resolve in the other.
+pub(crate) fn device_tag(id: u64) -> u32 {
     #[allow(clippy::cast_possible_truncation)]
     {
         1 + (id % DEVICE_TAG_COUNT) as u32
@@ -397,14 +481,39 @@ const fn queue_index(kind: QueueKind) -> u32 {
     }
 }
 
-/// Decodes a handle for `inner`'s pools, or says why it is not one.
-fn local_handle<E, M>(
+/// Stamps `owner`'s tag into a handle its pool just issued.
+///
+/// Every handle that crosses the seam goes through here; every handle that
+/// comes back goes through [`local_handle`]. A pool index too large to carry
+/// the tag gets tag `0`, which resolves nowhere — the object leaks until the
+/// owner is dropped, which is far better than a handle that might resolve to
+/// another owner's object. It takes more live objects of one kind than
+/// [`POOL_INDEX_MASK`] admits to reach.
+pub(crate) fn stamp<A, B>(owner: &impl Owner, handle: Handle<A>) -> Handle<B> {
+    let index = handle.index();
+    let tag = if index > POOL_INDEX_MASK {
+        log::error!(
+            "crcbl-mtl: pool index {index} is too large to carry an owner tag; issuing a handle \
+             that resolves nowhere rather than one that might resolve to another device's object"
+        );
+        0
+    } else {
+        owner.tag()
+    };
+    Handle::from_bits(
+        (u64::from(handle.generation()) << 32) | u64::from((tag << DEVICE_TAG_SHIFT) | index),
+    )
+    .unwrap_or_else(|| unreachable!("a handle's generation is never zero"))
+}
+
+/// Decodes a handle for `owner`'s pools, or says why it is not one.
+pub(crate) fn local_handle<E, M>(
     kind: &'static str,
     handle: Handle<M>,
-    inner: &DeviceInner,
+    owner: &impl Owner,
 ) -> Result<Handle<E>, HalError> {
     let tag = handle_tag(handle);
-    if tag == inner.tag {
+    if tag == owner.tag() {
         return Ok(untag(handle));
     }
     // Tag zero was never issued by any device — a hand-made handle, or one
@@ -421,16 +530,16 @@ fn local_handle<E, M>(
     })
 }
 
-/// Resolves a handle against a pool and its owning device.
+/// Resolves a handle against a pool and its owner.
 pub(crate) fn lookup<'p, E: Owned, M>(
     pool: &'p Pool<E>,
     kind: &'static str,
     handle: Handle<M>,
-    inner: &DeviceInner,
+    owner: &impl Owner,
 ) -> Result<&'p E, HalError> {
-    let local = local_handle(kind, handle, inner)?;
+    let local = local_handle(kind, handle, owner)?;
     match pool.get(local) {
-        Some(entry) if entry.owner() == inner.id => Ok(entry),
+        Some(entry) if entry.owner() == owner.owner_id() => Ok(entry),
         Some(_) => Err(HalError::ForeignObject {
             kind,
             bits: handle.to_bits(),
@@ -439,26 +548,59 @@ pub(crate) fn lookup<'p, E: Owned, M>(
     }
 }
 
-/// Removes a handle from `pool`, but **only** if this device owns it.
+/// [`lookup`], for the tables an operation has to modify — which since the
+/// surface slice means swapchains, whose acquire cursor and outstanding
+/// drawable both move.
+pub(crate) fn lookup_mut<'p, E: Owned, M>(
+    pool: &'p mut Pool<E>,
+    kind: &'static str,
+    handle: Handle<M>,
+    owner: &impl Owner,
+) -> Result<&'p mut E, HalError> {
+    let local = local_handle(kind, handle, owner)?;
+    let owner_id = owner.owner_id();
+    match pool.get(local) {
+        Some(entry) if entry.owner() == owner_id => {}
+        Some(_) => {
+            return Err(HalError::ForeignObject {
+                kind,
+                bits: handle.to_bits(),
+            });
+        }
+        None => return Err(HalError::invalid_handle(kind, handle)),
+    }
+    pool.get_mut(local)
+        .ok_or_else(|| HalError::invalid_handle(kind, handle))
+}
+
+/// Removes a handle from `pool` and hands the entry back, but **only** if
+/// `owner` owns it.
 ///
 /// The order is the point: removing first and checking the owner afterwards
 /// would already have dropped the entry, so a foreign handle that happened to
-/// resolve would destroy this device's own unrelated object.
+/// resolve would destroy this owner's own unrelated object.
+pub(crate) fn remove_owned<E: Owned, M>(
+    pool: &mut Pool<E>,
+    handle: Handle<M>,
+    owner: &impl Owner,
+) -> Option<E> {
+    let local = local_handle::<E, M>("object", handle, owner).ok()?;
+    if !pool
+        .get(local)
+        .is_some_and(|entry| entry.owner() == owner.owner_id())
+    {
+        return None;
+    }
+    pool.remove(local)
+}
+
+/// [`remove_owned`] for the callers that only need to know whether it happened.
 pub(crate) fn take_owned<E: Owned, M>(
     pool: &mut Pool<E>,
     handle: Handle<M>,
-    inner: &DeviceInner,
+    owner: &impl Owner,
 ) -> bool {
-    let Ok(local) = local_handle::<E, M>("object", handle, inner) else {
-        return false;
-    };
-    if !pool
-        .get(local)
-        .is_some_and(|entry| entry.owner() == inner.id)
-    {
-        return false;
-    }
-    pool.remove(local).is_some()
+    remove_owned(pool, handle, owner).is_some()
 }
 
 /// The Metal implementation of [`Device`].
@@ -506,7 +648,7 @@ impl MetalDevice {
         let caps = record.info.caps;
         let id = next_owner_id();
         let inner = Arc::new(DeviceInner {
-            _instance: instance,
+            instance,
             raw,
             queue,
             caps,
@@ -528,7 +670,82 @@ impl MetalDevice {
 
     /// Stamps this device's tag into a handle its pools just issued.
     pub(crate) fn stamp<A, B>(&self, handle: Handle<A>) -> Handle<B> {
-        self.inner.stamp(handle)
+        stamp(&*self.inner, handle)
+    }
+
+    /// Registers the drawable a `nextDrawable` just handed back as an image and
+    /// a whole-image view, and hands their two handles to the swapchain.
+    ///
+    /// **The view's texture is the drawable's own.** Metal has no separate view
+    /// object — `newTextureViewWithPixelFormat:…` returns another `MTLTexture` —
+    /// and the seam wants "a whole-image view of the image, in the swapchain's
+    /// format", which the drawable's texture already is. Cutting a view would
+    /// allocate an object per frame and additionally require
+    /// `MTLTextureUsagePixelFormatView` on a texture Core Animation, not this
+    /// backend, created.
+    pub(crate) fn insert_drawable_rows(
+        &self,
+        state: &mut DeviceState,
+        texture: &Retained<ProtocolObject<dyn MTLTexture>>,
+        format: Format,
+    ) -> (ImageHandle, ImageViewHandle) {
+        let image = state.images.insert(ImageEntry {
+            owner: self.inner.id,
+            raw: texture.clone(),
+            format,
+            image_type: ImageType::D2,
+            swapchain_owned: true,
+        });
+        let view = state.views.insert(ViewEntry {
+            owner: self.inner.id,
+            raw: texture.clone(),
+            format,
+            swapchain_owned: true,
+        });
+        (self.stamp(image), self.stamp(view))
+    }
+
+    /// Marks a ring image and its view as the swapchain's, so
+    /// [`Device::destroy_image`] and [`Device::destroy_image_view`] leave them
+    /// alone.
+    pub(crate) fn mark_swapchain_owned(&self, image: ImageHandle, view: ImageViewHandle) {
+        let mut state = self.state();
+        if let Ok(local) = local_handle::<ImageEntry, _>("image", image, &*self.inner)
+            && let Some(entry) = state.images.get_mut(local)
+        {
+            entry.swapchain_owned = true;
+        }
+        if let Ok(local) = local_handle::<ViewEntry, _>("image view", view, &*self.inner)
+            && let Some(entry) = state.views.get_mut(local)
+        {
+            entry.swapchain_owned = true;
+        }
+    }
+
+    /// Removes an image and its view, both of which the swapchain owns.
+    ///
+    /// This and the two below are the only paths that free a `swapchain_owned`
+    /// row, which is what makes the flag a guard rather than a leak:
+    /// `destroy_image` refuses, and none of these consults the flag at all.
+    pub(crate) fn remove_swapchain_rows(
+        &self,
+        state: &mut DeviceState,
+        rows: (ImageHandle, ImageViewHandle),
+    ) {
+        self.remove_swapchain_view(state, rows.1);
+        self.remove_swapchain_image(state, rows.0);
+    }
+
+    /// [`remove_swapchain_rows`](Self::remove_swapchain_rows) for the image
+    /// alone — the state a ring build is in when the *view* is what failed.
+    pub(crate) fn remove_swapchain_image(&self, state: &mut DeviceState, image: ImageHandle) {
+        remove_owned(&mut state.images, image, &*self.inner);
+    }
+
+    /// [`remove_swapchain_rows`](Self::remove_swapchain_rows) for the view
+    /// alone.
+    pub(crate) fn remove_swapchain_view(&self, state: &mut DeviceState, view: ImageViewHandle) {
+        remove_owned(&mut state.views, view, &*self.inner);
     }
 
     /// An empty command buffer: for the waits and signals that have nowhere
@@ -579,30 +796,28 @@ impl DeviceInner {
         })
     }
 
-    /// Stamps this device's tag into a handle its pools just issued.
-    ///
-    /// Every handle that crosses the seam goes through here; every handle that
-    /// comes back goes through [`local_handle`]. A pool index too large to
-    /// carry the tag gets tag `0`, which resolves nowhere — the object leaks
-    /// until the device is dropped, which is far better than a handle that
-    /// might resolve to another device's object. It takes more live objects of
-    /// one kind than [`POOL_INDEX_MASK`] admits to reach.
+    /// Stamps this device's tag into a handle its pools just issued. See
+    /// [`stamp`].
     pub(crate) fn stamp<A, B>(&self, handle: Handle<A>) -> Handle<B> {
-        let index = handle.index();
-        let tag = if index > POOL_INDEX_MASK {
-            log::error!(
-                "crcbl-mtl: pool index {index} is too large to carry a device tag; issuing a \
-                 handle that resolves nowhere rather than one that might resolve to another \
-                 device's object"
-            );
-            0
-        } else {
-            self.tag
-        };
-        Handle::from_bits(
-            (u64::from(handle.generation()) << 32) | u64::from((tag << DEVICE_TAG_SHIFT) | index),
-        )
-        .unwrap_or_else(|| unreachable!("a handle's generation is never zero"))
+        stamp(self, handle)
+    }
+
+    /// The event a GPU-side wait on `handle` has to encode, and the value.
+    ///
+    /// **The value is the highest one *encoded* onto the semaphore**, whichever
+    /// kind it is, and that is not a shortcut for a timeline: the only caller is
+    /// [`Device::present`], and [`PresentInfo::waits`] carries handles with no
+    /// values beside them, so "everything signalled onto this so far" is the
+    /// only thing the seam can be asking for. [`Device::submit`] takes its
+    /// values from the caller instead and does its own monotonicity check; this
+    /// is deliberately not that path.
+    pub(crate) fn semaphore_wait(
+        &self,
+        state: &DeviceState,
+        handle: SemaphoreHandle,
+    ) -> Result<ResolvedWait, HalError> {
+        let entry = lookup(&state.semaphores, "semaphore", handle, self)?;
+        Ok((entry.raw.clone(), entry.encoded))
     }
 
     /// The `MTLBuffer` a handle names, cloned so the lock can be released
@@ -741,7 +956,7 @@ impl Device for MetalDevice {
 
     fn destroy_buffer(&self, buffer: BufferHandle) {
         let mut state = self.state();
-        take_owned(&mut state.buffers, buffer, &self.inner);
+        take_owned(&mut state.buffers, buffer, &*self.inner);
     }
 
     /// Copies `data` into a host-visible buffer.
@@ -771,7 +986,7 @@ impl Device for MetalDevice {
     /// at the next command-buffer boundary with no call at all.
     fn write_buffer(&self, buffer: BufferHandle, offset: u64, data: &[u8]) -> Result<(), HalError> {
         let state = self.state();
-        let entry = lookup(&state.buffers, "buffer", buffer, &self.inner)?;
+        let entry = lookup(&state.buffers, "buffer", buffer, &*self.inner)?;
         if !entry.location.is_mappable() {
             return Err(HalError::InvalidDescriptor(format!(
                 "write_buffer needs a host-visible buffer; this one is {:?}, which Metal can \
@@ -843,7 +1058,7 @@ impl Device for MetalDevice {
     /// it, intermittently, on one machine.
     fn request_readback(&self, desc: &ReadbackDesc<'_>) -> Result<ReadbackHandle, HalError> {
         let mut state = self.state();
-        let entry = lookup(&state.buffers, "buffer", desc.buffer, &self.inner)?;
+        let entry = lookup(&state.buffers, "buffer", desc.buffer, &*self.inner)?;
         if entry.location != MemoryLocation::HostReadback {
             return Err(HalError::InvalidDescriptor(format!(
                 "request_readback needs a HostReadback buffer; this one is {:?}",
@@ -863,8 +1078,12 @@ impl Device for MetalDevice {
 
         let wait = match desc.after {
             Some(after) => {
-                let semaphore =
-                    lookup(&state.semaphores, "semaphore", after.semaphore, &self.inner)?;
+                let semaphore = lookup(
+                    &state.semaphores,
+                    "semaphore",
+                    after.semaphore,
+                    &*self.inner,
+                )?;
                 if semaphore.shared.is_none() {
                     return Err(HalError::Unsupported {
                         backend: BackendKind::Metal,
@@ -901,7 +1120,7 @@ impl Device for MetalDevice {
         out: &mut [u8],
     ) -> Result<ReadbackState, HalError> {
         let state = self.state();
-        let entry = lookup(&state.readbacks, "readback", readback, &self.inner)?;
+        let entry = lookup(&state.readbacks, "readback", readback, &*self.inner)?;
         if out.len() as u64 != entry.size {
             return Err(HalError::InvalidDescriptor(format!(
                 "poll_readback needs exactly {} bytes, got {}",
@@ -925,7 +1144,7 @@ impl Device for MetalDevice {
                 // Resolved from the handle stored at request time, so a
                 // semaphore destroyed in between fails lookup here rather than
                 // being dereferenced after its last reference went.
-                let entry = lookup(&state.semaphores, "semaphore", *semaphore, &self.inner)?;
+                let entry = lookup(&state.semaphores, "semaphore", *semaphore, &*self.inner)?;
                 let Some(shared) = entry.shared.as_ref() else {
                     return Err(HalError::Unsupported {
                         backend: BackendKind::Metal,
@@ -943,7 +1162,7 @@ impl Device for MetalDevice {
         // Resolved from the handle stored at request time for the same reason:
         // a buffer destroyed between request and poll fails lookup rather than
         // having its freed `contents` read.
-        let buffer = lookup(&state.buffers, "buffer", entry.buffer, &self.inner)?;
+        let buffer = lookup(&state.buffers, "buffer", entry.buffer, &*self.inner)?;
         let contents = buffer.raw.contents();
         // SAFETY: `contents` covers the whole `Shared` allocation, the range was
         // bounds-checked against `entry.size` at request time and `out.len()`
@@ -965,7 +1184,7 @@ impl Device for MetalDevice {
         // the caller still owns, and the retained command buffer is released
         // with the entry. Dropping the tracking entry is the whole of it.
         let mut state = self.state();
-        take_owned(&mut state.readbacks, readback, &self.inner);
+        take_owned(&mut state.readbacks, readback, &*self.inner);
     }
 
     fn create_image(&self, desc: &ImageDesc<'_>) -> Result<ImageHandle, HalError> {
@@ -1090,13 +1309,34 @@ impl Device for MetalDevice {
             raw,
             format: desc.format,
             image_type: desc.image_type,
+            // The offscreen ring is built through this call and flips the flag
+            // afterwards, so the default here is what a caller's own image is.
+            swapchain_owned: false,
         });
         Ok(self.stamp(handle))
     }
 
+    /// Destroys an image — unless the swapchain owns it.
+    ///
+    /// The seam says an [`AcquiredFrame`] image is the swapchain's and must not
+    /// be destroyed, and this is what makes that a no-op rather than a ring with
+    /// a hole in it. `destroy_*` has no way to report anything, which is why it
+    /// logs.
     fn destroy_image(&self, image: ImageHandle) {
         let mut state = self.state();
-        take_owned(&mut state.images, image, &self.inner);
+        if let Ok(local) = local_handle::<ImageEntry, _>("image", image, &*self.inner)
+            && state
+                .images
+                .get(local)
+                .is_some_and(|entry| entry.owner == self.inner.id && entry.swapchain_owned)
+        {
+            log::warn!(
+                "crcbl-mtl: destroy_image on a swapchain-owned image {image:?}; the swapchain owns \
+                 its images and destroys them with itself, so this is ignored"
+            );
+            return;
+        }
+        take_owned(&mut state.images, image, &*self.inner);
     }
 
     /// Creates a view onto a subrange of an image.
@@ -1108,7 +1348,7 @@ impl Device for MetalDevice {
     /// counts, read back off the object rather than remembered.
     fn create_image_view(&self, desc: &ImageViewDesc<'_>) -> Result<ImageViewHandle, HalError> {
         let mut state = self.state();
-        let entry = lookup(&state.images, "image", desc.image, &self.inner)?;
+        let entry = lookup(&state.images, "image", desc.image, &*self.inner)?;
         // A depth or stencil format has no compatible reinterpretation in
         // Metal — the depth formats are their own class — so the texture was
         // not created with `MTLTextureUsagePixelFormatView` and asking for a
@@ -1170,13 +1410,28 @@ impl Device for MetalDevice {
             owner: self.inner.id,
             raw: view,
             format: desc.format,
+            swapchain_owned: false,
         });
         Ok(self.stamp(handle))
     }
 
+    /// Destroys a view — unless the swapchain owns it. See
+    /// [`destroy_image`](Self::destroy_image).
     fn destroy_image_view(&self, view: ImageViewHandle) {
         let mut state = self.state();
-        take_owned(&mut state.views, view, &self.inner);
+        if let Ok(local) = local_handle::<ViewEntry, _>("image view", view, &*self.inner)
+            && state
+                .views
+                .get(local)
+                .is_some_and(|entry| entry.owner == self.inner.id && entry.swapchain_owned)
+        {
+            log::warn!(
+                "crcbl-mtl: destroy_image_view on a swapchain-owned view {view:?}; the swapchain \
+                 owns its views and reissues them on every reconfigure, so this is ignored"
+            );
+            return;
+        }
+        take_owned(&mut state.views, view, &*self.inner);
     }
 
     fn create_sampler(&self, desc: &SamplerDesc<'_>) -> Result<SamplerHandle, HalError> {
@@ -1249,7 +1504,7 @@ impl Device for MetalDevice {
 
     fn destroy_sampler(&self, sampler: SamplerHandle) {
         let mut state = self.state();
-        take_owned(&mut state.samplers, sampler, &self.inner);
+        take_owned(&mut state.samplers, sampler, &*self.inner);
     }
 
     // --- shaders and pipelines ---
@@ -1398,9 +1653,16 @@ impl Device for MetalDevice {
     /// encodes the next integer, and a submission that waits on it waits for
     /// the one most recently encoded. **So a binary semaphore must be signalled
     /// by an earlier submission than the one that waits on it**, which is how
-    /// the seam says they are used ("the swapchain owns them"). The surface
-    /// slice, which is the only thing that will create one, is where a
-    /// presentation-engine signal has to be reconciled with this.
+    /// the seam says they are used ("the swapchain owns them").
+    ///
+    /// MTL3 left that rule open against WSI acquire, where in Vulkan the
+    /// *presentation engine* signals and no submission does. **The surface
+    /// slice closed it by not needing it:** `nextDrawable` blocks the CPU and
+    /// hands back a ready texture, so `crcbl_mtl::swapchain` creates no
+    /// semaphore at all and hands back `None` for both of
+    /// [`AcquiredFrame`]'s — the implicit-acquire shape the seam documents for
+    /// `crcbl-wgpu`. Nothing here signals a binary semaphore from outside a
+    /// submission, so the rule stands unweakened.
     fn create_semaphore(&self, desc: &SemaphoreDesc<'_>) -> Result<SemaphoreHandle, HalError> {
         let label = desc.label.map(NSString::from_str);
         let (raw, shared) = match desc.kind {
@@ -1449,12 +1711,12 @@ impl Device for MetalDevice {
         // committed submission still has to signal outlives this call by
         // itself.
         let mut state = self.state();
-        take_owned(&mut state.semaphores, semaphore, &self.inner);
+        take_owned(&mut state.semaphores, semaphore, &*self.inner);
     }
 
     fn semaphore_value(&self, semaphore: SemaphoreHandle) -> Result<u64, HalError> {
         let state = self.state();
-        let entry = lookup(&state.semaphores, "semaphore", semaphore, &self.inner)?;
+        let entry = lookup(&state.semaphores, "semaphore", semaphore, &*self.inner)?;
         let Some(shared) = entry.shared.as_ref() else {
             return Err(HalError::Unsupported {
                 backend: BackendKind::Metal,
@@ -1484,7 +1746,7 @@ impl Device for MetalDevice {
         {
             let state = self.state();
             for wait in waits {
-                let entry = lookup(&state.semaphores, "semaphore", wait.semaphore, &self.inner)?;
+                let entry = lookup(&state.semaphores, "semaphore", wait.semaphore, &*self.inner)?;
                 let Some(shared) = entry.shared.as_ref() else {
                     return Err(HalError::Unsupported {
                         backend: BackendKind::Metal,
@@ -1554,7 +1816,7 @@ impl Device for MetalDevice {
         // completes, and it retains every resource it references. The seam
         // requires the caller to have waited anyway.
         let mut state = self.state();
-        take_owned(&mut state.command_buffers, buffer, &self.inner);
+        take_owned(&mut state.command_buffers, buffer, &*self.inner);
     }
 
     /// Commits command buffers to the queue, with the waits before and the
@@ -1621,7 +1883,7 @@ impl Device for MetalDevice {
                 &state.command_buffers,
                 "command buffer",
                 *handle,
-                &self.inner,
+                &*self.inner,
             )?;
             if entry.committed {
                 return Err(HalError::InvalidDescriptor(
@@ -1649,7 +1911,7 @@ impl Device for MetalDevice {
         }
         let mut waits = Vec::with_capacity(submit.waits.len());
         for wait in submit.waits {
-            let entry = lookup(&state.semaphores, "semaphore", wait.semaphore, &self.inner)?;
+            let entry = lookup(&state.semaphores, "semaphore", wait.semaphore, &*self.inner)?;
             // A binary semaphore's value is the one most recently encoded onto
             // it; the seam says its `value` field is ignored.
             let value = if entry.shared.is_some() {
@@ -1682,7 +1944,7 @@ impl Device for MetalDevice {
                 &state.semaphores,
                 "semaphore",
                 signal.semaphore,
-                &self.inner,
+                &*self.inner,
             )?;
             // The floor is the highest value encoded onto this semaphore so
             // far, *including* by an earlier signal in this same submission —
@@ -1753,14 +2015,14 @@ impl Device for MetalDevice {
         // every waiter on it stuck for the life of the process.
         for handle in submit.command_buffers {
             if let Ok(local) =
-                local_handle::<CommandBufferEntry, _>("command buffer", *handle, &self.inner)
+                local_handle::<CommandBufferEntry, _>("command buffer", *handle, &*self.inner)
                 && let Some(entry) = state.command_buffers.get_mut(local)
             {
                 entry.committed = true;
             }
         }
         for (handle, _, value) in signals {
-            if let Ok(local) = local_handle::<SemaphoreEntry, _>("semaphore", handle, &self.inner)
+            if let Ok(local) = local_handle::<SemaphoreEntry, _>("semaphore", handle, &*self.inner)
                 && let Some(entry) = state.semaphores.get_mut(local)
             {
                 entry.encoded = value;
@@ -1772,37 +2034,35 @@ impl Device for MetalDevice {
 
     // --- presentation ---
 
-    fn create_swapchain(&self, _desc: &SwapchainDesc<'_>) -> Result<SwapchainHandle, SurfaceError> {
-        Err(SurfaceError::Hal(not_yet(
-            "swapchains (the Metal surface slice)",
-        )))
+    /// Configures a `CAMetalLayer`, or builds the offscreen ring. See
+    /// `crcbl_mtl::swapchain`.
+    fn create_swapchain(&self, desc: &SwapchainDesc<'_>) -> Result<SwapchainHandle, SurfaceError> {
+        self.create_swapchain_impl(desc)
     }
 
     fn reconfigure_swapchain(
         &self,
-        _swapchain: SwapchainHandle,
-        _desc: &SwapchainDesc<'_>,
+        swapchain: SwapchainHandle,
+        desc: &SwapchainDesc<'_>,
     ) -> Result<(), SurfaceError> {
-        Err(SurfaceError::Hal(not_yet(
-            "swapchains (the Metal surface slice)",
-        )))
+        self.reconfigure_swapchain_impl(swapchain, desc)
     }
 
-    fn destroy_swapchain(&self, _swapchain: SwapchainHandle) {}
+    fn destroy_swapchain(&self, swapchain: SwapchainHandle) {
+        self.destroy_swapchain_impl(swapchain);
+    }
 
+    /// `nextDrawable` on a layer, a ring step offscreen. See
+    /// `crcbl_mtl::swapchain` for why neither returns a semaphore.
     fn acquire_next_frame(
         &self,
-        _swapchain: SwapchainHandle,
+        swapchain: SwapchainHandle,
     ) -> Result<AcquiredFrame, SurfaceError> {
-        Err(SurfaceError::Hal(not_yet(
-            "swapchains (the Metal surface slice)",
-        )))
+        self.acquire_next_frame_impl(swapchain)
     }
 
-    fn present(&self, _queue: QueueHandle, _present: &PresentInfo<'_>) -> Result<(), SurfaceError> {
-        Err(SurfaceError::Hal(not_yet(
-            "presentation (the Metal surface slice)",
-        )))
+    fn present(&self, queue: QueueHandle, present: &PresentInfo<'_>) -> Result<(), SurfaceError> {
+        self.present_impl(queue, present)
     }
 }
 
@@ -1873,7 +2133,7 @@ mod tests {
     /// only way to observe that `write_buffer` wrote anything.
     fn read_back(device: &MetalDevice, handle: BufferHandle, len: usize) -> Vec<u8> {
         let state = device.state();
-        let entry = lookup(&state.buffers, "buffer", handle, &device.inner)
+        let entry = lookup(&state.buffers, "buffer", handle, &*device.inner)
             .expect("the buffer is live and this device's");
         assert!(entry.location.is_mappable(), "not a readable buffer");
         assert!(len as u64 <= entry.size, "reading past the buffer");
@@ -2837,7 +3097,7 @@ using namespace metal;\n\
                 .create_buffer(&buffer(256, location))
                 .unwrap_or_else(|error| panic!("{location:?}: {error:?}"));
             let state = device.state();
-            let entry = lookup(&state.buffers, "buffer", handle, &device.inner)
+            let entry = lookup(&state.buffers, "buffer", handle, &*device.inner)
                 .expect("the buffer is live");
             assert_ne!(
                 entry.raw.hazardTrackingMode(),
@@ -2859,7 +3119,7 @@ using namespace metal;\n\
         let (image, view) = color_target(&device);
         let state = device.state();
         let entry =
-            lookup(&state.images, "image", image, &device.inner).expect("the image is live");
+            lookup(&state.images, "image", image, &*device.inner).expect("the image is live");
         assert_ne!(
             entry.raw.hazardTrackingMode(),
             MTLHazardTrackingMode::Untracked,
