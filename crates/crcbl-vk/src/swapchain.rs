@@ -243,12 +243,44 @@ pub(crate) struct SwapchainEntry {
     /// remembered here and folded into the *next* acquire, which is where the
     /// caller already handles it.
     pub(crate) pending_suboptimal: bool,
+    /// The highest present id chained onto a `vkQueuePresentKHR` that this
+    /// **swapchain object** accepted, or 0 if it has never been given one.
+    ///
+    /// `wait_until_presented` is what needs it. `vkWaitForPresentKHR` blocks
+    /// until the timeout for a frame that will never arrive, and there are two
+    /// ordinary ways to ask for one: `Device::present` can fail with
+    /// `OutOfDate` *after* the caller has already spent an id, and a
+    /// `reconfigure_swapchain` builds a fresh object that never saw the ids the
+    /// old one did. The seam's answer to both is `Ok(())` at once, and this is
+    /// the record that distinguishes them from a frame that is genuinely still
+    /// on its way.
+    ///
+    /// **It resets on reconfigure by construction**, not by a line of code:
+    /// `reconfigure_swapchain` replaces the whole entry with the one
+    /// `build_swapchain` returns, and that one starts at 0.
+    pub(crate) presented_id: u64,
 }
 
 impl SwapchainEntry {
     /// Whether this is the offscreen ring rather than a real WSI swapchain.
     pub(crate) fn is_offscreen(&self) -> bool {
         self.raw == vk::SwapchainKHR::null()
+    }
+
+    /// Records `present_id` as handed to this swapchain.
+    pub(crate) fn record_presented(&mut self, present_id: u64) {
+        self.presented_id = self.presented_id.max(present_id);
+    }
+
+    /// Whether this swapchain object was given `present_id`, and can therefore
+    /// be asked about it.
+    ///
+    /// Ids strictly increase for a swapchain — Vulkan requires it of
+    /// `VkPresentIdKHR` — so "at or below the highest" is the whole test. Zero
+    /// is never one of them: `VkPresentIdKHR` spells "this present has no id"
+    /// that way, so a wait for it has nothing to wait for.
+    pub(crate) fn has_presented(&self, present_id: u64) -> bool {
+        present_id != 0 && present_id <= self.presented_id
     }
 
     /// Builds the [`AcquiredFrame`] for image `index`.
@@ -335,6 +367,98 @@ pub(crate) fn swapchain_create_info<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `from_raw` lives on ash's `Handle` trait, and a swapchain handle is the
+    // one field that decides windowed-or-offscreen — so the tests below need a
+    // non-null value that names no driver object.
+    use ash::vk::Handle as _;
+
+    /// A `SwapchainEntry` with nothing in it but the fields the present-id
+    /// bookkeeping reads, so the bookkeeping is testable with no driver in the
+    /// room. `raw` decides windowed-or-offscreen and cannot be a real handle
+    /// here, so it is faked from a non-null bit pattern.
+    fn entry(raw: vk::SwapchainKHR) -> SwapchainEntry {
+        SwapchainEntry {
+            owner: 1,
+            surface_raw: vk::SurfaceKHR::null(),
+            raw,
+            extent: (1, 1),
+            images: Vec::new(),
+            views: Vec::new(),
+            view_handles: Vec::new(),
+            memory: Vec::new(),
+            image_handles: Vec::new(),
+            sync: None,
+            acquired: None,
+            next_offscreen: 0,
+            pending_suboptimal: false,
+            presented_id: 0,
+        }
+    }
+
+    /// The record `wait_until_presented` consults before it blocks.
+    ///
+    /// Every id at or below the highest one presented is answerable; an id
+    /// above it names a frame this swapchain was never given, which is what a
+    /// present that failed with `OutOfDate` leaves behind — the caller has
+    /// already spent the id. Blocking for one of those costs a whole timeout.
+    #[test]
+    fn only_an_id_this_swapchain_was_given_can_be_waited_for() {
+        let mut entry = entry(vk::SwapchainKHR::from_raw(1));
+        assert!(!entry.has_presented(1), "nothing has been presented yet");
+        assert!(!entry.has_presented(0), "zero is never a present id");
+
+        entry.record_presented(1);
+        entry.record_presented(2);
+        entry.record_presented(3);
+        assert!(entry.has_presented(1));
+        assert!(entry.has_presented(3));
+        assert!(
+            !entry.has_presented(4),
+            "the frame after the last present has not been presented"
+        );
+        assert!(!entry.has_presented(0));
+
+        // The failed present: id 5 was spent by the caller and never reached
+        // `vkQueuePresentKHR`, so nothing recorded it.
+        entry.record_presented(4);
+        assert!(!entry.has_presented(5));
+    }
+
+    /// A reconfigure restarts the numbering, and the entry a wait consults has
+    /// to restart with it.
+    ///
+    /// `reconfigure_swapchain` replaces the whole entry with a freshly built
+    /// one, so this asserts the property that makes that correct: a new entry
+    /// answers `false` for every id the old one had presented, whatever the
+    /// caller's own counter has reached. Waiting on the new `VkSwapchainKHR`
+    /// for a frame the old one showed is a wait that never completes.
+    #[test]
+    fn a_rebuilt_swapchain_remembers_none_of_the_old_ones() {
+        let mut old = entry(vk::SwapchainKHR::from_raw(1));
+        for id in 1..=100 {
+            old.record_presented(id);
+        }
+        assert!(old.has_presented(100));
+
+        let rebuilt = entry(vk::SwapchainKHR::from_raw(2));
+        assert_eq!(rebuilt.presented_id, 0);
+        assert!(!rebuilt.has_presented(100));
+        assert!(
+            !rebuilt.has_presented(101),
+            "the engine's counter does not reset, so the next id is 101 and \
+             this object has not seen it either"
+        );
+    }
+
+    /// An offscreen ring is not a `VkSwapchainKHR`, so there is nothing for
+    /// `vkWaitForPresentKHR` to take — `is_offscreen` is the check that keeps
+    /// a null handle out of the driver.
+    #[test]
+    fn the_offscreen_ring_is_told_apart_by_its_null_handle() {
+        assert!(entry(vk::SwapchainKHR::null()).is_offscreen());
+        assert!(!entry(vk::SwapchainKHR::from_raw(1)).is_offscreen());
+    }
 
     /// X11: the server knows the size, and pins the permitted range to it.
     fn x11_capabilities(width: u32, height: u32) -> vk::SurfaceCapabilitiesKHR {

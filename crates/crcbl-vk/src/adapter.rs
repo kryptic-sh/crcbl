@@ -23,7 +23,9 @@
 //! from the start and reporting the other two honestly is what makes a later
 //! async-compute slice additive.
 
-use ash::vk;
+use core::ffi::CStr;
+
+use ash::{khr, vk};
 
 use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits};
 
@@ -132,6 +134,26 @@ impl QueueFamilies {
     }
 }
 
+/// Whether a `vkEnumerateDeviceExtensionProperties` list names `name`.
+///
+/// The device-side counterpart of the instance's own intersection, and it
+/// exists for the same reason: **requesting an extension the device does not
+/// have fails `vkCreateDevice` outright**, so anything optional has to be
+/// probed before it is asked for. Pure, so the "is it there" half of an
+/// optional extension is testable without a driver.
+///
+/// A property whose name is not NUL-terminated is a driver bug and answers
+/// `false` rather than panicking — the honest reading of a name nothing can
+/// compare against.
+#[must_use]
+pub(crate) fn has_device_extension(properties: &[vk::ExtensionProperties], name: &CStr) -> bool {
+    properties.iter().any(|entry| {
+        entry
+            .extension_name_as_c_str()
+            .is_ok_and(|found| found == name)
+    })
+}
+
 /// Maps a Vulkan device type onto the seam's.
 #[must_use]
 fn device_type(raw: vk::PhysicalDeviceType) -> DeviceType {
@@ -158,6 +180,7 @@ pub(crate) fn features_of(
     limits: &vk::PhysicalDeviceLimits,
     families: QueueFamilies,
     debug_utils: bool,
+    present_feedback: bool,
 ) -> Features {
     let mut features = Features::empty();
 
@@ -235,6 +258,14 @@ pub(crate) fn features_of(
     }
     if debug_utils {
         features |= Features::DEBUG_MARKERS;
+    }
+    // Both extensions *and* both feature bits, which is what `describe`
+    // establishes before it calls this — the only place the argument is
+    // computed. Anything less is the optimistic lie the module docs warn
+    // about: `VK_KHR_present_wait` being listed says the driver knows the
+    // name, not that `presentWait` came back `VK_TRUE`.
+    if present_feedback {
+        features |= Features::PRESENT_FEEDBACK;
     }
     // SHADER_DEBUG_PRINTF needs the validation layer's printf feature wired to
     // a message handler; it lands with the debug UI at P7 and is
@@ -383,9 +414,29 @@ fn describe(
     unsafe { instance.get_physical_device_properties2(physical, &mut properties2) };
     let properties = properties2.properties;
 
+    // SAFETY: as above; the call only reads driver-owned tables.
+    let device_extensions =
+        match unsafe { instance.enumerate_device_extension_properties(physical) } {
+            Ok(properties) => properties,
+            Err(error) => {
+                // Every optional extension then reads as absent, which is the safe
+                // direction: nothing is requested, `vkCreateDevice` still succeeds,
+                // and the capability is reported missing rather than promised.
+                log::warn!("crcbl-vk: vkEnumerateDeviceExtensionProperties failed: {error:?}");
+                Vec::new()
+            }
+        };
+    // Both or neither: numbering a present buys nothing without a way to wait
+    // on the number, and the wait has nothing to wait for without the number.
+    let present_feedback_extensions =
+        has_device_extension(&device_extensions, khr::present_id::NAME)
+            && has_device_extension(&device_extensions, khr::present_wait::NAME);
+
     let mut vulkan_1_1 = vk::PhysicalDeviceVulkan11Features::default();
     let mut vulkan_1_2 = vk::PhysicalDeviceVulkan12Features::default();
     let mut vulkan_1_3 = vk::PhysicalDeviceVulkan13Features::default();
+    let mut present_id_features = vk::PhysicalDevicePresentIdFeaturesKHR::default();
+    let mut present_wait_features = vk::PhysicalDevicePresentWaitFeaturesKHR::default();
     // Only chained on a device that has the version defining it. A
     // `VkPhysicalDeviceVulkan13Features` in the chain of a 1.2 device is not
     // merely useless — the spec forbids it, and a driver that honours the
@@ -397,8 +448,24 @@ fn describe(
     if properties.api_version >= vk::API_VERSION_1_3 {
         features2 = features2.push_next(&mut vulkan_1_3);
     }
+    // The same rule as the 1.3 struct above, for the same reason: a feature
+    // struct belonging to an extension the device does not support is left
+    // untouched by a conforming driver, so chaining it unconditionally reads as
+    // "no" for the wrong reason — and it is the extension list, not the zeroed
+    // struct, that says which.
+    if present_feedback_extensions {
+        features2 = features2
+            .push_next(&mut present_id_features)
+            .push_next(&mut present_wait_features);
+    }
     // SAFETY: as above.
     unsafe { instance.get_physical_device_features2(physical, &mut features2) };
+    // Copied out before any chained struct is read: the chain holds a mutable
+    // borrow of each of them for as long as `features2` is used.
+    let core_features = features2.features;
+    let present_feedback = present_feedback_extensions
+        && present_id_features.present_id == vk::TRUE
+        && present_wait_features.present_wait == vk::TRUE;
 
     // SAFETY: as above.
     let family_properties =
@@ -406,11 +473,12 @@ fn describe(
     let families = QueueFamilies::select(&family_properties);
 
     let features = features_of(
-        &features2.features,
+        &core_features,
         &vulkan_1_2,
         &properties.limits,
         families,
         debug_utils,
+        present_feedback,
     );
     let limits = limits_of(&properties.limits, &vulkan_1_2_props, features);
 
@@ -603,6 +671,7 @@ mod tests {
             &desktop_limits(),
             QueueFamilies::select(&[family(GRAPHICS, 1)]),
             true,
+            false,
         );
         let caps = DeviceCaps {
             features,
@@ -613,6 +682,73 @@ mod tests {
         assert!(features.contains(Features::TIMESTAMP_QUERY));
         assert!(features.contains(Features::PUSH_CONSTANTS));
         assert!(features.contains(Features::DEBUG_MARKERS));
+        // Present feedback is a device *extension* pair, so nothing in a
+        // feature struct can imply it — and Tier A does not need it, which is
+        // why a fully featured device that lacks it is still Tier A.
+        assert!(!features.contains(Features::PRESENT_FEEDBACK));
+        assert!(!Features::TIER_A.contains(Features::PRESENT_FEEDBACK));
+    }
+
+    /// `PRESENT_FEEDBACK` comes from the extension probe and the feature query
+    /// together, and it is the argument `describe` computes from both.
+    ///
+    /// Reported here rather than inferred from a feature struct: a driver that
+    /// lists `VK_KHR_present_wait` and answers `presentWait = VK_FALSE` exists
+    /// on paper, and the seam's flag promises the CPU can actually find out.
+    #[test]
+    fn present_feedback_is_reported_only_when_it_was_established() {
+        let device = |present_feedback| {
+            features_of(
+                &vk::PhysicalDeviceFeatures::default(),
+                &tier_a_vulkan_1_2(),
+                &desktop_limits(),
+                QueueFamilies::select(&[family(GRAPHICS, 1)]),
+                false,
+                present_feedback,
+            )
+        };
+        assert!(device(true).contains(Features::PRESENT_FEEDBACK));
+        assert!(!device(false).contains(Features::PRESENT_FEEDBACK));
+        // Nothing else moves with it: a capability that changed the tier would
+        // make a Tier A device stop being one on a driver without the pair.
+        assert_eq!(
+            device(true).difference(device(false)),
+            Features::PRESENT_FEEDBACK
+        );
+    }
+
+    /// The probe itself. `vkCreateDevice` fails outright on an extension the
+    /// device does not have, so "is it in the list" is load-bearing rather than
+    /// advisory — and a name that merely *starts* the same must not match.
+    #[test]
+    fn the_extension_probe_matches_whole_names_only() {
+        fn named(name: &CStr) -> vk::ExtensionProperties {
+            let mut properties = vk::ExtensionProperties::default();
+            let bytes = name.to_bytes_with_nul();
+            for (slot, byte) in properties.extension_name.iter_mut().zip(bytes) {
+                #[allow(clippy::cast_possible_wrap)]
+                {
+                    *slot = *byte as core::ffi::c_char;
+                }
+            }
+            properties
+        }
+
+        let available = [named(khr::swapchain::NAME), named(khr::present_id::NAME)];
+        assert!(has_device_extension(&available, khr::swapchain::NAME));
+        assert!(has_device_extension(&available, khr::present_id::NAME));
+        assert!(!has_device_extension(&available, khr::present_wait::NAME));
+        assert!(!has_device_extension(&[], khr::present_id::NAME));
+
+        // **`VK_KHR_present_id` is a proper prefix of `VK_KHR_present_id2`**,
+        // and the same holds for the wait pair — a driver offering only the
+        // `2` extensions is a driver this backend must not ask for the `1`
+        // ones, because `vkCreateDevice` fails on a name that was never
+        // listed. A probe that matched prefixes would report exactly that.
+        let successors = [named(c"VK_KHR_present_id2"), named(c"VK_KHR_present_wait2")];
+        assert!(!has_device_extension(&successors, khr::present_id::NAME));
+        assert!(!has_device_extension(&successors, khr::present_wait::NAME));
+        assert!(has_device_extension(&successors, c"VK_KHR_present_id2"));
     }
 
     /// The half of "honest reporting" that matters: a device missing one
@@ -655,6 +791,7 @@ mod tests {
                 &desktop_limits(),
                 QueueFamilies::select(&[family(GRAPHICS, 1)]),
                 true,
+                false,
             );
             assert!(
                 !features.contains(Features::DESCRIPTOR_INDEXING),
@@ -678,6 +815,7 @@ mod tests {
             &tier_a_vulkan_1_2().draw_indirect_count(false),
             &desktop_limits(),
             QueueFamilies::select(&[family(GRAPHICS, 1)]),
+            false,
             false,
         );
         let caps = DeviceCaps {
@@ -713,6 +851,7 @@ mod tests {
             &vk::PhysicalDeviceVulkan12Features::default(),
             &raw,
             QueueFamilies::select(&[family(GRAPHICS, 1)]),
+            false,
             false,
         );
         let limits = limits_of(

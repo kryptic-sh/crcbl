@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use crate::harness::{CLEAR, EXTENT, Headless};
 use crcbl_hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
@@ -486,6 +488,93 @@ fn many_frames_of_the_sandboxs_loop_leave_validation_silent() {
         device.destroy_command_buffer(buffer);
     }
     device.destroy_semaphore(timeline);
+    headless.finish();
+}
+
+/// The seam's present wait, on a ring that has no display behind it.
+///
+/// An offscreen "swapchain" is `VK_NULL_HANDLE` — there is no `VkSwapchainKHR`
+/// for `vkWaitForPresentKHR` to take — and its present is an index bump, so
+/// every wait is answered at once. Same for an id that was never presented.
+///
+/// **This is only "it returned `Ok`" on a driver that lacks the extensions**,
+/// and the run says which it was. Where `Features::PRESENT_FEEDBACK` came back
+/// — radv does, lavapipe does not — `VK_KHR_present_wait` is *enabled* on this
+/// device, and a `wait_until_presented` that forgot either guard hands the
+/// driver a null swapchain or an id nothing presented. The first is what
+/// `Headless::finish`'s `assert_clean` catches; the second is a wait that runs
+/// out the timeout, which the deadline below catches.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn the_offscreen_ring_answers_a_present_wait_with_no_swapchain_to_wait_on() {
+    let headless = Headless::open();
+    let device = &headless.device;
+    let feedback = device
+        .caps()
+        .features
+        .contains(crcbl_hal::Features::PRESENT_FEEDBACK);
+    eprintln!(
+        "vk e2e: present feedback is {} on this driver",
+        if feedback { "ENABLED" } else { "absent" }
+    );
+
+    // Generous enough never to fire on a slow machine, and far below the
+    // timeout asked for below — so a wait that actually blocked shows up here
+    // rather than as a test that merely took a while.
+    let budget = Duration::from_secs(5);
+    // Long enough that reaching it would be unmistakably a block, and it is
+    // never reached: nothing offscreen can be waited on.
+    let timeout = Duration::from_secs(60);
+
+    let started = Instant::now();
+    for id in 1..=4u64 {
+        device
+            .acquire_next_frame(headless.swapchain)
+            .expect("the ring always has an image");
+        device
+            .present(
+                headless.queue,
+                &PresentInfo {
+                    swapchain: headless.swapchain,
+                    waits: &[],
+                    present_id: Some(id),
+                },
+            )
+            .expect("present");
+        device
+            .wait_until_presented(headless.swapchain, id, timeout)
+            .expect("an offscreen present is as complete as it will ever be");
+    }
+    // Never presented at all, and never will be: the frame after the last one,
+    // and one far beyond anything this run numbered.
+    device
+        .wait_until_presented(headless.swapchain, 5, timeout)
+        .expect("an id with no record behind it answers at once");
+    device
+        .wait_until_presented(headless.swapchain, u64::MAX, timeout)
+        .expect("an id with no record behind it answers at once");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < budget,
+        "the waits took {elapsed:?}; nothing offscreen may block"
+    );
+
+    // And an invalid handle is still refused — the immediate `Ok(())` is the
+    // answer for a *device* without the capability, not for a bad argument.
+    let stale = headless.swapchain;
+    device.destroy_swapchain(stale);
+    assert!(
+        matches!(
+            device.wait_until_presented(stale, 1, timeout),
+            Err(crcbl_hal::SurfaceError::Hal(
+                crcbl_hal::HalError::InvalidHandle { .. }
+            ))
+        ),
+        "a destroyed swapchain is an invalid handle, not a frame that is up"
+    );
+
+    // `destroy_swapchain` on a handle already destroyed is a no-op, so the
+    // canonical teardown still runs and still checks the layer.
     headless.finish();
 }
 

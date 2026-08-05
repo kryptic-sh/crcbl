@@ -463,9 +463,16 @@ impl Default for GpuContextDesc<'_> {
             // part of `TIER_A` — topic 10's browsers may lack it — so the
             // per-pass timers have to be asked for by name.
             required_features: Features::empty(),
+            // `PRESENT_FEEDBACK` is asked for here because `acquire` already
+            // calls `wait_until_presented` every frame: a device that has the
+            // capability and was never asked for it answers that call
+            // immediately forever, and the closed loop is dead code nothing can
+            // reach. Optional like the rest — it is not in `TIER_A`, and a
+            // device without it just keeps the open-loop frame limiter.
             optional_features: Features::TIER_A
                 | Features::TIMESTAMP_QUERY
-                | Features::DEBUG_MARKERS,
+                | Features::DEBUG_MARKERS
+                | Features::PRESENT_FEEDBACK,
             pacing: Pacing::default(),
         }
     }

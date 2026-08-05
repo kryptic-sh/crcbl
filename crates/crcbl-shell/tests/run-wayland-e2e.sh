@@ -165,6 +165,43 @@ run_sandbox() {
         return
     fi
 
+    # Closed-loop pacing, which is the only place in this repo where
+    # `vkWaitForPresentKHR` runs against a real `VkSwapchainKHR`: the vk suite is
+    # entirely offscreen and has no swapchain to wait on at all.
+    #
+    # The two halves have to agree rather than the fast path being demanded,
+    # because `VK_KHR_present_id` + `VK_KHR_present_wait` are **driver
+    # conditional**: radv has them, lavapipe does not, and CI runs lavapipe. So
+    # a run that enabled the extensions and then did not pace on them is a
+    # failure, and a driver that has neither says so out loud instead of passing
+    # quietly — a green run here is not evidence about the wait unless it
+    # printed that it exercised it.
+    # Both lines, and the second is the one that cannot be faked. "Pacing on
+    # presents" only says the engine took the branch; a `wait_until_presented`
+    # that returned `Ok(())` without calling anything — which is what every
+    # backend still does — prints it just the same, and **the difference does
+    # not show up in a frame time**, because FIFO already paces the loop
+    # through `vkQueuePresentKHR`. The backend's own line is emitted from
+    # inside the wait, so it is there only if the driver was really asked.
+    if grep -q "crcbl-vk: present feedback enabled" "$SANDBOX_LOG"; then
+        if ! grep -q "hal: pacing on presents" "$SANDBOX_LOG"; then
+            echo "crcbl e2e: the device enabled present feedback and the loop did not pace on it" >&2
+            cat "$SANDBOX_LOG" >&2
+            sway_log_tail
+            exit 1
+        fi
+        if ! grep -q "crcbl-vk: vkWaitForPresentKHR on present" "$SANDBOX_LOG"; then
+            echo "crcbl e2e: the loop reported pacing on presents and never waited on one" >&2
+            cat "$SANDBOX_LOG" >&2
+            sway_log_tail
+            exit 1
+        fi
+        echo "crcbl e2e: the sandbox paced $SANDBOX_FRAMES frames on vkWaitForPresentKHR"
+    else
+        echo "crcbl e2e: no VK_KHR_present_wait on this driver — the present-wait \
+path was NOT exercised, only the absent-capability path" >&2
+    fi
+
     # The mode the compositor settled on, and the extent that goes with it. Both
     # come off one line, so a run that reported borderless at the windowed size
     # — a swapchain that never caught up with the configure — fails here.

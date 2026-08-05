@@ -44,9 +44,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   unchanged and still needed — it answers "am I running faster than the cap",
   which is a different question.
 
-  **No backend implements the wait yet**, so behaviour is unchanged everywhere:
-  none advertises `PRESENT_FEEDBACK` and all five answer immediately.
-  `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl` are where it becomes real.
+  **`crcbl-vk` implements it**; `crcbl-dx12`, `crcbl-mtl`, `crcbl-wgpu` and the
+  null backend still answer immediately and advertise nothing.
+
+- **A Vulkan device paces on the display where the driver can say when a frame
+  landed.** `crcbl-vk` requests `VK_KHR_present_id` and `VK_KHR_present_wait`,
+  chains `VkPresentIdKHR` onto each present and answers
+  `Device::wait_until_presented` with `vkWaitForPresentKHR`. The pair is
+  optional and asked for only after `vkEnumerateDeviceExtensionProperties` lists
+  both and `vkGetPhysicalDeviceFeatures2` returns both feature bits — requesting
+  an absent device extension fails `vkCreateDevice` outright — so
+  `Features::PRESENT_FEEDBACK` on an `AdapterInfo` or a `DeviceCaps` means the
+  device really can answer. It is driver-dependent in practice: radv has the
+  pair, lavapipe does not.
+
+  `GpuContextDesc::default()` now asks for `PRESENT_FEEDBACK` among its optional
+  features, so a game built on the engine gets the closed loop without naming
+  it. A device that does not have it keeps the open-loop frame limiter, exactly
+  as before.
+
+  Three cases still answer at once rather than blocking, because
+  `vkWaitForPresentKHR` would otherwise sit out the whole timeout for a frame
+  that will never arrive: an offscreen image ring, which has no `VkSwapchainKHR`
+  at all; an id whose present failed with `OutOfDate` after the caller had
+  already spent it; and an id from before a `reconfigure_swapchain`, which
+  builds a new swapchain object that never saw it.
 
 - **The Metal backend's hardware suite now runs in CI, so `crcbl-mtl`'s draws
   are verified by a machine rather than by nobody.** A `mtl e2e (macos-latest)`

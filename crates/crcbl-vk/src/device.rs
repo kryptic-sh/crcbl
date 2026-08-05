@@ -30,7 +30,7 @@
 //! else — resources, queries, sync, submission, presentation — is in this file.
 
 use core::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Once};
 use std::time::Duration;
 
 use ash::vk::Handle as _;
@@ -316,6 +316,22 @@ pub(crate) struct DeviceInner {
     pub(crate) raw: ash::Device,
     pub(crate) physical: vk::PhysicalDevice,
     pub(crate) swapchain_ext: khr::swapchain::Device,
+    /// `Some` when `VK_KHR_present_id` and `VK_KHR_present_wait` were both
+    /// enabled — that is, when this device advertises
+    /// [`Features::PRESENT_FEEDBACK`]. `None` is what makes
+    /// [`Device::wait_until_presented`] the immediate `Ok(())` the seam
+    /// documents, and what keeps `VkPresentIdKHR` off the present chain.
+    pub(crate) present_wait_ext: Option<khr::present_wait::Device>,
+    /// Says, once, that a wait actually reached the driver.
+    ///
+    /// A second fact from the line `open` logs, and not one that can be
+    /// inferred from it: a device can negotiate both extensions and then never
+    /// wait on anything — which is what this backend did before the wait was
+    /// implemented — and **the difference is invisible in a frame time**,
+    /// because `vkQueuePresentKHR` in FIFO already paces the loop to the
+    /// display on its own. So the loop being genuinely closed is something
+    /// only the backend can report, and this is where it reports it.
+    first_present_wait: Once,
     pub(crate) debug_ext: Option<ext::debug_utils::Device>,
     pub(crate) caps: DeviceCaps,
     pub(crate) id: u64,
@@ -611,17 +627,41 @@ impl VkDevice {
             .synchronization2(true)
             .maintenance4(true);
 
+        // `granted` already carries the probe's answer: `adapter::describe`
+        // sets `PRESENT_FEEDBACK` only when `vkEnumerateDeviceExtensionProperties`
+        // listed **both** extensions and `vkGetPhysicalDeviceFeatures2` returned
+        // both feature bits, and `granted` is that intersected with what this
+        // caller asked for. Requesting an absent extension fails
+        // `vkCreateDevice` outright, so this pair must never be asked for on a
+        // guess.
+        let present_feedback = granted.contains(Features::PRESENT_FEEDBACK);
         // A named local, not a temporary in the chain: the builder stores the
         // pointer, so `&[…]` inline would dangle by the time `vkCreateDevice`
         // reads it.
-        let device_extensions = [khr::swapchain::NAME.as_ptr()];
-        let create_info = vk::DeviceCreateInfo::default()
+        let mut device_extensions = vec![khr::swapchain::NAME.as_ptr()];
+        if present_feedback {
+            device_extensions.push(khr::present_id::NAME.as_ptr());
+            device_extensions.push(khr::present_wait::NAME.as_ptr());
+        }
+        // The extension names alone enable nothing: chaining a `VkPresentIdKHR`
+        // onto a present without `presentId` granted here is a validation
+        // error, and `vkWaitForPresentKHR` without `presentWait` is undefined.
+        let mut present_id_features =
+            vk::PhysicalDevicePresentIdFeaturesKHR::default().present_id(true);
+        let mut present_wait_features =
+            vk::PhysicalDevicePresentWaitFeaturesKHR::default().present_wait(true);
+        let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_features(&core_features)
             .enabled_extension_names(&device_extensions)
             .push_next(&mut vulkan_1_1)
             .push_next(&mut vulkan_1_2)
             .push_next(&mut vulkan_1_3);
+        if present_feedback {
+            create_info = create_info
+                .push_next(&mut present_id_features)
+                .push_next(&mut present_wait_features);
+        }
 
         // SAFETY: `record.physical` came from `instance`; every pointer in
         // `create_info` borrows a local that outlives the call; the requested
@@ -634,6 +674,10 @@ impl VkDevice {
         .map_err(|error| conv::hal_error("vkCreateDevice", error))?;
 
         let swapchain_ext = khr::swapchain::Device::new(&instance.raw, &raw);
+        // `Some` is the whole record that the capability is live: every present
+        // and every wait branches on it rather than re-reading `caps`.
+        let present_wait_ext =
+            present_feedback.then(|| khr::present_wait::Device::new(&instance.raw, &raw));
         let debug_ext = instance
             .debug_ext
             .as_ref()
@@ -683,6 +727,8 @@ impl VkDevice {
             raw,
             physical: record.physical,
             swapchain_ext,
+            present_wait_ext,
+            first_present_wait: Once::new(),
             debug_ext,
             caps: DeviceCaps {
                 features: granted,
@@ -698,6 +744,13 @@ impl VkDevice {
         });
         inner.set_object_name(inner.raw.handle(), desc.label);
         inner.set_object_name(retire_timeline, Some("crcbl retire timeline"));
+        if present_feedback {
+            log::info!(
+                "crcbl-vk: present feedback enabled ({} + {})",
+                khr::present_id::NAME.to_string_lossy(),
+                khr::present_wait::NAME.to_string_lossy(),
+            );
+        }
         log::info!(
             "crcbl-vk: opened {:?} (tier {:?}), graphics family {graphics_family}, \
              async compute {:?}, transfer {:?}",
@@ -2346,14 +2399,44 @@ impl Device for VkDevice {
 
         let swapchains = [entry.raw];
         let indices = [index];
-        let info = vk::PresentInfoKHR::default()
+        // Numbering the present is the only thing that makes
+        // `wait_until_presented` able to answer about it, and it is chained
+        // only when the capability is live and the number is one Vulkan will
+        // accept. `VUID-VkPresentIdKHR-presentIds-04999` requires ids to
+        // **strictly increase** for a swapchain, so an id that does not is
+        // dropped rather than chained: the alternative is a validation error on
+        // a caller's bookkeeping slip, and an unnumbered present is exactly the
+        // "no record" case the wait already answers immediately.
+        let requested_id = present.present_id.unwrap_or(0);
+        let can_number = self.inner.present_wait_ext.is_some();
+        let numbered = can_number && requested_id > entry.presented_id;
+        if can_number && requested_id != 0 && !numbered {
+            log::warn!(
+                "crcbl-vk: present id {requested_id} does not follow {}; presenting unnumbered",
+                entry.presented_id
+            );
+        }
+        // Named locals, as everywhere a builder stores a pointer.
+        let present_ids = [requested_id];
+        let mut present_id = vk::PresentIdKHR::default().present_ids(&present_ids);
+        let mut info = vk::PresentInfoKHR::default()
             .wait_semaphores(&waits)
             .swapchains(&swapchains)
             .image_indices(&indices);
+        if numbered {
+            info = info.push_next(&mut present_id);
+        }
         // SAFETY: `slot.raw` is a live queue externally synchronised by the
         // state lock, the swapchain is live, `index` came from this
         // swapchain's own acquire, and the semaphores were resolved above.
         let result = unsafe { self.inner.swapchain_ext.queue_present(slot.raw, &info) };
+        // Only a present the driver **accepted** counts. One that failed with
+        // `OutOfDate` never reaches the display, so recording its id would be
+        // promising a frame that will never arrive — which is the wait that
+        // blocks for a whole timeout.
+        if numbered && result.is_ok() {
+            entry.record_presented(requested_id);
+        }
         match result {
             Ok(false) => Ok(()),
             // A suboptimal present is not an error and there is nowhere in the
@@ -2367,25 +2450,72 @@ impl Device for VkDevice {
         }
     }
 
-    /// Not yet: this device does not advertise
+    /// `vkWaitForPresentKHR`, on a device that has
     /// [`Features::PRESENT_FEEDBACK`](crcbl_hal::Features::PRESENT_FEEDBACK),
-    /// so the seam's answer is that there is nothing to wait for.
+    /// and an immediate `Ok(())` on one that does not.
     ///
-    /// Deliberately `Ok(())` rather than the refusal the rest of this backend
-    /// hands back for a slice that has not landed: this is the documented
-    /// answer for a device *without* the capability, and it is what keeps the
-    /// caller's frame loop from needing a branch. Numbering the presents and
-    /// blocking on the number is the next slice's work.
+    /// Three things answer at once rather than blocking, and each is the seam's
+    /// documented answer rather than a shortcut: a device without the
+    /// extensions has nothing to wait on; an offscreen ring's "present" is a
+    /// cursor bump with no display behind it and no `VkSwapchainKHR` to name;
+    /// and an id this swapchain object was never given — one whose present
+    /// failed, or one from before a reconfigure — names a frame that will never
+    /// arrive, which `vkWaitForPresentKHR` would sit out the whole timeout for.
     fn wait_until_presented(
         &self,
         swapchain: SwapchainHandle,
-        _present_id: u64,
-        _timeout: Duration,
+        present_id: u64,
+        timeout: Duration,
     ) -> Result<(), SurfaceError> {
-        let state = self.inner.state();
-        lookup(&state.swapchains, "swapchain", swapchain, &self.inner)?;
-        Ok(())
+        let mut state = self.inner.state();
+        let inner = Arc::clone(&self.inner);
+        let entry = lookup_mut(&mut state.swapchains, "swapchain", swapchain, &inner)?;
+        let Some(present_wait) = self.inner.present_wait_ext.as_ref() else {
+            return Ok(());
+        };
+        if entry.is_offscreen() || !entry.has_presented(present_id) {
+            return Ok(());
+        }
+        let raw = entry.raw;
+        self.inner.first_present_wait.call_once(|| {
+            log::info!("crcbl-vk: vkWaitForPresentKHR on present {present_id}; the loop is closed");
+        });
+        // SAFETY: `raw` is a live swapchain of this device and `present_id` was
+        // chained onto a `vkQueuePresentKHR` this same object accepted.
+        // `vkWaitForPresentKHR` requires the swapchain to be externally
+        // synchronised, and the state lock — held across the whole call — is
+        // this backend's external synchronisation for swapchains; it is also
+        // what stops a concurrent `destroy_swapchain` or `reconfigure_swapchain`
+        // from freeing `raw` underneath the wait. `acquire_next_frame` already
+        // blocks under this same lock with an infinite timeout.
+        let result =
+            unsafe { present_wait.wait_for_present(raw, present_id, present_wait_ns(timeout)) };
+        match result {
+            Ok(()) => Ok(()),
+            // A success code, not a failure: the frame is up and the swapchain
+            // merely wants rebuilding. It goes where a suboptimal *present*
+            // goes — folded into the next acquire — because this call's whole
+            // contract is "the numbered present is no longer waiting to
+            // happen", and it is not.
+            Err(vk::Result::SUBOPTIMAL_KHR) => {
+                entry.pending_suboptimal = true;
+                Ok(())
+            }
+            Err(error) => Err(conv::surface_error("vkWaitForPresentKHR", error)),
+        }
     }
+}
+
+/// A seam [`Duration`] as the nanosecond timeout `vkWaitForPresentKHR` takes.
+///
+/// Saturating, and the saturation is not a rounding detail: `u64::MAX`
+/// nanoseconds is the spec's spelling of "no timeout at all", and it is also
+/// what any `Duration` longer than ~584 years means in practice. A `Duration`
+/// that overflowed into a small number would turn a caller asking to wait
+/// forever into one that gives up immediately, which is the opposite answer.
+#[must_use]
+fn present_wait_ns(timeout: Duration) -> u64 {
+    u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX)
 }
 
 impl VkDevice {
@@ -2574,6 +2704,7 @@ impl VkDevice {
             acquired: None,
             next_offscreen: 0,
             pending_suboptimal: false,
+            presented_id: 0,
         })
     }
 
@@ -2714,6 +2845,7 @@ impl VkDevice {
             acquired: None,
             next_offscreen: 0,
             pending_suboptimal: false,
+            presented_id: 0,
         })
     }
 
@@ -3087,6 +3219,32 @@ impl Drop for DeviceInner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `vkWaitForPresentKHR` counts nanoseconds and the seam hands over a
+    /// `Duration`, so the conversion is the whole contract of the timeout.
+    ///
+    /// The saturating end is the one worth pinning: `Duration::MAX` is
+    /// ~584 billion years and its nanosecond count does not fit in a `u64`, so
+    /// a wrapping conversion would turn "wait as long as it takes" into a
+    /// number near zero — a caller that asked to block would return instantly
+    /// and read it as the frame being up.
+    #[test]
+    fn a_present_timeout_becomes_nanoseconds_and_saturates_upwards() {
+        assert_eq!(present_wait_ns(Duration::ZERO), 0);
+        assert_eq!(present_wait_ns(Duration::from_nanos(1)), 1);
+        assert_eq!(present_wait_ns(Duration::from_millis(16)), 16_000_000);
+        assert_eq!(present_wait_ns(Duration::from_secs(1)), 1_000_000_000);
+
+        // The last `Duration` that still fits, and the first that does not.
+        let exact = Duration::from_nanos(u64::MAX);
+        assert_eq!(present_wait_ns(exact), u64::MAX);
+        assert_eq!(
+            present_wait_ns(exact + Duration::from_nanos(1)),
+            u64::MAX,
+            "past the ceiling means 'no timeout', never a wrap to nearly none"
+        );
+        assert_eq!(present_wait_ns(Duration::MAX), u64::MAX);
+    }
 
     /// Queue handles are synthesised, not pooled — so the mapping must be a
     /// bijection, or `Device::queue(Compute)` would submit to graphics.

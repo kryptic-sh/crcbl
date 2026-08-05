@@ -238,30 +238,20 @@ the `wasm32` arm of `sleep` is deliberately a no-op because the browser paces
 frames itself. That is the whole mechanism, and it is open loop: it never learns
 when a frame was actually shown.
 
-**The seam and the engine wiring now exist; no backend implements them.**
+**The seam, the engine wiring and the Vulkan backend now exist.**
 `Features::PRESENT_FEEDBACK`, `PresentInfo::present_id` and
 `Device::wait_until_presented` are the capability-named seam the note below
 asked for, and `GpuContext::acquire` calls the wait for the present
 `FRAMES_IN_FLIGHT` behind the frame it is about to start
 (`GpuContext::present_to_wait_for` is the arithmetic, tested without a GPU). A
 device that does not advertise the flag answers `Ok(())` immediately, which is
-what lets the call site have no branch on which backend is underneath — and is
-why nothing changed behaviourally when this landed: all five `Device` impls are
-that immediate answer, and none advertises the flag. `FrameLimit` is untouched
-and still the only thing pacing any loop today.
+what lets the call site have no branch on which backend is underneath.
+`crcbl-vk` answers it with `vkWaitForPresentKHR` where the driver has
+`VK_KHR_present_id` + `VK_KHR_present_wait`; the other four `Device` impls are
+still the immediate answer, and `FrameLimit` is untouched and still the only
+thing pacing a loop on a device without the capability.
 
 What is still owed:
-
-- **Implement the wait on Vulkan.** `VK_KHR_present_id` + `VK_KHR_present_wait`
-  requested at device creation, `vk::PresentIdKHR` chained onto the present, and
-  `ash::khr::present_wait::Device::wait_for_present(swapchain, present_id, timeout)`
-  behind `wait_until_presented`. `ash 0.38.0+1.3.281` — the pin — already binds
-  both, so no hand-written FFI. Advertise `PRESENT_FEEDBACK` only when both
-  extensions are present. The one piece of backend state it needs: the highest
-  id actually handed to `vkQueuePresentKHR` for the **current** swapchain, so a
-  wait for an id that was never presented — a present that failed with
-  `OutOfDate`, or one from before a reconfigure — returns at once instead of
-  blocking until the timeout, which is what the seam's docs promise.
 
 - **Implement it on D3D12 and Metal.** DX12:
   `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` +
@@ -272,6 +262,41 @@ What is still owed:
   backend counts presents itself and matches the caller's number against its
   count. Neither keeps that count yet, deliberately: an unread counter is state
   that can only be wrong.
+
+- **`vkWaitForPresentKHR` is verified on radv only, and CI does not run it at
+  all.** `VK_KHR_present_wait` is a driver-conditional extension: this
+  developer's radv exposes it, lavapipe does not (`vulkaninfo` lists it under
+  both RADV devices and under neither llvmpipe entry), and lavapipe is what CI
+  runs for both `vk e2e` and the wayland sandbox pass. So every CI leg exercises
+  the _absent-capability_ path and proves nothing about the wait. `run_sandbox`
+  in `crates/crcbl-shell/tests/run-wayland-e2e.sh` says so on stderr rather than
+  passing quietly, and asserts the two halves agree when the extensions are
+  there — the backend's own `vkWaitForPresentKHR on present` line has to appear,
+  which is the only thing that tells a real wait from the immediate `Ok(())`.
+  Closing this needs a CI leg with a driver that has the pair; nothing else will
+  do it.
+
+- **Two guards on `wait_until_presented` have no automated check that would
+  catch losing one of them.** `VkDevice::wait_until_presented` in `crcbl-vk`
+  returns early for an offscreen ring _and_ for an id the swapchain object was
+  never given, and the vk e2e
+  (`the_offscreen_ring_answers_a_present_wait_with_no_swapchain_to_wait_on`)
+  only goes red when **both** are removed — verified: removing both segfaults
+  radv on a `VK_NULL_HANDLE` swapchain, removing the offscreen one alone still
+  passes because an offscreen entry never records an id. The windowed half of
+  the id check has no test at all: the suite that has a real `VkSwapchainKHR` is
+  the sandbox, and it never asks for an id it did not present. A `crcbl-shell`
+  wayland-e2e test that built a Vulkan swapchain on a real `wl_surface` and
+  waited for an unpresented id would cover it.
+
+- **`SwapchainEntry::presented_id` resets across a reconfigure by construction,
+  not by a check.** `reconfigure_swapchain` replaces the whole entry with what
+  `build_swapchain` returns, and that one starts at 0 —
+  `a_rebuilt_swapchain_remembers_none_of_the_old_ones` in
+  `crates/crcbl-vk/src/swapchain.rs` pins what `has_presented` must then answer,
+  but nothing would fail if someone wrote a different literal at either
+  construction site. Both sites building the entry through one constructor would
+  fix it and is a bigger change than this slice wanted.
 
 - **Read the real present mode with `VK_EXT_present_timing`.** Untouched by the
   above and still unstarted. Today `Pacing::Adaptive` is a _request_ with no

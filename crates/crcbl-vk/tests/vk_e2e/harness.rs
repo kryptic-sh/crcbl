@@ -82,9 +82,15 @@ impl Headless {
                 // Never `TIER_A`: lavapipe and radv genuinely differ, and this
                 // suite exists partly to find out how.
                 required_features: Features::empty(),
+                // `PRESENT_FEEDBACK` is asked for here even though nothing
+                // offscreen can be paced by a display: asking is what enables
+                // `VK_KHR_present_id` and `VK_KHR_present_wait`, and the
+                // offscreen ring then has to keep them *out* of its own path.
+                // Not asking would leave that guard untested on every driver.
                 optional_features: Features::TIER_A
                     | Features::TIMESTAMP_QUERY
-                    | Features::DEBUG_MARKERS,
+                    | Features::DEBUG_MARKERS
+                    | Features::PRESENT_FEEDBACK,
                 compatible_surface: Some(surface),
             })
             .expect("a device opens");
