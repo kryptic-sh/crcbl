@@ -52,17 +52,25 @@
 //!
 //! There is no Vulkan in a browser, so on `wasm32` the [`GpuBackend::Vulkan`]
 //! entry is `#[cfg]`-ed out and `crcbl-vk` is not even a dependency — see this
-//! crate's manifest. The `#[cfg]` is on the *element*, exactly as
-//! `crcbl_shell::backend`'s table gates Wayland and X11 to Linux, so nothing
-//! else in this file mentions a target and the walk in
+//! crate's manifest. [`GpuBackend::Metal`] is the mirror image: `crcbl-mtl` has
+//! no public items off macOS, so its entry exists only there. The `#[cfg]` is on
+//! the *element*, exactly as `crcbl_shell::backend`'s table gates Wayland and
+//! X11 to Linux, so nothing else in this file mentions a target and the walk in
 //! [`PendingInstance::poll`] needs no conditional compilation of its own.
 //!
 //! One consequence is deliberate: **`wgpu` is auto-selectable on `wasm32` and
 //! not on native**. It is the browser's only backend, so an `open()` there that
 //! refused to select it would always fail; on native Vulkan is the performance
 //! tier and wgpu stays the portability tier a developer asks for by name.
-//! Native selection order is therefore unchanged — Vulkan, and nothing else
-//! automatically.
+//!
+//! The other is **Metal, and only Metal, on macOS**. `docs/plan/09-backends-
+//! metal-dx12.md`'s 2026-08-05 correction settles the platform question: Apple
+//! platforms are Metal only, `crcbl-vk` is not expected to reach a device there,
+//! and a Mac without MoltenVK installed has no `libvulkan.dylib` to `dlopen` at
+//! all. So the Vulkan entry is registered on macOS but **not automatic**: an
+//! `open()` there tries Metal and stops, while `CRCBL_GPU=vk` still reaches the
+//! Vulkan backend by name for whoever has a loader and means it. Elsewhere on
+//! native the order is unchanged — Vulkan, and nothing else automatically.
 //!
 //! The blocking wrappers `open` and `open_backend` do not exist on `wasm32`
 //! either, for the reason `Instance::create_device` does not: the browser's
@@ -86,6 +94,9 @@ use crcbl_hal::{HalError, Instance};
 pub enum GpuBackend {
     /// `crcbl-vk` — Vulkan 1.3 through `ash`.
     Vulkan,
+    /// `crcbl-mtl` — Metal through `objc2-metal`, and the only path to a GPU on
+    /// macOS (P14).
+    Metal,
     /// `crcbl-hal`'s recording no-op backend. Renders nothing; never selected
     /// automatically.
     Null,
@@ -100,6 +111,7 @@ impl GpuBackend {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Vulkan => "vk",
+            Self::Metal => "mtl",
             Self::Null => "null",
             Self::Wgpu => "wgpu",
         }
@@ -108,11 +120,12 @@ impl GpuBackend {
     /// Parses a backend name.
     ///
     /// Accepts the spellings people type: `vk` and `vulkan` are the same thing,
-    /// and so are `null` and `none`.
+    /// and so are `mtl` and `metal`, and `null` and `none`.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "vk" | "vulkan" => Some(Self::Vulkan),
+            "mtl" | "metal" => Some(Self::Metal),
             "null" | "none" => Some(Self::Null),
             "wgpu" | "webgpu" => Some(Self::Wgpu),
             _ => None,
@@ -190,6 +203,31 @@ struct Registration {
 /// Every backend compiled into this build, in the order [`request_open`] tries
 /// them.
 static REGISTRY: &[Registration] = &[
+    // First on the platform that has it, because it is the only thing that can
+    // reach a GPU there. `crcbl-mtl` has no public items off macOS — the whole
+    // backend is `#[cfg(target_os = "macos")]` — so the entry is gated the same
+    // way, on the element.
+    //
+    // `MetalInstance::open` returns `Option`, not `Result`: the only failure it
+    // has is "the system reports no Metal device", which is the case a registry
+    // falls through on. It is turned into the `Unsupported` the walk needs here
+    // rather than in the backend, exactly as the wgpu entry below does with its
+    // own `Option`.
+    #[cfg(target_os = "macos")]
+    Registration {
+        backend: GpuBackend::Metal,
+        auto: true,
+        open: || {
+            ready(
+                crcbl_mtl::MetalInstance::open()
+                    .map(|instance| Box::new(instance) as Box<dyn Instance>)
+                    .ok_or(HalError::Unsupported {
+                        backend: crcbl_hal::BackendKind::Metal,
+                        what: "no Metal device on this system",
+                    }),
+            )
+        },
+    },
     // `#[cfg]` on the element, not on the whole table — the shape
     // `crcbl_shell::backend`'s registry uses for Wayland and X11. There is no
     // Vulkan in a browser and `crcbl-vk` is not a dependency there at all, so
@@ -197,7 +235,12 @@ static REGISTRY: &[Registration] = &[
     #[cfg(not(target_arch = "wasm32"))]
     Registration {
         backend: GpuBackend::Vulkan,
-        auto: true,
+        // Registered on macOS and not automatic there: Apple platforms are
+        // Metal only per `docs/plan/09-backends-metal-dx12.md`, and a Mac
+        // without MoltenVK has no `libvulkan.dylib` for `ash` to `dlopen`, so
+        // auto-selecting it would spend every start-up failing a load before
+        // reaching the backend that works. `CRCBL_GPU=vk` still gets it.
+        auto: !cfg!(target_os = "macos"),
         open: || {
             ready(
                 crcbl_vk::VkInstance::open()
@@ -478,6 +521,8 @@ mod tests {
     /// by every test that asserts about the table, so a new registration is a
     /// single deliberate edit here.
     const REGISTERED: &[GpuBackend] = &[
+        #[cfg(target_os = "macos")]
+        GpuBackend::Metal,
         #[cfg(not(target_arch = "wasm32"))]
         GpuBackend::Vulkan,
         GpuBackend::Wgpu,
@@ -504,7 +549,12 @@ mod tests {
     /// every variant is registered, so this asserts the arm it can.
     #[test]
     fn a_variant_this_target_lacks_is_rejected_by_name() {
-        for backend in [GpuBackend::Vulkan, GpuBackend::Wgpu, GpuBackend::Null] {
+        for backend in [
+            GpuBackend::Vulkan,
+            GpuBackend::Metal,
+            GpuBackend::Wgpu,
+            GpuBackend::Null,
+        ] {
             if REGISTERED.contains(&backend) {
                 continue;
             }
@@ -544,14 +594,20 @@ mod tests {
 
     #[test]
     fn backend_names_round_trip_and_accept_what_people_type() {
-        for backend in [GpuBackend::Vulkan, GpuBackend::Null, GpuBackend::Wgpu] {
+        for backend in [
+            GpuBackend::Vulkan,
+            GpuBackend::Metal,
+            GpuBackend::Null,
+            GpuBackend::Wgpu,
+        ] {
             assert_eq!(GpuBackend::from_name(backend.as_str()), Some(backend));
             assert_eq!(backend.to_string(), backend.as_str());
         }
         assert_eq!(GpuBackend::from_name("vulkan"), Some(GpuBackend::Vulkan));
         assert_eq!(GpuBackend::from_name(" VK "), Some(GpuBackend::Vulkan));
+        assert_eq!(GpuBackend::from_name("metal"), Some(GpuBackend::Metal));
         assert_eq!(GpuBackend::from_name("none"), Some(GpuBackend::Null));
-        assert_eq!(GpuBackend::from_name("metal"), None);
+        assert_eq!(GpuBackend::from_name("opengl"), None);
     }
 
     /// The tripwire for every backend slice: adding a registration must be a
@@ -568,11 +624,14 @@ mod tests {
         assert!(!null.auto, "a game must never silently render nothing");
     }
 
-    /// Auto-selection differs by target *on purpose*: Vulkan is the only
-    /// automatic entry on native, and wgpu is the only one in a browser because
-    /// it is the only backend there at all. Asserting it here is what stops a
-    /// later edit from quietly making wgpu automatic on native — which would
-    /// change which GPU path every existing game takes.
+    /// Auto-selection differs by target *on purpose*, and there is exactly one
+    /// automatic entry everywhere: Metal on macOS, because Apple platforms are
+    /// Metal only; Vulkan on the rest of native; wgpu in a browser because it is
+    /// the only backend there at all. Asserting it here is what stops a later
+    /// edit from quietly making wgpu automatic on native — which would change
+    /// which GPU path every existing game takes — or from leaving Vulkan
+    /// automatic on a Mac, where it means a failed `dlopen` before every
+    /// successful start-up.
     #[test]
     fn exactly_one_backend_is_auto_selectable_and_it_depends_on_the_target() {
         let auto: Vec<GpuBackend> = REGISTRY
@@ -580,7 +639,9 @@ mod tests {
             .filter(|entry| entry.auto)
             .map(|entry| entry.backend)
             .collect();
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(target_os = "macos")]
+        assert_eq!(auto, [GpuBackend::Metal]);
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
         assert_eq!(auto, [GpuBackend::Vulkan]);
         #[cfg(target_arch = "wasm32")]
         assert_eq!(auto, [GpuBackend::Wgpu]);
@@ -616,22 +677,39 @@ mod tests {
         }
     }
 
-    /// On a machine with a driver this genuinely opens Vulkan, which is correct
-    /// and not something to assert against; the point is the failure path's
-    /// message, which is what a developer with no driver actually sees.
+    /// On a machine with a driver this genuinely opens the platform's backend,
+    /// which is correct and not something to assert against; the point is the
+    /// failure path's message, which is what a developer with no driver actually
+    /// sees. Which backend that is comes from [`REGISTERED`]'s first entry
+    /// rather than a second hard-coded list, so a target added above is covered
+    /// here without a matching edit that could be forgotten.
     /// Blocking, so native-only: `open_backend` and `PendingInstance::block`
     /// do not exist on wasm32.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn automatic_selection_reports_what_it_tried() {
+        let expected = REGISTRY
+            .iter()
+            .find(|entry| entry.auto)
+            .expect("every native target has one automatic backend")
+            .backend;
+        // Exhaustive on purpose: the two enums are separate types — one is the
+        // registry's, one is the seam's — and a new backend must be taught the
+        // correspondence rather than defaulted into one.
+        let expected_kind = match expected {
+            GpuBackend::Vulkan => crcbl_hal::BackendKind::Vulkan,
+            GpuBackend::Metal => crcbl_hal::BackendKind::Metal,
+            GpuBackend::Wgpu => crcbl_hal::BackendKind::Wgpu,
+            GpuBackend::Null => crcbl_hal::BackendKind::Null,
+        };
         match request_open_auto(REGISTRY).block() {
             Ok(instance) => assert_eq!(
                 instance.backend(),
-                crcbl_hal::BackendKind::Vulkan,
-                "vulkan is the only auto-selectable backend today"
+                expected_kind,
+                "the auto-selectable backend is the one that opened"
             ),
             Err(GpuError::NoBackend { tried, last }) => {
-                assert_eq!(tried, "vk", "every attempt is named, in order");
+                assert_eq!(tried, expected.as_str(), "every attempt is named, in order");
                 assert!(!last.is_empty(), "and the last failure explains itself");
             }
             Err(error) => panic!("unexpected error: {error}"),

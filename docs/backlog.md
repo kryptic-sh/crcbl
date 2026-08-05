@@ -3944,12 +3944,20 @@ GAPS — reported honestly:
 `crates/crcbl-mtl` enumerates adapters and refuses everything else by name. Four
 things were raised while building it and not settled.
 
-- **Nothing instantiates it.** No app constructs `MetalInstance`, and it is not
-  in the engine's backend selection or re-exported from the `crcbl` umbrella. CI
-  builds and tests it on `macos-latest`; no shipping binary reaches it. The
-  wire- up belongs with the slice that gives it a device to hand back — a
-  registry entry for a backend whose `request_device` always refuses would be a
-  path that exists only to fail.
+- ~~**Nothing instantiates it.**~~ **Resolved after MTL6.** No app constructed
+  `MetalInstance`, and it was not in the engine's backend selection or
+  re-exported from the `crcbl` umbrella; CI built and tested it on
+  `macos-latest` and no shipping binary reached it. The wire-up was deferred to
+  the slice that gives it a device to hand back — a registry entry for a backend
+  whose `request_device` always refuses would have been a path that exists only
+  to fail — and MTL2 through MTL6 landed the device, the swapchain, pipelines,
+  bind groups and draws. `crates/crcbl/src/backend.rs` now registers
+  `GpuBackend::Metal` behind `cfg(target_os = "macos")` and makes it **the**
+  automatic entry there, with the Vulkan entry registered but no longer
+  automatic on macOS: Apple platforms are Metal only, so auto-selecting Vulkan
+  meant a failed `dlopen` of a `libvulkan.dylib` that is not on a stock Mac
+  before every successful start-up. That failure is what a `cargo run --bin
+  flappy` on macOS printed instead of a window.
 - **It advertises Tier B, and a tier-aware caller will believe it.**
   `DeviceCaps::tier` is derived, and `DRAW_INDIRECT_COUNT` /
   `MULTI_DRAW_INDIRECT` stay off until the command slice picks Metal's indirect

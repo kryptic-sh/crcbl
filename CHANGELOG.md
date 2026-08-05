@@ -16,6 +16,40 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-shaders`: the UI shaders declare their resources in binding order,
+  which is what makes text appear on Metal.** `ui.slang` and `ui_tier_b.slang`
+  declared `constants` first while numbering it last, and Slang's Metal target
+  assigns argument-table indices in *declaration* order — so their MSL bound
+  `constants` at `buffer(0)` and `vertices` at `buffer(1)`, while `crcbl-mtl`
+  flattens `(set, binding)` by ascending binding number and bound them the other
+  way round. The UI vertex stage read the viewport constants as its vertex
+  array: every quad went nowhere, silently, and macOS ran flappy with no HUD, no
+  score and no menu labels. Reordering the two declarations fixes it; SPIR-V and
+  WGSL are byte-identical afterwards, because `[[vk::binding]]` already pinned
+  those. `crcbl_mtl::binding` carries the rule and the obligation it puts on new
+  shaders.
+
+- **The Metal backend is selectable, and on macOS it is what `open()` picks.**
+  `crcbl`'s GPU registry grew a `GpuBackend::Metal` entry behind
+  `cfg(target_os = "macos")`, so `crcbl-mtl` is finally reachable from a game:
+  `--backend mtl` (or `metal`, or `CRCBL_GPU=mtl`) names it, and an ordinary run
+  with no flag gets it. This is the wire-up every Metal slice since MTL1
+  deferred — a registry entry for a backend that could not yet hand back a
+  device would have been a path that exists only to fail — and MTL2 through MTL6
+  landed the device, the swapchain, pipelines, bind groups and draws it was
+  waiting on.
+
+  **Vulkan is still registered on macOS but is no longer selected
+  automatically there.** Apple platforms are Metal only per
+  `docs/plan/09-backends-metal-dx12.md`'s 2026-08-05 correction, and a Mac
+  without MoltenVK has no `libvulkan.dylib` for `ash` to `dlopen` at all — so
+  what the old order produced was not a fallback but the only outcome: every
+  sample on macOS exited with "no GPU backend available (tried: vk)" and a hint
+  to run the null backend. `CRCBL_GPU=vk` still reaches Vulkan by name for
+  whoever installed a loader and means it. Selection elsewhere is unchanged:
+  Vulkan on the rest of native, wgpu in a browser, and null never automatic
+  anywhere.
+
 - **`crcbl-mtl`**: a new crate, opening P14 with **the only path to a GPU on
   macOS and iOS** — Apple platforms are Metal only, per the 2026-08-05 platform
   decision, so nothing else reaches a device there. Its first slice is **adapter
@@ -41,8 +75,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   slice makes. The hardware is Tier A; this backend is not yet.
 
   Off macOS the crate is documentation with no public items, so `objc2-metal` is
-  never fetched or built there. Nothing instantiates it yet — no app, and no
-  entry in the engine's backend selection.
+  never fetched or built there. Nothing instantiated it at this slice — no app,
+  and no entry in the engine's backend selection; the registry entry above is
+  what closed that, once there was a device to hand back.
 
   **Its second slice opens a real device.** `request_device` now checks adapter,
   then required features, then `compatible_surface`, and hands back a

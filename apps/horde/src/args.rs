@@ -31,7 +31,7 @@ OPTIONS:
     --frames <N>         Stop after N presented frames
     --tick-hz <N>        Simulation rate in Hz (default 60). Sets the server's
                          clock, the ECS timestep and every integrator.
-    --backend <B>        GPU backend: vk, vulkan, null, none or wgpu
+    --backend <B>        GPU backend: vk, vulkan, mtl, metal, null, none or wgpu
     --fullscreen         Open borderless instead of windowed. F11 still toggles.
                          A window system may refuse; the summary reports what
                          it actually did, not what was asked for.
@@ -212,7 +212,7 @@ mod tests {
             parsed(&["--backend", "vk"]).common.backend,
             Some(GpuBackend::Vulkan)
         );
-        assert!(rejected(&["--backend", "metal"]).contains("metal"));
+        assert!(rejected(&["--backend", "opengl"]).contains("opengl"));
         assert!(matches!(
             parse(["--help".to_string()].into_iter()),
             Invocation::Help
