@@ -536,15 +536,45 @@ mod tests {
 
     /// `resource_options` is the two enums above packed into one word, so it
     /// must still be readable back as those two.
+    ///
+    /// **`contains` cannot ask "is this Shared?", and that is what this test
+    /// originally got wrong.** `MTLResourceOptions` packs two *fields* into one
+    /// word rather than holding independent flags, and each field's default is
+    /// encoded as zero: `StorageModeShared` is `MTLStorageMode::Shared << shift`
+    /// with `Shared` = 0, and `CPUCacheModeDefaultCache` is zero the same way.
+    /// A zero-valued flag is contained by every value, so `contains` on one is
+    /// vacuously true and its negation is unsatisfiable — the first assertion
+    /// pins that fact, because it is the reason the rest is shaped as it is.
+    ///
+    /// So each half is checked through the mode that *does* have bits, and the
+    /// three locations are asserted mutually distinct — which is what catches
+    /// two of them collapsing onto one packing.
     #[test]
     fn resource_options_carry_both_halves() {
-        let upload = resource_options(MemoryLocation::HostUpload);
-        assert!(upload.contains(MTLResourceOptions::StorageModeShared));
-        assert!(upload.contains(MTLResourceOptions::CPUCacheModeWriteCombined));
+        assert_eq!(
+            MTLResourceOptions::StorageModeShared,
+            MTLResourceOptions::empty(),
+            "Shared stopped being the zero storage mode, so this test's shape no longer holds"
+        );
 
         let device_local = resource_options(MemoryLocation::DeviceLocal);
+        let upload = resource_options(MemoryLocation::HostUpload);
+        let readback = resource_options(MemoryLocation::HostReadback);
+
+        // Storage half, through the mode with bits: a `DeviceLocal` buffer that
+        // silently became host-visible fails the first, and a host buffer that
+        // became private fails the second.
         assert!(device_local.contains(MTLResourceOptions::StorageModePrivate));
-        assert!(!device_local.contains(MTLResourceOptions::StorageModeShared));
+        assert!(!upload.contains(MTLResourceOptions::StorageModePrivate));
+
+        // Cache half, likewise: upload is write-combined ("never read it back"),
+        // readback must not be.
+        assert!(upload.contains(MTLResourceOptions::CPUCacheModeWriteCombined));
+        assert!(!readback.contains(MTLResourceOptions::CPUCacheModeWriteCombined));
+
+        assert_ne!(device_local, upload);
+        assert_ne!(device_local, readback);
+        assert_ne!(upload, readback);
     }
 
     /// Dimensionality, arraying and multisampling all reach the same enum, and
