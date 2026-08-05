@@ -4517,8 +4517,8 @@ stand is the claim that no hosted runner can answer it.
   it out.** The fifth `mtl-e2e` test,
   `crcbl_mtl::swapchain::tests::a_layer_swapchain_acquires_a_drawable_and_presents_it`,
   is `#[ignore]`d for an unrelated reason — a CI container's detached layer
-  vends no drawable — and no probe result bears on it. The `mtl-e2e` job passes
-  `-E 'not test(a_layer_swapchain_acquires_a_drawable_and_presents_it)'` so
+  vends no drawable — and no probe result bears on it. The `mtl-e2e` job names
+  it in the filter that also holds out the four faulting draws, so
   `--run-ignored all` does not sweep it up, because a `nextDrawable` that blocks
   rather than returning nil would burn the job's timeout. **Whether a detached
   layer vends a drawable on macos-26 is an open question**, cheap to settle in a
@@ -4533,17 +4533,69 @@ stand is the claim that no hosted runner can answer it.
   non-virtual GPU.** The `mtl-e2e` job takes the automation half; what it cannot
   take is the hardware half, so the person-owned run stays on the list for that
   reason rather than for want of a job.
-- **The gating doc comment on
-  `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear` still says
-  "Needs a real GPU, and CI does not have one"** and still argues from the
-  macos-14 hang as though it were a platform property; the two later gated draws
-  (`an_indexed_draw_reads_the_bound_index_range`,
-  `a_multi_draw_indirect_emits_every_argument_structure`) and
-  `the_engines_own_triangle_draws_through_a_bind_group` point back at it. The
-  `#[ignore]` reason strings were corrected; that prose block was out of the
-  slice's scope and was deliberately left, so it now contradicts the job sitting
-  beside it. Rewriting it is a docs-only change to
-  `crates/crcbl-mtl/src/device.rs`.
+
+### And then the job ran: 102 pass, and every draw faults
+
+**Measured 2026-08-05, run 31042925024**, the first time any `crcbl-mtl` test
+executed on any machine. The suite is 106 tests; 102 passed, one is filtered
+(the drawable acquisition above), and **the four that failed are exactly the
+four that make the GPU run a shader**:
+
+```text
+FAIL crcbl-mtl device::tests::a_multi_draw_indirect_emits_every_argument_structure
+FAIL crcbl-mtl device::tests::a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear
+FAIL crcbl-mtl device::tests::an_indexed_draw_reads_the_bound_index_range
+FAIL crcbl-mtl device::tests::the_engines_own_triangle_draws_through_a_bind_group
+```
+
+Each faults the same way, and it is the signature this file has recorded twice
+before — `kIOGPUCommandBufferCallbackErrorHang`, every encoder `completed`, none
+faulted:
+
+```text
+DeviceLost("the submission a readback was waiting for failed: Caused GPU Hang
+Error (00000003:kIOGPUCommandBufferCallbackErrorHang) [MTLCommandBufferErrorDomain 2]
+on `Apple Paravirtual device`; encoders in recorded order: `canvas` completed,
+`crcbl copies` completed")
+```
+
+**This is a `crcbl-mtl` defect, not a runner limitation, and that is a stronger
+claim than anything said here before.** The probe drew a triangle on this same
+image from a standalone Swift script and read back the correct texel. So the
+device rasterises; what hangs is _this backend's_ command stream. The two
+previous entries above could not tell those apart, because there was nothing to
+compare against. Now there is.
+
+Two candidates, neither tested — both are differences between the probe's
+command stream and the backend's, and both are cheap to settle:
+
+- **Render-target format.** The probe drew into `Bgra8Unorm`; every draw test
+  here targets `Format::Rgba8Unorm` (`crates/crcbl-mtl/src/device.rs`, the
+  `draw_canvas` helper and the pipelines around it). `CAMetalLayer` itself
+  refuses RGBA8 — `layer_surface_caps` in `crates/crcbl-mtl/src/swapchain.rs`
+  records that and offers BGRA first — which is a hint that Apple's paravirtual
+  path may treat RGBA8 as a second-class render target. Re-running one draw test
+  against `Bgra8Unorm` settles it.
+- **The error-options command buffer.** Every command buffer in this backend is
+  made by `crate::fault::command_buffer`, which uses
+  `commandBufferWithDescriptor:` with
+  `MTLCommandBufferErrorOptionEncoderExecutionStatus`
+  (`crates/crcbl-mtl/src/fault.rs:56-60`); the probe used a plain
+  `makeCommandBuffer()`. **This is the weaker of the two** — the clear and blit
+  tests go through the same helper and pass — but they do not run a shader, and
+  the option is documented to change how the driver instruments execution.
+
+Until one of them is confirmed, `.github/workflows/ci.yml`'s `mtl-e2e` job holds
+the four out by name so the other 102 stay a gate. **They come back the moment
+this is understood** — the filter is a quarantine with a reason, not a
+concession, and leaving it un-revisited would turn the one real bug this job
+found into a permanently green-looking hole.
+
+Worth noting what the 102 buy in the meantime: every one of them had never
+executed anywhere before this job existed. Adapter enumeration, device and
+resource creation, the conversion tables, view creation, bind group layouts,
+pipeline construction from committed MSL, clears, blits, semaphores and readback
+all now have a machine asserting them on every push.
 
 ### The diagnostic that named the fault nearly hid it
 
