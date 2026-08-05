@@ -3956,8 +3956,8 @@ things were raised while building it and not settled.
   automatic entry there, with the Vulkan entry registered but no longer
   automatic on macOS: Apple platforms are Metal only, so auto-selecting Vulkan
   meant a failed `dlopen` of a `libvulkan.dylib` that is not on a stock Mac
-  before every successful start-up. That failure is what a `cargo run --bin
-  flappy` on macOS printed instead of a window.
+  before every successful start-up. That failure is what a
+  `cargo run --bin flappy` on macOS printed instead of a window.
 - **It advertises Tier B, and a tier-aware caller will believe it.**
   `DeviceCaps::tier` is derived, and `DRAW_INDIRECT_COUNT` /
   `MULTI_DRAW_INDIRECT` stay off until the command slice picks Metal's indirect
@@ -4679,6 +4679,44 @@ The same shape applies to `Command`'s list in `crcbl-hal/src/null/record.rs`,
 except that there an exhaustive `match` in the test forces an author who adds a
 variant to visit the file — which is the mitigation `Format` cannot have,
 because its list lives in a different crate from its consumers.
+
+## `crcbl-vk` does not enforce cross-kind pass scoping, where `null` does
+
+`begin_compute_pass` checks only whether a compute pass is already open, and
+`begin_render_pass` only whether a render pass is — so a compute pass opened
+_inside_ a render pass, or the reverse, is accepted. `dispatch` checks no scope
+at all. The null recorder rejects every one of those as `NestedPass` or
+`OutsidePass`.
+
+This may be deliberate: the seam says a backend **may assume** the scoping rules
+hold, which makes the null backend the strict reference and `crcbl-vk` the
+permissive one. So no behaviour was changed and no test asserts the absence of a
+check — that would pin a gap in place. Recorded because it is the second place
+the mock is stricter than the backend it models, after the cross-instance
+surface bug, and that pattern is worth watching rather than rediscovering.
+
+The illegal _commands_ are still caught by the validation layer at record time.
+The illegal _pass bookkeeping_ is caught nowhere.
+
+## The Tier B arms of the indirect-draw tests have never run
+
+`draw_indirect_count` and `draw_indexed_indirect_count` have a Tier A path and a
+fallback, and the tests cover both arms and assert which one they took. But
+lavapipe on Mesa 26.1.6 reports **tier A**, so on this machine and in CI the
+fallback is compiled and unrun. Reaching it needs a genuinely Tier B driver, and
+we do not currently have one anywhere — CI's "software rasteriser" leg is no
+longer the Tier B leg it was assumed to be.
+
+One arm was salvaged: the `update_bind_group` refusal is a layout rule rather
+than a tier rule, so that test runs its refusal path on Tier A devices too.
+
+## `crates/crcbl-vk/tests/vk_e2e.rs` is one file and it is far past reviewable
+
+It was already a monolith before the compute and indirect-draw tests, and those
+added to it rather than splitting it. Splitting is not free: the harness is
+addressed as `--test vk_e2e` by `run-vk-e2e.sh` and by CI, so the split has to
+keep that name working or change both. Worth its own slice, and worth doing
+before the next batch of e2e tests rather than after.
 
 ## Vulkan's cross-submission barriers are unverified on this machine
 
