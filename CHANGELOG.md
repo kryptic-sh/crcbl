@@ -62,8 +62,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
   **Deliberately not for streams.** Input edges, audio commands and net packets
   must not be droppable, and this drops by construction — a 3 ms tap between two
-  reads would simply not be there. Those want the accumulate-then-swap ring,
-  which is the next slice.
+  reads would simply not be there. Those want the ring below.
+
+- **`crcbl-jobs`**: `ring` — the bounded SPSC queue a _stream_ crosses a thread
+  boundary through, and the opposite discipline to the mailbox. Every item is
+  delivered, in order; a producer that outruns its consumer is refused rather
+  than allowed to overwrite. `Producer::push` hands the item **back** in a
+  `Full<T>` rather than dropping it, so shedding load is always the caller's
+  decision and never a silent one, and `Consumer::overflows` counts the refusals
+  for the profiler. Capacity rounds up to a power of two so the index wrap is a
+  mask.
+
+  **Drop-oldest is not implemented**, though the design lists it as a policy: it
+  cannot be done from the producer, because the read cursor belongs to the
+  consumer and advancing it would make the producer a second writer to it —
+  which is what makes an SPSC ring cheap in the first place. Documented at the
+  module and recorded in `docs/backlog.md` rather than left to be discovered.
+
+  Both primitives run under the weekly Miri job. **The memory orderings are
+  checked by Miri and by nothing else**, and that is the hardware's doing rather
+  than the suite's: on x86-64 a `Release` store and a `Relaxed` one compile to
+  the same instruction. Measured — weakening the ring's push to `Relaxed` left
+  the whole suite green while Miri reported the data race in `pop`.
 
 - **horde**: **health potions, dropped by brutes and drunk by walking over
   them.** A `potion` frame in `apps/horde/assets/actors.crpix` — a stoppered

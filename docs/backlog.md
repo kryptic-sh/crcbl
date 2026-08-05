@@ -264,20 +264,41 @@ either extension; the only mention of one anywhere is the doc comment on
 
 ## P5B — the job system, and the two decisions in front of it
 
-`crates/crcbl-jobs` exists as of the spawn-seam slice: `Spawn`, `Threads`,
-`Inline` and `default_spawner`, and nothing above them yet.
-`docs/plan/21-jobs.md` and the roadmap's 2026-08-03 correction carry the design
-and the measurements; what belongs here is the ordering and the two questions
-that are not ours to answer.
+`crates/crcbl-jobs` carries the spawn seam (`Spawn`, `Threads`, `Inline`,
+`default_spawner`) and two of the design's three communication primitives:
+`mailbox` (latest-wins triple buffer, for states) and `ring` (bounded SPSC, for
+streams). `docs/plan/21-jobs.md` and the roadmap's 2026-08-03 correction carry
+the design and the measurements; what belongs here is the ordering, what the
+primitives do not do, and the two questions that were not ours to answer.
 
 The order is forced: **the spawn seam and its single-threaded fallback come
 first** — done — because `docs/plan/21-jobs.md` records that
 `std::thread::spawn` _compiles_ on `wasm32-unknown-unknown` and returns
 `UNSUPPORTED_PLATFORM` at run time, so a pool built on `std::thread` is a pool
 that silently has no browser story. What is still owed, in order: the
-latest-wins mailboxes and SPSC rings, the work-stealing pool and `par_for` in
-both modes, adoption by the four samples (four consumers is what proves a seam
-before P6–P8 build on it), then the worker backend behind it.
+work-stealing pool and `par_for` in both modes, adoption by the four samples
+(four consumers is what proves a seam before P6–P8 build on it), then the worker
+backend behind it.
+
+**The atomics are checked by Miri and by nothing else.** x86-64 is
+total-store-order, so a `Release` store and a `Relaxed` one compile to the same
+instruction and weakening one is invisible to any test on this machine. That is
+measured rather than assumed: `ring`'s push was weakened to `Relaxed` and the
+whole suite stayed green, while `cargo miri test` reported the data race in
+`pop` with a backtrace. Consequences worth keeping in mind — the weekly Miri job
+is load-bearing rather than a nicety, it is the only gate that would catch a
+wrong ordering before an aarch64 or wasm user does, and **a per-PR run does not
+exist**, so an ordering regression can sit on `main` for up to a week. Moving
+`crcbl-jobs` alone into a per-PR miri step is cheap (its suite interprets in ~17
+s) and has not been done.
+
+**`ring` does not implement drop-oldest**, though `21-jobs.md` lists it beside
+drop-newest as an overflow policy. It cannot be done from the producer: the read
+cursor belongs to the consumer, and a producer advancing it to make room would
+be a second writer to it, which is exactly what makes an SPSC ring cheap. `push`
+hands the item back and counts the refusal instead, leaving the policy to the
+caller. If a real consumer turns up wanting drop-oldest, the honest options are
+a consumer-side drain-and-discard or an MPSC design, not a flag on this one.
 
 **The seam has no consumers yet, which is the thing to be honest about.** Its
 shape was chosen from the design doc and the topology, not from a caller pushing
@@ -287,27 +308,34 @@ two samples have used it. Expect the adoption slice to change something here;
 likely candidate, since a caller that wants "threads, but only one" cannot say
 so today.
 
-- **Decision, unanswered: pin a nightly toolchain for the wasm worker target.**
-  A threaded wasm artifact needs
+- **Decided 2026-08-05: pin a dated nightly for the wasm worker target only.** A
+  threaded wasm artifact needs
   `-C target-feature=+atomics,+bulk-memory,+mutable-globals` and `-Z build-std`,
-  which is nightly-only; `rust-toolchain.toml` pins an **exact stable**
-  (`1.97.0`) on purpose, with the reasoning written in the file. The shape that
-  would not disturb every contributor is a nightly pinned by date for that one
-  target, the way the `decoder-fuzz` job already pins one. `21-jobs.md` records
-  that the build is clean on `nightly-2026-07-02`. **This is a toolchain policy
-  call and it hits everybody**, which is why it is a question rather than a
-  task.
+  which is nightly-only, while `rust-toolchain.toml` pins an **exact stable**
+  (`1.97.0`) on purpose — its own comment calls a floating channel a broken
+  promise. The answer is the shape `decoder-fuzz` already uses: a nightly pinned
+  by date, used for that one target and nothing else, so contributors on stable
+  are unaffected and no CI job can go red on an untouched repository.
+  `21-jobs.md` records the build clean on `nightly-2026-07-02`, which is
+  installed on the development machine. **Not yet done** — it lands with the
+  worker backend, which is what needs it.
 
-- **Decision, unanswered: adopt `coi-serviceworker` for the demos.** GitHub
-  Pages cannot set COOP/COEP headers, so `crossOriginIsolated` is false, so
-  there is no `SharedArrayBuffer` and no shared-memory input ring in the
-  published demos. The shim is the only way to get isolation on Pages; it is
+- **Decided 2026-08-05: prove cross-origin isolation locally before deciding
+  about Pages.** GitHub Pages cannot set COOP/COEP, so `crossOriginIsolated` is
+  false there, so there is no `SharedArrayBuffer` and no shared-memory input
+  ring in the published demos; `coi-serviceworker` is the only route and it is
   third-party JavaScript in a `web/` directory that deliberately has no npm
-  dependencies. **If the answer is no, nothing is blocked** — the demos run
-  single-threaded through the fallback and native keeps the full topology, which
-  is what the seam-first ordering exists to survive. The gate the roadmap asks
-  for (`crossOriginIsolated` asserted by the browser gate) is the thing that
-  cannot be met without it.
+  dependencies. Rather than spend that call now, the worker backend gets proved
+  against a locally served site with real COOP/COEP headers —
+  `web/build.sh --serve` is where they go — and the Pages question returns when
+  there is something working to publish. **Not yet done**; the headers are not
+  in `build.sh` yet, and nothing asserts `crossOriginIsolated` anywhere.
+
+  What this does not change: if the shim is eventually declined, the demos run
+  single-threaded through `Inline` and native keeps the full topology, and the
+  roadmap's `crossOriginIsolated` gate should then be struck rather than left
+  unmeetable. That outcome is exactly what the seam-first ordering exists to
+  survive.
 
 ## What the scaffold's gate does not cover
 

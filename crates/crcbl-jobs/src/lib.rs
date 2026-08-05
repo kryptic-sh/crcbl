@@ -46,13 +46,22 @@
 //!
 //! # The unsafe, and what checks it
 //!
-//! [`mailbox`] is the only module here that reaches past the language's checks,
-//! and it does so for the reason the design names: the primitives are the sole
-//! novel concurrency surface, so they are kept tiny and checked hard. Its
-//! invariant is stated where the `unsafe` is, asserted directly by the tests
-//! rather than argued for, and the whole crate is interpreted by the weekly
-//! Miri job — including a two-thread stress run that would report a torn read
-//! as a data race.
+//! [`mailbox`] and [`ring`] are the modules that reach past the language's
+//! checks, for the reason the design names: the primitives are the sole novel
+//! concurrency surface, so they are kept tiny and checked hard. Each invariant
+//! is stated where its `unsafe` is and asserted directly by the tests rather
+//! than argued for.
+//!
+//! **The memory orderings are checked by Miri and by nothing else, and that is
+//! a property of the hardware rather than a gap in the suite.** x86-64 is
+//! total-store-order: a `Release` store and a `Relaxed` store compile to the
+//! same instruction, so weakening one changes no observable behaviour on this
+//! machine however long the stress tests run. Measured, not assumed —
+//! `Ordering::Release` was weakened to `Relaxed` in [`ring`]'s push and the
+//! whole suite stayed green, while Miri reported the data race in `pop` with a
+//! backtrace. The weekly Miri job is therefore the only thing standing between
+//! a wrong ordering and an aarch64 or wasm user, and it is where a change to
+//! any of these atomics has to be checked.
 //!
 //! # Degrading is a decision, not an error
 //!
@@ -66,6 +75,7 @@
 //! otherwise.
 
 pub mod mailbox;
+pub mod ring;
 mod spawn;
 
 #[cfg(not(target_arch = "wasm32"))]
