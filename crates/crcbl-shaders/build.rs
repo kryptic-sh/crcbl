@@ -351,11 +351,24 @@ fn recompile(
         .join(format!("{}.check.{}", record.name, target.flag()));
     let mut command = Command::new(slangc);
     command
-        .arg(root.join(&record.source))
+        // From the crate root, naming the source the way the manifest does —
+        // which is the way `tools/compile-shaders.sh` names it. Slang copies the
+        // path it was *given* into the `#line` directives of its Metal output,
+        // so passing `root.join(...)` here produced an artifact that differed
+        // from the committed one by an absolute path on every machine that had
+        // the pinned compiler. That failed the build rather than the check,
+        // and only for developers who had installed `slangc` — which is to say,
+        // only for the people editing shaders.
+        .current_dir(root)
+        .arg(&record.source)
         .args(["-target", target.flag()])
         .args(["-profile", &manifest.target]);
     if matches!(target, Target::SpirV) {
+        // Both flags must match `tools/compile-shaders.sh` exactly, or this
+        // recompile disagrees with the committed artifact for a reason that is
+        // not drift. See that script for what each one is for.
         command.arg("-emit-spirv-directly");
+        command.arg("-fvk-use-entrypoint-name");
     }
     let status = command.arg("-o").arg(&out).status();
     match status {

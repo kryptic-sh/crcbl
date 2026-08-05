@@ -6,6 +6,17 @@
 slangc-version = 2026.14
 target = spirv_1_5
 
+[compute_probe]
+source = shaders/compute_probe.slang
+source-sha256 = c0326af31bc69615d12ac421130039b50c43d31ec519a5d9f3f298a1615ce41a
+spirv = spirv/compute_probe.spv
+spirv-sha256 = f17714ecd645910c6c5e07f92f38c1425305a53442f8c4f680ff71530b46ce5a
+wgsl = wgsl/compute_probe.wgsl
+wgsl-sha256 = e73b742203440239765b9c7db76710eadb7adcee67c2707cb1440ae72c026fd9
+msl = msl/compute_probe.metal
+msl-sha256 = 142c45ee0c8939fa4d57bca43288d2e7312d8b9d4962e54554613618793fe8e3
+entry-points = computeMain:glcompute
+
 [mesh]
 source = shaders/mesh.slang
 source-sha256 = e72a843d9fb62ee128296f027a6aaf0badc713a9e376036113057fedeee640b0

@@ -114,11 +114,19 @@ for SOURCE in "${SHADERS[@]}"; do
     MSL_ARTIFACT="msl/${NAME}.metal"
     FRESH_MSL="$WORK/${NAME}.metal"
 
+    # `-fvk-use-entrypoint-name` keeps the *source* entry-point name in
+    # `OpEntryPoint`. Without it Slang renames a module's only entry point to
+    # `main`, while the WGSL and MSL targets keep the real name — so a
+    # single-entry-point module ends up addressed as `main` on Vulkan and as
+    # `computeMain` everywhere else, and this crate's cross-target name tests
+    # fail. It is a no-op for every module with two entry points, which is why
+    # the existing artifacts are byte-identical with and without it.
     echo "crcbl shaders: compiling $SOURCE → SPIR-V"
     "$SLANGC" "$SOURCE" \
         -target spirv \
         -profile "$SLANG_PROFILE" \
         -emit-spirv-directly \
+        -fvk-use-entrypoint-name \
         -o "$FRESH"
 
     echo "crcbl shaders: compiling $SOURCE → WGSL"

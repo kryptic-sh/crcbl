@@ -7164,3 +7164,1533 @@ fn assert_menu_corners_match(
 fn crcbl_ui_panel_inset() -> u32 {
     crcbl_render::MenuStyle::pixel_art(1).panel.left as u32
 }
+
+// --- the compute path ------------------------------------------------------
+//
+// Everything below is milestone-independent: it is the half of `crcbl-hal` that
+// had no test reaching a driver at all. `begin_compute_pass`,
+// `bind_compute_pipeline`, `dispatch`, `dispatch_indirect` and
+// `Device::create_compute_pipeline` were covered only by `crcbl-hal`'s null
+// recorder, which records the calls and executes none of them — so a dispatch
+// that did nothing and a dispatch that did the right thing were the same green
+// test. `crcbl_shaders::COMPUTE_PROBE` exists so the difference can be read back
+// and asserted.
+
+/// Workgroups the probe's buffers are sized for.
+///
+/// Eight, so `dispatch_indirect` can ask for two and leave six workgroups' worth
+/// of untouched sentinel behind it — which is what tells "the argument buffer
+/// was read" apart from "everything was dispatched anyway".
+const PROBE_GROUPS: u32 = 8;
+
+/// Elements the probe transforms.
+const PROBE_ELEMENTS: u32 = PROBE_GROUPS * crcbl_shaders::compute_probe::WORKGROUP_SIZE;
+
+/// What the destination buffer holds before every dispatch.
+///
+/// Deliberately not zero, and deliberately not a square: a destination that was
+/// never written must not be confusable with one the shader wrote, and zero is
+/// both its own square and what fresh device memory tends to be.
+const PROBE_SENTINEL: u32 = 0xDEAD_BEEF;
+
+/// The probe's input, one distinct value per index.
+///
+/// Distinct matters: with a constant input, a shader that indexed `source`
+/// wrongly would still produce the right number in every slot. `index + 1`
+/// avoids zero, whose square is itself.
+fn probe_source() -> Vec<u32> {
+    (0..PROBE_ELEMENTS).map(|index| index + 1).collect()
+}
+
+/// What the destination must hold for `elements` dispatched elements, and the
+/// sentinel beyond them.
+///
+/// Written out here rather than derived from the shader: squaring is a closed
+/// form the test states for itself, which is the whole reason the probe squares.
+fn probe_expected(elements: u32) -> Vec<u32> {
+    probe_source()
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if (index as u32) < elements {
+                value * value
+            } else {
+                PROBE_SENTINEL
+            }
+        })
+        .collect()
+}
+
+/// Everything one compute dispatch needs, built through the seam.
+struct ComputeProbe {
+    params: crcbl_hal::BufferHandle,
+    source: crcbl_hal::BufferHandle,
+    destination: crcbl_hal::BufferHandle,
+    /// Host-readable copy target, so the result can be asserted rather than
+    /// assumed.
+    staging: crcbl_hal::BufferHandle,
+    bind_group_layout: crcbl_hal::BindGroupLayoutHandle,
+    bind_group: crcbl_hal::BindGroupHandle,
+    pipeline_layout: crcbl_hal::PipelineLayoutHandle,
+    pipeline: crcbl_hal::ComputePipelineHandle,
+}
+
+/// Bytes one probe buffer occupies.
+const fn probe_bytes() -> u64 {
+    PROBE_ELEMENTS as u64 * 4
+}
+
+impl ComputeProbe {
+    /// Builds the pipeline and stages the input in.
+    ///
+    /// `flags` is the binding-flag set for the destination binding: empty for
+    /// the ordinary path, `UPDATE_AFTER_BIND` for the one test that rebinds it
+    /// after the group exists. Everything else is identical, which is why they
+    /// share this.
+    fn new(headless: &Headless, flags: crcbl_hal::BindingFlags) -> Self {
+        let device = headless.device.as_ref();
+        let params = crcbl_shaders::compute_probe::Params {
+            count: PROBE_ELEMENTS,
+        }
+        .to_bytes();
+        let source_bytes: Vec<u8> = probe_source()
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+
+        let upload = device
+            .create_buffer(&BufferDesc {
+                label: Some("compute probe upload"),
+                size: (params.len() + source_bytes.len()) as u64,
+                usage: BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a staging buffer");
+        device.write_buffer(upload, 0, &params).expect("write");
+        device
+            .write_buffer(upload, params.len() as u64, &source_bytes)
+            .expect("write");
+
+        let params_buffer = device
+            .create_buffer(&BufferDesc {
+                label: Some("compute probe params"),
+                size: crcbl_shaders::compute_probe::PARAMS_SIZE as u64,
+                usage: BufferUsage::UNIFORM | BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a uniform buffer");
+        let source = device
+            .create_buffer(&BufferDesc {
+                label: Some("compute probe source"),
+                size: probe_bytes(),
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a source buffer");
+        let destination = device
+            .create_buffer(&BufferDesc {
+                label: Some("compute probe destination"),
+                size: probe_bytes(),
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a destination buffer");
+        let staging = device
+            .create_buffer(&BufferDesc {
+                label: Some("compute probe readback"),
+                size: probe_bytes(),
+                usage: BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::HostReadback,
+            })
+            .expect("a readback buffer");
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("compute probe upload"),
+            queue: headless.queue,
+        });
+        encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+            src: upload,
+            src_offset: 0,
+            dst: params_buffer,
+            dst_offset: 0,
+            size: params.len() as u64,
+        });
+        encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+            src: upload,
+            src_offset: params.len() as u64,
+            dst: source,
+            dst_offset: 0,
+            size: probe_bytes(),
+        });
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &[
+                crcbl_hal::BufferBarrier {
+                    buffer: params_buffer,
+                    from: ResourceState::TransferDst,
+                    to: ResourceState::ShaderRead,
+                    queue_transfer: None,
+                },
+                crcbl_hal::BufferBarrier {
+                    buffer: source,
+                    from: ResourceState::TransferDst,
+                    to: ResourceState::ShaderRead,
+                    queue_transfer: None,
+                },
+            ],
+            ..Barriers::default()
+        });
+        let commands = encoder.finish().expect("recording succeeded");
+        device
+            .submit(headless.queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+        device.wait_idle().expect("idle");
+        device.destroy_command_buffer(commands);
+        device.destroy_buffer(upload);
+
+        let layout_entries = [
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: crcbl_hal::ShaderStages::COMPUTE,
+                kind: crcbl_hal::BindingKind::UniformBuffer { dynamic: false },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: crcbl_hal::ShaderStages::COMPUTE,
+                kind: crcbl_hal::BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: crcbl_hal::ShaderStages::COMPUTE,
+                kind: crcbl_hal::BindingKind::StorageBuffer {
+                    read_only: false,
+                    dynamic: false,
+                },
+                count: 1,
+                flags,
+            },
+        ];
+        let bind_group_layout = device
+            .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+                label: Some("compute probe"),
+                entries: &layout_entries,
+            })
+            .expect("the probe's layout");
+
+        let group_entries = [
+            crcbl_hal::BindGroupEntry {
+                binding: 0,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(params_buffer),
+            },
+            crcbl_hal::BindGroupEntry {
+                binding: 1,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(source),
+            },
+            crcbl_hal::BindGroupEntry {
+                binding: 2,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(destination),
+            },
+        ];
+        let bind_group = device
+            .create_bind_group(&crcbl_hal::BindGroupDesc {
+                label: Some("compute probe"),
+                layout: bind_group_layout,
+                entries: &group_entries,
+                variable_count: None,
+            })
+            .expect("a bind group");
+
+        let set_layouts = [bind_group_layout];
+        let pipeline_layout = device
+            .create_pipeline_layout(&crcbl_hal::PipelineLayoutDesc {
+                label: Some("compute probe"),
+                bind_group_layouts: &set_layouts,
+                push_constants: None,
+            })
+            .expect("a pipeline layout");
+
+        let module = device
+            .create_shader_module(&crcbl_hal::ShaderModuleDesc {
+                label: Some("compute_probe.slang"),
+                spirv: crcbl_shaders::COMPUTE_PROBE.spirv(),
+                wgsl: crcbl_shaders::COMPUTE_PROBE.wgsl(),
+                msl: crcbl_shaders::COMPUTE_PROBE.msl(),
+            })
+            .expect("the committed SPIR-V is accepted");
+        // The manifest's name rather than a literal: it is read out of the
+        // artifact's `OpEntryPoint` by the compile script, so a Slang release
+        // that renamed it would fail here rather than in a driver.
+        let entry_point = crcbl_shaders::COMPUTE_PROBE
+            .entry_point(crcbl_shaders::Stage::Compute)
+            .expect("the probe has exactly one compute entry point");
+        let pipeline = device
+            .create_compute_pipeline(&crcbl_hal::ComputePipelineDesc {
+                label: Some("compute probe"),
+                layout: pipeline_layout,
+                compute: crcbl_hal::ShaderEntry {
+                    module,
+                    entry_point,
+                },
+            })
+            .expect("a compute pipeline");
+        device.destroy_shader_module(module);
+
+        Self {
+            params: params_buffer,
+            source,
+            destination,
+            staging,
+            bind_group_layout,
+            bind_group,
+            pipeline_layout,
+            pipeline,
+        }
+    }
+
+    /// Fills the destination with the sentinel, runs `record` inside a compute
+    /// pass, and reads the destination back.
+    ///
+    /// `record` is the *only* thing that varies between the dispatch and the
+    /// indirect-dispatch tests, so both go through the same barriers and the
+    /// same readback and a difference in the result is a difference in the
+    /// dispatch.
+    fn run(
+        &self,
+        headless: &Headless,
+        record: impl FnOnce(&mut dyn crcbl_hal::CommandEncoder),
+    ) -> Vec<u32> {
+        self.run_into(headless, self.destination, record)
+    }
+
+    /// [`run`](Self::run), against a nominated destination buffer.
+    ///
+    /// The buffer the *bind group* points at is not necessarily this one — that
+    /// is what `update_bind_group` changes — so the sentinel fill and the
+    /// readback name it explicitly.
+    fn run_into(
+        &self,
+        headless: &Headless,
+        destination: crcbl_hal::BufferHandle,
+        record: impl FnOnce(&mut dyn crcbl_hal::CommandEncoder),
+    ) -> Vec<u32> {
+        let device = headless.device.as_ref();
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("compute probe dispatch"),
+            queue: headless.queue,
+        });
+        let buffer_barrier = |buffer, from, to| crcbl_hal::BufferBarrier {
+            buffer,
+            from,
+            to,
+            queue_transfer: None,
+        };
+        // `TransferSrc` as the source state is vacuous on the first run and is
+        // the real prior use on every later one — a buffer barrier carries no
+        // layout, so naming a wider source scope than happened costs a stage
+        // mask and cannot be wrong.
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &[buffer_barrier(
+                destination,
+                ResourceState::TransferSrc,
+                ResourceState::TransferDst,
+            )],
+            ..Barriers::default()
+        });
+        encoder.fill_buffer(destination, 0, probe_bytes(), PROBE_SENTINEL);
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &[buffer_barrier(
+                destination,
+                ResourceState::TransferDst,
+                ResourceState::ShaderWrite,
+            )],
+            ..Barriers::default()
+        });
+
+        encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc {
+            label: Some("compute probe"),
+        });
+        encoder.bind_compute_pipeline(self.pipeline);
+        // Inside the pass, because the open scope is the only signal the seam
+        // gives the backend about which bind point a group is for.
+        encoder.bind_group(0, self.bind_group, &[], self.pipeline_layout);
+        record(encoder.as_mut());
+        encoder.end_compute_pass();
+
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &[buffer_barrier(
+                destination,
+                ResourceState::ShaderWrite,
+                ResourceState::TransferSrc,
+            )],
+            ..Barriers::default()
+        });
+        encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+            src: destination,
+            src_offset: 0,
+            dst: self.staging,
+            dst_offset: 0,
+            size: probe_bytes(),
+        });
+        let commands = encoder.finish().expect("recording succeeded");
+        device
+            .submit(headless.queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+        device.wait_idle().expect("idle");
+        device.destroy_command_buffer(commands);
+
+        self.read_words(headless)
+    }
+
+    /// Copies `buffer` to the host and decodes it, with no fill and no dispatch.
+    ///
+    /// Separate from [`run_into`](Self::run_into) because the interesting
+    /// question about a buffer the bind group no longer names is what is *still*
+    /// in it — and a helper that filled it first could only ever answer that
+    /// with the value it had just written.
+    fn read_back(&self, headless: &Headless, buffer: crcbl_hal::BufferHandle) -> Vec<u32> {
+        let device = headless.device.as_ref();
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("compute probe read"),
+            queue: headless.queue,
+        });
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &[crcbl_hal::BufferBarrier {
+                buffer,
+                from: ResourceState::ShaderWrite,
+                to: ResourceState::TransferSrc,
+                queue_transfer: None,
+            }],
+            ..Barriers::default()
+        });
+        encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+            src: buffer,
+            src_offset: 0,
+            dst: self.staging,
+            dst_offset: 0,
+            size: probe_bytes(),
+        });
+        let commands = encoder.finish().expect("recording succeeded");
+        device
+            .submit(headless.queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+        device.wait_idle().expect("idle");
+        device.destroy_command_buffer(commands);
+        self.read_words(headless)
+    }
+
+    /// The staging buffer's contents, as the `u32`s the probe writes.
+    fn read_words(&self, headless: &Headless) -> Vec<u32> {
+        let mut bytes = vec![0u8; probe_bytes() as usize];
+        headless.readback(self.staging, probe_bytes(), &mut bytes);
+        bytes
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect()
+    }
+
+    fn destroy(self, device: &dyn Device) {
+        device.destroy_compute_pipeline(self.pipeline);
+        device.destroy_pipeline_layout(self.pipeline_layout);
+        device.destroy_bind_group(self.bind_group);
+        device.destroy_bind_group_layout(self.bind_group_layout);
+        device.destroy_buffer(self.staging);
+        device.destroy_buffer(self.destination);
+        device.destroy_buffer(self.source);
+        device.destroy_buffer(self.params);
+    }
+}
+
+/// Compares a probe result against what the CPU says it should be, and says
+/// which element disagreed first.
+///
+/// The element count is asserted before the values: a readback that came back
+/// short would otherwise satisfy a `zip` over nothing at all.
+fn assert_probe(actual: &[u32], expected: &[u32], what: &str) {
+    assert_eq!(
+        actual.len(),
+        PROBE_ELEMENTS as usize,
+        "{what}: the readback is not the whole destination buffer"
+    );
+    assert_eq!(expected.len(), actual.len(), "{what}: expectation length");
+    if let Some((index, (got, want))) = actual
+        .iter()
+        .zip(expected)
+        .enumerate()
+        .find(|(_, (got, want))| got != want)
+    {
+        panic!(
+            "{what}: element {index} is {got} ({got:#x}), expected {want} ({want:#x}). \
+             {} of {} elements were expected to be written.",
+            expected.iter().filter(|v| **v != PROBE_SENTINEL).count(),
+            expected.len()
+        );
+    }
+}
+
+/// A dispatch that really ran, and really wrote the values it was asked for.
+///
+/// The distinction this whole slice exists for: `dispatch` returns nothing, so
+/// a backend that recorded no `vkCmdDispatch` at all would submit cleanly,
+/// present cleanly and leave a buffer full of [`PROBE_SENTINEL`]. Only reading
+/// the destination back tells the two apart.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_compute_dispatch_writes_the_values_it_was_asked_for() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    // Not a skip. Every Vulkan device with a graphics queue has compute — the
+    // flag exists for a wgpu fallback that does not — so an absence here is a
+    // capability-reporting bug, not a machine this suite should tiptoe around.
+    assert!(
+        device.caps().features.contains(Features::COMPUTE),
+        "a Vulkan device with a graphics queue always has compute; \
+         adapter caps report {:?}",
+        device.caps().features
+    );
+
+    let probe = ComputeProbe::new(&headless, crcbl_hal::BindingFlags::empty());
+    let values = probe.run(&headless, |encoder| {
+        encoder.dispatch(PROBE_GROUPS, 1, 1);
+    });
+
+    assert_probe(&values, &probe_expected(PROBE_ELEMENTS), "a full dispatch");
+    assert!(
+        !values.contains(&PROBE_SENTINEL),
+        "a full dispatch must leave no element unwritten"
+    );
+
+    probe.destroy(device);
+    headless.finish();
+}
+
+/// `dispatch_indirect` reads its workgroup count out of GPU memory, at the
+/// offset it was given.
+///
+/// The argument buffer carries a **decoy** at offset zero that would dispatch
+/// every workgroup. So three different failures are distinguishable here rather
+/// than confusable: a backend that ignored the offset dispatches eight groups
+/// and overwrites the tail; a backend that ignored the argument buffer entirely
+/// writes nothing; a correct one writes exactly the front of the buffer and
+/// leaves the sentinel behind it.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn dispatch_indirect_reads_its_workgroup_count_from_the_buffer() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    let probe = ComputeProbe::new(&headless, crcbl_hal::BindingFlags::empty());
+
+    /// Workgroups the real arguments ask for. Fewer than [`PROBE_GROUPS`], so
+    /// the difference is visible in the readback.
+    const DISPATCHED_GROUPS: u32 = 2;
+    /// Where the real arguments live. Non-zero, and the decoy sits at zero.
+    const ARGS_OFFSET: u64 = 16;
+
+    // `VkDispatchIndirectCommand`: three `uint32_t`s, `x`, `y`, `z`. Fixed by
+    // the Vulkan specification rather than by this engine — `crcbl-hal` does not
+    // spell the argument layout, because it is the backend's native one, and
+    // this is a `crcbl-vk` test.
+    let mut args_bytes = vec![0u8; ARGS_OFFSET as usize + 12];
+    for (slot, value) in [PROBE_GROUPS, 1, 1].iter().enumerate() {
+        args_bytes[slot * 4..slot * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (slot, value) in [DISPATCHED_GROUPS, 1, 1].iter().enumerate() {
+        let at = ARGS_OFFSET as usize + slot * 4;
+        args_bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    let upload = device
+        .create_buffer(&BufferDesc {
+            label: Some("dispatch args upload"),
+            size: args_bytes.len() as u64,
+            usage: BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("a staging buffer");
+    device.write_buffer(upload, 0, &args_bytes).expect("write");
+    let args = device
+        .create_buffer(&BufferDesc {
+            label: Some("dispatch args"),
+            size: args_bytes.len() as u64,
+            usage: BufferUsage::INDIRECT | BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("an indirect buffer");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("dispatch args upload"),
+        queue: headless.queue,
+    });
+    encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+        src: upload,
+        src_offset: 0,
+        dst: args,
+        dst_offset: 0,
+        size: args_bytes.len() as u64,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[crcbl_hal::BufferBarrier {
+            buffer: args,
+            from: ResourceState::TransferDst,
+            to: ResourceState::IndirectArgument,
+            queue_transfer: None,
+        }],
+        ..Barriers::default()
+    });
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(commands);
+    device.destroy_buffer(upload);
+
+    let values = probe.run(&headless, |encoder| {
+        encoder.dispatch_indirect(args, ARGS_OFFSET);
+    });
+
+    let dispatched = DISPATCHED_GROUPS * crcbl_shaders::compute_probe::WORKGROUP_SIZE;
+    assert!(
+        dispatched > 0 && dispatched < PROBE_ELEMENTS,
+        "the indirect dispatch must cover part of the buffer, not none and not all"
+    );
+    assert_probe(&values, &probe_expected(dispatched), "an indirect dispatch");
+    // Said again in its own words, because the two halves fail for different
+    // reasons: the front proves work happened, the tail proves the *count* came
+    // from the buffer at the offset that was named.
+    assert!(
+        values[..dispatched as usize]
+            .iter()
+            .all(|value| *value != PROBE_SENTINEL),
+        "the dispatched workgroups wrote nothing"
+    );
+    assert!(
+        values[dispatched as usize..]
+            .iter()
+            .all(|value| *value == PROBE_SENTINEL),
+        "the workgroups past the indirect count ran anyway — the argument buffer \
+         or its offset was not honoured"
+    );
+
+    device.destroy_buffer(args);
+    probe.destroy(device);
+    headless.finish();
+}
+
+/// The compute scope's own rules, at record time.
+///
+/// `crcbl-hal`'s null recorder rejects a nested pass and an unclosed one, and
+/// the seam says a backend "may assume these hold". `crcbl-vk` does not merely
+/// assume: it reports both, and this is where that stops being a claim about
+/// code nobody ran. Both encoders fail at `finish`, so neither reaches a queue.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn compute_passes_do_not_nest_and_may_not_be_left_open() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+
+    let mut nested = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("nested compute pass"),
+        queue: headless.queue,
+    });
+    nested.begin_compute_pass(&crcbl_hal::ComputePassDesc { label: None });
+    nested.begin_compute_pass(&crcbl_hal::ComputePassDesc { label: None });
+    let error = nested
+        .finish()
+        .expect_err("a nested compute pass must fail recording, not the driver");
+    let crcbl_hal::HalError::InvalidDescriptor(message) = &error else {
+        panic!("a nested pass is a descriptor problem: {error}");
+    };
+    assert!(message.contains("do not nest"), "{message}");
+
+    let mut unclosed = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("unclosed compute pass"),
+        queue: headless.queue,
+    });
+    unclosed.begin_compute_pass(&crcbl_hal::ComputePassDesc { label: None });
+    let error = unclosed
+        .finish()
+        .expect_err("a compute pass left open must fail recording");
+    let crcbl_hal::HalError::InvalidDescriptor(message) = &error else {
+        panic!("an unclosed pass is a descriptor problem: {error}");
+    };
+    assert!(message.contains("compute pass still open"), "{message}");
+
+    // And a well-formed pass on the same device still records, so the two
+    // failures above are the shape of the pass rather than the encoder.
+    let mut good = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("well-formed compute pass"),
+        queue: headless.queue,
+    });
+    good.begin_compute_pass(&crcbl_hal::ComputePassDesc {
+        label: Some("empty"),
+    });
+    good.end_compute_pass();
+    let commands = good.finish().expect("an empty compute pass records");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(commands);
+
+    headless.finish();
+}
+
+/// `Device::update_bind_group`: the bindless write path, and the one call the
+/// seam permits while command buffers referencing the group are still pending.
+///
+/// Both tiers are covered and both are asserted. With `DESCRIPTOR_INDEXING` the
+/// group is rebuilt in place to point at a second destination buffer and the
+/// *same* pipeline then writes the new one and leaves the old one alone — which
+/// a write that silently did nothing could not produce. Without it, the call
+/// must be refused loudly, because rewriting a set that a pending submission may
+/// reference is undefined behaviour rather than a slow path.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn update_bind_group_moves_a_dispatch_onto_a_different_buffer() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    let indexing = device
+        .caps()
+        .features
+        .contains(Features::DESCRIPTOR_INDEXING);
+
+    if !indexing {
+        // Tier B: the layout cannot even carry the flag, so the refusal is
+        // asserted on the plain group the probe already builds.
+        let probe = ComputeProbe::new(&headless, crcbl_hal::BindingFlags::empty());
+        let error = device
+            .update_bind_group(probe.bind_group, &[])
+            .expect_err("a set without UPDATE_AFTER_BIND must refuse a rewrite");
+        assert!(
+            matches!(error, crcbl_hal::HalError::Unsupported { .. }),
+            "the refusal must be loud and typed: {error}"
+        );
+        eprintln!("vk e2e: update_bind_group — Tier B device refused the rewrite: {error}");
+        probe.destroy(device);
+        headless.finish();
+        return;
+    }
+
+    eprintln!("vk e2e: update_bind_group — Tier A device, rewriting a live set");
+    let probe = ComputeProbe::new(&headless, crcbl_hal::BindingFlags::UPDATE_AFTER_BIND);
+    let second = device
+        .create_buffer(&BufferDesc {
+            label: Some("compute probe second destination"),
+            size: probe_bytes(),
+            usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a second destination buffer");
+
+    // Before: the group still names the original buffer.
+    let before = probe.run(&headless, |encoder| {
+        encoder.dispatch(PROBE_GROUPS, 1, 1);
+    });
+    assert_probe(
+        &before,
+        &probe_expected(PROBE_ELEMENTS),
+        "before the rewrite",
+    );
+
+    device
+        .update_bind_group(
+            probe.bind_group,
+            &[crcbl_hal::BindGroupEntry {
+                binding: 2,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(second),
+            }],
+        )
+        .expect("a Tier A device rewrites an UPDATE_AFTER_BIND set");
+
+    // Reset the original to the sentinel and dispatch nothing, so the squares
+    // step one left in it cannot be mistaken for squares this step wrote. Setup,
+    // not an assertion — the assertion is three lines down.
+    let reset = probe.run_into(&headless, probe.destination, |_| {});
+    assert!(
+        reset.iter().all(|value| *value == PROBE_SENTINEL),
+        "a compute pass with no dispatch in it must write nothing"
+    );
+
+    // After: the *second* buffer is the one the same pipeline fills…
+    let after = probe.run_into(&headless, second, |encoder| {
+        encoder.dispatch(PROBE_GROUPS, 1, 1);
+    });
+    assert_probe(&after, &probe_expected(PROBE_ELEMENTS), "after the rewrite");
+
+    // …and the original is untouched by that dispatch, which is what makes this
+    // a rebind rather than a second write to the same place. An
+    // `update_bind_group` that did nothing would have sent the dispatch above
+    // here instead, failing both this and the assertion before it.
+    let untouched = probe.read_back(&headless, probe.destination);
+    assert!(
+        untouched.iter().all(|value| *value == PROBE_SENTINEL),
+        "the rebound-away buffer was written after the rewrite; got {:?}…",
+        &untouched[..4]
+    );
+
+    // The refusal is not a *tier* rule, it is a *layout* rule — so it is checked
+    // here too, on the Tier A device, rather than only in the branch above that
+    // a machine with a Tier A driver never enters. A group whose layout did not
+    // ask for `UPDATE_AFTER_BIND` must be refused whatever the device can do,
+    // because a pending command buffer may still reference the set.
+    let plain_entries = [crcbl_hal::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: crcbl_hal::ShaderStages::COMPUTE,
+        kind: crcbl_hal::BindingKind::StorageBuffer {
+            read_only: true,
+            dynamic: false,
+        },
+        count: 1,
+        flags: crcbl_hal::BindingFlags::empty(),
+    }];
+    let plain_layout = device
+        .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+            label: Some("no update-after-bind"),
+            entries: &plain_entries,
+        })
+        .expect("a flagless layout works on both tiers");
+    let plain_group = device
+        .create_bind_group(&crcbl_hal::BindGroupDesc {
+            label: Some("no update-after-bind"),
+            layout: plain_layout,
+            entries: &[crcbl_hal::BindGroupEntry {
+                binding: 0,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(probe.source),
+            }],
+            variable_count: None,
+        })
+        .expect("a bind group");
+    let error = device
+        .update_bind_group(plain_group, &[])
+        .expect_err("a set without UPDATE_AFTER_BIND must refuse a rewrite on any tier");
+    assert!(
+        matches!(error, crcbl_hal::HalError::Unsupported { .. }),
+        "the refusal must be loud and typed: {error}"
+    );
+    device.destroy_bind_group(plain_group);
+    device.destroy_bind_group_layout(plain_layout);
+
+    device.destroy_buffer(second);
+    probe.destroy(device);
+    headless.finish();
+}
+
+// --- the indirect draw path ------------------------------------------------
+//
+// `crcbl-hal`'s module docs call `draw_indexed_indirect_count` "Tier A's
+// steady-state draw call — one per pass, regardless of scene size" and say
+// `draw` "exists mostly for full-screen triangles and bring-up". Until this
+// section, the bring-up path was the only one that had ever reached a driver.
+//
+// Every test here draws the *same* four triangles, one per quadrant, through
+// `triangle.slang` — no new shader — and varies only the indirect arguments.
+// That is what makes a backend which honoured the arguments distinguishable
+// from one which ignored them and drew something reasonable anyway: each
+// argument selects a different subset of the four, and the quadrants it did not
+// select must still be the clear colour.
+
+/// Where each quadrant's triangle sits, in NDC.
+const QUADRANT_CENTRES: [[f32; 2]; 4] = [[-0.5, 0.5], [0.5, 0.5], [-0.5, -0.5], [0.5, -0.5]];
+
+/// One saturated colour per quadrant, no two alike, and the fourth a pair of
+/// channels rather than a third primary — so "the wrong triangle drew" is a
+/// different picture rather than a dimmer one.
+const QUADRANT_COLORS: [[f32; 4]; 4] = [
+    [1.0, 0.0, 0.0, 1.0],
+    [0.0, 1.0, 0.0, 1.0],
+    [0.0, 0.0, 1.0, 1.0],
+    [1.0, 1.0, 0.0, 1.0],
+];
+
+/// A triangle's three corners as offsets from its quadrant centre.
+///
+/// They sum to zero in both axes, so the centroid is the centre exactly and the
+/// sample point needs no fudge factor.
+const QUADRANT_CORNERS: [[f32; 2]; 3] = [[0.0, 0.30], [0.26, -0.15], [-0.26, -0.15]];
+
+/// Vertices per quadrant triangle.
+const QUADRANT_VERTICES: u32 = QUADRANT_CORNERS.len() as u32;
+
+/// The per-channel ceiling for "this is still the clear colour".
+///
+/// [`TRIANGLE_CLEAR`] is dark but not black, and its blue is the largest
+/// channel — the same asymmetry `a_triangle_pulled_from_a_storage_buffer_reaches_memory`
+/// allows for at the frame corners.
+const QUADRANT_DARK: [u32; 3] = [60, 60, 80];
+
+/// The four triangles, in the `std430` layout `triangle.slang` declares.
+fn quadrant_vertex_bytes() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for (centre, color) in QUADRANT_CENTRES.iter().zip(&QUADRANT_COLORS) {
+        for corner in &QUADRANT_CORNERS {
+            // Clip space directly, as `triangle.slang` documents: there is no
+            // camera, and `z` is inside Vulkan's 0..=w range.
+            for value in [centre[0] + corner[0], centre[1] + corner[1], 0.5, 1.0] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            for value in color {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    bytes
+}
+
+/// Where a quadrant's triangle should be sampled, in pixels.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn quadrant_pixel(quadrant: usize) -> (u32, u32) {
+    let (width, height) = TRIANGLE_EXTENT;
+    let centre = QUADRANT_CENTRES[quadrant];
+    // +Y is up in the seam's convention, which the backend's negative-height
+    // viewport preserves, so the Y term is inverted here and nowhere else.
+    (
+        (((centre[0] + 1.0) * 0.5) * width as f32) as u32,
+        (((1.0 - centre[1]) * 0.5) * height as f32) as u32,
+    )
+}
+
+/// `VkDrawIndirectCommand`, little-endian.
+///
+/// The seam does not spell the argument layout — it is the backend's native one
+/// — and this is a `crcbl-vk` test, so the Vulkan structure is what goes in.
+fn draw_args(vertex_count: u32, instance_count: u32, first_vertex: u32) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    for (slot, value) in [vertex_count, instance_count, first_vertex, 0]
+        .iter()
+        .enumerate()
+    {
+        out[slot * 4..slot * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
+/// `VkDrawIndexedIndirectCommand`, little-endian. `vertexOffset` is signed and
+/// zero throughout: the index buffer already selects the triangle.
+fn draw_indexed_args(index_count: u32, instance_count: u32, first_index: u32) -> [u8; 20] {
+    let mut out = [0u8; 20];
+    for (slot, value) in [index_count, instance_count, first_index, 0, 0]
+        .iter()
+        .enumerate()
+    {
+        out[slot * 4..slot * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
+/// Byte offsets into the one argument buffer every indirect test shares.
+///
+/// One buffer rather than one per call keeps the upload and its
+/// `IndirectArgument` barrier in a single place, and a **non-zero** offset for
+/// every argument a test actually uses is what makes "the offset was honoured"
+/// checkable: a decoy at zero would otherwise be indistinguishable from the
+/// real thing.
+mod indirect_at {
+    /// A decoy that draws all four quadrants, at the offset a backend which
+    /// ignored `offset` would read.
+    pub const DECOY: u64 = 0;
+    /// One non-indexed draw of the first two quadrants.
+    pub const DIRECT: u64 = 16;
+    /// One indexed draw of the third quadrant alone.
+    pub const INDEXED: u64 = 32;
+    /// Two indexed draws — the first and last quadrants — at stride 20.
+    pub const MULTI: u64 = 64;
+    /// Two non-indexed draws, of which the count buffer selects one.
+    pub const DIRECT_COUNT: u64 = 128;
+    /// Four indexed draws, of which the count buffer selects three.
+    pub const INDEXED_COUNT: u64 = 192;
+    /// A `u32` draw count of one, for [`DIRECT_COUNT`].
+    pub const COUNT_ONE: u64 = 288;
+    /// A `u32` draw count of three, for [`INDEXED_COUNT`].
+    pub const COUNT_THREE: u64 = 292;
+    /// Bytes the buffer needs.
+    pub const SIZE: u64 = 320;
+}
+
+/// `sizeof(VkDrawIndirectCommand)`.
+const DRAW_ARGS_STRIDE: u32 = 16;
+/// `sizeof(VkDrawIndexedIndirectCommand)`.
+const DRAW_INDEXED_ARGS_STRIDE: u32 = 20;
+
+/// The argument buffer's contents, laid out at [`indirect_at`]'s offsets.
+fn indirect_args_bytes() -> Vec<u8> {
+    let mut bytes = vec![0u8; indirect_at::SIZE as usize];
+    let mut put = |offset: u64, source: &[u8]| {
+        let at = offset as usize;
+        bytes[at..at + source.len()].copy_from_slice(source);
+    };
+    let all = QUADRANT_VERTICES * QUADRANT_COLORS.len() as u32;
+
+    put(indirect_at::DECOY, &draw_args(all, 1, 0));
+    put(indirect_at::DIRECT, &draw_args(QUADRANT_VERTICES * 2, 1, 0));
+    put(
+        indirect_at::INDEXED,
+        &draw_indexed_args(QUADRANT_VERTICES, 1, QUADRANT_VERTICES * 2),
+    );
+    put(
+        indirect_at::MULTI,
+        &draw_indexed_args(QUADRANT_VERTICES, 1, 0),
+    );
+    put(
+        indirect_at::MULTI + u64::from(DRAW_INDEXED_ARGS_STRIDE),
+        &draw_indexed_args(QUADRANT_VERTICES, 1, QUADRANT_VERTICES * 3),
+    );
+    // The count path's first argument draws one quadrant and its second draws
+    // all four, so a backend that used `max_draw_count` in place of the count
+    // buffer lights up the whole frame rather than one corner of it.
+    put(
+        indirect_at::DIRECT_COUNT,
+        &draw_args(QUADRANT_VERTICES, 1, 0),
+    );
+    put(
+        indirect_at::DIRECT_COUNT + u64::from(DRAW_ARGS_STRIDE),
+        &draw_args(all, 1, 0),
+    );
+    for quadrant in 0..QUADRANT_COLORS.len() as u32 {
+        put(
+            indirect_at::INDEXED_COUNT + u64::from(quadrant * DRAW_INDEXED_ARGS_STRIDE),
+            &draw_indexed_args(QUADRANT_VERTICES, 1, quadrant * QUADRANT_VERTICES),
+        );
+    }
+    put(indirect_at::COUNT_ONE, &1u32.to_le_bytes());
+    put(indirect_at::COUNT_THREE, &3u32.to_le_bytes());
+    bytes
+}
+
+/// The four quadrant triangles, their indices, and the arguments that select
+/// them — everything the indirect tests share.
+struct QuadrantResources {
+    vertices: crcbl_hal::BufferHandle,
+    indices: crcbl_hal::BufferHandle,
+    args: crcbl_hal::BufferHandle,
+    bind_group_layout: crcbl_hal::BindGroupLayoutHandle,
+    bind_group: crcbl_hal::BindGroupHandle,
+    pipeline_layout: crcbl_hal::PipelineLayoutHandle,
+    pipeline: crcbl_hal::GraphicsPipelineHandle,
+}
+
+impl QuadrantResources {
+    fn new(headless: &Headless) -> Self {
+        let device = headless.device.as_ref();
+        let vertex_bytes = quadrant_vertex_bytes();
+        // Identity indices: the argument's `first_index` is the lever under
+        // test, so a permutation here would only make a failure harder to read.
+        let index_bytes: Vec<u8> = (0..QUADRANT_VERTICES * QUADRANT_COLORS.len() as u32)
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let args_bytes = indirect_args_bytes();
+
+        let upload = device
+            .create_buffer(&BufferDesc {
+                label: Some("quadrant upload"),
+                size: (vertex_bytes.len() + index_bytes.len() + args_bytes.len()) as u64,
+                usage: BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a staging buffer");
+        let vertex_at = 0u64;
+        let index_at = vertex_bytes.len() as u64;
+        let args_at = index_at + index_bytes.len() as u64;
+        device
+            .write_buffer(upload, vertex_at, &vertex_bytes)
+            .expect("write");
+        device
+            .write_buffer(upload, index_at, &index_bytes)
+            .expect("write");
+        device
+            .write_buffer(upload, args_at, &args_bytes)
+            .expect("write");
+
+        let vertices = device
+            .create_buffer(&BufferDesc {
+                label: Some("quadrant vertices"),
+                size: vertex_bytes.len() as u64,
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a vertex buffer");
+        let indices = device
+            .create_buffer(&BufferDesc {
+                label: Some("quadrant indices"),
+                size: index_bytes.len() as u64,
+                usage: BufferUsage::INDEX | BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("an index buffer");
+        let args = device
+            .create_buffer(&BufferDesc {
+                label: Some("quadrant indirect arguments"),
+                size: indirect_at::SIZE,
+                usage: BufferUsage::INDIRECT | BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("an indirect buffer");
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("quadrant upload"),
+            queue: headless.queue,
+        });
+        for (src_offset, dst, size) in [
+            (vertex_at, vertices, vertex_bytes.len() as u64),
+            (index_at, indices, index_bytes.len() as u64),
+            (args_at, args, args_bytes.len() as u64),
+        ] {
+            encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+                src: upload,
+                src_offset,
+                dst,
+                dst_offset: 0,
+                size,
+            });
+        }
+        let barrier = |buffer, to| crcbl_hal::BufferBarrier {
+            buffer,
+            from: ResourceState::TransferDst,
+            to,
+            queue_transfer: None,
+        };
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &[
+                barrier(vertices, ResourceState::ShaderRead),
+                barrier(indices, ResourceState::IndexBuffer),
+                // The barrier `crcbl-hal` calls "the single most important
+                // barrier in a GPU-driven frame, and the one whose absence
+                // produces 'sometimes nothing draws'".
+                barrier(args, ResourceState::IndirectArgument),
+            ],
+            ..Barriers::default()
+        });
+        let commands = encoder.finish().expect("recording succeeded");
+        device
+            .submit(headless.queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+        device.wait_idle().expect("idle");
+        device.destroy_command_buffer(commands);
+        device.destroy_buffer(upload);
+
+        let layout_entries = [crcbl_hal::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: crcbl_hal::ShaderStages::VERTEX,
+            kind: crcbl_hal::BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+            },
+            count: 1,
+            flags: crcbl_hal::BindingFlags::empty(),
+        }];
+        let bind_group_layout = device
+            .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+                label: Some("quadrant vertices"),
+                entries: &layout_entries,
+            })
+            .expect("a layout with no descriptor-indexing flags works on both tiers");
+        let group_entries = [crcbl_hal::BindGroupEntry {
+            binding: 0,
+            array_index: 0,
+            resource: crcbl_hal::BindingResource::whole_buffer(vertices),
+        }];
+        let bind_group = device
+            .create_bind_group(&crcbl_hal::BindGroupDesc {
+                label: Some("quadrant vertices"),
+                layout: bind_group_layout,
+                entries: &group_entries,
+                variable_count: None,
+            })
+            .expect("a bind group");
+
+        let set_layouts = [bind_group_layout];
+        let pipeline_layout = device
+            .create_pipeline_layout(&crcbl_hal::PipelineLayoutDesc {
+                label: Some("quadrants"),
+                bind_group_layouts: &set_layouts,
+                push_constants: None,
+            })
+            .expect("a pipeline layout");
+        let module = device
+            .create_shader_module(&crcbl_hal::ShaderModuleDesc {
+                label: Some("triangle.slang"),
+                spirv: crcbl_shaders::TRIANGLE.spirv(),
+                wgsl: crcbl_shaders::TRIANGLE.wgsl(),
+                msl: crcbl_shaders::TRIANGLE.msl(),
+            })
+            .expect("the committed SPIR-V is accepted");
+        let color_targets = [crcbl_hal::ColorTargetState::opaque(headless.format)];
+        let pipeline = device
+            .create_graphics_pipeline(&crcbl_hal::GraphicsPipelineDesc {
+                label: Some("quadrants"),
+                layout: pipeline_layout,
+                vertex: crcbl_hal::ShaderEntry {
+                    module,
+                    entry_point: "vertexMain",
+                },
+                fragment: Some(crcbl_hal::ShaderEntry {
+                    module,
+                    entry_point: "fragmentMain",
+                }),
+                primitive: crcbl_hal::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: crcbl_hal::MultisampleState::default(),
+                color_targets: &color_targets,
+            })
+            .expect("a graphics pipeline");
+        device.destroy_shader_module(module);
+
+        Self {
+            vertices,
+            indices,
+            args,
+            bind_group_layout,
+            bind_group,
+            pipeline_layout,
+            pipeline,
+        }
+    }
+
+    /// Renders one frame whose only draw call is whatever `record` issues.
+    ///
+    /// The index buffer is always bound, so an indexed and a non-indexed
+    /// argument differ only in the call the test makes.
+    fn render(
+        &self,
+        headless: &Headless,
+        record: impl FnOnce(&mut dyn crcbl_hal::CommandEncoder),
+    ) -> crcbl_golden::Image {
+        let device = headless.device.as_ref();
+        let (width, height) = TRIANGLE_EXTENT;
+        let acquired = device
+            .acquire_next_frame(headless.swapchain)
+            .expect("the ring always has an image");
+        let byte_count = u64::from(width) * u64::from(height) * 4;
+        let staging = device
+            .create_buffer(&BufferDesc {
+                label: Some("quadrant readback"),
+                size: byte_count,
+                usage: BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::HostReadback,
+            })
+            .expect("a readback buffer");
+
+        let range = ImageSubresourceRange::all(headless.format);
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("quadrant frame"),
+            queue: headless.queue,
+        });
+        encoder.pipeline_barrier(&Barriers {
+            images: &[crcbl_hal::ImageBarrier::new(
+                acquired.image,
+                range,
+                ResourceState::Undefined,
+                ResourceState::ColorAttachment,
+            )],
+            ..Barriers::default()
+        });
+        encoder.begin_render_pass(&RenderPassDesc {
+            label: Some("indirect quadrants"),
+            color_attachments: &[ColorAttachment {
+                view: acquired.view,
+                resolve: None,
+                load: LoadOp::Clear,
+                store: StoreOp::Store,
+                clear: ClearValue::color(TRIANGLE_CLEAR),
+            }],
+            depth_stencil_attachment: None,
+            render_area: Rect2d::from_size(width, height),
+        });
+        encoder.set_viewport(&crcbl_hal::Viewport::from_size(width, height));
+        encoder.set_scissor(&Rect2d::from_size(width, height));
+        encoder.bind_graphics_pipeline(self.pipeline);
+        encoder.bind_group(0, self.bind_group, &[], self.pipeline_layout);
+        encoder.bind_index_buffer(self.indices, 0, crcbl_hal::IndexFormat::Uint32);
+        record(encoder.as_mut());
+        encoder.end_render_pass();
+        encoder.pipeline_barrier(&Barriers {
+            images: &[crcbl_hal::ImageBarrier::new(
+                acquired.image,
+                range,
+                ResourceState::ColorAttachment,
+                ResourceState::TransferSrc,
+            )],
+            ..Barriers::default()
+        });
+        encoder.copy_image_to_buffer(&BufferImageCopy {
+            buffer: staging,
+            buffer_offset: 0,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            image: acquired.image,
+            image_subresource: ImageSubresourceLayers {
+                aspect: ImageAspect::COLOR,
+                mip: 0,
+                base_layer: 0,
+                layer_count: 1,
+            },
+            image_offset: crcbl_hal::Offset3d::default(),
+            image_extent: Extent3d::d2(width, height),
+        });
+        let commands = encoder.finish().expect("recording succeeded");
+        device
+            .submit(headless.queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+        device
+            .present(
+                headless.queue,
+                &PresentInfo {
+                    swapchain: headless.swapchain,
+                    waits: acquired.present_semaphore.as_slice(),
+                },
+            )
+            .expect("present");
+
+        let mut bytes = vec![0u8; byte_count as usize];
+        headless.readback(staging, byte_count, &mut bytes);
+        device.destroy_command_buffer(commands);
+        device.destroy_buffer(staging);
+
+        let order = match headless.format {
+            Format::Bgra8Unorm | Format::Bgra8UnormSrgb => crcbl_golden::ChannelOrder::Bgra,
+            _ => crcbl_golden::ChannelOrder::Rgba,
+        };
+        crcbl_golden::Image::from_readback(width, height, &bytes, order)
+            .expect("the readback is exactly one image")
+    }
+
+    fn destroy(self, device: &dyn Device) {
+        device.destroy_graphics_pipeline(self.pipeline);
+        device.destroy_pipeline_layout(self.pipeline_layout);
+        device.destroy_bind_group(self.bind_group);
+        device.destroy_bind_group_layout(self.bind_group_layout);
+        device.destroy_buffer(self.args);
+        device.destroy_buffer(self.indices);
+        device.destroy_buffer(self.vertices);
+    }
+}
+
+/// Asserts exactly which quadrants the frame holds.
+///
+/// The point is the `false` entries as much as the `true` ones: an argument
+/// that was read and obeyed draws a *subset*, and a backend that ignored the
+/// arguments draws either nothing or everything. Both are caught here and
+/// neither would be caught by looking only at what should be there.
+fn assert_quadrants(image: &crcbl_golden::Image, drawn: [bool; 4], what: &str) {
+    // A `drawn` that is all-true or all-false could not distinguish those two
+    // failures, so the shape of the expectation is checked before the pixels.
+    assert!(
+        drawn.iter().any(|d| *d) && drawn.iter().any(|d| !*d),
+        "{what}: an expectation of {drawn:?} cannot tell an honoured argument \
+         from an ignored one"
+    );
+    for (quadrant, expected) in drawn.iter().enumerate() {
+        let (x, y) = quadrant_pixel(quadrant);
+        let pixel = image
+            .pixel(x, y)
+            .unwrap_or_else(|| panic!("{what}: quadrant {quadrant} sample ({x}, {y}) is outside"));
+        let color = QUADRANT_COLORS[quadrant];
+        for channel in 0..3 {
+            let value = u32::from(pixel[channel]);
+            if *expected && color[channel] == 1.0 {
+                assert!(
+                    value > 150,
+                    "{what}: quadrant {quadrant} at ({x}, {y}) is {pixel:?}; channel \
+                     {channel} must be strong because this quadrant was drawn"
+                );
+            } else {
+                assert!(
+                    value < QUADRANT_DARK[channel],
+                    "{what}: quadrant {quadrant} at ({x}, {y}) is {pixel:?}; channel \
+                     {channel} must be the clear colour. Expected drawn = {expected}, \
+                     colour {color:?}."
+                );
+            }
+        }
+    }
+    assert_eq!(
+        image.pixel(0, 0).expect("inside")[3],
+        255,
+        "{what}: alpha 1.0 must survive"
+    );
+}
+
+/// Indirect draws whose argument count is known on the CPU — Tier B's draw path,
+/// and the shape every backend has.
+///
+/// Each argument sits at a **non-zero** offset with a decoy at zero that would
+/// draw all four quadrants, so "read the arguments at the offset it was given"
+/// is what the assertions actually distinguish. The multi-draw arm runs only
+/// where [`Features::MULTI_DRAW_INDIRECT`] is reported, and the arms that ran
+/// are named in the output so a run cannot silently check less than it looks.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn indirect_draws_execute_the_arguments_they_were_given() {
+    let headless = Headless::open_for_triangle();
+    let device = headless.device.as_ref();
+    let resources = QuadrantResources::new(&headless);
+    let mut arms: Vec<&str> = Vec::new();
+
+    // Non-indexed, one draw. `vertex_count` is the lever: `SV_VertexID` is
+    // `gl_VertexIndex - gl_BaseVertex`, so `first_vertex` shifts both and the
+    // shader pulls from zero whatever it is — which is why the argument here
+    // selects a *prefix* rather than a slice.
+    let image = resources.render(&headless, |encoder| {
+        encoder.draw_indirect(&crcbl_hal::DrawIndirect {
+            args: resources.args,
+            offset: indirect_at::DIRECT,
+            draw_count: 1,
+            stride: DRAW_ARGS_STRIDE,
+        });
+    });
+    assert_quadrants(&image, [true, true, false, false], "draw_indirect");
+    arms.push("draw_indirect");
+
+    // Indexed, one draw. Here `first_index` genuinely selects a slice, because
+    // `SV_VertexID` is the value read out of the index buffer.
+    let image = resources.render(&headless, |encoder| {
+        encoder.draw_indexed_indirect(&crcbl_hal::DrawIndirect {
+            args: resources.args,
+            offset: indirect_at::INDEXED,
+            draw_count: 1,
+            stride: DRAW_INDEXED_ARGS_STRIDE,
+        });
+    });
+    assert_quadrants(&image, [false, false, true, false], "draw_indexed_indirect");
+    arms.push("draw_indexed_indirect");
+
+    if device
+        .caps()
+        .features
+        .contains(Features::MULTI_DRAW_INDIRECT)
+    {
+        // Two argument structures, one call. The two quadrants are the first
+        // and the *last*, so a backend that read one structure, or read both at
+        // the wrong stride, cannot land on this pair by accident.
+        let image = resources.render(&headless, |encoder| {
+            encoder.draw_indexed_indirect(&crcbl_hal::DrawIndirect {
+                args: resources.args,
+                offset: indirect_at::MULTI,
+                draw_count: 2,
+                stride: DRAW_INDEXED_ARGS_STRIDE,
+            });
+        });
+        assert_quadrants(&image, [true, false, false, true], "multi-draw indirect");
+        arms.push("multi-draw indirect (draw_count = 2)");
+    } else {
+        eprintln!(
+            "vk e2e: Tier B device — no MULTI_DRAW_INDIRECT, so one argument per call is \
+             all that was exercised"
+        );
+        arms.push("no MULTI_DRAW_INDIRECT on this device");
+    }
+
+    // Not decoration: a run that took no arm at all would otherwise pass having
+    // rendered nothing, which is the shape this project has shipped broken.
+    assert!(!arms.is_empty(), "no indirect arm ran");
+    eprintln!("vk e2e: indirect draws — arms taken: {}", arms.join(", "));
+
+    resources.destroy(device);
+    headless.finish();
+}
+
+/// The steady-state draw path: the draw *count* comes out of GPU memory too.
+///
+/// `crcbl-hal` calls `draw_indexed_indirect_count` "Tier A's steady-state draw
+/// call — one per pass, regardless of scene size", and until now it had never
+/// touched a driver. Both tiers are covered: with
+/// [`Features::DRAW_INDIRECT_COUNT`] the count buffer selects three of four
+/// arguments, and without it the call must be refused at record time rather
+/// than handed to a driver that has no entry point for it.
+///
+/// The count is deliberately **less** than `max_draw_count`. A backend that
+/// passed the maximum through, or ignored the count buffer, draws the quadrant
+/// the count excludes — which is the one assertion here that a merely-plausible
+/// implementation cannot satisfy.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn the_steady_state_indirect_count_draw_path_reads_its_count_from_the_gpu() {
+    let headless = Headless::open_for_triangle();
+    let device = headless.device.as_ref();
+    let resources = QuadrantResources::new(&headless);
+    let quadrants = QUADRANT_COLORS.len() as u32;
+
+    if !device
+        .caps()
+        .features
+        .contains(Features::DRAW_INDIRECT_COUNT)
+    {
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("indirect count on a Tier B device"),
+            queue: headless.queue,
+        });
+        encoder.draw_indexed_indirect_count(&crcbl_hal::DrawIndirectCount {
+            args: resources.args,
+            args_offset: indirect_at::INDEXED_COUNT,
+            count_buffer: resources.args,
+            count_offset: indirect_at::COUNT_THREE,
+            max_draw_count: quadrants,
+            stride: DRAW_INDEXED_ARGS_STRIDE,
+        });
+        let error = encoder
+            .finish()
+            .expect_err("a device without DRAW_INDIRECT_COUNT must refuse the call");
+        assert!(
+            matches!(error, crcbl_hal::HalError::Unsupported { .. }),
+            "the refusal must be loud and typed, not a silent no-op: {error}"
+        );
+        eprintln!("vk e2e: indirect count — Tier B device refused the call: {error}");
+        resources.destroy(device);
+        headless.finish();
+        return;
+    }
+
+    eprintln!("vk e2e: indirect count — Tier A device, the count buffer is read on the GPU");
+    assert!(
+        device.caps().limits.max_draw_indirect_count >= quadrants,
+        "a device reporting DRAW_INDIRECT_COUNT must allow the draws this test asks for; \
+         max_draw_indirect_count is {}",
+        device.caps().limits.max_draw_indirect_count
+    );
+
+    // Non-indexed first: two arguments, count one. The second would draw every
+    // quadrant, so "the count was honoured" and "the maximum was used instead"
+    // are three quadrants apart.
+    let image = resources.render(&headless, |encoder| {
+        encoder.draw_indirect_count(&crcbl_hal::DrawIndirectCount {
+            args: resources.args,
+            args_offset: indirect_at::DIRECT_COUNT,
+            count_buffer: resources.args,
+            count_offset: indirect_at::COUNT_ONE,
+            max_draw_count: 2,
+            stride: DRAW_ARGS_STRIDE,
+        });
+    });
+    assert_quadrants(&image, [true, false, false, false], "draw_indirect_count");
+
+    // And the one the seam calls the steady-state path: four arguments, count
+    // three, one call for the whole pass.
+    let image = resources.render(&headless, |encoder| {
+        encoder.draw_indexed_indirect_count(&crcbl_hal::DrawIndirectCount {
+            args: resources.args,
+            args_offset: indirect_at::INDEXED_COUNT,
+            count_buffer: resources.args,
+            count_offset: indirect_at::COUNT_THREE,
+            max_draw_count: quadrants,
+            stride: DRAW_INDEXED_ARGS_STRIDE,
+        });
+    });
+    assert_quadrants(
+        &image,
+        [true, true, true, false],
+        "draw_indexed_indirect_count",
+    );
+
+    resources.destroy(device);
+    headless.finish();
+}

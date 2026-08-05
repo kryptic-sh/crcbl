@@ -19,7 +19,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`crcbl-shaders`: the UI shaders declare their resources in binding order,
   which is what makes text appear on Metal.** `ui.slang` and `ui_tier_b.slang`
   declared `constants` first while numbering it last, and Slang's Metal target
-  assigns argument-table indices in *declaration* order — so their MSL bound
+  assigns argument-table indices in _declaration_ order — so their MSL bound
   `constants` at `buffer(0)` and `vertices` at `buffer(1)`, while `crcbl-mtl`
   flattens `(set, binding)` by ascending binding number and bound them the other
   way round. The UI vertex stage read the viewport constants as its vertex
@@ -39,8 +39,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   landed the device, the swapchain, pipelines, bind groups and draws it was
   waiting on.
 
-  **Vulkan is still registered on macOS but is no longer selected
-  automatically there.** Apple platforms are Metal only per
+  **Vulkan is still registered on macOS but is no longer selected automatically
+  there.** Apple platforms are Metal only per
   `docs/plan/09-backends-metal-dx12.md`'s 2026-08-05 correction, and a Mac
   without MoltenVK has no `libvulkan.dylib` for `ash` to `dlopen` at all — so
   what the old order produced was not a fallback but the only outcome: every
@@ -49,6 +49,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   whoever installed a loader and means it. Selection elsewhere is unchanged:
   Vulkan on the rest of native, wgpu in a browser, and null never automatic
   anywhere.
+
+- **`crcbl-shaders`**: `COMPUTE_PROBE`, the crate's first **compute** shader —
+  every other source it ships is a drawing shader. `shaders/compute_probe.slang`
+  squares a `StructuredBuffer<uint>` element-wise into an `RWStructuredBuffer`,
+  bounded by a `count` in a uniform buffer, with SPIR-V, WGSL and MSL artifacts
+  and a manifest entry like every other shader. The companion
+  `crcbl_shaders::compute_probe` module carries `WORKGROUP_SIZE` and the
+  `Params` uniform layout, so a caller computing its dispatch size reads the
+  number the shader declares rather than one it remembers; a unit test reads the
+  `.slang` source and fails if the two drift.
+
+  It exists to make the compute half of `crcbl-hal` testable against a real
+  driver — a dispatch that silently does nothing returns `Ok` too — and the MSL
+  and WGSL artifacts are emitted even though no Metal or wgpu code path
+  dispatches compute yet, because the compile script drives all three targets
+  and the manifest hashes all three.
 
 - **`crcbl-mtl`**: a new crate, opening P14 with **the only path to a GPU on
   macOS and iOS** — Apple platforms are Metal only, per the 2026-08-05 platform
@@ -829,6 +845,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl-shaders`**: `tools/compile-shaders.sh` now passes
+  `-fvk-use-entrypoint-name` to the SPIR-V target, so a module's entry point
+  keeps its source name in `OpEntryPoint`. Without it Slang renames a module's
+  _only_ entry point to `main` while the WGSL and MSL targets keep the real
+  name, which would have made a single-entry-point module addressable as `main`
+  on Vulkan and as its own name everywhere else. Every existing artifact is
+  byte-identical with and without the flag — each has two entry points, which is
+  the case Slang does not rename — so no committed `.spv` moved and no golden
+  image needed re-blessing.
+
 - **crcbl-mtl**: **a GPU fault now names the encoder that caused it.** Every
   `MTLCommandBuffer` this backend creates is built from an
   `MTLCommandBufferDescriptor` carrying
@@ -853,6 +879,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the surface is on no output or on two.
 
 ### Fixed
+
+- **`crcbl-shaders`**: `build.rs`'s byte-for-byte recompile check invoked
+  `slangc` with an **absolute** source path while `tools/compile-shaders.sh`
+  uses one relative to the crate root. Slang copies the path it was given into
+  the `#line` directives of its Metal output, so the check compared an artifact
+  against a differently-pathed rebuild of itself and failed the build outright —
+  on every machine with the pinned compiler installed, which is to say on every
+  machine belonging to someone editing a shader. The recompile now runs from the
+  crate root with the manifest's own relative path.
 
 - **`crcbl-vk`**: **a surface handle crossed instances silently, and freeing it
   destroyed the wrong object.** Each `VkInstance` owns its own surface pool, so

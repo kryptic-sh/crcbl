@@ -124,6 +124,10 @@ pub mod sha256;
 /// shader hash (`docs/plan/06-assets-scenes.md`).
 pub mod manifest;
 
+/// The workgroup size and uniform block `compute_probe.slang` declares, in the
+/// layouts that shader declares.
+pub mod compute_probe;
+
 /// The geometry and uniform block `mesh.slang` reads, in the layouts that
 /// shader declares.
 pub mod mesh;
