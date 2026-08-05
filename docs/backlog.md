@@ -3936,3 +3936,68 @@ GAPS — reported honestly:
 - No build/test run was performed during the review passes (read-only
   constraint); every finding above is static-verified. The project's CI gate
   (`cargo fmt/clippy/build/nextest`) was not run as part of this review.
+
+## What MTL1 left open on the Metal backend
+
+`crates/crcbl-mtl` enumerates adapters and refuses everything else by name. Four
+things were raised while building it and not settled.
+
+- **Nothing instantiates it.** No app constructs `MetalInstance`, and it is not
+  in the engine's backend selection or re-exported from the `crcbl` umbrella. CI
+  builds and tests it on `macos-latest`; no shipping binary reaches it. The
+  wire- up belongs with the slice that gives it a device to hand back — a
+  registry entry for a backend whose `request_device` always refuses would be a
+  path that exists only to fail.
+- **It advertises Tier B, and a tier-aware caller will believe it.**
+  `DeviceCaps::tier` is derived, and `DRAW_INDIRECT_COUNT` /
+  `MULTI_DRAW_INDIRECT` stay off until the command slice picks Metal's indirect
+  path (indirect command buffers, per `docs/plan/09-backends-metal-dx12.md`'s
+  mapping table). Correct today and documented in the crate docs, but it is
+  visible behaviour rather than an internal note: once anything selects on tier,
+  macOS takes the Tier B branch until MTL6.
+- **The engine has never stated a minimum macOS version.** `adapter.rs` sends
+  `supportsBCTextureCompression` among others, which dates the floor to macOS
+  11; `objc2` does not gate on availability, so an older system raises an
+  unrecognised-selector exception rather than answering wrongly. Loud, but
+  undecided — and the same question the AppKit shell backend has been carrying
+  unstated since P5C.
+- **`DeviceType::Virtual` is unreachable on Metal.** There is no virtualisation
+  query, so a paravirtual GPU under Apple's Virtualization framework answers
+  every question exactly as the built-in one and enumerates as `Integrated`.
+  Only name-matching would separate them, which is not a capability query.
+  Stated as a gap, not fixed.
+
+### Not verified: every assertion in the crate
+
+The seven tests in `crates/crcbl-mtl/src/instance.rs` have **never executed** —
+this is a Linux tree with no Apple hardware.
+`cargo clippy --target aarch64-apple-darwin` type-checks and lints the whole
+backend (the Darwin std is installed and no linking is involved), and that gate
+was shown able to fail, so the code is known to compile against the real
+`objc2-metal` 0.3.2 API. What is unverified is every runtime value: that
+`maxBufferLength` clears the seam's 128 MiB floor, that the sample-count probe
+finds anything, that Apple Silicon reports argument-buffer Tier 2, and that
+linking the Metal framework works at all. CI's `build + test (macos-latest)` leg
+is the first execution.
+
+## The weekly Miri job cannot finish, and the ALSA fix is what revealed it
+
+Run 30966491592 (manual `workflow_dispatch`, 2026-08-05) installed the ALSA
+headers successfully and then **hit `timeout-minutes: 60` inside "Interpret the
+physics and audio libraries"** — cancelled at 60:16, not failed. So the ALSA
+repair in `514b2ea` was correct and is confirmed; it just uncovered the next
+problem, which the earlier `pkg_config` failure had been masking since the
+dependency landed.
+
+`cron.yml`'s own comment claims the two steps take "about seven minutes of
+interpretation", and that number is now known wrong: step 1 (`crcbl-core`,
+`crcbl-hal`, `crcbl-ecs`, `crcbl-store`, `crcbl-ui`, `crcbl-jobs`) measured ~200
+s locally, and step 2 alone exceeds the remaining budget. The 2026-07-27 run
+passed, so something between then and now made `crcbl-phys` or `crcbl-audio`
+much slower under the interpreter — which of the two is unmeasured.
+
+Not yet chosen: split step 2 into per-crate steps to find the offender, raise
+the timeout, narrow the target list the way `crcbl-net` already was (with the
+reason recorded), or cut `PROPTEST_CASES` further for those two crates. Measure
+first — the current comment is evidence that guessing at these numbers is how
+the file got here.
