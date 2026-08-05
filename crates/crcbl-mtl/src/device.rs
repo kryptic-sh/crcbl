@@ -3074,15 +3074,21 @@ using namespace metal;\n\
         };
         assert!(text.contains("PUSH_CONSTANTS"), "{text}");
 
+        // Until the binding slice this was `Unsupported`, because no bind group
+        // layout could exist at all. Now that they are real, a hand-made handle
+        // is a *stale* handle and must be told apart from a backend that cannot
+        // do the thing — which is the stronger claim, and the one the seam asks
+        // for. Reporting `Unsupported` here now would hide a caller's bug behind
+        // a "not yet".
         let error = device
             .create_pipeline_layout(&PipelineLayoutDesc {
                 label: Some("with groups"),
                 bind_group_layouts: &[Handle::from_bits(1 << 32).expect("generation 1")],
                 push_constants: None,
             })
-            .expect_err("no bind group layout can exist yet");
+            .expect_err("that handle was never issued by this device");
         assert!(
-            matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Metal),
+            matches!(&error, HalError::InvalidHandle { kind, .. } if *kind == "bind group layout"),
             "{error:?}"
         );
     }
