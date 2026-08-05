@@ -4511,3 +4511,92 @@ Two things worth keeping from it:
   `desktop::take_foreground` already pulls `SPI_SETFOREGROUNDLOCKTIMEOUT` and
   `AttachThreadInput`; or mark the test as allowed-to-retry if nextest's retry
   support is acceptable here. Wants a decision rather than another re-run.
+
+## What MTL6 settled, and what it leaves for a decision
+
+Metal's last planned slice. **The backend still reports Tier B**, and the reason
+moved rather than went away — the detail is below, because "why not Tier A" is
+now a design answer rather than a to-do.
+
+### Needs the user: two shaders declare their buffers out of binding order
+
+**`ui.slang` and `ui_tier_b.slang` cannot be drawn on Metal**, and the fix is in
+`crcbl-shaders` rather than in the backend.
+
+Metal has no `(set, binding)` pair; a backend must flatten to per-stage argument
+tables. `crcbl-mtl` flattens in **ascending `(set, binding)`, counted per
+table**, which matches the committed MSL for `triangle`, `mesh`, `sprite` and
+`tonemap` exactly. It does not match the two UI shaders, because **Slang assigns
+Metal indices in source declaration order** and both declare their constant
+buffer before the storage buffer while numbering it after — `ui_tier_b.slang`
+has `constants` at binding 3 and `vertices` at binding 2, but its MSL emits
+`constants [[buffer(0)]]`, `vertices [[buffer(1)]]`.
+
+**Nothing below the seam can detect this.** Metal reflection reports the
+_shader's_ parameter names and `BindGroupLayoutEntry` carries no name to match
+them against, so the mismatch is silent: the shader reads the wrong buffer.
+
+The fix is a one-line reorder in each `.slang` source so declaration order
+matches binding order, plus regenerating the artifacts. `ui.slang` is blocked
+twice, since it also uses push constants. Not done here — it is a
+`crcbl-shaders` change and it re-blesses artifacts, so it wants its own commit.
+
+### Needs the user: `dispatch` is blocked on the seam, not on Metal
+
+`MTLComputeCommandEncoder` is otherwise ready. Metal takes
+`threadsPerThreadgroup` at `dispatchThreadgroups:threadsPerThreadgroup:`, but
+SPIR-V, DXIL and WGSL all bake the workgroup size **into the shader**, so MSL
+declares it nowhere and `ComputePipelineDesc` carries no field for it. There is
+no number the backend could pass that is not a guess about the kernel, and a
+wrong one runs the shader with the wrong thread count rather than failing.
+
+So this needs `ComputePipelineDesc` to carry the workgroup size, or `dispatch`
+to take threads-per-group — **a HAL change, with Vulkan to re-verify**. The
+constant `DISPATCH_SLICE` in `command.rs` says so at every refusal site.
+
+### `DESCRIPTOR_INDEXING` was withdrawn, deliberately
+
+MTL1 reported it from `argumentBuffersSupport == Tier2`, which is a true
+statement about the _hardware_. Now that bind groups exist as flat argument
+tables there is no runtime-sized array, so `create_bind_group_layout` refuses
+every `BindingFlags` — and `crcbl_hal::pipeline` states that a backend refusing
+them must not report the feature. Reporting it while rejecting the layouts it
+promises would be a documented lie, so the flag is off and
+`max_bindless_descriptors` is back at the floor's 0.
+
+**Nothing above the seam is blocked**: every `BindGroupLayoutEntry` in
+`crcbl-render` uses `BindingFlags::empty()`, and `forward.rs` says in a comment
+that the layout is deliberately legal on both tiers. It returns with argument
+buffers, which need Slang to emit argument-buffer-shaped MSL. If the flag is
+wanted back, the honest route is scheduling that shader work — not flipping the
+bit.
+
+### `DRAW_INDIRECT_COUNT` is unreachable in this backend's shape
+
+The count lives in GPU memory, and Metal's only execution that reads one is
+`executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over an
+`MTLIndirectCommandBuffer` whose commands must **already exist**. They can come
+from the CPU, which does not know GPU-side draw arguments, or from a compute
+kernel — which would have to run _before the render encoder the seam calls
+`draw_indirect_count` inside was opened_. This backend encodes straight into the
+`MTLCommandBuffer`, so there is nowhere to put that pass.
+
+The emulation — issue `max_draw_count` draws and hope the tail structures are
+zeroed — is silently wrong, because nothing in the seam promises they are.
+Closing this needs either deferred command recording, so a compute pass can be
+injected ahead of the render encoder, or a seam that hands the backend its
+indirect work before the pass opens. **Metal stays Tier B until one of those
+happens**, and that is the whole remaining gap: `MULTI_DRAW_INDIRECT` was earned
+this slice, and the other four Tier A features were already on.
+
+### Smaller, and unfixed
+
+- **A partially filled bind group leaves its unfilled argument-table slots
+  holding whatever the previous bind put there.** Not checked, because
+  `update_bind_group` makes create-then-fill a legal pattern. Vulkan leaves the
+  same hazard to its validation layer.
+- **Four `mtl-e2e` tests now exist and none has ever run.** The gap recorded
+  under "Metal cannot execute a shader in CI" is wider, not different:
+  `run-mtl-e2e.sh` on a real Mac is still a person-owned release gate, and it is
+  now the only thing that would catch a regression in bind groups, indexed draws
+  or multi-draw-indirect.

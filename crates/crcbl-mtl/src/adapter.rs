@@ -34,18 +34,7 @@
 use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits};
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSProcessInfo, NSUInteger};
-use objc2_metal::{MTLArgumentBuffersTier, MTLDevice, MTLDeviceLocation, MTLGPUFamily};
-
-/// Entries one Tier 2 argument buffer may address.
-///
-/// Apple's Metal Feature Set Tables give this as the argument-buffer entry
-/// count for every Tier 2 device; there is no `MTLDevice` property that reports
-/// it, and the number is fixed by the API rather than by hardware. It is the
-/// value [`Limits::max_bindless_descriptors`] takes when
-/// [`Features::DESCRIPTOR_INDEXING`] is reported, and it must stay non-zero
-/// whenever that flag is set — a bindless device with room for nothing is a
-/// promise no call can keep.
-const TIER2_ARGUMENT_BUFFER_ENTRIES: u32 = 500_000;
+use objc2_metal::{MTLDevice, MTLDeviceLocation, MTLGPUFamily};
 
 /// Sample counts to probe, coarsest first.
 ///
@@ -144,10 +133,6 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///
 /// # Reported, each from a real query
 ///
-/// * [`Features::DESCRIPTOR_INDEXING`] ← `argumentBuffersSupport` reporting
-///   [`MTLArgumentBuffersTier::Tier2`]. Tier 2 is the bindless model topic 03's
-///   Tier A is built on, and Tier 1 is not a smaller version of it — it cannot
-///   index an argument buffer from a shader at all.
 /// * [`Features::BUFFER_DEVICE_ADDRESS`] ← `supportsFamily:` with
 ///   [`MTLGPUFamily::Metal3`]. `MTLBuffer::gpuAddress` is the Metal 3 API the
 ///   plan's mapping table names for this feature, so the family query is the
@@ -180,9 +165,27 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   `crcbl_mtl::pipeline`'s `create_compute_pipeline_impl`:
 ///   `MTLDevice::newComputePipelineStateWithDescriptor:options:reflection:error:`
 ///   is a real call this backend makes, so a compute pipeline can now be built.
-///   **What is still missing is the dispatch**, which needs an
-///   `MTLComputeCommandEncoder`; `crcbl_mtl::command`'s `dispatch` refuses by
-///   name, so the flag says "compute pipelines exist" and nothing more.
+///   **What is still missing is the dispatch**, and it is missing for a seam
+///   reason rather than a Metal one: `dispatchThreadgroups:threadsPerThreadgroup:`
+///   takes the workgroup size at the *call*, MSL has nowhere to declare it, and
+///   [`ComputePipelineDesc`](crcbl_hal::ComputePipelineDesc) carries no field
+///   for it. `crcbl_mtl::command`'s `dispatch` refuses by name, so the flag
+///   says "compute pipelines exist" and nothing more.
+/// * [`Features::MULTI_DRAW_INDIRECT`] — backed by `crcbl_mtl::command`'s
+///   `indirect`, which issues one
+///   `drawPrimitives:indirectBuffer:indirectBufferOffset:` per argument
+///   structure. [`DrawIndirect::draw_count`](crcbl_hal::DrawIndirect::draw_count)
+///   is a CPU value by definition, so a loop over it is not an approximation of
+///   the feature — it emits exactly the N draws from N GPU-written argument
+///   structures that the flag means. `crcbl_mtl::draw` argues it in full.
+/// * [`Features::INDIRECT_FIRST_INSTANCE`] — `baseInstance` is a field of
+///   `MTLDrawPrimitivesIndirectArguments` and
+///   `MTLDrawIndexedPrimitivesIndirectArguments`, and Metal reads it rather
+///   than requiring it to be zero. Both structures are field-for-field the
+///   layouts Vulkan calls `VkDrawIndirectCommand` and
+///   `VkDrawIndexedIndirectCommand`, which is what lets one compute pass feed
+///   both backends; reported now because the indirect draws that read them are
+///   calls this backend makes.
 /// * [`Features::DEPTH_CLAMP`], [`Features::DEPTH_BIAS_CLAMP`] and
 ///   [`Features::POLYGON_MODE_LINE`] — all three are unconditional in Metal
 ///   and all three are now replayed onto the render encoder by
@@ -198,15 +201,30 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   the *render pass descriptor* and needs somewhere to put the results, which
 ///   is a query set; `create_query_set` refuses, so this would be a promise
 ///   about a call this backend cannot make.
-/// * [`Features::DRAW_INDIRECT_COUNT`] and [`Features::MULTI_DRAW_INDIRECT`] —
-///   Metal's plain `drawPrimitives:indirectBuffer:indirectBufferOffset:` emits
-///   exactly one draw and takes no count buffer. Indirect command buffers are
-///   the closest fit and `docs/plan/09-backends-metal-dx12.md` leaves the
-///   choice to implementation time. These two are why this backend's derived
-///   tier is B today; see the crate docs.
-/// * [`Features::INDIRECT_FIRST_INSTANCE`] — `baseInstance` is a field of
-///   `MTLDrawIndexedPrimitivesIndirectArguments`, so the answer follows from
-///   the indirect path chosen above rather than from the adapter.
+/// * [`Features::DESCRIPTOR_INDEXING`] — **removed by the binding slice, and
+///   this is the entry worth reading before changing anything here.**
+///   `argumentBuffersSupport` does report `MTLArgumentBuffersTier::Tier2` on
+///   every machine this backend targets, and MTL1 reported the flag from it.
+///   What has changed is that bind groups now exist, and `crcbl_mtl::binding`
+///   binds Metal's **flat argument tables** rather than argument buffers —
+///   because every MSL artifact `crcbl-shaders` commits declares plain
+///   `[[buffer(n)]]`/`[[texture(n)]]`/`[[sampler(n)]]` arguments, which an
+///   argument buffer cannot feed. A flat table has no runtime-sized array, so
+///   `create_bind_group_layout` refuses every
+///   [`BindingFlags`](crcbl_hal::BindingFlags), and `crcbl_hal::pipeline` is
+///   explicit that a backend which refuses them must not report the feature.
+///   Reporting it while refusing the layouts it promises is the shape this
+///   crate treats as a lie. It comes back with argument buffers, which need
+///   `crcbl-shaders` to emit MSL declaring them.
+/// * [`Features::DRAW_INDIRECT_COUNT`] — the count comes from **GPU memory**,
+///   and Metal's only execution that reads one is
+///   `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over an
+///   `MTLIndirectCommandBuffer` whose commands already exist. Encoding those
+///   commands from the seam's argument buffer needs a compute kernel running
+///   before the render encoder the seam calls `draw_indirect_count` *inside*
+///   was opened, which this backend's encode-straight-through shape cannot
+///   reach. This is the one Tier A feature still missing, and it is why the
+///   derived tier is still B; see the crate docs.
 /// * [`Features::TIMESTAMP_QUERY`] and
 ///   [`Features::PIPELINE_STATISTICS_QUERY`] — `supportsCounterSampling:` would
 ///   answer both, but reporting them obliges a
@@ -220,20 +238,19 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   `crcbl_hal::QueueKind` already records as the reason it is not named
 ///   `QueueFamily`.
 /// * [`Features::PUSH_CONSTANTS`] — `setVertexBytes:length:atIndex:` and its
-///   siblings are the closest fit and cap at 4 KiB, but **which buffer index**
-///   they would occupy cannot be decided without the binding model, because
-///   every bind group's buffers compete for the same flat index space. That is
-///   the binding slice's call, and `crcbl_mtl::pipeline`'s
-///   `create_pipeline_layout` refuses a push-constant range by name until it is
-///   made — which is what `crcbl_hal::pipeline` requires of a backend without
-///   the feature.
+///   siblings are the closest fit and cap at 4 KiB, and the binding slice
+///   sharpened the obstacle rather than removing it. The block competes for the
+///   same buffer table as every bind group's buffers, and the artifact that
+///   uses one — `msl/ui.metal` — has Slang place it at `buffer(0)`, **ahead of
+///   the bound buffers**, which no flattening of a
+///   [`PipelineLayoutDesc`](crcbl_hal::PipelineLayoutDesc) can reproduce.
+///   `crcbl_mtl::pipeline`'s `create_pipeline_layout` refuses a push-constant
+///   range by name and says so, which is what `crcbl_hal::pipeline` requires of
+///   a backend without the feature.
 /// * [`Features::SHADER_DEBUG_PRINTF`] — `MTLLogState` exists, and nothing
 ///   routes it into `log` yet.
 fn features_of(device: &ProtocolObject<dyn MTLDevice>) -> Features {
     let mut out = Features::empty();
-    if device.argumentBuffersSupport() == MTLArgumentBuffersTier::Tier2 {
-        out |= Features::DESCRIPTOR_INDEXING;
-    }
     if device.supportsFamily(MTLGPUFamily::Metal3) {
         out |= Features::BUFFER_DEVICE_ADDRESS;
     }
@@ -251,6 +268,11 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>) -> Features {
     out |= Features::DEPTH_CLAMP;
     out |= Features::DEPTH_BIAS_CLAMP;
     out |= Features::POLYGON_MODE_LINE;
+    // Likewise no query: every Metal device takes an indirect buffer on a draw
+    // and reads `baseInstance` out of it, and the binding slice's `indirect`
+    // loop is the call that makes both true of this backend.
+    out |= Features::MULTI_DRAW_INDIRECT;
+    out |= Features::INDIRECT_FIRST_INSTANCE;
     out
 }
 
@@ -278,12 +300,12 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>) -> Features {
 /// `MTLComputePipelineState::maxTotalThreadsPerThreadgroup`, which is not
 /// available before a device exists).
 ///
-/// The feature-keyed fields stay consistent with `features_of`: bindless
-/// capacity is non-zero exactly when [`Features::DESCRIPTOR_INDEXING`] is
-/// reported, the anisotropy cap is Metal's own ceiling because
-/// [`Features::SAMPLER_ANISOTROPY`] is, and the push-constant budget and the
-/// timestamp period stay at the floor's zeroes because their features are
-/// absent.
+/// The feature-keyed fields stay consistent with `features_of`: the anisotropy
+/// cap is Metal's own ceiling because [`Features::SAMPLER_ANISOTROPY`] is
+/// reported, and the bindless capacity, the push-constant budget and the
+/// timestamp period all stay at the floor's zeroes because their features are
+/// absent — `max_bindless_descriptors` since the binding slice, which took
+/// [`Features::DESCRIPTOR_INDEXING`] off for the reason `features_of` gives.
 fn limits_of(device: &ProtocolObject<dyn MTLDevice>, features: Features) -> Limits {
     let floor = Limits::minimum();
     let threads = device.maxThreadsPerThreadgroup();
@@ -291,11 +313,6 @@ fn limits_of(device: &ProtocolObject<dyn MTLDevice>, features: Features) -> Limi
     Limits {
         max_storage_buffer_range: max_buffer,
         max_uniform_buffer_range: max_buffer,
-        max_bindless_descriptors: if features.contains(Features::DESCRIPTOR_INDEXING) {
-            TIER2_ARGUMENT_BUFFER_ENTRIES
-        } else {
-            0
-        },
         max_sampler_anisotropy: if features.contains(Features::SAMPLER_ANISOTROPY) {
             crate::device::MAX_SAMPLER_ANISOTROPY
         } else {

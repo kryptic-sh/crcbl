@@ -45,15 +45,25 @@
 //! it lives, along with the sRGB argument, the extent rule and the reason a
 //! Metal acquire hands back no semaphores.
 //!
-//! What is still refused, with `what` naming the slice it will arrive in:
-//! **bind groups and everything that needs one** —
-//! bind group layouts, a pipeline layout that names any, push constants — query
-//! sets, indexed and indirect draws, and compute dispatches. The bind-group gap
-//! is the one with a visible consequence: a pipeline can be built here only
-//! from shaders that read no resources, so the engine's own `triangle.slang`,
-//! which pulls its vertices from a storage buffer, **compiles and builds a
-//! pipeline but cannot yet be drawn with**. Both halves of that are asserted —
-//! see `the_engines_own_triangle_artifact_builds_a_real_pipeline`.
+//! **The binding slice is what lets the engine's own shaders run.** Bind group
+//! layouts, bind groups and pipeline layouts naming them are real, indexed
+//! draws are real, and the indirect path is real — so `triangle.slang`, which
+//! pulls its vertices from a `StructuredBuffer` and could previously be
+//! compiled but not drawn with, **now records and executes a complete draw**.
+//! `crcbl_mtl::binding` is where the model lives, together with the decision
+//! that shapes the whole backend: bind groups map onto Metal's **flat argument
+//! tables** rather than argument buffers, because every MSL artifact
+//! `crcbl-shaders` commits declares plain `[[buffer(n)]]` arguments that an
+//! argument buffer cannot feed. `crcbl_mtl::draw` owns the index-buffer state
+//! and the indirect loop.
+//!
+//! What is still refused, with `what` naming what is missing: **query sets**,
+//! **push constants**, **compute dispatches** and **indirect-count draws**. The
+//! last two are not simply unwritten, and the crate says which is which — a
+//! dispatch needs a workgroup size the seam does not carry, and an
+//! indirect-count draw needs an `MTLIndirectCommandBuffer` filled by a compute
+//! pass that would have to run before the render encoder the call happens
+//! inside. See `crcbl_mtl::command`'s `DISPATCH_SLICE` and `indirect_count`.
 //!
 //! Nothing in this crate is a stub that reports success — a refused command
 //! recorded into an encoder *fails the encoder*, so `finish` hands back the
@@ -180,38 +190,60 @@
 //! handles for the same reason two devices do, and the tag is what separates
 //! them.
 //!
-//! # Tier: this slice still reports **Tier B**, and that is not a claim about
-//! Metal
+//! # Tier: this backend reports **Tier B**, and the binding slice moved the
+//! reason rather than removing it
 //!
 //! `docs/plan/09-backends-metal-dx12.md` specs this backend as Tier A, and the
 //! hardware supports it. [`DeviceCaps::tier`](crcbl_hal::DeviceCaps::tier) is
 //! *derived* from [`Features`](crcbl_hal::Features) precisely so that a backend
-//! cannot assert a tier it has not earned, and two of the six Tier A features
-//! are still off. [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT)
-//! and [`MULTI_DRAW_INDIRECT`](crcbl_hal::Features::MULTI_DRAW_INDIRECT) depend
-//! on which indirect path this backend takes — indirect command buffers, per
-//! the plan's mapping table — and no slice so far has chosen one, because a
-//! plain `drawPrimitives:indirectBuffer:` emits one draw and reads no count.
-//! [`COMPUTE`](crcbl_hal::Features::COMPUTE) is the one the pipeline slice
-//! turned on, and it is worth being precise about what it now claims: compute
-//! *pipelines* build, and `dispatch` still refuses, because that needs an
-//! `MTLComputeCommandEncoder` nothing opens yet.
+//! cannot assert a tier it has not earned. Two of the six Tier A features are
+//! off, and they are **not the two that were off before**:
+//!
+//! * [`MULTI_DRAW_INDIRECT`](crcbl_hal::Features::MULTI_DRAW_INDIRECT) is now
+//!   **on**. `crcbl_mtl::draw` explains why a loop over
+//!   `drawPrimitives:indirectBuffer:indirectBufferOffset:` is the feature
+//!   rather than an approximation of it: the draw count is a CPU value by
+//!   definition, so N calls emit exactly the N draws from N GPU-written
+//!   argument structures that the flag means.
+//! * [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) is still
+//!   **off**, and it is the one Metal cannot express through this seam's shape
+//!   at all. The count lives in GPU memory, Metal's only execution that reads
+//!   one is `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over
+//!   an `MTLIndirectCommandBuffer`, and filling that buffer from the seam's
+//!   argument structures needs a compute kernel running *before* the render
+//!   encoder the call happens inside was opened.
+//! * [`DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING) has been
+//!   **withdrawn**, and that is the reversal worth knowing about. MTL1 reported
+//!   it from `argumentBuffersSupport`, which is a true statement about the
+//!   *hardware*; the binding slice makes it a false one about this *backend*,
+//!   because bind groups here are flat argument tables with no runtime-sized
+//!   array, so `create_bind_group_layout` refuses every
+//!   [`BindingFlags`](crcbl_hal::BindingFlags) — and `crcbl_hal::pipeline` says
+//!   a backend that refuses them must not report the feature. It comes back
+//!   with argument buffers, which need `crcbl-shaders` to emit MSL declaring
+//!   them.
+//!
+//! [`COMPUTE`](crcbl_hal::Features::COMPUTE) stays on and stays precise:
+//! compute *pipelines* build, and `dispatch` refuses — for a seam reason rather
+//! than a Metal one, since
+//! [`ComputePipelineDesc`](crcbl_hal::ComputePipelineDesc) carries no workgroup
+//! size and Metal takes one at the dispatch call.
 //! [`TIMELINE_SEMAPHORE`](crcbl_hal::Features::TIMELINE_SEMAPHORE) arrived with
 //! the command slice, on `MTLSharedEvent`.
 //!
-//! That has a visible consequence now that devices open:
+//! That has a visible consequence:
 //! [`DeviceDesc::for_adapter`](crcbl_hal::DeviceDesc::for_adapter) asks for
 //! [`Features::TIER_A`](crcbl_hal::Features::TIER_A), so the seam's own
 //! convenience constructor is **refused** by this backend with
 //! [`UnsupportedFeatures`](crcbl_hal::HalError::UnsupportedFeatures). A caller
 //! that wants a device today asks for the features it actually needs. The
 //! `the_default_device_desc_is_refused_for_the_tier_a_gap` test is what keeps
-//! that from changing quietly.
+//! that from changing quietly, and it asserts all three flags above rather than
+//! only the missing ones.
 //!
-//! The Tier A features that *are* adapter questions —
-//! [`DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING) and
-//! [`BUFFER_DEVICE_ADDRESS`](crcbl_hal::Features::BUFFER_DEVICE_ADDRESS) — are
-//! reported from real queries. Every other flag this backend reports is
+//! The one Tier A feature that is still purely an adapter question —
+//! [`BUFFER_DEVICE_ADDRESS`](crcbl_hal::Features::BUFFER_DEVICE_ADDRESS) — is
+//! reported from a real query. Every other flag this backend reports is
 //! reported because a call in *this* crate now makes it true, never because
 //! Metal has the capability in the abstract:
 //! [`SAMPLER_ANISOTROPY`](crcbl_hal::Features::SAMPLER_ANISOTROPY) arrived with
@@ -220,19 +252,25 @@
 //! slice, and `COMPUTE`,
 //! [`DEPTH_CLAMP`](crcbl_hal::Features::DEPTH_CLAMP),
 //! [`DEPTH_BIAS_CLAMP`](crcbl_hal::Features::DEPTH_BIAS_CLAMP) and
-//! [`POLYGON_MODE_LINE`](crcbl_hal::Features::POLYGON_MODE_LINE) with this one
-//! — each because `bind_graphics_pipeline` now makes the call behind it. The
-//! full list, with a reason against every flag that is absent, is in this
-//! crate's `adapter` module.
+//! [`POLYGON_MODE_LINE`](crcbl_hal::Features::POLYGON_MODE_LINE) with the
+//! pipeline slice — each because `bind_graphics_pipeline` makes the call behind
+//! it — and `MULTI_DRAW_INDIRECT` plus
+//! [`INDIRECT_FIRST_INSTANCE`](crcbl_hal::Features::INDIRECT_FIRST_INSTANCE)
+//! with the binding slice's indirect loop. The full list, with a reason against
+//! every flag that is absent, is in this crate's `adapter` module.
 
 #[cfg(target_os = "macos")]
 mod adapter;
+#[cfg(target_os = "macos")]
+mod binding;
 #[cfg(target_os = "macos")]
 mod command;
 #[cfg(target_os = "macos")]
 mod conv;
 #[cfg(target_os = "macos")]
 mod device;
+#[cfg(target_os = "macos")]
+mod draw;
 #[cfg(target_os = "macos")]
 mod fault;
 #[cfg(target_os = "macos")]

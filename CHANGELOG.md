@@ -152,6 +152,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   would make it false is `BGRA8Unorm`: exactly the missing-encode bug that made
   the browser build render too dark.
 
+- **`crcbl-mtl`** binds resources and draws indexed and indirect. Bind group
+  layouts, bind groups, `update_bind_group`, pipeline layouts naming them, index
+  buffers, `draw_indexed`, `draw_indirect` and `draw_indexed_indirect` are all
+  real calls now. **The engine's own `triangle.slang` can finally be drawn** —
+  it compiles, builds a pipeline over a layout naming its `StructuredBuffer`,
+  binds a real vertex buffer and draws.
+
+  **Bind groups map to flat per-stage argument tables, not argument buffers**,
+  and the artifacts decided it: every MSL file `crcbl-shaders` commits declares
+  plain arguments (`device Vertex* [[buffer(0)]]`), because Slang's Metal target
+  emits no argument-buffer struct. Binding a descriptor block where a shader
+  declared a vertex pointer does not fail — the shader reads descriptor words as
+  vertex data. So argument buffers were the option that silently draws garbage
+  with the shaders that exist. A consequence worth having: directly bound
+  resources are made resident and hazard-tracked by Metal itself, so there is no
+  `useResource` residency management and MTL3's barrier-is-an-encoder-boundary
+  argument stays intact.
+
+  **The backend still reports Tier B, and `DESCRIPTOR_INDEXING` was withdrawn.**
+  It had been reported from `argumentBuffersSupport == Tier2` — true of the
+  hardware — but flat tables have no runtime-sized array, so the backend refuses
+  every `BindingFlags`, and the seam says a backend that refuses them must not
+  claim the feature. `MULTI_DRAW_INDIRECT` and `INDIRECT_FIRST_INSTANCE` were
+  earned. `DRAW_INDIRECT_COUNT` remains unreachable while the backend encodes
+  straight into the command buffer, because Metal's only GPU-count execution
+  needs an indirect command buffer populated by a compute pass that would have
+  to run before the render encoder exists. Nothing above the seam is affected —
+  every layout in `crcbl-render` already uses `BindingFlags::empty()`.
+
 - **`crcbl-shaders`** now emits **MSL** beside the SPIR-V and WGSL. Slang's
   `-target metal` output is committed as `msl/*.metal`, hashed into
   `spirv/manifest.txt` exactly like the other two, verified by `build.rs` on

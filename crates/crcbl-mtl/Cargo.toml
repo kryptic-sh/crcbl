@@ -104,6 +104,20 @@ crcbl-shaders = { workspace = true }
 # `MTLRenderCommandEncoder`, and `MTLStencilDescriptor`/`MTLStencilOperation` in
 # `MTLDepthStencil`; both were already on. `MTLPipelineOption` is in `MTLDevice`.
 #
+# MTL6 — bind groups, indexed draws and the indirect loop — adds exactly one:
+#
+# * `MTLArgument` is where the Metal headers put `MTLIndexType`, which is what
+#   `drawIndexedPrimitives:…` and its indirect sibling take. Every indexed-draw
+#   method upstream is `cfg`-gated on it, so it is not optional. The reflection
+#   types that live beside it (`MTLBinding`, `MTLBufferBinding`) are **not**
+#   used: `crcbl_mtl::binding` explains why reflection cannot answer the one
+#   question a bind group would want it for.
+#
+# Nothing else was needed, and that is the argument-table decision showing up in
+# the manifest: `MTLIndirectCommandBuffer`, `MTLArgumentEncoder`, `MTLHeap` and
+# `MTLFence` are all absent because `crcbl_mtl::binding` binds argument-table
+# slots directly, which Metal makes resident and hazard-tracks by itself.
+#
 # MTL5 — the `CAMetalLayer` swapchain — adds one feature here and two crates
 # below:
 #
@@ -157,6 +171,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 objc2-metal = { version = "0.3.2", default-features = false, features = [
   "std",
   "MTLAllocation",
+  "MTLArgument",
   "MTLBlitCommandEncoder",
   "MTLBuffer",
   "MTLCommandBuffer",

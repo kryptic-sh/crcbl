@@ -25,16 +25,19 @@
 //! no Mac in the loop — but a mismatch still surfaces here, by name, rather
 //! than as a nil function pointer reaching the pipeline descriptor.
 //!
-//! # A pipeline layout can only be empty in this slice, and says so
+//! # A pipeline layout is where the argument tables are laid out
 //!
-//! [`create_bind_group_layout`](crcbl_hal::Device::create_bind_group_layout)
-//! still refuses — the binding slice owns the argument-buffer decision — so no
-//! [`BindGroupLayoutHandle`](crcbl_hal::BindGroupLayoutHandle) exists for a
-//! layout to name, and
-//! [`create_pipeline_layout`](crcbl_hal::Device::create_pipeline_layout)
-//! accepts exactly the empty one. That is not a token gesture: a pipeline whose
-//! shaders read no resources needs no bindings at all, and it is what makes the
-//! triangle in `device.rs`'s test a real draw through the real seam.
+//! Metal has no pipeline-layout object, so [`PipelineLayoutEntry`] holds the
+//! only thing a layout is good for here: **where each set starts in Metal's
+//! flat argument tables**. `crcbl_mtl::binding` owns that rule and the evidence
+//! behind it; this module is where it is applied, because
+//! [`create_pipeline_layout`](crcbl_hal::Device::create_pipeline_layout) is the
+//! call that sees every set at once.
+//!
+//! The empty layout is still legal and still useful: a pipeline whose shaders
+//! read no resources needs no bindings at all, which is what makes the
+//! hand-written triangle in `device.rs`'s tests a real draw through the real
+//! seam.
 //!
 //! A push-constant range is refused for a different reason and with a different
 //! error: [`Features::PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS) is
@@ -97,17 +100,22 @@ pub(crate) struct ShaderModuleEntry {
     pub(crate) raw: Retained<ProtocolObject<dyn MTLLibrary>>,
 }
 
-/// A pipeline layout.
+/// A pipeline layout: where each of its sets starts in Metal's argument tables.
 ///
-/// It holds nothing but its owner, and that is the whole of what an empty
-/// layout is on Metal: there are no descriptor set layouts to combine and no
-/// root signature to build. It exists as a pool entry rather than a synthesised
-/// handle so that a pipeline naming another device's layout is caught as
-/// [`HalError::ForeignObject`], which obligation 3 requires and which a handle
+/// There is no Metal object behind it — no descriptor set layout to combine and
+/// no root signature to build — so what it holds is the *flattening*
+/// `crcbl_mtl::binding` computes: the per-table base index each set's bindings
+/// are offset by. That is the whole reason
+/// [`bind_group`](crcbl_hal::CommandEncoder::bind_group) takes a pipeline
+/// layout at all, and it is why the empty layout is still a pool entry rather
+/// than a synthesised handle: obligation 3 requires a pipeline naming another
+/// device's layout to be caught as [`HalError::ForeignObject`], which a handle
 /// nobody allocated could not provide.
 #[derive(Debug)]
 pub(crate) struct PipelineLayoutEntry {
     pub(crate) owner: u64,
+    /// In set order, so `sets[n]` is what `bind_group(n, …)` binds into.
+    pub(crate) sets: Vec<crate::binding::SetPlacement>,
 }
 
 /// The half of a graphics pipeline Metal keeps on the encoder rather than in
@@ -222,7 +230,15 @@ impl MetalDevice {
         Ok(self.stamp(handle))
     }
 
-    /// Creates the empty pipeline layout, and refuses everything else by name.
+    /// Places every set of a pipeline layout in Metal's argument tables.
+    ///
+    /// See `crcbl_mtl::binding` for the flattening rule and the evidence behind
+    /// it. The push-constant range stays refused, and the binding slice
+    /// *sharpened* rather than removed its reason: with the tables flattened,
+    /// the question is no longer "which buffer index would it take" in the
+    /// abstract but which one the **committed artifacts** put it at, and
+    /// `msl/ui.metal` answers `buffer(0)` — ahead of every bound buffer, where
+    /// no rule derivable from a [`PipelineLayoutDesc`] could place it.
     pub(crate) fn create_pipeline_layout_impl(
         &self,
         desc: &PipelineLayoutDesc<'_>,
@@ -233,18 +249,36 @@ impl MetalDevice {
             // of watching every draw read stale constants.
             return Err(HalError::InvalidDescriptor(format!(
                 "a push-constant range of {} bytes needs Features::PUSH_CONSTANTS, which this \
-                 device does not report: `setVertexBytes:length:atIndex:` is Metal's closest fit \
-                 and which buffer index it would occupy is a binding-slice decision",
+                 device does not report: `setVertexBytes:length:atIndex:` is Metal's closest fit, \
+                 and the committed MSL puts its push-constant block at buffer(0) — ahead of every \
+                 bound buffer, which no flattening of this descriptor can reproduce",
                 range.size
             )));
         }
-        if !desc.bind_group_layouts.is_empty() {
-            return Err(crate::MetalInstance::not_yet(
-                "pipeline layouts with bind groups (the Metal binding slice)",
-            ));
+        let ceiling = self.inner.caps.limits.max_bind_groups as usize;
+        if desc.bind_group_layouts.len() > ceiling {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{} bind group layouts exceed this device's limit of {ceiling}",
+                desc.bind_group_layouts.len()
+            )));
         }
+        let sets = {
+            let state = self.state();
+            let mut totals = Vec::with_capacity(desc.bind_group_layouts.len());
+            for handle in desc.bind_group_layouts {
+                let record = lookup(
+                    &state.bind_group_layouts,
+                    "bind group layout",
+                    *handle,
+                    &*self.inner,
+                )?;
+                totals.push((*handle, record.plan.totals));
+            }
+            crate::binding::plan_layout(&totals)?
+        };
         let handle = self.state().pipeline_layouts.insert(PipelineLayoutEntry {
             owner: self.inner.id,
+            sets,
         });
         Ok(self.stamp(handle))
     }

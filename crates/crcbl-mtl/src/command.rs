@@ -154,6 +154,13 @@ pub(crate) struct MetalCommandEncoder {
     /// not survive `endEncoding` — keeping it would let a draw in the *next*
     /// pass proceed with no pipeline set and let Metal raise.
     bound_primitive: Option<objc2_metal::MTLPrimitiveType>,
+    /// The index buffer an indexed draw will read, which Metal takes at the
+    /// draw call rather than as encoder state.
+    ///
+    /// Unlike [`Self::bound_primitive`] this **survives** [`Self::close_open`],
+    /// and `crcbl_mtl::draw` argues why: there is no Metal state to lose, so
+    /// keeping it is what makes the binding behave the way Vulkan's does.
+    index: Option<crate::draw::IndexBinding>,
 }
 
 impl core::fmt::Debug for MetalCommandEncoder {
@@ -200,6 +207,7 @@ impl MetalCommandEncoder {
             labels: Vec::new(),
             render_pass_label: false,
             bound_primitive: None,
+            index: None,
         };
         // The queue is checked before the command buffer is taken, so a handle
         // belonging to another device is reported as the crossing it is rather
@@ -447,11 +455,14 @@ impl CommandEncoder for MetalCommandEncoder {
     /// **Three things would break this**, and all three are additions rather
     /// than accidents:
     ///
-    /// 1. **Sub-allocating from an `MTLHeap`.** Heap resources are
-    ///    `MTLHazardTrackingModeUntracked` by default, and Metal inserts
-    ///    nothing for them. That is the residency work
-    ///    `docs/plan/09-backends-metal-dx12.md` puts in the bindless slice, and
-    ///    it is the slice that must turn this into `MTLFence`
+    /// 1. **Sub-allocating from an `MTLHeap`, or reaching resources through an
+    ///    argument buffer.** Both are `MTLHazardTrackingModeUntracked` or
+    ///    invisible to the encoder, and Metal inserts nothing for them — which
+    ///    is what `useResource:usage:` and `MTLFence` exist for. The binding
+    ///    slice deliberately introduced neither: `crcbl_mtl::binding` binds
+    ///    argument-table slots directly, which Metal both makes resident and
+    ///    hazard-tracks, so this argument survives it intact. The slice that
+    ///    adds argument buffers is the one that must turn this into
     ///    `updateFence:`/`waitForFence:` pairs.
     /// 2. **`MTLParallelRenderCommandEncoder`.** Its sub-encoders are not
     ///    ordered against one another, so "between encoders" stops meaning
@@ -967,30 +978,94 @@ impl CommandEncoder for MetalCommandEncoder {
         self.bound_primitive = Some(bound.raster.primitive);
     }
 
-    /// Refused, because Metal has nowhere to put it until the draw.
+    /// Records which buffer a later indexed draw reads, because Metal takes it
+    /// at the draw rather than as encoder state.
     ///
     /// `drawIndexedPrimitives:` takes the index buffer, its offset and its type
-    /// as **arguments of the draw itself**, so there is no encoder state this
-    /// could set — the seam's bind-then-draw split has no Metal counterpart, and
-    /// the backend has to carry the binding across to
-    /// [`draw_indexed`](CommandEncoder::draw_indexed) itself. That is a small
-    /// piece of state with one real design question attached (what a draw with
-    /// no index buffer bound should do), and it belongs with the indexed draw
-    /// rather than beside a plain one.
-    fn bind_index_buffer(&mut self, _buffer: BufferHandle, _offset: u64, _format: IndexFormat) {
-        self.fail(later("indexed draws (the Metal indexed-draw slice)"));
+    /// as **arguments of the draw itself**, so there is no encoder call to make
+    /// here and the backend carries the binding across to
+    /// [`draw_indexed`](CommandEncoder::draw_indexed) itself. Two consequences,
+    /// both argued in `crcbl_mtl::draw`: this is legal outside a render pass,
+    /// and the binding survives a pass boundary the way Vulkan's does.
+    fn bind_index_buffer(&mut self, buffer: BufferHandle, offset: u64, format: IndexFormat) {
+        if !self.ok() {
+            return;
+        }
+        let Some(raw) = self.buffer(buffer) else {
+            return;
+        };
+        let capacity = match crate::draw::plan_index_binding(offset, format, raw.length() as u64) {
+            Ok(capacity) => capacity,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        self.index = Some(crate::draw::IndexBinding {
+            raw,
+            offset,
+            format,
+            capacity,
+        });
     }
 
+    /// Sets one bind group's resources on the open render encoder.
+    ///
+    /// The indices come from `crcbl_mtl::binding`'s flattening of
+    /// `(set, binding)` onto Metal's three per-stage argument tables; the
+    /// pipeline layout is what says where this slot's tables start, which is
+    /// exactly why the seam passes one.
+    ///
+    /// Outside a render pass this is a caller error rather than a no-op, for
+    /// the reason [`bind_graphics_pipeline`](CommandEncoder::bind_graphics_pipeline)
+    /// gives: Metal keeps argument tables on the encoder, so there is nowhere
+    /// to record the binding and the following draw would use none of it.
     fn bind_group(
         &mut self,
-        _slot: u32,
-        _group: BindGroupHandle,
-        _dynamic_offsets: &[u32],
-        _layout: PipelineLayoutHandle,
+        slot: u32,
+        group: BindGroupHandle,
+        dynamic_offsets: &[u32],
+        layout: PipelineLayoutHandle,
     ) {
-        self.fail(binding_slice());
+        if !self.ok() {
+            return;
+        }
+        if self.in_compute_pass {
+            // Not "outside a render pass": a compute pass is a scope this
+            // backend tracks and cannot encode into, and saying so names the
+            // gap rather than the symptom.
+            self.fail(later(DISPATCH_SLICE));
+            return;
+        }
+        let encoder = match &self.open {
+            Open::Render(encoder) => encoder.clone(),
+            _ => {
+                self.fail(HalError::InvalidDescriptor(
+                    "bind_group outside a render pass: Metal keeps its argument tables on the \
+                     render encoder, so there is nowhere to record it"
+                        .to_string(),
+                ));
+                return;
+            }
+        };
+        let limits = self.device.caps.limits;
+        match self
+            .device
+            .bind_group_raw(slot, group, dynamic_offsets, layout, &limits)
+        {
+            Ok(bindings) => crate::binding::apply(&bindings, &encoder),
+            Err(error) => self.fail(error),
+        }
     }
 
+    /// Refused: this device reports no
+    /// [`Features::PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS).
+    ///
+    /// `create_pipeline_layout` is where the refusal that matters happens — the
+    /// seam requires a backend without the feature to fail there rather than
+    /// dropping writes here — so a caller can only reach this by passing a
+    /// layout it did not get from this backend. Failing anyway is what stops a
+    /// draw reading constants nobody wrote.
     fn push_constants(
         &mut self,
         _stages: ShaderStages,
@@ -998,7 +1073,11 @@ impl CommandEncoder for MetalCommandEncoder {
         _data: &[u8],
         _layout: PipelineLayoutHandle,
     ) {
-        self.fail(binding_slice());
+        self.fail(HalError::InvalidDescriptor(
+            "push_constants on a device that reports no Features::PUSH_CONSTANTS; \
+             create_pipeline_layout refuses the range that would have declared them, and says why"
+                .to_string(),
+        ));
     }
 
     // --- draws ---
@@ -1023,24 +1102,7 @@ impl CommandEncoder for MetalCommandEncoder {
     /// seam's ranges are half-open and `0..0` is a legitimate "no work this
     /// frame" a culling pass produces.
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
-        if !self.ok() {
-            return;
-        }
-        let encoder = match &self.open {
-            Open::Render(encoder) => encoder.clone(),
-            _ => {
-                self.fail(HalError::InvalidDescriptor(
-                    "draw outside a render pass; the seam places every draw inside one".to_string(),
-                ));
-                return;
-            }
-        };
-        let Some(primitive) = self.bound_primitive else {
-            self.fail(HalError::InvalidDescriptor(
-                "draw with no graphics pipeline bound: Metal raises rather than reporting it, and \
-                 a raise aborts the process"
-                    .to_string(),
-            ));
+        let Some((encoder, primitive)) = self.draw_target("draw") else {
             return;
         };
         if vertices.is_empty() || instances.is_empty() {
@@ -1063,16 +1125,70 @@ impl CommandEncoder for MetalCommandEncoder {
         }
     }
 
-    fn draw_indexed(&mut self, _indices: Range<u32>, _base_vertex: i32, _instances: Range<u32>) {
-        self.fail(later("indexed draws (the Metal indexed-draw slice)"));
+    /// `drawIndexedPrimitives:…:baseVertex:baseInstance:`, with the index
+    /// buffer [`bind_index_buffer`](CommandEncoder::bind_index_buffer)
+    /// recorded.
+    ///
+    /// The eight-argument form always, for the reason [`draw`](CommandEncoder::draw)
+    /// takes the five-argument one: the seam hands over a base vertex and an
+    /// instance *range*, and the shorter forms have nowhere to put either.
+    ///
+    /// An indexed draw with no index buffer bound is refused rather than left
+    /// to Metal, which has no nil to pass — `indexBuffer` is a non-optional
+    /// argument of the selector, so there is no call to make at all.
+    fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+        let Some((encoder, primitive)) = self.draw_target("draw_indexed") else {
+            return;
+        };
+        if indices.is_empty() || instances.is_empty() {
+            return;
+        }
+        let Some(index) = self.index.as_ref() else {
+            self.fail(HalError::InvalidDescriptor(
+                "draw_indexed with no index buffer bound: Metal takes the buffer as an argument \
+                 of the draw and has no nil to pass for it"
+                    .to_string(),
+            ));
+            return;
+        };
+        let count = indices.end - indices.start;
+        let (raw, index_type) = (index.raw.clone(), index.index_type());
+        let offset = match index.draw_offset(indices.start, count) {
+            Ok(offset) => offset,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        // SAFETY: `objc2` marks this unsafe because Metal bounds-checks neither
+        // the index count nor the buffer offset. `draw_offset` just checked the
+        // whole index range against the bound region's own length, which
+        // `bind_index_buffer` computed from the allocation's, and the counts
+        // were checked non-empty above. The buffer and the encoder are kept
+        // alive by the `Retained`s held across the call.
+        unsafe {
+            encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount_baseVertex_baseInstance(
+                primitive,
+                to_ns(u64::from(count)),
+                index_type,
+                &raw,
+                to_ns(offset),
+                to_ns(u64::from(instances.end - instances.start)),
+                base_vertex as isize,
+                to_ns(u64::from(instances.start)),
+            );
+        }
     }
 
-    fn draw_indirect(&mut self, _draw: &DrawIndirect) {
-        self.fail(later("indirect draws (the Metal indirect slice)"));
+    /// One `drawPrimitives:indirectBuffer:indirectBufferOffset:` per argument
+    /// structure. See `crcbl_mtl::draw` for why a loop *is* multi-draw-indirect
+    /// here rather than an approximation of it.
+    fn draw_indirect(&mut self, draw: &DrawIndirect) {
+        self.indirect(draw, false);
     }
 
-    fn draw_indexed_indirect(&mut self, _draw: &DrawIndirect) {
-        self.fail(later("indirect draws (the Metal indirect slice)"));
+    fn draw_indexed_indirect(&mut self, draw: &DrawIndirect) {
+        self.indirect(draw, true);
     }
 
     fn draw_indirect_count(&mut self, _draw: &DrawIndirectCount) {
@@ -1088,11 +1204,11 @@ impl CommandEncoder for MetalCommandEncoder {
     /// Opens a compute scope, and creates no Metal encoder for it.
     ///
     /// An `MTLComputeCommandEncoder` exists to hold a pipeline state and
-    /// dispatches, and this slice has neither — `create_compute_pipeline`
-    /// refuses, so nothing can be bound and nothing can be dispatched. Creating
-    /// an encoder that could only ever be opened and closed again would be a
-    /// driver object allocated to do nothing, so the scope is tracked here and
-    /// [`dispatch`](CommandEncoder::dispatch) is the refusal.
+    /// dispatches, and [`dispatch`](CommandEncoder::dispatch) still cannot be
+    /// expressed — see [`DISPATCH_SLICE`], where the obstacle is a missing seam
+    /// field rather than an unwritten call. Creating an encoder that could only
+    /// ever be opened and closed again would be a driver object allocated to do
+    /// nothing, so the scope is tracked here and the dispatch is the refusal.
     fn begin_compute_pass(&mut self, _desc: &ComputePassDesc<'_>) {
         if !self.ok() {
             return;
@@ -1110,23 +1226,24 @@ impl CommandEncoder for MetalCommandEncoder {
         self.in_compute_pass = false;
     }
 
-    /// Refused, even though `create_compute_pipeline` now succeeds.
+    /// Refused, even though `create_compute_pipeline` succeeds.
     ///
     /// A compute pipeline is bound onto an `MTLComputeCommandEncoder`, and
     /// [`begin_compute_pass`](CommandEncoder::begin_compute_pass) still opens
-    /// none — see its own docs. Opening one here instead would put the encoder's
+    /// none because nothing could be dispatched into it — see
+    /// [`DISPATCH_SLICE`]. Opening one here instead would put the encoder's
     /// lifetime in a different place from the pass's, which is the seam's shape
-    /// and not Metal's; the dispatch slice moves both together.
+    /// and not Metal's; whichever slice lands the dispatch moves both together.
     fn bind_compute_pipeline(&mut self, _pipeline: ComputePipelineHandle) {
-        self.fail(later("compute dispatches (the Metal dispatch slice)"));
+        self.fail(later(DISPATCH_SLICE));
     }
 
     fn dispatch(&mut self, _x: u32, _y: u32, _z: u32) {
-        self.fail(later("compute dispatches (the Metal dispatch slice)"));
+        self.fail(later(DISPATCH_SLICE));
     }
 
     fn dispatch_indirect(&mut self, _args: BufferHandle, _offset: u64) {
-        self.fail(later("compute dispatches (the Metal dispatch slice)"));
+        self.fail(later(DISPATCH_SLICE));
     }
 
     // --- queries ---
@@ -1201,6 +1318,117 @@ impl CommandEncoder for MetalCommandEncoder {
 }
 
 impl MetalCommandEncoder {
+    /// The open render encoder and the topology a draw needs, or the failure
+    /// that says which is missing.
+    ///
+    /// Metal takes the primitive type as a **draw** argument while the seam
+    /// declares it on the pipeline, so every draw reads the value
+    /// `bind_graphics_pipeline` recorded. With nothing bound there is no
+    /// topology and no pipeline state, and Metal answers that by raising —
+    /// which aborts the process — so it is refused here while it is still an
+    /// error a caller can catch.
+    fn draw_target(
+        &mut self,
+        what: &str,
+    ) -> Option<(
+        Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>,
+        objc2_metal::MTLPrimitiveType,
+    )> {
+        if !self.ok() {
+            return None;
+        }
+        let Open::Render(encoder) = &self.open else {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{what} outside a render pass; the seam places every draw inside one"
+            )));
+            return None;
+        };
+        let encoder = encoder.clone();
+        let Some(primitive) = self.bound_primitive else {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{what} with no graphics pipeline bound: Metal raises rather than reporting it, \
+                 and a raise aborts the process"
+            )));
+            return None;
+        };
+        Some((encoder, primitive))
+    }
+
+    /// The shared body of the two indirect draws.
+    ///
+    /// One Metal call per argument structure; `crcbl_mtl::draw`'s
+    /// [`plan_indirect`](crate::draw::plan_indirect) is what bounds the span
+    /// they read first.
+    fn indirect(&mut self, draw: &DrawIndirect, indexed: bool) {
+        let Some((encoder, primitive)) = self.draw_target(if indexed {
+            "draw_indexed_indirect"
+        } else {
+            "draw_indirect"
+        }) else {
+            return;
+        };
+        let Some(args) = self.buffer(draw.args) else {
+            return;
+        };
+        let plan = match crate::draw::plan_indirect(draw, indexed, args.length() as u64) {
+            Ok(Some(plan)) => plan,
+            // A draw of nothing, which the seam permits and which reads no
+            // argument structure at all.
+            Ok(None) => return,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        // Resolved before the loop so an indexed draw with nothing bound is one
+        // failure rather than `draw_count` of them.
+        let index = if indexed {
+            let Some(index) = self.index.as_ref() else {
+                self.fail(HalError::InvalidDescriptor(
+                    "draw_indexed_indirect with no index buffer bound: Metal takes the buffer as \
+                     an argument of the draw and has no nil to pass for it"
+                        .to_string(),
+                ));
+                return;
+            };
+            Some((index.raw.clone(), index.index_type(), index.offset))
+        } else {
+            None
+        };
+        for structure in 0..plan.count {
+            let offset = to_ns(plan.offset(structure));
+            match &index {
+                // SAFETY: `objc2` marks these unsafe because Metal
+                // bounds-checks neither the indirect offset nor the index
+                // buffer's. `plan_indirect` checked every structure this loop
+                // reads against the argument buffer's own length, and the index
+                // buffer's offset was checked against its allocation by
+                // `bind_index_buffer`. Both buffers and the encoder are kept
+                // alive by the `Retained`s held across the loop.
+                //
+                // What Metal cannot check, and neither can this, is the
+                // *contents* of the argument structures — an index count larger
+                // than the bound index buffer is a GPU-side fault either way,
+                // which is the whole nature of an indirect draw.
+                Some((raw, index_type, index_offset)) => unsafe {
+                    encoder.drawIndexedPrimitives_indexType_indexBuffer_indexBufferOffset_indirectBuffer_indirectBufferOffset(
+                        primitive,
+                        *index_type,
+                        raw,
+                        to_ns(*index_offset),
+                        &args,
+                        offset,
+                    );
+                },
+                None => unsafe {
+                    encoder.drawPrimitives_indirectBuffer_indirectBufferOffset(
+                        primitive, &args, offset,
+                    );
+                },
+            }
+        }
+    }
+
     /// Everything a buffer↔image copy needs, once every bound has been checked.
     fn plan_buffer_image_copy(&mut self, copy: &BufferImageCopy, what: &str) -> Option<CopyPlan> {
         let buffer = self.buffer(copy.buffer)?;
@@ -1321,21 +1549,39 @@ fn later(what: &'static str) -> HalError {
     crate::MetalInstance::not_yet(what)
 }
 
-/// The refusal for anything that needs a bind group or a pipeline layout.
-fn binding_slice() -> HalError {
-    crate::MetalInstance::not_yet("bind groups and push constants (the Metal binding slice)")
-}
-
-/// The refusal for the two calls Metal has no direct answer for at all.
+/// What every compute recording call refuses under.
 ///
-/// Metal's `drawPrimitives:indirectBuffer:indirectBufferOffset:` emits exactly
-/// one draw and reads no count buffer, which is why this backend reports
-/// neither [`Features::DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT)
-/// nor [`Features::MULTI_DRAW_INDIRECT`](crcbl_hal::Features::MULTI_DRAW_INDIRECT)
-/// and why its derived tier is B. Indirect command buffers are the closest fit
-/// and the slice that builds them is the one that moves the tier.
+/// Named once because the reason is one reason, and it is a **seam** gap rather
+/// than an unwritten slice: Metal takes `threadsPerThreadgroup` at
+/// `dispatchThreadgroups:threadsPerThreadgroup:`, while SPIR-V, DXIL and WGSL
+/// all bake the workgroup size into the shader — so MSL has no declaration of
+/// it and [`ComputePipelineDesc`](crcbl_hal::ComputePipelineDesc) has no field
+/// carrying it. There is no number this backend could pass that is not a guess
+/// about the kernel, and a wrong one runs the shader with the wrong number of
+/// threads rather than failing. `MTLComputeCommandEncoder` is otherwise ready;
+/// what is missing is the size.
+const DISPATCH_SLICE: &str = "compute dispatches: Metal takes threadsPerThreadgroup at the dispatch call and \
+     ComputePipelineDesc carries no workgroup size (the Metal dispatch slice, which needs a seam \
+     change first)";
+
+/// The refusal for the one indirect shape Metal cannot express at all.
+///
+/// `drawPrimitives:indirectBuffer:indirectBufferOffset:` emits one draw and
+/// reads no count, and the multi-draw loop `crcbl_mtl::draw` builds on it works
+/// only because [`DrawIndirect::draw_count`] is a **CPU** value.
+/// [`DrawIndirectCount`] takes its count from GPU memory, and Metal's only
+/// count-from-memory execution —
+/// `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over an
+/// `MTLIndirectCommandBuffer` — needs the commands to already exist, written by
+/// a compute kernel that would have to run before the render encoder this call
+/// happens inside was opened. So
+/// [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) stays off
+/// and this backend's derived tier stays B; see the crate docs.
 fn indirect_count() -> HalError {
-    crate::MetalInstance::not_yet("indirect-count draws (the Metal indirect slice)")
+    crate::MetalInstance::not_yet(
+        "indirect-count draws: Metal's only GPU-side count is an MTLIndirectCommandBuffer whose \
+         commands a compute pass must encode before the render pass begins (the Metal ICB slice)",
+    )
 }
 
 impl Drop for MetalCommandEncoder {

@@ -51,9 +51,9 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSRange, NSString, NSUInteger};
 use objc2_metal::{
-    MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue, MTLDevice, MTLEvent,
-    MTLResource, MTLSamplerDescriptor, MTLSamplerState, MTLSharedEvent, MTLTexture,
-    MTLTextureDescriptor,
+    MTLArgumentBuffersTier, MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue,
+    MTLDevice, MTLEvent, MTLResource, MTLSamplerDescriptor, MTLSamplerState, MTLSharedEvent,
+    MTLTexture, MTLTextureDescriptor,
 };
 
 use crate::command::MetalCommandEncoder;
@@ -173,9 +173,6 @@ struct ViewEntry {
 #[derive(Debug)]
 struct SamplerEntry {
     owner: u64,
-    /// Held to keep the sampler alive for as long as its handle resolves.
-    /// Nothing reads it back until the bind-group slice binds it.
-    #[allow(dead_code)]
     raw: Retained<ProtocolObject<dyn MTLSamplerState>>,
 }
 
@@ -277,6 +274,10 @@ pub(crate) struct DeviceState {
     pub(crate) pipeline_layouts: Pool<crate::pipeline::PipelineLayoutEntry>,
     pub(crate) graphics_pipelines: Pool<crate::pipeline::GraphicsPipelineEntry>,
     pub(crate) compute_pipelines: Pool<crate::pipeline::ComputePipelineEntry>,
+    /// The binding slice's two tables; `crcbl_mtl::binding` owns their entries
+    /// and every call that touches them.
+    pub(crate) bind_group_layouts: Pool<crate::binding::BindGroupLayoutRecord>,
+    pub(crate) bind_groups: Pool<crate::binding::BindGroupRecord>,
     /// The surface slice's one table; `crcbl_mtl::swapchain` owns its entries
     /// and every call that touches them.
     pub(crate) swapchains: Pool<crate::swapchain::SwapchainEntry>,
@@ -832,8 +833,49 @@ impl DeviceInner {
         &self,
         handle: BufferHandle,
     ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, HalError> {
-        let state = self.state();
-        Ok(lookup(&state.buffers, "buffer", handle, self)?.raw.clone())
+        Ok(self.buffer_raw_locked(&self.state(), handle)?.0)
+    }
+
+    /// [`buffer_raw`](Self::buffer_raw) for a caller that already holds the
+    /// lock, with the allocation's size beside the object.
+    ///
+    /// The `_locked` pair exists because [`Mutex`] is not reentrant: the
+    /// binding slice resolves a whole bind group's worth of handles under one
+    /// guard, and calling the self-locking form from inside that would deadlock
+    /// rather than block. The size comes back too because every caller of this
+    /// form is bounds-checking a range against it.
+    pub(crate) fn buffer_raw_locked(
+        &self,
+        state: &DeviceState,
+        handle: BufferHandle,
+    ) -> Result<(Retained<ProtocolObject<dyn MTLBuffer>>, u64), HalError> {
+        let entry = lookup(&state.buffers, "buffer", handle, self)?;
+        Ok((entry.raw.clone(), entry.size))
+    }
+
+    /// The `MTLTexture` an image-view handle names. See
+    /// [`buffer_raw_locked`](Self::buffer_raw_locked) for why the `_locked`
+    /// pair exists.
+    pub(crate) fn view_raw_locked(
+        &self,
+        state: &DeviceState,
+        handle: ImageViewHandle,
+    ) -> Result<Retained<ProtocolObject<dyn MTLTexture>>, HalError> {
+        Ok(lookup(&state.views, "image view", handle, self)?
+            .raw
+            .clone())
+    }
+
+    /// The `MTLSamplerState` a handle names. See
+    /// [`buffer_raw_locked`](Self::buffer_raw_locked).
+    pub(crate) fn sampler_raw_locked(
+        &self,
+        state: &DeviceState,
+        handle: SamplerHandle,
+    ) -> Result<Retained<ProtocolObject<dyn MTLSamplerState>>, HalError> {
+        Ok(lookup(&state.samplers, "sampler", handle, self)?
+            .raw
+            .clone())
     }
 
     /// The `MTLTexture` a handle names, with the two seam facts the object
@@ -1473,17 +1515,13 @@ impl Device for MetalDevice {
             descriptor.setCompareFunction(conv::compare_function(compare));
         }
         // A sampler's argument-buffer support is fixed at creation and cannot
-        // be retrofitted, and this backend's headline capability is Tier 2
-        // argument buffers — so a sampler made now that could not be written
-        // into one would be a sampler the bind-group slice has to re-create.
-        // Asked for only where the device reports the feature, because the
-        // property is meaningless without it.
-        if self
-            .inner
-            .caps
-            .features
-            .contains(Features::DESCRIPTOR_INDEXING)
-        {
+        // be retrofitted, so a sampler made now that could not be written into
+        // an argument buffer is one a later slice would have to re-create.
+        // `crcbl_mtl::binding` binds flat argument tables and does not need
+        // this; it is asked for anyway, keyed off the device's own tier query
+        // rather than off a reported feature, because the feature it used to be
+        // keyed off is exactly the one the binding slice took away.
+        if self.inner.raw.argumentBuffersSupport() == MTLArgumentBuffersTier::Tier2 {
             descriptor.setSupportArgumentBuffers(true);
         }
         if let Some(label) = desc.label {
@@ -1523,31 +1561,37 @@ impl Device for MetalDevice {
         self.destroy_shader_module_impl(module);
     }
 
+    /// Places a set's bindings in Metal's flat argument tables. See
+    /// `crcbl_mtl::binding` for the model and for why a bindless layout is
+    /// refused.
     fn create_bind_group_layout(
         &self,
-        _desc: &BindGroupLayoutDesc<'_>,
+        desc: &BindGroupLayoutDesc<'_>,
     ) -> Result<BindGroupLayoutHandle, HalError> {
-        Err(not_yet("bind group layouts (the Metal binding slice)"))
+        self.create_bind_group_layout_impl(desc)
     }
 
-    fn destroy_bind_group_layout(&self, _layout: BindGroupLayoutHandle) {}
+    fn destroy_bind_group_layout(&self, layout: BindGroupLayoutHandle) {
+        self.destroy_bind_group_layout_impl(layout);
+    }
 
-    fn create_bind_group(&self, _desc: &BindGroupDesc<'_>) -> Result<BindGroupHandle, HalError> {
-        Err(not_yet("bind groups (the Metal binding slice)"))
+    fn create_bind_group(&self, desc: &BindGroupDesc<'_>) -> Result<BindGroupHandle, HalError> {
+        self.create_bind_group_impl(desc)
     }
 
     fn update_bind_group(
         &self,
-        _group: BindGroupHandle,
-        _entries: &[BindGroupEntry],
+        group: BindGroupHandle,
+        entries: &[BindGroupEntry],
     ) -> Result<(), HalError> {
-        Err(not_yet("bind groups (the Metal binding slice)"))
+        self.update_bind_group_impl(group, entries)
     }
 
-    fn destroy_bind_group(&self, _group: BindGroupHandle) {}
+    fn destroy_bind_group(&self, group: BindGroupHandle) {
+        self.destroy_bind_group_impl(group);
+    }
 
-    /// Creates the empty pipeline layout, and refuses one naming bind groups —
-    /// which cannot exist yet. See `crcbl_mtl::pipeline`.
+    /// Lays out every set in the argument tables. See `crcbl_mtl::pipeline`.
     fn create_pipeline_layout(
         &self,
         desc: &PipelineLayoutDesc<'_>,
@@ -2651,111 +2695,35 @@ mod tests {
             })
             .expect("a colour-only pipeline over an Rgba8Unorm target");
 
-        let (image, view) = color_target_of(&device, CANVAS);
-        let readback = readback_buffer(&device, CANVAS_BYTES as u64);
-        let queue = device
-            .queue(QueueKind::Graphics)
-            .expect("the graphics queue exists");
-
-        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-            label: Some("crcbl-mtl triangle"),
-            queue,
+        let bytes = draw_canvas(&device, |encoder| {
+            encoder.bind_graphics_pipeline(pipeline);
+            encoder.draw(0..3, 0..1);
         });
-        encoder.begin_render_pass(&RenderPassDesc {
-            label: Some("triangle"),
-            color_attachments: &[ColorAttachment {
-                view,
-                resolve: None,
-                load: LoadOp::Clear,
-                store: StoreOp::Store,
-                clear: ClearValue::color(CLEAR),
-            }],
-            depth_stencil_attachment: None,
-            render_area: Rect2d::from_size(CANVAS.width, CANVAS.height),
-        });
-        encoder.bind_graphics_pipeline(pipeline);
-        encoder.set_viewport(&Viewport::from_size(CANVAS.width, CANVAS.height));
-        encoder.set_scissor(&Rect2d::from_size(CANVAS.width, CANVAS.height));
-        encoder.draw(0..3, 0..1);
-        encoder.end_render_pass();
-        encoder.pipeline_barrier(&Barriers {
-            images: &[ImageBarrier::new(
-                image,
-                ImageSubresourceRange::all(Format::Rgba8Unorm),
-                ResourceState::ColorAttachment,
-                ResourceState::TransferSrc,
-            )],
-            ..Barriers::default()
-        });
-        encoder.copy_image_to_buffer(&whole_image_copy_of(image, readback, CANVAS));
-        let commands = encoder.finish().expect("the recording is complete");
+        assert_ink_triangle(&bytes);
 
-        device
-            .submit(queue, &SubmitInfo::new(&[commands]))
-            .expect("the queue accepts it");
-        let request = device
-            .request_readback(&ReadbackDesc {
-                label: Some("the triangle"),
-                buffer: readback,
-                offset: 0,
-                size: CANVAS_BYTES as u64,
-                after: None,
-            })
-            .expect("a HostReadback buffer, in range");
-        let bytes = drain(&device, request, CANVAS_BYTES);
-
-        let (centre_x, centre_y) = (CANVAS.width / 2, CANVAS.height / 2);
-        assert_eq!(
-            texel_at(&bytes, centre_x, centre_y),
-            INK_TEXEL,
-            "the centre of the image is not the triangle's colour, so nothing was drawn"
-        );
-        let last = (CANVAS.width - 1, CANVAS.height - 1);
-        for (x, y) in [(0, 0), (last.0, 0), (0, last.1), (last.0, last.1)] {
-            assert_eq!(
-                texel_at(&bytes, x, y),
-                CLEAR_TEXEL,
-                "corner ({x}, {y}) is not the clear colour, so the draw covered the whole target \
-                 rather than a triangle"
-            );
-        }
-        // And nothing else is in the image at all: with one sample per pixel
-        // and no blending, every texel is exactly one of the two colours. This
-        // is what rules out the poison pattern surviving anywhere, and any
-        // stray content the two point checks would step over.
-        for (index, texel) in bytes.chunks_exact(4).enumerate() {
-            assert!(
-                texel == INK_TEXEL || texel == CLEAR_TEXEL,
-                "texel {index} is {texel:02X?}, which is neither the triangle nor the clear colour"
-            );
-        }
-
-        device.destroy_readback(request);
-        device.destroy_command_buffer(commands);
-        device.destroy_image_view(view);
-        device.destroy_image(image);
-        device.destroy_buffer(readback);
         device.destroy_graphics_pipeline(pipeline);
         device.destroy_pipeline_layout(layout);
         device.destroy_shader_module(module);
     }
 
     /// **The engine's own `triangle.slang` artifact, compiled by a real Metal
-    /// compiler and built into a real pipeline.**
+    /// compiler, built into a real pipeline, and recorded into a real draw.**
     ///
-    /// This is the half of the engine's shader this slice can exercise. The
-    /// draw is not: `triangle.slang` pulls its geometry from a
-    /// `StructuredBuffer`, Slang lowers that to `[[buffer(0)]]` on both stages,
-    /// and binding a buffer needs the bind groups this slice still refuses.
-    /// Compiling it and resolving both entry points by name is what proves the
-    /// committed MSL is real MSL and that `spirv/manifest.txt`'s entry-point
-    /// names address it — the two claims `crcbl-shaders`' own tests can only
-    /// make textually.
+    /// MTL4 could only do the first two, because the shader pulls its geometry
+    /// from a `StructuredBuffer` that Slang lowers to `[[buffer(0)]]` on both
+    /// stages and nothing could bind a buffer. The binding slice closes that,
+    /// and this test now records the whole draw — pipeline, bind group,
+    /// `draw(0..3, 0..1)` — and lets `finish` report it, which is the half a
+    /// machine with no working GPU can still check. **It deliberately does not
+    /// submit**; `the_engines_own_triangle_draws_through_a_bind_group` is the
+    /// gated test that runs the shader and asserts the pixels.
     ///
     /// **What turns it red.** A truncated or non-MSL artifact — the module
     /// creation fails. Slang mangling a name across targets, or the manifest
-    /// recording a name the MSL does not define — `newFunctionWithName:` returns
-    /// nil and pipeline creation reports which name was missing.
+    /// recording a name the MSL does not define — `newFunctionWithName:`
+    /// returns nil and pipeline creation reports which name was missing. Any
+    /// refusal or descriptor error anywhere in the bind-group chain — every
+    /// recording failure surfaces at `finish`, which is `expect`ed.
     #[test]
     fn the_engines_own_triangle_artifact_builds_a_real_pipeline() {
         use crcbl_shaders::{Stage as ShaderStage, TRIANGLE};
@@ -2819,6 +2787,107 @@ mod tests {
         };
         assert!(text.contains("crcbl_no_such_entry_point"), "{text}");
 
+        // And the draw the shader actually needs: one set, one read-only
+        // storage buffer, visible to both stages because Slang emitted the
+        // argument on both. Recorded and finished rather than submitted — the
+        // runner's paravirtual GPU cannot execute a shader, and `finish` is
+        // where every recording refusal lands anyway.
+        let set = device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("triangle.slang set 0"),
+                entries: &[crcbl_hal::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: crcbl_hal::ShaderStages::VERTEX | crcbl_hal::ShaderStages::FRAGMENT,
+                    kind: crcbl_hal::BindingKind::StorageBuffer {
+                        read_only: true,
+                        dynamic: false,
+                    },
+                    count: 1,
+                    flags: crcbl_hal::BindingFlags::empty(),
+                }],
+            })
+            .expect("one read-only storage buffer, which is what the shader declares");
+        let bound_layout = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("triangle.slang"),
+                bind_group_layouts: &[set],
+                push_constants: None,
+            })
+            .expect("one set");
+        let geometry = device
+            .create_buffer(&buffer(96, MemoryLocation::HostUpload))
+            .expect("three 32-byte vertices");
+        let group = device
+            .create_bind_group(&BindGroupDesc {
+                label: Some("triangle.slang vertices"),
+                layout: set,
+                entries: &[BindGroupEntry {
+                    binding: 0,
+                    array_index: 0,
+                    resource: crcbl_hal::BindingResource::whole_buffer(geometry),
+                }],
+                variable_count: None,
+            })
+            .expect("the geometry buffer in binding 0");
+        // `Rgba8Unorm` here rather than the `Rgba16Float` above, because this
+        // pipeline is recorded into a pass whose attachment is the one
+        // `color_target` makes, and Metal requires the two to agree.
+        let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
+        let bound_pipeline = device
+            .create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("triangle.slang, bound"),
+                layout: bound_layout,
+                vertex: ShaderEntry {
+                    module,
+                    entry_point: vertex,
+                },
+                fragment: Some(ShaderEntry {
+                    module,
+                    entry_point: fragment,
+                }),
+                primitive: PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                color_targets: &targets,
+            })
+            .expect("the same shader over a layout that names its buffer");
+
+        let (image, view) = color_target(&device);
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("triangle.slang"),
+            queue,
+        });
+        encoder.begin_render_pass(&RenderPassDesc {
+            label: Some("triangle.slang"),
+            color_attachments: &[ColorAttachment {
+                view,
+                resolve: None,
+                load: LoadOp::Clear,
+                store: StoreOp::Store,
+                clear: ClearValue::color(CLEAR),
+            }],
+            depth_stencil_attachment: None,
+            render_area: Rect2d::from_size(TARGET.width, TARGET.height),
+        });
+        encoder.bind_graphics_pipeline(bound_pipeline);
+        encoder.bind_group(0, group, &[], bound_layout);
+        encoder.draw(0..3, 0..1);
+        encoder.end_render_pass();
+        let commands = encoder
+            .finish()
+            .expect("the engine's own triangle records a complete draw");
+        device.destroy_command_buffer(commands);
+
+        device.destroy_image_view(view);
+        device.destroy_image(image);
+        device.destroy_graphics_pipeline(bound_pipeline);
+        device.destroy_bind_group(group);
+        device.destroy_buffer(geometry);
+        device.destroy_pipeline_layout(bound_layout);
+        device.destroy_bind_group_layout(set);
         device.destroy_graphics_pipeline(pipeline);
         device.destroy_pipeline_layout(layout);
         device.destroy_shader_module(module);
@@ -3922,52 +3991,29 @@ using namespace metal;\n\
 
     /// Every slice that has not arrived still refuses, by name — so none of
     /// them can be half-implemented without this saying so.
+    ///
+    /// **The binding slice emptied most of this list**, and what is left is the
+    /// two things that are not "a slice nobody has written": query sets, whose
+    /// obstacle is `supportsCounterSampling:` answering per sampling point, and
+    /// the compute and indirect-count calls, whose obstacles are named in
+    /// `crcbl_mtl::command`'s `DISPATCH_SLICE` and `indirect_count`. The calls
+    /// that stopped refusing are asserted in
+    /// `the_binding_slice_replaced_refusals_with_real_errors` rather than
+    /// merely dropped from here.
     #[test]
     fn the_slices_that_have_not_arrived_still_refuse_and_name_themselves() {
         let (_instance, device) = open_device();
 
-        let refusals: Vec<(&str, HalError)> = vec![
-            (
-                "bind group layouts",
-                device
-                    .create_bind_group_layout(&BindGroupLayoutDesc {
-                        label: None,
-                        entries: &[],
-                    })
-                    .expect_err("no argument buffers yet"),
-            ),
-            (
-                "query sets",
-                device
-                    .create_query_set(&QuerySetDesc {
-                        label: None,
-                        kind: crcbl_hal::QueryKind::Timestamp,
-                        count: 1,
-                    })
-                    .expect_err("no counter sampling yet"),
-            ),
-            (
-                "bind groups",
-                device
-                    .create_bind_group(&BindGroupDesc {
-                        label: None,
-                        layout: Handle::from_bits(1 << 32).expect("generation 1"),
-                        entries: &[],
-                        variable_count: None,
-                    })
-                    .expect_err("no argument buffers yet"),
-            ),
-            (
-                "pipeline layouts naming bind groups",
-                device
-                    .create_pipeline_layout(&PipelineLayoutDesc {
-                        label: None,
-                        bind_group_layouts: &[Handle::from_bits(1 << 32).expect("generation 1")],
-                        push_constants: None,
-                    })
-                    .expect_err("no bind group layout can exist to name"),
-            ),
-        ];
+        let refusals: Vec<(&str, HalError)> = vec![(
+            "query sets",
+            device
+                .create_query_set(&QuerySetDesc {
+                    label: None,
+                    kind: crcbl_hal::QueryKind::Timestamp,
+                    count: 1,
+                })
+                .expect_err("no counter sampling yet"),
+        )];
         assert!(!refusals.is_empty(), "nothing to check");
         for (what, error) in &refusals {
             assert!(
@@ -3992,32 +4038,32 @@ using namespace metal;\n\
         /// refuse under.
         type Refused = (&'static str, fn(&mut dyn CommandEncoder));
 
+        fn count(encoder: &mut dyn CommandEncoder, indexed: bool) {
+            let draw = crcbl_hal::DrawIndirectCount {
+                args: Handle::from_bits(1 << 32).expect("generation 1"),
+                args_offset: 0,
+                count_buffer: Handle::from_bits(1 << 32).expect("generation 1"),
+                count_offset: 0,
+                max_draw_count: 1,
+                stride: 20,
+            };
+            if indexed {
+                encoder.draw_indexed_indirect_count(&draw);
+            } else {
+                encoder.draw_indirect_count(&draw);
+            }
+        }
         let recording: &[Refused] = &[
-            ("indexed draws", |encoder| {
-                encoder.bind_index_buffer(
-                    Handle::from_bits(1 << 32).expect("generation 1"),
-                    0,
-                    crcbl_hal::IndexFormat::Uint32,
-                );
-            }),
             ("dispatches", |encoder| encoder.dispatch(1, 1, 1)),
-            ("bind groups", |encoder| {
-                encoder.push_constants(
-                    crcbl_hal::ShaderStages::ALL,
-                    0,
-                    &[0u8; 4],
-                    Handle::from_bits(1 << 32).expect("generation 1"),
-                );
+            ("indirect dispatches", |encoder| {
+                encoder.dispatch_indirect(Handle::from_bits(1 << 32).expect("generation 1"), 0);
             }),
-            ("indirect-count draws", |encoder| {
-                encoder.draw_indexed_indirect_count(&crcbl_hal::DrawIndirectCount {
-                    args: Handle::from_bits(1 << 32).expect("generation 1"),
-                    args_offset: 0,
-                    count_buffer: Handle::from_bits(1 << 32).expect("generation 1"),
-                    count_offset: 0,
-                    max_draw_count: 1,
-                    stride: 20,
-                });
+            ("compute pipeline binds", |encoder| {
+                encoder.bind_compute_pipeline(Handle::from_bits(1 << 32).expect("generation 1"));
+            }),
+            ("indirect-count draws", |encoder| count(encoder, false)),
+            ("indexed indirect-count draws", |encoder| {
+                count(encoder, true)
             }),
         ];
         assert!(!recording.is_empty(), "nothing to check");
@@ -4068,5 +4114,656 @@ using namespace metal;\n\
             matches!(error, HalError::InvalidHandle { kind, .. } if kind == "queue"),
             "{error:?}"
         );
+    }
+
+    /// The calls the binding slice took off the refusal list now fail for the
+    /// reasons they *should* fail for — never with
+    /// [`HalError::Unsupported`].
+    ///
+    /// The distinction is the whole point: "this backend cannot do that" and
+    /// "you passed a handle nobody issued" send a caller to different places,
+    /// and a call that kept the first message after gaining an implementation
+    /// would send them to the wrong one forever.
+    ///
+    /// **What turns it red.** Any of these four regressing to `Unsupported`, or
+    /// — for the first two — succeeding against a handle no device issued.
+    #[test]
+    fn the_binding_slice_replaced_refusals_with_real_errors() {
+        let (_instance, device) = open_device();
+        let unissued = Handle::from_bits(1 << 32).expect("generation 1");
+
+        let error = device
+            .create_bind_group(&BindGroupDesc {
+                label: None,
+                layout: unissued,
+                entries: &[],
+                variable_count: None,
+            })
+            .expect_err("no device issued that layout handle");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "bind group layout"),
+            "{error:?}"
+        );
+
+        let error = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: None,
+                bind_group_layouts: &[unissued],
+                push_constants: None,
+            })
+            .expect_err("no device issued that layout handle");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "bind group layout"),
+            "{error:?}"
+        );
+
+        // The empty layout still creates, so the refusal above is about the
+        // handle rather than about naming any set at all.
+        let empty = empty_layout(&device);
+        device.destroy_pipeline_layout(empty);
+
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        for (what, record) in [
+            (
+                "an index buffer nobody issued",
+                (|encoder: &mut dyn CommandEncoder| {
+                    encoder.bind_index_buffer(
+                        Handle::from_bits(1 << 32).expect("generation 1"),
+                        0,
+                        crcbl_hal::IndexFormat::Uint32,
+                    );
+                }) as fn(&mut dyn CommandEncoder),
+            ),
+            ("push constants this device has no feature for", |encoder| {
+                encoder.push_constants(
+                    crcbl_hal::ShaderStages::ALL,
+                    0,
+                    &[0u8; 4],
+                    Handle::from_bits(1 << 32).expect("generation 1"),
+                );
+            }),
+        ] {
+            let mut encoder =
+                device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+            record(encoder.as_mut());
+            let Err(error) = encoder.finish() else {
+                panic!("{what} recorded successfully, so the encoder reported a lie");
+            };
+            assert!(
+                !matches!(error, HalError::Unsupported { .. }),
+                "{what} still refuses as unsupported: {error:?}"
+            );
+        }
+    }
+
+    /// The indexed and indirect draws **record**, and their descriptor errors
+    /// reach the caller through `finish` rather than reaching Metal.
+    ///
+    /// `crcbl_mtl::draw`'s own tests check the arithmetic without a device;
+    /// this is the half that checks the encoder is wired to it — that a bind
+    /// really is remembered until the draw, that a draw with nothing bound is
+    /// caught, and that an out-of-range range or a bad stride comes back as an
+    /// error instead of as a Metal raise, which aborts the process.
+    ///
+    /// **What turns it red.** `draw_indexed` succeeding with no index buffer
+    /// bound, or failing with one. An over-long index range or a stride below
+    /// one argument structure being passed through. Every case here is a
+    /// *recording* check, so none of them needs the GPU to execute anything —
+    /// which is why this one is not gated.
+    #[test]
+    fn indexed_and_indirect_draws_record_and_report_their_descriptor_errors() {
+        let (_instance, device) = open_device();
+        let ink = ink_msl();
+        let module = device
+            .create_shader_module(&msl_module(&ink, "crcbl-mtl ink.metal"))
+            .expect("a shader with no bindings compiles");
+        let layout = empty_layout(&device);
+        let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
+        let pipeline = device
+            .create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("crcbl-mtl draws"),
+                layout,
+                vertex: ShaderEntry {
+                    module,
+                    entry_point: "vertexMain",
+                },
+                fragment: Some(ShaderEntry {
+                    module,
+                    entry_point: "fragmentMain",
+                }),
+                primitive: PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                color_targets: &targets,
+            })
+            .expect("a colour-only pipeline");
+        // 64 bytes: sixteen 32-bit indices, or three 16-byte argument
+        // structures with room to spare.
+        let data = device
+            .create_buffer(&BufferDesc {
+                label: Some("crcbl-mtl draw arguments"),
+                size: 64,
+                usage: BufferUsage::INDEX | BufferUsage::INDIRECT,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("an index and indirect buffer");
+
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let (image, view) = color_target(&device);
+        let record = |what: &str, paint: &dyn Fn(&mut dyn CommandEncoder)| {
+            let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+                label: Some("crcbl-mtl draws"),
+                queue,
+            });
+            encoder.begin_render_pass(&RenderPassDesc {
+                label: Some(what),
+                color_attachments: &[ColorAttachment {
+                    view,
+                    resolve: None,
+                    load: LoadOp::Clear,
+                    store: StoreOp::Store,
+                    clear: ClearValue::color(CLEAR),
+                }],
+                depth_stencil_attachment: None,
+                render_area: Rect2d::from_size(TARGET.width, TARGET.height),
+            });
+            encoder.bind_graphics_pipeline(pipeline);
+            paint(encoder.as_mut());
+            encoder.end_render_pass();
+            encoder.finish().map(|commands| {
+                device.destroy_command_buffer(commands);
+            })
+        };
+
+        record("indexed", &|encoder| {
+            encoder.bind_index_buffer(data, 0, crcbl_hal::IndexFormat::Uint32);
+            encoder.draw_indexed(0..3, 0, 0..1);
+        })
+        .expect("sixteen indices hold a range of three");
+        record("indirect", &|encoder| {
+            encoder.draw_indirect(&crcbl_hal::DrawIndirect {
+                args: data,
+                offset: 0,
+                draw_count: 3,
+                stride: 16,
+            });
+        })
+        .expect("three 16-byte structures fit in 64 bytes");
+        record("indexed indirect", &|encoder| {
+            encoder.bind_index_buffer(data, 0, crcbl_hal::IndexFormat::Uint16);
+            encoder.draw_indexed_indirect(&crcbl_hal::DrawIndirect {
+                args: data,
+                offset: 0,
+                draw_count: 2,
+                stride: 20,
+            });
+        })
+        .expect("two 20-byte structures fit in 64 bytes");
+
+        for (what, paint) in [
+            (
+                "an indexed draw with nothing bound",
+                &(|encoder: &mut dyn CommandEncoder| {
+                    encoder.draw_indexed(0..3, 0, 0..1);
+                }) as &dyn Fn(&mut dyn CommandEncoder),
+            ),
+            ("an index range past the end", &|encoder| {
+                encoder.bind_index_buffer(data, 0, crcbl_hal::IndexFormat::Uint32);
+                encoder.draw_indexed(0..17, 0, 0..1);
+            }),
+            ("a stride below one argument structure", &|encoder| {
+                encoder.draw_indirect(&crcbl_hal::DrawIndirect {
+                    args: data,
+                    offset: 0,
+                    draw_count: 2,
+                    stride: 8,
+                });
+            }),
+            ("an indirect span past the end", &|encoder| {
+                encoder.draw_indirect(&crcbl_hal::DrawIndirect {
+                    args: data,
+                    offset: 0,
+                    draw_count: 5,
+                    stride: 16,
+                });
+            }),
+            ("an indexed indirect draw with nothing bound", &|encoder| {
+                encoder.draw_indexed_indirect(&crcbl_hal::DrawIndirect {
+                    args: data,
+                    offset: 0,
+                    draw_count: 1,
+                    stride: 20,
+                });
+            }),
+        ] {
+            let error = record(what, paint).expect_err(what);
+            assert!(
+                matches!(error, HalError::InvalidDescriptor(_)),
+                "{what}: {error:?}"
+            );
+        }
+
+        device.destroy_image_view(view);
+        device.destroy_image(image);
+        device.destroy_buffer(data);
+        device.destroy_graphics_pipeline(pipeline);
+        device.destroy_pipeline_layout(layout);
+        device.destroy_shader_module(module);
+    }
+
+    /// **The milestone this phase exists for: the engine's own
+    /// `triangle.slang`, drawn.**
+    ///
+    /// MTL4 could compile `msl/triangle.metal` and build an
+    /// `MTLRenderPipelineState` from it and could not *draw* with it, because
+    /// the shader pulls its vertices from a `StructuredBuffer` that Slang
+    /// lowers to `[[buffer(0)]]` on **both** stages and nothing could bind a
+    /// buffer. This is the same artifact, the same entry points, and a real
+    /// bind group carrying real vertices — so what it paints is produced by the
+    /// engine's shader rather than by one written for the test.
+    ///
+    /// The three vertices carry **the same colour**, which is deliberate: the
+    /// shader interpolates `color` across the triangle, and identical inputs
+    /// interpolate to exactly that value at every covered pixel. An
+    /// interpolated *gradient* would make the expected centre texel depend on
+    /// the exact rasterisation of the vertices, which is not a thing to assert.
+    ///
+    /// The layout declares the buffer visible to vertex **and** fragment for
+    /// the same reason: Slang emitted the argument on both stages, and a
+    /// vertex-only layout would leave the fragment stage's copy unbound.
+    ///
+    /// **What turns it red.** Binding nothing, or binding at the wrong
+    /// argument-table index — the vertex stage reads an unbound buffer and the
+    /// draw produces no triangle, so the centre comes back [`CLEAR_TEXEL`],
+    /// which is asserted against explicitly. Losing the fragment-stage bind —
+    /// same. Rasterising the whole target — the four corner assertions.
+    /// Swapping a channel anywhere — [`INK_TEXEL`] is asymmetric in all four.
+    /// Never running the copy — every texel comes back [`POISON`], which the
+    /// last assertion admits nowhere.
+    ///
+    /// **Needs a real GPU, and CI does not have one** — see
+    /// `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`, whose
+    /// gating argument and measured evidence apply unchanged.
+    #[cfg(feature = "mtl-e2e")]
+    #[test]
+    #[ignore = "executes a shader; the CI runner's Apple Paravirtual device hangs on one"]
+    fn the_engines_own_triangle_draws_through_a_bind_group() {
+        use crcbl_shaders::{Stage as ShaderStage, TRIANGLE};
+
+        let (_instance, device) = open_device();
+        assert_ne!(
+            INK_TEXEL, CLEAR_TEXEL,
+            "the two colours must differ or no assertion below means anything"
+        );
+
+        // `triangle.slang`'s `Vertex` is two `float4`s: clip-space position
+        // then colour. The three positions are the ones `ink_msl` uses, so both
+        // triangles cover the centre and leave every corner clear.
+        let mut vertices = Vec::new();
+        for position in [[0.0f32, 0.8], [-0.8, -0.8], [0.8, -0.8]] {
+            for value in [position[0], position[1], 0.0, 1.0] {
+                vertices.extend_from_slice(&value.to_ne_bytes());
+            }
+            for value in INK {
+                vertices.extend_from_slice(&value.to_ne_bytes());
+            }
+        }
+        let geometry = device
+            .create_buffer(&BufferDesc {
+                label: Some("triangle.slang vertices"),
+                size: vertices.len() as u64,
+                usage: BufferUsage::STORAGE,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a storage buffer for three vertices");
+        device
+            .write_buffer(geometry, 0, &vertices)
+            .expect("HostUpload is what write_buffer is for");
+
+        let msl = TRIANGLE.msl().expect("the triangle ships an MSL artifact");
+        let module = device
+            .create_shader_module(&msl_module(msl, "triangle.slang"))
+            .expect("the committed MSL compiles on a real Metal compiler");
+        let set = device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("triangle.slang set 0"),
+                entries: &[crcbl_hal::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: crcbl_hal::ShaderStages::VERTEX | crcbl_hal::ShaderStages::FRAGMENT,
+                    kind: crcbl_hal::BindingKind::StorageBuffer {
+                        read_only: true,
+                        dynamic: false,
+                    },
+                    count: 1,
+                    flags: crcbl_hal::BindingFlags::empty(),
+                }],
+            })
+            .expect("one read-only storage buffer, which is what the shader declares");
+        let layout = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("triangle.slang"),
+                bind_group_layouts: &[set],
+                push_constants: None,
+            })
+            .expect("one set");
+        let group = device
+            .create_bind_group(&BindGroupDesc {
+                label: Some("triangle.slang vertices"),
+                layout: set,
+                entries: &[BindGroupEntry {
+                    binding: 0,
+                    array_index: 0,
+                    resource: crcbl_hal::BindingResource::whole_buffer(geometry),
+                }],
+                variable_count: None,
+            })
+            .expect("the geometry buffer in binding 0");
+
+        let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
+        let pipeline = device
+            .create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("triangle.slang"),
+                layout,
+                vertex: ShaderEntry {
+                    module,
+                    entry_point: TRIANGLE
+                        .entry_point(ShaderStage::Vertex)
+                        .expect("one vertex entry point"),
+                },
+                fragment: Some(ShaderEntry {
+                    module,
+                    entry_point: TRIANGLE
+                        .entry_point(ShaderStage::Fragment)
+                        .expect("one fragment entry point"),
+                }),
+                primitive: PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                color_targets: &targets,
+            })
+            .expect("the engine's own triangle over an Rgba8Unorm target");
+
+        let bytes = draw_canvas(&device, |encoder| {
+            encoder.bind_graphics_pipeline(pipeline);
+            encoder.bind_group(0, group, &[], layout);
+            encoder.draw(0..3, 0..1);
+        });
+        assert_ink_triangle(&bytes);
+
+        device.destroy_graphics_pipeline(pipeline);
+        device.destroy_bind_group(group);
+        device.destroy_pipeline_layout(layout);
+        device.destroy_bind_group_layout(set);
+        device.destroy_shader_module(module);
+        device.destroy_buffer(geometry);
+    }
+
+    /// **An indexed draw**, reading the index buffer
+    /// [`bind_index_buffer`](crcbl_hal::CommandEncoder::bind_index_buffer)
+    /// recorded — which is the whole of what Metal takes at the draw call
+    /// rather than as encoder state.
+    ///
+    /// The index buffer names the same three vertices as
+    /// `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`, in a
+    /// **rotated** order and from a non-zero first index, so a draw that
+    /// ignored the binding and drew `0..3` directly would still cover the
+    /// centre — and would fail the offset arithmetic that this exercises:
+    /// there are six indices, the draw reads `3..6`, and only the second half
+    /// spells the triangle.
+    ///
+    /// **What turns it red.** Ignoring `indices.start` — the draw reads
+    /// indices `0..3`, which are all vertex 0, so nothing is covered and the
+    /// centre comes back [`CLEAR_TEXEL`]. Scaling the first index by the wrong
+    /// width — same. Dropping the bind entirely — `draw_indexed` refuses and
+    /// `finish` fails.
+    ///
+    /// **Needs a real GPU**; see the other gated draw for the evidence.
+    #[cfg(feature = "mtl-e2e")]
+    #[test]
+    #[ignore = "executes a shader; the CI runner's Apple Paravirtual device hangs on one"]
+    fn an_indexed_draw_reads_the_bound_index_range() {
+        let (_instance, device) = open_device();
+        let ink = ink_msl();
+        let module = device
+            .create_shader_module(&msl_module(&ink, "crcbl-mtl ink.metal"))
+            .expect("a shader with no bindings compiles");
+        let layout = empty_layout(&device);
+        let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
+        let pipeline = device
+            .create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("crcbl-mtl indexed"),
+                layout,
+                vertex: ShaderEntry {
+                    module,
+                    entry_point: "vertexMain",
+                },
+                fragment: Some(ShaderEntry {
+                    module,
+                    entry_point: "fragmentMain",
+                }),
+                primitive: PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                color_targets: &targets,
+            })
+            .expect("a colour-only pipeline");
+
+        // Six indices: three degenerate ones first, then the triangle.
+        let indices: [u32; 6] = [0, 0, 0, 0, 1, 2];
+        let mut bytes = Vec::new();
+        for index in indices {
+            bytes.extend_from_slice(&index.to_ne_bytes());
+        }
+        let index_buffer = device
+            .create_buffer(&BufferDesc {
+                label: Some("crcbl-mtl indices"),
+                size: bytes.len() as u64,
+                usage: BufferUsage::INDEX,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("an index buffer");
+        device
+            .write_buffer(index_buffer, 0, &bytes)
+            .expect("HostUpload is writable");
+
+        let painted = draw_canvas(&device, |encoder| {
+            encoder.bind_graphics_pipeline(pipeline);
+            encoder.bind_index_buffer(index_buffer, 0, crcbl_hal::IndexFormat::Uint32);
+            encoder.draw_indexed(3..6, 0, 0..1);
+        });
+        assert_ink_triangle(&painted);
+
+        device.destroy_buffer(index_buffer);
+        device.destroy_graphics_pipeline(pipeline);
+        device.destroy_pipeline_layout(layout);
+        device.destroy_shader_module(module);
+    }
+
+    /// **A multi-draw indirect**, which on Metal is one
+    /// `drawPrimitives:indirectBuffer:indirectBufferOffset:` per argument
+    /// structure — the call that earns
+    /// [`Features::MULTI_DRAW_INDIRECT`].
+    ///
+    /// Two structures, and only the **second** draws anything: the first has an
+    /// `instanceCount` of zero, which is how a culling pass suppresses a draw
+    /// it decided against. So a backend that read one structure and stopped, or
+    /// that read the first one twice, paints nothing at all.
+    ///
+    /// **What turns it red.** Emitting one draw instead of `draw_count` — the
+    /// centre comes back [`CLEAR_TEXEL`]. Ignoring the stride — the second read
+    /// lands on the first structure and again draws nothing. Ignoring the base
+    /// offset — likewise.
+    ///
+    /// **Needs a real GPU**; see the other gated draws for the evidence.
+    #[cfg(feature = "mtl-e2e")]
+    #[test]
+    #[ignore = "executes a shader; the CI runner's Apple Paravirtual device hangs on one"]
+    fn a_multi_draw_indirect_emits_every_argument_structure() {
+        let (_instance, device) = open_device();
+        let ink = ink_msl();
+        let module = device
+            .create_shader_module(&msl_module(&ink, "crcbl-mtl ink.metal"))
+            .expect("a shader with no bindings compiles");
+        let layout = empty_layout(&device);
+        let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
+        let pipeline = device
+            .create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("crcbl-mtl indirect"),
+                layout,
+                vertex: ShaderEntry {
+                    module,
+                    entry_point: "vertexMain",
+                },
+                fragment: Some(ShaderEntry {
+                    module,
+                    entry_point: "fragmentMain",
+                }),
+                primitive: PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                color_targets: &targets,
+            })
+            .expect("a colour-only pipeline");
+
+        // `MTLDrawPrimitivesIndirectArguments`: vertexCount, instanceCount,
+        // vertexStart, baseInstance — the same four fields, in the same order,
+        // as Vulkan's `VkDrawIndirectCommand`.
+        let structures: [[u32; 4]; 2] = [[3, 0, 0, 0], [3, 1, 0, 0]];
+        let mut bytes = Vec::new();
+        for structure in structures {
+            for field in structure {
+                bytes.extend_from_slice(&field.to_ne_bytes());
+            }
+        }
+        let args = device
+            .create_buffer(&BufferDesc {
+                label: Some("crcbl-mtl indirect args"),
+                size: bytes.len() as u64,
+                usage: BufferUsage::INDIRECT,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("an indirect argument buffer");
+        device
+            .write_buffer(args, 0, &bytes)
+            .expect("HostUpload is writable");
+
+        let painted = draw_canvas(&device, |encoder| {
+            encoder.bind_graphics_pipeline(pipeline);
+            encoder.draw_indirect(&crcbl_hal::DrawIndirect {
+                args,
+                offset: 0,
+                draw_count: 2,
+                stride: 16,
+            });
+        });
+        assert_ink_triangle(&painted);
+
+        device.destroy_buffer(args);
+        device.destroy_graphics_pipeline(pipeline);
+        device.destroy_pipeline_layout(layout);
+        device.destroy_shader_module(module);
+    }
+
+    /// Records `paint` into a [`CANVAS`]-sized pass, copies the result back,
+    /// and hands over the texels.
+    ///
+    /// Shared by the three gated draw tests so the pass, the barrier, the copy
+    /// and the readback are written once and only the recording between
+    /// `begin_render_pass` and `end_render_pass` differs.
+    #[cfg(feature = "mtl-e2e")]
+    fn draw_canvas(device: &MetalDevice, paint: impl FnOnce(&mut dyn CommandEncoder)) -> Vec<u8> {
+        let (image, view) = color_target_of(device, CANVAS);
+        let readback = readback_buffer(device, CANVAS_BYTES as u64);
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("crcbl-mtl canvas"),
+            queue,
+        });
+        encoder.begin_render_pass(&RenderPassDesc {
+            label: Some("canvas"),
+            color_attachments: &[ColorAttachment {
+                view,
+                resolve: None,
+                load: LoadOp::Clear,
+                store: StoreOp::Store,
+                clear: ClearValue::color(CLEAR),
+            }],
+            depth_stencil_attachment: None,
+            render_area: Rect2d::from_size(CANVAS.width, CANVAS.height),
+        });
+        encoder.set_viewport(&Viewport::from_size(CANVAS.width, CANVAS.height));
+        encoder.set_scissor(&Rect2d::from_size(CANVAS.width, CANVAS.height));
+        paint(encoder.as_mut());
+        encoder.end_render_pass();
+        encoder.pipeline_barrier(&Barriers {
+            images: &[ImageBarrier::new(
+                image,
+                ImageSubresourceRange::all(Format::Rgba8Unorm),
+                ResourceState::ColorAttachment,
+                ResourceState::TransferSrc,
+            )],
+            ..Barriers::default()
+        });
+        encoder.copy_image_to_buffer(&whole_image_copy_of(image, readback, CANVAS));
+        let commands = encoder.finish().expect("the recording is complete");
+        device
+            .submit(queue, &SubmitInfo::new(&[commands]))
+            .expect("the queue accepts it");
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: Some("the canvas"),
+                buffer: readback,
+                offset: 0,
+                size: CANVAS_BYTES as u64,
+                after: None,
+            })
+            .expect("a HostReadback buffer, in range");
+        let bytes = drain(device, request, CANVAS_BYTES);
+
+        device.destroy_readback(request);
+        device.destroy_command_buffer(commands);
+        device.destroy_image_view(view);
+        device.destroy_image(image);
+        device.destroy_buffer(readback);
+        bytes
+    }
+
+    /// The assertions every gated draw makes about a [`CANVAS`] readback: the
+    /// centre is the triangle's colour, all four corners are the clear's, and
+    /// nothing else is anywhere.
+    #[cfg(feature = "mtl-e2e")]
+    fn assert_ink_triangle(bytes: &[u8]) {
+        assert_eq!(bytes.len(), CANVAS_BYTES, "the readback is the wrong size");
+        let (centre_x, centre_y) = (CANVAS.width / 2, CANVAS.height / 2);
+        assert_eq!(
+            texel_at(bytes, centre_x, centre_y),
+            INK_TEXEL,
+            "the centre of the image is not the triangle's colour, so nothing was drawn"
+        );
+        let last = (CANVAS.width - 1, CANVAS.height - 1);
+        for (x, y) in [(0, 0), (last.0, 0), (0, last.1), (last.0, last.1)] {
+            assert_eq!(
+                texel_at(bytes, x, y),
+                CLEAR_TEXEL,
+                "corner ({x}, {y}) is not the clear colour, so the draw covered the whole target \
+                 rather than a triangle"
+            );
+        }
+        // And nothing else is in the image at all: with one sample per pixel
+        // and no blending, every texel is exactly one of the two colours. This
+        // is what rules out the poison pattern surviving anywhere, and any
+        // stray content the point checks would step over.
+        for (index, texel) in bytes.chunks_exact(4).enumerate() {
+            assert!(
+                texel == INK_TEXEL || texel == CLEAR_TEXEL,
+                "texel {index} is {texel:02X?}, which is neither the triangle nor the clear colour"
+            );
+        }
     }
 }

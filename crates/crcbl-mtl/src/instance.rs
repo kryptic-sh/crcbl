@@ -492,13 +492,18 @@ pub(crate) mod tests {
         assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
     }
 
-    /// The seam's convenience constructor asks for Tier A, and this backend is
-    /// Tier B until the command slice picks Metal's indirect path — so
-    /// `for_adapter` is refused, by name, on real hardware.
+    /// The seam's convenience constructor asks for Tier A, and this backend
+    /// still does not report it — so `for_adapter` is refused, by name, on real
+    /// hardware.
     ///
-    /// This is the visible consequence of the tier decision the crate docs
-    /// argue for; if the backend ever starts reporting the two indirect
-    /// features, this test says so rather than letting the change go unnoticed.
+    /// **The gap moved in the binding slice, and this test is what records
+    /// where it moved to.** [`Features::MULTI_DRAW_INDIRECT`] is now reported,
+    /// because `crcbl_mtl::draw`'s loop is the call behind it;
+    /// [`Features::DESCRIPTOR_INDEXING`] has been *withdrawn*, because bind
+    /// groups bind Metal's flat argument tables and refuse every bindless
+    /// layout; and [`Features::DRAW_INDIRECT_COUNT`] was never reported and
+    /// still cannot be. All three are asserted rather than only the ones that
+    /// are missing, so a change in either direction fails here.
     #[test]
     fn the_default_device_desc_is_refused_for_the_tier_a_gap() {
         let instance = open();
@@ -512,8 +517,17 @@ pub(crate) mod tests {
             panic!("expected a feature gap, got {error:?}");
         };
         assert!(
-            missing.contains(Features::DRAW_INDIRECT_COUNT | Features::MULTI_DRAW_INDIRECT),
-            "the two indirect features are what keeps this backend at Tier B: {missing:?}"
+            missing.contains(Features::DRAW_INDIRECT_COUNT),
+            "a GPU-side draw count is what Metal cannot express at all: {missing:?}"
+        );
+        assert!(
+            missing.contains(Features::DESCRIPTOR_INDEXING),
+            "bind groups are flat argument tables, so bindless is refused rather than reported: \
+             {missing:?}"
+        );
+        assert!(
+            !missing.contains(Features::MULTI_DRAW_INDIRECT),
+            "the indirect loop earns this one, so it must no longer be part of the gap: {missing:?}"
         );
     }
 
