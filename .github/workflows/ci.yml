@@ -868,9 +868,20 @@ jobs:
       # in the crate is a shader-execution gate and every one of those runs.
       # The filter lives here rather than in the script because a person on a
       # real Mac, with a real window server, should run that test.
+      #
+      # **`--no-fail-fast`, because the first run of this job found a hang and
+      # then hid the rest of the answer.** Run 31040839716 reached
+      # `a_multi_draw_indirect_emits_every_argument_structure` at test 45 of
+      # 106, hung the command buffer on `Apple Paravirtual device`, and
+      # cancelled the remaining 59 — including the other three draw tests,
+      # which is exactly the set this job exists to report on. A GPU hang here
+      # surfaces as a `DeviceLost` error rather than a block, so letting the
+      # suite finish costs under a second per faulting test and buys the whole
+      # verdict instead of the first line of it.
       - name: Run the Metal suite, minus the drawable acquisition
         run: >-
           crates/crcbl-mtl/tests/run-mtl-e2e.sh
+          --no-fail-fast
           -E 'not test(a_layer_swapchain_acquires_a_drawable_and_presents_it)'
 
   # The anti-rot gate for the committed SPIR-V. `crates/crcbl-shaders` ships
