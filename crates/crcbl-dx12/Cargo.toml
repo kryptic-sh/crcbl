@@ -1,0 +1,73 @@
+[package]
+name = "crcbl-dx12"
+description = "Crucible Direct3D 12 backend — Windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+crcbl-hal = { workspace = true }
+log = { workspace = true }
+
+# The Win32 bindings, and only on the platform that has the ABI behind them.
+# `docs/plan/09-backends-metal-dx12.md`'s FFI correction is the rule this
+# satisfies: *bindings, not frameworks* — `windows-rs` is a thin binding to an
+# ABI the OS requires, in the same class as `ash` and `objc2`, and this is the
+# only crate in the workspace that may name it directly.
+#
+# Pinning it here rather than in the workspace table is what keeps the crate
+# building on Linux, macOS and wasm32 at all: off Windows the whole backend is
+# `#[cfg]`-ed out and this is neither fetched nor built.
+#
+# **Naming it adds features to the build graph, not a crate.** `windows` 0.62 is
+# already in this workspace's lockfile on Windows — `wgpu-hal`, `gpu-allocator`
+# and `cpal` all resolve it — so what this line buys is the three feature gates
+# below, and what `default-features = false` buys is not silently widening the
+# set those crates resolved for themselves. `std` is the crate's own default and
+# is kept: `windows_core::Error` carries a `String` message.
+#
+# Each feature is here because one call needs it, not because it looked related:
+#
+# * `Win32_Graphics_Dxgi` is enumeration itself — `CreateDXGIFactory2`,
+#   `IDXGIFactory4` (which is where `EnumWarpAdapter` lives, and the reason the
+#   version is 4 rather than 1), `IDXGIAdapter1::GetDesc1`, the
+#   `DXGI_ADAPTER_DESC1` it fills in, `DXGI_ADAPTER_FLAG_SOFTWARE`, the
+#   `DXGI_ERROR_NOT_FOUND` that ends the enumeration loop, and `IDXGIDevice`,
+#   whose IID is the key `CheckInterfaceSupport` answers the driver version for.
+# * `Win32_Graphics_Direct3D12` is every capability answer: `D3D12CreateDevice`,
+#   `ID3D12Device::CheckFeatureSupport`, the three `D3D12_FEATURE_DATA_*`
+#   structs this backend reads, `D3D12_RESOURCE_BINDING_TIER`,
+#   `D3D_SHADER_MODEL` (which the bindings put in this module rather than in
+#   `Direct3D`), and the `D3D12_REQ_*`/`D3D12_CS_*` constants `Limits` is filled
+#   from.
+# * `Win32_Graphics_Direct3D` is `D3D_FEATURE_LEVEL`. Not optional beside the
+#   above: `D3D12CreateDevice` takes one, and the binding gates the whole
+#   function on this feature.
+#
+# `Win32_Graphics_Dxgi_Common` is deliberately **absent**. It is where
+# `DXGI_FORMAT` lives, and every question that needs one — the sample-count
+# ceiling, BC format support — is per-format and belongs to the slice that
+# brings a format table. `crcbl_dx12::adapter` says so against each limit it
+# leaves at the seam's floor for that reason.
+#
+# A slice that needs more adds it here.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", default-features = false, features = [
+  "std",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D12",
+  "Win32_Graphics_Dxgi",
+] }
+
+# `Handle::from_bits` — the only way to build a surface handle no instance ever
+# issued, which is what `surface_caps` has to be handed to show that it refuses
+# before it looks at one. Target-gated beside `windows` for the same reason: the
+# tests that need it are inside the `cfg(target_os = "windows")` module, so off
+# Windows there is nothing to build it for. `crcbl-mtl` takes the same crate as a
+# full dependency because its pools need it; this slice has no pools.
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+crcbl-core = { workspace = true }
+
+[lints]
+workspace = true

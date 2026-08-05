@@ -4600,3 +4600,40 @@ this slice, and the other four Tier A features were already on.
   `run-mtl-e2e.sh` on a real Mac is still a person-owned release gate, and it is
   now the only thing that would catch a regression in bind groups, indexed draws
   or multi-draw-indirect.
+
+## DX1 landed the WARP measurement, but the answer is not in yet
+
+`crates/crcbl-dx12` enumerates adapters and reports, per adapter, its
+`ResourceBindingTier`, `HighestShaderModel`, whether SM6.6 dynamic resources are
+supported, and the derived renderer tier. A CI step in the
+`build + test (windows-latest)` job publishes those lines with
+`--success-output immediate`, because nextest hides a passing test's stdout and
+a green run is exactly when a measurement wants reading.
+
+**Nothing has executed yet.** This is a Linux tree; the crate is
+`#[cfg(target_os = "windows")]` and the Windows cross-check gates types, not
+behaviour — which this workspace has now twice learned is a different thing.
+**Read the answer off the next `windows-latest` run**, and specifically off
+`sm66-dynamic-resources`, never off `renderer-tier`: every adapter reports Tier
+B in this slice because `COMPUTE`, `TIMELINE_SEMAPHORE` and the two indirect
+features wait on calls no slice has written. That is the backend's gap, not the
+hardware's.
+
+What the answer decides, restated so it is not re-derived: **yes** and DX12 buys
+Windows the equivalent of lavapipe, closing a coverage hole that has been open
+since the platform crates were empty; **no** and `crcbl-wgpu` already covers
+Tier B there, leaving DX12's case as the Xbox door plus first-class Windows
+tooling.
+
+### Two things DX1 decided that a later slice may have to undo
+
+- **`DESCRIPTOR_INDEXING` is reported ahead of a call**, which is the opposite
+  of what `crcbl-mtl` ended up doing. It is deliberate and the reversal
+  condition is written into `adapter.rs`: the binding slice must withdraw it if
+  D3D12 bind groups cannot deliver a runtime-sized array, exactly as Metal's
+  did. The reason for the asymmetry is that `adapters()` is _where the WARP
+  question is asked_, so the flag has to be derivable before any device exists.
+- **`driver` comes from `CheckInterfaceSupport(IID_IDXGIDevice)`**, which is
+  documented as a Direct3D 10 interface check, with a fallback string when it
+  refuses. WARP is the adapter most likely to refuse it. If the CI line shows
+  the fallback on real hardware too, the field needs a different source.

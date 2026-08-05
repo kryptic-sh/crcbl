@@ -181,6 +181,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   to run before the render encoder exists. Nothing above the seam is affected —
   every layout in `crcbl-render` already uses `BindingFlags::empty()`.
 
+- **`crcbl-dx12`**: a new crate, opening the DX12 half of P14. This first slice
+  is **adapter enumeration and nothing else** — surfaces, surface caps and
+  device creation refuse by name, while an out-of-range adapter still gets
+  `NoSuchAdapter`.
+
+  **D3D12 has no adapter-level capability query.** `CheckFeatureSupport` lives
+  on `ID3D12Device` and there is no physical-device object, so enumeration opens
+  a device per adapter at feature level 11.0, asks, and drops it. An adapter
+  DXGI lists but D3D12 refuses is dropped — and the id counter advances only on
+  a kept adapter, or every id past the gap would name the wrong GPU.
+
+  **It exists to settle whether WARP clears Tier A.** WARP is D3D12's software
+  rasteriser and ships in Windows; `windows-latest` currently has no GPU at all,
+  so Windows has never had golden images or render coverage. Each adapter prints
+  its `ResourceBindingTier`, `HighestShaderModel` and SM6.6 dynamic-resource
+  answer, and a CI step publishes the line — nextest hides a passing test's
+  stdout, which is exactly the run where a measurement wants reading.
+
+  `DESCRIPTOR_INDEXING` is reported from tier 3 **and** shader model 6.6, both
+  required and neither implying the other. The indirect features are withheld
+  despite `ExecuteIndirect` being a direct fit, because no call in the crate
+  makes them true yet — the precedent `crcbl-mtl` set by withdrawing a flag it
+  could not honour.
+
 - **`crcbl-shaders`** now emits **MSL** beside the SPIR-V and WGSL. Slang's
   `-target metal` output is committed as `msl/*.metal`, hashed into
   `spirv/manifest.txt` exactly like the other two, verified by `build.rs` on

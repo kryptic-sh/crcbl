@@ -319,6 +319,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-dx12"
+version = "0.1.0"
+dependencies = [
+ "crcbl-core",
+ "crcbl-hal",
+ "log",
+ "windows",
+]
+
+[[package]]
 name = "crcbl-ecs"
 version = "0.1.0"
 dependencies = [

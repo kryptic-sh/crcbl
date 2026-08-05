@@ -312,6 +312,35 @@ jobs:
           cargo nextest run --locked -p crcbl-shell --test appkit_session
           --no-tests fail --success-output immediate
 
+      # # The DX12 adapter report, for the same reason as the step above
+      #
+      # `crcbl-dx12`'s enumeration tests print one line per adapter carrying its
+      # `ResourceBindingTier`, its `HighestShaderModel`, whether SM6.6 dynamic
+      # resources are supported, and the derived renderer tier. **That line is
+      # the answer to a question `docs/backlog.md` says to settle before
+      # committing to the DX12 phase**: whether WARP — D3D12's software
+      # rasteriser, which ships in Windows — clears Tier A. If it does, this
+      # runner can render, and Windows gains the golden-image coverage it has
+      # never had; if it does not, `crcbl-wgpu` already covers Tier B here and
+      # DX12's justification is Xbox plus tooling.
+      #
+      # nextest captures a passing test's stdout, so on a green run — the run
+      # where you actually want to read a measurement — the line is invisible.
+      # `--success-output immediate` is what publishes it, and `--no-tests fail`
+      # is the same count check the macOS step makes: this crate is behind no
+      # feature, so nothing else would go red if its suite stopped being built.
+      #
+      # Read the verdict off `sm66-dynamic-resources`, **not** off
+      # `renderer-tier`. Every adapter reports Tier B in the enumeration slice
+      # because `COMPUTE`, `TIMELINE_SEMAPHORE` and the two indirect features
+      # wait on calls no slice has written yet — that is the backend's gap, not
+      # the hardware's.
+      - name: The DX12 adapter report, named rather than swept up
+        if: runner.os == 'Windows'
+        run: >-
+          cargo nextest run --locked -p crcbl-dx12
+          --no-tests fail --success-output immediate
+
   # The only job that runs the Wayland backend against a real compositor.
   # `docs/plan/12-testing.md` schedules "scripted resize/mode-switch sequences
   # against the real backends under a nested compositor (sway headless / Xvfb)
