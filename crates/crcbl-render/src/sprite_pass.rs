@@ -647,6 +647,9 @@ impl SpriteRenderer {
             spirv: SPRITE.spirv(),
             wgsl: SPRITE.wgsl(),
             msl: SPRITE.msl(),
+            // `None` because a DXIL container holds one entry point and this
+            // module has two; see `crcbl_render::forward`.
+            dxil: None,
         })?;
         let targets = [color_target(target_format)];
         let created = device.create_graphics_pipeline(&GraphicsPipelineDesc {

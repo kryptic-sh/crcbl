@@ -15,6 +15,25 @@
 //! already assumes. Anything richer would be a reason to reconsider; nothing
 //! here wants to be.
 
+/// One compiled DXIL container, and the entry point it holds.
+///
+/// **DXIL is the one target with an artifact per entry point rather than per
+/// shader.** `dxc` compiles a single `-E`, and a D3D12 pipeline state object
+/// takes one bytecode blob per stage, so a container carrying two entry points
+/// would be something no call could consume. The path and the digest therefore
+/// arrive on one manifest line together with the entry point they belong to,
+/// where the other targets use a `path` key and a matching `-sha256` key that
+/// can drift apart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DxilArtifact {
+    /// Entry point the container holds, as it appears in `entry-points`.
+    pub entry_point: String,
+    /// Artifact path, relative to the crate root.
+    pub path: String,
+    /// SHA-256 of the artifact, lower-case hex.
+    pub sha256: String,
+}
+
 /// One shader source and the artifact built from it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShaderRecord {
@@ -38,6 +57,9 @@ pub struct ShaderRecord {
     pub msl: String,
     /// SHA-256 of the MSL artifact, lower-case hex. Empty when `msl` is.
     pub msl_sha256: String,
+    /// Compiled DXIL containers, one per entry point, in `entry-points` order.
+    /// Empty when this shader has no DXIL output (pre-DX4 artifacts).
+    pub dxil: Vec<DxilArtifact>,
     /// Entry points the artifact exposes, as `(name, stage)`.
     pub entry_points: Vec<(String, String)>,
 }
@@ -53,6 +75,18 @@ pub struct Manifest {
     pub slangc_version: String,
     /// The `-profile` the artifacts were produced with.
     pub target: String,
+    /// What `dxc --version` reported for the compiler that produced the DXIL,
+    /// with the loaded library's name stripped. Empty for a manifest with no
+    /// DXIL column at all; required as soon as one shader has one.
+    ///
+    /// Pinned for the reason [`slangc_version`](Self::slangc_version) is, and
+    /// one more: the `dxc` builds distributions ship are Shader Model 6.10
+    /// preview branches that crash on a trivial shader, so an unpinned compiler
+    /// here does not produce different bytes — it produces none.
+    pub dxc_version: String,
+    /// The shader model the DXIL was compiled at, as `dxc -T` spells it
+    /// (`6_6`). Empty when `dxc_version` is.
+    pub dxil_model: String,
     /// One record per shader, in file order.
     pub shaders: Vec<ShaderRecord>,
 }
@@ -99,6 +133,7 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
                     wgsl_sha256: String::new(),
                     msl: String::new(),
                     msl_sha256: String::new(),
+                    dxil: Vec::new(),
                     entry_points: Vec::new(),
                 },
                 line_number,
@@ -116,6 +151,8 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
         match (current.as_mut().map(|(record, _)| record), key) {
             (None, "slangc-version") => manifest.slangc_version = value.to_string(),
             (None, "target") => manifest.target = value.to_string(),
+            (None, "dxc-version") => manifest.dxc_version = value.to_string(),
+            (None, "dxil-model") => manifest.dxil_model = value.to_string(),
             (None, other) => {
                 return Err(format!(
                     "line {line_number}: `{other}` appears before any [section], and is not a \
@@ -150,6 +187,40 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
                 let hash = hex(value, line_number)?;
                 set_once(&mut record.msl_sha256, hash, key, line_number)?;
             }
+            (Some(record), "dxil") => {
+                let mut fields = value.split(':');
+                let (Some(entry_point), Some(path), Some(sha256), None) =
+                    (fields.next(), fields.next(), fields.next(), fields.next())
+                else {
+                    return Err(format!(
+                        "line {line_number}: DXIL artifact {value:?} must be \
+                         `entry-point:path:sha256`"
+                    ));
+                };
+                let (entry_point, path) = (entry_point.trim(), path.trim());
+                if entry_point.is_empty() || path.is_empty() {
+                    return Err(format!(
+                        "line {line_number}: DXIL artifact {value:?} names an empty entry point \
+                         or path"
+                    ));
+                }
+                if record
+                    .dxil
+                    .iter()
+                    .any(|artifact| artifact.entry_point == entry_point)
+                {
+                    return Err(format!(
+                        "line {line_number}: entry point `{entry_point}` has two DXIL artifacts; \
+                         one of them would be unreachable"
+                    ));
+                }
+                let sha256 = hex(sha256.trim(), line_number)?;
+                record.dxil.push(DxilArtifact {
+                    entry_point: entry_point.to_string(),
+                    path: path.to_string(),
+                    sha256,
+                });
+            }
             (Some(record), "entry-points") => {
                 for pair in value.split(',') {
                     let pair = pair.trim();
@@ -183,6 +254,26 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
     }
     if manifest.shaders.is_empty() {
         return Err("the manifest describes no shaders".to_string());
+    }
+    // The version pin is what makes a byte-for-byte DXIL comparison mean
+    // anything, so a manifest that has DXIL and does not say which compiler
+    // produced it has recorded artifacts nothing can re-derive.
+    if manifest
+        .shaders
+        .iter()
+        .any(|shader| !shader.dxil.is_empty())
+    {
+        for (key, value) in [
+            ("dxc-version", &manifest.dxc_version),
+            ("dxil-model", &manifest.dxil_model),
+        ] {
+            if value.is_empty() {
+                return Err(format!(
+                    "the manifest records DXIL artifacts but no `{key}`, so nothing says which \
+                     compiler produced them"
+                ));
+            }
+        }
     }
     Ok(manifest)
 }
@@ -292,6 +383,23 @@ fn finish(record: ShaderRecord, line_number: usize) -> Result<ShaderRecord, Stri
             record.name
         ));
     }
+    // A DXIL container is addressed by the entry point it holds, so one naming
+    // an entry point the shader does not declare is a container nothing can
+    // ever ask for — and, far more likely, a generator that renamed an entry
+    // point in one place and not the other.
+    for artifact in &record.dxil {
+        if !record
+            .entry_points
+            .iter()
+            .any(|(name, _)| *name == artifact.entry_point)
+        {
+            return Err(format!(
+                "line {line_number}: section [{}] has a DXIL artifact for `{}`, which is not one \
+                 of its entry points",
+                record.name, artifact.entry_point
+            ));
+        }
+    }
     Ok(record)
 }
 
@@ -321,6 +429,22 @@ spirv = spirv/triangle.spv
 spirv-sha256 = d1a318ebaf3e333a2b7646473aae647d55011b3e91036540beb491896bea6d33
 entry-points = vertexMain:vertex, fragmentMain:fragment
 ";
+
+    /// The last header key of [`SAMPLE`], and so where another one is spliced
+    /// in: a header key after the first `[section]` is an unknown key by
+    /// design, which would make a DXIL test fail for the wrong reason.
+    const HEADER_END: &str = "target = spirv_1_5";
+
+    /// A digest that is syntactically a SHA-256 and is nothing's.
+    const ZERO: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    /// [`SAMPLE`] with the DXIL compiler pins in its header.
+    fn pinned() -> String {
+        SAMPLE.replace(
+            HEADER_END,
+            &format!("{HEADER_END}\ndxc-version = 1.9\ndxil-model = 6_6"),
+        )
+    }
 
     #[test]
     fn a_well_formed_manifest_round_trips_into_records() {
@@ -500,6 +624,95 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
             assert!(!record.wgsl.is_empty(), "{}: no wgsl column", record.name);
             assert!(!record.msl.is_empty(), "{}: no msl column", record.name);
             assert!(!record.msl_sha256.is_empty(), "{}", record.name);
+            // One DXIL container per entry point, not one per shader — so the
+            // count is the check. A generator that emitted only the first entry
+            // point would leave every fragment stage unusable on D3D12, and a
+            // "there is a dxil column" assertion would pass.
+            assert_eq!(
+                record.dxil.len(),
+                record.entry_points.len(),
+                "{}: {} entry points but {} DXIL containers",
+                record.name,
+                record.entry_points.len(),
+                record.dxil.len()
+            );
         }
+        assert!(!manifest.dxc_version.is_empty());
+        assert_eq!(manifest.dxil_model, "6_6");
+    }
+
+    /// A DXIL line carries the entry point, the path and the digest together,
+    /// so the three cannot drift — and each malformed shape is refused rather
+    /// than half-read.
+    #[test]
+    fn a_malformed_dxil_line_is_refused() {
+        let bad = [
+            // Two fields rather than three: no digest at all.
+            "dxil = vertexMain:dxil/triangle.vertexMain.dxil",
+            // Four: a path with a colon in it, which would otherwise silently
+            // truncate.
+            "dxil = vertexMain:dxil/a:b.dxil:\
+             0000000000000000000000000000000000000000000000000000000000000000",
+            // A digest that is not one.
+            "dxil = vertexMain:dxil/triangle.vertexMain.dxil:deadbeef",
+            // An empty entry point.
+            "dxil = :dxil/triangle.vertexMain.dxil:\
+             0000000000000000000000000000000000000000000000000000000000000000",
+        ];
+        for line in bad {
+            let text = format!("{SAMPLE}{line}\n");
+            parse_manifest(&text).expect_err(line);
+        }
+    }
+
+    /// A container for an entry point the shader does not declare is one
+    /// nothing can ever ask for, because a DXIL artifact is addressed by name.
+    #[test]
+    fn a_dxil_artifact_for_an_undeclared_entry_point_is_refused() {
+        let text = format!(
+            "{SAMPLE}dxil = computeMain:dxil/triangle.computeMain.dxil:\
+             0000000000000000000000000000000000000000000000000000000000000000\n"
+        );
+        let error = parse_manifest(&text).expect_err("triangle declares no computeMain");
+        assert!(error.contains("computeMain"), "{error}");
+
+        // And the same line for an entry point it *does* declare parses, so the
+        // refusal above is the name check rather than the shape.
+        let text = format!(
+            "{}dxil = vertexMain:dxil/triangle.vertexMain.dxil:\
+             0000000000000000000000000000000000000000000000000000000000000000\n",
+            pinned()
+        );
+        let manifest = parse_manifest(&text).expect("a declared entry point parses");
+        assert_eq!(manifest.shaders[0].dxil.len(), 1);
+        assert_eq!(manifest.shaders[0].dxil[0].entry_point, "vertexMain");
+    }
+
+    /// Two containers claiming one entry point means one of them is dead, and
+    /// which one is dead would depend on lookup order.
+    #[test]
+    fn two_dxil_artifacts_for_one_entry_point_are_refused() {
+        let text = format!(
+            "{}dxil = vertexMain:dxil/a.dxil:{ZERO}\ndxil = vertexMain:dxil/b.dxil:{ZERO}\n",
+            pinned()
+        );
+        let error = parse_manifest(&text).expect_err("one entry point, two containers");
+        assert!(error.contains("unreachable"), "{error}");
+    }
+
+    /// DXIL with no compiler pin is an artifact nothing can re-derive, which is
+    /// the whole basis of the drift check.
+    #[test]
+    fn dxil_without_a_compiler_pin_is_refused() {
+        let text = format!("{SAMPLE}dxil = vertexMain:dxil/a.dxil:{ZERO}\n");
+        let error = parse_manifest(&text).expect_err("no dxc-version");
+        assert!(error.contains("dxc-version"), "{error}");
+
+        let text = format!(
+            "{}dxil = vertexMain:dxil/a.dxil:{ZERO}\n",
+            SAMPLE.replace(HEADER_END, &format!("{HEADER_END}\ndxc-version = 1.9"))
+        );
+        let error = parse_manifest(&text).expect_err("no dxil-model");
+        assert!(error.contains("dxil-model"), "{error}");
     }
 }

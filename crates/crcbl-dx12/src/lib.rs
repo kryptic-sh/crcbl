@@ -174,6 +174,8 @@
 #[cfg(target_os = "windows")]
 mod adapter;
 #[cfg(target_os = "windows")]
+mod binding;
+#[cfg(target_os = "windows")]
 mod command;
 #[cfg(target_os = "windows")]
 mod conv;
@@ -185,6 +187,8 @@ mod device;
 mod handle;
 #[cfg(target_os = "windows")]
 mod instance;
+#[cfg(target_os = "windows")]
+mod pipeline;
 #[cfg(target_os = "windows")]
 mod retire;
 #[cfg(target_os = "windows")]

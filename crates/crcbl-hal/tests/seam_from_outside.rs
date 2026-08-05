@@ -191,6 +191,7 @@ fn setup(instance: &dyn Instance) -> Frame {
             spirv: &SPIRV,
             wgsl: None,
             msl: None,
+            dxil: None,
         })
         .expect("shader module");
     let layout = device

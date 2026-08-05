@@ -1627,8 +1627,8 @@ fn declaring_one_image_twice_in_a_pass_is_an_error() {
     assert!(text.contains("scene"), "{text}");
 }
 
-/// Every shader module the engine's own passes create is offered **both**
-/// artifact formats.
+/// Every shader module the engine's own passes create is offered every
+/// artifact format that module *has*.
 ///
 /// `crcbl_hal::shader`'s contract is that a caller supplies every format it
 /// holds and the backend picks. Nothing about a Vulkan run can check that: a
@@ -1636,6 +1636,20 @@ fn declaring_one_image_twice_in_a_pass_is_an_error() {
 /// `crcbl-vk`, and only `crcbl-wgpu` — which needs a GPU, or a browser — would
 /// notice. That is precisely how the WGSL artifacts sat unused between P5.3 and
 /// P5.9. This runs with no ICD, no driver and no GPU.
+///
+/// # DXIL is absent, and the absence is asserted rather than tolerated
+///
+/// Every pass here creates **one** module and names it from two
+/// `ShaderEntry`s — a vertex stage and a fragment stage. A DXIL container holds
+/// exactly one entry point (`dxc` compiles a single `-E`, and a D3D12 pipeline
+/// takes one blob per stage), so there is no container that is "the DXIL for
+/// mesh.slang" and `None` is the truthful answer, not a dropped format.
+///
+/// So the expectation is spelled out rather than written as
+/// `ShaderSources::all()`, and the *second* assertion is the one that keeps it
+/// honest: it fails the day a pass starts creating a module per stage and can
+/// offer DXIL, which forces this expectation to be widened deliberately instead
+/// of drifting. `docs/backlog.md` carries that work.
 #[test]
 fn the_engine_passes_offer_every_shader_artifact_they_have() {
     use crcbl_hal::ShaderSources;
@@ -1654,12 +1668,19 @@ fn the_engine_passes_offer_every_shader_artifact_they_have() {
         !created.is_empty(),
         "the forward renderer created no shader modules at all"
     );
+    let expected = ShaderSources::SPIRV | ShaderSources::WGSL | ShaderSources::MSL;
     for (label, sources) in created {
         assert_eq!(
             sources,
-            ShaderSources::all(),
+            expected,
             "{}: offered only {sources}",
             label.as_deref().unwrap_or("<unlabelled>")
         );
     }
+    assert_ne!(
+        expected,
+        ShaderSources::all(),
+        "a pass can now offer DXIL, so the expectation above is stale — widen it \
+         and delete the backlog entry for per-stage shader modules"
+    );
 }

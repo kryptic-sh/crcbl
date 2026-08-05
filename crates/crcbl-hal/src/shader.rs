@@ -3,10 +3,10 @@
 //! # The caller offers every artifact it has; the backend picks
 //!
 //! [`ShaderModuleDesc`] carries **one field per artifact format** — SPIR-V
-//! words, WGSL source, MSL source — and the caller fills in every one it has.
-//! It does not choose between them and it is not told which backend it is
-//! talking to; the backend takes the format it can consume and ignores the
-//! rest.
+//! words, WGSL source, MSL source, DXIL bytes — and the caller fills in every
+//! one it has. It does not choose between them and it is not told which backend
+//! it is talking to; the backend takes the format it can consume and ignores
+//! the rest.
 //!
 //! This replaces "the seam takes SPIR-V words and nothing else", which held
 //! from P0 to P5 on the premise that a backend which cannot consume SPIR-V
@@ -32,7 +32,7 @@
 //! fields keep the selection below the seam, which is the whole point — a
 //! caller says "here is the SPIR-V, here is the WGSL, here is the MSL", every
 //! backend sees the same descriptor, and P14's MSL cost exactly one field —
-//! not a variant every existing `match` had to grow an arm for. DXIL will cost
+//! not a variant every existing `match` had to grow an arm for. DX4's DXIL cost
 //! the same.
 //!
 //! ## The contract
@@ -41,8 +41,16 @@
 //! preference — it is a statement that the artifact does not exist, and it is
 //! how a shader silently becomes unusable on a backend that has not been
 //! written yet. `crcbl-shaders`' generated table hands out every one
-//! (`Shader::spirv`, `Shader::wgsl`, `Shader::msl`), so the correct call site
-//! names all three.
+//! (`Shader::spirv`, `Shader::wgsl`, `Shader::msl`, `Shader::dxil`), so the
+//! correct call site names all four.
+//!
+//! **DXIL is per entry point, so a call site that uses it makes one descriptor
+//! per stage.** `dxc` compiles one entry point per container and a D3D12
+//! pipeline takes one blob per stage, so `Shader::dxil` takes an entry-point
+//! name where the other three accessors take nothing. A caller drawing with a
+//! vertex and a fragment stage therefore builds two descriptors — the same
+//! SPIR-V, WGSL and MSL in each, and a different [`ShaderModuleDesc::dxil`] —
+//! and the backends that ignore the DXIL simply see two equivalent modules.
 //!
 //! **A descriptor must carry at least one format.** One with neither is
 //! [`HalError::ShaderCompilation`].
@@ -100,6 +108,8 @@ bitflags::bitflags! {
         const WGSL = 1 << 1;
         /// [`ShaderModuleDesc::msl`] is `Some`.
         const MSL = 1 << 2;
+        /// [`ShaderModuleDesc::dxil`] is `Some`.
+        const DXIL = 1 << 3;
     }
 }
 
@@ -112,6 +122,7 @@ impl fmt::Display for ShaderSources {
             (Self::SPIRV, "SPIR-V"),
             (Self::WGSL, "WGSL"),
             (Self::MSL, "MSL"),
+            (Self::DXIL, "DXIL"),
         ] {
             if self.contains(bit) {
                 if !first {
@@ -177,6 +188,33 @@ pub struct ShaderModuleDesc<'a> {
     /// to compile it owes the caller Metal's own message — see
     /// [`HalError::ShaderCompilation`].
     pub msl: Option<&'a str>,
+    /// A compiled DXIL container, as raw bytes. `None` when there is no DXIL
+    /// artifact.
+    ///
+    /// **Bytes, not text — this field is closer to [`spirv`](Self::spirv) than
+    /// to its two `Option<&str>` neighbours.** DXIL is a *signed binary blob*:
+    /// a `DxilContainerHeader` whose 16-byte digest covers the contents, so
+    /// there is no source for a backend to compile and nothing for it to parse.
+    /// `crcbl-dx12` hands the slice straight to
+    /// `D3D12_SHADER_BYTECODE`. Passing text through here would only mean the
+    /// artifact had been decoded and re-encoded on the way, and an unsigned or
+    /// re-encoded container is rejected by every D3D12 driver.
+    ///
+    /// It is `Option<&[u8]>` rather than `&[u8]` — where `spirv` uses empty for
+    /// absence — because the two formats fail differently. A zero-word SPIR-V
+    /// module cannot exist, so `&[]` is unambiguous there; a zero-byte file
+    /// reaching here is a *truncated* container, and conflating that with "no
+    /// artifact" would report a corrupt build as an unwritten backend. It is
+    /// also `&[u8]` rather than `&[u32]` because nothing about a DXIL container
+    /// is word-addressed: its parts are byte-offset, so aligning it would buy
+    /// no consumer anything.
+    ///
+    /// **One entry point per container.** `dxc` compiles a single `-E` and a
+    /// D3D12 pipeline state object takes one bytecode blob per stage, so unlike
+    /// every other field here this one describes *one stage* rather than the
+    /// whole module. See the [module docs](self) for what that means at a call
+    /// site.
+    pub dxil: Option<&'a [u8]>,
 }
 
 impl ShaderModuleDesc<'_> {
@@ -195,6 +233,9 @@ impl ShaderModuleDesc<'_> {
         }
         if self.msl.is_some() {
             sources |= ShaderSources::MSL;
+        }
+        if self.dxil.is_some() {
+            sources |= ShaderSources::DXIL;
         }
         sources
     }
@@ -286,13 +327,45 @@ mod tests {
         );
         assert_eq!(
             ShaderModuleDesc {
-                spirv: &spirv,
-                wgsl: Some("@fragment fn main() {}"),
-                msl: Some("[[fragment]] float4 main() { return 0; }"),
+                dxil: Some(b"DXBC"),
                 ..ShaderModuleDesc::default()
             }
             .provided(),
-            ShaderSources::SPIRV | ShaderSources::WGSL | ShaderSources::MSL
+            ShaderSources::DXIL
+        );
+        assert_eq!(
+            ShaderModuleDesc {
+                spirv: &spirv,
+                wgsl: Some("@fragment fn main() {}"),
+                msl: Some("[[fragment]] float4 main() { return 0; }"),
+                dxil: Some(b"DXBC"),
+                ..ShaderModuleDesc::default()
+            }
+            .provided(),
+            ShaderSources::all()
+        );
+    }
+
+    /// An empty DXIL blob is a *present* artifact, like the two text formats
+    /// and unlike [`ShaderModuleDesc::spirv`].
+    ///
+    /// The distinction is the whole reason this field is an `Option` where
+    /// `spirv` is not: a zero-byte container is a truncated file, and reporting
+    /// it as absent would send a reader looking for an unwritten backend.
+    #[test]
+    fn an_empty_dxil_blob_is_present_not_absent() {
+        assert_eq!(
+            ShaderModuleDesc {
+                dxil: Some(b""),
+                ..ShaderModuleDesc::default()
+            }
+            .provided(),
+            ShaderSources::DXIL
+        );
+        assert_eq!(
+            ShaderModuleDesc::default().provided(),
+            ShaderSources::empty(),
+            "the default must still report nothing, or the check above is vacuous"
         );
     }
 
@@ -324,13 +397,14 @@ mod tests {
         assert_eq!(ShaderSources::SPIRV.to_string(), "SPIR-V");
         assert_eq!(ShaderSources::WGSL.to_string(), "WGSL");
         assert_eq!(ShaderSources::MSL.to_string(), "MSL");
+        assert_eq!(ShaderSources::DXIL.to_string(), "DXIL");
         assert_eq!(
             (ShaderSources::SPIRV | ShaderSources::WGSL).to_string(),
             "SPIR-V and WGSL"
         );
         assert_eq!(
             ShaderSources::all().to_string(),
-            "SPIR-V and WGSL and MSL",
+            "SPIR-V and WGSL and MSL and DXIL",
             "every bit must have a name in the sentence, or a backend's refusal \
              would silently omit the format the caller actually supplied"
         );

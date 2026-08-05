@@ -90,7 +90,9 @@ use windows::Win32::Graphics::Direct3D12::{
 use windows::core::Interface;
 
 use crate::conv;
-use crate::device::{AttachmentRef, BufferRef, CommandBufferEntry, DeviceInner, ImageRef};
+use crate::device::{
+    AttachmentRef, BoundPipeline, BufferRef, CommandBufferEntry, DeviceInner, ImageRef,
+};
 use crate::instance::not_yet;
 
 /// A batch of resource-state transitions, and the references they borrowed.
@@ -206,6 +208,12 @@ pub(crate) struct Dx12CommandEncoder {
     /// The first failure. Every later command is dropped and `finish` returns
     /// this.
     failed: Option<HalError>,
+    /// The graphics pipeline currently bound, if any.
+    ///
+    /// Held so `draw` can refuse when nothing is bound. Not read for its
+    /// contents: the pipeline's own state was replayed onto the command list at
+    /// bind time, which is where D3D12 keeps it.
+    pipeline: Option<BoundPipeline>,
     in_render_pass: bool,
     in_compute_pass: bool,
 }
@@ -235,6 +243,7 @@ impl Dx12CommandEncoder {
             list: None,
             retained: Vec::new(),
             failed: None,
+            pipeline: None,
             in_render_pass: false,
             in_compute_pass: false,
         };
@@ -1078,42 +1087,167 @@ impl CommandEncoder for Dx12CommandEncoder {
         unsafe { list.OMSetStencilRef(reference) };
     }
 
-    fn bind_graphics_pipeline(&mut self, _pipeline: GraphicsPipelineHandle) {
-        self.refuse("graphics pipelines (the DX12 pipeline slice)");
+    /// Binds a pipeline state object, its root signature, and the two pieces of
+    /// state D3D12 keeps on the command list.
+    ///
+    /// **`SetPipelineState` does not set a root signature.** A command list
+    /// carries one of its own, and a draw whose PSO and root signature disagree
+    /// is undefined behaviour the debug layer reports and a release runtime does
+    /// not — so the pipeline entry carries the signature it was built against
+    /// and both are set here.
+    ///
+    /// Setting the root signature also **resets every root argument**, so a
+    /// caller must bind its groups after its pipeline. That is the order
+    /// `crcbl_hal::CommandEncoder` already documents, and it is Vulkan's rule
+    /// too.
+    fn bind_graphics_pipeline(&mut self, pipeline: GraphicsPipelineHandle) {
+        if self.list().is_none() {
+            return;
+        }
+        let bound = match self.device.graphics_pipeline(pipeline) {
+            Ok(bound) => bound,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        let Some(list) = self.list() else { return };
+        // SAFETY: `list` is a live command list in the recording state, and each
+        // interface is one this encoder holds a reference to for the duration of
+        // the call. `IASetPrimitiveTopology` and `OMSetStencilRef` take scalars.
+        unsafe {
+            list.SetGraphicsRootSignature(&bound.root_signature);
+            list.SetPipelineState(&bound.raw);
+            list.IASetPrimitiveTopology(bound.topology);
+            if let Some(reference) = bound.stencil_reference {
+                list.OMSetStencilRef(reference);
+            }
+        }
+        self.pipeline = Some(bound);
     }
 
     fn bind_index_buffer(&mut self, _buffer: BufferHandle, _offset: u64, _format: IndexFormat) {
         self.refuse("indexed draws (the DX12 pipeline slice)");
     }
 
+    /// Binds a bind group's descriptor tables at the root parameters the
+    /// pipeline layout put them at.
+    ///
+    /// `dynamic_offsets` is refused rather than ignored: a descriptor table has
+    /// no offset to apply, which is why
+    /// [`create_bind_group_layout`](crcbl_hal::Device::create_bind_group_layout)
+    /// already refuses a `dynamic` binding. A caller reaching here with offsets
+    /// is holding a layout no bind group in this backend could conform to, and
+    /// dropping them would bind the wrong region of one large buffer.
     fn bind_group(
         &mut self,
-        _index: u32,
-        _group: BindGroupHandle,
-        _dynamic_offsets: &[u32],
-        _layout: PipelineLayoutHandle,
+        index: u32,
+        group: BindGroupHandle,
+        dynamic_offsets: &[u32],
+        layout: PipelineLayoutHandle,
     ) {
-        self.refuse("bind groups (the DX12 binding slice)");
+        if self.list().is_none() {
+            return;
+        }
+        if !dynamic_offsets.is_empty() {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{} dynamic offset(s) at set {index}, and a D3D12 descriptor table has none to \
+                 apply; no bind group layout on this device declares a dynamic binding (the DX12 \
+                 dynamic-offset slice)",
+                dynamic_offsets.len()
+            )));
+            return;
+        }
+        let bound = match self.device.bind_group(index, group, layout) {
+            Ok(bound) => bound,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        for resource in &bound.retained {
+            self.retain(resource);
+        }
+        let Some(list) = self.list() else { return };
+        // SAFETY: `list` is live and recording. `bound.heaps` is a live slice of
+        // shader-visible heaps this device owns, borrowed for the call and
+        // containing no null entry — `VisibleHeaps::bound` drops a heap that was
+        // never created rather than passing one. Each table base is an address
+        // inside one of exactly those heaps, at a root parameter index the
+        // pipeline layout's own root signature declares.
+        unsafe {
+            if !bound.heaps.is_empty() {
+                list.SetDescriptorHeaps(&bound.heaps);
+            }
+            if let Some((root, base)) = bound.views {
+                list.SetGraphicsRootDescriptorTable(root, base);
+            }
+            if let Some((root, base)) = bound.samplers {
+                list.SetGraphicsRootDescriptorTable(root, base);
+            }
+        }
     }
 
+    /// Fails the encoder, because no layout on this device can declare a range.
+    ///
+    /// Not [`not_yet`]: `create_pipeline_layout` refuses a
+    /// [`PushConstantRange`](crcbl_hal::PushConstantRange) outright — this
+    /// device does not report
+    /// [`Features::PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS) — so a
+    /// caller reaching here is holding a layout that does not exist, and "the
+    /// push-constant slice has not landed" would send it looking for a feature
+    /// rather than at the layout it built.
     fn push_constants(
         &mut self,
         _stages: ShaderStages,
-        _offset: u32,
-        _data: &[u8],
+        offset: u32,
+        data: &[u8],
         _layout: PipelineLayoutHandle,
     ) {
-        self.refuse("push constants (the DX12 binding slice)");
+        self.fail(HalError::InvalidDescriptor(format!(
+            "{} byte(s) of push constants at offset {offset}, on a device that does not report \
+             Features::PUSH_CONSTANTS: create_pipeline_layout refuses a push-constant range, so \
+             no layout here declares one",
+            data.len()
+        )));
     }
 
     // --- draws ---
 
-    fn draw(&mut self, _vertices: Range<u32>, _instances: Range<u32>) {
-        self.refuse("draws (the DX12 pipeline slice)");
+    /// `DrawInstanced`, with the seam's two ranges as D3D12's four scalars.
+    ///
+    /// **A draw with no pipeline bound fails the encoder rather than being
+    /// dropped.** D3D12 would draw nothing with no pipeline state object set,
+    /// and nothing is exactly what a caller reading a blank attachment cannot
+    /// tell from a shader that wrote nothing.
+    fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
+        if self.list().is_none() {
+            return;
+        }
+        if self.pipeline.is_none() {
+            self.fail(HalError::InvalidDescriptor(
+                "a draw with no graphics pipeline bound; D3D12 would rasterise nothing and report \
+                 nothing"
+                    .to_string(),
+            ));
+            return;
+        }
+        let Some(list) = self.list() else { return };
+        // SAFETY: `list` is live and recording, and the call takes four scalars.
+        // `saturating_sub` is what makes an empty or inverted range a zero
+        // count rather than a wrap to four billion vertices.
+        unsafe {
+            list.DrawInstanced(
+                vertices.end.saturating_sub(vertices.start),
+                instances.end.saturating_sub(instances.start),
+                vertices.start,
+                instances.start,
+            );
+        }
     }
 
     fn draw_indexed(&mut self, _indices: Range<u32>, _base_vertex: i32, _instances: Range<u32>) {
-        self.refuse("draws (the DX12 pipeline slice)");
+        self.refuse("indexed draws (the DX12 pipeline slice)");
     }
 
     fn draw_indirect(&mut self, _draw: &DrawIndirect) {

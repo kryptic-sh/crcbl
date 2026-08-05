@@ -86,5 +86,12 @@ windows = { version = "0.62.2", default-features = false, features = [
   "Win32_System_Threading",
 ] }
 
+# The committed DXIL, and the triangle geometry the shader that reads it
+# declares. Test-only and workspace-internal, exactly as `crcbl-mtl` takes it for
+# the same test: the artifacts this backend consumes have to come from the crate
+# that produced them, or the test would draw a triangle the engine does not ship.
+[dev-dependencies]
+crcbl-shaders = { workspace = true }
+
 [lints]
 workspace = true

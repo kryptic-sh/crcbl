@@ -5,6 +5,8 @@
 # is caught on a machine with no shader compiler at all.
 slangc-version = 2026.14
 target = spirv_1_5
+dxc-version = 1.9(1-0d3ee6b5)(1.9.0.1)
+dxil-model = 6_6
 
 [compute_probe]
 source = shaders/compute_probe.slang
@@ -15,6 +17,7 @@ wgsl = wgsl/compute_probe.wgsl
 wgsl-sha256 = e73b742203440239765b9c7db76710eadb7adcee67c2707cb1440ae72c026fd9
 msl = msl/compute_probe.metal
 msl-sha256 = 142c45ee0c8939fa4d57bca43288d2e7312d8b9d4962e54554613618793fe8e3
+dxil = computeMain:dxil/compute_probe.computeMain.dxil:75a92d8b7739f51794d8ff70f66ca2f53c9aeb2f9d1f9005a3945ec838dcc762
 entry-points = computeMain:glcompute
 
 [mesh]
@@ -26,6 +29,8 @@ wgsl = wgsl/mesh.wgsl
 wgsl-sha256 = 7749dd7473397643249ec2760e1ab44f13476ef4011bae9674560bd068ceab01
 msl = msl/mesh.metal
 msl-sha256 = 56e44ac67ff5db6b34450371cebc700bb4dd859eb055e63c84df525db5361768
+dxil = vertexMain:dxil/mesh.vertexMain.dxil:e133e740c878cd6375db9ea4f8d46452df0d3606f6638d18ec13112a5efba0da
+dxil = fragmentMain:dxil/mesh.fragmentMain.dxil:b280bb72c37899ab9ae075711ee1beb5e27bc3a3302e340a5267bb8e66f8192b
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [sprite]
@@ -37,6 +42,8 @@ wgsl = wgsl/sprite.wgsl
 wgsl-sha256 = ab16d30cf1b5f065673a5748845811b19c756ee877a0495647a454124cacf4f1
 msl = msl/sprite.metal
 msl-sha256 = d25baf4c46a296dc4aff6f04d149b71557d1b8ca11fb8c08c6d76bd147b953a7
+dxil = vertexMain:dxil/sprite.vertexMain.dxil:46ecd35707ee7eddefae8223f181f9bc3768bae8d728b99d642ae83cfdaeafcd
+dxil = fragmentMain:dxil/sprite.fragmentMain.dxil:210605a40ca95a9c1a417c54ac563a163ef59f03a83cbc7e25fcd4a59a38ff40
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [tonemap]
@@ -48,6 +55,8 @@ wgsl = wgsl/tonemap.wgsl
 wgsl-sha256 = 579856509aad67e6249eb4b0489bb393e9e6e3c77e9676221ac98a03dc121a41
 msl = msl/tonemap.metal
 msl-sha256 = 0679b254b174a4440ef42fbd56cb06af976cfd3d0e254899022cfee2592bfc45
+dxil = vertexMain:dxil/tonemap.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
+dxil = fragmentMain:dxil/tonemap.fragmentMain.dxil:9eb37f71b174b8651b910c3e60f0c4c82dc91f97ef3a62ec3925595403b94bc5
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [triangle]
@@ -59,6 +68,8 @@ wgsl = wgsl/triangle.wgsl
 wgsl-sha256 = e94308994c4b422b98293b5ca6c815a109dab182b6f96afc8d749bec38d35af9
 msl = msl/triangle.metal
 msl-sha256 = f45a9712c7d5762bf7d5c1d26bf521a3aff3f2aa5b4e6cd370c94cea09ac4c25
+dxil = vertexMain:dxil/triangle.vertexMain.dxil:e905842dc6032b16bc6693c688d9fea4badab2ab4a293cfe9581ccd7be5b3d67
+dxil = fragmentMain:dxil/triangle.fragmentMain.dxil:fb6542d1fa84d15525bb7cd86438bf382bcafbfee6645791f494eebdde3c3129
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ui]
@@ -70,6 +81,8 @@ wgsl = wgsl/ui.wgsl
 wgsl-sha256 = 4f184f7342f65b430c8521d18c1da19dd9ee206449ab473c167dcc9fe9d23414
 msl = msl/ui.metal
 msl-sha256 = 2d425e61fb62eb4d27560940113d89f782c12bf0dc90508f34d7f152968dc897
+dxil = vertexMain:dxil/ui.vertexMain.dxil:e0c0a9bea6c938720bb4af00ab290cd612fb295cccb05fffb85280981bf60196
+dxil = fragmentMain:dxil/ui.fragmentMain.dxil:3b8d3e9798e8673ba67a5ab96ef54cf064b01854c44bed06b957362700df52d1
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ui_tier_b]
@@ -81,4 +94,6 @@ wgsl = wgsl/ui_tier_b.wgsl
 wgsl-sha256 = 1113bc41a6805fae74a50a7227e2e6974c98d47a7391bd67a70dbd9cf0b50ee7
 msl = msl/ui_tier_b.metal
 msl-sha256 = 8fb073eb9c28ee21b35268a25a555e863ae86f04a3f0bb4477b58314e7caf5cf
+dxil = vertexMain:dxil/ui_tier_b.vertexMain.dxil:e0c0a9bea6c938720bb4af00ab290cd612fb295cccb05fffb85280981bf60196
+dxil = fragmentMain:dxil/ui_tier_b.fragmentMain.dxil:3b8d3e9798e8673ba67a5ab96ef54cf064b01854c44bed06b957362700df52d1
 entry-points = vertexMain:vertex, fragmentMain:fragment

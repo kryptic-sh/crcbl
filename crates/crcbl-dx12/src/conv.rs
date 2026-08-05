@@ -51,8 +51,32 @@
 //! `device.rs` checks it at image creation where the device is in hand.
 
 use crcbl_hal::{
-    BufferUsage, CompareOp, FilterMode, Format, ImageType, ImageUsage, MemoryLocation,
-    ResourceState, SamplerAddressMode, SamplerDesc,
+    BindingKind, BlendFactor, BlendOp, BufferUsage, ColorWrites, CompareOp, CullMode, FilterMode,
+    Format, ImageType, ImageUsage, MemoryLocation, PolygonMode, PrimitiveTopology, ResourceState,
+    SamplerAddressMode, SamplerDesc, ShaderStages, StencilOp,
+};
+use windows::Win32::Graphics::Direct3D::{
+    D3D_PRIMITIVE_TOPOLOGY, D3D_PRIMITIVE_TOPOLOGY_LINELIST, D3D_PRIMITIVE_TOPOLOGY_LINESTRIP,
+    D3D_PRIMITIVE_TOPOLOGY_POINTLIST, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+    D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+};
+use windows::Win32::Graphics::Direct3D12::{
+    D3D12_BLEND, D3D12_BLEND_DEST_ALPHA, D3D12_BLEND_DEST_COLOR, D3D12_BLEND_INV_DEST_ALPHA,
+    D3D12_BLEND_INV_DEST_COLOR, D3D12_BLEND_INV_SRC_ALPHA, D3D12_BLEND_INV_SRC_COLOR,
+    D3D12_BLEND_ONE, D3D12_BLEND_OP, D3D12_BLEND_OP_ADD, D3D12_BLEND_OP_MAX, D3D12_BLEND_OP_MIN,
+    D3D12_BLEND_OP_REV_SUBTRACT, D3D12_BLEND_OP_SUBTRACT, D3D12_BLEND_SRC_ALPHA,
+    D3D12_BLEND_SRC_COLOR, D3D12_BLEND_ZERO, D3D12_COLOR_WRITE_ENABLE_ALPHA,
+    D3D12_COLOR_WRITE_ENABLE_BLUE, D3D12_COLOR_WRITE_ENABLE_GREEN, D3D12_COLOR_WRITE_ENABLE_RED,
+    D3D12_CULL_MODE, D3D12_CULL_MODE_BACK, D3D12_CULL_MODE_FRONT, D3D12_CULL_MODE_NONE,
+    D3D12_DESCRIPTOR_RANGE_TYPE, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+    D3D12_DESCRIPTOR_RANGE_TYPE_UAV, D3D12_FILL_MODE, D3D12_FILL_MODE_SOLID,
+    D3D12_FILL_MODE_WIREFRAME, D3D12_PRIMITIVE_TOPOLOGY_TYPE, D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE,
+    D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT, D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+    D3D12_SHADER_VISIBILITY, D3D12_SHADER_VISIBILITY_ALL, D3D12_SHADER_VISIBILITY_PIXEL,
+    D3D12_SHADER_VISIBILITY_VERTEX, D3D12_STENCIL_OP, D3D12_STENCIL_OP_DECR,
+    D3D12_STENCIL_OP_DECR_SAT, D3D12_STENCIL_OP_INCR, D3D12_STENCIL_OP_INCR_SAT,
+    D3D12_STENCIL_OP_INVERT, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_REPLACE,
+    D3D12_STENCIL_OP_ZERO,
 };
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_COMPARISON_FUNC, D3D12_COMPARISON_FUNC_ALWAYS, D3D12_COMPARISON_FUNC_EQUAL,
@@ -445,6 +469,170 @@ pub(crate) const fn comparison_func(op: CompareOp) -> D3D12_COMPARISON_FUNC {
         CompareOp::NotEqual => D3D12_COMPARISON_FUNC_NOT_EQUAL,
         CompareOp::GreaterOrEqual => D3D12_COMPARISON_FUNC_GREATER_EQUAL,
         CompareOp::Always => D3D12_COMPARISON_FUNC_ALWAYS,
+    }
+}
+
+/// How primitives assemble, for the **pipeline state object**.
+///
+/// D3D12 splits what Vulkan and Metal keep in one place: the PSO takes a
+/// *category* — point, line or triangle — and the command list takes the exact
+/// topology at [`primitive_topology`]. A list and a strip share a PSO and
+/// differ only at `IASetPrimitiveTopology`, which is why
+/// `crcbl_dx12::pipeline` keeps the second value beside the object.
+pub(crate) const fn primitive_topology_type(
+    topology: PrimitiveTopology,
+) -> D3D12_PRIMITIVE_TOPOLOGY_TYPE {
+    match topology {
+        PrimitiveTopology::PointList => D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT,
+        PrimitiveTopology::LineList | PrimitiveTopology::LineStrip => {
+            D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
+        }
+        PrimitiveTopology::TriangleList | PrimitiveTopology::TriangleStrip => {
+            D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE
+        }
+    }
+}
+
+/// How primitives assemble, for the **command list**. See
+/// [`primitive_topology_type`] for why there are two.
+pub(crate) const fn primitive_topology(topology: PrimitiveTopology) -> D3D_PRIMITIVE_TOPOLOGY {
+    match topology {
+        PrimitiveTopology::PointList => D3D_PRIMITIVE_TOPOLOGY_POINTLIST,
+        PrimitiveTopology::LineList => D3D_PRIMITIVE_TOPOLOGY_LINELIST,
+        PrimitiveTopology::LineStrip => D3D_PRIMITIVE_TOPOLOGY_LINESTRIP,
+        PrimitiveTopology::TriangleList => D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+        PrimitiveTopology::TriangleStrip => D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+    }
+}
+
+/// Which faces the rasteriser discards.
+pub(crate) const fn cull_mode(mode: CullMode) -> D3D12_CULL_MODE {
+    match mode {
+        CullMode::None => D3D12_CULL_MODE_NONE,
+        CullMode::Front => D3D12_CULL_MODE_FRONT,
+        CullMode::Back => D3D12_CULL_MODE_BACK,
+    }
+}
+
+/// Solid or wireframe.
+pub(crate) const fn fill_mode(mode: PolygonMode) -> D3D12_FILL_MODE {
+    match mode {
+        PolygonMode::Fill => D3D12_FILL_MODE_SOLID,
+        PolygonMode::Line => D3D12_FILL_MODE_WIREFRAME,
+    }
+}
+
+/// One blend factor.
+///
+/// **`Src`/`Dst` are the colour factors and `SrcAlpha`/`DstAlpha` the alpha
+/// ones, and D3D12 spells the pair `_COLOR`/`_ALPHA` rather than by position.**
+/// Picking `D3D12_BLEND_SRC_ALPHA` for [`BlendFactor::Src`] would compile, blend
+/// something plausible, and be wrong only where alpha differs from luminance —
+/// which is most of a frame and none of a unit test.
+pub(crate) const fn blend_factor(factor: BlendFactor) -> D3D12_BLEND {
+    match factor {
+        BlendFactor::Zero => D3D12_BLEND_ZERO,
+        BlendFactor::One => D3D12_BLEND_ONE,
+        BlendFactor::Src => D3D12_BLEND_SRC_COLOR,
+        BlendFactor::OneMinusSrc => D3D12_BLEND_INV_SRC_COLOR,
+        BlendFactor::SrcAlpha => D3D12_BLEND_SRC_ALPHA,
+        BlendFactor::OneMinusSrcAlpha => D3D12_BLEND_INV_SRC_ALPHA,
+        BlendFactor::Dst => D3D12_BLEND_DEST_COLOR,
+        BlendFactor::OneMinusDst => D3D12_BLEND_INV_DEST_COLOR,
+        BlendFactor::DstAlpha => D3D12_BLEND_DEST_ALPHA,
+        BlendFactor::OneMinusDstAlpha => D3D12_BLEND_INV_DEST_ALPHA,
+    }
+}
+
+/// How the two blended terms combine.
+pub(crate) const fn blend_op(op: BlendOp) -> D3D12_BLEND_OP {
+    match op {
+        BlendOp::Add => D3D12_BLEND_OP_ADD,
+        BlendOp::Subtract => D3D12_BLEND_OP_SUBTRACT,
+        BlendOp::ReverseSubtract => D3D12_BLEND_OP_REV_SUBTRACT,
+        BlendOp::Min => D3D12_BLEND_OP_MIN,
+        BlendOp::Max => D3D12_BLEND_OP_MAX,
+    }
+}
+
+/// Which channels a colour target writes, as D3D12's 8-bit mask.
+///
+/// Bit for bit rather than by numeric value: the seam's [`ColorWrites`] and
+/// D3D12's `D3D12_COLOR_WRITE_ENABLE_*` happen to agree on R=1, G=2, B=4, A=8,
+/// and a `bits() as u8` cast would be a coincidence nothing checks.
+pub(crate) fn color_write_mask(writes: ColorWrites) -> u8 {
+    let mut mask = 0;
+    for (bit, enable) in [
+        (ColorWrites::R, D3D12_COLOR_WRITE_ENABLE_RED),
+        (ColorWrites::G, D3D12_COLOR_WRITE_ENABLE_GREEN),
+        (ColorWrites::B, D3D12_COLOR_WRITE_ENABLE_BLUE),
+        (ColorWrites::A, D3D12_COLOR_WRITE_ENABLE_ALPHA),
+    ] {
+        if writes.contains(bit) {
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            {
+                mask |= enable.0 as u8;
+            }
+        }
+    }
+    mask
+}
+
+/// What a stencil test outcome does to the stored value.
+pub(crate) const fn stencil_op(op: StencilOp) -> D3D12_STENCIL_OP {
+    match op {
+        StencilOp::Keep => D3D12_STENCIL_OP_KEEP,
+        StencilOp::Zero => D3D12_STENCIL_OP_ZERO,
+        StencilOp::Replace => D3D12_STENCIL_OP_REPLACE,
+        StencilOp::Invert => D3D12_STENCIL_OP_INVERT,
+        StencilOp::IncrementClamp => D3D12_STENCIL_OP_INCR_SAT,
+        StencilOp::DecrementClamp => D3D12_STENCIL_OP_DECR_SAT,
+        StencilOp::IncrementWrap => D3D12_STENCIL_OP_INCR,
+        StencilOp::DecrementWrap => D3D12_STENCIL_OP_DECR,
+    }
+}
+
+/// Which descriptor-heap range a binding lands in.
+///
+/// `None` for [`BindingKind::Sampler`], because a sampler is not a
+/// CBV/SRV/UAV range at all — it lives in a different heap type and therefore
+/// in a different root parameter. Returning a range type for it would let one
+/// descriptor table mix the two, which D3D12 refuses at root-signature
+/// serialisation and which is much clearer refused here by shape.
+pub(crate) const fn descriptor_range_type(
+    kind: BindingKind,
+) -> Option<D3D12_DESCRIPTOR_RANGE_TYPE> {
+    match kind {
+        BindingKind::UniformBuffer { .. } => Some(D3D12_DESCRIPTOR_RANGE_TYPE_CBV),
+        // A read-only storage buffer is an SRV and a writable one a UAV — the
+        // same split `StructuredBuffer` and `RWStructuredBuffer` make in the
+        // HLSL `crcbl-shaders` generates, so the two agree by construction.
+        BindingKind::StorageBuffer { read_only, .. } | BindingKind::StorageImage { read_only } => {
+            Some(if read_only {
+                D3D12_DESCRIPTOR_RANGE_TYPE_SRV
+            } else {
+                D3D12_DESCRIPTOR_RANGE_TYPE_UAV
+            })
+        }
+        BindingKind::SampledImage => Some(D3D12_DESCRIPTOR_RANGE_TYPE_SRV),
+        BindingKind::Sampler => None,
+    }
+}
+
+/// Which stages a root parameter is visible to.
+///
+/// D3D12 takes visibility per **root parameter**, not per binding, and offers
+/// exactly one stage or "all" — so a table whose bindings disagree gets `ALL`.
+/// That is wider than the caller asked for and never narrower, which is the
+/// only direction that cannot make a legal shader fail to read its own
+/// resource.
+pub(crate) const fn shader_visibility(stages: ShaderStages) -> D3D12_SHADER_VISIBILITY {
+    if stages.bits() == ShaderStages::VERTEX.bits() {
+        D3D12_SHADER_VISIBILITY_VERTEX
+    } else if stages.bits() == ShaderStages::FRAGMENT.bits() {
+        D3D12_SHADER_VISIBILITY_PIXEL
+    } else {
+        D3D12_SHADER_VISIBILITY_ALL
     }
 }
 
@@ -970,6 +1158,169 @@ mod tests {
                 address_mode(mode),
                 D3D12_TEXTURE_ADDRESS_MODE_MIRROR_ONCE,
                 "{mode:?}: mirror-once is a behaviour the seam does not have"
+            );
+        }
+    }
+
+    /// **A colour factor is never an alpha factor, and no two seam factors
+    /// share a D3D12 one.**
+    ///
+    /// The colour/alpha pairs are the transposition this exists to catch:
+    /// `Src`→`SRC_ALPHA` compiles, blends something plausible, and is wrong
+    /// wherever alpha differs from luminance — which is most of a frame and none
+    /// of an eyeballed screenshot. Injectivity is asserted over the whole table
+    /// rather than pair by pair, so a *new* factor mapped onto an existing one
+    /// fails here too.
+    #[test]
+    fn blend_factors_are_injective_and_keep_colour_apart_from_alpha() {
+        const FACTORS: &[BlendFactor] = &[
+            BlendFactor::Zero,
+            BlendFactor::One,
+            BlendFactor::Src,
+            BlendFactor::OneMinusSrc,
+            BlendFactor::SrcAlpha,
+            BlendFactor::OneMinusSrcAlpha,
+            BlendFactor::Dst,
+            BlendFactor::OneMinusDst,
+            BlendFactor::DstAlpha,
+            BlendFactor::OneMinusDstAlpha,
+        ];
+        let mut seen = Vec::new();
+        for &factor in FACTORS {
+            let mapped = blend_factor(factor);
+            assert!(
+                !seen.contains(&mapped),
+                "{factor:?} maps onto a factor another variant already claimed"
+            );
+            seen.push(mapped);
+        }
+        assert_eq!(seen.len(), FACTORS.len());
+
+        assert_eq!(blend_factor(BlendFactor::Src), D3D12_BLEND_SRC_COLOR);
+        assert_eq!(blend_factor(BlendFactor::SrcAlpha), D3D12_BLEND_SRC_ALPHA);
+        assert_eq!(blend_factor(BlendFactor::Dst), D3D12_BLEND_DEST_COLOR);
+        assert_eq!(blend_factor(BlendFactor::DstAlpha), D3D12_BLEND_DEST_ALPHA);
+    }
+
+    /// The write mask is built bit by bit, so it does not depend on the seam's
+    /// bit order happening to match D3D12's.
+    #[test]
+    fn the_colour_write_mask_names_each_channel() {
+        assert_eq!(color_write_mask(ColorWrites::empty()), 0);
+        assert_eq!(color_write_mask(ColorWrites::ALL), 0b1111);
+        for (writes, expected) in [
+            (ColorWrites::R, 0b0001),
+            (ColorWrites::G, 0b0010),
+            (ColorWrites::B, 0b0100),
+            (ColorWrites::A, 0b1000),
+        ] {
+            assert_eq!(color_write_mask(writes), expected, "{writes:?}");
+        }
+    }
+
+    /// A topology's PSO *category* and its command-list value are two answers,
+    /// and a list and a strip share the first while differing in the second.
+    ///
+    /// That agreement is the whole reason both functions exist: a pipeline built
+    /// as `TRIANGLE` and a list told `LINELIST` assembles primitives nothing
+    /// asked for, and D3D12 reports it only through the debug layer.
+    #[test]
+    fn a_topology_has_one_pipeline_category_and_its_own_list_value() {
+        const TOPOLOGIES: &[PrimitiveTopology] = &[
+            PrimitiveTopology::PointList,
+            PrimitiveTopology::LineList,
+            PrimitiveTopology::LineStrip,
+            PrimitiveTopology::TriangleList,
+            PrimitiveTopology::TriangleStrip,
+        ];
+        let mut seen = Vec::new();
+        for &topology in TOPOLOGIES {
+            let value = primitive_topology(topology);
+            assert!(
+                !seen.contains(&value),
+                "{topology:?} shares a command-list topology with another variant"
+            );
+            seen.push(value);
+        }
+        assert_eq!(
+            primitive_topology_type(PrimitiveTopology::TriangleList),
+            primitive_topology_type(PrimitiveTopology::TriangleStrip),
+            "a list and a strip are one pipeline category"
+        );
+        assert_ne!(
+            primitive_topology(PrimitiveTopology::TriangleList),
+            primitive_topology(PrimitiveTopology::TriangleStrip),
+            "and two command-list topologies"
+        );
+        assert_eq!(
+            primitive_topology_type(PrimitiveTopology::PointList),
+            D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT
+        );
+        assert_eq!(
+            primitive_topology_type(PrimitiveTopology::LineStrip),
+            D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
+        );
+    }
+
+    /// A sampler has **no** CBV/SRV/UAV range type, which is what keeps a
+    /// descriptor table from mixing heap types by construction.
+    #[test]
+    fn a_sampler_has_no_view_range_and_writability_picks_srv_or_uav() {
+        assert_eq!(descriptor_range_type(BindingKind::Sampler), None);
+        assert_eq!(
+            descriptor_range_type(BindingKind::UniformBuffer { dynamic: false }),
+            Some(D3D12_DESCRIPTOR_RANGE_TYPE_CBV)
+        );
+        assert_eq!(
+            descriptor_range_type(BindingKind::SampledImage),
+            Some(D3D12_DESCRIPTOR_RANGE_TYPE_SRV)
+        );
+        for (read_only, expected) in [
+            (true, D3D12_DESCRIPTOR_RANGE_TYPE_SRV),
+            (false, D3D12_DESCRIPTOR_RANGE_TYPE_UAV),
+        ] {
+            assert_eq!(
+                descriptor_range_type(BindingKind::StorageBuffer {
+                    read_only,
+                    dynamic: false
+                }),
+                Some(expected),
+                "storage buffer read_only={read_only}"
+            );
+            assert_eq!(
+                descriptor_range_type(BindingKind::StorageImage { read_only }),
+                Some(expected),
+                "storage image read_only={read_only}"
+            );
+        }
+    }
+
+    /// Visibility widens rather than narrows: one stage keeps its own value, and
+    /// anything else becomes `ALL`.
+    ///
+    /// Narrowing is the failure that matters — a root parameter visible to the
+    /// vertex stage alone makes a fragment shader's read of the same set a
+    /// device removal, where a wider one only costs the driver an optimisation.
+    #[test]
+    fn shader_visibility_widens_and_never_narrows() {
+        assert_eq!(
+            shader_visibility(ShaderStages::VERTEX),
+            D3D12_SHADER_VISIBILITY_VERTEX
+        );
+        assert_eq!(
+            shader_visibility(ShaderStages::FRAGMENT),
+            D3D12_SHADER_VISIBILITY_PIXEL
+        );
+        for stages in [
+            ShaderStages::GRAPHICS,
+            ShaderStages::ALL,
+            ShaderStages::COMPUTE,
+            ShaderStages::empty(),
+        ] {
+            assert_eq!(
+                shader_visibility(stages),
+                D3D12_SHADER_VISIBILITY_ALL,
+                "{stages:?} is not one graphics stage, so it must widen to ALL"
             );
         }
     }

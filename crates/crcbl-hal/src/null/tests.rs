@@ -15,6 +15,11 @@ use crate::{
 /// The SPIR-V magic number, so test modules look like modules.
 const SPIRV: [u32; 5] = [0x0723_0203, 0x0001_0600, 0, 0, 0];
 
+/// A stand-in DXIL container. The null backend compiles nothing, so only its
+/// presence is ever read — but it opens with the container magic so a reader
+/// does not mistake it for arbitrary bytes.
+const DXIL: &[u8] = b"DXBC\x00";
+
 fn boxed(instance: NullInstance) -> (Recorder, Box<dyn Instance>) {
     let recorder = instance.recorder();
     (recorder, Box::new(instance))
@@ -215,6 +220,7 @@ fn shader_modules_reject_non_spirv() {
             spirv: &[0xDEAD_BEEF],
             wgsl: None,
             msl: None,
+            dxil: None,
         })
         .expect_err("not SPIR-V");
     assert!(matches!(error, HalError::ShaderCompilation(_)), "{error:?}");
@@ -225,6 +231,7 @@ fn shader_modules_reject_non_spirv() {
                 spirv: &[],
                 wgsl: None,
                 msl: None,
+                dxil: None,
             })
             .is_err()
     );
@@ -235,6 +242,7 @@ fn shader_modules_reject_non_spirv() {
                 spirv: &SPIRV,
                 wgsl: None,
                 msl: None,
+                dxil: None,
             })
             .is_ok()
     );
@@ -254,6 +262,7 @@ fn shader_modules_accept_a_text_artifact_with_or_without_spirv() {
                 spirv: &[],
                 wgsl: Some("@fragment fn main() {}"),
                 msl: None,
+                dxil: None,
             })
             .is_ok()
     );
@@ -264,6 +273,7 @@ fn shader_modules_accept_a_text_artifact_with_or_without_spirv() {
                 spirv: &[],
                 wgsl: None,
                 msl: Some("[[fragment]] float4 main() { return 0; }"),
+                dxil: None,
             })
             .is_ok(),
         "MSL alone is a legal descriptor; crcbl-mtl is the backend that reads it"
@@ -271,10 +281,23 @@ fn shader_modules_accept_a_text_artifact_with_or_without_spirv() {
     assert!(
         device
             .create_shader_module(&ShaderModuleDesc {
-                label: Some("all three"),
+                label: Some("dxil only"),
+                spirv: &[],
+                wgsl: None,
+                msl: None,
+                dxil: Some(DXIL),
+            })
+            .is_ok(),
+        "DXIL alone is a legal descriptor; crcbl-dx12 is the backend that reads it"
+    );
+    assert!(
+        device
+            .create_shader_module(&ShaderModuleDesc {
+                label: Some("all four"),
                 spirv: &SPIRV,
                 wgsl: Some("@fragment fn main() {}"),
                 msl: Some("[[fragment]] float4 main() { return 0; }"),
+                dxil: Some(DXIL),
             })
             .is_ok()
     );
@@ -292,6 +315,7 @@ fn a_shader_module_with_no_artifact_names_the_gap() {
             spirv: &[],
             wgsl: None,
             msl: None,
+            dxil: None,
         })
         .expect_err("a descriptor with no artifact is not a shader");
     let text = error.to_string();
@@ -313,6 +337,7 @@ fn created_shader_modules_are_logged_with_the_formats_they_carried() {
             spirv: &SPIRV,
             wgsl: Some("@vertex fn vertexMain() {}"),
             msl: Some("[[vertex]] void vertexMain() {}"),
+            dxil: Some(DXIL),
         })
         .expect("every format");
     device.destroy_shader_module(module);
@@ -986,6 +1011,7 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
             spirv: &SPIRV,
             wgsl: None,
             msl: None,
+            dxil: None,
         })
         .expect("module");
     let set_layout = device

@@ -64,37 +64,41 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crcbl_core::Pool;
 use crcbl_hal::{
     AcquiredFrame, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupHandle,
-    BindGroupLayoutDesc, BindGroupLayoutHandle, BufferDesc, BufferHandle, CommandBufferHandle,
-    CommandEncoder, CommandEncoderDesc, ComputePipelineDesc, ComputePipelineHandle, Device,
-    DeviceCaps, DeviceDesc, Extent3d, Features, Format, GraphicsPipelineDesc,
-    GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType,
-    ImageUsage, ImageViewDesc, ImageViewHandle, MemoryLocation, PipelineLayoutDesc,
-    PipelineLayoutHandle, PresentInfo, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind,
-    ReadbackDesc, ReadbackHandle, ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc,
-    SemaphoreHandle, ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, SurfaceError, SwapchainDesc,
-    SwapchainHandle,
+    BindGroupLayoutDesc, BindGroupLayoutHandle, BindingResource, BufferDesc, BufferHandle,
+    CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePipelineDesc,
+    ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, Extent3d, Features, Format,
+    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle,
+    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, MemoryLocation,
+    PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, QuerySetDesc, QuerySetHandle,
+    QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState, SamplerDesc,
+    SamplerHandle, SemaphoreDesc, SemaphoreHandle, ShaderModuleDesc, ShaderModuleHandle,
+    SubmitInfo, SurfaceError, SwapchainDesc, SwapchainHandle,
 };
 use windows::Win32::Foundation::{CloseHandle, E_OUTOFMEMORY, WAIT_OBJECT_0};
-use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
+use windows::Win32::Graphics::Direct3D::{D3D_FEATURE_LEVEL_11_0, D3D_PRIMITIVE_TOPOLOGY};
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_DESC, D3D12_COMMAND_QUEUE_FLAG_NONE,
     D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_COMPARISON_FUNC_ALWAYS, D3D12_CPU_DESCRIPTOR_HANDLE,
     D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_DEPTH_STENCIL_VIEW_DESC, D3D12_FENCE_FLAG_NONE,
-    D3D12_HEAP_FLAG_NONE, D3D12_HEAP_PROPERTIES, D3D12_MEMORY_POOL_UNKNOWN, D3D12_RANGE,
-    D3D12_RENDER_TARGET_VIEW_DESC, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_DESC,
-    D3D12_RESOURCE_DIMENSION_BUFFER, D3D12_SAMPLER_DESC, D3D12_SHADER_RESOURCE_VIEW_DESC,
-    D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_UNORDERED_ACCESS_VIEW_DESC,
-    D3D12CreateDevice, ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue, ID3D12Device,
-    ID3D12Fence, ID3D12GraphicsCommandList, ID3D12Object, ID3D12Resource,
+    D3D12_GPU_DESCRIPTOR_HANDLE, D3D12_HEAP_FLAG_NONE, D3D12_HEAP_PROPERTIES,
+    D3D12_MEMORY_POOL_UNKNOWN, D3D12_RANGE, D3D12_RENDER_TARGET_VIEW_DESC,
+    D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_DESC, D3D12_RESOURCE_DIMENSION_BUFFER,
+    D3D12_SAMPLER_DESC, D3D12_SHADER_RESOURCE_VIEW_DESC, D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+    D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_UNORDERED_ACCESS_VIEW_DESC, D3D12CreateDevice,
+    ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue, ID3D12DescriptorHeap,
+    ID3D12Device, ID3D12Fence, ID3D12GraphicsCommandList, ID3D12Object, ID3D12PipelineState,
+    ID3D12Resource, ID3D12RootSignature,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
 use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
-use windows::core::PCWSTR;
+use windows::core::{Interface, PCWSTR};
 
+use crate::binding::{self, BindGroupLayoutRecord, BindGroupRecord, VisibleHeaps};
 use crate::command::Dx12CommandEncoder;
 use crate::descriptor::{Descriptors, Kind, Slot};
 use crate::handle::{self, Owned, Owner};
 use crate::instance::{AdapterRecord, InstanceInner, next_owner_id, not_yet};
+use crate::pipeline::{self, GraphicsPipelineEntry, PipelineLayoutEntry, ShaderModuleEntry};
 use crate::retire::RetireQueue;
 use crate::view::Subresource;
 use crate::{conv, view};
@@ -277,7 +281,15 @@ pub(crate) struct DeviceState {
     samplers: Pool<SamplerEntry>,
     command_buffers: Pool<CommandBufferEntry>,
     readbacks: Pool<ReadbackEntry>,
+    shader_modules: Pool<ShaderModuleEntry>,
+    bind_group_layouts: Pool<BindGroupLayoutRecord>,
+    bind_groups: Pool<BindGroupRecord>,
+    pipeline_layouts: Pool<PipelineLayoutEntry>,
+    graphics_pipelines: Pool<GraphicsPipelineEntry>,
     descriptors: Descriptors,
+    /// The shader-visible heaps a root signature binds against, which
+    /// `crate::descriptor` deliberately never creates. See `crate::binding`.
+    visible: VisibleHeaps,
     retire: RetireQueue<Retired>,
     /// The last fence value handed out, by [`Device::submit`] or
     /// [`Device::wait_idle`].
@@ -415,6 +427,36 @@ impl ImageRef {
         }
         out
     }
+}
+
+/// A graphics pipeline resolved to everything the command list must be told.
+///
+/// The root signature travels with the pipeline because `SetPipelineState` does
+/// not set one — a command list carries its own — so binding a pipeline is two
+/// calls, and the encoder has only the pipeline handle to reach the second from.
+#[derive(Debug)]
+pub(crate) struct BoundPipeline {
+    pub(crate) raw: ID3D12PipelineState,
+    pub(crate) root_signature: ID3D12RootSignature,
+    pub(crate) topology: D3D_PRIMITIVE_TOPOLOGY,
+    pub(crate) stencil_reference: Option<u32>,
+}
+
+/// A bind group resolved to the root parameters and GPU addresses it binds.
+#[derive(Debug)]
+pub(crate) struct BoundGroup {
+    /// The shader-visible heaps that must be bound before the table is. Set on
+    /// every `bind_group` rather than once, because a command list's heaps are
+    /// state a later `Reset` clears and this slice has no frame loop to hang the
+    /// one call on.
+    pub(crate) heaps: Vec<Option<ID3D12DescriptorHeap>>,
+    /// `(root parameter index, table base)` for the CBV/SRV/UAV table.
+    pub(crate) views: Option<(u32, D3D12_GPU_DESCRIPTOR_HANDLE)>,
+    /// The same for the sampler table.
+    pub(crate) samplers: Option<(u32, D3D12_GPU_DESCRIPTOR_HANDLE)>,
+    /// Every resource the group's descriptors point into, so the encoder can
+    /// hold a reference for the length of the submission.
+    pub(crate) retained: Vec<ID3D12Resource>,
 }
 
 /// A render pass attachment: its descriptor, and the resource behind it.
@@ -577,6 +619,84 @@ impl DeviceInner {
         })
     }
 
+    /// Resolves a graphics pipeline for the encoder.
+    ///
+    /// Cloned out from under the lock, exactly as [`buffer`](Self::buffer) is
+    /// and for the same reason: the encoder resolves handles with the lock held
+    /// and then records without it.
+    ///
+    /// # Errors
+    ///
+    /// As [`handle::lookup`].
+    pub(crate) fn graphics_pipeline(
+        &self,
+        handle: GraphicsPipelineHandle,
+    ) -> Result<BoundPipeline, HalError> {
+        let state = self.state();
+        let entry = handle::lookup(
+            &state.graphics_pipelines,
+            "graphics pipeline",
+            handle,
+            self.owner,
+        )?;
+        Ok(BoundPipeline {
+            raw: entry.raw.clone(),
+            root_signature: entry.root_signature.clone(),
+            topology: entry.topology,
+            stencil_reference: entry.stencil_reference,
+        })
+    }
+
+    /// Resolves a bind group against the pipeline layout it is being bound
+    /// with.
+    ///
+    /// # Errors
+    ///
+    /// As [`handle::lookup`] for either handle, plus
+    /// [`HalError::InvalidDescriptor`] when `index` is past the layout's sets or
+    /// when the group's own layout is not the one that set declares — the case
+    /// that otherwise binds a table of the wrong length, which D3D12 reads as
+    /// arithmetic and never reports.
+    pub(crate) fn bind_group(
+        &self,
+        index: u32,
+        group: BindGroupHandle,
+        layout: PipelineLayoutHandle,
+    ) -> Result<BoundGroup, HalError> {
+        let state = self.state();
+        let layout = handle::lookup(
+            &state.pipeline_layouts,
+            "pipeline layout",
+            layout,
+            self.owner,
+        )?;
+        let Some(placement) = layout.sets.get(index as usize) else {
+            return Err(HalError::InvalidDescriptor(format!(
+                "bind group {index} is past the {} set(s) this pipeline layout declares",
+                layout.sets.len()
+            )));
+        };
+        let record = handle::lookup(&state.bind_groups, "bind group", group, self.owner)?;
+        if layout.layouts.get(index as usize) != Some(&record.layout) {
+            return Err(HalError::InvalidDescriptor(format!(
+                "the bind group offered at set {index} was created from a different bind group \
+                 layout than the one this pipeline layout declares there"
+            )));
+        }
+        Ok(BoundGroup {
+            heaps: state.visible.bound(),
+            views: placement
+                .views
+                .zip(record.views)
+                .map(|(root, block)| (root, state.visible.gpu_views(block))),
+            samplers: placement
+                .samplers
+                .zip(record.samplers)
+                .map(|(root, block)| (root, state.visible.gpu_samplers(block))),
+            retained: record.retained.clone(),
+        })
+    }
+
     /// Files a finished command buffer and stamps its handle.
     pub(crate) fn register_command_buffer(&self, entry: CommandBufferEntry) -> CommandBufferHandle {
         let handle = self.state().command_buffers.insert(entry);
@@ -705,6 +825,22 @@ impl Drop for DeviceInner {
         }
         state.retire.drain_all();
     }
+}
+
+/// Every resource a resolved batch of bindings points into, deduplicated.
+///
+/// Deduplicated by interface pointer for the reason `crate::command`'s `retain`
+/// is: a group binding one buffer at ten array indices should hold one
+/// reference, not ten.
+fn retained(resolved: &[binding::Resolved]) -> Vec<ID3D12Resource> {
+    let mut out: Vec<ID3D12Resource> = Vec::new();
+    for resource in resolved.iter().filter_map(binding::Resolved::resource) {
+        let raw = resource.as_raw();
+        if !out.iter().any(|held| held.as_raw() == raw) {
+            out.push(resource.clone());
+        }
+    }
+    out
 }
 
 /// Puts a debug name on a D3D12 object, for PIX and the debug layer.
@@ -841,7 +977,13 @@ impl Dx12Device {
             samplers: Pool::new(),
             command_buffers: Pool::new(),
             readbacks: Pool::new(),
+            shader_modules: Pool::new(),
+            bind_group_layouts: Pool::new(),
+            bind_groups: Pool::new(),
+            pipeline_layouts: Pool::new(),
+            graphics_pipelines: Pool::new(),
             descriptors: Descriptors::new(&raw),
+            visible: VisibleHeaps::new(),
             retire: RetireQueue::new(),
             next_fence_value: 0,
         };
@@ -864,6 +1006,95 @@ impl Dx12Device {
 
     fn state(&self) -> MutexGuard<'_, DeviceState> {
         self.inner.state()
+    }
+
+    /// Resolves every [`BindingResource`] in a batch against this device's
+    /// tables, **before** the caller takes the lock.
+    ///
+    /// Separate from writing them because this device has exactly one
+    /// [`Mutex`], which is not reentrant: resolving inside a call that already
+    /// holds the guard would deadlock. It also means a batch naming one dead
+    /// handle fails before any descriptor is written, so a group is never left
+    /// half-updated by a caller error.
+    fn resolve_bindings(
+        &self,
+        entries: &[BindGroupEntry],
+    ) -> Result<Vec<binding::Resolved>, HalError> {
+        let mut state = self.state();
+        let owner = self.inner.owner;
+        entries
+            .iter()
+            .map(|entry| match entry.resource {
+                BindingResource::Buffer {
+                    buffer,
+                    offset,
+                    size,
+                } => {
+                    let record = handle::lookup(&state.buffers, "buffer", buffer, owner)?;
+                    if offset > record.size {
+                        return Err(HalError::InvalidDescriptor(format!(
+                            "binding {} starts at {offset} of a {}-byte buffer",
+                            entry.binding, record.size
+                        )));
+                    }
+                    let remaining = record.size - offset;
+                    let size = if size == BindingResource::WHOLE_BUFFER {
+                        remaining
+                    } else if size > remaining {
+                        return Err(HalError::InvalidDescriptor(format!(
+                            "binding {} binds {size} bytes at offset {offset} of a {}-byte buffer",
+                            entry.binding, record.size
+                        )));
+                    } else {
+                        size
+                    };
+                    // SAFETY: `record.raw` is a live buffer resource this device
+                    // owns a reference to. `GetGPUVirtualAddress` reads no
+                    // pointer of ours and returns an address by value.
+                    let address = unsafe { record.raw.GetGPUVirtualAddress() };
+                    Ok(binding::Resolved::Buffer {
+                        raw: record.raw.clone(),
+                        address,
+                        offset,
+                        size,
+                    })
+                }
+                BindingResource::ImageView(view) => {
+                    let (slot, image) = {
+                        let record = handle::lookup(&state.views, "image view", view, owner)?;
+                        // A sampled binding wants the shader resource view and a
+                        // storage binding the unordered access one; both are
+                        // written by `create_image_view` from the image's usage,
+                        // so an image created without the usage the binding
+                        // needs has no descriptor and says so here rather than
+                        // binding the other one.
+                        let slot = record
+                            .descriptors
+                            .shader_resource
+                            .or(record.descriptors.unordered_access);
+                        (slot, record.image.clone())
+                    };
+                    let Some(slot) = slot else {
+                        return Err(HalError::InvalidDescriptor(format!(
+                            "binding {} names an image view with no shader-readable descriptor, \
+                             because its image was created without ImageUsage::SAMPLED or \
+                             ImageUsage::STORAGE",
+                            entry.binding
+                        )));
+                    };
+                    Ok(binding::Resolved::View {
+                        raw: image,
+                        descriptor: state.descriptors.cpu_handle(slot),
+                    })
+                }
+                BindingResource::Sampler(sampler) => {
+                    let slot = handle::lookup(&state.samplers, "sampler", sampler, owner)?.slot;
+                    Ok(binding::Resolved::Sampler {
+                        descriptor: state.descriptors.cpu_handle(slot),
+                    })
+                }
+            })
+            .collect()
     }
 
     /// The `ID3D12Device` underneath, for the tests that need to build
@@ -1786,59 +2017,256 @@ impl Device for Dx12Device {
 
     // --- shaders and pipelines ---
 
+    /// Validates a DXIL container and files it.
+    ///
+    /// See [`crate::pipeline`] for why nothing is compiled, why the container is
+    /// parsed here rather than left to the driver, and why a module is **one
+    /// entry point**.
     fn create_shader_module(
         &self,
-        _desc: &ShaderModuleDesc<'_>,
+        desc: &ShaderModuleDesc<'_>,
     ) -> Result<ShaderModuleHandle, HalError> {
-        // Not `ShaderCompilation`, which the seam reserves for an artifact this
-        // backend tried and failed to compile. Nothing was tried: DXIL is not a
-        // `crcbl-shaders` output yet, and `ShaderModuleDesc` carries no field
-        // this backend reads.
-        Err(not_yet("shader modules (the DX12 pipeline slice)"))
+        let entry = pipeline::module(desc, self.inner.owner.id)?;
+        let handle = self.state().shader_modules.insert(entry);
+        Ok(handle::stamp(self.inner.owner, handle))
     }
 
-    fn destroy_shader_module(&self, _module: ShaderModuleHandle) {}
+    fn destroy_shader_module(&self, module: ShaderModuleHandle) {
+        let mut state = self.state();
+        handle::take_owned(&mut state.shader_modules, module, self.inner.owner);
+    }
 
+    /// Plans the descriptor ranges a set becomes. See [`crate::binding`].
     fn create_bind_group_layout(
         &self,
-        _desc: &BindGroupLayoutDesc<'_>,
+        desc: &BindGroupLayoutDesc<'_>,
     ) -> Result<BindGroupLayoutHandle, HalError> {
-        Err(not_yet("bind group layouts (the DX12 binding slice)"))
+        let record = binding::plan_layout(desc, self.inner.owner.id)?;
+        let handle = self.state().bind_group_layouts.insert(record);
+        Ok(handle::stamp(self.inner.owner, handle))
     }
 
-    fn destroy_bind_group_layout(&self, _layout: BindGroupLayoutHandle) {}
-
-    fn create_bind_group(&self, _desc: &BindGroupDesc<'_>) -> Result<BindGroupHandle, HalError> {
-        Err(not_yet("bind groups (the DX12 binding slice)"))
+    fn destroy_bind_group_layout(&self, layout: BindGroupLayoutHandle) {
+        let mut state = self.state();
+        handle::take_owned(&mut state.bind_group_layouts, layout, self.inner.owner);
     }
 
+    /// Takes a block in the shader-visible heaps and writes the descriptors.
+    ///
+    /// The entries are applied through the same path
+    /// [`update_bind_group`](Self::update_bind_group) uses, so a group created
+    /// with entries and one created empty and then updated are the same object.
+    fn create_bind_group(&self, desc: &BindGroupDesc<'_>) -> Result<BindGroupHandle, HalError> {
+        // Resolved before the lock is taken, because resolving takes it: a
+        // `Mutex` is not reentrant and this device has exactly one.
+        let resolved = self.resolve_bindings(desc.entries)?;
+        let mut guard = self.state();
+        // Through the guard once, so the pools and the heaps below are disjoint
+        // field borrows rather than two borrows of the guard.
+        let state = &mut *guard;
+        let layout = handle::lookup(
+            &state.bind_group_layouts,
+            "bind group layout",
+            desc.layout,
+            self.inner.owner,
+        )?;
+        let (views, samplers) =
+            binding::allocate_group(&self.inner.raw, &mut state.visible, layout, desc)?;
+        let mut record = BindGroupRecord {
+            owner: self.inner.owner.id,
+            layout: desc.layout,
+            views,
+            samplers,
+            retained: retained(&resolved),
+        };
+
+        // The writes are one expression so their borrow of the layout table ends
+        // before the error arm needs `state.visible` mutably to give the block
+        // back — which it must, or a group that failed half way through would
+        // leak its descriptors for the device's lifetime.
+        let written = desc
+            .entries
+            .iter()
+            .zip(&resolved)
+            .try_for_each(|(entry, resource)| {
+                let layout = handle::lookup(
+                    &state.bind_group_layouts,
+                    "bind group layout",
+                    desc.layout,
+                    self.inner.owner,
+                )?;
+                binding::write_entry(
+                    &self.inner.raw,
+                    &state.visible,
+                    layout,
+                    &record,
+                    entry,
+                    resource,
+                )
+            });
+        if let Err(error) = written {
+            binding::free_group(&mut state.visible, &record);
+            // The references were taken before the writes and are dropped with
+            // the record, which never reaches a pool.
+            record.retained.clear();
+            return Err(error);
+        }
+        let handle = state.bind_groups.insert(record);
+        Ok(handle::stamp(self.inner.owner, handle))
+    }
+
+    /// Rewrites some of a group's descriptors.
+    ///
+    /// The references the group holds **grow** rather than being replaced: a
+    /// descriptor this call overwrote may still be recorded into a command
+    /// buffer that has not been submitted, so releasing the resource behind it
+    /// now would be the use-after-free the retire queue exists to prevent. The
+    /// group's own destruction is what drops them.
     fn update_bind_group(
         &self,
-        _group: BindGroupHandle,
-        _entries: &[BindGroupEntry],
+        group: BindGroupHandle,
+        entries: &[BindGroupEntry],
     ) -> Result<(), HalError> {
-        Err(not_yet("bind groups (the DX12 binding slice)"))
+        let resolved = self.resolve_bindings(entries)?;
+        let mut guard = self.state();
+        let state = &mut *guard;
+        // Resolved before the loop rather than inside it, so an *empty* batch
+        // against a destroyed group is still the `InvalidHandle` it should be
+        // rather than a silent success.
+        let index = {
+            let record = handle::lookup(&state.bind_groups, "bind group", group, self.inner.owner)?;
+            record.layout
+        };
+        for (entry, resource) in entries.iter().zip(&resolved) {
+            let record = handle::lookup(&state.bind_groups, "bind group", group, self.inner.owner)?;
+            let layout = handle::lookup(
+                &state.bind_group_layouts,
+                "bind group layout",
+                index,
+                self.inner.owner,
+            )?;
+            binding::write_entry(
+                &self.inner.raw,
+                &state.visible,
+                layout,
+                record,
+                entry,
+                resource,
+            )?;
+        }
+        let slot = handle::local::<BindGroupRecord, _>("bind group", group, self.inner.owner)?;
+        if let Some(record) = state.bind_groups.get_mut(slot) {
+            record.retained.extend(retained(&resolved));
+        }
+        Ok(())
     }
 
-    fn destroy_bind_group(&self, _group: BindGroupHandle) {}
+    fn destroy_bind_group(&self, group: BindGroupHandle) {
+        let mut state = self.state();
+        let Some(record) = handle::take_owned(&mut state.bind_groups, group, self.inner.owner)
+        else {
+            return;
+        };
+        binding::free_group(&mut state.visible, &record);
+    }
 
+    /// Builds a root signature from the sets. See [`crate::pipeline`].
     fn create_pipeline_layout(
         &self,
-        _desc: &PipelineLayoutDesc<'_>,
+        desc: &PipelineLayoutDesc<'_>,
     ) -> Result<PipelineLayoutHandle, HalError> {
-        Err(not_yet("pipeline layouts (the DX12 binding slice)"))
+        let ceiling = self.inner.caps.limits.max_bind_groups as usize;
+        if desc.bind_group_layouts.len() > ceiling {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{} bind group layouts exceed this device's limit of {ceiling}",
+                desc.bind_group_layouts.len()
+            )));
+        }
+        let mut state = self.state();
+        let mut sets = Vec::with_capacity(desc.bind_group_layouts.len());
+        for (index, handle) in desc.bind_group_layouts.iter().enumerate() {
+            let record = handle::lookup(
+                &state.bind_group_layouts,
+                "bind group layout",
+                *handle,
+                self.inner.owner,
+            )?;
+            let set = u32::try_from(index).unwrap_or(u32::MAX);
+            sets.push((
+                *handle,
+                pipeline::RootTables {
+                    views: binding::ranges(&record.views, set),
+                    samplers: binding::ranges(&record.samplers, set),
+                    visibility: record.visibility,
+                },
+            ));
+        }
+        let entry = pipeline::layout(&self.inner.raw, desc, &sets, self.inner.owner.id)?;
+        if let Some(label) = desc.label {
+            label_object(&entry.raw, label);
+        }
+        let handle = state.pipeline_layouts.insert(entry);
+        Ok(handle::stamp(self.inner.owner, handle))
     }
 
-    fn destroy_pipeline_layout(&self, _layout: PipelineLayoutHandle) {}
+    fn destroy_pipeline_layout(&self, layout: PipelineLayoutHandle) {
+        let mut state = self.state();
+        handle::take_owned(&mut state.pipeline_layouts, layout, self.inner.owner);
+    }
 
+    /// Builds a `D3D12_GRAPHICS_PIPELINE_STATE_DESC` and the object from it.
     fn create_graphics_pipeline(
         &self,
-        _desc: &GraphicsPipelineDesc<'_>,
+        desc: &GraphicsPipelineDesc<'_>,
     ) -> Result<GraphicsPipelineHandle, HalError> {
-        Err(not_yet("graphics pipelines (the DX12 pipeline slice)"))
+        let ceiling = self.inner.caps.limits.max_color_attachments as usize;
+        if desc.color_targets.len() > ceiling {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{} colour targets exceed this device's limit of {ceiling}",
+                desc.color_targets.len()
+            )));
+        }
+        let mut state = self.state();
+        let layout = handle::lookup(
+            &state.pipeline_layouts,
+            "pipeline layout",
+            desc.layout,
+            self.inner.owner,
+        )?;
+        let vertex = handle::lookup(
+            &state.shader_modules,
+            "shader module",
+            desc.vertex.module,
+            self.inner.owner,
+        )?;
+        let fragment = match desc.fragment {
+            Some(entry) => Some(handle::lookup(
+                &state.shader_modules,
+                "shader module",
+                entry.module,
+                self.inner.owner,
+            )?),
+            None => None,
+        };
+        let entry = pipeline::graphics(
+            &self.inner.raw,
+            desc,
+            layout,
+            vertex,
+            fragment,
+            self.inner.owner.id,
+        )?;
+        if let Some(label) = desc.label {
+            label_object(&entry.raw, label);
+        }
+        let handle = state.graphics_pipelines.insert(entry);
+        Ok(handle::stamp(self.inner.owner, handle))
     }
 
-    fn destroy_graphics_pipeline(&self, _pipeline: GraphicsPipelineHandle) {}
+    fn destroy_graphics_pipeline(&self, pipeline: GraphicsPipelineHandle) {
+        let mut state = self.state();
+        handle::take_owned(&mut state.graphics_pipelines, pipeline, self.inner.owner);
+    }
 
     fn create_compute_pipeline(
         &self,
@@ -2096,12 +2524,13 @@ pub(crate) mod tests {
     use super::*;
     use crcbl_core::Handle;
     use crcbl_hal::{
-        Barriers, BindingResource, BufferCopy, BufferImageCopy, BufferUsage, ClearValue,
-        ColorAttachment, CompareOp, CompositeAlpha, DrawIndirectCount, Extent3d, FilterMode,
-        ImageAspect, ImageBarrier, ImageCopy, ImageSubresourceLayers, ImageViewType, IndexFormat,
-        Instance, LoadOp, MultisampleState, Offset3d, PresentMode, PrimitiveState, QueryKind,
-        Rect2d, RenderPassDesc, ResourceState, SemaphoreKind, SemaphoreSignal, SemaphoreWait,
-        ShaderEntry, ShaderStages, StoreOp,
+        Barriers, BindGroupLayoutEntry, BindingFlags, BindingKind, BindingResource, BufferCopy,
+        BufferImageCopy, BufferUsage, ClearValue, ColorAttachment, ColorTargetState, CompareOp,
+        CompositeAlpha, DrawIndirectCount, Extent3d, FilterMode, ImageAspect, ImageBarrier,
+        ImageCopy, ImageSubresourceLayers, ImageViewType, IndexFormat, Instance, LoadOp,
+        MultisampleState, Offset3d, PresentMode, PrimitiveState, QueryKind, Rect2d, RenderPassDesc,
+        ResourceState, SemaphoreKind, SemaphoreSignal, SemaphoreWait, ShaderEntry, ShaderStages,
+        StoreOp,
     };
 
     use crate::Dx12Instance;
@@ -2456,6 +2885,295 @@ pub(crate) mod tests {
         );
 
         device.destroy_readback(request);
+        device.destroy_buffer(readback);
+        device.destroy_image_view(view);
+        device.destroy_image(target);
+    }
+
+    /// The square target the triangle is drawn into.
+    ///
+    /// Square rather than [`TARGET`]'s 64×4, because the assertions below sample
+    /// *inside* the triangle near each of its three corners and a four-row target
+    /// has nowhere to put them. 64 texels wide keeps the row pitch at exactly
+    /// [`D3D12_TEXTURE_DATA_PITCH_ALIGNMENT`], which is the rule `plan_copy`
+    /// enforces on the readback copy.
+    const SQUARE: Extent3d = Extent3d::d2(64, 64);
+
+    /// Bytes one whole [`SQUARE`] readback occupies.
+    const SQUARE_BYTES: usize = 64 * 64 * 4;
+
+    /// One texel of a [`SQUARE`] readback, as `(r, g, b, a)`.
+    fn texel(bytes: &[u8], x: usize, y: usize) -> [u8; 4] {
+        let at = (y * 64 + x) * 4;
+        bytes[at..at + 4].try_into().expect("four bytes")
+    }
+
+    /// **The deliverable of DX4: a triangle WARP actually drew, read back and
+    /// asserted texel by texel.**
+    ///
+    /// Everything in the chain is real and none of it is this crate's own
+    /// bookkeeping: two DXIL containers from `crcbl-shaders`, a root signature
+    /// serialised from a bind group layout, a shader-visible descriptor heap, an
+    /// SRV over the vertex buffer the vertex stage *pulls* from, a
+    /// `D3D12_GRAPHICS_PIPELINE_STATE_DESC`, `SetGraphicsRootDescriptorTable`
+    /// and `DrawInstanced`.
+    ///
+    /// # What makes each assertion able to fail
+    ///
+    /// * **A corner is still the clear colour.** The clear already worked before
+    ///   this slice, so a draw that covered the whole target — the shape a
+    ///   full-screen fallback or an ignored viewport produces — fails here.
+    /// * **The centre is not the clear colour.** A draw that recorded nothing,
+    ///   or a pipeline bound but never used, leaves the clear behind.
+    /// * **The three probes are red, green and blue dominant, in that
+    ///   arrangement.** `crcbl_shaders::triangle` puts one saturated primary at
+    ///   each corner precisely so a Y flip, an X mirror or a vertex-order
+    ///   mistake produces a *different* picture rather than a plausible one. A
+    ///   flat fill fails all three at once; a Y flip swaps the apex probe with
+    ///   the two base probes; an X mirror swaps green and blue.
+    /// * **Every probe's channels sum to about full scale.** Barycentric weights
+    ///   sum to one and each vertex contributes full intensity in exactly one
+    ///   channel, so this holds for any point inside the triangle — and fails if
+    ///   the vertex stage read the wrong offsets in the storage buffer, which is
+    ///   what it would do if the SRV's element stride or first element were
+    ///   wrong. That is the failure a picture "looking about right" hides.
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it. This crate compiles on Windows alone and the development box
+    /// is Linux, so nothing here has ever executed outside a CI runner. The
+    /// panics name the stage they reached — see [`run`] — because a WARP that
+    /// cannot execute a *shader* must fail legibly rather than as a timeout: it
+    /// has already been shown to execute a clear and a readback, so a failure
+    /// here is about shaders specifically.
+    #[test]
+    fn a_pulled_triangle_is_drawn_and_read_back_texel_by_texel() {
+        use crcbl_shaders::{TRIANGLE, triangle};
+
+        let (_instance, device) = open_device();
+        let target = device
+            .create_image(&image(
+                Format::Rgba8Unorm,
+                ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+                SQUARE,
+            ))
+            .expect("a colour target");
+        let view = device
+            .create_image_view(&whole(target, Format::Rgba8Unorm))
+            .expect("a render target view");
+        let readback = readback_buffer(&device, SQUARE_BYTES);
+
+        // The geometry the vertex stage pulls, on the upload heap so it needs no
+        // copy: D3D12 leaves an upload-heap buffer in `GENERIC_READ` for its
+        // whole life, which already admits a shader read.
+        let geometry = triangle::vertex_bytes();
+        let vertices = device
+            .create_buffer(&BufferDesc {
+                label: Some("triangle vertices"),
+                size: geometry.len() as u64,
+                usage: BufferUsage::STORAGE,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a vertex storage buffer");
+        device
+            .write_buffer(vertices, 0, &geometry)
+            .expect("an upload-heap buffer is host-visible");
+
+        let set_layout = device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("triangle geometry"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    // The vertex stage alone reads it, which is what
+                    // `triangle.slang` declares and what makes the root
+                    // parameter's visibility a real value rather than `ALL`.
+                    visibility: ShaderStages::VERTEX,
+                    kind: BindingKind::StorageBuffer {
+                        read_only: true,
+                        dynamic: false,
+                    },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                }],
+            })
+            .expect("one read-only storage buffer");
+        let pipeline_layout = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("triangle"),
+                bind_group_layouts: &[set_layout],
+                push_constants: None,
+            })
+            .expect("a root signature with one descriptor table");
+        let group = device
+            .create_bind_group(&BindGroupDesc {
+                label: Some("triangle geometry"),
+                layout: set_layout,
+                entries: &[BindGroupEntry {
+                    binding: 0,
+                    array_index: 0,
+                    resource: BindingResource::whole_buffer(vertices),
+                }],
+                variable_count: None,
+            })
+            .expect("a bind group over the vertex buffer");
+
+        // **One module per stage**, which is the DXIL shape: `dxc` compiles a
+        // single entry point per container, so there is no module that is "the
+        // DXIL for triangle.slang".
+        let module = |entry: &str| {
+            device
+                .create_shader_module(&ShaderModuleDesc {
+                    label: Some("triangle.slang"),
+                    spirv: TRIANGLE.spirv(),
+                    wgsl: TRIANGLE.wgsl(),
+                    msl: TRIANGLE.msl(),
+                    dxil: TRIANGLE.dxil(entry),
+                })
+                .unwrap_or_else(|error| panic!("stage=create_shader_module({entry}): {error:?}"))
+        };
+        let vertex_module = module("vertexMain");
+        let fragment_module = module("fragmentMain");
+
+        let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
+        let pipeline = device
+            .create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("triangle"),
+                layout: pipeline_layout,
+                vertex: ShaderEntry {
+                    module: vertex_module,
+                    entry_point: "vertexMain",
+                },
+                fragment: Some(ShaderEntry {
+                    module: fragment_module,
+                    entry_point: "fragmentMain",
+                }),
+                primitive: PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                color_targets: &targets,
+            })
+            .unwrap_or_else(|error| panic!("stage=create_graphics_pipeline: {error:?}"));
+
+        let pass = clear_pass(
+            view,
+            CLEAR,
+            LoadOp::Clear,
+            Rect2d::from_size(SQUARE.width, SQUARE.height),
+        );
+        run(&device, |encoder| {
+            encoder.pipeline_barrier(&Barriers {
+                images: &[ImageBarrier::new(
+                    target,
+                    ImageSubresourceRange::all(Format::Rgba8Unorm),
+                    ResourceState::Undefined,
+                    ResourceState::ColorAttachment,
+                )],
+                ..Barriers::default()
+            });
+            encoder.begin_render_pass(&pass.desc());
+            // Pipeline before group: setting a root signature resets every root
+            // argument, so the reverse order would bind a table the next call
+            // discards.
+            encoder.bind_graphics_pipeline(pipeline);
+            encoder.bind_group(0, group, &[], pipeline_layout);
+            encoder.draw(0..3, 0..1);
+            encoder.end_render_pass();
+            encoder.pipeline_barrier(&Barriers {
+                images: &[ImageBarrier::new(
+                    target,
+                    ImageSubresourceRange::all(Format::Rgba8Unorm),
+                    ResourceState::ColorAttachment,
+                    ResourceState::TransferSrc,
+                )],
+                ..Barriers::default()
+            });
+            encoder.copy_image_to_buffer(&BufferImageCopy {
+                buffer: readback,
+                buffer_offset: 0,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image: target,
+                image_subresource: ImageSubresourceLayers {
+                    aspect: ImageAspect::COLOR,
+                    mip: 0,
+                    base_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: Offset3d::default(),
+                image_extent: SQUARE,
+            });
+        });
+
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: Some("crcbl-dx12 triangle readback"),
+                buffer: readback,
+                offset: 0,
+                size: SQUARE_BYTES as u64,
+                after: None,
+            })
+            .expect("a readback of a HostReadback buffer");
+        let bytes = drain(&device, request, SQUARE_BYTES);
+
+        assert_eq!(
+            texel(&bytes, 0, 0),
+            CLEAR_TEXEL,
+            "the top-left corner is outside the triangle, so the draw covered more than it should"
+        );
+        assert_eq!(
+            texel(&bytes, 63, 63),
+            CLEAR_TEXEL,
+            "the bottom-right corner is outside the triangle too"
+        );
+        let centre = texel(&bytes, 32, 32);
+        assert_ne!(
+            centre, CLEAR_TEXEL,
+            "the centre is inside the triangle and still holds the clear colour, so nothing drew"
+        );
+        assert_eq!(centre[3], 0xFF, "every vertex has alpha 1: {centre:?}");
+
+        // `(column, row, which channel must dominate, what that corner is)`.
+        // Each row and column is inside the triangle — see the assertion below
+        // for the check that says so — and near exactly one of its corners.
+        let probes = [
+            (32usize, 12usize, 0usize, "the red apex, near the top"),
+            (16, 48, 2, "the blue corner, bottom left"),
+            (48, 48, 1, "the green corner, bottom right"),
+        ];
+        for (x, y, channel, what) in probes {
+            let texel = texel(&bytes, x, y);
+            assert_ne!(
+                texel, CLEAR_TEXEL,
+                "({x}, {y}) is inside the triangle and holds the clear colour: {what}"
+            );
+            for other in 0..3 {
+                if other == channel {
+                    continue;
+                }
+                assert!(
+                    texel[channel] > texel[other],
+                    "({x}, {y}) is {texel:?}, which is not dominated by channel {channel} — \
+                     expected {what}"
+                );
+            }
+            // Barycentric weights sum to one and each vertex is saturated in
+            // exactly one channel, so any interior point sums to full scale.
+            let sum = u32::from(texel[0]) + u32::from(texel[1]) + u32::from(texel[2]);
+            assert!(
+                (250..=260).contains(&sum),
+                "({x}, {y}) is {texel:?}, summing to {sum} rather than full scale — the vertex \
+                 stage is not reading the colours the storage buffer holds"
+            );
+        }
+
+        device.destroy_readback(request);
+        device.destroy_graphics_pipeline(pipeline);
+        device.destroy_shader_module(fragment_module);
+        device.destroy_shader_module(vertex_module);
+        device.destroy_bind_group(group);
+        device.destroy_pipeline_layout(pipeline_layout);
+        device.destroy_bind_group_layout(set_layout);
+        device.destroy_buffer(vertices);
         device.destroy_buffer(readback);
         device.destroy_image_view(view);
         device.destroy_image(target);
@@ -3835,36 +4553,6 @@ pub(crate) mod tests {
 
         let refusals: Vec<(&str, HalError)> = vec![
             (
-                "shader modules",
-                device
-                    .create_shader_module(&ShaderModuleDesc {
-                        label: None,
-                        spirv: &[],
-                        wgsl: None,
-                        msl: None,
-                    })
-                    .expect_err("no DXIL path yet"),
-            ),
-            (
-                "bind group layouts",
-                device
-                    .create_bind_group_layout(&BindGroupLayoutDesc {
-                        label: None,
-                        entries: &[],
-                    })
-                    .expect_err("no root signatures yet"),
-            ),
-            (
-                "pipeline layouts",
-                device
-                    .create_pipeline_layout(&PipelineLayoutDesc {
-                        label: None,
-                        bind_group_layouts: &[],
-                        push_constants: None,
-                    })
-                    .expect_err("no pipeline layouts yet"),
-            ),
-            (
                 "query sets",
                 device
                     .create_query_set(&QuerySetDesc {
@@ -3882,48 +4570,6 @@ pub(crate) mod tests {
                         kind: SemaphoreKind::Timeline { initial_value: 0 },
                     })
                     .expect_err("no shared fence yet"),
-            ),
-            (
-                "bind groups",
-                device
-                    .create_bind_group(&BindGroupDesc {
-                        label: None,
-                        layout: unissued(),
-                        entries: &[],
-                        variable_count: None,
-                    })
-                    .expect_err("no descriptor tables yet"),
-            ),
-            (
-                "bind group updates",
-                device
-                    .update_bind_group(
-                        unissued(),
-                        &[BindGroupEntry {
-                            binding: 0,
-                            array_index: 0,
-                            resource: BindingResource::Sampler(unissued()),
-                        }],
-                    )
-                    .expect_err("no descriptor tables yet"),
-            ),
-            (
-                "graphics pipelines",
-                device
-                    .create_graphics_pipeline(&GraphicsPipelineDesc {
-                        label: None,
-                        layout: unissued(),
-                        vertex: ShaderEntry {
-                            module: unissued(),
-                            entry_point: "vs_main",
-                        },
-                        fragment: None,
-                        primitive: PrimitiveState::default(),
-                        depth_stencil: None,
-                        multisample: MultisampleState::default(),
-                        color_targets: &[],
-                    })
-                    .expect_err("no pipeline state objects yet"),
             ),
             (
                 "compute pipelines",
@@ -3976,7 +4622,6 @@ pub(crate) mod tests {
             .expect("the graphics queue exists");
         type Refused = (&'static str, fn(&mut dyn CommandEncoder));
         let recording: &[Refused] = &[
-            ("draws", |encoder| encoder.draw(0..3, 0..1)),
             ("indexed draws", |encoder| {
                 encoder.draw_indexed(0..3, 0, 0..1);
             }),
@@ -3991,17 +4636,8 @@ pub(crate) mod tests {
                 });
             }),
             ("dispatches", |encoder| encoder.dispatch(1, 1, 1)),
-            ("graphics pipelines", |encoder| {
-                encoder.bind_graphics_pipeline(unissued());
-            }),
             ("index buffers", |encoder| {
                 encoder.bind_index_buffer(unissued(), 0, IndexFormat::Uint32);
-            }),
-            ("bind groups", |encoder| {
-                encoder.bind_group(0, unissued(), &[], unissued());
-            }),
-            ("push constants", |encoder| {
-                encoder.push_constants(ShaderStages::ALL, 0, &[0u8; 4], unissued());
             }),
             ("buffer fills", |encoder| {
                 encoder.fill_buffer(unissued(), 0, 4, 0);
@@ -4072,6 +4708,142 @@ pub(crate) mod tests {
             matches!(error, HalError::InvalidHandle { kind, .. } if kind == "queue"),
             "{error:?}"
         );
+    }
+
+    /// **The entry points that crossed over must never answer `Unsupported`
+    /// again.**
+    ///
+    /// This is the half that rots. The test above asserts that unwritten slices
+    /// still refuse; without its inverse, an entry point that was implemented
+    /// and then *regressed* to `not_yet` — a merge that reverted a match arm, a
+    /// refactor that reinstated a stub — would go on passing every test in this
+    /// file. `crcbl-mtl` added this after exactly that happened.
+    ///
+    /// Each call below is given deliberately bad arguments, because the claim is
+    /// not that they succeed: it is that they now *diagnose*. A stale handle is
+    /// [`HalError::InvalidHandle`], a descriptor D3D12 cannot express is
+    /// [`HalError::InvalidDescriptor`], an artifact it cannot use is
+    /// [`HalError::ShaderCompilation`] — and none of them is
+    /// [`HalError::Unsupported`].
+    #[test]
+    fn the_entry_points_that_landed_never_answer_unsupported_again() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+
+        let landed: Vec<(&str, HalError)> = vec![
+            (
+                "shader modules",
+                device
+                    .create_shader_module(&ShaderModuleDesc {
+                        label: Some("nothing.slang"),
+                        ..ShaderModuleDesc::default()
+                    })
+                    .expect_err("a descriptor with no artifact is not a shader"),
+            ),
+            (
+                "bind group layouts",
+                device
+                    .create_bind_group_layout(&BindGroupLayoutDesc {
+                        label: None,
+                        entries: &[BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: ShaderStages::ALL,
+                            kind: BindingKind::UniformBuffer { dynamic: true },
+                            count: 1,
+                            flags: BindingFlags::empty(),
+                        }],
+                    })
+                    .expect_err("a descriptor table has no dynamic offset"),
+            ),
+            (
+                "pipeline layouts",
+                device
+                    .create_pipeline_layout(&PipelineLayoutDesc {
+                        label: None,
+                        bind_group_layouts: &[unissued()],
+                        push_constants: None,
+                    })
+                    .expect_err("that bind group layout was never issued"),
+            ),
+            (
+                "bind groups",
+                device
+                    .create_bind_group(&BindGroupDesc {
+                        label: None,
+                        layout: unissued(),
+                        entries: &[],
+                        variable_count: None,
+                    })
+                    .expect_err("that bind group layout was never issued"),
+            ),
+            (
+                "bind group updates",
+                device
+                    .update_bind_group(
+                        unissued(),
+                        &[BindGroupEntry {
+                            binding: 0,
+                            array_index: 0,
+                            resource: BindingResource::Sampler(unissued()),
+                        }],
+                    )
+                    .expect_err("that sampler was never issued"),
+            ),
+            (
+                "graphics pipelines",
+                device
+                    .create_graphics_pipeline(&GraphicsPipelineDesc {
+                        label: None,
+                        layout: unissued(),
+                        vertex: ShaderEntry {
+                            module: unissued(),
+                            entry_point: "vertexMain",
+                        },
+                        fragment: None,
+                        primitive: PrimitiveState::default(),
+                        depth_stencil: None,
+                        multisample: MultisampleState::default(),
+                        color_targets: &[],
+                    })
+                    .expect_err("that pipeline layout was never issued"),
+            ),
+        ];
+        assert!(!landed.is_empty(), "nothing to check");
+        for (what, error) in &landed {
+            assert!(
+                !matches!(error, HalError::Unsupported { .. }),
+                "{what} answered Unsupported, so the slice regressed to a refusal: {error:?}"
+            );
+        }
+
+        type Landed = (&'static str, fn(&mut dyn CommandEncoder));
+        let recording: &[Landed] = &[
+            ("graphics pipelines", |encoder| {
+                encoder.bind_graphics_pipeline(unissued());
+            }),
+            ("bind groups", |encoder| {
+                encoder.bind_group(0, unissued(), &[], unissued());
+            }),
+            ("push constants", |encoder| {
+                encoder.push_constants(ShaderStages::ALL, 0, &[0u8; 4], unissued());
+            }),
+            ("draws", |encoder| encoder.draw(0..3, 0..1)),
+        ];
+        assert!(!recording.is_empty(), "nothing to check");
+        for (what, record) in recording {
+            let mut encoder =
+                device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+            record(encoder.as_mut());
+            let Err(error) = encoder.finish() else {
+                panic!("{what} recorded successfully against handles nothing issued");
+            };
+            assert!(
+                !matches!(error, HalError::Unsupported { .. }),
+                "{what} answered Unsupported, so the slice regressed to a refusal: {error:?}"
+            );
+        }
     }
 
     /// **The presentation half refuses through [`SurfaceError`], and the words

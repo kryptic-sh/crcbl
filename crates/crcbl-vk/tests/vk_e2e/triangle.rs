@@ -183,6 +183,7 @@ impl TriangleResources {
                 spirv: crcbl_shaders::TRIANGLE.spirv(),
                 wgsl: crcbl_shaders::TRIANGLE.wgsl(),
                 msl: crcbl_shaders::TRIANGLE.msl(),
+                dxil: None,
             })
             .expect("the committed SPIR-V is accepted");
 

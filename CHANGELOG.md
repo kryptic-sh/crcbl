@@ -16,6 +16,36 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-shaders` ships DXIL, and `crcbl-dx12` draws a triangle with it.** The
+  artifact pipeline grew a fourth target: `dxil/<shader>.<entry>.dxil`, compiled
+  in two steps — `slangc -target hlsl` then a **pinned** `dxc` at Shader Model
+  6.6 — because Slang's own `-target dxil` shells out to whichever `dxc` it
+  finds. `CRCBL_DXC` is required with **no `PATH` fallback**: distributions ship
+  Shader Model 6.10 preview builds that abort on a trivial shader, and a
+  fallback would find one silently. The script verifies the container signature
+  of every artifact it generates, because an unsigned container hashes and
+  commits like any other and is then refused by every real D3D12 driver.
+
+  DXIL is the one target with an artifact **per entry point** — `dxc` compiles a
+  single `-E`, and a D3D12 pipeline takes one blob per stage — so
+  `crcbl_shaders::EntryPoint::dxil` and `Shader::dxil(entry_point)` are
+  per-entry-point where `Shader::wgsl` and `Shader::msl` are per-shader, and
+  `spirv/manifest.txt` records one `dxil` line per entry point beside a
+  `dxc-version` and `dxil-model` pin.
+
+  `crcbl-dx12` consumes it: shader modules over validated DXIL containers, root
+  signatures from pipeline layouts, bind group layouts and bind groups over a
+  shader-visible descriptor heap, `D3D12_GRAPHICS_PIPELINE_STATE_DESC` built
+  from the seam's descriptors, and `bind_graphics_pipeline` / `bind_group` /
+  `draw` on the encoder. The measurement is a triangle drawn through the real
+  seam and read back with its texels asserted, not a call that returned `Ok`.
+
+  Still refused by name: compute pipelines, indexed and indirect draws, index
+  buffers, dispatches, query sets, semaphores, swapchains, dynamic offsets and
+  push constants — the last two as `InvalidDescriptor` rather than
+  `Unsupported`, because a descriptor table has no offset to apply and this
+  device reports no `PUSH_CONSTANTS`.
+
 - **`crcbl-shaders`: the UI shaders declare their resources in binding order,
   which is what makes text appear on Metal.** `ui.slang` and `ui_tier_b.slang`
   declared `constants` first while numbering it last, and Slang's Metal target
@@ -889,6 +919,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   platform has a Vulkan device — `docs/plan/ROADMAP.md` schedules it for P14.
 
 ### Changed
+
+- **`crcbl_hal::ShaderModuleDesc` gained a `dxil` field**, and
+  `crcbl_hal::ShaderSources` a matching `DXIL` bit. It is `Option<&'a [u8]>` — a
+  DXIL container is a signed binary blob, so it is closer to `spirv: &[u32]`
+  than to the `Option<&str>` source text of `wgsl` and `msl`, and it is an
+  `Option` because a zero-byte container is a _truncated_ file rather than an
+  absent one. Every construction site must name the field; a module carrying two
+  entry points passes `None`, which is the truthful answer rather than an
+  omission.
+
+- **`crcbl-shaders`: `Shader::new` and `EntryPoint::new` changed shape.**
+  `EntryPoint::new` takes the entry point's DXIL container as a third argument
+  and `Shader::new` is unchanged in arity — the DXIL hangs off the entry point,
+  because that is what a container holds. Only the generated table calls either.
+
+- **`crcbl-shaders`: the SPIR-V, WGSL and MSL artifacts are byte-identical.**
+  Nothing about the existing three targets changed; a moved hash there would be
+  a bug, not a re-bless.
 
 - **`crcbl-shaders`**: `tools/compile-shaders.sh` now passes
   `-fvk-use-entrypoint-name` to the SPIR-V target, so a module's entry point

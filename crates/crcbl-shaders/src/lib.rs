@@ -1,22 +1,36 @@
-//! The engine's shaders: Slang sources, and the SPIR-V, WGSL and MSL compiled
-//! from them.
+//! The engine's shaders: Slang sources, and the SPIR-V, WGSL, MSL and DXIL
+//! compiled from them.
 //!
 //! ```text
-//! shaders/*.slang ──tools/compile-shaders.sh──┬─▶ spirv/*.spv    (committed)
-//!                                             ├─▶ wgsl/*.wgsl    (committed)
-//!                                             └─▶ msl/*.metal    (committed)
+//! shaders/*.slang ──tools/compile-shaders.sh──┬─▶ spirv/*.spv          (committed)
+//!                                             ├─▶ wgsl/*.wgsl          (committed)
+//!                                             ├─▶ msl/*.metal          (committed)
+//!                                             └─▶ dxil/*.<entry>.dxil  (committed)
 //!                                                    │
 //!                          build.rs verifies ────────┤
 //!                                                    ▼
-//!               crcbl_shaders::TRIANGLE.spirv() / .wgsl() / .msl()
+//!        crcbl_shaders::TRIANGLE.spirv() / .wgsl() / .msl() / .dxil(entry)
 //!                                                    │
-//!                                  ShaderModuleDesc { spirv, wgsl, msl }
+//!                             ShaderModuleDesc { spirv, wgsl, msl, dxil }
 //! ```
 //!
 //! Every artifact is handed over on every call and the backend picks:
 //! `crcbl-vk` reads the SPIR-V, `crcbl-wgpu` reads the WGSL, `crcbl-mtl` reads
-//! the MSL. See `crcbl_hal::shader` for why the seam is shaped that way and
-//! what a caller owes it.
+//! the MSL, `crcbl-dx12` reads the DXIL. See `crcbl_hal::shader` for why the
+//! seam is shaped that way and what a caller owes it.
+//!
+//! # DXIL is one artifact per entry point, and that is not a stylistic choice
+//!
+//! `dxc` compiles exactly one `-E` per invocation, and a D3D12 pipeline state
+//! object takes one bytecode blob per stage — so there is nothing a container
+//! holding two entry points could be handed to. The other three targets each
+//! produce one artifact carrying every entry point of the module.
+//!
+//! That difference reaches all the way up: [`Shader::dxil`] takes an entry-point
+//! name where [`Shader::wgsl`] and [`Shader::msl`] take nothing, and a D3D12
+//! caller creates one shader module per stage where the others create one per
+//! shader. `spirv/manifest.txt` records one `dxil` line per entry point for the
+//! same reason.
 //!
 //! # Decision: Slang source, committed SPIR-V, no compiler in the build
 //!
@@ -63,7 +77,8 @@
 //! runtime path adds a `slangc`-shaped compiler behind a dev-only feature
 //! without changing this crate's shape. P5's WGSL took exactly that shape —
 //! another artifact column in the manifest, another `include_bytes!` in the
-//! generated table — P14's MSL took it again, and DXIL will take it once more.
+//! generated table — P14's MSL took it again, and DX4's DXIL took it a third
+//! time, widened only by the per-entry-point split above.
 //!
 //! # The MSL column is *source*, not a `.metallib`
 //!
@@ -96,6 +111,10 @@
 //! so `crcbl-wgpu` cannot create the `ui.slang` module. `mesh`, `tonemap` and
 //! `triangle` use no push constants and compile.
 //!
+//! **The DXIL column does not share this gap.** HLSL has root constants and
+//! Slang lowers the same block to an ordinary `cbuffer`, so `dxil/ui.*.dxil`
+//! compiles; the gap is WGSL's alone.
+//!
 //! This is not fixable here: the artifact is a faithful translation of a source
 //! that asks for something the target does not have. The fix is in
 //! `crcbl-render`'s UI pass and `ui.slang` — a uniform buffer binding in place
@@ -110,8 +129,9 @@
 //! # Nothing here knows a backend
 //!
 //! This crate has no dependencies at all, not even `crcbl-hal`. It hands out
-//! `&[u32]`, `Option<&str>` and entry-point names, which is exactly what
-//! `crcbl_hal::ShaderModuleDesc` takes field for field, and it stays usable by
+//! `&[u32]`, `Option<&str>`, `Option<&[u8]>` and entry-point names, which is
+//! exactly what `crcbl_hal::ShaderModuleDesc` takes field for field, and it
+//! stays usable by
 //! a backend that has not been written yet. Each new artifact format is a new
 //! accessor here and a new field there; neither names the other's types.
 
@@ -168,18 +188,49 @@ pub enum Stage {
     Compute,
 }
 
-/// One `OpEntryPoint` in a compiled module.
+/// One `OpEntryPoint` in a compiled module, and the DXIL compiled for it.
+///
+/// **The DXIL lives here rather than on [`Shader`] because a container holds one
+/// entry point.** `dxc` compiles a single `-E` per invocation and a D3D12
+/// pipeline state object takes one bytecode blob per stage, so there is nothing
+/// a container carrying a whole module could be handed to — where the SPIR-V,
+/// WGSL and MSL artifacts each carry every entry point of their module and sit
+/// on the shader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EntryPoint {
     name: &'static str,
     stage: Stage,
+    /// The DXIL container for this entry point. `&[]` when not compiled
+    /// (DX4+).
+    dxil_bytes: &'static [u8],
 }
 
 impl EntryPoint {
     /// Names an entry point. Called only by the generated table.
     #[must_use]
-    pub const fn new(name: &'static str, stage: Stage) -> Self {
-        Self { name, stage }
+    pub const fn new(name: &'static str, stage: Stage, dxil_bytes: &'static [u8]) -> Self {
+        Self {
+            name,
+            stage,
+            dxil_bytes,
+        }
+    }
+
+    /// The compiled DXIL container for this entry point, or `None` when there is
+    /// no DXIL artifact.
+    ///
+    /// This is what `crcbl_hal::ShaderModuleDesc::dxil` takes, in the shape it
+    /// takes it: raw bytes, because a DXIL container is a *signed binary blob*
+    /// whose digest covers its own contents — neither decoded nor realigned on
+    /// the way. `crcbl-dx12` hands the slice straight to
+    /// `D3D12_SHADER_BYTECODE`; the other backends ignore it.
+    #[must_use]
+    pub const fn dxil(&self) -> Option<&'static [u8]> {
+        if self.dxil_bytes.is_empty() {
+            None
+        } else {
+            Some(self.dxil_bytes)
+        }
     }
 
     /// The name, exactly as it appears in the SPIR-V `OpEntryPoint` — which is
@@ -328,6 +379,29 @@ impl Shader {
         self.text_artifact(self.msl_bytes, "MSL")
     }
 
+    /// The compiled DXIL container for one entry point, or `None` for a shader
+    /// with no DXIL artifact — or an entry point this shader does not have.
+    ///
+    /// **This is the one accessor that takes an argument, because DXIL is the
+    /// one target with an artifact per entry point.** `dxc` compiles a single
+    /// `-E`, and a D3D12 pipeline state object takes one bytecode blob per
+    /// stage, so there is nothing a container holding both a vertex and a
+    /// fragment entry point could be handed to. A caller therefore creates one
+    /// `crcbl_hal::ShaderModuleDesc` per stage, each with the container for that
+    /// stage's entry point, where SPIR-V, WGSL and MSL each get one module for
+    /// the whole shader.
+    ///
+    /// It is a lookup by name because the containers hang off
+    /// [`EntryPoint::dxil`], which is where the per-entry-point shape is
+    /// expressed rather than restated.
+    #[must_use]
+    pub fn dxil(&self, entry_point: &str) -> Option<&'static [u8]> {
+        self.entry_points
+            .iter()
+            .find(|entry| entry.name == entry_point)
+            .and_then(EntryPoint::dxil)
+    }
+
     /// One text artifact, decoded — the body [`wgsl`](Self::wgsl) and
     /// [`msl`](Self::msl) share.
     ///
@@ -453,9 +527,9 @@ mod tests {
     #[test]
     fn an_ambiguous_stage_resolves_to_nothing() {
         static ENTRIES: [EntryPoint; 3] = [
-            EntryPoint::new("shadowVs", Stage::Vertex),
-            EntryPoint::new("mainVs", Stage::Vertex),
-            EntryPoint::new("mainFs", Stage::Fragment),
+            EntryPoint::new("shadowVs", Stage::Vertex, b""),
+            EntryPoint::new("mainVs", Stage::Vertex, b""),
+            EntryPoint::new("mainFs", Stage::Fragment, b""),
         ];
         let ambiguous = Shader::new(
             "ambiguous",
@@ -553,7 +627,7 @@ mod tests {
     /// `Option`s for.
     #[test]
     fn a_shader_without_a_text_artifact_reports_none() {
-        static ENTRIES: [EntryPoint; 1] = [EntryPoint::new("mainVs", Stage::Vertex)];
+        static BARE: [EntryPoint; 1] = [EntryPoint::new("mainVs", Stage::Vertex, b"")];
         let spirv_only = Shader::new(
             "spirv-only",
             "shaders/spirv-only.slang",
@@ -561,13 +635,15 @@ mod tests {
             b"",
             b"",
             b"",
-            &ENTRIES,
+            &BARE,
         );
         assert_eq!(spirv_only.wgsl(), None);
         assert_eq!(spirv_only.msl(), None);
+        assert_eq!(spirv_only.dxil("mainVs"), None);
 
         // And a column that *is* present reads back, so `None` above is the
         // absence rule rather than a decode that never returns anything.
+        static ENTRIES: [EntryPoint; 1] = [EntryPoint::new("mainVs", Stage::Vertex, b"DXBC-ish")];
         static PRESENT: Shader = Shader::new(
             "text-only",
             "shaders/text-only.slang",
@@ -579,6 +655,133 @@ mod tests {
         );
         assert_eq!(PRESENT.wgsl(), Some("@vertex fn mainVs() {}"));
         assert_eq!(PRESENT.msl(), Some("[[vertex]] void mainVs() {}"));
+        assert_eq!(PRESENT.dxil("mainVs"), Some(b"DXBC-ish".as_slice()));
+        assert_eq!(
+            PRESENT.dxil("mainPs"),
+            None,
+            "an entry point this shader does not have must not resolve to another \
+             one's container"
+        );
+    }
+
+    /// **Every shipped shader has a signed DXIL container for every entry
+    /// point, at the shader model the manifest pins.**
+    ///
+    /// The container header is a fixed binary layout, so all of this is
+    /// checkable with no Windows in the loop — which is the point, because
+    /// `crcbl-dx12` compiles only on Windows and CI is its only executor. The
+    /// three things asserted are the three that go wrong silently:
+    ///
+    /// * The **digest** is sixteen zero bytes until `libdxil.so` signs the
+    ///   container. An unsigned one compiles, hashes and commits, and is then
+    ///   refused by every real D3D12 driver at pipeline creation — the furthest
+    ///   possible point from the mistake.
+    /// * The **program kind** in the `DXIL` part says which stage the container
+    ///   is for. A vertex container generated for a fragment entry point would
+    ///   otherwise be caught only by `CreateGraphicsPipelineState`.
+    /// * The **declared container size** must be the file's, or the artifact is
+    ///   truncated.
+    #[test]
+    fn every_shipped_shader_has_a_signed_dxil_container_per_entry_point() {
+        assert!(!ALL.is_empty(), "the crate ships no shaders at all");
+        for shader in ALL {
+            for entry in shader.entry_points() {
+                let blob = shader
+                    .dxil(entry.name())
+                    .unwrap_or_else(|| panic!("{}: no DXIL for `{}`", shader.name(), entry.name()));
+                let header = dxil_container(blob)
+                    .unwrap_or_else(|error| panic!("{}:{}: {error}", shader.name(), entry.name()));
+                assert_ne!(
+                    header.digest,
+                    [0u8; 16],
+                    "{}:{} has an all-zero container digest, so dxc never signed it",
+                    shader.name(),
+                    entry.name()
+                );
+                assert_eq!(
+                    header.program_kind,
+                    dxil_program_kind(entry.stage()),
+                    "{}:{} is a container for the wrong stage",
+                    shader.name(),
+                    entry.name()
+                );
+                assert_eq!(
+                    header.shader_model,
+                    (6, 6),
+                    "{}:{} was not compiled at the pinned shader model",
+                    shader.name(),
+                    entry.name()
+                );
+            }
+        }
+    }
+
+    /// What [`dxil_container`] reads out of a `DxilContainerHeader`.
+    struct DxilHeader {
+        digest: [u8; 16],
+        /// `DXIL::ShaderKind` from the `DXIL` part's `ProgramVersion`.
+        program_kind: u32,
+        shader_model: (u32, u32),
+    }
+
+    /// `DXIL::ShaderKind` for a stage. Fixed by the container format, not by
+    /// this crate — pixel is `0`, vertex `1`, compute `5`.
+    const fn dxil_program_kind(stage: Stage) -> u32 {
+        match stage {
+            Stage::Fragment => 0,
+            Stage::Vertex => 1,
+            Stage::Compute => 5,
+        }
+    }
+
+    /// Parses the fixed part of a DXBC/DXIL container header.
+    ///
+    /// Deliberately hand-written and deliberately tiny: this is the *format's*
+    /// layout, fixed outside this repository, and the alternative is a Windows
+    /// dependency in a test whose whole value is running without one.
+    ///
+    /// ```text
+    /// 0  u32     magic "DXBC"
+    /// 4  [u8;16] digest, all-zero until libdxil.so signs it
+    /// 20 u16 u16 container version
+    /// 24 u32     container size in bytes
+    /// 28 u32     part count
+    /// 32 u32[]   part offsets; each part is a fourcc, a u32 size, then data
+    /// ```
+    ///
+    /// The `DXIL` part's data opens with a `DxilProgramHeader`, whose first
+    /// word packs the shader kind and model as `kind << 16 | major << 4 | minor`.
+    fn dxil_container(blob: &[u8]) -> Result<DxilHeader, String> {
+        let word = |at: usize| -> Result<u32, String> {
+            blob.get(at..at + 4)
+                .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                .ok_or_else(|| format!("the container is {} bytes, truncated at {at}", blob.len()))
+        };
+        if blob.get(..4) != Some(b"DXBC") {
+            return Err("does not open with the DXBC container magic".to_string());
+        }
+        let digest: [u8; 16] = blob[4..20].try_into().expect("20 bytes were just indexed");
+        let declared = word(24)? as usize;
+        if declared != blob.len() {
+            return Err(format!(
+                "declares {declared} bytes but is {}, so it is truncated",
+                blob.len()
+            ));
+        }
+        for part in 0..word(28)? as usize {
+            let offset = word(32 + part * 4)? as usize;
+            if blob.get(offset..offset + 4) == Some(b"DXIL") {
+                // The part header is a fourcc and a size, so the program header
+                // starts eight bytes in.
+                let version = word(offset + 8)?;
+                return Ok(DxilHeader {
+                    digest,
+                    program_kind: version >> 16,
+                    shader_model: ((version >> 4) & 0xF, version & 0xF),
+                });
+            }
+        }
+        Err("has no DXIL part, so it carries no bytecode".to_string())
     }
 
     /// The recorded hash is the drift check's whole basis, so it must actually

@@ -831,12 +831,28 @@ jobs:
   # unpinned comparison would fail for a reason that is not drift. Bumping it is
   # a deliberate act that re-blesses every artifact — and any golden image the
   # new codegen moves — in the same commit.
+  #
+  # The DXIL half is compiled the same way and pinned harder. Slang's own
+  # `-target dxil` shells out to whichever `dxc` it finds, so the script goes
+  # `slangc -target hlsl` then `dxc` explicitly — and `CRCBL_DXC` never falls
+  # back to `PATH`, because distributions ship Shader Model 6.10 *preview*
+  # builds of `dxc` that abort with an LLVM internal assertion on a trivial
+  # shader.
   shaders:
     name: shaders (committed SPIR-V matches its source)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Raised from 10 when `dxc` was added: its archive is around 492 MiB and
+    # dominates the job's wall clock. See the install step.
+    timeout-minutes: 20
     env:
       SLANG_VERSION: "2026.14"
+      # Pinned in `tools/compile-shaders.sh` and repeated here, exactly as the
+      # Slang version is. The script checks what the binary *reports* rather
+      # than this tag — a `dxc` does not know which release it came from — so a
+      # mismatched download fails the check step rather than silently producing
+      # different bytes.
+      DXC_RELEASE: "v1.9.2607"
+      DXC_ASSET: "linux_dxc_2026_07_29.x86_x64.tar.gz"
     steps:
       - uses: actions/checkout@v7
       # `spirv-val` and `spirv-dis`: the script validates every fresh artifact
@@ -857,6 +873,28 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/slang"
           tar xzf slang.tar.gz -C "${RUNNER_TEMP}/slang"
           echo "CRCBL_SLANGC=${RUNNER_TEMP}/slang/bin/slangc" >>"$GITHUB_ENV"
+      # **This download is around 492 MiB**, which is the bulk of this job's
+      # wall-clock time and worth knowing before adding another step beside it.
+      # Microsoft ships one Linux archive covering every tool; there is no
+      # compiler-only asset to take instead.
+      #
+      # `bin/dxc` finds its own `lib/libdxcompiler.so` and `lib/libdxil.so`
+      # through an RPATH, so no `LD_LIBRARY_PATH` is exported here — and
+      # `libdxil.so` is what *signs* the container. An unsigned one hashes and
+      # compares like any other artifact and is then refused by every real D3D12
+      # driver, which is why the script checks the container digest of every
+      # file it generates.
+      - name: Install the pinned dxc
+        run: |
+          curl -fsSL -o dxc.tar.gz \
+            "https://github.com/microsoft/DirectXShaderCompiler/releases/download/${DXC_RELEASE}/${DXC_ASSET}"
+          mkdir -p "${RUNNER_TEMP}/dxc"
+          # `--strip-components=1` because the archive wraps everything in a
+          # directory named after the asset, so without it the binary's path
+          # would carry the release's date and every bump would move it.
+          tar xzf dxc.tar.gz -C "${RUNNER_TEMP}/dxc" --strip-components=1
+          chmod +x "${RUNNER_TEMP}/dxc/bin/dxc"
+          echo "CRCBL_DXC=${RUNNER_TEMP}/dxc/bin/dxc" >>"$GITHUB_ENV"
       - name: Check the committed SPIR-V against its sources
         run: crates/crcbl-shaders/tools/compile-shaders.sh --check
 

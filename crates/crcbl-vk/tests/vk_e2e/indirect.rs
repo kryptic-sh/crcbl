@@ -343,6 +343,7 @@ impl QuadrantResources {
                 spirv: crcbl_shaders::TRIANGLE.spirv(),
                 wgsl: crcbl_shaders::TRIANGLE.wgsl(),
                 msl: crcbl_shaders::TRIANGLE.msl(),
+                dxil: None,
             })
             .expect("the committed SPIR-V is accepted");
         let color_targets = [crcbl_hal::ColorTargetState::opaque(headless.format)];

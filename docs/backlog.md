@@ -4638,6 +4638,52 @@ coverage" remains a plan rather than a fact.
 `TIMELINE_SEMAPHORE` and the two indirect features wait on calls no slice has
 written — and says nothing about the hardware.
 
+### What DX4 left unmeasured, and what it added to the list
+
+DX4 landed shader modules, root signatures, bind groups, graphics pipelines and
+a draw, and its measurement is `crcbl_dx12::device`'s
+`a_pulled_triangle_is_drawn_and_read_back_texel_by_texel` — a triangle pulled
+from a storage buffer through a real root signature, with its texels asserted.
+**Nothing in it has ever executed**: the development box is Linux and
+`crcbl-dx12` compiles on Windows alone, so CI is the first machine to run any of
+it. Until that test is green, "WARP executes a shader" stays a plan.
+
+Deferred inside DX4, each with what it would take:
+
+- **Compute pipelines.** `create_compute_pipeline` still refuses.
+  `crcbl_dx12::pipeline` builds the graphics half; the compute half is a
+  `D3D12_COMPUTE_PIPELINE_STATE_DESC` over the same root signature plus
+  `SetComputeRootSignature`/`SetComputeRootDescriptorTable` on the encoder,
+  which are the compute twins of calls `bind_group` already makes.
+- **Indexed and indirect draws.** `bind_index_buffer`, `draw_indexed` and the
+  four indirect entry points refuse. Indexed needs `IASetIndexBuffer` and a
+  `D3D12_INDEX_BUFFER_VIEW`; indirect needs an `ID3D12CommandSignature`, which
+  is a per-argument-layout object with no counterpart in the seam.
+- **Dynamic offsets.** `create_bind_group_layout` refuses a `dynamic` binding by
+  name. A descriptor table has no offset to apply — D3D12's answer is a _root_
+  CBV/SRV/UAV carrying a raw GPU address, which changes the root parameter type
+  for every binding in the set rather than adding to it.
+- **Push constants / root constants.** `create_pipeline_layout` refuses a range,
+  and this device reports no `Features::PUSH_CONSTANTS`. D3D12 _has_ the
+  feature; what is missing is knowing which root parameter slot the committed
+  DXIL expects one at, which is the same gap `crcbl-mtl` names for
+  `setVertexBytes:`.
+- **The shader-visible descriptor heaps do not grow.** `crcbl_dx12::binding`
+  allocates one heap per type at a fixed capacity and answers
+  `HalError::OutOfDeviceMemory` past it, because a bind group's GPU handle is an
+  address inside the heap it came from and growing would invalidate every handle
+  already recorded. Freed blocks are reused only at exactly their own size, so
+  nothing coalesces. A real suballocator is a slice of its own.
+- **`crcbl-render` cannot reach D3D12 yet, and the reason is structural.** Each
+  of its passes creates **one** shader module and names it from a vertex and a
+  fragment `ShaderEntry`, but a DXIL container holds exactly one entry point —
+  so those call sites pass `ShaderModuleDesc::dxil: None`, truthfully. Reaching
+  D3D12 means one module per stage in `crcbl_render::forward`,
+  `crcbl_render::sprite_pass` and `crcbl_render::ui_pass`, which is a change to
+  each pass's handle bookkeeping rather than to the descriptor. `crcbl-render`'s
+  `the_engine_passes_offer_every_shader_artifact_they_have` asserts DXIL's
+  absence, so it goes red the day a pass can offer it — delete this entry then.
+
 ### Do not write a LUID into code or an assertion
 
 DXGI's `AdapterLuid` is **per-boot**. Two CI runs of the same commit reported
