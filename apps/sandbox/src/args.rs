@@ -19,9 +19,10 @@ USAGE:
 OPTIONS:
         --headless        Run against HeadlessShell with a hand-driven clock.
                           Deterministic, needs no display, always terminates.
-        --backend <NAME>  GPU backend: `vk` or `null`. Default: choose one,
-                          which today means Vulkan. `null` renders nothing and
-                          needs no driver, so it is never chosen automatically.
+        --backend <NAME>  GPU backend: `vk`, `mtl`, `wgpu` or `null`. Default:
+                          choose one, which means Metal on macOS and Vulkan
+                          everywhere else. `null` renders nothing and needs no
+                          driver, so it is never chosen automatically.
         --camera <MODE>   `perspective` or `ortho`. Default: perspective.
                           The 2D story is a projection-matrix swap and nothing
                           else, which is what this flag exists to demonstrate.
@@ -74,7 +75,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
                     Some(backend) => options.backend = Some(backend),
                     None => {
                         return Invocation::BadUsage(format!(
-                            "unknown --backend `{name}`; try `vk` or `null`"
+                            "unknown --backend `{name}`; try `vk`, `mtl` or `null`"
                         ));
                     }
                 },
@@ -263,7 +264,7 @@ mod tests {
             vec!["--tick-hz", "5000000000"],
             vec!["--title"],
             vec!["--backend"],
-            vec!["--backend", "metal"],
+            vec!["--backend", "opengl"],
             vec!["--camera"],
             vec!["--camera", "isometric"],
             vec!["--nope"],

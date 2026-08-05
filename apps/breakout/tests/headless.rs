@@ -93,7 +93,7 @@ fn a_bad_invocation_exits_two_and_help_exits_zero() {
     assert_eq!(code(&breakout(&["--nonsense"])), 2);
     assert_eq!(code(&breakout(&["--tick-hz", "0"])), 2);
     assert_eq!(code(&breakout(&["--frames", "0"])), 2);
-    assert_eq!(code(&breakout(&["--backend", "metal"])), 2);
+    assert_eq!(code(&breakout(&["--backend", "opengl"])), 2);
 
     let help = breakout(&["--help"]);
     assert_eq!(code(&help), 0);

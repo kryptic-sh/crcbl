@@ -59,6 +59,22 @@ thiserror = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 crcbl-vk = { workspace = true }
 
+# Metal, and only where Metal exists. `crcbl-mtl` is `#[cfg(target_os =
+# "macos")]` from its crate root down and its `objc2-*` dependencies are pinned
+# to the same target, so naming it unconditionally would compile to nothing
+# everywhere else while still resolving the framework bindings; the per-target
+# line says what is true instead. Same shape and same reason as `crcbl-vk`
+# above, and `src/backend.rs` gates the matching registry entry with the same
+# `cfg`.
+#
+# This is the wire-up `docs/backlog.md`'s "What MTL1 left open" entry deferred:
+# it asked for the slice that gives the backend a device to hand back, and MTL2
+# through MTL6 landed the device, the swapchain, pipelines, bind groups and
+# draws. Registering it before that would have been a path that exists only to
+# fail; not registering it now is macOS with no GPU at all.
+[target.'cfg(target_os = "macos")'.dependencies]
+crcbl-mtl = { workspace = true }
+
 # `crcbl-golden` is a **dev**-dependency: the only reference to it from this
 # crate is an intra-doc link in `screenshot.rs`, and rustdoc resolves those from
 # dev-dependencies. As a normal dependency it linked `png` into every binary
