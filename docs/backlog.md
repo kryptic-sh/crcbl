@@ -4001,3 +4001,59 @@ the timeout, narrow the target list the way `crcbl-net` already was (with the
 reason recorded), or cut `PROPTEST_CASES` further for those two crates. Measure
 first — the current comment is evidence that guessing at these numbers is how
 the file got here.
+
+## Considered and declined: an OpenGL / GLES backend
+
+**Decided 2026-08-05.** GL is a dying support surface and the engine will not
+grow a `crcbl-gl`. The platform matrix is Vulkan for Windows, Linux and Android;
+Metal for macOS and iOS; DX12 for Windows as the second Windows path; and
+MoltenVK as an optional way to run the Vulkan seam on macOS.
+
+Reasons, so this is not re-argued:
+
+- **GL is already reachable and nobody needs a crate for it.** `crcbl-wgpu`
+  enumerates `wgpu::Backends::all()` and wgpu's default feature set includes
+  `gles`, so a GL device is enumerable through the existing backend today. It is
+  present and unproven rather than supported — nothing in CI exercises it — but
+  the cheap experiment would be pointing the existing wgpu e2e suite at a GL
+  device, not writing a backend.
+- **The blocker is above the seam, not at it.** `RendererTier` declares exactly
+  two tiers, and Tier B is not a low bar: per-batch indirect draws, indexed SSBO
+  lookups, and culling still running in compute. GLES 3.0 has no compute, no
+  SSBOs and no indirect draw — those arrive in 3.1 — so the old hardware GL
+  would be added _for_ cannot reach even Tier B. A Tier C is a renderer change
+  with a third draw-emission path and a third set of golden images, which is far
+  more expensive than the backend crate it would sit under.
+- **GL fights this seam specifically.** No command buffers (the seam hands out a
+  `CommandEncoder` and submits; GL executes immediately), thread-affine contexts
+  against a seam that requires `Device: Send + Sync` on native, no explicit sync
+  to map `pipeline_barrier` onto, and reversed-Z — locked engine-wide — needing
+  `glClipControl`, which is core in GL 4.5 but only an extension on GLES.
+- **It is the wrong tool for mobile anyway.** iOS is Metal-only and has
+  deprecated GL ES since iOS 12; modern Android ships Vulkan. The Android gap is
+  a `crcbl-shell` surface backend, not a HAL backend — `crcbl-vk` already exists
+  and is the best-tested path in the workspace.
+
+### The MoltenVK half of that plan has an unopened gate
+
+"The Vulkan seam runs on macOS under MoltenVK" is true of Vulkan generally and
+**not yet established for this engine**, because `crcbl-vk` requires the Tier A
+set as a hard requirement rather than degrading. `Features::TIER_A` is
+`DESCRIPTOR_INDEXING | BUFFER_DEVICE_ADDRESS | DRAW_INDIRECT_COUNT | MULTI_DRAW_INDIRECT | COMPUTE | TIMELINE_SEMAPHORE`,
+and `crates/crcbl-vk/src/adapter.rs` reads `draw_indirect_count` straight off
+`VkPhysicalDeviceVulkan12Features`. **`drawIndirectCount` is the doubtful one**:
+Metal has no native indirect-count draw, so whether MoltenVK reports it — and at
+what cost — decides whether the seam sees Tier A or falls to Tier B on macOS.
+
+`docs/plan/09-backends-metal-dx12.md` schedules exactly this as a timeboxed
+spike and a decision gate, and it has never been run. It is cheaper now than
+when it was written: `macos-latest` runners are real Macs, so it is a CI job
+installing MoltenVK and reading what the adapter reports, not a hardware-access
+problem.
+
+Also worth stating because the framing matters for shipping: MoltenVK is
+normally **bundled with the application**, not installed by the user. The Vulkan
+SDK's macOS installer places an ICD for development, but a shipped app embeds
+`libMoltenVK.dylib`; on iOS there is no loader or ICD story at all and it is
+linked directly. "If the user installs MoltenVK" describes the developer's
+machine, not the player's.
