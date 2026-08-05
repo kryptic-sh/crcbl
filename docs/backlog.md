@@ -287,16 +287,39 @@ measured rather than assumed: `ring`'s push was weakened to `Relaxed` and the
 whole suite stayed green, while `cargo miri test` reported the data race in
 `pop` with a backtrace. The Miri job is therefore load-bearing rather than a
 nicety: it is the only gate that would catch a wrong ordering before an aarch64
-or wasm user does. It now runs on every pull request and every push to `main` as
-well as weekly — `.github/workflows/miri.yml` is a reusable workflow that
-`ci.yml` and `cron.yml` both call, so there is one crate list rather than two
-that drift.
+or wasm user does.
 
-Still open on this: **nothing runs the primitives on a weakly-ordered machine.**
+**It runs weekly, in `cron.yml`, and that is a deliberate choice rather than an
+oversight.** Moving it onto the per-PR path was tried on 2026-08-05 and reverted
+the same day: the full crate list is minutes of interpretation on every pull
+request, and that is not a price this repository wants to pay for a check whose
+per-commit value is concentrated in one small crate. The consequences to keep in
+mind:
+
+- **An ordering regression can sit on `main` for up to a week.** Nothing on the
+  per-PR path can see one.
+- So the obligation moves to the author: `cargo miri test -p crcbl-jobs`
+  interprets that crate in about **seventeen seconds**, and any change to its
+  atomics is expected to be run under it before it is pushed. That is written
+  into the crate docs as well, where somebody editing the atomics will see it.
+- The narrower option — a `crcbl-jobs`-only per-PR leg at that seventeen-second
+  cost, leaving the broad list weekly — was **not** taken and remains available
+  if the weekly cadence ever misses something real.
+
+Also still open: **nothing runs the primitives on a weakly-ordered machine.**
 Miri models the memory ordering, which is a stronger check than any test on x86,
 but it is a model — an aarch64 runner exercising the same stress tests natively
 would be independent evidence, and GitHub offers one. Not attempted, and the
 cost is a second `test` leg rather than anything subtle.
+
+**A weekly job is a job nobody watches, and this file has now paid for that
+twice.** The Miri run went red on 2026-08-03 because `crcbl-audio` gained a
+native device path and `alsa-sys`'s build script wants `libasound2-dev`, which
+the cron job never installed; it stayed red until 2026-08-05, and was found only
+because the job was briefly moved onto the per-PR path. The install step is
+there now. The habit that would have caught it sooner: after a dependency lands,
+trigger the cron manually (`gh workflow run cron.yml`) instead of waiting for
+Monday.
 
 **`ring` does not implement drop-oldest**, though `21-jobs.md` lists it beside
 drop-newest as an overflow policy. It cannot be done from the producer: the read
