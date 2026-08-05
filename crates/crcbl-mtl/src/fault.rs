@@ -137,15 +137,18 @@ fn encoders(error: &NSError) -> Option<Vec<String>> {
         // `ProtocolObject` is a type-erased object header either way.
         let info: Retained<ProtocolObject<dyn MTLCommandBufferEncoderInfo>> =
             unsafe { Retained::cast_unchecked(element) };
-        let mut entry = format!("`{}` {}", info.label(), state(info.errorState()));
-        let signposts = info.debugSignposts();
-        if signposts.count() > 0 {
-            let names: Vec<String> = (0..signposts.count())
-                .map(|index| signposts.objectAtIndex(index).to_string())
-                .collect();
-            entry.push_str(&format!(" after [{}]", names.join(" → ")));
-        }
-        out.push(entry);
+        // **`debugSignposts` is deliberately not read**, and the reason is a
+        // trap rather than a preference. `objc2` generates it as returning a
+        // non-optional `Retained<NSArray<NSString>>`, but the real
+        // `_MTLCommandBufferEncoderInfo` returns **nil** when an encoder
+        // recorded no signposts — which is every encoder this backend produces,
+        // since nothing here calls `insertDebugSignpost:`. Sending it therefore
+        // panics inside the binding with "unexpected NULL returned", *replacing*
+        // the GPU fault this function exists to report with an unrelated one.
+        // Measured: it did exactly that on the macOS runner and hid the fault
+        // for a whole CI round trip. If signposts are ever inserted, read this
+        // through a nil-tolerant path rather than the generated accessor.
+        out.push(format!("`{}` {}", info.label(), state(info.errorState())));
     }
     Some(out)
 }
