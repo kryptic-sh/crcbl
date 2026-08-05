@@ -4630,35 +4630,19 @@ coverage" remains a plan rather than a fact.
 `TIMELINE_SEMAPHORE` and the two indirect features wait on calls no slice has
 written — and says nothing about the hardware.
 
-### The two listed adapters are two adapters, and the first is misclassified
+### Do not write a LUID into code or an assertion
 
-The runner lists two, with identical name, vendor, device and driver, differing
-in that the first is classified `Integrated` and the second `Cpu`. That read as
-one adapter enumerated twice, and the de-duplication was rekeyed from
-`DXGI_ADAPTER_FLAG_SOFTWARE` onto `AdapterLuid` on that reading.
+DXGI's `AdapterLuid` is **per-boot**. Two CI runs of the same commit reported
+different LUIDs for the same two adapters, which is the behaviour the name
+promises and is easy to forget when a LUID appears in a log that otherwise looks
+stable. It is an identity _within_ one enumeration and nothing more, so it is
+fit for de-duplicating a list and unfit for a fixture, a golden value or a
+comparison across runs.
 
-**The DX2 run settled it, and the reading was wrong.** With the LUID in the
-report, the two lines carry `luid=0x0000000000005cd3` and
-`luid=0x0000000000005d64` — different, so DXGI considers them distinct adapters
-and the de-duplication has nothing to collapse.
-
-The rekeying is kept regardless, and not just because it is harmless: the flag
-it replaced does not answer the question it was asked. DXGI lists "Microsoft
-Basic Render Driver" — a software rasteriser — with `DXGI_ADAPTER_FLAG_SOFTWARE`
-**clear**, so a filter keyed on that flag admits a software adapter as hardware.
-The LUID is the only identity DXGI guarantees, and it is in the report now, so a
-real duplicate would be visible in the log rather than inferred from a
-coincidence of names.
-
-**What is left is a classification bug, and it is real.** `type=Integrated` on
-"Microsoft Basic Render Driver" is `adapter.rs` calling a software rasteriser an
-integrated GPU, because the only signal it consults is the flag DXGI leaves
-clear. A caller that picks the first non-`Cpu` adapter — the obvious way to
-prefer hardware — gets WARP on this runner and believes it has a GPU. Neither
-adapter is hardware here, so nothing in CI can go wrong because of it; a machine
-with a real GPU **and** the Basic Render Driver present is where it bites. The
-fix needs a signal other than the flag, and none of the obvious ones (the vendor
-id `0x1414`, the name) is a guarantee either.
+The de-duplication keyed on it does one job: it stops `EnumWarpAdapter`
+re-listing an adapter the hardware pass already kept. It never collapsed the
+runner's two entries — those carry different LUIDs and really are two adapter
+objects.
 
 ### Two things DX1 decided that a later slice may have to undo
 

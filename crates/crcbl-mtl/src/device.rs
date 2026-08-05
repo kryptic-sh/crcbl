@@ -2188,6 +2188,194 @@ mod tests {
         unsafe { core::slice::from_raw_parts(contents.as_ptr().cast::<u8>(), len) }.to_vec()
     }
 
+    // --- handle tagging, with no device in it -------------------------------
+    //
+    // Every other test in this file goes through a live `MTLDevice`, which
+    // cannot construct the case the tagging exists for: two owners whose pools
+    // issue *identical bits*. Live devices allocate at their own pace and drift
+    // apart immediately, so a foreign-handle check made through them passes on
+    // the pool index and proves nothing about the tag. Two fresh `Pool`s here do
+    // issue identical bits, and that is asserted before it is relied on.
+
+    /// A stand-in owner, so the rules above are testable without a device or an
+    /// instance — the two things that implement [`Owner`] for real.
+    #[derive(Clone, Copy, Debug)]
+    struct TestOwner {
+        id: u64,
+        tag: u32,
+    }
+
+    impl TestOwner {
+        /// An owner with `id`, tagged exactly as a device with that id would be.
+        fn new(id: u64) -> Self {
+            Self {
+                id,
+                tag: device_tag(id),
+            }
+        }
+    }
+
+    impl Owner for TestOwner {
+        fn owner_id(&self) -> u64 {
+            self.id
+        }
+
+        fn tag(&self) -> u32 {
+            self.tag
+        }
+    }
+
+    /// A stand-in table entry, so the lookup rules do not need a real
+    /// `MTLBuffer` to be checked.
+    #[derive(Debug)]
+    struct TestEntry {
+        owner: u64,
+    }
+
+    owned!(TestEntry);
+
+    /// A tag is never zero, because zero is what a handle nobody issued carries.
+    ///
+    /// The wrap is asserted rather than assumed: it is the residual hole the
+    /// module comment above describes, and a `%` that produced a zero tag would
+    /// make the wrapping owner accept every hand-made handle.
+    #[test]
+    fn every_owner_id_gets_a_non_zero_tag_and_ids_wrap_rather_than_collide_at_zero() {
+        for id in [1u64, 2, 254, 255, 256, 1_000_000] {
+            assert_ne!(
+                device_tag(id),
+                0,
+                "owner {id} would accept an untagged handle"
+            );
+        }
+        // Neighbouring ids must differ, or two devices opened back to back would
+        // share a tag and fall through to the id check.
+        assert_ne!(device_tag(1), device_tag(2));
+    }
+
+    /// A stamped handle round-trips: the tag comes back out and the pool index
+    /// and generation survive untouched.
+    ///
+    /// The generation is the half that must not move — `Pool` keys its staleness
+    /// on it, so a stamp that disturbed it would make every handle stale on its
+    /// first use.
+    #[test]
+    fn stamping_preserves_the_pool_index_and_the_generation() {
+        let owner = TestOwner::new(7);
+        let mut pool: Pool<TestEntry> = Pool::new();
+        let raw = pool.insert(TestEntry { owner: owner.id });
+
+        let stamped: Handle<crcbl_hal::Buffer> = stamp(&owner, raw);
+        assert_eq!(handle_tag(stamped), owner.tag, "the tag did not survive");
+        assert_eq!(
+            stamped.generation(),
+            raw.generation(),
+            "the generation moved, which would make the handle stale at once"
+        );
+        assert_eq!(
+            stamped.index() & POOL_INDEX_MASK,
+            raw.index(),
+            "the pool index did not survive"
+        );
+
+        let back: Handle<TestEntry> =
+            local_handle("entry", stamped, &owner).expect("this owner's own handle");
+        assert_eq!(
+            back, raw,
+            "the round trip did not recover the pool's handle"
+        );
+        assert_eq!(
+            lookup(&pool, "entry", stamped, &owner)
+                .expect("the entry is live")
+                .owner,
+            owner.id
+        );
+    }
+
+    /// **The three outcomes are three errors.** This is the property the tagging
+    /// exists for, and it is checked on handles whose *bits are identical* — two
+    /// fresh pools issue the same index and generation, so the tag is the only
+    /// thing that can tell them apart.
+    #[test]
+    fn a_foreign_handle_is_foreign_a_stale_one_is_stale_and_an_untagged_one_is_neither() {
+        let a = TestOwner::new(1);
+        let b = TestOwner::new(2);
+        let mut pool_a: Pool<TestEntry> = Pool::new();
+        let mut pool_b: Pool<TestEntry> = Pool::new();
+        let raw_a = pool_a.insert(TestEntry { owner: a.id });
+        let raw_b = pool_b.insert(TestEntry { owner: b.id });
+        assert_eq!(
+            raw_a, raw_b,
+            "two fresh pools must issue identical bits, or this test proves nothing"
+        );
+
+        let on_a: Handle<crcbl_hal::Buffer> = stamp(&a, raw_a);
+        let on_b: Handle<crcbl_hal::Buffer> = stamp(&b, raw_b);
+        assert_ne!(on_a, on_b, "the tag is the only difference and it vanished");
+
+        let error = lookup(&pool_b, "entry", on_a, &b).expect_err("A's handle is not B's");
+        assert!(
+            matches!(error, HalError::ForeignObject { kind, .. } if kind == "entry"),
+            "{error:?}"
+        );
+        // B's own still resolves, so the check is not simply refusing
+        // everything.
+        lookup(&pool_b, "entry", on_b, &b).expect("B's own handle");
+        // The mutable path answers the same three ways, and it is the one the
+        // swapchain slice reaches for.
+        let error = lookup_mut(&mut pool_b, "entry", on_a, &b).expect_err("A's handle is not B's");
+        assert!(
+            matches!(error, HalError::ForeignObject { kind, .. } if kind == "entry"),
+            "{error:?}"
+        );
+        lookup_mut(&mut pool_b, "entry", on_b, &b).expect("B's own handle");
+
+        // A destroy with a foreign handle must not take the local object that
+        // shares its bits.
+        assert!(
+            !take_owned(&mut pool_b, on_a, &b),
+            "a foreign handle removed a local entry"
+        );
+        lookup(&pool_b, "entry", on_b, &b).expect("B's entry survived a foreign destroy");
+
+        // Destroyed, then stale — a different error from foreign.
+        assert!(
+            remove_owned(&mut pool_b, on_b, &b).is_some(),
+            "B's own handle names B's own entry"
+        );
+        let error = lookup(&pool_b, "entry", on_b, &b).expect_err("the entry was removed");
+        assert!(matches!(error, HalError::InvalidHandle { .. }), "{error:?}");
+
+        // A hand-made handle carries no tag at all, so no owner ever issued it.
+        let untagged: Handle<crcbl_hal::Buffer> =
+            Handle::from_bits(1 << 32).expect("generation 1 is non-zero");
+        assert_eq!(handle_tag(untagged), 0);
+        let error =
+            local_handle::<TestEntry, _>("entry", untagged, &a).expect_err("nobody issued that");
+        assert!(matches!(error, HalError::InvalidHandle { .. }), "{error:?}");
+    }
+
+    /// Queue handles are per owner and per kind, and carry the tag so a queue
+    /// from another device is detectable.
+    #[test]
+    fn queue_handles_differ_by_device_and_by_kind() {
+        let kinds = [QueueKind::Graphics, QueueKind::Compute, QueueKind::Transfer];
+        let mut seen: Vec<QueueHandle> = Vec::new();
+        for owner in [TestOwner::new(1), TestOwner::new(2)] {
+            for kind in kinds {
+                let handle = queue_handle(owner.tag, kind);
+                assert_eq!(handle_tag(handle), owner.tag, "{kind:?}");
+                assert!(
+                    !seen.contains(&handle),
+                    "{kind:?} on owner {} duplicates an earlier queue handle",
+                    owner.id
+                );
+                seen.push(handle);
+            }
+        }
+        assert_eq!(seen.len(), kinds.len() * 2);
+    }
+
     // --- the clear rung ----------------------------------------------------
 
     /// The attachment every render-pass test clears.
@@ -3947,8 +4135,10 @@ using namespace metal;\n\
         let (_instance, device) = open_device();
         let cap = device.caps().limits.max_sampler_anisotropy;
         assert!(
-            cap >= 1.0,
-            "an anisotropy cap below 1.0 would disable a sampler that asked for none"
+            cap > 1.0,
+            "this backend reports SAMPLER_ANISOTROPY, so the cap must exceed the value that \
+             disables it — at 1.0 every assertion below still passes and the feature has \
+             silently gone away"
         );
 
         let too_much = device.create_sampler(&SamplerDesc {
@@ -3982,17 +4172,117 @@ using namespace metal;\n\
         device.destroy_sampler(sampler);
     }
 
-    /// `wait_idle` really waits: it commits a command buffer to the real queue
-    /// and blocks on it. A queue that could not produce or run one fails here.
+    /// **`wait_idle` waits for work committed before it, and something says so.**
+    ///
+    /// Two `Ok`s and nothing else is exactly what a `wait_idle` that returned
+    /// without waiting would also produce, so the observable is a timeline
+    /// semaphore signalled by a submission committed *before* the wait. An
+    /// `MTLCommandQueue` runs its command buffers in commit order — the property
+    /// `wait_idle`'s own documentation rests on — so its empty buffer cannot
+    /// complete until that submission has, and the signal encoded on that
+    /// submission has therefore fired by the time the call returns.
+    ///
+    /// The submission carries a real blit rather than being empty, so a
+    /// `wait_idle` that dropped `waitUntilCompleted` has actual GPU work to
+    /// outrun instead of a signal that may already have landed while it was
+    /// being asked about.
+    ///
+    /// **What turns it red.** Dropping the `waitUntilCompleted` — the value read
+    /// back is the one the previous line asserted, not the one the submission
+    /// signals. Committing `wait_idle`'s buffer to something other than the
+    /// device's own queue — the ordering it relies on is between buffers on one
+    /// queue, and across two the wait says nothing about the blit. The second
+    /// round is what a queue that works exactly once fails.
     #[test]
-    fn wait_idle_runs_a_command_buffer_to_completion() {
+    fn wait_idle_waits_for_the_work_committed_before_it() {
         let (_instance, device) = open_device();
-        device
-            .wait_idle()
-            .expect("an empty command buffer completes");
-        // Twice, because a queue that only works once is a queue that leaked
-        // something.
-        device.wait_idle().expect("and again");
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let semaphore = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("crcbl-mtl wait_idle observer"),
+                kind: SemaphoreKind::Timeline { initial_value: 0 },
+            })
+            .expect("this device reports TIMELINE_SEMAPHORE");
+
+        /// Bytes moved by the blit each round.
+        ///
+        /// Large enough that a `wait_idle` which did not wait would have to
+        /// outrun a real copy rather than a command buffer with nothing in it,
+        /// and small enough to allocate twice on the smallest Mac this runs on.
+        const COPIED: u64 = 16 << 20;
+
+        let source = device
+            .create_buffer(&BufferDesc {
+                label: Some("crcbl-mtl wait_idle source"),
+                size: COPIED,
+                usage: BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a device-local blit source");
+        let destination = device
+            .create_buffer(&BufferDesc {
+                label: Some("crcbl-mtl wait_idle destination"),
+                size: COPIED,
+                usage: BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a device-local blit destination");
+
+        let mut submitted = Vec::new();
+        for round in 1..=2u64 {
+            assert_ne!(
+                device.semaphore_value(semaphore).expect("a timeline value"),
+                round,
+                "round {round} is being observed with the value it is about to signal"
+            );
+
+            let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+                label: Some("crcbl-mtl wait_idle work"),
+                queue,
+            });
+            encoder.copy_buffer_to_buffer(&BufferCopy {
+                src: source,
+                src_offset: 0,
+                dst: destination,
+                dst_offset: 0,
+                size: COPIED,
+            });
+            let commands = encoder.finish().expect("the recording is complete");
+            device
+                .submit(
+                    queue,
+                    &SubmitInfo {
+                        command_buffers: &[commands],
+                        waits: &[],
+                        signals: &[SemaphoreSignal {
+                            semaphore,
+                            value: round,
+                        }],
+                    },
+                )
+                .expect("the queue accepts it");
+            submitted.push(commands);
+
+            device
+                .wait_idle()
+                .unwrap_or_else(|error| panic!("round {round}: {error:?}"));
+
+            let observed = device.semaphore_value(semaphore).expect("a timeline value");
+            assert_eq!(
+                observed, round,
+                "round {round}: wait_idle returned with the timeline at {observed}, so it did \
+                 not wait for the blit committed before it"
+            );
+        }
+
+        for commands in submitted {
+            device.destroy_command_buffer(commands);
+        }
+        device.destroy_semaphore(semaphore);
+        device.destroy_buffer(source);
+        device.destroy_buffer(destination);
     }
 
     /// Every slice that has not arrived still refuses, by name — so none of

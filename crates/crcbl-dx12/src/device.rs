@@ -1499,8 +1499,9 @@ pub(crate) mod tests {
     use super::*;
     use crcbl_core::Handle;
     use crcbl_hal::{
-        BufferUsage, CompareOp, Extent3d, FilterMode, ImageAspect, ImageViewType, Instance,
-        QueryKind, SemaphoreKind,
+        BindingResource, BufferUsage, CompareOp, CompositeAlpha, Extent3d, FilterMode, ImageAspect,
+        ImageViewType, Instance, MultisampleState, PresentMode, PrimitiveState, QueryKind,
+        SemaphoreKind, SemaphoreWait, ShaderEntry,
     };
 
     use crate::Dx12Instance;
@@ -1524,6 +1525,17 @@ pub(crate) mod tests {
             .open_device(&device_desc(adapters[0].id))
             .expect("a D3D12 device opens with no required features");
         (instance, device)
+    }
+
+    /// A handle no device ever issued.
+    ///
+    /// Generation 1 — the lowest a `Handle` admits — and index 0, so the device
+    /// tag `crcbl_dx12::handle` reads out of the index half is `0`, which that
+    /// module reserves for "nobody". Every entry point that takes a handle and
+    /// still refuses is offered one of these, and it is the same claim each
+    /// time, so it is written once.
+    fn unissued<T>() -> Handle<T> {
+        Handle::from_bits(1 << 32).expect("generation 1 is non-zero")
     }
 
     fn buffer(size: u64, memory: MemoryLocation) -> BufferDesc<'static> {
@@ -2367,12 +2379,85 @@ pub(crate) mod tests {
                 device
                     .request_readback(&ReadbackDesc {
                         label: None,
-                        buffer: Handle::from_bits(1 << 32).expect("generation 1"),
+                        buffer: unissued(),
                         offset: 0,
                         size: 4,
                         after: None,
                     })
                     .expect_err("no command list yet"),
+            ),
+            (
+                "bind groups",
+                device
+                    .create_bind_group(&BindGroupDesc {
+                        label: None,
+                        layout: unissued(),
+                        entries: &[],
+                        variable_count: None,
+                    })
+                    .expect_err("no descriptor tables yet"),
+            ),
+            (
+                "bind group updates",
+                device
+                    .update_bind_group(
+                        unissued(),
+                        &[BindGroupEntry {
+                            binding: 0,
+                            array_index: 0,
+                            resource: BindingResource::Sampler(unissued()),
+                        }],
+                    )
+                    .expect_err("no descriptor tables yet"),
+            ),
+            (
+                "graphics pipelines",
+                device
+                    .create_graphics_pipeline(&GraphicsPipelineDesc {
+                        label: None,
+                        layout: unissued(),
+                        vertex: ShaderEntry {
+                            module: unissued(),
+                            entry_point: "vs_main",
+                        },
+                        fragment: None,
+                        primitive: PrimitiveState::default(),
+                        depth_stencil: None,
+                        multisample: MultisampleState::default(),
+                        color_targets: &[],
+                    })
+                    .expect_err("no pipeline state objects yet"),
+            ),
+            (
+                "compute pipelines",
+                device
+                    .create_compute_pipeline(&ComputePipelineDesc {
+                        label: None,
+                        layout: unissued(),
+                        compute: ShaderEntry {
+                            module: unissued(),
+                            entry_point: "cs_main",
+                        },
+                    })
+                    .expect_err("no pipeline state objects yet"),
+            ),
+            (
+                "semaphore waits",
+                device
+                    .wait_semaphores(
+                        &[SemaphoreWait {
+                            semaphore: unissued(),
+                            value: 1,
+                        }],
+                        0,
+                    )
+                    .expect_err("no fence a caller can hold yet"),
+            ),
+            (
+                "readback polls",
+                device
+                    .poll_readback(unissued(), &mut [0u8; 4])
+                    .expect_err("no readback was ever issued"),
             ),
         ];
         assert!(!refusals.is_empty(), "nothing to check");
@@ -2425,12 +2510,163 @@ pub(crate) mod tests {
             "{error:?}"
         );
 
-        let untagged = Handle::from_bits(1 << 32).expect("generation 1");
+        let untagged = unissued();
         let error = device
             .submit(untagged, &SubmitInfo::new(&[]))
             .expect_err("no device ever issued that handle");
         assert!(
             matches!(error, HalError::InvalidHandle { kind, .. } if kind == "queue"),
+            "{error:?}"
+        );
+    }
+
+    /// **The presentation half refuses through [`SurfaceError`], and the words
+    /// survive the conversion.**
+    ///
+    /// These four are the entry points whose refusal takes a different route
+    /// out: [`not_yet`] builds a [`HalError`] and `SurfaceError::Hal` wraps it,
+    /// so a caller matching on `SurfaceError` sees a `Hal` arm rather than
+    /// [`SurfaceError::Lost`] or [`SurfaceError::OutOfDate`]. Nothing asserted
+    /// that before — and the two failures it admits are the ones a caller cannot
+    /// recover from: an unwritten call that *panicked* instead of returning
+    /// looks the same as one nobody tested, and a refusal miscast as `OutOfDate`
+    /// would put a render loop into an unending reconfigure.
+    ///
+    /// Every handle offered is one no device issued, because none can be: both
+    /// [`Instance::create_surface`](crcbl_hal::Instance::create_surface) and
+    /// `create_swapchain` refuse. So the refusal has to arrive before any handle
+    /// is resolved, which is what makes these reachable at all.
+    #[test]
+    fn the_presentation_slice_refuses_through_surface_error_and_names_dx12() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let swapchain = SwapchainDesc {
+            label: Some("crcbl-dx12 test swapchain"),
+            surface: unissued(),
+            format: Format::Bgra8UnormSrgb,
+            extent: (320, 200),
+            image_count: 3,
+            present_mode: PresentMode::Fifo,
+            composite_alpha: CompositeAlpha::Opaque,
+        };
+
+        let refusals: Vec<(&str, SurfaceError)> = vec![
+            (
+                "swapchain creation",
+                device
+                    .create_swapchain(&swapchain)
+                    .expect_err("no DXGI swapchain yet"),
+            ),
+            (
+                "swapchain reconfiguration",
+                device
+                    .reconfigure_swapchain(unissued(), &swapchain)
+                    .expect_err("there is no swapchain to reconfigure"),
+            ),
+            (
+                "acquire",
+                device
+                    .acquire_next_frame(unissued())
+                    .expect_err("no swapchain hands out a frame"),
+            ),
+            (
+                "present",
+                device
+                    .present(
+                        queue,
+                        &PresentInfo {
+                            swapchain: unissued(),
+                            waits: &[],
+                        },
+                    )
+                    .expect_err("there is nothing to present"),
+            ),
+        ];
+        assert!(!refusals.is_empty(), "nothing to check");
+        for (what, error) in &refusals {
+            let SurfaceError::Hal(hal) = error else {
+                panic!("{what}: a slice that has not landed is not a surface condition: {error:?}");
+            };
+            assert!(
+                matches!(hal, HalError::Unsupported { backend, .. } if *backend == BackendKind::Dx12),
+                "{what}: {hal:?}"
+            );
+            // `SurfaceError::Hal` is transparent, so the refusal's own words are
+            // what a caller prints. A wrapper that swallowed them would leave
+            // the caller with a message naming no backend and no slice.
+            let text = error.to_string();
+            assert!(text.contains("dx12"), "{what}: {text}");
+            assert!(
+                text.contains("DX12") && text.contains("slice"),
+                "{what}: {text}"
+            );
+        }
+    }
+
+    /// **A handle that cannot resolve is not the same answer as a slice that has
+    /// not landed**, and these are the two entry points that say so.
+    ///
+    /// The crate docs draw the line: `Unsupported` for a call this backend has
+    /// not written, and [`HalError::InvalidHandle`] for anything it can genuinely
+    /// diagnose. `query_results` and `semaphore_value` are on the far side of it
+    /// — they take a handle, no query set or semaphore exists to have issued
+    /// one, so "you handed me something that never resolved" is both true and
+    /// more useful than "the query slice is not here".
+    ///
+    /// Asserted beside the *creation* calls, which refuse the other way, because
+    /// the claim is about the difference: a backend that answered `Unsupported`
+    /// everywhere would pass either assertion alone.
+    #[test]
+    fn a_query_set_and_a_semaphore_handle_refuse_as_unresolvable_not_as_unimplemented() {
+        let (_instance, device) = open_device();
+
+        // Poisoned, so "left untouched" is distinguishable from "written with
+        // the zeros a timestamp-less device is allowed to report".
+        let mut results = [u64::MAX; 2];
+        let error = device
+            .query_results(unissued(), 0, &mut results)
+            .expect_err("no query set was ever issued");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "query set"),
+            "{error:?}"
+        );
+        assert_eq!(
+            results,
+            [u64::MAX; 2],
+            "a refused query wrote results anyway: {results:?}"
+        );
+
+        let error = device
+            .semaphore_value(unissued())
+            .expect_err("no semaphore was ever issued");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "semaphore"),
+            "{error:?}"
+        );
+
+        // The other side of the line, on the calls that create the very objects
+        // those handles would have named.
+        let error = device
+            .create_query_set(&QuerySetDesc {
+                label: None,
+                kind: QueryKind::Timestamp,
+                count: 1,
+            })
+            .expect_err("no query heaps yet");
+        assert!(
+            matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
+            "{error:?}"
+        );
+        let error = device
+            .create_semaphore(&SemaphoreDesc {
+                label: None,
+                kind: SemaphoreKind::Timeline { initial_value: 0 },
+            })
+            .expect_err("no shared fence yet");
+        assert!(
+            matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
             "{error:?}"
         );
     }

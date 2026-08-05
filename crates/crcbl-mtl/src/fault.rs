@@ -172,3 +172,149 @@ fn state(state: MTLCommandEncoderErrorState) -> String {
         other => format!("error state {}, which this build does not name", other.0),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objc2_foundation::NSDictionary;
+
+    /// **The two states the whole report turns on say different things, and the
+    /// right things.**
+    ///
+    /// Transposing the [`MTLCommandEncoderErrorState::Faulted`] and
+    /// [`MTLCommandEncoderErrorState::Affected`] arms is a one-line edit that
+    /// compiles, keeps every encoder in the log, and names the wrong one as the
+    /// cause — which is the entire question a fault report is opened to answer.
+    /// Each is asserted to carry its own sense *and not the other's*, so the
+    /// swap goes red twice.
+    ///
+    /// The states are otherwise pairwise distinct: two arms rendering to one
+    /// string would make two different fates indistinguishable in the log, and a
+    /// `match` where a later arm is unreachable is exactly how that happens.
+    #[test]
+    fn the_faulted_encoder_and_the_affected_ones_are_not_described_alike() {
+        let faulted = state(MTLCommandEncoderErrorState::Faulted);
+        assert!(
+            faulted.contains("caused"),
+            "the encoder that caused the fault must say so: {faulted}"
+        );
+        assert!(
+            !faulted.contains("affected"),
+            "the cause is being described as a bystander: {faulted}"
+        );
+
+        let affected = state(MTLCommandEncoderErrorState::Affected);
+        assert!(
+            affected.contains("affected by another"),
+            "a bystander encoder must say it was caught up in someone else's fault: {affected}"
+        );
+        assert!(
+            !affected.contains("caused"),
+            "a bystander is being blamed for the fault: {affected}"
+        );
+
+        let named = [
+            MTLCommandEncoderErrorState::Completed,
+            MTLCommandEncoderErrorState::Faulted,
+            MTLCommandEncoderErrorState::Affected,
+            MTLCommandEncoderErrorState::Pending,
+            MTLCommandEncoderErrorState::Unknown,
+        ];
+        let mut described: Vec<String> = named.iter().copied().map(state).collect();
+        assert_eq!(described.len(), named.len(), "nothing to check");
+        described.sort_unstable();
+        described.dedup();
+        assert_eq!(
+            described.len(),
+            named.len(),
+            "two encoder states render to one string, so their fates are indistinguishable \
+             in a log: {described:?}"
+        );
+
+        // A state this build has no name for still reaches the log carrying its
+        // number, rather than being folded into "unknown" — which is a real
+        // state with a real meaning. The value is one past the last named state,
+        // so it is exactly what a newer Metal would add.
+        let unnamed = MTLCommandEncoderErrorState(MTLCommandEncoderErrorState::Faulted.0 + 1);
+        let described = state(unnamed);
+        assert!(
+            described.contains(&unnamed.0.to_string()),
+            "an unrecognised state lost its number: {described}"
+        );
+        assert_ne!(
+            described,
+            state(MTLCommandEncoderErrorState::Unknown),
+            "an unrecognised state must not be reported as Metal's own Unknown"
+        );
+    }
+
+    /// **A `userInfo` with no encoder array, and one whose value is not an
+    /// array, both answer `None`** — which is what makes [`describe`] print the
+    /// "no per-encoder status" sentence rather than an empty list.
+    ///
+    /// Built from a synthetic [`NSError`] because that half of this module needs
+    /// no GPU: `encoders` only reads a dictionary. **The other half genuinely
+    /// cannot be reached synthetically** — an `MTLCommandBufferEncoderInfo` is a
+    /// private Metal class with no public initialiser, so no test can put a real
+    /// one in the array, and the `Faulted`/`Affected` rendering is pinned
+    /// directly on [`state`] above instead.
+    ///
+    /// The last case is the one with a bug behind it: a non-conforming element
+    /// is *reported in place*, not skipped, because dropping it would shift
+    /// every later encoder in a list whose order is the recording order.
+    #[test]
+    fn a_user_info_without_a_conforming_encoder_array_says_so_rather_than_pretending() {
+        let domain = NSString::from_str("crcbl-mtl test domain");
+        // SAFETY: `objc2` declares this as an `extern "C"` static, which Rust
+        // requires an `unsafe` block to name. It is an immutable `NSString`
+        // constant the Metal framework has initialised, and reading the
+        // reference is the whole of the access — the same access `encoders`
+        // makes.
+        let key = unsafe { MTLCommandBufferEncoderInfoErrorKey };
+
+        // SAFETY: the dictionary really is keyed by `NSErrorUserInfoKey` and
+        // holds `AnyObject` values, which is the generic pairing this
+        // constructor asks the caller to guarantee. Same for each call below.
+        let no_key = unsafe { NSError::errorWithDomain_code_userInfo(&domain, 1, None) };
+        assert!(
+            encoders(&no_key).is_none(),
+            "an error with no userInfo named an encoder"
+        );
+
+        let string = NSString::from_str("not an array");
+        let string_value: &AnyObject = &string;
+        let not_an_array: Retained<NSDictionary<NSString, AnyObject>> =
+            NSDictionary::from_slices(&[key], &[string_value]);
+        // SAFETY: as above.
+        let wrong_type =
+            unsafe { NSError::errorWithDomain_code_userInfo(&domain, 2, Some(&not_an_array)) };
+        assert!(
+            encoders(&wrong_type).is_none(),
+            "a userInfo value that is not an NSArray was read as one anyway"
+        );
+
+        let strangers: Retained<NSArray<NSString>> = NSArray::from_retained_slice(&[
+            NSString::from_str("first"),
+            NSString::from_str("second"),
+        ]);
+        let strangers_value: &AnyObject = &strangers;
+        let with_strangers: Retained<NSDictionary<NSString, AnyObject>> =
+            NSDictionary::from_slices(&[key], &[strangers_value]);
+        // SAFETY: as above.
+        let stranger_error =
+            unsafe { NSError::errorWithDomain_code_userInfo(&domain, 3, Some(&with_strangers)) };
+        let described = encoders(&stranger_error).expect("the key holds an array");
+        assert_eq!(
+            described.len(),
+            strangers.count(),
+            "an element was dropped, which shifts every later encoder out of recorded \
+             order: {described:?}"
+        );
+        for line in &described {
+            assert!(
+                line.contains("does not conform to MTLCommandBufferEncoderInfo"),
+                "a non-encoder was reported as an encoder: {line}"
+            );
+        }
+    }
+}

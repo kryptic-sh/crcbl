@@ -819,6 +819,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **crcbl-dx12**: **a software rasteriser was enumerated as an integrated GPU.**
+  `is_software` consulted only `DXGI_ADAPTER_FLAG_SOFTWARE`, and DXGI lists
+  "Microsoft Basic Render Driver" — which is WARP — with that flag _clear_, so
+  `Instance::adapters` reported it as `DeviceType::Integrated`. A caller ranking
+  `Discrete > Integrated > Cpu` to prefer real hardware picked the software
+  rasteriser and believed it had a GPU. Measured on `windows-latest`, where
+  neither listed adapter is hardware; a machine carrying the Basic Render Driver
+  beside a real GPU is where it would have cost a frame rate.
+
+  The test is now that flag **or** Microsoft's own vendor and device ids, named
+  as constants in `crcbl_dx12::adapter` and read off the runner's own
+  enumeration line. Both halves of the pair are required, and the flag is still
+  consulted first, so an adapter that sets it is caught whatever its ids say.
+  One consequence reaches `Instance::adapters`: such an entry is now skipped by
+  the hardware pass and appended once by `EnumWarpAdapter`, so a machine that
+  listed it twice lists it once, as `Cpu`.
+
+  The LUID de-duplication is unchanged, and was never what fixed this: those two
+  entries carry different LUIDs, so DXGI considers them two adapters and there
+  was nothing for it to collapse.
+
 - **crcbl-wgpu**: **the browser build presented every frame far too dark.**
   WebGPU's supported context formats are all linear — `getPreferredCanvasFormat`
   returns `rgba8unorm` or `bgra8unorm`, and `configure` refuses an `-srgb` one —

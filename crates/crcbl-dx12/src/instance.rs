@@ -156,22 +156,29 @@ impl Dx12Instance {
     /// stock Windows — "Microsoft Basic Render Driver", which *is* WARP — so
     /// enumerating it and then appending
     /// [`IDXGIFactory4::EnumWarpAdapter`](IDXGIFactory4) would list one
-    /// rasteriser twice under two ids. The first pass therefore skips
-    /// `DXGI_ADAPTER_FLAG_SOFTWARE` — `crcbl_dx12::adapter`'s `is_software` is
-    /// the one place that flag is tested — and the second asks for WARP by name,
-    /// which is also what gets it on machines where DXGI does *not* list it, the
-    /// whole reason `EnumWarpAdapter` exists as a separate call.
+    /// rasteriser twice under two ids. The first pass therefore skips whatever
+    /// `crcbl_dx12::adapter`'s `is_software` calls software — the one place that
+    /// question is asked — and the second asks for WARP by name, which is also
+    /// what gets it on machines where DXGI does *not* list it, the whole reason
+    /// `EnumWarpAdapter` exists as a separate call.
     ///
-    /// **That flag alone is not enough, and the first CI run is the evidence.**
-    /// On a runner with no GPU, DXGI listed the Basic Render Driver with
-    /// `DXGI_ADAPTER_FLAG_SOFTWARE` *clear*: it survived the hardware pass, and
-    /// `EnumWarpAdapter` then returned the same device again. One adapter
-    /// appeared twice, once as `Integrated` and once as `Cpu`, with identical
-    /// name, vendor, device and driver strings. So the append also compares
-    /// `AdapterLuid`, which is the only identity DXGI guarantees — unique per
-    /// adapter for the lifetime of the system, and equal across two interfaces
-    /// onto one. Name and ids would not do: two distinct cards of one model
-    /// share all of them.
+    /// **`DXGI_ADAPTER_FLAG_SOFTWARE` alone is not enough, and CI is the
+    /// evidence.** On a runner with no GPU, DXGI lists the Basic Render Driver
+    /// with that flag *clear*, so a pass keyed on the flag admitted a software
+    /// rasteriser as hardware and reported it as `Integrated`. `is_software`
+    /// consults Microsoft's own vendor and device ids as well, which is what
+    /// keeps such an entry out of the hardware pass and out of
+    /// [`DeviceType::Integrated`](crcbl_hal::DeviceType::Integrated).
+    ///
+    /// The append separately compares `AdapterLuid`, the only identity DXGI
+    /// guarantees — unique per adapter for the lifetime of the system, and equal
+    /// across two interfaces onto one. It is what stops `EnumWarpAdapter`
+    /// re-listing an adapter the first pass already kept. **It does not collapse
+    /// the runner's two Basic Render Driver entries and cannot**: they carry
+    /// different LUIDs, so DXGI considers them two adapters. Skipping both as
+    /// software and appending WARP once by name is what leaves one entry there.
+    /// Name and ids are no substitute for the LUID either way: two distinct
+    /// cards of one model share all of them.
     ///
     /// The cost is that WARP is always last, so its [`AdapterId`] moves when a
     /// GPU is added or removed. That is true of every adapter id in every
@@ -327,20 +334,21 @@ fn candidates(factory: &IDXGIFactory4) -> Vec<(IDXGIAdapter1, DXGI_ADAPTER_DESC1
     match unsafe { factory.EnumWarpAdapter::<IDXGIAdapter1>() } {
         Ok(warp) => {
             if let Some(desc) = desc_of(&warp) {
-                // **The `is_software` filter above is not sufficient, and the
-                // first CI run proved it.** On a runner with no GPU, DXGI lists
-                // "Microsoft Basic Render Driver" — which *is* WARP — as an
-                // ordinary adapter with `DXGI_ADAPTER_FLAG_SOFTWARE` clear, so
-                // it survives the first pass and `EnumWarpAdapter` then returns
-                // the same device again. The measured result was one physical
-                // adapter enumerated twice, once as `Integrated` and once as
-                // `Cpu`, with identical vendor, device and driver strings.
+                // `EnumWarpAdapter` may hand back an adapter the pass above
+                // already kept — on a machine where DXGI flags WARP as software
+                // it will not, but nothing guarantees the two agree.
                 //
                 // `AdapterLuid` is the identity DXGI actually guarantees:
                 // locally unique for the lifetime of the system, and equal for
                 // two interfaces onto one adapter. Comparing it is what makes
                 // the de-duplication independent of a flag a driver may or may
-                // not set.
+                // not set. Name, vendor and device id would not do as a key:
+                // two genuinely distinct cards of one model share all three,
+                // and so — measured on `windows-latest` — do the two Basic
+                // Render Driver entries DXGI lists there, which carry different
+                // LUIDs and really are two adapters. **Those are kept out by
+                // `is_software` above, not by this comparison**, which sees
+                // nothing to collapse.
                 let duplicate = out
                     .iter()
                     .any(|(_, seen)| seen.AdapterLuid == desc.AdapterLuid);
@@ -705,17 +713,18 @@ pub(crate) mod tests {
         println!("{all}");
 
         // **No adapter is listed twice, keyed on the identity DXGI guarantees.**
-        // This is the assertion the first CI run needed and did not have: the
-        // check below counts adapters DXGI *flagged* as software, and on a
-        // GPU-less runner "Microsoft Basic Render Driver" — which is WARP —
-        // arrives unflagged, survives the hardware pass, and is then appended a
-        // second time by `EnumWarpAdapter`. One physical adapter appeared twice,
-        // once as `Integrated` and once as `Cpu`, and the flag count was still
-        // exactly 1.
+        // Name, vendor and device id would not do as a key: two genuinely
+        // distinct cards of one model share all three, and `windows-latest`
+        // lists two Basic Render Driver entries that share all three and are
+        // still two adapters. `AdapterLuid` is the only thing DXGI promises is
+        // unique.
         //
-        // Name, vendor and device id would not do as a key either: two genuinely
-        // distinct cards of one model share all three. `AdapterLuid` is the only
-        // thing DXGI promises is unique.
+        // **This cannot fail while the de-duplication keys on the same field**,
+        // which is why it is not the whole of what this test does — it goes red
+        // only if the key moves back to something DXGI does not guarantee. What
+        // no adapter may be is *hardware while carrying the software ids*, and
+        // that is
+        // `a_microsoft_software_rasteriser_is_never_enumerated_as_hardware`.
         let mut luids: Vec<u64> = instance
             .records()
             .iter()
@@ -763,6 +772,67 @@ pub(crate) mod tests {
                 u32::try_from(instance.records().len() - 1).expect("adapters fit in a u32 index")
             ),
             "WARP is appended last, after the hardware pass: {line}"
+        );
+    }
+
+    /// **No enumerated adapter is hardware while carrying Microsoft's software
+    /// ids.**
+    ///
+    /// This is the assertion the runner needed and did not have. It reported
+    /// "Microsoft Basic Render Driver" as [`DeviceType::Integrated`] for as long
+    /// as `is_software` consulted only `DXGI_ADAPTER_FLAG_SOFTWARE`, which that
+    /// adapter arrives with *clear* — so a caller ranking
+    /// `Discrete > Integrated > Cpu` to prefer real hardware picked the software
+    /// rasteriser and believed it had a GPU. Nothing went red: the LUIDs are
+    /// distinct, so the de-duplication had nothing to collapse, and the count of
+    /// *flagged* software adapters was right the whole time.
+    ///
+    /// It is asserted over the **enumerated** adapters rather than over a
+    /// constructed descriptor, because that is the half a constructed one cannot
+    /// reach: whether the classification survives `describe`, the enumeration
+    /// filter and the append. `crcbl_dx12::adapter`'s own
+    /// `the_software_test_reads_the_known_ids_as_well_as_the_flag` pins the rule
+    /// itself, on inputs no machine is obliged to produce.
+    ///
+    /// The loop is asserted to have run. On any Windows where
+    /// `EnumWarpAdapter` succeeds there is at least one adapter carrying these
+    /// ids, so an empty sweep means either that call failed — a finding, and one
+    /// the software-count assertion above reports too — or that Microsoft's
+    /// rasteriser now reports ids this backend does not recognise, which is the
+    /// classification silently reverting to the bug.
+    #[test]
+    fn a_microsoft_software_rasteriser_is_never_enumerated_as_hardware() {
+        let instance = open();
+        let all = report_all(&instance);
+        assert!(!instance.records().is_empty(), "nothing to check:\n{all}");
+
+        let mut matched = 0usize;
+        for record in instance.records() {
+            if record.info.vendor_id != adapter::MICROSOFT_VENDOR_ID
+                || record.info.device_id != adapter::BASIC_RENDER_DRIVER_DEVICE_ID
+            {
+                continue;
+            }
+            matched += 1;
+            let line = record.report();
+            assert!(
+                record.raw.software,
+                "an adapter with Microsoft's software rasteriser ids was described as \
+                 hardware: {line}"
+            );
+            assert_eq!(
+                record.info.device_type,
+                DeviceType::Cpu,
+                "a software rasteriser must not outrank itself into hardware: {line}"
+            );
+        }
+        assert!(
+            matched > 0,
+            "no adapter carries vendor {:#06x} device {:#06x}, so this test checked nothing — \
+             either EnumWarpAdapter failed or the ids the classification keys on have \
+             moved:\n{all}",
+            adapter::MICROSOFT_VENDOR_ID,
+            adapter::BASIC_RENDER_DRIVER_DEVICE_ID
         );
     }
 

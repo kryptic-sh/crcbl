@@ -78,6 +78,22 @@ use crate::conv;
 /// expression.
 const CONSTANT_BUFFER_ELEMENT_BYTES: u64 = 4 * 4;
 
+/// Microsoft's PCI vendor id, as DXGI reports it for the adapters Windows
+/// itself provides.
+///
+/// Read off the `windows-latest` runner's own enumeration line rather than
+/// recalled: both adapters it lists carry this vendor together with
+/// [`BASIC_RENDER_DRIVER_DEVICE_ID`]. Consulted by [`is_software`] because
+/// `DXGI_ADAPTER_FLAG_SOFTWARE` is clear on that machine and so cannot be
+/// trusted on its own.
+pub(crate) const MICROSOFT_VENDOR_ID: u32 = 0x1414;
+
+/// The device id "Microsoft Basic Render Driver" — WARP — reports.
+///
+/// Same source as [`MICROSOFT_VENDOR_ID`], and only meaningful beside it: a
+/// device id is unique within a vendor, never on its own.
+pub(crate) const BASIC_RENDER_DRIVER_DEVICE_ID: u32 = 0x008c;
+
 /// Shader models to ask about, newest first.
 ///
 /// [`D3D12_FEATURE_SHADER_MODEL`] is an **in/out** query: the caller writes the
@@ -116,8 +132,9 @@ pub(crate) struct RawCaps {
     pub(crate) binding_tier: D3D12_RESOURCE_BINDING_TIER,
     /// `D3D12_FEATURE_DATA_SHADER_MODEL::HighestShaderModel`, probed.
     pub(crate) shader_model: D3D_SHADER_MODEL,
-    /// Whether DXGI flagged this adapter as a software rasteriser — which, on a
-    /// stock Windows, means it is WARP.
+    /// Whether this adapter is a software rasteriser — which, on a stock
+    /// Windows, means it is WARP. [`is_software`]'s answer, so it is the flag
+    /// **and** the known Microsoft ids rather than the flag alone.
     pub(crate) software: bool,
     /// `D3D12_FEATURE_DATA_ARCHITECTURE1::UMA`: the GPU shares the CPU's memory
     /// pool.
@@ -126,11 +143,11 @@ pub(crate) struct RawCaps {
     /// actually guarantees**, locally unique for the lifetime of the system and
     /// equal for two interfaces onto one adapter.
     ///
-    /// Kept because name, vendor and device id are *not* an identity: the first
-    /// CI run listed one physical adapter twice under identical strings, and
-    /// two genuinely distinct cards of the same model would share all three
-    /// anyway. Enumeration de-duplicates on this, and a test asserts no two
-    /// adapters share one.
+    /// Kept because name, vendor and device id are *not* an identity: two
+    /// genuinely distinct cards of one model share all three, and the runner
+    /// lists two adapters that share all three and are still two adapters — they
+    /// carry different LUIDs. Enumeration de-duplicates on this, and a test
+    /// asserts no two adapters share one.
     pub(crate) luid: u64,
     /// Whether every BC format the seam declares can be sampled as a 2D texture
     /// on this adapter, from `D3D12_FEATURE_FORMAT_SUPPORT`.
@@ -354,21 +371,39 @@ fn name_of(desc: &DXGI_ADAPTER_DESC1) -> String {
     String::from_utf16_lossy(&desc.Description[..end])
 }
 
-/// Whether DXGI flagged this adapter as a software rasteriser.
+/// Whether this adapter is a software rasteriser.
 ///
-/// One function rather than the flag test written twice, because it is asked in
-/// two places for two different reasons — `crcbl_dx12::instance` skips software
+/// One function rather than the test written twice, because it is asked in two
+/// places for two different reasons — `crcbl_dx12::instance` skips software
 /// adapters in the ordinary enumeration so that WARP is listed exactly once, and
 /// [`describe`] records the answer so [`device_type_of`] can reach it — and two
-/// copies of a bit test against a `u32` field is precisely where the two would
-/// drift.
+/// copies of it is precisely where the two would drift.
 ///
-/// `DXGI_ADAPTER_FLAG_SOFTWARE` is the only flag consulted. `DXGI_ADAPTER_FLAG_NONE`
-/// is deliberately never tested against: it is **zero**, so `Flags & NONE != 0` is
-/// false for every adapter that ever existed and `Flags & NONE == 0` is true for
-/// every one — a test that cannot fail either way.
+/// # The flag alone is wrong, and the runner is the evidence
+///
+/// `DXGI_ADAPTER_FLAG_SOFTWARE` is the obvious signal and it is **not
+/// sufficient**: `windows-latest` lists "Microsoft Basic Render Driver", which
+/// *is* WARP, with that flag clear. Consulting only the flag therefore made
+/// [`device_type_of`] answer [`DeviceType::Integrated`] for a software
+/// rasteriser — WARP shares the CPU's memory pool, so `UMA` is true for it — and
+/// a caller ranking `Discrete > Integrated > Cpu` to prefer hardware would pick
+/// it and believe it had a GPU.
+///
+/// So the known ids are consulted alongside the flag. They are a *known pair*
+/// rather than a guarantee, which is why the flag is still tested first: a
+/// future software adapter that sets the flag and reports different ids is
+/// caught by the flag, and this one is caught by the ids.
+/// [`MICROSOFT_VENDOR_ID`] and [`BASIC_RENDER_DRIVER_DEVICE_ID`] both carry the
+/// value the runner reported, and both halves are required — Microsoft's vendor
+/// id alone would also claim a future hardware adapter Microsoft ships.
+///
+/// `DXGI_ADAPTER_FLAG_NONE` is deliberately never tested against: it is
+/// **zero**, so `Flags & NONE != 0` is false for every adapter that ever existed
+/// and `Flags & NONE == 0` is true for every one — a test that cannot fail
+/// either way.
 pub(crate) fn is_software(desc: &DXGI_ADAPTER_DESC1) -> bool {
     desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0.cast_unsigned() != 0
+        || (desc.VendorId == MICROSOFT_VENDOR_ID && desc.DeviceId == BASIC_RENDER_DRIVER_DEVICE_ID)
 }
 
 /// Which class of device this is, from what DXGI and D3D12 actually report.
@@ -377,8 +412,10 @@ pub(crate) fn is_software(desc: &DXGI_ADAPTER_DESC1) -> bool {
 /// *where the memory is* does, because WARP shares the CPU's memory pool and
 /// would otherwise report as integrated.
 ///
-/// * [`DeviceType::Cpu`] ← `DXGI_ADAPTER_FLAG_SOFTWARE`. This is WARP, which the
-///   seam's own documentation names as an example of the variant.
+/// * [`DeviceType::Cpu`] ← [`is_software`], which is the flag **and** the known
+///   Microsoft software ids, because the flag is clear on the very rasteriser it
+///   is supposed to name. This is WARP, which the seam's own documentation names
+///   as an example of the variant.
 /// * [`DeviceType::Integrated`] ← `D3D12_FEATURE_DATA_ARCHITECTURE1::UMA`. The
 ///   real question, rather than the `DedicatedVideoMemory == 0` heuristic that
 ///   is usually substituted for it.
@@ -816,6 +853,92 @@ mod tests {
                 "every D3D12 device has GPU virtual addresses: {raw:?}"
             );
         }
+    }
+
+    /// **The software test does not depend on the flag being set**, because on
+    /// the runner it is not.
+    ///
+    /// Written on constructed descriptors, because the combination that matters
+    /// — Microsoft's software ids with `DXGI_ADAPTER_FLAG_SOFTWARE` *clear* — is
+    /// what `windows-latest` produces and what no machine with a real GPU can be
+    /// relied on to produce. The hardware cases are asserted in the same test:
+    /// without them a rule that answered "software" to everything would pass,
+    /// and every adapter on every machine would report as [`DeviceType::Cpu`].
+    ///
+    /// The falsifying edit is dropping either half of the id pair from
+    /// [`is_software`] — the vendor alone claims any future Microsoft hardware,
+    /// and the device id alone claims another vendor's part that happens to
+    /// share the number.
+    #[test]
+    fn the_software_test_reads_the_known_ids_as_well_as_the_flag() {
+        let flagged = DXGI_ADAPTER_FLAG_SOFTWARE.0.cast_unsigned();
+        let warp_ids = DXGI_ADAPTER_DESC1 {
+            VendorId: MICROSOFT_VENDOR_ID,
+            DeviceId: BASIC_RENDER_DRIVER_DEVICE_ID,
+            ..Default::default()
+        };
+        assert!(
+            is_software(&warp_ids),
+            "the Basic Render Driver arrives with the flag clear and must still be software: \
+             vendor={:#06x} device={:#06x} flags={:#x}",
+            warp_ids.VendorId,
+            warp_ids.DeviceId,
+            warp_ids.Flags
+        );
+        let warp_flagged = DXGI_ADAPTER_DESC1 {
+            Flags: flagged,
+            ..warp_ids
+        };
+        assert!(is_software(&warp_flagged), "{:#x}", warp_flagged.Flags);
+
+        // Both halves of the pair are required, and each alone is somebody
+        // else's adapter.
+        let other_vendor = DXGI_ADAPTER_DESC1 {
+            VendorId: MICROSOFT_VENDOR_ID + 1,
+            ..warp_ids
+        };
+        assert!(
+            !is_software(&other_vendor),
+            "another vendor's part sharing the device id is not WARP: vendor={:#06x} \
+             device={:#06x}",
+            other_vendor.VendorId,
+            other_vendor.DeviceId
+        );
+        let other_device = DXGI_ADAPTER_DESC1 {
+            DeviceId: BASIC_RENDER_DRIVER_DEVICE_ID + 1,
+            ..warp_ids
+        };
+        assert!(
+            !is_software(&other_device),
+            "a different Microsoft part is not the Basic Render Driver: vendor={:#06x} \
+             device={:#06x}",
+            other_device.VendorId,
+            other_device.DeviceId
+        );
+
+        // A real GPU is hardware, and the flag still answers for a software
+        // adapter that does set it.
+        let hardware = DXGI_ADAPTER_DESC1 {
+            VendorId: MICROSOFT_VENDOR_ID + 1,
+            DeviceId: BASIC_RENDER_DRIVER_DEVICE_ID + 1,
+            ..Default::default()
+        };
+        assert!(
+            !is_software(&hardware),
+            "every adapter would report as Cpu: vendor={:#06x} device={:#06x} flags={:#x}",
+            hardware.VendorId,
+            hardware.DeviceId,
+            hardware.Flags
+        );
+        let flagged_hardware_ids = DXGI_ADAPTER_DESC1 {
+            Flags: flagged,
+            ..hardware
+        };
+        assert!(
+            is_software(&flagged_hardware_ids),
+            "the flag is still consulted: flags={:#x}",
+            flagged_hardware_ids.Flags
+        );
     }
 
     /// A software adapter is the seam's `Cpu`, whatever its memory looks like.
