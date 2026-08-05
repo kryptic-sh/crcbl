@@ -16,6 +16,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-jobs`**: a new crate, opening P5B with **the seam every engine thread
+  will start through**. `Spawn` has three methods — `threaded`, `parallelism`
+  and `spawn` — with two backends behind it: `Threads` over `std::thread`, and
+  `Inline`, which has none and refuses every spawn by name. `default_spawner`
+  picks between them and is the only place in the threading model that spells
+  `cfg(target_arch)`.
+
+  **It exists because `std::thread::spawn` compiles on `wasm32-unknown-unknown`
+  and fails at run time.** `std`'s wasm-with-atomics arm takes only `sleep` from
+  `thread/wasm.rs`; `Thread::new` comes from `thread/unsupported.rs` and returns
+  `UNSUPPORTED_PLATFORM`, because a wasm module cannot instantiate its own
+  worker — only the host can, against the shared `WebAssembly.Memory`. A pool
+  written on `std::thread` would therefore compile for the browser and have no
+  browser story, so the seam lands before anything is built on it. `Threads` is
+  not nameable on `wasm32` at all, which makes reaching for it there a compile
+  error rather than a run-time `Err`.
+
+  **Degrading is a decision, not an error**: `Spawn::threaded` is asked once
+  while a subsystem is being built, and a caller picks a long-lived thread or a
+  tick-driven loop from the answer. A `spawn` that fails afterwards is a real
+  error, and the closure is gone by then either way.
+
+  Not here yet: the mailboxes, the SPSC rings, the work-stealing pool and
+  `par_for` — the slices above this one — and the browser's worker backend,
+  which needs a pinned nightly and cross-origin isolation. Both of those are
+  open questions in `docs/backlog.md`, and this ordering is what keeps either
+  answer from blocking the rest.
+
 - **horde**: **health potions, dropped by brutes and drunk by walking over
   them.** A `potion` frame in `apps/horde/assets/actors.crpix` — a stoppered
   flask in a crimson that appears nowhere else in the sheet, drawn to the same

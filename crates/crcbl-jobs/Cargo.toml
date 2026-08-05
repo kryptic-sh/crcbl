@@ -1,0 +1,15 @@
+[package]
+name = "crcbl-jobs"
+description = "Crucible job system: the seam every engine thread starts through"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The seam's one error type. Every other engine crate that has an error enum
+# spells it this way; see `crcbl-store` for the same call.
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

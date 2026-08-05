@@ -264,16 +264,28 @@ either extension; the only mention of one anywhere is the doc comment on
 
 ## P5B — the job system, and the two decisions in front of it
 
-`crates/crcbl-jobs` does not exist. `docs/plan/21-jobs.md` and the roadmap's
-2026-08-03 correction carry the design and the measurements; what belongs here
-is the ordering and the two questions that are not ours to answer.
+`crates/crcbl-jobs` exists as of the spawn-seam slice: `Spawn`, `Threads`,
+`Inline` and `default_spawner`, and nothing above them yet.
+`docs/plan/21-jobs.md` and the roadmap's 2026-08-03 correction carry the design
+and the measurements; what belongs here is the ordering and the two questions
+that are not ours to answer.
 
 The order is forced: **the spawn seam and its single-threaded fallback come
-first**, because `docs/plan/21-jobs.md` records that `std::thread::spawn`
-_compiles_ on `wasm32-unknown-unknown` and returns `UNSUPPORTED_PLATFORM` at run
-time — so a pool built on `std::thread` is a pool that silently has no browser
-story. Then the samples adopt the seam (four consumers is what proves a seam
+first** — done — because `docs/plan/21-jobs.md` records that
+`std::thread::spawn` _compiles_ on `wasm32-unknown-unknown` and returns
+`UNSUPPORTED_PLATFORM` at run time, so a pool built on `std::thread` is a pool
+that silently has no browser story. What is still owed, in order: the
+latest-wins mailboxes and SPSC rings, the work-stealing pool and `par_for` in
+both modes, adoption by the four samples (four consumers is what proves a seam
 before P6–P8 build on it), then the worker backend behind it.
+
+**The seam has no consumers yet, which is the thing to be honest about.** Its
+shape was chosen from the design doc and the topology, not from a caller pushing
+back on it — and this workspace's own rule is that a seam is not frozen until
+two samples have used it. Expect the adoption slice to change something here;
+`Spawn::threaded` returning a `bool` rather than a richer capability is the most
+likely candidate, since a caller that wants "threads, but only one" cannot say
+so today.
 
 - **Decision, unanswered: pin a nightly toolchain for the wasm worker target.**
   A threaded wasm artifact needs
