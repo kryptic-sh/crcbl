@@ -4184,15 +4184,18 @@ toolchain consumes HLSL-ish input, so the path is Slang → HLSL → PSSL — a 
 artifact after SPIR-V, WGSL, MSL and DXIL, and the only one whose compiler could
 never run in public CI.
 
-### One thing to settle before the seam freezes
+### `BackendKind` would need a variant — and that is not a problem
 
-`crcbl_hal::BackendKind` is a **closed enum** —
-`Vulkan | Wgpu | Metal | Dx12 | Null`. Any console backend needs either a new
-variant (naming a console is not an NDA breach) or a `Custom(&'static str)`.
-`crcbl-hal`'s docs say the seam freezes at P5 exit and P14 work has already
-begun, so this is worth deciding while variants are still cheap to add: after
-the freeze it is a breaking change to a public enum, and a private backend
-cannot patch a public crate to get one.
+`crcbl_hal::BackendKind` is a closed enum —
+`Vulkan | Wgpu | Metal | Dx12 | Null` — so a console backend needs a new variant
+(naming a console is not an NDA breach) or a `Custom(&'static str)`, because a
+private crate cannot add one to a public enum it does not control.
 
-Not acted on — it is a HAL change, wants Vulkan re-verified, and no console work
-is scheduled.
+**Add it when a console backend actually exists.** This was first written up as
+something to settle before the seam freezes, on the grounds that a new variant
+is a breaking change to a public API. That reasoning does not apply here: the
+workspace is `0.1.0` with no tags, everything so far is unreleased, and the
+project's own convention is that below 1.0 a breaking change bumps the minor.
+Breaking changes are routine and expected, so there is nothing to buy by
+deciding early — and adding a variant nothing implements would be the
+speculative machinery this codebase deletes rather than keeps.
