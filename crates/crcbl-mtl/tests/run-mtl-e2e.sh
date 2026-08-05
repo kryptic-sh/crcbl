@@ -41,7 +41,12 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$REPO"
 
 LOG="$(mktemp -t crcbl-mtl-e2e.XXXXXX.log)"
-trap 'rm -f "$LOG"' EXIT INT TERM
+cleanup() {
+    local status=$?
+    rm -f "$LOG" "${LOG}.plain"
+    exit "$status"
+}
+trap cleanup EXIT INT TERM
 
 set +e
 cargo nextest run --locked -p crcbl-mtl --features mtl-e2e \
@@ -54,9 +59,17 @@ if [ "$STATUS" -ne 0 ]; then
     exit "$STATUS"
 fi
 
+# The colour-stripped copy is load-bearing, exactly as it is in
+# `crates/crcbl-vk/tests/run-vk-e2e.sh`: CI sets `CARGO_TERM_COLOR: always`, so
+# nextest wraps its counts in escapes and the match below sees no digits next to
+# "tests run". Without this the check fires on a suite that ran everything and
+# passed — which is what run 31045734181 did, reporting the zero-tests trap at
+# `102 tests run: 102 passed`.
+sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$LOG" >"${LOG}.plain"
+
 # nextest reports its own totals; counting lines of its output would silently
 # pick up headers and land a number that is close and wrong.
-if ! grep -qE "Summary \[[^]]*\] +[1-9][0-9]* tests? run" "$LOG"; then
+if ! grep -qE "Summary \[[^]]*\] +[1-9][0-9]* tests? run" "${LOG}.plain"; then
     echo "crcbl mtl e2e: the suite reported zero tests run, which is the trap" >&2
     echo "  this script exists to catch — the feature gate or the ignore" >&2
     echo "  attribute stopped matching the tests." >&2
