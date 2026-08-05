@@ -155,20 +155,27 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 /// * [`Features::TEXTURE_COMPRESSION_BC`] ← `supportsBCTextureCompression`.
 ///   Apple Silicon answers no and Intel Macs answer yes, so this is the one
 ///   flag here that genuinely varies across the machines the engine ships to.
+/// * [`Features::SAMPLER_ANISOTROPY`] — unconditional in Metal
+///   (`MTLSamplerDescriptor::maxAnisotropy` is a plain property of every
+///   sampler) **and now backed by a call this backend makes**: the device slice
+///   creates samplers, so this is the flag that has stopped being a promise
+///   about unwritten code. It is reported with no query because there is none
+///   to make; [`Limits::max_sampler_anisotropy`] carries the API's own ceiling
+///   beside it, and `crcbl_mtl::device`'s sampler creation is what enforces it.
 ///
 /// # Absent, with the reason for each
 ///
 /// * [`Features::COMPUTE`], [`Features::TIMELINE_SEMAPHORE`],
 ///   [`Features::DEBUG_MARKERS`], [`Features::OCCLUSION_QUERY`],
-///   [`Features::SAMPLER_ANISOTROPY`], [`Features::DEPTH_CLAMP`],
-///   [`Features::DEPTH_BIAS_CLAMP`], [`Features::POLYGON_MODE_LINE`] — every
-///   one is unconditional in Metal (`MTLComputeCommandEncoder`,
-///   `MTLSharedEvent`, `pushDebugGroup:`, `visibilityResultBuffer`,
-///   `MTLSamplerDescriptor::maxAnisotropy`, `MTLDepthClipMode::Clamp`,
+///   [`Features::DEPTH_CLAMP`], [`Features::DEPTH_BIAS_CLAMP`],
+///   [`Features::POLYGON_MODE_LINE`] — every one is unconditional in Metal
+///   (`MTLComputeCommandEncoder`, `MTLSharedEvent`, `pushDebugGroup:`,
+///   `visibilityResultBuffer`, `MTLDepthClipMode::Clamp`,
 ///   `MTLRenderCommandEncoder::setDepthBias:…:clamp:`,
-///   `MTLTriangleFillMode::Lines`) and every one is a promise about a call this
-///   backend cannot make: no device opens, so no encoder exists. They land with
-///   the slices that implement them.
+///   `MTLTriangleFillMode::Lines`) and every one is still a promise about a
+///   call this backend cannot make: there is a device now, but no encoder and
+///   no pipeline. They land with the slices that implement them, exactly as
+///   `SAMPLER_ANISOTROPY` just did.
 /// * [`Features::DRAW_INDIRECT_COUNT`] and [`Features::MULTI_DRAW_INDIRECT`] —
 ///   Metal's plain `drawPrimitives:indirectBuffer:indirectBufferOffset:` emits
 ///   exactly one draw and takes no count buffer. Indirect command buffers are
@@ -207,6 +214,9 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>) -> Features {
     if device.supportsBCTextureCompression() {
         out |= Features::TEXTURE_COMPRESSION_BC;
     }
+    // No query: every Metal device samples anisotropically, and the device
+    // slice creates the samplers that use it.
+    out |= Features::SAMPLER_ANISOTROPY;
     out
 }
 
@@ -234,10 +244,12 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>) -> Features {
 /// `MTLComputePipelineState::maxTotalThreadsPerThreadgroup`, which is not
 /// available before a device exists).
 ///
-/// The three feature-keyed fields stay consistent with `features_of`: bindless
+/// The feature-keyed fields stay consistent with `features_of`: bindless
 /// capacity is non-zero exactly when [`Features::DESCRIPTOR_INDEXING`] is
-/// reported, and the push-constant budget, the anisotropy cap and the timestamp
-/// period stay at the floor's zeroes because their features are absent.
+/// reported, the anisotropy cap is Metal's own ceiling because
+/// [`Features::SAMPLER_ANISOTROPY`] is, and the push-constant budget and the
+/// timestamp period stay at the floor's zeroes because their features are
+/// absent.
 fn limits_of(device: &ProtocolObject<dyn MTLDevice>, features: Features) -> Limits {
     let floor = Limits::minimum();
     let threads = device.maxThreadsPerThreadgroup();
@@ -249,6 +261,11 @@ fn limits_of(device: &ProtocolObject<dyn MTLDevice>, features: Features) -> Limi
             TIER2_ARGUMENT_BUFFER_ENTRIES
         } else {
             0
+        },
+        max_sampler_anisotropy: if features.contains(Features::SAMPLER_ANISOTROPY) {
+            crate::device::MAX_SAMPLER_ANISOTROPY
+        } else {
+            floor.max_sampler_anisotropy
         },
         max_sample_count: max_sample_count(device),
         max_compute_workgroup_size: [

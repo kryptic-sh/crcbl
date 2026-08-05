@@ -16,9 +16,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`crcbl-mtl`**: a new crate, opening P14 with macOS's only path to a GPU —
-  there is no Vulkan on Apple hardware without MoltenVK. This first slice is
-  **adapter enumeration and nothing else**: `MetalInstance::open` calls
+- **`crcbl-mtl`**: a new crate, opening P14 with **the only path to a GPU on
+  macOS and iOS** — Apple platforms are Metal only, per the 2026-08-05 platform
+  decision, so nothing else reaches a device there. Its first slice is **adapter
+  enumeration and nothing else**: `MetalInstance::open` calls
   `MTLCopyAllDevices` and turns every device into an `AdapterInfo` whose
   `DeviceCaps` come from real queries — `argumentBuffersSupport` for
   `DESCRIPTOR_INDEXING`, the `MTLGPUFamily::Metal3` query for
@@ -42,6 +43,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Off macOS the crate is documentation with no public items, so `objc2-metal` is
   never fetched or built there. Nothing instantiates it yet — no app, and no
   entry in the engine's backend selection.
+
+  **Its second slice opens a real device.** `request_device` now checks adapter,
+  then required features, then `compatible_surface`, and hands back a
+  `PendingDevice` that completes on its first poll. `MetalDevice` implements the
+  resource half of the seam — buffers, images, image views and samplers in
+  `crcbl-core` `Pool`s, plus `write_buffer`, `queue` and a `wait_idle` that
+  really commits a command buffer and waits on it. The instance now keeps its
+  `MTLDevice` objects behind an `Arc` shared with every device it opens, which
+  is how the seam's "a `Device` outlives its `Instance`" obligation is
+  discharged.
+
+  `MemoryLocation` maps to `Private` for `DeviceLocal` and `Shared` for both
+  host locations. **`Managed` is deliberately never produced**: it is the
+  two-copy mode and both directions need a call this slice does not have, so
+  choosing it for readback would return stale bytes on an Intel Mac and correct
+  ones on Apple silicon — right on one class of Mac only. `write_buffer` refuses
+  `DeviceLocal` by name rather than silently writing nothing, matching what
+  `crcbl-vk` answers for the same call.
+
+  All 29 seam formats have an exact `MTLPixelFormat` counterpart, and the
+  mapping is tested for **injectivity** — two formats sharing one Metal format
+  is invisible at run time (the image is created, the sample succeeds, the
+  colour is wrong), and it is the same class of defect as the missing sRGB
+  encode that made the browser build render too dark.
 
 - **`crcbl-jobs`**: a new crate, opening P5B with **the seam every engine thread
   will start through**. `Spawn` has three methods — `threaded`, `parallelism`

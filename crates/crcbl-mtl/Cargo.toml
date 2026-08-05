@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# `Handle` and `Pool` — the generational side tables every backend keeps its
+# driver objects in, and the mechanism that turns use-after-destroy into a
+# lookup failure instead of an alias. `crcbl-vk` and the null backend take the
+# same dependency for the same reason.
+crcbl-core = { workspace = true }
 crcbl-hal = { workspace = true }
 log = { workspace = true }
 
@@ -30,8 +35,25 @@ log = { workspace = true }
 # `MTLDevice` brings the protocol, `MTLCopyAllDevices`, `MTLGPUFamily`,
 # `MTLArgumentBuffersTier` and `MTLDeviceLocation`; `MTLTypes` is what makes
 # `maxThreadsPerThreadgroup` — an `MTLSize` — exist. `objc2-foundation` is here
-# for exactly one item, `NSProcessInfo`, plus `NSEnumerator` for iterating the
-# `NSArray` that enumeration returns. A slice that needs more adds it here.
+# for `NSProcessInfo`, `NSString` (every `setLabel:` takes one), `NSRange` (the
+# level and slice ranges a texture view is cut with) and `NSEnumerator` for
+# iterating the `NSArray` that enumeration returns.
+#
+# MTL2 — the device and its resources — adds the rest of this list, and every
+# entry is here because one call needs it, not because it looked related:
+#
+# * `MTLCommandQueue` for `newCommandQueue`, and `MTLCommandBuffer` because
+#   `wait_idle` commits an empty one and waits on it.
+# * `MTLAllocation` + `MTLResource` are the two protocols `MTLBuffer` and
+#   `MTLTexture` inherit from, and `MTLResource` is also where
+#   `MTLStorageMode`, `MTLCPUCacheMode` and `MTLResourceOptions` live.
+# * `MTLBuffer`, `MTLTexture`, `MTLSampler` for the three resource kinds and
+#   their descriptors; `MTLPixelFormat` for the format table.
+# * `MTLDepthStencil` for `MTLCompareFunction`, which is what a comparison
+#   sampler's `compareFunction` takes — the type lives with depth/stencil state
+#   in Metal even though a sampler is the only thing this slice puts it on.
+#
+# A slice that needs more adds it here.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
@@ -39,11 +61,21 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSArray",
   "NSEnumerator",
   "NSProcessInfo",
+  "NSRange",
   "NSString",
 ] }
 objc2-metal = { version = "0.3.2", default-features = false, features = [
   "std",
+  "MTLAllocation",
+  "MTLBuffer",
+  "MTLCommandBuffer",
+  "MTLCommandQueue",
+  "MTLDepthStencil",
   "MTLDevice",
+  "MTLPixelFormat",
+  "MTLResource",
+  "MTLSampler",
+  "MTLTexture",
   "MTLTypes",
 ] }
 

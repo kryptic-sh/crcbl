@@ -4199,3 +4199,41 @@ project's own convention is that below 1.0 a breaking change bumps the minor.
 Breaking changes are routine and expected, so there is nothing to buy by
 deciding early — and adding a variant nothing implements would be the
 speculative machinery this codebase deletes rather than keeps.
+
+## What MTL2 left open on the Metal backend
+
+Supersedes the MTL1 list above where they overlap; MTL1's items about tier and
+the macOS floor still stand.
+
+- **`MTLTextureUsagePixelFormatView` is set on every colour image,
+  unconditionally.** `ImageViewDesc::format` is documented as free to differ
+  from the image's own "for sRGB reinterpretation", Metal requires that intent
+  declared at _texture_ creation time, and `ImageDesc` carries nothing saying a
+  view is coming. The cost is real — it can disable lossless bandwidth
+  compression on some Apple GPUs. Narrowing it needs the seam to carry intended
+  view formats the way WebGPU's `viewFormats` does, which is a HAL change and so
+  was not made. Recorded in `conv::texture_usage`'s docs.
+- **Metal validates descriptors by raising, not by returning nil**, and an
+  Objective-C exception crossing into Rust aborts the process. `create_image`
+  guards the rules confirmable from the headers (extent, mip, sample and layer
+  counts against `Limits`; multisample implies one mip; `D1` implies height 1;
+  the two per-device format questions) and deliberately invents no rule that
+  could not be confirmed — for example whether a depth texture may be `Shared`
+  on a discrete Intel Mac. **So a caller passing `HostUpload` for a depth image
+  could abort rather than receive an `Err`.** How far descriptor pre-validation
+  should go on this backend is undecided, and it is a question the other
+  backends do not have, because Vulkan returns error codes.
+- **`conv`'s `ALL` format list is hand-maintained.** `pixel_format`'s match is
+  exhaustive, so the compiler forces an arm for any new `Format` — but `ALL` is
+  a test fixture, and a format inserted mid-enum would get its arm and still not
+  be covered by the injectivity test. The staleness guard asserts the last
+  sorted entry is `Bc7RgbaUnormSrgb`, which catches an appended format and not
+  an inserted one. Small, and the compiler catches the half that matters.
+
+### Not verified: every runtime value, again
+
+The 36 tests in this crate have still never executed on Apple hardware at the
+time of writing; `cargo clippy`/`rustdoc --target aarch64-apple-darwin` is the
+only local gate and it checks types and links, not behaviour. Both gates were
+shown able to fail. CI's `build + test (macos-latest)` leg is the first
+execution.
