@@ -10,6 +10,12 @@ repository.workspace = true
 crcbl-hal = { workspace = true }
 log = { workspace = true }
 
+# The generational `Pool` every resource table is built on, and the `Handle` the
+# seam's resource handles already are. Target-gated beside `windows` because off
+# Windows this crate has no code to hold a pool.
+[target.'cfg(target_os = "windows")'.dependencies.crcbl-core]
+workspace = true
+
 # The Win32 bindings, and only on the platform that has the ABI behind them.
 # `docs/plan/09-backends-metal-dx12.md`'s FFI correction is the rule this
 # satisfies: *bindings, not frameworks* — `windows-rs` is a thin binding to an
@@ -44,30 +50,41 @@ log = { workspace = true }
 # * `Win32_Graphics_Direct3D` is `D3D_FEATURE_LEVEL`. Not optional beside the
 #   above: `D3D12CreateDevice` takes one, and the binding gates the whole
 #   function on this feature.
-#
-# `Win32_Graphics_Dxgi_Common` is deliberately **absent**. It is where
-# `DXGI_FORMAT` lives, and every question that needs one — the sample-count
-# ceiling, BC format support — is per-format and belongs to the slice that
-# brings a format table. `crcbl_dx12::adapter` says so against each limit it
-# leaves at the seam's floor for that reason.
+# * `Win32_Graphics_Dxgi_Common` is `DXGI_FORMAT` and `DXGI_SAMPLE_DESC`, which
+#   `crcbl_dx12::conv`'s format table produces and `D3D12_RESOURCE_DESC` carries.
+#   The binding gates far more than the type on it: `CreateCommittedResource`,
+#   `CreateShaderResourceView`, `CreateUnorderedAccessView`,
+#   `CreateRenderTargetView`, `CreateDepthStencilView` and
+#   `D3D12_FEATURE_DATA_FORMAT_SUPPORT` — the BC-format query — are each
+#   `#[cfg]`-ed on it, so the resource half of the seam is unreachable without
+#   it.
+# * `Win32_Foundation` is the `HANDLE` an `ID3D12Fence` wait is armed with, plus
+#   the `CloseHandle` that releases it, the `WAIT_OBJECT_0` that says the wait
+#   was satisfied, and the `E_OUTOFMEMORY` that separates an allocation failure
+#   from a descriptor bug. Reached transitively by every feature above, and named
+#   anyway because this crate calls into it directly.
+# * `Win32_System_Threading` is `CreateEventW`, `WaitForSingleObject` and
+#   `INFINITE` — `Device::wait_idle`'s event. It is an event rather than
+#   `SetEventOnCompletion`'s documented null-handle block because
+#   `WaitForSingleObject` reports which way it returned, and a `wait_idle` that
+#   silently did not wait is worse than none.
+# * `Win32_Security` is `SECURITY_ATTRIBUTES`, `CreateEventW`'s first parameter.
+#   This crate passes `None` for it and never names the type; the binding gates
+#   the whole function on the feature, the same way `Win32_Graphics_Direct3D`
+#   above is required by `D3D12CreateDevice`'s feature-level argument.
 #
 # A slice that needs more adds it here.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62.2", default-features = false, features = [
   "std",
+  "Win32_Foundation",
   "Win32_Graphics_Direct3D",
   "Win32_Graphics_Direct3D12",
   "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Security",
+  "Win32_System_Threading",
 ] }
-
-# `Handle::from_bits` — the only way to build a surface handle no instance ever
-# issued, which is what `surface_caps` has to be handed to show that it refuses
-# before it looks at one. Target-gated beside `windows` for the same reason: the
-# tests that need it are inside the `cfg(target_os = "windows")` module, so off
-# Windows there is nothing to build it for. `crcbl-mtl` takes the same crate as a
-# full dependency because its pools need it; this slice has no pools.
-[target.'cfg(target_os = "windows")'.dev-dependencies]
-crcbl-core = { workspace = true }
 
 [lints]
 workspace = true

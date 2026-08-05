@@ -205,6 +205,54 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   makes them true yet — the precedent `crcbl-mtl` set by withdrawing a flag it
   could not honour.
 
+  **Its second slice opens a real device.** `request_device` now checks adapter,
+  then required features, then `compatible_surface`, and hands back a
+  `PendingDevice` that completes on its first poll; behind it are a real
+  `ID3D12Device` and a `D3D12_COMMAND_LIST_TYPE_DIRECT` queue. `Dx12Device`
+  implements the resource half of the seam — buffers, images, image views and
+  samplers in `crcbl-core` `Pool`s, plus `write_buffer`, `queue` and a
+  `wait_idle` that signals an `ID3D12Fence` and blocks on it. The instance now
+  keeps its DXGI factory and adapters behind an `Arc` shared with every device
+  it opens, which is how the seam's "a `Device` outlives its `Instance`"
+  obligation is discharged.
+
+  **An image view is a descriptor, not an object**, so the crate gained a small
+  allocator over CPU-visible descriptor heaps — one per D3D12 heap type, grown a
+  chunk at a time. One seam view becomes up to four descriptors, because a
+  texture that is sampled and rendered to needs an SRV _and_ an RTV; the image's
+  `ImageUsage` decides which. Every combination D3D12 has no member for — a
+  depth stencil view of a volume, a multisampled UAV, a cube whose layers are
+  not whole cubes, a view whose dimensionality is not its image's — is refused
+  with `InvalidDescriptor` naming it, because `CreateShaderResourceView` and its
+  three siblings return `void` and cannot report anything.
+
+  **`ImageViewDesc::format` must equal its image's format on this backend**,
+  which is a documented divergence from `crcbl-mtl`: D3D12 permits the sRGB
+  reinterpretation the seam describes only from a typeless resource, or where an
+  optional casting capability is reported, and neither is worth making the
+  seam's promise machine-dependent or every render target uncompressed. A
+  **sampled depth** image is not that case and does work: it is stored typeless
+  (`R32_TYPELESS` and friends) with the depth-stencil view and the shader view
+  each naming their own concrete format.
+
+  `MemoryLocation` maps to D3D12's three standard heaps, and each gets the only
+  initial resource state D3D12 accepts for it. An image on a host-visible heap
+  is refused — those heaps hold buffers only — as is `write_buffer` on a
+  `DeviceLocal` buffer, which D3D12 reaches through a copy rather than a map.
+
+  Every seam format has an exact `DXGI_FORMAT` and the mapping is tested for
+  injectivity, as is the separate typeless/depth-read table: two seam formats
+  collapsing onto one API format is invisible at run time — the image is
+  created, the sample succeeds, the colour is wrong.
+
+  `TEXTURE_COMPRESSION_BC` and `SAMPLER_ANISOTROPY` are now reported, each
+  because the call behind it landed: BC support is measured with a real
+  `CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT)` per BC format, and
+  `max_sampler_anisotropy` moves to `D3D12_REQ_MAXANISOTROPY`. The tier is still
+  B on every adapter. Everything past resources — pipelines, bind groups,
+  command recording, submission, swapchains, queries, readback — still refuses
+  by name.
+
 - **`crcbl-shaders`** now emits **MSL** beside the SPIR-V and WGSL. Slang's
   `-target metal` output is committed as `msl/*.metal`, hashed into
   `spirv/manifest.txt` exactly like the other two, verified by `build.rs` on

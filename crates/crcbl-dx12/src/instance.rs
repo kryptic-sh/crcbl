@@ -1,9 +1,12 @@
 //! The Direct3D 12 [`Instance`] implementation — adapter enumeration, the WARP
-//! question, and refusals that name themselves.
+//! question, device creation, and the refusals that still name themselves.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crcbl_hal::{
-    AdapterId, AdapterInfo, BackendKind, DeviceDesc, HalError, Instance, PendingDevice,
-    SurfaceCaps, SurfaceHandle, SurfaceTarget,
+    AdapterId, AdapterInfo, BackendKind, DeviceDesc, DeviceRequestState, HalError, Instance,
+    PendingDevice, SurfaceCaps, SurfaceHandle, SurfaceTarget,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, DXGI_ADAPTER_DESC1, DXGI_CREATE_FACTORY_FLAGS, DXGI_ERROR_NOT_FOUND,
@@ -11,19 +14,49 @@ use windows::Win32::Graphics::Dxgi::{
 };
 
 use crate::adapter::{self, RawCaps};
+use crate::device::Dx12Device;
 
-/// One enumerated adapter: what the seam was told about it, and the raw D3D12
-/// answers that were told from.
+/// Process-wide source of owner ids.
 ///
-/// The `IDXGIAdapter1` it was read from is **not** kept. `D3D12CreateDevice`
-/// takes one, so the device slice will have to keep both it and the factory —
-/// but this slice opens nothing, and holding a COM reference nobody reads would
-/// be state with no reader. `crcbl-mtl`'s first slice made the same call about
-/// its `MTLDevice` objects and reversed it in the slice that needed them.
+/// `crcbl-hal`'s [`device`](crcbl_hal::device) obligation 3 obliges every
+/// backend to stamp an owner identity into its own side table, because a
+/// [`Handle`](crcbl_core::Handle) has no room for one and two devices genuinely
+/// do issue identical bits. A counter is enough, and is cheaper to compare than
+/// an interface pointer — which on D3D12 would additionally be the wrong key,
+/// since two `D3D12CreateDevice` calls on one adapter may hand back the same
+/// object.
+static NEXT_OWNER_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn next_owner_id() -> u64 {
+    NEXT_OWNER_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The refusal this backend hands back for a slice that has not arrived, with
+/// `what` naming that slice.
+///
+/// One constructor rather than a literal per call site so every entry point
+/// refuses in the same voice, and so the reader can see at a glance which ones
+/// still do.
+pub(crate) fn not_yet(what: &'static str) -> HalError {
+    HalError::Unsupported {
+        backend: BackendKind::Dx12,
+        what,
+    }
+}
+
+/// One enumerated adapter: what the seam was told about it, the raw D3D12
+/// answers that were told from, and the DXGI interface it was read through.
+///
+/// DX1 kept only the first two and dropped the `IDXGIAdapter1`, because nothing
+/// needed it. [`Instance::request_device`] needs it — `D3D12CreateDevice` takes
+/// an `IDXGIAdapter1` and there is no way to name an adapter without one — so it
+/// is kept now that there is a caller. `crcbl-mtl` made and reversed exactly
+/// this call about its `MTLDevice` objects.
 #[derive(Debug)]
 pub(crate) struct AdapterRecord {
     pub(crate) info: AdapterInfo,
     pub(crate) raw: RawCaps,
+    pub(crate) adapter: IDXGIAdapter1,
 }
 
 impl AdapterRecord {
@@ -43,7 +76,8 @@ impl AdapterRecord {
             "crcbl-dx12 adapter {id} \"{name}\" luid={luid:#018x} type={kind:?} \
              vendor={vendor:#06x} device={device:#06x} ResourceBindingTier={tier} \
              HighestShaderModel={model} sm66-dynamic-resources={dynamic} \
-             renderer-tier={renderer:?} features={features:?} driver=\"{driver}\"",
+             block-compression={bc} renderer-tier={renderer:?} features={features:?} \
+             driver=\"{driver}\"",
             id = self.info.id.0,
             luid = self.raw.luid,
             name = self.info.name,
@@ -57,6 +91,11 @@ impl AdapterRecord {
             } else {
                 "no"
             },
+            bc = if self.raw.block_compression {
+                "yes"
+            } else {
+                "no"
+            },
             renderer = self.info.caps.tier(),
             features = self.info.caps.features,
             driver = self.info.driver,
@@ -64,14 +103,42 @@ impl AdapterRecord {
     }
 }
 
+/// Everything a device needs to keep alive from the instance that made it.
+///
+/// `crcbl-hal`'s **obligation 1**: a `Device` may outlive its `Instance`, and
+/// the backend *must* keep the instance-level state alive internally rather than
+/// borrowing it. This is that state, and [`Dx12Device`] holds an [`Arc`] of it,
+/// so dropping the public [`Dx12Instance`] while a device is open releases
+/// nothing the device is still using.
+///
+/// On D3D12 that state is the DXGI factory and the adapters. The factory is
+/// **not** dead weight: DXGI documents an adapter enumerated from a factory as
+/// tied to it, and the swapchain slice needs the same factory to call
+/// `CreateSwapChainForHwnd` — so keeping it here is what stops that slice
+/// re-creating one and asking DXGI a question about an adapter the new factory
+/// never enumerated.
+///
+/// There is no instance-level owner id here. Obligation 3 splits ownership two
+/// ways — surfaces are checked against the *instance*, everything else against
+/// the *device* — and this instance issues no surfaces, so an instance id would
+/// be a field nothing compares. The swapchain slice adds it along with the
+/// surfaces it has to check.
+#[derive(Debug)]
+pub(crate) struct InstanceInner {
+    /// Held for the reasons above; nothing in this slice reads it back.
+    _factory: IDXGIFactory4,
+    pub(crate) adapters: Vec<AdapterRecord>,
+}
+
 /// Every D3D12 adapter on the machine, described before any of them is opened.
 ///
-/// Holds owned [`AdapterInfo`] and the raw D3D12 answers behind it; no COM
-/// object survives [`Dx12Instance::open`]. See the crate docs for why that
-/// means no `unsafe` marker impl is written here.
+/// Holds owned [`AdapterInfo`], the raw D3D12 answers behind it, and the DXGI
+/// factory and adapters — behind an [`Arc`] shared with every `Dx12Device`
+/// opened from it. See `InstanceInner` for the lifetime obligation that shape
+/// discharges, and the crate docs for why none of it needs an `unsafe` marker.
 #[derive(Debug)]
 pub struct Dx12Instance {
-    adapters: Vec<AdapterRecord>,
+    inner: Arc<InstanceInner>,
 }
 
 impl Dx12Instance {
@@ -143,7 +210,11 @@ impl Dx12Instance {
             else {
                 continue;
             };
-            let record = AdapterRecord { info, raw };
+            let record = AdapterRecord {
+                info,
+                raw,
+                adapter: raw_adapter,
+            };
             // The measurement, emitted by the backend itself rather than only by
             // its tests: an application with a logger installed gets the line
             // that answers `docs/backlog.md`'s question without anyone running a
@@ -158,7 +229,12 @@ impl Dx12Instance {
             log::warn!("crcbl-dx12: DXGI lists no adapter D3D12 will open, not even WARP");
             return None;
         }
-        Some(Self { adapters })
+        Some(Self {
+            inner: Arc::new(InstanceInner {
+                _factory: factory,
+                adapters,
+            }),
+        })
     }
 
     /// The enumerated records, raw D3D12 answers included.
@@ -175,20 +251,39 @@ impl Dx12Instance {
     /// to object to.
     #[cfg(test)]
     pub(crate) fn records(&self) -> &[AdapterRecord] {
-        &self.adapters
+        &self.inner.adapters
     }
 
-    /// The refusal this slice hands back, with `what` naming the slice the
-    /// answer arrives in.
+    /// Opens a device, returning this crate's own type.
     ///
-    /// One constructor rather than a literal per call site so every entry point
-    /// refuses in the same voice, and so the reader can see at a glance that all
-    /// of them do.
-    fn not_yet(what: &'static str) -> HalError {
-        HalError::Unsupported {
-            backend: BackendKind::Dx12,
-            what,
+    /// [`Instance::request_device`] wraps this in a [`PendingDevice`]; the
+    /// crate's tests call it directly, because a `Box<dyn Device>` cannot be
+    /// asked about the pools underneath it.
+    ///
+    /// The order of the three refusals is the seam's, and it is deliberate: the
+    /// adapter first, then the features, then the surface. Answering
+    /// `UnsupportedFeatures` for an adapter that does not exist would blame the
+    /// hardware for a caller's index bug.
+    pub(crate) fn open_device(&self, desc: &DeviceDesc<'_>) -> Result<Dx12Device, HalError> {
+        let Some(record) = self
+            .inner
+            .adapters
+            .iter()
+            .find(|record| record.info.id == desc.adapter)
+        else {
+            return Err(HalError::NoSuchAdapter(desc.adapter.0));
+        };
+        let missing = record.info.caps.missing(desc.required_features);
+        if !missing.is_empty() {
+            return Err(HalError::UnsupportedFeatures { missing });
         }
+        if let Some(surface) = desc.compatible_surface {
+            // Not `ForeignObject`: this instance has issued no surface at all
+            // (`create_surface` refuses), so every handle offered here is one
+            // that never resolved rather than one belonging to somebody else.
+            return Err(HalError::invalid_handle("surface", surface));
+        }
+        Dx12Device::open(Arc::clone(&self.inner), record, desc)
     }
 }
 
@@ -287,7 +382,8 @@ impl Instance for Dx12Instance {
     }
 
     fn adapters(&self) -> Vec<AdapterInfo> {
-        self.adapters
+        self.inner
+            .adapters
             .iter()
             .map(|record| record.info.clone())
             .collect()
@@ -299,7 +395,7 @@ impl Instance for Dx12Instance {
         // `target`. The swapchain slice is where obligation 2 (the window
         // outlives the surface) starts to matter, and where
         // `SurfaceTarget::Win32`'s `hwnd` finally gets read.
-        Err(Self::not_yet("surface creation (the DX12 swapchain slice)"))
+        Err(not_yet("surface creation (the DX12 swapchain slice)"))
     }
 
     fn destroy_surface(&self, _surface: SurfaceHandle) {
@@ -324,35 +420,57 @@ impl Instance for Dx12Instance {
         // What must never happen here is the failure the trait calls out by
         // name — reporting a non-presentable adapter as empty `formats` or empty
         // `present_modes`. This slice cannot present at all, so it says so.
-        Err(Self::not_yet(
+        Err(not_yet(
             "surface capability queries (the DX12 swapchain slice)",
         ))
     }
 
+    /// Opens the device *now* and hands it over on the first poll.
+    ///
+    /// D3D12 device creation is synchronous — `D3D12CreateDevice` and
+    /// `CreateCommandQueue` both return before this call does — so there is
+    /// nothing to wait for and this backend does not pretend otherwise. The seam
+    /// is poll-shaped because WebGPU's `requestDevice` is a promise (see
+    /// [`crcbl_hal::device`]); `crcbl-vk` and `crcbl-mtl` complete on their
+    /// first poll for the same reason, and so does this.
     fn request_device(&self, desc: &DeviceDesc<'_>) -> Result<Box<dyn PendingDevice>, HalError> {
-        // The adapter check is real and comes first: an unknown adapter is a
-        // caller bug this slice can genuinely diagnose today, and the trait
-        // makes `NoSuchAdapter` a distinct contract from "the backend cannot do
-        // this". Reporting the slice's refusal for an out-of-range id would hide
-        // a bug behind a "not yet".
-        if !self
-            .adapters
-            .iter()
-            .any(|record| record.info.id == desc.adapter)
-        {
-            return Err(HalError::NoSuchAdapter(desc.adapter.0));
-        }
-        // `desc.required_features` is deliberately *not* checked against the
-        // adapter's caps. The refusal below is unconditional, so answering
-        // `UnsupportedFeatures` first would blame the adapter for a gap that is
-        // this backend's: a caller asking for `Features::TIER_A` would be told
-        // its GPU is inadequate when the truth is that no device opens yet.
-        Err(Self::not_yet("device creation (the DX12 device slice)"))
+        let device = self.open_device(desc)?;
+        Ok(Box::new(Dx12PendingDevice {
+            device: Some(Box::new(device)),
+        }))
+    }
+}
+
+/// A D3D12 device request — already finished before it is returned.
+///
+/// See [`Instance::request_device`] above for why this exists at all on a
+/// backend whose device creation is synchronous.
+#[derive(Debug)]
+struct Dx12PendingDevice {
+    /// `None` once handed over, so a second poll is the caller bug it is rather
+    /// than a second device.
+    device: Option<Box<dyn crcbl_hal::Device>>,
+}
+
+impl PendingDevice for Dx12PendingDevice {
+    fn backend(&self) -> BackendKind {
+        BackendKind::Dx12
+    }
+
+    fn poll(&mut self) -> Result<DeviceRequestState, HalError> {
+        self.device
+            .take()
+            .map(DeviceRequestState::Ready)
+            .ok_or_else(|| {
+                HalError::InvalidDescriptor(
+                    "this device request already produced its device".to_string(),
+                )
+            })
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crcbl_hal::{DeviceType, Features, Limits, RendererTier};
     /// The two constants the bindless rule is written against, named here so the
@@ -369,8 +487,24 @@ mod tests {
     /// suite that skips itself into green is how "compile-verified only"
     /// backends happen — the trap `docs/plan/09-backends-metal-dx12.md` names in
     /// its risk list. WARP ships in Windows, so there is always something.
-    fn open() -> Dx12Instance {
+    pub(crate) fn open() -> Dx12Instance {
         Dx12Instance::open().expect("a Windows machine reports at least WARP")
+    }
+
+    /// A device request this backend can actually satisfy today.
+    ///
+    /// [`DeviceDesc::for_adapter`] asks for [`Features::TIER_A`], which this
+    /// backend does not report until the pipeline and command slices land — see
+    /// `the_default_device_desc_is_refused_for_the_tier_a_gap` below, which is
+    /// the test that pins that.
+    pub(crate) fn desc(adapter: AdapterId) -> DeviceDesc<'static> {
+        DeviceDesc {
+            label: Some("crcbl-dx12 test device"),
+            adapter,
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            compatible_surface: None,
+        }
     }
 
     /// Every adapter's measurement, on one line each.
@@ -679,29 +813,114 @@ mod tests {
         }
     }
 
-    /// Opening a device is refused *by name*: the message says which backend and
-    /// which slice, so the log line reads "not yet" and not "broken".
+    /// A device now opens, and arrives through exactly the request/poll pair the
+    /// seam specifies — including the second poll being a caller bug rather than
+    /// a second device.
     #[test]
-    fn opening_a_device_is_refused_and_the_refusal_names_dx12() {
+    fn a_device_opens_on_the_first_poll_and_only_once() {
+        let instance = open();
+        let adapters = instance.adapters();
+        assert!(!adapters.is_empty(), "nothing to check");
+
+        let mut pending = instance
+            .request_device(&desc(adapters[0].id))
+            .expect("a D3D12 device opens with no required features");
+        assert_eq!(pending.backend(), BackendKind::Dx12);
+
+        let device = pending
+            .poll()
+            .expect("D3D12 device creation is synchronous")
+            .into_device()
+            .expect("the first poll must complete a synchronous backend");
+        assert_eq!(device.backend(), BackendKind::Dx12);
+
+        let error = pending
+            .poll()
+            .expect_err("the device was already handed over");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+    }
+
+    /// The seam's convenience constructor asks for Tier A, and this backend is
+    /// Tier B until the pipeline and command slices land — so `for_adapter` is
+    /// refused, by name, on real hardware.
+    ///
+    /// This is the visible consequence of the tier decision the crate docs argue
+    /// for; if the backend ever starts reporting the four waiting features, this
+    /// test says so rather than letting the change go unnoticed.
+    #[test]
+    fn the_default_device_desc_is_refused_for_the_tier_a_gap() {
         let instance = open();
         let adapters = instance.adapters();
         assert!(!adapters.is_empty(), "nothing to check");
 
         let error = instance
             .request_device(&DeviceDesc::for_adapter(adapters[0].id))
-            .expect_err("this slice creates no devices");
+            .expect_err("this backend does not report Tier A");
+        let HalError::UnsupportedFeatures { missing } = error else {
+            panic!("expected a feature gap, got {error:?}");
+        };
         assert!(
-            matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
-            "{error:?}"
+            missing.contains(Features::COMPUTE | Features::TIMELINE_SEMAPHORE),
+            "the calls behind these are what keep this backend at Tier B: {missing:?}"
         );
-        let text = error.to_string();
-        assert!(text.contains("dx12"), "{text}");
-        assert!(text.contains("device creation"), "{text}");
     }
 
-    /// An out-of-range adapter is a distinct contract from "not yet", and it is
-    /// one this slice can genuinely satisfy — so it must not be swallowed by the
-    /// refusal above.
+    /// A device asked to be compatible with a surface is refused on the surface,
+    /// not on the device — no surface exists to be compatible with.
+    ///
+    /// The order matters and is what this pins: the surface is checked *after*
+    /// the adapter and the features, so a valid adapter with a stale surface
+    /// reaches this branch rather than an earlier one.
+    #[test]
+    fn a_compatible_surface_is_refused_as_an_unresolvable_handle() {
+        let instance = open();
+        let adapters = instance.adapters();
+        assert!(!adapters.is_empty(), "nothing to check");
+
+        let mut with_surface = desc(adapters[0].id);
+        // `create_surface` issues nothing, so any handle at all is one that
+        // never resolved. `Handle::from_bits` is the only way to build one.
+        with_surface.compatible_surface =
+            Some(crcbl_core::Handle::from_bits(1 << 32).expect("generation 1 is non-zero"));
+
+        let error = instance
+            .request_device(&with_surface)
+            .expect_err("no surface handle can resolve on this backend");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "surface"),
+            "{error:?}"
+        );
+    }
+
+    /// Obligation 1, made observable: the device must survive its instance being
+    /// dropped, and must still work afterwards.
+    #[test]
+    fn a_device_outlives_the_instance_that_made_it() {
+        let device = {
+            let instance = open();
+            let adapters = instance.adapters();
+            assert!(!adapters.is_empty(), "nothing to check");
+            instance
+                .create_device(&desc(adapters[0].id))
+                .expect("a D3D12 device opens with no required features")
+        };
+        // The instance is gone; the `Arc` inside the device is what keeps its
+        // factory and adapter alive. A buffer round trip is the cheapest proof
+        // that the device is still usable rather than merely still addressable.
+        assert_eq!(device.backend(), BackendKind::Dx12);
+        let buffer = device
+            .create_buffer(&crcbl_hal::BufferDesc {
+                label: Some("outlives its instance"),
+                size: 256,
+                usage: crcbl_hal::BufferUsage::STORAGE,
+                memory: crcbl_hal::MemoryLocation::HostUpload,
+            })
+            .expect("the D3D12 device is still live");
+        device.destroy_buffer(buffer);
+    }
+
+    /// An out-of-range adapter is a distinct contract from a feature gap, and it
+    /// must not be swallowed by one.
     #[test]
     fn an_unknown_adapter_is_refused_as_such_not_as_unimplemented() {
         let instance = open();

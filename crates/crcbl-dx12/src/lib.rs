@@ -8,18 +8,37 @@
 //! (PIX, DRED), robustness against a missing vendor ICD — and one thing this
 //! slice exists to *measure* rather than assume.
 //!
-//! # What this slice is, and the question it was written to answer
+//! # What this backend does, and the question it was written to answer
 //!
-//! **Adapter enumeration, and nothing else.** `Dx12Instance` lists every D3D12
-//! adapter with its capabilities filled in, which is the one thing
-//! [`Instance::adapters`](crcbl_hal::Instance::adapters) promises can be
-//! answered before a device exists. Every other entry point refuses with
+//! **Adapter enumeration, and the resource half of the seam.**
+//! `Dx12Instance` lists every D3D12 adapter with its capabilities filled in,
+//! which is the one thing [`Instance::adapters`](crcbl_hal::Instance::adapters)
+//! promises can be answered before a device exists. `request_device` then opens
+//! a real `ID3D12Device` and a `D3D12_COMMAND_LIST_TYPE_DIRECT` queue, and the
+//! device it hands back creates buffers, images, image views and samplers,
+//! writes into a host-visible buffer, and waits for the GPU on a fence.
+//!
+//! Everything past that — shader modules, pipelines, bind groups, command
+//! recording, submission, swapchains, queries and readback — refuses with
 //! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported) whose `what`
 //! names the slice the answer arrives in, so a caller reads "not yet" rather
-//! than "broken". An out-of-range adapter still gets
-//! [`NoSuchAdapter`](crcbl_hal::HalError::NoSuchAdapter): that is a caller bug
-//! this slice can genuinely diagnose, and folding it into the refusal would lose
-//! it.
+//! than "broken". What is **not** folded into that refusal is anything the
+//! backend can genuinely diagnose: an out-of-range adapter is
+//! [`NoSuchAdapter`](crcbl_hal::HalError::NoSuchAdapter), a stale handle is
+//! [`InvalidHandle`](crcbl_hal::HalError::InvalidHandle), one from another
+//! device is [`ForeignObject`](crcbl_hal::HalError::ForeignObject), and a
+//! descriptor D3D12 cannot satisfy is
+//! [`InvalidDescriptor`](crcbl_hal::HalError::InvalidDescriptor) saying which
+//! field and why.
+//!
+//! **One capability of the seam is refused rather than implemented**, and it is
+//! called out here because it is a divergence from `crcbl-mtl` rather than a
+//! missing slice: an [`ImageViewDesc`](crcbl_hal::ImageViewDesc) whose `format`
+//! differs from its image's — the sRGB reinterpretation the seam documents — is
+//! an error on this backend. D3D12 allows the cast only from a *typeless*
+//! resource, or where an optional casting capability is reported, and
+//! `crcbl_dx12::device`'s `create_image_view` argues why neither is the right
+//! trade for this slice.
 //!
 //! The question is `docs/backlog.md`'s **"Does WARP clear Tier A?"**. Every
 //! software-rasteriser job in `.github/workflows/ci.yml` is
@@ -44,13 +63,13 @@
 //! `Apple Paravirtual device` that cannot execute a shader at all, and the
 //! Windows runner is owed the same suspicion.
 //!
-//! # Every adapter is Tier B in this slice, and that is *this backend* speaking
+//! # Every adapter is Tier B so far, and that is *this backend* speaking
 //!
 //! [`DeviceCaps::tier`](crcbl_hal::DeviceCaps::tier) is derived from
 //! [`Features`](crcbl_hal::Features) precisely so a backend cannot claim a tier
-//! it has not earned, and this slice earns two of the six Tier A flags. So the
-//! derived tier is **B for every adapter, including a Tier-A-capable GPU** —
-//! because [`COMPUTE`](crcbl_hal::Features::COMPUTE),
+//! it has not earned, and the flags it has not earned are still the majority of
+//! the Tier A set. So the derived tier is **B for every adapter, including a
+//! Tier-A-capable GPU** — because [`COMPUTE`](crcbl_hal::Features::COMPUTE),
 //! [`TIMELINE_SEMAPHORE`](crcbl_hal::Features::TIMELINE_SEMAPHORE),
 //! [`MULTI_DRAW_INDIRECT`](crcbl_hal::Features::MULTI_DRAW_INDIRECT) and
 //! [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) all wait on
@@ -61,24 +80,30 @@
 //! answer is the statement about the adapter, and it is the one the backlog
 //! asked for.
 //!
-//! # Two flags are reported with no call behind them, on purpose
+//! # `DESCRIPTOR_INDEXING` is reported ahead of the call behind it, on purpose
 //!
 //! `crcbl-mtl`'s rule is that a backend reports a feature once a call in the
 //! crate makes it true, and it withdrew
 //! [`DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING) when its
-//! bind groups turned out not to deliver one. This slice reports it anyway,
-//! together with
-//! [`BUFFER_DEVICE_ADDRESS`](crcbl_hal::Features::BUFFER_DEVICE_ADDRESS), and
-//! the reason it is not the same mistake is that **no caller can act on either
-//! one here**: `request_device` refuses unconditionally, so there is no device,
-//! no bind group layout and no buffer to be misled about. Both are adapter-level
-//! facts read from real queries, and answering the backlog's question requires
-//! reporting the first of them.
+//! bind groups turned out not to deliver one. This backend reports it anyway,
+//! and the reason it is not the same mistake is that **no caller can act on it
+//! here**: `create_bind_group_layout` and every pipeline entry point refuse, so
+//! there is no layout and no pipeline to be misled. It is an adapter-level fact
+//! read from real queries, and answering the backlog's question requires
+//! reporting it.
 //!
-//! What *would* be the mistake is keeping `DESCRIPTOR_INDEXING` past the slice
-//! that discovers whether this backend's bind groups can deliver a runtime-sized
-//! array. `crcbl_dx12::adapter` says so on the flag itself, so the withdrawal is
-//! a decision someone has already been warned about rather than a surprise.
+//! What *would* be the mistake is keeping it past the slice that discovers
+//! whether this backend's bind groups can deliver a runtime-sized array.
+//! `crcbl_dx12::adapter` says so on the flag itself, so the withdrawal is a
+//! decision someone has already been warned about rather than a surprise.
+//!
+//! The other three reported flags do have a call behind them:
+//! [`BUFFER_DEVICE_ADDRESS`](crcbl_hal::Features::BUFFER_DEVICE_ADDRESS) is not
+//! optional in D3D12 and has no query to make,
+//! [`TEXTURE_COMPRESSION_BC`](crcbl_hal::Features::TEXTURE_COMPRESSION_BC) is
+//! measured per format and gates `create_image`, and
+//! [`SAMPLER_ANISOTROPY`](crcbl_hal::Features::SAMPLER_ANISOTROPY) arrived with
+//! `create_sampler`.
 //!
 //! # `Dx12Instance` exists only on Windows, and is unlinked here on purpose
 //!
@@ -95,28 +120,46 @@
 //! `crcbl-hal`'s rule — because the absence is expressed by the crate having no
 //! public items, not by a caller testing the platform.
 //!
-//! # No `unsafe` marker impls, and no COM object outlives enumeration
+//! # No `unsafe` marker impls anywhere in this crate
 //!
-//! [`Instance`](crcbl_hal::Instance) requires
-//! [`HalThreadSafe`](crcbl_hal::threading::HalThreadSafe), which is
-//! `Send + Sync` on native. `Dx12Instance` holds owned
-//! [`AdapterInfo`](crcbl_hal::AdapterInfo) and the raw D3D12 answers it was
-//! derived from — plain data, no COM pointers — so the markers come from the
-//! compiler rather than from an assertion written here.
+//! [`Instance`](crcbl_hal::Instance) and [`Device`](crcbl_hal::Device) both
+//! require [`HalThreadSafe`](crcbl_hal::threading::HalThreadSafe), which is
+//! `Send + Sync` on native, and neither is satisfied here by an assertion.
+//! `windows-rs` declares `unsafe impl Send` **and** `Sync` for every interface
+//! this crate holds — `IDXGIFactory4`, `IDXGIAdapter1`, `ID3D12Device`,
+//! `ID3D12CommandQueue`, `ID3D12Resource`, `ID3D12DescriptorHeap` and
+//! `ID3D12Fence` — so the markers come from the compiler.
 //!
-//! That is a decision about *this* slice, not a claim about `windows-rs`: the
-//! bindings do declare `unsafe impl Send`/`Sync` for `IDXGIFactory4`,
-//! `IDXGIAdapter1` and `ID3D12Device`, so the device slice can keep them without
-//! writing an `unsafe` impl either. What it will have to keep is the factory and
-//! the adapters, because `D3D12CreateDevice` takes an `IDXGIAdapter1` — this
-//! slice drops them because nothing needs them after the capability read, which
-//! is the same call `crcbl-mtl`'s first slice made about its `MTLDevice`
-//! objects.
+//! That is worth stating because `crcbl-mtl` could not do it: `MTLBuffer` and
+//! `MTLTexture` inherit from `MTLResource`, which objc2 leaves unmarked, so its
+//! device slice had to write the impl and justify it. The one Win32 type here
+//! that is not `Send` is the event `HANDLE` a fence wait is armed with, and
+//! `Device::wait_idle` creates and closes it inside the call rather than storing
+//! it — which is the second reason for a decision the first reason (two
+//! concurrent waiters must not share an auto-reset event) already forced.
+//!
+//! The factory and the adapters **are** kept, behind an `Arc` shared with every
+//! device: `D3D12CreateDevice` takes an `IDXGIAdapter1`, and the seam obliges a
+//! `Device` to outlive its `Instance`. That obligation is discharged by
+//! construction rather than by a rule someone has to remember, exactly as
+//! `crcbl-mtl` discharged it.
 
 #[cfg(target_os = "windows")]
 mod adapter;
 #[cfg(target_os = "windows")]
+mod command;
+#[cfg(target_os = "windows")]
+mod conv;
+#[cfg(target_os = "windows")]
+mod descriptor;
+#[cfg(target_os = "windows")]
+mod device;
+#[cfg(target_os = "windows")]
+mod handle;
+#[cfg(target_os = "windows")]
 mod instance;
+#[cfg(target_os = "windows")]
+mod view;
 
 #[cfg(target_os = "windows")]
 pub use instance::Dx12Instance;

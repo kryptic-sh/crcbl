@@ -27,17 +27,20 @@
 //!
 //! **Report what the adapter answers; leave off what would be a promise about
 //! code that is not written.** D3D12 is generous with universal guarantees —
-//! every device has compute, `ID3D12Fence`, PIX markers, anisotropic sampling —
-//! and it is tempting to advertise them because they are true of the *API*. They
-//! are not yet true of this *backend*: nothing here opens a device, so a caller
-//! that keyed off one of those flags would find the entry point behind it
-//! refusing. `crcbl-mtl` and `crcbl-wgpu` reached the same conclusion and state
-//! it the same way.
+//! every device has compute, `ID3D12Fence`, PIX markers — and it is tempting to
+//! advertise them because they are true of the *API*. They are not yet true of
+//! this *backend*: a caller that keyed off one of those flags would find the
+//! entry point behind it refusing. `crcbl-mtl` and `crcbl-wgpu` reached the same
+//! conclusion and state it the same way.
 //!
-//! The two exceptions, and why they are not the same mistake, are argued on
-//! [`features_of`] and in the crate docs.
+//! A flag moves when the call behind it lands, and the resource slice moved two:
+//! `TEXTURE_COMPRESSION_BC`, now that `create_image` creates BC images, and
+//! `SAMPLER_ANISOTROPY`, now that `create_sampler` fills in a `MaxAnisotropy`.
+//! Every reported flag, and every withheld one, is argued on [`features_of`].
 
-use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits};
+use crcbl_hal::{
+    AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Format, Limits,
+};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
 use windows::Win32::Graphics::Direct3D12::{
     D3D_SHADER_MODEL, D3D_SHADER_MODEL_5_1, D3D_SHADER_MODEL_6_0, D3D_SHADER_MODEL_6_1,
@@ -48,9 +51,11 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_CS_THREAD_GROUP_MAX_X, D3D12_CS_THREAD_GROUP_MAX_Y, D3D12_CS_THREAD_GROUP_MAX_Z,
     D3D12_FEATURE, D3D12_FEATURE_ARCHITECTURE1, D3D12_FEATURE_D3D12_OPTIONS,
     D3D12_FEATURE_DATA_ARCHITECTURE1, D3D12_FEATURE_DATA_D3D12_OPTIONS,
-    D3D12_FEATURE_DATA_SHADER_MODEL, D3D12_FEATURE_SHADER_MODEL,
-    D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2, D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT,
-    D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT, D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION,
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT, D3D12_FEATURE_DATA_SHADER_MODEL,
+    D3D12_FEATURE_FORMAT_SUPPORT, D3D12_FEATURE_SHADER_MODEL, D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE,
+    D3D12_FORMAT_SUPPORT1_TEXTURE2D, D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2,
+    D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT, D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT,
+    D3D12_REQ_MAXANISOTROPY, D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION,
     D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION, D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION,
     D3D12_RESOURCE_BINDING_TIER, D3D12_RESOURCE_BINDING_TIER_3,
     D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT,
@@ -60,6 +65,8 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIAdapter1, IDXGIDevice,
 };
 use windows::core::Interface;
+
+use crate::conv;
 
 /// Bytes in one constant-buffer element.
 ///
@@ -125,6 +132,14 @@ pub(crate) struct RawCaps {
     /// anyway. Enumeration de-duplicates on this, and a test asserts no two
     /// adapters share one.
     pub(crate) luid: u64,
+    /// Whether every BC format the seam declares can be sampled as a 2D texture
+    /// on this adapter, from `D3D12_FEATURE_FORMAT_SUPPORT`.
+    ///
+    /// Asked per format because that is the only way D3D12 answers it, and
+    /// answered as one flag because [`Features::TEXTURE_COMPRESSION_BC`] is one
+    /// flag — a partial answer would be a feature that is true of some of the
+    /// formats it names, which is worse than either.
+    pub(crate) block_compression: bool,
 }
 
 impl RawCaps {
@@ -172,6 +187,10 @@ impl FeatureQuery for D3D12_FEATURE_DATA_SHADER_MODEL {
 
 impl FeatureQuery for D3D12_FEATURE_DATA_ARCHITECTURE1 {
     const FEATURE: D3D12_FEATURE = D3D12_FEATURE_ARCHITECTURE1;
+}
+
+impl FeatureQuery for D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+    const FEATURE: D3D12_FEATURE = D3D12_FEATURE_FORMAT_SUPPORT;
 }
 
 /// One `CheckFeatureSupport` call, with the answer returned rather than written
@@ -224,6 +243,50 @@ fn highest_shader_model(device: &ID3D12Device) -> D3D_SHADER_MODEL {
         }
     }
     D3D_SHADER_MODEL_NONE
+}
+
+/// Every BC format the seam declares.
+///
+/// Hand-written because [`Format`] has no iterator. Only the BC arms appear:
+/// `supports_block_compression` asks about exactly the formats
+/// [`Features::TEXTURE_COMPRESSION_BC`] promises, and a list that reached wider
+/// would report the feature on the strength of formats it does not name.
+const BC_FORMATS: [Format; 9] = [
+    Format::Bc1RgbaUnorm,
+    Format::Bc1RgbaUnormSrgb,
+    Format::Bc3RgbaUnorm,
+    Format::Bc3RgbaUnormSrgb,
+    Format::Bc4RUnorm,
+    Format::Bc5RgUnorm,
+    Format::Bc6hRgbUfloat,
+    Format::Bc7RgbaUnorm,
+    Format::Bc7RgbaUnormSrgb,
+];
+
+/// Whether every BC format can be a sampled 2D texture on this device.
+///
+/// Both support bits are required and neither implies the other:
+/// `D3D12_FORMAT_SUPPORT1_TEXTURE2D` says a texture of that format can exist,
+/// and `_SHADER_SAMPLE` says a shader may sample it. A format that could be
+/// created and not sampled would pass a one-bit check and then produce a
+/// texture the renderer cannot read.
+///
+/// **A refused query degrades to "no".** `D3D12_FEATURE_DATA_FORMAT_SUPPORT`
+/// answers per format and a driver that will not answer loses the feature rather
+/// than gaining it, which is the direction a capability must fail in.
+fn supports_block_compression(device: &ID3D12Device) -> bool {
+    BC_FORMATS.iter().all(|&format| {
+        let asked = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+            Format: conv::dxgi_format(format),
+            ..Default::default()
+        };
+        check_feature(device, asked).is_some_and(|answer| {
+            answer.Support1.contains(D3D12_FORMAT_SUPPORT1_TEXTURE2D)
+                && answer
+                    .Support1
+                    .contains(D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE)
+        })
+    })
 }
 
 /// A shader model as `"major.minor"`.
@@ -350,16 +413,17 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///   `docs/plan/09-backends-metal-dx12.md`'s mapping table calls a near-direct
 ///   fit and the one `docs/backlog.md` wants measured on WARP.
 ///
-///   **It is reported before a call backs it, and that is a deliberate
-///   exception.** `crcbl-mtl` reported this flag from `argumentBuffersSupport`
-///   in its first slice and had to *withdraw* it when its bind groups turned
-///   out to bind flat argument tables with no runtime-sized array. The reason
-///   the same reversal is not a lie here is that nothing in this slice can act
-///   on the flag: `request_device` refuses unconditionally, so no device, no
-///   bind group layout and no pipeline exists to be misled. **The slice that
-///   builds bind groups owns this flag** — if `create_bind_group_layout` cannot
-///   honour [`BindingFlags`](crcbl_hal::BindingFlags) on a descriptor heap, it
-///   must come off, exactly as it came off Metal.
+///   **It is reported ahead of the call that will back it, and that is a
+///   deliberate exception.** `crcbl-mtl` reported this flag from
+///   `argumentBuffersSupport` in its first slice and had to *withdraw* it when
+///   its bind groups turned out to bind flat argument tables with no
+///   runtime-sized array. The reason the same reversal is not a lie here is that
+///   nothing a caller can reach acts on the flag: the device slice creates no
+///   bind group layout and no pipeline, so there is nothing to be misled. **The
+///   slice that builds bind groups owns this flag** — if
+///   `create_bind_group_layout` cannot honour
+///   [`BindingFlags`](crcbl_hal::BindingFlags) on a descriptor heap, it must
+///   come off, exactly as it came off Metal.
 /// * [`Features::BUFFER_DEVICE_ADDRESS`] — **unconditional, and there is no
 ///   query to make.** Every D3D12 buffer resource answers
 ///   `ID3D12Resource::GetGPUVirtualAddress`, and a root SRV/UAV/CBV descriptor
@@ -367,6 +431,18 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///   there is no D3D12 device without it. The plan's mapping table calls it a
 ///   direct fit for the same reason. Reported with a comment rather than with a
 ///   query that would only ever answer yes.
+/// * [`Features::TEXTURE_COMPRESSION_BC`] ←
+///   [`supports_block_compression`], which asks
+///   `CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT)` about every BC format
+///   the seam declares and requires both `TEXTURE2D` and `SHADER_SAMPLE` on
+///   each. The query needs a `DXGI_FORMAT` and so had to wait for the format
+///   table [`crate::conv`] brought; `Device::create_image` creates images from
+///   it, which is what earns the flag rather than merely enabling the question.
+/// * [`Features::SAMPLER_ANISOTROPY`] — unconditional in D3D12, which states
+///   `D3D12_REQ_MAXANISOTROPY` as an architectural constant rather than a
+///   per-device answer. Reported now that `Device::create_sampler` builds a
+///   `D3D12_SAMPLER_DESC` with a `MaxAnisotropy` in it; `crcbl-mtl` withheld it
+///   until exactly the same point and for the same reason.
 ///
 /// # Absent, with the reason for each
 ///
@@ -379,18 +455,13 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///   call, and the command slice is the one that makes it.
 /// * [`Features::COMPUTE`] — `ID3D12Device::CreateComputePipelineState` is the
 ///   call; the pipeline slice makes it.
-/// * [`Features::TIMELINE_SEMAPHORE`] — `ID3D12Device::CreateFence` and
-///   `ID3D12CommandQueue::Signal` are the calls, and `ID3D12Fence` is a
-///   monotonic counter with no separate binary form, so this one is the seam's
-///   timeline almost verbatim. The device slice makes it.
-/// * [`Features::TEXTURE_COMPRESSION_BC`] —
-///   `CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT)` answers it, per format.
-///   That needs a `DXGI_FORMAT`, which needs the format table, which is the
-///   format slice; this crate's manifest says the same thing about the feature
-///   gate it would take.
-/// * [`Features::SAMPLER_ANISOTROPY`] — unconditional in D3D12
-///   (`D3D12_SAMPLER_DESC::MaxAnisotropy`), and withheld for the reason
-///   `crcbl-mtl` withheld it until its device slice: no sampler is created here.
+/// * [`Features::TIMELINE_SEMAPHORE`] — `ID3D12Fence` is a monotonic counter
+///   with no separate binary form, so this one is the seam's timeline almost
+///   verbatim, and `Device::wait_idle` already drives one. It stays off because
+///   the seam's semaphore is a *shared* completion point:
+///   `Device::create_semaphore` has to hand one out and
+///   `ID3D12CommandQueue::Wait` has to consume it on a submission, and the
+///   command slice owns both.
 /// * [`Features::DEBUG_MARKERS`] — PIX events go through `WinPixEventRuntime`,
 ///   a library this workspace does not depend on, so this needs a decision
 ///   before it needs a slice.
@@ -408,7 +479,9 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 /// * [`Features::ASYNC_COMPUTE_QUEUE`] and [`Features::TRANSFER_QUEUE`] —
 ///   `D3D12_COMMAND_LIST_TYPE_COMPUTE` and `_COPY` are exactly these, and
 ///   `crcbl_hal::QueueKind` already records that as why it is not named
-///   `QueueFamily`. The device slice creates the queues.
+///   `QueueFamily`. The device slice creates only the direct queue, because a
+///   queue handed out for a feature that is not reported is this rule in
+///   reverse; the slice that has work to put on a second queue reports it.
 /// * [`Features::DEPTH_CLAMP`], [`Features::DEPTH_BIAS_CLAMP`] and
 ///   [`Features::POLYGON_MODE_LINE`] — all three are fields of
 ///   `D3D12_RASTERIZER_DESC`, which is part of a pipeline state object. The
@@ -423,8 +496,12 @@ fn features_of(raw: &RawCaps) -> Features {
     if raw.dynamic_resources() {
         out |= Features::DESCRIPTOR_INDEXING;
     }
-    // No query: a GPU virtual address is not optional in D3D12. See above.
-    out |= Features::BUFFER_DEVICE_ADDRESS;
+    if raw.block_compression {
+        out |= Features::TEXTURE_COMPRESSION_BC;
+    }
+    // No query for either: a GPU virtual address is not optional in D3D12, and
+    // anisotropic sampling is an architectural constant. See above.
+    out |= Features::BUFFER_DEVICE_ADDRESS | Features::SAMPLER_ANISOTROPY;
     out
 }
 
@@ -471,16 +548,20 @@ fn features_of(raw: &RawCaps) -> Features {
 ///   WebGPU's downlevel guarantee and D3D12 clears it everywhere.
 /// * `max_draw_indirect_count` — the floor's value means "one draw per call",
 ///   which is exactly right while [`Features::DRAW_INDIRECT_COUNT`] is off.
-/// * `max_sampler_anisotropy` and `timestamp_period_ns` — keyed off features
-///   this adapter does not report, so they stay at the floor's neutral values.
-///   `D3D12_REQ_MAXANISOTROPY` is what the sampler slice will report.
+/// * `timestamp_period_ns` — keyed off a feature this adapter does not report,
+///   so it stays at the floor's neutral value.
 ///
-/// The one feature-keyed field that does move is `max_bindless_descriptors`, and
-/// it moves to [`D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2`]
-/// deliberately: [`Features::DESCRIPTOR_INDEXING`] requires binding tier 3, for
-/// which D3D12 defines **no constant at all** because the heap is bounded only
-/// by memory. The tier 2 constant is the largest figure the API commits to in
-/// writing, which makes it a ceiling this backend can actually honour.
+/// Two feature-keyed fields do move:
+///
+/// * `max_bindless_descriptors` moves to
+///   [`D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2`] deliberately:
+///   [`Features::DESCRIPTOR_INDEXING`] requires binding tier 3, for which D3D12
+///   defines **no constant at all** because the heap is bounded only by memory.
+///   The tier 2 constant is the largest figure the API commits to in writing,
+///   which makes it a ceiling this backend can actually honour.
+/// * `max_sampler_anisotropy` moves to [`D3D12_REQ_MAXANISOTROPY`], the value
+///   `D3D12_SAMPLER_DESC::MaxAnisotropy` is documented as capped at, now that
+///   [`Features::SAMPLER_ANISOTROPY`] is reported.
 fn limits_of(features: Features) -> Limits {
     let floor = Limits::minimum();
     Limits {
@@ -493,6 +574,14 @@ fn limits_of(features: Features) -> Limits {
             D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2
         } else {
             floor.max_bindless_descriptors
+        },
+        max_sampler_anisotropy: if features.contains(Features::SAMPLER_ANISOTROPY) {
+            #[allow(clippy::cast_precision_loss)]
+            {
+                D3D12_REQ_MAXANISOTROPY as f32
+            }
+        } else {
+            floor.max_sampler_anisotropy
         },
         max_color_attachments: D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT,
         max_compute_workgroup_size: [
@@ -573,6 +662,7 @@ pub(crate) fn describe(
         // parts back, only compares whole values.
         luid: (u64::from(desc.AdapterLuid.HighPart.cast_unsigned()) << 32)
             | u64::from(desc.AdapterLuid.LowPart),
+        block_compression: supports_block_compression(&device),
     };
     let features = features_of(&raw);
     let info = AdapterInfo {
@@ -660,6 +750,7 @@ mod tests {
             software: false,
             unified_memory: false,
             luid: 0,
+            block_compression: true,
         };
         assert!(base.dynamic_resources(), "tier 3 with SM6.6 is the answer");
 
@@ -711,6 +802,7 @@ mod tests {
                 software: false,
                 unified_memory: false,
                 luid: 0,
+                block_compression: true,
             };
             let features = features_of(&raw);
             let limits = limits_of(features);
@@ -740,6 +832,7 @@ mod tests {
             software: true,
             unified_memory: true,
             luid: 0,
+            block_compression: true,
         };
         assert_eq!(device_type_of(&warp), DeviceType::Cpu, "{warp:?}");
 

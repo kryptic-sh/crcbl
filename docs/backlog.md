@@ -4664,3 +4664,59 @@ visible to anyone reading the CI log.
   documented as a Direct3D 10 interface check, with a fallback string when it
   refuses. WARP is the adapter most likely to refuse it. If the CI line shows
   the fallback on real hardware too, the field needs a different source.
+
+## What DX2 left open
+
+The device-and-resources slice. Everything below is in `crates/crcbl-dx12`.
+
+- **An image view's format must equal its image's on DX12, and the seam says it
+  need not.** `create_image_view` refuses a differing `ImageViewDesc::format`
+  outright, so the sRGB reinterpretation `crcbl-hal` documents — and `crcbl-mtl`
+  delivers — is unavailable on this backend. D3D12 permits the cast only from a
+  typeless resource, which costs compression on every render target, or where
+  `CastingFullyTypedFormatSupported` is reported, which would make the seam's
+  promise depend on the machine. Both were declined for those reasons and the
+  argument is in the code. **This wants a decision before the bind-group
+  slice**: either the seam narrows its promise, or DX12 pays one of the two
+  costs. A sampled _depth_ image is not affected — it is stored typeless with
+  the depth-stencil view and the shader view each naming a concrete format.
+
+- **DX12 needs a deletion queue and does not have one.** A D3D12 command list
+  does not retain the resources it references, unlike Metal's command buffer, so
+  `destroy_buffer` and its siblings dropping the interface is sound today _only_
+  because `submit` refuses. **The command slice must bring a retire queue with
+  it** — a resource freed while a list that names it is in flight is a
+  use-after-free the debug layer reports and a release build does not.
+  `device.rs`'s module docs say so at the destroy calls.
+
+- **`create_image` does not check `mip_levels` against the extent.** More mips
+  than the extent admits reaches D3D12 as `E_INVALIDARG` and surfaces as
+  `HalError::Backend` rather than the `InvalidDescriptor` it is. Every other
+  descriptor rule in the slice is checked up front precisely because the
+  `Create*View` calls return `void`; this one was left to the runtime.
+
+- **`max_sample_count` and `max_storage_buffer_range` are still at the seam's
+  floor.** Both need per-format `CheckFeatureSupport` queries, which the format
+  table DX2 added now makes possible — the reason `adapter.rs` gives for
+  deferring them no longer holds.
+
+- **`device.rs`'s implementation half is over the size a module should reach**,
+  after `handle.rs`, `conv.rs`, `descriptor.rs` and `view.rs` were already split
+  out of it. The next seam available is the descriptor validation —
+  `check_image`, `check_view_type` and `build_views` — which is a move, not a
+  behaviour change.
+
+- **Nothing in the slice has executed anywhere but CI**, and the cross-target
+  clippy this tree runs gates types and links, not behaviour. The calls CI is
+  the first to exercise are the `CreateCommittedResource` descriptors, the four
+  `Create*View` calls (which report nothing, so a wrong descriptor is a dead
+  view rather than an error), the typeless depth path, and the
+  `GetDescriptorHandleIncrementSize` strides.
+
+- **The concurrent-`wait_idle` ordering is not provable by test.**
+  `concurrent_waits_each_signal_once_and_all_return` pins that every call
+  signals exactly once, which is deterministic. It does not pin that the signals
+  reach the queue in increasing order — that is what the lock on
+  `DeviceInner::idle_value` exists for, and its failure mode is a hang caught by
+  `slow-timeout`, not a red assertion. A passing run is not evidence the race
+  cannot happen.
