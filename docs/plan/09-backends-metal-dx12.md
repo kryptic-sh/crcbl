@@ -7,15 +7,15 @@ keeping the door open for Xbox; Metal is the only path on macOS.
 
 ## Order
 
-**Metal first.** It's the mandatory one (no Vulkan on macOS without MoltenVK)
-and the API distance is larger — it flushes out HAL leaks DX12 wouldn't. Then
-DX12, which maps near-1:1 to the Vulkan-shaped HAL.
+**Metal first.** It's the mandatory one — as of the 2026-08-05 decision it is
+the _only_ Apple path, so macOS and iOS have no GPU without it — and the API
+distance is larger, so it flushes out HAL leaks DX12 wouldn't. Then DX12, which
+maps near-1:1 to the Vulkan-shaped HAL.
 
-An escape hatch worth timeboxing first: **MoltenVK spike (2–3 days)** — run
-`crcbl-vk` on MoltenVK. If the tier-A feature set (descriptor indexing,
-BDA-equivalent, indirect count) works acceptably, native Metal can be
-deprioritized post-MVP and macOS ships on MoltenVK meanwhile. Decision gate, not
-a plan change.
+~~An escape hatch worth timeboxing first: **MoltenVK spike (2–3 days)**~~ —
+**cancelled 2026-08-05, see the correction at the bottom of this file.** Apple
+platforms are Metal only; the spike will not be run and there is no gate to
+clear.
 
 ## Shared prerequisites
 
@@ -70,7 +70,7 @@ GPU-based validation) integration into the same log path as Vulkan validation.
 
 ## Tasks
 
-1. MoltenVK spike + decision gate.
+1. ~~MoltenVK spike + decision gate.~~ Cancelled; see the 2026-08-05 correction.
 2. Slang → MSL/DXIL build outputs + shader hash plumbing.
 3. `crcbl-mtl`: bring-up ladder (clear → triangle → sandbox → editor), then
    tier-A features, then perf pass vs Vulkan baseline.
@@ -83,9 +83,9 @@ GPU-based validation) integration into the same log path as Vulkan validation.
 
 ## Exit criteria
 
-- Sandbox + editor run natively on macOS (Metal or MoltenVK per gate decision)
-  and Windows (DX12 and Vulkan — both, since `crcbl-vk` should just work on
-  Windows and is the better-tested path).
+- Sandbox + editor run natively on macOS (**Metal** — the gate is closed, see
+  the 2026-08-05 correction) and Windows (DX12 and Vulkan — both, since
+  `crcbl-vk` should just work on Windows and is the better-tested path).
 - Same RenderDoc/Xcode-GPU-capture debuggability: named objects, per-pass timers
   feeding the same profiler HUD.
 - Zero renderer/game/editor code changes attributable to backend differences
@@ -111,3 +111,49 @@ GPU-based validation) integration into the same log path as Vulkan validation.
   don't support (they're what `crcbl-wgpu` exists for). DX12 is here for (a) the
   Xbox door and (b) first-class Windows GPU debugging/vendor tooling. No Tier B
   DX12 path is planned.
+
+## Correction (platform decision, 2026-08-05)
+
+**Apple platforms are Metal only. The MoltenVK spike is cancelled, and there is
+no longer a decision gate in front of this phase.**
+
+### What changed
+
+The order section above timeboxed a 2–3 day MoltenVK spike as an escape hatch:
+if `crcbl-vk` ran acceptably on MoltenVK, native Metal could be deprioritized
+post-MVP and macOS could ship on MoltenVK meanwhile. That hatch is closed by
+decision rather than by measurement. `crcbl-vk` is not expected to run on macOS
+or iOS, and `crcbl-mtl` is the only Apple path.
+
+The wider matrix this belongs to: Vulkan for Windows, Linux and Android; Metal
+for macOS and iOS; DX12 as the second Windows path, for the reasons the
+2026-07-27 correction already gives (the Xbox door and first-class Windows GPU
+debugging — **not** old-iGPU coverage). An OpenGL/GLES backend was considered
+and declined in the same pass; `docs/backlog.md` carries that entry and its
+reasons.
+
+### Why, and what it costs
+
+Two GPU paths on the platform with the least CI capacity is the expensive
+outcome, and it is the one the hatch led to: every macOS bug report would have
+started with "which backend were you on". iOS settles the question anyway —
+there is no Vulkan loader or ICD story there at all, MoltenVK is linked directly
+into the application — so choosing Metal for macOS as well makes the whole Apple
+side a single backend.
+
+The cost is that **`crcbl-mtl` is load-bearing rather than an optimisation**.
+Until it can present a frame, macOS has no native GPU path at all: `crcbl-wgpu`
+is the only thing that runs there, at Tier B. Nothing about this phase's ladder
+changes, but its first two rungs — clear, then swapchain — are now the ones
+holding up the platform.
+
+### The technical question the spike would have answered
+
+Worth keeping, because native Metal has to answer the same one. `crcbl-vk`
+requires `Features::TIER_A` outright rather than degrading, that set includes
+`DRAW_INDIRECT_COUNT`, and `crates/crcbl-vk/src/adapter.rs` reads it straight
+off `VkPhysicalDeviceVulkan12Features`. Metal has no native indirect-count draw
+— which is exactly why `crcbl-mtl` reports Tier B today, and why the
+indirect-command-buffer work in this phase's tier-A step is what moves it.
+MoltenVK would have met the same wall from the other side; the mapping table
+above already names ICBs as the closest fit.

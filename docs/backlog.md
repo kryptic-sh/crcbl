@@ -416,7 +416,8 @@ sample from outside its process. What is still uncovered:
   driven directly. Nobody presses `F11` at a running sample on either, the way
   `run-wayland-e2e.sh` does: Windows would need the key sender pointed at a game
   rather than at the suite's own window, and macOS has no renderer to run a game
-  with until MoltenVK clears P14. See the platform sections below.
+  with until `crcbl-mtl` can present — permanently so, since the 2026-08-05
+  decision makes Metal the only Apple path. See the platform sections below.
 
 ## The docs gate reads more files than any other, and it reads them on wasm32
 
@@ -898,11 +899,11 @@ What W4 closes, and what it does not:
   coverage, with the caveat recorded above.
 - **No sample-level pass, and there cannot be one yet.** The Linux suites run
   the sandbox and press F11 at it; that needs a renderer, and neither
-  `windows-latest` nor `macos-latest` has a Vulkan device
-  (`docs/plan/ROADMAP.md`, 2026-08-04 correction — MoltenVK is gated behind
-  P14). This is a coverage gap stated rather than approximated: nothing in
-  `tests/win32_e2e.rs` pretends to cover the `set_mode`-from-a-key path in a
-  running game.
+  `windows-latest` nor `macos-latest` has a Vulkan device — and macOS never
+  will, per the 2026-08-05 decision that Apple platforms are Metal only, so this
+  waits on `crcbl-mtl` rather than on a gate. This is a coverage gap stated
+  rather than approximated: nothing in `tests/win32_e2e.rs` pretends to cover
+  the `set_mode`-from-a-key path in a running game.
 - **`tests/run-win32-e2e.ps1` has never been parsed by a PowerShell.** It was
   written on a machine with no `pwsh`, so its syntax, its `$LASTEXITCODE`
   handling through `Tee-Object`, and its ANSI-stripping regex are all unrun. The
@@ -1834,8 +1835,9 @@ Still uncovered after M5:
   this as a background process on their own machine will meet. If it is ever
   taken it prints the `Activation` evidence and branches on `can_become_key` to
   say whose defect it is, rather than reporting a bare timeout.
-- **The sample-level F11 pass.** Needs a renderer; macOS has no Vulkan until
-  MoltenVK clears its P14 gate (`docs/plan/ROADMAP.md`, 2026-08-04). Not
+- **The sample-level F11 pass.** Needs a renderer, and macOS has no Vulkan at
+  all — permanently, per the 2026-08-05 decision that Apple platforms are Metal
+  only. It waits on `crcbl-mtl` reaching a swapchain, not on a gate. Not
   approximated.
 - **A real drag and drop.** Unchanged from M3: a drag needs a _source_
   application with a mouse held down over a Finder item, which `CGEventPost`
@@ -4006,8 +4008,9 @@ the file got here.
 
 **Decided 2026-08-05.** GL is a dying support surface and the engine will not
 grow a `crcbl-gl`. The platform matrix is Vulkan for Windows, Linux and Android;
-Metal for macOS and iOS; DX12 for Windows as the second Windows path; and
-MoltenVK as an optional way to run the Vulkan seam on macOS.
+Metal for macOS and iOS; DX12 for Windows as the second Windows path. Nothing
+else — see the Apple decision below, taken the same day, which closed the
+MoltenVK option this entry originally listed alongside them.
 
 Reasons, so this is not re-argued:
 
@@ -4034,26 +4037,41 @@ Reasons, so this is not re-argued:
   a `crcbl-shell` surface backend, not a HAL backend — `crcbl-vk` already exists
   and is the best-tested path in the workspace.
 
-### The MoltenVK half of that plan has an unopened gate
+## Considered and declined: Vulkan on macOS and iOS
 
-"The Vulkan seam runs on macOS under MoltenVK" is true of Vulkan generally and
-**not yet established for this engine**, because `crcbl-vk` requires the Tier A
-set as a hard requirement rather than degrading. `Features::TIER_A` is
-`DESCRIPTOR_INDEXING | BUFFER_DEVICE_ADDRESS | DRAW_INDIRECT_COUNT | MULTI_DRAW_INDIRECT | COMPUTE | TIMELINE_SEMAPHORE`,
-and `crates/crcbl-vk/src/adapter.rs` reads `draw_indirect_count` straight off
-`VkPhysicalDeviceVulkan12Features`. **`drawIndirectCount` is the doubtful one**:
-Metal has no native indirect-count draw, so whether MoltenVK reports it — and at
-what cost — decides whether the seam sees Tier A or falls to Tier B on macOS.
+**Decided 2026-08-05. Apple platforms are Metal only.** `crcbl-vk` is not
+expected to run there, MoltenVK is not a shipping path, and the MoltenVK spike
+`docs/plan/09-backends-metal-dx12.md` scheduled as P14's first task **will not
+be run** — the gate it was meant to inform is closed by this decision instead.
 
-`docs/plan/09-backends-metal-dx12.md` schedules exactly this as a timeboxed
-spike and a decision gate, and it has never been run. It is cheaper now than
-when it was written: `macos-latest` runners are real Macs, so it is a CI job
-installing MoltenVK and reading what the adapter reports, not a hardware-access
-problem.
+What that buys, and what it costs:
 
-Also worth stating because the framing matters for shipping: MoltenVK is
-normally **bundled with the application**, not installed by the user. The Vulkan
-SDK's macOS installer places an ICD for development, but a shipped app embeds
-`libMoltenVK.dylib`; on iOS there is no loader or ICD story at all and it is
-linked directly. "If the user installs MoltenVK" describes the developer's
-machine, not the player's.
+- **One macOS path instead of two.** The alternative was shipping on MoltenVK
+  while native Metal caught up, which means two GPU paths to test on the
+  platform with the least CI capacity, and bug reports that begin with "which
+  one were you on".
+- **iOS was never in question.** There is no Vulkan loader or ICD story on iOS
+  at all; MoltenVK is linked directly into the app. Metal is the only path
+  there, so choosing it for macOS as well makes the whole Apple side one
+  backend.
+- **The cost is that `crcbl-mtl` is now load-bearing rather than an
+  optimisation.** Until it can present a frame, macOS has no native GPU path —
+  `crcbl-wgpu` is the only thing that runs, at Tier B. That raises the stakes on
+  MTL3 (first pixel) and MTL5 (swapchain) and is the reason they are the two
+  slices worth watching.
+
+The technical question the spike would have answered is recorded here because it
+is the same question `crcbl-mtl` itself has to answer, and the answer is now
+expected from the Metal side rather than the Vulkan one: `crcbl-vk` demands
+`Features::TIER_A` outright rather than degrading, that set includes
+`DRAW_INDIRECT_COUNT`, and `crates/crcbl-vk/src/adapter.rs` reads it straight
+off `VkPhysicalDeviceVulkan12Features`. **Metal has no native indirect-count
+draw**, which is exactly why `crcbl-mtl` reports Tier B today and why MTL6's
+indirect-command-buffer work is what moves it. MoltenVK would have hit the same
+wall from the other side.
+
+One framing note kept because it explains why "the user installs MoltenVK" was
+never the shape this would have taken: MoltenVK ships **bundled with the
+application**. The Vulkan SDK's macOS installer places an ICD for development,
+but a shipped app embeds `libMoltenVK.dylib`. It describes a developer's
+machine, not a player's.
