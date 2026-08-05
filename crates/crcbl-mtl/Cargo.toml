@@ -1,0 +1,51 @@
+[package]
+name = "crcbl-mtl"
+description = "Crucible Metal backend — macOS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+crcbl-hal = { workspace = true }
+log = { workspace = true }
+
+# The Objective-C bindings, and only on the platform that has the framework
+# behind them. `docs/plan/09-backends-metal-dx12.md`'s FFI correction is the
+# rule they satisfy: *bindings, not frameworks* — `objc2` is a thin binding to
+# an ABI the OS requires, in the same class as `ash` and `windows-rs`, and this
+# is the only crate in the workspace that may name it.
+#
+# Pinning them here rather than in the workspace table is what keeps the crate
+# building on Linux, Windows and wasm32 at all: off macOS the whole backend is
+# `#[cfg]`-ed out and none of these are fetched or built.
+#
+# Both framework crates are per-item feature-gated and their defaults are "all
+# of it" — `objc2-metal`'s default set is over ninety features covering every
+# encoder, pipeline and MTL4 type. Enabling only the ones this crate names keeps
+# the macOS build honest about what the backend actually touches, and stops this
+# crate widening the feature set `wgpu-hal` (which also depends on
+# `objc2-metal`, and also opts out of the defaults) resolved for itself.
+#
+# `MTLDevice` brings the protocol, `MTLCopyAllDevices`, `MTLGPUFamily`,
+# `MTLArgumentBuffersTier` and `MTLDeviceLocation`; `MTLTypes` is what makes
+# `maxThreadsPerThreadgroup` — an `MTLSize` — exist. `objc2-foundation` is here
+# for exactly one item, `NSProcessInfo`, plus `NSEnumerator` for iterating the
+# `NSArray` that enumeration returns. A slice that needs more adds it here.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "NSArray",
+  "NSEnumerator",
+  "NSProcessInfo",
+  "NSString",
+] }
+objc2-metal = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "MTLDevice",
+  "MTLTypes",
+] }
+
+[lints]
+workspace = true

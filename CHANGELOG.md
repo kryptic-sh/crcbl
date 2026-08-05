@@ -16,6 +16,33 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-mtl`**: a new crate, opening P14 with macOS's only path to a GPU —
+  there is no Vulkan on Apple hardware without MoltenVK. This first slice is
+  **adapter enumeration and nothing else**: `MetalInstance::open` calls
+  `MTLCopyAllDevices` and turns every device into an `AdapterInfo` whose
+  `DeviceCaps` come from real queries — `argumentBuffersSupport` for
+  `DESCRIPTOR_INDEXING`, the `MTLGPUFamily::Metal3` query for
+  `BUFFER_DEVICE_ADDRESS`, `supportsBCTextureCompression`, and `maxBufferLength`
+  / `maxThreadsPerThreadgroup` / a `supportsTextureSampleCount:` probe for the
+  limits Metal will answer before a device exists.
+
+  **Every other entry point refuses by name.** `create_surface`, `surface_caps`
+  and `request_device` return `HalError::Unsupported` whose `what` says which
+  slice the answer arrives in, so a caller reads "not yet" rather than "broken";
+  an out-of-range adapter still gets `NoSuchAdapter`, because that is a caller
+  bug this slice can genuinely diagnose and hiding it behind a refusal would
+  lose it.
+
+  **It advertises Tier B today, and that is not a claim about Metal.**
+  `DeviceCaps::tier` is derived from `Features` precisely so a backend cannot
+  assert a tier it has not earned, and `DRAW_INDIRECT_COUNT` /
+  `MULTI_DRAW_INDIRECT` wait on the indirect-command-buffer decision the command
+  slice makes. The hardware is Tier A; this backend is not yet.
+
+  Off macOS the crate is documentation with no public items, so `objc2-metal` is
+  never fetched or built there. Nothing instantiates it yet — no app, and no
+  entry in the engine's backend selection.
+
 - **`crcbl-jobs`**: a new crate, opening P5B with **the seam every engine thread
   will start through**. `Spawn` has three methods — `threaded`, `parallelism`
   and `spawn` — with two backends behind it: `Threads` over `std::thread`, and

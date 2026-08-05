@@ -356,6 +356,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-mtl"
+version = "0.1.0"
+dependencies = [
+ "crcbl-hal",
+ "log",
+ "objc2",
+ "objc2-foundation",
+ "objc2-metal",
+]
+
+[[package]]
 name = "crcbl-net"
 version = "0.1.0"
 dependencies = [
