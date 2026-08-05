@@ -4630,27 +4630,35 @@ coverage" remains a plan rather than a fact.
 `TIMELINE_SEMAPHORE` and the two indirect features wait on calls no slice has
 written — and says nothing about the hardware.
 
-### The same run exposed a bug the test could not catch
+### The two listed adapters are two adapters, and the first is misclassified
 
-The two lines above are **one physical adapter, listed twice**: identical name,
-vendor, device and driver, differing only in that the first was classified
-`Integrated` and the second `Cpu`.
+The runner lists two, with identical name, vendor, device and driver, differing
+in that the first is classified `Integrated` and the second `Cpu`. That read as
+one adapter enumerated twice, and the de-duplication was rekeyed from
+`DXGI_ADAPTER_FLAG_SOFTWARE` onto `AdapterLuid` on that reading.
 
-The de-duplication skipped `DXGI_ADAPTER_FLAG_SOFTWARE` in the hardware pass and
-then appended WARP by name. But on that runner DXGI lists "Microsoft Basic
-Render Driver" — which _is_ WARP — with the flag **clear**, so it survived the
-filter and `EnumWarpAdapter` returned it again.
+**The DX2 run settled it, and the reading was wrong.** With the LUID in the
+report, the two lines carry `luid=0x0000000000005cd3` and
+`luid=0x0000000000005d64` — different, so DXGI considers them distinct adapters
+and the de-duplication has nothing to collapse.
 
-The test meant to catch this asserted "exactly one _software-flagged_ adapter",
-which was true the whole time: the duplicate was not flagged. **Another
-assertion keyed on the wrong thing** — the third in this workspace, after the
-zero-valued bitflag and the stale `Unsupported` expectation.
+The rekeying is kept regardless, and not just because it is harmless: the flag
+it replaced does not answer the question it was asked. DXGI lists "Microsoft
+Basic Render Driver" — a software rasteriser — with `DXGI_ADAPTER_FLAG_SOFTWARE`
+**clear**, so a filter keyed on that flag admits a software adapter as hardware.
+The LUID is the only identity DXGI guarantees, and it is in the report now, so a
+real duplicate would be visible in the log rather than inferred from a
+coincidence of names.
 
-Fixed by comparing `AdapterLuid`, the only identity DXGI guarantees, with a test
-that asserts no two enumerated adapters share one. Name plus vendor plus device
-id would not have done either: two genuinely distinct cards of one model share
-all three. The LUID is now in the adapter report as well, so a duplicate is
-visible to anyone reading the CI log.
+**What is left is a classification bug, and it is real.** `type=Integrated` on
+"Microsoft Basic Render Driver" is `adapter.rs` calling a software rasteriser an
+integrated GPU, because the only signal it consults is the flag DXGI leaves
+clear. A caller that picks the first non-`Cpu` adapter — the obvious way to
+prefer hardware — gets WARP on this runner and believes it has a GPU. Neither
+adapter is hardware here, so nothing in CI can go wrong because of it; a machine
+with a real GPU **and** the Basic Render Driver present is where it bites. The
+fix needs a signal other than the flag, and none of the obvious ones (the vendor
+id `0x1414`, the name) is a guarantee either.
 
 ### Two things DX1 decided that a later slice may have to undo
 
@@ -4706,12 +4714,15 @@ The device-and-resources slice. Everything below is in `crates/crcbl-dx12`.
   `check_image`, `check_view_type` and `build_views` — which is a move, not a
   behaviour change.
 
-- **Nothing in the slice has executed anywhere but CI**, and the cross-target
-  clippy this tree runs gates types and links, not behaviour. The calls CI is
-  the first to exercise are the `CreateCommittedResource` descriptors, the four
-  `Create*View` calls (which report nothing, so a wrong descriptor is a dead
-  view rather than an error), the typeless depth path, and the
-  `GetDescriptorHandleIncrementSize` strides.
+- **The slice runs on WARP and nowhere else.** Its whole suite passed on
+  `windows-latest` on the first attempt, which is a behavioural result and not a
+  compile: `D3D12CreateDevice`, the DIRECT queue, `CreateCommittedResource`, the
+  four `Create*View` calls, the descriptor-heap strides, `Map`/`Unmap` and the
+  fence wait all did what the code assumed. **What that does not cover is
+  hardware.** WARP is one implementation with one set of tolerances, and the
+  `Create*View` calls return `void` — a descriptor a real driver rejects and
+  WARP accepts fails as a dead view, silently, on the machine nobody tested. No
+  D3D12 code in this workspace has run on a GPU.
 
 - **The concurrent-`wait_idle` ordering is not provable by test.**
   `concurrent_waits_each_signal_once_and_all_return` pins that every call
