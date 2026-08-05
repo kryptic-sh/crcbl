@@ -539,34 +539,76 @@ it by handing `Pool::with_workers` an `Inline` spawner when `--workers 0` is
 asked for, which is a caller saying "threads, but none" through the only channel
 there is.
 
-- **Decided 2026-08-05: pin a dated nightly for the wasm worker target only.** A
-  threaded wasm artifact needs
-  `-C target-feature=+atomics,+bulk-memory,+mutable-globals` and `-Z build-std`,
-  which is nightly-only, while `rust-toolchain.toml` pins an **exact stable**
-  (`1.97.0`) on purpose — its own comment calls a floating channel a broken
-  promise. The answer is the shape `decoder-fuzz` already uses: a nightly pinned
-  by date, used for that one target and nothing else, so contributors on stable
-  are unaffected and no CI job can go red on an untouched repository.
-  `21-jobs.md` records the build clean on `nightly-2026-07-02`, which is
-  installed on the development machine. **Not yet done** — it lands with the
-  worker backend, which is what needs it.
+- **Cross-origin isolation is proved locally, and the worker backend is blocked
+  on the pinned nightly's `rust-src`.** The isolation half of the 2026-08-05
+  pair is done: `web/tools/serve.mjs` is one static server sending
+  `Cross-Origin-Opener-Policy: same-origin` and
+  `Cross-Origin-Embedder-Policy: require-corp`, `web/build.sh --serve` runs it
+  and `web/tools/browser-e2e.mjs` imports it, so the origin the gate checks is
+  the origin a human loads. Group A asserts `crossOriginIsolated === true` and
+  that `new WebAssembly.Memory({ shared: true })` succeeds, and
+  `run-browser-e2e.sh` refuses a run whose output does not contain that check by
+  name. Falsified three ways on 2026-08-06 — dropping COOP, dropping COEP, and
+  dropping both each turn both assertions red with
+  `ReferenceError: SharedArrayBuffer is not defined`; renaming the check trips
+  the harness guard.
 
-- **Decided 2026-08-05: prove cross-origin isolation locally before deciding
-  about Pages.** GitHub Pages cannot set COOP/COEP, so `crossOriginIsolated` is
-  false there, so there is no `SharedArrayBuffer` and no shared-memory input
-  ring in the published demos; `coi-serviceworker` is the only route and it is
-  third-party JavaScript in a `web/` directory that deliberately has no npm
-  dependencies. Rather than spend that call now, the worker backend gets proved
-  against a locally served site with real COOP/COEP headers —
-  `web/build.sh --serve` is where they go — and the Pages question returns when
-  there is something working to publish. **Not yet done**; the headers are not
-  in `build.sh` yet, and nothing asserts `crossOriginIsolated` anywhere.
+  **What could not be verified on this machine, and it is not the headers.**
+  `run-browser-e2e.sh` cannot reach a green run here at all: group A's
+  known-colour clear reads back `rgb(0,0,0)` under both the hardware and the
+  SwiftShader adapter, so the harness refuses the render groups by design. That
+  is **pre-existing** — the committed driver from `2e61284`, run unmodified
+  against the same site and the same browser, fails identically — and the
+  suspect is the browser rather than the change: the readback table in
+  `web/run-browser-e2e.sh` was measured on Chromium 150 and this machine has
+  Chromium 151, where the `Xvfb` + SwiftShader row no longer holds. Groups B
+  through E are therefore unrun locally; CI's `ubuntu-latest` Chrome is what
+  currently says anything about them. Worth re-measuring the table before the
+  next person concludes the gate is broken.
 
-  What this does not change: if the shim is eventually declined, the demos run
-  single-threaded through `Inline` and native keeps the full topology, and the
-  roadmap's `crossOriginIsolated` gate should then be struck rather than left
-  unmeetable. That outcome is exactly what the seam-first ordering exists to
-  survive.
+  The Pages question is deliberately still open: GitHub Pages cannot set either
+  header, `coi-serviceworker` is third-party JavaScript in a directory with no
+  npm dependencies, and that call waits for something working to publish. If the
+  shim is eventually declined, the demos run single-threaded through `Inline`,
+  native keeps the full topology, and the roadmap's `crossOriginIsolated` gate
+  should be struck rather than left unmeetable.
+
+- **Blocked 2026-08-06: the wasm worker backend needs `rust-src` on
+  `nightly-2026-07-02`, which is not installed.** The plan stands — a nightly
+  pinned by date for that one target, in the shape `decoder-fuzz` already uses,
+  because `rust-toolchain.toml` pins an **exact stable** (`1.97.0`) on purpose
+  and its own comment calls a floating channel a broken promise. What was
+  measured rather than assumed:
+  `rustup component list --toolchain nightly-2026-07-02 --installed` lists
+  `cargo`, `rust-std` and `rustc` and **not** `rust-src`, and the build says so
+  itself —
+  `RUSTUP_TOOLCHAIN=nightly-2026-07-02 RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals" cargo build -p crcbl-jobs --target wasm32-unknown-unknown -Z build-std=std,panic_abort`
+  fails with
+  `library/Cargo.lock does not exist, unable to build with the standard library`.
+  No backend was written against a toolchain that cannot build it:
+  `default_spawner` still yields `Inline` on wasm, which is a whole answer
+  rather than a stub.
+
+  To unblock:
+  `rustup component add rust-src --toolchain nightly-2026-07-02-x86_64-unknown-linux-gnu`,
+  then re-check `21-jobs.md`'s finding 1 before building on it. Beyond the
+  toolchain, three things are known to be in the way and are worth deciding
+  before writing code:
+  - **A wasm module cannot start its own worker** (`21-jobs.md` finding 2), so
+    the backend is an `extern "C"` import the `web/` half implements — the same
+    hand-written ABI shape `crcbl-audio`'s `web` module and `crcbl-store`'s OPFS
+    path already use, and the reason no engine crate depends on `wasm-bindgen`.
+    A `web-sys`/`js-sys` backend would be a new dependency in a wasm graph that
+    currently has zero third-party crates, which is the user's call.
+  - **The demos are built without atomics**, so the worker path cannot be
+    exercised by the existing site at all. Proving it needs a threaded artifact
+    the `DEMOS` loop in `web/build.sh` does not build, and
+    `wasm-bindgen --target web` has to emit glue that accepts a shared
+    `WebAssembly.Memory` — untested here against the pinned 0.2.126 CLI.
+  - **The fallback has to be automatic and loud**, because every GitHub Pages
+    visitor is in the non-isolated state. The observable to assert is the one
+    `apps/horde`'s determinism tests already use — `pool.workers()` and two
+    distinct thread ids — not "a worker backend was selected".
 
 ## What the scaffold's gate does not cover
 
@@ -3301,10 +3343,10 @@ not:
   being written to.
 - **No golden image covers a single asteroids pixel.** Weaker than it was: the
   browser gate now loads the demo in a real Chromium, opens a WebGPU device and
-  reads the canvas back at 26/26, so "the frame is not blank, not one flat
-  colour and changes between frames" is checked — 89 distinct colours across a
-  959×463 canvas on the SwiftShader adapter. What is still unchecked is whether
-  it is the **right** picture, and in particular whether a rotated
+  reads the canvas back with every check green, so "the frame is not blank, not
+  one flat colour and changes between frames" is checked — 89 distinct colours
+  across a 959×463 canvas on the SwiftShader adapter. What is still unchecked is
+  whether it is the **right** picture, and in particular whether a rotated
   `SampleMode::Pixel` sprite looks right on a real driver.
   `crates/crcbl-vk/tests/vk_e2e.rs` has sprite goldens including a rotated one,
   so the shader path is covered; the game's own frame is not. There is also no

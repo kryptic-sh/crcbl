@@ -24,6 +24,7 @@ framework that owns policy — and it applies here for the same reason.
 | `engine/audio-worklet.js` | the `AudioWorkletProcessor` itself                                         |
 | `engine/log.js`           | drains the engine's log queue into the console                             |
 | `demos/<name>/main.js`    | that sample's `__crcbl_<name>_*` symbols and its two status strings        |
+| `tools/serve.mjs`         | the static server, and the COOP/COEP pair that buys `SharedArrayBuffer`    |
 | `tools/check-exports.mjs` | the JS↔wasm symbol contract check                                          |
 | `tools/smoke.mjs`         | runs the artifact's boot sequence under node                               |
 | `build.sh`                | assembles `target/site/`                                                   |
@@ -69,6 +70,13 @@ cargo install wasm-bindgen-cli --version "$(awk '/^name = "wasm-bindgen"$/{f=1;n
 `file://` will not work: ES modules need an origin, and the Origin Private File
 System needs a secure context. `localhost` is one.
 
+`--serve` runs `web/tools/serve.mjs`, which sends
+`Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp` — the pair that makes the document
+cross-origin isolated and therefore allows `SharedArrayBuffer`. The browser gate
+imports the same server and asserts the isolation, which is why there is one
+server rather than one per caller.
+
 ## Why `wasm-bindgen` is here at all
 
 The engine's own ABI is **hand-written** `extern "C"` — no `#[wasm_bindgen]`
@@ -99,15 +107,17 @@ somebody's browser rather than in the build.
 site `build.sh` already produced, or pass `--build`:
 
 ```sh
-./web/run-browser-e2e.sh --build      # Xvfb + Chromium, then 26 checks
+./web/run-browser-e2e.sh --build      # Xvfb + Chromium, then the check list
 ./web/run-browser-e2e.sh --headless --hardware   # the real GPU, no display
 ```
 
-It starts its own Xvfb and its own static server, opens Chromium over the
-DevTools protocol, sends a **real** click and a **real** Space key into the
-canvas, and reads the canvas back to assert the frame is neither one flat colour
-nor identical from frame to frame while the ball is in flight. It fails if zero
-checks ran.
+It starts its own Xvfb, serves the site through `web/tools/serve.mjs` — the same
+server `build.sh --serve` runs, so the origin the gate checks is the origin a
+human loads — opens Chromium over the DevTools protocol, sends a **real** click
+and a **real** Space key into the canvas, and reads the canvas back to assert
+the frame is neither one flat colour nor identical from frame to frame while the
+ball is in flight. It fails if zero checks ran, and separately if the
+cross-origin isolation check is not among the ones that did.
 
 **It needs no GPU**, which is what lets it run on a CI runner. Getting there
 took measuring something undocumented: three of the four obvious ways to read a
@@ -155,9 +165,14 @@ included, is what `run-browser-e2e.sh` is for.
 
 ## What is not here
 
-- **No `SharedArrayBuffer`.** GitHub Pages cannot set COOP/COEP, so the demos
-  are single-threaded and the audio feed is `postMessage`-based rather than a
-  ring buffer. `docs/plan/10-wasm-webgpu.md`'s 2026-07-27 correction settles it.
+- **No `SharedArrayBuffer` on Pages.** GitHub Pages cannot set COOP/COEP, so the
+  published demos are single-threaded and the audio feed is `postMessage`-based
+  rather than a ring buffer. `docs/plan/10-wasm-webgpu.md`'s 2026-07-27
+  correction settles it. **Locally is different**: `web/tools/serve.mjs` sends
+  both headers, so a site served by `build.sh --serve` or by the browser gate
+  _is_ cross-origin isolated, and the gate asserts that rather than assuming it.
+  That is what makes a threaded wasm build testable at all — the build itself is
+  not here yet; see `docs/backlog.md`.
 - **No pointer lock, no clipboard, no IME.** The Web shell backend clears those
   capability bits; there is nothing for a shim to wire.
 - **No service worker, no offline cache.** The site is static files.

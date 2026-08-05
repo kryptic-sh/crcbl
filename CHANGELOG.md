@@ -16,6 +16,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The demo site is served cross-origin isolated, and the browser gate asserts
+  it.** `web/tools/serve.mjs` is a new static server that sends
+  `Cross-Origin-Opener-Policy: same-origin` and
+  `Cross-Origin-Embedder-Policy: require-corp` — the pair a browser requires
+  before it will hand out `SharedArrayBuffer`, and therefore before any wasm
+  build with `+atomics` can run. `web/build.sh --serve` runs it in place of
+  `python3 -m http.server`, and `web/tools/browser-e2e.mjs` imports it instead
+  of keeping a second server of its own, so the origin the gate checks is the
+  origin a human loads. Group A now asserts `crossOriginIsolated === true` and
+  that `new WebAssembly.Memory({ shared: true })` actually succeeds, and
+  `run-browser-e2e.sh` fails a run whose output does not contain that check by
+  name — the headers are otherwise something nothing in the repository would
+  notice going missing.
+
+  `--serve` binds loopback only now, where `python3 -m http.server` bound every
+  interface: `http://<lan-ip>:8000` is not a secure context, so it would have
+  served a page that looked right and was not isolated.
+
+  This is the local half of the question only. GitHub Pages cannot set either
+  header, so the published demos are still not isolated; see `docs/backlog.md`.
+
 - **`apps/horde` steers its crowd on the job pool, and `--workers` is the switch
   that proves it deterministic.** The separation pass — one broadphase
   neighbourhood query per enemy per tick, which is the workload the sample

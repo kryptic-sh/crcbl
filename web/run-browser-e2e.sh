@@ -24,6 +24,13 @@
 #   trusting a status code — a black canvas satisfies every other check in the
 #   repository.
 #
+#   It is also the only gate on **cross-origin isolation**. `web/tools/serve.mjs`
+#   sends COOP and COEP, `web/build.sh --serve` runs that same server, and the
+#   driver asserts `crossOriginIsolated === true` inside the loaded document —
+#   the precondition for `SharedArrayBuffer`, and therefore for any wasm build
+#   with `+atomics`. Nothing else in the repository would notice those headers
+#   going missing, so the named-check guard below insists that assertion ran.
+#
 # WHAT IT NEEDS
 #   * **A Chromium or Chrome with WebGPU.** `CRCBL_CHROMIUM` pins one;
 #     otherwise `google-chrome`, `google-chrome-stable`, `chromium` and
@@ -256,6 +263,20 @@ if [ -z "$RAN" ] || [ "$RAN" -eq 0 ]; then
     exit 1
 fi
 
+# The isolation assertion by name, not just by count — beside the count guard
+# rather than after the verdict, because both are about the harness rather than
+# about the engine, and a harness that stopped gating is worth saying whichever
+# way the run went. Every other check here is about the engine and would still
+# run, and still pass, on an origin with no COOP/COEP at all, so "some checks
+# ran" is not evidence that this one did. Renaming the check in the driver is
+# meant to fail here and be renamed here too.
+ISOLATION="$(grep -F 'the document is cross-origin isolated' "${OUTPUT}.plain" || true)"
+if [ -z "$ISOLATION" ]; then
+    echo "crcbl web e2e: the driver never asked whether the origin is cross-origin isolated;" >&2
+    echo "               the COOP/COEP headers in web/tools/serve.mjs are ungated" >&2
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2
     echo "crcbl web e2e: the canvas and the page log are in target/web-e2e/" >&2
@@ -272,3 +293,4 @@ if [ -z "$CONFIG" ]; then
 fi
 echo "crcbl web e2e: $RAN checks ran in a real browser, ${CONFIG#running against the }"
 echo "crcbl web e2e: $DEMO booted, opened a WebGPU device, took a real key event, and drew moving frames"
+echo "crcbl web e2e:${ISOLATION#*ok  }"

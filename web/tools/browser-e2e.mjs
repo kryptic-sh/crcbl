@@ -18,8 +18,10 @@
 //
 // WHAT IT ASSERTS. Five groups, printed in order:
 //
-//   A  the platform — `navigator.gpu`, an adapter, and **that this browser can
-//      report canvas pixels at all** (see below; this one is not a formality)
+//   A  the platform — `navigator.gpu`, an adapter, **that this browser can
+//      report canvas pixels at all** (see below; this one is not a formality),
+//      and that the origin is cross-origin isolated, which is what decides
+//      whether a threaded wasm build could run here at all
 //   B  the engine boots — canvas size, wgpu backend, swapchain, STATUS_RUNNING
 //   C  input drives the simulation — a real click focuses the canvas, a real
 //      Space key launches the ball, and the game's own HUD log line changes
@@ -58,19 +60,18 @@
 
 import { spawn } from 'node:child_process';
 import {
-  createReadStream,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from 'node:fs';
-import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { dirname, join, normalize, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { ISOLATION_HEADERS, MIME, serve } from './serve.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -266,18 +267,12 @@ const pause = (ms) => new Promise((ok) => setTimeout(ok, ms));
 // `file://` is not an option and neither is "assume python3": ES modules,
 // `WebAssembly.instantiateStreaming`, OPFS and WebGPU all want a real origin,
 // and `localhost` is the one origin a browser treats as secure without a
-// certificate. Node already has an HTTP server, so this is thirty lines rather
-// than a dependency.
-
-const MIME = {
-  '.css': 'text/css; charset=utf-8',
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.png': 'image/png',
-  '.wasm': 'application/wasm',
-};
+// certificate.
+//
+// It lives in `serve.mjs` because `web/build.sh --serve` runs the same code:
+// that server sends the COOP/COEP pair, group A asserts the isolation those
+// headers buy, and sharing the file is what stops the gate proving something
+// about an origin no human ever loads.
 
 /**
  * The control page group A uses to prove this browser can report canvas pixels.
@@ -330,70 +325,10 @@ try {
 }
 </script>`;
 
-/** @returns {Promise<{ origin: string, close: () => Promise<void>, misses: string[] }>} */
-function serve(root) {
-  /** Requests that 404'd. A missing asset is a shim bug, not a warning. */
-  const misses = [];
-  const server = createServer((request, response) => {
-    // Only the path; a query string is not part of a file name.
-    const path = decodeURIComponent(
-      new URL(request.url, 'http://localhost').pathname
-    );
-    if (path === CONTROL_PATH || path === `${CONTROL_PATH}/`) {
-      response.writeHead(200, {
-        'content-type': MIME['.html'],
-        'cache-control': 'no-store',
-      });
-      response.end(CONTROL_PAGE);
-      return;
-    }
-    // `normalize` collapses `..` before the prefix test, so a request for
-    // `/../../etc/passwd` cannot escape the site directory.
-    const target = normalize(
-      join(root, path.endsWith('/') ? `${path}index.html` : path)
-    );
-    if (!target.startsWith(root)) {
-      response.writeHead(403).end('outside the site');
-      return;
-    }
-    let info;
-    try {
-      info = statSync(target);
-    } catch {
-      misses.push(path);
-      response.writeHead(404).end('not found');
-      return;
-    }
-    if (info.isDirectory()) {
-      response.writeHead(301, { location: `${path}/` }).end();
-      return;
-    }
-    const extension = target.slice(target.lastIndexOf('.'));
-    response.writeHead(200, {
-      'content-type': MIME[extension] ?? 'application/octet-stream',
-      'content-length': info.size,
-      // A stale artifact served to a fresh browser is a debugging session
-      // nobody enjoys, and this server lives for one run.
-      'cache-control': 'no-store',
-    });
-    createReadStream(target).pipe(response);
-  });
-  return new Promise((ok, no) => {
-    server.on('error', no);
-    // Port 0: the OS picks a free one. A hard-coded port turns two harnesses on
-    // one machine into a flake, and this repository treats a flake as a bug.
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = /** @type {import('node:net').AddressInfo} */ (
-        server.address()
-      );
-      ok({
-        origin: `http://localhost:${port}`,
-        misses,
-        close: () => new Promise((done) => server.close(() => done(undefined))),
-      });
-    });
-  });
-}
+/** The routes `serve` answers itself, rather than from the site directory. */
+const CONTROL_ROUTES = {
+  [CONTROL_PATH]: { contentType: MIME['.html'], body: CONTROL_PAGE },
+};
 
 // ---------------------------------------------------------------------------
 // The browser
@@ -799,7 +734,24 @@ async function preflight(binary, mode, origin) {
         page,
         `(async () => {
            if (document.readyState !== 'complete') return null;
-           const out = { gpu: 'gpu' in navigator, secure: isSecureContext };
+           const out = {
+             gpu: 'gpu' in navigator,
+             secure: isSecureContext,
+             // Cross-origin isolation, asked of the document rather than
+             // inferred from the fact that serve.mjs was told to send the
+             // headers. Two spellings because they can fail apart: the flag is
+             // what the headers buy, and a shared WebAssembly.Memory is the
+             // capability a +atomics build actually reaches for.
+             isolated: globalThis.crossOriginIsolated === true,
+             sharedMemory: (() => {
+               try {
+                 return new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true })
+                   .buffer instanceof SharedArrayBuffer;
+               } catch (error) {
+                 return String(error);
+               }
+             })(),
+           };
            if (!out.gpu) return out;
            const adapter = await navigator.gpu.requestAdapter();
            if (!adapter) return { ...out, adapter: null };
@@ -879,7 +831,7 @@ function group(name) {
 
 mkdirSync(OUT, { recursive: true });
 
-const site = await serve(SITE);
+const site = await serve(SITE, { routes: CONTROL_ROUTES });
 const binary = findBrowser();
 
 /** Everything the page logged, in order, so a failure can print it. */
@@ -921,6 +873,32 @@ try {
   }
 
   const best = chosen ?? attempts.at(-1);
+
+  // Isolation first, and above the readback gate on purpose: it is a property
+  // of the *origin* rather than of the GPU, it is the one thing here that
+  // `web/tools/serve.mjs` alone decides, and a browser that cannot report
+  // canvas pixels can still answer it. Below the gate it would be skipped by
+  // the `throw` on exactly the machines where nobody would notice.
+  check(
+    'A',
+    'the document is cross-origin isolated',
+    best?.isolated,
+    best?.isolated
+      ? Object.entries(ISOLATION_HEADERS)
+          .map(([name, value]) => `${name}: ${value}`)
+          .join('; ')
+      : 'crossOriginIsolated is false — no SharedArrayBuffer, so a wasm build ' +
+          'with +atomics cannot start a worker on this origin'
+  );
+  check(
+    'A',
+    'a shared WebAssembly.Memory can be constructed',
+    best?.sharedMemory === true,
+    best?.sharedMemory === true
+      ? 'its buffer is a SharedArrayBuffer'
+      : String(best?.sharedMemory)
+  );
+
   check(
     'A',
     'the browser exposes navigator.gpu',

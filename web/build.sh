@@ -10,6 +10,12 @@
 #
 # Serving matters: ES modules and `WebAssembly.instantiateStreaming` do not work
 # from `file://`, and OPFS needs a secure context, which `localhost` is.
+#
+# `--serve` runs `web/tools/serve.mjs`, which is the same server the browser
+# e2e uses and therefore sends the same COOP/COEP pair — see that file for why
+# cross-origin isolation is what a threaded wasm build stands on. Sharing it is
+# deliberate: the gate asserts `crossOriginIsolated === true`, and a separate
+# `python3 -m http.server` for humans would be an origin the gate never sees.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -113,6 +119,5 @@ echo "==> $SITE"
 find "$SITE" -type f | sed "s|$SITE/|    |" | sort
 
 if [ "${1:-}" = "--serve" ]; then
-  echo "==> http://localhost:8000/"
-  cd "$SITE" && exec python3 -m http.server 8000
+  exec node "$REPO/web/tools/serve.mjs" "$SITE" --port "${PORT:-8000}"
 fi
