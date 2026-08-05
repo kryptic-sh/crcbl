@@ -8,10 +8,19 @@
 //! [`Device::backend`], [`Device::caps`], [`Device::queue`],
 //! [`Device::write_buffer`], [`Device::create_command_encoder`],
 //! [`Device::submit`], [`Device::request_readback`], [`Device::poll_readback`]
-//! and [`Device::wait_idle`]. Everything else on the trait refuses with
+//! and [`Device::wait_idle`], and the presentation block: swapchains, acquire,
+//! present and the present wait. Everything else on the trait refuses with
 //! [`HalError::Unsupported`] whose `what` names the slice it arrives in, in the
 //! same voice `Dx12Instance` established. Nothing here is a stub that reports
 //! success.
+//!
+//! The presentation block is **thin on purpose**: the DXGI calls live in
+//! [`crate::swapchain`] and every decision that is arithmetic lives in
+//! [`crate::present`], which is the only module in this crate a non-Windows
+//! `cargo test` can execute. What is left here is the pool wiring — a swapchain
+//! is device-scoped while the surface it names is instance-scoped, which is
+//! `crcbl-hal`'s obligation 2 and the reason the two tables sit in different
+//! structs.
 //!
 //! # One lock over every table
 //!
@@ -69,11 +78,11 @@ use crcbl_hal::{
     CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePipelineDesc,
     ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, Extent3d, Features, Format,
     GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle,
-    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, MemoryLocation,
-    PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, QuerySetDesc, QuerySetHandle,
-    QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState, SamplerDesc,
-    SamplerHandle, SemaphoreDesc, SemaphoreHandle, ShaderModuleDesc, ShaderModuleHandle,
-    SubmitInfo, SurfaceError, SwapchainDesc, SwapchainHandle,
+    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
+    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, QuerySetDesc,
+    QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState,
+    SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, ShaderModuleDesc,
+    ShaderModuleHandle, SubmitInfo, SurfaceError, SwapchainDesc, SwapchainHandle,
 };
 use windows::Win32::Foundation::{CloseHandle, E_OUTOFMEMORY, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D::{D3D_FEATURE_LEVEL_11_0, D3D_PRIMITIVE_TOPOLOGY};
@@ -100,7 +109,9 @@ use crate::descriptor::{Descriptors, Kind, Slot};
 use crate::handle::{self, Owned, Owner};
 use crate::instance::{AdapterRecord, InstanceInner, next_owner_id, not_yet};
 use crate::pipeline::{self, GraphicsPipelineEntry, PipelineLayoutEntry, ShaderModuleEntry};
+use crate::present::{self, PresentWait};
 use crate::retire::RetireQueue;
+use crate::swapchain::{self, SwapchainEntry};
 use crate::view::Subresource;
 use crate::{conv, view};
 
@@ -287,6 +298,10 @@ pub(crate) struct DeviceState {
     bind_groups: Pool<BindGroupRecord>,
     pipeline_layouts: Pool<PipelineLayoutEntry>,
     graphics_pipelines: Pool<GraphicsPipelineEntry>,
+    /// Swapchains are **device**-scoped while the surfaces they present to are
+    /// instance-scoped, which is `crcbl-hal`'s obligation 2 and the reason this
+    /// pool is here and `crate::instance`'s surface pool is not.
+    swapchains: Pool<SwapchainEntry>,
     descriptors: Descriptors,
     /// The shader-visible heaps a root signature binds against, which
     /// `crate::descriptor` deliberately never creates. See `crate::binding`.
@@ -317,9 +332,13 @@ pub(crate) struct DeviceState {
 /// docs.
 pub(crate) struct DeviceInner {
     /// Obligation 1: a `Device` may outlive its `Instance`, so the instance's
-    /// state — the DXGI factory and the enumerated adapters — is kept alive here
-    /// rather than borrowed. See [`InstanceInner`].
-    _instance: Arc<InstanceInner>,
+    /// state — the DXGI factory, the enumerated adapters and the surface table
+    /// — is kept alive here rather than borrowed. See [`InstanceInner`].
+    ///
+    /// Read as well as held, since the swapchain slice: obligation 2 makes a
+    /// surface instance-scoped, so `create_swapchain` resolves its handle
+    /// through here rather than through any table of its own.
+    pub(crate) instance: Arc<InstanceInner>,
     pub(crate) raw: ID3D12Device,
     /// The one queue, `D3D12_COMMAND_LIST_TYPE_DIRECT`, which accepts graphics,
     /// compute and copy work. The compute and copy queue *types* are exactly
@@ -983,13 +1002,14 @@ impl Dx12Device {
             bind_groups: Pool::new(),
             pipeline_layouts: Pool::new(),
             graphics_pipelines: Pool::new(),
+            swapchains: Pool::new(),
             descriptors: Descriptors::new(&raw),
             visible: VisibleHeaps::new(),
             retire: RetireQueue::new(),
             next_fence_value: 0,
         };
         let inner = Arc::new(DeviceInner {
-            _instance: instance,
+            instance,
             raw,
             queue,
             fence,
@@ -1103,6 +1123,87 @@ impl Dx12Device {
     #[cfg(test)]
     pub(crate) fn raw(&self) -> &ID3D12Device {
         &self.inner.raw
+    }
+
+    /// Files a swapchain's back buffers in this device's tables and gives each
+    /// one a whole-image render target view.
+    ///
+    /// Shared by `create_swapchain` and `reconfigure_swapchain`, which need the
+    /// identical work: `ResizeBuffers` invalidates every `GetBuffer` result, so
+    /// a reconfigure re-registers from scratch rather than patching.
+    ///
+    /// **Nothing is left half-created.** A failure part-way through destroys
+    /// what this call already made, so the caller is not left with orphaned
+    /// descriptors in the heaps and rows in the pools that no swapchain names.
+    ///
+    /// # Errors
+    ///
+    /// `GetBuffer`'s failure through [`swapchain::surface_error`], or
+    /// `create_image_view`'s — which here can only be a descriptor heap that
+    /// will not grow.
+    fn register_backbuffers(
+        &self,
+        created: &swapchain::Created,
+        desc: &SwapchainDesc<'_>,
+    ) -> Result<(Vec<ImageHandle>, Vec<ImageViewHandle>), SurfaceError> {
+        let mut images: Vec<ImageHandle> = Vec::with_capacity(created.buffers as usize);
+        let mut views: Vec<ImageViewHandle> = Vec::with_capacity(created.buffers as usize);
+        let outcome = (|| -> Result<(), SurfaceError> {
+            for index in 0..created.buffers {
+                // SAFETY: `created.raw` is a live swapchain this device just
+                // created or resized, `index` is below its buffer count, and
+                // `ID3D12Resource` is the IID asked for — which is what a
+                // D3D12 swapchain's buffers are.
+                let raw: ID3D12Resource =
+                    unsafe { created.raw.GetBuffer(index) }.map_err(|error| {
+                        swapchain::surface_error("IDXGISwapChain::GetBuffer", &error)
+                    })?;
+                if let Some(label) = desc.label {
+                    label_object(&raw, label);
+                }
+                let slot = self.state().images.insert(ImageEntry {
+                    owner: self.inner.owner.id,
+                    raw,
+                    // The format the *views* carry, which is what a render pass
+                    // and a later `create_image_view` are checked against. The
+                    // resource underneath is `present::buffer_format` of it —
+                    // see `crate::swapchain`.
+                    format: desc.format,
+                    image_type: ImageType::D2,
+                    // `TRANSFER_SRC` beside the attachment usage so a presented
+                    // frame can be copied out — `crcbl screenshot`'s shape,
+                    // and the same pair `crcbl-vk` puts on its swapchain
+                    // images. Neither usage adds a descriptor beyond the render
+                    // target view.
+                    usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+                    extent: Extent3d::d2(created.extent.0, created.extent.1),
+                    mip_levels: 1,
+                    slices: 1,
+                    samples: 1,
+                });
+                let image = handle::stamp(self.inner.owner, slot);
+                images.push(image);
+                let view = self.create_image_view(&ImageViewDesc {
+                    label: desc.label,
+                    image,
+                    view_type: ImageViewType::D2,
+                    format: desc.format,
+                    range: ImageSubresourceRange::all(desc.format),
+                })?;
+                views.push(view);
+            }
+            Ok(())
+        })();
+        if let Err(error) = outcome {
+            for view in views {
+                self.destroy_image_view(view);
+            }
+            for image in images {
+                self.destroy_image(image);
+            }
+            return Err(error);
+        }
+        Ok((images, views))
     }
 
     /// Checks an [`ImageDesc`] against this device's limits and D3D12's own
@@ -2472,60 +2573,375 @@ impl Device for Dx12Device {
 
     // --- presentation ---
 
-    fn create_swapchain(&self, _desc: &SwapchainDesc<'_>) -> Result<SwapchainHandle, SurfaceError> {
-        Err(SurfaceError::Hal(not_yet(
-            "swapchains (the DX12 swapchain slice)",
-        )))
+    /// Configures a flip-model swapchain on a window.
+    ///
+    /// The surface handle is resolved through the **instance**, not this
+    /// device: obligation 2 makes surfaces instance-scoped and obligation 3
+    /// says they are checked against the instance id, so any device from that
+    /// instance may present to them and another instance's handle is
+    /// [`HalError::ForeignObject`].
+    ///
+    /// # The swapchain owns its images and its views
+    ///
+    /// D3D12 hands back plain `ID3D12Resource` back buffers, so each one is
+    /// filed in this device's image table and given a whole-image render target
+    /// view — which is what makes `AcquiredFrame::view` a real object a render
+    /// pass can take, rather than something every caller rebuilds. They are
+    /// reissued on every reconfigure and removed with the swapchain, exactly as
+    /// [`crcbl_hal::swapchain`] requires.
+    ///
+    /// The views carry the **caller's** format, which may be sRGB while the
+    /// buffer is linear; see [`crate::swapchain`] for why that is the only way
+    /// to present sRGB through flip-discard, and note that it is the one place
+    /// this backend performs the differing-format cast `create_image_view`
+    /// refuses — legal here because a swapchain buffer is the case D3D12
+    /// permits it on.
+    fn create_swapchain(&self, desc: &SwapchainDesc<'_>) -> Result<SwapchainHandle, SurfaceError> {
+        let hwnd = self.inner.instance.surface_hwnd(desc.surface)?;
+        let created = swapchain::create(
+            &self.inner.instance.factory,
+            &self.inner.queue,
+            hwnd,
+            desc,
+            self.inner.instance.allow_tearing,
+        )?;
+        let (images, views) = self.register_backbuffers(&created, desc)?;
+        let entry = SwapchainEntry {
+            owner: self.inner.owner.id,
+            raw: created.raw,
+            waitable: created.waitable,
+            hwnd: hwnd.0 as usize,
+            extent: created.extent,
+            format: desc.format,
+            buffers: created.buffers,
+            present_mode: created.present_mode,
+            flags: created.flags,
+            images,
+            views,
+            ledger: present::PresentLedger::default(),
+        };
+        let handle = self.state().swapchains.insert(entry);
+        Ok(handle::stamp(self.inner.owner, handle))
     }
 
+    /// Resizes, reformats or re-paces an existing swapchain in place.
+    ///
+    /// `ResizeBuffers` is the call, and it has two preconditions this method
+    /// discharges in order: **every reference to the old back buffers must be
+    /// gone**, and the GPU must be finished with them. So the queue is waited
+    /// on — which also lets [`crate::retire`] release the references a
+    /// submission was holding — and then the views and images are destroyed,
+    /// and only then does DXGI see the resize. Skipping either is
+    /// `E_INVALIDARG` from `ResizeBuffers` at best and a use-after-free at
+    /// worst.
+    ///
+    /// **One reference this cannot reach is a command buffer the caller has not
+    /// destroyed.** `crcbl_dx12::command`'s encoder takes its own reference to
+    /// every resource it records against, and a
+    /// [`CommandBufferHandle`](crcbl_hal::CommandBufferHandle) still in the
+    /// caller's hand still holds it — so a caller that renders into a swapchain
+    /// image and keeps the command buffer across a resize gets DXGI's refusal
+    /// rather than a resized swapchain. Destroying finished command buffers is
+    /// something the seam already asks for; this is the first call where
+    /// forgetting is visible.
+    ///
+    /// The handle survives, which is the seam's promise across a resize storm —
+    /// but the image and view handles do **not**: they are reissued, and a
+    /// caller holding one from before this call gets
+    /// [`HalError::InvalidHandle`] rather than a stale object. That is the same
+    /// contract `AcquiredFrame::view` states.
+    ///
+    /// The present numbering starts over here, which is what
+    /// [`PresentInfo::present_id`] documents: the ledger is replaced with a
+    /// fresh one, so a wait for an id the old configuration presented is
+    /// answered at once instead of blocking on a swapchain that has forgotten
+    /// it.
     fn reconfigure_swapchain(
         &self,
-        _swapchain: SwapchainHandle,
-        _desc: &SwapchainDesc<'_>,
+        swapchain: SwapchainHandle,
+        desc: &SwapchainDesc<'_>,
     ) -> Result<(), SurfaceError> {
-        Err(SurfaceError::Hal(not_yet(
-            "swapchains (the DX12 swapchain slice)",
-        )))
+        let hwnd = self.inner.instance.surface_hwnd(desc.surface)?;
+        let (extent, buffers) = swapchain::check(desc)?;
+        let (old_images, old_views) = {
+            let state = self.state();
+            let entry =
+                handle::lookup(&state.swapchains, "swapchain", swapchain, self.inner.owner)?;
+            if entry.hwnd != hwnd.0 as usize {
+                return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
+                    "reconfigure_swapchain cannot move a swapchain to a different window"
+                        .to_string(),
+                )));
+            }
+            if entry.format != desc.format {
+                // `ResizeBuffers` does take a new format, and this backend
+                // still refuses one: the views are created from the swapchain's
+                // format and the entry's `format` is what a later reconfigure
+                // resizes with, so a changed format would have to be threaded
+                // through the failure path too. Refused by name rather than
+                // half-applied.
+                return Err(SurfaceError::Hal(HalError::InvalidDescriptor(format!(
+                    "reconfigure_swapchain cannot change a swapchain's format from {:?} to {:?} \
+                     on this backend; destroy it and create another",
+                    entry.format, desc.format
+                ))));
+            }
+            (entry.images.clone(), entry.views.clone())
+        };
+
+        // Both preconditions of `ResizeBuffers`, in the only order that works.
+        self.wait_idle()?;
+        for view in old_views {
+            self.destroy_image_view(view);
+        }
+        for image in old_images {
+            self.destroy_image(image);
+        }
+        {
+            // Forgotten *now*, not when the new ones are ready. Every step
+            // below can fail, and an entry left naming handles that have just
+            // been destroyed would hand a dead view to the next
+            // `acquire_next_frame`; empty lists make that acquire an error
+            // instead, which is what a caller can act on.
+            let mut state = self.state();
+            let entry = handle::lookup_mut(
+                &mut state.swapchains,
+                "swapchain",
+                swapchain,
+                self.inner.owner,
+            )?;
+            entry.images.clear();
+            entry.views.clear();
+        }
+
+        let present_mode =
+            present::resolve_present_mode(desc.present_mode, self.inner.instance.allow_tearing);
+        {
+            let state = self.state();
+            let entry =
+                handle::lookup(&state.swapchains, "swapchain", swapchain, self.inner.owner)?;
+            swapchain::resize(entry, extent, buffers)?;
+        }
+
+        // Re-fetched after the lock was released, because `create_image_view`
+        // takes it: this device has one non-reentrant `Mutex`.
+        let created = {
+            let state = self.state();
+            let entry =
+                handle::lookup(&state.swapchains, "swapchain", swapchain, self.inner.owner)?;
+            swapchain::Created {
+                raw: entry.raw.clone(),
+                waitable: entry.waitable,
+                extent,
+                buffers,
+                present_mode,
+                flags: entry.flags,
+            }
+        };
+        let (images, views) = self.register_backbuffers(&created, desc)?;
+
+        let mut state = self.state();
+        let entry = handle::lookup_mut(
+            &mut state.swapchains,
+            "swapchain",
+            swapchain,
+            self.inner.owner,
+        )?;
+        entry.extent = extent;
+        entry.buffers = buffers;
+        entry.present_mode = present_mode;
+        entry.images = images;
+        entry.views = views;
+        // The numbering restarts, per `PresentInfo::present_id`.
+        entry.ledger = present::PresentLedger::default();
+        Ok(())
     }
 
-    fn destroy_swapchain(&self, _swapchain: SwapchainHandle) {}
+    /// Destroys a swapchain and everything it owns.
+    ///
+    /// The queue is waited on first, for the same reason `ResizeBuffers`
+    /// demands it: releasing the last reference to a back buffer the GPU is
+    /// still writing is the use-after-free [`crate::retire`] exists to prevent,
+    /// arriving through the one path that queue cannot see. A failed wait is
+    /// logged rather than propagated — this signature returns `()`, and a
+    /// device already lost has nothing left to protect.
+    fn destroy_swapchain(&self, swapchain: SwapchainHandle) {
+        let (images, views) = {
+            let state = self.state();
+            let Ok(entry) =
+                handle::lookup(&state.swapchains, "swapchain", swapchain, self.inner.owner)
+            else {
+                return;
+            };
+            (entry.images.clone(), entry.views.clone())
+        };
+        if let Err(error) = self.wait_idle() {
+            log::error!("crcbl-dx12: a swapchain was destroyed with the queue unfinished: {error}");
+        }
+        for view in views {
+            self.destroy_image_view(view);
+        }
+        for image in images {
+            self.destroy_image(image);
+        }
+        let mut state = self.state();
+        drop(handle::take_owned(
+            &mut state.swapchains,
+            swapchain,
+            self.inner.owner,
+        ));
+    }
 
+    /// The back buffer DXGI says is next, with no synchronisation attached.
+    ///
+    /// **This is the implicit-acquire shape the seam documents for
+    /// `crcbl-wgpu` and `crcbl-mtl`, and D3D12 is a third example of it**:
+    /// there is no acquire semaphore to signal and no present semaphore to
+    /// wait, because `GetCurrentBackBufferIndex` is a read of state DXGI
+    /// already maintains and `Present` is ordered on the queue the swapchain
+    /// was created against. Both are `None`, so the renderer's splice becomes
+    /// an empty slice with no tier branch.
+    ///
+    /// `suboptimal` is always `false`, and that is not a stub: DXGI has no
+    /// notion of a swapchain that no longer matches its window — see
+    /// [`crate::swapchain`] — so there is nothing to report and inventing one
+    /// would put a caller into an unending reconfigure.
     fn acquire_next_frame(
         &self,
-        _swapchain: SwapchainHandle,
+        swapchain: SwapchainHandle,
     ) -> Result<AcquiredFrame, SurfaceError> {
-        Err(SurfaceError::Hal(not_yet(
-            "swapchains (the DX12 swapchain slice)",
-        )))
+        let mut state = self.state();
+        self.inner.poll_retire(&mut state);
+        let owner = self.inner.owner;
+        let entry = handle::lookup(&state.swapchains, "swapchain", swapchain, owner)?;
+        // SAFETY: `entry.raw` is a live swapchain this device created. The call
+        // reads no pointer of ours and returns an index by value.
+        let index = unsafe { entry.raw.GetCurrentBackBufferIndex() };
+        let slot = index as usize;
+        let (Some(&image), Some(&view)) = (entry.images.get(slot), entry.views.get(slot)) else {
+            return Err(SurfaceError::Hal(HalError::Backend(format!(
+                "GetCurrentBackBufferIndex answered {index} for a swapchain of {} buffers",
+                entry.buffers
+            ))));
+        };
+        Ok(AcquiredFrame {
+            image,
+            view,
+            extent: entry.extent,
+            index,
+            acquire_semaphore: None,
+            present_semaphore: None,
+            suboptimal: false,
+        })
     }
 
-    fn present(&self, _queue: QueueHandle, _present: &PresentInfo<'_>) -> Result<(), SurfaceError> {
-        Err(SurfaceError::Hal(not_yet(
-            "presentation (the DX12 swapchain slice)",
-        )))
-    }
-
-    /// Not yet: this device does not advertise
-    /// [`Features::PRESENT_FEEDBACK`](crcbl_hal::Features::PRESENT_FEEDBACK),
-    /// so the seam's answer is that there is nothing to wait for.
+    /// Presents the current back buffer, and numbers it if the caller asked.
     ///
-    /// The one method in this block that is **not** [`not_yet`], deliberately.
-    /// A refusal here would not be "this slice has not landed", it would be a
-    /// frame loop failing every frame the moment the swapchain slice lands and
-    /// presentation starts working — the seam defines `Ok(())` as the answer
-    /// for a device without the capability precisely so a caller needs no
-    /// branch. What is owed is the capability itself: a swapchain created with
-    /// the waitable-object flag, the handle it hands out, and a maximum frame
-    /// latency to wait against. That wait counts *outstanding presents* and has
-    /// no number in it, so the slice that implements this maps `present_id`
-    /// onto its own count of presents.
+    /// The id is recorded **only on a present that succeeded**, which is the
+    /// half that makes [`Device::wait_until_presented`]'s "no record of this
+    /// id" answer mean something: a caller that spent an id on a present DXGI
+    /// refused has a number nothing will ever complete, and blocking for the
+    /// whole timeout on it is the worst of the available answers.
+    fn present(&self, queue: QueueHandle, present: &PresentInfo<'_>) -> Result<(), SurfaceError> {
+        // The queue first, as `submit` does: a handle from another device is a
+        // caller bug with its own contract, and reporting it after a resolution
+        // failure further down would lose it.
+        self.inner.check_queue(queue)?;
+        if let Some(wait) = present.waits.first() {
+            // `acquire_next_frame` hands out no present semaphore, so a caller
+            // following the seam splices an empty slice here. Anything else is
+            // a handle no device issued.
+            return Err(SurfaceError::Hal(HalError::invalid_handle(
+                "semaphore",
+                *wait,
+            )));
+        }
+        let owner = self.inner.owner;
+        // Resolved, then released: `Present` blocks when the frame queue is
+        // full, and this device has one lock over every table.
+        let (raw, mode) = {
+            let state = self.state();
+            let entry = handle::lookup(&state.swapchains, "swapchain", present.swapchain, owner)?;
+            (entry.raw.clone(), entry.present_mode)
+        };
+        swapchain::present(&raw, mode)?;
+
+        let Some(id) = present.present_id else {
+            return Ok(());
+        };
+        let mut state = self.state();
+        // The frame has gone out, so a swapchain destroyed from another thread
+        // while it was in flight is not a failure to report back — there is
+        // nothing left to record the id on, and nothing left to wait for it.
+        let Ok(entry) =
+            handle::lookup_mut(&mut state.swapchains, "swapchain", present.swapchain, owner)
+        else {
+            log::debug!("crcbl-dx12: a swapchain went away during a present, so id {id} is lost");
+            return Ok(());
+        };
+        if !entry.ledger.record_present(id) {
+            log::debug!(
+                "crcbl-dx12: present id {id} does not follow this swapchain's last, so nothing \
+                 will be able to wait for it"
+            );
+        }
+        Ok(())
+    }
+
+    /// Blocks until fewer than the swapchain's maximum frame latency presents
+    /// are outstanding.
+    ///
+    /// # What a return actually promises here
+    ///
+    /// The seam's guarantee is "the numbered present is no longer waiting to
+    /// happen", and it says in the same breath that it takes the **weakest** of
+    /// the three platforms' answers — one of which is, in its own words, "only
+    /// knows that fewer than *n* presents are still outstanding". That is
+    /// exactly this one. DXGI's waitable object carries no id at all, so the id
+    /// is matched against [`crate::present`]'s ledger and the *blocking* is
+    /// done against a count.
+    ///
+    /// Two consequences worth stating rather than discovering:
+    ///
+    /// * The first [`present::frame_latency`] waits on a fresh swapchain return
+    ///   immediately, because the object starts signalled that many times. That
+    ///   is the pipeline filling, not a wait that failed.
+    /// * One call blocks at most once. The seam's own advice — "ask for a frame
+    ///   or more back, never the one just submitted" — is what makes that the
+    ///   right cadence: a caller pacing on this calls it once per frame, which
+    ///   is exactly how DXGI's object is meant to be consumed.
+    ///
+    /// # The seam's immediate answers
+    ///
+    /// Two of the three arise here. There is no "device without the
+    /// capability": `crcbl_dx12::adapter` reports
+    /// [`Features::PRESENT_FEEDBACK`] for every adapter and every swapchain
+    /// this backend creates carries the waitable-object flag. The other two are
+    /// the ledger's: an id of zero numbers nothing, and an id above the highest
+    /// this swapchain **object** was given names a frame it was never asked to
+    /// present — a present that failed after the caller spent the id, or one
+    /// from before a `reconfigure_swapchain`, which is where `ResizeBuffers`
+    /// restarts the numbering.
+    ///
+    /// The lock is released before the wait. Blocking with the device's one
+    /// [`Mutex`] held would stall every other thread's `create_buffer` for the
+    /// length of a frame.
     fn wait_until_presented(
         &self,
-        _swapchain: SwapchainHandle,
-        _present_id: u64,
-        _timeout: Duration,
+        swapchain: SwapchainHandle,
+        present_id: u64,
+        timeout: Duration,
     ) -> Result<(), SurfaceError> {
-        Ok(())
+        let waitable = {
+            let state = self.state();
+            let entry =
+                handle::lookup(&state.swapchains, "swapchain", swapchain, self.inner.owner)?;
+            match entry.ledger.plan(present_id) {
+                PresentWait::NothingToWaitFor => return Ok(()),
+                PresentWait::Block => entry.waitable,
+            }
+        };
+        swapchain::wait(waitable, timeout)
     }
 }
 
@@ -4870,24 +5286,34 @@ pub(crate) mod tests {
         }
     }
 
-    /// **The presentation half refuses through [`SurfaceError`], and the words
-    /// survive the conversion.**
+    /// **Every presentation entry point refuses a handle nothing issued as a
+    /// dead handle, and never as `OutOfDate` or `Lost`.**
     ///
-    /// These four are the entry points whose refusal takes a different route
-    /// out: [`not_yet`] builds a [`HalError`] and `SurfaceError::Hal` wraps it,
-    /// so a caller matching on `SurfaceError` sees a `Hal` arm rather than
-    /// [`SurfaceError::Lost`] or [`SurfaceError::OutOfDate`]. Nothing asserted
-    /// that before — and the two failures it admits are the ones a caller cannot
-    /// recover from: an unwritten call that *panicked* instead of returning
-    /// looks the same as one nobody tested, and a refusal miscast as `OutOfDate`
-    /// would put a render loop into an unending reconfigure.
+    /// This is what the slice's four refusals were protecting, restated for a
+    /// slice that has landed. The refusals themselves are gone — the calls
+    /// work now — but the property underneath them was never about `Unsupported`
+    /// as such. It was that **the refusal has to arrive before any handle is
+    /// resolved into a real object, and it must not be a surface condition**:
+    /// a call that panicked instead of returning looks the same as one nobody
+    /// tested, and a dead handle miscast as [`SurfaceError::OutOfDate`] would
+    /// put a render loop into an unending reconfigure, reconfiguring a
+    /// swapchain that does not exist.
     ///
-    /// Every handle offered is one no device issued, because none can be: both
-    /// [`Instance::create_surface`](crcbl_hal::Instance::create_surface) and
-    /// `create_swapchain` refuse. So the refusal has to arrive before any handle
-    /// is resolved, which is what makes these reachable at all.
+    /// So the same five calls are made with the same unissued handles, and the
+    /// answer demanded is [`HalError::InvalidHandle`] naming the kind. Every
+    /// handle carries no device tag at all, which is the case
+    /// `crate::handle`'s `local` separates from another device's — so none of
+    /// them can resolve, whatever this device has created.
+    ///
+    /// `wait_until_presented` is in the list and answers `Err` rather than the
+    /// seam's immediate `Ok(())`: that answer is for an *id* with no record,
+    /// not for a swapchain handle that never existed, and collapsing the two
+    /// would make a caller's typo indistinguishable from a frame already shown.
+    ///
+    /// Red the moment any of them answers `OutOfDate`, `Lost`, `Timeout` or
+    /// `Unsupported`, and red if one starts resolving a handle it should not.
     #[test]
-    fn the_presentation_slice_refuses_through_surface_error_and_names_dx12() {
+    fn the_presentation_entry_points_refuse_a_dead_handle_and_never_as_out_of_date() {
         let (_instance, device) = open_device();
         let queue = device
             .queue(QueueKind::Graphics)
@@ -4902,58 +5328,124 @@ pub(crate) mod tests {
             composite_alpha: CompositeAlpha::Opaque,
         };
 
-        let refusals: Vec<(&str, SurfaceError)> = vec![
+        let refusals: Vec<(&str, &str, SurfaceError)> = vec![
             (
                 "swapchain creation",
+                "surface",
                 device
                     .create_swapchain(&swapchain)
-                    .expect_err("no DXGI swapchain yet"),
+                    .expect_err("no instance issued that surface"),
             ),
             (
                 "swapchain reconfiguration",
+                "surface",
                 device
                     .reconfigure_swapchain(unissued(), &swapchain)
-                    .expect_err("there is no swapchain to reconfigure"),
+                    .expect_err("nor for a reconfigure"),
             ),
             (
                 "acquire",
+                "swapchain",
                 device
                     .acquire_next_frame(unissued())
-                    .expect_err("no swapchain hands out a frame"),
+                    .expect_err("no device issued that swapchain"),
             ),
             (
                 "present",
+                "swapchain",
                 device
                     .present(
                         queue,
                         &PresentInfo {
                             swapchain: unissued(),
                             waits: &[],
-                            present_id: None,
+                            present_id: Some(1),
                         },
                     )
                     .expect_err("there is nothing to present"),
             ),
+            (
+                "present wait",
+                "swapchain",
+                device
+                    .wait_until_presented(unissued(), 1, Duration::from_millis(1))
+                    .expect_err("a dead handle is not an id with no record"),
+            ),
         ];
         assert!(!refusals.is_empty(), "nothing to check");
-        for (what, error) in &refusals {
+        for (what, kind, error) in &refusals {
             let SurfaceError::Hal(hal) = error else {
-                panic!("{what}: a slice that has not landed is not a surface condition: {error:?}");
+                panic!("{what}: a dead handle is not a surface condition: {error:?}");
             };
             assert!(
-                matches!(hal, HalError::Unsupported { backend, .. } if *backend == BackendKind::Dx12),
-                "{what}: {hal:?}"
+                matches!(hal, HalError::InvalidHandle { kind: named, .. } if named == kind),
+                "{what}: expected a dead {kind}, got {hal:?}"
             );
-            // `SurfaceError::Hal` is transparent, so the refusal's own words are
+            // `SurfaceError::Hal` is transparent, so the error's own words are
             // what a caller prints. A wrapper that swallowed them would leave
-            // the caller with a message naming no backend and no slice.
+            // the caller with a message naming nothing at all.
             let text = error.to_string();
-            assert!(text.contains("dx12"), "{what}: {text}");
-            assert!(
-                text.contains("DX12") && text.contains("slice"),
-                "{what}: {text}"
-            );
+            assert!(text.contains(kind), "{what}: {text}");
         }
+    }
+
+    /// A present whose `waits` name a semaphore is refused on the semaphore,
+    /// because `acquire_next_frame` hands none out.
+    ///
+    /// The seam's implicit-acquire shape means a conforming caller splices an
+    /// empty slice here, so anything in it is a handle no device issued — and
+    /// the answer has to say *semaphore*, not "swapchain", or a caller reading
+    /// the message goes looking at the wrong object. Asserted with a live-ish
+    /// swapchain handle position deliberately left unissued too: the semaphore
+    /// is checked first.
+    #[test]
+    fn a_present_with_a_semaphore_is_refused_on_the_semaphore() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let error = device
+            .present(
+                queue,
+                &PresentInfo {
+                    swapchain: unissued(),
+                    waits: &[unissued()],
+                    present_id: None,
+                },
+            )
+            .expect_err("no semaphore was ever issued");
+        let SurfaceError::Hal(hal) = error else {
+            panic!("a dead semaphore is not a surface condition: {error:?}");
+        };
+        assert!(
+            matches!(hal, HalError::InvalidHandle { kind, .. } if kind == "semaphore"),
+            "{hal:?}"
+        );
+    }
+
+    /// **`Features::PRESENT_FEEDBACK` is reported, and the seam's immediate
+    /// answers do not depend on a swapchain existing.**
+    ///
+    /// The flag is read once at device open, before any swapchain — which is
+    /// the whole reason a per-swapchain capability has to be answered at device
+    /// level — so this is where the claim is checked. `crcbl_dx12::adapter`
+    /// argues why it is unconditional here where `crcbl-vk` has to probe.
+    ///
+    /// Red when the flag stops being reported, and red if it ever creeps into
+    /// [`Features::TIER_A`], which it must not: the seam says a device without
+    /// present feedback renders the same frames.
+    #[test]
+    fn every_device_reports_present_feedback_and_it_is_not_a_tier_a_flag() {
+        let (_instance, device) = open_device();
+        assert!(
+            device.caps().features.contains(Features::PRESENT_FEEDBACK),
+            "every D3D12 machine can create a waitable swapchain: {:?}",
+            device.caps().features
+        );
+        assert!(
+            !Features::TIER_A.contains(Features::PRESENT_FEEDBACK),
+            "pacing is not part of what makes a device Tier A"
+        );
     }
 
     /// **A handle that cannot resolve is not the same answer as a slice that has

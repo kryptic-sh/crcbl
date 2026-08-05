@@ -186,6 +186,38 @@ pub(crate) fn lookup<'p, E: Owned, M>(
     }
 }
 
+/// [`lookup`], for an entry the caller has to change.
+///
+/// Separate rather than `lookup` returning a `&mut`, because every other table
+/// in this backend is read through the shared form and a swapchain is the one
+/// object with per-frame state on it — the acquired index and the present
+/// ledger.
+///
+/// # Errors
+///
+/// As [`lookup`].
+pub(crate) fn lookup_mut<'p, E: Owned, M>(
+    pool: &'p mut Pool<E>,
+    kind: &'static str,
+    handle: Handle<M>,
+    owner: Owner,
+) -> Result<&'p mut E, HalError> {
+    let index = local(kind, handle, owner)?;
+    // The owner check happens through an immutable borrow that ends before the
+    // mutable one begins, which is what stops a foreign handle from handing
+    // back a mutable reference to this device's own object.
+    match pool.get(index).map(Owned::owner) {
+        Some(entry) if entry == owner.id => Ok(pool
+            .get_mut(index)
+            .unwrap_or_else(|| unreachable!("the slot resolved a moment ago"))),
+        Some(_) => Err(HalError::ForeignObject {
+            kind,
+            bits: handle.to_bits(),
+        }),
+        None => Err(HalError::invalid_handle(kind, handle)),
+    }
+}
+
 /// Removes a handle from `pool`, but **only** if `owner` owns it.
 ///
 /// The order is the point: removing first and checking the owner afterwards

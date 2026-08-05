@@ -480,6 +480,29 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///   per-device answer. Reported now that `Device::create_sampler` builds a
 ///   `D3D12_SAMPLER_DESC` with a `MaxAnisotropy` in it; `crcbl-mtl` withheld it
 ///   until exactly the same point and for the same reason.
+/// * [`Features::PRESENT_FEEDBACK`] — **unconditional, and for a stronger
+///   reason than Metal's.** The mechanism is
+///   `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` plus
+///   `IDXGISwapChain2::GetFrameLatencyWaitableObject`, and the flag is a
+///   **swapchain creation** flag rather than a device property — so the
+///   question this raises is the one `crcbl-mtl` had to argue: is a
+///   device-level flag honest about a per-swapchain capability?
+///
+///   Here it is, and the argument does not rest on the same "no honest
+///   device-level answer" trade Metal made. `IDXGISwapChain2` arrived with DXGI
+///   1.3 in Windows 8.1 and D3D12 requires Windows 10, so **every machine that
+///   can open an `ID3D12Device` at all can create a waitable swapchain** —
+///   there is no query to make, no driver to ask, and no machine where this
+///   would have been probed and come back no. `crcbl-vk` cannot say that:
+///   `VK_KHR_present_wait` is driver-conditional and its adapter probes for it.
+///   And `crcbl_dx12::swapchain` sets the flag on **every** swapchain it
+///   creates, so there is no swapchain on this backend for which the claim is
+///   false.
+///
+///   The flag is also read once, at device open, before any swapchain exists —
+///   `GpuContext::open` logs which pacing story a run gets from it — which is
+///   the structural reason a per-swapchain fact has to be answered at device
+///   level whatever the backend.
 ///
 /// # Absent, with the reason for each
 ///
@@ -536,9 +559,11 @@ fn features_of(raw: &RawCaps) -> Features {
     if raw.block_compression {
         out |= Features::TEXTURE_COMPRESSION_BC;
     }
-    // No query for either: a GPU virtual address is not optional in D3D12, and
-    // anisotropic sampling is an architectural constant. See above.
-    out |= Features::BUFFER_DEVICE_ADDRESS | Features::SAMPLER_ANISOTROPY;
+    // No query for any of the three: a GPU virtual address is not optional in
+    // D3D12, anisotropic sampling is an architectural constant, and the
+    // frame-latency waitable object predates D3D12 itself. See above.
+    out |=
+        Features::BUFFER_DEVICE_ADDRESS | Features::SAMPLER_ANISOTROPY | Features::PRESENT_FEEDBACK;
     out
 }
 

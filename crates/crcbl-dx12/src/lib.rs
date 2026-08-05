@@ -10,23 +10,32 @@
 //!
 //! # What this backend does, and the question it was written to answer
 //!
-//! **Adapter enumeration, the resource half of the seam, and a cleared pixel
-//! read back.** `Dx12Instance` lists every D3D12 adapter with its capabilities
-//! filled in, which is the one thing
+//! **Adapter enumeration, the resource half of the seam, a cleared pixel read
+//! back, and a window presented to.** `Dx12Instance` lists every D3D12 adapter
+//! with its capabilities filled in, which is the one thing
 //! [`Instance::adapters`](crcbl_hal::Instance::adapters) promises can be
 //! answered before a device exists. `request_device` then opens a real
 //! `ID3D12Device` and a `D3D12_COMMAND_LIST_TYPE_DIRECT` queue, and the device
 //! it hands back creates buffers, images, image views and samplers, writes into
 //! a host-visible buffer, records an `ID3D12GraphicsCommandList`, runs it on the
-//! queue, and reads the result back through an `ID3D12Fence`.
+//! queue, and reads the result back through an `ID3D12Fence`. It also builds a
+//! `DXGI_SWAP_EFFECT_FLIP_DISCARD` swapchain on an `HWND`, acquires and presents
+//! through it, and answers
+//! [`Device::wait_until_presented`](crcbl_hal::Device::wait_until_presented)
+//! from the frame-latency waitable object — see `crcbl_dx12::swapchain` and
+//! `crcbl_dx12::present`.
 //!
 //! **Nothing in this crate is a stub that reports success** — a draw recorded
 //! into an encoder *fails the encoder*, so `finish` hands back the refusal
 //! rather than a command buffer that submits and draws nothing. Everything past
-//! the clear — shader modules, pipelines, bind groups, swapchains and queries —
-//! refuses with [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported)
+//! the clear that no slice has written — compute pipelines, queries, timeline
+//! semaphores, indexed and indirect draws, an offscreen surface — refuses with
+//! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported)
 //! whose `what` names the slice the answer arrives in, so a caller reads "not
-//! yet" rather than "broken". What is **not** folded into that refusal is
+//! yet" rather than "broken". A refusal that is *permanent* deliberately does
+//! not read that way: a Wayland, XCB, AppKit or canvas surface names the
+//! backend that owns it instead, because D3D12 presents to an `HWND` and
+//! nothing else. What is **not** folded into either refusal is
 //! anything the backend can genuinely diagnose: an out-of-range adapter is
 //! [`NoSuchAdapter`](crcbl_hal::HalError::NoSuchAdapter), a stale handle is
 //! [`InvalidHandle`](crcbl_hal::HalError::InvalidHandle), one from another
@@ -153,17 +162,27 @@
 //! require [`HalThreadSafe`](crcbl_hal::threading::HalThreadSafe), which is
 //! `Send + Sync` on native, and neither is satisfied here by an assertion.
 //! `windows-rs` declares `unsafe impl Send` **and** `Sync` for every interface
-//! this crate holds — `IDXGIFactory4`, `IDXGIAdapter1`, `ID3D12Device`,
-//! `ID3D12CommandQueue`, `ID3D12Resource`, `ID3D12DescriptorHeap` and
-//! `ID3D12Fence` — so the markers come from the compiler.
+//! this crate holds — `IDXGIFactory4`, `IDXGIAdapter1`, `IDXGISwapChain3`,
+//! `ID3D12Device`, `ID3D12CommandQueue`, `ID3D12Resource`,
+//! `ID3D12DescriptorHeap` and `ID3D12Fence` — so the markers come from the
+//! compiler.
 //!
 //! That is worth stating because `crcbl-mtl` could not do it: `MTLBuffer` and
 //! `MTLTexture` inherit from `MTLResource`, which objc2 leaves unmarked, so its
-//! device slice had to write the impl and justify it. The one Win32 type here
-//! that is not `Send` is the event `HANDLE` a fence wait is armed with, and
-//! `Device::wait_idle` creates and closes it inside the call rather than storing
-//! it — which is the second reason for a decision the first reason (two
-//! concurrent waiters must not share an auto-reset event) already forced.
+//! device slice had to write the impl and justify it. The Win32 types here that
+//! are **not** `Send` are all raw pointers — `HANDLE` and `HWND` — and none of
+//! them is stored as one:
+//!
+//! * The event a fence wait is armed with never leaves `Device::wait_idle`,
+//!   which creates and closes it inside the call. That is the second reason for
+//!   a decision the first reason (two concurrent waiters must not share an
+//!   auto-reset event) already forced.
+//! * A surface's window and a swapchain's frame-latency waitable object are
+//!   both kept as plain addresses and rebuilt at each call site, because both
+//!   live in a pool behind a lock inside a struct the seam requires to be
+//!   `Send + Sync`. An `HWND` is not a pointer this crate may dereference in
+//!   any case — only Win32 may — so the integer loses nothing it was entitled
+//!   to use.
 //!
 //! The factory and the adapters **are** kept, behind an `Arc` shared with every
 //! device: `D3D12CreateDevice` takes an `IDXGIAdapter1`, and the seam obliges a
@@ -189,8 +208,15 @@ mod handle;
 mod instance;
 #[cfg(target_os = "windows")]
 mod pipeline;
+// The one module that is not Windows-only, and the crate docs say why: it holds
+// no `windows` type, and off Windows it exists in the test build alone so that
+// `cargo test` on any host runs the swapchain and present-wait arithmetic.
+#[cfg(any(target_os = "windows", test))]
+mod present;
 #[cfg(target_os = "windows")]
 mod retire;
+#[cfg(target_os = "windows")]
+mod swapchain;
 #[cfg(target_os = "windows")]
 mod view;
 

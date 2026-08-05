@@ -72,6 +72,12 @@ workspace = true
 #   This crate passes `None` for it and never names the type; the binding gates
 #   the whole function on the feature, the same way `Win32_Graphics_Direct3D`
 #   above is required by `D3D12CreateDevice`'s feature-level argument.
+# * `Win32_UI_WindowsAndMessaging` is `GetClientRect`, which is where
+#   `Instance::surface_caps`'s `current_extent` comes from — DXGI has no query
+#   for a window's size, so the answer comes from the window manager or from
+#   nowhere. The same feature carries `CreateWindowExW`/`DestroyWindow`, which
+#   this crate's swapchain tests use to make a real `HWND` to present to; that
+#   is a second caller and not the reason the feature is here.
 #
 # A slice that needs more adds it here.
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -84,6 +90,7 @@ windows = { version = "0.62.2", default-features = false, features = [
   "Win32_Graphics_Dxgi_Common",
   "Win32_Security",
   "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 
 # The committed DXIL, and the triangle geometry the shader that reads it

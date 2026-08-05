@@ -253,16 +253,6 @@ thing pacing a loop on a device without the capability.
 
 What is still owed:
 
-- **Implement it on D3D12.**
-  `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` +
-  `GetFrameLatencyWaitableObject`, a wait with no id in it that means "fewer
-  than `SetMaximumFrameLatency` presents outstanding", so the backend maps the
-  caller's id onto its own count of presents. `crcbl-dx12` keeps no such count
-  yet, deliberately: an unread counter is state that can only be wrong. Metal
-  landed — `crcbl_mtl::present`'s ledger is the shape a DX12 count would take,
-  minus the id-per-present, since DXGI's waitable object cannot be asked about a
-  particular frame.
-
 - **`vkWaitForPresentKHR` is verified on radv only, and CI does not run it at
   all.** `VK_KHR_present_wait` is a driver-conditional extension: this
   developer's radv exposes it, lavapipe does not (`vulkaninfo` lists it under
@@ -5154,3 +5144,93 @@ The command-list, render-pass and clear slice. All in `crates/crcbl-dx12`.
 - **`device.rs` grew again.** DX2's note about splitting `check_image`,
   `check_view_type` and `build_views` out of it still stands and is more urgent
   now, not less.
+
+## What the DX12 swapchain and present-feedback slice left open
+
+Surfaces, a flip-model swapchain, acquire/present/reconfigure, and
+`Device::wait_until_presented`. `crcbl_dx12::present` holds everything that is
+arithmetic (host-testable, and its tests run on any `cargo test`);
+`crcbl_dx12::swapchain` holds everything that needs DXGI.
+
+- **Nothing in the DXGI half has executed anywhere.** The development box is
+  Linux and `windows-latest` is the first machine to run a line of it — the same
+  position every earlier DX slice started from, with one difference: this one
+  needs a **window**. `crcbl_dx12::swapchain`'s tests create a real `HWND` with
+  `CreateWindowExW` on the predefined `STATIC` class, which is a thing the
+  runner can do (`crcbl-shell`'s win32 e2e job does it on the same image) but
+  which nothing in this crate had needed before. If that turns out not to work
+  in the `build + test (windows-latest)` job's session, the finding is about the
+  session and the fix is to move those tests into a job of their own like
+  `win32-e2e`, not to delete them.
+
+- **Whether the pacing wait genuinely blocks is measured, not asserted.**
+  `a_windowed_swapchain_presents_paces_and_resizes_on_a_real_hwnd` prints
+  whether each `wait_until_presented` returned or lapsed, and accepts either,
+  because a window nobody is looking at is a state the compositor may retire
+  frames differently for and the seam calls `SurfaceError::Timeout` expected
+  traffic. Any _other_ error fails. Closing this needs a run whose output is
+  read: if the waits return promptly there, the tolerance can become an
+  assertion.
+
+- **Whose handle `GetFrameLatencyWaitableObject` returns is unsettled**, so it
+  is never closed. `SwapchainEntry::waitable` argues the asymmetry — a double
+  `CloseHandle` is a process fault, a leaked handle is bounded — and records
+  that `wgpu-hal` 29's D3D12 backend does not close it either (checked in the
+  vendored source, not recalled). Settling it means reading the current DXGI
+  documentation for that method; if the caller owns it, `destroy_swapchain` and
+  `reconfigure_swapchain` are the two places that have to close it.
+
+- **A present id is matched against a count, and the mapping is deliberately
+  coarse.** DXGI's waitable object answers "fewer than `SetMaximumFrameLatency`
+  presents are outstanding" and carries no id, so `PresentLedger` records only
+  the highest id this swapchain object was given and a wait for any id at or
+  below it blocks **once**. The seam licenses exactly this — its guarantee is
+  "the weakest of the three" and it names this shape — but the consequence is
+  worth writing down: a caller asking about a frame far back blocks as long as
+  one asking about the frame before last, and the first `frame_latency` waits on
+  a fresh swapchain return immediately because the object starts signalled that
+  many times. An exact id→completion map would need a bounded ring of in-flight
+  ids and a soundness argument about how many presents DXGI can have
+  outstanding; it was **considered and declined** for this slice as machinery
+  ahead of a caller that needs it.
+
+- **A command buffer the caller has not destroyed blocks a resize.** The encoder
+  retains every resource it records against, so a `CommandBufferHandle` still in
+  the caller's hand holds a reference to a back buffer and `ResizeBuffers`
+  refuses. `reconfigure_swapchain` waits for the queue and destroys the
+  swapchain's own views and images, which is everything it can reach; the rest
+  is the caller obeying the seam's existing rule about destroying finished
+  command buffers. Nothing tests it — the test helper destroys its command
+  buffer every frame — and the failure is a DXGI refusal with no field named,
+  which is the class of thing `crcbl_dx12::swapchain`'s `check` otherwise turns
+  into something readable.
+
+- **`reconfigure_swapchain` refuses a format change**, by name. `ResizeBuffers`
+  does take a new format, but the entry's `format` is what the views are built
+  from and what a _later_ reconfigure resizes with, so changing it means
+  threading the new format through the failure path too. Destroy and recreate
+  works today.
+
+- **Offscreen surfaces are still refused.** `SurfaceTarget::Offscreen` names an
+  unwritten slice rather than a permanent refusal, so `crcbl screenshot` and the
+  golden-image e2e cannot reach D3D12 — which is the same gap that keeps this
+  backend out of `crcbl`'s registry. A ring of plain images through the same
+  acquire/present path is what `crcbl-vk` and `crcbl-mtl` both build.
+
+- **The sRGB-through-the-view path is the one place this backend performs the
+  differing-format cast `create_image_view` refuses**, and it is legal only
+  because a flip-model back buffer is the case D3D12 permits it on. DX2's entry
+  about that refusal is unaffected — it still applies to every image a caller
+  creates — but the two now disagree in the same crate, and the "needs a
+  decision before the bind-group slice" note should be read with this in mind.
+
+- **`MakeWindowAssociation(DXGI_MWA_NO_ALT_ENTER)` is called per swapchain, on
+  the caller's window.** It stops DXGI's own message hook taking Alt+Enter into
+  a fullscreen transition nothing above the seam can see. It is a window-global
+  side effect a HAL backend arguably should not have; nothing above the seam
+  asked for it and nothing can turn it off.
+
+- **Nothing above the seam uses any of this yet.** No crate outside `crcbl-dx12`
+  names `Dx12Instance`, so the backend is not in `crcbl`'s registry and no
+  `crcbl-shell` window has ever been handed to it. Wiring it up is its own slice
+  and would make the win32 shell e2e a real end-to-end D3D12 path.

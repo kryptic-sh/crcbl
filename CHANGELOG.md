@@ -44,8 +44,50 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   unchanged and still needed — it answers "am I running faster than the cap",
   which is a different question.
 
-  **`crcbl-vk` and `crcbl-mtl` implement it**; `crcbl-dx12`, `crcbl-wgpu` and
+  **`crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` implement it**; `crcbl-wgpu` and
   the null backend still answer immediately and advertise nothing.
+
+- **`crcbl-dx12` presents to a window, and paces on the display while doing
+  it.** `Instance::create_surface` finally reads `SurfaceTarget::Win32`'s
+  `hwnd`, `Instance::surface_caps` answers from DXGI and the window, and
+  `Device::create_swapchain` / `reconfigure_swapchain` / `acquire_next_frame` /
+  `present` / `destroy_swapchain` build and drive a
+  `DXGI_SWAP_EFFECT_FLIP_DISCARD` swapchain on it. Every other `SurfaceTarget`
+  variant is refused by name, and the two kinds of refusal stay apart:
+  `Offscreen` names an unwritten slice, while a Wayland, XCB, AppKit or canvas
+  target names the backend that owns it, because D3D12's only presentation
+  target is an `HWND`.
+
+  **`surface_caps` offers only what `CreateSwapChainForHwnd` will accept.**
+  Flip-model takes four back-buffer layouts and rejects everything else, so the
+  format list is those four plus the two sRGB spellings — presented the way
+  D3D12 requires, as a linear back buffer under an sRGB render target view,
+  which is the one differing-format cast this backend permits. Present modes are
+  `Fifo` always and `Immediate` **only where the factory reports
+  `DXGI_FEATURE_PRESENT_ALLOW_TEARING`**, since a flip-model present with a zero
+  sync interval and no tearing flag does not tear and offering it would be a
+  mode that does not do what its name says. `Mailbox` and `FifoRelaxed` are
+  absent: DXGI has neither. `current_extent` comes from `GetClientRect`, which
+  is the only thing on Windows that knows.
+
+  Acquire is the **implicit** shape the seam already documents for `crcbl-wgpu`
+  and `crcbl-mtl` — the index comes from `GetCurrentBackBufferIndex`, so both
+  semaphores are `None` — and `suboptimal` is always `false` and
+  `SurfaceError::OutOfDate` never produced, because DXGI has no such condition
+  and inventing one would put a frame loop into an unending reconfigure.
+
+  Present feedback ships in the same change rather than after it, because
+  `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` is a **creation** flag:
+  designing the swapchain without it would have meant replacing it immediately.
+  `Features::PRESENT_FEEDBACK` is reported for every adapter — `IDXGISwapChain2`
+  predates D3D12, so there is no machine where it would have been probed and
+  come back no — and `Device::wait_until_presented` blocks on
+  `GetFrameLatencyWaitableObject`'s handle. That handle carries **no id**, so
+  the backend keeps its own record of the ids it was given and answers the
+  seam's immediate cases from it: zero numbers nothing, and an id above the
+  highest this swapchain object presented names a frame it was never asked for —
+  a present that failed after the caller spent the id, or one from before a
+  `reconfigure_swapchain`, where `ResizeBuffers` restarts the numbering.
 
 - **A Vulkan device paces on the display where the driver can say when a frame
   landed.** `crcbl-vk` requests `VK_KHR_present_id` and `VK_KHR_present_wait`,

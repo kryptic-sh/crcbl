@@ -1,20 +1,26 @@
 //! The Direct3D 12 [`Instance`] implementation — adapter enumeration, the WARP
 //! question, device creation, and the refusals that still name themselves.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
+use crcbl_core::Pool;
 use crcbl_hal::{
-    AdapterId, AdapterInfo, BackendKind, DeviceDesc, DeviceRequestState, HalError, Instance,
-    PendingDevice, SurfaceCaps, SurfaceHandle, SurfaceTarget,
+    AdapterId, AdapterInfo, BackendKind, CompositeAlpha, DeviceDesc, DeviceRequestState, HalError,
+    Instance, PendingDevice, SurfaceCaps, SurfaceHandle, SurfaceTarget,
 };
+use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, DXGI_ADAPTER_DESC1, DXGI_CREATE_FACTORY_FLAGS, DXGI_ERROR_NOT_FOUND,
-    IDXGIAdapter1, IDXGIFactory4,
+    DXGI_FEATURE_PRESENT_ALLOW_TEARING, IDXGIAdapter1, IDXGIFactory4, IDXGIFactory5,
 };
+use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+use windows::core::{BOOL, Interface};
 
 use crate::adapter::{self, RawCaps};
 use crate::device::Dx12Device;
+use crate::handle::{self, Owned, Owner};
+use crate::present;
 
 /// Process-wide source of owner ids.
 ///
@@ -103,6 +109,46 @@ impl AdapterRecord {
     }
 }
 
+/// One live surface: the window it presents to, and the instance that issued
+/// it.
+///
+/// **There is no DXGI object here, and that is the whole shape of obligation 2
+/// on this backend.** A `VkSurfaceKHR` is a driver object whose destruction has
+/// to be deferred past the last swapchain on it — obligation 2b, and undefined
+/// behaviour in the driver when it is not. DXGI has no such object: a swapchain
+/// is created *from* an `HWND` and holds whatever it needs itself, so a
+/// surface here is a record of an address the caller promised is a live window.
+/// Destroying the handle therefore frees nothing and can strand nothing, and
+/// the deferral obligation is discharged by having nothing to defer rather than
+/// by a mechanism. What still binds is the caller's half: the **window** must
+/// outlive every swapchain, which is
+/// [`Instance::create_surface`](crcbl_hal::Instance::create_surface)'s safety
+/// contract and not something this crate can check.
+///
+/// The `HWND` is kept as a plain address rather than as a
+/// [`HWND`](windows::Win32::Foundation::HWND) because that type is a raw
+/// pointer, which `windows-rs` declares neither `Send` nor `Sync` — and this
+/// table lives behind a [`Mutex`] inside a struct the seam requires to be both.
+/// Storing the integer is what keeps this crate's "no `unsafe` marker impls
+/// anywhere" claim true; the pointer is rebuilt at each call site that needs
+/// one.
+#[derive(Debug)]
+pub(crate) struct SurfaceEntry {
+    /// Instance that created it. Surfaces are checked against the *instance*
+    /// id, per obligation 3, so any device from that instance may use them.
+    owner: u64,
+    /// The window's `HWND`, as an address. Never dereferenced here.
+    hwnd: usize,
+    /// Which [`SurfaceTarget`] variant it came from, for logs.
+    platform: &'static str,
+}
+
+impl Owned for SurfaceEntry {
+    fn owner(&self) -> u64 {
+        self.owner
+    }
+}
+
 /// Everything a device needs to keep alive from the instance that made it.
 ///
 /// `crcbl-hal`'s **obligation 1**: a `Device` may outlive its `Instance`, and
@@ -111,23 +157,61 @@ impl AdapterRecord {
 /// so dropping the public [`Dx12Instance`] while a device is open releases
 /// nothing the device is still using.
 ///
-/// On D3D12 that state is the DXGI factory and the adapters. The factory is
-/// **not** dead weight: DXGI documents an adapter enumerated from a factory as
-/// tied to it, and the swapchain slice needs the same factory to call
-/// `CreateSwapChainForHwnd` — so keeping it here is what stops that slice
-/// re-creating one and asking DXGI a question about an adapter the new factory
-/// never enumerated.
+/// On D3D12 that state is the DXGI factory, the adapters, and the surface
+/// table. The factory is **not** dead weight: DXGI documents an adapter
+/// enumerated from a factory as tied to it, and `create_swapchain` calls
+/// `CreateSwapChainForHwnd` on this one — so keeping it here is what stops a
+/// device re-creating a factory and asking DXGI a question about an adapter the
+/// new factory never enumerated.
 ///
-/// There is no instance-level owner id here. Obligation 3 splits ownership two
-/// ways — surfaces are checked against the *instance*, everything else against
-/// the *device* — and this instance issues no surfaces, so an instance id would
-/// be a field nothing compares. The swapchain slice adds it along with the
-/// surfaces it has to check.
+/// The surface table is here rather than on the device because **obligation 2
+/// makes surfaces instance-scoped**: a surface outlives the device that
+/// presented through it, and any device from this instance may use it. That is
+/// also why [`owner`](Self::owner) exists — obligation 3 splits ownership two
+/// ways, surfaces against the *instance* and everything else against the
+/// *device*, and two instances' pools genuinely do issue identical bits.
 #[derive(Debug)]
 pub(crate) struct InstanceInner {
-    /// Held for the reasons above; nothing in this slice reads it back.
-    _factory: IDXGIFactory4,
+    pub(crate) factory: IDXGIFactory4,
     pub(crate) adapters: Vec<AdapterRecord>,
+    /// Which instance this is, and the tag it stamps into every surface handle
+    /// it issues. The same scheme [`crate::handle`] uses for devices, from the
+    /// same counter, so an instance id and a device id never collide.
+    pub(crate) owner: Owner,
+    /// What `IDXGIFactory5::CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING)`
+    /// answered, once, at start-up.
+    ///
+    /// Probed rather than assumed: the flag needs Windows 10 1703 and a DXGI
+    /// 1.5 factory, and a swapchain created with
+    /// `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING` where it is unsupported fails to
+    /// create at all. It decides both what [`Instance::surface_caps`] offers
+    /// and what flags every swapchain carries.
+    pub(crate) allow_tearing: bool,
+    surfaces: Mutex<Pool<SurfaceEntry>>,
+}
+
+impl InstanceInner {
+    fn surfaces(&self) -> MutexGuard<'_, Pool<SurfaceEntry>> {
+        self.surfaces
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The window a surface handle names, checked against *this* instance.
+    ///
+    /// The three outcomes [`crate::handle`] keeps apart are kept apart here
+    /// too: this instance's live surface resolves, this instance's dead one is
+    /// [`HalError::InvalidHandle`], and another instance's is
+    /// [`HalError::ForeignObject`].
+    ///
+    /// # Errors
+    ///
+    /// As [`handle::lookup`].
+    pub(crate) fn surface_hwnd(&self, surface: SurfaceHandle) -> Result<HWND, HalError> {
+        let surfaces = self.surfaces();
+        let entry = handle::lookup(&surfaces, "surface", surface, self.owner)?;
+        Ok(HWND(core::ptr::without_provenance_mut(entry.hwnd)))
+    }
 }
 
 /// Every D3D12 adapter on the machine, described before any of them is opened.
@@ -236,10 +320,15 @@ impl Dx12Instance {
             log::warn!("crcbl-dx12: DXGI lists no adapter D3D12 will open, not even WARP");
             return None;
         }
+        let allow_tearing = probe_tearing(&factory);
+        log::info!("crcbl-dx12: DXGI_FEATURE_PRESENT_ALLOW_TEARING={allow_tearing}");
         Some(Self {
             inner: Arc::new(InstanceInner {
-                _factory: factory,
+                factory,
                 adapters,
+                owner: Owner::new(next_owner_id()),
+                allow_tearing,
+                surfaces: Mutex::new(Pool::new()),
             }),
         })
     }
@@ -285,10 +374,15 @@ impl Dx12Instance {
             return Err(HalError::UnsupportedFeatures { missing });
         }
         if let Some(surface) = desc.compatible_surface {
-            // Not `ForeignObject`: this instance has issued no surface at all
-            // (`create_surface` refuses), so every handle offered here is one
-            // that never resolved rather than one belonging to somebody else.
-            return Err(HalError::invalid_handle("surface", surface));
+            // Resolved and then discarded, on purpose. `DeviceDesc::compatible_surface`
+            // exists because Vulkan has to pick a present-capable queue family
+            // at device-creation time; D3D12 has no such choice to make — every
+            // adapter presents to every `HWND` — so the only thing this can
+            // usefully do is check the handle really is one of this instance's,
+            // which is obligation 3 and which no other call on this path would
+            // catch. The three outcomes stay apart: a handle nothing issued is
+            // `InvalidHandle`, another instance's is `ForeignObject`.
+            self.inner.surface_hwnd(surface)?;
         }
         Dx12Device::open(Arc::clone(&self.inner), record, desc)
     }
@@ -370,6 +464,79 @@ fn candidates(factory: &IDXGIFactory4) -> Vec<(IDXGIAdapter1, DXGI_ADAPTER_DESC1
     out
 }
 
+/// The window's client area, or `None` when Win32 will not say.
+///
+/// `SurfaceCaps::current_extent` is obligation 4's cross-check and nothing
+/// above the seam acts on it, so a failure is `None` rather than an error:
+/// `GetClientRect` fails exactly when the `HWND` is already gone, which is the
+/// caller's obligation 2 broken and not something to report through a
+/// capability query.
+///
+/// A minimized window has a zero client rect, and that is reported as `None`
+/// too — the seam's obligation 5 says a zero extent means "do not create a
+/// swapchain yet", and a `Some((0, 0))` would read as a size somebody could
+/// clamp to.
+fn client_extent(hwnd: HWND) -> Option<(u32, u32)> {
+    let mut rect = RECT::default();
+    // SAFETY: `hwnd` is the address the caller promised names a live window in
+    // `create_surface`'s safety contract, and `rect` is a live local the call
+    // writes through and which outlives it.
+    if let Err(error) = unsafe { GetClientRect(hwnd, &mut rect) } {
+        log::debug!("crcbl-dx12: GetClientRect failed, so the surface reports no extent: {error}");
+        return None;
+    }
+    // A client rect's origin is always (0, 0), so the far corner *is* the size;
+    // `saturating_sub` is there because a driver-supplied rectangle is not
+    // something to trust into a subtraction underflow.
+    let width = u32::try_from(rect.right.saturating_sub(rect.left)).ok()?;
+    let height = u32::try_from(rect.bottom.saturating_sub(rect.top)).ok()?;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+/// Whether this machine will let a present tear.
+///
+/// **Asked, not assumed, and the two halves of the answer are separate
+/// questions.** `DXGI_PRESENT_ALLOW_TEARING` on a present and
+/// `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING` on the swapchain that receives it are
+/// both required, and both are refused outright on a machine where this query
+/// says no — so a swapchain created with the flag unqueried does not tear, it
+/// fails to be created. That is why the answer is taken once here, at the
+/// factory, rather than at each swapchain.
+///
+/// `false` on any failure, including the `QueryInterface` for `IDXGIFactory5`:
+/// the interface arrived with DXGI 1.5 and the feature with Windows 10 1703, so
+/// an older machine simply has no tearing and reporting none is the honest
+/// answer rather than an error to propagate out of enumeration.
+fn probe_tearing(factory: &IDXGIFactory4) -> bool {
+    let factory5 = match factory.cast::<IDXGIFactory5>() {
+        Ok(factory5) => factory5,
+        Err(error) => {
+            log::debug!("crcbl-dx12: no IDXGIFactory5, so no tearing: {error}");
+            return false;
+        }
+    };
+    let mut allowed = BOOL(0);
+    let size =
+        u32::try_from(size_of::<BOOL>()).unwrap_or_else(|_| unreachable!("a BOOL is four bytes"));
+    // SAFETY: `factory5` is a live COM interface this crate owns a reference
+    // to. The pointer names a live local of exactly the type
+    // `DXGI_FEATURE_PRESENT_ALLOW_TEARING` is documented to write — a `BOOL` —
+    // and `size` is that type's own size, so the call cannot write past it. The
+    // local outlives the call.
+    let queried = unsafe {
+        factory5.CheckFeatureSupport(
+            DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+            core::ptr::from_mut(&mut allowed).cast(),
+            size,
+        )
+    };
+    if let Err(error) = queried {
+        log::debug!("crcbl-dx12: the tearing query failed, so no tearing: {error}");
+        return false;
+    }
+    allowed.as_bool()
+}
+
 /// One `GetDesc1`, with the failure logged rather than swallowed.
 fn desc_of(raw_adapter: &IDXGIAdapter1) -> Option<DXGI_ADAPTER_DESC1> {
     // SAFETY: `raw_adapter` is a live COM interface this crate owns a reference
@@ -397,40 +564,144 @@ impl Instance for Dx12Instance {
             .collect()
     }
 
-    unsafe fn create_surface(&self, _target: &SurfaceTarget) -> Result<SurfaceHandle, HalError> {
-        // Nothing is dereferenced, so the trait's safety contract is discharged
-        // trivially here — this slice creates no DXGI swapchain and never reads
-        // `target`. The swapchain slice is where obligation 2 (the window
-        // outlives the surface) starts to matter, and where
-        // `SurfaceTarget::Win32`'s `hwnd` finally gets read.
-        Err(not_yet("surface creation (the DX12 swapchain slice)"))
+    /// Records the window a swapchain will be created on.
+    ///
+    /// # What this call actually does with the handles
+    ///
+    /// It reads [`SurfaceTarget::Win32`]'s `hwnd` — as an **address**, which it
+    /// stores — and dereferences nothing. The window is first touched by
+    /// `CreateSwapChainForHwnd` in
+    /// [`Device::create_swapchain`](crcbl_hal::Device::create_swapchain), and
+    /// by `GetClientRect` in [`Instance::surface_caps`]. So the trait's safety
+    /// contract is not discharged trivially any more, and each of its three
+    /// obligations lands somewhere real:
+    ///
+    /// 1. **`hwnd` really is an `HWND`.** Nothing here can check it — an
+    ///    arbitrary address may name a live window belonging to another process
+    ///    — and DXGI is what finds out. `hinstance` is ignored: DXGI takes the
+    ///    window, not the module that registered its class.
+    /// 2. **The window outlives the surface and every swapchain on it.** This
+    ///    is the obligation with teeth on Windows: `DestroyWindow` while a
+    ///    swapchain is configured leaves DXGI presenting to a dead `HWND`.
+    ///    `crcbl-hal`'s obligation 2 orders the teardown, and see
+    ///    `SurfaceEntry` for why the *backend* half of 2b is vacuous here.
+    /// 3. **Called from the thread that owns the window.** An `HWND` is
+    ///    thread-affine and `CreateSwapChainForHwnd` installs a message hook on
+    ///    it.
+    ///
+    /// # Every other target is refused, and two of them differently
+    ///
+    /// [`SurfaceTarget::Offscreen`] is `not_yet` and names its slice: a ring
+    /// of plain images is a thing this backend could do and has not written, so
+    /// a caller reads "not here yet" rather than "never". The four
+    /// window-system targets are permanently [`HalError::Unsupported`] —
+    /// D3D12's only presentation target is an `HWND` (a `CoreWindow` and a
+    /// composition surface are the other two DXGI accepts, and neither is a
+    /// variant of this enum), so no slice will ever make them work.
+    unsafe fn create_surface(&self, target: &SurfaceTarget) -> Result<SurfaceHandle, HalError> {
+        let never = |what| {
+            Err(HalError::Unsupported {
+                backend: BackendKind::Dx12,
+                what,
+            })
+        };
+        let hwnd = match *target {
+            // The one variant this backend presents to. `hinstance` is
+            // deliberately unread: `CreateSwapChainForHwnd` takes the window
+            // alone.
+            SurfaceTarget::Win32 { hwnd, .. } => hwnd.as_ptr() as usize,
+            SurfaceTarget::Offscreen => {
+                return Err(not_yet("offscreen surfaces (a later DX12 slice)"));
+            }
+            SurfaceTarget::Wayland { .. } | SurfaceTarget::Xcb { .. } => {
+                return never("a Linux window system is crcbl-vk's target, not D3D12's");
+            }
+            SurfaceTarget::AppKit { .. } => {
+                return never("a CAMetalLayer is crcbl-mtl's target, not D3D12's");
+            }
+            SurfaceTarget::Web { .. } => {
+                return never("a canvas is crcbl-wgpu's target, not D3D12's");
+            }
+        };
+
+        let handle: SurfaceHandle = {
+            let mut surfaces = self.inner.surfaces();
+            let slot = surfaces.insert(SurfaceEntry {
+                owner: self.inner.owner.id,
+                hwnd,
+                platform: target.platform_name(),
+            });
+            handle::stamp(self.inner.owner, slot)
+        };
+        log::debug!("crcbl-dx12: created a win32 surface {handle:?} on HWND {hwnd:#x}");
+        Ok(handle)
     }
 
-    fn destroy_surface(&self, _surface: SurfaceHandle) {
-        // A no-op that cannot be reached with a live handle: `create_surface`
-        // above never returns one, so this instance has issued no surface for a
-        // caller to destroy. The signature returns `()` and so has no way to
-        // report that, which is precisely why the refusal lives in
-        // `create_surface` — a caller cannot get far enough to need one here.
+    /// Invalidates the handle. There is nothing underneath it to destroy.
+    ///
+    /// Obligation 2's two halves come apart on this backend: the handle dies
+    /// here and now, which is what makes a later use fail the generational
+    /// lookup, and the *object* half has nothing to defer because DXGI never
+    /// made one — see `SurfaceEntry`. A swapchain still configured on this
+    /// surface keeps working, because it holds its own `IDXGISwapChain3` and
+    /// its own copy of the `HWND` and never consults this table again.
+    fn destroy_surface(&self, surface: SurfaceHandle) {
+        let mut surfaces = self.inner.surfaces();
+        if let Some(entry) = handle::take_owned(&mut surfaces, surface, self.inner.owner) {
+            log::debug!(
+                "crcbl-dx12: destroyed a {} surface handle; the window is the caller's",
+                entry.platform
+            );
+        }
     }
 
+    /// What a flip-model swapchain on this window will accept.
+    ///
+    /// The adapter is checked first and the surface second, which is the order
+    /// `Dx12Instance::open_device` uses and for the same reason: answering
+    /// about a surface for an adapter that does not exist would blame the
+    /// window for a caller's index bug.
+    ///
+    /// **The adapter otherwise does not change the answer, and that is a real
+    /// difference from Vulkan.** `crcbl-vk` has to refuse the pairing when no
+    /// queue family on the adapter can present to the surface — a common case
+    /// on Linux. DXGI has no equivalent: any D3D12 adapter can present to any
+    /// `HWND`, with the runtime copying across adapters where it has to. So
+    /// there is no "this pairing does not work" answer to give, and none is
+    /// invented.
+    ///
+    /// What the trait calls out by name — reporting a surface as empty
+    /// `formats` or empty `present_modes` — cannot happen here: both lists are
+    /// non-empty constants, `present::FLIP_MODEL_FORMATS` and
+    /// `present::present_modes`, and the second always contains
+    /// [`PresentMode::Fifo`](crcbl_hal::PresentMode::Fifo).
     fn surface_caps(
         &self,
-        _surface: SurfaceHandle,
-        _adapter: AdapterId,
+        surface: SurfaceHandle,
+        adapter: AdapterId,
     ) -> Result<SurfaceCaps, HalError> {
-        // Deliberately refused before either argument is checked. The trait
-        // documents `InvalidHandle` for a stale surface and `NoSuchAdapter` for
-        // an unknown adapter, and neither branch is reachable: no
-        // `SurfaceHandle` exists, so every handle is stale and the adapter check
-        // could only ever be answering about a surface that was never made.
-        //
-        // What must never happen here is the failure the trait calls out by
-        // name — reporting a non-presentable adapter as empty `formats` or empty
-        // `present_modes`. This slice cannot present at all, so it says so.
-        Err(not_yet(
-            "surface capability queries (the DX12 swapchain slice)",
-        ))
+        if !self
+            .inner
+            .adapters
+            .iter()
+            .any(|record| record.info.id == adapter)
+        {
+            return Err(HalError::NoSuchAdapter(adapter.0));
+        }
+        let hwnd = self.inner.surface_hwnd(surface)?;
+        Ok(SurfaceCaps {
+            formats: present::FLIP_MODEL_FORMATS.to_vec(),
+            present_modes: present::present_modes(self.inner.allow_tearing),
+            // Flip-model on an `HWND` composites as opaque:
+            // `DXGI_ALPHA_MODE_PREMULTIPLIED` is a composition-swapchain mode
+            // and `CreateSwapChainForHwnd` rejects anything but `IGNORE` and
+            // `UNSPECIFIED`. Offering one this backend cannot configure would
+            // be the same mistake as offering a format it cannot create.
+            composite_alpha: vec![CompositeAlpha::Opaque],
+            min_image_count: present::MIN_BUFFERS,
+            max_image_count: present::MAX_BUFFERS,
+            current_extent: client_extent(hwnd),
+        })
     }
 
     /// Opens the device *now* and hands it over on the first poll.
@@ -935,8 +1206,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// A device asked to be compatible with a surface is refused on the surface,
-    /// not on the device — no surface exists to be compatible with.
+    /// A device asked to be compatible with a surface handle nothing issued is
+    /// refused on the surface, not on the device.
     ///
     /// The order matters and is what this pins: the surface is checked *after*
     /// the adapter and the features, so a valid adapter with a stale surface
@@ -948,8 +1219,10 @@ pub(crate) mod tests {
         assert!(!adapters.is_empty(), "nothing to check");
 
         let mut with_surface = desc(adapters[0].id);
-        // `create_surface` issues nothing, so any handle at all is one that
-        // never resolved. `Handle::from_bits` is the only way to build one.
+        // Carries no instance tag, so no instance ever issued it — which is a
+        // different answer from a *real* surface's, and the reason
+        // `open_device` resolves the handle rather than refusing every one.
+        // `Handle::from_bits` is the only way to build one.
         with_surface.compatible_surface =
             Some(crcbl_core::Handle::from_bits(1 << 32).expect("generation 1 is non-zero"));
 
@@ -1005,48 +1278,129 @@ pub(crate) mod tests {
         );
     }
 
-    /// Surfaces are refused in the same voice, including the offscreen target
-    /// that needs no window at all and the Win32 one this backend will
-    /// eventually own.
+    /// **Every target D3D12 cannot present to is refused, and the two kinds of
+    /// refusal stay apart.**
+    ///
+    /// This replaces the slice's blanket refusal, and what it keeps is the half
+    /// that still matters: a caller must be able to tell "this backend will
+    /// never do that" from "that has not been written yet", because only the
+    /// second is worth waiting for. [`SurfaceTarget::Offscreen`] is a ring of
+    /// plain images this backend could build and has not, so it names its
+    /// slice; the four window-system targets are not D3D12's at all, so they
+    /// name the backend that owns each.
+    ///
+    /// [`SurfaceTarget::Win32`] is deliberately **not** here. It now succeeds,
+    /// and a surface made from a dangling pointer would be one `surface_caps`
+    /// goes on to hand to `GetClientRect` — see
+    /// `crcbl_dx12::swapchain`'s tests, which make a real window instead.
+    ///
+    /// Red when a refusal loses the backend's name, and red when `Offscreen`
+    /// starts answering with the permanent refusal the other four get.
     #[test]
-    fn surfaces_are_refused_and_the_refusal_names_dx12() {
+    fn every_target_d3d12_cannot_present_to_is_refused_by_name() {
         let instance = open();
         let dangling = core::ptr::NonNull::dangling();
-        for target in [
-            SurfaceTarget::Offscreen,
-            SurfaceTarget::Win32 {
-                hinstance: dangling,
-                hwnd: dangling,
+
+        // SAFETY: `create_surface` matches this variant and returns before it
+        // reads any handle, so nothing is dereferenced.
+        let error = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+            .expect_err("this backend builds no image ring yet");
+        let text = error.to_string();
+        assert!(text.contains("dx12"), "{text}");
+        assert!(
+            text.contains("offscreen surfaces") && text.contains("slice"),
+            "an unwritten slice must say so, not read as never: {text}"
+        );
+
+        let never = [
+            SurfaceTarget::Wayland {
+                display: dangling,
+                surface: dangling,
             },
-        ] {
-            // SAFETY: `create_surface` refuses before it reads `target` at all —
-            // it matches nothing and returns — so the dangling pointers are
-            // never dereferenced. That is what makes it safe to name a target
-            // this slice does not implement.
+            SurfaceTarget::Xcb {
+                connection: dangling,
+                window: 1,
+                visual_id: 1,
+            },
+            SurfaceTarget::AppKit { layer: dangling },
+            SurfaceTarget::Web { canvas_id: 0 },
+        ];
+        assert!(!never.is_empty(), "nothing to check");
+        for target in never {
+            // SAFETY: as above — the arm that matches each of these returns
+            // without reading a pointer, which is what makes a dangling one
+            // safe to name here.
             let error = unsafe { instance.create_surface(&target) }
-                .expect_err("this slice creates no surfaces");
+                .expect_err("D3D12 presents to an HWND and nothing else");
             let text = error.to_string();
             assert!(text.contains("dx12"), "{target:?}: {text}");
-            assert!(text.contains("surface creation"), "{target:?}: {text}");
+            assert!(
+                !text.contains("slice"),
+                "a permanent refusal must not read as an unwritten slice: {target:?}: {text}"
+            );
+            assert!(
+                matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
+                "{target:?}: {error:?}"
+            );
         }
     }
 
-    /// Surface capability queries refuse rather than answering emptily, which is
-    /// the failure `Instance::surface_caps` calls out by name.
+    /// **A capability query refuses the two arguments it can genuinely
+    /// diagnose, and keeps them apart.**
+    ///
+    /// The failure `Instance::surface_caps` calls out by name — answering with
+    /// empty `formats` or empty `present_modes` — is now structurally
+    /// impossible: both come from non-empty constants. What is left to guard is
+    /// the pair of refusals, and their **order**: the adapter is checked first,
+    /// so an out-of-range adapter beside a stale surface is reported as the
+    /// adapter, which is the same order `open_device` uses.
+    ///
+    /// Red when the adapter check moves below the surface lookup (the first
+    /// assertion then finds `InvalidHandle`), and red when either check is
+    /// dropped.
     #[test]
-    fn surface_capability_queries_are_refused_and_name_dx12() {
+    fn surface_capability_queries_refuse_an_unknown_adapter_before_a_stale_handle() {
         let instance = open();
         let adapters = instance.adapters();
         assert!(!adapters.is_empty(), "nothing to check");
-        // No instance issued this handle, which is the point: the refusal must
-        // arrive before the handle or the adapter is looked at.
-        let stale = crcbl_core::Handle::from_bits(1 << 32).expect("generation 1 is non-zero");
+        // No instance issued this handle. `Handle::from_bits` is the only way
+        // to build one.
+        let stale: SurfaceHandle =
+            crcbl_core::Handle::from_bits(1 << 32).expect("generation 1 is non-zero");
+        let past_the_end = AdapterId(adapters.len() as u32);
+
+        let error = instance
+            .surface_caps(stale, past_the_end)
+            .expect_err("there is no adapter one past the last");
+        assert!(
+            matches!(error, HalError::NoSuchAdapter(id) if id == past_the_end.0),
+            "the adapter must be blamed before the surface: {error:?}"
+        );
 
         let error = instance
             .surface_caps(stale, adapters[0].id)
-            .expect_err("this slice presents to nothing");
-        let text = error.to_string();
-        assert!(text.contains("dx12"), "{text}");
-        assert!(text.contains("surface capability"), "{text}");
+            .expect_err("no instance issued that surface handle");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "surface"),
+            "{error:?}"
+        );
+    }
+
+    /// Destroying a handle nothing issued is a no-op, not a panic and not
+    /// somebody else's surface.
+    ///
+    /// `destroy_surface` returns `()`, so the only way it can report a
+    /// mistake is by not making one. The handle here carries no instance tag at
+    /// all, which is the case `crate::handle`'s `take_owned` exists to keep
+    /// away from a live row that shares its bits.
+    #[test]
+    fn destroying_a_surface_handle_nothing_issued_does_nothing() {
+        let instance = open();
+        let stale: SurfaceHandle =
+            crcbl_core::Handle::from_bits(1 << 32).expect("generation 1 is non-zero");
+        instance.destroy_surface(stale);
+        // And again, because a double destroy is a caller bug this must absorb
+        // rather than a second free.
+        instance.destroy_surface(stale);
     }
 }
