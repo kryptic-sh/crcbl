@@ -7506,11 +7506,20 @@ impl ComputeProbe {
             ..Barriers::default()
         });
         encoder.fill_buffer(destination, 0, probe_bytes(), PROBE_SENTINEL);
+        // `ShaderReadWrite`, not `ShaderWrite`, even though `compute_probe.slang`
+        // only ever assigns to `destination`. A barrier names the access the
+        // *descriptor* permits rather than the one the source performs, and a
+        // `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER` is read-write unless the SPIR-V
+        // marks it `NonReadable` — which Slang does not emit for an
+        // `RWStructuredBuffer`. Naming the write alone leaves the fill's
+        // transfer write unsynchronised against a read the driver is entitled to
+        // make, which is a `SYNC-HAZARD-READ-AFTER-WRITE` the validation layer
+        // reports. Measured: caught by CI's layer, missed by this machine's.
         encoder.pipeline_barrier(&Barriers {
             buffers: &[buffer_barrier(
                 destination,
                 ResourceState::TransferDst,
-                ResourceState::ShaderWrite,
+                ResourceState::ShaderReadWrite,
             )],
             ..Barriers::default()
         });
@@ -7528,7 +7537,7 @@ impl ComputeProbe {
         encoder.pipeline_barrier(&Barriers {
             buffers: &[buffer_barrier(
                 destination,
-                ResourceState::ShaderWrite,
+                ResourceState::ShaderReadWrite,
                 ResourceState::TransferSrc,
             )],
             ..Barriers::default()
@@ -7565,7 +7574,7 @@ impl ComputeProbe {
         encoder.pipeline_barrier(&Barriers {
             buffers: &[crcbl_hal::BufferBarrier {
                 buffer,
-                from: ResourceState::ShaderWrite,
+                from: ResourceState::ShaderReadWrite,
                 to: ResourceState::TransferSrc,
                 queue_transfer: None,
             }],
