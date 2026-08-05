@@ -318,6 +318,7 @@ fn render_triangle(headless: &Headless, resources: &TriangleResources) -> crcbl_
             &PresentInfo {
                 swapchain: headless.swapchain,
                 waits: acquired.present_semaphore.as_slice(),
+                present_id: None,
             },
         )
         .expect("present");

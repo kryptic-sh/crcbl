@@ -399,6 +399,7 @@ impl OffscreenSetup {
             &PresentInfo {
                 swapchain: self.swapchain,
                 waits: acquired.present_semaphore.as_slice(),
+                present_id: None,
             },
         )?;
 

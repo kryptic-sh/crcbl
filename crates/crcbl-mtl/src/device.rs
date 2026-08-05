@@ -32,7 +32,7 @@
 //! reintroduces the hazard and must reintroduce the queue with it.
 
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crcbl_core::{Handle, Pool};
 use crcbl_hal::{
@@ -2107,6 +2107,26 @@ impl Device for MetalDevice {
 
     fn present(&self, queue: QueueHandle, present: &PresentInfo<'_>) -> Result<(), SurfaceError> {
         self.present_impl(queue, present)
+    }
+
+    /// Not yet: this device does not advertise
+    /// [`Features::PRESENT_FEEDBACK`](crcbl_hal::Features::PRESENT_FEEDBACK),
+    /// so the seam's answer is that there is nothing to wait for, and this
+    /// returns without blocking.
+    ///
+    /// Metal has neither a number for a present nor a handle to wait on — a
+    /// drawable calls back once it has been shown, and nothing else — so the
+    /// slice that implements this has to count presents on this side of the
+    /// seam and match the caller's number against its own. That is why the
+    /// count is not being kept yet: an unread counter is state that can only
+    /// be wrong.
+    fn wait_until_presented(
+        &self,
+        swapchain: SwapchainHandle,
+        _present_id: u64,
+        _timeout: Duration,
+    ) -> Result<(), SurfaceError> {
+        self.wait_until_presented_impl(swapchain)
     }
 }
 

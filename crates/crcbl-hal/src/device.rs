@@ -183,6 +183,8 @@
 //! checked against the *instance* id (so any device from that instance may use
 //! them) and everything else against the *device* id.
 
+use std::time::Duration;
+
 use crate::{
     AcquiredFrame, AdapterId, AdapterInfo, BackendKind, BindGroupDesc, BindGroupHandle,
     BindGroupLayoutDesc, BindGroupLayoutHandle, BufferDesc, BufferHandle, CommandBufferHandle,
@@ -910,6 +912,56 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// [`SurfaceError::OutOfDate`] or [`SurfaceError::Lost`], handled as for
     /// [`Device::acquire_next_frame`].
     fn present(&self, queue: QueueHandle, present: &PresentInfo<'_>) -> Result<(), SurfaceError>;
+
+    /// Blocks until the present numbered `present_id` has completed, so the
+    /// caller can pace itself on the display rather than on a clock.
+    ///
+    /// `present_id` is one that was handed to [`present`](Self::present) as
+    /// [`PresentInfo::present_id`]. **Ask for a frame or more back, never the
+    /// one just submitted**: waiting on your own present drains the pipeline to
+    /// a single frame and costs more than not waiting at all.
+    ///
+    /// # What "completed" means, and why it is not spelled more precisely
+    ///
+    /// The three platforms that can answer this answer slightly different
+    /// questions — one knows a numbered image reached the display, one only
+    /// knows that fewer than *n* presents are still outstanding, one calls back
+    /// once a drawable has been shown. The guarantee the seam takes from all
+    /// three is the weakest of them and the only one a frame loop needs: **when
+    /// this returns, the numbered present is no longer waiting to happen**. A
+    /// caller that needs a timestamp needs a different method, which does not
+    /// exist yet.
+    ///
+    /// # A device without the capability is not an error
+    ///
+    /// Returns `Ok(())` immediately, without blocking, on a device that does
+    /// not advertise [`Features::PRESENT_FEEDBACK`] — "there is nothing here to
+    /// wait for", not "this call was wrong". The alternative, refusing, would
+    /// put a branch on every frame of every caller for a condition that never
+    /// changes after device creation, and a caller that skipped the branch
+    /// would turn a missing capability into a failed frame. A caller that
+    /// genuinely wants to know reads the flag once, at start-up.
+    ///
+    /// The same answer covers a `present_id` the backend has no record of —
+    /// never presented, or presented before the last
+    /// [`reconfigure_swapchain`](Self::reconfigure_swapchain), which restarts
+    /// the numbering. That frame can no longer be waited for, and blocking
+    /// until `timeout` for one that will never arrive is the worst of the
+    /// available answers.
+    ///
+    /// # Errors
+    ///
+    /// [`SurfaceError::Timeout`] if `timeout` passed with the frame still not
+    /// up — **expected traffic** on a stalled compositor, and not a reason to
+    /// abandon the frame; render it and let the next wait catch up.
+    /// [`SurfaceError::OutOfDate`] or [`SurfaceError::Lost`], handled as for
+    /// [`Device::acquire_next_frame`].
+    fn wait_until_presented(
+        &self,
+        swapchain: SwapchainHandle,
+        present_id: u64,
+        timeout: Duration,
+    ) -> Result<(), SurfaceError>;
 }
 
 #[cfg(test)]

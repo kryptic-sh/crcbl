@@ -238,29 +238,58 @@ the `wasm32` arm of `sleep` is deliberately a no-op because the browser paces
 frames itself. That is the whole mechanism, and it is open loop: it never learns
 when a frame was actually shown.
 
-Two pieces are named and neither is started. No code under `crates/` requests
-either extension; the only mention of one anywhere is the doc comment on
-`Pacing` saying why the engine cannot answer which mode is running.
+**The seam and the engine wiring now exist; no backend implements them.**
+`Features::PRESENT_FEEDBACK`, `PresentInfo::present_id` and
+`Device::wait_until_presented` are the capability-named seam the note below
+asked for, and `GpuContext::acquire` calls the wait for the present
+`FRAMES_IN_FLIGHT` behind the frame it is about to start
+(`GpuContext::present_to_wait_for` is the arithmetic, tested without a GPU). A
+device that does not advertise the flag answers `Ok(())` immediately, which is
+what lets the call site have no branch on which backend is underneath — and is
+why nothing changed behaviourally when this landed: all five `Device` impls are
+that immediate answer, and none advertises the flag. `FrameLimit` is untouched
+and still the only thing pacing any loop today.
 
-- **Pace on `VK_KHR_present_wait`.** `vkWaitForPresentKHR` blocks until a
-  numbered present is on screen, which is the closed-loop version of the sleep
-  above and the way to cut a frame of latency without spinning.
-  `ash 0.38.0+1.3.281` — the pin — **already binds it**:
-  `ash::khr::present_wait::Device::wait_for_present(swapchain, present_id, timeout)`,
-  and `vk::PresentIdKHR` is in `definitions.rs`, so the swapchain can number its
-  presents. No hand-written FFI needed, contrary to what this was assumed to
-  cost. What it needs is the extension pair requested at device creation, an id
-  per present, and a wait the loop can skip when the extension is absent. **The
-  seam must be named for the capability, never the extension** — v2 of
-  `present_wait` is a different contract and should drop in behind the same
-  name.
+What is still owed:
 
-- **Read the real present mode with `VK_EXT_present_timing`.** Today
-  `Pacing::Adaptive` is a _request_ with no observation behind it, which the
-  enum documents. `present_timing` is **not** in the pinned `ash` (checked: no
-  `present_timing` anywhere in its source) and is still provisional, so this
-  half is genuine hand-written FFI. It is what would let the engine say which
-  mode is running and what the panel's range is; nothing depends on it yet.
+- **Implement the wait on Vulkan.** `VK_KHR_present_id` + `VK_KHR_present_wait`
+  requested at device creation, `vk::PresentIdKHR` chained onto the present, and
+  `ash::khr::present_wait::Device::wait_for_present(swapchain, present_id, timeout)`
+  behind `wait_until_presented`. `ash 0.38.0+1.3.281` — the pin — already binds
+  both, so no hand-written FFI. Advertise `PRESENT_FEEDBACK` only when both
+  extensions are present. The one piece of backend state it needs: the highest
+  id actually handed to `vkQueuePresentKHR` for the **current** swapchain, so a
+  wait for an id that was never presented — a present that failed with
+  `OutOfDate`, or one from before a reconfigure — returns at once instead of
+  blocking until the timeout, which is what the seam's docs promise.
+
+- **Implement it on D3D12 and Metal.** DX12:
+  `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` +
+  `GetFrameLatencyWaitableObject`, a wait with no id in it that means "fewer
+  than `SetMaximumFrameLatency` presents outstanding", so the backend maps the
+  caller's id onto its own count of presents. Metal: no id and no handle at all
+  — `MTLDrawable`'s `addPresentedHandler:` fires with a `presentedTime`, so the
+  backend counts presents itself and matches the caller's number against its
+  count. Neither keeps that count yet, deliberately: an unread counter is state
+  that can only be wrong.
+
+- **Read the real present mode with `VK_EXT_present_timing`.** Untouched by the
+  above and still unstarted. Today `Pacing::Adaptive` is a _request_ with no
+  observation behind it, which the enum documents. `present_timing` is **not**
+  in the pinned `ash` (checked: no `present_timing` anywhere in its source) and
+  is still provisional, so this half is genuine hand-written FFI. It is what
+  would let the engine say which mode is running and what the panel's range is;
+  nothing depends on it yet. Note that `wait_until_presented` deliberately does
+  **not** return a timestamp — a caller that needs one needs a second method,
+  and this is where it would come from.
+
+Considered and declined while shaping the seam, so it is not re-argued: having
+the wait return an enum distinguishing "waited" from "this device cannot observe
+presents". The distinction has exactly one consumer — a log line — and
+`caps().features` already answers it once at start-up, where the engine now logs
+it. Also declined: refusing with `HalError::Unsupported` on a device without the
+capability. It was tried as a falsification and the engine's frame loop fails
+every frame under it, which is the argument against it in one line.
 
 ## P5B — the job system, and the two decisions in front of it
 

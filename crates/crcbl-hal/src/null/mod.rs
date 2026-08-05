@@ -70,6 +70,7 @@ use record::Detail;
 
 use core::ops::Range;
 use core::sync::atomic::{AtomicU64, Ordering};
+use core::time::Duration;
 
 use crcbl_core::{Handle, SurfaceTarget};
 
@@ -1494,6 +1495,30 @@ impl Device for NullDevice {
         let mut state = self.recorder.lock();
         state.events.push(Event::Presented {
             swapchain: present.swapchain,
+            present_id: present.present_id,
+        });
+        Ok(())
+    }
+
+    /// Records the request and returns at once.
+    ///
+    /// There is no display under this backend, so there is nothing a wait could
+    /// observe — which is exactly the seam's answer for a device that does not
+    /// advertise [`Features::PRESENT_FEEDBACK`], and this one never does. The
+    /// handle is still checked, because a caller waiting on a swapchain it
+    /// already destroyed has a bug whether or not anyone was going to block.
+    fn wait_until_presented(
+        &self,
+        swapchain: SwapchainHandle,
+        present_id: u64,
+        _timeout: Duration,
+    ) -> Result<(), SurfaceError> {
+        self.check(ObjectKind::Swapchain, swapchain.to_bits(), "swapchain")
+            .map_err(SurfaceError::Hal)?;
+        let mut state = self.recorder.lock();
+        state.events.push(Event::PresentWaited {
+            swapchain,
+            present_id,
         });
         Ok(())
     }

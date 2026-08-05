@@ -336,6 +336,22 @@ pub struct PresentInfo<'a> {
     /// Waited on before the image is handed to the compositor. Normally exactly
     /// the [`AcquiredFrame::present_semaphore`], or empty when that was `None`.
     pub waits: &'a [SemaphoreHandle],
+    /// A number for this present, so it can be waited for afterwards with
+    /// [`Device::wait_until_presented`](crate::Device::wait_until_presented).
+    ///
+    /// **Must strictly increase** across the presents of one swapchain, and
+    /// starts over when the swapchain is
+    /// [reconfigured](crate::Device::reconfigure_swapchain) — a backend is
+    /// free to key state off the number, so a repeated or a going-backwards
+    /// one is a caller bug. The engine uses its submission counter, which is
+    /// monotonic already.
+    ///
+    /// `None` numbers nothing and is always legal: a caller that will never
+    /// wait pays nothing for the seam existing, and a backend with no way to
+    /// number a present ignores this field. It is an `Option` rather than a
+    /// reserved `0` because a sentinel is a value someone eventually passes by
+    /// accident.
+    pub present_id: Option<u64>,
 }
 
 impl SurfaceCaps {
@@ -532,6 +548,7 @@ mod tests {
                 &PresentInfo {
                     swapchain,
                     waits: &waits,
+                    present_id: None,
                 },
             )
             .expect("presenting with no waits is the Tier B path, not an error");

@@ -222,6 +222,7 @@ fn a_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
             &PresentInfo {
                 swapchain: headless.swapchain,
                 waits: acquired.present_semaphore.as_slice(),
+                present_id: None,
             },
         )
         .expect("present");

@@ -290,6 +290,7 @@ fn render_mesh(
             &PresentInfo {
                 swapchain: headless.swapchain,
                 waits: acquired.present_semaphore.as_slice(),
+                present_id: None,
             },
         )
         .expect("present");
@@ -675,6 +676,7 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
                     &PresentInfo {
                         swapchain: headless.swapchain,
                         waits: acquired.present_semaphore.as_slice(),
+                        present_id: None,
                     },
                 )
                 .expect("present");

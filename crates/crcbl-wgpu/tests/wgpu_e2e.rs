@@ -232,6 +232,7 @@ impl Headless {
                 &PresentInfo {
                     swapchain: self.swapchain,
                     waits: acquired.present_semaphore.as_slice(),
+                    present_id: None,
                 },
             )
             .expect("present");
@@ -336,6 +337,7 @@ fn a_render_pass_clear_reaches_host_memory_with_the_colour_it_was_given() {
             &PresentInfo {
                 swapchain: headless.swapchain,
                 waits: acquired.present_semaphore.as_slice(),
+                present_id: None,
             },
         )
         .expect("present");
@@ -490,6 +492,7 @@ fn reusing_an_offscreen_ring_image_is_ordered_against_the_frame_that_had_it() {
             &PresentInfo {
                 swapchain: headless.swapchain,
                 waits: first.present_semaphore.as_slice(),
+                present_id: None,
             },
         )
         .expect("present");
@@ -515,6 +518,7 @@ fn reusing_an_offscreen_ring_image_is_ordered_against_the_frame_that_had_it() {
             &PresentInfo {
                 swapchain: headless.swapchain,
                 waits: second.present_semaphore.as_slice(),
+                present_id: None,
             },
         )
         .expect("present");
@@ -644,6 +648,7 @@ fn presenting_without_an_acquire_is_refused() {
             &PresentInfo {
                 swapchain: headless.swapchain,
                 waits: &[],
+                present_id: None,
             },
         )
         .expect_err("nothing was acquired");

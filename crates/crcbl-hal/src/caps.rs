@@ -181,6 +181,20 @@ bitflags::bitflags! {
         const DEBUG_MARKERS = 1 << 18;
         /// GPU-side shader printf / validation messages are routed into `log`.
         const SHADER_DEBUG_PRINTF = 1 << 19;
+        /// The device reports back when a present has actually completed, so a
+        /// frame loop can pace on the display instead of on a clock —
+        /// [`Device::wait_until_presented`](crate::Device::wait_until_presented).
+        ///
+        /// Named for the capability rather than for any one API's spelling of
+        /// it, because the three that have it do not agree on the shape: one
+        /// numbers each present and blocks on the number, one hands out a
+        /// waitable object with no number at all, and one only calls back once
+        /// a drawable has been shown. What they share is that the CPU can find
+        /// out, which is the whole of what this flag promises. Optional, and
+        /// deliberately **not** part of [`TIER_A`](Self::TIER_A): a device
+        /// without it renders exactly the same frames, it just cannot be paced
+        /// by them.
+        const PRESENT_FEEDBACK = 1 << 20;
 
         /// The capability set that defines **Tier A** (topic 03).
         ///

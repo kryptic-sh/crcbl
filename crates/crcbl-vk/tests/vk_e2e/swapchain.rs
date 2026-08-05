@@ -107,6 +107,7 @@ fn a_render_pass_clear_reaches_memory_with_the_colour_it_was_given() {
             &PresentInfo {
                 swapchain: headless.swapchain,
                 waits: acquired.present_semaphore.as_slice(),
+                present_id: None,
             },
         )
         .expect("present");
@@ -290,6 +291,7 @@ fn reusing_an_offscreen_ring_image_is_ordered_against_the_frame_that_had_it() {
             &PresentInfo {
                 swapchain: headless.swapchain,
                 waits: first.present_semaphore.as_slice(),
+                present_id: None,
             },
         )
         .expect("present");
@@ -347,6 +349,7 @@ fn reusing_an_offscreen_ring_image_is_ordered_against_the_frame_that_had_it() {
             &PresentInfo {
                 swapchain: headless.swapchain,
                 waits: second.present_semaphore.as_slice(),
+                present_id: None,
             },
         )
         .expect("present");
@@ -448,6 +451,7 @@ fn many_frames_of_the_sandboxs_loop_leave_validation_silent() {
                 &PresentInfo {
                     swapchain: headless.swapchain,
                     waits: acquired.present_semaphore.as_slice(),
+                    present_id: None,
                 },
             )
             .expect("present");
@@ -504,6 +508,7 @@ fn a_resize_storm_keeps_the_swapchain_handle_and_invalidates_the_old_images() {
             &PresentInfo {
                 swapchain: headless.swapchain,
                 waits: &[],
+                present_id: None,
             },
         )
         .expect("present");
@@ -543,6 +548,7 @@ fn a_resize_storm_keeps_the_swapchain_handle_and_invalidates_the_old_images() {
                 &PresentInfo {
                     swapchain: headless.swapchain,
                     waits: frame.present_semaphore.as_slice(),
+                    present_id: None,
                 },
             )
             .expect("present");
@@ -609,6 +615,7 @@ fn a_caller_cannot_destroy_the_swapchains_own_image_or_view() {
                 &PresentInfo {
                     swapchain: headless.swapchain,
                     waits: wrapped.present_semaphore.as_slice(),
+                    present_id: None,
                 },
             )
             .expect("present");

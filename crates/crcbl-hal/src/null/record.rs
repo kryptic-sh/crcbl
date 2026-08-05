@@ -427,6 +427,22 @@ pub enum Event {
     Presented {
         /// Swapchain presented.
         swapchain: SwapchainHandle,
+        /// The number the caller gave this present, from
+        /// [`PresentInfo::present_id`](crate::PresentInfo::present_id).
+        present_id: Option<u64>,
+    },
+    /// The caller asked to wait for a numbered present with
+    /// [`Device::wait_until_presented`](crate::Device::wait_until_presented).
+    ///
+    /// Recorded even though nothing is waited for: this backend does not
+    /// advertise [`Features::PRESENT_FEEDBACK`](crate::Features::PRESENT_FEEDBACK)
+    /// and has no display behind it, so the call returns at once. The event is
+    /// the request, which is what a test of a frame loop's pacing needs to see.
+    PresentWaited {
+        /// Swapchain the wait named.
+        swapchain: SwapchainHandle,
+        /// Present the caller waited for.
+        present_id: u64,
     },
     /// A swapchain was reconfigured (resize, present-mode change).
     Reconfigured {

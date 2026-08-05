@@ -31,6 +31,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use ash::vk::Handle as _;
 use ash::{ext, khr, vk};
@@ -2364,6 +2365,26 @@ impl Device for VkDevice {
             }
             Err(error) => Err(conv::surface_error("vkQueuePresentKHR", error)),
         }
+    }
+
+    /// Not yet: this device does not advertise
+    /// [`Features::PRESENT_FEEDBACK`](crcbl_hal::Features::PRESENT_FEEDBACK),
+    /// so the seam's answer is that there is nothing to wait for.
+    ///
+    /// Deliberately `Ok(())` rather than the refusal the rest of this backend
+    /// hands back for a slice that has not landed: this is the documented
+    /// answer for a device *without* the capability, and it is what keeps the
+    /// caller's frame loop from needing a branch. Numbering the presents and
+    /// blocking on the number is the next slice's work.
+    fn wait_until_presented(
+        &self,
+        swapchain: SwapchainHandle,
+        _present_id: u64,
+        _timeout: Duration,
+    ) -> Result<(), SurfaceError> {
+        let state = self.inner.state();
+        lookup(&state.swapchains, "swapchain", swapchain, &self.inner)?;
+        Ok(())
     }
 }
 

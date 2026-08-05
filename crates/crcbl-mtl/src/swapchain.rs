@@ -752,6 +752,21 @@ impl MetalDevice {
         })
     }
 
+    /// Resolves the swapchain and returns, because this backend has nothing to
+    /// wait on yet — see [`Device::wait_until_presented`](crcbl_hal::Device::wait_until_presented)
+    /// for the seam's answer on a device without the capability.
+    ///
+    /// The handle is still resolved: a caller waiting on a swapchain it already
+    /// destroyed has a bug whether or not anyone was going to block on it.
+    pub(crate) fn wait_until_presented_impl(
+        &self,
+        swapchain: SwapchainHandle,
+    ) -> Result<(), SurfaceError> {
+        let state = self.state();
+        lookup(&state.swapchains, "swapchain", swapchain, &*self.inner)?;
+        Ok(())
+    }
+
     /// Presents the acquired image.
     pub(crate) fn present_impl(
         &self,
@@ -1318,6 +1333,7 @@ mod tests {
                 &crcbl_hal::PresentInfo {
                     swapchain,
                     waits: &[],
+                    present_id: None,
                 },
             )
             .expect("presenting a ring image advances the ring");
@@ -1334,6 +1350,7 @@ mod tests {
                 &crcbl_hal::PresentInfo {
                     swapchain,
                     waits: &[],
+                    present_id: None,
                 },
             )
             .expect("presented");
@@ -1372,6 +1389,7 @@ mod tests {
                     &crcbl_hal::PresentInfo {
                         swapchain,
                         waits: &[],
+                        present_id: None,
                     },
                 )
                 .expect("presented");
@@ -1478,6 +1496,7 @@ mod tests {
                 &crcbl_hal::PresentInfo {
                     swapchain,
                     waits: frame.present_semaphore.as_slice(),
+                    present_id: None,
                 },
             )
             .expect("presented");
@@ -1534,6 +1553,7 @@ mod tests {
                 &crcbl_hal::PresentInfo {
                     swapchain,
                     waits: &[],
+                    present_id: None,
                 },
             )
             .expect("presented");
@@ -1580,6 +1600,7 @@ mod tests {
                 &crcbl_hal::PresentInfo {
                     swapchain,
                     waits: &[],
+                    present_id: None,
                 },
             )
             .expect_err("nothing was acquired");
@@ -1622,6 +1643,7 @@ mod tests {
                 &crcbl_hal::PresentInfo {
                     swapchain,
                     waits: &[],
+                    present_id: None,
                 },
             )
             .expect("presented");
@@ -2052,6 +2074,7 @@ mod tests {
                     &crcbl_hal::PresentInfo {
                         swapchain,
                         waits: &[],
+                        present_id: None,
                     },
                 )
                 .expect("presented");

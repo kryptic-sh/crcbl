@@ -1,5 +1,7 @@
 //! The wgpu `Device` implementation — P5.2 resource mappings.
 
+use std::time::Duration;
+
 use crcbl_hal::{
     self as hal, AcquiredFrame, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupHandle,
     BindGroupLayoutDesc, BindGroupLayoutHandle, BufferDesc, BufferHandle, CommandBufferHandle,
@@ -1659,6 +1661,30 @@ impl Device for WgpuDevice {
             self.queue.present(texture);
         }
         Ok(())
+    }
+
+    /// Not yet, and quite possibly never: this device does not advertise
+    /// [`Features::PRESENT_FEEDBACK`](crcbl_hal::Features::PRESENT_FEEDBACK),
+    /// so the seam's answer is that there is nothing to wait for.
+    ///
+    /// WebGPU has no notion of a present at all — the browser composites the
+    /// canvas when it composites the page, and `requestAnimationFrame` is the
+    /// only thing that tells a page when that happened. That is the browser
+    /// pacing the loop rather than the loop pacing itself, which is the same
+    /// reason the engine's frame-limiter sleep is a no-op on `wasm32`. The
+    /// swapchain is still resolved, so a wait on a dead handle is an error
+    /// rather than something nobody looked at.
+    fn wait_until_presented(
+        &self,
+        swapchain: SwapchainHandle,
+        _present_id: u64,
+        _timeout: Duration,
+    ) -> Result<(), SurfaceError> {
+        let swapchains = self.pools.swapchains.lock().unwrap();
+        swapchains
+            .get(swapchain.cast())
+            .ok_or(SurfaceError::Lost)
+            .map(|_| ())
     }
 }
 

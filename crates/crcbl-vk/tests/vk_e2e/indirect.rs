@@ -469,6 +469,7 @@ impl QuadrantResources {
                 &PresentInfo {
                     swapchain: headless.swapchain,
                     waits: acquired.present_semaphore.as_slice(),
+                    present_id: None,
                 },
             )
             .expect("present");

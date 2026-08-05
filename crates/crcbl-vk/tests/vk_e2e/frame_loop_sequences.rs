@@ -146,6 +146,7 @@ fn a_read_only_depth_pass_uses_the_read_only_layout() {
             &PresentInfo {
                 swapchain: headless.swapchain,
                 waits: acquired.present_semaphore.as_slice(),
+                present_id: None,
             },
         )
         .expect("present");
@@ -420,6 +421,7 @@ fn a_reconfigure_between_acquire_and_present_is_survivable() {
                 &PresentInfo {
                     swapchain: headless.swapchain,
                     waits: fresh.present_semaphore.as_slice(),
+                    present_id: None,
                 },
             )
             .expect("present");

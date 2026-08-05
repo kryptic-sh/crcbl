@@ -158,6 +158,17 @@ pub const MAX_CONSECUTIVE_RECONFIGURES: u32 = 240;
 /// camera is a read-after-write hazard across submissions.
 pub const FRAMES_IN_FLIGHT: usize = crcbl_render::forward::FRAMES_IN_FLIGHT;
 
+/// How long a frame will wait for an older present to reach the display.
+///
+/// A bound rather than a pacing choice: the wait it guards normally returns
+/// within a display period, and this only fires when something underneath has
+/// stopped answering — a compositor that stopped drawing, a monitor being
+/// re-plugged. Waiting forever there would hang the loop with no way out,
+/// including its input handling and its close button, so the loop renders the
+/// frame instead and asks again next time. Far longer than any panel's period
+/// and far shorter than a user's patience.
+pub const PRESENT_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -479,7 +490,15 @@ pub struct GpuContext {
     /// `None` on a device without timeline semaphores; see the module docs.
     timeline: Option<SemaphoreHandle>,
     /// Submissions issued so far, and therefore the value the next one signals.
+    ///
+    /// Doubles as the present id: it is already monotonic and already one per
+    /// frame, so the frame the display is being asked about and the frame the
+    /// timeline is being asked about are the same number.
     submitted: u64,
+    /// What the caller asked for, kept because the resolved
+    /// [`PresentMode`] in `config` cannot answer whether waiting for the
+    /// display is wanted at all — [`Pacing::Off`] says it is not.
+    pacing: Pacing,
     in_flight: VecDeque<(u64, CommandBufferHandle)>,
     /// The extent the swapchain was last *configured* at, from
     /// [`AcquiredFrame::extent`]. Distinct from what the shell asked for.
@@ -578,8 +597,15 @@ impl PendingGpuContext {
                         return Ok(None);
                     }
                     crcbl_hal::DeviceRequestState::Ready(device) => {
-                        return GpuContext::finish(instance, surface, config, device, self.extent)
-                            .map(Some);
+                        return GpuContext::finish(
+                            instance,
+                            surface,
+                            config,
+                            device,
+                            self.extent,
+                            self.pacing,
+                        )
+                        .map(Some);
                     }
                 },
                 OpenStage::Done => {
@@ -800,6 +826,7 @@ impl GpuContext {
         config: SwapchainConfig,
         device: Box<dyn Device>,
         extent: (u32, u32),
+        pacing: Pacing,
     ) -> Result<Self, GpuError> {
         let queue = device
             .queue(QueueKind::Graphics)
@@ -828,6 +855,15 @@ impl GpuContext {
             None
         };
 
+        // Which of the two pacing stories this run gets, said once at start-up
+        // rather than branched on per frame: `acquire` calls the wait either
+        // way, and a device without the capability answers it immediately.
+        if device.caps().features.contains(Features::PRESENT_FEEDBACK) {
+            log::info!("hal: pacing on presents, {FRAMES_IN_FLIGHT} frames deep");
+        } else {
+            log::debug!("hal: no present feedback; the frame limiter is the only pacing");
+        }
+
         Ok(Self {
             instance,
             device,
@@ -837,6 +873,7 @@ impl GpuContext {
             config,
             timeline,
             submitted: 0,
+            pacing,
             in_flight: VecDeque::with_capacity(FRAMES_IN_FLIGHT + 1),
             configured_extent: extent,
             waits: Vec::with_capacity(1),
@@ -869,6 +906,37 @@ impl GpuContext {
         self.configured_extent
     }
 
+    /// Which present the frame about to start should wait for, or `None` if
+    /// there is nothing worth waiting on yet.
+    ///
+    /// `submitted` is the id of the most recent present, so the frame about to
+    /// start will be `submitted + 1` and the one to wait for is
+    /// **`FRAMES_IN_FLIGHT` behind it**. The two ends of that range are both
+    /// wrong: waiting for `submitted + 1` is waiting for something that has not
+    /// been submitted, and waiting for `submitted` — the frame just sent —
+    /// empties the pipeline every frame, so the CPU sits out a whole display
+    /// period doing nothing and the result is worse than not waiting at all.
+    /// One `FRAMES_IN_FLIGHT` back is the id whose display leaves exactly
+    /// `FRAMES_IN_FLIGHT` presents outstanding, which is the depth
+    /// [`retire_to`](Self::retire_to) already holds command buffers to; the
+    /// wait therefore paces the loop without changing that depth.
+    ///
+    /// `None` in two cases. The first `FRAMES_IN_FLIGHT` frames have nothing
+    /// that far behind them — ids start at 1, so the subtraction lands on 0 or
+    /// underflows — and the loop is still filling anyway. And [`Pacing::Off`]
+    /// asked *not* to be paced by the display: blocking until a frame is on
+    /// screen would pin the loop to the refresh rate, which is the one thing
+    /// that mode exists to avoid.
+    fn present_to_wait_for(submitted: u64, pacing: Pacing) -> Option<u64> {
+        if matches!(pacing, Pacing::Off) {
+            return None;
+        }
+        submitted
+            .saturating_add(1)
+            .checked_sub(FRAMES_IN_FLIGHT as u64)
+            .filter(|id| *id > 0)
+    }
+
     /// Acquires the next swapchain image, or reconfigures and says so.
     ///
     /// `Ok(None)` means the swapchain was out of date and has been
@@ -889,6 +957,30 @@ impl GpuContext {
         // every pipeline is built — are caught by the first frame.
         if let Some(message) = self.device.take_error() {
             return Err(GpuError::Hal(HalError::Backend(message)));
+        }
+
+        // Closed-loop pacing, before an image is taken and before any work is
+        // recorded: this is the point in a frame where the CPU can be held back
+        // without holding anything else up. A device without present feedback
+        // answers immediately, which is why there is no branch here on which
+        // backend is underneath.
+        if let Some(present_id) = Self::present_to_wait_for(self.submitted, self.pacing) {
+            match self
+                .device
+                .wait_until_presented(self.swapchain, present_id, PRESENT_WAIT_TIMEOUT)
+            {
+                Ok(()) => {}
+                // The display did not get to it in time. Render anyway: a
+                // frame skipped because the *last* one was slow is two frames
+                // lost instead of one, and the next wait catches up.
+                Err(SurfaceError::Timeout) => {
+                    log::debug!("hal: present {present_id} was still not up after a whole timeout");
+                }
+                // Not reported here: the acquire below reports it too, through
+                // the arm that already reconfigures and skips the frame.
+                Err(SurfaceError::OutOfDate) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
 
         let acquired = match self.device.acquire_next_frame(self.swapchain) {
@@ -971,6 +1063,11 @@ impl GpuContext {
             &PresentInfo {
                 swapchain: self.swapchain,
                 waits: acquired.present_semaphore.as_slice(),
+                // The submission counter, not a second one: it is monotonic
+                // already, and a frame's present and its timeline value being
+                // the same number is what lets `acquire` ask about a frame by
+                // the only id it has.
+                present_id: Some(value),
             },
         ) {
             Ok(()) => {}
@@ -4711,6 +4808,168 @@ mod tests {
             gpu.acquire().expect("acquire").map(|f| f.extent),
             Some((640, 480))
         );
+        gpu.destroy().expect("teardown");
+        shell.destroy_window(window).expect("the window goes away");
+    }
+
+    /// Which present a frame waits for, without a GPU and without spending the
+    /// time — the same split as [`FrameLimit::wait_from`].
+    #[test]
+    fn a_frame_waits_for_the_present_frames_in_flight_behind_it() {
+        let depth = FRAMES_IN_FLIGHT as u64;
+
+        // Still filling: the first `FRAMES_IN_FLIGHT` frames have nothing that
+        // far back, and present ids start at 1 rather than 0.
+        for submitted in 0..depth {
+            assert_eq!(
+                GpuContext::present_to_wait_for(submitted, Pacing::Vsync),
+                None,
+                "frame {} has only {submitted} presents behind it",
+                submitted + 1
+            );
+        }
+
+        for submitted in depth..depth + 8 {
+            let waited = GpuContext::present_to_wait_for(submitted, Pacing::Vsync)
+                .expect("the loop has filled");
+            assert_eq!(
+                waited,
+                submitted + 1 - depth,
+                "the frame about to start is {}, so it waits {depth} back",
+                submitted + 1
+            );
+            assert!(
+                waited < submitted,
+                "waiting on present {submitted}, the one just submitted, would drain the \
+                 pipeline to a single frame"
+            );
+        }
+    }
+
+    /// `Pacing::Off` asked not to be paced by the display, and a wait for a
+    /// frame to be on screen is exactly that.
+    #[test]
+    fn pacing_off_waits_for_nothing() {
+        for submitted in 0..8 {
+            assert_eq!(
+                GpuContext::present_to_wait_for(submitted, Pacing::Off),
+                None,
+                "submitted {submitted}"
+            );
+            assert!(
+                GpuContext::present_to_wait_for(submitted, Pacing::Adaptive).is_some()
+                    == GpuContext::present_to_wait_for(submitted, Pacing::Vsync).is_some(),
+                "adaptive still follows the display when it can, so it waits when vsync does"
+            );
+        }
+    }
+
+    /// The wiring, read off the device rather than off the engine: every
+    /// present is numbered, and every frame past the first `FRAMES_IN_FLIGHT`
+    /// waits for one that has already been presented.
+    #[test]
+    fn the_loop_numbers_its_presents_and_waits_for_the_older_ones() {
+        use crcbl_hal::CommandEncoderDesc;
+        use crcbl_hal::null::{Event, NullInstance, Recorder};
+        use crcbl_shell::{HeadlessShell, WindowDesc};
+
+        let mut shell = HeadlessShell::new();
+        let window = shell
+            .create_window(&WindowDesc::default())
+            .expect("headless always creates a window");
+        let mut shell_events = 0;
+        let extent = wait_for_configure(&mut shell, window, &mut shell_events).expect("configured");
+
+        // By hand rather than through the registry, because the point of the
+        // test is to hold the recorder the device writes to.
+        let recorder = Recorder::new();
+        let instance: Box<dyn Instance> =
+            Box::new(NullInstance::tier_a().with_recorder(recorder.clone()));
+        let target = shell
+            .surface_target(window)
+            .expect("the window is still alive");
+        let stage = GpuContext::start_device(
+            instance,
+            &target,
+            extent,
+            "present pacing test",
+            Features::empty(),
+            Features::empty(),
+            Pacing::Vsync,
+        )
+        .expect("the null backend opens everywhere");
+        let mut pending = PendingGpuContext {
+            stage,
+            target,
+            extent,
+            label: "present pacing test".to_string(),
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            pacing: Pacing::Vsync,
+        };
+        let mut gpu = loop {
+            if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
+                break context;
+            }
+        };
+
+        const FRAMES: u64 = 5;
+        for _ in 0..FRAMES {
+            let acquired = gpu.acquire().expect("acquire").expect("no resize happened");
+            let encoder = gpu.device().create_command_encoder(&CommandEncoderDesc {
+                label: Some("present pacing test"),
+                queue: gpu.queue(),
+            });
+            let command_buffer = encoder.finish().expect("an empty command buffer");
+            assert_eq!(
+                gpu.submit_and_present(&acquired, command_buffer)
+                    .expect("present"),
+                FrameOutcome::Presented,
+            );
+        }
+
+        let events = recorder.events();
+        let presented: Vec<Option<u64>> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Presented { present_id, .. } => Some(*present_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            presented,
+            (1..=FRAMES).map(Some).collect::<Vec<_>>(),
+            "every present is numbered, from one, with no gaps"
+        );
+
+        let waited: Vec<u64> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::PresentWaited { present_id, .. } => Some(*present_id),
+                _ => None,
+            })
+            .collect();
+        let depth = FRAMES_IN_FLIGHT as u64;
+        assert_eq!(
+            waited,
+            (1..=FRAMES - depth).collect::<Vec<_>>(),
+            "the first {depth} frames wait for nothing and the rest wait {depth} back"
+        );
+
+        // The same claim again, from the order of the stream rather than from
+        // the counts: a wait never names a present that has not happened.
+        let mut presented_so_far = 0;
+        for event in &events {
+            match event {
+                Event::Presented { .. } => presented_so_far += 1,
+                Event::PresentWaited { present_id, .. } => assert!(
+                    *present_id <= presented_so_far,
+                    "waited for present {present_id} with only {presented_so_far} presented"
+                ),
+                _ => {}
+            }
+        }
+
         gpu.destroy().expect("teardown");
         shell.destroy_window(window).expect("the window goes away");
     }

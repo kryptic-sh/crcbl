@@ -564,6 +564,7 @@ fn swapchain_acquire_matches_the_tiers_sync_model() {
                 &PresentInfo {
                     swapchain,
                     waits: &waits,
+                    present_id: None,
                 },
             )
             .expect("present");
@@ -655,6 +656,60 @@ fn reconfiguring_to_a_larger_ring_reissues_the_semaphores_too() {
     }
 
     device.destroy_swapchain(swapchain);
+    instance.destroy_surface(surface);
+}
+
+/// The seam's answer for a device that cannot observe presents: the wait is
+/// answered rather than refused, and it still resolves what it was given.
+///
+/// Both halves matter. A refusal would put a branch on every frame of every
+/// caller for a condition that cannot change after device creation, and the
+/// caller that skipped the branch would turn a missing capability into a failed
+/// frame. Answering it without looking at the handle would let a wait on a
+/// destroyed swapchain — a real ordering bug in a frame loop — pass unnoticed
+/// on the one backend whose whole job is noticing.
+#[test]
+fn a_present_wait_is_answered_not_refused_and_still_checks_its_swapchain() {
+    let instance = NullInstance::tier_a();
+    let recorder = instance.recorder();
+    let device = open(&instance);
+    assert!(
+        !device.caps().features.contains(Features::PRESENT_FEEDBACK),
+        "there is no display under this backend, so it must not claim to see one"
+    );
+    // SAFETY: an offscreen target holds no platform pointers.
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
+    let swapchain = device
+        .create_swapchain(&SwapchainDesc {
+            label: None,
+            surface,
+            format: Format::Bgra8UnormSrgb,
+            extent: (8, 8),
+            image_count: 2,
+            present_mode: PresentMode::Fifo,
+            composite_alpha: CompositeAlpha::Opaque,
+        })
+        .expect("swapchain");
+
+    device
+        .wait_until_presented(swapchain, 7, Duration::from_secs(30))
+        .expect("a device without the capability answers, it does not refuse");
+    assert!(
+        recorder.events().contains(&Event::PresentWaited {
+            swapchain,
+            present_id: 7,
+        }),
+        "the request is what a test of a caller's pacing reads, so it is recorded"
+    );
+
+    device.destroy_swapchain(swapchain);
+    let error = device
+        .wait_until_presented(swapchain, 8, Duration::from_secs(30))
+        .expect_err("the swapchain is gone");
+    assert!(
+        matches!(error, SurfaceError::Hal(HalError::InvalidHandle { .. })),
+        "{error}"
+    );
     instance.destroy_surface(surface);
 }
 
@@ -2207,6 +2262,7 @@ fn a_swapchain_format_must_be_one_the_surface_offers() {
                 &PresentInfo {
                     swapchain,
                     waits: &[],
+                    present_id: None,
                 },
             )
             .expect("present");

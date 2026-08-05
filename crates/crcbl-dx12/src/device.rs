@@ -60,6 +60,7 @@
 //! list is still running.
 
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use crcbl_core::Pool;
 use crcbl_hal::{
@@ -2503,6 +2504,29 @@ impl Device for Dx12Device {
             "presentation (the DX12 swapchain slice)",
         )))
     }
+
+    /// Not yet: this device does not advertise
+    /// [`Features::PRESENT_FEEDBACK`](crcbl_hal::Features::PRESENT_FEEDBACK),
+    /// so the seam's answer is that there is nothing to wait for.
+    ///
+    /// The one method in this block that is **not** [`not_yet`], deliberately.
+    /// A refusal here would not be "this slice has not landed", it would be a
+    /// frame loop failing every frame the moment the swapchain slice lands and
+    /// presentation starts working — the seam defines `Ok(())` as the answer
+    /// for a device without the capability precisely so a caller needs no
+    /// branch. What is owed is the capability itself: a swapchain created with
+    /// the waitable-object flag, the handle it hands out, and a maximum frame
+    /// latency to wait against. That wait counts *outstanding presents* and has
+    /// no number in it, so the slice that implements this maps `present_id`
+    /// onto its own count of presents.
+    fn wait_until_presented(
+        &self,
+        _swapchain: SwapchainHandle,
+        _present_id: u64,
+        _timeout: Duration,
+    ) -> Result<(), SurfaceError> {
+        Ok(())
+    }
 }
 
 /// Resolves a seam subresource count against the object's real extent.
@@ -4905,6 +4929,7 @@ pub(crate) mod tests {
                         &PresentInfo {
                             swapchain: unissued(),
                             waits: &[],
+                            present_id: None,
                         },
                     )
                     .expect_err("there is nothing to present"),

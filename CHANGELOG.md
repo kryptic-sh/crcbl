@@ -16,6 +16,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The seam can now be asked when a frame actually reached the display, and the
+  engine asks.** `Device::wait_until_presented(swapchain, present_id, timeout)`
+  blocks until a numbered present has completed, `PresentInfo::present_id`
+  numbers it, and `Features::PRESENT_FEEDBACK` says whether a device can answer.
+  The names are the capability's rather than any one platform's, because the
+  three that have it disagree on the shape — one numbers a present and blocks on
+  the number, one hands out a waitable object with no number, one only calls
+  back once a drawable has been shown — so the id is the caller's currency and
+  each backend maps it onto whatever it has.
+
+  **A device without the capability returns `Ok(())` at once rather than
+  refusing**, which is what keeps the wait out of every caller's per-frame
+  branching: a condition that cannot change after device creation should not be
+  re-tested every frame, and a caller that skipped the test would turn a missing
+  capability into a failed frame. So does a `present_id` the backend has no
+  record of — never presented, or from before the last `reconfigure_swapchain`,
+  which restarts the numbering.
+
+  `crcbl::engine`'s `GpuContext::acquire` waits for the present
+  `FRAMES_IN_FLIGHT` behind the frame it is about to start, before it takes an
+  image and before any work is recorded. Not the frame just submitted: that
+  drains the pipeline to a single frame and costs more than not waiting at all.
+  `Pacing::Off` waits for nothing, since being paced by the display is the one
+  thing that mode exists to avoid, and `PRESENT_WAIT_TIMEOUT` bounds the wait so
+  a compositor that stopped answering cannot hang the loop. The frame limiter is
+  unchanged and still needed — it answers "am I running faster than the cap",
+  which is a different question.
+
+  **No backend implements the wait yet**, so behaviour is unchanged everywhere:
+  none advertises `PRESENT_FEEDBACK` and all five answer immediately.
+  `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl` are where it becomes real.
+
 - **The Metal backend's hardware suite now runs in CI, so `crcbl-mtl`'s draws
   are verified by a machine rather than by nobody.** A `mtl e2e (macos-latest)`
   job runs `crates/crcbl-mtl/tests/run-mtl-e2e.sh`, which turns on the `mtl-e2e`
