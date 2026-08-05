@@ -10,26 +10,42 @@
 //!
 //! # What this backend does, and the question it was written to answer
 //!
-//! **Adapter enumeration, and the resource half of the seam.**
-//! `Dx12Instance` lists every D3D12 adapter with its capabilities filled in,
-//! which is the one thing [`Instance::adapters`](crcbl_hal::Instance::adapters)
-//! promises can be answered before a device exists. `request_device` then opens
-//! a real `ID3D12Device` and a `D3D12_COMMAND_LIST_TYPE_DIRECT` queue, and the
-//! device it hands back creates buffers, images, image views and samplers,
-//! writes into a host-visible buffer, and waits for the GPU on a fence.
+//! **Adapter enumeration, the resource half of the seam, and a cleared pixel
+//! read back.** `Dx12Instance` lists every D3D12 adapter with its capabilities
+//! filled in, which is the one thing
+//! [`Instance::adapters`](crcbl_hal::Instance::adapters) promises can be
+//! answered before a device exists. `request_device` then opens a real
+//! `ID3D12Device` and a `D3D12_COMMAND_LIST_TYPE_DIRECT` queue, and the device
+//! it hands back creates buffers, images, image views and samplers, writes into
+//! a host-visible buffer, records an `ID3D12GraphicsCommandList`, runs it on the
+//! queue, and reads the result back through an `ID3D12Fence`.
 //!
-//! Everything past that — shader modules, pipelines, bind groups, command
-//! recording, submission, swapchains, queries and readback — refuses with
-//! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported) whose `what`
-//! names the slice the answer arrives in, so a caller reads "not yet" rather
-//! than "broken". What is **not** folded into that refusal is anything the
-//! backend can genuinely diagnose: an out-of-range adapter is
+//! **Nothing in this crate is a stub that reports success** — a draw recorded
+//! into an encoder *fails the encoder*, so `finish` hands back the refusal
+//! rather than a command buffer that submits and draws nothing. Everything past
+//! the clear — shader modules, pipelines, bind groups, swapchains and queries —
+//! refuses with [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported)
+//! whose `what` names the slice the answer arrives in, so a caller reads "not
+//! yet" rather than "broken". What is **not** folded into that refusal is
+//! anything the backend can genuinely diagnose: an out-of-range adapter is
 //! [`NoSuchAdapter`](crcbl_hal::HalError::NoSuchAdapter), a stale handle is
 //! [`InvalidHandle`](crcbl_hal::HalError::InvalidHandle), one from another
 //! device is [`ForeignObject`](crcbl_hal::HalError::ForeignObject), and a
 //! descriptor D3D12 cannot satisfy is
 //! [`InvalidDescriptor`](crcbl_hal::HalError::InvalidDescriptor) saying which
 //! field and why.
+//!
+//! # A D3D12 command list retains nothing, so this crate does
+//!
+//! `crcbl_dx12::command`'s encoder takes its own reference to every resource it
+//! records against, and a submission parks that set on `crcbl_dx12::retire`'s
+//! fence-keyed queue along with the command list and allocator — which
+//! `ExecuteCommandLists` does not retain either. That is what makes
+//! `destroy_buffer` mean "this handle is dead now" without freeing memory the
+//! driver is still reading, and it is why every `destroy_*` still releases on
+//! the spot. `crcbl-vk` needs a larger mechanism for the same guarantee because
+//! a `VkBuffer` has no refcount; `crcbl-mtl` needs none, because an
+//! `MTLCommandBuffer` retains what it references.
 //!
 //! **One capability of the seam is refused rather than implemented**, and it is
 //! called out here because it is a divergence from `crcbl-mtl` rather than a
@@ -57,11 +73,22 @@
 //! [`RendererTier`](crcbl_hal::RendererTier). See `crcbl_dx12::instance`'s tests
 //! for the report line and how to read it out of a run.
 //!
-//! **The answer comes from a machine, not from this crate.** Nothing here has
-//! ever executed on the development box, which is Linux; the Metal backend found
+//! **Reporting tier 3 is a claim about the API surface, not about execution.**
+//! That half is now measured too:
+//! `crcbl_dx12::device`'s `a_render_pass_clear_reads_back_the_exact_texels`
+//! clears an attachment through a real render pass, copies it into a readback
+//! buffer, submits, and asserts the texels. If a runner enumerates a
+//! capable-looking adapter that cannot execute anything, that test is where it
+//! shows — and it panics naming the stage it reached (`finish`, `submit`,
+//! `wait_idle`, or a readback still pending after its deadline) rather than
+//! running into `slow-timeout` with nothing in the log. The Metal backend found
 //! out the hard way that GitHub's `macos-latest` exposes an
-//! `Apple Paravirtual device` that cannot execute a shader at all, and the
-//! Windows runner is owed the same suspicion.
+//! `Apple Paravirtual device` which hangs the command buffer on any draw while
+//! both encoders report `completed`; the Windows runner is owed the same
+//! suspicion, and this is how it is paid.
+//!
+//! **The answer still comes from a machine, not from this crate.** Nothing here
+//! has ever executed on the development box, which is Linux.
 //!
 //! # Every adapter is Tier B so far, and that is *this backend* speaking
 //!
@@ -158,6 +185,8 @@ mod device;
 mod handle;
 #[cfg(target_os = "windows")]
 mod instance;
+#[cfg(target_os = "windows")]
+mod retire;
 #[cfg(target_os = "windows")]
 mod view;
 

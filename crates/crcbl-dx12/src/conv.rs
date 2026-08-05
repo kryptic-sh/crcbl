@@ -52,7 +52,7 @@
 
 use crcbl_hal::{
     BufferUsage, CompareOp, FilterMode, Format, ImageType, ImageUsage, MemoryLocation,
-    SamplerAddressMode, SamplerDesc,
+    ResourceState, SamplerAddressMode, SamplerDesc,
 };
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_COMPARISON_FUNC, D3D12_COMPARISON_FUNC_ALWAYS, D3D12_COMPARISON_FUNC_EQUAL,
@@ -74,10 +74,14 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_RESOURCE_DIMENSION_TEXTURE3D, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
     D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
     D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_FLAGS, D3D12_RESOURCE_STATE_COMMON,
-    D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATES,
-    D3D12_TEXTURE_ADDRESS_MODE, D3D12_TEXTURE_ADDRESS_MODE_BORDER,
-    D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_MIRROR,
-    D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+    D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE,
+    D3D12_RESOURCE_STATE_DEPTH_READ, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+    D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_INDEX_BUFFER,
+    D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET,
+    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATES, D3D12_TEXTURE_ADDRESS_MODE,
+    D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+    D3D12_TEXTURE_ADDRESS_MODE_MIRROR, D3D12_TEXTURE_ADDRESS_MODE_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
@@ -214,6 +218,62 @@ pub(crate) const fn initial_state(memory: MemoryLocation) -> D3D12_RESOURCE_STAT
         MemoryLocation::DeviceLocal => D3D12_RESOURCE_STATE_COMMON,
         MemoryLocation::HostUpload => D3D12_RESOURCE_STATE_GENERIC_READ,
         MemoryLocation::HostReadback => D3D12_RESOURCE_STATE_COPY_DEST,
+    }
+}
+
+/// The D3D12 states a [`ResourceState`] means.
+///
+/// # Not injective, and it cannot be
+///
+/// [`ResourceState::Undefined`] and [`ResourceState::Present`] both become
+/// `COMMON`, because `D3D12_RESOURCE_STATE_PRESENT` **is** `COMMON` — the two
+/// constants are the same zero, spelled twice so a swapchain barrier reads as
+/// one. So the table cannot be checked for collisions the way
+/// [`dxgi_format`]'s is, and `every_seam_state_maps_to_a_state_d3d12_has`
+/// asserts the individual mappings instead.
+///
+/// # Two shader-read bits, not one
+///
+/// The seam's [`ResourceState::ShaderRead`] says nothing about which stage
+/// reads, and D3D12 splits the read state in two. Naming both is the
+/// conservative answer and the only correct one available: a resource
+/// transitioned to `PIXEL_SHADER_RESOURCE` alone and then sampled from a
+/// compute shader is a read of memory the barrier did not make visible.
+/// [`crate::command`]'s barrier is where the cost of that shows up, and it is
+/// the over-synchronisation `crcbl-hal`'s module docs already name as this
+/// seam's known price.
+///
+/// # A write state is a single bit, deliberately
+///
+/// `ShaderWrite` and `ShaderReadWrite` are both `UNORDERED_ACCESS`: D3D12 has
+/// no read-modify-write state distinct from the write one, and combining
+/// `UNORDERED_ACCESS` with a read state is illegal — the API rejects a write
+/// state paired with anything else.
+pub(crate) const fn resource_state(state: ResourceState) -> D3D12_RESOURCE_STATES {
+    match state {
+        // `PRESENT` and `COMMON` are the same value; see the docs above.
+        ResourceState::Undefined | ResourceState::Present => D3D12_RESOURCE_STATE_COMMON,
+        ResourceState::ShaderRead => D3D12_RESOURCE_STATES(
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0
+                | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0,
+        ),
+        ResourceState::ShaderWrite | ResourceState::ShaderReadWrite => {
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+        }
+        ResourceState::ColorAttachment => D3D12_RESOURCE_STATE_RENDER_TARGET,
+        ResourceState::DepthStencilWrite => D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        ResourceState::DepthStencilRead => D3D12_RESOURCE_STATE_DEPTH_READ,
+        ResourceState::TransferSrc => D3D12_RESOURCE_STATE_COPY_SOURCE,
+        ResourceState::TransferDst => D3D12_RESOURCE_STATE_COPY_DEST,
+        ResourceState::IndirectArgument => D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+        ResourceState::IndexBuffer => D3D12_RESOURCE_STATE_INDEX_BUFFER,
+        // A resource the CPU reads is on the readback heap, which D3D12 pins to
+        // `COPY_DEST` for its whole lifetime — see `initial_state`. Nothing
+        // transitions such a buffer, and `crate::command`'s barrier skips it
+        // rather than recording an illegal transition; this arm exists for the
+        // `DeviceLocal` resource a caller nonetheless names, whose only honest
+        // resting state is `COMMON`.
+        ResourceState::HostRead => D3D12_RESOURCE_STATE_COMMON,
     }
 }
 
@@ -398,45 +458,6 @@ mod tests {
         DXGI_FORMAT_R9G9B9E5_SHAREDEXP, DXGI_FORMAT_UNKNOWN,
     };
 
-    /// Every [`Format`] the seam declares, so the properties below are checked
-    /// over all of them rather than over the handful someone remembered.
-    ///
-    /// Hand-written because `Format` has no iterator; [`dxgi_format`]'s
-    /// exhaustive `match` is what makes a *missing* variant a compile error, and
-    /// `every_format_appears_in_the_exhaustive_list` below is what makes a
-    /// variant missing from *this* list fail.
-    const ALL: &[Format] = &[
-        Format::R8Unorm,
-        Format::Rg8Unorm,
-        Format::Rgba8Unorm,
-        Format::Rgba8UnormSrgb,
-        Format::Bgra8Unorm,
-        Format::Bgra8UnormSrgb,
-        Format::Rgb10a2Unorm,
-        Format::R11g11b10Float,
-        Format::R16Float,
-        Format::Rg16Float,
-        Format::Rgba16Float,
-        Format::R32Float,
-        Format::Rg32Float,
-        Format::Rgba32Float,
-        Format::R32Uint,
-        Format::Rg32Uint,
-        Format::D32Float,
-        Format::D32FloatS8Uint,
-        Format::D24UnormS8Uint,
-        Format::D16Unorm,
-        Format::Bc1RgbaUnorm,
-        Format::Bc1RgbaUnormSrgb,
-        Format::Bc3RgbaUnorm,
-        Format::Bc3RgbaUnormSrgb,
-        Format::Bc4RUnorm,
-        Format::Bc5RgUnorm,
-        Format::Bc6hRgbUfloat,
-        Format::Bc7RgbaUnorm,
-        Format::Bc7RgbaUnormSrgb,
-    ];
-
     /// The seam's linear/sRGB pairs, which are the entries a transposition makes
     /// *dark* rather than broken.
     const SRGB_PAIRS: &[(Format, Format)] = &[
@@ -455,31 +476,41 @@ mod tests {
         MemoryLocation::HostReadback,
     ];
 
-    /// `ALL` really is all of them, so every property below has the coverage it
-    /// claims. `Format` is `Ord`, so the largest variant plus a count is enough
-    /// to catch both an addition to the seam and a deletion from this list.
-    #[test]
-    fn every_format_appears_in_the_exhaustive_list() {
-        let mut sorted: Vec<Format> = ALL.to_vec();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(sorted.len(), ALL.len(), "a duplicate in ALL");
-        assert_eq!(
-            sorted.last().copied(),
-            Some(Format::Bc7RgbaUnormSrgb),
-            "the seam gained a format after the last one this list knows"
-        );
-    }
+    /// Every seam state, so the table below is checked over all of them rather
+    /// than the handful a clear happens to use. Hand-written because
+    /// [`ResourceState`] has no list of its own; [`resource_state`]'s
+    /// exhaustive `match` is what makes a *missing* variant a compile error.
+    const STATES: &[ResourceState] = &[
+        ResourceState::Undefined,
+        ResourceState::ShaderRead,
+        ResourceState::ShaderWrite,
+        ResourceState::ShaderReadWrite,
+        ResourceState::ColorAttachment,
+        ResourceState::DepthStencilWrite,
+        ResourceState::DepthStencilRead,
+        ResourceState::TransferSrc,
+        ResourceState::TransferDst,
+        ResourceState::IndirectArgument,
+        ResourceState::IndexBuffer,
+        ResourceState::HostRead,
+        ResourceState::Present,
+    ];
 
     /// **The mapping is injective.** Two seam formats sharing one DXGI format is
     /// the copy-paste failure this file is most exposed to, and it is invisible
     /// at run time: the image is created, the sample succeeds, the colour is
     /// wrong.
+    ///
+    /// Driven off [`Format::ALL`] — the seam's list, not a second copy kept
+    /// here. The copy that used to sit in this module covered whatever it
+    /// happened to name, so a format added to `Format` and forgotten here left
+    /// this test green over an incomplete set. `crcbl-vk` deleted its copy for
+    /// the same reason.
     #[test]
     fn no_two_formats_share_a_dxgi_format() {
-        assert!(!ALL.is_empty(), "nothing to check");
+        assert!(!Format::ALL.is_empty(), "nothing to check");
         let mut seen: Vec<(Format, DXGI_FORMAT)> = Vec::new();
-        for &format in ALL {
+        for &format in Format::ALL {
             let dxgi = dxgi_format(format);
             assert_ne!(dxgi, DXGI_FORMAT_UNKNOWN, "{format:?} has no DXGI format");
             if let Some((other, _)) = seen.iter().find(|(_, seen)| *seen == dxgi) {
@@ -487,7 +518,80 @@ mod tests {
             }
             seen.push((format, dxgi));
         }
-        assert_eq!(seen.len(), ALL.len());
+        assert_eq!(seen.len(), Format::ALL.len());
+    }
+
+    /// Every seam state reaches a D3D12 state, and the ones whose confusion is
+    /// silent are pinned by name.
+    ///
+    /// Injectivity is *not* asserted, and the reason is in [`resource_state`]'s
+    /// docs: `PRESENT` and `COMMON` are one constant, so `Undefined` and
+    /// `Present` genuinely collide. What is asserted instead is the pairs a
+    /// transposition would make wrong without failing anything — a copy source
+    /// read as a copy destination is a copy that runs and moves nothing, and a
+    /// depth attachment transitioned to `DEPTH_READ` when it is written is a
+    /// depth buffer that stops updating.
+    #[test]
+    fn every_seam_state_maps_to_the_d3d12_state_it_names() {
+        assert!(!STATES.is_empty(), "nothing to check");
+        for &state in STATES {
+            // Only `Undefined`, `Present` and `HostRead` may be `COMMON`, which
+            // is zero: any other state landing there is a `match` arm that was
+            // never written.
+            let expected_common = matches!(
+                state,
+                ResourceState::Undefined | ResourceState::Present | ResourceState::HostRead
+            );
+            assert_eq!(
+                resource_state(state) == D3D12_RESOURCE_STATE_COMMON,
+                expected_common,
+                "{state:?} landed on COMMON"
+            );
+        }
+        assert_eq!(
+            resource_state(ResourceState::TransferSrc),
+            D3D12_RESOURCE_STATE_COPY_SOURCE
+        );
+        assert_eq!(
+            resource_state(ResourceState::TransferDst),
+            D3D12_RESOURCE_STATE_COPY_DEST
+        );
+        assert_eq!(
+            resource_state(ResourceState::ColorAttachment),
+            D3D12_RESOURCE_STATE_RENDER_TARGET
+        );
+        assert_eq!(
+            resource_state(ResourceState::DepthStencilWrite),
+            D3D12_RESOURCE_STATE_DEPTH_WRITE
+        );
+        assert_eq!(
+            resource_state(ResourceState::DepthStencilRead),
+            D3D12_RESOURCE_STATE_DEPTH_READ
+        );
+        assert_ne!(
+            resource_state(ResourceState::DepthStencilRead),
+            resource_state(ResourceState::DepthStencilWrite),
+            "the two depth states collapsed, so a written depth buffer would be read-only"
+        );
+        // A shader read must name **both** stages: a resource made visible only
+        // to the pixel stage and then sampled from compute is a read of memory
+        // the barrier did not flush, which no call reports.
+        let read = resource_state(ResourceState::ShaderRead);
+        assert!(
+            read.contains(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
+                && read.contains(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+            "ShaderRead names only one shader stage: {read:?}"
+        );
+        // And a write state is that bit alone — D3D12 rejects `UNORDERED_ACCESS`
+        // combined with any read state.
+        assert_eq!(
+            resource_state(ResourceState::ShaderWrite),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+        );
+        assert_eq!(
+            resource_state(ResourceState::ShaderReadWrite),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+        );
     }
 
     /// The typeless storage formats are injective too, and for the same reason:
@@ -500,7 +604,7 @@ mod tests {
     /// a view D3D12 rejects with no return value to say so.
     #[test]
     fn sampled_depth_formats_get_a_distinct_typeless_storage_and_read_format() {
-        let depth: Vec<Format> = ALL
+        let depth: Vec<Format> = Format::ALL
             .iter()
             .copied()
             .filter(|format| format.is_depth_stencil())
@@ -549,7 +653,7 @@ mod tests {
     /// reach for.
     #[test]
     fn colour_formats_have_one_spelling_whatever_the_usage() {
-        let colour: Vec<Format> = ALL
+        let colour: Vec<Format> = Format::ALL
             .iter()
             .copied()
             .filter(|format| !format.is_depth_stencil())

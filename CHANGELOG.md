@@ -300,9 +300,54 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   because the call behind it landed: BC support is measured with a real
   `CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT)` per BC format, and
   `max_sampler_anisotropy` moves to `D3D12_REQ_MAXANISOTROPY`. The tier is still
-  B on every adapter. Everything past resources — pipelines, bind groups,
-  command recording, submission, swapchains, queries, readback — still refuses
-  by name.
+  B on every adapter.
+
+  **Its third slice records, submits and clears.** `Dx12CommandEncoder` is a
+  real `ID3D12GraphicsCommandList` over its own `ID3D12CommandAllocator`, taken
+  when the encoder is created so a queue handle from another device is a
+  `ForeignObject` the encoder carries to `finish`. `begin_render_pass` binds
+  attachments with `OMSetRenderTargets` and honours `LoadOp::Clear` through
+  `ClearRenderTargetView`/`ClearDepthStencilView`, with viewport and scissor set
+  from the pass's render area; `Device::submit` runs the lists on the queue and
+  signals an `ID3D12Fence`; `request_readback`/`poll_readback` observe that
+  fence and map the buffer. So a cleared pixel is now written, copied and **read
+  back and asserted** rather than assumed — which is the measurement
+  `docs/backlog.md` asked for about whether WARP can execute anything at all, as
+  opposed to merely reporting `ResourceBindingTier=3`.
+
+  **A clear honours `RenderPassDesc::render_area`, unlike `crcbl-mtl`.** D3D12's
+  clears take a rectangle list, so the area is passed through — Vulkan's
+  semantic; a Metal `loadAction` clears the whole attachment whatever the pass
+  said. `StoreOp::Discard` is honoured as `Store`: `OMSetRenderTargets` has no
+  store op, and storing when the caller did not need it is slower and never
+  wrong.
+
+  **`destroy_*` freeing a resource with work in flight is no longer a
+  use-after-free.** A D3D12 command list retains nothing it references, so the
+  encoder now takes its own reference to every resource it records against and a
+  submission parks that set on a fence-keyed retire queue — along with the
+  command list and allocator, which `ExecuteCommandLists` does not retain
+  either. `destroy_buffer` and its siblings are unchanged and still free on the
+  spot, because the reference keeping the resource alive is the submission's.
+  That is a smaller mechanism than `crcbl-vk`'s deletion queue needs, and the
+  reason is that COM refcounts the bookkeeping Vulkan handles cannot.
+
+  `pipeline_barrier` becomes `ResourceBarrier` transitions, per subresource or
+  whole-resource; a barrier on a host-visible buffer is dropped rather than
+  recorded, because D3D12 pins upload and readback resources to one state for
+  their lifetime. Buffer↔buffer and buffer↔image copies are recorded, with
+  D3D12's 256-byte row pitch and 512-byte placement alignments refused by name —
+  neither is expressible in `BufferImageCopy`, and `CopyTextureRegion` returns
+  `void`, so an unaligned footprint would arrive as a readback of the wrong
+  bytes. Draws, dispatches, bind groups, push constants, index buffers, buffer
+  fills, image-to-image copies, MSAA resolves and read-only depth attachments
+  all **fail the encoder**, so `finish` returns the refusal rather than a
+  command buffer that submits and does nothing. Semaphore waits and signals on a
+  submission, and `ReadbackDesc::after`, are `InvalidHandle` — no semaphore
+  exists to have issued one.
+
+  Everything past that — pipelines, bind groups, shader modules, swapchains and
+  queries — still refuses by name.
 
 - **`crcbl-shaders`** now emits **MSL** beside the SPIR-V and WGSL. Slang's
   `-target metal` output is committed as `msl/*.metal`, hashed into

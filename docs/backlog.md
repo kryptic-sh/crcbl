@@ -4761,14 +4761,6 @@ The device-and-resources slice. Everything below is in `crates/crcbl-dx12`.
   costs. A sampled _depth_ image is not affected — it is stored typeless with
   the depth-stencil view and the shader view each naming a concrete format.
 
-- **DX12 needs a deletion queue and does not have one.** A D3D12 command list
-  does not retain the resources it references, unlike Metal's command buffer, so
-  `destroy_buffer` and its siblings dropping the interface is sound today _only_
-  because `submit` refuses. **The command slice must bring a retire queue with
-  it** — a resource freed while a list that names it is in flight is a
-  use-after-free the debug layer reports and a release build does not.
-  `device.rs`'s module docs say so at the destroy calls.
-
 - **`create_image` does not check `mip_levels` against the extent.** More mips
   than the extent admits reaches D3D12 as `E_INVALIDARG` and surfaces as
   `HalError::Backend` rather than the `InvalidDescriptor` it is. Every other
@@ -4803,3 +4795,54 @@ The device-and-resources slice. Everything below is in `crates/crcbl-dx12`.
   `DeviceInner::idle_value` exists for, and its failure mode is a hang caught by
   `slow-timeout`, not a red assertion. A passing run is not evidence the race
   cannot happen.
+
+## What DX3 left open
+
+The command-list, render-pass and clear slice. All in `crates/crcbl-dx12`.
+
+- **`StoreOp::Discard` is recorded as a store.** `OMSetRenderTargets` has no
+  store op; the API that has one is
+  `ID3D12GraphicsCommandList4::BeginRenderPass`, plus `DiscardResource` with its
+  own state constraints. Correct but slower than it needs to be, and
+  `crcbl_dx12::command`'s module docs say what it does rather than what it
+  should do.
+
+- **Read-only depth attachments are refused.** `create_image_view` builds one
+  writable DSV per view, and the seam has no field asking for
+  `D3D12_DSV_FLAG_READ_ONLY_DEPTH`, so a view cannot know which pass will only
+  read it. **Needs a decision**: a second descriptor per depth view, or a field
+  on `ImageViewDesc`.
+
+- **Descriptor-heap slots are not retired, and the belief behind that is
+  unverified.** The encoder retains an attachment's _resource_ but not its
+  RTV/DSV slot, on the reading that D3D12 consumes those descriptors at record
+  time. If that is wrong, a `destroy_image_view` followed by a new view while
+  work is in flight overwrites a descriptor the GPU is still reading. Nothing
+  tests it and WARP without the debug layer may not object either way.
+
+- **`pipeline_barrier` skips transitions on host-visible buffers**, because
+  upload and readback heap resources are pinned to one state for their lifetime
+  and recording a transition on them is illegal. The seam has no vocabulary for
+  that, and neither Vulkan nor Metal needs it. There is **no test**: no
+  deterministic observable for a skipped barrier was found.
+
+- **`ReadbackState::Pending` is never exercised.** Every test waits before
+  requesting, so `poll_readback` is `Ready` on its first poll. Forcing `Pending`
+  needs work genuinely in flight, which is a race rather than a test.
+
+- **The retire queue's "does not release early" half has no device-level test.**
+  After `submit` the fence may already have passed, so asserting `pending() > 0`
+  would be racy. The device tests pin the two deterministic halves — the bytes
+  arrive despite a destroy, and the queue drains to empty when idle — and the
+  _ordering_ is pinned by `retire.rs`'s pure unit tests instead.
+
+- **A WARP that hangs while executing still fails as a timeout, not a named
+  stage.** The test helper panics with `stage=finish`, `stage=submit` or
+  `stage=wait_idle`, and the readback poll has its own deadline — but a hang
+  inside execution blocks in `wait_idle`'s `INFINITE` fence wait, so it surfaces
+  as nextest's SLOW-then-SIGKILL. The test name identifies it; the stage marker
+  does not.
+
+- **`device.rs` grew again.** DX2's note about splitting `check_image`,
+  `check_view_type` and `build_views` out of it still stands and is more urgent
+  now, not less.

@@ -1,14 +1,17 @@
-//! [`Dx12Device`]: one `ID3D12Device`, its queue, and the four resource tables
-//! this slice fills.
+//! [`Dx12Device`]: one `ID3D12Device`, its queue, and the resource tables this
+//! slice fills.
 //!
 //! # What this slice implements, and what it still refuses
 //!
-//! Buffers, images, image views and samplers — created, destroyed, and looked up
-//! through generational handles — plus [`Device::backend`], [`Device::caps`],
-//! [`Device::queue`], [`Device::write_buffer`] and [`Device::wait_idle`].
-//! Everything else on the trait refuses with [`HalError::Unsupported`] whose
-//! `what` names the slice it arrives in, in the same voice `Dx12Instance`
-//! established. Nothing here is a stub that reports success.
+//! Buffers, images, image views, samplers, command buffers and readbacks —
+//! created, destroyed, and looked up through generational handles — plus
+//! [`Device::backend`], [`Device::caps`], [`Device::queue`],
+//! [`Device::write_buffer`], [`Device::create_command_encoder`],
+//! [`Device::submit`], [`Device::request_readback`], [`Device::poll_readback`]
+//! and [`Device::wait_idle`]. Everything else on the trait refuses with
+//! [`HalError::Unsupported`] whose `what` names the slice it arrives in, in the
+//! same voice `Dx12Instance` established. Nothing here is a stub that reports
+//! success.
 //!
 //! # One lock over every table
 //!
@@ -34,16 +37,27 @@
 //! [`Device::wait_idle`] creates and closes it inside the call rather than
 //! storing it, so it never becomes this struct's problem.
 //!
-//! # There is no deletion queue here, and that **is** a gap
+//! # `destroy_*` frees on the spot, and the retire queue is why that is sound
 //!
-//! `crcbl-vk` parks every destroyed object on a timeline-keyed retire queue,
-//! because destroying a resource the GPU is still reading is undefined
-//! behaviour. D3D12 is Vulkan's model, not Metal's: a command list does **not**
-//! retain the resources it references, and releasing the last reference to one
-//! with work in flight is a use-after-free in the driver. `destroy_*` therefore
-//! drops the interface and is done, which is sound only because nothing in this
-//! slice can submit — [`Device::submit`] refuses. **The command slice must
-//! bring the retire queue with it**, and this paragraph is the note it is owed.
+//! A D3D12 command list does **not** retain the resources it references, so
+//! releasing the last reference to one with work in flight is a use-after-free
+//! in the driver — the gap DX2's docs said the command slice owed. It is
+//! discharged in [`crate::retire`], and the shape it took is *not* `crcbl-vk`'s:
+//!
+//! `crcbl_dx12::command`'s encoder takes its own reference to every resource it
+//! records against, [`Device::submit`] parks that set on the retire queue keyed
+//! on the fence value the submission signals, and the queue releases it once
+//! `GetCompletedValue` has reached that value. So a resource stays alive because
+//! the submission using it holds a reference, which is why every `destroy_*`
+//! below still drops the pool's reference immediately and needs no change.
+//! `crcbl-vk` cannot do that — a `VkBuffer` has no refcount to hold — so its
+//! queue keeps destroyed objects and re-keys them against each submission's
+//! recorded handles instead.
+//!
+//! What the queue also holds is the `ID3D12GraphicsCommandList` and
+//! `ID3D12CommandAllocator` themselves: `ExecuteCommandLists` does not retain
+//! those either, and [`Device::destroy_command_buffer`] may arrive while the
+//! list is still running.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -52,24 +66,26 @@ use crcbl_hal::{
     AcquiredFrame, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupHandle,
     BindGroupLayoutDesc, BindGroupLayoutHandle, BufferDesc, BufferHandle, CommandBufferHandle,
     CommandEncoder, CommandEncoderDesc, ComputePipelineDesc, ComputePipelineHandle, Device,
-    DeviceCaps, DeviceDesc, Features, Format, GraphicsPipelineDesc, GraphicsPipelineHandle,
-    HalError, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
-    ImageViewHandle, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo,
-    QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle,
-    ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, ShaderModuleDesc,
-    ShaderModuleHandle, SubmitInfo, SurfaceError, SwapchainDesc, SwapchainHandle,
+    DeviceCaps, DeviceDesc, Extent3d, Features, Format, GraphicsPipelineDesc,
+    GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType,
+    ImageUsage, ImageViewDesc, ImageViewHandle, MemoryLocation, PipelineLayoutDesc,
+    PipelineLayoutHandle, PresentInfo, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind,
+    ReadbackDesc, ReadbackHandle, ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc,
+    SemaphoreHandle, ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, SurfaceError, SwapchainDesc,
+    SwapchainHandle,
 };
 use windows::Win32::Foundation::{CloseHandle, E_OUTOFMEMORY, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_DESC, D3D12_COMMAND_QUEUE_FLAG_NONE,
-    D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_COMPARISON_FUNC_ALWAYS,
+    D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_COMPARISON_FUNC_ALWAYS, D3D12_CPU_DESCRIPTOR_HANDLE,
     D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_DEPTH_STENCIL_VIEW_DESC, D3D12_FENCE_FLAG_NONE,
     D3D12_HEAP_FLAG_NONE, D3D12_HEAP_PROPERTIES, D3D12_MEMORY_POOL_UNKNOWN, D3D12_RANGE,
-    D3D12_RENDER_TARGET_VIEW_DESC, D3D12_RESOURCE_DESC, D3D12_RESOURCE_DIMENSION_BUFFER,
-    D3D12_SAMPLER_DESC, D3D12_SHADER_RESOURCE_VIEW_DESC, D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-    D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_UNORDERED_ACCESS_VIEW_DESC, D3D12CreateDevice,
-    ID3D12CommandQueue, ID3D12Device, ID3D12Fence, ID3D12Object, ID3D12Resource,
+    D3D12_RENDER_TARGET_VIEW_DESC, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_DESC,
+    D3D12_RESOURCE_DIMENSION_BUFFER, D3D12_SAMPLER_DESC, D3D12_SHADER_RESOURCE_VIEW_DESC,
+    D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_UNORDERED_ACCESS_VIEW_DESC,
+    D3D12CreateDevice, ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue, ID3D12Device,
+    ID3D12Fence, ID3D12GraphicsCommandList, ID3D12Object, ID3D12Resource,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
 use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
@@ -79,6 +95,7 @@ use crate::command::Dx12CommandEncoder;
 use crate::descriptor::{Descriptors, Kind, Slot};
 use crate::handle::{self, Owned, Owner};
 use crate::instance::{AdapterRecord, InstanceInner, next_owner_id, not_yet};
+use crate::retire::RetireQueue;
 use crate::view::Subresource;
 use crate::{conv, view};
 
@@ -127,6 +144,10 @@ struct ImageEntry {
     format: Format,
     image_type: ImageType,
     usage: ImageUsage,
+    /// The extent at mip zero, kept because a copy's footprint and its bounds
+    /// check are both derived from it and `GetDesc` is a call across the ABI to
+    /// learn something this crate already decided.
+    extent: Extent3d,
     mip_levels: u32,
     /// Array layers, or depth slices for a volume — the two readings of
     /// [`Extent3d::depth_or_layers`](crcbl_hal::Extent3d::depth_or_layers), kept
@@ -169,11 +190,16 @@ impl ViewDescriptors {
 struct ViewEntry {
     owner: u64,
     descriptors: ViewDescriptors,
+    /// The image's format, which is also the view's — `create_image_view`
+    /// refuses a differing one. Kept so a render pass can ask whether a
+    /// depth-stencil attachment has a stencil plane to clear without resolving
+    /// the image handle it no longer has.
+    format: Format,
     /// Held so the resource cannot outlive its own descriptors. The seam already
     /// obliges a caller to destroy every view before its image, but a descriptor
     /// is a raw address into a freed resource if it does not, and a refcount is
     /// cheaper than the debugging.
-    _image: ID3D12Resource,
+    image: ID3D12Resource,
 }
 
 /// A sampler: one descriptor in the sampler heap.
@@ -183,16 +209,92 @@ struct SamplerEntry {
     slot: Slot,
 }
 
-owned!(BufferEntry, ImageEntry, ViewEntry, SamplerEntry);
+/// A finished command buffer: what runs, and everything it needs alive.
+#[derive(Debug)]
+pub(crate) struct CommandBufferEntry {
+    pub(crate) owner: u64,
+    /// The allocator holding the recorded commands. Released with the list,
+    /// never before it: the list's memory *is* the allocator's.
+    pub(crate) allocator: ID3D12CommandAllocator,
+    pub(crate) list: ID3D12GraphicsCommandList,
+    /// Every resource the recorded commands name. See [`crate::retire`].
+    pub(crate) retained: Vec<ID3D12Resource>,
+}
+
+/// An in-flight readback request.
+#[derive(Debug)]
+struct ReadbackEntry {
+    owner: u64,
+    /// Stored as a handle so it is re-resolved at poll time. A buffer destroyed
+    /// between the request and the poll then fails lookup rather than having its
+    /// freed mapping read.
+    buffer: BufferHandle,
+    offset: u64,
+    size: u64,
+    /// The fence value that covers the work this readback observes: the highest
+    /// one handed out when [`Device::request_readback`] was called, which is
+    /// exactly "everything submitted to this device before this call".
+    after: u64,
+}
+
+/// Something a submission still needs, held until its fence value passes.
+///
+/// Release is [`Drop`], because every arm is a refcounted COM interface — which
+/// is the whole reason [`crate::retire`]'s queue needs no destroy callback.
+#[derive(Debug)]
+pub(crate) enum Retired {
+    /// A resource a recorded command names.
+    ///
+    /// Held rather than read — releasing it is the whole job, and the release is
+    /// this value's own `Drop`. That is why the field carries the leading
+    /// underscore this crate uses everywhere it keeps an interface alive without
+    /// reading it back.
+    Resource { _raw: ID3D12Resource },
+    /// The list and the allocator its commands live in, together because
+    /// neither is meaningful without the other: the list's memory *is* the
+    /// allocator's.
+    Recording {
+        _list: ID3D12GraphicsCommandList,
+        _allocator: ID3D12CommandAllocator,
+    },
+}
+
+owned!(
+    BufferEntry,
+    ImageEntry,
+    ViewEntry,
+    SamplerEntry,
+    CommandBufferEntry,
+    ReadbackEntry,
+);
 
 /// Every table the device owns, behind one lock.
 #[derive(Debug)]
-struct DeviceState {
+pub(crate) struct DeviceState {
     buffers: Pool<BufferEntry>,
     images: Pool<ImageEntry>,
     views: Pool<ViewEntry>,
     samplers: Pool<SamplerEntry>,
+    command_buffers: Pool<CommandBufferEntry>,
+    readbacks: Pool<ReadbackEntry>,
     descriptors: Descriptors,
+    retire: RetireQueue<Retired>,
+    /// The last fence value handed out, by [`Device::submit`] or
+    /// [`Device::wait_idle`].
+    ///
+    /// **The lock is what makes the fence monotonic, and an atomic counter is
+    /// not enough.** Reserving under an atomic gives two concurrent callers two
+    /// distinct values, but nothing then orders the two `Signal` calls: the one
+    /// holding the higher value can reach the queue first, so the fence is set
+    /// to that value and then back down to the lower one. The caller that
+    /// reserved the higher value samples the fence *after* the drop, sees less
+    /// than its own value, arms an event for a value nothing will signal again,
+    /// and blocks on it forever.
+    ///
+    /// One counter for both calls rather than two, because they are the same
+    /// question — how much work has been issued — and two counters on one fence
+    /// would be two sequences interleaved on one monotonic number.
+    next_fence_value: u64,
 }
 
 /// The device's shared state.
@@ -200,37 +302,30 @@ struct DeviceState {
 /// No `unsafe impl Send`/`Sync`: every field is either plain data or a
 /// `windows-rs` interface the bindings already declare both for. See the module
 /// docs.
-struct DeviceInner {
+pub(crate) struct DeviceInner {
     /// Obligation 1: a `Device` may outlive its `Instance`, so the instance's
     /// state — the DXGI factory and the enumerated adapters — is kept alive here
     /// rather than borrowed. See [`InstanceInner`].
     _instance: Arc<InstanceInner>,
-    raw: ID3D12Device,
+    pub(crate) raw: ID3D12Device,
     /// The one queue, `D3D12_COMMAND_LIST_TYPE_DIRECT`, which accepts graphics,
     /// compute and copy work. The compute and copy queue *types* are exactly
     /// [`Features::ASYNC_COMPUTE_QUEUE`] and [`Features::TRANSFER_QUEUE`], and
     /// neither is reported, so neither is created.
     queue: ID3D12CommandQueue,
-    /// The fence [`Device::wait_idle`] signals through. One per device rather
-    /// than one per call: a fence is a monotonic counter and reusing it is what
-    /// makes each wait cheaper than the `CreateFence` it would otherwise need.
-    idle_fence: ID3D12Fence,
-    /// The last value [`Device::wait_idle`] signalled, behind the lock that
-    /// keeps the signals ordered.
+    /// The one fence every submission and every wait moves. One per device
+    /// rather than one per call: a fence is a monotonic counter and reusing it
+    /// is what makes each wait cheaper than the `CreateFence` it would otherwise
+    /// need — and it is what lets [`crate::retire`] key on a single number.
     ///
-    /// **The lock is what makes the fence monotonic, and an atomic counter is
-    /// not enough.** Reserving under an atomic gives two concurrent waiters two
-    /// distinct values, but nothing then orders the two `Signal` calls: the
-    /// waiter holding the higher value can reach the queue first, so the fence
-    /// is set to that value and then back down to the lower one. The waiter that
-    /// reserved the higher value samples the fence *after* the drop, sees less
-    /// than its own value, arms an event for a value nothing will signal again,
-    /// and blocks on it forever.
-    idle_value: Mutex<u64>,
-    caps: DeviceCaps,
+    /// The value it is being driven towards lives in
+    /// [`DeviceState::next_fence_value`], because ordering the signals needs a
+    /// lock and this device already has exactly one.
+    fence: ID3D12Fence,
+    pub(crate) caps: DeviceCaps,
     /// Which device this is, and the tag it stamps into every handle it issues.
     /// See [`crate::handle`].
-    owner: Owner,
+    pub(crate) owner: Owner,
     state: Mutex<DeviceState>,
 }
 
@@ -242,6 +337,373 @@ impl core::fmt::Debug for DeviceInner {
             .field("id", &self.owner.id)
             .field("tier", &self.caps.tier())
             .finish_non_exhaustive()
+    }
+}
+
+/// What [`crate::command`] needs to know about a buffer.
+///
+/// A copy of the fields rather than a borrow of the table entry, because the
+/// device lock has to be released before the encoder records: holding it across
+/// a recording call would put a `MutexGuard` inside an encoder that the seam
+/// says may be moved to a worker thread.
+#[derive(Debug)]
+pub(crate) struct BufferRef {
+    pub(crate) raw: ID3D12Resource,
+    pub(crate) size: u64,
+    pub(crate) location: MemoryLocation,
+}
+
+/// What [`crate::command`] needs to know about an image.
+#[derive(Debug)]
+pub(crate) struct ImageRef {
+    pub(crate) raw: ID3D12Resource,
+    pub(crate) format: Format,
+    pub(crate) image_type: ImageType,
+    pub(crate) extent: Extent3d,
+    pub(crate) mip_levels: u32,
+    /// Array layers, or depth slices for a volume — see [`ImageEntry::slices`].
+    pub(crate) slices: u32,
+}
+
+impl ImageRef {
+    /// The extent of one mip level, in texels.
+    ///
+    /// A mip halves each *spatial* dimension and rounds up to one; an array's
+    /// layer count is not a spatial dimension and does not change, which is the
+    /// distinction `depth_or_layers` folds together and this has to unfold.
+    pub(crate) fn mip_extent(&self, mip: u32) -> (u32, u32, u32) {
+        let halve = |size: u32| (size >> mip.min(31)).max(1);
+        let depth = if matches!(self.image_type, ImageType::D3) {
+            halve(self.extent.depth_or_layers)
+        } else {
+            1
+        };
+        (halve(self.extent.width), halve(self.extent.height), depth)
+    }
+
+    /// D3D12's subresource index for a mip and array layer.
+    ///
+    /// Plane zero: this backend copies colour images only, and a colour format
+    /// has one plane. `D3D12CalcSubresource` is `mip + layer * mip_levels +
+    /// plane * mip_levels * layers`, and the plane term is what a depth copy
+    /// would need.
+    pub(crate) fn subresource(&self, mip: u32, layer: u32) -> u32 {
+        mip + layer * self.mip_levels
+    }
+
+    /// Every subresource index a seam subrange covers, or the "all of them"
+    /// sentinel when it covers the whole image.
+    ///
+    /// The sentinel is not an optimisation: a barrier on a whole image is one
+    /// entry rather than `mips * layers`, and D3D12 reads the two forms
+    /// identically.
+    pub(crate) fn subresources(&self, range: ImageSubresourceRange) -> Vec<u32> {
+        let mips = resolve_count(range.mip_count, range.base_mip, self.mip_levels);
+        let layers = resolve_count(range.layer_count, range.base_layer, self.slices);
+        if range.base_mip == 0
+            && range.base_layer == 0
+            && mips >= self.mip_levels
+            && layers >= self.slices
+        {
+            return vec![D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES];
+        }
+        let mut out = Vec::with_capacity((mips * layers) as usize);
+        for layer in range.base_layer..range.base_layer + layers {
+            for mip in range.base_mip..range.base_mip + mips {
+                out.push(self.subresource(mip, layer));
+            }
+        }
+        out
+    }
+}
+
+/// A render pass attachment: its descriptor, and the resource behind it.
+#[derive(Debug)]
+pub(crate) struct AttachmentRef {
+    pub(crate) descriptor: D3D12_CPU_DESCRIPTOR_HANDLE,
+    pub(crate) image: ID3D12Resource,
+    pub(crate) format: Format,
+}
+
+impl DeviceInner {
+    pub(crate) fn state(&self) -> MutexGuard<'_, DeviceState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Resolves a queue handle against *this* device.
+    ///
+    /// Obligation 3 covers queues too, and the three outcomes are kept apart for
+    /// the same reason they are everywhere else: a handle carrying another
+    /// device's tag is [`HalError::ForeignObject`] — the caller crossed two
+    /// objects that never met — while one carrying no tag at all was never
+    /// issued by any device and is [`HalError::InvalidHandle`].
+    pub(crate) fn check_queue(&self, queue: QueueHandle) -> Result<(), HalError> {
+        if queue == handle::queue(self.owner, QueueKind::Graphics) {
+            return Ok(());
+        }
+        Err(if handle::tag_of(queue) == 0 {
+            HalError::invalid_handle("queue", queue)
+        } else {
+            HalError::ForeignObject {
+                kind: "queue",
+                bits: queue.to_bits(),
+            }
+        })
+    }
+
+    /// Opens an allocator and a command list recording into it.
+    ///
+    /// Both are `D3D12_COMMAND_LIST_TYPE_DIRECT`, the one type this device's
+    /// queue accepts: an allocator's type must match the list's, and the list's
+    /// must match the queue's.
+    pub(crate) fn open_list(
+        &self,
+        label: Option<&str>,
+    ) -> Result<(ID3D12CommandAllocator, ID3D12GraphicsCommandList), HalError> {
+        // SAFETY: `raw` is a live `ID3D12Device` this crate owns a reference to,
+        // the call takes one scalar, and `ID3D12CommandAllocator` is the IID
+        // asked for.
+        let allocator: ID3D12CommandAllocator = unsafe {
+            self.raw
+                .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
+        }
+        .map_err(|error| creation_error("CreateCommandAllocator", &error))?;
+        // SAFETY: `allocator` is the allocator just created, of the same type as
+        // the list being asked for, and no list has been created from it yet —
+        // D3D12 permits one recording list per allocator at a time. The initial
+        // pipeline state is `None`, which is legal and means "no PSO bound";
+        // nothing in this slice draws, and a draw is what would need one.
+        let list: ID3D12GraphicsCommandList = unsafe {
+            self.raw
+                .CreateCommandList(FIRST_NODE, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None)
+        }
+        .map_err(|error| creation_error("CreateCommandList", &error))?;
+        if let Some(label) = label {
+            label_object(&list, label);
+        }
+        Ok((allocator, list))
+    }
+
+    /// Resolves a buffer handle for the encoder.
+    ///
+    /// # Errors
+    ///
+    /// As [`handle::lookup`].
+    pub(crate) fn buffer(&self, handle: BufferHandle) -> Result<BufferRef, HalError> {
+        let state = self.state();
+        let entry = handle::lookup(&state.buffers, "buffer", handle, self.owner)?;
+        Ok(BufferRef {
+            raw: entry.raw.clone(),
+            size: entry.size,
+            location: entry.location,
+        })
+    }
+
+    /// Resolves an image handle for the encoder.
+    ///
+    /// # Errors
+    ///
+    /// As [`handle::lookup`].
+    pub(crate) fn image(&self, handle: ImageHandle) -> Result<ImageRef, HalError> {
+        let state = self.state();
+        let entry = handle::lookup(&state.images, "image", handle, self.owner)?;
+        Ok(ImageRef {
+            raw: entry.raw.clone(),
+            format: entry.format,
+            image_type: entry.image_type,
+            extent: entry.extent,
+            mip_levels: entry.mip_levels,
+            slices: entry.slices,
+        })
+    }
+
+    /// Resolves a colour attachment's render target view.
+    ///
+    /// # Errors
+    ///
+    /// As [`handle::lookup`], plus [`HalError::InvalidDescriptor`] when the view
+    /// has no render target descriptor — which means its image was created
+    /// without [`ImageUsage::COLOR_ATTACHMENT`], since that is the only thing
+    /// `create_image_view` builds one from.
+    pub(crate) fn color_attachment(
+        &self,
+        view: ImageViewHandle,
+    ) -> Result<AttachmentRef, HalError> {
+        self.attachment(view, false)
+    }
+
+    /// Resolves a depth/stencil attachment's view. See
+    /// [`color_attachment`](Self::color_attachment).
+    ///
+    /// # Errors
+    ///
+    /// As [`color_attachment`](Self::color_attachment), naming
+    /// [`ImageUsage::DEPTH_STENCIL_ATTACHMENT`] instead.
+    pub(crate) fn depth_attachment(
+        &self,
+        view: ImageViewHandle,
+    ) -> Result<AttachmentRef, HalError> {
+        self.attachment(view, true)
+    }
+
+    fn attachment(&self, view: ImageViewHandle, depth: bool) -> Result<AttachmentRef, HalError> {
+        let mut state = self.state();
+        let (slot, image, format) = {
+            let entry = handle::lookup(&state.views, "image view", view, self.owner)?;
+            let slot = if depth {
+                entry.descriptors.depth_stencil
+            } else {
+                entry.descriptors.render_target
+            };
+            (slot, entry.image.clone(), entry.format)
+        };
+        let Some(slot) = slot else {
+            let usage = if depth {
+                "ImageUsage::DEPTH_STENCIL_ATTACHMENT"
+            } else {
+                "ImageUsage::COLOR_ATTACHMENT"
+            };
+            return Err(HalError::InvalidDescriptor(format!(
+                "this view of a {format:?} image has no attachment descriptor, because its image \
+                 was not created with {usage}"
+            )));
+        };
+        Ok(AttachmentRef {
+            descriptor: state.descriptors.cpu_handle(slot),
+            image,
+            format,
+        })
+    }
+
+    /// Files a finished command buffer and stamps its handle.
+    pub(crate) fn register_command_buffer(&self, entry: CommandBufferEntry) -> CommandBufferHandle {
+        let handle = self.state().command_buffers.insert(entry);
+        handle::stamp(self.owner, handle)
+    }
+
+    /// Reserves the next fence value and signals it on the queue.
+    ///
+    /// The reservation and the signal happen together under `state`, so the
+    /// queue receives the signals in increasing order — see
+    /// [`DeviceState::next_fence_value`] for the deadlock the lock rules out.
+    ///
+    /// **The value is committed whether or not `Signal` succeeded**, and the
+    /// caller parks against it either way: a fence that will never reach a value
+    /// leaks whatever was parked at it, which on a lost device is the right
+    /// trade against releasing memory the driver may still be reading.
+    fn signal(&self, state: &mut DeviceState) -> Result<u64, HalError> {
+        state.next_fence_value += 1;
+        let value = state.next_fence_value;
+        // SAFETY: `queue` and `fence` are live interfaces this device owns,
+        // created together in `open`. `Signal` takes the fence by reference and
+        // a scalar.
+        unsafe { self.queue.Signal(&self.fence, value) }.map_err(|error| {
+            HalError::DeviceLost(format!("ID3D12CommandQueue::Signal failed: {error}"))
+        })?;
+        Ok(value)
+    }
+
+    /// Blocks until the fence has reached `value`.
+    ///
+    /// # The wait uses a real event, and checks that it waited
+    ///
+    /// `SetEventOnCompletion` accepts a null handle and is documented to block
+    /// until the value is reached, which would be less code. The event is used
+    /// anyway because it is the version that can be *checked*:
+    /// `WaitForSingleObject` reports which way it returned, so a wait that did
+    /// not happen is an `Err` here rather than a wait that silently does not
+    /// wait — and a silent one is worse than none, because it would be trusted
+    /// at shutdown.
+    ///
+    /// The event is created and closed inside the call rather than kept on the
+    /// device. Two reasons, and the first is enough: an auto-reset event shared
+    /// between two concurrent waiters lets one consume the other's signal, and a
+    /// Win32 `HANDLE` is a raw pointer that `windows-rs` declares neither `Send`
+    /// nor `Sync`, so storing one would cost this module the marker impl it
+    /// otherwise does not need.
+    fn wait_for(&self, value: u64) -> Result<(), HalError> {
+        if self.completed() >= value {
+            return Ok(());
+        }
+        // SAFETY: no security attributes, auto-reset, initially unsignalled,
+        // unnamed. Every argument is a scalar or a null pointer the API
+        // documents as optional.
+        let event = unsafe { CreateEventW(None, false, false, PCWSTR::null()) }
+            .map_err(|error| HalError::DeviceLost(format!("CreateEventW failed: {error}")))?;
+        // SAFETY: `event` is the handle just created and `value` is one this
+        // device signalled. The runtime signals the event when the fence reaches
+        // the value, including immediately if it already has.
+        let armed = unsafe { self.fence.SetEventOnCompletion(value, event) };
+        let waited = if armed.is_ok() {
+            // SAFETY: `event` is a live event handle owned by this call.
+            Some(unsafe { WaitForSingleObject(event, INFINITE) })
+        } else {
+            None
+        };
+        // SAFETY: `event` is this call's handle and is not used again. Closed on
+        // both paths, so a failed `SetEventOnCompletion` leaks nothing.
+        if let Err(error) = unsafe { CloseHandle(event) } {
+            log::debug!("crcbl-dx12: could not close a fence wait event: {error}");
+        }
+        armed.map_err(|error| {
+            HalError::DeviceLost(format!("SetEventOnCompletion failed: {error}"))
+        })?;
+        if waited != Some(WAIT_OBJECT_0) {
+            return Err(HalError::DeviceLost(format!(
+                "waiting for fence value {value} returned {waited:?} rather than WAIT_OBJECT_0"
+            )));
+        }
+        let completed = self.completed();
+        if completed < value {
+            return Err(HalError::DeviceLost(format!(
+                "the wait returned with the fence at {completed}, short of {value}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// What the GPU has finished.
+    fn completed(&self) -> u64 {
+        // SAFETY: `fence` is live and `GetCompletedValue` reads no pointer of
+        // ours and returns a `u64` by value.
+        unsafe { self.fence.GetCompletedValue() }
+    }
+
+    /// Releases everything the fence has passed. See [`crate::retire`].
+    fn poll_retire(&self, state: &mut DeviceState) {
+        state.retire.retire(self.completed());
+    }
+}
+
+impl Drop for DeviceInner {
+    /// Waits for the queue before anything the queue may still be reading is
+    /// released.
+    ///
+    /// Dropping this struct releases the retire queue's references *and* every
+    /// live pool entry's, and D3D12 does not wait for its queue when the queue
+    /// itself is released. So a device dropped with work in flight would free
+    /// resources the GPU is mid-copy on — the same use-after-free the retire
+    /// queue exists to prevent, arriving through the one path the queue cannot
+    /// see.
+    ///
+    /// A failed wait is logged rather than propagated: `Drop` has nowhere to
+    /// return, and a device that has already been lost has nothing left to
+    /// protect.
+    fn drop(&mut self) {
+        let target = self.state().next_fence_value;
+        if let Err(error) = self.wait_for(target) {
+            log::error!(
+                "crcbl-dx12: a device was dropped without reaching fence {target}: {error}"
+            );
+        }
+        let mut state = self.state();
+        let pending = state.retire.pending();
+        if pending > 0 {
+            log::debug!("crcbl-dx12: releasing {pending} retired batches at device teardown");
+        }
+        state.retire.drain_all();
     }
 }
 
@@ -352,7 +814,7 @@ impl Dx12Device {
 
         // SAFETY: `raw` is the device just created. `CreateFence` takes only
         // scalars and writes the interface it returns.
-        let idle_fence: ID3D12Fence = unsafe { raw.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
+        let fence: ID3D12Fence = unsafe { raw.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
             .map_err(|error| HalError::Backend(format!("CreateFence failed: {error}")))?;
 
         if let Some(label) = desc.label {
@@ -377,14 +839,17 @@ impl Dx12Device {
             images: Pool::new(),
             views: Pool::new(),
             samplers: Pool::new(),
+            command_buffers: Pool::new(),
+            readbacks: Pool::new(),
             descriptors: Descriptors::new(&raw),
+            retire: RetireQueue::new(),
+            next_fence_value: 0,
         };
         let inner = Arc::new(DeviceInner {
             _instance: instance,
             raw,
             queue,
-            idle_fence,
-            idle_value: Mutex::new(0),
+            fence,
             caps,
             owner,
             state: Mutex::new(state),
@@ -398,10 +863,7 @@ impl Dx12Device {
     }
 
     fn state(&self) -> MutexGuard<'_, DeviceState> {
-        self.inner
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner.state()
     }
 
     /// The `ID3D12Device` underneath, for the tests that need to build
@@ -409,27 +871,6 @@ impl Dx12Device {
     #[cfg(test)]
     pub(crate) fn raw(&self) -> &ID3D12Device {
         &self.inner.raw
-    }
-
-    /// Resolves a queue handle against *this* device.
-    ///
-    /// Obligation 3 covers queues too, and the three outcomes are kept apart for
-    /// the same reason they are everywhere else: a handle carrying another
-    /// device's tag is [`HalError::ForeignObject`] — the caller crossed two
-    /// objects that never met — while one carrying no tag at all was never
-    /// issued by any device and is [`HalError::InvalidHandle`].
-    fn check_queue(&self, queue: QueueHandle) -> Result<(), HalError> {
-        if queue == handle::queue(self.inner.owner, QueueKind::Graphics) {
-            return Ok(());
-        }
-        Err(if handle::tag_of(queue) == 0 {
-            HalError::invalid_handle("queue", queue)
-        } else {
-            HalError::ForeignObject {
-                kind: "queue",
-                bits: queue.to_bits(),
-            }
-        })
     }
 
     /// Checks an [`ImageDesc`] against this device's limits and D3D12's own
@@ -847,25 +1288,146 @@ impl Device for Dx12Device {
         Ok(())
     }
 
-    fn request_readback(&self, _desc: &ReadbackDesc<'_>) -> Result<ReadbackHandle, HalError> {
-        // Deliberately refused before the buffer handle is checked. A readback
-        // is not a buffer read: the seam's contract is that it covers work
-        // already submitted, which means waiting on a completion point and, on a
-        // default-heap source, copying into a readback buffer. Both need a
-        // command list.
-        Err(not_yet("GPU readback (the DX12 command slice)"))
+    /// Records what a later [`Device::poll_readback`] has to wait for.
+    ///
+    /// Nothing happens on the GPU here and nothing blocks: the whole request is
+    /// a completion point plus a range, which is what makes the seam's
+    /// poll-shaped readback implementable in a browser and is why this backend
+    /// is shaped the same way. See [`crcbl_hal::readback`].
+    ///
+    /// # `after` is refused rather than ignored
+    ///
+    /// [`ReadbackDesc::after`] names a semaphore, and [`Device::create_semaphore`]
+    /// refuses — so no handle a caller can pass was ever issued, and the answer
+    /// is [`HalError::InvalidHandle`]. Ignoring it would be the bad kind of
+    /// silence: the readback would resolve against the wrong completion point
+    /// and hand back whatever happened to be in the buffer.
+    fn request_readback(&self, desc: &ReadbackDesc<'_>) -> Result<ReadbackHandle, HalError> {
+        let mut state = self.state();
+        let entry = handle::lookup(&state.buffers, "buffer", desc.buffer, self.inner.owner)?;
+        if !matches!(entry.location, MemoryLocation::HostReadback) {
+            return Err(HalError::InvalidDescriptor(format!(
+                "request_readback needs a HostReadback buffer; this one is {:?}, and D3D12 will \
+                 not map anything else for reading",
+                entry.location
+            )));
+        }
+        let end = desc
+            .offset
+            .checked_add(desc.size)
+            .ok_or_else(|| HalError::InvalidDescriptor("readback range overflows".to_string()))?;
+        if end > entry.size {
+            return Err(HalError::InvalidDescriptor(format!(
+                "readback range {}..{end} exceeds the buffer's {} bytes",
+                desc.offset, entry.size
+            )));
+        }
+        if let Some(wait) = desc.after {
+            return Err(HalError::invalid_handle("semaphore", wait.semaphore));
+        }
+        // "Everything submitted to this device before this call" is exactly the
+        // highest fence value handed out, so an unqualified request needs no
+        // synchronisation object at all.
+        let after = state.next_fence_value;
+        let handle = state.readbacks.insert(ReadbackEntry {
+            owner: self.inner.owner.id,
+            buffer: desc.buffer,
+            offset: desc.offset,
+            size: desc.size,
+            after,
+        });
+        Ok(handle::stamp(self.inner.owner, handle))
     }
 
+    /// A poll, never a wait.
+    ///
+    /// The fence is sampled and the answer is [`ReadbackState::Pending`] if it
+    /// has not arrived — no event is armed and nothing blocks, because a caller
+    /// polling once per frame must not lose the frame to a readback that is one
+    /// submission late.
+    ///
+    /// The buffer is re-resolved from the handle stored at request time rather
+    /// than kept as a pointer, so a buffer destroyed between the request and the
+    /// poll fails lookup instead of having a freed mapping read.
     fn poll_readback(
         &self,
-        _readback: ReadbackHandle,
-        _out: &mut [u8],
+        readback: ReadbackHandle,
+        out: &mut [u8],
     ) -> Result<ReadbackState, HalError> {
-        Err(not_yet("GPU readback (the DX12 command slice)"))
+        let mut state = self.state();
+        let (buffer, offset, size, after) = {
+            let entry = handle::lookup(&state.readbacks, "readback", readback, self.inner.owner)?;
+            (entry.buffer, entry.offset, entry.size, entry.after)
+        };
+        if out.len() as u64 != size {
+            return Err(HalError::InvalidDescriptor(format!(
+                "poll_readback needs exactly {size} bytes, got {}",
+                out.len()
+            )));
+        }
+        if self.inner.completed() < after {
+            return Ok(ReadbackState::Pending);
+        }
+        // The work is done, so this is also a natural moment to sweep — a caller
+        // that only ever polls still drains the retire queue.
+        self.inner.poll_retire(&mut state);
+        if size == 0 {
+            return Ok(ReadbackState::Ready);
+        }
+        let entry = handle::lookup(&state.buffers, "buffer", buffer, self.inner.owner)?;
+        // A `D3D12_RANGE` is expressed in `usize`; only reachable on a 32-bit
+        // host, where the allocation could not have existed either.
+        let begin = usize::try_from(offset).map_err(|_| {
+            HalError::InvalidDescriptor(format!(
+                "readback offset {offset} does not fit this host's address space"
+            ))
+        })?;
+        // The read range is not decoration on a readback heap: it is what tells
+        // the runtime which bytes the CPU is about to look at, and a `None`
+        // means "all of them".
+        let read = D3D12_RANGE {
+            Begin: begin,
+            End: begin + out.len(),
+        };
+        let mut mapped: *mut core::ffi::c_void = core::ptr::null_mut();
+        // SAFETY: `entry.raw` is a live buffer on the readback heap — checked at
+        // request time and re-resolved above — and subresource 0 is the only one
+        // a buffer has. Both pointers name live locals.
+        unsafe { entry.raw.Map(0, Some(&read), Some(&mut mapped)) }
+            .map_err(|error| HalError::Backend(format!("ID3D12Resource::Map failed: {error}")))?;
+        if mapped.is_null() {
+            return Err(HalError::Backend(
+                "ID3D12Resource::Map reported success and wrote no pointer".to_string(),
+            ));
+        }
+        // SAFETY: `mapped` points at the buffer's whole allocation, the range
+        // `begin..begin + out.len()` was bounds-checked against its size at
+        // request time and the buffer is the same one — the generational handle
+        // saw to that. The two regions cannot overlap: `out` is a caller-owned
+        // slice and the source is the buffer's own mapping. The fence has passed
+        // `after`, so every write the submission made is complete.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                mapped.cast::<u8>().add(begin),
+                out.as_mut_ptr(),
+                out.len(),
+            );
+        }
+        // SAFETY: the matching `Unmap`. The written range is empty because this
+        // call wrote nothing.
+        unsafe {
+            entry.raw.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
+        }
+        Ok(ReadbackState::Ready)
     }
 
-    fn destroy_readback(&self, _readback: ReadbackHandle) {
-        // Unreachable with a live handle: `request_readback` above issues none.
+    /// Drops the tracking entry.
+    ///
+    /// There is no driver object: the mapping belongs to the buffer, which the
+    /// caller still owns, and the completion point is a number.
+    fn destroy_readback(&self, readback: ReadbackHandle) {
+        let mut state = self.state();
+        handle::take_owned(&mut state.readbacks, readback, self.inner.owner);
     }
 
     fn create_image(&self, desc: &ImageDesc<'_>) -> Result<ImageHandle, HalError> {
@@ -944,6 +1506,7 @@ impl Device for Dx12Device {
             format: desc.format,
             image_type: desc.image_type,
             usage: desc.usage,
+            extent,
             mip_levels,
             slices: extent.depth_or_layers,
             samples,
@@ -1129,7 +1692,8 @@ impl Device for Dx12Device {
         let handle = state.views.insert(ViewEntry {
             owner: self.inner.owner.id,
             descriptors,
-            _image: image,
+            format: image_format,
+            image,
         });
         Ok(handle::stamp(self.inner.owner, handle))
     }
@@ -1338,110 +1902,143 @@ impl Device for Dx12Device {
     /// for the fence to reach it. A queue executes in submission order, so the
     /// signal lands after everything submitted before it.
     ///
-    /// # The wait uses a real event, and checks that it waited
-    ///
-    /// `SetEventOnCompletion` accepts a null handle and is documented to block
-    /// until the value is reached, which would be less code. The event is used
-    /// anyway because it is the version that can be *checked*:
-    /// `WaitForSingleObject` reports which way it returned, so a wait that did
-    /// not happen is an `Err` here rather than a `wait_idle` that silently does
-    /// not wait — and a silent one is worse than none, because it would be
-    /// trusted at shutdown.
-    ///
-    /// The event is created and closed inside the call rather than kept on the
-    /// device. Two reasons, and the first is enough: an auto-reset event shared
-    /// between two concurrent waiters lets one consume the other's signal, and a
-    /// Win32 `HANDLE` is a raw pointer that `windows-rs` declares neither `Send`
-    /// nor `Sync`, so storing one would cost this module the marker impl it
-    /// otherwise does not need.
-    ///
-    /// It is a real wait today even though [`Device::submit`] still refuses: the
-    /// queue is real and the fence is real, and this is the call that proves
-    /// both work. When submission lands, nothing here changes.
+    /// The wait itself is outside the device lock — two callers block
+    /// concurrently, they just do not race to signal — which is why the retire
+    /// sweep afterwards takes the lock again rather than holding it across a
+    /// block that can last a frame.
     fn wait_idle(&self) -> Result<(), HalError> {
-        // Reserving the value and signalling it happen together, under one lock,
-        // so the queue receives the signals in increasing order. See
-        // [`DeviceInner::idle_value`] for the deadlock the lock rules out. The
-        // wait itself is outside it: two waiters block concurrently, they just
-        // do not race to signal.
         let value = {
-            let mut next = self
-                .inner
-                .idle_value
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *next += 1;
-            // SAFETY: `queue` and `idle_fence` are live interfaces this device
-            // owns, created together in `open`. `Signal` takes the fence by
-            // reference and a scalar.
-            unsafe { self.inner.queue.Signal(&self.inner.idle_fence, *next) }.map_err(|error| {
-                HalError::DeviceLost(format!("ID3D12CommandQueue::Signal failed: {error}"))
-            })?;
-            *next
+            let mut state = self.state();
+            self.inner.signal(&mut state)?
         };
-
-        // SAFETY: `idle_fence` is live; `GetCompletedValue` reads no pointer of
-        // ours and returns a `u64` by value.
-        if unsafe { self.inner.idle_fence.GetCompletedValue() } < value {
-            // SAFETY: no security attributes, auto-reset, initially unsignalled,
-            // unnamed. Every argument is a scalar or a null pointer the API
-            // documents as optional.
-            let event = unsafe { CreateEventW(None, false, false, PCWSTR::null()) }
-                .map_err(|error| HalError::DeviceLost(format!("CreateEventW failed: {error}")))?;
-            // SAFETY: `event` is the handle just created and `value` is the one
-            // this call signalled. The runtime signals the event when the fence
-            // reaches the value, including immediately if it already has.
-            let armed = unsafe { self.inner.idle_fence.SetEventOnCompletion(value, event) };
-            let waited = if armed.is_ok() {
-                // SAFETY: `event` is a live event handle owned by this call.
-                Some(unsafe { WaitForSingleObject(event, INFINITE) })
-            } else {
-                None
-            };
-            // SAFETY: `event` is this call's handle and is not used again. Closed
-            // on both paths, so a failed `SetEventOnCompletion` leaks nothing.
-            if let Err(error) = unsafe { CloseHandle(event) } {
-                log::debug!("crcbl-dx12: could not close a wait_idle event: {error}");
-            }
-            armed.map_err(|error| {
-                HalError::DeviceLost(format!("SetEventOnCompletion failed: {error}"))
-            })?;
-            if waited != Some(WAIT_OBJECT_0) {
-                return Err(HalError::DeviceLost(format!(
-                    "waiting for fence value {value} returned {waited:?} rather than \
-                     WAIT_OBJECT_0"
-                )));
-            }
-        }
-
-        // SAFETY: as above.
-        let completed = unsafe { self.inner.idle_fence.GetCompletedValue() };
-        if completed < value {
-            return Err(HalError::DeviceLost(format!(
-                "the wait returned with the fence at {completed}, short of {value}"
-            )));
-        }
+        self.inner.wait_for(value)?;
+        // An idle device is the cheapest possible moment to release what the GPU
+        // has finished with, and at shutdown it is the only one left.
+        let mut state = self.state();
+        self.inner.poll_retire(&mut state);
         Ok(())
     }
 
     // --- commands ---
 
-    fn create_command_encoder(&self, _desc: &CommandEncoderDesc<'_>) -> Box<dyn CommandEncoder> {
-        Box::new(Dx12CommandEncoder::new())
+    /// Opens an encoder, which takes its command list immediately.
+    ///
+    /// The seam returns a bare `Box` here, so a queue handle from another device
+    /// and a driver that would not open a list both become a failure the encoder
+    /// carries to [`CommandEncoder::finish`]. See [`crate::command`].
+    fn create_command_encoder(&self, desc: &CommandEncoderDesc<'_>) -> Box<dyn CommandEncoder> {
+        Box::new(Dx12CommandEncoder::new(Arc::clone(&self.inner), desc))
     }
 
-    fn destroy_command_buffer(&self, _buffer: CommandBufferHandle) {
-        // Unreachable with a live handle: no encoder finishes, so this device
-        // has issued no command buffer for a caller to release.
+    /// Releases a command buffer, once the GPU has finished with it.
+    ///
+    /// The list, the allocator and every resource the recording names go on the
+    /// retire queue at the last value handed out rather than being dropped here.
+    /// The seam says this call must not arrive before the submission that used
+    /// the buffer completed — but "must not" is a rule above the seam, and the
+    /// cost of it being broken is a driver reading a freed command list. Parking
+    /// costs one queue entry.
+    fn destroy_command_buffer(&self, buffer: CommandBufferHandle) {
+        let mut state = self.state();
+        let Some(entry) = handle::take_owned(&mut state.command_buffers, buffer, self.inner.owner)
+        else {
+            return;
+        };
+        let at = state.next_fence_value;
+        for resource in entry.retained {
+            state.retire.park(at, Retired::Resource { _raw: resource });
+        }
+        state.retire.park(
+            at,
+            Retired::Recording {
+                _list: entry.list,
+                _allocator: entry.allocator,
+            },
+        );
+        self.inner.poll_retire(&mut state);
     }
 
-    fn submit(&self, queue: QueueHandle, _submit: &SubmitInfo<'_>) -> Result<(), HalError> {
-        // The queue check is real and comes first, because it is the one thing
-        // here this slice can genuinely diagnose: a handle from another device
-        // is a caller bug with its own contract, and hiding it behind the
-        // refusal below would lose it.
-        self.check_queue(queue)?;
-        Err(not_yet("submission (the DX12 command slice)"))
+    /// Executes command buffers on the queue, and signals the fence they retire
+    /// against.
+    ///
+    /// # Waits and signals are refused, not ignored
+    ///
+    /// A [`SemaphoreWait`](crcbl_hal::SemaphoreWait) or
+    /// [`SemaphoreSignal`](crcbl_hal::SemaphoreSignal) names a semaphore, and
+    /// [`Device::create_semaphore`] refuses — so no handle in either list was
+    /// ever issued by any device, and the honest answer is
+    /// [`HalError::InvalidHandle`] rather than a refusal naming the slice.
+    /// Accepting them and doing nothing is the failure worth avoiding: the
+    /// caller believes the ordering it asked for exists.
+    ///
+    /// # An empty submission is a no-op that still moves the fence
+    ///
+    /// There is no work to run, but "everything submitted before this call" is a
+    /// question [`Device::request_readback`] asks of the same counter, so the
+    /// value advances either way. That costs one `Signal` and keeps a readback
+    /// requested after an empty submit coherent with one requested before it.
+    fn submit(&self, queue: QueueHandle, submit: &SubmitInfo<'_>) -> Result<(), HalError> {
+        // The queue check comes first: a handle from another device is a caller
+        // bug with its own contract, and reporting it after a resolution failure
+        // further down would lose it.
+        self.inner.check_queue(queue)?;
+        if let Some(wait) = submit.waits.first() {
+            return Err(HalError::invalid_handle("semaphore", wait.semaphore));
+        }
+        if let Some(signal) = submit.signals.first() {
+            return Err(HalError::invalid_handle("semaphore", signal.semaphore));
+        }
+
+        let mut state = self.state();
+        // Everything is resolved before anything executes: a submission that
+        // failed halfway would leave some of its command buffers running and
+        // some not, which no caller can recover from.
+        let mut lists: Vec<Option<ID3D12CommandList>> =
+            Vec::with_capacity(submit.command_buffers.len());
+        let mut held: Vec<Retired> = Vec::new();
+        for &buffer in submit.command_buffers {
+            let entry = handle::lookup(
+                &state.command_buffers,
+                "command buffer",
+                buffer,
+                self.inner.owner,
+            )?;
+            lists.push(Some(ID3D12CommandList::from(entry.list.clone())));
+            held.extend(
+                entry
+                    .retained
+                    .iter()
+                    .cloned()
+                    .map(|raw| Retired::Resource { _raw: raw }),
+            );
+            held.push(Retired::Recording {
+                _list: entry.list.clone(),
+                _allocator: entry.allocator.clone(),
+            });
+        }
+
+        if !lists.is_empty() {
+            // SAFETY: every entry is a live, closed command list this device
+            // created, held by the `CommandBufferEntry` it came from for the
+            // duration of this call and by the retire queue below for the
+            // duration of its execution. The array is a live local borrowed for
+            // the call. The queue is externally synchronised by the state lock
+            // held here, which is the rule `ExecuteCommandLists` imposes.
+            unsafe { self.inner.queue.ExecuteCommandLists(&lists) };
+        }
+
+        // Reserve and signal, then park **whatever the signal answered**: a
+        // fence that will never reach the value leaks what is parked at it,
+        // which is the right side to err on against releasing memory a running
+        // list still names.
+        let signalled = self.inner.signal(&mut state);
+        let at = state.next_fence_value;
+        for item in held {
+            state.retire.park(at, item);
+        }
+        signalled?;
+        self.inner.poll_retire(&mut state);
+        Ok(())
     }
 
     // --- presentation ---
@@ -1499,9 +2096,12 @@ pub(crate) mod tests {
     use super::*;
     use crcbl_core::Handle;
     use crcbl_hal::{
-        BindingResource, BufferUsage, CompareOp, CompositeAlpha, Extent3d, FilterMode, ImageAspect,
-        ImageViewType, Instance, MultisampleState, PresentMode, PrimitiveState, QueryKind,
-        SemaphoreKind, SemaphoreWait, ShaderEntry,
+        Barriers, BindingResource, BufferCopy, BufferImageCopy, BufferUsage, ClearValue,
+        ColorAttachment, CompareOp, CompositeAlpha, DrawIndirectCount, Extent3d, FilterMode,
+        ImageAspect, ImageBarrier, ImageCopy, ImageSubresourceLayers, ImageViewType, IndexFormat,
+        Instance, LoadOp, MultisampleState, Offset3d, PresentMode, PrimitiveState, QueryKind,
+        Rect2d, RenderPassDesc, ResourceState, SemaphoreKind, SemaphoreSignal, SemaphoreWait,
+        ShaderEntry, ShaderStages, StoreOp,
     };
 
     use crate::Dx12Instance;
@@ -1525,6 +2125,184 @@ pub(crate) mod tests {
             .open_device(&device_desc(adapters[0].id))
             .expect("a D3D12 device opens with no required features");
         (instance, device)
+    }
+
+    /// The render target every clear test uses.
+    ///
+    /// 64 texels wide is not arbitrary: at four bytes a texel that is exactly
+    /// [`D3D12_TEXTURE_DATA_PITCH_ALIGNMENT`] bytes per row, which is the pitch
+    /// a placed footprint must be a multiple of. A narrower target is a copy
+    /// this backend refuses by name — see
+    /// `a_copy_d3d12_cannot_place_is_refused_by_name`.
+    const TARGET: Extent3d = Extent3d::d2(64, 4);
+
+    /// Bytes one whole [`TARGET`] readback occupies.
+    const TARGET_BYTES: usize = 64 * 4 * 4;
+
+    /// A byte no clear and no copy in this file ever writes, so "left untouched"
+    /// is distinguishable from "written with zeros".
+    const POISON: u8 = 0xA5;
+
+    /// The clear colour, and the bytes it must land as.
+    ///
+    /// Every channel differs and none is zero or `0xFF` except alpha, so a
+    /// buffer that was never written, a channel swizzle and a dropped alpha are
+    /// three different failures rather than one. Each value is an exact eighth
+    /// of `255`'s neighbourhood — `17`, `34`, `51` — so the `f32`→`unorm8`
+    /// round trip is exact and the assertion is on equality rather than a
+    /// tolerance.
+    const CLEAR: [f32; 4] = [17.0 / 255.0, 34.0 / 255.0, 51.0 / 255.0, 1.0];
+    const CLEAR_TEXEL: [u8; 4] = [0x11, 0x22, 0x33, 0xFF];
+    const OTHER: [f32; 4] = [204.0 / 255.0, 187.0 / 255.0, 170.0 / 255.0, 1.0];
+    const OTHER_TEXEL: [u8; 4] = [0xCC, 0xBB, 0xAA, 0xFF];
+
+    /// A colour target and a view of it, which is what a render pass needs.
+    fn color_target(device: &Dx12Device) -> (ImageHandle, ImageViewHandle) {
+        let handle = device
+            .create_image(&image(
+                Format::Rgba8Unorm,
+                ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+                TARGET,
+            ))
+            .expect("a colour target");
+        let view = device
+            .create_image_view(&whole(handle, Format::Rgba8Unorm))
+            .expect("a render target view");
+        (handle, view)
+    }
+
+    /// A readback buffer pre-filled with [`POISON`], so an assertion on its
+    /// contents fails when nothing wrote them.
+    fn readback_buffer(device: &Dx12Device, bytes: usize) -> BufferHandle {
+        let handle = device
+            .create_buffer(&BufferDesc {
+                label: Some("crcbl-dx12 test readback"),
+                size: bytes as u64,
+                usage: BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::HostReadback,
+            })
+            .expect("a readback buffer");
+        device
+            .write_buffer(handle, 0, &vec![POISON; bytes])
+            .expect("a readback buffer is host-visible");
+        handle
+    }
+
+    /// A one-attachment pass that clears `colour` over `area`.
+    fn clear_pass(
+        view: ImageViewHandle,
+        colour: [f32; 4],
+        load: LoadOp,
+        area: Rect2d,
+    ) -> ClearPass {
+        ClearPass {
+            attachment: ColorAttachment {
+                view,
+                resolve: None,
+                load,
+                store: StoreOp::Store,
+                clear: ClearValue::color(colour),
+            },
+            area,
+        }
+    }
+
+    /// A render pass descriptor's owned parts, because `RenderPassDesc` borrows
+    /// its attachment slice and a temporary would not outlive the call.
+    struct ClearPass {
+        attachment: ColorAttachment,
+        area: Rect2d,
+    }
+
+    impl ClearPass {
+        fn desc(&self) -> RenderPassDesc<'_> {
+            RenderPassDesc {
+                label: Some("crcbl-dx12 clear"),
+                color_attachments: core::slice::from_ref(&self.attachment),
+                depth_stencil_attachment: None,
+                render_area: self.area,
+            }
+        }
+    }
+
+    /// The whole of [`TARGET`], as a copy of mip zero layer zero.
+    fn whole_image_copy(buffer: BufferHandle, offset: u64, image: ImageHandle) -> BufferImageCopy {
+        BufferImageCopy {
+            buffer,
+            buffer_offset: offset,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            image,
+            image_subresource: ImageSubresourceLayers {
+                aspect: ImageAspect::COLOR,
+                mip: 0,
+                base_layer: 0,
+                layer_count: 1,
+            },
+            image_offset: Offset3d::default(),
+            image_extent: TARGET,
+        }
+    }
+
+    /// Polls a readback to completion, with a deadline rather than a sleep.
+    ///
+    /// `docs/plan/12-testing.md`'s rule, and the reason the deadline is here
+    /// rather than left to `slow-timeout`: a readback that never becomes ready
+    /// fails as a named panic naming the stage it reached, where a bare loop
+    /// would be a SIGKILL four minutes later with nothing in the log.
+    fn drain(device: &Dx12Device, readback: ReadbackHandle, bytes: usize) -> Vec<u8> {
+        let mut out = vec![POISON; bytes];
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut polls = 0u64;
+        loop {
+            polls += 1;
+            match device.poll_readback(readback, &mut out) {
+                Ok(ReadbackState::Ready) => return out,
+                Ok(ReadbackState::Pending) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "a readback was still Pending after 10s and {polls} polls: the submission \
+                         it waits on never completed"
+                    );
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("poll_readback after {polls} polls: {error:?}"),
+            }
+        }
+    }
+
+    /// The texels a whole-[`TARGET`] readback must hold when every one is
+    /// `texel`.
+    fn expected(texel: [u8; 4]) -> Vec<u8> {
+        texel.iter().copied().cycle().take(TARGET_BYTES).collect()
+    }
+
+    /// Records, finishes and submits one encoder, panicking with the stage that
+    /// failed rather than the error alone.
+    ///
+    /// **This is the shape the WARP question needs.** If `windows-latest`'s
+    /// software rasteriser cannot execute a clear, the failure has to say
+    /// whether it was recording, `finish`, `submit` or the readback — a bare
+    /// timeout says only that four minutes went by.
+    fn run(device: &Dx12Device, record: impl FnOnce(&mut dyn CommandEncoder)) {
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("crcbl-dx12 test encoder"),
+            queue,
+        });
+        record(encoder.as_mut());
+        let buffer = encoder
+            .finish()
+            .unwrap_or_else(|error| panic!("stage=finish: {error:?}"));
+        device
+            .submit(queue, &SubmitInfo::new(&[buffer]))
+            .unwrap_or_else(|error| panic!("stage=submit: {error:?}"));
+        device
+            .wait_idle()
+            .unwrap_or_else(|error| panic!("stage=wait_idle: {error:?}"));
+        device.destroy_command_buffer(buffer);
     }
 
     /// A handle no device ever issued.
@@ -1597,6 +2375,737 @@ pub(crate) mod tests {
             entry.raw.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
         }
         bytes
+    }
+
+    /// **The deliverable of this slice, and the measurement `docs/backlog.md`
+    /// asked for.**
+    ///
+    /// A render pass with [`LoadOp::Clear`] writes the attachment, a copy moves
+    /// it into a readback buffer, a submission runs both, and a poll reads the
+    /// bytes back. Everything in the chain is real: `OMSetRenderTargets`,
+    /// `ClearRenderTargetView`, two resource transitions, `CopyTextureRegion`,
+    /// `ExecuteCommandLists` and an `ID3D12Fence`.
+    ///
+    /// **What would make it fail.** A clear that never happened leaves
+    /// [`POISON`], because the readback buffer is filled with it before the
+    /// submission — so this cannot pass against a copy that moved nothing. A
+    /// clear that reached the wrong channels fails on the texel rather than on
+    /// the length, because no two channels of [`CLEAR_TEXEL`] are equal. A copy
+    /// that got the row pitch wrong fails on the later rows, because every row
+    /// is asserted rather than the first texel.
+    ///
+    /// **What it settles.** Whether WARP can execute anything at all. Reporting
+    /// `ResourceBindingTier=3` and `HighestShaderModel=6.8` is a claim about the
+    /// API surface; this is the pixel.
+    #[test]
+    fn a_render_pass_clear_reads_back_the_exact_texels() {
+        let (_instance, device) = open_device();
+        let (target, view) = color_target(&device);
+        let readback = readback_buffer(&device, TARGET_BYTES);
+
+        let pass = clear_pass(
+            view,
+            CLEAR,
+            LoadOp::Clear,
+            Rect2d::from_size(TARGET.width, TARGET.height),
+        );
+        run(&device, |encoder| {
+            encoder.pipeline_barrier(&Barriers {
+                images: &[ImageBarrier::new(
+                    target,
+                    ImageSubresourceRange::all(Format::Rgba8Unorm),
+                    ResourceState::Undefined,
+                    ResourceState::ColorAttachment,
+                )],
+                ..Barriers::default()
+            });
+            encoder.begin_render_pass(&pass.desc());
+            encoder.end_render_pass();
+            encoder.pipeline_barrier(&Barriers {
+                images: &[ImageBarrier::new(
+                    target,
+                    ImageSubresourceRange::all(Format::Rgba8Unorm),
+                    ResourceState::ColorAttachment,
+                    ResourceState::TransferSrc,
+                )],
+                ..Barriers::default()
+            });
+            encoder.copy_image_to_buffer(&whole_image_copy(readback, 0, target));
+        });
+
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: Some("crcbl-dx12 clear readback"),
+                buffer: readback,
+                offset: 0,
+                size: TARGET_BYTES as u64,
+                after: None,
+            })
+            .expect("a readback of a HostReadback buffer");
+        let bytes = drain(&device, request, TARGET_BYTES);
+        assert_eq!(
+            &bytes[..4],
+            &CLEAR_TEXEL,
+            "the first texel is {:?}, not the colour the pass cleared to",
+            &bytes[..4]
+        );
+        assert_eq!(
+            bytes,
+            expected(CLEAR_TEXEL),
+            "the clear did not reach every texel of the attachment"
+        );
+
+        device.destroy_readback(request);
+        device.destroy_buffer(readback);
+        device.destroy_image_view(view);
+        device.destroy_image(target);
+    }
+
+    /// [`LoadOp::Load`] keeps what is there and [`LoadOp::Clear`] replaces it,
+    /// in one command buffer so the two answers cannot come from two different
+    /// images.
+    ///
+    /// The three readbacks share one buffer at three offsets, each a multiple of
+    /// [`D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT`] because a placed footprint's
+    /// offset must be — which is the rule `plan_copy` enforces and this exercises
+    /// from the outside.
+    #[test]
+    fn load_preserves_what_clear_replaces() {
+        let (_instance, device) = open_device();
+        let (target, view) = color_target(&device);
+        let readback = readback_buffer(&device, TARGET_BYTES * 3);
+        let whole = Rect2d::from_size(TARGET.width, TARGET.height);
+        let first = clear_pass(view, CLEAR, LoadOp::Clear, whole);
+        let second = clear_pass(view, OTHER, LoadOp::Load, whole);
+        let third = clear_pass(view, OTHER, LoadOp::Clear, whole);
+        let range = ImageSubresourceRange::all(Format::Rgba8Unorm);
+        let to_source = |encoder: &mut dyn CommandEncoder| {
+            encoder.pipeline_barrier(&Barriers {
+                images: &[ImageBarrier::new(
+                    target,
+                    range,
+                    ResourceState::ColorAttachment,
+                    ResourceState::TransferSrc,
+                )],
+                ..Barriers::default()
+            });
+        };
+        let to_attachment = |encoder: &mut dyn CommandEncoder| {
+            encoder.pipeline_barrier(&Barriers {
+                images: &[ImageBarrier::new(
+                    target,
+                    range,
+                    ResourceState::TransferSrc,
+                    ResourceState::ColorAttachment,
+                )],
+                ..Barriers::default()
+            });
+        };
+
+        run(&device, |encoder| {
+            encoder.pipeline_barrier(&Barriers {
+                images: &[ImageBarrier::new(
+                    target,
+                    range,
+                    ResourceState::Undefined,
+                    ResourceState::ColorAttachment,
+                )],
+                ..Barriers::default()
+            });
+            for (index, pass) in [&first, &second, &third].into_iter().enumerate() {
+                if index > 0 {
+                    to_attachment(encoder);
+                }
+                encoder.begin_render_pass(&pass.desc());
+                encoder.end_render_pass();
+                to_source(encoder);
+                encoder.copy_image_to_buffer(&whole_image_copy(
+                    readback,
+                    (index * TARGET_BYTES) as u64,
+                    target,
+                ));
+            }
+        });
+
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: None,
+                buffer: readback,
+                offset: 0,
+                size: (TARGET_BYTES * 3) as u64,
+                after: None,
+            })
+            .expect("a readback of the whole buffer");
+        let bytes = drain(&device, request, TARGET_BYTES * 3);
+        assert_eq!(
+            &bytes[..TARGET_BYTES],
+            expected(CLEAR_TEXEL),
+            "pass 1 cleared"
+        );
+        assert_eq!(
+            &bytes[TARGET_BYTES..TARGET_BYTES * 2],
+            expected(CLEAR_TEXEL),
+            "LoadOp::Load overwrote the attachment with its own clear value"
+        );
+        assert_eq!(
+            &bytes[TARGET_BYTES * 2..],
+            expected(OTHER_TEXEL),
+            "LoadOp::Clear did not replace what LoadOp::Load preserved"
+        );
+
+        device.destroy_readback(request);
+        device.destroy_buffer(readback);
+        device.destroy_image_view(view);
+        device.destroy_image(target);
+    }
+
+    /// **A clear honours the render area, which is Vulkan's semantic and not
+    /// Metal's.**
+    ///
+    /// `crcbl-mtl` documents the opposite: a Metal `loadAction` clears the whole
+    /// attachment whatever the pass's area. D3D12's clears take a rectangle
+    /// list, so this backend passes the area through — and that is a claim worth
+    /// an assertion rather than a sentence, because a backend that dropped the
+    /// rectangle would clear everything and pass every other test in this file.
+    ///
+    /// The falsifying value is the right-hand half: it must still hold the
+    /// colour the *first* pass wrote.
+    #[test]
+    fn a_clear_covers_the_render_area_and_leaves_the_rest_alone() {
+        let (_instance, device) = open_device();
+        let (target, view) = color_target(&device);
+        let readback = readback_buffer(&device, TARGET_BYTES);
+        let half = TARGET.width / 2;
+        let whole = clear_pass(
+            view,
+            OTHER,
+            LoadOp::Clear,
+            Rect2d::from_size(TARGET.width, TARGET.height),
+        );
+        // `LoadOp::Clear` over half the attachment. D3D12 has no load op — the
+        // clear *is* a `ClearRenderTargetView` with a rectangle list — so this
+        // is the call whose rectangle the assertion below is about.
+        let left = clear_pass(
+            view,
+            CLEAR,
+            LoadOp::Clear,
+            Rect2d::from_size(half, TARGET.height),
+        );
+        let range = ImageSubresourceRange::all(Format::Rgba8Unorm);
+
+        run(&device, |encoder| {
+            encoder.pipeline_barrier(&Barriers {
+                images: &[ImageBarrier::new(
+                    target,
+                    range,
+                    ResourceState::Undefined,
+                    ResourceState::ColorAttachment,
+                )],
+                ..Barriers::default()
+            });
+            encoder.begin_render_pass(&whole.desc());
+            encoder.end_render_pass();
+            encoder.begin_render_pass(&left.desc());
+            encoder.end_render_pass();
+            encoder.pipeline_barrier(&Barriers {
+                images: &[ImageBarrier::new(
+                    target,
+                    range,
+                    ResourceState::ColorAttachment,
+                    ResourceState::TransferSrc,
+                )],
+                ..Barriers::default()
+            });
+            encoder.copy_image_to_buffer(&whole_image_copy(readback, 0, target));
+        });
+
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: None,
+                buffer: readback,
+                offset: 0,
+                size: TARGET_BYTES as u64,
+                after: None,
+            })
+            .expect("a readback");
+        let bytes = drain(&device, request, TARGET_BYTES);
+        let row = TARGET.width as usize * 4;
+        let split = half as usize * 4;
+        for y in 0..TARGET.height as usize {
+            let start = y * row;
+            assert_eq!(
+                &bytes[start..start + 4],
+                &CLEAR_TEXEL,
+                "row {y}: the second pass did not clear inside its render area"
+            );
+            assert_eq!(
+                &bytes[start + split..start + split + 4],
+                &OTHER_TEXEL,
+                "row {y}: the second pass cleared outside its render area, so the rectangle was \
+                 dropped"
+            );
+        }
+
+        device.destroy_readback(request);
+        device.destroy_buffer(readback);
+        device.destroy_image_view(view);
+        device.destroy_image(target);
+    }
+
+    /// A buffer copy moves the bytes, at both offsets, and nothing else.
+    ///
+    /// The window is deliberately not the whole buffer: a copy that ignored one
+    /// of the two offsets would still move the right *number* of bytes, and only
+    /// the poison either side of the window catches it.
+    #[test]
+    fn a_buffer_to_buffer_copy_moves_the_bytes_at_both_offsets() {
+        let (_instance, device) = open_device();
+        let source = device
+            .create_buffer(&BufferDesc {
+                label: Some("crcbl-dx12 copy source"),
+                size: 64,
+                usage: BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("an upload buffer");
+        let payload: Vec<u8> = (0..64u8).collect();
+        device
+            .write_buffer(source, 0, &payload)
+            .expect("an upload buffer is host-visible");
+        let readback = readback_buffer(&device, 64);
+
+        run(&device, |encoder| {
+            encoder.copy_buffer_to_buffer(&BufferCopy {
+                src: source,
+                src_offset: 8,
+                dst: readback,
+                dst_offset: 16,
+                size: 32,
+            });
+        });
+
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: None,
+                buffer: readback,
+                offset: 0,
+                size: 64,
+                after: None,
+            })
+            .expect("a readback");
+        let bytes = drain(&device, request, 64);
+        let mut want = vec![POISON; 64];
+        want[16..48].copy_from_slice(&payload[8..40]);
+        assert_eq!(bytes, want, "the copy landed at the wrong offsets");
+
+        device.destroy_readback(request);
+        device.destroy_buffer(readback);
+        device.destroy_buffer(source);
+    }
+
+    /// **A resource destroyed while its submission is in flight is not freed
+    /// under the GPU.**
+    ///
+    /// This is what `crate::retire` exists for, and the two halves it can pin
+    /// deterministically are here:
+    ///
+    /// * The copy still delivers the right bytes although `destroy_buffer` ran
+    ///   between `submit` and completion. A backend whose `destroy_buffer`
+    ///   released the last reference would be reading freed driver memory —
+    ///   which is the bug, and which WARP is free to survive by luck, so this
+    ///   half is necessary and not sufficient.
+    /// * The handle is genuinely dead the moment `destroy_buffer` returns, so
+    ///   the reference that keeps the resource alive is the submission's and not
+    ///   a destroy that quietly deferred.
+    /// * The retire queue drains to empty once the device is idle, so the
+    ///   references it took are released rather than leaked for the process's
+    ///   life.
+    ///
+    /// The half that is **not** here is "nothing is released early", which is a
+    /// race at this level and is pinned instead by `crate::retire`'s own unit
+    /// tests over a payload that records its release.
+    #[test]
+    fn a_buffer_destroyed_while_its_submission_is_in_flight_survives_it() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let source = device
+            .create_buffer(&BufferDesc {
+                label: Some("crcbl-dx12 doomed source"),
+                size: 64,
+                usage: BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("an upload buffer");
+        let payload: Vec<u8> = (0..64u8).map(|byte| byte ^ 0x5A).collect();
+        device
+            .write_buffer(source, 0, &payload)
+            .expect("an upload buffer is host-visible");
+        let readback = readback_buffer(&device, 64);
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("crcbl-dx12 doomed copy"),
+            queue,
+        });
+        encoder.copy_buffer_to_buffer(&BufferCopy {
+            src: source,
+            src_offset: 0,
+            dst: readback,
+            dst_offset: 0,
+            size: 64,
+        });
+        let command_buffer = encoder.finish().expect("a recorded copy");
+        device
+            .submit(queue, &SubmitInfo::new(&[command_buffer]))
+            .expect("a copy submits");
+
+        // Destroyed with the submission in flight — the whole point. The
+        // command buffer goes too: `ExecuteCommandLists` does not retain the
+        // list any more than it retains the resources, so this is the release
+        // the retire queue is actually the only thing standing between.
+        device.destroy_buffer(source);
+        device.destroy_command_buffer(command_buffer);
+        let error = device
+            .write_buffer(source, 0, &[0u8; 4])
+            .expect_err("the handle died with the destroy, whatever the resource did");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "buffer"),
+            "{error:?}"
+        );
+        let error = device
+            .submit(queue, &SubmitInfo::new(&[command_buffer]))
+            .expect_err("the command buffer's handle died too");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "command buffer"),
+            "{error:?}"
+        );
+
+        device.wait_idle().expect("the copy completes");
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: None,
+                buffer: readback,
+                offset: 0,
+                size: 64,
+                after: None,
+            })
+            .expect("a readback");
+        assert_eq!(
+            drain(&device, request, 64),
+            payload,
+            "the copy read a buffer that had already been freed"
+        );
+
+        device.wait_idle().expect("nothing is left in flight");
+        assert_eq!(
+            device.state().retire.pending(),
+            0,
+            "the retire queue held references past an idle device, so it leaks"
+        );
+
+        device.destroy_readback(request);
+        device.destroy_buffer(readback);
+    }
+
+    /// The copies D3D12 cannot place are refused by name, before anything is
+    /// recorded.
+    ///
+    /// Every case here is a rule the seam has no field for, so a backend that
+    /// did not check would hand D3D12 a footprint it rejects — and a rejected
+    /// `CopyTextureRegion` returns `void`, so the failure would arrive as a
+    /// readback of the wrong bytes rather than as an error.
+    #[test]
+    fn a_copy_d3d12_cannot_place_is_refused_by_name() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        // 63 texels is 252 bytes a row, which is not a multiple of D3D12's
+        // 256-byte pitch — the case that makes the whole rule visible.
+        let narrow = device
+            .create_image(&image(
+                Format::Rgba8Unorm,
+                ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+                Extent3d::d2(63, 4),
+            ))
+            .expect("a 63-texel-wide image");
+        let wide = device
+            .create_image(&image(
+                Format::Rgba8Unorm,
+                ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+                TARGET,
+            ))
+            .expect("a 64-texel-wide image");
+        let readback = readback_buffer(&device, TARGET_BYTES * 2);
+
+        type Case = (&'static str, &'static str, BufferImageCopy);
+        let cases: Vec<Case> = vec![
+            (
+                "an unaligned row pitch",
+                "row pitch",
+                BufferImageCopy {
+                    image_extent: Extent3d::d2(63, 4),
+                    ..whole_image_copy(readback, 0, narrow)
+                },
+            ),
+            (
+                "an unaligned buffer offset",
+                "multiple of",
+                whole_image_copy(readback, 4, wide),
+            ),
+            (
+                "a region past the mip",
+                "runs past mip",
+                BufferImageCopy {
+                    image_offset: Offset3d { x: 4, y: 0, z: 0 },
+                    ..whole_image_copy(readback, 0, wide)
+                },
+            ),
+            (
+                "a mip the image does not have",
+                "mips",
+                BufferImageCopy {
+                    image_subresource: ImageSubresourceLayers {
+                        aspect: ImageAspect::COLOR,
+                        mip: 3,
+                        base_layer: 0,
+                        layer_count: 1,
+                    },
+                    ..whole_image_copy(readback, 0, wide)
+                },
+            ),
+            (
+                "a buffer too small for the region",
+                "byte buffer",
+                whole_image_copy(readback, (TARGET_BYTES + 512) as u64, wide),
+            ),
+        ];
+        assert!(!cases.is_empty(), "nothing to check");
+        for (what, fragment, copy) in cases {
+            let mut encoder =
+                device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+            encoder.copy_image_to_buffer(&copy);
+            let error = encoder
+                .finish()
+                .err()
+                .unwrap_or_else(|| panic!("{what} was accepted"));
+            let HalError::InvalidDescriptor(text) = error else {
+                panic!("{what}: expected InvalidDescriptor, got {error:?}");
+            };
+            assert!(
+                text.contains(fragment),
+                "{what}: the refusal must name the rule; got {text}"
+            );
+        }
+
+        // And the aligned copy of the same image really is accepted, so the
+        // refusals above are about the layout and not about the image.
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+        encoder.copy_image_to_buffer(&whole_image_copy(readback, 0, wide));
+        let accepted = encoder
+            .finish()
+            .expect("a 256-byte-pitch copy at offset zero is exactly what D3D12 wants");
+        device.destroy_command_buffer(accepted);
+
+        device.destroy_buffer(readback);
+        device.destroy_image(wide);
+        device.destroy_image(narrow);
+    }
+
+    /// An encoder built on another device's queue refuses at `finish`, which is
+    /// the first call it has to refuse through.
+    ///
+    /// `create_command_encoder` returns a bare `Box`, so this is the deferred
+    /// failure path end to end — and the error is `ForeignObject` rather than a
+    /// missing slice, because the caller crossed two devices.
+    #[test]
+    fn an_encoder_built_on_a_foreign_queue_refuses_at_finish() {
+        let (_instance, device) = open_device();
+        let (_other_instance, other) = open_device();
+        let foreign = other
+            .queue(QueueKind::Graphics)
+            .expect("the other device has a queue");
+        let encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: None,
+            queue: foreign,
+        });
+        let error = encoder
+            .finish()
+            .expect_err("that queue is not this device's");
+        assert!(
+            matches!(error, HalError::ForeignObject { kind, .. } if kind == "queue"),
+            "{error:?}"
+        );
+
+        // A hand-made queue handle carries no device tag at all.
+        let encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: None,
+            queue: unissued(),
+        });
+        let error = encoder.finish().expect_err("nobody issued that queue");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "queue"),
+            "{error:?}"
+        );
+    }
+
+    /// An encoder that mis-nests or leaves a pass open refuses, rather than
+    /// handing back a command buffer D3D12 would run half of.
+    #[test]
+    fn a_mis_nested_or_unclosed_pass_refuses_at_finish() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let (target, view) = color_target(&device);
+        let pass = clear_pass(
+            view,
+            CLEAR,
+            LoadOp::Clear,
+            Rect2d::from_size(TARGET.width, TARGET.height),
+        );
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+        encoder.begin_render_pass(&pass.desc());
+        let error = encoder
+            .finish()
+            .expect_err("a pass left open is a command buffer nobody can submit");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+        encoder.begin_render_pass(&pass.desc());
+        encoder.begin_render_pass(&pass.desc());
+        encoder.end_render_pass();
+        let error = encoder.finish().expect_err("passes do not nest");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+
+        // A copy inside a pass is the other side of the same rule.
+        let readback = readback_buffer(&device, TARGET_BYTES);
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+        encoder.begin_render_pass(&pass.desc());
+        encoder.copy_image_to_buffer(&whole_image_copy(readback, 0, target));
+        encoder.end_render_pass();
+        let error = encoder.finish().expect_err("a copy belongs between passes");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+
+        // And a well-formed pass on the same objects still finishes, so none of
+        // the three refusals is the encoder simply refusing everything.
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+        encoder.begin_render_pass(&pass.desc());
+        encoder.end_render_pass();
+        let buffer = encoder.finish().expect("a closed pass is a command buffer");
+        device.destroy_command_buffer(buffer);
+
+        device.destroy_buffer(readback);
+        device.destroy_image_view(view);
+        device.destroy_image(target);
+    }
+
+    /// A destroyed command buffer stops resolving, so a second submission of it
+    /// is a stale handle rather than a second execution.
+    #[test]
+    fn a_destroyed_command_buffer_stops_resolving() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+        let buffer = encoder.finish().expect("an empty command buffer is legal");
+        device
+            .submit(queue, &SubmitInfo::new(&[buffer]))
+            .expect("an empty command buffer submits");
+        device.wait_idle().expect("it completes");
+
+        device.destroy_command_buffer(buffer);
+        let error = device
+            .submit(queue, &SubmitInfo::new(&[buffer]))
+            .expect_err("the handle was destroyed");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "command buffer"),
+            "{error:?}"
+        );
+    }
+
+    /// A readback names a range of a `HostReadback` buffer, and every other
+    /// shape is refused by name.
+    ///
+    /// The two rejected memory locations are the point: D3D12 will map an
+    /// upload buffer, so a backend that only checked "is it mappable" would
+    /// accept one and hand back write-combined memory the CPU reads at a crawl
+    /// and the GPU never wrote.
+    #[test]
+    fn a_readback_refuses_the_buffers_and_ranges_it_cannot_serve() {
+        let (_instance, device) = open_device();
+        let readback = readback_buffer(&device, 64);
+        let private = device
+            .create_buffer(&buffer(64, MemoryLocation::DeviceLocal))
+            .expect("a device-local buffer");
+        let upload = device
+            .create_buffer(&buffer(64, MemoryLocation::HostUpload))
+            .expect("an upload buffer");
+
+        let refusals: Vec<(&str, BufferHandle, u64, u64)> = vec![
+            ("a device-local buffer", private, 0, 4),
+            ("an upload buffer", upload, 0, 4),
+            ("a range past the end", readback, 48, 32),
+            ("a range that overflows", readback, u64::MAX, 8),
+        ];
+        assert!(!refusals.is_empty(), "nothing to check");
+        for (what, handle, offset, size) in refusals {
+            let error = device
+                .request_readback(&ReadbackDesc {
+                    label: None,
+                    buffer: handle,
+                    offset,
+                    size,
+                    after: None,
+                })
+                .err()
+                .unwrap_or_else(|| panic!("{what} was accepted"));
+            assert!(
+                matches!(error, HalError::InvalidDescriptor(_)),
+                "{what}: {error:?}"
+            );
+        }
+
+        // The readback buffer itself is accepted, so the refusals are about the
+        // location and the range rather than about readbacks.
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: None,
+                buffer: readback,
+                offset: 0,
+                size: 64,
+                after: None,
+            })
+            .expect("a HostReadback buffer is what a readback is for");
+        // The output length is the contract, not a hint: a short slice would
+        // otherwise be filled with a prefix the caller reads as the whole thing.
+        let mut wrong = [0u8; 8];
+        let error = device
+            .poll_readback(request, &mut wrong)
+            .expect_err("8 bytes is not 64");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+        assert_eq!(
+            drain(&device, request, 64),
+            vec![POISON; 64],
+            "nothing was submitted, so the readback is what write_buffer left"
+        );
+
+        // A destroyed readback stops resolving.
+        device.destroy_readback(request);
+        let error = device
+            .poll_readback(request, &mut [0u8; 64])
+            .expect_err("the readback was destroyed");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "readback"),
+            "{error:?}"
+        );
+
+        device.destroy_buffer(upload);
+        device.destroy_buffer(private);
+        device.destroy_buffer(readback);
     }
 
     /// The device opens, says which backend it is, and has exactly the queue
@@ -2269,7 +3778,7 @@ pub(crate) mod tests {
         // rather than a repeat of the first.
         // SAFETY: `idle_fence` is live and `GetCompletedValue` returns a `u64`
         // by value.
-        let completed = unsafe { device.inner.idle_fence.GetCompletedValue() };
+        let completed = unsafe { device.inner.fence.GetCompletedValue() };
         assert!(
             completed >= 2,
             "two waits left the fence at {completed}, so at least one did not signal"
@@ -2293,7 +3802,7 @@ pub(crate) mod tests {
         let before = {
             // SAFETY: `idle_fence` is live and `GetCompletedValue` returns a
             // `u64` by value.
-            unsafe { device.inner.idle_fence.GetCompletedValue() }
+            unsafe { device.inner.fence.GetCompletedValue() }
         };
 
         let waiters: u64 = 8;
@@ -2309,7 +3818,7 @@ pub(crate) mod tests {
         });
 
         // SAFETY: as above.
-        let after = unsafe { device.inner.idle_fence.GetCompletedValue() };
+        let after = unsafe { device.inner.fence.GetCompletedValue() };
         assert_eq!(
             after,
             before + waiters,
@@ -2373,18 +3882,6 @@ pub(crate) mod tests {
                         kind: SemaphoreKind::Timeline { initial_value: 0 },
                     })
                     .expect_err("no shared fence yet"),
-            ),
-            (
-                "readback",
-                device
-                    .request_readback(&ReadbackDesc {
-                        label: None,
-                        buffer: unissued(),
-                        offset: 0,
-                        size: 4,
-                        after: None,
-                    })
-                    .expect_err("no command list yet"),
             ),
             (
                 "bind groups",
@@ -2453,12 +3950,6 @@ pub(crate) mod tests {
                     )
                     .expect_err("no fence a caller can hold yet"),
             ),
-            (
-                "readback polls",
-                device
-                    .poll_readback(unissued(), &mut [0u8; 4])
-                    .expect_err("no readback was ever issued"),
-            ),
         ];
         assert!(!refusals.is_empty(), "nothing to check");
         for (what, error) in &refusals {
@@ -2474,27 +3965,90 @@ pub(crate) mod tests {
             );
         }
 
-        // Recording is refused where the seam gives it a `Result` to say so:
-        // `create_command_encoder` returns a bare `Box`, so the encoder accepts
-        // the recording calls and `finish` is the refusal.
+        // **Recording works now, so the encoder's refusals moved to the commands
+        // that still need a pipeline state object or a root signature.** This is
+        // the inverse half, and it is the half that rots: without it a command
+        // that started working would keep passing a test written when nothing
+        // did. `create_command_encoder` returns a bare `Box`, so a draw has
+        // nowhere to report itself and `finish` carries the refusal.
         let queue = device
             .queue(QueueKind::Graphics)
             .expect("the graphics queue exists");
-        let encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
-        let error = encoder.finish().expect_err("nothing was recorded");
-        assert!(
-            matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
-            "{error:?}"
-        );
+        type Refused = (&'static str, fn(&mut dyn CommandEncoder));
+        let recording: &[Refused] = &[
+            ("draws", |encoder| encoder.draw(0..3, 0..1)),
+            ("indexed draws", |encoder| {
+                encoder.draw_indexed(0..3, 0, 0..1);
+            }),
+            ("indirect-count draws", |encoder| {
+                encoder.draw_indexed_indirect_count(&DrawIndirectCount {
+                    args: unissued(),
+                    args_offset: 0,
+                    count_buffer: unissued(),
+                    count_offset: 0,
+                    max_draw_count: 1,
+                    stride: 20,
+                });
+            }),
+            ("dispatches", |encoder| encoder.dispatch(1, 1, 1)),
+            ("graphics pipelines", |encoder| {
+                encoder.bind_graphics_pipeline(unissued());
+            }),
+            ("index buffers", |encoder| {
+                encoder.bind_index_buffer(unissued(), 0, IndexFormat::Uint32);
+            }),
+            ("bind groups", |encoder| {
+                encoder.bind_group(0, unissued(), &[], unissued());
+            }),
+            ("push constants", |encoder| {
+                encoder.push_constants(ShaderStages::ALL, 0, &[0u8; 4], unissued());
+            }),
+            ("buffer fills", |encoder| {
+                encoder.fill_buffer(unissued(), 0, 4, 0);
+            }),
+            ("image-to-image copies", |encoder| {
+                let layers = ImageSubresourceLayers {
+                    aspect: ImageAspect::COLOR,
+                    mip: 0,
+                    base_layer: 0,
+                    layer_count: 1,
+                };
+                encoder.copy_image_to_image(&ImageCopy {
+                    src: unissued(),
+                    src_subresource: layers,
+                    src_offset: Offset3d::default(),
+                    dst: unissued(),
+                    dst_subresource: layers,
+                    dst_offset: Offset3d::default(),
+                    extent: Extent3d::d2(1, 1),
+                });
+            }),
+        ];
+        assert!(!recording.is_empty(), "nothing to check");
+        for (what, record) in recording {
+            let mut encoder =
+                device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+            record(encoder.as_mut());
+            let Err(error) = encoder.finish() else {
+                panic!("{what} recorded successfully, so the encoder reported a lie");
+            };
+            assert!(
+                matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
+                "{what}: {error:?}"
+            );
+            let text = error.to_string();
+            assert!(
+                text.contains("dx12") && text.contains("DX12") && text.contains("slice"),
+                "{what}: {text}"
+            );
+        }
 
-        // Submission checks the queue handle first and refuses second.
-        let error = device
+        // And an empty submission is a legal no-op now rather than a refusal,
+        // which is the only honest answer: there is no work to run and nothing
+        // to signal for.
+        device
             .submit(queue, &SubmitInfo::new(&[]))
-            .expect_err("nothing can be submitted yet");
-        assert!(
-            matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
-            "{error:?}"
-        );
+            .expect("an empty submission is a no-op, not a refusal");
         // A queue handle really belonging to another device is foreign; a
         // hand-made one carries no device tag at all and was never issued.
         let (_other_instance, other) = open_device();
@@ -2669,5 +4223,79 @@ pub(crate) mod tests {
             matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
             "{error:?}"
         );
+
+        // **The three entry points that now take a semaphore they cannot get.**
+        // `submit` and `request_readback` both work, so neither may answer
+        // `Unsupported` — the caller handed over a handle, and no device issued
+        // it. Answering "the semaphore slice is not here" would send a reader
+        // looking for a missing feature instead of a dead handle.
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let wait = SemaphoreWait {
+            semaphore: unissued(),
+            value: 1,
+        };
+        let error = device
+            .submit(
+                queue,
+                &SubmitInfo {
+                    command_buffers: &[],
+                    waits: &[wait],
+                    signals: &[],
+                },
+            )
+            .expect_err("no semaphore was ever issued");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "semaphore"),
+            "{error:?}"
+        );
+        let error = device
+            .submit(
+                queue,
+                &SubmitInfo {
+                    command_buffers: &[],
+                    waits: &[],
+                    signals: &[SemaphoreSignal {
+                        semaphore: unissued(),
+                        value: 1,
+                    }],
+                },
+            )
+            .expect_err("no semaphore was ever issued");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "semaphore"),
+            "{error:?}"
+        );
+        let readback = device
+            .create_buffer(&buffer(TARGET_BYTES as u64, MemoryLocation::HostReadback))
+            .expect("a readback buffer");
+        let error = device
+            .request_readback(&ReadbackDesc {
+                label: None,
+                buffer: readback,
+                offset: 0,
+                size: 4,
+                after: Some(wait),
+            })
+            .expect_err("ReadbackDesc::after names a semaphore nothing issued");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "semaphore"),
+            "{error:?}"
+        );
+
+        // A readback handle nothing issued is unresolvable too, and the poll
+        // must leave the output alone rather than write the zeros a caller would
+        // read as data.
+        let mut poisoned = [POISON; 4];
+        let error = device
+            .poll_readback(unissued(), &mut poisoned)
+            .expect_err("no readback was ever issued");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "readback"),
+            "{error:?}"
+        );
+        assert_eq!(poisoned, [POISON; 4], "a refused poll wrote to the output");
+        device.destroy_buffer(readback);
     }
 }
