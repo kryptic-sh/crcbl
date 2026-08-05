@@ -21,9 +21,6 @@ struct UiConstants
     float2 viewport;       // framebuffer size in pixels
 };
 
-[[vk::push_constant]]
-ConstantBuffer<UiConstants> constants;
-
 /// One drawn quad vertex.
 struct Vertex
 {
@@ -31,6 +28,16 @@ struct Vertex
     float2 uv;         // glyph atlas UV (zero for untextured)
     float4 color;      // RGBA
 };
+
+// **Declaration order is binding order, and it is load-bearing on Metal.**
+// Slang's Metal target ignores `[[vk::binding]]` and assigns each resource an
+// index in its own flat argument table in the order the declarations appear,
+// while `crcbl-mtl` flattens `(set, binding)` by ascending binding number per
+// table. The two agree only while this file declares its resources in the order
+// it numbers them, so the glyph atlas, its sampler and the vertex buffer come
+// first and `constants` — which carries no binding number at all here, being a
+// push constant — comes last. See `crcbl_mtl::binding`'s "The index a binding
+// lands on" for the rule and the artifacts that check it.
 
 // The glyph atlas: R8_UNORM, so the shader sees r=alpha, g=b=a=0 or 1 depending
 // on the implementation. We only read `.r`.
@@ -43,6 +50,9 @@ SamplerState glyphSampler;
 /// The merged UI geometry for this frame. Read-only storage buffer.
 [[vk::binding(2, 0)]]
 StructuredBuffer<Vertex> vertices;
+
+[[vk::push_constant]]
+ConstantBuffer<UiConstants> constants;
 
 struct UiOutput
 {
