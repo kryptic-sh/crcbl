@@ -285,12 +285,18 @@ total-store-order, so a `Release` store and a `Relaxed` one compile to the same
 instruction and weakening one is invisible to any test on this machine. That is
 measured rather than assumed: `ring`'s push was weakened to `Relaxed` and the
 whole suite stayed green, while `cargo miri test` reported the data race in
-`pop` with a backtrace. Consequences worth keeping in mind — the weekly Miri job
-is load-bearing rather than a nicety, it is the only gate that would catch a
-wrong ordering before an aarch64 or wasm user does, and **a per-PR run does not
-exist**, so an ordering regression can sit on `main` for up to a week. Moving
-`crcbl-jobs` alone into a per-PR miri step is cheap (its suite interprets in ~17
-s) and has not been done.
+`pop` with a backtrace. The Miri job is therefore load-bearing rather than a
+nicety: it is the only gate that would catch a wrong ordering before an aarch64
+or wasm user does. It now runs on every pull request and every push to `main` as
+well as weekly — `.github/workflows/miri.yml` is a reusable workflow that
+`ci.yml` and `cron.yml` both call, so there is one crate list rather than two
+that drift.
+
+Still open on this: **nothing runs the primitives on a weakly-ordered machine.**
+Miri models the memory ordering, which is a stronger check than any test on x86,
+but it is a model — an aarch64 runner exercising the same stress tests natively
+would be independent evidence, and GitHub offers one. Not attempted, and the
+cost is a second `test` leg rather than anything subtle.
 
 **`ring` does not implement drop-oldest**, though `21-jobs.md` lists it beside
 drop-newest as an overflow policy. It cannot be done from the producer: the read

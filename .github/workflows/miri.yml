@@ -1,0 +1,111 @@
+name: Miri
+
+# Called, never triggered on its own. Two workflows want the identical job and
+# the crate list below is the thing that must not drift between them:
+#
+#   * `ci.yml` — every pull request and every push to `main`, so an aliasing or
+#     data-race regression is caught by the change that introduced it.
+#   * `cron.yml` — Monday mornings, so a quiet repository is re-checked against
+#     whatever nightly miri has become. The toolchain here floats; a new miri
+#     release that finds something in untouched code has no push to ride in on.
+#
+# Both are wanted, which is why this is a reusable workflow rather than a job in
+# one file and a copy of it in the other. A second copy is a crate list that
+# goes stale on one side, and the failure mode is a crate silently losing its
+# only undefined-behaviour check.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  # Miri: the undefined-behaviour interpreter, over the crates it can run.
+  #
+  # **It cannot run over `crcbl-vk`**, and that is not a gap this job can close:
+  # miri interprets MIR and has no way to execute a `dlopen`ed
+  # `libvulkan.so.1`, so every FFI and GPU crate — `crcbl-vk`, `crcbl-wgpu`,
+  # `crcbl-shell`'s Wayland/X11 backends, `crcbl-audio`'s device path — is
+  # outside its reach by construction. What it *does* cover is the crates whose
+  # unsafe is pure Rust: the handle allocators and the frame arena in
+  # `crcbl-core`, the seam types and the null backend in `crcbl-hal`, the
+  # storage and ECS containers, the physics broadphase, the UI vertex builders,
+  # and the audio mixer's sample buffers.
+  #
+  # `crcbl-jobs` is the one whose unsafe is *concurrent* rather than merely
+  # aliasing, and it is why this job moved onto the per-PR path. Its mailbox and
+  # ring hand slots between two threads through atomic words, and miri runs the
+  # two-thread stress tests for real.
+  #
+  # **It is also the only gate that can see a wrong memory ordering.** x86-64 is
+  # total-store-order, so a `Release` store and a `Relaxed` one compile to the
+  # same instruction: weakening `crcbl-jobs`'s ring push to `Relaxed` left the
+  # entire 2541-test suite green, while miri reported the data race in `pop`
+  # with a backtrace. Measured, not assumed. That is the argument for paying the
+  # interpretation cost on every pull request rather than once a week.
+  #
+  # ## Why the flags
+  #
+  # `-Zmiri-disable-isolation`: several suites read the clock and the
+  # filesystem.
+  #
+  # `-Zmiri-deterministic-floats`: miri deliberately returns *any* permissible
+  # result from `sin`/`cos`/`exp` to catch code that depends on one libm's exact
+  # answer. `crcbl-audio`'s orbit suite hashes a rendered sine wave, so without
+  # this the job fails on miri's intentional non-determinism rather than on a
+  # bug. Confirmed by running that one test both ways.
+  #
+  # `PROPTEST_CASES: 4`: the default 256 cases per property, interpreted, is the
+  # difference between `crcbl-core` taking 70 seconds and taking over ten
+  # minutes. The property suites run at full width in `test-linux`; what this
+  # job wants from them is a handful of executions under an interpreter that
+  # checks aliasing, not more coverage of the properties themselves.
+  #
+  # ## Why these targets and not `--workspace`
+  #
+  # `--lib` for `crcbl-phys` and `crcbl-audio`: their integration suites are
+  # long-running simulations that add interpreter time without adding unsafe
+  # coverage — every `unsafe` in both crates is in the library.
+  #
+  # `crcbl-net` is deliberately **absent**. Its library suite does not finish
+  # inside 40 minutes under miri, which would make this job a timeout rather
+  # than a gate. Its decoders are the part worth checking and they are already
+  # attacked from the other side, per-PR, by the bounded `decoder-fuzz` job in
+  # `ci.yml` — which runs libFuzzer over the same code with ASan-grade
+  # instrumentation. Re-measure and add it here when either miri or the suite
+  # gets faster.
+  miri:
+    name: miri (crates without FFI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # `rust-toolchain.toml` pins an exact stable and claims authority over
+      # rustup; miri only exists on nightly, so the channel is overridden here.
+      RUSTUP_TOOLCHAIN: nightly
+      MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-deterministic-floats
+      PROPTEST_CASES: "4"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: miri
+          cache: false
+      # Shared with the cron caller, so the weekly run and the per-PR runs warm
+      # the same cache rather than each paying a cold compile.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: miri
+      - run: cargo miri setup
+      - name: Interpret the seam and container crates
+        run: >-
+          cargo miri test
+          -p crcbl-core -p crcbl-hal -p crcbl-ecs -p crcbl-store -p crcbl-ui
+          -p crcbl-jobs
+      - name: Interpret the physics and audio libraries
+        run: cargo miri test --lib -p crcbl-phys -p crcbl-audio

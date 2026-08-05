@@ -59,9 +59,10 @@
 //! machine however long the stress tests run. Measured, not assumed —
 //! `Ordering::Release` was weakened to `Relaxed` in [`ring`]'s push and the
 //! whole suite stayed green, while Miri reported the data race in `pop` with a
-//! backtrace. The weekly Miri job is therefore the only thing standing between
-//! a wrong ordering and an aarch64 or wasm user, and it is where a change to
-//! any of these atomics has to be checked.
+//! backtrace. Miri is therefore the only thing standing between a wrong
+//! ordering and an aarch64 or wasm user, which is why it runs on every pull
+//! request and every push to `main` rather than only weekly — and why a change
+//! to any of these atomics has to be checked under it before it is believed.
 //!
 //! # Degrading is a decision, not an error
 //!

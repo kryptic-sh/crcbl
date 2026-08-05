@@ -891,6 +891,23 @@ jobs:
             crates/crcbl-net/fuzz/coverage/decoder/
           if-no-files-found: ignore
 
+  # The undefined-behaviour interpreter, on every pull request and every push to
+  # `main`. `cron.yml` calls the same reusable workflow weekly, so a quiet
+  # repository is still re-checked against a newer nightly; the crate list and
+  # the reasoning for every flag live once, in `.github/workflows/miri.yml`.
+  #
+  # **It earns a per-PR slot because it is the only gate here that can see a
+  # wrong memory ordering.** This runner is x86-64, which is total-store-order,
+  # so a `Release` store and a `Relaxed` one compile to the same instruction —
+  # weakening `crcbl-jobs`'s ring push to `Relaxed` left the whole suite green
+  # while miri reported the data race with a backtrace. Every other job in this
+  # file would pass a `crcbl-jobs` that is broken on aarch64 and in a browser.
+  #
+  # It costs roughly seven minutes of interpretation on a warm cache, which is
+  # why it was weekly-only until the concurrent primitives arrived.
+  miri:
+    uses: ./.github/workflows/miri.yml
+
   coverage:
     name: coverage (linux)
     runs-on: ubuntu-latest

@@ -14,6 +14,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Changed
+
+- **CI**: **Miri now runs on every pull request and every push to `main`**, as
+  well as keeping its Monday slot. The job moved into
+  `.github/workflows/miri.yml` as a reusable workflow that `ci.yml` and
+  `cron.yml` both call, so the crate list and the reasoning for every flag live
+  once instead of in two copies that drift.
+
+  It earns the per-PR slot because it is the only gate in the repository that
+  can see a wrong memory ordering: the runners are x86-64, which is
+  total-store-order, so a `Release` store and a `Relaxed` one compile to the
+  same instruction. Both legs are wanted rather than one — the per-PR run
+  catches the change that introduced a defect, and the weekly run re-checks a
+  quiet repository against whatever nightly Miri has since become. Costs roughly
+  seven minutes of interpretation on a warm cache.
+
 ### Added
 
 - **`crcbl-jobs`**: a new crate, opening P5B with **the seam every engine thread
@@ -56,9 +72,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   rests on `{producer, handoff, consumer}` staying a permutation of `{0, 1, 2}`
   — both sides only ever exchange their own index with the handoff's — and the
   tests assert that permutation directly after every operation rather than
-  arguing for it. `crcbl-jobs` joins the weekly Miri job, which runs the
-  two-thread stress test for real: a torn read is reported there as a data race,
-  and nothing else in this workspace can detect one.
+  arguing for it. `crcbl-jobs` joins the Miri job, which runs the two-thread
+  stress test for real: a torn read is reported there as a data race, and
+  nothing else in this workspace can detect one.
 
   **Deliberately not for streams.** Input edges, audio commands and net packets
   must not be droppable, and this drops by construction — a 3 ms tap between two
@@ -79,11 +95,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   which is what makes an SPSC ring cheap in the first place. Documented at the
   module and recorded in `docs/backlog.md` rather than left to be discovered.
 
-  Both primitives run under the weekly Miri job. **The memory orderings are
-  checked by Miri and by nothing else**, and that is the hardware's doing rather
-  than the suite's: on x86-64 a `Release` store and a `Relaxed` one compile to
-  the same instruction. Measured — weakening the ring's push to `Relaxed` left
-  the whole suite green while Miri reported the data race in `pop`.
+  Both primitives run under the Miri job. **The memory orderings are checked by
+  Miri and by nothing else**, and that is the hardware's doing rather than the
+  suite's: on x86-64 a `Release` store and a `Relaxed` one compile to the same
+  instruction. Measured — weakening the ring's push to `Relaxed` left the whole
+  suite green while Miri reported the data race in `pop`.
 
 - **horde**: **health potions, dropped by brutes and drunk by walking over
   them.** A `potion` frame in `apps/horde/assets/actors.crpix` — a stoppered
