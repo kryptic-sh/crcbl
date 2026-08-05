@@ -653,6 +653,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **crcbl-mtl**: **a GPU fault now names the encoder that caused it.** Every
+  `MTLCommandBuffer` this backend creates is built from an
+  `MTLCommandBufferDescriptor` carrying
+  `MTLCommandBufferErrorOptionEncoderExecutionStatus`, and the `HalError`
+  reported by `poll_readback` and `wait_idle` unpacks
+  `MTLCommandBufferEncoderInfoErrorKey` out of the failure's `userInfo`: each
+  encoder in recording order, with its label, its debug signposts and whether it
+  faulted, was merely affected, or never started. The message also carries the
+  `NSError` domain and code and the `MTLDevice`'s own name. Where a fault
+  previously read `Caused GPU Hang Error (00000003:…)` and stopped, it now says
+  which of a command buffer's encoders died — the difference between a broken
+  render pass and a copy that never ran. Every encoder is labelled to make that
+  legible: the copy encoder is `crcbl copies`, and a render pass with no
+  `RenderPassDesc::label` is `crcbl render pass` rather than nameless.
+
 - **crcbl-shell** (Wayland): the effective mode of a fullscreen window now names
   the monitor it is on, taken from `wl_surface.enter`. Asking for a monitor is
   only a hint on this platform, but which one the compositor used is observable,

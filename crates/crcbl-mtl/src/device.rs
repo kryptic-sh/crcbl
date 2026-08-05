@@ -531,19 +531,23 @@ impl MetalDevice {
         self.inner.stamp(handle)
     }
 
-    /// An empty command buffer, for the waits and signals that have nowhere
-    /// else to go. See [`Device::submit`].
+    /// An empty command buffer: for the waits and signals that have nowhere
+    /// else to go (see [`Device::submit`]), and for the one
+    /// [`Device::wait_idle`] commits to have something to wait on.
+    ///
+    /// It goes through `crcbl_mtl::fault` rather than calling
+    /// `MTLCommandQueue::commandBuffer` itself, so that this one is as able to
+    /// report which of its encoders faulted as any other — a command buffer
+    /// created the short way is one whose fault arrives unattributed.
     fn new_command_buffer(
         &self,
         label: &str,
     ) -> Result<Retained<ProtocolObject<dyn MTLCommandBuffer>>, HalError> {
-        let Some(raw) = self.inner.queue.commandBuffer() else {
-            return Err(HalError::DeviceLost(
-                "MTLCommandQueue::commandBuffer returned nil".to_string(),
-            ));
-        };
-        raw.setLabel(Some(&NSString::from_str(label)));
-        Ok(raw)
+        crate::fault::command_buffer(&self.inner.queue, label).ok_or_else(|| {
+            HalError::DeviceLost(
+                "MTLCommandQueue::commandBufferWithDescriptor: returned nil".to_string(),
+            )
+        })
     }
 }
 
@@ -910,11 +914,9 @@ impl Device for MetalDevice {
             ReadbackWait::Submission(Some(command_buffer)) => match command_buffer.status() {
                 MTLCommandBufferStatus::Completed => {}
                 MTLCommandBufferStatus::Error => {
-                    let reason = command_buffer
-                        .error()
-                        .map_or_else(|| "no reason given".to_string(), |error| error.to_string());
                     return Err(HalError::DeviceLost(format!(
-                        "the submission a readback was waiting for failed: {reason}"
+                        "the submission a readback was waiting for failed: {}",
+                        crate::fault::describe(command_buffer)
                     )));
                 }
                 _ => return Ok(ReadbackState::Pending),
@@ -1528,20 +1530,13 @@ impl Device for MetalDevice {
     /// the queue is real, the command buffer is real, and this is the call that
     /// proves both work. When submission lands, nothing here changes.
     fn wait_idle(&self) -> Result<(), HalError> {
-        let Some(command_buffer) = self.inner.queue.commandBuffer() else {
-            return Err(HalError::DeviceLost(
-                "MTLCommandQueue::commandBuffer returned nil".to_string(),
-            ));
-        };
-        command_buffer.setLabel(Some(&NSString::from_str("crcbl wait_idle")));
+        let command_buffer = self.new_command_buffer("crcbl wait_idle")?;
         command_buffer.commit();
         command_buffer.waitUntilCompleted();
         if command_buffer.status() == MTLCommandBufferStatus::Error {
-            let reason = command_buffer
-                .error()
-                .map_or_else(|| "no reason given".to_string(), |error| error.to_string());
             return Err(HalError::DeviceLost(format!(
-                "the wait_idle command buffer failed: {reason}"
+                "the wait_idle command buffer failed: {}",
+                crate::fault::describe(&command_buffer)
             )));
         }
         Ok(())

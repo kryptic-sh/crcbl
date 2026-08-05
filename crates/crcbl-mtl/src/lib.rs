@@ -193,6 +193,8 @@ mod conv;
 #[cfg(target_os = "macos")]
 mod device;
 #[cfg(target_os = "macos")]
+mod fault;
+#[cfg(target_os = "macos")]
 mod instance;
 #[cfg(target_os = "macos")]
 mod pipeline;

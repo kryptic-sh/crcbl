@@ -4318,3 +4318,65 @@ stores them in a `RasterState` beside the pipeline and replays them at bind, so
 binding restores everything the descriptor asked for. A future slice that binds
 pipelines through a different path has to replay them too, or half the
 descriptor silently stops applying.
+
+## `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear` hangs the GPU on CI
+
+**Open, and the cause is not known.** On `macos-latest` the triangle test fails
+with
+`DeviceLost("… Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)")`,
+raised out of `drain`'s `poll_readback`. Every other test in `crcbl-mtl` passes
+on the same runner, including
+`the_engines_own_triangle_artifact_builds_a_real_pipeline` (which compiles
+`msl/triangle.metal` and builds a real `MTLRenderPipelineState`),
+`a_render_pass_clear_reads_back_the_exact_texels` and
+`load_op_preserves_what_clear_replaces`. Submission, render passes, clears,
+blits, readback and completion observation therefore all work; only a draw
+faults.
+
+**What was checked and ruled out**, by reading the Metal semantics against the
+code rather than by running anything — no Mac was available:
+
+- The pipeline's colour format, sample count, stencil and depth attachment
+  formats all match the pass: one `Rgba8Unorm` colour target,
+  `rasterSampleCount` 1 against a `sampleCount` 1 texture, no depth or stencil
+  format declared on either side.
+- The whole `RasterState` replay in `bind_graphics_pipeline` is at
+  `PrimitiveState::default()` for this test — `MTLCullMode::None`,
+  `CounterClockwise`, `Fill`, `MTLDepthClipMode::Clip`, `setDepthBias:0:0:0`
+  (not NaN, not infinity, because `desc.depth_stencil` is `None`), and
+  `setDepthStencilState:nil`, which `objc2` generates as `Option<&…>` precisely
+  because Apple's header marks the argument nullable.
+- The generated MSL has no loops, no buffer or texture arguments, and three
+  hardcoded clip-space corners indexed by `[[vertex_id]]`; the `format!` that
+  builds it produces exactly the source it reads as, line continuations
+  included.
+- `drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:` is called
+  as `(Triangle, 0, 3, 1, 0)`, and `MTLViewport` / `MTLScissorRect` carry
+  `{0, 0, 64, 64}` with `znear 0`, `zfar 1`. Both structs' `objc2` field order
+  matches the C layout.
+
+**The one structural observation worth carrying forward:** this is the only test
+in the crate that makes the GPU run a shader program. The clear tests exercise
+load/store actions and the blit engine; the pipeline test stops at compilation.
+So "the first draw hangs" and "the first shader execution hangs" are the same
+statement here, and nothing yet distinguishes a defect in the command stream
+from the runner's virtualised GPU being unable to rasterise.
+
+Next steps, cheapest first:
+
+- **Read the encoder report the next red run now prints.** `crcbl_mtl::fault`
+  sets `MTLCommandBufferErrorOptionEncoderExecutionStatus` on every command
+  buffer and unpacks `MTLCommandBufferEncoderInfoErrorKey`, so the failure now
+  names the faulting encoder, its state, and the `MTLDevice`. If the device name
+  is a paravirtual one, the environment hypothesis is the answer and the test
+  needs a runner with a real GPU, not a code change.
+- **Run the job with `MTL_DEBUG_LAYER=1` and `MTL_SHADER_VALIDATION=1`.**
+  Metal's API validation is off by default outside Xcode, and an invalid encoder
+  state it would have named turns into a fault with no diagnostic. This is a
+  workflow change in `.github/workflows/ci.yml`, not a backend one.
+- **Replace the shader's `const float2 corners[3]` with a branchless select on
+  `[[vertex_id]]`.** Same geometry, same assertions; it only removes the dynamic
+  index into a `thread`-address-space array. Deliberately _not_ done as part of
+  the fix attempt, because a test edit that turns CI green without an
+  explanation is indistinguishable from weakening it — do it as a named
+  experiment, and if it passes, say so in the shader's docs.

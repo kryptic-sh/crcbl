@@ -67,13 +67,27 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSRange, NSString, NSUInteger};
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLCommandQueue,
-    MTLOrigin, MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLScissorRect, MTLTexture,
-    MTLViewport,
+    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLOrigin,
+    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLScissorRect, MTLTexture, MTLViewport,
 };
 
 use crate::conv;
 use crate::device::{CommandBufferEntry, DeviceInner, ResolvedImage, to_ns};
+
+/// What a command buffer and its encoders are called when the seam gave no
+/// label, and the name the copy encoder always carries.
+///
+/// **This is not cosmetic.** A GPU fault names the encoder that caused it by
+/// its label — see `crcbl_mtl::fault` — and an encoder that was never labelled
+/// reports an empty string, which turns a report naming the culprit back into a
+/// list of blanks. [`RenderPassDesc::label`] is optional and the copy encoder is
+/// this backend's own object that no seam call ever names, so these three are
+/// the floor beneath every label a caller does supply.
+const UNLABELLED_COMMAND_BUFFER: &str = "crcbl command buffer";
+/// See [`UNLABELLED_COMMAND_BUFFER`].
+const UNLABELLED_RENDER_PASS: &str = "crcbl render pass";
+/// See [`UNLABELLED_COMMAND_BUFFER`].
+const COPY_ENCODER: &str = "crcbl copies";
 
 /// The one Metal encoder that may be open on the command buffer.
 enum Open {
@@ -194,15 +208,18 @@ impl MetalCommandEncoder {
             encoder.failed = Some(error);
             return encoder;
         }
-        let Some(raw) = encoder.device.queue.commandBuffer() else {
+        // Through `crcbl_mtl::fault`, which is what asks Metal for per-encoder
+        // status on a fault. Every command buffer this backend creates goes
+        // through it, because the one that skipped it is the one that faults.
+        let Some(raw) = crate::fault::command_buffer(
+            &encoder.device.queue,
+            desc.label.unwrap_or(UNLABELLED_COMMAND_BUFFER),
+        ) else {
             encoder.failed = Some(HalError::DeviceLost(
-                "MTLCommandQueue::commandBuffer returned nil".to_string(),
+                "MTLCommandQueue::commandBufferWithDescriptor: returned nil".to_string(),
             ));
             return encoder;
         };
-        if let Some(label) = desc.label {
-            raw.setLabel(Some(&NSString::from_str(label)));
-        }
         encoder.raw = Some(raw);
         encoder
     }
@@ -262,6 +279,7 @@ impl MetalCommandEncoder {
             ));
             return None;
         };
+        encoder.setLabel(Some(&NSString::from_str(COPY_ENCODER)));
         self.epoch += 1;
         self.open = Open::Blit(encoder.clone());
         Some(encoder)
@@ -810,9 +828,9 @@ impl CommandEncoder for MetalCommandEncoder {
             return;
         };
         self.epoch += 1;
-        if let Some(label) = desc.label {
-            encoder.setLabel(Some(&NSString::from_str(label)));
-        }
+        encoder.setLabel(Some(&NSString::from_str(
+            desc.label.unwrap_or(UNLABELLED_RENDER_PASS),
+        )));
         if let Some((width, height)) = target {
             let area = desc.render_area;
             // Clamped to the attachment, because `setScissorRect:` raises on a

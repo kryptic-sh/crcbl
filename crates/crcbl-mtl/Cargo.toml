@@ -48,7 +48,13 @@ crcbl-shaders = { workspace = true }
 # `maxThreadsPerThreadgroup` — an `MTLSize` — exist. `objc2-foundation` is here
 # for `NSProcessInfo`, `NSString` (every `setLabel:` takes one), `NSRange` (the
 # level and slice ranges a texture view is cut with) and `NSEnumerator` for
-# iterating the `NSArray` that enumeration returns.
+# iterating the `NSArray` that enumeration returns. `NSError` and `NSDictionary`
+# are what `crcbl_mtl::fault` reads a failed command buffer's `userInfo`
+# through, which is where Metal puts the per-encoder fault report and nowhere
+# else. Both are already on transitively — `MTLCommandBuffer` and `MTLLibrary`
+# below pull them in — and are named anyway, because a feature this crate's own
+# `use` lines depend on is one a dependency must not be able to drop from
+# under it.
 #
 # MTL2 — the device and its resources — adds the rest of this list, and every
 # entry is here because one call needs it, not because it looked related:
@@ -109,7 +115,9 @@ objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "std",
   "NSArray",
+  "NSDictionary",
   "NSEnumerator",
+  "NSError",
   "NSProcessInfo",
   "NSRange",
   "NSString",
