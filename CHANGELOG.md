@@ -100,6 +100,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   only debugging aid a shader author gets. Graphics and compute pipelines build,
   and a draw paints pixels a test asserts exactly.
 
+  **That draw test does not run in CI, and the reason is the runner rather than
+  the code.** GitHub's `macos-latest` exposes an `Apple Paravirtual device` that
+  hangs the command buffer on any shader execution — measured, with both
+  encoders reporting `completed` rather than faulted. The test is therefore
+  feature-gated behind `mtl-e2e` and `#[ignore]`d, run by
+  `crates/crcbl-mtl/tests/run-mtl-e2e.sh` on a real Mac. Metal has no software
+  rasteriser to substitute the way lavapipe does for Vulkan, so this is a
+  coverage gap rather than a workaround; `docs/backlog.md` states it as one.
+  Everything short of shader execution — clears, blit copies, semaphores,
+  readback, MSL compilation, pipeline-state creation — does run there, and does
+  pass.
+
   **An `MTLRenderPipelineState` is only half of `GraphicsPipelineDesc`.** Cull
   mode, winding, fill mode, depth clip, depth bias, the depth/stencil state and
   the primitive topology are all encoder or draw-call state in Metal rather than
