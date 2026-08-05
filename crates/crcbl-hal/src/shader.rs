@@ -3,9 +3,9 @@
 //! # The caller offers every artifact it has; the backend picks
 //!
 //! [`ShaderModuleDesc`] carries **one field per artifact format** — SPIR-V
-//! words today, WGSL source alongside them — and the caller fills in every one
-//! it has. It does not choose between them and it is not told which backend it
-//! is talking to; the backend takes the format it can consume and ignores the
+//! words, WGSL source, MSL source — and the caller fills in every one it has.
+//! It does not choose between them and it is not told which backend it is
+//! talking to; the backend takes the format it can consume and ignores the
 //! rest.
 //!
 //! This replaces "the seam takes SPIR-V words and nothing else", which held
@@ -30,17 +30,19 @@
 //! *selection* above the seam, where the renderer would have to know which
 //! backend it was talking to in order to hand it the right bytes. Parallel
 //! fields keep the selection below the seam, which is the whole point — a
-//! caller says "here is the SPIR-V and here is the WGSL", every backend sees
-//! the same descriptor, and adding MSL or DXIL at P14 adds a field rather than
-//! a variant every existing `match` has to grow an arm for.
+//! caller says "here is the SPIR-V, here is the WGSL, here is the MSL", every
+//! backend sees the same descriptor, and P14's MSL cost exactly one field —
+//! not a variant every existing `match` had to grow an arm for. DXIL will cost
+//! the same.
 //!
 //! ## The contract
 //!
 //! **Callers must supply every format they hold.** Omitting one is not a
 //! preference — it is a statement that the artifact does not exist, and it is
 //! how a shader silently becomes unusable on a backend that has not been
-//! written yet. `crcbl-shaders`' generated table hands out both halves
-//! (`Shader::spirv`, `Shader::wgsl`), so the correct call site names both.
+//! written yet. `crcbl-shaders`' generated table hands out every one
+//! (`Shader::spirv`, `Shader::wgsl`, `Shader::msl`), so the correct call site
+//! names all three.
 //!
 //! **A descriptor must carry at least one format.** One with neither is
 //! [`HalError::ShaderCompilation`].
@@ -96,6 +98,8 @@ bitflags::bitflags! {
         const SPIRV = 1 << 0;
         /// [`ShaderModuleDesc::wgsl`] is `Some`.
         const WGSL = 1 << 1;
+        /// [`ShaderModuleDesc::msl`] is `Some`.
+        const MSL = 1 << 2;
     }
 }
 
@@ -104,7 +108,11 @@ impl fmt::Display for ShaderSources {
     /// `"SPIR-V and WGSL"`, `"WGSL"`, or `"nothing"` for the empty set.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
-        for (bit, name) in [(Self::SPIRV, "SPIR-V"), (Self::WGSL, "WGSL")] {
+        for (bit, name) in [
+            (Self::SPIRV, "SPIR-V"),
+            (Self::WGSL, "WGSL"),
+            (Self::MSL, "MSL"),
+        ] {
             if self.contains(bit) {
                 if !first {
                     f.write_str(" and ")?;
@@ -154,6 +162,21 @@ pub struct ShaderModuleDesc<'a> {
     /// consumer of it is a compiler, and the seam has no business owning a
     /// syntax tree.
     pub wgsl: Option<&'a str>,
+    /// Metal Shading Language source, as text. `None` when there is no MSL
+    /// artifact.
+    ///
+    /// `Option<&str>` for the same reason [`wgsl`](Self::wgsl) is one: an empty
+    /// MSL translation unit is valid — it declares no functions — so conflating
+    /// it with "no artifact" would turn a truncated file into "this backend
+    /// does not get MSL".
+    ///
+    /// **Source, not a compiled `.metallib`.** Metal's offline compiler ships
+    /// only with Xcode, so `crcbl-shaders` stops at MSL text and `crcbl-mtl`
+    /// finishes the job with
+    /// `MTLDevice::newLibraryWithSource:options:error:`. A backend that fails
+    /// to compile it owes the caller Metal's own message — see
+    /// [`HalError::ShaderCompilation`].
+    pub msl: Option<&'a str>,
 }
 
 impl ShaderModuleDesc<'_> {
@@ -169,6 +192,9 @@ impl ShaderModuleDesc<'_> {
         }
         if self.wgsl.is_some() {
             sources |= ShaderSources::WGSL;
+        }
+        if self.msl.is_some() {
+            sources |= ShaderSources::MSL;
         }
         sources
     }
@@ -226,6 +252,7 @@ mod tests {
             label: Some("probe"),
             spirv: &spirv,
             wgsl: None,
+            msl: None,
         };
         assert_eq!(desc.spirv[0], MAGIC);
         assert_eq!(desc.spirv.len(), 5);
@@ -258,24 +285,44 @@ mod tests {
         );
         assert_eq!(
             ShaderModuleDesc {
-                spirv: &spirv,
-                wgsl: Some("@fragment fn main() {}"),
+                msl: Some("[[fragment]] float4 main() { return 0; }"),
                 ..ShaderModuleDesc::default()
             }
             .provided(),
-            ShaderSources::SPIRV | ShaderSources::WGSL
+            ShaderSources::MSL
+        );
+        assert_eq!(
+            ShaderModuleDesc {
+                spirv: &spirv,
+                wgsl: Some("@fragment fn main() {}"),
+                msl: Some("[[fragment]] float4 main() { return 0; }"),
+                ..ShaderModuleDesc::default()
+            }
+            .provided(),
+            ShaderSources::SPIRV | ShaderSources::WGSL | ShaderSources::MSL
         );
     }
 
-    /// An empty WGSL string is a *present* artifact, not an absent one — the
-    /// distinction `Option` exists to keep.
+    /// An empty text string is a *present* artifact, not an absent one — the
+    /// distinction `Option` exists to keep, for both text formats.
     #[test]
-    fn empty_wgsl_is_present_not_absent() {
-        let desc = ShaderModuleDesc {
-            wgsl: Some(""),
-            ..ShaderModuleDesc::default()
-        };
-        assert_eq!(desc.provided(), ShaderSources::WGSL);
+    fn an_empty_text_artifact_is_present_not_absent() {
+        assert_eq!(
+            ShaderModuleDesc {
+                wgsl: Some(""),
+                ..ShaderModuleDesc::default()
+            }
+            .provided(),
+            ShaderSources::WGSL
+        );
+        assert_eq!(
+            ShaderModuleDesc {
+                msl: Some(""),
+                ..ShaderModuleDesc::default()
+            }
+            .provided(),
+            ShaderSources::MSL
+        );
     }
 
     #[test]
@@ -283,9 +330,16 @@ mod tests {
         assert_eq!(ShaderSources::empty().to_string(), "nothing");
         assert_eq!(ShaderSources::SPIRV.to_string(), "SPIR-V");
         assert_eq!(ShaderSources::WGSL.to_string(), "WGSL");
+        assert_eq!(ShaderSources::MSL.to_string(), "MSL");
         assert_eq!(
             (ShaderSources::SPIRV | ShaderSources::WGSL).to_string(),
             "SPIR-V and WGSL"
+        );
+        assert_eq!(
+            ShaderSources::all().to_string(),
+            "SPIR-V and WGSL and MSL",
+            "every bit must have a name in the sentence, or a backend's refusal \
+             would silently omit the format the caller actually supplied"
         );
     }
 

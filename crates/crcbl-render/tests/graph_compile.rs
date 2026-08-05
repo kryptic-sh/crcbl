@@ -1657,7 +1657,7 @@ fn the_engine_passes_offer_every_shader_artifact_they_have() {
     for (label, sources) in created {
         assert_eq!(
             sources,
-            ShaderSources::SPIRV | ShaderSources::WGSL,
+            ShaderSources::all(),
             "{}: offered only {sources}",
             label.as_deref().unwrap_or("<unlabelled>")
         );

@@ -33,6 +33,11 @@ pub struct ShaderRecord {
     pub wgsl: String,
     /// SHA-256 of the WGSL artifact, lower-case hex. Empty when `wgsl` is.
     pub wgsl_sha256: String,
+    /// Compiled MSL artifact path, relative to the crate root. Empty when this
+    /// shader has no MSL output (pre-P14 artifacts).
+    pub msl: String,
+    /// SHA-256 of the MSL artifact, lower-case hex. Empty when `msl` is.
+    pub msl_sha256: String,
     /// Entry points the artifact exposes, as `(name, stage)`.
     pub entry_points: Vec<(String, String)>,
 }
@@ -92,6 +97,8 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
                     spirv_sha256: String::new(),
                     wgsl: String::new(),
                     wgsl_sha256: String::new(),
+                    msl: String::new(),
+                    msl_sha256: String::new(),
                     entry_points: Vec::new(),
                 },
                 line_number,
@@ -135,6 +142,13 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
             (Some(record), "wgsl-sha256") => {
                 let hash = hex(value, line_number)?;
                 set_once(&mut record.wgsl_sha256, hash, key, line_number)?;
+            }
+            (Some(record), "msl") => {
+                set_once(&mut record.msl, value.to_string(), key, line_number)?
+            }
+            (Some(record), "msl-sha256") => {
+                let hash = hex(value, line_number)?;
+                set_once(&mut record.msl_sha256, hash, key, line_number)?;
             }
             (Some(record), "entry-points") => {
                 for pair in value.split(',') {
@@ -252,14 +266,20 @@ fn finish(record: ShaderRecord, line_number: usize) -> Result<ShaderRecord, Stri
             ));
         }
     }
-    // `wgsl` and `wgsl-sha256` are optional, but only together: a `wgsl` with
-    // no hash used to reach build.rs and fail its comparison against `""`,
+    // Each optional artifact's path and hash are optional *together*: a path
+    // with no hash used to reach build.rs and fail its comparison against `""`,
     // with a message naming drift rather than the missing key.
-    if record.wgsl.is_empty() != record.wgsl_sha256.is_empty() {
-        let (present, missing) = if record.wgsl.is_empty() {
-            ("wgsl-sha256", "wgsl")
+    for (path_key, path, hash_key, hash) in [
+        ("wgsl", &record.wgsl, "wgsl-sha256", &record.wgsl_sha256),
+        ("msl", &record.msl, "msl-sha256", &record.msl_sha256),
+    ] {
+        if path.is_empty() == hash.is_empty() {
+            continue;
+        }
+        let (present, missing) = if path.is_empty() {
+            (hash_key, path_key)
         } else {
-            ("wgsl", "wgsl-sha256")
+            (path_key, hash_key)
         };
         return Err(format!(
             "line {line_number}: section [{}] has `{present}` but no `{missing}`; both or neither",
@@ -407,21 +427,32 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
         assert!(error.contains("twice"), "{error}");
     }
 
-    /// `wgsl` and `wgsl-sha256` are optional together. One without the other
-    /// used to reach `build.rs` and fail there against `""`, with a message
-    /// naming drift rather than the missing key.
+    /// Each optional artifact's path and hash are optional *together*. One
+    /// without the other used to reach `build.rs` and fail there against `""`,
+    /// with a message naming drift rather than the missing key.
+    ///
+    /// Both optional columns are checked, because the pairing rule is one loop
+    /// now and a loop that only ever ran over `wgsl` would pass identically.
     #[test]
-    fn a_wgsl_path_without_its_hash_is_refused() {
-        let text = format!("{SAMPLE}wgsl = wgsl/triangle.wgsl\n");
-        let error = parse_manifest(&text).expect_err("a wgsl with no hash is unusable");
-        assert!(error.contains("wgsl-sha256"), "{error}");
+    fn an_artifact_path_without_its_hash_is_refused() {
+        for (path_key, path, hash_key) in [
+            ("wgsl", "wgsl/triangle.wgsl", "wgsl-sha256"),
+            ("msl", "msl/triangle.metal", "msl-sha256"),
+        ] {
+            let text = format!("{SAMPLE}{path_key} = {path}\n");
+            let error = parse_manifest(&text).expect_err("a path with no hash is unusable");
+            assert!(error.contains(hash_key), "{path_key}: {error}");
 
-        let text = format!(
-            "{SAMPLE}wgsl-sha256 = \
-             0000000000000000000000000000000000000000000000000000000000000000\n"
-        );
-        let error = parse_manifest(&text).expect_err("a hash with no wgsl is unusable");
-        assert!(error.contains("`wgsl`"), "{error}");
+            let text = format!(
+                "{SAMPLE}{hash_key} = \
+                 0000000000000000000000000000000000000000000000000000000000000000\n"
+            );
+            let error = parse_manifest(&text).expect_err("a hash with no path is unusable");
+            assert!(
+                error.contains(&format!("`{path_key}`")),
+                "{path_key}: {error}"
+            );
+        }
     }
 
     /// The error must point at the offending section's own header, not at the
@@ -462,5 +493,13 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
         let manifest = parse_manifest(&text).expect("the committed manifest parses");
         assert!(!manifest.shaders.is_empty());
         assert!(!manifest.slangc_version.is_empty());
+        // Every optional column is filled for every shipped shader. The
+        // pairing rule in `finish` only checks path-and-hash *together*, so a
+        // whole column silently missing from the generator would parse fine.
+        for record in &manifest.shaders {
+            assert!(!record.wgsl.is_empty(), "{}: no wgsl column", record.name);
+            assert!(!record.msl.is_empty(), "{}: no msl column", record.name);
+            assert!(!record.msl_sha256.is_empty(), "{}", record.name);
+        }
     }
 }

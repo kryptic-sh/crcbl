@@ -14,8 +14,13 @@
 # this line, so the Windows job failed on `wgsl/mesh.wgsl` for the identical
 # reason a year of comments above was written about. A new hashed *text*
 # artifact type needs a line here in the commit that introduces it.
+#
+# `*.metal` is the third such type: the MSL artifacts `crcbl-mtl` hands to
+# `MTLDevice::newLibraryWithSource:` are hashed by the same manifest, and are
+# source rather than a compiled `.metallib` precisely so they stay text.
 *.slang text eol=lf
 *.wgsl text eol=lf
+*.metal text eol=lf
 
 # Shell harnesses: LF regardless of platform, since they run under bash.
 *.sh text eol=lf

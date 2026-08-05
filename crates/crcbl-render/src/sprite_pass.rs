@@ -646,6 +646,7 @@ impl SpriteRenderer {
             label: Some("sprite.slang"),
             spirv: SPRITE.spirv(),
             wgsl: SPRITE.wgsl(),
+            msl: SPRITE.msl(),
         })?;
         let targets = [color_target(target_format)];
         let created = device.create_graphics_pipeline(&GraphicsPipelineDesc {

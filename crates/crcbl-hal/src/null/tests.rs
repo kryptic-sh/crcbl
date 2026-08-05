@@ -214,6 +214,7 @@ fn shader_modules_reject_non_spirv() {
             label: None,
             spirv: &[0xDEAD_BEEF],
             wgsl: None,
+            msl: None,
         })
         .expect_err("not SPIR-V");
     assert!(matches!(error, HalError::ShaderCompilation(_)), "{error:?}");
@@ -223,6 +224,7 @@ fn shader_modules_reject_non_spirv() {
                 label: None,
                 spirv: &[],
                 wgsl: None,
+                msl: None,
             })
             .is_err()
     );
@@ -232,16 +234,17 @@ fn shader_modules_reject_non_spirv() {
                 label: Some("cull"),
                 spirv: &SPIRV,
                 wgsl: None,
+                msl: None,
             })
             .is_ok()
     );
 }
 
-/// The null backend compiles nothing, so it accepts either artifact format on
-/// its own — including WGSL with no SPIR-V beside it, which is a legal
+/// The null backend compiles nothing, so it accepts any artifact format on its
+/// own — including a text one with no SPIR-V beside it, which is a legal
 /// descriptor the SPIR-V magic-number check must not reject.
 #[test]
-fn shader_modules_accept_wgsl_with_or_without_spirv() {
+fn shader_modules_accept_a_text_artifact_with_or_without_spirv() {
     let instance = NullInstance::tier_a();
     let device = open(&instance);
     assert!(
@@ -250,15 +253,28 @@ fn shader_modules_accept_wgsl_with_or_without_spirv() {
                 label: Some("wgsl only"),
                 spirv: &[],
                 wgsl: Some("@fragment fn main() {}"),
+                msl: None,
             })
             .is_ok()
     );
     assert!(
         device
             .create_shader_module(&ShaderModuleDesc {
-                label: Some("both"),
+                label: Some("msl only"),
+                spirv: &[],
+                wgsl: None,
+                msl: Some("[[fragment]] float4 main() { return 0; }"),
+            })
+            .is_ok(),
+        "MSL alone is a legal descriptor; crcbl-mtl is the backend that reads it"
+    );
+    assert!(
+        device
+            .create_shader_module(&ShaderModuleDesc {
+                label: Some("all three"),
                 spirv: &SPIRV,
                 wgsl: Some("@fragment fn main() {}"),
+                msl: Some("[[fragment]] float4 main() { return 0; }"),
             })
             .is_ok()
     );
@@ -275,6 +291,7 @@ fn a_shader_module_with_no_artifact_names_the_gap() {
             label: Some("empty.slang"),
             spirv: &[],
             wgsl: None,
+            msl: None,
         })
         .expect_err("a descriptor with no artifact is not a shader");
     let text = error.to_string();
@@ -295,15 +312,13 @@ fn created_shader_modules_are_logged_with_the_formats_they_carried() {
             label: Some("mesh.slang"),
             spirv: &SPIRV,
             wgsl: Some("@vertex fn vertexMain() {}"),
+            msl: Some("[[vertex]] void vertexMain() {}"),
         })
-        .expect("both formats");
+        .expect("every format");
     device.destroy_shader_module(module);
     assert_eq!(
         recorder.shader_modules_created(),
-        vec![(
-            Some("mesh.slang".to_string()),
-            ShaderSources::SPIRV | ShaderSources::WGSL
-        )]
+        vec![(Some("mesh.slang".to_string()), ShaderSources::all())]
     );
     recorder.clear();
     assert!(recorder.shader_modules_created().is_empty());
@@ -970,6 +985,7 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
             label: Some("frame"),
             spirv: &SPIRV,
             wgsl: None,
+            msl: None,
         })
         .expect("module");
     let set_layout = device

@@ -15,6 +15,17 @@ crcbl-core = { workspace = true }
 crcbl-hal = { workspace = true }
 log = { workspace = true }
 
+# Test-only, and for one thing: the pipeline tests compile the engine's *own*
+# `msl/triangle.metal` into an `MTLLibrary` and look its entry points up by
+# name, which is the check that the committed MSL artifact and the entry-point
+# names `spirv/manifest.txt` records agree on a real Metal compiler.
+#
+# The dependency direction stays clean — nothing this crate ships depends on the
+# engine's shaders, exactly as `crcbl-vk` states for the identical
+# dev-dependency.
+[dev-dependencies]
+crcbl-shaders = { workspace = true }
+
 # The Objective-C bindings, and only on the platform that has the framework
 # behind them. `docs/plan/09-backends-metal-dx12.md`'s FFI correction is the
 # rule they satisfy: *bindings, not frameworks* — `objc2` is a thin binding to
@@ -68,8 +79,29 @@ log = { workspace = true }
 # * `MTLEvent` for `MTLSharedEvent`, which is the seam's timeline semaphore, and
 #   for the plain `MTLEvent` a binary one becomes.
 #
+# MTL4 — MSL shader modules, pipelines and the triangle — adds three:
+#
+# * `MTLLibrary` for `MTLLibrary` itself (what
+#   `newLibraryWithSource:options:error:` returns), `MTLFunction` (what
+#   `newFunctionWithName:` returns) and `MTLCompileOptions`, which the source
+#   compile takes as `None`. `MTLRenderPipelineDescriptor`'s function setters
+#   are `cfg`-gated on it upstream, so it is not optional.
+# * `MTLRenderPipeline` for `MTLRenderPipelineDescriptor`,
+#   `MTLRenderPipelineState`, the colour-attachment array, and the
+#   `MTLBlendFactor`, `MTLBlendOperation` and `MTLColorWriteMask` the blend
+#   table maps onto.
+# * `MTLComputePipeline` for `MTLComputePipelineDescriptor` and
+#   `MTLComputePipelineState`.
+#
+# The rasteriser enums this slice also maps — `MTLPrimitiveType`, `MTLCullMode`,
+# `MTLWinding`, `MTLTriangleFillMode`, `MTLDepthClipMode` — live in
+# `MTLRenderCommandEncoder`, and `MTLStencilDescriptor`/`MTLStencilOperation` in
+# `MTLDepthStencil`; both were already on. `MTLPipelineOption` is in `MTLDevice`.
+#
 # `MTLCounters` is deliberately **absent**: query sets still refuse, and
-# `crcbl_mtl::device`'s `create_query_set` says why.
+# `crcbl_mtl::device`'s `create_query_set` says why. So is `MTLVertexDescriptor`
+# — this engine has no vertex input state at all, by design, and enabling it
+# would advertise a path `crcbl_hal::pipeline` deliberately does not have.
 #
 # A slice that needs more adds it here.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -90,10 +122,13 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
   "MTLCommandBuffer",
   "MTLCommandEncoder",
   "MTLCommandQueue",
+  "MTLComputePipeline",
   "MTLDepthStencil",
   "MTLDevice",
   "MTLEvent",
+  "MTLLibrary",
   "MTLPixelFormat",
+  "MTLRenderPipeline",
   "MTLRenderCommandEncoder",
   "MTLRenderPass",
   "MTLResource",

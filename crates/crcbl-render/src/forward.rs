@@ -282,6 +282,7 @@ impl ForwardRenderer {
             label: Some("mesh.slang"),
             spirv: MESH.spirv(),
             wgsl: MESH.wgsl(),
+            msl: MESH.msl(),
         })?;
         let mesh_targets = [ColorTargetState::opaque(Format::Rgba16Float)];
         let mesh_pipeline = device.create_graphics_pipeline(&GraphicsPipelineDesc {
@@ -352,6 +353,7 @@ impl ForwardRenderer {
             label: Some("tonemap.slang"),
             spirv: TONEMAP.spirv(),
             wgsl: TONEMAP.wgsl(),
+            msl: TONEMAP.msl(),
         })?;
         let tonemap_targets = [ColorTargetState::opaque(target_format)];
         let tonemap_pipeline = device.create_graphics_pipeline(&GraphicsPipelineDesc {

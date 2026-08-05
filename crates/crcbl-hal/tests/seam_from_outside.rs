@@ -190,6 +190,7 @@ fn setup(instance: &dyn Instance) -> Frame {
             label: Some("opaque"),
             spirv: &SPIRV,
             wgsl: None,
+            msl: None,
         })
         .expect("shader module");
     let layout = device

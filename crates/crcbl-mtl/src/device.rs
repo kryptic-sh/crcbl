@@ -84,6 +84,7 @@ macro_rules! owned {
         })+
     };
 }
+pub(crate) use owned;
 
 /// A buffer, its size and where its memory lives.
 ///
@@ -227,6 +228,12 @@ pub(crate) struct DeviceState {
     pub(crate) command_buffers: Pool<CommandBufferEntry>,
     semaphores: Pool<SemaphoreEntry>,
     readbacks: Pool<ReadbackEntry>,
+    /// The pipeline slice's four tables; `crcbl_mtl::pipeline` owns their
+    /// entries and every call that touches them.
+    pub(crate) shader_modules: Pool<crate::pipeline::ShaderModuleEntry>,
+    pub(crate) pipeline_layouts: Pool<crate::pipeline::PipelineLayoutEntry>,
+    pub(crate) graphics_pipelines: Pool<crate::pipeline::GraphicsPipelineEntry>,
+    pub(crate) compute_pipelines: Pool<crate::pipeline::ComputePipelineEntry>,
     /// The last command buffer of the most recent submission, retained.
     ///
     /// This is the whole of this backend's completion tracking, and it is one
@@ -250,7 +257,7 @@ pub(crate) struct DeviceInner {
     /// state — on Metal, the enumerated `MTLDevice` objects — is kept alive
     /// here rather than borrowed. See [`InstanceInner`].
     _instance: Arc<InstanceInner>,
-    raw: Retained<ProtocolObject<dyn MTLDevice>>,
+    pub(crate) raw: Retained<ProtocolObject<dyn MTLDevice>>,
     /// The one queue. Metal has a single `MTLCommandQueue` type and no queue
     /// families, which is exactly why the seam's enum is named
     /// [`QueueKind`] rather than `QueueFamily`.
@@ -415,7 +422,7 @@ fn local_handle<E, M>(
 }
 
 /// Resolves a handle against a pool and its owning device.
-fn lookup<'p, E: Owned, M>(
+pub(crate) fn lookup<'p, E: Owned, M>(
     pool: &'p Pool<E>,
     kind: &'static str,
     handle: Handle<M>,
@@ -437,7 +444,11 @@ fn lookup<'p, E: Owned, M>(
 /// The order is the point: removing first and checking the owner afterwards
 /// would already have dropped the entry, so a foreign handle that happened to
 /// resolve would destroy this device's own unrelated object.
-fn take_owned<E: Owned, M>(pool: &mut Pool<E>, handle: Handle<M>, inner: &DeviceInner) -> bool {
+pub(crate) fn take_owned<E: Owned, M>(
+    pool: &mut Pool<E>,
+    handle: Handle<M>,
+    inner: &DeviceInner,
+) -> bool {
     let Ok(local) = local_handle::<E, M>("object", handle, inner) else {
         return false;
     };
@@ -453,7 +464,7 @@ fn take_owned<E: Owned, M>(pool: &mut Pool<E>, handle: Handle<M>, inner: &Device
 /// The Metal implementation of [`Device`].
 #[derive(Debug)]
 pub struct MetalDevice {
-    inner: Arc<DeviceInner>,
+    pub(crate) inner: Arc<DeviceInner>,
 }
 
 impl MetalDevice {
@@ -511,12 +522,12 @@ impl MetalDevice {
         Ok(Self { inner })
     }
 
-    fn state(&self) -> MutexGuard<'_, DeviceState> {
+    pub(crate) fn state(&self) -> MutexGuard<'_, DeviceState> {
         self.inner.state()
     }
 
     /// Stamps this device's tag into a handle its pools just issued.
-    fn stamp<A, B>(&self, handle: Handle<A>) -> Handle<B> {
+    pub(crate) fn stamp<A, B>(&self, handle: Handle<A>) -> Handle<B> {
         self.inner.stamp(handle)
     }
 
@@ -1241,18 +1252,19 @@ impl Device for MetalDevice {
 
     // --- shaders and pipelines ---
 
+    /// Compiles [`ShaderModuleDesc::msl`] through
+    /// `MTLDevice::newLibraryWithSource:options:error:`; see
+    /// `crcbl_mtl::pipeline`.
     fn create_shader_module(
         &self,
-        _desc: &ShaderModuleDesc<'_>,
+        desc: &ShaderModuleDesc<'_>,
     ) -> Result<ShaderModuleHandle, HalError> {
-        // Not `ShaderCompilation`, which the seam reserves for an artifact this
-        // backend tried and failed to compile. Nothing was tried: MSL is a
-        // `crcbl-shaders` output that does not exist yet, and
-        // `ShaderModuleDesc` carries no field this backend reads.
-        Err(not_yet("shader modules (the Metal pipeline slice)"))
+        self.create_shader_module_impl(desc)
     }
 
-    fn destroy_shader_module(&self, _module: ShaderModuleHandle) {}
+    fn destroy_shader_module(&self, module: ShaderModuleHandle) {
+        self.destroy_shader_module_impl(module);
+    }
 
     fn create_bind_group_layout(
         &self,
@@ -1277,32 +1289,40 @@ impl Device for MetalDevice {
 
     fn destroy_bind_group(&self, _group: BindGroupHandle) {}
 
+    /// Creates the empty pipeline layout, and refuses one naming bind groups —
+    /// which cannot exist yet. See `crcbl_mtl::pipeline`.
     fn create_pipeline_layout(
         &self,
-        _desc: &PipelineLayoutDesc<'_>,
+        desc: &PipelineLayoutDesc<'_>,
     ) -> Result<PipelineLayoutHandle, HalError> {
-        Err(not_yet("pipeline layouts (the Metal binding slice)"))
+        self.create_pipeline_layout_impl(desc)
     }
 
-    fn destroy_pipeline_layout(&self, _layout: PipelineLayoutHandle) {}
+    fn destroy_pipeline_layout(&self, layout: PipelineLayoutHandle) {
+        self.destroy_pipeline_layout_impl(layout);
+    }
 
     fn create_graphics_pipeline(
         &self,
-        _desc: &GraphicsPipelineDesc<'_>,
+        desc: &GraphicsPipelineDesc<'_>,
     ) -> Result<GraphicsPipelineHandle, HalError> {
-        Err(not_yet("graphics pipelines (the Metal pipeline slice)"))
+        self.create_graphics_pipeline_impl(desc)
     }
 
-    fn destroy_graphics_pipeline(&self, _pipeline: GraphicsPipelineHandle) {}
+    fn destroy_graphics_pipeline(&self, pipeline: GraphicsPipelineHandle) {
+        self.destroy_graphics_pipeline_impl(pipeline);
+    }
 
     fn create_compute_pipeline(
         &self,
-        _desc: &ComputePipelineDesc<'_>,
+        desc: &ComputePipelineDesc<'_>,
     ) -> Result<ComputePipelineHandle, HalError> {
-        Err(not_yet("compute pipelines (the Metal pipeline slice)"))
+        self.create_compute_pipeline_impl(desc)
     }
 
-    fn destroy_compute_pipeline(&self, _pipeline: ComputePipelineHandle) {}
+    fn destroy_compute_pipeline(&self, pipeline: ComputePipelineHandle) {
+        self.destroy_compute_pipeline_impl(pipeline);
+    }
 
     // --- queries ---
 
@@ -1811,10 +1831,10 @@ mod tests {
     use std::time::Duration;
 
     use crcbl_hal::{
-        Barriers, BufferCopy, BufferImageCopy, ClearValue, ColorAttachment, Extent3d, ImageAspect,
-        ImageBarrier, ImageSubresourceLayers, ImageSubresourceRange, ImageUsage, ImageViewType,
-        Instance, LoadOp, Offset3d, Rect2d, RenderPassDesc, ResourceState, SemaphoreSignal,
-        StoreOp,
+        Barriers, BufferCopy, BufferImageCopy, ClearValue, ColorAttachment, ColorTargetState,
+        Extent3d, ImageAspect, ImageBarrier, ImageSubresourceLayers, ImageSubresourceRange,
+        ImageUsage, ImageViewType, Instance, LoadOp, MultisampleState, Offset3d, PrimitiveState,
+        Rect2d, RenderPassDesc, ResourceState, SemaphoreSignal, ShaderEntry, StoreOp, Viewport,
     };
     use objc2_metal::MTLHazardTrackingMode;
 
@@ -1917,13 +1937,13 @@ mod tests {
     /// on a buffer Metal happened to hand back zeroed.
     const POISON: u8 = 0xA5;
 
-    /// A colour target with a whole-image view of it.
-    fn color_target(device: &MetalDevice) -> (ImageHandle, ImageViewHandle) {
+    /// A colour target of `extent`, with a whole-image view of it.
+    fn color_target_of(device: &MetalDevice, extent: Extent3d) -> (ImageHandle, ImageViewHandle) {
         let image = device
             .create_image(&ImageDesc {
                 label: Some("crcbl-mtl clear target"),
                 image_type: ImageType::D2,
-                extent: TARGET,
+                extent,
                 format: Format::Rgba8Unorm,
                 mip_levels: 1,
                 samples: 1,
@@ -1943,6 +1963,11 @@ mod tests {
         (image, view)
     }
 
+    /// The [`TARGET`]-sized colour target every clear test uses.
+    fn color_target(device: &MetalDevice) -> (ImageHandle, ImageViewHandle) {
+        color_target_of(device, TARGET)
+    }
+
     /// A host-readable buffer, poisoned so an absent copy cannot pass.
     fn readback_buffer(device: &MetalDevice, size: u64) -> BufferHandle {
         let handle = device
@@ -1954,8 +1979,12 @@ mod tests {
         handle
     }
 
-    /// The whole of an image, copied into the start of a buffer.
-    fn whole_image_copy(image: ImageHandle, into: BufferHandle) -> BufferImageCopy {
+    /// The whole of an `extent`-sized image, copied into the start of a buffer.
+    fn whole_image_copy_of(
+        image: ImageHandle,
+        into: BufferHandle,
+        extent: Extent3d,
+    ) -> BufferImageCopy {
         BufferImageCopy {
             buffer: into,
             buffer_offset: 0,
@@ -1969,8 +1998,13 @@ mod tests {
                 layer_count: 1,
             },
             image_offset: Offset3d { x: 0, y: 0, z: 0 },
-            image_extent: TARGET,
+            image_extent: extent,
         }
+    }
+
+    /// The same, for the [`TARGET`]-sized image the clear tests use.
+    fn whole_image_copy(image: ImageHandle, into: BufferHandle) -> BufferImageCopy {
+        whole_image_copy_of(image, into, TARGET)
     }
 
     /// Polls a readback to completion, with a deadline rather than a sleep.
@@ -2169,6 +2203,527 @@ mod tests {
             two_passes(&device, CLEAR, LoadOp::Clear, OTHER),
             expected(OTHER_TEXEL),
             "a Clear pass must replace what the first pass left"
+        );
+    }
+
+    // --- the triangle rung -------------------------------------------------
+
+    /// The image the triangle is drawn into: square, so "the centre" and "a
+    /// corner" are far apart, and 64 texels wide so a row is 256 bytes — the
+    /// same comfortable stride [`TARGET`] was chosen for.
+    const CANVAS: Extent3d = Extent3d::d2(64, 64);
+
+    /// Bytes one full copy of [`CANVAS`] occupies, at four bytes a texel.
+    const CANVAS_BYTES: usize = 64 * 64 * 4;
+
+    /// **The triangle's colour, derived exactly as [`CLEAR`] is.**
+    ///
+    /// [`Format::Rgba8Unorm`] applies no transfer function, so a component
+    /// written as `n / 255` is stored as `round((n / 255) × 255)` = `n`. The
+    /// four values are mutually distinct, none is zero, and none matches a
+    /// channel of [`CLEAR`] — so a channel swizzle, a dropped draw and a clear
+    /// that leaked into the triangle are three different failures.
+    ///
+    /// A fragment shader returns this as a literal rather than interpolating
+    /// it, because an interpolated colour would make the expected value at the
+    /// centre depend on the exact rasterisation of the triangle's vertices.
+    const INK: [f32; 4] = [64.0 / 255.0, 128.0 / 255.0, 192.0 / 255.0, 1.0];
+
+    /// What [`INK`] must read back as, per the derivation above.
+    const INK_TEXEL: [u8; 4] = [0x40, 0x80, 0xC0, 0xFF];
+
+    /// A triangle with no resources at all, in Metal Shading Language.
+    ///
+    /// **This is not the engine's `triangle.slang`, and the difference is one
+    /// thing: bindings.** The committed shader pulls its vertices from a
+    /// `StructuredBuffer`, which Slang lowers to a `[[buffer(0)]]` argument on
+    /// *both* stages — and binding a buffer needs bind groups, which this slice
+    /// deliberately still refuses. So the draw below uses a shader that reads
+    /// nothing and builds its geometry from `[[vertex_id]]`, which is the
+    /// largest triangle this slice can honestly render end to end.
+    ///
+    /// The engine's own artifact is still exercised, one rung lower down:
+    /// `the_engines_own_triangle_artifact_builds_a_real_pipeline` compiles
+    /// `msl/triangle.metal` and builds an `MTLRenderPipelineState` from it. What
+    /// is missing is the draw, not the compile.
+    ///
+    /// The three positions are chosen so that **every corner of the image is
+    /// outside the triangle and the centre is well inside it**, whichever way up
+    /// clip space turns out to be — the shape is symmetric in X and its extreme
+    /// point in Y reaches only 0.8, so no corner at `(±1, ±1)` is covered.
+    ///
+    /// Built with [`INK`] formatted in rather than written out, so the colour
+    /// the shader returns and the colour the assertions expect cannot drift
+    /// apart.
+    fn ink_msl() -> String {
+        format!(
+            "#include <metal_stdlib>\n\
+             using namespace metal;\n\
+             struct VertexOutput {{ float4 position [[position]]; }};\n\
+             [[vertex]] VertexOutput vertexMain(uint index [[vertex_id]]) {{\n\
+                 const float2 corners[3] = {{ float2(0.0, 0.8), float2(-0.8, -0.8), \
+                     float2(0.8, -0.8) }};\n\
+                 VertexOutput out;\n\
+                 out.position = float4(corners[index], 0.0, 1.0);\n\
+                 return out;\n\
+             }}\n\
+             [[fragment]] float4 fragmentMain() {{\n\
+                 return float4({r}, {g}, {b}, {a});\n\
+             }}\n",
+            r = INK[0],
+            g = INK[1],
+            b = INK[2],
+            a = INK[3],
+        )
+    }
+
+    /// The MSL-only descriptor a Metal caller supplies.
+    fn msl_module<'a>(msl: &'a str, label: &'a str) -> ShaderModuleDesc<'a> {
+        ShaderModuleDesc {
+            label: Some(label),
+            spirv: &[],
+            wgsl: None,
+            msl: Some(msl),
+        }
+    }
+
+    /// The empty pipeline layout, which is the only one this slice can make.
+    fn empty_layout(device: &MetalDevice) -> PipelineLayoutHandle {
+        device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("crcbl-mtl empty layout"),
+                bind_group_layouts: &[],
+                push_constants: None,
+            })
+            .expect("a layout naming no bind groups and no push constants")
+    }
+
+    /// The texel at `(x, y)` of a [`CANVAS`]-sized readback.
+    fn texel_at(bytes: &[u8], x: u32, y: u32) -> [u8; 4] {
+        let offset = ((y * CANVAS.width + x) * 4) as usize;
+        bytes[offset..offset + 4]
+            .try_into()
+            .expect("four bytes of an Rgba8Unorm texel")
+    }
+
+    /// **The triangle.** A real `MTLRenderPipelineState`, a real
+    /// `drawPrimitives:`, and the exact texels read back.
+    ///
+    /// Every stage the pipeline slice added is on the path: MSL compiled into an
+    /// `MTLLibrary`, both entry points resolved by name, a pipeline layout, a
+    /// render pipeline descriptor with a colour format, the viewport and scissor
+    /// calls, `setRenderPipelineState:` with the rasteriser state replayed
+    /// beside it, and `drawPrimitives:` — on top of MTL3's pass, blit,
+    /// submission and readback.
+    ///
+    /// **What turns it red.** Dropping the draw, or binding no pipeline, or
+    /// failing the pipeline creation — the centre comes back [`CLEAR_TEXEL`],
+    /// which is asserted against explicitly rather than merely differing from
+    /// [`INK_TEXEL`]. Rasterising the whole target instead of a triangle — the
+    /// four corner assertions. A channel swizzle in
+    /// [`conv::color_write_mask`](crate::conv) or the clear colour — both
+    /// texels are asymmetric in every channel. Writing only some channels —
+    /// the write mask is `ALL` and the alpha assertion is part of the texel
+    /// comparison. Never running the copy, or reading before the command buffer
+    /// completes — every texel comes back [`POISON`], which is neither of the
+    /// two colours the last assertion admits.
+    #[test]
+    fn a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear() {
+        let (_instance, device) = open_device();
+        assert_ne!(
+            INK_TEXEL, CLEAR_TEXEL,
+            "the two colours must differ or no assertion below means anything"
+        );
+
+        let ink = ink_msl();
+        let module = device
+            .create_shader_module(&msl_module(&ink, "crcbl-mtl ink.metal"))
+            .expect("a shader with no bindings compiles");
+        let layout = empty_layout(&device);
+        let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
+        let pipeline = device
+            .create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("crcbl-mtl triangle"),
+                layout,
+                vertex: ShaderEntry {
+                    module,
+                    entry_point: "vertexMain",
+                },
+                fragment: Some(ShaderEntry {
+                    module,
+                    entry_point: "fragmentMain",
+                }),
+                primitive: PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                color_targets: &targets,
+            })
+            .expect("a colour-only pipeline over an Rgba8Unorm target");
+
+        let (image, view) = color_target_of(&device, CANVAS);
+        let readback = readback_buffer(&device, CANVAS_BYTES as u64);
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("crcbl-mtl triangle"),
+            queue,
+        });
+        encoder.begin_render_pass(&RenderPassDesc {
+            label: Some("triangle"),
+            color_attachments: &[ColorAttachment {
+                view,
+                resolve: None,
+                load: LoadOp::Clear,
+                store: StoreOp::Store,
+                clear: ClearValue::color(CLEAR),
+            }],
+            depth_stencil_attachment: None,
+            render_area: Rect2d::from_size(CANVAS.width, CANVAS.height),
+        });
+        encoder.bind_graphics_pipeline(pipeline);
+        encoder.set_viewport(&Viewport::from_size(CANVAS.width, CANVAS.height));
+        encoder.set_scissor(&Rect2d::from_size(CANVAS.width, CANVAS.height));
+        encoder.draw(0..3, 0..1);
+        encoder.end_render_pass();
+        encoder.pipeline_barrier(&Barriers {
+            images: &[ImageBarrier::new(
+                image,
+                ImageSubresourceRange::all(Format::Rgba8Unorm),
+                ResourceState::ColorAttachment,
+                ResourceState::TransferSrc,
+            )],
+            ..Barriers::default()
+        });
+        encoder.copy_image_to_buffer(&whole_image_copy_of(image, readback, CANVAS));
+        let commands = encoder.finish().expect("the recording is complete");
+
+        device
+            .submit(queue, &SubmitInfo::new(&[commands]))
+            .expect("the queue accepts it");
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: Some("the triangle"),
+                buffer: readback,
+                offset: 0,
+                size: CANVAS_BYTES as u64,
+                after: None,
+            })
+            .expect("a HostReadback buffer, in range");
+        let bytes = drain(&device, request, CANVAS_BYTES);
+
+        let (centre_x, centre_y) = (CANVAS.width / 2, CANVAS.height / 2);
+        assert_eq!(
+            texel_at(&bytes, centre_x, centre_y),
+            INK_TEXEL,
+            "the centre of the image is not the triangle's colour, so nothing was drawn"
+        );
+        let last = (CANVAS.width - 1, CANVAS.height - 1);
+        for (x, y) in [(0, 0), (last.0, 0), (0, last.1), (last.0, last.1)] {
+            assert_eq!(
+                texel_at(&bytes, x, y),
+                CLEAR_TEXEL,
+                "corner ({x}, {y}) is not the clear colour, so the draw covered the whole target \
+                 rather than a triangle"
+            );
+        }
+        // And nothing else is in the image at all: with one sample per pixel
+        // and no blending, every texel is exactly one of the two colours. This
+        // is what rules out the poison pattern surviving anywhere, and any
+        // stray content the two point checks would step over.
+        for (index, texel) in bytes.chunks_exact(4).enumerate() {
+            assert!(
+                texel == INK_TEXEL || texel == CLEAR_TEXEL,
+                "texel {index} is {texel:02X?}, which is neither the triangle nor the clear colour"
+            );
+        }
+
+        device.destroy_readback(request);
+        device.destroy_command_buffer(commands);
+        device.destroy_image_view(view);
+        device.destroy_image(image);
+        device.destroy_buffer(readback);
+        device.destroy_graphics_pipeline(pipeline);
+        device.destroy_pipeline_layout(layout);
+        device.destroy_shader_module(module);
+    }
+
+    /// **The engine's own `triangle.slang` artifact, compiled by a real Metal
+    /// compiler and built into a real pipeline.**
+    ///
+    /// This is the half of the engine's shader this slice can exercise. The
+    /// draw is not: `triangle.slang` pulls its geometry from a
+    /// `StructuredBuffer`, Slang lowers that to `[[buffer(0)]]` on both stages,
+    /// and binding a buffer needs the bind groups this slice still refuses.
+    /// Compiling it and resolving both entry points by name is what proves the
+    /// committed MSL is real MSL and that `spirv/manifest.txt`'s entry-point
+    /// names address it — the two claims `crcbl-shaders`' own tests can only
+    /// make textually.
+    ///
+    /// **What turns it red.** A truncated or non-MSL artifact — the module
+    /// creation fails. Slang mangling a name across targets, or the manifest
+    /// recording a name the MSL does not define — `newFunctionWithName:` returns
+    /// nil and pipeline creation reports which name was missing.
+    #[test]
+    fn the_engines_own_triangle_artifact_builds_a_real_pipeline() {
+        use crcbl_shaders::{Stage as ShaderStage, TRIANGLE};
+
+        let (_instance, device) = open_device();
+        let msl = TRIANGLE.msl().expect("the triangle ships an MSL artifact");
+        let module = device
+            .create_shader_module(&msl_module(msl, "triangle.slang"))
+            .expect("the committed MSL compiles on a real Metal compiler");
+
+        let vertex = TRIANGLE
+            .entry_point(ShaderStage::Vertex)
+            .expect("one vertex entry point");
+        let fragment = TRIANGLE
+            .entry_point(ShaderStage::Fragment)
+            .expect("one fragment entry point");
+        let layout = empty_layout(&device);
+        // `Rgba16Float` because that is the target `triangle.slang`'s own
+        // comments say its `color.a` is carried for.
+        let targets = [ColorTargetState::opaque(Format::Rgba16Float)];
+        let pipeline = device
+            .create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("triangle.slang"),
+                layout,
+                vertex: ShaderEntry {
+                    module,
+                    entry_point: vertex,
+                },
+                fragment: Some(ShaderEntry {
+                    module,
+                    entry_point: fragment,
+                }),
+                primitive: PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                color_targets: &targets,
+            })
+            .unwrap_or_else(|error| {
+                panic!("the engine's own triangle does not build a Metal pipeline: {error}")
+            });
+
+        // A name the artifact does not define is reported as the missing
+        // function it is, not as a nil reaching the descriptor.
+        let error = device
+            .create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("triangle.slang, misnamed"),
+                layout,
+                vertex: ShaderEntry {
+                    module,
+                    entry_point: "crcbl_no_such_entry_point",
+                },
+                fragment: None,
+                primitive: PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                color_targets: &[],
+            })
+            .expect_err("the library has no such function");
+        let HalError::ShaderCompilation(text) = error else {
+            panic!("a missing entry point is a shader-compilation failure, got {error:?}");
+        };
+        assert!(text.contains("crcbl_no_such_entry_point"), "{text}");
+
+        device.destroy_graphics_pipeline(pipeline);
+        device.destroy_pipeline_layout(layout);
+        device.destroy_shader_module(module);
+    }
+
+    /// A shader module compiles, and a broken one comes back with **Metal's own
+    /// diagnostic**.
+    ///
+    /// The broken source names an identifier that exists nowhere, so the
+    /// compiler's message must quote it — "use of undeclared identifier
+    /// `crcbl_not_a_symbol`". Asserting on that substring is what distinguishes
+    /// "the error text is Metal's" from "the error text is ours": no wording
+    /// this crate could invent contains a token that only appears inside the
+    /// caller's source.
+    ///
+    /// **What turns it red.** Discarding the `NSError` and returning a fixed
+    /// message — the substring assertion. Returning `Ok` for a source that does
+    /// not compile — the `expect_err`. Reporting it as anything other than a
+    /// compilation failure — the `let else`.
+    #[test]
+    fn a_broken_shader_module_carries_metals_own_message() {
+        let (_instance, device) = open_device();
+
+        let good = device
+            .create_shader_module(&msl_module(&ink_msl(), "good.metal"))
+            .expect("valid MSL compiles");
+        device.destroy_shader_module(good);
+
+        let broken = "[[fragment]] float4 fragmentMain() { return crcbl_not_a_symbol; }";
+        let error = device
+            .create_shader_module(&msl_module(broken, "broken.metal"))
+            .expect_err("that identifier is declared nowhere");
+        let HalError::ShaderCompilation(text) = error else {
+            panic!("a source Metal rejects is a shader-compilation failure, got {error:?}");
+        };
+        assert!(
+            text.contains("broken.metal"),
+            "the message must name the module: {text}"
+        );
+        assert!(
+            text.contains("crcbl_not_a_symbol"),
+            "the message must be Metal's own, which quotes the undeclared identifier: {text}"
+        );
+
+        // And a descriptor with no MSL at all names the gap rather than being
+        // reported as a compiler error — nothing was compiled.
+        let error = device
+            .create_shader_module(&ShaderModuleDesc {
+                label: Some("spirv-only.slang"),
+                spirv: crcbl_shaders::TRIANGLE.spirv(),
+                wgsl: crcbl_shaders::TRIANGLE.wgsl(),
+                msl: None,
+            })
+            .expect_err("this backend compiles MSL and nothing else");
+        let HalError::ShaderCompilation(text) = error else {
+            panic!("an unusable descriptor is a shader-compilation failure, got {error:?}");
+        };
+        assert!(text.contains("only compile MSL"), "{text}");
+        assert!(text.contains("SPIR-V and WGSL"), "{text}");
+    }
+
+    /// Pipelines and their layouts create, destroy, and stop resolving — and a
+    /// compute pipeline is created from a real kernel rather than assumed.
+    ///
+    /// **What turns it red.** Never inserting into the pool — the creations
+    /// fail. Not removing on destroy, or removing without the owner check — the
+    /// stale-handle assertions, which demand `InvalidHandle` specifically:
+    /// "it returned an error" would pass against a pipeline layout that was
+    /// never valid in the first place.
+    #[test]
+    fn pipelines_create_and_then_stop_resolving() {
+        let (_instance, device) = open_device();
+        let layout = empty_layout(&device);
+
+        let compute_msl = "\
+#include <metal_stdlib>\n\
+using namespace metal;\n\
+[[kernel]] void computeMain(uint3 id [[thread_position_in_grid]]) {}\n";
+        let compute_module = device
+            .create_shader_module(&msl_module(compute_msl, "crcbl-mtl kernel.metal"))
+            .expect("a kernel compiles");
+        assert!(
+            device.caps().features.contains(Features::COMPUTE),
+            "this backend reports COMPUTE because this call is the one that backs it"
+        );
+        let compute = device
+            .create_compute_pipeline(&ComputePipelineDesc {
+                label: Some("crcbl-mtl compute"),
+                layout,
+                compute: ShaderEntry {
+                    module: compute_module,
+                    entry_point: "computeMain",
+                },
+            })
+            .expect("a kernel with no bindings builds a compute pipeline");
+
+        let ink = ink_msl();
+        let module = device
+            .create_shader_module(&msl_module(&ink, "crcbl-mtl ink.metal"))
+            .expect("valid MSL compiles");
+        let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
+        let graphics = device
+            .create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("crcbl-mtl graphics"),
+                layout,
+                vertex: ShaderEntry {
+                    module,
+                    entry_point: "vertexMain",
+                },
+                fragment: Some(ShaderEntry {
+                    module,
+                    entry_point: "fragmentMain",
+                }),
+                primitive: PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                color_targets: &targets,
+            })
+            .expect("a colour-only pipeline");
+
+        device.destroy_compute_pipeline(compute);
+        device.destroy_graphics_pipeline(graphics);
+        device.destroy_shader_module(module);
+        device.destroy_shader_module(compute_module);
+        device.destroy_pipeline_layout(layout);
+
+        // A destroyed module cannot be named by a pipeline, and a destroyed
+        // layout cannot back one.
+        let error = device
+            .create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: None,
+                layout,
+                vertex: ShaderEntry {
+                    module,
+                    entry_point: "vertexMain",
+                },
+                fragment: None,
+                primitive: PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                color_targets: &[],
+            })
+            .expect_err("both the layout and the module were destroyed");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "pipeline layout"),
+            "{error:?}"
+        );
+    }
+
+    /// A pipeline layout is the empty one or a refusal, and the two refusals are
+    /// different errors because they have different causes.
+    ///
+    /// **What turns it red.** Accepting a push-constant range — the seam
+    /// requires the failure *here* rather than at the `push_constants` call, and
+    /// this backend reports no [`Features::PUSH_CONSTANTS`]. Accepting a
+    /// non-empty bind-group list — nothing could satisfy it, since
+    /// `create_bind_group_layout` still refuses, so the handle would name
+    /// nothing. Collapsing the two onto one error — the two `matches!` demand
+    /// different variants.
+    #[test]
+    fn a_pipeline_layout_is_empty_or_refused_by_cause() {
+        let (_instance, device) = open_device();
+        assert!(
+            !device.caps().features.contains(Features::PUSH_CONSTANTS),
+            "the refusal below is only correct while the feature is absent"
+        );
+
+        let layout = empty_layout(&device);
+        device.destroy_pipeline_layout(layout);
+
+        let error = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("with constants"),
+                bind_group_layouts: &[],
+                push_constants: Some(crcbl_hal::PushConstantRange {
+                    stages: crcbl_hal::ShaderStages::ALL,
+                    offset: 0,
+                    size: 64,
+                }),
+            })
+            .expect_err("this device reports no PUSH_CONSTANTS");
+        let HalError::InvalidDescriptor(text) = error else {
+            panic!("a feature this device lacks is a descriptor error, got {error:?}");
+        };
+        assert!(text.contains("PUSH_CONSTANTS"), "{text}");
+
+        let error = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("with groups"),
+                bind_group_layouts: &[Handle::from_bits(1 << 32).expect("generation 1")],
+                push_constants: None,
+            })
+            .expect_err("no bind group layout can exist yet");
+        assert!(
+            matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Metal),
+            "{error:?}"
         );
     }
 
@@ -3082,16 +3637,6 @@ mod tests {
 
         let refusals: Vec<(&str, HalError)> = vec![
             (
-                "shader modules",
-                device
-                    .create_shader_module(&ShaderModuleDesc {
-                        label: None,
-                        spirv: &[],
-                        wgsl: None,
-                    })
-                    .expect_err("no MSL path yet"),
-            ),
-            (
                 "bind group layouts",
                 device
                     .create_bind_group_layout(&BindGroupLayoutDesc {
@@ -3099,16 +3644,6 @@ mod tests {
                         entries: &[],
                     })
                     .expect_err("no argument buffers yet"),
-            ),
-            (
-                "pipeline layouts",
-                device
-                    .create_pipeline_layout(&PipelineLayoutDesc {
-                        label: None,
-                        bind_group_layouts: &[],
-                        push_constants: None,
-                    })
-                    .expect_err("no pipeline layouts yet"),
             ),
             (
                 "query sets",
@@ -3121,19 +3656,6 @@ mod tests {
                     .expect_err("no counter sampling yet"),
             ),
             (
-                "compute pipelines",
-                device
-                    .create_compute_pipeline(&ComputePipelineDesc {
-                        label: None,
-                        layout: Handle::from_bits(1 << 32).expect("generation 1"),
-                        compute: crcbl_hal::ShaderEntry {
-                            module: Handle::from_bits(1 << 32).expect("generation 1"),
-                            entry_point: "main",
-                        },
-                    })
-                    .expect_err("no MSL path yet"),
-            ),
-            (
                 "bind groups",
                 device
                     .create_bind_group(&BindGroupDesc {
@@ -3143,6 +3665,16 @@ mod tests {
                         variable_count: None,
                     })
                     .expect_err("no argument buffers yet"),
+            ),
+            (
+                "pipeline layouts naming bind groups",
+                device
+                    .create_pipeline_layout(&PipelineLayoutDesc {
+                        label: None,
+                        bind_group_layouts: &[Handle::from_bits(1 << 32).expect("generation 1")],
+                        push_constants: None,
+                    })
+                    .expect_err("no bind group layout can exist to name"),
             ),
         ];
         assert!(!refusals.is_empty(), "nothing to check");
@@ -3170,7 +3702,13 @@ mod tests {
         type Refused = (&'static str, fn(&mut dyn CommandEncoder));
 
         let recording: &[Refused] = &[
-            ("draws", |encoder| encoder.draw(0..3, 0..1)),
+            ("indexed draws", |encoder| {
+                encoder.bind_index_buffer(
+                    Handle::from_bits(1 << 32).expect("generation 1"),
+                    0,
+                    crcbl_hal::IndexFormat::Uint32,
+                );
+            }),
             ("dispatches", |encoder| encoder.dispatch(1, 1, 1)),
             ("bind groups", |encoder| {
                 encoder.push_constants(

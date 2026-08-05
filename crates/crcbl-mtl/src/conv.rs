@@ -32,14 +32,17 @@
 //! hand; a table cannot answer them and must not pretend to.
 
 use crcbl_hal::{
-    BufferImageCopy, CompareOp, Extent3d, FilterMode, Format, ImageAspect, ImageType, ImageUsage,
-    ImageViewType, LoadOp, MemoryLocation, Offset3d, SamplerAddressMode, StoreOp,
+    BlendFactor, BlendOp, BufferImageCopy, ColorWrites, CompareOp, CullMode, Extent3d, FilterMode,
+    Format, FrontFace, ImageAspect, ImageType, ImageUsage, ImageViewType, LoadOp, MemoryLocation,
+    Offset3d, PolygonMode, PrimitiveTopology, SamplerAddressMode, StencilOp, StoreOp,
 };
 use objc2_foundation::NSUInteger;
 use objc2_metal::{
-    MTLCPUCacheMode, MTLClearColor, MTLCompareFunction, MTLLoadAction, MTLOrigin, MTLPixelFormat,
-    MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerMinMagFilter, MTLSamplerMipFilter,
-    MTLSize, MTLStorageMode, MTLStoreAction, MTLTextureType, MTLTextureUsage,
+    MTLBlendFactor, MTLBlendOperation, MTLCPUCacheMode, MTLClearColor, MTLColorWriteMask,
+    MTLCompareFunction, MTLCullMode, MTLDepthClipMode, MTLLoadAction, MTLOrigin, MTLPixelFormat,
+    MTLPrimitiveType, MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerMinMagFilter,
+    MTLSamplerMipFilter, MTLSize, MTLStencilOperation, MTLStorageMode, MTLStoreAction,
+    MTLTextureType, MTLTextureUsage, MTLTriangleFillMode, MTLWinding,
 };
 
 /// The seam's texel format as Metal spells it.
@@ -338,6 +341,142 @@ pub(crate) fn compare_function(op: CompareOp) -> MTLCompareFunction {
         CompareOp::NotEqual => MTLCompareFunction::NotEqual,
         CompareOp::GreaterOrEqual => MTLCompareFunction::GreaterEqual,
         CompareOp::Always => MTLCompareFunction::Always,
+    }
+}
+
+// --- pipelines -------------------------------------------------------------
+
+/// How vertices assemble into primitives.
+///
+/// Metal takes this at the **draw call** rather than in the pipeline state —
+/// `MTLRenderPipelineDescriptor::inputPrimitiveTopology` is a coarser
+/// *topology class*, needed only for layered rendering and tessellation — so a
+/// graphics pipeline entry carries this value and
+/// [`CommandEncoder::draw`](crcbl_hal::CommandEncoder::draw) passes it to
+/// `drawPrimitives:`. That is why the seam's per-pipeline topology survives a
+/// backend whose draws are per-call.
+///
+/// The seam has no triangle *fan* and Metal has no line loop, so the five
+/// variants line up one for one with nothing left over on either side.
+pub(crate) const fn primitive_type(topology: PrimitiveTopology) -> MTLPrimitiveType {
+    match topology {
+        PrimitiveTopology::PointList => MTLPrimitiveType::Point,
+        PrimitiveTopology::LineList => MTLPrimitiveType::Line,
+        PrimitiveTopology::LineStrip => MTLPrimitiveType::LineStrip,
+        PrimitiveTopology::TriangleList => MTLPrimitiveType::Triangle,
+        PrimitiveTopology::TriangleStrip => MTLPrimitiveType::TriangleStrip,
+    }
+}
+
+/// Which faces are discarded.
+pub(crate) const fn cull_mode(mode: CullMode) -> MTLCullMode {
+    match mode {
+        CullMode::None => MTLCullMode::None,
+        CullMode::Front => MTLCullMode::Front,
+        CullMode::Back => MTLCullMode::Back,
+    }
+}
+
+/// Which winding is front-facing.
+///
+/// **No flip.** `crcbl-vk` passes a negative viewport height to put Vulkan's
+/// inverted Y the right way up, which reverses the winding a triangle appears
+/// to have and is why a Vulkan backend has to think about this. Metal's
+/// framebuffer origin is already top-left with Y increasing downwards — the
+/// convention the seam is written in, and the reason `set_viewport` performs no
+/// flip either — so `Ccw` here means counter-clockwise on screen exactly as the
+/// seam says.
+pub(crate) const fn winding(face: FrontFace) -> MTLWinding {
+    match face {
+        FrontFace::Ccw => MTLWinding::CounterClockwise,
+        FrontFace::Cw => MTLWinding::Clockwise,
+    }
+}
+
+/// Solid or wireframe.
+pub(crate) const fn fill_mode(mode: PolygonMode) -> MTLTriangleFillMode {
+    match mode {
+        PolygonMode::Fill => MTLTriangleFillMode::Fill,
+        PolygonMode::Line => MTLTriangleFillMode::Lines,
+    }
+}
+
+/// Whether fragments outside the depth range are clamped or clipped.
+pub(crate) const fn depth_clip_mode(clamp: bool) -> MTLDepthClipMode {
+    if clamp {
+        MTLDepthClipMode::Clamp
+    } else {
+        MTLDepthClipMode::Clip
+    }
+}
+
+/// A blend factor.
+///
+/// The seam's ten factors are the subset every target has; Metal's `Source1*`
+/// dual-source family and its `BlendColor` constants have no seam spelling and
+/// are therefore unreachable rather than approximated.
+pub(crate) const fn blend_factor(factor: BlendFactor) -> MTLBlendFactor {
+    match factor {
+        BlendFactor::Zero => MTLBlendFactor::Zero,
+        BlendFactor::One => MTLBlendFactor::One,
+        BlendFactor::Src => MTLBlendFactor::SourceColor,
+        BlendFactor::OneMinusSrc => MTLBlendFactor::OneMinusSourceColor,
+        BlendFactor::SrcAlpha => MTLBlendFactor::SourceAlpha,
+        BlendFactor::OneMinusSrcAlpha => MTLBlendFactor::OneMinusSourceAlpha,
+        BlendFactor::Dst => MTLBlendFactor::DestinationColor,
+        BlendFactor::OneMinusDst => MTLBlendFactor::OneMinusDestinationColor,
+        BlendFactor::DstAlpha => MTLBlendFactor::DestinationAlpha,
+        BlendFactor::OneMinusDstAlpha => MTLBlendFactor::OneMinusDestinationAlpha,
+    }
+}
+
+/// How blended terms combine.
+pub(crate) const fn blend_operation(op: BlendOp) -> MTLBlendOperation {
+    match op {
+        BlendOp::Add => MTLBlendOperation::Add,
+        BlendOp::Subtract => MTLBlendOperation::Subtract,
+        BlendOp::ReverseSubtract => MTLBlendOperation::ReverseSubtract,
+        BlendOp::Min => MTLBlendOperation::Min,
+        BlendOp::Max => MTLBlendOperation::Max,
+    }
+}
+
+/// Which channels a colour target writes.
+///
+/// **The two bit orders are opposite, and this is the one mapping in this file
+/// a bit-cast would silently corrupt.** The seam numbers its channels
+/// `R = 1 << 0 … A = 1 << 3`; Metal numbers them the other way round —
+/// `MTLColorWriteMaskAlpha` is `1 << 0` and `MTLColorWriteMaskRed` is `1 << 3`.
+/// So the two masks *look* interchangeable (both are four low bits, both spell
+/// "all" as `0xF`) and are exact mirrors of each other. Writing only red would
+/// write only alpha. Hence the flag-by-flag rebuild below and
+/// `color_write_masks_are_not_bit_compatible` beside it.
+pub(crate) fn color_write_mask(writes: ColorWrites) -> MTLColorWriteMask {
+    let mut out = MTLColorWriteMask::None;
+    for (seam, metal) in [
+        (ColorWrites::R, MTLColorWriteMask::Red),
+        (ColorWrites::G, MTLColorWriteMask::Green),
+        (ColorWrites::B, MTLColorWriteMask::Blue),
+        (ColorWrites::A, MTLColorWriteMask::Alpha),
+    ] {
+        if writes.contains(seam) {
+            out |= metal;
+        }
+    }
+    out
+}
+
+/// What a stencil test outcome does to the stencil buffer.
+pub(crate) const fn stencil_operation(op: StencilOp) -> MTLStencilOperation {
+    match op {
+        StencilOp::Keep => MTLStencilOperation::Keep,
+        StencilOp::Zero => MTLStencilOperation::Zero,
+        StencilOp::Replace => MTLStencilOperation::Replace,
+        StencilOp::Invert => MTLStencilOperation::Invert,
+        StencilOp::IncrementClamp => MTLStencilOperation::IncrementClamp,
+        StencilOp::DecrementClamp => MTLStencilOperation::DecrementClamp,
+        StencilOp::IncrementWrap => MTLStencilOperation::IncrementWrap,
+        StencilOp::DecrementWrap => MTLStencilOperation::DecrementWrap,
     }
 }
 
@@ -1021,6 +1160,145 @@ mod tests {
             copy_footprint(Format::Rgba8Unorm, ImageAspect::DEPTH, &packed),
             None,
             "a colour format has no depth plane"
+        );
+    }
+
+    /// **The mask this file is most exposed to.** The seam and Metal number
+    /// their colour channels in opposite bit orders, so a mask that was
+    /// bit-cast rather than rebuilt writes the mirror-image set of channels —
+    /// red becomes alpha — while `ALL` and `None` keep working, which is how it
+    /// survives every casual test.
+    ///
+    /// **What turns it red:** replacing `color_write_mask`'s loop with
+    /// `MTLColorWriteMask(writes.bits() as NSUInteger)` fails the first two
+    /// assertions and leaves the `ALL`/`None` ones passing, which is the point.
+    #[test]
+    fn color_write_masks_are_not_bit_compatible() {
+        assert_eq!(color_write_mask(ColorWrites::R), MTLColorWriteMask::Red);
+        assert_eq!(color_write_mask(ColorWrites::A), MTLColorWriteMask::Alpha);
+        assert_ne!(
+            MTLColorWriteMask::Red.bits(),
+            ColorWrites::R.bits() as NSUInteger,
+            "the two bit orders agreed, so this test's whole premise is gone"
+        );
+        assert_eq!(color_write_mask(ColorWrites::ALL), MTLColorWriteMask::All);
+        assert_eq!(
+            color_write_mask(ColorWrites::empty()),
+            MTLColorWriteMask::None
+        );
+        assert_eq!(
+            color_write_mask(ColorWrites::R | ColorWrites::G),
+            MTLColorWriteMask::Red | MTLColorWriteMask::Green
+        );
+    }
+
+    /// Every pipeline enum, with no two seam variants collapsing onto one Metal
+    /// value — the same injectivity property the format table has, and the same
+    /// failure if it is lost: the pipeline is created and draws the wrong
+    /// thing.
+    #[test]
+    fn pipeline_enums_are_injective() {
+        let topologies = [
+            PrimitiveTopology::PointList,
+            PrimitiveTopology::LineList,
+            PrimitiveTopology::LineStrip,
+            PrimitiveTopology::TriangleList,
+            PrimitiveTopology::TriangleStrip,
+        ];
+        assert!(!topologies.is_empty(), "nothing to check");
+        let mut seen = Vec::new();
+        for topology in topologies {
+            let metal = primitive_type(topology);
+            assert!(!seen.contains(&metal), "{topology:?} duplicates {metal:?}");
+            seen.push(metal);
+        }
+        assert_eq!(
+            primitive_type(PrimitiveTopology::default()),
+            MTLPrimitiveType::Triangle,
+            "the seam's default topology is a triangle list"
+        );
+
+        let factors = [
+            BlendFactor::Zero,
+            BlendFactor::One,
+            BlendFactor::Src,
+            BlendFactor::OneMinusSrc,
+            BlendFactor::SrcAlpha,
+            BlendFactor::OneMinusSrcAlpha,
+            BlendFactor::Dst,
+            BlendFactor::OneMinusDst,
+            BlendFactor::DstAlpha,
+            BlendFactor::OneMinusDstAlpha,
+        ];
+        assert!(!factors.is_empty(), "nothing to check");
+        let mut seen = Vec::new();
+        for factor in factors {
+            let metal = blend_factor(factor);
+            assert!(!seen.contains(&metal), "{factor:?} duplicates {metal:?}");
+            seen.push(metal);
+        }
+
+        let ops = [
+            StencilOp::Keep,
+            StencilOp::Zero,
+            StencilOp::Replace,
+            StencilOp::Invert,
+            StencilOp::IncrementClamp,
+            StencilOp::DecrementClamp,
+            StencilOp::IncrementWrap,
+            StencilOp::DecrementWrap,
+        ];
+        assert!(!ops.is_empty(), "nothing to check");
+        let mut seen = Vec::new();
+        for op in ops {
+            let metal = stencil_operation(op);
+            assert!(!seen.contains(&metal), "{op:?} duplicates {metal:?}");
+            seen.push(metal);
+        }
+        // The pair Metal orders differently from the seam's declaration order:
+        // `Invert` is 5 in Metal and sits between the two clamps in the seam's
+        // enum, so a positional cast would swap it with `IncrementWrap`.
+        assert_eq!(
+            stencil_operation(StencilOp::Invert),
+            MTLStencilOperation::Invert
+        );
+        assert_eq!(
+            stencil_operation(StencilOp::IncrementWrap),
+            MTLStencilOperation::IncrementWrap
+        );
+
+        assert_eq!(
+            blend_operation(BlendOp::Subtract),
+            MTLBlendOperation::Subtract
+        );
+        assert_eq!(
+            blend_operation(BlendOp::ReverseSubtract),
+            MTLBlendOperation::ReverseSubtract,
+            "Subtract and ReverseSubtract differ only in which term is negated"
+        );
+        assert_eq!(cull_mode(CullMode::Front), MTLCullMode::Front);
+        assert_eq!(cull_mode(CullMode::Back), MTLCullMode::Back);
+        assert_eq!(cull_mode(CullMode::default()), MTLCullMode::None);
+        assert_eq!(fill_mode(PolygonMode::Line), MTLTriangleFillMode::Lines);
+        assert_eq!(fill_mode(PolygonMode::default()), MTLTriangleFillMode::Fill);
+        assert_eq!(depth_clip_mode(true), MTLDepthClipMode::Clamp);
+        assert_eq!(depth_clip_mode(false), MTLDepthClipMode::Clip);
+    }
+
+    /// Winding is **not** flipped, and that is a real difference from
+    /// `crcbl-vk`, whose negative viewport height reverses it.
+    ///
+    /// **What turns it red:** swapping the two arms of `winding`, which is the
+    /// change someone porting the Vulkan backend's Y-flip reasoning would make
+    /// — and which would cull exactly the visible half of every model.
+    #[test]
+    fn front_face_winding_is_not_flipped_for_metals_framebuffer_origin() {
+        assert_eq!(winding(FrontFace::Ccw), MTLWinding::CounterClockwise);
+        assert_eq!(winding(FrontFace::Cw), MTLWinding::Clockwise);
+        assert_eq!(
+            winding(FrontFace::default()),
+            MTLWinding::CounterClockwise,
+            "the seam's default winding is counter-clockwise"
         );
     }
 

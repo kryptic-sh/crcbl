@@ -132,6 +132,14 @@ pub(crate) struct MetalCommandEncoder {
     labels: Vec<Label>,
     /// Whether the open render pass pushed a label of its own.
     render_pass_label: bool,
+    /// The topology of the bound graphics pipeline, which Metal takes at the
+    /// draw call rather than in the pipeline object.
+    ///
+    /// `None` means nothing is bound. It is cleared by [`Self::close_open`]
+    /// along with the encoder, because a render encoder's pipeline state does
+    /// not survive `endEncoding` — keeping it would let a draw in the *next*
+    /// pass proceed with no pipeline set and let Metal raise.
+    bound_primitive: Option<objc2_metal::MTLPrimitiveType>,
 }
 
 impl core::fmt::Debug for MetalCommandEncoder {
@@ -177,6 +185,7 @@ impl MetalCommandEncoder {
             in_compute_pass: false,
             labels: Vec::new(),
             render_pass_label: false,
+            bound_primitive: None,
         };
         // The queue is checked before the command buffer is taken, so a handle
         // belonging to another device is reported as the crossing it is rather
@@ -221,6 +230,9 @@ impl MetalCommandEncoder {
             encoder.endEncoding();
         }
         self.open = Open::None;
+        // Pipeline state belongs to the encoder that is going away; see
+        // `bound_primitive`.
+        self.bound_primitive = None;
     }
 
     /// The blit encoder, opening one if the command buffer has none.
@@ -884,17 +896,71 @@ impl CommandEncoder for MetalCommandEncoder {
         encoder.setStencilReferenceValue(reference);
     }
 
-    fn bind_graphics_pipeline(&mut self, _pipeline: GraphicsPipelineHandle) {
-        self.fail(pipeline_slice(
-            "graphics pipelines (the Metal pipeline slice)",
-        ));
+    /// Sets the pipeline state, **and the rasteriser state Metal keeps on the
+    /// encoder rather than in the pipeline object**.
+    ///
+    /// Cull mode, winding, fill mode, depth clip, depth bias, the depth/stencil
+    /// test and the stencil reference are all encoder calls in Metal and all
+    /// fields of [`GraphicsPipelineDesc`](crcbl_hal::GraphicsPipelineDesc)
+    /// here, so binding replays every one of them from
+    /// `crcbl_mtl::pipeline`'s `RasterState`. Leaving any of them out would
+    /// make a pipeline draw with whatever the *previous* pipeline set, which is
+    /// the class of bug that shows up as one pass rendering correctly and the
+    /// next one inheriting its culling.
+    ///
+    /// Outside a render pass this is a caller error rather than a no-op: there
+    /// is no Metal object to hold the state, so silently dropping it would mean
+    /// the following draw used none of it.
+    fn bind_graphics_pipeline(&mut self, pipeline: GraphicsPipelineHandle) {
+        if !self.ok() {
+            return;
+        }
+        let encoder = match &self.open {
+            Open::Render(encoder) => encoder.clone(),
+            _ => {
+                self.fail(HalError::InvalidDescriptor(
+                    "bind_graphics_pipeline outside a render pass: Metal keeps pipeline state on \
+                     the render encoder, so there is nowhere to record it"
+                        .to_string(),
+                ));
+                return;
+            }
+        };
+        let bound = match self.device.graphics_pipeline_raw(pipeline) {
+            Ok(bound) => bound,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        encoder.setRenderPipelineState(&bound.raw);
+        encoder.setCullMode(bound.raster.cull);
+        encoder.setFrontFacingWinding(bound.raster.winding);
+        encoder.setTriangleFillMode(bound.raster.fill);
+        encoder.setDepthClipMode(bound.raster.clip);
+        let [constant, slope_scale, clamp] = bound.raster.bias;
+        encoder.setDepthBias_slopeScale_clamp(constant, slope_scale, clamp);
+        // Nil restores Metal's default state — always pass, never write —
+        // which is exactly what `depth_stencil: None` means on the seam.
+        encoder.setDepthStencilState(bound.depth_stencil.as_deref());
+        if let Some(reference) = bound.raster.stencil_reference {
+            encoder.setStencilReferenceValue(reference);
+        }
+        self.bound_primitive = Some(bound.raster.primitive);
     }
 
+    /// Refused, because Metal has nowhere to put it until the draw.
+    ///
+    /// `drawIndexedPrimitives:` takes the index buffer, its offset and its type
+    /// as **arguments of the draw itself**, so there is no encoder state this
+    /// could set — the seam's bind-then-draw split has no Metal counterpart, and
+    /// the backend has to carry the binding across to
+    /// [`draw_indexed`](CommandEncoder::draw_indexed) itself. That is a small
+    /// piece of state with one real design question attached (what a draw with
+    /// no index buffer bound should do), and it belongs with the indexed draw
+    /// rather than beside a plain one.
     fn bind_index_buffer(&mut self, _buffer: BufferHandle, _offset: u64, _format: IndexFormat) {
-        // Nothing to bind it for: Metal takes the index buffer as an argument
-        // of the draw call itself, so there is no state to set until there is a
-        // draw. The pipeline slice is where both arrive together.
-        self.fail(pipeline_slice("indexed draws (the Metal pipeline slice)"));
+        self.fail(later("indexed draws (the Metal indexed-draw slice)"));
     }
 
     fn bind_group(
@@ -919,20 +985,76 @@ impl CommandEncoder for MetalCommandEncoder {
 
     // --- draws ---
 
-    fn draw(&mut self, _vertices: Range<u32>, _instances: Range<u32>) {
-        self.fail(pipeline_slice("draws (the Metal pipeline slice)"));
+    /// `drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:`.
+    ///
+    /// The five-argument form always, not the three-argument one: the seam
+    /// hands over an instance *range*, and the short form has no base instance
+    /// to put its start in. Passing `0..1` through the long form costs nothing
+    /// and keeps one code path.
+    ///
+    /// # The topology comes from the pipeline, and there must be one
+    ///
+    /// Metal takes the primitive type as a **draw** argument while the seam
+    /// declares it on the pipeline, so this reads the value
+    /// `bind_graphics_pipeline` recorded. With nothing bound there is no
+    /// topology and no pipeline state, and Metal answers that by raising —
+    /// which aborts the process — so it is refused here while it is still an
+    /// error a caller can catch.
+    ///
+    /// An empty vertex or instance range draws nothing and is not an error: the
+    /// seam's ranges are half-open and `0..0` is a legitimate "no work this
+    /// frame" a culling pass produces.
+    fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
+        if !self.ok() {
+            return;
+        }
+        let encoder = match &self.open {
+            Open::Render(encoder) => encoder.clone(),
+            _ => {
+                self.fail(HalError::InvalidDescriptor(
+                    "draw outside a render pass; the seam places every draw inside one".to_string(),
+                ));
+                return;
+            }
+        };
+        let Some(primitive) = self.bound_primitive else {
+            self.fail(HalError::InvalidDescriptor(
+                "draw with no graphics pipeline bound: Metal raises rather than reporting it, and \
+                 a raise aborts the process"
+                    .to_string(),
+            ));
+            return;
+        };
+        if vertices.is_empty() || instances.is_empty() {
+            return;
+        }
+        // SAFETY: `objc2` marks this unsafe because Metal bounds-checks neither
+        // count. Neither is a bound into an object here — a draw's vertex count
+        // indexes whatever the vertex shader chooses to read, not a buffer this
+        // call names — and both ranges were just checked to be non-empty, which
+        // is the one value (`0`) Metal's own validation layer objects to. The
+        // encoder is kept alive by the `Retained` held across the call.
+        unsafe {
+            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
+                primitive,
+                to_ns(u64::from(vertices.start)),
+                to_ns(u64::from(vertices.end - vertices.start)),
+                to_ns(u64::from(instances.end - instances.start)),
+                to_ns(u64::from(instances.start)),
+            );
+        }
     }
 
     fn draw_indexed(&mut self, _indices: Range<u32>, _base_vertex: i32, _instances: Range<u32>) {
-        self.fail(pipeline_slice("draws (the Metal pipeline slice)"));
+        self.fail(later("indexed draws (the Metal indexed-draw slice)"));
     }
 
     fn draw_indirect(&mut self, _draw: &DrawIndirect) {
-        self.fail(pipeline_slice("draws (the Metal pipeline slice)"));
+        self.fail(later("indirect draws (the Metal indirect slice)"));
     }
 
     fn draw_indexed_indirect(&mut self, _draw: &DrawIndirect) {
-        self.fail(pipeline_slice("draws (the Metal pipeline slice)"));
+        self.fail(later("indirect draws (the Metal indirect slice)"));
     }
 
     fn draw_indirect_count(&mut self, _draw: &DrawIndirectCount) {
@@ -970,22 +1092,23 @@ impl CommandEncoder for MetalCommandEncoder {
         self.in_compute_pass = false;
     }
 
+    /// Refused, even though `create_compute_pipeline` now succeeds.
+    ///
+    /// A compute pipeline is bound onto an `MTLComputeCommandEncoder`, and
+    /// [`begin_compute_pass`](CommandEncoder::begin_compute_pass) still opens
+    /// none — see its own docs. Opening one here instead would put the encoder's
+    /// lifetime in a different place from the pass's, which is the seam's shape
+    /// and not Metal's; the dispatch slice moves both together.
     fn bind_compute_pipeline(&mut self, _pipeline: ComputePipelineHandle) {
-        self.fail(pipeline_slice(
-            "compute pipelines (the Metal pipeline slice)",
-        ));
+        self.fail(later("compute dispatches (the Metal dispatch slice)"));
     }
 
     fn dispatch(&mut self, _x: u32, _y: u32, _z: u32) {
-        self.fail(pipeline_slice(
-            "compute dispatches (the Metal pipeline slice)",
-        ));
+        self.fail(later("compute dispatches (the Metal dispatch slice)"));
     }
 
     fn dispatch_indirect(&mut self, _args: BufferHandle, _offset: u64) {
-        self.fail(pipeline_slice(
-            "compute dispatches (the Metal pipeline slice)",
-        ));
+        self.fail(later("compute dispatches (the Metal dispatch slice)"));
     }
 
     // --- queries ---
@@ -1172,11 +1295,11 @@ struct CopyPlan {
     slices: Range<NSUInteger>,
 }
 
-/// The refusal for anything that needs a pipeline state object.
+/// The refusal for a recording call whose slice has not arrived.
 ///
 /// `what` is already the whole phrase, so a reader of the call site sees the
 /// message a caller will get rather than a key into a table somewhere else.
-fn pipeline_slice(what: &'static str) -> HalError {
+fn later(what: &'static str) -> HalError {
     crate::MetalInstance::not_yet(what)
 }
 

@@ -15,10 +15,10 @@
 //! 1. Parses `spirv/manifest.txt`.
 //! 2. Fails if any source's SHA-256 differs from the recorded one — "someone
 //!    edited the `.slang` and did not regenerate".
-//! 3. Fails if any artifact's SHA-256 differs — "the `.spv` or `.wgsl` is
-//!    truncated, corrupt, or was replaced by hand".
+//! 3. Fails if any artifact's SHA-256 differs — "the `.spv`, `.wgsl` or
+//!    `.metal` is truncated, corrupt, or was replaced by hand".
 //! 4. If a `slangc` matching the pinned version happens to be present,
-//!    recompiles **both** targets and demands the bytes match, which catches
+//!    recompiles **every** target and demands the bytes match, which catches
 //!    the one case hashing cannot: a manifest regenerated against a *different*
 //!    source than the one committed.
 //! 5. Writes `$OUT_DIR/shaders.rs`, the static table `src/lib.rs` includes.
@@ -73,10 +73,20 @@ fn main() {
         let spirv_path = root.join(&record.spirv);
         println!("cargo::rerun-if-changed={}", record.source);
         println!("cargo::rerun-if-changed={}", record.spirv);
-        if !record.wgsl.is_empty() {
-            let wgsl_path = root.join(&record.wgsl);
-            println!("cargo::rerun-if-changed={}", record.wgsl);
-            check_hash(&wgsl_path, &record.wgsl_sha256, record, "WGSL artifact");
+
+        // The two optional columns, handled identically. Absent is a legal
+        // state for both — a manifest predating the target — and an absent one
+        // is skipped rather than compared against an empty hash.
+        let optional = [
+            (Target::Wgsl, &record.wgsl, &record.wgsl_sha256),
+            (Target::Msl, &record.msl, &record.msl_sha256),
+        ];
+        for (target, artifact, hash) in optional {
+            if artifact.is_empty() {
+                continue;
+            }
+            println!("cargo::rerun-if-changed={artifact}");
+            check_hash(&root.join(artifact), hash, record, target.artifact_name());
         }
 
         check_hash(&source_path, &record.source_sha256, record, "source");
@@ -92,15 +102,18 @@ fn main() {
                 &record.spirv,
                 &spirv_path,
             );
-            if !record.wgsl.is_empty() {
+            for (target, artifact, _) in optional {
+                if artifact.is_empty() {
+                    continue;
+                }
                 recompile(
                     slangc,
                     &manifest,
                     record,
                     &root,
-                    Target::Wgsl,
-                    &record.wgsl,
-                    &root.join(&record.wgsl),
+                    target,
+                    artifact,
+                    &root.join(artifact),
                 );
             }
         }
@@ -124,20 +137,8 @@ fn main() {
             })
             .collect();
 
-        // WGSL include_bytes or empty.
-        //
-        // `{:?}` rather than `{}` for the path, as for `name`/`source` below: a
-        // manifest path containing a quote or a backslash would otherwise close
-        // the generated string literal and inject arbitrary code into
-        // `$OUT_DIR/shaders.rs`.
-        let wgsl_include = if record.wgsl.is_empty() {
-            "b\"\"".to_string()
-        } else {
-            format!(
-                "include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/\", {wgsl:?}))",
-                wgsl = record.wgsl
-            )
-        };
+        let wgsl_include = optional_include(&record.wgsl);
+        let msl_include = optional_include(&record.msl);
 
         generated.push_str(&format!(
             "/// The `{name}` shader, compiled from `{source}`.\n\
@@ -147,6 +148,7 @@ fn main() {
                  {hash:?},\n    \
                  include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/\", {spirv:?})),\n    \
                  {wgsl_include},\n    \
+                 {msl_include},\n    \
                  &[{entries}],\n\
              );\n\n",
             name = record.name,
@@ -175,6 +177,20 @@ fn main() {
     if let Err(error) = std::fs::write(&out, generated) {
         fail(&format!("could not write {}: {error}", out.display()));
     }
+}
+
+/// The generated initialiser for an optional artifact column: an
+/// `include_bytes!` of the committed file, or `b""` for a shader that has none.
+///
+/// `{:?}` rather than `{}` for the path, as for the `name`/`source` fields: a
+/// manifest path containing a quote or a backslash would otherwise close the
+/// generated string literal and inject arbitrary code into
+/// `$OUT_DIR/shaders.rs`.
+fn optional_include(artifact: &str) -> String {
+    if artifact.is_empty() {
+        return "b\"\"".to_string();
+    }
+    format!("include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/\", {artifact:?}))")
 }
 
 /// Reads a file, or explains which one was missing.
@@ -288,14 +304,16 @@ fn names_version(line: &str, pinned: &str) -> bool {
 
 /// One of Slang's output targets, and the artifact column it fills.
 ///
-/// Both columns get the same treatment for the same reason: a manifest hash
+/// Every column gets the same treatment for the same reason: a manifest hash
 /// agrees with a file that nobody checked came from the committed source. The
-/// WGSL is what the wgpu backend actually compiles, so leaving it hash-only
-/// would have made the *rendering* backend the least-checked artifact.
+/// WGSL is what the wgpu backend actually compiles and the MSL is what the
+/// Metal backend hands to `newLibraryWithSource:`, so leaving either hash-only
+/// would have made a *rendering* backend the least-checked artifact.
 #[derive(Clone, Copy)]
 enum Target {
     SpirV,
     Wgsl,
+    Msl,
 }
 
 impl Target {
@@ -305,6 +323,16 @@ impl Target {
         match self {
             Self::SpirV => "spirv",
             Self::Wgsl => "wgsl",
+            Self::Msl => "metal",
+        }
+    }
+
+    /// How a hash-mismatch message names this column.
+    const fn artifact_name(self) -> &'static str {
+        match self {
+            Self::SpirV => "SPIR-V artifact",
+            Self::Wgsl => "WGSL artifact",
+            Self::Msl => "MSL artifact",
         }
     }
 }

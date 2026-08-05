@@ -1,21 +1,22 @@
-//! The engine's shaders: Slang sources, and the SPIR-V and WGSL compiled from
-//! them.
+//! The engine's shaders: Slang sources, and the SPIR-V, WGSL and MSL compiled
+//! from them.
 //!
 //! ```text
-//! shaders/*.slang ──tools/compile-shaders.sh──┬─▶ spirv/*.spv   (committed)
-//!                                             └─▶ wgsl/*.wgsl   (committed)
+//! shaders/*.slang ──tools/compile-shaders.sh──┬─▶ spirv/*.spv    (committed)
+//!                                             ├─▶ wgsl/*.wgsl    (committed)
+//!                                             └─▶ msl/*.metal    (committed)
 //!                                                    │
 //!                          build.rs verifies ────────┤
 //!                                                    ▼
-//!                          crcbl_shaders::TRIANGLE.spirv() / .wgsl()
+//!               crcbl_shaders::TRIANGLE.spirv() / .wgsl() / .msl()
 //!                                                    │
-//!                                     ShaderModuleDesc { spirv, wgsl }
+//!                                  ShaderModuleDesc { spirv, wgsl, msl }
 //! ```
 //!
-//! Both artifacts are handed over on every call and the backend picks:
-//! `crcbl-vk` reads the SPIR-V, `crcbl-wgpu` reads the WGSL. See
-//! `crcbl_hal::shader` for why the seam is shaped that way and what a caller
-//! owes it.
+//! Every artifact is handed over on every call and the backend picks:
+//! `crcbl-vk` reads the SPIR-V, `crcbl-wgpu` reads the WGSL, `crcbl-mtl` reads
+//! the MSL. See `crcbl_hal::shader` for why the seam is shaped that way and
+//! what a caller owes it.
 //!
 //! # Decision: Slang source, committed SPIR-V, no compiler in the build
 //!
@@ -62,7 +63,19 @@
 //! runtime path adds a `slangc`-shaped compiler behind a dev-only feature
 //! without changing this crate's shape. P5's WGSL took exactly that shape —
 //! another artifact column in the manifest, another `include_bytes!` in the
-//! generated table — and P14's MSL/DXIL will take it again.
+//! generated table — P14's MSL took it again, and DXIL will take it once more.
+//!
+//! # The MSL column is *source*, not a `.metallib`
+//!
+//! `msl/*.metal` is Metal Shading Language text, and `crcbl-mtl` compiles it at
+//! device-init time through `MTLDevice::newLibraryWithSource:options:error:`.
+//! The alternative — a pre-linked `.metallib` — needs Apple's `metal` compiler,
+//! which exists only on macOS with Xcode installed, and this script runs on
+//! every leg of CI including the Linux one. A macOS-only step in the middle of
+//! it would make the artifacts unregenerable on the machine most contributors
+//! have, which is precisely the toolchain friction the committed-artifact
+//! design exists to avoid. The cost is a compile at start-up per module, on the
+//! same path `crcbl-wgpu` already pays for WGSL.
 //!
 //! What is *not* here is `03-gpu-driven-rendering.md`'s tier permutation axis.
 //! The triangle does not vary by tier, and a permutation system with one
@@ -189,6 +202,8 @@ pub struct Shader {
     spirv_bytes: &'static [u8],
     /// The WGSL artifact, as raw UTF-8 bytes. `&[]` when not compiled (P5+).
     wgsl_bytes: &'static [u8],
+    /// The MSL artifact, as raw UTF-8 bytes. `&[]` when not compiled (P14+).
+    msl_bytes: &'static [u8],
     entry_points: &'static [EntryPoint],
     /// The SPIR-V byte stream decoded into words, once.
     words: OnceLock<Vec<u32>>,
@@ -206,6 +221,7 @@ impl Shader {
         source_sha256: &'static str,
         spirv_bytes: &'static [u8],
         wgsl_bytes: &'static [u8],
+        msl_bytes: &'static [u8],
         entry_points: &'static [EntryPoint],
     ) -> Self {
         Self {
@@ -214,6 +230,7 @@ impl Shader {
             source_sha256,
             spirv_bytes,
             wgsl_bytes,
+            msl_bytes,
             entry_points,
             words: OnceLock::new(),
         }
@@ -285,13 +302,42 @@ impl Shader {
     /// missing rather than as broken.
     #[must_use]
     pub fn wgsl(&self) -> Option<&str> {
-        if self.wgsl_bytes.is_empty() {
+        self.text_artifact(self.wgsl_bytes, "WGSL")
+    }
+
+    /// The compiled Metal Shading Language source, valid UTF-8, or `None` for a
+    /// shader with no MSL artifact.
+    ///
+    /// This is what `crcbl_hal::ShaderModuleDesc::msl` takes, in the shape it
+    /// takes it, exactly as [`wgsl`](Self::wgsl) is — and it is *source*, not a
+    /// compiled `.metallib`: `crcbl-mtl` hands it to
+    /// `MTLDevice::newLibraryWithSource:options:error:`. The crate docs say why
+    /// the artifact stops at source. The Vulkan and wgpu backends ignore it.
+    ///
+    /// # Panics
+    ///
+    /// If the embedded artifact is not valid UTF-8, for the reason
+    /// [`wgsl`](Self::wgsl) gives: absence is a legitimate state and mapping
+    /// corruption onto it would report a broken shader as a missing one.
+    #[must_use]
+    pub fn msl(&self) -> Option<&str> {
+        self.text_artifact(self.msl_bytes, "MSL")
+    }
+
+    /// One text artifact, decoded — the body [`wgsl`](Self::wgsl) and
+    /// [`msl`](Self::msl) share.
+    ///
+    /// `&[]` is absence, because an empty artifact is not something the
+    /// generator can emit for a column that exists; anything else must be
+    /// UTF-8, and is not silently downgraded to absence if it is not.
+    fn text_artifact<'a>(&self, bytes: &'a [u8], what: &str) -> Option<&'a str> {
+        if bytes.is_empty() {
             return None;
         }
-        match std::str::from_utf8(self.wgsl_bytes) {
+        match std::str::from_utf8(bytes) {
             Ok(text) => Some(text),
             Err(error) => panic!(
-                "shader `{}`: the committed WGSL artifact is not valid UTF-8 ({error})",
+                "shader `{}`: the committed {what} artifact is not valid UTF-8 ({error})",
                 self.name
             ),
         }
@@ -413,6 +459,7 @@ mod tests {
             "0000000000000000000000000000000000000000000000000000000000000000",
             b"",
             b"",
+            b"",
             &ENTRIES,
         );
         assert_eq!(ambiguous.entry_point(Stage::Vertex), None);
@@ -456,10 +503,52 @@ mod tests {
         }
     }
 
-    /// A shader with no WGSL column reports absence, not an empty source — the
-    /// distinction `crcbl_hal::ShaderModuleDesc::wgsl` is an `Option` for.
+    /// Every shipped shader has an MSL artifact, and it names the entry points
+    /// the manifest recorded from the SPIR-V.
+    ///
+    /// The same check as the WGSL one above and for the same reason: the Metal
+    /// backend looks a function up **by name** in the compiled `MTLLibrary`, so
+    /// a Slang release that mangled names across targets would fail every
+    /// `newFunctionWithName:` on a Mac and nowhere else. This is that check,
+    /// with no Mac.
+    ///
+    /// The attribute is checked as well as the name, because a stage-qualified
+    /// function is the only kind Metal will accept into a pipeline slot — an
+    /// unqualified `vertexMain` compiles and then fails at pipeline creation.
     #[test]
-    fn a_shader_without_wgsl_reports_none() {
+    fn every_shipped_shader_has_msl_naming_the_same_entry_points() {
+        assert!(!ALL.is_empty(), "the crate ships no shaders at all");
+        for shader in ALL {
+            let msl = shader
+                .msl()
+                .unwrap_or_else(|| panic!("{}: no MSL artifact", shader.name()));
+            for entry in shader.entry_points() {
+                let attribute = match entry.stage() {
+                    Stage::Vertex => "[[vertex]]",
+                    Stage::Fragment => "[[fragment]]",
+                    Stage::Compute => "[[kernel]]",
+                };
+                assert!(
+                    msl.contains(attribute),
+                    "{}: MSL declares no {attribute} stage",
+                    shader.name()
+                );
+                assert!(
+                    msl.contains(&format!("{}(", entry.name())),
+                    "{}: MSL has no `{}(`, so the entry point the manifest records from the \
+                     SPIR-V is not addressable in the MSL",
+                    shader.name(),
+                    entry.name()
+                );
+            }
+        }
+    }
+
+    /// A shader with no text column reports absence, not an empty source — the
+    /// distinction `crcbl_hal::ShaderModuleDesc::wgsl` and `::msl` are
+    /// `Option`s for.
+    #[test]
+    fn a_shader_without_a_text_artifact_reports_none() {
         static ENTRIES: [EntryPoint; 1] = [EntryPoint::new("mainVs", Stage::Vertex)];
         let spirv_only = Shader::new(
             "spirv-only",
@@ -467,9 +556,25 @@ mod tests {
             "0000000000000000000000000000000000000000000000000000000000000000",
             b"",
             b"",
+            b"",
             &ENTRIES,
         );
         assert_eq!(spirv_only.wgsl(), None);
+        assert_eq!(spirv_only.msl(), None);
+
+        // And a column that *is* present reads back, so `None` above is the
+        // absence rule rather than a decode that never returns anything.
+        static PRESENT: Shader = Shader::new(
+            "text-only",
+            "shaders/text-only.slang",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            b"",
+            b"@vertex fn mainVs() {}",
+            b"[[vertex]] void mainVs() {}",
+            &ENTRIES,
+        );
+        assert_eq!(PRESENT.wgsl(), Some("@vertex fn mainVs() {}"));
+        assert_eq!(PRESENT.msl(), Some("[[vertex]] void mainVs() {}"));
     }
 
     /// The recorded hash is the drift check's whole basis, so it must actually

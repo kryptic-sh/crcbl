@@ -19,20 +19,31 @@
 //! next section gives: they do not exist in the build these docs are generated
 //! from.)
 //!
-//! That is the plan's **clear** rung: a render pass opened with
-//! [`LoadOp::Clear`](crcbl_hal::LoadOp::Clear) and closed again is a clear, and
-//! `a_render_pass_clear_reads_back_the_exact_texels` submits one, copies the
-//! image into a host-readable buffer and asserts the byte values. There are no
-//! draws yet, because there are no pipelines to draw with.
+//! That was the plan's **clear** rung. **The pipeline slice reaches the
+//! triangle**: `create_shader_module` compiles the MSL `crcbl-shaders` now
+//! commits, `create_pipeline_layout` makes the empty layout, and
+//! `create_graphics_pipeline` and `create_compute_pipeline` build real
+//! `MTLRenderPipelineState` and `MTLComputePipelineState` objects — so
+//! `bind_graphics_pipeline` and `draw` are calls rather than refusals, and
+//! `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear` submits a
+//! draw, copies the image into a host-readable buffer and asserts that the
+//! centre carries the triangle's colour while every corner still carries the
+//! clear's. `crcbl_mtl::pipeline` is where that all lives, and where the split
+//! of Metal's pipeline state across the object and the encoder is argued.
 //!
-//! Everything else refuses with
-//! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported) whose `what`
-//! names the slice it arrives in, so a caller reads "not yet" rather than
-//! "broken": surfaces and swapchains, shader modules, bind groups, pipeline
-//! layouts, pipelines, query sets, and every draw and dispatch. Nothing in this
-//! crate is a stub that reports success — a draw recorded into an encoder
-//! *fails the encoder*, so `finish` hands back the refusal rather than a
-//! command buffer that submits and draws nothing.
+//! What is still refused, with `what` naming the slice it will arrive in:
+//! surfaces and swapchains, **bind groups and everything that needs one** —
+//! bind group layouts, a pipeline layout that names any, push constants — query
+//! sets, indexed and indirect draws, and compute dispatches. The bind-group gap
+//! is the one with a visible consequence: a pipeline can be built here only
+//! from shaders that read no resources, so the engine's own `triangle.slang`,
+//! which pulls its vertices from a storage buffer, **compiles and builds a
+//! pipeline but cannot yet be drawn with**. Both halves of that are asserted —
+//! see `the_engines_own_triangle_artifact_builds_a_real_pipeline`.
+//!
+//! Nothing in this crate is a stub that reports success — a refused command
+//! recorded into an encoder *fails the encoder*, so `finish` hands back the
+//! refusal rather than a command buffer that submits and does nothing.
 //!
 //! # Barriers are encoder boundaries, not calls
 //!
@@ -134,15 +145,18 @@
 //! `docs/plan/09-backends-metal-dx12.md` specs this backend as Tier A, and the
 //! hardware supports it. [`DeviceCaps::tier`](crcbl_hal::DeviceCaps::tier) is
 //! *derived* from [`Features`](crcbl_hal::Features) precisely so that a backend
-//! cannot assert a tier it has not earned, and three of the six Tier A features
+//! cannot assert a tier it has not earned, and two of the six Tier A features
 //! are still off. [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT)
 //! and [`MULTI_DRAW_INDIRECT`](crcbl_hal::Features::MULTI_DRAW_INDIRECT) depend
 //! on which indirect path this backend takes — indirect command buffers, per
-//! the plan's mapping table — and this slice deliberately does not choose one:
-//! there is nothing to draw with, so a choice made here would be a guess.
-//! [`COMPUTE`](crcbl_hal::Features::COMPUTE) waits for the pipeline slice for
-//! the same reason. [`TIMELINE_SEMAPHORE`](crcbl_hal::Features::TIMELINE_SEMAPHORE)
-//! is the one that *did* arrive here, on `MTLSharedEvent`.
+//! the plan's mapping table — and no slice so far has chosen one, because a
+//! plain `drawPrimitives:indirectBuffer:` emits one draw and reads no count.
+//! [`COMPUTE`](crcbl_hal::Features::COMPUTE) is the one the pipeline slice
+//! turned on, and it is worth being precise about what it now claims: compute
+//! *pipelines* build, and `dispatch` still refuses, because that needs an
+//! `MTLComputeCommandEncoder` nothing opens yet.
+//! [`TIMELINE_SEMAPHORE`](crcbl_hal::Features::TIMELINE_SEMAPHORE) arrived with
+//! the command slice, on `MTLSharedEvent`.
 //!
 //! That has a visible consequence now that devices open:
 //! [`DeviceDesc::for_adapter`](crcbl_hal::DeviceDesc::for_adapter) asks for
@@ -160,10 +174,15 @@
 //! reported because a call in *this* crate now makes it true, never because
 //! Metal has the capability in the abstract:
 //! [`SAMPLER_ANISOTROPY`](crcbl_hal::Features::SAMPLER_ANISOTROPY) arrived with
-//! sampler creation, and `TIMELINE_SEMAPHORE` and
+//! sampler creation, `TIMELINE_SEMAPHORE` and
 //! [`DEBUG_MARKERS`](crcbl_hal::Features::DEBUG_MARKERS) with the command
-//! slice. The full list, with a reason against every flag that is absent, is in
-//! this crate's `adapter` module.
+//! slice, and `COMPUTE`,
+//! [`DEPTH_CLAMP`](crcbl_hal::Features::DEPTH_CLAMP),
+//! [`DEPTH_BIAS_CLAMP`](crcbl_hal::Features::DEPTH_BIAS_CLAMP) and
+//! [`POLYGON_MODE_LINE`](crcbl_hal::Features::POLYGON_MODE_LINE) with this one
+//! — each because `bind_graphics_pipeline` now makes the call behind it. The
+//! full list, with a reason against every flag that is absent, is in this
+//! crate's `adapter` module.
 
 #[cfg(target_os = "macos")]
 mod adapter;
@@ -175,6 +194,8 @@ mod conv;
 mod device;
 #[cfg(target_os = "macos")]
 mod instance;
+#[cfg(target_os = "macos")]
+mod pipeline;
 
 #[cfg(target_os = "macos")]
 pub use device::MetalDevice;

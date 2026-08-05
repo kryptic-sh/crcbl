@@ -176,20 +176,28 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   `crcbl_mtl::command`'s debug-label methods call, which is what puts named
 ///   regions in an Xcode GPU capture — one of this phase's exit criteria.
 ///
+/// * [`Features::COMPUTE`] — unconditional in Metal, and backed by
+///   `crcbl_mtl::pipeline`'s `create_compute_pipeline_impl`:
+///   `MTLDevice::newComputePipelineStateWithDescriptor:options:reflection:error:`
+///   is a real call this backend makes, so a compute pipeline can now be built.
+///   **What is still missing is the dispatch**, which needs an
+///   `MTLComputeCommandEncoder`; `crcbl_mtl::command`'s `dispatch` refuses by
+///   name, so the flag says "compute pipelines exist" and nothing more.
+/// * [`Features::DEPTH_CLAMP`], [`Features::DEPTH_BIAS_CLAMP`] and
+///   [`Features::POLYGON_MODE_LINE`] — all three are unconditional in Metal
+///   and all three are now replayed onto the render encoder by
+///   `bind_graphics_pipeline`: `setDepthClipMode:`,
+///   `setDepthBias:slopeScale:clamp:` (whose third argument *is* the clamp) and
+///   `setTriangleFillMode:`. They are reported because those calls are made,
+///   which is the same standard `SAMPLER_ANISOTROPY` and `TIMELINE_SEMAPHORE`
+///   were held to.
+///
 /// # Absent, with the reason for each
 ///
-/// * [`Features::COMPUTE`] — an `MTLComputeCommandEncoder` is unconditional,
-///   but a compute pass with no pipeline to bind dispatches nothing, and
-///   `create_compute_pipeline` still refuses. It lands with the pipeline slice.
-/// * [`Features::OCCLUSION_QUERY`], [`Features::DEPTH_CLAMP`],
-///   [`Features::DEPTH_BIAS_CLAMP`], [`Features::POLYGON_MODE_LINE`] — every
-///   one is unconditional in Metal (`visibilityResultBuffer`,
-///   `MTLDepthClipMode::Clamp`,
-///   `MTLRenderCommandEncoder::setDepthBias:…:clamp:`,
-///   `MTLTriangleFillMode::Lines`) and every one is still a promise about a
-///   call this backend cannot make: there are passes now, but no pipeline and
-///   no draw. They land with the slices that implement them, exactly as
-///   `SAMPLER_ANISOTROPY` and the two above just did.
+/// * [`Features::OCCLUSION_QUERY`] — `visibilityResultBuffer` is a property of
+///   the *render pass descriptor* and needs somewhere to put the results, which
+///   is a query set; `create_query_set` refuses, so this would be a promise
+///   about a call this backend cannot make.
 /// * [`Features::DRAW_INDIRECT_COUNT`] and [`Features::MULTI_DRAW_INDIRECT`] —
 ///   Metal's plain `drawPrimitives:indirectBuffer:indirectBufferOffset:` emits
 ///   exactly one draw and takes no count buffer. Indirect command buffers are
@@ -212,9 +220,13 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   `crcbl_hal::QueueKind` already records as the reason it is not named
 ///   `QueueFamily`.
 /// * [`Features::PUSH_CONSTANTS`] — `setVertexBytes:length:atIndex:` and its
-///   siblings are the closest fit and cap at 4 KiB, but whether this backend
-///   routes constants that way is a pipeline-slice decision, and
-///   [`Limits::max_push_constant_size`] has to agree with whatever it decides.
+///   siblings are the closest fit and cap at 4 KiB, but **which buffer index**
+///   they would occupy cannot be decided without the binding model, because
+///   every bind group's buffers compete for the same flat index space. That is
+///   the binding slice's call, and `crcbl_mtl::pipeline`'s
+///   `create_pipeline_layout` refuses a push-constant range by name until it is
+///   made — which is what `crcbl_hal::pipeline` requires of a backend without
+///   the feature.
 /// * [`Features::SHADER_DEBUG_PRINTF`] — `MTLLogState` exists, and nothing
 ///   routes it into `log` yet.
 fn features_of(device: &ProtocolObject<dyn MTLDevice>) -> Features {
@@ -228,12 +240,17 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>) -> Features {
     if device.supportsBCTextureCompression() {
         out |= Features::TEXTURE_COMPRESSION_BC;
     }
-    // No query for these three: every Metal device has anisotropic sampling,
-    // `MTLSharedEvent` and `pushDebugGroup:`, and the slices that call them
-    // have now landed. See the doc comment above for which call backs each.
+    // No query for any of these: every Metal device has anisotropic sampling,
+    // `MTLSharedEvent`, `pushDebugGroup:`, compute pipelines, depth clamping,
+    // a depth-bias clamp and a line fill mode — and the slice that calls each
+    // one has now landed. See the doc comment above for which call backs each.
     out |= Features::SAMPLER_ANISOTROPY;
     out |= Features::TIMELINE_SEMAPHORE;
     out |= Features::DEBUG_MARKERS;
+    out |= Features::COMPUTE;
+    out |= Features::DEPTH_CLAMP;
+    out |= Features::DEPTH_BIAS_CLAMP;
+    out |= Features::POLYGON_MODE_LINE;
     out
 }
 

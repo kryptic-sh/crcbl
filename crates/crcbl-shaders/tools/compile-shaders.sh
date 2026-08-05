@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Compile `shaders/*.slang` to the committed SPIR-V in `spirv/`, and rewrite
-# `spirv/manifest.txt`.
+# Compile `shaders/*.slang` to the committed SPIR-V in `spirv/`, the WGSL in
+# `wgsl/` and the MSL in `msl/`, and rewrite `spirv/manifest.txt`.
 #
 #   crates/crcbl-shaders/tools/compile-shaders.sh            # regenerate
 #   crates/crcbl-shaders/tools/compile-shaders.sh --check     # verify only
@@ -82,6 +82,7 @@ fi
 cd "$CRATE_DIR"
 mkdir -p spirv
 mkdir -p wgsl
+mkdir -p msl
 
 WORK="$(mktemp -d -t crcbl-shaders.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT INT TERM
@@ -110,6 +111,8 @@ for SOURCE in "${SHADERS[@]}"; do
     FRESH="$WORK/${NAME}.spv"
     WGSL_ARTIFACT="wgsl/${NAME}.wgsl"
     FRESH_WGSL="$WORK/${NAME}.wgsl"
+    MSL_ARTIFACT="msl/${NAME}.metal"
+    FRESH_MSL="$WORK/${NAME}.metal"
 
     echo "crcbl shaders: compiling $SOURCE → SPIR-V"
     "$SLANGC" "$SOURCE" \
@@ -123,6 +126,17 @@ for SOURCE in "${SHADERS[@]}"; do
         -target wgsl \
         -profile "$SLANG_PROFILE" \
         -o "$FRESH_WGSL"
+
+    # The Metal backend compiles this at run time through
+    # `MTLDevice::newLibraryWithSource:options:error:`, so the artifact is MSL
+    # *source* rather than a `.metallib` — there is no offline Metal compiler
+    # off macOS, and committing one would put a macOS-only step in the middle of
+    # a script every leg of CI runs.
+    echo "crcbl shaders: compiling $SOURCE → MSL"
+    "$SLANGC" "$SOURCE" \
+        -target metal \
+        -profile "$SLANG_PROFILE" \
+        -o "$FRESH_MSL"
 
     # A compiler that emitted something the driver will reject is worse than one
     # that failed, because the failure moves to `vkCreateShaderModule` on
@@ -165,9 +179,15 @@ for SOURCE in "${SHADERS[@]}"; do
             echo "  Run crates/crcbl-shaders/tools/compile-shaders.sh and commit the result." >&2
             STATUS=1
         fi
+        if ! cmp -s "$FRESH_MSL" "$MSL_ARTIFACT"; then
+            echo "crcbl shaders: $MSL_ARTIFACT does not match a fresh compile of $SOURCE." >&2
+            echo "  Run crates/crcbl-shaders/tools/compile-shaders.sh and commit the result." >&2
+            STATUS=1
+        fi
     else
         cp "$FRESH" "$ARTIFACT"
         cp "$FRESH_WGSL" "$WGSL_ARTIFACT"
+        cp "$FRESH_MSL" "$MSL_ARTIFACT"
     fi
 
     {
@@ -179,6 +199,8 @@ for SOURCE in "${SHADERS[@]}"; do
         echo "spirv-sha256 = $(sha256sum "$FRESH" | cut -d' ' -f1)"
         echo "wgsl = $WGSL_ARTIFACT"
         echo "wgsl-sha256 = $(sha256sum "$FRESH_WGSL" | cut -d' ' -f1)"
+        echo "msl = $MSL_ARTIFACT"
+        echo "msl-sha256 = $(sha256sum "$FRESH_MSL" | cut -d' ' -f1)"
         echo "entry-points = $ENTRY_POINTS"
     } >>"$MANIFEST"
 done

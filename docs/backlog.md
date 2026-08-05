@@ -4274,3 +4274,47 @@ Metal slice.
   be a move-only change so a reviewer can see it is only a move.
 - **`DepthStencilAttachment::read_only` is read and deliberately not acted on.**
   Metal has no image layouts, so there is nothing to set.
+
+## What MTL4 left open, and what still blocks the engine's own triangle
+
+**`crcbl-mtl` cannot yet draw `triangle.slang`, the engine's own shader.** It
+compiles it — `the_engines_own_triangle_artifact_builds_a_real_pipeline` builds
+a real `MTLRenderPipelineState` from the committed `msl/triangle.metal`,
+resolving both entry points by the names `spirv/manifest.txt` records — but it
+cannot _draw_ it, because the shader pulls vertices from a `StructuredBuffer`
+and Slang lowers that to a `device*` buffer argument on both stages. Binding a
+buffer needs bind groups, which this slice leaves refused. The pixel-asserting
+test therefore draws a minimal `[[vertex_id]]` triangle generated from the same
+constant the assertion uses, so shader and expectation cannot drift. **Stated
+plainly because the difference matters: the draw path is proven, the engine's
+own shader is not.**
+
+Blocking work, in the order it unblocks things:
+
+- **Bind groups, and the argument-buffer decision behind them.** Tier 2 argument
+  buffers are what `DESCRIPTOR_INDEXING` is already reported from, so the
+  decision is which of argument buffers or plain `setVertexBuffer:` the seam's
+  `BindGroup` maps onto. This is what unblocks drawing `triangle.slang` and
+  everything above it.
+- **`MTLComputeCommandEncoder`.** Compute _pipelines_ build and `COMPUTE` is
+  reported; no dispatch encoder is opened yet, so `dispatch` still refuses.
+- **The indirect path.** `DRAW_INDIRECT_COUNT` and `MULTI_DRAW_INDIRECT` are
+  what hold this backend at Tier B, and indirect command buffers are the closest
+  fit per `docs/plan/09-backends-metal-dx12.md`'s mapping table.
+- **Index buffers.** `bind_index_buffer` refuses; Metal takes the index buffer
+  as an argument to `drawIndexedPrimitives:` rather than as encoder state, so
+  the backend must carry it from the bind call to the draw.
+- **`MultisampleState::mask` is refused.** `MTLRenderPipelineDescriptor` has no
+  sample mask at all. A seam question, not a backend one, if anything ever wants
+  it.
+
+### The pipeline object is only half of `GraphicsPipelineDesc`
+
+Worth knowing before MTL5/MTL6 touch this. An `MTLRenderPipelineState` carries
+the shaders, the colour attachment formats and blending — and **not** cull mode,
+winding, fill mode, depth clip, depth bias, the depth/stencil state, or the
+primitive topology. Those are encoder or draw-call state in Metal. `crcbl-mtl`
+stores them in a `RasterState` beside the pipeline and replays them at bind, so
+binding restores everything the descriptor asked for. A future slice that binds
+pipelines through a different path has to replay them too, or half the
+descriptor silently stops applying.

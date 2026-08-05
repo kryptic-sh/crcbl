@@ -434,6 +434,7 @@ impl UiRenderer {
             label: Some(&module_label),
             spirv: shader.spirv(),
             wgsl: shader.wgsl(),
+            msl: shader.msl(),
         })?;
         let ui_targets = [ColorTargetState {
             format: target_format,

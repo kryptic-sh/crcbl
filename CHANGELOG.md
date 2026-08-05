@@ -94,6 +94,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   never be satisfied, and its failure mode is a queue that stops with the
   process alive and nothing in any log — so it is refused up front, by name.
 
+  **Its fourth slice compiles shaders and draws.** `create_shader_module` goes
+  through `newLibraryWithSource:options:error:` and carries Metal's own
+  `NSError` text into `HalError::ShaderCompilation`, because that message is the
+  only debugging aid a shader author gets. Graphics and compute pipelines build,
+  and a draw paints pixels a test asserts exactly.
+
+  **An `MTLRenderPipelineState` is only half of `GraphicsPipelineDesc`.** Cull
+  mode, winding, fill mode, depth clip, depth bias, the depth/stencil state and
+  the primitive topology are all encoder or draw-call state in Metal rather than
+  pipeline state, so they are stored beside the pipeline object and replayed
+  when it is bound — otherwise half the descriptor would silently not apply.
+
+  The engine's own `triangle.slang` **compiles into a real pipeline** but is not
+  yet drawn: it pulls vertices from a `StructuredBuffer`, which needs bind
+  groups, and those are still refused. The pixel test draws a resource-free
+  `[[vertex_id]]` triangle instead, generated from the same constant the
+  assertion uses so the two cannot drift.
+
+- **`crcbl-shaders`** now emits **MSL** beside the SPIR-V and WGSL. Slang's
+  `-target metal` output is committed as `msl/*.metal`, hashed into
+  `spirv/manifest.txt` exactly like the other two, verified by `build.rs` on
+  every machine and byte-recompiled by the `shaders` CI job. `Shader::msl()`
+  joins `.spirv()` and `.wgsl()`. Regenerating left every existing `.spv` and
+  `.wgsl` byte-identical, which is independent evidence the pinned `slangc` is
+  the one the artifacts were built with.
+
+- **`crcbl-hal`**: `ShaderModuleDesc` gained `msl`, and `ShaderSources` gained
+  `MSL`. A backend that can only compile one language now reports the gap by
+  name, so an MSL-only descriptor handed to `crcbl-vk` says so rather than
+  failing obscurely. Every call site in `crcbl-render`, `crcbl-vk`, the null
+  backend and the seam suites was updated in the same change.
+
 - **`crcbl-jobs`**: a new crate, opening P5B with **the seam every engine thread
   will start through**. `Spawn` has three methods — `threaded`, `parallelism`
   and `spawn` — with two backends behind it: `Threads` over `std::thread`, and

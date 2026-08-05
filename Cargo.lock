@@ -361,6 +361,7 @@ version = "0.1.0"
 dependencies = [
  "crcbl-core",
  "crcbl-hal",
+ "crcbl-shaders",
  "log",
  "objc2",
  "objc2-foundation",
