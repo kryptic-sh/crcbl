@@ -101,6 +101,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: miri
+      # `cpal` — `crcbl-audio`'s native output — links ALSA through `alsa-sys`,
+      # whose build script shells out to `pkg-config alsa`. The runner image does
+      # not carry `libasound2-dev`, so the second step below died in that build
+      # script before interpreting a line of our own code. Every other linux job
+      # that compiles the workspace installs this and points at the `clippy` job
+      # in `ci.yml` for the argument; this one was written before `crcbl-audio`
+      # had a device path and never caught up.
+      #
+      # It is what made the 2026-08-03 weekly run red — and it stayed red,
+      # unnoticed, because nobody reads a cron that only fails once a week. That
+      # is a second argument for the per-PR leg beyond the one above.
+      - name: Install the ALSA headers cpal links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev
       - run: cargo miri setup
       - name: Interpret the seam and container crates
         run: >-
