@@ -186,6 +186,28 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   `VkDrawIndexedIndirectCommand`, which is what lets one compute pass feed
 ///   both backends; reported now because the indirect draws that read them are
 ///   calls this backend makes.
+/// * [`Features::PRESENT_FEEDBACK`] — `MTLDrawable::addPresentedHandler:` is a
+///   plain method of the drawable protocol with no query behind it and no
+///   version gate, so this is unconditional in the same sense the four above
+///   are, and it is backed by `crcbl_mtl::swapchain`'s `present`, which
+///   attaches a handler, and its `wait_until_presented`, which sleeps until one
+///   fires.
+///
+///   **Reported for the device even though only a windowed swapchain can
+///   answer**, and that is the decision worth reading. The flag lives on the
+///   device and is read once at start-up — `GpuContext::open` logs which pacing
+///   story the run gets from it — while whether there is a drawable to observe
+///   is a property of a *swapchain*, created later and possibly one of several.
+///   So there is no honest device-level answer that accounts for the offscreen
+///   ring, and the two candidate errors are not symmetric: withholding the flag
+///   would make every macOS window unpaceable, because the seam then requires
+///   an immediate `Ok(())` forever and the closed loop becomes unreachable
+///   code, whereas reporting it costs an offscreen-only device nothing — the
+///   ring's wait returns at once through the seam's own "nothing to wait for"
+///   answer, which is exactly what `crcbl-vk` does with its own offscreen ring
+///   on a driver that has `VK_KHR_present_wait`. The flag therefore means what
+///   the seam says it means, "the CPU can find out", and not "every swapchain
+///   on this device will block".
 /// * [`Features::DEPTH_CLAMP`], [`Features::DEPTH_BIAS_CLAMP`] and
 ///   [`Features::POLYGON_MODE_LINE`] — all three are unconditional in Metal
 ///   and all three are now replayed onto the render encoder by
@@ -259,8 +281,10 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>) -> Features {
     }
     // No query for any of these: every Metal device has anisotropic sampling,
     // `MTLSharedEvent`, `pushDebugGroup:`, compute pipelines, depth clamping,
-    // a depth-bias clamp and a line fill mode — and the slice that calls each
-    // one has now landed. See the doc comment above for which call backs each.
+    // a depth-bias clamp, a line fill mode and a drawable that will call back
+    // once it has been shown — and the slice that calls each one has now
+    // landed. See the doc comment above for which call backs each, and for why
+    // the last is reported for a device whose swapchain may be offscreen.
     out |= Features::SAMPLER_ANISOTROPY;
     out |= Features::TIMELINE_SEMAPHORE;
     out |= Features::DEBUG_MARKERS;
@@ -268,6 +292,7 @@ fn features_of(device: &ProtocolObject<dyn MTLDevice>) -> Features {
     out |= Features::DEPTH_CLAMP;
     out |= Features::DEPTH_BIAS_CLAMP;
     out |= Features::POLYGON_MODE_LINE;
+    out |= Features::PRESENT_FEEDBACK;
     // Likewise no query: every Metal device takes an indirect buffer on a draw
     // and reads `baseInstance` out of it, and the binding slice's `indirect`
     // loop is the call that makes both true of this backend.

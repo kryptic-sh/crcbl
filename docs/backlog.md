@@ -253,15 +253,15 @@ thing pacing a loop on a device without the capability.
 
 What is still owed:
 
-- **Implement it on D3D12 and Metal.** DX12:
+- **Implement it on D3D12.**
   `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` +
   `GetFrameLatencyWaitableObject`, a wait with no id in it that means "fewer
   than `SetMaximumFrameLatency` presents outstanding", so the backend maps the
-  caller's id onto its own count of presents. Metal: no id and no handle at all
-  — `MTLDrawable`'s `addPresentedHandler:` fires with a `presentedTime`, so the
-  backend counts presents itself and matches the caller's number against its
-  count. Neither keeps that count yet, deliberately: an unread counter is state
-  that can only be wrong.
+  caller's id onto its own count of presents. `crcbl-dx12` keeps no such count
+  yet, deliberately: an unread counter is state that can only be wrong. Metal
+  landed — `crcbl_mtl::present`'s ledger is the shape a DX12 count would take,
+  minus the id-per-present, since DXGI's waitable object cannot be asked about a
+  particular frame.
 
 - **`vkWaitForPresentKHR` is verified on radv only, and CI does not run it at
   all.** `VK_KHR_present_wait` is a driver-conditional extension: this
@@ -288,6 +288,46 @@ What is still owed:
   the sandbox, and it never asks for an id it did not present. A `crcbl-shell`
   wayland-e2e test that built a Vulkan swapchain on a real `wl_surface` and
   waited for an unpresented id would cover it.
+
+- **Metal's `addPresentedHandler:` path is verified by nothing, on any
+  machine.** This is the wider of the two coverage holes in present feedback,
+  because unlike Vulkan's it is not driver-conditional — it is simply that no
+  automated run anywhere has a drawable. `crcbl_mtl::swapchain`'s
+  `attach_presented_handler` is the only code in the capability that is not
+  plain Rust, and the only test that reaches it is
+  `a_layer_swapchain_acquires_a_drawable_and_presents_it`, which numbers each
+  present and waits for its number. That test is `#[ignore]`d **and** excluded
+  by name from the `mtl-e2e` job's filter, because a headless runner's detached
+  `CAMetalLayer` vends no drawable at all — so the job says nothing about it and
+  never will.
+
+  What would close it: **a person on a real Mac running
+  `crates/crcbl-mtl/tests/run-mtl-e2e.sh`**, which needs a window server. That
+  is the only thing that has ever executed a Metal present at all. Two outcomes
+  are worth writing down when someone does. If it passes, the handler fires for
+  a _detached_ layer and the capability is confirmed end to end. If it times out
+  on the first wait, the handler does **not** fire for a layer outside a view
+  hierarchy — which would be a real constraint, not a bug in the ledger, and
+  would mean the test needs an `NSWindow` rather than a detached layer. Neither
+  is known today; nothing has run it.
+
+  Everything on this side of the callback _is_ covered and runs on every host:
+  `crcbl_mtl::present`'s tests pin the immediate answers, the strictly
+  increasing id, the out-of-order report, the reset across a reconfigure, the
+  lapsed timeout, and that a blocked wait is genuinely woken rather than left to
+  time out and re-check its condition. That module is compiled off macOS under
+  `cfg(test)` for exactly that reason.
+
+- **`Condvar::wait_timeout_while` reports success after a timeout it should have
+  failed, and that is not a Metal fact.** Found while falsifying
+  `crcbl_mtl::present`: with `record_shown`'s `notify_all` removed, every
+  present wait still returned `Ok`, because `wait_timeout_while` re-tests its
+  condition _after_ the deadline lapses and reports "not timed out" when it has
+  since become true. A missing wake-up therefore costs a whole
+  `PRESENT_WAIT_TIMEOUT` per frame and raises no error anywhere. The test now
+  bounds the elapsed time from above as well as below, which is what catches it.
+  Anywhere else in this workspace that pairs a condvar with a timeout wants the
+  same upper bound; nobody has audited for other instances.
 
 - **`SwapchainEntry::presented_id` resets across a reconfigure by construction,
   not by a check.** `reconfigure_swapchain` replaces the whole entry with what

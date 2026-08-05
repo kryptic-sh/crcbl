@@ -92,6 +92,26 @@
 //! already rest on — is after the caller's own submission has finished writing
 //! the image.
 //!
+//! # Present feedback is a callback, so the number is kept on this side
+//!
+//! [`Features::PRESENT_FEEDBACK`](crcbl_hal::Features::PRESENT_FEEDBACK) is
+//! advertised, and Metal answers it in the third of the three shapes the seam
+//! names: `MTLDrawable::addPresentedHandler:` runs a block once the drawable
+//! has been shown, with no id in it and nothing to block on. So `present`
+//! attaches a handler carrying the caller's own
+//! [`PresentInfo::present_id`](crcbl_hal::PresentInfo::present_id), and
+//! `wait_until_presented` sleeps on a condition variable until that number has
+//! come back. `crcbl_mtl::present` is where all of that lives — plain `u64`s
+//! under a lock, no Objective-C — and it argues the ordering, the reset across
+//! a reconfigure and why an `Arc` of it is sound to hand to a block that runs
+//! on a thread Core Animation picks.
+//!
+//! **The offscreen ring answers immediately**, because a cursor bump has no
+//! drawable and nothing will ever call back for it. That is not a check in the
+//! wait: [`SwapchainTarget::Offscreen`] simply has no ledger to consult, so the
+//! seam's documented answer for a swapchain with nothing to wait on is the
+//! shape of the type.
+//!
 //! # A drawable's handles die at present; a ring image's do not
 //!
 //! [`AcquiredFrame::image`] is documented as "valid until the matching
@@ -107,6 +127,11 @@
 //! ring images are ours and have no such owner, so their handles are stable for
 //! the whole life of the swapchain, exactly as `crcbl-vk`'s are.
 
+use core::ptr::NonNull;
+use std::sync::Arc;
+use std::time::Duration;
+
+use block2::RcBlock;
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
     AcquiredFrame, AdapterId, CompositeAlpha, Device as _, Extent3d, Format, HalError, ImageDesc,
@@ -119,7 +144,7 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_core_foundation::CGSize;
 use objc2_foundation::{NSObjectProtocol, NSString};
-use objc2_metal::{MTLCommandBuffer, MTLTexture};
+use objc2_metal::{MTLCommandBuffer, MTLDrawable, MTLTexture};
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use crate::conv;
@@ -127,6 +152,7 @@ use crate::device::{
     DeviceState, MetalDevice, Owned, local_handle, lookup, lookup_mut, owned, to_ns,
 };
 use crate::instance::{InstanceInner, MetalInstance};
+use crate::present::{PresentLedger, PresentWait};
 
 /// What a [`SurfaceHandle`] names.
 pub(crate) enum SurfaceKind {
@@ -183,6 +209,15 @@ pub(crate) enum SwapchainTarget {
         /// The pool rows naming that drawable's texture, removed at present.
         /// See the module docs for why they must not outlive it.
         rows: Option<(ImageHandle, ImageViewHandle)>,
+        /// What [`MetalDevice::wait_until_presented_impl`] is answered from,
+        /// and what each drawable's presented handler reports into. Shared with
+        /// those handlers, which is why it is an `Arc` and why it holds nothing
+        /// but numbers under a lock — [`PresentLedger`] argues both.
+        ///
+        /// **Only this variant has one.** An offscreen ring has no drawable to
+        /// observe, so the seam's immediate answer for a ring is the absence of
+        /// a field rather than a branch that could be deleted.
+        presents: Arc<PresentLedger>,
     },
     /// A ring of plain textures this module allocated, with stable handles.
     Offscreen {
@@ -657,6 +692,7 @@ impl MetalDevice {
                 layer,
                 drawable,
                 rows,
+                ..
             } = &mut entry.target
             else {
                 unreachable!("the ring branch returned above")
@@ -752,18 +788,53 @@ impl MetalDevice {
         })
     }
 
-    /// Resolves the swapchain and returns, because this backend has nothing to
-    /// wait on yet — see [`Device::wait_until_presented`](crcbl_hal::Device::wait_until_presented)
-    /// for the seam's answer on a device without the capability.
+    /// Blocks until the drawable numbered `present_id` has been shown.
     ///
-    /// The handle is still resolved: a caller waiting on a swapchain it already
-    /// destroyed has a bug whether or not anyone was going to block on it.
+    /// Two of the seam's three immediate answers are here and the third is in
+    /// [`PresentLedger::wait_until_shown`]: an offscreen ring has no drawable
+    /// and therefore no ledger, a swapchain whose ledger was never given this
+    /// id names a frame that will never arrive, and — the case that does not
+    /// apply to this backend — a device without the capability. Every Metal
+    /// device has it; see `crcbl_mtl::adapter`.
+    ///
+    /// **The device lock is released before the wait.** Blocking under it would
+    /// stall every other thread's resource creation for as long as the
+    /// compositor takes, which is the same reason `acquire_next_frame_impl`
+    /// drops it before `nextDrawable`. The ledger is an `Arc` precisely so it
+    /// can outlive that guard, and it is also the only thing the presented
+    /// handler touches — so a handler firing mid-wait needs no lock this
+    /// function holds.
+    ///
+    /// The handle is still resolved first: a caller waiting on a swapchain it
+    /// already destroyed has a bug whether or not anyone was going to block.
     pub(crate) fn wait_until_presented_impl(
         &self,
         swapchain: SwapchainHandle,
+        present_id: u64,
+        timeout: Duration,
     ) -> Result<(), SurfaceError> {
-        let state = self.state();
-        lookup(&state.swapchains, "swapchain", swapchain, &*self.inner)?;
+        let presents = {
+            let state = self.state();
+            let entry = lookup(&state.swapchains, "swapchain", swapchain, &*self.inner)?;
+            match &entry.target {
+                SwapchainTarget::Layer { presents, .. } => Arc::clone(presents),
+                SwapchainTarget::Offscreen { .. } => return Ok(()),
+            }
+        };
+        let outcome = presents.wait_until_shown(present_id, timeout)?;
+        if outcome == PresentWait::Shown {
+            // Said once, and it is the only thing that tells a closed loop from
+            // a device that advertises the capability and then answers every
+            // wait immediately: `displaySyncEnabled` already paces a Fifo
+            // swapchain to the display, so the two are indistinguishable in a
+            // frame time. `crcbl-vk` logs the same fact for the same reason.
+            self.inner.first_present_wait.call_once(|| {
+                log::info!(
+                    "crcbl-mtl: present {present_id} reached its presented handler; \
+                     the loop is closed"
+                );
+            });
+        }
         Ok(())
     }
 
@@ -796,9 +867,14 @@ impl MetalDevice {
         let count = entry.image_count;
         let taken = match &mut entry.target {
             SwapchainTarget::Offscreen { .. } => None,
-            SwapchainTarget::Layer { drawable, rows, .. } => Some((drawable.take(), rows.take())),
+            SwapchainTarget::Layer {
+                drawable,
+                rows,
+                presents,
+                ..
+            } => Some((drawable.take(), rows.take(), Arc::clone(presents))),
         };
-        let Some((drawable, rows)) = taken else {
+        let Some((drawable, rows, presents)) = taken else {
             // "Presenting" a ring image is advancing the ring. The image stays
             // valid and is reused when the cursor comes back round, exactly as
             // a real swapchain image is.
@@ -828,6 +904,23 @@ impl MetalDevice {
             })?;
         for (event, value) in &waits {
             command_buffer.encodeWaitForEvent_value(event, *value);
+        }
+        // The present's number, taken **before** the drawable can be shown, so
+        // the ledger's `committed` can never trail a `shown` the handler has
+        // already reported. An id the ledger refuses — zero, or one that does
+        // not follow the last — presents unnumbered and is exactly the "no
+        // record of this id" case the wait answers immediately.
+        let numbered = present
+            .present_id
+            .filter(|present_id| presents.record_present(*present_id));
+        if let (Some(present_id), None) = (present.present_id, numbered) {
+            log::warn!(
+                "crcbl-mtl: present id {present_id} does not follow this swapchain's last; \
+                 presenting unnumbered"
+            );
+        }
+        if let Some(present_id) = numbered {
+            attach_presented_handler(&drawable, &presents, present_id);
         }
         // Not `MTLDrawable::present`: see the module docs.
         command_buffer.presentDrawable(ProtocolObject::from_ref(&*drawable));
@@ -885,6 +978,12 @@ impl MetalDevice {
                     layer: layer.clone(),
                     drawable: None,
                     rows: None,
+                    // Fresh, which is the whole of how the present numbering
+                    // restarts across a reconfigure: that call replaces the
+                    // entry with what this function returns, so there is no
+                    // reset to forget to write. `crcbl_mtl::present` says so
+                    // from the other side.
+                    presents: Arc::default(),
                 }
             }
             SurfaceKindRef::Offscreen => {
@@ -1051,6 +1150,56 @@ impl MetalDevice {
     }
 }
 
+/// Asks `drawable` to report into `presents` under `present_id` once it has
+/// been shown.
+///
+/// **This is the whole of present feedback on Metal**, and the only part of the
+/// capability that is not plain Rust: everything the number is then compared
+/// against lives in [`PresentLedger`], where it is testable without a display.
+///
+/// Apple documents the handler as running once the drawable has been presented
+/// *or dropped*, which is the seam's guarantee exactly — "the numbered present
+/// is no longer waiting to happen" — rather than a claim that the pixels were
+/// seen. `presentedTime` is deliberately not read: it would oblige a timestamp
+/// the seam has no method for, and would pull a second `objc2-metal` feature in
+/// for nothing.
+fn attach_presented_handler(
+    drawable: &ProtocolObject<dyn CAMetalDrawable>,
+    presents: &Arc<PresentLedger>,
+    present_id: u64,
+) {
+    let presents = Arc::clone(presents);
+    let handler = RcBlock::new(move |_drawable: NonNull<ProtocolObject<dyn MTLDrawable>>| {
+        presents.record_shown(present_id);
+    });
+    // SAFETY: three conditions, and the first is the one `objc2` names.
+    //
+    // 1. **The pointer is a valid block.** It is `RcBlock`'s own, taken from a
+    //    live `RcBlock` that outlives this statement; the block's signature is
+    //    the `MTLDrawablePresentedHandler` `objc2-metal` declares, so the
+    //    argument and return encodings match what Metal will call it with.
+    //
+    // 2. **The block outlives this call.** `addPresentedHandler:` stores the
+    //    block to run later, and the Objective-C convention for a stored block
+    //    is that the callee copies it — which for a block already on the heap
+    //    is a retain. That is convention rather than a documented sentence in
+    //    Apple's reference, and it is the one assumption here that is: every
+    //    Metal sample passes a *stack* block to this method, which would be a
+    //    use-after-free the moment the frame returned if the copy did not
+    //    happen. Our block being heap-allocated to begin with makes the retain
+    //    the whole of it.
+    //
+    // 3. **It is sound to run on Core Animation's thread.** The block captures
+    //    an `Arc<PresentLedger>` and a `u64` and nothing else. `PresentLedger`
+    //    is `Send + Sync` by derivation — a `Mutex` and a `Condvar` over two
+    //    integers, with no `unsafe impl` anywhere and no Objective-C object
+    //    inside it — which is what makes touching it from a thread this crate
+    //    did not create, concurrently with a waiter, defined. The drawable the
+    //    handler is passed is ignored rather than retained, so nothing here
+    //    extends a drawable's life past the pool's expectations.
+    unsafe { drawable.addPresentedHandler(RcBlock::as_ptr(&handler)) };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1059,9 +1208,9 @@ mod tests {
     use crcbl_core::Handle;
     use crcbl_hal::{
         Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
-        CommandEncoderDesc, ImageAspect, ImageBarrier, ImageSubresourceLayers, Instance, LoadOp,
-        Offset3d, QueueKind, ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc, ResourceState,
-        StoreOp, SubmitInfo,
+        CommandEncoderDesc, Features, ImageAspect, ImageBarrier, ImageSubresourceLayers, Instance,
+        LoadOp, Offset3d, QueueKind, ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc,
+        ResourceState, StoreOp, SubmitInfo,
     };
     use objc2_metal::MTLPixelFormat;
     use objc2_quartz_core::CALayer;
@@ -1295,6 +1444,80 @@ mod tests {
     }
 
     // --- the offscreen ring, end to end ------------------------------------
+
+    /// **Present feedback is advertised, and an offscreen ring still answers a
+    /// wait at once.**
+    ///
+    /// The two halves are one claim. `crcbl_mtl::adapter` reports
+    /// [`Features::PRESENT_FEEDBACK`] for every device, because
+    /// `addPresentedHandler:` is a plain drawable method with no query behind
+    /// it — and a device whose swapchain is the ring has no drawable to
+    /// observe. So the seam's "nothing to wait for" answer has to come from the
+    /// *swapchain*, and this is where that is checked. A ring that blocked
+    /// instead would cost `GpuContext::acquire` a whole present timeout on
+    /// every frame of every offscreen run, which is `crcbl screenshot` and the
+    /// golden-image e2e.
+    ///
+    /// **This is the half of the capability an automated run can execute**: no
+    /// window server and no shader. The `addPresentedHandler:` path itself is
+    /// covered by nothing, anywhere — `docs/backlog.md` records it as a gap.
+    ///
+    /// Red when the flag stops being reported (first assertion). Red when the
+    /// ring is given a ledger that a present records into, or when the
+    /// `SwapchainTarget::Offscreen` arm of `wait_until_presented_impl` stops
+    /// returning early: both leave the wait blocking on a frame no handler will
+    /// ever report, so it sits out `PRESENT_WAIT` and comes back
+    /// [`SurfaceError::Timeout`].
+    #[test]
+    fn an_offscreen_ring_advertises_present_feedback_and_still_answers_at_once() {
+        use crcbl_hal::Device as _;
+        /// Long enough that a wait which really blocked is unmistakable in the
+        /// elapsed time, short enough not to stall the suite when one does.
+        const PRESENT_WAIT: Duration = Duration::from_secs(2);
+
+        let (instance, device) = open_device();
+        assert!(
+            device.caps().features.contains(Features::PRESENT_FEEDBACK),
+            "every Metal device can attach a presented handler to a drawable"
+        );
+        let surface = offscreen_surface(&instance);
+        let swapchain = device
+            .create_swapchain(&swapchain_desc(surface, Format::Rgba8Unorm, 2))
+            .expect("a ring of two images");
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+
+        // A *numbered* present, so the id below is one the caller has really
+        // spent rather than one nothing ever reached.
+        device.acquire_next_frame(swapchain).expect("a ring image");
+        device
+            .present(
+                queue,
+                &PresentInfo {
+                    swapchain,
+                    waits: &[],
+                    present_id: Some(1),
+                },
+            )
+            .expect("presenting a ring image advances the cursor");
+
+        let started = Instant::now();
+        device
+            .wait_until_presented(swapchain, 1, PRESENT_WAIT)
+            .expect("a ring has no display behind it to wait for");
+        device
+            .wait_until_presented(swapchain, 99, PRESENT_WAIT)
+            .expect("nor for an id nothing ever presented");
+        assert!(
+            started.elapsed() < PRESENT_WAIT,
+            "an offscreen wait blocked for {:?}; it must answer immediately",
+            started.elapsed()
+        );
+
+        device.destroy_swapchain(swapchain);
+        instance.destroy_surface(surface);
+    }
 
     /// An offscreen surface configures, acquires, presents and destroys — the
     /// whole cycle, with the implicit-acquire shape the seam specifies.
@@ -2036,6 +2259,24 @@ mod tests {
     /// the extent is remembered instead of read off the texture, and when the
     /// rows outlive the present — which is what the second cycle checks, since
     /// a layer holding every drawable cannot vend another.
+    ///
+    /// # It is also the only check `addPresentedHandler:` has anywhere
+    ///
+    /// Each cycle numbers its present and then waits for that number, so a
+    /// handler that is never attached, or one attached to a drawable whose
+    /// report never arrives, fails here as [`SurfaceError::Timeout`] rather
+    /// than passing quietly. Waiting on the frame just presented is what the
+    /// seam tells a *frame loop* not to do — it drains the pipeline — and is
+    /// exactly right for a test, which wants the narrowest window in which the
+    /// report must appear.
+    ///
+    /// Nothing automated runs this: the `mtl-e2e` job excludes it by name
+    /// because a headless runner's detached `CAMetalLayer` vends no drawable at
+    /// all. **A person on a real Mac running `tests/run-mtl-e2e.sh` is the only
+    /// thing that has ever executed the present-feedback path**, and if a
+    /// detached layer turns out to vend drawables whose handlers never fire,
+    /// this is where that will be discovered — as a timeout, with the wait
+    /// naming the id it gave up on.
     #[cfg(feature = "mtl-e2e")]
     #[test]
     #[ignore = "needs a real drawable; a CI container's detached layer vends none"]
@@ -2053,6 +2294,11 @@ mod tests {
             .queue(QueueKind::Graphics)
             .expect("the graphics queue exists");
 
+        // Ten display periods at 60 Hz, so a frame that is genuinely on its way
+        // has room even on a busy machine, and one that will never be reported
+        // still fails the test in well under a second.
+        let present_wait = Duration::from_millis(160);
+
         // More cycles than the layer has drawables: a backend that never gives
         // one back blocks here rather than finishing, which is the failure
         // `crcbl-wgpu`'s own e2e docs describe.
@@ -2068,16 +2314,24 @@ mod tests {
                 .inner
                 .view_raw(frame.view)
                 .expect("an acquired view resolves until its present");
+            // Ids strictly increase across a swapchain's presents, and the
+            // first must not be zero — the seam spells "unnumbered" that way.
+            let present_id = u64::from(cycle) + 1;
             device
                 .present(
                     queue,
                     &crcbl_hal::PresentInfo {
                         swapchain,
                         waits: &[],
-                        present_id: None,
+                        present_id: Some(present_id),
                     },
                 )
                 .expect("presented");
+            device
+                .wait_until_presented(swapchain, present_id, present_wait)
+                .unwrap_or_else(|error| {
+                    panic!("present {present_id} was never reported as shown: {error:?}")
+                });
             assert!(
                 device.inner.view_raw(frame.view).is_err(),
                 "the seam says an acquired image is valid *until* the present"

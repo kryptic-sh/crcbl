@@ -147,6 +147,18 @@ crcbl-shaders = { workspace = true }
 # The alternative was hand-rolled `msg_send!` against a raw pointer, which is
 # the same FFI with the type checking taken out.
 [target.'cfg(target_os = "macos")'.dependencies]
+# The Objective-C block ABI, and the same class of binding as `objc2` itself —
+# `objc2` and `block2` are one project and are versioned together. It is named
+# here for exactly one call: `MTLDrawable::addPresentedHandler:` takes a block,
+# and that callback is the *whole* of present feedback on Metal, so
+# `Features::PRESENT_FEEDBACK` cannot be reported without it. `objc2-metal`
+# types the parameter as a `block2::DynBlock` and re-exports nothing, so a
+# direct dependency is the only way to build the value it asks for.
+#
+# It adds no package to `Cargo.lock`: `block2` was already resolved there
+# through another consumer of `objc2-metal`, and the lock gained only this
+# crate's edge to it.
+block2 = { version = "0.6.2", default-features = false, features = ["std"] }
 objc2 = "0.6.4"
 # `CGSize`, and only `CGSize`: `CAMetalLayer::setDrawableSize:` is how the seam's
 # extent obligation is discharged, and `drawableSize` is how `current_extent` is
@@ -170,6 +182,12 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 ] }
 objc2-metal = { version = "0.3.2", default-features = false, features = [
   "std",
+  # `MTLDrawable::addPresentedHandler:` takes a block, and the whole of Metal's
+  # present feedback is that one callback — so this feature is what makes
+  # `Features::PRESENT_FEEDBACK` reportable at all. It adds no crate to the
+  # lockfile: `block2` is already there, because `objc2-metal` is in the graph
+  # more than once and something else had already switched it on.
+  "block2",
   "MTLAllocation",
   "MTLArgument",
   "MTLBlitCommandEncoder",

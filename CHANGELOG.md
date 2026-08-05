@@ -44,8 +44,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   unchanged and still needed — it answers "am I running faster than the cap",
   which is a different question.
 
-  **`crcbl-vk` implements it**; `crcbl-dx12`, `crcbl-mtl`, `crcbl-wgpu` and the
-  null backend still answer immediately and advertise nothing.
+  **`crcbl-vk` and `crcbl-mtl` implement it**; `crcbl-dx12`, `crcbl-wgpu` and
+  the null backend still answer immediately and advertise nothing.
 
 - **A Vulkan device paces on the display where the driver can say when a frame
   landed.** `crcbl-vk` requests `VK_KHR_present_id` and `VK_KHR_present_wait`,
@@ -69,6 +69,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   at all; an id whose present failed with `OutOfDate` after the caller had
   already spent it; and an id from before a `reconfigure_swapchain`, which
   builds a new swapchain object that never saw it.
+
+- **A Metal device paces on the display too, and every Metal device can.**
+  `crcbl-mtl` reports `Features::PRESENT_FEEDBACK` unconditionally and answers
+  `Device::wait_until_presented` from `MTLDrawable::addPresentedHandler:` —
+  Metal numbers no present and offers nothing to block on, so `present` attaches
+  a handler carrying the caller's own `PresentInfo::present_id` and the wait
+  sleeps on a condition variable until that number is reported back. The flag is
+  unconditional because the handler is a plain drawable method with no query
+  behind it; there is no Metal device that cannot answer.
+
+  The flag is on the **device** while the drawable is a property of a
+  **swapchain**, so a device driving the offscreen ring advertises it and its
+  ring still answers every wait at once, through the seam's own "nothing to wait
+  for" case. Withholding the flag instead would make every macOS window
+  unpaceable, since the seam then requires an immediate `Ok(())` forever.
+
+  An id the swapchain was never given also answers at once, and a reconfigure
+  restarts the numbering: the ledger belongs to the swapchain and a rebuilt one
+  starts empty. An id that does not strictly increase is refused and its present
+  goes out unnumbered, with a warning, rather than renumbering the swapchain
+  backwards.
+
+  Adds a direct dependency on `block2`, the Objective-C block ABI —
+  `addPresentedHandler:` takes a block and there is no other way to reach it. It
+  is the same binding family as `objc2` and was already in `Cargo.lock`.
 
 - **The Metal backend's hardware suite now runs in CI, so `crcbl-mtl`'s draws
   are verified by a machine rather than by nobody.** A `mtl e2e (macos-latest)`

@@ -31,7 +31,7 @@
 //! slice adds `commandBufferWithUnretainedReferences` — the opt-out — it
 //! reintroduces the hazard and must reintroduce the queue with it.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Once};
 use std::time::{Duration, Instant};
 
 use crcbl_core::{Handle, Pool};
@@ -316,6 +316,16 @@ pub(crate) struct DeviceInner {
     /// [`QueueKind`] rather than `QueueFamily`.
     pub(crate) queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pub(crate) caps: DeviceCaps,
+    /// Says, once, that a present wait actually reached a drawable.
+    ///
+    /// Not inferable from anything else this device logs. `PRESENT_FEEDBACK` is
+    /// unconditional on Metal, so its being advertised says nothing about
+    /// whether a handler ever fired — and a `CAMetalLayer` with
+    /// `displaySyncEnabled` already paces the loop to the display on its own,
+    /// so a closed loop and a wait that answers immediately forever have the
+    /// same frame time. `crcbl_mtl::swapchain`'s `wait_until_presented_impl` is
+    /// where it is said, and `crcbl-vk` keeps the identical fact.
+    pub(crate) first_present_wait: Once,
     pub(crate) id: u64,
     /// This device's stamp on every handle it issues; see the handle-tagging
     /// section below. Never zero.
@@ -653,6 +663,7 @@ impl MetalDevice {
             raw,
             queue,
             caps,
+            first_present_wait: Once::new(),
             id,
             tag: device_tag(id),
             state: Mutex::new(DeviceState::default()),
@@ -2109,24 +2120,27 @@ impl Device for MetalDevice {
         self.present_impl(queue, present)
     }
 
-    /// Not yet: this device does not advertise
-    /// [`Features::PRESENT_FEEDBACK`](crcbl_hal::Features::PRESENT_FEEDBACK),
-    /// so the seam's answer is that there is nothing to wait for, and this
-    /// returns without blocking.
+    /// Blocks until `present_id`'s drawable has been shown, which on Metal
+    /// means until the `addPresentedHandler:` block that present attached has
+    /// run.
     ///
-    /// Metal has neither a number for a present nor a handle to wait on — a
-    /// drawable calls back once it has been shown, and nothing else — so the
-    /// slice that implements this has to count presents on this side of the
-    /// seam and match the caller's number against its own. That is why the
-    /// count is not being kept yet: an unread counter is state that can only
-    /// be wrong.
+    /// Metal has neither a number for a present nor a handle to wait on, so the
+    /// count is kept on this side of the seam and the caller's own id is what
+    /// it is kept under; `crcbl_mtl::present` holds that ledger and
+    /// `crcbl_mtl::swapchain` attaches the handler. The seam's immediate
+    /// answers that do apply are an offscreen ring, which has no drawable, and
+    /// an id this swapchain was never given — one whose present was refused, or
+    /// one from before a reconfigure. The third, a device without
+    /// [`Features::PRESENT_FEEDBACK`](crcbl_hal::Features::PRESENT_FEEDBACK),
+    /// cannot arise here: every Metal device has the capability and
+    /// `crcbl_mtl::adapter` reports it unconditionally.
     fn wait_until_presented(
         &self,
         swapchain: SwapchainHandle,
-        _present_id: u64,
-        _timeout: Duration,
+        present_id: u64,
+        timeout: Duration,
     ) -> Result<(), SurfaceError> {
-        self.wait_until_presented_impl(swapchain)
+        self.wait_until_presented_impl(swapchain, present_id, timeout)
     }
 }
 

@@ -92,6 +92,16 @@
 //! rather than linked, because a link to it is unresolvable in exactly the
 //! builds that do not have it, and rustdoc is a CI gate in this workspace.
 //!
+//! **One module is the exception, and only in a test build.** The present
+//! ledger — the count that answers `Device::wait_until_presented`, since Metal
+//! numbers no present — is plain Rust with no Objective-C in it, and it is
+//! compiled off macOS under `cfg(test)` so that `cargo test` on any host runs
+//! its assertions. Nothing it contains is public or reachable from a non-test
+//! build, so the paragraph above still holds for anything a caller can see; the
+//! reason for the exception is that the drawable half of that capability is
+//! covered by no automated test anywhere, and this converts the half that can
+//! be checked into one that is.
+//!
 //! No `#[cfg(target_os = …)]` appears *above* the seam as a result of any of
 //! this — `crcbl-hal`'s rule — because the absence is expressed by the crate
 //! having no public items, not by a caller testing the platform.
@@ -277,6 +287,11 @@ mod fault;
 mod instance;
 #[cfg(target_os = "macos")]
 mod pipeline;
+// The one module that is not macOS-only, and the crate docs say why: it holds
+// no Objective-C, and off macOS it exists in the test build alone so that
+// `cargo test` on any host runs the present-wait assertions.
+#[cfg(any(target_os = "macos", test))]
+mod present;
 #[cfg(target_os = "macos")]
 mod swapchain;
 

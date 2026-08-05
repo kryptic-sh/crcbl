@@ -371,6 +371,7 @@ dependencies = [
 name = "crcbl-mtl"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "crcbl-core",
  "crcbl-hal",
  "crcbl-shaders",
