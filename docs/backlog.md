@@ -4075,3 +4075,71 @@ never the shape this would have taken: MoltenVK ships **bundled with the
 application**. The Vulkan SDK's macOS installer places an ICD for development,
 but a shipped app embeds `libMoltenVK.dylib`. It describes a developer's
 machine, not a player's.
+
+## Confirmed: DX12 stays, alongside Vulkan on Windows, and last
+
+**Decided 2026-08-05**, closing a question that had been half-answered twice —
+`docs/plan/09-backends-metal-dx12.md`'s original text justified DX12 as old-iGPU
+coverage, its 2026-07-27 correction retracted that and substituted the Xbox door
+plus Windows tooling, and neither pass weighed it against simply using
+`crcbl-vk` on Windows.
+
+**Windows keeps both backends. DX12 is never a replacement for Vulkan there.**
+
+### The asymmetry that settles the "instead of" framing
+
+`crcbl-vk` has to exist regardless — it is the Linux path and, per the same
+day's platform decision, the Android one. Windows support falls out of it at
+approximately zero marginal cost, because it is the same code reaching a
+different loader. So dropping Vulkan _from Windows_ saves nothing: the crate,
+its tests and its maintenance all stay. Replacing it with DX12 would pay for a
+new backend to obtain a working path that already exists.
+
+It would also cost the one thing Windows is uniquely placed to give:
+**cross-backend differential debugging on identical hardware.** "Does it repro
+on the other backend?" is reason #1 in `crcbl-hal`'s own argument for dynamic
+dispatch and for compiling two backends into one binary, and Windows is the only
+platform where both can run against the same GPU.
+
+### Why it is still worth building
+
+- **Xbox.** The only item here obtainable no other way.
+- **A GPU device on the Windows CI runner.** Every software-rasteriser job in
+  `ci.yml` is `ubuntu-latest`/lavapipe; `windows-latest` has no device at all,
+  which is why Windows has no golden images and no sample-level render pass.
+  WARP is D3D12's software rasteriser and ships in Windows, so this would be
+  Windows' lavapipe. **See the open question below — this benefit is
+  unconfirmed.**
+- **Robustness against a missing or stale vendor ICD.** D3D12 is part of the OS;
+  Vulkan is not.
+- **Windows-on-ARM**, where D3D12 is first-class and Vulkan is patchier.
+- **PIX and DRED**, and DXGI's waitable swapchain object — a mature answer to
+  the closed-loop frame pacing this backlog already has open, where the Vulkan
+  side needs `VK_KHR_present_wait` (bound in the pinned `ash`, unstarted) and
+  `VK_EXT_present_timing` (not in `ash` at all, still provisional, genuine
+  hand-written FFI).
+
+### Why it is last
+
+- It maps near-1:1 onto the Vulkan-shaped seam, so **it finds no HAL leaks**.
+  That is a cost saving and a value reduction at once: Metal is the backend that
+  stresses the abstraction, which is why the plan orders it first.
+- Its value is infrastructure and optionality, not capability. Nothing renders
+  today that it would render better.
+- It is a crate comparable in size to `crcbl-vk`, the largest in the workspace,
+  plus a third shader artifact (DXIL) in `crcbl-shaders` and its manifest, plus
+  another pinned toolchain in the `shaders` job, plus a second Windows path to
+  test permanently.
+
+Ranked below finishing Metal — which after the same day's decision is the _only_
+Apple path — and below an Android surface in `crcbl-shell`, which is the largest
+coverage win available and needs no new HAL backend at all.
+
+### Open question, worth an afternoon before the phase starts
+
+**Does WARP clear Tier A?** Specifically SM6.6 dynamic resources, which this
+backend is specced around. If it does, the Windows CI argument is real and DX12
+buys golden-image coverage on a second OS. If WARP is Tier B only, `crcbl-wgpu`
+already covers that on Windows and the CI half of the justification collapses,
+leaving Xbox and tooling. Cheap to check, and it changes how much of the above
+is true — so check it before committing the phase, not during it.
