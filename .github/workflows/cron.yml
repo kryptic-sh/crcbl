@@ -45,12 +45,31 @@ jobs:
   # **It cannot run over `crcbl-vk` itself**, and that is not a gap this job can
   # close: miri interprets MIR and has no way to execute a `dlopen`ed
   # `libvulkan.so.1`, so every FFI and GPU crate — `crcbl-vk`, `crcbl-wgpu`,
-  # `crcbl-shell`'s Wayland/X11 backends, `crcbl-audio`'s device path — is
-  # outside its reach by construction. What it *does* cover is the crates whose
-  # unsafe is pure Rust: the handle allocators and the frame arena in
-  # `crcbl-core`, the seam types and the null backend in `crcbl-hal`, the
-  # storage and ECS containers, the physics broadphase, the UI vertex builders,
-  # and the audio mixer's sample buffers.
+  # `crcbl-mtl`, `crcbl-shell`'s Wayland/X11 backends, `crcbl-audio`'s device
+  # path — is outside its reach by construction. What it *does* cover is the
+  # crates whose unsafe is pure Rust: the handle allocators and the frame arena
+  # in `crcbl-core`, the seam types and the null backend in `crcbl-hal`, the
+  # storage containers, the UI vertex builders, and `crcbl-jobs`.
+  #
+  # ## The target list is the unsafe census, and it is checked rather than assumed
+  #
+  # An earlier version of this comment also claimed "the physics broadphase, and
+  # the audio mixer's sample buffers". **Both were false.** Counting `unsafe`
+  # blocks, functions, impls and traits per crate — excluding the
+  # `unsafe(no_mangle)` attribute, which is syntax rather than an escape hatch —
+  # gives `crcbl-phys` **0** and `crcbl-audio` **0**. Neither crate contains any
+  # unsafe at all, so interpreting them bought nothing this job exists for.
+  #
+  # That mattered because of what they cost: measured locally with this job's own
+  # environment, `crcbl-phys` interprets in 53 s and **`crcbl-audio` in 4906 s —
+  # 82 minutes**, past the timeout below on its own. So the step that ran both
+  # was removed rather than given a bigger budget. `crcbl-audio` is also the
+  # reason `-Zmiri-deterministic-floats` is set; the flag stays, because a future
+  # target may need it and it costs nothing.
+  #
+  # Re-add a crate here when it grows unsafe, not by default. `crcbl-ecs` is kept
+  # despite also counting 0 because it interprets in about six seconds and its
+  # containers are where unsafe would first appear.
   #
   # `crcbl-jobs` is the one whose unsafe is *concurrent* rather than merely
   # aliasing, and it is what turns this job from a nice-to-have into the only
@@ -78,20 +97,19 @@ jobs:
   #
   # ## Why these targets and not `--workspace`
   #
-  # `--lib` for `crcbl-phys` and `crcbl-audio`: their integration suites are
-  # long-running simulations that add interpreter time without adding unsafe
-  # coverage — every `unsafe` in both crates is in the library.
-  #
-  # `crcbl-net` is deliberately **absent**. Its library suite does not finish
-  # inside 40 minutes under miri, which would make this job a timeout rather
-  # than a gate. Its decoders are the part worth checking and they are already
-  # attacked from the other side, per-PR, by the bounded `decoder-fuzz` job in
-  # `ci.yml` — which runs libFuzzer over the same code with ASan-grade
+  # `crcbl-net` is deliberately **absent**, and for a different reason than the
+  # two crates above: it does contain no unsafe today, but its library suite also
+  # does not finish inside 40 minutes under miri, so it would be a timeout rather
+  # than a gate either way. Its decoders are the part worth checking and they are
+  # already attacked from the other side, per-PR, by the bounded `decoder-fuzz`
+  # job in `ci.yml` — libFuzzer over the same code with ASan-grade
   # instrumentation. Re-measure and add it here when either miri or the suite
   # gets faster.
   #
-  # Weekly rather than per-PR: the two steps below take about seven minutes of
-  # interpretation on top of a cold compile.
+  # Weekly rather than per-PR: the step below takes about three and a half
+  # minutes of interpretation on top of a cold compile, measured locally with
+  # this job's environment — `crcbl-core` 81 s, `crcbl-store` 58 s, `crcbl-jobs`
+  # 25 s, `crcbl-ui` 17 s, `crcbl-ecs` 6 s, `crcbl-hal` 2 s.
   miri:
     name: miri (crates without FFI)
     runs-on: ubuntu-latest
@@ -112,29 +130,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: miri
-      # `cpal` — `crcbl-audio`'s native output — links ALSA through `alsa-sys`,
-      # whose build script shells out to `pkg-config alsa`. The runner image does
-      # not carry `libasound2-dev`, so the second step below died in that build
-      # script before interpreting a line of our own code. Every other linux job
-      # that compiles the workspace installs this and points at the `clippy` job
-      # in `ci.yml` for the argument; this one was written before `crcbl-audio`
-      # had a device path and never caught up.
+      # **No ALSA headers here, unlike every other linux job.**
+      # `cargo miri test -p` builds only the named crates and their
+      # dependencies, and none of the six below reaches `cpal` — checked with
+      # `cargo tree -e normal` rather than assumed. The install this job briefly
+      # carried was for `crcbl-audio`, and it goes with it. If a target ever
+      # grows an audio dependency, it comes back.
       #
-      # It is what made the 2026-08-03 run red — the first Monday after the
-      # dependency landed, since 2026-07-27 passed — and nothing reported it,
-      # because a job that fails once a week is a job nobody is watching. **That
-      # is the standing hazard of this file**: after a dependency lands, trigger
-      # it deliberately with `gh workflow run cron.yml` rather than waiting for a
-      # Monday to tell you.
-      - name: Install the ALSA headers cpal links against
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev
+      # **The standing hazard of this file, which that episode illustrates:** a
+      # job that runs once a week is a job nobody is watching. `crcbl-audio`
+      # gaining `cpal` broke this on 2026-08-03 — the first Monday after the
+      # dependency landed, 2026-07-27 having passed — and nothing reported it;
+      # fixing that then exposed the 82-minute interpretation behind it, which
+      # had been masked all along. After a dependency lands, or after this file
+      # changes, trigger it deliberately with `gh workflow run cron.yml` instead
+      # of waiting for a Monday to tell you.
       - run: cargo miri setup
       - name: Interpret the seam and container crates
         run: >-
           cargo miri test
           -p crcbl-core -p crcbl-hal -p crcbl-ecs -p crcbl-store -p crcbl-ui
           -p crcbl-jobs
-      - name: Interpret the physics and audio libraries
-        run: cargo miri test --lib -p crcbl-phys -p crcbl-audio

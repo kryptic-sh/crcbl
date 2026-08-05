@@ -3982,28 +3982,6 @@ finds anything, that Apple Silicon reports argument-buffer Tier 2, and that
 linking the Metal framework works at all. CI's `build + test (macos-latest)` leg
 is the first execution.
 
-## The weekly Miri job cannot finish, and the ALSA fix is what revealed it
-
-Run 30966491592 (manual `workflow_dispatch`, 2026-08-05) installed the ALSA
-headers successfully and then **hit `timeout-minutes: 60` inside "Interpret the
-physics and audio libraries"** — cancelled at 60:16, not failed. So the ALSA
-repair in `514b2ea` was correct and is confirmed; it just uncovered the next
-problem, which the earlier `pkg_config` failure had been masking since the
-dependency landed.
-
-`cron.yml`'s own comment claims the two steps take "about seven minutes of
-interpretation", and that number is now known wrong: step 1 (`crcbl-core`,
-`crcbl-hal`, `crcbl-ecs`, `crcbl-store`, `crcbl-ui`, `crcbl-jobs`) measured ~200
-s locally, and step 2 alone exceeds the remaining budget. The 2026-07-27 run
-passed, so something between then and now made `crcbl-phys` or `crcbl-audio`
-much slower under the interpreter — which of the two is unmeasured.
-
-Not yet chosen: split step 2 into per-crate steps to find the offender, raise
-the timeout, narrow the target list the way `crcbl-net` already was (with the
-reason recorded), or cut `PROPTEST_CASES` further for those two crates. Measure
-first — the current comment is evidence that guessing at these numbers is how
-the file got here.
-
 ## Considered and declined: an OpenGL / GLES backend
 
 **Decided 2026-08-05.** GL is a dying support surface and the engine will not
