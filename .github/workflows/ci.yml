@@ -811,6 +811,68 @@ jobs:
           path: target/golden-diff/
           if-no-files-found: ignore
 
+  # The third backend's own e2e suite, in the shape of `vk-e2e` and `wgpu-e2e`.
+  # `crates/crcbl-mtl/tests/run-mtl-e2e.sh` has existed since the Metal slice
+  # landed and had never been run by anything, because the crate's hardware
+  # tests were believed unrunnable in CI: `macos-latest` exposes an
+  # `Apple Paravirtual device`, and a draw on one hung the command buffer.
+  #
+  # That was measured on macos-14 and generalised to the platform. Run
+  # 31037470086 asked all three hosted images directly, with a standalone Swift
+  # script: macos-14's `MTLCreateSystemDefaultDevice()` returns nil and it
+  # executes nothing, while macos-15 and macos-26 both run a compute dispatch
+  # and two differently-shaped triangle draws correctly. `macos-latest` now
+  # resolves to `macos-26-arm64`, so the suite has a device that executes.
+  # `docs/backlog.md` carries the per-image output.
+  #
+  # The tests stay `#[ignore]`d in the source, exactly as `crcbl-vk`'s and
+  # `crcbl-wgpu`'s do: a plain `cargo nextest run --workspace --all-features`
+  # on a machine with no usable GPU must stay green, and the script's
+  # `--run-ignored all` is the only thing that turns them on. The script also
+  # fails when the suite reports zero tests run, because a suite that is both
+  # feature-gated and `#[ignore]`d has two ways to run nothing and
+  # `docs/plan/12-testing.md` calls a silently-skipped e2e job a known trap.
+  #
+  # This job does not replace running the script on a real Mac. It says the
+  # suite passes on Apple's paravirtual device; a discrete or unvirtualised
+  # Apple GPU is still covered by a person, and Metal has no software
+  # rasteriser to cross-check against the way Vulkan has lavapipe.
+  mtl-e2e:
+    name: mtl e2e (macos-latest)
+    runs-on: macos-latest
+    # macOS runners are roughly 2x slower than Linux; see `build + test`.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+      # Nothing to install: Metal ships with the OS, and the crate links it
+      # through `objc2` rather than `dlopen`ing anything.
+      #
+      # **One test is held out, and not for the reason the others were gated.**
+      # `a_layer_swapchain_acquires_a_drawable_and_presents_it` is `#[ignore]`d
+      # because a detached `CAMetalLayer` in a headless container has no
+      # surface to vend a drawable from, so `nextDrawable` returns nil or
+      # blocks — a claim about the window server, not about shader execution.
+      # The probe above measured shader execution and says nothing about
+      # drawables, so whether macos-26 vends one here is an open question this
+      # job deliberately does not gamble on: `--run-ignored all` would sweep
+      # the test up and a block would burn the timeout. Every other `#[ignore]`
+      # in the crate is a shader-execution gate and every one of those runs.
+      # The filter lives here rather than in the script because a person on a
+      # real Mac, with a real window server, should run that test.
+      - name: Run the Metal suite, minus the drawable acquisition
+        run: >-
+          crates/crcbl-mtl/tests/run-mtl-e2e.sh
+          -E 'not test(a_layer_swapchain_acquires_a_drawable_and_presents_it)'
+
   # The anti-rot gate for the committed SPIR-V. `crates/crcbl-shaders` ships
   # Slang sources *and* the compiled artifacts, because
   # `docs/plan/02-vulkan-backend.md`'s risk list sanctions exactly that ("Slang

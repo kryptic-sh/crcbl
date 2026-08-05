@@ -4,18 +4,25 @@
 #
 #   crates/crcbl-mtl/tests/run-mtl-e2e.sh [extra nextest args…]
 #
-# # Why this is not a CI job
+# # Who runs this
 #
-# It needs a real Metal GPU, and no CI runner this project has access to
-# provides one. GitHub's `macos-latest` exposes an `Apple Paravirtual device`
-# that hangs the command buffer on any draw — measured, with both encoders
-# reporting `completed` rather than faulted, so the fault is the device and not
-# the command stream. Vulkan has lavapipe to fall back on; Metal has no software
-# rasteriser at all, so there is nothing to substitute.
+# **CI runs it, on `macos-latest`.** The device that image exposes is an
+# `Apple Paravirtual device`, and a paravirtual device was long assumed unable
+# to execute a shader — but that was generalised from macos-14, the one hosted
+# image whose `MTLCreateSystemDefaultDevice()` returns nil. macos-15 and
+# macos-26 both run a compute dispatch and a triangle draw correctly, and
+# `macos-latest` resolves to macos-26. `docs/backlog.md` has the measurements.
 #
-# **So this script is run by a person on a Mac, and its results are not
-# automated.** `docs/backlog.md` records that as a coverage gap rather than
-# pretending the `build + test (macos-latest)` job covers it.
+# **A person on a real Mac runs it too, and that is still the only thing that
+# covers a non-virtual GPU.** The CI job says the suite passes on Apple's
+# paravirtual device; it says nothing about a discrete or an unvirtualised
+# Apple GPU, and Metal has no software rasteriser to cross-check against the
+# way Vulkan has lavapipe.
+#
+# The CI job holds one test out — the layer swapchain's drawable acquisition,
+# which is gated on a headless container vending a `CAMetalLayer` drawable and
+# not on shader execution. `.github/workflows/ci.yml` explains why there and
+# passes the filter; this script excludes nothing on its own.
 #
 # # The zero-tests check is the point
 #
@@ -56,4 +63,4 @@ if ! grep -qE "Summary \[[^]]*\] +[1-9][0-9]* tests? run" "$LOG"; then
     exit 1
 fi
 
-echo "crcbl mtl e2e: the hardware suite ran against a real Metal GPU"
+echo "crcbl mtl e2e: the hardware suite ran against a Metal device"

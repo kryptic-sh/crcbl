@@ -2822,36 +2822,29 @@ mod tests {
     /// comparison. Never running the copy, or reading before the command buffer
     /// completes — every texel comes back [`POISON`], which is neither of the
     /// two colours the last assertion admits.
-    /// **Needs a real GPU, and CI does not have one.** Feature-gated *and*
+    /// **Needs a device that executes a shader.** Feature-gated *and*
     /// `#[ignore]`d, the shape `crcbl-vk` and `crcbl-wgpu` already use for the
     /// same reason: `--all-features` on a machine that cannot run it must stay
     /// green, and `tests/run-mtl-e2e.sh` is the only thing that turns it on —
     /// and that script fails when the suite reports zero tests run, because
     /// `docs/plan/12-testing.md` calls a silently-skipped e2e job a known trap.
     ///
-    /// The evidence, rather than an assumption. On `macos-latest` this hung the
-    /// GPU, and the fault report named both halves of the question:
+    /// **That gate used to say CI could never satisfy it, and that was wrong.**
+    /// This test once hung the GPU on `macos-latest` with both encoders
+    /// completing and neither faulting, which correctly ruled out the command
+    /// stream — and was then read as a property of Apple's paravirtual device.
+    /// It is a property of macos-14, the one hosted image that executes nothing
+    /// and whose `MTLCreateSystemDefaultDevice()` returns nil; macos-15 and
+    /// macos-26 run the same draw correctly, and `macos-latest` resolves to
+    /// macos-26. `docs/backlog.md` carries the per-image measurements.
     ///
-    /// ```text
-    /// GPU Hang Error (kIOGPUCommandBufferCallbackErrorHang) on `Apple Paravirtual device`;
-    /// encoders in recorded order: `triangle` completed, `crcbl copies` completed
-    /// ```
-    ///
-    /// **Both encoders completed and neither faulted**, so the command stream is
-    /// not what broke — the paravirtual GPU those runners expose cannot execute
-    /// a shader program. Everything up to that line still runs there and still
-    /// passes: clears go through load actions, copies through the blit engine,
-    /// and `the_engines_own_triangle_artifact_builds_a_real_pipeline` compiles
-    /// MSL and builds a pipeline state. **This is the only test in the crate
-    /// that makes the GPU run a shader**, which is exactly why it is the only
-    /// one gated.
-    ///
-    /// Unlike Vulkan there is no software rasteriser to fall back to — no
-    /// lavapipe for Metal — so this is a coverage gap rather than a
-    /// substitution, and `docs/backlog.md` records it as one.
+    /// So the script has a CI job now. What a person on a real Mac still adds
+    /// is an unvirtualised GPU: Metal has no lavapipe to cross-check against,
+    /// and a paravirtual device is one implementation with one set of
+    /// tolerances.
     #[cfg(feature = "mtl-e2e")]
     #[test]
-    #[ignore = "executes a shader; the CI runner's Apple Paravirtual device hangs on one"]
+    #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear() {
         let (_instance, device) = open_device();
         assert_ne!(
@@ -2978,9 +2971,12 @@ mod tests {
 
         // And the draw the shader actually needs: one set, one read-only
         // storage buffer, visible to both stages because Slang emitted the
-        // argument on both. Recorded and finished rather than submitted — the
-        // runner's paravirtual GPU cannot execute a shader, and `finish` is
-        // where every recording refusal lands anyway.
+        // argument on both. Recorded and finished rather than submitted —
+        // this test is behind neither the feature nor the ignore, so it runs
+        // on every machine that can open a device at all, including one whose
+        // GPU executes nothing. `the_engines_own_triangle_draws_through_a_bind_group`
+        // is the gated test that submits, and `finish` is where every
+        // recording refusal lands anyway.
         let set = device
             .create_bind_group_layout(&BindGroupLayoutDesc {
                 label: Some("triangle.slang set 0"),
@@ -4688,7 +4684,7 @@ using namespace metal;\n\
     /// gating argument and measured evidence apply unchanged.
     #[cfg(feature = "mtl-e2e")]
     #[test]
-    #[ignore = "executes a shader; the CI runner's Apple Paravirtual device hangs on one"]
+    #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
     fn the_engines_own_triangle_draws_through_a_bind_group() {
         use crcbl_shaders::{Stage as ShaderStage, TRIANGLE};
 
@@ -4822,7 +4818,7 @@ using namespace metal;\n\
     /// **Needs a real GPU**; see the other gated draw for the evidence.
     #[cfg(feature = "mtl-e2e")]
     #[test]
-    #[ignore = "executes a shader; the CI runner's Apple Paravirtual device hangs on one"]
+    #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
     fn an_indexed_draw_reads_the_bound_index_range() {
         let (_instance, device) = open_device();
         let ink = ink_msl();
@@ -4899,7 +4895,7 @@ using namespace metal;\n\
     /// **Needs a real GPU**; see the other gated draws for the evidence.
     #[cfg(feature = "mtl-e2e")]
     #[test]
-    #[ignore = "executes a shader; the CI runner's Apple Paravirtual device hangs on one"]
+    #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_multi_draw_indirect_emits_every_argument_structure() {
         let (_instance, device) = open_device();
         let ink = ink_msl();

@@ -16,6 +16,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The Metal backend's hardware suite now runs in CI, so `crcbl-mtl`'s draws
+  are verified by a machine rather than by nobody.** A `mtl e2e (macos-latest)`
+  job runs `crates/crcbl-mtl/tests/run-mtl-e2e.sh`, which turns on the `mtl-e2e`
+  feature and the crate's `#[ignore]`d tests — the triangle draw, the engine's
+  own `triangle.slang` draw through a bind group, the indexed draw and the
+  multi-draw-indirect. Those four had never been executed anywhere: they were
+  gated on the belief that a CI runner's `Apple Paravirtual device` cannot run a
+  shader, which was measured on macos-14 and is not true of the image
+  `macos-latest` resolves to today. The tests stay `#[ignore]`d, so a plain
+  `--all-features` run on a machine without a usable GPU is still green, and the
+  script still fails when the suite reports zero tests run.
+
+  One test is held out of the CI job: the layer swapchain's drawable
+  acquisition, which depends on a headless container vending a `CAMetalLayer`
+  drawable rather than on shader execution. Running the script on a real Mac
+  covers it, and covers a non-virtual GPU besides.
+
 - **`crcbl-shaders` ships DXIL, and `crcbl-dx12` draws a triangle with it.** The
   artifact pipeline grew a fourth target: `dxil/<shader>.<entry>.dxil`, compiled
   in two steps — `slangc -target hlsl` then a **pinned** `dxc` at Shader Model

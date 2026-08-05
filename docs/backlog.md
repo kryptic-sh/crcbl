@@ -4472,23 +4472,49 @@ stand is the claim that no hosted runner can answer it.
 
 **What is still not known**, none of it settled by the above:
 
-- **Nobody has run `crcbl-mtl`'s own suite on an image that executes.** The
-  probe was standalone Swift with its own MSL and its own command buffers; no
-  backend code was involved. "The runner can execute a shader" and "this
-  backend's draw path executes on that runner" are different claims, and only
-  the first is measured. Un-`#[ignore]`ing the four tests and adding the CI job
-  that runs them is the next slice, and is what turns one into the other.
-- **The layer and `nextDrawable` path is untouched by this.** The fifth
-  `mtl-e2e` test, at `crates/crcbl-mtl/src/swapchain.rs:2017`, is `#[ignore]`d
-  for an unrelated reason — a CI container's detached layer vends no drawable —
-  and no probe result bears on it.
+- **Nobody has run `crcbl-mtl`'s own suite on an image that executes — the job
+  that would exists now, and has not reported yet.** The probe was standalone
+  Swift with its own MSL and its own command buffers; no backend code was
+  involved. "The runner can execute a shader" and "this backend's draw path
+  executes on that runner" are different claims, and only the first is measured.
+  `.github/workflows/ci.yml`'s `mtl-e2e` job runs
+  `crates/crcbl-mtl/tests/run-mtl-e2e.sh` on `macos-latest`, which is what turns
+  one claim into the other — **its first run is the measurement, and nobody has
+  read it.** The tests stayed `#[ignore]`d rather than being un-ignored: that is
+  what keeps a plain `--all-features` run green on a machine with no usable GPU,
+  and `--run-ignored all` inside the script is what turns them on, the shape
+  `crcbl-vk` and `crcbl-wgpu` already use.
+- **The layer and `nextDrawable` path is untouched by this, and the CI job holds
+  it out.** The fifth `mtl-e2e` test,
+  `crcbl_mtl::swapchain::tests::a_layer_swapchain_acquires_a_drawable_and_presents_it`,
+  is `#[ignore]`d for an unrelated reason — a CI container's detached layer
+  vends no drawable — and no probe result bears on it. The `mtl-e2e` job passes
+  `-E 'not test(a_layer_swapchain_acquires_a_drawable_and_presents_it)'` so
+  `--run-ignored all` does not sweep it up, because a `nextDrawable` that blocks
+  rather than returning nil would burn the job's timeout. **Whether a detached
+  layer vends a drawable on macos-26 is an open question**, cheap to settle in a
+  throwaway workflow the way the shader question was settled, and worth settling
+  before the filter is dropped.
 - **Real Apple GPUs remain uncovered.** Every runner reported
   `Apple M1 (Virtual)`. A paravirtual device is one implementation with one set
   of tolerances — the same caveat WARP carries on Windows — so a hosted green
   run is not evidence about hardware, and
   `docs/plan/09-backends-metal-dx12.md`'s on-hardware smoke stays on the list.
-- **`run-mtl-e2e.sh` on a real Mac is still the only thing that has ever run any
-  of these tests**, and stays a person-owned step until the CI job exists.
+- **`run-mtl-e2e.sh` on a real Mac is still the only thing that covers a
+  non-virtual GPU.** The `mtl-e2e` job takes the automation half; what it cannot
+  take is the hardware half, so the person-owned run stays on the list for that
+  reason rather than for want of a job.
+- **The gating doc comment on
+  `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear` still says
+  "Needs a real GPU, and CI does not have one"** and still argues from the
+  macos-14 hang as though it were a platform property; the two later gated draws
+  (`an_indexed_draw_reads_the_bound_index_range`,
+  `a_multi_draw_indirect_emits_every_argument_structure`) and
+  `the_engines_own_triangle_draws_through_a_bind_group` point back at it. The
+  `#[ignore]` reason strings were corrected; that prose block was out of the
+  slice's scope and was deliberately left, so it now contradicts the job sitting
+  beside it. Rewriting it is a docs-only change to
+  `crates/crcbl-mtl/src/device.rs`.
 
 ### The diagnostic that named the fault nearly hid it
 
@@ -4672,12 +4698,13 @@ this slice, and the other four Tier A features were already on.
   holding whatever the previous bind put there.** Not checked, because
   `update_bind_group` makes create-then-fill a legal pattern. Vulkan leaves the
   same hazard to its validation layer.
-- **Four `mtl-e2e` tests now exist and none has ever run.** Still true, but the
-  reason changed: the 2026-08-05 probe showed the runner `macos-latest` points
-  at does execute shaders, so these are `#[ignore]`d on a finding that no longer
-  holds rather than for want of a machine. Until the next slice un-ignores them
-  and adds the job, `run-mtl-e2e.sh` on a real Mac remains the only thing that
-  would catch a regression in bind groups, indexed draws or multi-draw-indirect.
+- **Four `mtl-e2e` tests exist and none has ever run — a job that runs them now
+  exists, and has not reported.** The 2026-08-05 probe showed the runner
+  `macos-latest` points at does execute shaders, and the `mtl-e2e` workflow job
+  drives `run-mtl-e2e.sh` there. Until that job has a first result, nothing has
+  yet caught a regression in bind groups, indexed draws or multi-draw-indirect —
+  and a first run that goes red is a finding about the backend, not about the
+  job.
 
 ## WARP clears the bindless bar — measured, 2026-08-05
 
