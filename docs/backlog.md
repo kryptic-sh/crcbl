@@ -4322,22 +4322,32 @@ binding restores everything the descriptor asked for. A future slice that binds
 pipelines through a different path has to replay them too, or half the
 descriptor silently stops applying.
 
-## `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear` hangs the GPU on CI
+## `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear` hung on macos-14, and only there
 
-**Open, and the cause is not known.** On `macos-latest` the triangle test fails
-with
+**Closed by measurement, 2026-08-05.** On `macos-latest` the triangle test
+failed with
 `DeviceLost("… Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)")`,
-raised out of `drain`'s `poll_readback`. Every other test in `crcbl-mtl` passes
+raised out of `drain`'s `poll_readback`. Every other test in `crcbl-mtl` passed
 on the same runner, including
 `the_engines_own_triangle_artifact_builds_a_real_pipeline` (which compiles
 `msl/triangle.metal` and builds a real `MTLRenderPipelineState`),
 `a_render_pass_clear_reads_back_the_exact_texels` and
 `load_op_preserves_what_clear_replaces`. Submission, render passes, clears,
-blits, readback and completion observation therefore all work; only a draw
-faults.
+blits, readback and completion observation therefore all worked; only a draw
+faulted.
 
-**What was checked and ruled out**, by reading the Metal semantics against the
-code rather than by running anything — no Mac was available:
+**The variable nobody controlled for was the image.** `macos-latest` pointed at
+macos-14 when this was measured, and macos-14 is the one hosted image whose
+paravirtual device executes nothing at all — it does not even return a system
+default device. The probe below ran the same compute dispatch and the same two
+draws on macos-14, macos-15 and macos-26; only macos-14 failed to execute, and
+`macos-latest` no longer points at it. See "Metal executes a shader on the
+runner `macos-latest` points at" for the measurements.
+
+**What was checked and ruled out** while the cause was still open, by reading
+the Metal semantics against the code rather than by running anything — no Mac
+was available. The audit stands, and the probe corroborates its conclusion that
+nothing in the command stream was wrong:
 
 - The pipeline's colour format, sample count, stencil and depth attachment
   formats all match the pass: one `Rgba8Unorm` colour target,
@@ -4361,76 +4371,126 @@ code rather than by running anything — no Mac was available:
 **The one structural observation worth carrying forward:** this is the only test
 in the crate that makes the GPU run a shader program. The clear tests exercise
 load/store actions and the blit engine; the pipeline test stops at compilation.
-So "the first draw hangs" and "the first shader execution hangs" are the same
-statement here, and nothing yet distinguishes a defect in the command stream
-from the runner's virtualised GPU being unable to rasterise.
+So "the first draw hangs" and "the first shader execution hangs" were the same
+statement here — which is why the environment, not the command stream, turned
+out to be the whole of it.
 
-Next steps, cheapest first:
+**The branchless-select experiment this section used to list is done, and
+negative.** The probe drew the same triangle twice — once indexing a
+`thread`-address-space `float2 corners[3]` by `[[vertex_id]]`, once through a
+branchless select — and on both images that execute anything at all, the two
+shapes painted the same centre texel. The dynamic index was never the fault and
+no shader edit is owed. The other listed step, reading the encoder report to
+decide between the environment and the command stream, is likewise answered:
+both encoders completed and neither faulted.
 
-- **Read the encoder report the next red run now prints.** `crcbl_mtl::fault`
-  sets `MTLCommandBufferErrorOptionEncoderExecutionStatus` on every command
-  buffer and unpacks `MTLCommandBufferEncoderInfoErrorKey`, so the failure now
-  names the faulting encoder, its state, and the `MTLDevice`. If the device name
-  is a paravirtual one, the environment hypothesis is the answer and the test
-  needs a runner with a real GPU, not a code change.
-- **Run the job with `MTL_DEBUG_LAYER=1` and `MTL_SHADER_VALIDATION=1`.**
-  Metal's API validation is off by default outside Xcode, and an invalid encoder
-  state it would have named turns into a fault with no diagnostic. This is a
-  workflow change in `.github/workflows/ci.yml`, not a backend one.
-- **Replace the shader's `const float2 corners[3]` with a branchless select on
-  `[[vertex_id]]`.** Same geometry, same assertions; it only removes the dynamic
-  index into a `thread`-address-space array. Deliberately _not_ done as part of
-  the fix attempt, because a test edit that turns CI green without an
-  explanation is indistinguishable from weakening it — do it as a named
-  experiment, and if it passes, say so in the shader's docs.
+The one diagnostic never run is the job with `MTL_DEBUG_LAYER=1` and
+`MTL_SHADER_VALIDATION=1`, since Metal's API validation is off by default
+outside Xcode and an invalid encoder state it would have named turns into a
+fault with no diagnostic. It is a workflow change rather than a backend one, and
+it is now optional: the image it would have diagnosed is not the one
+`macos-latest` resolves to.
 
-## Not covered: Metal cannot execute a shader in CI, and there is no substitute
+## Metal executes a shader on the runner `macos-latest` points at — measured, 2026-08-05
 
-**Measured on `macos-latest`, 2026-08-05.** `crcbl-mtl`'s draw test hung the
-GPU, and with `MTLCommandBufferErrorOption::EncoderExecutionStatus` wired in,
-the fault named both halves of the question:
+**Run 31037470086 asked every hosted macOS image the question directly**, with a
+standalone Swift script rather than through `crcbl-mtl`: print the device list,
+dispatch a compute kernel writing `i*i` over 64 threads and check all 64, then
+draw a full-screen triangle into a 64x64 `BGRA8Unorm` texture twice — once with
+a vertex shader indexing a `thread`-address-space `float2 corners[3]` by
+`[[vertex_id]]`, once with a branchless select — and read the centre texel.
+Every runner reported `uname -m` = `arm64` and `Apple M1 (Virtual)`.
 
 ```text
-GPU Hang Error (kIOGPUCommandBufferCallbackErrorHang) [MTLCommandBufferErrorDomain 2]
-on `Apple Paravirtual device`;
-encoders in recorded order: `triangle` completed, `crcbl copies` completed
+macos-14  (ProductVersion 14.8.7, BuildVersion 23J520)
+  MTLCopyAllDevices=1
+  name=Apple Paravirtual device low-power=false headless=false removable=false unified-memory=true argument-buffers-tier=0
+  system-default=none — nothing further to ask
+  (no verdict lines: the script stopped, because MTLCreateSystemDefaultDevice() returned nil)
+
+macos-15  (ProductVersion 15.7.7, BuildVersion 24G720)
+  MTLCopyAllDevices=1
+  name=Apple Paravirtual device low-power=false headless=false removable=false unified-memory=true argument-buffers-tier=1
+  system-default=Apple Paravirtual device
+  verdict=compute: EXECUTED, 64 squares correct
+  verdict=vertexArray: EXECUTED, centre is bgra[0, 255, 0, 255]
+  verdict=vertexSelect: EXECUTED, centre is bgra[0, 255, 0, 255]
+
+macos-26  (ProductVersion 26.5.2, BuildVersion 25F84)
+  MTLCopyAllDevices=1
+  name=Apple Paravirtual device low-power=false headless=false removable=false unified-memory=true argument-buffers-tier=1
+  system-default=Apple Paravirtual device
+  verdict=compute: EXECUTED, 64 squares correct
+  verdict=vertexArray: EXECUTED, centre is bgra[0, 255, 0, 255]
+  verdict=vertexSelect: EXECUTED, centre is bgra[0, 255, 0, 255]
 ```
 
-**Both encoders completed and neither faulted**, so the command stream is not
-what broke — the paravirtual GPU those runners expose cannot execute a shader
-program. Everything short of that still runs and still passes there: adapter
-enumeration, device and resource creation, clears through load actions, blit
-copies, timeline semaphores, readback with real completion observation, MSL
-compilation, and building an `MTLRenderPipelineState` from the engine's own
-committed `msl/triangle.metal`.
+**The device name was never the discriminator it was taken for.** All three
+images enumerate exactly one device and all three call it
+`Apple Paravirtual device`, so the name the fault reporter printed said nothing
+about whether that device could run a shader. What separates them is
+`MTLCreateSystemDefaultDevice()` — nil on macos-14, the device itself on the
+other two — with `argument-buffers-tier` moving the same way: 0 on macos-14, 1
+on both images that execute.
 
-So the one test that makes the GPU run a shader is feature-gated behind
-`mtl-e2e` **and** `#[ignore]`d, with `crates/crcbl-mtl/tests/run-mtl-e2e.sh` the
-only thing that turns it on — the same shape `vk-e2e` and `wgpu-e2e` already
-use, including the zero-tests-run check that `docs/plan/12-testing.md` demands.
+**`macos-latest` resolves to `macos-26-arm64`**, read off run 31029816035's
+`build + test (macos-latest)` job log (`Image: macos-26-arm64`). The macOS leg
+this workspace already runs on every push therefore sits on an image that
+executes a compute dispatch and both vertex shapes.
 
-**The difference from those two is what makes this a gap rather than a
-substitution.** `crcbl-vk` has lavapipe and `crcbl-wgpu` has lavapipe through
-its GL/Vulkan paths, so their e2e suites run in CI against a software
-rasteriser. **Metal has no software rasteriser at all.** There is nothing to
-point `run-mtl-e2e.sh` at except a real Mac, so its results are not automated
-and no CI job asserts them.
+**`crcbl-mtl`'s enumeration choice turns out to have been load-bearing, for a
+reason nobody anticipated.** `crates/crcbl-mtl/src/instance.rs:162-167` argues
+for `MTLCopyAllDevices` over `MTLCreateSystemDefaultDevice` on multi-GPU grounds
+— the seam requires a caller to see every adapter and pick, so a single
+"default" device is a bug on the second machine. On macos-14 it is also the
+difference between enumerating a working device and enumerating nothing at all,
+since `MTLCreateSystemDefaultDevice()` returns nil there while
+`MTLCopyAllDevices()` returns a device. The decision was made for the multi-GPU
+reason and holds for this one too.
 
-What that leaves unproven, and what would prove it:
+**macos-13 was not measured.** Its leg never got a runner — it sat queued and
+the run was cancelled. That is "no hosted Intel runner was available", not a
+result about what an Intel image would do.
 
-- **Nothing above `crcbl-mtl`'s clear path is verified by machine.** Draws,
-  pipelines-in-anger, and everything MTL5/MTL6 add are compile- and
-  lint-verified for `aarch64-apple-darwin` plus whatever a person runs by hand.
-- **A self-hosted macOS runner with a real GPU** is the only thing that closes
-  it, and `docs/plan/09-backends-metal-dx12.md` already anticipated exactly this
-  under "on-hardware smoke (render one frame, hash the readback) on
-  self-hosted/manual runners — compile-verified-only backends are a known trap".
-  That line was written before anyone checked whether the hosted runner would
-  do; it will not.
-- Until then, **`run-mtl-e2e.sh` on a Mac is a release-gate step a person
-  owns**, not something CI can be trusted to have done.
+**What this overturns.** The section this replaces concluded that Metal cannot
+execute a shader in CI, that there is no substitute, and that only a self-hosted
+Mac with a real GPU closes the gap. It was measured on one image, at a time
+`macos-latest` pointed at macos-14 — the one image of the three that executes
+nothing — and it generalised from a device name all three share. Metal still has
+no software rasteriser, which is what `crcbl-vk` and `crcbl-wgpu` get from
+lavapipe; what it has instead is a paravirtual device that on two of three
+images runs the shader anyway. So the four `#[ignore]`d `mtl-e2e` tests in
+`crcbl_mtl::device` —
+`a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`,
+`the_engines_own_triangle_draws_through_a_bind_group`,
+`an_indexed_draw_reads_the_bound_index_range` and
+`a_multi_draw_indirect_emits_every_argument_structure`, each carrying the reason
+"the CI runner's Apple Paravirtual device hangs on one" — are gated on a finding
+that no longer holds. `docs/plan/09-backends-metal-dx12.md`'s warning that
+compile-verified-only backends are a known trap still stands; what does not
+stand is the claim that no hosted runner can answer it.
 
-### The diagnostic that found this nearly hid it
+**What is still not known**, none of it settled by the above:
+
+- **Nobody has run `crcbl-mtl`'s own suite on an image that executes.** The
+  probe was standalone Swift with its own MSL and its own command buffers; no
+  backend code was involved. "The runner can execute a shader" and "this
+  backend's draw path executes on that runner" are different claims, and only
+  the first is measured. Un-`#[ignore]`ing the four tests and adding the CI job
+  that runs them is the next slice, and is what turns one into the other.
+- **The layer and `nextDrawable` path is untouched by this.** The fifth
+  `mtl-e2e` test, at `crates/crcbl-mtl/src/swapchain.rs:2017`, is `#[ignore]`d
+  for an unrelated reason — a CI container's detached layer vends no drawable —
+  and no probe result bears on it.
+- **Real Apple GPUs remain uncovered.** Every runner reported
+  `Apple M1 (Virtual)`. A paravirtual device is one implementation with one set
+  of tolerances — the same caveat WARP carries on Windows — so a hosted green
+  run is not evidence about hardware, and
+  `docs/plan/09-backends-metal-dx12.md`'s on-hardware smoke stays on the list.
+- **`run-mtl-e2e.sh` on a real Mac is still the only thing that has ever run any
+  of these tests**, and stays a person-owned step until the CI job exists.
+
+### The diagnostic that named the fault nearly hid it
 
 Worth keeping, because the shape recurs. The first version of the fault reporter
 read `MTLCommandBufferEncoderInfo::debugSignposts`, which `objc2` generates as
@@ -4442,6 +4502,13 @@ a full CI round trip. A diagnostic that can fail can destroy the evidence it was
 added to collect; prefer the nil-tolerant path even when the binding says the
 value is non-optional.
 
+**And once it worked, its output was over-read.** The report named the device,
+`Apple Paravirtual device`, and a conclusion about the whole platform was drawn
+from that string — which every hosted image prints, including the two that
+execute shaders fine. A diagnostic tells you what it measured on the machine it
+ran on; the generalisation is a separate step, and here it was taken without a
+second data point.
+
 ## What MTL5 left open on the swapchain
 
 - **`nextDrawable` and `presentDrawable:` are proven by nothing automated.**
@@ -4450,8 +4517,10 @@ value is non-optional.
   — runs on CI, because a detached `CAMetalLayer` needs no window server,
   `NSView` or run loop. Acquiring an actual drawable does. That one test is
   behind `mtl-e2e` and `#[ignore]`, so a person on a Mac is the only thing that
-  has ever run it. See "Metal cannot execute a shader in CI" above for why there
-  is no substitute.
+  has ever run it. **The 2026-08-05 probe does not help here**: it settles that
+  the runner executes shaders, and this test is `#[ignore]`d for a different
+  reason — no drawable to acquire — which un-`#[ignore]`ing the four draw tests
+  will not change.
 - **`surface_caps` can never return the `Unsupported` branch its own contract
   requires.** The trait documents that an adapter which cannot present to a
   surface must be reported as `Unsupported`, and callers must treat that as "try
@@ -4603,11 +4672,12 @@ this slice, and the other four Tier A features were already on.
   holding whatever the previous bind put there.** Not checked, because
   `update_bind_group` makes create-then-fill a legal pattern. Vulkan leaves the
   same hazard to its validation layer.
-- **Four `mtl-e2e` tests now exist and none has ever run.** The gap recorded
-  under "Metal cannot execute a shader in CI" is wider, not different:
-  `run-mtl-e2e.sh` on a real Mac is still a person-owned release gate, and it is
-  now the only thing that would catch a regression in bind groups, indexed draws
-  or multi-draw-indirect.
+- **Four `mtl-e2e` tests now exist and none has ever run.** Still true, but the
+  reason changed: the 2026-08-05 probe showed the runner `macos-latest` points
+  at does execute shaders, so these are `#[ignore]`d on a finding that no longer
+  holds rather than for want of a machine. Until the next slice un-ignores them
+  and adds the job, `run-mtl-e2e.sh` on a real Mac remains the only thing that
+  would catch a regression in bind groups, indexed draws or multi-draw-indirect.
 
 ## WARP clears the bindless bar — measured, 2026-08-05
 
@@ -4626,13 +4696,15 @@ hoped for: Windows can have a software rasteriser to render against, the way
 Linux has lavapipe. That closes a coverage hole open since the platform crates
 were empty — `windows-latest` has never had golden images or a render pass.
 
-**What is still unmeasured**: whether WARP will actually _execute_ a shader
-without hanging. macOS taught this the hard way — its runner enumerates a
-perfectly capable-looking `Apple Paravirtual device` and then hangs the command
-buffer on any draw. Reporting tier 3 and SM6.8 is a claim about the API surface,
-not proof that a pixel comes out. **The clear-and-readback test in DX3 is what
-settles that**, and until it runs, "WARP gives Windows lavapipe-equivalent
-coverage" remains a plan rather than a fact.
+**Reporting tier 3 and SM6.8 was a claim about the API surface, not proof that a
+pixel comes out** — and macOS is the cautionary tale for exactly that gap: a
+runner there enumerated a perfectly capable-looking `Apple Paravirtual device`
+and then hung the command buffer on a draw. (That hang turned out to be one
+macOS image rather than paravirtualisation as such; the lesson that enumeration
+answers a different question from execution is unchanged.) **WARP has since
+drawn**: `crcbl_dx12::device`'s
+`a_pulled_triangle_is_drawn_and_read_back_texel_by_texel` passed on
+`windows-latest` in run 31029816035, so the execution half is measured too.
 
 `renderer-tier=B` in those lines is the backend's own gap — `COMPUTE`,
 `TIMELINE_SEMAPHORE` and the two indirect features wait on calls no slice has
@@ -4644,9 +4716,11 @@ DX4 landed shader modules, root signatures, bind groups, graphics pipelines and
 a draw, and its measurement is `crcbl_dx12::device`'s
 `a_pulled_triangle_is_drawn_and_read_back_texel_by_texel` — a triangle pulled
 from a storage buffer through a real root signature, with its texels asserted.
-**Nothing in it has ever executed**: the development box is Linux and
-`crcbl-dx12` compiles on Windows alone, so CI is the first machine to run any of
-it. Until that test is green, "WARP executes a shader" stays a plan.
+The development box is Linux and `crcbl-dx12` compiles on Windows alone, so CI
+was the first machine to run any of it — and it passed on `windows-latest` in
+run 31029816035. "WARP executes a shader" is a measurement now — on WARP alone,
+which is one implementation with one set of tolerances; no D3D12 code in this
+workspace has run on a GPU.
 
 Deferred inside DX4, each with what it would take:
 
