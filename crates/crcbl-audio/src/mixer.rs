@@ -23,6 +23,57 @@ fn finite_or(value: f32, fallback: f32, min: f32, max: f32) -> f32 {
     }
 }
 
+/// Per-channel delay-line length. One past the longest ITD the mixer will
+/// serve: the clamp below guarantees both fractional taps of any delay stay
+/// inside the buffer.
+const DELAY_CAPACITY: usize = 64;
+
+/// Largest ITD in samples, per channel. `(capacity - 2)`: a delay of exactly
+/// this reads taps at `62` and `63` samples ago, so `capacity - 1` is the
+/// deepest tap that still lands in-buffer. Well above the cue grammar's
+/// [`CueGrammar::max_itd_samples`](crate::spatial::CueGrammar) default of 30.
+const MAX_ITD_DELAY: f32 = (DELAY_CAPACITY - 2) as f32;
+
+/// A per-channel circular buffer that answers a fractional delay.
+///
+/// `push_and_read` writes `sample` and returns the value `delay` samples
+/// ago, linearly interpolated between the taps at `floor(delay)` and
+/// `ceil(delay)` — the standard one-multiply fractional delay. The buffer
+/// starts silent, so a channel whose delay is `d` fades in over its first
+/// `d` frames, which is what an interaural delay is: the far ear's first
+/// arrival is later, not quieter.
+#[derive(Debug)]
+struct DelayLine {
+    buf: Vec<f32>,
+    /// The slot the next push overwrites.
+    write: usize,
+}
+
+impl DelayLine {
+    /// A silent line of `capacity` slots.
+    fn new(capacity: usize) -> Self {
+        Self {
+            buf: vec![0.0; capacity],
+            write: 0,
+        }
+    }
+
+    /// Write `sample`, answer the value `delay` samples ago.
+    ///
+    /// The caller guarantees `delay ∈ [0, capacity - 2]` (that is what
+    /// [`MAX_ITD_DELAY`] is for), so both taps are always in-buffer and the
+    /// second never aliases the just-written slot.
+    fn push_and_read(&mut self, sample: f32, delay: f32) -> f32 {
+        self.buf[self.write] = sample;
+        let k = delay.floor() as usize;
+        let frac = delay - k as f32;
+        let at = |k: usize| self.buf[(self.write + self.buf.len() - k) % self.buf.len()];
+        let out = at(k) * (1.0 - frac) + at(k + 1) * frac;
+        self.write = (self.write + 1) % self.buf.len();
+        out
+    }
+}
+
 /// How a voice sits in the mix: level, pan and speed.
 ///
 /// The three parameters a spatialiser produces, in one value, so a caller can
@@ -42,6 +93,10 @@ pub struct VoiceMix {
     pub gains: (f32, f32),
     /// Varispeed ratio, clamped to `[0.25, 4.0]`.
     pub pitch: f32,
+    /// Fractional interaural delay in samples: positive delays the right
+    /// channel, negative the left (the [`crate::spatial::SpatialCue`]
+    /// contract), clamped to `±MAX_ITD_DELAY`.
+    pub itd_samples: f32,
 }
 
 impl VoiceMix {
@@ -50,6 +105,7 @@ impl VoiceMix {
         volume: 1.0,
         gains: (1.0, 1.0),
         pitch: 1.0,
+        itd_samples: 0.0,
     };
 }
 
@@ -62,20 +118,21 @@ impl Default for VoiceMix {
 /// The spatialiser's answer, as something a voice can be played at.
 ///
 /// The glue every game was writing by hand: [`compute_cue`] produces gains, a
-/// pitch ratio and a volume, and this is what carries them to [`Mixer::play`].
+/// pitch ratio, a volume and an interaural time difference, and this is what
+/// carries them to [`Mixer::play`].
 ///
-/// **[`SpatialCue::itd_samples`] is dropped**, because a [`Voice`] has no
-/// per-channel delay line to put it in. The pan that survives is the gain
-/// difference alone, which is most of the direction and none of the timing.
+/// Nothing is dropped: the pan is the gain difference and the delay is the
+/// timing, and a [`Voice`] applies both — the ITD through its per-channel
+/// delay line.
 ///
 /// [`compute_cue`]: crate::spatial::compute_cue
-/// [`SpatialCue::itd_samples`]: crate::spatial::SpatialCue::itd_samples
 impl From<&crate::spatial::SpatialCue> for VoiceMix {
     fn from(cue: &crate::spatial::SpatialCue) -> Self {
         Self {
             volume: cue.volume,
             gains: (cue.gain_left, cue.gain_right),
             pitch: cue.pitch_ratio,
+            itd_samples: cue.itd_samples,
         }
     }
 }
@@ -120,6 +177,12 @@ pub struct Voice {
     /// Values > 1.0 play faster/higher; < 1.0 play slower/lower.
     /// Applied by advancing the playhead at the adjusted rate.
     pitch: f32,
+    /// Fractional interaural delay in samples: positive delays the right
+    /// channel, negative the left (the [`crate::spatial::SpatialCue`]
+    /// contract), clamped to `±MAX_ITD_DELAY`.
+    itd_samples: f32,
+    /// One fractional delay line per output channel, fed by `itd_samples`.
+    delay: [DelayLine; CHANNELS],
 }
 
 impl Voice {
@@ -144,6 +207,8 @@ impl Voice {
             releasing: false,
             gains: (1.0, 1.0),
             pitch: 1.0,
+            itd_samples: 0.0,
+            delay: std::array::from_fn(|_| DelayLine::new(DELAY_CAPACITY)),
         }
     }
 
@@ -194,6 +259,7 @@ impl Voice {
             volume: self.volume,
             gains: self.gains,
             pitch: self.pitch,
+            itd_samples: self.itd_samples,
         }
     }
 
@@ -211,6 +277,7 @@ impl Voice {
             finite_or(mix.gains.1, 1.0, 0.0, 1.0),
         );
         self.pitch = finite_or(mix.pitch, 1.0, 0.25, 4.0);
+        self.itd_samples = finite_or(mix.itd_samples, 0.0, -MAX_ITD_DELAY, MAX_ITD_DELAY);
     }
 
     /// Stop playback after the current block.
@@ -263,6 +330,11 @@ impl Voice {
         // and the last is exactly silence. A one-frame block is degenerate:
         // the fade is 0.0.
         let block_frames = buffer.len() / CHANNELS;
+        // The ITD is fixed for the block. Positive delays the right channel
+        // (source left), negative the left (source right) — each channel's
+        // line delays its own ear.
+        let itd = self.itd_samples;
+        let delay = [(-itd).max(0.0), itd.max(0.0)];
 
         for (i, out) in buffer.chunks_exact_mut(CHANNELS).enumerate() {
             if pos as usize >= frames {
@@ -283,8 +355,10 @@ impl Voice {
             } else {
                 1.0
             };
-            out[0] += self.data[base] * self.volume * self.gains.0 * fade;
-            out[1] += self.data[base + 1] * self.volume * self.gains.1 * fade;
+            let sample = self.delay[0].push_and_read(self.data[base], delay[0]);
+            out[0] += sample * self.volume * self.gains.0 * fade;
+            let sample = self.delay[1].push_and_read(self.data[base + 1], delay[1]);
+            out[1] += sample * self.volume * self.gains.1 * fade;
             pos += step;
         }
         self.playhead = (pos as usize).min(frames);
@@ -559,6 +633,8 @@ impl std::fmt::Debug for Mixer {
 mod tests {
     use super::*;
 
+    use crate::spatial::{CueGrammar, SpatialCue, compute_cue};
+
     /// Interleaved stereo data whose left and right channels differ, so a
     /// decoder that reads the wrong channel is visible.
     fn split_channels(frames: usize) -> Vec<AudioSample> {
@@ -813,6 +889,7 @@ mod tests {
                 volume: 1.0,
                 gains: (1.0, 0.0),
                 pitch: 1.0,
+                itd_samples: 0.0,
             }),
         );
 
@@ -829,6 +906,7 @@ mod tests {
                 volume: 1.0,
                 gains: (0.0, 1.0),
                 pitch: 1.0,
+                itd_samples: 0.0,
             },
         ));
 
@@ -845,7 +923,8 @@ mod tests {
                 VoiceMix {
                     volume: 1.0,
                     gains: (0.0, 1.0),
-                    pitch: 1.0
+                    pitch: 1.0,
+                    itd_samples: 0.0,
                 }
             )],
         );
@@ -863,6 +942,7 @@ mod tests {
                 volume: f32::NAN,
                 gains: (2.0, f32::INFINITY),
                 pitch: -1.0,
+                itd_samples: f32::NAN,
             },
         ));
 
@@ -874,9 +954,144 @@ mod tests {
             VoiceMix {
                 volume: 0.0,
                 gains: (1.0, 1.0),
-                pitch: 0.25
+                pitch: 0.25,
+                itd_samples: 0.0,
             },
         );
+    }
+
+    /// Interleaved ramp data whose channels are far apart — left holds `n`,
+    /// right holds `1000 + n` — so a delay that crossed channels would be
+    /// unmissable.
+    fn ramp_channels(frames: usize) -> Vec<AudioSample> {
+        let mut out = Vec::with_capacity(frames * CHANNELS);
+        for n in 0..frames {
+            out.push(n as f32);
+            out.push(1000.0 + n as f32);
+        }
+        out
+    }
+
+    /// The [`From`] impl carries the cue's ITD instead of dropping it: an
+    /// emitter off to one side mixes at its own delay, and anything
+    /// reference-derived mixes with none.
+    #[test]
+    fn from_cue_carries_the_itd() {
+        let grammar = CueGrammar::default();
+        let right = compute_cue([0.0, 0.0, 0.0], [5.0, 0.0, 0.0], &grammar);
+        assert!(right.itd_samples < 0.0, "right emitter delays the left ear");
+        assert_eq!(VoiceMix::from(&right).itd_samples, right.itd_samples);
+
+        let ahead = compute_cue([0.0, 0.0, 0.0], [0.0, 0.0, 0.5], &grammar);
+        assert_eq!(VoiceMix::from(&ahead).itd_samples, 0.0);
+        assert_eq!(VoiceMix::from(&SpatialCue::REFERENCE).itd_samples, 0.0);
+    }
+
+    /// A positive ITD delays the right channel by exactly that many frames,
+    /// scaled by the mix's volume. The line starts silent, so the first two
+    /// frames read zero; frame `k` reads data frame `k - 2`. The left channel
+    /// is untouched. The old code read `self.data[base + ch]` directly and
+    /// answered `1000 + k` in the right channel, so this fails on it.
+    #[test]
+    fn a_positive_itd_delays_the_right_channel() {
+        let mut voice = Voice::new(ramp_channels(64)).with_mix(VoiceMix {
+            volume: 0.5,
+            itd_samples: 2.0,
+            ..VoiceMix::UNITY
+        });
+        let mut buf = vec![0.0f32; 32 * CHANNELS];
+        assert!(voice.mix_block(&mut buf, 48_000));
+
+        for (k, frame) in buf.chunks_exact(CHANNELS).enumerate() {
+            let expected_right = if k >= 2 {
+                (1000.0 + (k - 2) as f32) * 0.5
+            } else {
+                0.0
+            };
+            assert!(
+                (frame[0] - k as f32 * 0.5).abs() < 1e-6,
+                "frame {k}: left was delayed: {}",
+                frame[0],
+            );
+            assert!(
+                (frame[1] - expected_right).abs() < 1e-6,
+                "frame {k}: right expected {expected_right}, got {}",
+                frame[1],
+            );
+        }
+    }
+
+    /// The sign convention pinned the other way: a negative ITD delays the
+    /// left channel, and the right is untouched.
+    #[test]
+    fn a_negative_itd_delays_the_left_channel() {
+        let mut voice = Voice::new(ramp_channels(64)).with_mix(VoiceMix {
+            volume: 0.5,
+            itd_samples: -2.0,
+            ..VoiceMix::UNITY
+        });
+        let mut buf = vec![0.0f32; 32 * CHANNELS];
+        assert!(voice.mix_block(&mut buf, 48_000));
+
+        for (k, frame) in buf.chunks_exact(CHANNELS).enumerate() {
+            let expected_left = if k >= 2 { (k - 2) as f32 * 0.5 } else { 0.0 };
+            assert!(
+                (frame[0] - expected_left).abs() < 1e-6,
+                "frame {k}: left expected {expected_left}, got {}",
+                frame[0],
+            );
+            assert!(
+                (frame[1] - (1000.0 + k as f32) * 0.5).abs() < 1e-6,
+                "frame {k}: right was delayed: {}",
+                frame[1],
+            );
+        }
+    }
+
+    /// A fractional ITD interpolates between the two taps: frame `k` reads
+    /// `0.5·x[k] + 0.5·x[k−1]`, where `x` is the delayed channel's ramp and
+    /// the missing `x[−1]` is the silent start of the line.
+    #[test]
+    fn a_fractional_itd_interpolates_between_taps() {
+        let mut voice = Voice::new(ramp_channels(64)).with_mix(VoiceMix {
+            itd_samples: 0.5,
+            ..VoiceMix::UNITY
+        });
+        let mut buf = vec![0.0f32; 32 * CHANNELS];
+        assert!(voice.mix_block(&mut buf, 48_000));
+
+        for (k, frame) in buf.chunks_exact(CHANNELS).enumerate() {
+            let prev = if k >= 1 { 1000.0 + (k - 1) as f32 } else { 0.0 };
+            let expected_right = 0.5 * (1000.0 + k as f32) + 0.5 * prev;
+            assert!(
+                (frame[1] - expected_right).abs() < 1e-6,
+                "frame {k}: right expected {expected_right}, got {}",
+                frame[1],
+            );
+            assert!(
+                (frame[0] - k as f32).abs() < 1e-6,
+                "frame {k}: left was delayed: {}",
+                frame[0],
+            );
+        }
+    }
+
+    /// The clamp bounds the delay at `±MAX_ITD_DELAY`, which is what keeps
+    /// both fractional taps of any admitted delay inside the line. The getter
+    /// reports the clamped value.
+    #[test]
+    fn itd_is_clamped_to_the_delay_line_capacity() {
+        let voice = Voice::new(vec![0.0f32; 8 * CHANNELS]).with_mix(VoiceMix {
+            itd_samples: 1e9,
+            ..VoiceMix::UNITY
+        });
+        assert_eq!(voice.mix().itd_samples, MAX_ITD_DELAY);
+
+        let voice = Voice::new(vec![0.0f32; 8 * CHANNELS]).with_mix(VoiceMix {
+            itd_samples: -1e9,
+            ..VoiceMix::UNITY
+        });
+        assert_eq!(voice.mix().itd_samples, -MAX_ITD_DELAY);
     }
 
     /// **A looping voice outlives its own sample data**, which is the whole
