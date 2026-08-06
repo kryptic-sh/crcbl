@@ -2399,16 +2399,6 @@ without activation, and what did not.
   under the text. Closing it needs a seam addition ("the caret is here"), which
   is a decision above this crate and should be taken once for every backend that
   has an IME.
-- **`appkit::keys::named_keysym` and `win32::keys::named_keysym` are the same
-  table, and it was not extracted.** It is a pure function of the engine's own
-  `KeyCode` with no platform in it, so it is duplicated _knowledge_ rather than
-  duplicated shape, and the codebase's own rule says extract it. It was not,
-  because M2's brief scoped its edits to `crates/crcbl-shell/src/appkit/**` and
-  the extraction moves a `win32` file. What guards it meanwhile is a test in
-  `appkit::keys` asserting the two agree for every `KeyCode`, which compiles
-  wherever both modules do — every host, under `cfg(test)`. The extraction
-  itself is a shared module (`crate::keysym`, or a third entry beside
-  `linux::keymap`) plus a re-export from `win32::keys` so callers do not churn.
 
 ### What M3 could not verify, and what would verify it
 

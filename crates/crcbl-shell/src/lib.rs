@@ -273,6 +273,16 @@ pub mod headless;
 pub mod monitor;
 pub mod window;
 
+/// The `KeyCode` → keysym table that has no platform in it, shared by the
+/// backends that need one (see the module docs for why it is a separate module
+/// rather than a third copy beside the evdev table).
+///
+/// Compiled wherever a consumer exists — the AppKit and Win32 backends — and,
+/// under `cfg(test)`, on every host so the table's own tests run in `cargo
+/// test` on the machine the engine is developed on.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+pub(crate) mod keysym;
+
 /// What the two Linux backends share: the evdev key table and libxkbcommon.
 ///
 /// Not `pub`, like the backends themselves. See the module's own docs for why
