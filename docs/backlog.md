@@ -5365,19 +5365,6 @@ longer the Tier B leg it was assumed to be.
 One arm was salvaged: the `update_bind_group` refusal is a layout rule rather
 than a tier rule, so that test runs its refusal path on Tier A devices too.
 
-## `frame_loop_sequences.rs`'s section banner counts three tests and holds four
-
-The `// --- regressions from the 2026-08 code review ---` banner at the top of
-`crates/crcbl-vk/tests/vk_e2e/frame_loop_sequences.rs` says "Three paths the
-review identified", and four tests sit under it —
-`a_read_only_depth_pass_uses_the_read_only_layout`,
-`a_failed_submit_does_not_wedge_the_retire_timeline`,
-`a_readback_whose_wait_semaphore_is_destroyed_fails_cleanly` and
-`a_reconfigure_between_acquire_and_present_is_survivable`. The count was already
-stale before the file was split; the split moved the banner verbatim rather than
-editing it, because that change was out of scope for a move-only slice. Dropping
-the count is the fix — "a count of code elements loses the number entirely".
-
 ## Modules of `--test vk_e2e` need `#[path]`, which is not obvious
 
 `crates/crcbl-vk/tests/vk_e2e.rs` declares its modules with

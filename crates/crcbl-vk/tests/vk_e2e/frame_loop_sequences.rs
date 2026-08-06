@@ -9,7 +9,7 @@ use crcbl_hal::{
 
 // --- regressions from the 2026-08 code review -------------------------------
 //
-// Three paths the review identified as both wrong and untested. Each one is a
+// Paths the review identified as both wrong and untested. Each one is a
 // sequence a real frame loop performs and the offscreen suite never did.
 
 /// A **read-only** depth attachment must begin rendering in the layout the
