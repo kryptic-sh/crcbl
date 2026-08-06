@@ -3242,22 +3242,13 @@ annotated.
   rather than by rotating — which would cost nothing per enemy either, if a
   future enemy ever wants a heading.
 
-- **The mirrored wizard has never been rasterised, and the walk has never been
-  watched.** `art::mirrored` swaps a frame's `u` ends;
-  `art::tests::facing_left_reverses_the_frames_u_range` asserts the exact
-  reversal, asserts every point the quad will sample stays inside the frame's
-  own interval — the property that stops a mirrored actor sampling the grunt
-  next to it in the strip — and reproduces `sprite.slang`'s
-  `lerp(uv.x, uv.z, corner.x)` on the CPU. That last part is a **copy of the
-  shader's rule, not the shader**. What was checked by reading the shader: `u`
-  is an unconditional `lerp` with no clamp and no `saturate`, and the fragment's
-  `sharpen` is written in terms of `fwidth`, which is symmetric — so a reversed
-  range interpolates rather than degenerating. The evidence that would actually
-  settle it is a golden in `crates/crcbl-vk/tests/vk_e2e.rs` that renders a
-  frame and its mirror and compares the two images column-reversed; that file
-  was outside the write scope of the slice that added the flip. Nobody has seen
-  a picture of a wizard facing left, and nobody has seen the walk cycle play —
-  the browser gate's canvas capture that a human looked at predates both.
+- **The wizard's walk cycle has never been watched.** `art::mirrored`'s reversal
+  is now rasterised — `crates/crcbl-vk/tests/vk_e2e/sprite/mirror.rs` renders a
+  frame and its mirror and compares the two images column-reversed, bit-exact on
+  radv, which is the shader-side evidence the older entry asked for. What is
+  still unverified is the _animation_: nobody has seen the walk cycle play in a
+  running window, and the browser gate's canvas capture that a human looked at
+  predates the flip.
 
 - **A wizard walking into a wall keeps walking on the spot.**
   `RenderState::player_walking` is the intent, not the velocity after
