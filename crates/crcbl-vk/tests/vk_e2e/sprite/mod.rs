@@ -8,6 +8,7 @@ use crcbl_hal::{
 
 mod drawing;
 mod filtering;
+mod mirror;
 mod rotation;
 
 // --- slice 4: the sprite pass, and the first pixels it is shown to draw -------
