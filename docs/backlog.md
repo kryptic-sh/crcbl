@@ -3,6 +3,31 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## Five dependabot PRs are open and untriaged, and two of them are not routine
+
+Checked 2026-08-06. `#5` (`actions/deploy-pages` 4→5), `#3`
+(`actions/setup-node` 6→7) and `#2` (`actions/configure-pages` 5→6) are action
+bumps and mechanical — CI either goes green or it does not, and that is the
+whole review.
+
+The other two are semver-major **crate** bumps and want a real read of their
+changelogs before merging, because a green CI on this workspace is weaker
+evidence than it looks:
+
+- **`#7` `pollster` 0.4.0 → 1.0.1.** `pollster` blocks a thread on a future, and
+  it sits under the synchronous device-open path. A 1.0 release is where an
+  executor changes its parking or panic behaviour, and the failure mode is a
+  hang rather than a compile error — which no test in this repo is shaped to
+  catch, since nothing asserts a bounded wall-clock on device open.
+- **`#6` `toml` 0.8.23 → 1.1.4+spec-1.1.0.** The version string names a **spec**
+  change, not just an API one, so the question is whether any TOML this
+  workspace parses or emits is affected by TOML 1.1 semantics — not whether it
+  still compiles.
+
+Nobody has read either changelog. The reason this is in the backlog rather than
+only in GitHub is that "CI is green" is the tempting and wrong way to merge
+both.
+
 ## Owed
 
 The S1B findings in `docs/plan/ROADMAP.md` were the substantive list — six
