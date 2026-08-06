@@ -16,19 +16,6 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`crcbl-shaders`: the UI shaders declare their resources in binding order,
-  which is what makes text appear on Metal.** `ui.slang` and `ui_tier_b.slang`
-  declared `constants` first while numbering it last, and Slang's Metal target
-  assigns argument-table indices in *declaration* order — so their MSL bound
-  `constants` at `buffer(0)` and `vertices` at `buffer(1)`, while `crcbl-mtl`
-  flattens `(set, binding)` by ascending binding number and bound them the other
-  way round. The UI vertex stage read the viewport constants as its vertex
-  array: every quad went nowhere, silently, and macOS ran flappy with no HUD, no
-  score and no menu labels. Reordering the two declarations fixes it; SPIR-V and
-  WGSL are byte-identical afterwards, because `[[vk::binding]]` already pinned
-  those. `crcbl_mtl::binding` carries the rule and the obligation it puts on new
-  shaders.
-
 - **`--pacing` and `--fps`, so a run can pick its display sync and its frame cap
   from the command line.** `--pacing <auto|vsync|adaptive|off>` sets
   `GpuContextDesc::pacing` and `--fps <N>` sets the loop's `FrameLimit`; both
