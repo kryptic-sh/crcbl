@@ -43,7 +43,7 @@ use crcbl::args::{COMMON_OPTIONS_HELP, COMMON_TAIL_HELP, Common, Consumed, Invoc
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Booted, Clock, DEBUG_OVERLAY_ID, FRAMES_IN_FLIGHT, FULLSCREEN_ID, FrameInfo, FrameOutcome,
-    GameGpu, GpuContext, GpuContextDesc, GpuError, GpuSurface, HostedGame, LoopConfig, LoopError,
+    GameGpu, GpuContext, GpuContextDesc, GpuError, GpuOptions, GpuSurface, HostedGame, LoopError,
     RESUME_ID, RunSummary, drive, open_window, wait_for_configure,
 };
 use crcbl::hal::{CommandEncoderDesc, Features};
@@ -72,7 +72,8 @@ const APP_ID: &str = "{{name}}";
 /// The simulation rate. Fixed, and independent of the frame rate.
 ///
 /// The default the command line starts from — `--tick-hz` overrides it, and
-/// [`LoopConfig::tick_hz`] is what actually drives the accumulator.
+/// [`crcbl::engine::LoopConfig::tick_hz`] is what actually drives the
+/// accumulator.
 const TICK_HZ: u32 = 60;
 
 /// What the window asks the compositor for. A window system is free to refuse.
@@ -319,7 +320,7 @@ impl Gpu {
         shell: &S,
         window: WindowId,
         extent: (u32, u32),
-        backend: Option<GpuBackend>,
+        gpu: GpuOptions,
     ) -> Result<Self, GpuError> {
         let ctx = GpuContext::open(
             shell,
@@ -327,7 +328,6 @@ impl Gpu {
             extent,
             &GpuContextDesc {
                 label: NAME,
-                backend,
                 // Optional, never required: the UI pass hands its shader the
                 // viewport size through a push constant where there are any and
                 // through a uniform buffer where there are none. A browser is
@@ -336,7 +336,9 @@ impl Gpu {
                     | Features::TIMESTAMP_QUERY
                     | Features::DEBUG_MARKERS
                     | Features::PUSH_CONSTANTS,
-                ..GpuContextDesc::default()
+                // The command line's half: `--backend` and `--pacing`. The
+                // label and the features above are this game's.
+                ..GpuContextDesc::from(gpu)
             },
         )?;
 
@@ -519,7 +521,7 @@ fn start(options: &Common) -> Result<crcbl::engine::Loop<dyn Shell, Game>, Error
     // needs one. This wait is mandatory, not defensive.
     let mut events = 0;
     let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
-    let gpu = Gpu::open(shell.as_ref(), window, extent, options.backend)?;
+    let gpu = Gpu::open(shell.as_ref(), window, extent, options.gpu())?;
 
     Ok(crcbl::engine::Loop::new(
         Booted {
@@ -530,14 +532,11 @@ fn start(options: &Common) -> Result<crcbl::engine::Loop<dyn Shell, Game>, Error
             events,
         },
         Game::default(),
-        LoopConfig {
-            tick_hz: options.tick_hz,
-            frames: options.frame_budget(),
-            debug_overlay: options.debug_overlay_visible(),
-            // A headless run has no compositor to idle against and would
-            // otherwise sleep its way through its frame budget.
-            windowed: !options.headless,
-        },
+        // The tick rate, the frame budget, the overlay, whether to idle between
+        // frames, and the `--fps` limit — every one of them straight off the
+        // command line, so a flag added to `Common` reaches this loop without
+        // this call changing.
+        options.loop_config(),
     ))
 }
 
@@ -558,6 +557,23 @@ fn usage() -> String {
 /// [`Common`] carries every flag the engine defines. A flag of this game's own
 /// goes in the [`Consumed::No`] arm, which is where an unrecognised argument
 /// currently ends up.
+///
+/// A game whose own defaults differ from the engine's writes them here, and the
+/// command line still overrides them:
+///
+/// ```ignore
+/// let mut options = Common {
+///     // 144 rather than the engine's 1000, and vsync rather than "follow the
+///     // display". `--fps` and `--pacing` still win over both.
+///     limit: crcbl::engine::FrameLimit::fps(144),
+///     pacing: crcbl::engine::Pacing::Vsync,
+///     ..Common::new(TICK_HZ)
+/// };
+/// ```
+///
+/// Either can also be changed while the game is running — a settings screen
+/// calls `crcbl::engine::GpuContext::set_pacing` on this game's own [`Gpu`] and
+/// `crcbl::engine::Clock::set_limit` on the loop's clock.
 fn parse(args: impl Iterator<Item = String>) -> Invocation<Common> {
     let mut options = Common::new(TICK_HZ);
     let mut rest = args;

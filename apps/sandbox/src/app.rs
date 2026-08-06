@@ -61,7 +61,8 @@ use crcbl::backend::GpuBackend;
 // `MAX_CONSECUTIVE_RECONFIGURES` is what makes `--frames N` terminate when the
 // swapchain never becomes presentable — a budget of *presented* frames cannot.
 use crcbl::engine::{
-    Booted, Clock, ExitReason, FrameInfo, HostedGame, LoopConfig, RunSummary, wait_for_configure,
+    Booted, Clock, ExitReason, FrameInfo, FrameLimit, GpuOptions, HostedGame, LoopConfig, Pacing,
+    RunSummary, wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{DisplayMode, LogicalSize, ShellBackend as Backend, open, open_backend};
@@ -152,6 +153,16 @@ pub struct Options {
     /// builds", so `None` means [`Options::debug_overlay_visible`]'s
     /// `cfg!(debug_assertions)` and either flag overrides it.
     pub debug_overlay: Option<bool>,
+    /// How presented frames are paced against the display.
+    ///
+    /// The same value [`crcbl::args::Common::pacing`] carries for the four
+    /// games; the sandbox predates that shared parser and still has its own.
+    pub pacing: Pacing,
+    /// The most frames a second the loop will run.
+    ///
+    /// The same value [`crcbl::args::Common::limit`] carries. It is the only
+    /// pacing there is under [`Pacing::Off`], and under vsync it rarely fires.
+    pub limit: FrameLimit,
 }
 
 impl Default for Options {
@@ -165,11 +176,24 @@ impl Default for Options {
             camera: CameraMode::default(),
             fullscreen: false,
             debug_overlay: None,
+            pacing: Pacing::default(),
+            limit: FrameLimit::default(),
         }
     }
 }
 
 impl Options {
+    /// What the command line contributes to opening a GPU.
+    ///
+    /// The same value [`crcbl::args::Common::gpu`] gives the four games.
+    #[must_use]
+    pub const fn gpu(&self) -> GpuOptions {
+        GpuOptions {
+            backend: self.backend,
+            pacing: self.pacing,
+        }
+    }
+
     /// The frame budget actually used: a headless run always has one, because a
     /// headless window is never closed by a user and a CI job must terminate.
     #[must_use]
@@ -329,7 +353,7 @@ pub fn with_shell<S: Shell + ?Sized>(
         shell.as_ref(),
         window,
         extent,
-        options.backend,
+        options.gpu(),
         options.camera.projection(),
     )?;
 
@@ -347,6 +371,7 @@ pub fn with_shell<S: Shell + ?Sized>(
             frames: options.frame_budget(),
             debug_overlay: options.debug_overlay_visible(),
             windowed: !options.headless,
+            limit: options.limit,
         },
     ))
 }
@@ -492,6 +517,8 @@ mod tests {
             camera: CameraMode::Perspective,
             fullscreen: false,
             debug_overlay: None,
+            pacing: Pacing::default(),
+            limit: FrameLimit::default(),
         }
     }
 

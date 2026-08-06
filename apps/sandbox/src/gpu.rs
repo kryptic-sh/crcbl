@@ -102,10 +102,9 @@
 //! 6. **A render pass needed a view the seam would not give it** — *fixed in
 //!    the seam*, `AcquiredFrame::view`.
 
-use crcbl::backend::GpuBackend;
 pub use crcbl::engine::{FrameOutcome, GpuError};
 
-use crcbl::engine::{GpuContext, GpuContextDesc};
+use crcbl::engine::{GpuContext, GpuContextDesc, GpuOptions};
 use crcbl::hal::CommandEncoderDesc;
 use crcbl::prelude::*;
 use crcbl::render::{
@@ -178,7 +177,7 @@ impl Gpu {
         shell: &S,
         window: WindowId,
         extent: (u32, u32),
-        backend: Option<GpuBackend>,
+        gpu: GpuOptions,
         projection: crcbl::render::Projection,
     ) -> Result<Self, GpuError> {
         let ctx = GpuContext::open(
@@ -187,8 +186,7 @@ impl Gpu {
             extent,
             &GpuContextDesc {
                 label: "sandbox",
-                backend,
-                ..GpuContextDesc::default()
+                ..GpuContextDesc::from(gpu)
             },
         )?;
 

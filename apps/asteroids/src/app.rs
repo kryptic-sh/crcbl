@@ -34,7 +34,7 @@
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Booted, Clock, ExitReason, FrameInfo, HostedGame, LoopConfig, RunSummary, wait_for_configure,
+    Booted, Clock, ExitReason, FrameInfo, HostedGame, RunSummary, wait_for_configure,
 };
 use crcbl::math::Vec2;
 use crcbl::prelude::*;
@@ -162,7 +162,7 @@ pub fn with_shell<S: Shell + ?Sized>(
     let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
     crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
 
-    let gpu = Gpu::open(shell.as_ref(), window, extent, options.common.backend)?;
+    let gpu = Gpu::open(shell.as_ref(), window, extent, options.common.gpu())?;
     assemble(
         Booted {
             shell,
@@ -201,12 +201,7 @@ fn assemble<S: Shell + ?Sized>(
             render_state: RenderState::default(),
             hud: HudStrings::default(),
         },
-        LoopConfig {
-            tick_hz: options.common.tick_hz,
-            frames: options.common.frame_budget(),
-            debug_overlay: options.common.debug_overlay_visible(),
-            windowed: !options.common.headless,
-        },
+        options.common.loop_config(),
     ))
 }
 
@@ -392,7 +387,7 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
                 shell,
                 window,
                 clock_source,
-                options.common.backend,
+                options.common.gpu(),
             ),
             options: options.clone(),
         })

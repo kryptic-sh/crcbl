@@ -259,6 +259,104 @@ path was NOT exercised, only the absent-capability path" >&2
 $want_mode at $want_extent on wayland/$backend"
 }
 
+# How many frames the paced pass presents, and at what rate. Small, because
+# `--fps 30` means it really does take a second: the limiter is the only thing
+# pacing a run that asked for no display sync, which is the point.
+PACED_FRAMES=30
+PACED_FPS=30
+# The floor the *measured* mean frame time has to clear, in whole milliseconds.
+# `PACED_FPS` asks for a 33 ms period; this is a little under it, because the
+# first frame of a run never waits — there is no previous frame to be early
+# against — and it is one of the samples the mean is taken over. An ignored
+# limiter measures around 4 ms here, so the gap this has to resolve is large.
+PACED_MIN_FRAME_MS=30
+
+# `run_sandbox_paced <backend>`
+#
+# The pass that proves `--pacing` and `--fps` are wired to something. Every
+# other run here takes the defaults, so a `Common` field parsed and then dropped
+# on the floor — never reaching `GpuContextDesc` or the clock — would look
+# exactly like a working engine from the outside.
+#
+# Three assertions on the engine's own lines, and one on what it measured:
+#
+#  * `engine: the frame limit is 30 fps` is printed from `Clock::set_limit`, so
+#    it is there only if the value reached the clock the loop advances.
+#  * ...and the run's own end-of-run measurement says the limiter then *waited*,
+#    which a line about a setting cannot. That number is worth asserting here
+#    rather than only in the unit test because this is a real display, a real
+#    swapchain and a real scheduler: bring-up is a few tens of milliseconds and
+#    the paced second is the whole run.
+#  * `asked for Off, pacing Off` comes off the same `settle_pacing` line the
+#    display-timing block above reads. It is the half that says the request
+#    survived: `asked for Auto` — the default, and what every other pass in this
+#    file produces — would still print, and would still name a pacing.
+#
+# And the mode the swapchain actually opened on, which is the difference a
+# player would feel: `Pacing::Off` prefers Mailbox and falls back to Immediate,
+# where the default's Fifo blocks on vblank. Mesa's Wayland WSI offers both on
+# radv and on lavapipe, so a Fifo here means the request did not reach
+# `choose_present_mode` rather than that the surface was poor.
+run_sandbox_paced() {
+    local backend="$1"
+    local log="${SWAY_RUNTIME_DIR}/sandbox-paced.log"
+
+    echo "crcbl e2e: running the sandbox on $backend with --pacing off --fps $PACED_FPS"
+    set +e
+    CRCBL_SHELL=wayland \
+    CRCBL_VK_VALIDATION=1 \
+    CRCBL_LOG="${CRCBL_E2E_SANDBOX_LOG:-info}" \
+        cargo run --locked --quiet --package sandbox -- \
+        --backend "$backend" --frames "$PACED_FRAMES" --title "crcbl e2e sandbox" \
+        --pacing off --fps "$PACED_FPS" 2>&1 | tee "$log"
+    local status=${PIPESTATUS[0]}
+    set -e
+    if [ "$status" -ne 0 ]; then
+        echo "crcbl e2e: the paced sandbox failed against sway on $backend (exit $status)" >&2
+        sway_log_tail
+        exit "$status"
+    fi
+
+    if ! grep -q "engine: the frame limit is ${PACED_FPS} fps" "$log"; then
+        echo "crcbl e2e: --fps $PACED_FPS never reached the loop's clock" >&2
+        cat "$log" >&2
+        sway_log_tail
+        exit 1
+    fi
+    # The mean frame time the engine measured on the real clock, as whole
+    # milliseconds — no float arithmetic in shell, and none needed to tell 33
+    # from 4. `|| true` because an absent line is one of the cases being tested
+    # for, and a `grep` that matches nothing under `set -o pipefail` would
+    # otherwise abort the script before the message below could print.
+    local mean_ms
+    mean_ms="$(grep -Eo 'frame cpu \(real clock[^)]*\): mean [0-9]+' "$log" | tail -1 \
+        | sed -E 's/.* //' || true)"
+    if [ -z "$mean_ms" ] || [ "$mean_ms" -lt "$PACED_MIN_FRAME_MS" ]; then
+        echo "crcbl e2e: asked for $PACED_FPS fps and the run measured \
+'${mean_ms:-no}' ms a frame, under the ${PACED_MIN_FRAME_MS} ms floor — the limit was \
+logged and not obeyed" >&2
+        cat "$log" >&2
+        sway_log_tail
+        exit 1
+    fi
+    if ! grep -qE "hal: display timing [A-Za-z]+; asked for Off, pacing Off" "$log"; then
+        echo "crcbl e2e: --pacing off never reached the swapchain; the engine reported \
+something other than 'asked for Off, pacing Off'" >&2
+        cat "$log" >&2
+        sway_log_tail
+        exit 1
+    fi
+    if ! grep -qE "hal: swapchain [0-9]+x[0-9]+ [A-Za-z0-9]+ (Mailbox|Immediate) " "$log"; then
+        echo "crcbl e2e: the run asked for no display sync and still opened its \
+swapchain on a display-synced present mode" >&2
+        cat "$log" >&2
+        sway_log_tail
+        exit 1
+    fi
+    echo "crcbl e2e: the sandbox ran unsynced at $PACED_FPS fps on wayland/$backend, \
+measuring ${mean_ms} ms a frame"
+}
+
 # Vulkan first, and only when there is a loader to run it on: this harness is
 # also used on developer machines, and `docs/plan/12-testing.md`'s "no silently
 # skipped gate" rule is served by the message rather than by failing a machine
@@ -403,6 +501,9 @@ if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so
     # a fullscreen configure is a swapchain recreation and that is the half a
     # recording backend cannot get wrong.
     run_sandbox vk fullscreen
+    # And with the display sync turned off and a frame cap in its place, which
+    # is the one pass where either flag is anything but its default.
+    run_sandbox_paced vk
     # And the switch between them, which neither of those two makes.
     cargo build --locked --quiet --package sandbox
     cargo build --locked --quiet --package crcbl-shell \

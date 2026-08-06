@@ -31,8 +31,9 @@
 //! panel is opaque while its labels are UI-pass text, so it must come before the
 //! UI.
 
-use crcbl::backend::GpuBackend;
-use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError, PendingGpuContext};
+use crcbl::engine::{
+    FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions, PendingGpuContext,
+};
 use crcbl::hal::{CommandEncoderDesc, Features};
 use crcbl::math::DVec3;
 use crcbl::math::Vec3;
@@ -133,10 +134,9 @@ pub struct Gpu {
 }
 
 /// What [`Gpu::open`] asks the engine for.
-fn desc(backend: Option<GpuBackend>) -> GpuContextDesc<'static> {
+fn desc(gpu: GpuOptions) -> GpuContextDesc<'static> {
     GpuContextDesc {
         label: "horde",
-        backend,
         // Optional, not required: the UI pass hands its shader the viewport size
         // through a push constant where there are any and through a uniform
         // buffer where there are none.
@@ -144,7 +144,7 @@ fn desc(backend: Option<GpuBackend>) -> GpuContextDesc<'static> {
             | Features::TIMESTAMP_QUERY
             | Features::DEBUG_MARKERS
             | Features::PUSH_CONSTANTS,
-        ..GpuContextDesc::default()
+        ..GpuContextDesc::from(gpu)
     }
 }
 
@@ -183,9 +183,9 @@ impl Gpu {
         shell: &S,
         window: WindowId,
         extent: (u32, u32),
-        backend: Option<GpuBackend>,
+        gpu: GpuOptions,
     ) -> Result<Self, GpuError> {
-        Self::from_context(GpuContext::open(shell, window, extent, &desc(backend))?)
+        Self::from_context(GpuContext::open(shell, window, extent, &desc(gpu))?)
     }
 
     /// Starts opening the same thing without blocking.
@@ -198,10 +198,10 @@ impl Gpu {
         shell: &S,
         window: WindowId,
         extent: (u32, u32),
-        backend: Option<GpuBackend>,
+        gpu: GpuOptions,
     ) -> Result<PendingGpu, GpuError> {
         Ok(PendingGpu {
-            pending: GpuContext::request_open(shell, window, extent, &desc(backend))?,
+            pending: GpuContext::request_open(shell, window, extent, &desc(gpu))?,
         })
     }
 
@@ -455,9 +455,9 @@ impl crcbl::engine::PolledGpu for Gpu {
         shell: &S,
         window: WindowId,
         extent: (u32, u32),
-        backend: Option<GpuBackend>,
+        gpu: GpuOptions,
     ) -> Result<Self::Pending, GpuError> {
-        Self::request_open(shell, window, extent, backend)
+        Self::request_open(shell, window, extent, gpu)
     }
 
     fn poll_pending(pending: &mut Self::Pending) -> Result<Option<Self>, GpuError> {

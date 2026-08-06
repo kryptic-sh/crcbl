@@ -33,6 +33,7 @@
 //! stranded CI on a machine with no driver.
 
 use crate::backend::GpuBackend;
+use crate::engine::{FrameLimit, GpuOptions, LoopConfig, Pacing};
 
 /// The shared `OPTIONS:` block, so four help texts cannot drift.
 ///
@@ -48,7 +49,15 @@ pub const COMMON_OPTIONS_HELP: &str = "\
     --backend <B>        GPU backend: vk, vulkan, mtl, metal, null, none or wgpu
     --fullscreen         Open borderless instead of windowed. F11 still toggles.
                          A window system may refuse; the summary reports what
-                         it actually did, not what was asked for.";
+                         it actually did, not what was asked for.
+    --pacing <P>         How frames are paced against the display: auto, vsync,
+                         adaptive or off. Default: auto, which is adaptive sync
+                         where the display is running it and vsync where it is
+                         not. 'adaptive' is the one to ask for on a VRR panel.
+    --fps <N>            Frame limit, in frames a second. Default: 1000, high
+                         enough to be a runaway guard rather than a cap. 0 is
+                         unlimited. Under vsync the display paces the loop and
+                         this rarely fires.";
 
 /// The tail of the shared block: the debug overlay pair and `--help`.
 ///
@@ -129,6 +138,33 @@ pub struct Common {
     /// dev builds", so `None` means [`Common::debug_overlay_visible`]'s
     /// `cfg!(debug_assertions)` and either flag overrides it.
     pub debug_overlay: Option<bool>,
+    /// How presented frames are paced against the display.
+    ///
+    /// Two-valued rather than three — no `Option` — because unlike
+    /// [`debug_overlay`](Self::debug_overlay) the default *is* a constant:
+    /// [`Pacing::Auto`]. There is nothing for `None` to mean that
+    /// [`Pacing::Auto`] does not already say, and a second spelling of "the
+    /// engine decides" is a second thing to keep in step.
+    ///
+    /// A **request**: `Auto` settles against the display after the first
+    /// present, and a surface that does not offer the mode a pacing prefers
+    /// falls back — [`GpuContext::effective_pacing`](crate::engine::GpuContext::effective_pacing)
+    /// is what a run actually got.
+    pub pacing: Pacing,
+    /// The most frames a second the loop will run.
+    ///
+    /// Resolved rather than optional for the same reason as
+    /// [`pacing`](Self::pacing): the default is the constant
+    /// [`FrameLimit::DEFAULT_FPS`]. `--fps 0` is
+    /// [`FrameLimit::unlimited`], which is the spelling
+    /// [`FrameLimit::fps`] already documents.
+    ///
+    /// A game whose own default is not a thousand writes it before parsing —
+    /// `Common { limit: FrameLimit::fps(144), ..Common::new(60) }` — the way it
+    /// would for any other field it has an opinion about. It is not a
+    /// [`Common::new`] parameter because, unlike the tick rate, most games have
+    /// no opinion at all.
+    pub limit: FrameLimit,
 }
 
 impl Common {
@@ -146,6 +182,42 @@ impl Common {
             backend: None,
             fullscreen: false,
             debug_overlay: None,
+            pacing: Pacing::Auto,
+            limit: FrameLimit::fps(FrameLimit::DEFAULT_FPS),
+        }
+    }
+
+    /// What the command line contributes to opening a GPU.
+    ///
+    /// The value a sample's `Gpu::open` takes, so that a run-level knob the
+    /// device or the swapchain cares about is added here and in
+    /// [`GpuContextDesc`](crate::engine::GpuContextDesc) rather than as another
+    /// parameter on every bring-up path.
+    #[must_use]
+    pub const fn gpu(&self) -> GpuOptions {
+        GpuOptions {
+            backend: self.backend,
+            pacing: self.pacing,
+        }
+    }
+
+    /// Everything [`crcbl::engine::Loop`](crate::engine::Loop) takes from the
+    /// command line.
+    ///
+    /// All four sample parsers built this struct literal from these same five
+    /// expressions, which is four places to forget a field: `--fps` would have
+    /// been wired into three of them and silently ignored by the fourth, and
+    /// nothing would have failed to compile.
+    #[must_use]
+    pub fn loop_config(&self) -> LoopConfig {
+        LoopConfig {
+            tick_hz: self.tick_hz,
+            frames: self.frame_budget(),
+            debug_overlay: self.debug_overlay_visible(),
+            // A headless run has no compositor to idle against and would
+            // otherwise sleep its way through its frame budget.
+            windowed: !self.headless,
+            limit: self.limit,
         }
     }
 
@@ -215,6 +287,37 @@ impl Common {
                 },
                 Err(message) => return Consumed::Bad(message),
             },
+            // Zero is a legal value — it is how `FrameLimit` spells "no limit" —
+            // so `number` rather than `positive`.
+            "--fps" => match number(arg, rest, "frame rate") {
+                Ok(fps) => match u32::try_from(fps) {
+                    Ok(fps) => self.limit = FrameLimit::fps(fps),
+                    Err(_) => {
+                        return Consumed::Bad(format!(
+                            "frame rate {fps} is too large (max {})",
+                            u32::MAX
+                        ));
+                    }
+                },
+                Err(message) => return Consumed::Bad(message),
+            },
+            "--pacing" => {
+                let Some(name) = rest.next() else {
+                    return Consumed::Bad("--pacing needs a value".into());
+                };
+                match Pacing::from_name(&name) {
+                    Some(pacing) => self.pacing = pacing,
+                    // Every name, not just a complaint: the word a player knows
+                    // for the adaptive case is "VRR", which is not one of these,
+                    // and a message that did not list them would leave them
+                    // guessing at a four-word vocabulary.
+                    None => {
+                        return Consumed::Bad(format!(
+                            "unknown pacing '{name}' — try `auto`, `vsync`, `adaptive` or `off`"
+                        ));
+                    }
+                }
+            }
             "--backend" => {
                 let Some(name) = rest.next() else {
                     return Consumed::Bad("--backend needs a value".into());
@@ -331,6 +434,96 @@ mod tests {
             "a run nobody asked to be fullscreen opens windowed",
         );
         assert_eq!(Common::new(120).tick_hz, 120, "the rate is the game's");
+        assert_eq!(
+            common.pacing,
+            Pacing::Auto,
+            "follow the display unless told otherwise",
+        );
+        assert_eq!(
+            common.limit,
+            FrameLimit::fps(FrameLimit::DEFAULT_FPS),
+            "a runaway guard, not a cap",
+        );
+        assert_eq!(common.limit.rate(), 1000);
+    }
+
+    /// Both new flags reach the engine, through the two values a sample passes.
+    ///
+    /// The seam itself: `--pacing` is only real if it lands in
+    /// [`GpuContextDesc::pacing`](crate::engine::GpuContextDesc::pacing), and
+    /// `--fps` is only real if it lands in
+    /// [`LoopConfig::limit`](crate::engine::LoopConfig::limit). A field parsed
+    /// into `Common` and read by nothing is the failure this covers.
+    #[test]
+    fn the_pacing_and_the_frame_limit_reach_the_gpu_and_the_loop() {
+        let common = parsed(&["--pacing", "adaptive", "--fps", "30"]);
+        assert_eq!(common.pacing, Pacing::Adaptive);
+        assert_eq!(common.limit, FrameLimit::fps(30));
+
+        assert_eq!(common.gpu().pacing, Pacing::Adaptive);
+        assert_eq!(common.gpu().backend, None);
+        assert_eq!(
+            crate::engine::GpuContextDesc::from(common.gpu()).pacing,
+            Pacing::Adaptive,
+            "and through the desc a sample's Gpu::open builds",
+        );
+        assert_eq!(common.loop_config().limit, FrameLimit::fps(30));
+
+        // The rest of the config still says what it said, because a sample now
+        // gets all five fields from this one call.
+        let config = parsed(&["--headless", "--frames", "9", "--tick-hz", "120"]).loop_config();
+        assert_eq!(config.tick_hz, 120);
+        assert_eq!(config.frames, Some(9));
+        assert!(!config.windowed, "a headless run must not idle");
+        assert_eq!(config.limit, FrameLimit::default());
+    }
+
+    /// Every pacing the engine has is reachable by name, and the word a player
+    /// would try first is refused with the word this engine uses.
+    #[test]
+    fn the_pacing_flag_accepts_every_name_and_says_so_when_it_does_not() {
+        for (name, pacing) in [
+            ("auto", Pacing::Auto),
+            ("vsync", Pacing::Vsync),
+            ("adaptive", Pacing::Adaptive),
+            ("off", Pacing::Off),
+        ] {
+            assert_eq!(
+                parsed(&["--pacing", name]).pacing,
+                pacing,
+                "--pacing {name}"
+            );
+        }
+
+        let refused = rejected(&["--pacing", "vrr"]);
+        assert!(refused.contains("vrr"), "{refused}");
+        assert!(
+            refused.contains("adaptive"),
+            "a player who typed the hardware word has to be told this engine's: {refused}",
+        );
+        assert!(rejected(&["--pacing"]).contains("--pacing"));
+    }
+
+    /// Zero is unlimited, and a rate too large for the field is refused rather
+    /// than truncated into a plausible one.
+    #[test]
+    fn the_fps_flag_takes_a_rate_and_zero_means_unlimited() {
+        assert_eq!(parsed(&["--fps", "144"]).limit, FrameLimit::fps(144));
+        assert_eq!(
+            parsed(&["--fps", "0"]).limit,
+            FrameLimit::unlimited(),
+            "0 is how FrameLimit already spells 'no limit'",
+        );
+        assert_eq!(parsed(&["--fps", "0"]).limit.period(), None);
+
+        assert!(rejected(&["--fps", "kittens"]).contains("frame rate"));
+        // A negative rate fails the u64 parse, which is the same rejection by a
+        // different route.
+        assert!(rejected(&["--fps", "-1"]).contains("frame rate"));
+        assert!(rejected(&["--fps"]).contains("--fps"));
+
+        let too_big = (u64::from(u32::MAX) + 1).to_string();
+        assert!(rejected(&["--fps", &too_big]).contains("too large"));
     }
 
     /// `--fullscreen` reaches [`crcbl_shell::WindowDesc::mode`], which is what
@@ -494,13 +687,18 @@ mod tests {
             "--frames",
             "--tick-hz",
             "--backend",
+            "--pacing",
+            "--fps",
             "--debug-overlay",
             "--no-debug-overlay",
             "-h",
             "--help",
         ] {
             assert!(help.contains(flag), "{flag} is not in the help");
-            let mut rest = ["1".to_string()].into_iter();
+            // `1` is a legal value for every flag that takes one — a rate, a
+            // count — except `--pacing`, whose values are words.
+            let value = if flag == "--pacing" { "auto" } else { "1" };
+            let mut rest = [value.to_string()].into_iter();
             assert_ne!(
                 Common::new(60).consume(flag, &mut rest),
                 Consumed::No,

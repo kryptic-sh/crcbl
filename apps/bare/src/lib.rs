@@ -129,7 +129,11 @@ impl<S: Shell + ?Sized> Bare<S> {
     /// [`BareError`] if the window never configured or the device would not
     /// open.
     pub fn with_shell(mut shell: Box<S>, options: &Common) -> Result<Self, BareError> {
-        let clock_source = Clock::new(options.headless);
+        let mut clock_source = Clock::new(options.headless);
+        // What `crcbl::engine::Loop::new` does for a hosted game, written out:
+        // this sample owns its loop, so it owns the one line that applies
+        // `--fps` too. A manual clock ignores it — see `Clock::set_limit`.
+        clock_source.set_limit(options.limit);
         let window = open_window(
             shell.as_mut(),
             &clock_source,
@@ -152,8 +156,7 @@ impl<S: Shell + ?Sized> Bare<S> {
             extent,
             &GpuContextDesc {
                 label: "bare",
-                backend: options.backend,
-                ..GpuContextDesc::default()
+                ..GpuContextDesc::from(options.gpu())
             },
         )?;
 
@@ -358,6 +361,14 @@ OPTIONS:
     --fullscreen         Open borderless instead of windowed. F11 still toggles.
                          A window system may refuse; the summary reports what
                          it actually did, not what was asked for.
+    --pacing <P>         How frames are paced against the display: auto, vsync,
+                         adaptive or off. Default: auto, which is adaptive sync
+                         where the display is running it and vsync where it is
+                         not. 'adaptive' is the one to ask for on a VRR panel.
+    --fps <N>            Frame limit, in frames a second. Default: 1000, high
+                         enough to be a runaway guard rather than a cap. 0 is
+                         unlimited. Under vsync the display paces the loop and
+                         this rarely fires.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'

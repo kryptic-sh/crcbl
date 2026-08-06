@@ -35,8 +35,9 @@
 //! decides the half-height, so there is one place the two can be made to
 //! disagree and it is that one.
 
-use crcbl::backend::GpuBackend;
-use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError, PendingGpuContext};
+use crcbl::engine::{
+    FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions, PendingGpuContext,
+};
 use crcbl::hal::{CommandEncoderDesc, Features};
 use crcbl::math::DVec3;
 use crcbl::math::Vec3;
@@ -162,10 +163,9 @@ pub struct Gpu {
 /// One value rather than two copies of the same descriptor: the browser path
 /// and the native path must open the *same* device, or a feature that only the
 /// blocking path requested is a bug nobody sees until someone loads the page.
-fn desc(backend: Option<GpuBackend>) -> GpuContextDesc<'static> {
+fn desc(gpu: GpuOptions) -> GpuContextDesc<'static> {
     GpuContextDesc {
         label: "breakout",
-        backend,
         // `optional_features`, not required: the UI pass hands `ui.slang` its
         // viewport size through a push constant where there are any, and
         // through a uniform buffer where there are none — see
@@ -175,7 +175,7 @@ fn desc(backend: Option<GpuBackend>) -> GpuContextDesc<'static> {
             | Features::TIMESTAMP_QUERY
             | Features::DEBUG_MARKERS
             | Features::PUSH_CONSTANTS,
-        ..GpuContextDesc::default()
+        ..GpuContextDesc::from(gpu)
     }
 }
 
@@ -220,9 +220,9 @@ impl Gpu {
         shell: &S,
         window: WindowId,
         extent: (u32, u32),
-        backend: Option<GpuBackend>,
+        gpu: GpuOptions,
     ) -> Result<Self, GpuError> {
-        Self::from_context(GpuContext::open(shell, window, extent, &desc(backend))?)
+        Self::from_context(GpuContext::open(shell, window, extent, &desc(gpu))?)
     }
 
     /// Starts opening the same thing without blocking.
@@ -236,10 +236,10 @@ impl Gpu {
         shell: &S,
         window: WindowId,
         extent: (u32, u32),
-        backend: Option<GpuBackend>,
+        gpu: GpuOptions,
     ) -> Result<PendingGpu, GpuError> {
         Ok(PendingGpu {
-            pending: GpuContext::request_open(shell, window, extent, &desc(backend))?,
+            pending: GpuContext::request_open(shell, window, extent, &desc(gpu))?,
         })
     }
 
@@ -500,9 +500,9 @@ impl crcbl::engine::PolledGpu for Gpu {
         shell: &S,
         window: WindowId,
         extent: (u32, u32),
-        backend: Option<GpuBackend>,
+        gpu: GpuOptions,
     ) -> Result<Self::Pending, GpuError> {
-        Self::request_open(shell, window, extent, backend)
+        Self::request_open(shell, window, extent, gpu)
     }
 
     fn poll_pending(pending: &mut Self::Pending) -> Result<Option<Self>, GpuError> {

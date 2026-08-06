@@ -16,6 +16,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`--pacing` and `--fps`, so a run can pick its display sync and its frame cap
+  from the command line.** `--pacing <auto|vsync|adaptive|off>` sets
+  `GpuContextDesc::pacing` and `--fps <N>` sets the loop's `FrameLimit`; both
+  are on `crcbl::args::Common`, so every sample that takes the shared flag set
+  gets them, and `apps/sandbox` — which keeps its own parser — takes them too.
+  The defaults are unchanged and are what they always were: `auto`, which is
+  adaptive sync where the display is running it and vsync where it is not, and
+  1000 fps, which is a runaway guard rather than a cap. `--fps 0` is unlimited,
+  the spelling `FrameLimit::fps` already documented. An unknown pacing is
+  refused by name and lists the four — `--pacing vrr` is told the word here is
+  `adaptive` — and `--fps` refuses a value that is not a number or does not fit
+  a `u32` rather than truncating it.
+
+  **A run now says what it got.** `Clock::set_limit` logs one `info` line,
+  `engine: the frame limit is 30 fps` (or `unlimited`), on the real clock only —
+  a headless run has no frame limit to report. The pacing already appeared on
+  the `hal: display timing …; asked for …, pacing …` line.
+
+  **A game can still pick both, and change them while it runs.** The flags are
+  the command line's route to values a game may set for itself: `Common` is an
+  ordinary struct with public fields, `crcbl::engine::Loop::clock_source_mut` is
+  new and is the frame limit's counterpart to `GpuContext::set_pacing`, and the
+  `crcbl new` template documents both routes where a scaffolded game would look
+  for them.
+
 - **The HAL can be asked what the display is doing with presented frames, not
   just what was requested.** `crcbl_hal::DisplayTiming` is a new four-state
   answer — `Unknown`, `Fixed { cycle }`, `Variable { shortest }` and
@@ -1198,6 +1223,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   platform has a Vulkan device — `docs/plan/ROADMAP.md` schedules it for P14.
 
 ### Changed
+
+- **Breaking: `FrameLimit` stores the rate it was asked for and derives the
+  period.** `FrameLimit::fps` is now `const` and `FrameLimit::period` is not;
+  `rate()` is new, and `Display` prints `1000 fps` or `unlimited`. Nothing about
+  the pacing changes — this is what lets a log report the number that was typed
+  instead of a 33.333333 ms period, or a rate recovered from one by a division
+  that rounds.
+
+- **Breaking: `LoopConfig` gained `limit`, and `PolledGpu::request` /
+  `PolledBoot::request` take a `GpuOptions` in place of an
+  `Option<GpuBackend>`.** `GpuOptions` is the half of `GpuContextDesc` that
+  comes from the command line rather than from the game — the backend and the
+  pacing — so a game's own `desc` ends `..GpuContextDesc::from(gpu)` and the
+  next run-level knob is a field there rather than another parameter threaded
+  through five bring-up paths. `Common::gpu()` and `Common::loop_config()` are
+  the two calls a sample makes; the four games' identical six-line `LoopConfig`
+  literals are now one call each.
 
 - **Breaking: `Pacing` has a fourth variant and a new default.** `Pacing::Auto`
   is now `Pacing::default()`; `Pacing::Vsync` is not. Any `match` on `Pacing`

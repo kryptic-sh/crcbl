@@ -41,6 +41,14 @@ OPTIONS:
     --fullscreen         Open borderless instead of windowed. F11 still toggles.
                          A window system may refuse; the summary reports what
                          it actually did, not what was asked for.
+    --pacing <P>         How frames are paced against the display: auto, vsync,
+                         adaptive or off. Default: auto, which is adaptive sync
+                         where the display is running it and vsync where it is
+                         not. 'adaptive' is the one to ask for on a VRR panel.
+    --fps <N>            Frame limit, in frames a second. Default: 1000, high
+                         enough to be a runaway guard rather than a cap. 0 is
+                         unlimited. Under vsync the display paces the loop and
+                         this rarely fires.
     --seed <N>           Board seed. The same seed is the same rocks.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a

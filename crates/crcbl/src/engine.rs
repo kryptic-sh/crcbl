@@ -398,6 +398,29 @@ pub enum Pacing {
 }
 
 impl Pacing {
+    /// The value a command line spells `name`, or `None` for a word this is not
+    /// one of.
+    ///
+    /// Trimmed and case-folded like
+    /// [`GpuBackend::from_name`](crate::backend::GpuBackend::from_name), so a
+    /// wrapper script that quoted a value with a stray space still works.
+    ///
+    /// **`vrr` is deliberately not a spelling of [`Adaptive`](Self::Adaptive).**
+    /// The names here are the variants' own, and a caller who typed the hardware
+    /// word is better served by a rejection that says which word this engine
+    /// uses than by a synonym that quietly works in one of the two places the
+    /// value is written down.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "vsync" => Some(Self::Vsync),
+            "adaptive" => Some(Self::Adaptive),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
     /// The present modes to try, best first.
     ///
     /// Every list ends in a mode the surface must support, so
@@ -497,6 +520,26 @@ impl SwapchainConfig {
 // GpuContext
 // ---------------------------------------------------------------------------
 
+/// The half of [`GpuContextDesc`] that comes from the command line rather than
+/// from the game.
+///
+/// A game's own `desc` fills in its label and the features its passes need,
+/// which are properties of the *game*; which backend to open and how to pace
+/// are properties of the **run**, and they arrive together, from the same place,
+/// through every bring-up path a sample has. Carried as one value so that the
+/// next run-level knob is a field here rather than a fifth parameter threaded
+/// through five `Gpu::open`s, five `request_open`s and five
+/// [`PolledGpu::request`]s — which is what a second one would have cost.
+///
+/// [`Common::gpu`](crate::args::Common::gpu) is where a sample gets one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuOptions {
+    /// Which backend to open, or `None` to let `crcbl::backend`'s table choose.
+    pub backend: Option<GpuBackend>,
+    /// How presented frames should be paced against the display.
+    pub pacing: Pacing,
+}
+
 /// What [`GpuContext::open`] should ask the device for.
 #[derive(Clone, Copy, Debug)]
 pub struct GpuContextDesc<'a> {
@@ -548,6 +591,21 @@ impl Default for GpuContextDesc<'_> {
                 | Features::PRESENT_FEEDBACK
                 | Features::PRESENT_TIMING,
             pacing: Pacing::default(),
+        }
+    }
+}
+
+impl From<GpuOptions> for GpuContextDesc<'_> {
+    /// The defaults, with the run's own two fields filled in.
+    ///
+    /// Written for `..GpuContextDesc::from(gpu)` at the end of a game's struct
+    /// literal: the label and the feature set above it are the game's, and
+    /// everything the command line had a say in comes from here.
+    fn from(gpu: GpuOptions) -> Self {
+        Self {
+            backend: gpu.backend,
+            pacing: gpu.pacing,
+            ..Self::default()
         }
     }
 }
@@ -1532,10 +1590,18 @@ impl GpuContext {
 /// period is already the display's and this never fires. It earns its keep on
 /// [`Pacing::Adaptive`] and [`Pacing::Off`], where nothing else is pacing the
 /// loop.
+///
+/// # It stores the rate, and derives the period
+///
+/// The other way round loses the only number anybody typed: a period recovers
+/// its rate by a division that is exact for the rates a display has and off by
+/// one for the rates it does not, so a run reporting what it was asked for would
+/// be reporting an approximation of it. The period is a division away and is
+/// wanted once a frame; the rate is wanted whenever a human reads a log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameLimit {
-    /// The least time one frame may take, or `None` for no limit.
-    period: Option<Duration>,
+    /// Frames a second, or zero for no limit — see [`fps`](Self::fps).
+    fps: u32,
 }
 
 impl FrameLimit {
@@ -1549,25 +1615,30 @@ impl FrameLimit {
     /// other reading of it — a loop that never runs — is not something a caller
     /// would ask for by accident.
     #[must_use]
-    pub fn fps(fps: u32) -> Self {
-        if fps == 0 {
-            return Self::unlimited();
-        }
-        Self {
-            period: Some(Duration::from_secs(1) / fps),
-        }
+    pub const fn fps(fps: u32) -> Self {
+        Self { fps }
     }
 
     /// No limit: run as fast as the loop can.
     #[must_use]
     pub const fn unlimited() -> Self {
-        Self { period: None }
+        Self { fps: 0 }
+    }
+
+    /// The rate this was asked for, or zero when there is no limit.
+    #[must_use]
+    pub const fn rate(self) -> u32 {
+        self.fps
     }
 
     /// The least time one frame may take, if there is a limit.
+    ///
+    /// Truncated to whole nanoseconds, which is the resolution a [`Duration`]
+    /// has: at 60 the period is 16.666666 ms rather than a recurring decimal, so
+    /// the limiter's ceiling is a hair *above* the rate rather than below it.
     #[must_use]
-    pub const fn period(self) -> Option<Duration> {
-        self.period
+    pub fn period(self) -> Option<Duration> {
+        (self.fps != 0).then(|| Duration::from_secs(1) / self.fps)
     }
 
     /// How long to wait before starting a frame, given when the last one
@@ -1583,7 +1654,7 @@ impl FrameLimit {
     /// a burst.
     #[must_use]
     pub fn wait_from(self, last_start: Option<Duration>, now: Duration) -> Option<Duration> {
-        let period = self.period?;
+        let period = self.period()?;
         let deadline = last_start?.checked_add(period)?;
         deadline.checked_sub(now).filter(|wait| !wait.is_zero())
     }
@@ -1592,6 +1663,16 @@ impl FrameLimit {
 impl Default for FrameLimit {
     fn default() -> Self {
         Self::fps(Self::DEFAULT_FPS)
+    }
+}
+
+impl std::fmt::Display for FrameLimit {
+    /// How a log says what is capping a loop: `1000 fps`, or `unlimited`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.fps {
+            0 => f.write_str("unlimited"),
+            fps => write!(f, "{fps} fps"),
+        }
     }
 }
 
@@ -1643,8 +1724,24 @@ impl RealClock {
     }
 
     /// Changes the limit. Takes effect on the next frame.
-    pub const fn set_limit(&mut self, limit: FrameLimit) {
+    ///
+    /// # The log line
+    ///
+    /// One line per call, here rather than at the call sites, because there are
+    /// three kinds of caller — [`Loop::new`] applying
+    /// [`LoopConfig::limit`], a hand-written loop like `apps/bare`, and a game
+    /// changing it mid-run from a settings screen — and a run that does not say
+    /// what is capping it leaves "the frame rate is wrong" with nothing to read.
+    /// It leads with `engine: the frame limit is `, which
+    /// `crates/crcbl-shell/tests/run-wayland-e2e.sh` greps for; keep that prefix
+    /// first if the line is ever reworded.
+    ///
+    /// [`RealClock::new`] does *not* log: the default is not news, and a run
+    /// that never touches this reports the default through [`Loop::new`]
+    /// anyway.
+    pub fn set_limit(&mut self, limit: FrameLimit) {
         self.limit = limit;
+        log::info!("engine: the frame limit is {limit}");
     }
 }
 
@@ -1707,7 +1804,9 @@ impl Clock {
     /// A no-op on a manual clock rather than an error: a game that sets a limit
     /// during setup should not have to ask whether it is running headless, and
     /// a headless run that silently obeyed one would stop being deterministic.
-    pub const fn set_limit(&mut self, limit: FrameLimit) {
+    /// Nothing is logged in that case either, for the same reason: a headless
+    /// run has no frame limit to report.
+    pub fn set_limit(&mut self, limit: FrameLimit) {
         if let Self::Real(real) = self {
             real.set_limit(limit);
         }
@@ -2704,7 +2803,7 @@ pub trait PolledGpu: GpuSurface + Sized {
         shell: &S,
         window: WindowId,
         extent: (u32, u32),
-        backend: Option<GpuBackend>,
+        gpu: GpuOptions,
     ) -> Result<Self::Pending, GpuError>;
 
     /// `Ok(None)` means "not yet, poll again next frame".
@@ -2761,7 +2860,7 @@ pub struct PolledBoot<S: Shell + ?Sized, G: PolledGpu> {
     shell: Option<Box<S>>,
     window: WindowId,
     clock_source: Option<Clock>,
-    backend: Option<GpuBackend>,
+    gpu: GpuOptions,
     stage: BootStage<G>,
     /// The most recent size the shell reported, which is not necessarily the one
     /// the swapchain was requested at: the canvas can be resized while the
@@ -2796,17 +2895,12 @@ impl<S: Shell + ?Sized, G: PolledGpu> PolledBoot<S, G> {
     /// The window is the caller's because its title and size are the game's;
     /// [`open_window`] is what makes one.
     #[must_use]
-    pub fn request(
-        shell: Box<S>,
-        window: WindowId,
-        clock_source: Clock,
-        backend: Option<GpuBackend>,
-    ) -> Self {
+    pub fn request(shell: Box<S>, window: WindowId, clock_source: Clock, gpu: GpuOptions) -> Self {
         Self {
             shell: Some(shell),
             window,
             clock_source: Some(clock_source),
-            backend,
+            gpu,
             stage: BootStage::Configure,
             extent: None,
             events: 0,
@@ -2858,7 +2952,7 @@ impl<S: Shell + ?Sized, G: PolledGpu> PolledBoot<S, G> {
                 // Left `Done` if this fails, so a failed start-up stays failed
                 // rather than requesting a second device next frame.
                 self.stage = BootStage::Device {
-                    pending: G::request(shell.as_ref(), self.window, extent, self.backend)?,
+                    pending: G::request(shell.as_ref(), self.window, extent, self.gpu)?,
                 };
                 Ok(None)
             }
@@ -3109,6 +3203,14 @@ pub struct LoopConfig {
     /// Whether to idle between frames. False for a headless run, which has no
     /// compositor to wait on and would otherwise sleep through its budget.
     pub windowed: bool,
+    /// The most frames a second the loop will run.
+    ///
+    /// Applied to [`Booted::clock_source`] by [`Loop::new`], and a no-op on the
+    /// manual clock a headless run gets — see [`Clock::set_limit`]. A game that
+    /// exposes this as a user setting calls that method on
+    /// [`Loop::clock_source_mut`] when the setting changes; this is only the
+    /// value the run starts at.
+    pub limit: FrameLimit,
 }
 
 /// The frame, owned by the engine.
@@ -3176,12 +3278,17 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     /// browser's from [`PolledBoot::poll`] — so there is one struct literal for
     /// the loop rather than one per path per game.
     pub fn new(booted: Booted<S, G::Gpu>, game: G, config: LoopConfig) -> Self {
+        // Here rather than at every bring-up path's `Clock::new`, because this
+        // is the one place both of them pass through and the one place the
+        // command line's value is already in hand. A manual clock ignores it.
+        let mut clock_source = booted.clock_source;
+        clock_source.set_limit(config.limit);
         Self {
             shell: booted.shell,
             window: booted.window,
             gpu: booted.gpu,
             game,
-            clock_source: booted.clock_source,
+            clock_source,
             frame_clock: crcbl_core::FrameClock::new(config.tick_hz),
             draw_list: crcbl_ui::draw_list::DrawList::new(),
             menus: G::menus(),
@@ -3558,6 +3665,19 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         &self.clock_source
     }
 
+    /// The clock, mutably, so a run can change its [`FrameLimit`] after it has
+    /// started.
+    ///
+    /// The frame limit's counterpart to
+    /// [`GpuContext::set_pacing`](GpuContext::set_pacing): a settings screen
+    /// that offers "vsync / VRR / off" and an fps cap changes the first through
+    /// the game's own `Gpu` — which [`HostedGame::tick`] is handed every frame —
+    /// and the second through here. [`LoopConfig::limit`] is only the value the
+    /// run starts at.
+    pub const fn clock_source_mut(&mut self) -> &mut Clock {
+        &mut self.clock_source
+    }
+
     /// Keys forwarded to the game as pressed and not yet released.
     ///
     /// Public because the obligation it discharges is testable and worth
@@ -3739,6 +3859,9 @@ mod tests {
         static REQUESTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
         /// Whether the next [`FakeGpu`] request should fail.
         static REQUESTS_FAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        /// What the last [`FakeGpu`] request was asked to open.
+        static REQUESTED: std::cell::Cell<GpuOptions> =
+            const { std::cell::Cell::new(GpuOptions { backend: None, pacing: Pacing::Auto }) };
     }
 
     /// A [`PolledGpu`] that arrives after a set number of polls.
@@ -3782,9 +3905,10 @@ mod tests {
             _shell: &S,
             _window: WindowId,
             extent: (u32, u32),
-            _backend: Option<GpuBackend>,
+            gpu: GpuOptions,
         ) -> Result<Self::Pending, GpuError> {
             REQUESTS.with(|n| n.set(n.get() + 1));
+            REQUESTED.with(|options| options.set(gpu));
             if REQUESTS_FAIL.with(std::cell::Cell::get) {
                 return Err(GpuError::Unusable("the fixture refused"));
             }
@@ -3863,8 +3987,12 @@ mod tests {
             .create_window(&crcbl_shell::WindowDesc::default())
             .expect("headless always creates a window");
 
+        let asked_for = GpuOptions {
+            backend: Some(GpuBackend::Null),
+            pacing: Pacing::Off,
+        };
         let mut boot: PolledBoot<crcbl_shell::HeadlessShell, FakeGpu> =
-            PolledBoot::request(Box::new(shell), window, Clock::new(true), None);
+            PolledBoot::request(Box::new(shell), window, Clock::new(true), asked_for);
 
         // `HeadlessShell` delays the first configure by a pump or two, exactly
         // as a compositor does.
@@ -3882,6 +4010,14 @@ mod tests {
             REQUESTS.with(std::cell::Cell::get),
             1,
             "the device must be asked for exactly once",
+        );
+        // And asked for what the caller said. The polled path is the browser's,
+        // and it is the one where a dropped field would never be noticed: no CLI
+        // reaches it, so `Auto` is what it would carry either way.
+        assert_eq!(
+            REQUESTED.with(std::cell::Cell::get),
+            asked_for,
+            "start-up requested a device the caller did not ask for",
         );
         assert_eq!(
             booted.gpu.extent(),
@@ -3907,8 +4043,12 @@ mod tests {
         let window = shell
             .create_window(&crcbl_shell::WindowDesc::default())
             .expect("headless always creates a window");
-        let mut boot: PolledBoot<crcbl_shell::HeadlessShell, FakeGpu> =
-            PolledBoot::request(Box::new(shell), window, Clock::new(true), None);
+        let mut boot: PolledBoot<crcbl_shell::HeadlessShell, FakeGpu> = PolledBoot::request(
+            Box::new(shell),
+            window,
+            Clock::new(true),
+            GpuOptions::default(),
+        );
 
         let mut polls = 0;
         while boot.poll::<LoopError>().expect("no failure").is_none() {
@@ -3946,8 +4086,12 @@ mod tests {
         let window = shell
             .create_window(&crcbl_shell::WindowDesc::default())
             .expect("headless always creates a window");
-        let mut boot: PolledBoot<crcbl_shell::HeadlessShell, FakeGpu> =
-            PolledBoot::request(Box::new(shell), window, Clock::new(true), None);
+        let mut boot: PolledBoot<crcbl_shell::HeadlessShell, FakeGpu> = PolledBoot::request(
+            Box::new(shell),
+            window,
+            Clock::new(true),
+            GpuOptions::default(),
+        );
 
         let mut polls = 0;
         let failure = loop {
@@ -4893,6 +5037,65 @@ mod tests {
         assert_eq!(clock.limit(), Some(FrameLimit::fps(30)));
     }
 
+    /// The rate survives the round trip, and says itself out loud.
+    ///
+    /// [`FrameLimit`] stores the rate and derives the period precisely so that
+    /// the number a log prints is the number that was asked for: recovering 30
+    /// from a 33.333333 ms period is a division that rounds, and a run reporting
+    /// `29 fps` for a `--fps 30` would be a diagnostic that lies.
+    #[test]
+    fn a_frame_limit_reports_the_rate_it_was_asked_for() {
+        for fps in [1, 30, 60, 144, 1000, FrameLimit::DEFAULT_FPS, u32::MAX] {
+            let limit = FrameLimit::fps(fps);
+            assert_eq!(limit.rate(), fps);
+            assert_eq!(limit.to_string(), format!("{fps} fps"));
+        }
+        assert_eq!(FrameLimit::unlimited().rate(), 0);
+        assert_eq!(FrameLimit::unlimited().to_string(), "unlimited");
+        assert_eq!(FrameLimit::fps(0).to_string(), "unlimited");
+        assert_eq!(FrameLimit::default().to_string(), "1000 fps");
+    }
+
+    /// **The loop applies [`LoopConfig::limit`] to the clock it was handed.**
+    ///
+    /// The mechanism `--fps` arrives through, and one nothing else can observe:
+    /// a [`Loop::new`] that ignored the field would build an identical loop, run
+    /// identically in every headless test — where the clock is manual and takes
+    /// no limit at all — and only ever be wrong on a machine with a window.
+    #[test]
+    fn a_hosted_loop_takes_its_frame_limit_from_the_config_and_can_be_changed() {
+        let mut shell = crcbl_shell::HeadlessShell::new();
+        let window = shell
+            .create_window(&crcbl_shell::WindowDesc::default())
+            .expect("headless always creates a window");
+        let mut engine: Loop<_, FakeGame> = Loop::new(
+            Booted {
+                shell: Box::new(shell),
+                window,
+                gpu: FakeGpu::at((640, 480)),
+                // A *real* clock, because the limiter lives on that one: a
+                // manual clock would report `None` however this went.
+                clock_source: Clock::new(false),
+                events: 0,
+            },
+            FakeGame::default(),
+            LoopConfig {
+                limit: FrameLimit::fps(30),
+                ..hosted_config(None)
+            },
+        );
+        assert_eq!(engine.clock_source().limit(), Some(FrameLimit::fps(30)));
+
+        // And the settings-screen half: a game that offers an fps cap changes it
+        // while the loop is running, not only when it is built.
+        engine.clock_source_mut().set_limit(FrameLimit::unlimited());
+        assert_eq!(
+            engine.clock_source().limit(),
+            Some(FrameLimit::unlimited()),
+            "a mid-run change did not reach the clock",
+        );
+    }
+
     /// The limiter actually holds a real clock back.
     ///
     /// The only test here that spends wall time, and the only one that observes
@@ -4978,6 +5181,32 @@ mod tests {
             Some(&PresentMode::Mailbox),
             "off prefers the untorn uncapped mode before the torn one"
         );
+    }
+
+    /// Every pacing has a name a command line can spell, and nothing else does.
+    ///
+    /// The `vrr` case is the one worth pinning: it is the word a player knows,
+    /// it is **not** the word this enum uses, and a parser that quietly accepted
+    /// it would leave `--pacing vrr` meaning `adaptive` here and nothing
+    /// anywhere else. Rejected, and `crcbl::args` names the alternative.
+    #[test]
+    fn every_pacing_has_a_name_and_only_its_own() {
+        for (name, pacing) in [
+            ("auto", Pacing::Auto),
+            ("vsync", Pacing::Vsync),
+            ("adaptive", Pacing::Adaptive),
+            ("off", Pacing::Off),
+        ] {
+            assert_eq!(Pacing::from_name(name), Some(pacing));
+            assert_eq!(
+                Pacing::from_name(&format!(" {} ", name.to_uppercase())),
+                Some(pacing),
+                "trimmed and case-folded, like --backend",
+            );
+        }
+        for name in ["vrr", "freesync", "g-sync", "fifo", "on", "none", ""] {
+            assert_eq!(Pacing::from_name(name), None, "{name} is not a pacing");
+        }
     }
 
     /// One 60 Hz cycle, for the observations below. The figures are arbitrary —
@@ -5152,6 +5381,36 @@ mod tests {
     /// backend: `request_open` never blocks, and polling it produces exactly
     /// the context `open` would have produced.
     ///
+    /// **A game's `desc` keeps its own half and takes the run's.**
+    ///
+    /// The shape every sample's `desc` is written in: the label and the features
+    /// are the game's and survive, the backend and the pacing come from the
+    /// command line, and the optional features it does *not* name stay the
+    /// engine's default rather than being cleared by the update syntax.
+    #[test]
+    fn a_gpu_options_becomes_the_run_s_half_of_a_desc() {
+        let gpu = GpuOptions {
+            backend: Some(GpuBackend::Null),
+            pacing: Pacing::Off,
+        };
+        let desc = GpuContextDesc {
+            label: "a game",
+            ..GpuContextDesc::from(gpu)
+        };
+        assert_eq!(desc.label, "a game");
+        assert_eq!(desc.backend, Some(GpuBackend::Null));
+        assert_eq!(desc.pacing, Pacing::Off);
+        assert_eq!(
+            desc.optional_features,
+            GpuContextDesc::default().optional_features,
+            "the features a game did not name are still the engine's",
+        );
+
+        let defaults = GpuContextDesc::from(GpuOptions::default());
+        assert_eq!(defaults.backend, None, "None is 'you pick', and is default");
+        assert_eq!(defaults.pacing, Pacing::Auto);
+    }
+
     /// `open` itself is this loop with a `yield_now` in it, so a break in the
     /// state machine breaks both — which is the point of having only one.
     #[test]
@@ -5816,6 +6075,7 @@ mod tests {
             frames,
             debug_overlay: false,
             windowed: false,
+            limit: FrameLimit::fps(FrameLimit::DEFAULT_FPS),
         }
     }
 

@@ -6,6 +6,7 @@
 
 use crcbl::args::MAX_TICK_RATE;
 use crcbl::backend::GpuBackend;
+use crcbl::engine::{FrameLimit, Pacing};
 
 use crate::app::{CameraMode, Options};
 
@@ -33,6 +34,15 @@ OPTIONS:
         --fullscreen      Open borderless instead of windowed. F11 still
                           toggles, and a window system may refuse both; the
                           summary reports what it actually did.
+        --pacing <P>      How frames are paced against the display: `auto`,
+                          `vsync`, `adaptive` or `off`. Default: auto, which is
+                          adaptive sync where the display is running it and
+                          vsync where it is not. `adaptive` is the one to ask
+                          for on a VRR panel.
+        --fps <N>         Frame limit, in frames a second. Default: 1000, which
+                          is a runaway guard rather than a cap. 0 is unlimited.
+                          Under vsync the display paces the loop and this
+                          rarely fires.
         --debug-overlay   Start with the debug panel visible. F3 toggles it.
         --no-debug-overlay
                           Start with it hidden. The default is `visible in a
@@ -80,6 +90,28 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
                     }
                 },
                 None => return Invocation::BadUsage("--backend needs a value".to_string()),
+            },
+            "--pacing" => match args.next() {
+                Some(name) => match Pacing::from_name(&name) {
+                    Some(pacing) => options.pacing = pacing,
+                    None => {
+                        return Invocation::BadUsage(format!(
+                            "unknown --pacing `{name}`; try `auto`, `vsync`, `adaptive` or `off`"
+                        ));
+                    }
+                },
+                None => return Invocation::BadUsage("--pacing needs a value".to_string()),
+            },
+            // Zero is a legal value — it is how `FrameLimit` spells "no limit" —
+            // so this is the one numeric flag with no lower bound.
+            "--fps" => match take_number(&mut args, "--fps") {
+                Ok(fps) => match u32::try_from(fps) {
+                    Ok(fps) => options.limit = FrameLimit::fps(fps),
+                    Err(_) => {
+                        return Invocation::BadUsage(format!("--fps {fps} is out of range"));
+                    }
+                },
+                Err(message) => return Invocation::BadUsage(message),
             },
             "--camera" => match args.next() {
                 Some(name) => match CameraMode::from_name(&name) {
@@ -187,7 +219,13 @@ mod tests {
             "--backend",
             "null",
             "--fullscreen",
+            "--pacing",
+            "adaptive",
+            "--fps",
+            "144",
         ]);
+        assert_eq!(options.pacing, crcbl::engine::Pacing::Adaptive);
+        assert_eq!(options.limit, crcbl::engine::FrameLimit::fps(144));
         assert!(options.headless);
         assert_eq!(options.frames, Some(12));
         assert_eq!(options.tick_hz, 30);
@@ -245,6 +283,30 @@ mod tests {
         );
     }
 
+    /// The defaults the engine picks, and the two values `--pacing off --fps 0`
+    /// are the only way to reach.
+    ///
+    /// `off` and `0` matter together: they are the pair the frame limiter is the
+    /// *only* pacing for, so a run that took one and dropped the other would be
+    /// unpaced rather than capped.
+    #[test]
+    fn the_pacing_and_frame_limit_default_to_the_engine_s_and_take_a_flag() {
+        assert_eq!(options(&[]).pacing, crcbl::engine::Pacing::Auto);
+        assert_eq!(options(&[]).limit, crcbl::engine::FrameLimit::default());
+        assert_eq!(options(&[]).limit.rate(), 1000);
+
+        let options = options(&["--pacing", "off", "--fps", "0"]);
+        assert_eq!(options.pacing, crcbl::engine::Pacing::Off);
+        assert_eq!(options.limit, crcbl::engine::FrameLimit::unlimited());
+        assert_eq!(
+            options.gpu().pacing,
+            crcbl::engine::Pacing::Off,
+            "and it reaches the value Gpu::open takes",
+        );
+        assert!(USAGE.contains("--pacing"));
+        assert!(USAGE.contains("--fps"));
+    }
+
     #[test]
     fn help_wins_wherever_it_appears() {
         assert_eq!(parse_args(&["--headless", "-h"]), Invocation::Help);
@@ -267,6 +329,13 @@ mod tests {
             vec!["--backend", "opengl"],
             vec!["--camera"],
             vec!["--camera", "isometric"],
+            vec!["--pacing"],
+            // The word a player knows for the adaptive case, which is not this
+            // engine's word for it — the message says which is.
+            vec!["--pacing", "vrr"],
+            vec!["--fps"],
+            vec!["--fps", "lots"],
+            vec!["--fps", "5000000000"],
             vec!["--nope"],
             vec!["stray"],
         ] {

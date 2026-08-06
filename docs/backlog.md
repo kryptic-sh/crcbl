@@ -432,6 +432,77 @@ it. Also declined: refusing with `HalError::Unsupported` on a device without the
 capability. It was tried as a falsification and the engine's frame loop fails
 every frame under it, which is the argument against it in one line.
 
+## `--pacing` and `--fps` reach the engine; three quarters of what they can ask for is unexercised
+
+`crcbl::args::Common::pacing` and `::limit` carry the two values,
+`Common::gpu()` hands the first to `GpuContextDesc` through `GpuOptions`, and
+`Common::loop_config()` hands the second to `Loop::new`, which applies it to the
+clock. `run_sandbox_paced` in `crates/crcbl-shell/tests/run-wayland-e2e.sh`
+proves the whole path on a real Vulkan swapchain — the flag, the present mode,
+the logged limit and the measured frame time. What that leaves:
+
+- **Only `--pacing off` is covered end to end.** `vsync` is covered incidentally
+  (it is what `auto` resolves to on every machine this repo has run on), and
+  **`adaptive` is covered by unit tests and by nothing else** — no run has ever
+  opened a swapchain on `FifoRelaxed`. It is the one a VRR panel actually wants,
+  so the gap is the same missing machine `Pacing::resolve`'s entry above needs;
+  a second `run_sandbox_paced adaptive` pass would at least prove the present
+  mode is reachable, which is cheap and was left out only because the pass it
+  would copy is the one that had never existed before.
+
+- **`--fps` is unobservable on every CI leg without a compositor.** The limiter
+  lives on `Clock::Real` by construction, so a headless run takes the flag and
+  correctly does nothing with it — which means the macOS, Windows and null-
+  backend legs say nothing about it, and neither does the browser, where every
+  entry point builds `Clock::manual` and `requestAnimationFrame` is the pacing.
+  The wayland pass is the only place it is real.
+
+- **Nothing in the repository changes either value while running.**
+  `Loop::clock_source_mut` (new) and `GpuContext::set_pacing` are what a
+  settings screen would call, a game reaches its own `Gpu` — and therefore its
+  `GpuContext` — from `HostedGame::tick`, and the `crcbl new` template documents
+  both routes. But no sample has a settings menu, so the mid-run path is covered
+  by `a_hosted_loop_takes_its_frame_limit_from_the_config_and_can_be_changed` in
+  `crates/crcbl/src/engine.rs` and by no running game. A pacing/fps row in
+  `apps/sandbox`'s pause menu is the obvious thing that would exercise it.
+
+- **`apps/sandbox` now duplicates eight shared flags rather than six.** Its
+  parser is deliberately its own (`crates/crcbl/src/args.rs`'s module docs make
+  the case, and it is a real one: the sandbox takes `--camera` and `--title` and
+  no `--seed`). The cost is that the sandbox is also the **only** sample the
+  Wayland and X11 harnesses drive, so every flag added to `Common` is either
+  written twice or untestable against a window system. `--pacing` and `--fps`
+  were written twice. Worth deciding once: either `apps/sandbox` consumes
+  `Common::consume` for the shared set and keeps its own arms for the rest, or a
+  `Common`-consuming sample joins the harness scripts. Not attempted here
+  because either is a change to what the harness runs, which is not something to
+  do inside a flag slice.
+
+## The CLI scaffold gate has thin timing margin, observed once
+
+`a_scaffolded_project_builds_lints_and_runs_headless` in
+`crates/crcbl-cli/tests/cli_e2e.rs` scaffolds a project into a temporary
+directory and points `CARGO_TARGET_DIR` at another one, so **every run is a cold
+build of the whole engine** — the sharing that makes the rest of the suite fast
+is deliberately absent, because an inherited target directory would deadlock
+against the lock the test runner already holds (the comment on `scaffold_cargo`
+explains it).
+
+`.config/nextest.toml` gives it
+`slow-timeout = { period = "60s", terminate-after = 4 }`, so the ceiling is
+240s. Running it twice in a row on this machine, back to back, gave
+**`TIMEOUT [240.174s]`** and then **`Summary [36.367s] 1 test run: 1 passed`**.
+The cause of the 6x spread was not determined — no other build was running in
+the foreground either time — so treat this as "seen once, unexplained" rather
+than a known flake with a known trigger.
+
+It has not failed in CI, so nothing is broken today. What is worth knowing: the
+margin is a wall-clock budget on a from-scratch engine build, and it moves with
+every dependency the engine gains and every runner GitHub retires. If this job
+ever goes red on a timeout, the fix is the `period`/`terminate-after` pair
+rather than anything in the scaffold. Nobody has measured what the budget
+actually needs to be, on this machine or on a runner.
+
 ## P5B — the job system, and the two decisions in front of it
 
 `crates/crcbl-jobs` carries the spawn seam (`Spawn`, `Threads`, `Inline`,
