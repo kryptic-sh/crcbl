@@ -2939,46 +2939,39 @@ mod tests {
         device.destroy_shader_module(module);
     }
 
-    /// **The same triangle, into a [`Format::Bgra8Unorm`] target — a controlled
-    /// experiment, not a second draw test.**
+    /// **The same triangle, into a [`Format::Bgra8Unorm`] target.** Worth having
+    /// on its own — `CAMetalLayer` refuses RGBA8, so BGRA8 is the format a real
+    /// Metal application actually renders to — and it began as a controlled
+    /// experiment whose answer is recorded below.
     ///
-    /// # What it is measuring
+    /// # The experiment, and what it settled
     ///
     /// [`a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`] faults
     /// on the CI runner (`macos-latest`, an Apple Paravirtual device) with
     /// `kIOGPUCommandBufferCallbackErrorHang`, every encoder reported
-    /// `completed` and none faulted — and it is one of four draws that do, which
+    /// `completed` and none faulted — one of four draws that do, which
     /// `.github/workflows/ci.yml` holds out by name. A standalone Swift script
     /// drawing a triangle into a `Bgra8Unorm` texture on that same image
-    /// produced a correct image. So the fault is in this backend's command
-    /// stream rather than in the device, and the two streams differ in more than
+    /// produced a correct image, so the fault is in this backend's command
+    /// stream rather than in the device. The two streams differed in more than
     /// one way; `docs/backlog.md` lists the candidates.
     ///
-    /// This test isolates one of them. **The render-target format is the only
+    /// This test isolated one of them. **The render-target format is the only
     /// difference between it and its twin above** — same MSL from [`ink_msl`],
     /// same [`CANVAS`], same [`CLEAR`], same [`draw_canvas`] helper and so the
-    /// same command-buffer construction, same `drawPrimitives:`, same
-    /// assertions through [`assert_ink_triangle`] with the channel order the
-    /// format implies. Varying anything else as well would leave both
-    /// hypotheses standing.
+    /// same command-buffer construction, same `drawPrimitives:`, same assertions
+    /// through [`assert_ink_triangle`] with the channel order the format
+    /// implies.
     ///
-    /// # What each outcome means
-    ///
-    /// * **Green here, red there.** The format is implicated: this backend's
-    ///   command stream is fine and Apple's paravirtual device does not survive
-    ///   an `Rgba8Unorm` render target — which
-    ///   [`layer_surface_caps`](crate::swapchain) already hints at, since
-    ///   `CAMetalLayer` refuses RGBA8 outright and offers BGRA first. The four
-    ///   quarantined tests then come back with a format change.
-    /// * **Red here too.** The format is ruled out, and the remaining candidate
-    ///   is the command buffer itself: every one in this backend comes from
-    ///   [`command_buffer`](crate::fault::command_buffer), which sets
-    ///   `MTLCommandBufferErrorOption::EncoderExecutionStatus`, and the Swift
-    ///   probe used a plain `makeCommandBuffer()`. That is the next thing to
-    ///   test.
-    ///
-    /// Nothing here has been measured yet — this test exists to produce the
-    /// measurement, and neither branch above is a prediction.
+    /// **It faults too**, byte-identically: run 31080128007 reported
+    /// `kIOGPUCommandBufferCallbackErrorHang`, `canvas` and `crcbl copies` both
+    /// `completed`, neither faulted. So the render-target format is **ruled
+    /// out**, and the remaining candidate is the command buffer itself: every
+    /// one in this backend comes from
+    /// [`command_buffer`](crate::fault::command_buffer), which sets
+    /// `MTLCommandBufferErrorOption::EncoderExecutionStatus`, where the Swift
+    /// probe used a plain `makeCommandBuffer()`. That is the next thing to test.
+    /// This test is quarantined alongside the other four until it is.
     ///
     /// **What turns it red for ordinary reasons**, as for its twin: a dropped
     /// draw or a failed pipeline leaves the centre at [`CLEAR_TEXEL`], a

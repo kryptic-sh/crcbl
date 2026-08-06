@@ -876,7 +876,7 @@ jobs:
       # surfaces as a `DeviceLost` error rather than a block, so letting the
       # suite finish costs under a second per faulting test.
       #
-      # # The four draw tests are held out, and the reason is not the device
+      # # The draw tests are held out, and the reason is not the device
       #
       # Run 31042925024 ran the suite out: **102 passed, 4 failed**, and the
       # four are exactly the tests that make the GPU run a shader. They fault
@@ -892,15 +892,16 @@ jobs:
       # (render-target format, and the error-options command-buffer
       # descriptor). They come back the moment that is understood.
       #
-      # **This job is what settles the first candidate.**
-      # `a_triangle_draw_into_a_bgra_target_paints_the_same_image` is the held-out
-      # triangle with `Format::Bgra8Unorm` in place of `Format::Rgba8Unorm` and
-      # nothing else changed, and it is deliberately *not* in the filter below.
-      # Green while its twin is red implicates the RGBA8 render target on this
-      # device; red as well rules the format out and leaves the command-buffer
-      # descriptor as the next thing to test.
+      # **The first candidate is settled, and it was not the format.**
+      # `a_triangle_draw_into_a_bgra_target_paints_the_same_image` is the
+      # held-out triangle with `Format::Bgra8Unorm` in place of
+      # `Format::Rgba8Unorm` and nothing else changed. Run 31080128007 ran it
+      # unfiltered: **110 passed, 1 failed**, and the one is that test, faulting
+      # byte-identically to its RGBA twin. So the render-target format is ruled
+      # out, the error-options command-buffer descriptor is what is left, and
+      # this test joins the quarantine until that is tested.
       #
-      # The fifth exclusion is older and unrelated:
+      # One name in the list is older and unrelated:
       # `a_layer_swapchain_acquires_a_drawable_and_presents_it` is `#[ignore]`d
       # because a detached `CAMetalLayer` in a headless container vends no
       # drawable — a claim about the window server, not shader execution. It
@@ -913,6 +914,7 @@ jobs:
           --no-fail-fast
           -E 'not (test(a_layer_swapchain_acquires_a_drawable_and_presents_it)
           + test(a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear)
+          + test(a_triangle_draw_into_a_bgra_target_paints_the_same_image)
           + test(the_engines_own_triangle_draws_through_a_bind_group)
           + test(an_indexed_draw_reads_the_bound_index_range)
           + test(a_multi_draw_indirect_emits_every_argument_structure))'

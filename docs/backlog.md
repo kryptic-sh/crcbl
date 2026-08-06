@@ -4770,37 +4770,49 @@ device rasterises; what hangs is _this backend's_ command stream. The two
 previous entries above could not tell those apart, because there was nothing to
 compare against. Now there is.
 
-Two candidates, neither tested — both are differences between the probe's
-command stream and the backend's, and both are cheap to settle:
+There were two candidates, both differences between the probe's command stream
+and the backend's. **One has now been measured and is dead.**
 
-- **Render-target format.** The probe drew into `Bgra8Unorm`; every draw test
-  here targets `Format::Rgba8Unorm` (`crates/crcbl-mtl/src/device.rs`, the
-  `draw_canvas` helper and the pipelines around it). `CAMetalLayer` itself
-  refuses RGBA8 — `layer_surface_caps` in `crates/crcbl-mtl/src/swapchain.rs`
-  records that and offers BGRA first — which is a hint that Apple's paravirtual
-  path may treat RGBA8 as a second-class render target. Re-running one draw test
-  against `Bgra8Unorm` settles it. **The measurement is in flight**:
-  `a_triangle_draw_into_a_bgra_target_paints_the_same_image` is the held-out
-  triangle with the render-target format as the only difference, and it is not
-  in the `mtl-e2e` filter. Record the result here and delete this sentence.
-  Worth keeping in mind while reading it: `CAMetalLayer` refusing RGBA8 is a
-  presentation constraint and an offscreen `MTLTexture` never touches the layer,
-  so the inference is suggestive rather than structural — which is exactly why
-  it is being measured rather than assumed.
-- **The error-options command buffer.** Every command buffer in this backend is
-  made by `crate::fault::command_buffer`, which uses
+- **Render-target format — RULED OUT, run 31080128007.** The probe drew into
+  `Bgra8Unorm` where every draw test here targeted `Format::Rgba8Unorm`, and
+  `CAMetalLayer` refuses RGBA8 outright (`layer_surface_caps` in
+  `crates/crcbl-mtl/src/swapchain.rs` records that and offers BGRA first), which
+  read as a hint that Apple's paravirtual path might treat RGBA8 as a
+  second-class render target. So
+  `a_triangle_draw_into_a_bgra_target_paints_the_same_image` was added — the
+  held-out triangle with the render-target format as its only difference, run
+  unfiltered. It faults byte-identically:
+  `kIOGPUCommandBufferCallbackErrorHang`, `canvas` and `crcbl copies` both
+  `completed`, neither faulted. The format is not the cause. In hindsight the
+  inference was never structural: RGBA8 is a _presentation_ constraint of
+  `CAMetalLayer` and an offscreen `MTLTexture` never touches the layer. The test
+  stays — BGRA8 is what a real Metal application renders to, so it earns its
+  place independently — and is quarantined with the rest.
+- **The error-options command buffer — the one still standing.** Every command
+  buffer in this backend is made by `crate::fault::command_buffer`, which uses
   `commandBufferWithDescriptor:` with
   `MTLCommandBufferErrorOptionEncoderExecutionStatus`
-  (`crates/crcbl-mtl/src/fault.rs:56-60`); the probe used a plain
-  `makeCommandBuffer()`. **This is the weaker of the two** — the clear and blit
-  tests go through the same helper and pass — but they do not run a shader, and
-  the option is documented to change how the driver instruments execution.
+  (`crates/crcbl-mtl/src/fault.rs`, the `command_buffer` helper); the probe used
+  a plain `makeCommandBuffer()`. It was called the weaker of the two — the clear
+  and blit tests go through the same helper and pass — but they do not run a
+  shader, and the option is documented to change how the driver instruments
+  execution. **Next experiment:** the same triangle through a command buffer
+  made without the descriptor, as the only difference. That needs a test-only
+  way to reach a plain command buffer, since the backend has no other path to
+  one, and it is worth thinking about whether that seam is something the backend
+  should own (an error-options-off mode) rather than something a test reaches
+  around.
 
-Until one of them is confirmed, `.github/workflows/ci.yml`'s `mtl-e2e` job holds
-the four out by name so the other 102 stay a gate. **They come back the moment
-this is understood** — the filter is a quarantine with a reason, not a
-concession, and leaving it un-revisited would turn the one real bug this job
-found into a permanently green-looking hole.
+If that one is also ruled out, the remaining differences between the two streams
+are the ones nobody has enumerated yet: the blit encoder the probe did not have,
+the `retainedReferences` default, and the readback's `didModifyRange`/managed
+storage path. Enumerate before guessing again.
+
+Until the cause is found, `.github/workflows/ci.yml`'s `mtl-e2e` job holds the
+faulting draws out by name so the rest of the suite stays a gate. **They come
+back the moment this is understood** — the filter is a quarantine with a reason,
+not a concession, and leaving it un-revisited would turn the one real bug this
+job found into a permanently green-looking hole.
 
 Worth noting what the 102 buy in the meantime: every one of them had never
 executed anywhere before this job existed. Adapter enumeration, device and
