@@ -978,4 +978,61 @@ mod tests {
         }
         assert_eq!(mixer.voice_count(), 16);
     }
+
+    /// The game thread races the audio thread. In a real game the game thread
+    /// calls `play`/`stop`/`set_mix` while the audio callback runs `fill`; this
+    /// test drives exactly that shape — a filler looping on one thread while
+    /// the other plays, re-aims and stops — and asserts the two halves agree
+    /// when it is over. The `Mutex` is what makes it safe by construction; this
+    /// is the test that says so.
+    #[test]
+    fn play_stop_and_set_mix_race_a_live_fill() {
+        use std::sync::{Arc, Barrier};
+
+        let mixer = Arc::new(Mixer::new());
+        let start = Arc::new(Barrier::new(2));
+
+        let filler = {
+            let mixer: Arc<Mixer> = Arc::clone(&mixer);
+            let start: Arc<Barrier> = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                let mut buf = vec![0.0f32; 256 * CHANNELS];
+                for _ in 0..200 {
+                    mixer.fill(&mut buf, 48_000);
+                }
+            })
+        };
+
+        // Played before the race and never stopped: must still be sounding.
+        let keepers: Vec<VoiceId> = (0..8)
+            .map(|_| mixer.play(Voice::new(vec![0.1f32; 4096 * CHANNELS]).with_looping()))
+            .collect();
+        // Played before the race and stopped during it: must be gone.
+        let doomed: Vec<VoiceId> = (0..8)
+            .map(|_| mixer.play(Voice::new(vec![0.1f32; 4096 * CHANNELS]).with_looping()))
+            .collect();
+
+        start.wait();
+        for _ in 0..50 {
+            for id in &keepers {
+                mixer.set_mix(*id, VoiceMix::default());
+            }
+            // `stop` may answer false — a previous turn of this loop already
+            // took the voice — but it must never leave one behind.
+            for id in &doomed {
+                mixer.set_mix(*id, VoiceMix::default());
+                mixer.stop(*id);
+            }
+            mixer.play(Voice::new(vec![0.1f32; 4096 * CHANNELS]).with_looping());
+        }
+        filler.join().unwrap();
+
+        for id in keepers {
+            assert!(mixer.is_playing(id), "a keeper was lost to the fill thread");
+        }
+        for id in doomed {
+            assert!(!mixer.is_playing(id), "a stopped voice came back");
+        }
+    }
 }

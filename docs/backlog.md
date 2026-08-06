@@ -2889,13 +2889,6 @@ The modular panel is built and all three samples switch it on with F3 (or
   audible-only.** See the entry under _Owed_ above. Structurally everything is
   pinned; nothing has been listened to.
 
-- **`Mixer` is exercised single-threaded in every sample test.** The engine has
-  `mixer_is_sync_and_fill_is_serialised`, which drives four threads through
-  `fill` while voices loop, but nothing tests `play`/`stop`/`set_mix` racing
-  against a live `fill` — which is exactly what happens in a real game, where
-  the game thread calls all three while the audio callback runs. The `Mutex`
-  makes it safe by construction and no test says so.
-
 - **The `wasm32` audio path is not built by the local verification loop.**
   `AudioStream::open` on `wasm32` goes through `web::install`, and the blanket
   `impl AudioSource for Arc<T>` is what makes an `Arc<Mixer>` acceptable there
