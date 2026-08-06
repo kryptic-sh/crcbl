@@ -57,7 +57,7 @@ jobs:
       # a `.js` file without a `package.json` to declare the dialect, and the
       # export checker uses `WebAssembly.Module.exports`. There is no npm step
       # and no `node_modules` — this repository hand-writes its bindings.
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
 
