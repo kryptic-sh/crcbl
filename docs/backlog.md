@@ -80,34 +80,6 @@ phase attached to it.
   measurement needs the reference machine and a release build, and H1 and H4
   were art slices.
 
-- **The whole horde art overhaul is verified by measurement and none of it by
-  eye**, and that is one gap rather than five. The grass ground, the wizard and
-  its walk cycle, the three monsters, the props and the potions all landed on
-  2026-08-04 without a display in the environment, so every claim about the
-  _picture_ is an assertion about baked bytes: silhouettes against colliders,
-  palettes against each other's luma, the staff orb's centroid against
-  `game::STAFF_MUZZLE`, drop rates off seeded runs. The per-slice entries below
-  and under "Told apart at a glance" say what each one specifically has not been
-  seen doing. **The grass has the least behind it of the five** — it was checked
-  as an offline mosaic rendered from the same `.crpix` bytes and the same hash,
-  which is not the shipped pipeline, and no test anywhere asserts that the
-  tiling has no visible seam. Half an hour of `cargo run -p horde` on a machine
-  with a screen closes more of this than any test that could be written for it.
-
-- **Nobody has looked at horde's props on a screen.** H4 was developed and
-  verified headless. `assets/props.crpix`'s two frames are pinned against the
-  other sheets by `the_props_sit_between_the_grass_and_the_crowd_in_luma` and
-  sized against their colliders by
-  `every_prop_silhouette_is_the_size_of_the_collider_it_stands_for`, both in
-  `art::tests` — which is the same standing the monsters' art has and no better.
-  Three things are therefore unverified rather than wrong: whether a top-down
-  canopy reads as a _tree_ at all rather than as a green disc; whether the
-  overlap of a wizard standing on a canopy edge looks acceptable in motion (the
-  reasoning for accepting it is in `assets/props.crpix`, and it is reasoning);
-  and whether the density feels right in play. One run of the demo with a person
-  watching settles all three. Related and already recorded below: "Told apart at
-  a glance" is the same shape of gap for the crowd.
-
 - **How many props a view holds is not pinned by anything.** The count over the
   whole arena is —
   `game::tests::the_scatter_is_sparse_and_never_pens_the_player_in` asserts it
@@ -165,68 +137,6 @@ non-obvious residue: each sample's `web.rs` still carries its own
 `__crcbl_<sample>_` symbols, which `web/tools/check-exports.mjs` requires to be
 literal — see _Considered and declined_. Adopting `crcbl_ui::hud` was declined
 on its merits, also below.
-
-## "Told apart at a glance" is the horde art's whole premise and nothing measures it
-
-`apps/horde/assets/actors.crpix` sizes the entire sheet — `art::TEXELS_PER_UNIT`
-= 20, and every argument that follows from it — on three enemy kinds being
-distinguishable in a crowd. Nothing tests that, and after the Diablo II redraw
-it is worth writing down that nothing can:
-
-- `art::tests::the_three_enemy_kinds_are_three_different_pictures` measures each
-  outline along eight rays from the frame's centre and asserts the largest
-  difference between any pair exceeds 0.12 of the frame's half-width. It rules
-  out three sizes of one drawing. It says nothing about legibility, and a pair
-  of genuinely different monsters can score low on it — after the redraw
-  `fallen` against `quill-rat` is **0.162**, where the shapes it replaced scored
-  0.412. The shapes are not less distinct (a horned biped against a spined
-  quadruped); the eight-ray metric is just insensitive to the difference,
-  because both are drawn out to the edges of their own collider box and the
-  metric mostly reports box size. Do not read that number as a legibility
-  margin, and do not tighten the threshold expecting it to mean one.
-- `the_monsters_sit_between_the_grass_and_the_player_in_luma` and
-  `the_monsters_have_a_dark_rim_and_the_player_a_bright_one` pin the two
-  brightness relations the sheet argues for. Neither is a legibility test
-  either; they are the conditions under which legibility is _possible_.
-
-What would actually measure it is a human looking at a full screen of the crowd,
-or a perceptual difference metric over the rendered frames. Neither was
-attempted. **The redraw was eyeballed by its author on a static sprite strip
-against the grass base colour, not in a running window and not at a crowd
-density** — the headless `--prefill 200` run exercises the code path and prints
-stats, and no frame from it was looked at.
-
-## The browser's sRGB fix has never been seen in a browser
-
-`crcbl-wgpu` now advertises the sRGB counterparts of a canvas's linear formats
-and configures the canvas linear with an sRGB `viewFormats` entry, so the
-hardware encode happens on the view rather than not at all. What is verified,
-and what is not:
-
-- **Verified by falsification.** `with_srgb_views` and `swapchain_config` are
-  the two decision points and both are unit tested against the format list
-  WebGPU actually reports (`wgpu-30.0.0/src/backend/webgpu.rs`, whose
-  `get_capabilities` returns `Rgba8Unorm`, `Bgra8Unorm` and — only where the
-  canvas takes it — `Rgba16Float`). Each test was watched go red with its half
-  of the fix removed.
-- **Verified by the compiler.** The wasm32 clippy and rustdoc gates both pass,
-  which is what CI runs; there is no wasm test harness.
-- **Not verified at all: that the frame is no longer dark.** Nothing here can
-  open a browser. The diagnosis is read off the shader (`sprite.wgsl`'s fragment
-  entry returns `textureSample(...) * tint` with no OETF) and the sheet's format
-  (`Rgba8UnormSrgb`, so sampling decodes to linear), and the arithmetic says
-  `#19211a` reaches the canvas as roughly `#020302` without the encode — which
-  is what "the grass is black" looked like. Confidence in the cause is high;
-  confidence that _this_ is the whole of it rests on nobody having loaded the
-  page.
-
-`./web/build.sh --serve` and half a minute at `http://localhost:8000` settles
-it, and would also settle the eyeball gap recorded above. Until then the entry
-stays here.
-
-Also unclosed by this fix: every other sample presents through the same path, so
-breakout, flappy and asteroids were dark in a browser too and are expected to
-have changed appearance. None of them was looked at either.
 
 ## Frame pacing sleeps on the monotonic clock, which is not what a display does
 
