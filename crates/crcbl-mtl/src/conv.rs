@@ -634,45 +634,6 @@ pub(crate) fn copy_footprint(
 mod tests {
     use super::*;
 
-    /// Every [`Format`] the seam declares, so the properties below are checked
-    /// over all of them rather than over the handful someone remembered.
-    ///
-    /// Hand-written because `Format` has no iterator; `pixel_format`'s
-    /// exhaustive `match` is what makes a *missing* variant a compile error,
-    /// and `every_format_appears_in_the_exhaustive_list` below is what makes a
-    /// variant missing from *this* list fail.
-    const ALL: &[Format] = &[
-        Format::R8Unorm,
-        Format::Rg8Unorm,
-        Format::Rgba8Unorm,
-        Format::Rgba8UnormSrgb,
-        Format::Bgra8Unorm,
-        Format::Bgra8UnormSrgb,
-        Format::Rgb10a2Unorm,
-        Format::R11g11b10Float,
-        Format::R16Float,
-        Format::Rg16Float,
-        Format::Rgba16Float,
-        Format::R32Float,
-        Format::Rg32Float,
-        Format::Rgba32Float,
-        Format::R32Uint,
-        Format::Rg32Uint,
-        Format::D32Float,
-        Format::D32FloatS8Uint,
-        Format::D24UnormS8Uint,
-        Format::D16Unorm,
-        Format::Bc1RgbaUnorm,
-        Format::Bc1RgbaUnormSrgb,
-        Format::Bc3RgbaUnorm,
-        Format::Bc3RgbaUnormSrgb,
-        Format::Bc4RUnorm,
-        Format::Bc5RgUnorm,
-        Format::Bc6hRgbUfloat,
-        Format::Bc7RgbaUnorm,
-        Format::Bc7RgbaUnormSrgb,
-    ];
-
     /// The seam's linear/sRGB pairs, which are the entries a transposition
     /// makes *dark* rather than broken.
     const SRGB_PAIRS: &[(Format, Format)] = &[
@@ -683,31 +644,21 @@ mod tests {
         (Format::Bc7RgbaUnorm, Format::Bc7RgbaUnormSrgb),
     ];
 
-    /// `ALL` really is all of them, so every property below has the coverage it
-    /// claims. `Format` is `Ord`, so the largest variant plus a count is enough
-    /// to catch both an addition to the seam and a deletion from this list.
-    #[test]
-    fn every_format_appears_in_the_exhaustive_list() {
-        let mut sorted: Vec<Format> = ALL.to_vec();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(sorted.len(), ALL.len(), "a duplicate in ALL");
-        assert_eq!(
-            sorted.last().copied(),
-            Some(Format::Bc7RgbaUnormSrgb),
-            "the seam gained a format after the last one this list knows"
-        );
-    }
-
     /// **The mapping is injective.** Two seam formats sharing one Metal format
     /// is the copy-paste failure this file is most exposed to, and it is
     /// invisible at run time: the image is created, the sample succeeds, the
     /// colour is wrong.
+    ///
+    /// Driven off [`Format::ALL`] — the seam's list, not a second copy kept
+    /// here. The copy that used to sit in this module covered whatever it
+    /// happened to name, so a format added to `Format` and forgotten here left
+    /// this test green over an incomplete set. `crcbl-vk` and `crcbl-dx12`
+    /// deleted their copies for the same reason.
     #[test]
     fn no_two_formats_share_a_metal_format() {
-        assert!(!ALL.is_empty(), "nothing to check");
+        assert!(!Format::ALL.is_empty(), "nothing to check");
         let mut seen: Vec<(Format, MTLPixelFormat)> = Vec::new();
-        for &format in ALL {
+        for &format in Format::ALL {
             let metal = pixel_format(format);
             assert_ne!(
                 metal,
@@ -719,7 +670,7 @@ mod tests {
             }
             seen.push((format, metal));
         }
-        assert_eq!(seen.len(), ALL.len());
+        assert_eq!(seen.len(), Format::ALL.len());
     }
 
     /// The pairs, pinned to Metal's own `_sRGB` constants.
