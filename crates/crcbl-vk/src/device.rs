@@ -2794,20 +2794,17 @@ impl VkDevice {
             images.len()
         );
         Ok(SwapchainEntry {
-            owner: self.inner.id,
             surface_raw,
             raw,
-            extent: extent.configured,
-            images,
-            views,
-            view_handles,
-            memory: Vec::new(),
-            image_handles,
             sync: Some(sync),
-            acquired: None,
-            next_offscreen: 0,
-            pending_suboptimal: false,
-            presented_id: 0,
+            ..SwapchainEntry::fresh(
+                self.inner.id,
+                extent.configured,
+                images,
+                views,
+                view_handles,
+                image_handles,
+            )
         })
     }
 
@@ -2935,20 +2932,15 @@ impl VkDevice {
             desc.format,
         );
         Ok(SwapchainEntry {
-            owner: self.inner.id,
-            surface_raw: vk::SurfaceKHR::null(),
-            raw: vk::SwapchainKHR::null(),
-            extent: extent.configured,
-            images,
-            views,
-            view_handles,
             memory,
-            image_handles,
-            sync: None,
-            acquired: None,
-            next_offscreen: 0,
-            pending_suboptimal: false,
-            presented_id: 0,
+            ..SwapchainEntry::fresh(
+                self.inner.id,
+                extent.configured,
+                images,
+                views,
+                view_handles,
+                image_handles,
+            )
         })
     }
 

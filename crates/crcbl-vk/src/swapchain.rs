@@ -262,6 +262,43 @@ pub(crate) struct SwapchainEntry {
 }
 
 impl SwapchainEntry {
+    /// A swapchain with the site-specific fields at their offscreen defaults
+    /// and the fresh tail in place. Every construction site — the WSI path,
+    /// the offscreen ring, and every reconfigure, which rebuilds through the
+    /// WSI path — starts from this and overrides only what differs, so a fresh
+    /// object always begins with the four fields that say "nothing has
+    /// happened yet": no outstanding acquire, the ring at its first image, no
+    /// pending suboptimal report, and `presented_id` at 0.
+    ///
+    /// `presented_id` resetting on reconfigure is therefore true by
+    /// construction: a rebuilt swapchain never saw the ids the old one did,
+    /// and `wait_until_presented` answers `Ok(())` at once for any of them.
+    pub(crate) fn fresh(
+        owner: u64,
+        extent: (u32, u32),
+        images: Vec<vk::Image>,
+        views: Vec<vk::ImageView>,
+        view_handles: Vec<ImageViewHandle>,
+        image_handles: Vec<ImageHandle>,
+    ) -> Self {
+        Self {
+            owner,
+            surface_raw: vk::SurfaceKHR::null(),
+            raw: vk::SwapchainKHR::null(),
+            extent,
+            images,
+            views,
+            view_handles,
+            memory: Vec::new(),
+            image_handles,
+            sync: None,
+            acquired: None,
+            next_offscreen: 0,
+            pending_suboptimal: false,
+            presented_id: 0,
+        }
+    }
+
     /// Whether this is the offscreen ring rather than a real WSI swapchain.
     pub(crate) fn is_offscreen(&self) -> bool {
         self.raw == vk::SwapchainKHR::null()
@@ -379,20 +416,8 @@ mod tests {
     /// here, so it is faked from a non-null bit pattern.
     fn entry(raw: vk::SwapchainKHR) -> SwapchainEntry {
         SwapchainEntry {
-            owner: 1,
-            surface_raw: vk::SurfaceKHR::null(),
             raw,
-            extent: (1, 1),
-            images: Vec::new(),
-            views: Vec::new(),
-            view_handles: Vec::new(),
-            memory: Vec::new(),
-            image_handles: Vec::new(),
-            sync: None,
-            acquired: None,
-            next_offscreen: 0,
-            pending_suboptimal: false,
-            presented_id: 0,
+            ..SwapchainEntry::fresh(1, (1, 1), Vec::new(), Vec::new(), Vec::new(), Vec::new())
         }
     }
 
