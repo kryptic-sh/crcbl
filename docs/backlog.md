@@ -3166,13 +3166,6 @@ annotated.
   measured rather than predicted — see the density entry above — and it is what
   makes the plan's count unplayable in this arena.
 
-- **The spawn ring is relative to the player and clamped into the arena**, so a
-  player standing in a corner gets enemies materialising on the wall beside them
-  instead of walking on from off screen. Rejecting and re-drawing the angle
-  would fix it and would no longer be a pure function of the index, which is the
-  property the determinism suite rests on; the honest fix is to pick the arc
-  that is inside the arena rather than to retry.
-
 - **Nothing pulls a gem towards the player.** `Upgrade::Magnet` widens the
   radius the collection query runs at, so a gem inside it is banked on the tick
   it comes into range and one outside it is not. The genre's version drifts the
