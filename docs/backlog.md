@@ -5098,18 +5098,12 @@ re-listing an adapter the hardware pass already kept. It never collapsed the
 runner's two entries — those carry different LUIDs and really are two adapter
 objects.
 
-## `Format::ALL` cannot be made airtight on stable, and two backends still copy it
+## `Format::ALL` cannot be made airtight on stable
 
-The seam now owns the canonical format list as `Format::ALL` in
-`crcbl-hal::format`, and `crcbl-vk` was repointed at it — the two lists that had
-drifted apart are one. Two things are left.
-
-**`crcbl-mtl` and `crcbl-dx12` still keep their own copies**, in each crate's
-`conv.rs`. Both should be repointed at `Format::ALL`; they were left alone only
-because the slice that added it was scoped to `crcbl-hal` and `crcbl-vk`. Until
-then, each backend's injectivity test still covers only the formats its own copy
-happens to list. (`crcbl-mtl/src/swapchain.rs`'s `LAYER_FORMATS` and
-`OFFSCREEN_FORMATS` are deliberate subsets and are not this.)
+The seam owns the canonical format list as `Format::ALL` in `crcbl-hal::format`,
+and all three backends — `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl` — now drive
+their injectivity tests off it rather than a copy each kept beside the mapping.
+What is left is one thing.
 
 **The list is hand-maintained, and the gap that remains is a variant appended to
 the enum and not to `ALL`.** `the_format_table_is_in_declaration_order` compares
