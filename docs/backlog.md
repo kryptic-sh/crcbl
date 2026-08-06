@@ -38,14 +38,6 @@ phase attached to it.
   the spatial grammar's API means, and the adoption slice was already touching
   four samples.
 
-- **`VoiceMix::from(&SpatialCue)` drops `itd_samples` on the floor.** A `Voice`
-  has no per-channel delay line, so the interaural time difference the cue
-  grammar computes — rule 1's other half — reaches nothing. What survives is the
-  gain difference, which is the direction without the timing. Documented on the
-  `From` impl in `crates/crcbl-audio/src/mixer.rs` so it is not a silent loss.
-  Fixing it means a fractional delay per channel inside `Voice::mix_block`, at a
-  cost the audio thread has not been measured for.
-
 - **Nothing has listened to the migrated cues on a real device.** Every sample's
   audio was rewritten onto `crcbl_audio::mixer` and the checks are all
   structural: buffer shapes, pan ordering, voice counts, loop seams. Two
