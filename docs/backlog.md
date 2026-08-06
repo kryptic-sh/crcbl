@@ -360,16 +360,6 @@ What is still owed:
   the only `wait_timeout` pairing in the tree and no other instance needs the
   bound.
 
-- **`SwapchainEntry::presented_id` resets across a reconfigure by
-  construction.** `reconfigure_swapchain` replaces the whole entry with what
-  `build_swapchain` returns, and that one starts at 0 —
-  `a_rebuilt_swapchain_remembers_none_of_the_old_ones` in
-  `crates/crcbl-vk/src/swapchain.rs` pins what `has_presented` must then answer.
-  Both construction sites — the WSI path and the offscreen ring — now start from
-  one `SwapchainEntry::fresh` and override only what differs, so the fresh tail
-  (including `presented_id: 0`) is one place rather than two literals that could
-  drift.
-
 - **Read the real present mode with `VK_EXT_present_timing`.** The seam, the
   Vulkan backend and the engine's use of them now exist; **what no run has
   produced is an answer other than `Unknown`.** `DisplayTiming` and
