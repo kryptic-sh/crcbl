@@ -328,39 +328,75 @@ What is still owed:
   construction site. Both sites building the entry through one constructor would
   fix it and is a bigger change than this slice wanted.
 
-- **Read the real present mode with `VK_EXT_present_timing`.** The seam and the
-  Vulkan backend now exist; **the engine does not use them.** `DisplayTiming`
-  and `display_timing_from_refresh_nanos` in `crcbl_hal::swapchain`,
+- **Read the real present mode with `VK_EXT_present_timing`.** The seam, the
+  Vulkan backend and the engine's use of them now exist; **what no run has
+  produced is an answer other than `Unknown`.** `DisplayTiming` and
+  `display_timing_from_refresh_nanos` in `crcbl_hal::swapchain`,
   `Features::PRESENT_TIMING` and `Device::display_timing` are the capability-
   named seam; `crcbl_vk::present_timing` is the hand-written FFI (`ash` still
-  has no bindings — rechecked against the pinned 0.38.0+1.3.281). The extension
-  is **ratified**, not provisional as this entry previously said:
+  has no bindings — rechecked against the pinned 0.38.0+1.3.281);
+  `GpuContext::observe_display_timing` in `crates/crcbl/src/engine.rs` is the
+  caller, asking after every present and logging on change. The extension is
+  **ratified**, not provisional as this entry previously said:
   `supported="vulkan" ratified="vulkan"` in `vk.xml`, revision 3, which is what
   `/usr/include/vulkan/vulkan_core.h` declares and what RADV exposes here.
 
   Still owed:
-  - **`crcbl::engine` is untouched, deliberately.** `Pacing::Adaptive` is still
-    a _request_ with no observation behind it and its doc comment still says the
-    engine cannot observe the answer. Nothing anywhere calls `display_timing`
-    outside the vk e2e suite, so the feature is never negotiated in a real run —
-    `crcbl-vk` logs `present timing enabled` only when a caller asks for the
-    flag, and no engine caller does. Adopting it is the next slice.
-  - **Only the `Unknown` arm has ever executed against a driver.** The vk e2e
-    suite is offscreen by construction, so
-    `the_offscreen_ring_reports_no_display_timing_and_never_takes_a_null_swapchain`
-    proves the extension chain negotiates on RADV and that the offscreen guard
-    holds — nothing more. `Fixed`, `Variable` and `Stepped` are covered by unit
-    tests on the pure mapping and by **nothing else on any machine**; reaching
-    them needs a real windowed swapchain on a real panel, which no automated run
-    in this repo has. A VRR monitor would be needed for `Variable`/`Stepped`
-    specifically, and nothing would distinguish a wrong `Fixed` from a right one
-    on a fixed-refresh panel.
+  - **Only the `Unknown` arm has ever executed against a driver, and that is now
+    a measured result rather than an untested path.**
+    `crates/crcbl-shell/tests/run-wayland-e2e.sh` drives the sandbox on RADV (RX
+    7900 XTX, Mesa 26.1.6) against a nested headless sway 1.12. The chain
+    negotiates —
+    `crcbl-vk: present timing enabled (VK_EXT_present_timing + VK_KHR_present_id2)`
+    — the query reaches the driver after a present, and the answer is
+    `hal: display timing Unknown`, every frame, in both display modes. `Fixed`,
+    `Variable` and `Stepped` are still covered by unit tests on the pure mapping
+    and by **nothing else on any machine**. The script asserts only that the
+    engine _asked_; it shouts when the arm is `Unknown` rather than asserting a
+    cadence nobody has seen.
+  - **Why RADV answers `Unknown` there is partly determined.** Verified: that
+    sway session advertises `wp_presentation` and neither
+    `wp_commit_timing_manager_v1` nor `wp_fifo_manager_v1` (`wayland-info` on
+    the session the script starts), while `libvulkan_radeon.so` contains
+    bindings for both of those names — so the Wayland WSI looks for protocols
+    this compositor does not offer. **Not determined:** whether
+    `vkGetSwapchainTimingPropertiesEXT` returned `VK_NOT_READY` or `SUCCESS`
+    with zeroed figures, since `crcbl-vk` maps both to `Unknown` and logs only
+    the mapped arm; and whether RADV would report a real cadence on a compositor
+    that does advertise those protocols. Hyprland 0.56.2 (installed here)
+    implements both, but it cannot be nested inside sway for a safe headless
+    experiment — it demands `xdg_wm_base` v6 and sway 1.12 offers v5 — and
+    running it on DRM would take over this machine's console. A DRM-backed
+    session, or the same run under a compositor with commit-timing, is what
+    would settle it.
   - **The four-state reading of `refreshDuration`/`refreshInterval` is taken
     from the proposal text, not from a driver.** In particular the `Stepped`
     case (interval non-zero, not `UINT64_MAX`, not equal to the duration) is a
     shape no driver here has been observed to emit, and the contradictory-input
     arm — an interval that does not divide the duration, mapped conservatively
     to `Unknown` — is a guess about driver bugs rather than a response to one.
+  - **The query's cost has been reasoned about, not measured.** It is one
+    `vkGetSwapchainTimingPropertiesEXT` per present, under the backend's state
+    lock, argued in `observe_display_timing`'s doc comment to be far below the
+    frame's own submit. Nobody has profiled it, and the headless runs above are
+    not a place where it would show.
+
+  **Decision needed from the user: should `Pacing::Adaptive` become the default
+  when `Variable` is reported?** The observation now exists and nothing consumes
+  it; `Pacing::default()` is `Vsync` and `Pacing::preferences()` is unchanged on
+  purpose. For: on a VRR panel `Fifo` makes the display wait for a fixed vblank
+  the panel is not keeping, which is exactly the case `FifoRelaxed` exists for,
+  and the engine can now tell that case from a fixed 60 Hz panel — which is the
+  only reason this was not decidable before. Against: the present mode is a
+  swapchain property, so acting on the observation means _reconfiguring_ a
+  swapchain mid-run, on a value the seam documents as changing underneath a
+  running swapchain (power saving, a window moved between monitors) — that is a
+  rebuild storm waiting for a panel that flaps, and it silently overrides a
+  `Pacing` the caller chose. A middle option: leave the default alone and act
+  only when the caller asked for `Adaptive`, so the observation refines a
+  request instead of replacing one. Whichever way it goes, `Pacing`'s doc
+  comment in `crates/crcbl/src/engine.rs` states the current answer and would
+  need rewriting with it.
 
   Note that `wait_until_presented` deliberately does **not** return a timestamp
   — a caller that needs one needs a second method, and `VK_EXT_present_timing`'s
@@ -4363,9 +4399,9 @@ platform where both can run against the same GPU.
 - **Windows-on-ARM**, where D3D12 is first-class and Vulkan is patchier.
 - **PIX and DRED**, and DXGI's waitable swapchain object — a mature answer to
   the closed-loop frame pacing this backlog already has open, where the Vulkan
-  side needs `VK_KHR_present_wait` (bound in the pinned `ash`, unstarted) and
-  `VK_EXT_present_timing` (not in `ash` at all, still provisional, genuine
-  hand-written FFI).
+  side needed `VK_KHR_present_wait` (bound in the pinned `ash`) and
+  `VK_EXT_present_timing` (ratified, but not in `ash` at all, so genuine
+  hand-written FFI) — both of which have since landed.
 
 ### Why it is last
 

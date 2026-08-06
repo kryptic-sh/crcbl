@@ -202,6 +202,50 @@ run_sandbox() {
 path was NOT exercised, only the absent-capability path" >&2
     fi
 
+    # What the display is doing with those frames, which is a different question
+    # from whether the loop paced on them — and driver conditional for the same
+    # reason: radv has `VK_EXT_present_timing`, lavapipe does not, and CI runs
+    # lavapipe.
+    #
+    # **The assertion is that the engine asked, not what it heard.**
+    # "present timing enabled" only says the extension chain was negotiated;
+    # the engine's own line is printed from `observe_display_timing`, after a
+    # present, so it is there only if the query really reached the device. It is
+    # absent the moment the engine goes back to never calling `display_timing`,
+    # which is the state this check exists to stop returning.
+    #
+    # It deliberately does **not** demand a cadence. On the machine this was
+    # written on — radv on a nested headless sway — the answer is `Unknown`
+    # every frame, so an assertion naming `Fixed`/`Variable`/`Stepped` would be
+    # one nobody has ever seen pass. That case shouts instead, so a run on a
+    # compositor that does report a refresh says so out loud rather than
+    # quietly passing the same check.
+    local timing
+    if grep -q "crcbl-vk: present timing enabled" "$SANDBOX_LOG"; then
+        # `|| true` because the empty case is the one being *tested for*: this
+        # runs under `set -o pipefail`, so a `grep` that matches nothing would
+        # otherwise abort the script here and the message below — the whole
+        # point of the check — would never be printed. Found by breaking the
+        # engine's log line and watching this exit non-zero silently.
+        timing="$(grep -Eo 'hal: display timing [A-Za-z]+' "$SANDBOX_LOG" | tail -1 \
+            | sed -E 's/.* //' || true)"
+        if [ -z "$timing" ]; then
+            echo "crcbl e2e: the device enabled present timing and the engine never read it" >&2
+            cat "$SANDBOX_LOG" >&2
+            sway_log_tail
+            exit 1
+        fi
+        if [ "$timing" = "Unknown" ]; then
+            echo "crcbl e2e: the engine read the display timing and got Unknown — the query \
+path ran, but no real DisplayTiming arm was exercised" >&2
+        else
+            echo "crcbl e2e: the display reports $timing"
+        fi
+    else
+        echo "crcbl e2e: no VK_EXT_present_timing on this driver — the display-timing \
+path was NOT exercised, only the absent-capability path" >&2
+    fi
+
     # The mode the compositor settled on, and the extent that goes with it. Both
     # come off one line, so a run that reported borderless at the windowed size
     # — a swapchain that never caught up with the configure — fails here.

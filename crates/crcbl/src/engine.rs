@@ -105,10 +105,10 @@ use std::time::Duration;
 
 use crcbl_core::time::{ManualTime, MonotonicTime, TimeSource};
 use crcbl_hal::{
-    AcquiredFrame, CommandBufferHandle, DeviceDesc, Features, Format, HalError, PresentInfo,
-    PresentMode, QueueHandle, QueueKind, SemaphoreDesc, SemaphoreHandle, SemaphoreKind,
-    SemaphoreSignal, SemaphoreWait, SubmitInfo, SurfaceError, SurfaceHandle, SwapchainDesc,
-    SwapchainHandle,
+    AcquiredFrame, CommandBufferHandle, DeviceDesc, DisplayTiming, Features, Format, HalError,
+    PresentInfo, PresentMode, QueueHandle, QueueKind, SemaphoreDesc, SemaphoreHandle,
+    SemaphoreKind, SemaphoreSignal, SemaphoreWait, SubmitInfo, SurfaceError, SurfaceHandle,
+    SwapchainDesc, SwapchainHandle,
 };
 use crcbl_hal::{Device, Instance};
 use crcbl_shell::{CloseReply, DisplayMode, PhysicalSize, Shell, ShellError, ShellEvent, WindowId};
@@ -351,12 +351,17 @@ pub enum FrameOutcome {
 /// this enum makes is which present mode to ask for, and the job left to the
 /// frame limiter is staying inside the panel's range.
 ///
-/// Which mode is actually running is a separate question the engine cannot
-/// answer yet — it needs `VK_EXT_present_timing`, which has no Rust bindings in
-/// the pinned `ash` and is still a provisional extension. Until then
-/// [`Adaptive`](Self::Adaptive) is a request, not an observation, and the
-/// default is [`Vsync`](Self::Vsync) because it is the one every surface
-/// supports.
+/// Which mode is actually running is a separate question, and it is one the
+/// engine now answers: [`GpuContext`] asks [`Device::display_timing`] after
+/// every present and logs the [`DisplayTiming`] whenever it changes, so a
+/// run's log says what the panel was really doing rather than what was asked
+/// of it.
+///
+/// **Nothing acts on that observation.** [`Adaptive`](Self::Adaptive) is still
+/// a request — it picks a present mode and no more — and the default is still
+/// [`Vsync`](Self::Vsync), because it is the one every surface supports.
+/// Whether a reported [`DisplayTiming::Variable`] should change the pacing the
+/// engine asks for is an open decision, not an oversight.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Pacing {
     /// Wait for the display. [`PresentMode::Fifo`], which is the only mode
@@ -467,12 +472,18 @@ impl Default for GpuContextDesc<'_> {
             // calls `wait_until_presented` every frame: a device that has the
             // capability and was never asked for it answers that call
             // immediately forever, and the closed loop is dead code nothing can
-            // reach. Optional like the rest — it is not in `TIER_A`, and a
-            // device without it just keeps the open-loop frame limiter.
+            // reach. `PRESENT_TIMING` is the same argument for the same reason:
+            // `submit_and_present` calls `display_timing` every frame, and
+            // unasked-for it answers `Unknown` forever, so the engine would
+            // report every panel as unreadable and never negotiate the
+            // extension chain that could have told it otherwise. Optional like
+            // the rest — neither is in `TIER_A`, and a device without them just
+            // keeps the open-loop frame limiter and the `Unknown` cadence.
             optional_features: Features::TIER_A
                 | Features::TIMESTAMP_QUERY
                 | Features::DEBUG_MARKERS
-                | Features::PRESENT_FEEDBACK,
+                | Features::PRESENT_FEEDBACK
+                | Features::PRESENT_TIMING,
             pacing: Pacing::default(),
         }
     }
@@ -510,6 +521,20 @@ pub struct GpuContext {
     /// The extent the swapchain was last *configured* at, from
     /// [`AcquiredFrame::extent`]. Distinct from what the shell asked for.
     configured_extent: (u32, u32),
+    /// The last cadence [`Device::display_timing`] reported, so the log line
+    /// fires on a change rather than every frame.
+    ///
+    /// **Not a cache.** The seam forbids treating one sample as the answer, and
+    /// nothing reads this to decide anything — it is only the previous sample
+    /// the next one is compared against.
+    ///
+    /// `None` is "nothing observed yet", which is a different thing from
+    /// [`DisplayTiming::Unknown`] — "asked, and the display would not say" —
+    /// and keeping them apart is what makes the first observation a change and
+    /// therefore something the log reports. Collapsing them would make a run
+    /// that only ever reads `Unknown` completely silent, which is the one
+    /// outcome nobody could tell from the query never having run.
+    display_timing: Option<DisplayTiming>,
     /// Scratch, reused every frame so a steady-state frame allocates nothing.
     waits: Vec<SemaphoreWait>,
     signals: Vec<SemaphoreSignal>,
@@ -883,6 +908,9 @@ impl GpuContext {
             pacing,
             in_flight: VecDeque::with_capacity(FRAMES_IN_FLIGHT + 1),
             configured_extent: extent,
+            // Nothing has been presented yet, and the query is only meaningful
+            // after a present — see `observe_display_timing`.
+            display_timing: None,
             waits: Vec::with_capacity(1),
             signals: Vec::with_capacity(2),
         })
@@ -1086,11 +1114,66 @@ impl GpuContext {
             Err(error) => return Err(error.into()),
         }
 
+        // After the present, never before it — and after *this* present rather
+        // than at the top of the next frame, so the reconfigure below can clear
+        // what was just observed.
+        self.observe_display_timing();
+
         if acquired.suboptimal {
             log::debug!("hal: swapchain suboptimal; reconfiguring after present");
             self.reconfigure()?;
         }
         Ok(FrameOutcome::Presented)
+    }
+
+    /// Reads what the display is doing with the frames just presented, and says
+    /// so when the answer has changed.
+    ///
+    /// # Why here, and why after the present
+    ///
+    /// `VK_EXT_present_timing`'s proposal is explicit that
+    /// `vkGetSwapchainTimingPropertiesEXT` may answer `VK_NOT_READY` until at
+    /// least one image has been presented to the swapchain, and again after the
+    /// properties change. So a query at acquire time — or anywhere before the
+    /// first present — is expected to report
+    /// [`Unknown`](DisplayTiming::Unknown), and that is the platform working as
+    /// specified rather than a fault to chase.
+    ///
+    /// # Why every present, and what that costs
+    ///
+    /// One driver call per frame: on `crcbl-vk` it is a lock, a handle lookup
+    /// and one `vkGetSwapchainTimingPropertiesEXT`, which reads driver-side
+    /// state and neither allocates nor waits on the GPU. That is the same order
+    /// as the `vkQueuePresentKHR` it follows and far below the frame's own
+    /// submit, so it does not need rationing; every other backend answers
+    /// `Ok(Unknown)` without reaching a driver at all. Sampling less often
+    /// would trade that for a window in which the engine's log is wrong about
+    /// the panel, and the whole point of the query is that the answer moves —
+    /// a laptop entering power-saving mode, a window dragged to another
+    /// monitor.
+    ///
+    /// # Why an error is not a failed frame
+    ///
+    /// It degrades to [`Unknown`](DisplayTiming::Unknown) and a `debug!` line.
+    /// The frame has already been presented and is on its way to the display by
+    /// the time this runs, so there is nothing left to abandon; a cadence
+    /// nobody can read is a thing the engine already has an arm for, and
+    /// turning it into a `GpuError` would let a diagnostic kill a loop that is
+    /// working. The failure a caller does care about — the surface going
+    /// out of date or being lost — arrives again on the next acquire or
+    /// present, which are the two calls that handle it.
+    fn observe_display_timing(&mut self) {
+        let observed = match self.device.display_timing(self.swapchain) {
+            Ok(timing) => timing,
+            Err(error) => {
+                log::debug!("hal: could not read the display timing: {error}");
+                DisplayTiming::Unknown
+            }
+        };
+        if self.display_timing != Some(observed) {
+            log::info!("hal: display timing {observed:?}");
+            self.display_timing = Some(observed);
+        }
     }
 
     /// Waits for and destroys command buffers until at most `keep` are in
@@ -1147,6 +1230,12 @@ impl GpuContext {
         // across a resize storm, which is what the seam promises callers.
         self.device
             .reconfigure_swapchain(self.swapchain, &self.config.desc(self.surface))?;
+        // The swapchain behind the handle is a new one, and a swapchain nothing
+        // has been presented to has no timing to report yet. Forgetting the old
+        // sample is what stops the engine claiming a panel it can no longer see
+        // — a window dragged to a second monitor arrives here — and makes the
+        // first observation after the rebuild a change again, so it is logged.
+        self.display_timing = None;
         Ok(())
     }
 

@@ -35,9 +35,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   every subtle mistake in this feature lives there. `crcbl-vk` implements it
   against `VK_EXT_present_timing` through hand-written FFI (`ash` has no
   bindings for it); `crcbl-wgpu`, `crcbl-mtl` and `crcbl-dx12` answer `Unknown`
-  and document what their platform would need to do better. **Nothing in
-  `crcbl::engine` consumes this yet** — `Pacing::Adaptive` is still a request
-  with no observation behind it.
+  and document what their platform would need to do better.
+
+  **The engine reads it, and a run's log now says what the display was doing.**
+  `GpuContextDesc::default()` asks for `Features::PRESENT_TIMING` beside
+  `PRESENT_FEEDBACK`, so the extension chain is negotiated on a device that has
+  it, and `GpuContext::submit_and_present` queries after every present — after,
+  because the platform may report nothing until an image has been presented. The
+  observation is logged at `info` **when it changes**, on a line beginning
+  `hal: display timing `, so a panel dropping to 48 Hz under power saving shows
+  up in the log of any game built on the engine and a steady one costs a single
+  line. A rebuilt swapchain — any resize, mode change or out-of-date present —
+  forgets the last observation, so the first reading after it is reported again
+  rather than a stale panel being claimed. A failed query degrades to `Unknown`
+  and a `debug` line; it never fails a frame that has already been presented.
+
+  **`Pacing` is unchanged.** `Pacing::Adaptive` is still a request that picks a
+  present mode, the default is still `Pacing::Vsync`, and nothing switches
+  pacing on the strength of a reported `DisplayTiming::Variable`.
 
 - **The demo site is served cross-origin isolated, and the browser gate asserts
   it.** `web/tools/serve.mjs` is a new static server that sends
