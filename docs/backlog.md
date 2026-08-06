@@ -4779,7 +4779,14 @@ command stream and the backend's, and both are cheap to settle:
   refuses RGBA8 — `layer_surface_caps` in `crates/crcbl-mtl/src/swapchain.rs`
   records that and offers BGRA first — which is a hint that Apple's paravirtual
   path may treat RGBA8 as a second-class render target. Re-running one draw test
-  against `Bgra8Unorm` settles it.
+  against `Bgra8Unorm` settles it. **The measurement is in flight**:
+  `a_triangle_draw_into_a_bgra_target_paints_the_same_image` is the held-out
+  triangle with the render-target format as the only difference, and it is not
+  in the `mtl-e2e` filter. Record the result here and delete this sentence.
+  Worth keeping in mind while reading it: `CAMetalLayer` refusing RGBA8 is a
+  presentation constraint and an offscreen `MTLTexture` never touches the layer,
+  so the inference is suggestive rather than structural — which is exactly why
+  it is being measured rather than assumed.
 - **The error-options command buffer.** Every command buffer in this backend is
   made by `crate::fault::command_buffer`, which uses
   `commandBufferWithDescriptor:` with

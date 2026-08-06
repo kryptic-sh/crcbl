@@ -2461,14 +2461,23 @@ mod tests {
     /// on a buffer Metal happened to hand back zeroed.
     const POISON: u8 = 0xA5;
 
-    /// A colour target of `extent`, with a whole-image view of it.
-    fn color_target_of(device: &MetalDevice, extent: Extent3d) -> (ImageHandle, ImageViewHandle) {
+    /// A colour target of `extent` in `format`, with a whole-image view of it.
+    ///
+    /// The image, the view and the view's subresource range all take the one
+    /// `format`: Metal permits a view to reinterpret a texture's format, and a
+    /// test that reinterpreted one here by accident would be asserting about a
+    /// pair of formats rather than the one it named.
+    fn color_target_of(
+        device: &MetalDevice,
+        extent: Extent3d,
+        format: Format,
+    ) -> (ImageHandle, ImageViewHandle) {
         let image = device
             .create_image(&ImageDesc {
                 label: Some("crcbl-mtl clear target"),
                 image_type: ImageType::D2,
                 extent,
-                format: Format::Rgba8Unorm,
+                format,
                 mip_levels: 1,
                 samples: 1,
                 usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
@@ -2480,8 +2489,8 @@ mod tests {
                 label: Some("crcbl-mtl clear view"),
                 image,
                 view_type: ImageViewType::D2,
-                format: Format::Rgba8Unorm,
-                range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+                format,
+                range: ImageSubresourceRange::all(format),
             })
             .expect("a whole-image view");
         (image, view)
@@ -2489,7 +2498,7 @@ mod tests {
 
     /// The [`TARGET`]-sized colour target every clear test uses.
     fn color_target(device: &MetalDevice) -> (ImageHandle, ImageViewHandle) {
-        color_target_of(device, TARGET)
+        color_target_of(device, TARGET, Format::Rgba8Unorm)
     }
 
     /// A host-readable buffer, poisoned so an absent copy cannot pass.
@@ -2864,18 +2873,26 @@ mod tests {
     /// `docs/plan/12-testing.md` calls a silently-skipped e2e job a known trap.
     ///
     /// **That gate used to say CI could never satisfy it, and that was wrong.**
-    /// This test once hung the GPU on `macos-latest` with both encoders
-    /// completing and neither faulting, which correctly ruled out the command
-    /// stream — and was then read as a property of Apple's paravirtual device.
-    /// It is a property of macos-14, the one hosted image that executes nothing
-    /// and whose `MTLCreateSystemDefaultDevice()` returns nil; macos-15 and
-    /// macos-26 run the same draw correctly, and `macos-latest` resolves to
-    /// macos-26. `docs/backlog.md` carries the per-image measurements.
+    /// A paravirtual device was long assumed to execute nothing at all, which
+    /// was generalised from macos-14 — the one hosted image whose
+    /// `MTLCreateSystemDefaultDevice()` returns nil. macos-15 and macos-26 both
+    /// run a standalone Swift compute dispatch and triangle draw correctly, and
+    /// `macos-latest` resolves to macos-26, so the script has a CI job now.
+    /// `docs/backlog.md` carries the per-image measurements.
     ///
-    /// So the script has a CI job now. What a person on a real Mac still adds
-    /// is an unvirtualised GPU: Metal has no lavapipe to cross-check against,
-    /// and a paravirtual device is one implementation with one set of
-    /// tolerances.
+    /// **This test still faults there**, with
+    /// `kIOGPUCommandBufferCallbackErrorHang`, every encoder reported
+    /// `completed` and none faulted — one of four draws that do, which
+    /// `.github/workflows/ci.yml` holds out by name so the rest of the suite
+    /// stays a gate. The probe's own draw succeeding on that same image is what
+    /// makes this a defect in this backend's command stream rather than a
+    /// property of the device, and
+    /// [`a_triangle_draw_into_a_bgra_target_paints_the_same_image`] is the
+    /// controlled experiment that narrows which part of it.
+    ///
+    /// What a person on a real Mac still adds is an unvirtualised GPU: Metal
+    /// has no lavapipe to cross-check against, and a paravirtual device is one
+    /// implementation with one set of tolerances.
     #[cfg(feature = "mtl-e2e")]
     #[test]
     #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
@@ -2911,11 +2928,113 @@ mod tests {
             })
             .expect("a colour-only pipeline over an Rgba8Unorm target");
 
-        let bytes = draw_canvas(&device, |encoder| {
+        let bytes = draw_canvas(&device, Format::Rgba8Unorm, |encoder| {
             encoder.bind_graphics_pipeline(pipeline);
             encoder.draw(0..3, 0..1);
         });
-        assert_ink_triangle(&bytes);
+        assert_ink_triangle(&bytes, Format::Rgba8Unorm);
+
+        device.destroy_graphics_pipeline(pipeline);
+        device.destroy_pipeline_layout(layout);
+        device.destroy_shader_module(module);
+    }
+
+    /// **The same triangle, into a [`Format::Bgra8Unorm`] target — a controlled
+    /// experiment, not a second draw test.**
+    ///
+    /// # What it is measuring
+    ///
+    /// [`a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`] faults
+    /// on the CI runner (`macos-latest`, an Apple Paravirtual device) with
+    /// `kIOGPUCommandBufferCallbackErrorHang`, every encoder reported
+    /// `completed` and none faulted — and it is one of four draws that do, which
+    /// `.github/workflows/ci.yml` holds out by name. A standalone Swift script
+    /// drawing a triangle into a `Bgra8Unorm` texture on that same image
+    /// produced a correct image. So the fault is in this backend's command
+    /// stream rather than in the device, and the two streams differ in more than
+    /// one way; `docs/backlog.md` lists the candidates.
+    ///
+    /// This test isolates one of them. **The render-target format is the only
+    /// difference between it and its twin above** — same MSL from [`ink_msl`],
+    /// same [`CANVAS`], same [`CLEAR`], same [`draw_canvas`] helper and so the
+    /// same command-buffer construction, same `drawPrimitives:`, same
+    /// assertions through [`assert_ink_triangle`] with the channel order the
+    /// format implies. Varying anything else as well would leave both
+    /// hypotheses standing.
+    ///
+    /// # What each outcome means
+    ///
+    /// * **Green here, red there.** The format is implicated: this backend's
+    ///   command stream is fine and Apple's paravirtual device does not survive
+    ///   an `Rgba8Unorm` render target — which
+    ///   [`layer_surface_caps`](crate::swapchain) already hints at, since
+    ///   `CAMetalLayer` refuses RGBA8 outright and offers BGRA first. The four
+    ///   quarantined tests then come back with a format change.
+    /// * **Red here too.** The format is ruled out, and the remaining candidate
+    ///   is the command buffer itself: every one in this backend comes from
+    ///   [`command_buffer`](crate::fault::command_buffer), which sets
+    ///   `MTLCommandBufferErrorOption::EncoderExecutionStatus`, and the Swift
+    ///   probe used a plain `makeCommandBuffer()`. That is the next thing to
+    ///   test.
+    ///
+    /// Nothing here has been measured yet — this test exists to produce the
+    /// measurement, and neither branch above is a prediction.
+    ///
+    /// **What turns it red for ordinary reasons**, as for its twin: a dropped
+    /// draw or a failed pipeline leaves the centre at [`CLEAR_TEXEL`], a
+    /// full-target rasterisation trips the corner assertions, and a channel
+    /// swizzle trips the byte comparison — which on this format is a stricter
+    /// check than on RGBA8, because the expected bytes are the reordered ones.
+    ///
+    /// **Needs a device that executes a shader**, like every other gated draw.
+    #[cfg(feature = "mtl-e2e")]
+    #[test]
+    #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
+    fn a_triangle_draw_into_a_bgra_target_paints_the_same_image() {
+        const FORMAT: Format = Format::Bgra8Unorm;
+
+        let (_instance, device) = open_device();
+        assert_ne!(
+            INK_TEXEL, CLEAR_TEXEL,
+            "the two colours must differ or no assertion below means anything"
+        );
+        assert_ne!(
+            texel_in(FORMAT, INK_TEXEL),
+            INK_TEXEL,
+            "a BGRA readback must expect different bytes from an RGBA one, or this test is not \
+             checking the channel order it claims to"
+        );
+
+        let ink = ink_msl();
+        let module = device
+            .create_shader_module(&msl_module(&ink, "crcbl-mtl ink.metal"))
+            .expect("a shader with no bindings compiles");
+        let layout = empty_layout(&device);
+        let targets = [ColorTargetState::opaque(FORMAT)];
+        let pipeline = device
+            .create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("crcbl-mtl bgra triangle"),
+                layout,
+                vertex: ShaderEntry {
+                    module,
+                    entry_point: "vertexMain",
+                },
+                fragment: Some(ShaderEntry {
+                    module,
+                    entry_point: "fragmentMain",
+                }),
+                primitive: PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                color_targets: &targets,
+            })
+            .expect("a colour-only pipeline over a Bgra8Unorm target");
+
+        let bytes = draw_canvas(&device, FORMAT, |encoder| {
+            encoder.bind_graphics_pipeline(pipeline);
+            encoder.draw(0..3, 0..1);
+        });
+        assert_ink_triangle(&bytes, FORMAT);
 
         device.destroy_graphics_pipeline(pipeline);
         device.destroy_pipeline_layout(layout);
@@ -4815,12 +4934,12 @@ using namespace metal;\n\
             })
             .expect("the engine's own triangle over an Rgba8Unorm target");
 
-        let bytes = draw_canvas(&device, |encoder| {
+        let bytes = draw_canvas(&device, Format::Rgba8Unorm, |encoder| {
             encoder.bind_graphics_pipeline(pipeline);
             encoder.bind_group(0, group, &[], layout);
             encoder.draw(0..3, 0..1);
         });
-        assert_ink_triangle(&bytes);
+        assert_ink_triangle(&bytes, Format::Rgba8Unorm);
 
         device.destroy_graphics_pipeline(pipeline);
         device.destroy_bind_group(group);
@@ -4898,12 +5017,12 @@ using namespace metal;\n\
             .write_buffer(index_buffer, 0, &bytes)
             .expect("HostUpload is writable");
 
-        let painted = draw_canvas(&device, |encoder| {
+        let painted = draw_canvas(&device, Format::Rgba8Unorm, |encoder| {
             encoder.bind_graphics_pipeline(pipeline);
             encoder.bind_index_buffer(index_buffer, 0, crcbl_hal::IndexFormat::Uint32);
             encoder.draw_indexed(3..6, 0, 0..1);
         });
-        assert_ink_triangle(&painted);
+        assert_ink_triangle(&painted, Format::Rgba8Unorm);
 
         device.destroy_buffer(index_buffer);
         device.destroy_graphics_pipeline(pipeline);
@@ -4979,7 +5098,7 @@ using namespace metal;\n\
             .write_buffer(args, 0, &bytes)
             .expect("HostUpload is writable");
 
-        let painted = draw_canvas(&device, |encoder| {
+        let painted = draw_canvas(&device, Format::Rgba8Unorm, |encoder| {
             encoder.bind_graphics_pipeline(pipeline);
             encoder.draw_indirect(&crcbl_hal::DrawIndirect {
                 args,
@@ -4988,7 +5107,7 @@ using namespace metal;\n\
                 stride: 16,
             });
         });
-        assert_ink_triangle(&painted);
+        assert_ink_triangle(&painted, Format::Rgba8Unorm);
 
         device.destroy_buffer(args);
         device.destroy_graphics_pipeline(pipeline);
@@ -4996,15 +5115,21 @@ using namespace metal;\n\
         device.destroy_shader_module(module);
     }
 
-    /// Records `paint` into a [`CANVAS`]-sized pass, copies the result back,
-    /// and hands over the texels.
+    /// Records `paint` into a [`CANVAS`]-sized pass over a `format` target,
+    /// copies the result back, and hands over the texels.
     ///
-    /// Shared by the three gated draw tests so the pass, the barrier, the copy
-    /// and the readback are written once and only the recording between
-    /// `begin_render_pass` and `end_render_pass` differs.
+    /// Shared by the gated draw tests so the pass, the barrier, the copy and
+    /// the readback are written once and only the recording between
+    /// `begin_render_pass` and `end_render_pass` — and the attachment's format
+    /// — differ. The readback is in `format`'s channel order, which is what
+    /// [`assert_ink_triangle`] takes the format for.
     #[cfg(feature = "mtl-e2e")]
-    fn draw_canvas(device: &MetalDevice, paint: impl FnOnce(&mut dyn CommandEncoder)) -> Vec<u8> {
-        let (image, view) = color_target_of(device, CANVAS);
+    fn draw_canvas(
+        device: &MetalDevice,
+        format: Format,
+        paint: impl FnOnce(&mut dyn CommandEncoder),
+    ) -> Vec<u8> {
+        let (image, view) = color_target_of(device, CANVAS, format);
         let readback = readback_buffer(device, CANVAS_BYTES as u64);
         let queue = device
             .queue(QueueKind::Graphics)
@@ -5032,7 +5157,7 @@ using namespace metal;\n\
         encoder.pipeline_barrier(&Barriers {
             images: &[ImageBarrier::new(
                 image,
-                ImageSubresourceRange::all(Format::Rgba8Unorm),
+                ImageSubresourceRange::all(format),
                 ResourceState::ColorAttachment,
                 ResourceState::TransferSrc,
             )],
@@ -5062,23 +5187,51 @@ using namespace metal;\n\
         bytes
     }
 
-    /// The assertions every gated draw makes about a [`CANVAS`] readback: the
-    /// centre is the triangle's colour, all four corners are the clear's, and
-    /// nothing else is anywhere.
+    /// An RGBA-ordered texel as a `format` attachment stores it.
+    ///
+    /// [`CLEAR_TEXEL`] and [`INK_TEXEL`] are written in R, G, B, A order
+    /// because that is the order [`Format::Rgba8Unorm`] lays them out in
+    /// memory; a [`Format::Bgra8Unorm`] readback of the same colour comes back
+    /// B, G, R, A. Reordering here rather than relaxing the comparison is what
+    /// keeps the assertion able to catch a channel swizzle: both texels are
+    /// asymmetric in every channel, so the expected bytes for one format are
+    /// wrong for the other.
+    ///
+    /// Panics on any other format rather than passing one through, because a
+    /// silent identity for a format whose layout is neither of these two would
+    /// be an assertion that no longer knows what it is comparing.
     #[cfg(feature = "mtl-e2e")]
-    fn assert_ink_triangle(bytes: &[u8]) {
+    fn texel_in(format: Format, rgba: [u8; 4]) -> [u8; 4] {
+        match format {
+            Format::Rgba8Unorm => rgba,
+            Format::Bgra8Unorm => [rgba[2], rgba[1], rgba[0], rgba[3]],
+            other => panic!("{other:?} has no RGBA byte reordering defined here"),
+        }
+    }
+
+    /// The assertions every gated draw makes about a [`CANVAS`] readback in
+    /// `format`: the centre is the triangle's colour, all four corners are the
+    /// clear's, and nothing else is anywhere.
+    ///
+    /// Taking the format means the comparison is against the exact bytes that
+    /// attachment must hold, so it proves the channel *order* as well as the
+    /// coverage — see [`texel_in`].
+    #[cfg(feature = "mtl-e2e")]
+    fn assert_ink_triangle(bytes: &[u8], format: Format) {
         assert_eq!(bytes.len(), CANVAS_BYTES, "the readback is the wrong size");
+        let ink = texel_in(format, INK_TEXEL);
+        let clear = texel_in(format, CLEAR_TEXEL);
         let (centre_x, centre_y) = (CANVAS.width / 2, CANVAS.height / 2);
         assert_eq!(
             texel_at(bytes, centre_x, centre_y),
-            INK_TEXEL,
+            ink,
             "the centre of the image is not the triangle's colour, so nothing was drawn"
         );
         let last = (CANVAS.width - 1, CANVAS.height - 1);
         for (x, y) in [(0, 0), (last.0, 0), (0, last.1), (last.0, last.1)] {
             assert_eq!(
                 texel_at(bytes, x, y),
-                CLEAR_TEXEL,
+                clear,
                 "corner ({x}, {y}) is not the clear colour, so the draw covered the whole target \
                  rather than a triangle"
             );
@@ -5089,7 +5242,7 @@ using namespace metal;\n\
         // stray content the point checks would step over.
         for (index, texel) in bytes.chunks_exact(4).enumerate() {
             assert!(
-                texel == INK_TEXEL || texel == CLEAR_TEXEL,
+                texel == ink || texel == clear,
                 "texel {index} is {texel:02X?}, which is neither the triangle nor the clear colour"
             );
         }

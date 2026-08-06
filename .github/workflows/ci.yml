@@ -892,6 +892,14 @@ jobs:
       # (render-target format, and the error-options command-buffer
       # descriptor). They come back the moment that is understood.
       #
+      # **This job is what settles the first candidate.**
+      # `a_triangle_draw_into_a_bgra_target_paints_the_same_image` is the held-out
+      # triangle with `Format::Bgra8Unorm` in place of `Format::Rgba8Unorm` and
+      # nothing else changed, and it is deliberately *not* in the filter below.
+      # Green while its twin is red implicates the RGBA8 render target on this
+      # device; red as well rules the format out and leaves the command-buffer
+      # descriptor as the next thing to test.
+      #
       # The fifth exclusion is older and unrelated:
       # `a_layer_swapchain_acquires_a_drawable_and_presents_it` is `#[ignore]`d
       # because a detached `CAMetalLayer` in a headless container vends no
