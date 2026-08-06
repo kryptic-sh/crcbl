@@ -1311,6 +1311,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   read `borderless on monitor 2`. `None` still means the backend cannot say —
   the surface is on no output or on two.
 
+- **asteroids**: the ship draws a flame under its nozzle while thrusting. The
+  sheet gains a second frame (`assets/ship.crpix`), `RenderState` carries the
+  thrust intent from the tick, and `art::Scene::build` picks the frame — the
+  ship is no longer one picture whether or not the engine is on.
+
 ### Fixed
 
 - **`crcbl-shaders`**: `build.rs`'s byte-for-byte recompile check invoked

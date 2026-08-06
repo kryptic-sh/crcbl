@@ -124,6 +124,28 @@ struct StillArt {
     uv: [f32; 4],
 }
 
+/// The ship's two frames, resolved to the UV rectangles they will ever use.
+///
+/// `hull` is the ship under no power; `flame` is the same hull with a plume
+/// below the nozzle, drawn while the game reports thrust. [`Scene::build`]
+/// picks between them, so the ship is not "one frame whatever it is doing".
+#[derive(Clone, Copy, Debug)]
+struct ShipArt {
+    sheet: SheetId,
+    hull: [f32; 4],
+    flame: [f32; 4],
+}
+
+/// Resolve the ship's two frames by index, matching `assets/ship.crpix`'s
+/// declared order — `hull` first, `flame` second.
+fn ship_art(sheet: SheetId, description: &Sheet) -> ShipArt {
+    ShipArt {
+        sheet,
+        hull: description.uv(0).expect("the ship sheet has a hull frame"),
+        flame: description.uv(1).expect("the ship sheet has a flame frame"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The scene
 // ---------------------------------------------------------------------------
@@ -140,7 +162,7 @@ pub struct Scene {
     /// frames of one: the sizes are 34, 20 and 11 texels square, and a `.crpix`
     /// has one frame size for the whole file.
     rocks: [StillArt; 3],
-    ship: StillArt,
+    ship: ShipArt,
     bullet: StillArt,
     /// The rocks, behind the game.
     field: Layer,
@@ -190,7 +212,7 @@ impl Scene {
                 still(medium_sheet, &medium.sheet),
                 still(small_sheet, &small.sheet),
             ],
-            ship: still(ship_sheet, &ship.sheet),
+            ship: ship_art(ship_sheet, &ship.sheet),
             bullet: still(bullet_sheet, &bullet.sheet),
             field,
             play,
@@ -264,7 +286,11 @@ impl Scene {
                     // ship's heading.
                     rotation: lerp_angle(render.ship_heading_prev, render.ship_heading, alpha)
                         as f32,
-                    uv: self.ship.uv,
+                    uv: if render.thrusting {
+                        self.ship.flame
+                    } else {
+                        self.ship.hull
+                    },
                     tint: UNTINTED,
                 },
             );
@@ -503,9 +529,13 @@ mod tests {
         }
 
         let ship = baked("ship", SHIP_PNG, SHIP_JSON);
-        assert_eq!((ship.image.width, ship.image.height), (16, 16));
+        // Two frames laid out as a horizontal strip: 32 x 16, both 16 x 16.
+        assert_eq!((ship.image.width, ship.image.height), (32, 16));
+        assert_eq!(ship.sheet.frames.len(), 2, "the ship sheet has two frames");
+        let hull = ship.sheet.uv(0).expect("the ship sheet has a hull frame");
+        let hull_texels = f64::from(ship.image.width) * f64::from(hull[2] - hull[0]);
         assert_eq!(
-            f64::from(ship.image.width) / scale,
+            hull_texels / scale,
             2.0 * SHIP_HALF_EXTENT,
             "the hull's frame and the rectangle it is drawn at disagree",
         );
@@ -515,6 +545,15 @@ mod tests {
                 "the hull must be drawn larger than the sphere that kills it",
             );
         }
+        // The flame frame is not a copy of the hull: the baked strip's two
+        // halves differ. A sheet where they matched would pass every structural
+        // check and defeat the field's whole point.
+        let frame_bytes = 16 * 16 * 4;
+        let (hull_pixels, flame_pixels) = ship.image.pixels.split_at(frame_bytes);
+        assert_ne!(
+            hull_pixels, flame_pixels,
+            "the flame frame is a copy of the hull"
+        );
 
         let bullet = baked("bullet", BULLET_PNG, BULLET_JSON);
         assert_eq!((bullet.image.width, bullet.image.height), (4, 4));
@@ -760,6 +799,36 @@ mod tests {
             let play = scene.stack.sprites(scene.play).to_vec();
             assert_eq!(play.len(), 1, "the wreck is still being drawn");
             assert_eq!(play[0].sheet, scene.bullet.sheet);
+        });
+    }
+
+    /// **The ship draws its flame frame while thrusting and the plain hull
+    /// otherwise**, and the two frames are different pictures — a sheet where
+    /// the flame frame was a copy of the hull would pass every structure check
+    /// and defeat the whole point of the field.
+    #[test]
+    fn the_ship_draws_its_flame_frame_only_while_thrusting() {
+        with_scene(|scene| {
+            let render = |thrusting| RenderState {
+                ship_alive: true,
+                thrusting,
+                ..RenderState::default()
+            };
+
+            let hull = scene.build(&render(false), 0.0).to_vec();
+            assert_eq!(
+                hull.last().expect("the ship is on the play layer").uv,
+                scene.ship.hull,
+                "a coasting ship drew the flame frame",
+            );
+
+            let flame = scene.build(&render(true), 0.0).to_vec();
+            assert_eq!(
+                flame.last().expect("the ship is on the play layer").uv,
+                scene.ship.flame,
+                "a thrusting ship drew the hull frame",
+            );
+            assert_ne!(scene.ship.hull, scene.ship.flame);
         });
     }
 

@@ -3467,17 +3467,6 @@ annotated.
 S2 is done — simulation, art, audio, persistence and the browser demo. What is
 not:
 
-- **No thrust flame still, and the audio slice was where it was going to land.**
-  The previous entry here said "do it with the audio slice, where the thrust cue
-  lands anyway", and the audio slice did not: `RenderState` still carries no
-  thrust intent, so the ship draws one frame whatever it is doing and a player
-  hears the engine without seeing it. It is two rows of `assets/ship.crpix`, a
-  `bool` on `RenderState` set from `Intent::thrust`, and a frame index in
-  `art::Scene::build`. The `bool` now exists on the simulation side —
-  `GameLogic::thrusting`, mirrored onto `Game::thrusting` — so what is left is
-  carrying it onto `RenderState` and picking the frame. The cue timer that used
-  to be suggested as the flame's clock is gone; a flame that flickers wants its
-  own, and the frame's alpha is the honest source.
 - **No golden buffer for the cues.** The three sounds are synthesised
   deterministically — `audio::noise` runs splitmix64 from a fixed seed — so a
   golden buffer is _possible_, and there is not one. What the tests assert is

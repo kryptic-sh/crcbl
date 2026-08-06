@@ -1484,6 +1484,13 @@ pub struct RenderState {
     /// The ship's heading at the end of the previous tick.
     pub ship_heading_prev: f64,
     pub ship_alive: bool,
+    /// Whether the ship was under power on the tick just run.
+    ///
+    /// The renderer's half of `game::Game::thrusting`: picks the ship's flame
+    /// frame in `art::Scene::build`. Kept off `RenderState` for as long as it
+    /// was because the flame frame did not exist; the audio cue was already
+    /// driven by the same bool on the game side.
+    pub thrusting: bool,
     pub rocks: Vec<RockView>,
     pub bullets: Vec<BulletView>,
     pub score: u32,
@@ -1858,6 +1865,7 @@ impl Game {
         out.ship_heading = logic.heading;
         out.ship_heading_prev = logic.prev_heading;
         out.ship_alive = logic.ship_alive;
+        out.thrusting = self.thrusting;
         out.rocks.clear();
         out.rocks.extend_from_slice(&logic.rock_views);
         out.bullets.clear();
