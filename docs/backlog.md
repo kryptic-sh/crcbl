@@ -28,6 +28,17 @@ Nobody has read either changelog. The reason this is in the backlog rather than
 only in GitHub is that "CI is green" is the tempting and wrong way to merge
 both.
 
+## The `shaders` job still calls itself "committed SPIR-V" while checking four targets
+
+The job's name (`ci.yml`, the `shaders` job) and its last step ("Check the
+committed SPIR-V against its sources") both describe one artifact, but
+`tools/compile-shaders.sh --check` is the anti-rot gate for **four** — SPIR-V,
+WGSL, MSL and DXIL. The rename is a two-word change. The other half of what the
+2026-08-05 slice noted is already recorded in the workflow itself: the pinned
+`dxc` archive is ~492 MiB and dominates the job's wall clock
+(`timeout-minutes: 20` and the install step both say so), so that part is not
+repeated here.
+
 ## Owed
 
 The S1B findings in `docs/plan/ROADMAP.md` were the substantive list — six
@@ -5143,6 +5154,16 @@ So this needs `ComputePipelineDesc` to carry the workgroup size, or `dispatch`
 to take threads-per-group — **a HAL change, with Vulkan to re-verify**. The
 constant `DISPATCH_SLICE` in `command.rs` says so at every refusal site.
 
+### Needs the user: `block2` is now a direct dependency of `crcbl-mtl`
+
+The present-feedback slice made it one: `objc2-metal` types the
+`addPresentedHandler:` parameter as a `block2::DynBlock` and re-exports nothing,
+so the callback the seam needs cannot be written without naming the type. The
+case is argued next to the edge in `crates/crcbl-mtl/Cargo.toml`. It adds no
+package to the graph — `block2` was already in `Cargo.lock` as an `objc2`
+sibling — but a direct dependency is a decision, so it is flagged here for
+ratification rather than kept silently.
+
 ### `DESCRIPTOR_INDEXING` was withdrawn, deliberately
 
 MTL1 reported it from `argumentBuffersSupport == Tier2`, which is a true
@@ -5184,13 +5205,6 @@ this slice, and the other four Tier A features were already on.
   holding whatever the previous bind put there.** Not checked, because
   `update_bind_group` makes create-then-fill a legal pattern. Vulkan leaves the
   same hazard to its validation layer.
-- **Four `mtl-e2e` tests exist and none has ever run — a job that runs them now
-  exists, and has not reported.** The 2026-08-05 probe showed the runner
-  `macos-latest` points at does execute shaders, and the `mtl-e2e` workflow job
-  drives `run-mtl-e2e.sh` there. Until that job has a first result, nothing has
-  yet caught a regression in bind groups, indexed draws or multi-draw-indirect —
-  and a first run that goes red is a finding about the backend, not about the
-  job.
 
 ## WARP clears the bindless bar — measured, 2026-08-05
 
@@ -5255,6 +5269,13 @@ Deferred inside DX4, each with what it would take:
   feature; what is missing is knowing which root parameter slot the committed
   DXIL expects one at, which is the same gap `crcbl-mtl` names for
   `setVertexBytes:`.
+- **Register-space mapping is verified for set 0 only.** Every committed shader
+  declares `[[vk::binding(N, 0)]]` — none uses a set-1 binding — so
+  `SetPlacement`'s multi-set path in `crcbl_dx12::pipeline` is untested against
+  real DXIL. Slang is confirmed to emit `register(t0)` for
+  `[[vk::binding(0, 0)]]`; what a set-1 binding maps to (`space1` is the
+  expectation) has never been checked. A shader with a set-1 binding, or a
+  direct `dxc` run, would settle it before a second set is trusted.
 - **The shader-visible descriptor heaps do not grow.** `crcbl_dx12::binding`
   allocates one heap per type at a fixed capacity and answers
   `HalError::OutOfDeviceMemory` past it, because a bind group's GPU handle is an
@@ -5501,17 +5522,6 @@ Surfaces, a flip-model swapchain, acquire/present/reconfigure, and
 `Device::wait_until_presented`. `crcbl_dx12::present` holds everything that is
 arithmetic (host-testable, and its tests run on any `cargo test`);
 `crcbl_dx12::swapchain` holds everything that needs DXGI.
-
-- **Nothing in the DXGI half has executed anywhere.** The development box is
-  Linux and `windows-latest` is the first machine to run a line of it — the same
-  position every earlier DX slice started from, with one difference: this one
-  needs a **window**. `crcbl_dx12::swapchain`'s tests create a real `HWND` with
-  `CreateWindowExW` on the predefined `STATIC` class, which is a thing the
-  runner can do (`crcbl-shell`'s win32 e2e job does it on the same image) but
-  which nothing in this crate had needed before. If that turns out not to work
-  in the `build + test (windows-latest)` job's session, the finding is about the
-  session and the fix is to move those tests into a job of their own like
-  `win32-e2e`, not to delete them.
 
 - **Whether the pacing wait genuinely blocks is measured, not asserted.**
   `a_windowed_swapchain_presents_paces_and_resizes_on_a_real_hwnd` prints
