@@ -2313,6 +2313,38 @@ mod tests {
         );
     }
 
+    /// The shipped first wave, pinned to literal positions and velocities. A
+    /// change to `wave_rock_position`'s or `wave_rock_velocity`'s arithmetic —
+    /// or to the hash under them — redraws every board and every replay the
+    /// project ships, and the determinism suites compare one run against
+    /// another, so they would all move together. These literals are the anchor
+    /// that does not.
+    #[test]
+    fn the_shipped_first_wave_is_pinned_to_literal_values() {
+        let positions = [
+            DVec3::new(3.669167470067322, -12.0, 0.0),
+            DVec3::new(16.0, 7.514915638166904, 0.0),
+            DVec3::new(16.0, -3.819280049496051, 0.0),
+        ];
+        let velocities = [
+            DVec3::new(-1.966823772697785, 0.9856998768138566, 0.0),
+            DVec3::new(2.109494435445692, -0.624526402022895, 0.0),
+            DVec3::new(1.7103816638749278, 1.3836887525308696, 0.0),
+        ];
+        for (rock, (position, velocity)) in positions.iter().zip(&velocities).enumerate() {
+            assert_eq!(
+                wave_rock_position(DEFAULT_SEED, 0, rock as u32),
+                *position,
+                "rock {rock}"
+            );
+            assert_eq!(
+                wave_rock_velocity(DEFAULT_SEED, 0, rock as u32),
+                *velocity,
+                "rock {rock}"
+            );
+        }
+    }
+
     /// Waves grow, and then stop growing.
     #[test]
     fn waves_grow_to_a_ceiling_and_no_further() {

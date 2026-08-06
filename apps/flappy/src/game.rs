@@ -1725,6 +1725,28 @@ mod tests {
         );
     }
 
+    /// The shipped course, pinned to literal positions. A change to
+    /// `gap_centre`'s arithmetic — or to the hash under it — redraws every
+    /// course and every replay the project ships, and the determinism suites
+    /// compare one run against another, so they would all move together. These
+    /// literals are the anchor that does not.
+    #[test]
+    fn the_shipped_course_is_pinned_to_literal_positions() {
+        let centres = [
+            2.0177573532261244,
+            1.8261138393612706,
+            -2.1026246715483863,
+            -3.190160135569415,
+        ];
+        for (index, expected) in centres.iter().enumerate() {
+            assert_eq!(
+                gap_centre(DEFAULT_SEED, index as u32),
+                *expected,
+                "pipe {index}"
+            );
+        }
+    }
+
     /// A game has a course before anybody presses anything. A screen that fills
     /// in on the first flap reads as a bug.
     #[test]

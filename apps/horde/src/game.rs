@@ -4080,6 +4080,33 @@ mod tests {
         }
     }
 
+    /// The shipped spawn table, pinned to literal offsets and kinds. A change
+    /// to `spawn_offset`'s or `spawn_kind`'s arithmetic — or to the hash under
+    /// them — relocates every enemy of every run the project ships, and the
+    /// determinism suites compare one run against another, so they would all
+    /// move together. These literals are the anchor that does not.
+    #[test]
+    fn the_shipped_spawn_table_is_pinned_to_literal_values() {
+        let offsets = [
+            DVec3::new(20.39094247691221, 12.657387759852242, 0.0),
+            DVec3::new(22.09133346865561, 9.379391535523855, 0.0),
+            DVec3::new(-7.73781539968375, -22.71841131858513, 0.0),
+        ];
+        let kinds = [EnemyKind::Brute, EnemyKind::Grunt, EnemyKind::Runner];
+        for (counter, (offset, kind)) in offsets.iter().zip(&kinds).enumerate() {
+            assert_eq!(
+                spawn_offset(DEFAULT_SEED, counter as u64),
+                *offset,
+                "spawn {counter}"
+            );
+            assert_eq!(
+                spawn_kind(DEFAULT_SEED, counter as u64),
+                *kind,
+                "spawn {counter}"
+            );
+        }
+    }
+
     // ---- the player and the arena's rules -------------------------------------
 
     /// The player moves at the stated speed, and a diagonal is not faster than a
