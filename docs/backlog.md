@@ -3,30 +3,42 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## Five dependabot PRs are open and untriaged, and two of them are not routine
+## Five dependabot PRs were open and untriaged; two are now merged, three are blocked on a token scope
 
 Checked 2026-08-06. `#5` (`actions/deploy-pages` 4→5), `#3`
 (`actions/setup-node` 6→7) and `#2` (`actions/configure-pages` 5→6) are action
 bumps and mechanical — CI either goes green or it does not, and that is the
-whole review.
+whole review. **They are still open, and cannot be merged with the current `gh`
+token: it lacks the `workflow` scope, which GitHub requires for any merge that
+writes a `.github/workflows/` file.** `setup-node` lives in the `build` job, so
+its bump was executed by the PR's green run; `configure-pages` and
+`deploy-pages` live in the `deploy` job (main pushes only), so their first
+exercise is the next deploy after merge. Both are minor bumps of official
+actions; merging them needs `gh auth refresh -s workflow` (or the user's own
+token).
 
-The other two are semver-major **crate** bumps and want a real read of their
-changelogs before merging, because a green CI on this workspace is weaker
-evidence than it looks:
+The two semver-major **crate** bumps were reviewed properly and merged on
+2026-08-06:
 
-- **`#7` `pollster` 0.4.0 → 1.0.1.** `pollster` blocks a thread on a future, and
-  it sits under the synchronous device-open path. A 1.0 release is where an
-  executor changes its parking or panic behaviour, and the failure mode is a
-  hang rather than a compile error — which no test in this repo is shaped to
-  catch, since nothing asserts a bounded wall-clock on device open.
-- **`#6` `toml` 0.8.23 → 1.1.4+spec-1.1.0.** The version string names a **spec**
-  change, not just an API one, so the question is whether any TOML this
-  workspace parses or emits is affected by TOML 1.1 semantics — not whether it
-  still compiles.
-
-Nobody has read either changelog. The reason this is in the backlog rather than
-only in GitHub is that "CI is green" is the tempting and wrong way to merge
-both.
+- **`#7` `pollster` 0.4.0 → 1.0.1 — merged.** The changelog's only 1.0 change is
+  `FutureExt` moving to `IntoFuture` (a superset); `block_on` — the only thing
+  this workspace calls, in `crcbl-wgpu`'s device-open path — is untouched, and
+  there is no parking or panic change. The backlog's "hang rather than compile
+  error" worry does not apply to 1.0.
+- **`#6` `toml` 0.8.23 → 1.1.4+spec-1.1.0 — merged, after reading the changelog
+  and probing the one consumer.** `crcbl-store`'s settings stack is the only
+  user, and it never parses a `Value` from a string (so 0.9.0's
+  `FromStr for Value` change is unreachable) and never touches datetimes (so
+  1.0.0's `Time::second`/`nanosecond` → `Option` is unreachable). The 1.1
+  grammar additions (`\e`, `\xHH`, trailing commas, multi-line inline tables)
+  only loosen parsing, and no authored settings file uses them. **The one
+  observable delta, measured by round-trip probe against 0.8.23 on the same
+  file: emitted settings files are reformatted** — the 1.x writer canonicalises
+  section order and expands arrays to one element per line, where 0.8 emitted
+  document order with compact arrays. Values and semantics are byte-identical
+  after the reformat, nothing in the workspace asserts on the bytes, and the
+  `preserve_order` feature was tried and does not restore the 0.8 output either
+  (it fixes within-table key order and leaves the rest). Accepted as cosmetic.
 
 ## The `shaders` job still calls itself "committed SPIR-V" while checking four targets
 
