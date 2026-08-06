@@ -11,15 +11,16 @@
 //!                                                     SpriteRenderer::begin_frame
 //! ```
 //!
-//! # Sprite space is world space times [`TEXELS_PER_UNIT`]
+//! # The sprite plane is world units, and the art scale lives on the source
 //!
-//! **Every rectangle in this module is in texels, not in world units**, and the
-//! camera the sprite pass is given is scaled to match. Flappy reached the same
-//! convention and `apps/flappy/src/art.rs` explains it; the reason is not
-//! flappy's and it is not a house style, it is what
-//! [`NineSliceSource::expand`] does: a nine-slice's fixed bands are its insets
-//! *taken as one target unit per texel*, so `assets/field.crpix`'s 10-texel wall
-//! would come out ten world units thick against a court that is only 28 across.
+//! **Every rectangle in this module is in world units**, and the camera the
+//! sprite pass is given matches. That is possible because
+//! [`NineSliceSource`] carries its own texels-per-unit scale:
+//! [`with_texels_per_unit`](NineSliceSource::with_texels_per_unit) divides the
+//! fixed bands of an expansion by the scale, so `assets/field.crpix`'s 10-texel
+//! wall comes out one world unit thick against a court 28 across instead of
+//! ten. Flappy reached the same convention and `apps/flappy/src/art.rs`
+//! explains it; the two scales are each sample's own, not a house style.
 //!
 //! **The number is breakout's own, and was not copied.** Flappy's 20 is derived
 //! from a pipe 1.6 world units wide drawn from 32 texels of art. Here the
@@ -60,7 +61,13 @@ include!(concat!(env!("OUT_DIR"), "/art_data.rs"));
 // The scale, the clock, and the colours
 // ---------------------------------------------------------------------------
 
-/// Texels of art per world unit — see the module docs for why this exists.
+/// Texels of art per world unit — the art's authoring scale.
+///
+/// The court's nine-slice source is built with
+/// [`with_texels_per_unit`](NineSliceSource::with_texels_per_unit) at this
+/// scale, so its walls come out in world units, and the texel sizes of the
+/// sheets below are converted to world units by it. It does **not** scale the
+/// sprite plane or the camera — the plane is world units now.
 ///
 /// **10 is chosen by the ball.** `2 * BALL_RADIUS` is 0.6 world units, the
 /// smallest collider on the field, and a ball has to be at least six texels
@@ -182,7 +189,8 @@ impl Scene {
             field: FieldArt {
                 sheet: field_sheet,
                 source: NineSliceSource::from_sheet(&field.sheet, 0)
-                    .expect("field.crpix declares a nine-slice over its one frame"),
+                    .expect("field.crpix declares a nine-slice over its one frame")
+                    .with_texels_per_unit(TEXELS_PER_UNIT),
             },
             field_layer,
             bricks: BrickArt {
@@ -202,9 +210,9 @@ impl Scene {
 
     /// This frame's sprites, back to front.
     ///
-    /// Everything is in **sprite units** — world units times
-    /// [`TEXELS_PER_UNIT`] — and the same frame's view-projection must have been
-    /// built at the same scale. [`crate::gpu`] applies it in one place.
+    /// Everything is in **world units**, and the same frame's view-projection
+    /// must have been built at the same scale. [`crate::gpu`] builds it in
+    /// world units too.
     pub fn build(&mut self, paddle_x: f64, ball: DVec3, bricks: &[DVec3]) -> &[Sprite] {
         self.stack.clear();
 
@@ -259,24 +267,23 @@ impl Scene {
 // Pure geometry — no device, no sheet ids
 // ---------------------------------------------------------------------------
 
-/// The rectangle the court is expanded into, in sprite units.
+/// The rectangle the court is expanded into, in world units.
 ///
 /// The **walls' outer faces**, derived from where `game.rs` puts them: each side
 /// wall is [`WALL_THICKNESS`] thick and sits outside [`WORLD_LEFT`] /
 /// [`WORLD_RIGHT`], the top wall the same above [`WORLD_TOP`], and the side
-/// walls run down to `-WORLD_TOP`. The nine-slice's insets are that same
-/// thickness, so the *inner* faces of the drawn walls land exactly on the lines
-/// the ball bounces off — which is what
+/// walls run down to `-WORLD_TOP`. The nine-slice's insets divided by its
+/// texels-per-unit scale are that same thickness, so the *inner* faces of the
+/// drawn walls land exactly on the lines the ball bounces off — which is what
 /// [`tests::the_court_is_drawn_where_the_walls_actually_are`] measures.
 ///
 /// There is no bottom wall and the art has no bottom inset, so the court is open
 /// at `-WORLD_TOP` and the ball falls out of it into [`SURROUND`].
 fn field_target() -> [f32; 4] {
-    let scale = f64::from(TEXELS_PER_UNIT);
-    let left = (WORLD_LEFT - WALL_THICKNESS) * scale;
-    let bottom = -WORLD_TOP * scale;
-    let right = (WORLD_RIGHT + WALL_THICKNESS) * scale;
-    let top = (WORLD_TOP + WALL_THICKNESS) * scale;
+    let left = WORLD_LEFT - WALL_THICKNESS;
+    let bottom = -WORLD_TOP;
+    let right = WORLD_RIGHT + WALL_THICKNESS;
+    let top = WORLD_TOP + WALL_THICKNESS;
     [
         left as f32,
         bottom as f32,
@@ -285,18 +292,18 @@ fn field_target() -> [f32; 4] {
     ]
 }
 
-/// One brick's rectangle, in sprite units: the box collider `spawn_brick_grid`
+/// One brick's rectangle, in world units: the box collider `spawn_brick_grid`
 /// gives it, to the texel.
 fn brick_rect(centre: DVec3) -> [f32; 4] {
     rect(centre.x, centre.y, BRICK_WIDTH / 2.0, BRICK_HEIGHT / 2.0)
 }
 
-/// The paddle's rectangle, in sprite units, at the x the simulation reports.
+/// The paddle's rectangle, in world units, at the x the simulation reports.
 fn paddle_rect(x: f64) -> [f32; 4] {
     rect(x, PADDLE_Y, PADDLE_HALF_WIDTH, PADDLE_HALF_HEIGHT)
 }
 
-/// The ball's rectangle, in sprite units: its sphere collider's bounding square.
+/// The ball's rectangle, in world units: its sphere collider's bounding square.
 fn ball_rect(centre: DVec3) -> [f32; 4] {
     rect(centre.x, centre.y, BALL_RADIUS, BALL_RADIUS)
 }
@@ -304,12 +311,11 @@ fn ball_rect(centre: DVec3) -> [f32; 4] {
 /// A world-space centre and half-extents as a sprite rectangle: `[x, y, w, h]`,
 /// **minimum corner first**, which is what [`Sprite::rect`] takes.
 fn rect(cx: f64, cy: f64, half_w: f64, half_h: f64) -> [f32; 4] {
-    let scale = f64::from(TEXELS_PER_UNIT);
     [
-        ((cx - half_w) * scale) as f32,
-        ((cy - half_h) * scale) as f32,
-        (2.0 * half_w * scale) as f32,
-        (2.0 * half_h * scale) as f32,
+        (cx - half_w) as f32,
+        (cy - half_h) as f32,
+        (2.0 * half_w) as f32,
+        (2.0 * half_h) as f32,
     ]
 }
 
@@ -544,14 +550,16 @@ mod tests {
     /// **The court's walls keep their thickness however wide the court is.**
     ///
     /// The whole reason `field.crpix` is a nine-slice, and the assertion that
-    /// catches [`TEXELS_PER_UNIT`] being dropped: at one target unit per texel
-    /// the 10-texel inset would be ten *world* units of wall inside a court 28
-    /// across.
+    /// catches the source's texels-per-unit scale being dropped: without
+    /// `with_texels_per_unit(TEXELS_PER_UNIT)` the 10-texel inset would be ten
+    /// *world* units of wall inside a court 28 across.
     #[test]
     fn the_courts_walls_keep_their_thickness_when_it_is_stretched() {
         let field = baked("field", FIELD_PNG, FIELD_JSON);
-        let source =
-            NineSliceSource::from_sheet(&field.sheet, 0).expect("the sheet declares a nine-slice");
+        // Built the way [`Scene::new`] builds it, so the walls are world units.
+        let source = NineSliceSource::from_sheet(&field.sheet, 0)
+            .expect("the sheet declares a nine-slice")
+            .with_texels_per_unit(TEXELS_PER_UNIT);
 
         let target = field_target();
         let quads = source.expand(target);
@@ -560,9 +568,10 @@ mod tests {
         assert_eq!(quads.len(), 6, "{quads:?}");
 
         // The top-left corner is the fixed one, and it is a wall thick in both
-        // directions — in world units, after the scale is taken back off.
+        // directions — the 10-texel inset at `TEXELS_PER_UNIT` = 10 is one
+        // world unit, [`WALL_THICKNESS`].
         let corner = quads[0].rect;
-        let thickness = WALL_THICKNESS as f32 * TEXELS_PER_UNIT;
+        let thickness = WALL_THICKNESS as f32;
         assert_eq!(corner[2], thickness, "the left wall is not one unit thick");
         assert_eq!(corner[3], thickness, "the top wall is not one unit thick");
 
@@ -686,14 +695,13 @@ mod tests {
             scene.build(paddle_x, ball, &grid);
             let play = scene.stack.sprites(scene.play).to_vec();
 
-            let scale = f64::from(TEXELS_PER_UNIT);
             // `[x, y, w, h]` against a centre and half-extents, in world units.
             let covers = |rect: [f32; 4], cx: f64, cy: f64, hw: f64, hh: f64, what: &str| {
                 let expected = [
-                    ((cx - hw) * scale) as f32,
-                    ((cy - hh) * scale) as f32,
-                    (2.0 * hw * scale) as f32,
-                    (2.0 * hh * scale) as f32,
+                    (cx - hw) as f32,
+                    (cy - hh) as f32,
+                    (2.0 * hw) as f32,
+                    (2.0 * hh) as f32,
                 ];
                 for (axis, (got, want)) in rect.iter().zip(expected.iter()).enumerate() {
                     assert!(
@@ -752,20 +760,15 @@ mod tests {
     #[test]
     fn the_court_is_drawn_where_the_walls_actually_are() {
         let target = field_target();
-        let scale = TEXELS_PER_UNIT;
-        assert_eq!(target[0], (WORLD_LEFT - WALL_THICKNESS) as f32 * scale);
-        assert_eq!(target[1], -WORLD_TOP as f32 * scale);
-        assert_eq!(
-            target[0] + target[2],
-            (WORLD_RIGHT + WALL_THICKNESS) as f32 * scale
-        );
-        assert_eq!(
-            target[1] + target[3],
-            (WORLD_TOP + WALL_THICKNESS) as f32 * scale
-        );
+        assert_eq!(target[0], (WORLD_LEFT - WALL_THICKNESS) as f32);
+        assert_eq!(target[1], -WORLD_TOP as f32);
+        assert_eq!(target[0] + target[2], (WORLD_RIGHT + WALL_THICKNESS) as f32);
+        assert_eq!(target[1] + target[3], (WORLD_TOP + WALL_THICKNESS) as f32);
 
         let field = baked("field", FIELD_PNG, FIELD_JSON);
-        let source = NineSliceSource::from_sheet(&field.sheet, 0).expect("a nine-slice");
+        let source = NineSliceSource::from_sheet(&field.sheet, 0)
+            .expect("a nine-slice")
+            .with_texels_per_unit(TEXELS_PER_UNIT);
         let quads = source.expand(target);
 
         // In image order: top-left, top edge, top-right, then left edge, centre,
@@ -774,13 +777,9 @@ mod tests {
         let left_face = quads[0].rect[0] + quads[0].rect[2];
         let right_face = quads[2].rect[0];
         let top_face = quads[0].rect[1];
-        assert_eq!(left_face, WORLD_LEFT as f32 * scale, "the left wall's face");
-        assert_eq!(
-            right_face,
-            WORLD_RIGHT as f32 * scale,
-            "the right wall's face"
-        );
-        assert_eq!(top_face, WORLD_TOP as f32 * scale, "the ceiling's face");
+        assert_eq!(left_face, WORLD_LEFT as f32, "the left wall's face");
+        assert_eq!(right_face, WORLD_RIGHT as f32, "the right wall's face");
+        assert_eq!(top_face, WORLD_TOP as f32, "the ceiling's face");
 
         // The centre band reaches the bottom of the target: nothing is drawn
         // below it, because nothing is there to bounce off.

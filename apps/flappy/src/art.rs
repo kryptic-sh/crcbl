@@ -11,22 +11,19 @@
 //!                                                     SpriteRenderer::begin_frame
 //! ```
 //!
-//! # Sprite space is world space times [`TEXELS_PER_UNIT`]
+//! # The sprite plane is world units, and the art scale lives on the source
 //!
-//! **Every rectangle in this module is in texels, not in world units**, and the
-//! camera the sprite pass is given is scaled to match. That is not decoration;
-//! it is forced by what [`NineSliceSource::expand`] does. A nine-slice's fixed
-//! bands are its insets *taken as one target unit per texel* — a 6-texel cap
-//! comes out 6 units tall — so a pipe drawn in flappy's world units, where the
-//! whole playable band is 12 units, would have a cap taller than the sky. The
-//! choice is between an art scale and integer insets of 1, and an inset of 1
-//! texel is not a cap.
-//!
-//! So one constant scales the whole sprite plane. The pipe is then authored at
-//! exactly one texel per sprite unit, which is what keeps its cap square while
-//! its shaft stretches. [`crate::gpu`] multiplies the camera by the same
-//! constant in the same place it builds the projection, so there is one number
-//! and no second mapping to disagree with it.
+//! **Every rectangle in this module is in world units**, and the camera the
+//! sprite pass is given matches. That is possible because
+//! [`NineSliceSource`] carries its own texels-per-unit scale:
+//! [`with_texels_per_unit`](NineSliceSource::with_texels_per_unit) divides the
+//! fixed bands of an expansion by the scale, so the pipe's 6-texel caps come
+//! out `6 / 20` = 0.3 units tall in a world whose whole playable band is 12
+//! units. Before the scale existed, the pipe's caps would have been six units
+//! tall and the samples scaled their whole sprite plane — and with it the
+//! camera — by [`TEXELS_PER_UNIT`] to compensate. That constant is now just
+//! the art's authoring scale: it is set on the pipe's source below and used to
+//! convert texel sizes, and [`crate::gpu`] no longer multiplies.
 //!
 //! # Parallax is derived from the camera the frame actually uses
 //!
@@ -55,13 +52,19 @@ include!(concat!(env!("OUT_DIR"), "/art_data.rs"));
 // The scale, the clock, and the colours
 // ---------------------------------------------------------------------------
 
-/// Texels of art per world unit — see the module docs for why this exists.
+/// Texels of art per world unit — the art's authoring scale.
+///
+/// The pipe's nine-slice source is built with
+/// [`with_texels_per_unit`](NineSliceSource::with_texels_per_unit) at this
+/// scale, so its caps come out in world units, and the texel sizes of the
+/// sheets below are converted to world units by it. It does **not** scale the
+/// sprite plane or the camera — the plane is world units now.
 ///
 /// 20 is chosen by the pipe: the course makes them `2 * PIPE_HALF_WIDTH` = 1.6
 /// world units wide, and `assets/pipe.crpix` is 32 texels wide, so the art is
-/// drawn at exactly one texel per sprite unit and its cap cannot be squashed.
-/// The bird's 16×16 then lands on 0.8 world units against a collider 0.7
-/// across, which is the right way round.
+/// drawn at 20 texels to the world unit and the cap keeps its authored shape
+/// at 0.3 units whatever the pipe's length. The bird's 16×16 then lands on 0.8
+/// world units against a collider 0.7 across, which is the right way round.
 pub const TEXELS_PER_UNIT: f32 = 20.0;
 
 /// The sky, as the clear value for the swapchain.
@@ -89,7 +92,8 @@ const GROUND_PARALLAX: f32 = 0.85;
 /// for a silhouette with four features in it. Doubling the two background
 /// bands is the cheaper half of that trade and is invisible at the distance
 /// they sit; the **pipe** is deliberately not scaled, because a nine-slice's
-/// caps are measured in texels and a scaled one would stretch them.
+/// fixed bands come from its source's texels-per-unit scale and doubling the
+/// whole frame would double its caps.
 const BACKGROUND_SCALE: f32 = 2.0;
 
 /// How far the pipes run past the top and bottom of the playable band.
@@ -117,10 +121,11 @@ struct BandArt {
     sheet: SheetId,
     layer: Layer,
     uv: [f32; 4],
-    /// The tile's size in sprite units — its texels times [`BACKGROUND_SCALE`].
+    /// The tile's size in world units — its texels times [`BACKGROUND_SCALE`],
+    /// divided by [`TEXELS_PER_UNIT`].
     width: f32,
     height: f32,
-    /// The world y of the band's bottom edge, in sprite units.
+    /// The world y of the band's bottom edge, in world units.
     bottom: f32,
 }
 
@@ -216,7 +221,8 @@ impl Scene {
             pipe: PipeArt {
                 sheet: pipe_sheet,
                 source: NineSliceSource::from_sheet(&pipe.sheet, 0)
-                    .expect("pipe.crpix declares a nine-slice over its one frame"),
+                    .expect("pipe.crpix declares a nine-slice over its one frame")
+                    .with_texels_per_unit(TEXELS_PER_UNIT),
             },
             bird: BirdArt {
                 sheet: bird_sheet,
@@ -290,9 +296,9 @@ impl Scene {
 
     /// This frame's sprites, back to front.
     ///
-    /// `camera` and `half_width` are **sprite units** — the camera's centre and
-    /// half-extent multiplied by [`TEXELS_PER_UNIT`] — and must be the ones the
-    /// same frame's view-projection was built from.
+    /// `camera` and `half_width` are **world units** — the camera's centre and
+    /// half-extent — and must be the ones the same frame's view-projection was
+    /// built from.
     pub fn build(
         &mut self,
         bird: DVec3,
@@ -336,12 +342,16 @@ impl Scene {
             .frame_index(self.description(), clip)
             .expect("a validated sheet always has a frame to show");
         let frame = &self.description().frames[index];
-        let (width, height) = (frame.rect.w as f32, frame.rect.h as f32);
+        // The frame's size is in texels; the sprite's is in world units.
+        let (width, height) = (
+            frame.rect.w as f32 / TEXELS_PER_UNIT,
+            frame.rect.h as f32 / TEXELS_PER_UNIT,
+        );
         Sprite {
             sheet: self.bird.sheet,
             rect: [
-                bird.x as f32 * TEXELS_PER_UNIT - width / 2.0,
-                bird.y as f32 * TEXELS_PER_UNIT - height / 2.0,
+                bird.x as f32 - width / 2.0,
+                bird.y as f32 - height / 2.0,
                 width,
                 height,
             ],
@@ -363,19 +373,18 @@ impl Scene {
 // Pure geometry — no device, no sheet ids
 // ---------------------------------------------------------------------------
 
-/// The two rectangles a pipe fills, in sprite units: the upper one hanging from
+/// The two rectangles a pipe fills, in world units: the upper one hanging from
 /// above the ceiling, the lower one standing from below the floor.
 ///
 /// Both are `[x, y, w, h]` with the **minimum** corner first, which is what
 /// [`NineSliceSource::expand`] and [`Sprite::rect`] take.
 fn pipe_targets(pipe: &PipeView) -> [[f32; 4]; 2] {
-    let scale = f64::from(TEXELS_PER_UNIT);
-    let x = ((pipe.x - PIPE_HALF_WIDTH) * scale) as f32;
-    let width = (2.0 * PIPE_HALF_WIDTH * scale) as f32;
-    let top = ((WORLD_CEILING + PIPE_OVERHANG) * scale) as f32;
-    let bottom = ((WORLD_FLOOR - PIPE_OVERHANG) * scale) as f32;
-    let gap_top = ((pipe.gap_centre + GAP_HALF_HEIGHT) * scale) as f32;
-    let gap_bottom = ((pipe.gap_centre - GAP_HALF_HEIGHT) * scale) as f32;
+    let x = (pipe.x - PIPE_HALF_WIDTH) as f32;
+    let width = (2.0 * PIPE_HALF_WIDTH) as f32;
+    let top = (WORLD_CEILING + PIPE_OVERHANG) as f32;
+    let bottom = (WORLD_FLOOR - PIPE_OVERHANG) as f32;
+    let gap_top = (pipe.gap_centre + GAP_HALF_HEIGHT) as f32;
+    let gap_bottom = (pipe.gap_centre - GAP_HALF_HEIGHT) as f32;
     [
         [x, gap_top, width, top - gap_top],
         [x, bottom, width, gap_bottom - bottom],
@@ -430,16 +439,18 @@ fn register(
     )
 }
 
-/// A background band from a single-frame sheet, standing with its bottom edge
-/// at `bottom` sprite units.
+/// A background band from a single-frame sheet. `bottom` is the band's hang
+/// below the floor, in texels — derived from the sheet's own height by the
+/// caller — and the band's bottom edge lands at
+/// `WORLD_FLOOR + bottom / TEXELS_PER_UNIT` world units.
 fn band(sheet: SheetId, layer: Layer, description: &Sheet, bottom: f32) -> BandArt {
     BandArt {
         sheet,
         layer,
         uv: description.uv(0).expect("a background sheet has one frame"),
-        width: description.width as f32 * BACKGROUND_SCALE,
-        height: description.height as f32 * BACKGROUND_SCALE,
-        bottom: (WORLD_FLOOR as f32).mul_add(TEXELS_PER_UNIT, bottom),
+        width: description.width as f32 * BACKGROUND_SCALE / TEXELS_PER_UNIT,
+        height: description.height as f32 * BACKGROUND_SCALE / TEXELS_PER_UNIT,
+        bottom: WORLD_FLOOR as f32 + bottom / TEXELS_PER_UNIT,
     }
 }
 
@@ -493,11 +504,11 @@ mod tests {
             .collect()
     }
 
-    /// The camera the whole test module measures against, in sprite units.
+    /// The camera the whole test module measures against, in world units.
     fn camera(bird_x: f64, extent: (u32, u32)) -> (f32, f32) {
         (
-            crate::gpu::camera_x(bird_x, extent) * TEXELS_PER_UNIT,
-            crate::gpu::camera_half_width(extent) * TEXELS_PER_UNIT,
+            crate::gpu::camera_x(bird_x, extent),
+            crate::gpu::camera_half_width(extent),
         )
     }
 
@@ -613,9 +624,11 @@ mod tests {
     #[test]
     fn the_pipe_cap_fits_the_shortest_pipe_the_course_can_make() {
         let pipe = baked("pipe", PIPE_PNG, PIPE_JSON);
-        let source =
-            NineSliceSource::from_sheet(&pipe.sheet, 0).expect("the sheet declares a nine-slice");
-        let minimum = source.minimum_size().1 / TEXELS_PER_UNIT;
+        // Built the way [`Scene::new`] builds it, so the caps are world units.
+        let source = NineSliceSource::from_sheet(&pipe.sheet, 0)
+            .expect("the sheet declares a nine-slice")
+            .with_texels_per_unit(TEXELS_PER_UNIT);
+        let minimum = source.minimum_size().1;
 
         // A gap pushed as far up as `gap_centre` can put it leaves the shortest
         // possible upper pipe between it and the ceiling.
@@ -629,9 +642,19 @@ mod tests {
 
         // Said the other way: at that height the expansion still emits a shaft
         // between the two caps, rather than the four-quad squashed form.
-        let quads = source.expand([0.0, 0.0, 32.0, shortest * TEXELS_PER_UNIT]);
+        let quads = source.expand([0.0, 0.0, (2.0 * PIPE_HALF_WIDTH) as f32, shortest]);
         assert_eq!(quads.len(), 3, "cap, shaft, cap");
         assert!(quads[1].rect[3] > 0.0, "the shaft vanished");
+
+        // And each cap is the authored 6 texels, in world units: 6 / 20 = 0.3.
+        for (cap, which) in [(0usize, "far"), (2, "near")] {
+            let h = quads[cap].rect[3];
+            assert!(
+                (h - 6.0 / TEXELS_PER_UNIT).abs() < 1e-4,
+                "the {which} cap is {h} world units tall, not {}",
+                6.0 / TEXELS_PER_UNIT
+            );
+        }
 
         // The course really does reach that extreme, within a texel.
         let reach = (0..4096)
@@ -734,7 +757,7 @@ mod tests {
                     .collect()
             };
 
-            let step = 100.0f32;
+            let step = 100.0 / TEXELS_PER_UNIT;
             let before = screens(scene, 0.0);
             let after = screens(scene, step);
 
@@ -969,23 +992,23 @@ mod tests {
             x: 21.0,
             gap_centre: 1.25,
         };
-        let scale = TEXELS_PER_UNIT;
         let [upper, lower] = pipe_targets(&pipe);
-        assert_eq!(upper[0], (pipe.x - PIPE_HALF_WIDTH) as f32 * scale);
-        assert_eq!(upper[2], (2.0 * PIPE_HALF_WIDTH) as f32 * scale);
+        assert_eq!(upper[0], (pipe.x - PIPE_HALF_WIDTH) as f32);
+        assert_eq!(upper[2], (2.0 * PIPE_HALF_WIDTH) as f32);
         assert_eq!(lower[2], upper[2]);
 
-        // The hole between them is the gap the collider uses, to the texel.
+        // The hole between them is the gap the collider uses, to a rounding
+        // error of the f64→f32 conversions.
         let hole = upper[1] - (lower[1] + lower[3]);
         assert!(
-            (hole - (2.0 * GAP_HALF_HEIGHT) as f32 * scale).abs() < 1e-2,
-            "the drawn gap is {} texels and the collided one is {}",
+            (hole - (2.0 * GAP_HALF_HEIGHT) as f32).abs() < 1e-2,
+            "the drawn gap is {} world units and the collided one is {}",
             hole,
-            (2.0 * GAP_HALF_HEIGHT) as f32 * scale
+            (2.0 * GAP_HALF_HEIGHT) as f32
         );
         // And both halves run past the camera's band, so no cap shows at the
         // far end.
-        let visible = crate::gpu::camera_half_height() * scale;
+        let visible = crate::gpu::camera_half_height();
         assert!(
             upper[1] + upper[3] > visible,
             "the upper pipe stops in view"
@@ -993,7 +1016,8 @@ mod tests {
         assert!(lower[1] < -visible, "the lower pipe stops in view");
 
         let source = NineSliceSource::from_sheet(&baked("pipe", PIPE_PNG, PIPE_JSON).sheet, 0)
-            .expect("a nine-slice");
+            .expect("a nine-slice")
+            .with_texels_per_unit(TEXELS_PER_UNIT);
         for target in [upper, lower] {
             let quads = source.expand(target);
             assert_eq!(quads.len(), 3);
@@ -1003,9 +1027,16 @@ mod tests {
                 "the three quads cover {area} of a {} target",
                 target[2] * target[3]
             );
-            // The caps keep their authored height whatever the pipe's length.
-            assert_eq!(quads[0].rect[3], 6.0, "the far cap is six texels");
-            assert_eq!(quads[2].rect[3], 6.0, "and so is the near one");
+            // The caps keep their authored height whatever the pipe's length:
+            // 6 texels at `TEXELS_PER_UNIT` = 20 is 0.3 world units.
+            for (cap, which) in [(0usize, "far"), (2, "near")] {
+                let h = quads[cap].rect[3];
+                assert!(
+                    (h - 6.0 / TEXELS_PER_UNIT).abs() < 1e-4,
+                    "the {which} cap is {h} tall, not {}",
+                    6.0 / TEXELS_PER_UNIT
+                );
+            }
         }
     }
 

@@ -83,6 +83,7 @@ fn button_source(frame: u32) -> crcbl_render::NineSliceSource {
         frame: crcbl_render::Rect::new(frame * BUTTON_FRAME, 0, BUTTON_FRAME, BUTTON_FRAME),
         sheet_width: BUTTON_SHEET_W,
         sheet_height: BUTTON_SHEET_H,
+        texels_per_unit: 1.0,
     }
 }
 

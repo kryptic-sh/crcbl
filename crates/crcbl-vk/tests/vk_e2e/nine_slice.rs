@@ -86,6 +86,7 @@ fn a_nine_slice_stretched_beyond_its_source_keeps_its_corners_and_shows_no_seam(
         frame: crcbl_render::Rect::new(0, 0, NINE_SLICE_SIZE, NINE_SLICE_SIZE),
         sheet_width: NINE_SLICE_SIZE,
         sheet_height: NINE_SLICE_SIZE,
+        texels_per_unit: 1.0,
     };
     // World 192 × 160 at 1 unit per pixel: screen x 32..224, y 16..176.
     let target = [-96.0f32, -80.0, 192.0, 160.0];

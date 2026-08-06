@@ -28,12 +28,11 @@
 //! both load the target rather than clearing it, so declaring the UI pass first
 //! would put the court on top of the score.
 //!
-//! # The camera is in sprite units
+//! # The camera is in world units
 //!
-//! [`crate::art`]'s header sets out why the sprite plane is scaled by
-//! [`TEXELS_PER_UNIT`]. [`projection`] applies it in the same expression that
-//! decides the half-height, so there is one place the two can be made to
-//! disagree and it is that one.
+//! The sprite plane is world units — the art's texels-per-unit scale lives on
+//! the nine-slice sources in [`crate::art`], so [`projection`] has nothing to
+//! compensate for.
 
 use crcbl::engine::{
     FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions, PendingGpuContext,
@@ -51,7 +50,7 @@ use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::menu::{Menu, MenuLayout};
 use crcbl::ui::text::FontAtlas;
 
-use crate::art::{SURROUND, Scene, TEXELS_PER_UNIT};
+use crate::art::{SURROUND, Scene};
 use crate::game::RenderState;
 
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
@@ -73,8 +72,8 @@ const MAX_TIMED_PASSES: u32 = 8;
 /// letterboxed vertically instead of cropped horizontally, and a wide one keeps
 /// 9.0 and shows some empty margin either side.
 ///
-/// **In world units.** [`projection`] is what scales it into sprite units, and
-/// is the only caller that may.
+/// **In world units.** [`projection`] uses it directly — the sprite plane is
+/// world units too, so nothing here scales.
 #[must_use]
 pub fn camera_half_height(extent: (u32, u32)) -> f32 {
     let aspect = extent.0.max(1) as f32 / extent.1.max(1) as f32;
@@ -100,15 +99,12 @@ pub fn camera_half_height(extent: (u32, u32)) -> f32 {
 /// module's other comment is about — and half a unit is cheap.
 const VIEW_MARGIN: f32 = 0.5;
 
-/// The camera projection for an `extent`-sized viewport.
-///
-/// **In sprite units, not world units.** [`crate::art`]'s header sets out why
-/// the sprite plane is scaled: a nine-slice's fixed bands are its insets taken
-/// as one target unit per texel, so the court's walls only keep their thickness
-/// if one texel is one unit of the space the sprites are drawn in.
+/// The camera projection for an `extent`-sized viewport, in world units —
+/// matching the sprite plane, whose nine-slice sources carry their own
+/// texels-per-unit scale in [`crate::art`].
 fn projection(extent: (u32, u32)) -> Projection {
     Projection::Orthographic {
-        half_height: camera_half_height(extent) * TEXELS_PER_UNIT,
+        half_height: camera_half_height(extent),
         near: 0.1,
         far: 100.0,
     }
@@ -589,13 +585,9 @@ mod tests {
 
             for x in [WORLD_LEFT, WORLD_RIGHT] {
                 for y in [-WORLD_TOP, WORLD_TOP] {
-                    // Through the same scale the sprites are submitted at.
-                    let world = crcbl::math::Vec4::new(
-                        x as f32 * TEXELS_PER_UNIT,
-                        y as f32 * TEXELS_PER_UNIT,
-                        0.0,
-                        1.0,
-                    );
+                    // The sprite plane is world units, so this is the point as
+                    // submitted.
+                    let world = crcbl::math::Vec4::new(x as f32, y as f32, 0.0, 1.0);
                     let clip = view_projection * world;
                     let ndc = crcbl::math::Vec2::new(clip.x / clip.w, clip.y / clip.w);
                     assert!(

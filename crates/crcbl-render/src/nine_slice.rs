@@ -148,7 +148,10 @@ impl Deref for NineQuads {
 /// The sheet's size is here because it is the UV divisor — the one number a
 /// [`Rect`] on its own does not know, for exactly the reason
 /// [`Sheet::uv`] lives on the sheet rather than on the rect.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// No `Eq`: [`texels_per_unit`](Self::texels_per_unit) is an `f32`, and `f32`
+/// is not `Eq`.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NineSliceSource {
     /// The insets that stay fixed, in texels.
     pub nine: NineSlice,
@@ -158,6 +161,16 @@ pub struct NineSliceSource {
     pub sheet_width: u32,
     /// The sheet image's height in texels.
     pub sheet_height: u32,
+    /// How many texels of art one caller unit is.
+    ///
+    /// The fixed bands [`expand`](Self::expand) emits and
+    /// [`minimum_size`](Self::minimum_size) come back divided by this, so a
+    /// source whose caller's world is not one unit per texel does not have to
+    /// scale its camera to compensate. [`from_sheet`](Self::from_sheet) defaults
+    /// it to 1 — one caller unit per texel, which is the behaviour this type
+    /// always had — and [`with_texels_per_unit`](Self::with_texels_per_unit) is
+    /// the way a caller changes it.
+    pub texels_per_unit: f32,
 }
 
 impl NineSliceSource {
@@ -178,7 +191,24 @@ impl NineSliceSource {
             frame: sheet.frames.get(index)?.rect,
             sheet_width: sheet.width,
             sheet_height: sheet.height,
+            // One caller unit per texel: the behaviour this type always had.
+            // A caller whose world is not one unit per texel changes it with
+            // [`with_texels_per_unit`](Self::with_texels_per_unit).
+            texels_per_unit: 1.0,
         })
+    }
+
+    /// The source, with its texels-per-unit scale set.
+    ///
+    /// The fixed bands [`expand`](Self::expand) emits and
+    /// [`minimum_size`](Self::minimum_size) come back divided by
+    /// `texels_per_unit`. Any value is accepted: [`expand`](Self::expand) draws
+    /// nothing when the scale is not a positive finite number, the same way it
+    /// draws nothing for a nonsense target.
+    #[must_use]
+    pub fn with_texels_per_unit(mut self, texels_per_unit: f32) -> Self {
+        self.texels_per_unit = texels_per_unit;
+        self
     }
 
     /// The insets this source actually expands with, in texels.
@@ -193,11 +223,16 @@ impl NineSliceSource {
     }
 
     /// The smallest target this source draws at its natural corner size, in
-    /// world units — [`NineSlice::minimum_size`] as floats.
+    /// world units — [`NineSlice::minimum_size`] as floats, divided by
+    /// [`texels_per_unit`](Self::texels_per_unit) so it is in the same caller
+    /// units as the bands [`expand`](Self::expand) emits.
     #[must_use]
     pub fn minimum_size(&self) -> (f32, f32) {
         let (width, height) = self.clamped().minimum_size();
-        (width as f32, height as f32)
+        (
+            width as f32 / self.texels_per_unit,
+            height as f32 / self.texels_per_unit,
+        )
     }
 
     /// The quads that draw this frame stretched to `target`.
@@ -209,9 +244,10 @@ impl NineSliceSource {
     ///
     /// Between zero and nine quads, in image order (top row left to right, then
     /// middle, then bottom). Corners are `left`/`right` wide and `top`/`bottom`
-    /// tall in world units — one world unit per texel, so a target the size of
-    /// the frame reproduces the single sprite exactly. Edges stretch on one axis
-    /// and the centre on both.
+    /// tall in world units — `inset / texels_per_unit` each, so at the default
+    /// of one caller unit per texel a target the size of the frame reproduces
+    /// the single sprite exactly. Edges stretch on one axis and the centre on
+    /// both.
     ///
     /// **Empty bands are not emitted.** A band whose extent is zero in texels or
     /// zero in world units is skipped, so a three-slice (`top == bottom == 0`)
@@ -230,8 +266,9 @@ impl NineSliceSource {
     /// # A target smaller than the corners
     ///
     /// **The fixed bands shrink in proportion and the stretched band vanishes.**
-    /// A target 6 units wide on a slice with `left = 4, right = 8` draws a
-    /// 2-unit left cap and a 4-unit right cap and no centre at all.
+    /// A target 6 units wide on a slice with `left = 4, right = 8` (at the
+    /// default scale of one caller unit per texel) draws a 2-unit left cap and a
+    /// 4-unit right cap and no centre at all.
     ///
     /// The alternatives were both worse. *Refusing* — no quads, or a clamp of
     /// the target up to the minimum — makes a pipe squeezed below its two caps
@@ -255,7 +292,11 @@ impl NineSliceSource {
     #[must_use]
     pub fn expand(&self, target: [f32; 4]) -> NineQuads {
         let mut out = NineQuads::default();
-        if self.sheet_width == 0 || self.sheet_height == 0 || !target.iter().all(|v| v.is_finite())
+        if self.sheet_width == 0
+            || self.sheet_height == 0
+            || !target.iter().all(|v| v.is_finite())
+            || !self.texels_per_unit.is_finite()
+            || self.texels_per_unit <= 0.0
         {
             return out;
         }
@@ -281,16 +322,27 @@ impl NineSliceSource {
         ];
         let us = texel_x.map(|x| x as f32 / self.sheet_width as f32);
         let vs = texel_y.map(|y| y as f32 / self.sheet_height as f32);
+        // The fixed bands come back in the caller's units: the texel insets
+        // divided by the scale, so a six-texel cap at twenty texels per unit is
+        // a 0.3-unit cap.
         let xs = cuts(
             target[0],
-            bands(nine.left, nine.right, target[2]),
+            bands(
+                nine.left as f32 / self.texels_per_unit,
+                nine.right as f32 / self.texels_per_unit,
+                target[2],
+            ),
             target[2],
         );
         // World Y is up and the frame's `top` inset is the top of the *image*,
         // so the low world band is `bottom` and the high one is `top`.
         let ys = cuts(
             target[1],
-            bands(nine.bottom, nine.top, target[3]),
+            bands(
+                nine.bottom as f32 / self.texels_per_unit,
+                nine.top as f32 / self.texels_per_unit,
+                target[3],
+            ),
             target[3],
         );
 
@@ -338,14 +390,14 @@ impl NineSliceSource {
 /// The three world-space band lengths along one axis: the low fixed band, the
 /// stretched band, and the high fixed band.
 ///
-/// `low` and `high` are insets in texels, taken as one world unit per texel.
-/// Below `low + high` the two fixed bands shrink in proportion and the stretched
-/// band is zero — see [`NineSliceSource::expand`]'s account of that choice.
-fn bands(low: u32, high: u32, extent: f32) -> [f32; 3] {
+/// `low` and `high` are the fixed bands in the caller's units — the texel
+/// insets already divided by [`NineSliceSource::texels_per_unit`]. Below
+/// `low + high` the two fixed bands shrink in proportion and the stretched band
+/// is zero — see [`NineSliceSource::expand`]'s account of that choice.
+fn bands(low: f32, high: f32, extent: f32) -> [f32; 3] {
     if extent.is_nan() || extent <= 0.0 {
         return [0.0; 3];
     }
-    let (low, high) = (low as f32, high as f32);
     let fixed = low + high;
     if extent < fixed {
         // `fixed > extent > 0`, so the division is safe.
@@ -390,6 +442,7 @@ mod tests {
             frame: FRAME,
             sheet_width: 32,
             sheet_height: 16,
+            texels_per_unit: 1.0,
         }
     }
 
@@ -780,6 +833,134 @@ mod tests {
         // The frame is 16 wide, so `left` takes all of it and `right` gets none.
         assert_eq!(quads.len(), 1);
         assert_eq!(quads[0].uv, [US[0], VS[0], US[3], VS[3]]);
+    }
+
+    // -----------------------------------------------------------------------
+    // The texels-per-unit scale
+    // -----------------------------------------------------------------------
+
+    /// **A scale turns the fixed bands into caller units.** A pipe-style
+    /// three-slice (`top == bottom == 6` texels) at twenty texels per unit draws
+    /// its caps 6 / 20 = 0.3 units tall, and `minimum_size` reports the same
+    /// units.
+    #[test]
+    fn a_scale_makes_the_fixed_bands_come_back_in_caller_units() {
+        let mut source = source();
+        source.nine = NineSlice::new(0, 0, 6, 6);
+        // Taller than the frame the helper ships with: the clamp trims insets
+        // to the frame, and the pipe both caps fit in needs 12 texels of height.
+        source.frame = Rect::new(8, 4, 16, 24);
+        let scaled = source.with_texels_per_unit(20.0);
+
+        assert_eq!(
+            scaled.minimum_size(),
+            (0.0, 12.0 / 20.0),
+            "0 + 0 wide, 6 + 6 tall, in caller units"
+        );
+        assert_eq!(
+            source.minimum_size(),
+            (0.0, 12.0),
+            "the un-scaled source keeps its texel-sized minimum"
+        );
+
+        let quads = scaled.expand([0.0, 0.0, 2.0, 20.0]);
+        assert_eq!(quads.len(), 3, "a three-slice: cap, shaft, cap");
+        for (cap, which) in [(0usize, "top"), (2, "bottom")] {
+            let h = quads[cap].rect[3];
+            assert!(
+                (h - 6.0 / 20.0).abs() < 1e-4,
+                "the {which} cap is {h} tall, not 0.3"
+            );
+        }
+        // The shaft takes the rest of the 20-unit target.
+        assert!((quads[1].rect[3] - 19.4).abs() < 1e-4);
+
+        // Without the scale the same target draws 6-unit caps — the behaviour
+        // this feature exists to replace.
+        let plain = source.expand([0.0, 0.0, 2.0, 20.0]);
+        assert_eq!(plain[0].rect[3], 6.0);
+        assert_eq!(plain[2].rect[3], 6.0);
+    }
+
+    /// **A scaled expand still tiles the target exactly and samples the same
+    /// texels.** Only the units change: the quads cover the target edge-to-edge
+    /// with the corners at their natural size, and their UVs are the unscaled
+    /// ones — the texel cuts never see the scale.
+    #[test]
+    fn a_scaled_expand_tiles_the_target_with_the_same_uvs() {
+        let plain = source();
+        let scaled = plain.with_texels_per_unit(20.0);
+        let target = [100.0f32, 200.0, 16.0, 8.0];
+        let quads = scaled.expand(target);
+        assert_eq!(quads.len(), 9, "the target is well above the minimum");
+
+        // Same nine quads, in the same order, sampling the same texels.
+        for (scaled_quad, plain_quad) in quads.iter().zip(plain.expand(target).iter()) {
+            assert_eq!(scaled_quad.uv, plain_quad.uv, "the scale touched the UVs");
+        }
+
+        // The corners are at their natural size: `inset / texels_per_unit`.
+        for corner in [0usize, 2, 6, 8] {
+            let (w, h) = (quads[corner].rect[2], quads[corner].rect[3]);
+            assert!(
+                (w - 3.0 / 20.0).abs() < 1e-4 || (w - 5.0 / 20.0).abs() < 1e-4,
+                "corner {corner} is {w} wide, not an inset-sized block"
+            );
+            assert!(
+                (h - 2.0 / 20.0).abs() < 1e-4 || (h - 1.0 / 20.0).abs() < 1e-4,
+                "corner {corner} is {h} tall, not an inset-sized block"
+            );
+        }
+
+        // And the quads tile `target` exactly: shared edges are the *same*
+        // float and the outside edges are the target's own.
+        for row in 0..3 {
+            for column in 0..2 {
+                let left = quads[row * 3 + column];
+                let right = quads[row * 3 + column + 1];
+                assert_eq!(
+                    left.rect[0] + left.rect[2],
+                    right.rect[0],
+                    "world gap between columns {column} and {} of row {row}",
+                    column + 1
+                );
+            }
+        }
+        for column in 0..3 {
+            for row in 0..2 {
+                let upper = quads[row * 3 + column];
+                let lower = quads[(row + 1) * 3 + column];
+                assert_eq!(
+                    lower.rect[1] + lower.rect[3],
+                    upper.rect[1],
+                    "world gap between rows {row} and {} of column {column}",
+                    row + 1
+                );
+            }
+        }
+        assert_eq!(quads[6].rect[0], target[0]);
+        assert_eq!(quads[6].rect[1], target[1]);
+        assert_eq!(quads[2].rect[0] + quads[2].rect[2], target[0] + target[2]);
+        assert_eq!(quads[2].rect[1] + quads[2].rect[3], target[1] + target[3]);
+    }
+
+    /// **A scale of one is exactly the old behaviour.** `from_sheet` defaults
+    /// the field to 1 and this pins the two together: the identity, the
+    /// stretch, the below-minimum and the awkward-fractional targets all come
+    /// back identical to an un-scaled source, bit for bit.
+    #[test]
+    fn a_scale_of_one_is_exactly_the_default() {
+        let source = source();
+        let one = source.with_texels_per_unit(1.0);
+        for target in [
+            [100.0f32, 200.0, 16.0, 8.0],
+            [100.0, 200.0, 16.0, 40.0],
+            [0.0, 0.0, 4.0, 2.0],
+            [-13.7, 4.3, 91.1, 250.9],
+        ] {
+            assert_eq!(one.expand(target), source.expand(target), "{target:?}");
+        }
+        assert_eq!(one.minimum_size(), source.minimum_size());
     }
 
     // -----------------------------------------------------------------------

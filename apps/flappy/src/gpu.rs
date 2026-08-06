@@ -54,7 +54,7 @@ use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::menu::{Menu, MenuLayout};
 use crcbl::ui::text::FontAtlas;
 
-use crate::art::{Scene, TEXELS_PER_UNIT};
+use crate::art::Scene;
 use crate::game::{PipeView, RenderState};
 
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
@@ -105,15 +105,12 @@ pub fn camera_x(bird_x: f64, extent: (u32, u32)) -> f32 {
 
 /// The camera projection for an `extent`-sized viewport.
 ///
-/// **In sprite units, not world units.** [`crate::art`]'s header sets out why
-/// the sprite plane is scaled: a nine-slice's fixed bands are its insets taken
-/// as one target unit per texel, so the pipe's cap only keeps its shape if one
-/// texel is one unit of the space the sprites are drawn in. The camera is
-/// scaled to match here, in the same function that decides the half-height, so
-/// there is one place the two can be made to disagree and it is this one.
+/// **In world units**, matching the sprite plane: the art's texels-per-unit
+/// scale lives on the nine-slice sources in [`crate::art`] now, so nothing
+/// here has to compensate for it.
 fn projection() -> Projection {
     Projection::Orthographic {
-        half_height: camera_half_height() * TEXELS_PER_UNIT,
+        half_height: camera_half_height(),
         near: 0.1,
         far: 100.0,
     }
@@ -377,11 +374,10 @@ impl Gpu {
         // with the surface actually being drawn into.
         //
         // **One call to `camera_x`, and everything else is derived from it.**
-        // The sprite plane is `TEXELS_PER_UNIT` times the world (see
-        // `crate::art`), so the scale is applied here, once, to the value both
-        // the projection and the parallax offsets are built from.
-        let centre = camera_x(self.bird.x, extent) * TEXELS_PER_UNIT;
-        let half_width = camera_half_width(extent) * TEXELS_PER_UNIT;
+        // The sprite plane is world units (see `crate::art`), so the same value
+        // feeds the projection and the parallax offsets.
+        let centre = camera_x(self.bird.x, extent);
+        let half_width = camera_half_width(extent);
         self.camera.projection = projection();
         self.camera.eye = Vec3::new(centre, 0.0, 2.0);
         self.camera.target = Vec3::new(centre, 0.0, 0.0);
@@ -589,7 +585,7 @@ mod tests {
             (600, 900),   // taller than it is wide
         ] {
             let aspect = extent.0.max(1) as f32 / extent.1.max(1) as f32;
-            let centre = camera_x(0.0, extent) * TEXELS_PER_UNIT;
+            let centre = camera_x(0.0, extent);
             let mut camera = Camera::default().with_projection(projection());
             camera.eye = Vec3::new(centre, 0.0, 2.0);
             camera.target = Vec3::new(centre, 0.0, 0.0);
@@ -599,7 +595,7 @@ mod tests {
                 // The bird's own column — `camera_x` was asked where the view
                 // goes when the bird is at 0 — so the horizontal assertion below
                 // is about the bird and not about the middle of the screen.
-                let world = crcbl::math::Vec4::new(0.0, y as f32 * TEXELS_PER_UNIT, 0.0, 1.0);
+                let world = crcbl::math::Vec4::new(0.0, y as f32, 0.0, 1.0);
                 let clip = view_projection * world;
                 let ndc = clip.y / clip.w;
                 assert!(
