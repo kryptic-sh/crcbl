@@ -2606,35 +2606,23 @@ The pipeline is joined up end to end for both games: each of `apps/flappy` and
 and an `art::Scene` draws it through `SpriteRenderer` on a layer stack. What is
 left:
 
-- **`NineSliceSource` has no texels → units scale, and there are now two callers
-  working around it.** `expand` takes its insets as target units directly, so a
-  6-texel cap is 6 units tall whatever the caller's world is. Flappy scaled its
-  whole sprite plane by `art::TEXELS_PER_UNIT` = 20 so its pipe's cap would
-  survive a 12-unit playable band; breakout hit the identical wall on
-  `assets/field.crpix`, whose 10-texel walls would otherwise be ten world units
-  thick inside a court 28 across, and reached the same convention at a scale of
-  10 — chosen independently, from the ball rather than from the pipe, which is
-  the only part that did not copy.
-
-  **This was the "if a second game hits this" condition, and it has been hit.**
-  It was not fixed in that slice because the slice was scoped to `apps/*` and
-  the change is in `crcbl-render`. The fix: a scale on `NineSliceSource` — a
-  `texels_per_unit: f32` field set at `from_sheet` time, or an
-  `expand_scaled(target, scale)` beside `expand` — so `minimum_size` and the
-  fixed bands come back in the caller's units and a game whose world is not one
-  unit per texel does not have to scale its camera to compensate. Both
-  `art::TEXELS_PER_UNIT` constants and both `gpu::projection` multiplications
-  come out when it lands; the sprite rectangles stay as they are, because those
-  were never the problem. Nothing else in the workspace calls `expand` —
-  `crcbl-render`'s own `button_skin` does, and would take the same scale of 1.
-
-  **A third caller has now appeared, inside `crcbl-render` itself.**
-  `crcbl_render::menu_camera` exists only because of this: the menu is laid out
-  in device pixels, and drawing it through a camera of one unit per pixel would
-  make the window frame's four-texel corner four _pixels_ at every scale, so a
-  menu drawn three times as large would keep a hairline border. The camera
-  divides by the style's scale instead, exactly as the two samples scale theirs.
-  It comes out with the other two when `expand` learns a scale.
+- **The menu still works around `NineSliceSource`'s texels-per-unit scale.**
+  Flappy and breakout are migrated: the source carries a `texels_per_unit` scale
+  (`with_texels_per_unit`, default 1), so the fixed bands of `expand` and
+  `minimum_size` come back in the caller's units and both samples' sprite planes
+  are world units — the two `art::TEXELS_PER_UNIT` camera scalings and both
+  `gpu::projection` multiplications are gone, and `crcbl-render`'s own
+  `button_skin` is untouched at the default scale of 1. What is left is the
+  third caller: `crcbl_render::menu_camera` still exists only because the menu
+  is laid out in device pixels, and drawing it through a camera of one unit per
+  pixel would make the window frame's four-texel corner four pixels at every
+  scale, so a menu drawn three times as large would keep a hairline border. The
+  camera divides by the style's scale instead. Migrating it means the menu's
+  world becomes device pixels — `menu_camera`'s division comes out, the menu's
+  sources take `with_texels_per_unit(1 / scale)`, and `crcbl_ui::menu`'s
+  `PANEL_INSETS`/`BUTTON_INSETS` (in texels) and the `MenuStyle` pixels-vs-
+  texels mixed units get resolved. That touches `crcbl-ui` as well as
+  `crcbl-render`, and was left out of the migration slice on purpose.
 
 - **The tick rate is one constant now, and the guard around it is still weak in
   three of the five.** `bake_dir` writes `ART_TICK_HZ` into the generated table,

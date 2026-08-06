@@ -16,6 +16,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`NineSliceSource` carries its own texels-per-unit scale.**
+  `with_texels_per_unit` (default 1) makes the fixed bands of `expand` and
+  `minimum_size` come back in the caller's units, so a game whose world is not
+  one unit per texel no longer has to scale its sprite plane and camera to
+  compensate. The flappy and breakout samples were migrated to world-unit sprite
+  planes; the menu's camera workaround is still owed (backlog).
+
 - **`--pacing` and `--fps`, so a run can pick its display sync and its frame cap
   from the command line.** `--pacing <auto|vsync|adaptive|off>` sets
   `GpuContextDesc::pacing` and `--fps <N>` sets the loop's `FrameLimit`; both
