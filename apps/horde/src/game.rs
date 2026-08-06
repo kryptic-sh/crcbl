@@ -762,6 +762,25 @@ pub fn separation_query_radius(kind: EnemyKind) -> f64 {
 /// appearing in it. `enemies_enter_from_beyond_the_view` asserts the relation.
 pub const SPAWN_RING: f64 = 24.0;
 
+/// The largest enemy radius, in world units.
+///
+/// The spawn ring's arc is inset by this much: [`spawn_arc`] draws only the
+/// angles whose ring point is at least this far from every wall, so even the
+/// biggest body that can be spawned there is fully inside the arena and the
+/// clamp in `spawn_enemy` never moves a spawn.
+const MAX_ENEMY_RADIUS: f64 = {
+    let mut max = 0.0;
+    let mut i = 0;
+    while i < EnemyKind::ALL.len() {
+        let radius = EnemyKind::ALL[i].radius();
+        if radius > max {
+            max = radius;
+        }
+        i += 1;
+    }
+    max
+};
+
 /// The gap between spawns at the start of a run, in seconds.
 pub const SPAWN_INTERVAL_START: f64 = 0.5;
 
@@ -847,6 +866,109 @@ const DRAW_RING_ANGLE: u64 = 0;
 const DRAW_KIND: u64 = 1;
 const DRAW_JITTER: u64 = 2;
 
+/// The arc of [`SPAWN_RING`] around `player` that stays fully inside the
+/// arena, as `(start, span)` with `start ∈ [0, 2π)` and `span ∈ (0, 2π]`.
+///
+/// The ring crosses each of the four inset box lines — `x = ±(half width −
+/// largest enemy radius)`, `y = ±(half height − largest enemy radius)` — at
+/// most twice, and between two consecutive crossings it is wholly inside or
+/// wholly outside, so one midpoint test per interval decides them all. The
+/// intervals are the segments between the sorted crossing angles, plus the one
+/// that wraps past 0. Each axis's constraint permits at most one arc of
+/// angles, so the inside intervals join into a single arc; with no crossings
+/// at all — the player at the origin — the whole circle is inside and the
+/// answer is `(0, 2π)` exactly.
+#[must_use]
+fn spawn_arc(player: DVec3) -> (f64, f64) {
+    let half_x = ARENA_HALF_WIDTH - MAX_ENEMY_RADIUS;
+    let half_y = ARENA_HALF_HEIGHT - MAX_ENEMY_RADIUS;
+    let tau = std::f64::consts::TAU;
+
+    // Every angle at which the ring sits on one of the four box lines.
+    let mut crossings: Vec<f64> = Vec::new();
+    // x = ±half_x: the ring crosses where cos θ = (±half_x − player.x) / R.
+    for c in [
+        (half_x - player.x) / SPAWN_RING,
+        (-half_x - player.x) / SPAWN_RING,
+    ] {
+        if (-1.0..=1.0).contains(&c) {
+            let a = c.acos();
+            crossings.push(a);
+            crossings.push(-a);
+        }
+    }
+    // y = ±half_y: the ring crosses where sin θ = (±half_y − player.y) / R.
+    for c in [
+        (half_y - player.y) / SPAWN_RING,
+        (-half_y - player.y) / SPAWN_RING,
+    ] {
+        if (-1.0..=1.0).contains(&c) {
+            let a = c.asin();
+            crossings.push(a);
+            crossings.push(std::f64::consts::PI - a);
+        }
+    }
+    for angle in &mut crossings {
+        *angle = angle.rem_euclid(tau);
+    }
+    crossings.sort_by(f64::total_cmp);
+
+    let mut inside: Vec<(f64, f64)> = Vec::new();
+    for i in 0..crossings.len() {
+        let start = crossings[i];
+        let end = if i + 1 < crossings.len() {
+            crossings[i + 1]
+        } else {
+            crossings[0] + tau // the interval that wraps past 0
+        };
+        if end - start <= 0.0 {
+            continue; // degenerate: the ring touches a line rather than crossing it
+        }
+        let mid = (start + end) * 0.5;
+        let point = DVec3::new(
+            player.x + SPAWN_RING * mid.cos(),
+            player.y + SPAWN_RING * mid.sin(),
+            0.0,
+        );
+        if point.x.abs() <= half_x && point.y.abs() <= half_y {
+            inside.push((start, end));
+        }
+    }
+
+    match inside.as_slice() {
+        // No crossings means the whole ring is inside the box — the player at
+        // the origin is exactly this, and the answer is the full circle. An
+        // out-of-arena player also lands here (defensively, since the draw must
+        // stay defined): the full ring is the fallback, at the cost of the
+        // inside promise — the alternative to returning something silently.
+        [] => (0.0, tau),
+        [one] => {
+            let span = one.1 - one.0;
+            if span > 0.0 && span <= tau {
+                (one.0, span)
+            } else {
+                (0.0, tau)
+            }
+        }
+        _ => {
+            // Unreachable in this geometry — each axis allows at most one arc,
+            // so their intersection is one — but a near-tangent sliver misjudged
+            // by rounding would read as a second, tiny interval. The widest one
+            // is the real arc, and it alone keeps the inside-the-arena promise.
+            let widest = inside
+                .iter()
+                .max_by(|a, b| (a.1 - a.0).total_cmp(&(b.1 - b.0)))
+                .expect("the arm above guarantees a non-empty slice");
+            let span = widest.1 - widest.0;
+            if span > 0.0 && span <= tau {
+                (widest.0, span)
+            } else {
+                (0.0, tau)
+            }
+        }
+    }
+}
+
 /// Where the `counter`-th enemy of run `seed` enters, relative to the player.
 ///
 /// **On a ring, never in the view.** An enemy that appeared inside the screen
@@ -854,9 +976,16 @@ const DRAW_JITTER: u64 = 2;
 /// of the player would be damage the player had no chance to avoid. A ring is a
 /// pure function *and* is provably outside the view, where a rejection loop
 /// would be neither.
+///
+/// The angle is drawn within the arc of the ring that stays inside the arena,
+/// inset by the largest enemy radius — see [`spawn_arc`] — so the clamp in
+/// `spawn_enemy` never moves a spawn, however close to a wall the player
+/// stands. Still a pure function of its three arguments: `(seed, counter,
+/// player)`.
 #[must_use]
-pub fn spawn_offset(seed: u64, counter: u64) -> DVec3 {
-    let angle = hash_unit(seed, spawn_index(counter, DRAW_RING_ANGLE)) * std::f64::consts::TAU;
+pub fn spawn_offset(seed: u64, counter: u64, player: DVec3) -> DVec3 {
+    let (start, span) = spawn_arc(player);
+    let angle = start + hash_unit(seed, spawn_index(counter, DRAW_RING_ANGLE)) * span;
     DVec3::new(angle.cos(), angle.sin(), 0.0) * SPAWN_RING
 }
 
@@ -2598,7 +2727,7 @@ fn spawn_enemies(logic: &mut GameLogic, world: &mut World, dt: f64) {
             logic,
             world,
             spawn_kind(seed, counter),
-            logic.player_pos + spawn_offset(seed, counter),
+            logic.player_pos + spawn_offset(seed, counter, logic.player_pos),
             spawn_jitter(seed, counter),
         );
     }
@@ -3778,40 +3907,69 @@ mod tests {
             }
         }
 
+        /// The bookkeeping a driver runs before each tick: restart a finished
+        /// run, answer a level-up screen, and count both.
+        ///
+        /// **A restart is two edges, one tick apart**, because it lands on the
+        /// title screen and the title screen is left by the same key. Only the
+        /// first is counted: the second is a start, not a restart. The edge is
+        /// pressed and released inside the one tick, and it is the harness that
+        /// does it rather than `autopilot`, because the plan is a set of held
+        /// keys and this is not one. **A level-up screen has to be answered or
+        /// a soak stops.** The field freezes while it is up and the spawner
+        /// does not run, so a driver that walked past it would measure a frozen
+        /// field for the rest of the run — which is exactly the shape of a soak
+        /// that silently tests nothing.
+        fn settle(&mut self) {
+            if self.game.state == GameState::Dead {
+                self.restarts += 1;
+            }
+            if matches!(self.game.state, GameState::Dead | GameState::WaitingToStart) {
+                self.game.key_event(KeyCode::KeyR, true);
+                self.game.key_event(KeyCode::KeyR, false);
+            }
+            if self.game.state == GameState::LevelUp {
+                self.levels += 1;
+                self.game.key_event(KeyCode::Digit1, true);
+                self.game.key_event(KeyCode::Digit1, false);
+            }
+        }
+
         /// Runs to `ticks` under the autopilot — a player who kites.
         fn play_ticks(&mut self, ticks: u64) {
             while self.ticks < ticks {
                 self.time.advance(self.frame_step);
                 self.clock.update(self.time.elapsed());
                 while self.ticks < ticks && self.clock.consume_tick() {
-                    // Start the next run — **two edges, one tick apart**, because
-                    // a restart lands on the title screen and the title screen
-                    // is left by the same key. Only the first is counted: the
-                    // second is a start, not a restart. The edge is pressed and
-                    // released inside the one tick, and it is the harness that
-                    // does it rather than `autopilot`, because the plan is a set
-                    // of held keys and this is not one.
-                    if self.game.state == GameState::Dead {
-                        self.restarts += 1;
-                    }
-                    if matches!(self.game.state, GameState::Dead | GameState::WaitingToStart) {
-                        self.game.key_event(KeyCode::KeyR, true);
-                        self.game.key_event(KeyCode::KeyR, false);
-                    }
-                    // **A level-up screen has to be answered or the soak
-                    // stops.** The field freezes while it is up and the spawner
-                    // does not run, so an autopilot that walked past it would
-                    // measure a frozen field for the rest of the run — which is
-                    // exactly the shape of a soak that silently tests nothing.
-                    if self.game.state == GameState::LevelUp {
-                        self.levels += 1;
-                        self.game.key_event(KeyCode::Digit1, true);
-                        self.game.key_event(KeyCode::Digit1, false);
-                    }
+                    self.settle();
                     let plan = autopilot(&self.game, self.ticks);
                     for (slot, want) in plan.iter().copied().enumerate() {
                         self.hold(slot, want);
                     }
+                    self.game.tick();
+                    self.ticks += 1;
+                }
+            }
+        }
+
+        /// Runs to `ticks` while the player stands still — the same bookkeeping
+        /// as [`Self::play_ticks`], but no movement key is ever pressed.
+        ///
+        /// The horde converges on a stationary player, which is what ends a run
+        /// the kite now survives: spawns arrive on the ring inside the arena
+        /// rather than materialising beside the player, so nothing catches a
+        /// player who keeps moving.
+        fn stand_still(&mut self, ticks: u64) {
+            // The autopilot may have left a movement key held by a previous
+            // stretch.
+            for slot in 0..HELD_KEYS.len() {
+                self.hold(slot, false);
+            }
+            while self.ticks < ticks {
+                self.time.advance(self.frame_step);
+                self.clock.update(self.time.elapsed());
+                while self.ticks < ticks && self.clock.consume_tick() {
+                    self.settle();
                     self.game.tick();
                     self.ticks += 1;
                 }
@@ -4072,7 +4230,7 @@ mod tests {
         // autopilot's kite.
         const { assert!(SPAWN_RING < ARENA_HALF_HEIGHT) };
         for counter in 0..500 {
-            let offset = spawn_offset(DEFAULT_SEED, counter);
+            let offset = spawn_offset(DEFAULT_SEED, counter, DVec3::ZERO);
             assert!(
                 (offset.length() - SPAWN_RING).abs() < 1e-9,
                 "spawn {counter} was dealt at {offset:?}, off the ring",
@@ -4095,7 +4253,7 @@ mod tests {
         let kinds = [EnemyKind::Brute, EnemyKind::Grunt, EnemyKind::Runner];
         for (counter, (offset, kind)) in offsets.iter().zip(&kinds).enumerate() {
             assert_eq!(
-                spawn_offset(DEFAULT_SEED, counter as u64),
+                spawn_offset(DEFAULT_SEED, counter as u64, DVec3::ZERO),
                 *offset,
                 "spawn {counter}"
             );
@@ -4104,6 +4262,117 @@ mod tests {
                 *kind,
                 "spawn {counter}"
             );
+        }
+    }
+
+    /// A player parked in a corner or against a wall gets spawns inside the
+    /// arena, never materialising on the wall beside them.
+    ///
+    /// `spawn_offset` draws from the arc that stays inside the arena, so every
+    /// `player + offset` satisfies the fully-inside bound — asserted through
+    /// `clamp_to_arena`, which is the exact check `spawn_enemy` runs and which
+    /// must therefore never move a spawn.
+    #[test]
+    fn spawns_stay_inside_the_arena_from_a_corner_or_a_wall() {
+        let radius = EnemyKind::Brute.radius();
+        for player in [
+            // Parked in the corner…
+            DVec3::new(ARENA_HALF_WIDTH - 0.1, ARENA_HALF_HEIGHT - 0.1, 0.0),
+            // …and on a wall, at the player clamp's own limit.
+            DVec3::new(ARENA_HALF_WIDTH - PLAYER_RADIUS, 0.0, 0.0),
+            DVec3::new(0.0, ARENA_HALF_HEIGHT - PLAYER_RADIUS, 0.0),
+        ] {
+            for counter in 0..300 {
+                let offset = spawn_offset(DEFAULT_SEED, counter, player);
+                assert!(
+                    (offset.length() - SPAWN_RING).abs() < 1e-9,
+                    "counter {counter} at {player:?} was dealt {offset:?}, off the ring",
+                );
+                let point = player + offset;
+                assert_eq!(
+                    clamp_to_arena(point, radius),
+                    point,
+                    "counter {counter} at {player:?}: the clamp moved the spawn at {point:?}",
+                );
+            }
+        }
+    }
+
+    /// The draw is a pure function of `(seed, counter, player)`: the same
+    /// triple twice gives bit-identical offsets, and a different player draws
+    /// a different arc.
+    #[test]
+    fn the_spawn_draw_is_a_pure_function_of_seed_counter_and_player() {
+        let corner = DVec3::new(ARENA_HALF_WIDTH - 0.1, ARENA_HALF_HEIGHT - 0.1, 0.0);
+        for counter in 0..100 {
+            assert_eq!(
+                spawn_offset(DEFAULT_SEED, counter, corner),
+                spawn_offset(DEFAULT_SEED, counter, corner),
+                "counter {counter}",
+            );
+        }
+        assert!(
+            (0..500).any(|counter| {
+                spawn_offset(DEFAULT_SEED, counter, DVec3::ZERO)
+                    != spawn_offset(DEFAULT_SEED, counter, corner)
+            }),
+            "the corner's arc is a strict subset of the origin's, so the two \
+             draws should differ somewhere",
+        );
+    }
+
+    /// At the origin the arc is the whole circle, and the draw is bit-identical
+    /// to the pre-arc formula — the relation the shipped table anchors.
+    #[test]
+    fn the_origin_draws_the_full_circle() {
+        let angle =
+            hash_unit(DEFAULT_SEED, spawn_index(0, DRAW_RING_ANGLE)) * std::f64::consts::TAU;
+        let plain = DVec3::new(angle.cos(), angle.sin(), 0.0) * SPAWN_RING;
+        assert_eq!(spawn_offset(DEFAULT_SEED, 0, DVec3::ZERO), plain);
+    }
+
+    /// `spawn_arc` directly: the full circle at the origin, a strict subset at
+    /// a corner whose every sampled angle stays inside the arena, and never an
+    /// empty arc across a grid of player positions.
+    #[test]
+    fn the_spawn_arc_stays_inside_the_arena() {
+        let tau = std::f64::consts::TAU;
+        assert_eq!(spawn_arc(DVec3::ZERO), (0.0, tau));
+
+        let half_x = ARENA_HALF_WIDTH - EnemyKind::Brute.radius();
+        let half_y = ARENA_HALF_HEIGHT - EnemyKind::Brute.radius();
+        let corner = DVec3::new(ARENA_HALF_WIDTH - 0.1, ARENA_HALF_HEIGHT - 0.1, 0.0);
+        let (start, span) = spawn_arc(corner);
+        assert!(
+            span < tau,
+            "a corner's arc should not cover the whole circle"
+        );
+        for i in 1..1024 {
+            let angle = start + span * i as f64 / 1024.0;
+            let point =
+                corner + DVec3::new(SPAWN_RING * angle.cos(), SPAWN_RING * angle.sin(), 0.0);
+            assert!(
+                point.x.abs() <= half_x && point.y.abs() <= half_y,
+                "sampled angle {angle} put the ring point at {point:?}, outside the arena",
+            );
+        }
+
+        for x in (-45..=45).step_by(5) {
+            for y in (-30..=30).step_by(6) {
+                let player = DVec3::new(f64::from(x), f64::from(y), 0.0);
+                let (start, span) = spawn_arc(player);
+                assert!(
+                    span > 0.0 && span <= tau,
+                    "player at {player:?} was dealt an arc of {span}",
+                );
+                let angle = start + 0.5 * span;
+                let point =
+                    player + DVec3::new(SPAWN_RING * angle.cos(), SPAWN_RING * angle.sin(), 0.0);
+                assert!(
+                    point.x.abs() <= half_x && point.y.abs() <= half_y,
+                    "the midpoint of {player:?}'s arc is outside: {point:?}",
+                );
+            }
         }
     }
 
@@ -5832,7 +6101,16 @@ mod tests {
         );
         let mut peak = 0;
         while harness.ticks < 9_000 {
-            harness.play_ticks(harness.ticks + 1);
+            // The kite outruns the horde on its own now that spawns arrive on
+            // the ring inside the arena — a kiting player would never die, and
+            // the restart would never be exercised. Every other lap the player
+            // stands still instead: the crowd catches up, the run ends, and
+            // `stand_still`'s bookkeeping starts the next one.
+            if harness.ticks % (2 * KITE_PERIOD) < KITE_PERIOD {
+                harness.play_ticks(harness.ticks + 1);
+            } else {
+                harness.stand_still(harness.ticks + 1);
+            }
             harness.assert_nothing_leaked();
             peak = peak.max(harness.game.entity_count());
         }
