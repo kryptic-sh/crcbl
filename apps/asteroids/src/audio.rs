@@ -469,11 +469,21 @@ mod tests {
             "the key came up and it kept running"
         );
         assert_eq!(audio.voices(), 0);
+        // The accounting is immediate but the sound is not cut: the engine
+        // voice plays one release block — a linear fade to silence — so the
+        // first fill after the key comes up is still (fading) audible, and
+        // the second fill is silent.
+        block.fill(0.0);
+        crcbl::audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
+        assert!(
+            block.iter().any(|s| s.abs() > 1e-3),
+            "the engine's release block was cut",
+        );
         block.fill(0.0);
         crcbl::audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
         assert!(
             block.iter().all(|s| *s == 0.0),
-            "the stopped engine is still audible",
+            "the stopped engine is still audible after its release block",
         );
 
         // A second burn is a second play, and a new voice.

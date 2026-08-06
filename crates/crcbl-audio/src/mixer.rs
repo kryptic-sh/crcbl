@@ -109,6 +109,10 @@ pub struct Voice {
     looping: bool,
     /// Stopped voices are removed from the mixer on the next fill.
     stopped: bool,
+    /// Releasing voices mix one final block with a linear fade to silence,
+    /// then are dropped by the caller — [`Mixer::stop`] sets this, so a loud
+    /// voice stopped mid-cycle ramps down instead of clicking.
+    releasing: bool,
     /// Per-channel gains applied during mixing: `[left, right]`.
     /// Defaults to `(1.0, 1.0)` — un-panned, centre.
     gains: (f32, f32),
@@ -137,6 +141,7 @@ impl Voice {
             volume: 1.0,
             looping: false,
             stopped: false,
+            releasing: false,
             gains: (1.0, 1.0),
             pitch: 1.0,
         }
@@ -251,7 +256,15 @@ impl Voice {
         };
         let step = self.pitch as f64 * ratio;
 
-        for out in buffer.chunks_exact_mut(CHANNELS) {
+        // The release ramp: a releasing voice mixes ONE final block, faded
+        // linearly to silence, and is then dropped by the caller. With `N`
+        // frames in this block, frame `i` (0-based) keeps `(N - 1 - i) / (N - 1)`
+        // of its level — the first frame is unchanged (fade 1.0, no step down)
+        // and the last is exactly silence. A one-frame block is degenerate:
+        // the fade is 0.0.
+        let block_frames = buffer.len() / CHANNELS;
+
+        for (i, out) in buffer.chunks_exact_mut(CHANNELS).enumerate() {
             if pos as usize >= frames {
                 if self.looping {
                     pos %= frames as f64;
@@ -261,12 +274,21 @@ impl Voice {
                 }
             }
             let base = (pos as usize) * CHANNELS;
-            out[0] += self.data[base] * self.volume * self.gains.0;
-            out[1] += self.data[base + 1] * self.volume * self.gains.1;
+            let fade = if self.releasing {
+                if block_frames <= 1 {
+                    0.0
+                } else {
+                    (block_frames - 1 - i) as f32 / (block_frames - 1) as f32
+                }
+            } else {
+                1.0
+            };
+            out[0] += self.data[base] * self.volume * self.gains.0 * fade;
+            out[1] += self.data[base + 1] * self.volume * self.gains.1 * fade;
             pos += step;
         }
         self.playhead = (pos as usize).min(frames);
-        true
+        !self.releasing
     }
 }
 
@@ -283,6 +305,11 @@ impl Voice {
 /// leaves the game a handle to go on playing through. See [`Mixer::play`].
 pub struct Mixer {
     voices: Mutex<Vec<(VoiceId, Voice)>>,
+    /// Voices mid-release: stopped but playing their one fade-to-silence
+    /// block. [`Mixer::voice_count`] and [`Mixer::is_playing`] do not count
+    /// them — [`Mixer::stop`] frees the slot on the spot — and the next
+    /// [`fill`](AudioSource::fill) mixes the ramp and drops each one.
+    releasing: Mutex<Vec<(VoiceId, Voice)>>,
     /// The next handle to hand out. Monotonic; ids are never reused, so a
     /// stale [`VoiceId`] can never name a later voice.
     next_id: AtomicU64,
@@ -294,6 +321,7 @@ impl Mixer {
     pub fn new() -> Self {
         Self {
             voices: Mutex::new(Vec::new()),
+            releasing: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(1),
         }
     }
@@ -316,18 +344,26 @@ impl Mixer {
         id
     }
 
-    /// Stop `id` and drop it now. Answers whether it was still playing.
+    /// Stop `id` and fade it out. Answers whether it was still playing.
     ///
-    /// Dropped here rather than marked and reaped at the next block, so
-    /// [`Mixer::voice_count`] and [`Mixer::is_playing`] answer immediately even
-    /// when nothing is filling this mixer — a headless test and a game whose
-    /// output device failed to open both have no audio thread to do the reaping,
-    /// and a cap counting voices that will never be reaped is a mute button.
+    /// The accounting is still immediate — [`Mixer::voice_count`] and
+    /// [`Mixer::is_playing`] drop on the spot and the cap slot frees — but
+    /// the sound itself is not cut: it mixes one final block with a linear
+    /// fade to silence (the release ramp), then is dropped by the next fill.
+    ///
+    /// A mixer nothing is filling keeps its accounting right: the stopped
+    /// voice is already out of the list [`Mixer::voice_count`] reads, and its
+    /// release data waits in `releasing` until a fill reaps it — the same
+    /// shape as a finished one-shot waiting in `voices`.
     pub fn stop(&self, id: VoiceId) -> bool {
         let mut voices = self.lock();
-        let before = voices.len();
-        voices.retain(|(voice_id, _)| *voice_id != id);
-        voices.len() != before
+        let Some(index) = voices.iter().position(|(voice_id, _)| *voice_id == id) else {
+            return false;
+        };
+        let (_, mut voice) = voices.remove(index);
+        voice.releasing = true;
+        self.lock_releasing().push((id, voice));
+        true
     }
 
     /// Whether `id` is still sounding.
@@ -379,6 +415,12 @@ impl Mixer {
     /// process; the voice list is a plain `Vec` and is left consistent.
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<(VoiceId, Voice)>> {
         self.voices.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Lock the releasing list, recovering from poisoning, as [`Mixer::lock`]
+    /// does for the voice list.
+    fn lock_releasing(&self) -> std::sync::MutexGuard<'_, Vec<(VoiceId, Voice)>> {
+        self.releasing.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -479,6 +521,10 @@ impl AudioSource for Mixer {
     fn fill(&self, buffer: &mut [AudioSample], sample_rate: u32) {
         self.lock()
             .retain_mut(|(_, voice)| voice.mix_block(buffer, sample_rate));
+        // Releasing voices contribute their one fade-to-silence block and are
+        // then dropped — `mix_block` answers `false` for them at the end.
+        self.lock_releasing()
+            .retain_mut(|(_, voice)| voice.mix_block(buffer, sample_rate));
 
         // Clip once, here, where the finished mix is written: N voices summing
         // past ±1.0 would otherwise wrap or distort in the device. A NaN that
@@ -497,8 +543,10 @@ impl AudioSource for Mixer {
 impl std::fmt::Debug for Mixer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let count = self.voice_count();
+        let releasing = self.lock_releasing().len();
         f.debug_struct("Mixer")
             .field("voice_count", &count)
+            .field("releasing_count", &releasing)
             .finish()
     }
 }
@@ -592,8 +640,10 @@ mod tests {
         }
     }
 
-    /// A handle stops the voice it was issued for, immediately — no fill in
-    /// between, because a mixer nothing is filling still has to answer.
+    /// A handle stops the voice it was issued for — the accounting immediately,
+    /// with no fill in between, because a mixer nothing is filling still has
+    /// to answer — while the sound itself fades out over the next block
+    /// rather than cutting.
     #[test]
     fn a_handle_stops_its_own_voice_and_leaves_the_others() {
         let mixer = Mixer::new();
@@ -606,17 +656,127 @@ mod tests {
         assert!(mixer.is_playing(second), "stop took the wrong voice");
         assert_eq!(mixer.voice_count(), 1);
 
-        // And it is audibly gone: 0.5 + 0.25 would be 0.75 here.
+        // The first fill still hears the stopped voice — it is fading, not
+        // cut. 16 frames, so frame `i` keeps `(15 - i) / 15` of first's 0.5
+        // on top of the second voice's constant 0.25: the first frame is
+        // 0.75 (fade starts at 1.0, no step down) and the last is exactly
+        // 0.25 (first's fade ends at silence).
         let mut buf = vec![0.0f32; 16 * CHANNELS];
+        mixer.fill(&mut buf, 48_000);
+        assert!(
+            (buf[0] - 0.75).abs() < 1e-6,
+            "the ramp must start at the voice's own level: {}",
+            buf[0],
+        );
+        assert!(
+            (buf[buf.len() - CHANNELS] - 0.25).abs() < 1e-6,
+            "the ramp must end at silence for the stopped voice: {}",
+            buf[buf.len() - CHANNELS],
+        );
+        for (i, &s) in buf.iter().enumerate() {
+            assert!(
+                (0.25 - 1e-6..=0.75 + 1e-6).contains(&s),
+                "frame {}: expected 0.25..=0.75, got {s}",
+                i / CHANNELS,
+            );
+        }
+
+        // A second fill hears only the second voice: first's release block is
+        // done and it has been dropped.
+        buf.fill(0.0);
         mixer.fill(&mut buf, 48_000);
         for &s in &buf {
             assert!(
                 (s - 0.25).abs() < 1e-6,
-                "the stopped voice is still audible: {s}"
+                "the stopped voice is still audible after its release block: {s}",
             );
         }
 
         assert!(!mixer.stop(first), "stopping twice reported a second kill");
+    }
+
+    /// A stopped voice is not cut: it plays one release block — a linear fade
+    /// to silence — and is gone after it. The fade starts at the voice's own
+    /// level (no step down) and ends exactly at silence.
+    #[test]
+    fn stop_starts_a_release_ramp_not_a_cut() {
+        let mixer = Mixer::new();
+        // Plenty of data: the pre-stop fill and the full 64-frame release
+        // block must both fit, or the ramp would be cut short by the sound
+        // ending rather than by the fade.
+        let id = mixer.play(Voice::new(vec![0.5f32; 128 * CHANNELS]));
+
+        let mut buf = vec![0.0f32; 8 * CHANNELS];
+        mixer.fill(&mut buf, 48_000);
+        for &s in &buf {
+            assert!((s - 0.5).abs() < 1e-6, "pre-stop level: {s}");
+        }
+
+        assert!(mixer.stop(id));
+        assert!(
+            !mixer.is_playing(id),
+            "the accounting must drop on the spot"
+        );
+        assert_eq!(mixer.voice_count(), 0);
+
+        // One release block of 64 frames: frame `i` keeps (63 - i) / 63 of
+        // the voice's 0.5.
+        let n = 64;
+        buf = vec![0.0f32; n * CHANNELS];
+        mixer.fill(&mut buf, 48_000);
+        assert!(
+            (buf[0] - 0.5).abs() < 1e-6,
+            "the ramp must start at the voice's own level, not step down: {}",
+            buf[0],
+        );
+        assert!(
+            buf[buf.len() - CHANNELS].abs() < 1e-6,
+            "the ramp must end exactly at silence: {}",
+            buf[buf.len() - CHANNELS],
+        );
+        for frame in buf.chunks_exact(CHANNELS) {
+            assert!(
+                (frame[0] - frame[1]).abs() < 1e-6,
+                "the ramp must stay in its channels: {frame:?}",
+            );
+        }
+        // Monotone down along the block: the ramp never rises. Both channels
+        // carry the same DC, so a per-frame magnitude is a single number.
+        let mut last = f32::INFINITY;
+        for (i, frame) in buf.chunks_exact(CHANNELS).enumerate() {
+            let magnitude = (frame[0] * frame[0] + frame[1] * frame[1]).sqrt();
+            assert!(
+                magnitude <= last + 1e-6,
+                "frame {i} rose: magnitude {magnitude} > {last}",
+            );
+            last = magnitude;
+        }
+
+        // Gone after exactly one release block.
+        buf.fill(0.0);
+        mixer.fill(&mut buf, 48_000);
+        assert!(
+            buf.iter().all(|s| *s == 0.0),
+            "the voice survived its release block",
+        );
+        assert_eq!(mixer.voice_count(), 0);
+    }
+
+    /// `stop` frees the cap slot and the countable list on the spot — with no
+    /// fill in between — even though the sound itself keeps playing its
+    /// release block. This pins the property the backlog demands; it passes
+    /// on the old drop-now code too.
+    #[test]
+    fn stop_frees_the_slot_immediately_without_a_fill() {
+        let mixer = Mixer::new();
+        let first = mixer.play(Voice::new(vec![0.5f32; 64 * CHANNELS]));
+        let second = mixer.play(Voice::new(vec![0.5f32; 64 * CHANNELS]));
+        assert_eq!(mixer.voice_count(), 2);
+
+        assert!(mixer.stop(first));
+        assert!(!mixer.is_playing(first), "the stopped voice still counts");
+        assert_eq!(mixer.voice_count(), 1, "the cap slot must free on the spot");
+        assert!(mixer.is_playing(second), "stop took the wrong voice");
     }
 
     /// Ids are never reused, so a handle held past the end of its sound is inert
@@ -739,11 +899,30 @@ mod tests {
             }
         }
 
-        // …and it ends when, and only when, it is told to.
+        // …and it ends when, and only when, it is told to. Stopping starts a
+        // one-block release ramp rather than a cut: the fill after `stop`
+        // fades from the loop's level to silence, and the voice is gone
+        // afterwards.
         assert!(mixer.stop(id));
         buf.fill(0.0);
         mixer.fill(&mut buf, 48_000);
-        assert!(buf.iter().all(|s| *s == 0.0), "the loop survived stop");
+        assert!(
+            (buf[0] - 0.5).abs() < 1e-6,
+            "the release ramp must start at the loop's level: {}",
+            buf[0],
+        );
+        assert!(
+            buf[buf.len() - CHANNELS].abs() < 1e-6,
+            "the release ramp must end at silence: {}",
+            buf[buf.len() - CHANNELS],
+        );
+        assert!(!mixer.is_playing(id), "the loop survived stop");
+        buf.fill(0.0);
+        mixer.fill(&mut buf, 48_000);
+        assert!(
+            buf.iter().all(|s| *s == 0.0),
+            "the loop survived its release block",
+        );
     }
 
     /// A bank hands out voices over one buffer rather than a copy each.
