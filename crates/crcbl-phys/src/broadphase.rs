@@ -615,6 +615,17 @@ impl Bvh {
         self.live_elements == 0
     }
 
+    /// Allocated node slots, including those a [`Bvh::remove`] recycled.
+    ///
+    /// A balanced binary tree over `n` leaves holds about `2n − 1` nodes; the
+    /// number drifting up past that is the memory footprint of churn, which is
+    /// what [`PhysicsWorld::broadphase_stats`](crate::world::PhysicsWorld::broadphase_stats)
+    /// reports it for.
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
     /// The longest root-to-leaf path, counted in nodes (a one-element tree has
     /// depth 1, an empty one 0).
     ///

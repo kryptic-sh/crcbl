@@ -81,6 +81,22 @@ impl ColliderEntry {
 // PhysicsWorld
 // ---------------------------------------------------------------------------
 
+/// A snapshot of the broadphase's shape, from [`PhysicsWorld::broadphase_stats`].
+///
+/// The two numbers that let a structural policy (a teleport rule, a rebuild
+/// cadence) be argued from measurement: how deep the tree is, and how many
+/// nodes it holds for how many live elements. Depth is the query-cost bound;
+/// node count is the footprint, including recycled slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BroadphaseStats {
+    /// Live colliders (leaves) in the tree.
+    pub elements: usize,
+    /// Allocated node slots, including those a `remove` recycled.
+    pub nodes: usize,
+    /// Longest root-to-leaf path, counted in nodes ([`Bvh::depth`]'s units).
+    pub depth: usize,
+}
+
 /// A spatial world that stores colliders and supports ray/sweep queries.
 ///
 /// Colliders are added with `add_sphere`, `add_box`, or `add_capsule` and
@@ -500,6 +516,25 @@ impl PhysicsWorld {
         self.colliders[slot].as_ref().map(|s| s.entry.aabb())
     }
 
+    /// The broadphase's shape, as a snapshot a game can measure a policy
+    /// against.
+    ///
+    /// **For diagnostics, not for the frame path.** It forces the lazy rebuild
+    /// if the tree is dirty, and `Bvh::depth` walks the whole tree — `O(n)` —
+    /// so this is what a teleport rule's cost/benefit is argued from, the way
+    /// `docs/backlog.md`'s "A consumer cannot see the cost it is being asked to
+    /// avoid" asked for, and nothing a hot loop should call.
+    #[must_use]
+    pub fn broadphase_stats(&mut self) -> BroadphaseStats {
+        self.ensure_bvh();
+        let bvh = self.bvh.as_ref().expect("ensure_bvh built it");
+        BroadphaseStats {
+            elements: bvh.len(),
+            nodes: bvh.node_count(),
+            depth: bvh.depth(),
+        }
+    }
+
     // ── Internal helpers ───────────────────────────────────────────────
 
     /// Resolve an id to a live storage slot, or `None` if the id is stale
@@ -674,6 +709,40 @@ mod tests {
         let world = PhysicsWorld::new();
         assert!(world.is_empty());
         assert_eq!(world.len(), 0);
+    }
+
+    /// **The stats a teleport rule would measure with.** `broadphase_stats`
+    /// forces the lazy rebuild and reports the tree's shape: one entry per
+    /// live collider, at least one node per leaf, and a depth that exists for
+    /// a non-empty tree. The exact node count and depth are the AVL balance's
+    /// business — what is pinned is that the observable exists and agrees with
+    /// the world's own count.
+    #[test]
+    fn broadphase_stats_report_the_trees_shape() {
+        let mut world = PhysicsWorld::new();
+        assert_eq!(
+            world.broadphase_stats(),
+            BroadphaseStats {
+                elements: 0,
+                nodes: 0,
+                depth: 0,
+            },
+            "an empty world has an empty tree"
+        );
+
+        for x in 0..16 {
+            world.add_sphere(Sphere::new(DVec3::new(f64::from(x), 0.0, 0.0), 0.4));
+        }
+        let stats = world.broadphase_stats();
+        assert_eq!(stats.elements, 16, "every collider is a leaf");
+        assert!(
+            stats.nodes >= 16,
+            "a binary tree holds at least one node per leaf; got {stats:?}"
+        );
+        assert!(
+            stats.depth >= 1,
+            "a non-empty tree has a depth; got {stats:?}"
+        );
     }
 
     /// **The shared view finds exactly what overlaps, checked against a scan

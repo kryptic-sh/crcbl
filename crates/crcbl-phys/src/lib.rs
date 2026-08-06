@@ -43,4 +43,4 @@ pub use query::{
     swept_sphere_vs_sphere,
 };
 pub use system::{EntityOverlapQueries, PhysicsSystem};
-pub use world::{ColliderId, OverlapQueries, PhysicsWorld, QueryScratch};
+pub use world::{BroadphaseStats, ColliderId, OverlapQueries, PhysicsWorld, QueryScratch};
